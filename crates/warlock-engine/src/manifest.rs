@@ -54,6 +54,36 @@ impl Manifest {
         }
     }
 
+    /// Rebuild around a new set of `[[pact]]` rows, carrying the `[[scope]]`
+    /// records across as they stand.
+    ///
+    /// ```
+    /// use warlock_engine::{Manifest, PactEntry, ScopeRecord};
+    ///
+    /// let manifest = Manifest::with_entries([PactEntry::new(".", "crates/engine", "crates/engine/WARLOCK.md")?])
+    ///     .with_scopes([ScopeRecord::new("data-plane", "Data Plane", "In Review", "area/data-plane")]);
+    ///
+    /// // Every pact gone, and the record that no pact now names is still there.
+    /// let emptied = manifest.rebuilt_with([]);
+    /// assert!(emptied.entries().is_empty());
+    /// assert_eq!(emptied.scopes(), manifest.scopes());
+    /// # Ok::<(), warlock_engine::manifest::Error>(())
+    /// ```
+    // The counterpart to `with_entries` for every caller that has a manifest in
+    // hand: that one is an associated function with nothing to copy from, so a
+    // rebuild written through it silently drops the records. Records are not
+    // pruned to what the new entries name — a record outlives the pacts that
+    // spelled its scope by design, and un-pacting the last directory under a
+    // scope would otherwise delete where that work is filed.
+    #[must_use]
+    pub fn rebuilt_with(&self, entries: impl IntoIterator<Item = PactEntry>) -> Self {
+        Self {
+            version: self.version,
+            entries: entries.into_iter().collect(),
+            scopes: self.scopes.clone(),
+        }
+    }
+
     #[must_use]
     pub fn with_scopes(mut self, scopes: impl IntoIterator<Item = ScopeRecord>) -> Self {
         self.scopes = scopes.into_iter().collect();

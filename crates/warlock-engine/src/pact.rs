@@ -583,17 +583,19 @@ fn rewrite(
         }
     }
     kept.extend(outcomes.into_values().map(Outcome::into_entry));
-    Manifest::with_entries(kept)
+    manifest.rebuilt_with(kept)
 }
 
 // Deliberately not the symmetric reverse of a pact: this opens no file for
 // writing, so it cannot delete a `WARLOCK.md`. The document belongs to the
 // project and is reviewed in the git diff like any other file.
 //
-// It does take the scopes, because an entry is the only home a scope has — the
-// one operation here that can lose a boundary, and a deliberate press on a
-// directory rather than a side effect of a run. Who may ask is not settled
-// here: both callers ask `closed_scopes_at_or_below` first.
+// It does take the scopes off the entries it drops, because an entry is the
+// only place a boundary is stated — the one operation here that can lose one,
+// and a deliberate press on a directory rather than a side effect of a run. Who
+// may ask is not settled here: both callers ask `closed_scopes_at_or_below`
+// first. A `[[scope]]` record is not a boundary and is never pruned to what the
+// surviving entries name, which is why the rebuild goes through `rebuilt_with`.
 /// ```
 /// use warlock_engine::{Manifest, PactEntry, unpact_subtree};
 ///
@@ -616,7 +618,7 @@ pub fn unpact_subtree(
     manifest: &Manifest,
 ) -> Result<Manifest, manifest::Error> {
     let selected = to_manifest_path(root, directory)?;
-    Ok(Manifest::with_entries(
+    Ok(manifest.rebuilt_with(
         manifest
             .entries()
             .iter()
@@ -629,9 +631,11 @@ pub fn unpact_subtree(
 // caller owns the one write of `pacts.toml`.
 //
 // Scope is not consulted, and that is the whole difference from a keypress. A
-// scope lives on an entry, so this drops boundaries along with the entries that
-// held them — but the repository itself said the content is out, in a file that
-// is committed beside the scopes, so there is no machine-side sigil to ask.
+// boundary lives on an entry, so this drops boundaries along with the entries
+// that held them — but the repository itself said the content is out, in a file
+// that is committed beside the scopes, so there is no machine-side sigil to ask.
+// The `[[scope]]` records come through untouched: every removal here is an
+// `unpact_subtree`, and that carries them.
 /// ```
 /// use std::fs;
 /// use warlock_engine::{Manifest, PactEntry, unpact_ignored};
