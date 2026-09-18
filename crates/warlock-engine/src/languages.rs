@@ -574,18 +574,27 @@ fn comments_of(path: &Path) -> Option<&'static Comments> {
         .map(|(_, comments)| comments)
 }
 
-/// The file with its comments blanked, for deciding what a claim may rest on.
+/// The file with its comments cut out: what a pass is shown, and what a claim
+/// in its answer may rest on.
 ///
 /// `None` for an extension [`COMMENTS`] does not claim, which leaves that
-/// language's comments standing as evidence. That is the same conservatism as
-/// the rest of the module: a row that is not there cannot be wrong about a
-/// language, and adding one can only tighten warlock on it.
+/// language alone entirely — its comments are sent and are evidence. That is the
+/// same conservatism as the rest of the module: a row that is not there cannot
+/// be wrong about a language, and adding one can only tighten warlock on it.
+///
+/// A line the stripping empties is dropped rather than left blank, which is
+/// worth about a tenth of what the stripping saves on a comment-dense file. A
+/// line that was already blank stays: those are the file's own paragraphing, and
+/// a wall of code with every gap closed up is harder to read, for a model as
+/// much as for anyone.
 pub(crate) fn without_comments(path: &Path, text: &str) -> Option<String> {
     let comments = comments_of(path)?;
     let mut kept = String::with_capacity(text.len());
     let mut closing: Option<&'static str> = None;
 
     for line in text.lines() {
+        let emptied = !line.trim().is_empty();
+        let before = kept.len();
         let mut rest = line;
         while !rest.is_empty() {
             if let Some(closer) = closing {
@@ -629,6 +638,10 @@ pub(crate) fn without_comments(path: &Path, text: &str) -> Option<String> {
                     closing = Some(closer);
                 }
             }
+        }
+        if emptied && kept[before..].trim().is_empty() {
+            kept.truncate(before);
+            continue;
         }
         kept.push('\n');
     }

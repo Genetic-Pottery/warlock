@@ -725,9 +725,9 @@ the file in its own voice: no first person, nothing about this request or \
 about what you were or were not shown, and no guess at what the rest of the \
 directory holds — you have not been shown it.
 
-You are given the file's name and size, and its text with function bodies \
-elided where that was needed to fit. Where the name and the text disagree, the \
-text is right.";
+You are given the file's name and size, and its code with the comments removed \
+and with function bodies elided where that was needed to fit. Describe what the \
+code does. Where the name and the code disagree, the code is right.";
 
 #[must_use]
 pub fn file_instructions(path: &str, rejected: &[Defect]) -> String {
@@ -765,9 +765,41 @@ pub fn accept_file(
 
     let mut defects = Vec::new();
     self::line(&field, line, ENTRY_MINIMUM, ENTRY_CHARS, &mut defects);
-    if !Evidence::new(expected, described).mentions_tool() && names_tool(line) {
-        defects.push(Defect::ToolNamed { field });
+    let evidence = Evidence::new(expected, described);
+    if !evidence.mentions_tool() && names_tool(line) {
+        defects.push(Defect::ToolNamed {
+            field: field.clone(),
+        });
     }
+
+    // The names are checked here, against this one file, because this is the
+    // only place a per-file line is ever looked at. `check` grew a loop over
+    // `fill.files` for this and never ran it: `accept_synthesis` clears that map
+    // before checking and merges the lines back in afterwards, so the loop sees
+    // an empty map on every real pass and fires only from `mend`, which runs
+    // only once an answer has already failed for something else. The comment
+    // above `check` claimed this function did the job; it did not, and
+    // `Decoder::decode()` reached engine/core's document while every test of the
+    // check passed, because those tests build a `Fill` by hand and call `check`
+    // directly.
+    //
+    // One file's evidence and not the directory's, which is the narrower rule
+    // and the right one. A line naming a symbol some neighbour declares is
+    // spending this file's characters routing a reader out of this file, which
+    // is what the line exists not to do. It costs nothing in true lines: a file
+    // that really does call `ledger::post()` has `post` in its own text, so the
+    // name is witnessed and stands. What it refuses is a name with nothing
+    // behind it here — which, once comments stop counting, means a name with
+    // nothing behind it at all.
+    for name in referenced(line) {
+        if !evidence.knows(&name) {
+            defects.push(Defect::UnknownTarget {
+                field: field.clone(),
+                name,
+            });
+        }
+    }
+
     if defects.is_empty() {
         Ok(line.trim().to_owned())
     } else {
@@ -799,10 +831,18 @@ fn parse(answer: &str) -> Result<Fill, Defect> {
     })
 }
 
-// `files` is never looked at here. Every line in it was checked by `accept_file`
-// as it was accepted, and a synthesis request sends no text, so
-// `Expected::asked` is empty and keying the lines against it would report every
-// one of them as a slot nothing asked for.
+// The `files` loop below is reached from `mend` and never from
+// `accept_synthesis`, which clears that map before calling this and merges the
+// lines in afterwards. That is not a hole any more — `accept_file` checks each
+// line's names as it accepts it, against the one file the line is about — but it
+// was one for as long as this comment claimed otherwise, so do not read the loop
+// as the guard on a fresh line. It guards a fill being repaired: lines carried
+// forward off the page, and lines already standing when something else about the
+// answer failed.
+//
+// Keying the lines is a separate matter and still not done here: a synthesis
+// request sends no text, so `Expected::asked` is empty and keying against it
+// would report every line as a slot nothing asked for.
 fn check(fill: &Fill, expected: &Expected<'_>, described: &Described) -> Vec<Defect> {
     let mut defects = Vec::new();
     let evidence = Evidence::new(expected, described);

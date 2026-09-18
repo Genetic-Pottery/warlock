@@ -1774,20 +1774,80 @@ fn a_files_line_may_not_assert_a_mechanism_only_a_comment_claims() {
 }
 
 #[test]
-fn a_comment_is_not_a_declaration_but_the_pass_still_reads_it() {
-    // The narrow claim. Stripping comments changes what a name may rest on and
-    // nothing else: the request still carries every byte of the file, so a pass
-    // still reads the comment and may still say what it claims — attributed.
+fn the_pass_that_writes_a_files_line_is_the_one_that_checks_its_names() {
+    // The live line, verbatim, from the run that put it in the fixture's
+    // engine/core document: `Decoder` is a C++ class two directories away and
+    // balance.rs never calls it. It reached the page with the files-line check
+    // already written and passing its own tests, because those tests called
+    // `check` with a hand-built `Fill` while the road that writes a line goes
+    // through here — and `accept_synthesis` empties `files` before `check` sees
+    // it. So this asserts the defect at the door a real line comes in by.
+    let request = Request::new(FILE_PROMPT, "/repo/engine/core").with_files([File::present(
+        "balance.rs",
+        *b"//! Every Posting is validated by Decoder::decode() before VAULT_LIMIT.\n\
+           \n\
+           pub const VAULT_LIMIT: usize = 512;\n\
+           pub fn is_settled(open: usize) -> bool {\n\
+               open == 0\n\
+           }\n",
+    )]);
+    let expected = Expected::of(&request);
+    let mut described = Described::default();
+    described.declared.insert(
+        "balance.rs".to_owned(),
+        vec!["is_settled".to_owned(), "VAULT_LIMIT".to_owned()],
+    );
+
+    let asserted = "Defines VAULT_LIMIT constant and is_settled(open) checking if open \
+                    account count is zero; referenced by Decoder::decode()'s validation flow.";
+    let refused = accept_file(
+        &format!("{{\"line\": {asserted:?}}}"),
+        "balance.rs",
+        &expected,
+        &described,
+    )
+    .expect_err("the invented mechanism is refused");
+    assert!(
+        refused.iter().any(|defect| matches!(
+            defect,
+            Defect::UnknownTarget { name, .. } if name == "Decoder::decode"
+        )),
+        "{refused:?}"
+    );
+
+    // The same line without the clause stands, and so does a call the file
+    // really makes: narrowing the evidence to one file must not cost a line
+    // that routes to the file it is about.
+    let honest = "Defines VAULT_LIMIT constant and is_settled(open), which reports whether \
+                  the open account count is zero.";
+    accept_file(
+        &format!("{{\"line\": {honest:?}}}"),
+        "balance.rs",
+        &expected,
+        &described,
+    )
+    .expect("a line resting on the file's own code is accepted");
+}
+
+#[test]
+fn a_claim_resting_on_a_comment_is_refused_even_where_one_reached_a_pass() {
+    // The check outlives the reason it was written for. A pass is no longer
+    // shown a comment at all — `fitting::elided_or_whole` cuts them out of the
+    // request — so the claim below is one the pass had no way to read. The check
+    // stays because the request is not the only road: a file in a language no
+    // `COMMENTS` row claims is sent whole, comments and all, and a name may
+    // reach a line from somewhere nobody has thought of.
+    //
+    // This test used to assert the opposite, that the comment reached the model
+    // untouched, on the reasoning that a pass may repeat a comment's claim so
+    // long as it attributes it. That was measured and abandoned: attributing a
+    // claim spends the same characters as asserting it, and `engine/core` showed
+    // a refused claim coming back as "applied post-decode" — the invention
+    // reworded past the check rather than dropped.
     let text = *b"//! A gorilla reconciles balances overnight.\npub fn post() {}\n";
     let request = Request::new("describe", "/repo/engine/core")
         .with_files([File::present("ledger.rs", text)]);
     let expected = Expected::of(&request);
-
-    let sent = request.files()[0].bytes().expect("the text is sent whole");
-    assert!(
-        String::from_utf8_lossy(sent).contains("gorilla"),
-        "the comment reaches the model untouched"
-    );
 
     let mut fill = Fill::stub(&request);
     fill.purpose = "The ledger core.".to_owned();

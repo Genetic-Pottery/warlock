@@ -8,13 +8,40 @@ use crate::{agent, hash, languages, walk};
 
 pub const PER_FILE_BYTE_CAP: u64 = 1024 * 1024;
 
+// Comments come off before anything else, and they come off for the pass and
+// not just for the check.
+//
+// Cutting them out of the evidence only was half a measure, and the half that
+// remained is a loop: the pass reads a comment, believes it, writes the claim
+// into a line, the line is refused, and the pass writes the same claim in a
+// shape no name check can see. `engine/core` did exactly that within one run —
+// refused for `Decoder::decode()`, re-asked, and back came "VAULT_LIMIT = 512
+// applied post-decode", the same invention with the names filed off. There is
+// no narrowing that closes it, because the input was wrong rather than the
+// output.
+//
+// What is lost is real and was weighed: a pass shown a comment sometimes
+// catches one that is wrong about its own code and says so. That clause costs
+// `ENTRY_CHARS` that a document has for routing, and a reader who wants to know
+// why a file exists is a model that will infer it from the code — so what
+// letting comments in reliably buys is somebody's stale prose, presented to the
+// next reader as fact.
+//
+// A file whose comments came off is sent stripped even where `elide` found
+// nothing to drop, which is why the `None` arm no longer returns the original
+// bytes. An extension with no comment form is still sent exactly as it is.
 fn elided_or_whole(path: &Path, relative: String, size: u64, bytes: Vec<u8>) -> agent::File {
     let Ok(text) = str::from_utf8(&bytes) else {
         return agent::File::present(relative, bytes);
     };
-    match languages::elide(path, text) {
+    let stripped = languages::without_comments(path, text);
+    let source = stripped.as_deref().unwrap_or(text);
+    match languages::elide(path, source) {
         Some(elided) => agent::File::elided(relative, size, elided.text),
-        None => agent::File::present(relative, bytes),
+        None => match stripped {
+            Some(stripped) => agent::File::present(relative, stripped.into_bytes()),
+            None => agent::File::present(relative, bytes),
+        },
     }
 }
 
