@@ -3,16 +3,16 @@
 
 # warlock-engine
 
-The engine crate: builds and maintains a repo's freshness ledger, hashing files, tracking pacted/unpacted state, walking directories and filling WARLOCK.md documents via an agent port, kept free of TUI, terminal, HTTP or Anthropic dependencies.
+The warlock-engine crate: builds the module tree from a repo walk, computes per-file freshness against a pacts.toml manifest, and drives the describe-then-grant pact engine reading and writing WARLOCK.md documents through an Agent boundary.
 
 ## Files
 
-- `Cargo.toml` (1.1 KB) — Manifest for warlock-engine: blake3, ignore, serde/serde_json and toml deps, kept free of TUI/terminal/HTTP/Anthropic crates by design.
+- `Cargo.toml` (1.1 KB) — Cargo.toml: engine crate manifest — deps blake3, ignore, serde, serde_json, toml; owns the JSON document contract; dev-deps serde_test, tempfile; lints from workspace
 
 ## Directories
 
-- `src/` — The crate root: modules for hashing, tree walking, manifest state, pact engine and document filling; start at lib.rs to see how they connect.
+- `src/` — Crate root; agent boundary, briefs/claude_md/clock/decide/document/fitting/hash/ignores/languages/load/manifest/pact/scope/sigils/state/tree modules — open for module tree, freshness, or pact engine questions.
 
 ## Structure
 
-- Manifest for warlock-engine: blake3, ignore, serde/serde_json and toml deps, kept free of TUI/terminal/HTTP/Anthropic crates by design.
+- Cargo.toml: engine crate manifest — deps blake3, ignore, serde, serde_json, toml; owns the JSON document contract; dev-deps serde_test, tempfile; lints from workspace

@@ -3,9 +3,14 @@
 
 # crates
 
-Holds the two crates that make up the workspace: warlock-engine, the freshness-ledger core, and warlock-tui, the terminal front end that builds the warlock binary over it.
+The crates directory holds the workspace's Rust crates: warlock-engine, the module tree, freshness and pact engine library, and warlock-tui, the front end and CLI that builds the warlock binary on top of it.
 
 ## Directories
 
-- `warlock-engine/` — The engine crate: hashing, tree walking, manifest state, pact engine and document filling; go here for freshness-ledger or WARLOCK.md-generation questions.
-- `warlock-tui/` — The front-end crate building the warlock binary: App state, Panel/Composer/Thread cards, boundary check and subcommand dispatch; go here for terminal UI or CLI questions.
+- `warlock-engine/` — Engine crate root; module tree, per-file freshness against pacts.toml, and the describe-then-grant pact engine behind an Agent boundary — go here for freshness or pact questions.
+- `warlock-tui/` — Front end and CLI crate; panel/app state, boundary and scope enforcement, agent chat driving /pact /refresh /brief /write, terminal rendering — go here for key press, command or frame questions.
+
+## Structure
+
+- The warlock-engine crate: builds the module tree from a repo walk, computes per-file freshness against a pacts.toml manifest, and drives the describe-then-grant pact engine reading and writing WARLOCK.md documents through an Agent boundary.
+- The warlock-tui crate: builds the `warlock` binary and warlock_tui library, depending on warlock-engine.

@@ -3,16 +3,17 @@
 
 # warlock-tui
 
-warlock-tui builds the `warlock` binary: the terminal front end over warlock-engine, with App state, Panel/Composer/Thread cards, the boundary check shared by keys and headless doors, and subcommand dispatch for pact/refresh/unpact/check/config/scope/stale/fresh.
+The warlock-tui crate: builds the `warlock` binary and warlock_tui library — panel/app state, boundary and scope enforcement, agent chat driving /pact /refresh /brief /write, and terminal rendering.
 
 ## Files
 
-- `Cargo.toml` (1.8 KB) — Manifest for warlock-tui, building the `warlock` binary from src/main.rs over the warlock_tui library; depends on warlock-engine, arboard, ctrlc, ratatui.
+- `Cargo.toml` (1.8 KB) — Cargo.toml for warlock-tui: builds the `warlock` binary from src/main.rs and the warlock_tui library from src/lib.rs, depending on arboard, clap, ctrlc, notify, ratatui, serde_json and warlock-engine.
 
 ## Directories
 
-- `src/` — The crate root: App, Panel, boundary check, subcommand dispatch and terminal/watch/drawing code; go here for any front-end or CLI question.
+- `src/` — Front end and CLI source — panel/app state, boundary checks, chat, rendering; go here for how a key press, command or frame is handled.
 
 ## Structure
 
-- Manifest for warlock-tui, building the `warlock` binary from src/main.rs over the warlock_tui library; depends on warlock-engine, arboard, ctrlc, ratatui.
+- Cargo.toml for warlock-tui: builds the `warlock` binary from src/main.rs and the warlock_tui library from src/lib.rs.
+- Depends on arboard, clap, ctrlc, notify, ratatui, serde_json and warlock-engine.
