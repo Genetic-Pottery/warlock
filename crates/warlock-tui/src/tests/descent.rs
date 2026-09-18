@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::Path;
 
-use warlock_engine::{Agent, Manifest, agent, stub_answer};
+use warlock_engine::{Agent, Manifest, PactEntry, agent, stub_answer};
 use warlock_tui::Cancel;
 
 use super::{Descent, carry_on, descend};
@@ -145,6 +145,123 @@ fn a_refresh_of_a_fresh_subtree_spends_no_pass_and_still_saves() {
         stored(repo.path()),
         before,
         "a no-op refresh moved an entry"
+    );
+}
+
+// Hand-written rather than serialised from a `Manifest`, because what this
+// guards is the bytes a reader of `pacts.toml` sees: the order of the tables,
+// the order of the keys inside them, and the blank line between. `third-party`
+// is named by nothing the runs below write, and `data-plane` is named by
+// nothing either — a save that rebuilt the file from its entries would take
+// both with it, which is the dropped-scope defect this repository has seen once.
+const RECORDS: &str = concat!(
+    "[[scope]]\n",
+    "name = \"data-plane\"\n",
+    "team = \"Data Plane\"\n",
+    "review_state = \"In Review\"\n",
+    "label = \"area/data-plane\"\n\n",
+    "[[scope]]\n",
+    "name = \"third-party\"\n",
+    "team = \"Vendor\"\n",
+    "review_state = \"Triage\"\n",
+    "label = \"area/vendor\"\n",
+);
+
+// The records are on disk before the first run, so what the assertions below
+// say is that a command found them in the file and put them back — not that a
+// `Manifest` this test built kept hold of them.
+fn a_checkout_of_records() -> tempfile::TempDir {
+    let repo = a_checkout();
+    let path = warlock_engine::manifest_path(repo.path());
+    fs::create_dir_all(path.parent().expect("the manifest has a directory"))
+        .expect("a .warlock directory");
+    fs::write(&path, format!("version = 1\n\n{RECORDS}")).expect("a manifest with records");
+    repo
+}
+
+// From the first `[[scope]]` table to the end of the file: the records are
+// written after the `[[pact]]` rows, so this is the whole section and it moves
+// if anything reorders, reformats or drops one of them.
+fn records_on_disk(repo: &Path) -> String {
+    let text = fs::read_to_string(warlock_engine::manifest_path(repo)).expect("a manifest on disk");
+    let at = text.find("[[scope]]").unwrap_or(text.len());
+    text[at..].to_owned()
+}
+
+#[test]
+fn pacting_un_pacting_and_granting_again_leave_the_records_byte_identical() {
+    let repo = a_checkout_of_records();
+    assert_eq!(
+        records_on_disk(repo.path()),
+        RECORDS,
+        "the fixture starts out holding its records"
+    );
+
+    // A pact: entries where there were none, and a grant on each of them.
+    let manifest = Manifest::load(repo.path()).expect("a manifest that reads");
+    let pacted = descend(
+        Descent::Pact,
+        repo.path(),
+        repo.path(),
+        &manifest,
+        &Answering,
+        &Cancel::new(),
+        &mut |_| {},
+    )
+    .expect("a pact of a readable subtree");
+    assert!(pacted.failures.is_empty(), "{:?}", pacted.failures);
+    assert!(!stored(repo.path()).is_empty(), "the pact wrote no entries");
+    assert_eq!(
+        records_on_disk(repo.path()),
+        RECORDS,
+        "the pact's save moved a record"
+    );
+
+    // An un-pact: every entry the pact wrote, gone.
+    let manifest = Manifest::load(repo.path()).expect("a manifest that reads");
+    descend(
+        Descent::Unpact,
+        repo.path(),
+        repo.path(),
+        &manifest,
+        &Answering,
+        &Cancel::new(),
+        &mut |_| {},
+    )
+    .expect("an un-pact of a pacted subtree");
+    assert!(
+        stored(repo.path()).is_empty(),
+        "an entry survived the un-pact"
+    );
+    assert_eq!(
+        records_on_disk(repo.path()),
+        RECORDS,
+        "the un-pact's save moved a record"
+    );
+
+    // And a grant: with nothing pacted, a refresh describes the whole subtree
+    // again and writes a hash and a timestamp against every directory.
+    let manifest = Manifest::load(repo.path()).expect("a manifest that reads");
+    let granted = descend(
+        Descent::Refresh,
+        repo.path(),
+        repo.path(),
+        &manifest,
+        &Answering,
+        &Cancel::new(),
+        &mut |_| {},
+    )
+    .expect("a refresh of an un-pacted subtree");
+    assert!(granted.failures.is_empty(), "{:?}", granted.failures);
+    let judged = Manifest::load(repo.path()).expect("a manifest that reads");
+    assert!(
+        !judged.entries().is_empty() && judged.entries().iter().all(PactEntry::is_judged),
+        "the run granted nothing, so this says nothing about a grant's save"
+    );
+    assert_eq!(
+        records_on_disk(repo.path()),
+        RECORDS,
+        "the grant's save moved a record"
     );
 }
 

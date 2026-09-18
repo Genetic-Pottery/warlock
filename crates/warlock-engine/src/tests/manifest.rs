@@ -322,6 +322,95 @@ fn a_scope_record_round_trips_byte_for_byte() {
 }
 
 #[test]
+fn a_scope_a_pact_names_and_no_record_declares_loads() {
+    let root = a_root();
+    // Every manifest written before records existed is this file: scopes on
+    // the pacts and nothing declaring them. A reader that treated a scope with
+    // no record as a hole would refuse every one of them.
+    let original = concat!(
+        "version = 1\n\n",
+        "[[pact]]\n",
+        "module = \"crates/warlock-engine\"\n",
+        "document = \"crates/warlock-engine/WARLOCK.md\"\n",
+        "scope = \"data-plane\"\n\n",
+        "[[pact]]\n",
+        "module = \"crates/warlock-tui\"\n",
+        "document = \"crates/warlock-tui/WARLOCK.md\"\n",
+        "scope = \"billing\"\n",
+    );
+    hand_write(root.path(), original);
+
+    let loaded = Manifest::load(root.path()).expect("a scope with no record is not a failure");
+    assert_eq!(
+        loaded
+            .entries()
+            .iter()
+            .map(PactEntry::scope)
+            .collect::<Vec<_>>(),
+        [Some("data-plane"), Some("billing")],
+        "both entries kept the scope they spelled"
+    );
+    assert!(
+        loaded.scopes().is_empty(),
+        "a scope that routes to nothing is nothing, not an invented record"
+    );
+
+    loaded.save(root.path()).expect("saves");
+    assert_eq!(
+        fs::read_to_string(manifest_path(root.path())).expect("reads"),
+        original,
+        "and nothing was written down on the scopes' behalf"
+    );
+}
+
+#[test]
+fn a_record_no_pact_names_is_loaded_and_written_back_unchanged() {
+    let root = a_root();
+    // `third-party` is spelled by no entry here and is still where work under
+    // it would be filed: a record is written down before anything is pacted
+    // under it and outlives the last pact that named it, so pruning it to what
+    // the entries happen to say would lose the only copy.
+    let original = concat!(
+        "version = 1\n\n",
+        "[[pact]]\n",
+        "module = \"crates/warlock-engine\"\n",
+        "document = \"crates/warlock-engine/WARLOCK.md\"\n\n",
+        "[[scope]]\n",
+        "name = \"third-party\"\n",
+        "team = \"Vendor\"\n",
+        "review_state = \"Triage\"\n",
+        "label = \"area/vendor\"\n",
+    );
+    hand_write(root.path(), original);
+
+    let loaded = Manifest::load(root.path()).expect("loads");
+    assert_eq!(
+        loaded.scopes(),
+        [ScopeRecord::new(
+            "third-party",
+            "Vendor",
+            "Triage",
+            "area/vendor"
+        )],
+        "the record nothing points at is read like any other"
+    );
+    assert!(
+        loaded
+            .entries()
+            .iter()
+            .all(|entry| entry.scope() != Some("third-party")),
+        "no entry names it, which is the whole point of this fixture"
+    );
+
+    loaded.save(root.path()).expect("saves");
+    assert_eq!(
+        fs::read_to_string(manifest_path(root.path())).expect("reads"),
+        original,
+        "an unused record survives a load and a save byte for byte"
+    );
+}
+
+#[test]
 fn a_manifest_with_no_records_writes_the_bytes_it_always_did() {
     let with_none = Manifest::with_entries([unjudged(), judged()]);
     // Emptied rather than never set, which is the case `skip_serializing_if`
