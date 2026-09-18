@@ -21,13 +21,21 @@ const HOME: &str = "HOME";
 
 const USERPROFILE: &str = "USERPROFILE";
 
-// The nine tails of `Error::NoRepository`'s sentence — "warlock could not find
+// The ten tails of `Error::NoRepository`'s sentence — "warlock could not find
 // a repository to *…*" — together because they are one vocabulary. They used to
 // sit beside their own subcommands, and two were re-typed as literals inside
 // `error.rs`'s tests, where rewording the original failed nothing.
 pub(crate) const FOR_CLAUDE_MD: &str = "write `CLAUDE.md` at";
 
 pub(crate) const FOR_SIGILS: &str = "hold sigils for";
+
+// One tail for `key use` and `key forget` rather than one each. Both stand here
+// for the same reason — a binding belongs to a checkout and neither verb can
+// say what it did to one without knowing which checkout it is standing in — and
+// "bind" alone would be the wrong word on a `forget` that only reads the
+// binding to report it. `key add` and `key list` have no tail because they
+// resolve no repository at all: a key store is a fact about the machine.
+pub(crate) const FOR_KEY: &str = "settle which key is bound in";
 
 pub(crate) const FOR_CHECK: &str = "answer about the boundary over";
 

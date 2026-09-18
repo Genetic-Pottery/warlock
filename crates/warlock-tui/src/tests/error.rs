@@ -175,6 +175,10 @@ fn every_message_warlock_words_itself_is_one_line_so_it_prints_as_one() {
         Error::NoKey {
             name: "acme".to_owned(),
         },
+        Error::UnknownKey {
+            name: "acme".to_owned(),
+            wanted: "bind",
+        },
         Error::ClosedScope {
             path: "crates/engine".to_owned(),
             scope: "data-plane".to_owned(),

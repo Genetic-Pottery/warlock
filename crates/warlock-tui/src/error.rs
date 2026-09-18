@@ -116,6 +116,17 @@ pub(crate) enum Error {
     NoKey {
         name: String,
     },
+    // A name no key is stored under, raised by `key use` before it writes and
+    // by `key forget` after the engine reports it removed nothing. `wanted` is
+    // one of [`crate::key`]'s tails, following `NoRepository`: the fact is one
+    // fact and only what it cost differs between the two verbs. A store that is
+    // missing entirely is this refusal as well — it holds no key by that name
+    // either, and a sentence about an absent file answers a question nobody
+    // asked.
+    UnknownKey {
+        name: String,
+        wanted: &'static str,
+    },
     // The engine's key store, and the one variant here that wraps an error from
     // a module holding secrets. It is safe to carry and to print because
     // `keys::Error` carries paths, names and a line number and never a value —
@@ -309,6 +320,14 @@ impl fmt::Display for Error {
                 "nothing was typed, so no key is stored under `{name}`: pipe one in with \
                  `warlock key add {name} < key.txt`"
             ),
+            // The one place a reader is sent, because the names are the one
+            // thing `warlock key list` will tell them and a misremembered name
+            // is what this usually is.
+            Self::UnknownKey { name, wanted } => write!(
+                f,
+                "this machine holds no key called `{name}`, so there was nothing to {wanted}: \
+                 `warlock key list` names the keys it does hold"
+            ),
             // Flattened like the sigil config's: a store that will not parse
             // carries a position rather than the parser's own diagnostic, and
             // the rest is the filesystem's, which can still run to two lines.
@@ -349,9 +368,10 @@ impl std::error::Error for Error {
             | Self::ClosedScope { .. }
             | Self::ClosedScopeBelow { .. }
             | Self::NoPact { .. }
-            // Nor here: a prompt answered with a blank line is a person and not
-            // a failure underneath.
+            // Nor here: a prompt answered with a blank line, and a name nobody
+            // stored a key under, are a person and not a failure underneath.
             | Self::NoKey { .. }
+            | Self::UnknownKey { .. }
             // Nor here, and there could not be one: a run's failures are N
             // errors rather than one, they have already been printed in full,
             // and picking a first to be "the" cause would be the summary

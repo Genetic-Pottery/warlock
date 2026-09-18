@@ -62,7 +62,7 @@ use editing::edit_press;
 use edits::{scope_add, scope_remove, unpact};
 use error::Error;
 use input::{Action, Drag, MouseAction, Pressed, drag_after, mouse_action, press_for};
-use key::{key_add, key_list};
+use key::{key_add, key_forget, key_list, key_use};
 use pacting::{Pact, Reloaded};
 use query::{Listing, list};
 use running::{pact, refresh};
@@ -213,7 +213,7 @@ enum Command {
         command: ScopeCommand,
     },
     #[command(
-        about = "Store and list the named Linear keys this machine holds.",
+        about = "Store, list, bind and forget the named Linear keys this machine holds.",
         long_about = None
     )]
     Key {
@@ -266,9 +266,14 @@ enum ScopeCommand {
 /// `warlock key add acme < key.txt` is the way to keep it off the screen as
 /// well. See [`mod@key`] for why there is no echo suppression either.
 ///
-/// `add` takes no `--json`, matching the other writing subcommands: an envelope
-/// is for an answer a script parses, and the only thing that could go in this
-/// one is the name the command was already given.
+/// `add`, `use` and `forget` take no `--json`, matching the other writing
+/// subcommands: an envelope is for an answer a script parses, and the only
+/// thing that could go in one of these is the name the command was already
+/// given.
+///
+/// A checkout binds one name with `use` and there is no default for one that
+/// has bound none — an unbound checkout is unbound, and says so, rather than
+/// quietly reaching for whichever key happens to be first in the store.
 #[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
 enum KeyCommand {
     #[command(
@@ -292,6 +297,24 @@ enum KeyCommand {
         /// Answer as one JSON object instead of one name per line.
         #[arg(long)]
         json: bool,
+    },
+    #[command(
+        about = "Bind one of the stored keys to this checkout by name.",
+        long_about = None
+    )]
+    Use {
+        /// The name of a key this machine already holds.
+        #[arg(value_name = "NAME")]
+        name: String,
+    },
+    #[command(
+        about = "Remove a stored key from this machine by name.",
+        long_about = None
+    )]
+    Forget {
+        /// The name to remove, whatever is bound to it.
+        #[arg(value_name = "NAME")]
+        name: String,
     },
 }
 
@@ -376,12 +399,16 @@ fn main() -> ExitCode {
         // The key store, dispatched here for `config`'s reasons and with one
         // more of its own: `add` reads a line from stdin in cooked mode, so a
         // program that had taken the terminal would be reading a secret in raw
-        // mode with the panic hook armed over it. Neither verb stands in a
-        // repository — a key is a fact about the machine — and the nesting is
-        // clap's and stops here, each arm one call into [`mod@key`].
+        // mode with the panic hook armed over it. The first two verbs stand in
+        // no repository — a key is a fact about the machine — and the last two
+        // stand in one because a binding is a fact about a checkout; each
+        // resolves what it needs itself. The nesting is clap's and stops here,
+        // each arm one call into [`mod@key`].
         Some(Command::Key { command }) => match command {
             KeyCommand::Add { name } => key_add(&name),
             KeyCommand::List { json } => key_list(json),
+            KeyCommand::Use { name } => key_use(&name),
+            KeyCommand::Forget { name } => key_forget(&name),
         },
     };
 

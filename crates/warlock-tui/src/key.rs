@@ -1,5 +1,5 @@
-//! `warlock key add` and `warlock key list`: the Linear keys this machine
-//! holds, by name.
+//! `warlock key add`, `list`, `use` and `forget`: the Linear keys this machine
+//! holds, by name, and which of them this checkout is bound to.
 //!
 //! The secret is taken on stdin and never in argv, because an argument is
 //! readable by every process on the box for as long as the command runs and is
@@ -22,11 +22,14 @@ use std::io::{self, Write};
 use std::path::Path;
 
 use serde_json::Value;
-use warlock_engine::{keys, keys_path, load_key_names, save_key, validate_scope};
+use warlock_engine::{
+    Forgotten, forget_key, keys, keys_path, load_key_binding, load_key_names, save_key,
+    save_key_binding, sigils_path, validate_scope,
+};
 
 use crate::error::{Error, one_line};
 use crate::query::{envelope, write_object};
-use crate::standing::Standing;
+use crate::standing::{FOR_KEY, Standing};
 
 const COMMAND: &str = "key list";
 
@@ -34,12 +37,17 @@ const NAMES: &str = "names";
 
 const PROMPT: &str = "key> ";
 
-// Neither verb stands in a repository, and that is the decision rather than an
-// omission: a key store is a fact about the machine and is the same store from
-// inside any checkout or from none, so asking `Standing::here` for a root would
-// refuse `warlock key list` in a home directory over a question that never
-// needed one. The verbs that bind a name to a checkout do need it, and resolve
-// it themselves.
+// The two tails of `Error::UnknownKey`'s sentence, which is one fact — the
+// store holds no such name — costing the two verbs different things.
+const TO_BIND: &str = "bind";
+
+const TO_FORGET: &str = "forget";
+
+// Neither of these two verbs stands in a repository, and that is the decision
+// rather than an omission: a key store is a fact about the machine and is the
+// same store from inside any checkout or from none, so asking `Standing::here`
+// for a root would refuse `warlock key list` in a home directory over a
+// question that never needed one.
 pub(crate) fn key_add(name: &str) -> Result<(), Error> {
     let home = Standing::home()?;
 
@@ -50,6 +58,24 @@ pub(crate) fn key_list(json: bool) -> Result<(), Error> {
     let home = Standing::home()?;
 
     listed(&home, json, &mut io::stdout())
+}
+
+// These two do stand in one, because a binding belongs to a checkout: `use`
+// writes into this checkout's config and `forget` can only say what it did to
+// this checkout by reading it. Both resolutions happen here and are passed down
+// as parameters, so nothing below reads `HOME` or the working directory.
+pub(crate) fn key_use(name: &str) -> Result<(), Error> {
+    let standing = Standing::here(FOR_KEY)?;
+    let home = Standing::home()?;
+
+    bound(&home, standing.repo_root(), name, &mut io::stdout())
+}
+
+pub(crate) fn key_forget(name: &str) -> Result<(), Error> {
+    let standing = Standing::here(FOR_KEY)?;
+    let home = Standing::home()?;
+
+    forgotten(&home, standing.repo_root(), name, &mut io::stdout())
 }
 
 // Split from `key_add` so the order is something a test can run against a
@@ -226,6 +252,82 @@ fn object(names: &[String]) -> Value {
             Value::Array(names.iter().cloned().map(Value::String).collect()),
         )],
     )
+}
+
+// Split from `key_use` for `listed`'s reason: `out` is what a test reads back,
+// and the home and the root arrive as parameters rather than being asked of the
+// environment down here.
+fn bound<W: Write>(home: &Path, root: &Path, name: &str, out: &mut W) -> Result<(), Error> {
+    // The store is asked before a byte is written, and that ordering is the
+    // whole of the refusal: `save_key_binding` judges the *shape* of a name, so
+    // without this a typo would be written into the config and the checkout
+    // would look bound and fail at the API instead. What that save does with
+    // the sigils already in the config is its own business — it reads them
+    // first and writes them back.
+    if !names(home)?.iter().any(|stored| stored == name) {
+        return Err(Error::UnknownKey {
+            name: name.to_owned(),
+            wanted: TO_BIND,
+        });
+    }
+
+    save_key_binding(home, root, name).map_err(|source| Error::Sigils { source })?;
+    drop(writeln!(
+        out,
+        "warlock: `{}` is bound to the key `{name}`, written to `{}`",
+        root.display(),
+        sigils_path(home, root).display()
+    ));
+    Ok(())
+}
+
+// Split from `key_forget` for `bound`'s reason.
+fn forgotten<W: Write>(home: &Path, root: &Path, name: &str, out: &mut W) -> Result<(), Error> {
+    // Asked before the removal and answered after it. Before, because it is a
+    // question about a different file that the removal never touches, and the
+    // removal is not waiting on it; after, because a checkout is only worth a
+    // sentence when the key really went. An unreadable or absent config reads
+    // as "not this checkout" rather than as a failure: by the time this is
+    // looked at the key is gone, and refusing then would tell a reader nothing
+    // had happened when something had.
+    let unbinds = matches!(load_key_binding(home, root), Ok(Some(held)) if held == name);
+
+    match forget_key(home, name) {
+        Ok(Forgotten::Key) => {}
+        // A store that holds no such name and a store that is not there at all
+        // are the same answer to the same question, and the second is not a
+        // failure for `forget` any more than it is for `list`: nothing was
+        // removed because there was nothing to remove.
+        Ok(Forgotten::Nothing) | Err(keys::Error::NotFound { .. }) => {
+            return Err(Error::UnknownKey {
+                name: name.to_owned(),
+                wanted: TO_FORGET,
+            });
+        }
+        Err(source) => return Err(Error::Keys { source }),
+    }
+
+    // One line either way, with the checkout's half on the end of it rather
+    // than on a second line: the removal is what happened and the binding is
+    // what it cost. No prompt before any of this and no walk of the other
+    // checkouts' configs after it — warlock has no list of them to walk, and
+    // going looking would mean reading every project directory under the home
+    // to warn about machines-worth of bindings nobody asked about.
+    let unbound = if unbinds {
+        format!(
+            "; `{}` was bound to it and is now unbound, and warlock will refuse there until \
+             `warlock key use <name>` binds another",
+            root.display()
+        )
+    } else {
+        String::new()
+    };
+    drop(writeln!(
+        out,
+        "warlock: forgot the key `{name}`, removed from `{}`{unbound}",
+        keys_path(home).display()
+    ));
+    Ok(())
 }
 
 // `Ok(0)` is EOF and nothing else. It is told apart from an empty line here
