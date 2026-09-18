@@ -19,6 +19,27 @@ pub(crate) struct Block {
     closer: &'static str,
 }
 
+// Where a language writes prose instead of code. Only [`without_comments`] reads
+// these, and only to decide what counts as evidence for a claim — never to
+// change a byte that reaches a document, a request or a hash.
+//
+// The module docs above refuse to lex for `elide`, because over-stripping there
+// silently deletes real code. The direction of harm reverses here: a comment
+// left standing is evidence for a claim the code does not support, which is the
+// defect this exists to close, while a string literal mistaken for a comment
+// costs one true claim its witness and `mend` drops the line. So this strips
+// bluntly and on purpose, and `//` inside a URL is a cost already paid for.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Comments {
+    line: &'static [&'static str],
+    block: &'static [(&'static str, &'static str)],
+}
+
+const SLASHES: Comments = Comments {
+    line: &["//"],
+    block: &[("/*", "*/")],
+};
+
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Language {
     extensions: &'static [&'static str],
@@ -26,6 +47,7 @@ pub(crate) struct Language {
     test_prefixes: &'static [&'static str],
     blocks: &'static [Block],
     declarations: &'static [&'static str],
+    comments: Comments,
 }
 
 impl Language {
@@ -70,6 +92,7 @@ impl Language {
 static TABLE: &[Language] = &[
     Language {
         extensions: &["rs"],
+        comments: SLASHES,
         test_suffixes: &[],
         test_prefixes: &[],
         blocks: &[Block {
@@ -107,6 +130,7 @@ static TABLE: &[Language] = &[
     // Zig. `test "name" { … }` sits at the top level of the file it tests.
     Language {
         extensions: &["zig"],
+        comments: SLASHES,
         test_suffixes: &[],
         test_prefixes: &[],
         blocks: &[Block {
@@ -119,6 +143,7 @@ static TABLE: &[Language] = &[
     // Go. `_test.go` is the toolchain's own rule, not a convention.
     Language {
         extensions: &["go"],
+        comments: SLASHES,
         test_suffixes: &["_test.go"],
         test_prefixes: &[],
         blocks: &[],
@@ -138,6 +163,7 @@ static TABLE: &[Language] = &[
     // which is the safe direction.
     Language {
         extensions: &["ts", "tsx", "js", "jsx", "mts", "cts", "mjs", "cjs"],
+        comments: SLASHES,
         test_suffixes: &[
             ".test.ts",
             ".test.tsx",
@@ -169,6 +195,10 @@ static TABLE: &[Language] = &[
     // Python. Both halves of pytest's discovery rule.
     Language {
         extensions: &["py"],
+        comments: Comments {
+            line: &["#"],
+            block: &[("\"\"\"", "\"\"\""), ("'''", "'''")],
+        },
         test_suffixes: &["_test.py"],
         test_prefixes: &["test_"],
         blocks: &[],
@@ -177,6 +207,10 @@ static TABLE: &[Language] = &[
     // Ruby.
     Language {
         extensions: &["rb"],
+        comments: Comments {
+            line: &["#"],
+            block: &[("=begin", "=end")],
+        },
         test_suffixes: &["_spec.rb", "_test.rb"],
         test_prefixes: &[],
         blocks: &[],
@@ -186,6 +220,7 @@ static TABLE: &[Language] = &[
     // enough that one row serves and the declarations overlap almost entirely.
     Language {
         extensions: &["java", "kt", "cs", "swift"],
+        comments: SLASHES,
         test_suffixes: &[
             "Test.java",
             "Tests.java",
@@ -213,6 +248,10 @@ static TABLE: &[Language] = &[
     // Elixir, whose test files are the only `.exs` most projects have.
     Language {
         extensions: &["ex", "exs"],
+        comments: Comments {
+            line: &["#"],
+            block: &[("\"\"\"", "\"\"\"")],
+        },
         test_suffixes: &["_test.exs"],
         test_prefixes: &[],
         blocks: &[],
@@ -416,6 +455,68 @@ fn language_of(path: &Path) -> Option<&'static Language> {
     TABLE
         .iter()
         .find(|language| language.extensions.contains(&extension.as_str()))
+}
+
+/// The file with its comments blanked, for deciding what a claim may rest on.
+///
+/// `None` for an extension no row claims, which leaves that language's comments
+/// standing as evidence. That is the same conservatism as the rest of the table:
+/// a row that is not there cannot be wrong about a language, and adding one can
+/// only tighten warlock on it.
+pub(crate) fn without_comments(path: &Path, text: &str) -> Option<String> {
+    let language = language_of(path)?;
+    let comments = &language.comments;
+    let mut kept = String::with_capacity(text.len());
+    let mut closing: Option<&'static str> = None;
+
+    for line in text.lines() {
+        let mut rest = line;
+        while !rest.is_empty() {
+            if let Some(closer) = closing {
+                match rest.find(closer) {
+                    Some(at) => {
+                        rest = &rest[at + closer.len()..];
+                        closing = None;
+                    }
+                    None => break,
+                }
+                continue;
+            }
+            let mut first: Option<(usize, usize, Option<&'static str>)> = None;
+            let mut note = |at: usize, width: usize, closer: Option<&'static str>| {
+                if first.is_none_or(|(seen, _, _)| at < seen) {
+                    first = Some((at, width, closer));
+                }
+            };
+            for marker in comments.line {
+                if let Some(at) = rest.find(marker) {
+                    note(at, marker.len(), None);
+                }
+            }
+            for (opener, closer) in comments.block {
+                if let Some(at) = rest.find(opener) {
+                    note(at, opener.len(), Some(closer));
+                }
+            }
+            match first {
+                None => {
+                    kept.push_str(rest);
+                    break;
+                }
+                Some((at, _, None)) => {
+                    kept.push_str(&rest[..at]);
+                    break;
+                }
+                Some((at, width, Some(closer))) => {
+                    kept.push_str(&rest[..at]);
+                    rest = &rest[at + width..];
+                    closing = Some(closer);
+                }
+            }
+        }
+        kept.push('\n');
+    }
+    Some(kept)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

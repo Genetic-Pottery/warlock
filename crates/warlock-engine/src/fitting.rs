@@ -151,13 +151,25 @@ fn describe(described: &mut Described, path: &Path, name: &str, text: &str) {
     if !names.is_empty() {
         described.declared.insert(name.to_owned(), names);
     }
-    described.tokens.insert(name.to_owned(), tokens_of(text));
+    let evidence = languages::without_comments(path, text);
+    described
+        .tokens
+        .insert(name.to_owned(), tokens_of(evidence.as_deref().unwrap_or(text)));
 }
 
 // Read whole rather than capped, and for the same reason the declared list is
 // no longer capped: this is evidence and not a rendered line. Nothing here
 // reaches a document or a request — it is compared against, and the comparison
 // is the only thing standing between a true claim and a dropped one.
+//
+// Comments are cut out of that comparison above. A module comment asserting a
+// mechanism its file does not implement put every name in the assertion into
+// this set, which witnessed the claim that repeated it: `VAULT_LIMIT caps
+// postings validated by Decoder::decode()` reached a document with `Decoder`
+// declared two directories away and no call to it anywhere. A comment is not a
+// declaration, and the text that reaches the model is untouched — a pass still
+// reads every comment, and may still say what one claims, so long as it says
+// whose claim it is.
 fn tokens_of(text: &str) -> BTreeSet<String> {
     document::identifiers(text).map(str::to_owned).collect()
 }

@@ -288,3 +288,42 @@ fn every_problem_says_what_was_left_out_and_why_on_one_line() {
         "and an unreadable file's cause names the io error under it",
     );
 }
+
+#[test]
+fn a_name_only_a_comment_writes_is_not_token_evidence() {
+    // The arm a synthesis pass leans on. `Described` is measured here and
+    // answers for a directory whose files were never sent, so a comment
+    // counting as evidence in this map is a lie witnessing itself in every
+    // document too big to send whole.
+    let dir = tempfile::tempdir().expect("a temporary directory");
+    write(
+        dir.path(),
+        "balance.rs",
+        "//! Every Posting is validated by Decoder::decode().\n\
+         \n\
+         pub const VAULT_LIMIT: usize = 512;\n\
+         pub fn is_settled(open: usize) -> bool {\n\
+             open == 0\n\
+         }\n",
+    );
+
+    let snapshot = super::Snapshot::take(dir.path()).expect("reads the directory");
+    let described = &snapshot.described;
+
+    assert!(
+        described.written_anywhere("is_settled"),
+        "code is evidence for a claim"
+    );
+    assert!(
+        described.written_anywhere("VAULT_LIMIT"),
+        "so is a constant the table declares"
+    );
+    assert!(
+        !described.written_anywhere("Decoder"),
+        "a comment is not evidence"
+    );
+    assert!(
+        !described.written_anywhere("Posting"),
+        "nor is the rest of the same sentence"
+    );
+}
