@@ -3,7 +3,7 @@
 
 # src
 
-The warlock-engine crate root: builds the module tree from a repo walk, computes freshness state per file/directory against a pacts.toml manifest, and drives the describe-then-grant pact engine that reads and writes WARLOCK.md documents via an Agent boundary.
+The warlock-engine crate's core: the model-call boundary, tree loading and hashing, the two-phase pact engine that describes then grants freshness, and WARLOCK.md/pacts.toml generation and repair.
 
 ## Files
 
@@ -12,11 +12,11 @@ The warlock-engine crate root: builds the module tree from a repo walk, computes
 - `claude_md.rs` (13.5 KB) — Writes the warlock section into CLAUDE.md via write_claude_md, splicing between BEGIN/END markers; defines Written and Error. · declares `write_claude_md`, `Written`, `path`, `Error`, `FILE`, `BEGIN`, `END`, `BODY`, `section`, `splice`, `fmt`, `source`
 - `clock.rs` (5.0 KB) — now_rfc3339() renders a SystemTime as UTC RFC 3339 to the second via hand-rolled proleptic Gregorian arithmetic (civil_from_days), infallible and clamped to years 0000-9999. · declares `now_rfc3339`, `SECONDS_PER_DAY`, `DAYS_FROM_SHIFTED_EPOCH_TO_UNIX_EPOCH`, `DAYS_PER_ERA`, `MIN_REPRESENTABLE`, `MAX_REPRESENTABLE`, `rfc3339_from_unix_seconds`, `civil_from_days`
 - `decide.rs` (1.8 KB) — decide_state(entry: Option<&PactEntry>, computed_hash: &str) -> NodeState: pure rule mapping manifest entry plus a computed hash to Unpacted/PactedFresh/PactedStale. · declares `decide_state`
-- `document.rs` (61.3 KB) — WARLOCK.md's data model and lifecycle: Fill, Entry, Described, Evidence, Defect, Mend, plus check/mend/render/accept_file/accept_synthesis · declares `ENTRY_CHARS`, `ENTRY_MINIMUM`, `PURPOSE_CHARS`, `LIST_CAP`, `DECLARED_SHOWN`, `ATTEMPTS`, `STAMP`, `Fill`, `Entry`, `Described`, `written_anywhere`, `mentions_tool`, `identifiers`, `stub`, `to_json`, `stub_answer` (+70)
-- `fitting.rs` (9.3 KB) — Snapshot::take and one_file: reads a directory or single file into an agent::Request with Described evidence, capped at PER_FILE_BYTE_CAP, tracking Measured hashes and Omission/Problem for unreadable or oversized files. · declares `PER_FILE_BYTE_CAP`, `Snapshot`, `Measured`, `take`, `directory`, `files`, `synthesis_request`, `accept_synthesis`, `mend`, `render`, `carried_bytes`, `one_file`, `byte_count`, `Problem`, `Omission`, `elided_or_whole` (+5)
+- `document.rs` (63.4 KB) — Defines the Fill/Entry/Described/Expected/Evidence model, synthesis and file prompts, defect checking, rendering, and the mend() repair pass for WARLOCK.md generation. · declares `ENTRY_CHARS`, `ENTRY_MINIMUM`, `PURPOSE_CHARS`, `LIST_CAP`, `DECLARED_SHOWN`, `ATTEMPTS`, `STAMP`, `Fill`, `Entry`, `Described`, `written_anywhere`, `mentions_tool`, `identifiers`, `stub`, `to_json`, `stub_answer` (+70)
+- `fitting.rs` (11.1 KB) — Snapshot::take and one_file build agent::Request payloads for a directory or single file, eliding/omitting per PER_FILE_BYTE_CAP; Problem/Omission report skipped files. · declares `PER_FILE_BYTE_CAP`, `Snapshot`, `Measured`, `take`, `directory`, `files`, `synthesis_request`, `accept_synthesis`, `mend`, `render`, `carried_bytes`, `one_file`, `byte_count`, `Problem`, `Omission`, `elided_or_whole` (+5)
 - `hash.rs` (9.0 KB) — Digests: subtree_hash for a directory's paths+contents, file_hash/bytes_hash for one file's bytes, line_hash for a [pact.lines] entry, carry_hash for early-cutoff comparison; Error variants Walk/Read/Path. · declares `file_hash`, `bytes_hash`, `line_hash`, `subtree_hash`, `carry_hash`, `length`, `Error`, `HASH_CONTEXT`, `FILE_CONTEXT`, `LINE_CONTEXT`, `CARRY_HASH_CONTEXT`, `update_section`, `update_prefixed`, `fmt`, `source`
 - `ignores.rs` (3.1 KB) — is_ignored(path) checks whether a directory itself (not its contents) is excluded by .warlockignore, via a one-deep walk of its parent (walk_one_deep); FILENAME = ".warlockignore". · declares `FILENAME`, `is_ignored`, `walk_one_deep`
-- `languages.rs` (21.1 KB) — Per-extension Language table and matching declared_names, without_comments, and elide functions that route test-body elision and comment-stripping by file extension. · declares `Block`, `Comments`, `Language`, `declared_names`, `without_comments`, `Elided`, `elide`, `SLASHES`, `is_test_file`, `declares`, `VISIBILITY`, `KEYWORDS`, `outside_blocks`, `closes_after`, `without_visibility`, `past_receiver` (+6)
+- `languages.rs` (25.3 KB) — Per-language table and Language/Comments/Block types plus declared_names, without_comments, and elide, driving comment-stripping and test-body elision by extension. · declares `Block`, `Comments`, `Language`, `declared_names`, `without_comments`, `Elided`, `elide`, `SLASHES`, `HASH`, `is_test_file`, `declares`, `VISIBILITY`, `KEYWORDS`, `outside_blocks`, `closes_after`, `without_visibility` (+8)
 - `lib.rs` (2.1 KB) — Crate root: declares engine modules (agent, briefs, claude_md, clock, decide, document, fitting, hash, load, manifest, pact, scope, sigils, state, tree) and re-exports their public items.
 - `load.rs` (15.0 KB) — Builds the module Tree from a repo walk and pact manifest: load_tree, repository_root, and the Loaded/Problem/Error types reporting hash and scope failures. · declares `load_tree`, `Loaded`, `Problem`, `ProblemCause`, `repository_root`, `Error`, `GIT_DIR`, `fmt`, `source`, `walk`, `mark_excluded`, `Directory`, `Builder`, `node`, `children_of`, `state_of` (+2)
 - `manifest.rs` (21.2 KB) — Manifest and PactEntry: pacts.toml schema (SCHEMA_VERSION), atomic save/load, module/document path conversion, and per-entry scope, grant and line hashes. · declares `ROOT_MODULE`, `SCHEMA_VERSION`, `Manifest`, `new`, `with_entries`, `version`, `entries`, `push`, `entry`, `to_toml_string`, `from_toml_str`, `save`, `load`, `PactEntry`, `with_grant`, `with_carry_hash` (+28)
@@ -29,15 +29,15 @@ The warlock-engine crate root: builds the module tree from a repo walk, computes
 
 ## Structure
 
-- Defines the Agent trait and its Request/File/ChildDocument/Response/Error types, the model-call boundary the engine spawns no subprocess across.
-- Loads the optional brief directory setting from .warlock/briefs.toml via load_briefs and briefs_path, defaulting to DEFAULT_BRIEF_DIRECTORY ("docs").
-- Writes the warlock section into CLAUDE.md via write_claude_md, splicing between BEGIN/END markers; defines Written and Error.
-- now_rfc3339() renders a SystemTime as UTC RFC 3339 via civil_from_days, used wherever the engine timestamps output.
-- decide_state(entry, computed_hash) maps a PactEntry plus hash to NodeState, called by load.rs and pact.rs to classify freshness.
-- document.rs defines WARLOCK.md's data model (Fill, Entry, Described, Evidence, Defect, Mend) and lifecycle functions check/mend/render/accept_file/accept_synthesis used by pact.rs.
-- fitting.rs's Snapshot::take and one_file read a directory or file into an agent::Request, feeding hash.rs's Measured hashes into pact.rs.
-- hash.rs's subtree_hash, file_hash, bytes_hash, line_hash and carry_hash are the digests decide.rs and manifest.rs compare against pact entries.
-- ignores.rs's is_ignored, backed by walk_one_deep and .warlockignore, is consulted by load.rs and walk.rs when building the tree.
-- languages.rs's Language table, declared_names, without_comments and elide route per-extension handling used by fitting.rs when snapshotting file content.
-- lib.rs declares and re-exports every engine module: agent, briefs, claude_md, clock, decide, document, fitting, hash, load, manifest, pact, scope, sigils, state, tree.
-- load.rs's load_tree and repository_root build the Tree from a repo walk and the pact manifest, calling ignores.rs, hash.rs, decide.rs and manifest.rs.
+- lib.rs — Crate root: declares engine modules (agent, briefs, claude_md, clock, decide, document, fitting, hash, load, manifest, pact, scope, sigils, state, tree) and re-exports their public items.
+- load.rs builds the module Tree from a repo walk and pact manifest via load_tree, repository_root.
+- walk.rs's subtree_files and pactable_directories are shared so hash, pact and generation agree on content.
+- pact.rs's pact_subtree/refresh_subtree/pact_directory write WARLOCK.md via document.rs and pacts.toml entries via manifest.rs.
+- document.rs's fitting and rendering draw on fitting.rs Snapshot/one_file requests and languages.rs elision to build agent.rs Requests.
+- decide.rs's decide_state maps a manifest.rs PactEntry plus a computed hash.rs hash to a state.rs NodeState.
+- tree.rs's Node/Tree carry state.rs NodeState and scope.rs scope per node, walked by DepthFirst.
+- scope.rs's scope_covering and scope_opens_to are used against sigils.rs's per-repo sigil storage to settle boundary rules.
+- briefs.rs's load_briefs reads .warlock/briefs.toml, feeding document.rs's synthesis and file prompts.
+- ignores.rs's is_ignored walks .warlockignore one directory deep, consulted by load.rs and pact.rs before descending.
+- claude_md.rs's write_claude_md splices the warlock section into CLAUDE.md between markers, called after pact.rs grants.
+- clock.rs's now_rfc3339 timestamps manifest.rs entries and document.rs renders.

@@ -3,7 +3,7 @@
 
 # warlock-engine
 
-The warlock-engine crate: builds the module tree from a repo walk, computes per-file freshness against a pacts.toml manifest, and drives the describe-then-grant pact engine reading and writing WARLOCK.md documents through an Agent boundary.
+warlock-engine is the core crate: the Agent model-call boundary, tree loading and hashing, the two-phase pact engine that describes then grants freshness, and WARLOCK.md/pacts.toml generation and repair.
 
 ## Files
 
@@ -11,7 +11,7 @@ The warlock-engine crate: builds the module tree from a repo walk, computes per-
 
 ## Directories
 
-- `src/` — Crate root; agent boundary, briefs/claude_md/clock/decide/document/fitting/hash/ignores/languages/load/manifest/pact/scope/sigils/state/tree modules — open for module tree, freshness, or pact engine questions.
+- `src/` — The crate's modules: agent, briefs, claude_md, clock, decide, document, fitting, hash, ignores, languages, lib, load, manifest, pact, scope, sigils, state, tree, walk.
 
 ## Structure
 
