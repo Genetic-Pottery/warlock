@@ -11,38 +11,50 @@ passes over the fixture. Where a number appears, it was counted.
 
 ## The plan, in order
 
-1. **Verify and merge `a-comment-is-not-a-declaration`.** The comment change is
-   already built. It does not need rewriting.
-2. **Build the head sample**, so a file too big to send whole is still
-   described. This is the only capability warlock is actually missing.
-3. **Cut the fixture's section 4** and the planted lies it existed to catch, and
-   strengthen its section 2 once step 2 can satisfy it.
+1. **Verify and merge `a-comment-is-not-a-declaration`.** Done — merged to
+   `main`, 1,850 tests, fmt and clippy clean. Two defects were fixed on the way
+   in; see below.
+2. **Cut the fixture's section 4** and the planted lies it existed to catch.
 
-Steps 1 and 2 are the feature work. Step 3 is cleanup and takes about an hour.
-Nothing else in either document is being done — see "Considered and dropped".
+That is all. The head sample for over-cap files was planned here and has been
+dropped on a better argument than the one it was planned on — see "The over-cap
+file, and why it is parked".
 
 ## Decisions already made — do not reopen these
 
 - **Comments do not reach a pass.** Settled. Do not re-argue it, and do not
   build a check that polices comment-derived claims in the output instead.
-- **A file too big to send whole is still described**, not just named and
-  sized.
+- **An over-cap file stays named and sized**, and is not described from a
+  sample. This reverses what this document said earlier on the day it was
+  written; the reasoning is below and it is stronger than what it replaced.
 
 ---
 
-## Step 1 — merge the comment branch
+## Step 1 — the comment branch, merged
 
-`a-comment-is-not-a-declaration`, 6 commits, unmerged. It is where every
-measurement in this file came from.
+`a-comment-is-not-a-declaration`, 6 commits, merged to `main`. It is where every
+measurement in this file came from. 1,850 tests pass, fmt and clippy are clean,
+and the per-file name check sits in `document::accept_file`, which is the
+correct home for it — see "The trap" below.
 
-What has been checked so far is placement, not the suite: the per-file name
-check sits in `document::accept_file`, which is the correct home for it (see
-"The trap" below), and the reasoning is recorded in the code. Before merging,
-run `cargo test`, `cargo clippy` and `cargo fmt --all --check` and read the
-diff. The branch claims 1,850 tests passing and clean lints; confirm rather
-than inherit that claim.
+Two defects were found reviewing it and fixed in `75f4ca8` before the merge.
+Both are worth knowing about, because neither was visible from the branch's
+commit messages and one would have been silent:
 
-One thing in it is known to be wasted work, and is being kept anyway: it grew a
+- **`5dba3c6` dropped the `warlock-team` scope from the repository root.** It
+  un-pacted to regrant from scratch, and un-pacting takes the scope with it. Its
+  own message says `warlock scope` on the root is the whole of putting it back —
+  and that was never run. Nothing below the root carries a scope of its own, so
+  merging as it stood would have opened every directory in the repository to
+  anyone, with no line in any diff saying so.
+- **The comment above `fitting::tokens_of` had gone false.** `3d56ebb` wrote it
+  when the change kept comments out of the *evidence* only; `8333d39` then
+  stopped sending them to the pass at all and did not reread the block, whose
+  last clause still read "the text that reaches the model is untouched — a pass
+  still reads every comment". Exactly the half-true block `CLAUDE.md` is about,
+  in the file that argues for the change.
+
+One thing in it is known to be wasted work, and was kept anyway: it grew a
 comment-form table covering C, Terraform, SQL, Lua and a dozen more, built to
 close a channel this change closes completely. The breadth costs nothing but is
 not why the table should exist.
@@ -170,46 +182,51 @@ written up as though this were closed.
 
 ---
 
-## Step 2 — describing a file too big to send
+## The over-cap file, and why it is parked
 
 `data/inventory.json` is 1,755,356 bytes and its line reads *"contents not
-loaded, structure and fields unknown"*, which routes nowhere. It should say what
-the file holds.
+loaded, structure and fields unknown"*, which routes nowhere. This document
+planned to fix it by sending a head sample, and that was started and reverted
+the same day. **Do not pick it back up without answering the objection below.**
 
-**The cap is not the problem, and raising it is not the fix.**
+The mechanics were never the problem and are all in place: `pact::read_capped`
+and `view_file` already truncate, flag the cut and handle a cut landing
+mid-character, and `agent::Content` takes a fourth variant cleanly. Nor is the
+cap the problem — `PER_FILE_BYTE_CAP` is `1024 * 1024` with nothing justifying
+it, so the number is arbitrary and may be changed, though raising it far enough
+to admit this file admits every file, which is what a cap is for.
 
-`PER_FILE_BYTE_CAP` is `1024 * 1024` in `fitting.rs` with no comment justifying
-it — no measurement, no reasoning, a round number. So the *number* is arbitrary
-and you may change it. But the file it is keeping out is 60,000 repetitions of
+**What stops it is that a sampled line cannot be checked.** Every other claim in
+a document rests on a name witnessed in that file's own token set — that is what
+`accept_file` enforces and what the whole comment change above was for. A line
+written from 8 KB of a 1.7 MB file is a claim about the 1.7 MB, and warlock has
+no way to tell a good one from a bad one. It would be the one line in every
+document that is trusted rather than checked, in a tool whose entire subject is
+not trusting documents.
 
-```json
-{ "id": 0, "sku": "SKU-0000000", "qty": 464 }
-```
+Marking the sample as a sample softens how the claim reads. It does not make it
+checkable, which is the part that matters.
 
-The first 120 bytes carry the entire shape. Sending 1.7 MB buys nothing over
-sending 2 KB, and a cap large enough to admit this file admits every file, which
-is what the cap is for. Removing it would be answering "the number is made up"
-with unbounded spend.
+There was also a recorded rejection of truncation, in `agent.rs` above
+`Content`, which this plan would have overturned: "sending the first n bytes of
+a source file was rejected because it invites confident wrong conclusions about
+the part that never arrived". It is still there and still right.
 
-**Send a head sample instead, and the primitive already exists.**
-`pact::read_capped` reads to `PER_FILE_BYTE_CAP + 1`, and `view_file` truncates,
-sets a `cut` flag, and handles a cut landing mid-character. That is exactly the
-shape wanted, already written and already tested, for the `v` key.
+**The shape a future attempt should take** is reading the file rather than
+describing it — parsing an over-cap file's structure deterministically, so
+`inventory.json` yields the field names `id`, `sku`, `qty` as extracted facts
+that the existing name check can witness, the same as any other file's
+declarations. That is a real design and a much larger one; a per-format parser
+is a different project from a freshness ledger. It is written down here so the
+next person starts from it instead of from the sample.
 
-So the change in `fitting::one_file` is to stop returning
-`left_out(Omission::TooLarge)` for an over-cap file and instead send a truncated
-head marked as truncated, so the pass knows it is describing a sample and not a
-whole file. A sample cap wants to be much smaller than the send cap — the shape
-of a record-per-line file is in its first few KB — and unlike
-`PER_FILE_BYTE_CAP`, that number carries a comment saying what it was chosen
-against.
-
-What was there before and must **not** come back: a chunked map-reduce over the
+What must **not** come back under any of this: a chunked map-reduce over the
 whole file with a disk cache under `.warlock/summaries/`. That was removed with
 the budget ladder and `fitting.rs` still argues for its removal. It is a model
-pass per chunk to learn what 2 KB already says.
+pass per chunk to learn what 2 KB already says — and it produces the same
+uncheckable claim, more expensively.
 
-### The trap in the middle of it
+## The trap, if a per-file check is ever touched
 
 **Do not put a per-file line check in `document::check`.** It will not run.
 
@@ -228,7 +245,7 @@ something else. This exact mistake was made, shipped with a commit message
 claiming it worked, and its tests passed the whole time because they built a
 `Fill` by hand and called `check` directly.
 
-The branch in step 1 fixes it: **the check lives in `document::accept_file`**,
+The merged branch fixes it: **the check lives in `document::accept_file`**,
 the one place a per-file line is ever looked at, checked against **that one
 file's** evidence and not the directory's. A line naming a symbol some neighbour
 declares is spending this file's characters routing a reader out of this file.
