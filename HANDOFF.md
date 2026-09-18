@@ -9,16 +9,27 @@ it asked for was work on the harness rather than on warlock.
 Everything below with a number attached was measured on 2026-09-18 against real
 passes over the fixture. Where a number appears, it was counted.
 
-## The plan, in order
+## The plan, in order — both done
 
-1. **Verify and merge `a-comment-is-not-a-declaration`.** Done — merged to
-   `main`, 1,850 tests, fmt and clippy clean. Two defects were fixed on the way
-   in; see below.
-2. **Cut the fixture's section 4** and the planted lies it existed to catch.
+1. **Verify and merge `a-comment-is-not-a-declaration`.** Merged to `main`,
+   1,850 tests, fmt and clippy clean. Two defects were fixed on the way in; see
+   below.
+2. **Cut the fixture's lie checks** and the plants they existed to catch, and
+   the over-cap pair with them. Done in the fixture repository at `8c842e0`;
+   `../warlock-test-repo/HANDOFF.md` records what went and what stayed. The
+   suite is 28 checks, all positive, all passing.
 
-That is all. The head sample for over-cap files was planned here and has been
-dropped on a better argument than the one it was planned on — see "The over-cap
-file, and why it is parked".
+That is all of it. The head sample for over-cap files was planned here and has
+been dropped on a better argument than the one it was planned on — see "The
+over-cap file, and why it is parked".
+
+**Nothing here is owed further work.** Both repository roots are stale, because
+editing a `HANDOFF.md` changes the digest of the directory its `WARLOCK.md`
+describes; so is every fixture directory whose plant was rewritten. That is the
+ledger being honest and not a defect — it is paid off by a pass when someone
+wants these documents fresh, and a fixture pass costs 25 minutes and real model
+spend, so it is worth batching with the next real change rather than run for
+its own sake.
 
 ## Decisions already made — do not reopen these
 
