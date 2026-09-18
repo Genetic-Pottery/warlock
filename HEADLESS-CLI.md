@@ -10,6 +10,10 @@ repaint.
 | --- | --- | --- |
 | `warlock init` | Write warlock's section of `CLAUDE.md` at the repository root | nothing |
 | `warlock config` | Print the sigils this machine holds here, and read a line replacing them | nothing |
+| `warlock key add <name>` | Read a Linear key on stdin and store it under a name | one key-store write |
+| `warlock key list` | Print the names this machine holds keys for, and never a key | nothing |
+| `warlock key use <name>` | Bind one of the stored names to this checkout | one config write |
+| `warlock key forget <name>` | Remove a stored key from this machine by name | one key-store write |
 | `warlock stale [path]` | List the pacted directories at or below `path` that are stale | nothing |
 | `warlock fresh [path]` | The same for the fresh ones | nothing |
 | `warlock check <path>` | Say which scope covers `path`, what this machine holds, and whether the two meet | nothing |
@@ -33,6 +37,81 @@ sigils in and what is held now, then reads one line: the sigils on it replace
 everything held for this repository, a blank line clears it, and Ctrl-C or EOF
 changes nothing. It is the only road to a sigil, and a sigil is the only thing
 that opens a scope.
+
+### Keys
+
+`warlock key` is the other half of what this machine holds, and it is a
+different thing from a sigil: the Linear keys, stored by name in
+`~/.warlock/keys.toml`, owner-only on unix. The binding — which of those names
+this checkout uses — lives in the per-project `config.toml` under the same
+directory, beside the sigils. Neither file is in the repository and neither is
+committed; both are the machine's.
+
+`key add` is the only verb that reads a key and no verb prints one. `list`
+prints names, `use` writes a name, `forget` removes one, and no key value
+reaches a line, an error or a JSON value from any of them. There is no field
+for one in the envelope and there is not going to be.
+
+`warlock key add <name>` takes the secret on stdin and never as an argument:
+argv is readable by every process on the box for as long as the command runs,
+and is in a shell history afterwards. It prints the name, the file the key
+lands in and what is stored under that name now, then reads one line. That line
+is echoed — there is no raw mode here, in the one family of subcommands that
+deliberately touches no terminal at all — so the pipe is what keeps a key off
+the screen, and `warlock key add acme < key.txt` is the way to do it:
+
+```sh
+$ warlock key add acme < key.txt
+key `acme`
+stored at `/home/you/.warlock/keys.toml`
+no key is stored under this name yet
+the line is echoed, so `warlock key add acme < key.txt` is how to keep it off the screen
+Ctrl-C or EOF changes nothing
+key> warlock: stored a key for `acme` in `/home/you/.warlock/keys.toml`
+```
+
+EOF — Ctrl-D at a terminal, an empty pipe everywhere else — writes nothing and
+says so, and a name that is not a name is refused before the preamble is
+printed, so nobody pastes a live credential at a prompt that was always going
+to refuse the name afterwards. A line that is typed and holds nothing is
+refused instead of stored: a checkout binding an empty key would look bound and
+fail at the API.
+
+`warlock key list` prints one name a line, nothing else on the line, and never
+a key. `--json` is the same names in one object:
+
+```sh
+$ warlock key list
+acme
+
+$ warlock key list --json
+{"command":"key list","names":["acme"]}
+```
+
+A machine nobody has run `key add` on holds no keys, which is an empty answer
+and a 0, exactly as nothing stale is.
+
+`warlock key use <name>` binds one of those names to this checkout, written
+into the per-project `config.toml` with the sigils already there left where they
+were. A checkout that has bound none is *unbound* rather than defaulted:
+warlock does not reach for whichever key happens to be first in the store, and
+`use` is how a checkout stops being unbound. One checkout binds one name, and
+the name is the only thing written — the key itself stays in `keys.toml`.
+
+`warlock key forget <name>` removes a key from the machine. When this checkout
+was the one bound to it, the removal still happens and the line says so: this
+checkout is unbound and will refuse until another `use` binds a key. No other
+checkout is read and none is warned, because warlock keeps no list of them to
+walk.
+
+`add`, `use` and `forget` take no `--json`, matching `unpact` and the two
+`scope` verbs. A name the store has never heard of is refused by `use` before a
+byte reaches the config and by `forget` with nothing removed, one line on
+stderr and an ordinary **1** — not the 3, which is a scope this machine's
+sigils do not open and which no name in a key store has anything to do with.
+`use` and `forget` also want a repository, because a binding belongs to a
+checkout; `add` and `list` want none and answer for the same store from
+anywhere.
 
 ### Asking
 
