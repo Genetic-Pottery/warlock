@@ -391,6 +391,12 @@ fn per_subcommand_help_is_a_help_exit_too() {
         ["scope", "--help"].as_slice(),
         ["scope", "add", "--help"].as_slice(),
         ["scope", "remove", "--help"].as_slice(),
+        // The other nested noun, asked for at both depths for the same reason,
+        // and `key add` most of all: it is the one help a person reads before
+        // typing a command that takes a credential.
+        ["key", "--help"].as_slice(),
+        ["key", "add", "--help"].as_slice(),
+        ["key", "list", "--help"].as_slice(),
     ] {
         let error = parse(args).unwrap_err();
         assert_eq!(error.kind(), ErrorKind::DisplayHelp, "{args:?}");
@@ -417,6 +423,7 @@ fn each_subcommands_help_says_what_that_subcommand_does() {
         ("pact", "WARLOCK.md"),
         ("refresh", "stale"),
         ("scope", "scope"),
+        ("key", "Linear"),
     ] {
         let mut command = Cli::command();
         let help = command
@@ -492,12 +499,15 @@ fn help_prints_a_few_lines_rather_than_this_file() {
     // essays above; without it clap lifts the doc comments wholesale.
     let help = Cli::command().render_long_help().to_string();
     for subcommand in [
-        "init", "config", "stale", "fresh", "check", "unpact", "pact", "refresh", "scope",
+        "init", "config", "stale", "fresh", "check", "unpact", "pact", "refresh", "scope", "key",
     ] {
         assert!(help.contains(subcommand), "{subcommand}: {help}");
     }
     assert!(!help.contains("panic hook"), "{help}");
-    assert!(help.lines().count() < 20, "{help}");
+    // A row per subcommand plus the usage and options chrome: the ceiling is
+    // what stops an `about` becoming a paragraph, so it moves by one when a
+    // subcommand is added and never to make room for prose.
+    assert!(help.lines().count() < 21, "{help}");
     // Every doc comment on `Cli` and its variants spells the command in
     // backticks, and no `about` above does, so a backtick reaching the help
     // is a doc comment that got lifted into it.

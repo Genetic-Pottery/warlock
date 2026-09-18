@@ -41,6 +41,7 @@ mod editing;
 mod edits;
 mod error;
 mod input;
+mod key;
 mod pacting;
 mod query;
 mod running;
@@ -61,6 +62,7 @@ use editing::edit_press;
 use edits::{scope_add, scope_remove, unpact};
 use error::Error;
 use input::{Action, Drag, MouseAction, Pressed, drag_after, mouse_action, press_for};
+use key::{key_add, key_list};
 use pacting::{Pact, Reloaded};
 use query::{Listing, list};
 use running::{pact, refresh};
@@ -210,6 +212,14 @@ enum Command {
         #[command(subcommand)]
         command: ScopeCommand,
     },
+    #[command(
+        about = "Store and list the named Linear keys this machine holds.",
+        long_about = None
+    )]
+    Key {
+        #[command(subcommand)]
+        command: KeyCommand,
+    },
 }
 
 /// Add and remove, and no third. No `list`, because that is `warlock check`;
@@ -245,6 +255,43 @@ enum ScopeCommand {
         /// Which directory to clear the scope on.
         #[arg(value_name = "PATH")]
         path: PathBuf,
+    },
+}
+
+/// The machine's key store, by name.
+///
+/// There is no argument for the secret and there is not going to be one: argv
+/// is readable by every process on the box while the command runs and is
+/// written into a shell history afterwards, so the key comes in on stdin and
+/// `warlock key add acme < key.txt` is the way to keep it off the screen as
+/// well. See [`mod@key`] for why there is no echo suppression either.
+///
+/// `add` takes no `--json`, matching the other writing subcommands: an envelope
+/// is for an answer a script parses, and the only thing that could go in this
+/// one is the name the command was already given.
+#[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
+enum KeyCommand {
+    #[command(
+        about = "Read a Linear key on stdin and store it under a name.",
+        long_about = None
+    )]
+    Add {
+        // A `String` and not a validated type, for the reason a scope is one:
+        // what a name may be is the engine's to say, and a parser judging it
+        // here would spend clap's exit status of 2 on a rule warlock words
+        // itself.
+        /// The name to store the key under.
+        #[arg(value_name = "NAME")]
+        name: String,
+    },
+    #[command(
+        about = "List the names this machine holds keys for, and never a key.",
+        long_about = None
+    )]
+    List {
+        /// Answer as one JSON object instead of one name per line.
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -325,6 +372,16 @@ fn main() -> ExitCode {
         Some(Command::Scope { command }) => match command {
             ScopeCommand::Add { path, scope } => scope_add(&path, &scope),
             ScopeCommand::Remove { path } => scope_remove(&path),
+        },
+        // The key store, dispatched here for `config`'s reasons and with one
+        // more of its own: `add` reads a line from stdin in cooked mode, so a
+        // program that had taken the terminal would be reading a secret in raw
+        // mode with the panic hook armed over it. Neither verb stands in a
+        // repository — a key is a fact about the machine — and the nesting is
+        // clap's and stops here, each arm one call into [`mod@key`].
+        Some(Command::Key { command }) => match command {
+            KeyCommand::Add { name } => key_add(&name),
+            KeyCommand::List { json } => key_list(json),
         },
     };
 

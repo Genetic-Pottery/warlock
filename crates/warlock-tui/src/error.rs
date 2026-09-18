@@ -6,7 +6,7 @@
 use std::path::PathBuf;
 use std::{fmt, io};
 
-use warlock_engine::{claude_md, load, manifest, pact, scope, sigils};
+use warlock_engine::{claude_md, keys, load, manifest, pact, scope, sigils};
 
 use crate::boundary::{blocking_scopes_message, closed_scope_message};
 
@@ -102,6 +102,27 @@ pub(crate) enum Error {
     },
     Sigils {
         source: sigils::Error,
+    },
+    // The name a key is stored under, judged before anything is read — so this
+    // is the one key failure raised with no line typed. It carries the name and
+    // the rule and could not carry a value if it wanted to.
+    KeyName {
+        name: String,
+        rule: scope::Rule,
+    },
+    // A line that was typed and held nothing, which is not the EOF that changes
+    // nothing: `name` is what a person asked to store under, never what they
+    // typed.
+    NoKey {
+        name: String,
+    },
+    // The engine's key store, and the one variant here that wraps an error from
+    // a module holding secrets. It is safe to carry and to print because
+    // `keys::Error` carries paths, names and a line number and never a value —
+    // which is also why `keys::Unparseable` exists instead of the TOML parse
+    // error, whose diagnostic would quote the line the key is on.
+    Keys {
+        source: keys::Error,
     },
     Terminal {
         source: io::Error,
@@ -274,6 +295,24 @@ impl fmt::Display for Error {
             // Flattened like the manifest's, and for the same reason: a config
             // that will not parse carries the TOML parser's diagnostic.
             Self::Sigils { source } => write!(f, "{}", one_line(&source.to_string())),
+            // `Sigil`'s shape, with the other half of what a reader needs on the
+            // end: the rule is a sentence of its own, and what is worth adding
+            // to it is that the prompt never happened, so no key is anywhere.
+            Self::KeyName { name, rule } => {
+                write!(f, "`{name}` is not a key name, so nothing was read: {rule}")
+            }
+            // Names the pipe rather than only the emptiness, because the person
+            // who typed a blank line at this prompt is the person who has a key
+            // in a file and does not want it on their screen.
+            Self::NoKey { name } => write!(
+                f,
+                "nothing was typed, so no key is stored under `{name}`: pipe one in with \
+                 `warlock key add {name} < key.txt`"
+            ),
+            // Flattened like the sigil config's: a store that will not parse
+            // carries a position rather than the parser's own diagnostic, and
+            // the rest is the filesystem's, which can still run to two lines.
+            Self::Keys { source } => write!(f, "{}", one_line(&source.to_string())),
             Self::Problems { first, rest: 0 } => write!(f, "{first}"),
             Self::Problems { first, rest } => {
                 write!(f, "{first} (and {rest} more like it)")
@@ -293,8 +332,11 @@ impl std::error::Error for Error {
             Self::Manifest { source } | Self::Unspellable { source } => Some(source),
             Self::Pact { source } => Some(source),
             Self::ClaudeMd { source } => Some(source),
-            Self::Sigil { rule, .. } | Self::Scope { rule } => Some(rule),
+            Self::Sigil { rule, .. } | Self::Scope { rule } | Self::KeyName { rule, .. } => {
+                Some(rule)
+            }
             Self::Sigils { source } => Some(source),
+            Self::Keys { source } => Some(source),
             Self::Signal { source } => Some(source),
             Self::Clipboard { source } => Some(source),
             // No source, and there is none to have: a boundary this machine
@@ -307,6 +349,9 @@ impl std::error::Error for Error {
             | Self::ClosedScope { .. }
             | Self::ClosedScopeBelow { .. }
             | Self::NoPact { .. }
+            // Nor here: a prompt answered with a blank line is a person and not
+            // a failure underneath.
+            | Self::NoKey { .. }
             // Nor here, and there could not be one: a run's failures are N
             // errors rather than one, they have already been printed in full,
             // and picking a first to be "the" cause would be the summary
