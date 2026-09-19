@@ -9,7 +9,10 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::Size;
 use ratatui::{Frame, Terminal};
 use warlock_engine::{Loaded, Manifest, Node, NodeState, Tree, load_tree, repository_root};
-use warlock_tui::{App, Chrome, Focus, QuitConfirm, Row, ScopePrompt, tree_height};
+use warlock_tui::{
+    App, Chrome, Focus, QuitConfirm, RecordAsk, RecordFields, RecordPrompt, Row, ScopePrompt,
+    tree_height,
+};
 
 use super::{Cli, Command, Error, FOR_CLAUDE_MD, ScopeCommand, Session, status_for};
 use crate::chatting::Chat;
@@ -772,6 +775,7 @@ fn driving(app: App, scope: Scope, tree: &Tree) -> Driven {
         clipboard: Copying::taking(),
         confirm: QuitConfirm::default(),
         prompt: ScopePrompt::default(),
+        record: RecordPrompt::default(),
         drag: None,
         said: None,
         document: None,
@@ -1058,6 +1062,39 @@ fn a_key_the_window_does_not_want_puts_it_down_and_starts_nothing() {
     assert_eq!(
         driven.prompt,
         ScopePrompt::Closed,
+        "Esc closes the window rather than quitting warlock"
+    );
+}
+
+#[test]
+fn the_record_window_swallows_the_pact_key_too() {
+    // The same promise as the window before it, over the second half of `s`:
+    // while a team is being typed there is no `p` that pacts a directory
+    // behind the window.
+    let mut driven = session(vec![directory("/repo/crates")]);
+    driven.record = RecordPrompt::Open(RecordFields::new("crates", "data-plane"));
+
+    assert!(pressed(&mut driven, key(KeyCode::Char('p'))));
+    let fields = driven
+        .record
+        .fields()
+        .expect("the window is still up over the name it opened on");
+    assert_eq!(
+        fields.field(RecordAsk::Team).text(),
+        "p",
+        "the key was typed, not pressed"
+    );
+}
+
+#[test]
+fn esc_on_the_record_window_puts_it_down_and_writes_nothing() {
+    let mut driven = session(vec![directory("/repo/crates")]);
+    driven.record = RecordPrompt::Open(RecordFields::new("crates", "data-plane"));
+
+    assert!(pressed(&mut driven, key(KeyCode::Esc)));
+    assert_eq!(
+        driven.record,
+        RecordPrompt::Closed,
         "Esc closes the window rather than quitting warlock"
     );
 }

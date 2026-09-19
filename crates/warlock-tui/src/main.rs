@@ -66,7 +66,7 @@ use key::{key_add, key_forget, key_list, key_use};
 use pacting::{Pact, Reloaded};
 use query::{Listing, list};
 use running::{pact, refresh};
-use scoping::{Asking, scope_edit, scope_press};
+use scoping::{Asking, record_edit, scope_edit, scope_press};
 use session::{Scope, Watched, load_app, start_watching};
 use standing::{FOR_CLAUDE_MD, Standing};
 use terminal::{Screen, TerminalGuard, install_panic_hook};
@@ -520,6 +520,7 @@ fn run() -> Result<(), Error> {
         clipboard: Clipboard::open(),
         confirm: QuitConfirm::default(),
         prompt: ScopePrompt::default(),
+        record: RecordPrompt::default(),
         drag: None,
         document: None,
         said: None,
@@ -607,6 +608,11 @@ struct Session<S: Screen, P: Wired + Agent, C: Converses, B: Clip> {
     clipboard: B,
     confirm: QuitConfirm,
     prompt: ScopePrompt,
+    /// The second half of the `s` key: the team, review state and label a
+    /// brand-new scope name is being recorded under. Never up at the same time
+    /// as `prompt` — the question moves from one window to the other and back,
+    /// and [`Session::press`] sets both from the one answer.
+    record: RecordPrompt,
     /// The left button held down over the conversation, if it is: the one piece
     /// of a gesture that outlives the event carrying it, because the rounds
     /// between one drag event and the next are what [`Session::drag_scroll`]
@@ -655,8 +661,13 @@ impl<S: Screen, P: Wired + Agent, C: Converses, B: Clip> Session<S, P, C, B> {
         panel.set_height(panel_height(size, field, header.as_ref()));
         panel.set_width(width);
 
-        let (app, chrome, confirm, prompt) =
-            (&self.app, &self.scope.chrome, self.confirm, &self.prompt);
+        let (app, chrome, confirm, prompt, record) = (
+            &self.app,
+            &self.scope.chrome,
+            self.confirm,
+            &self.prompt,
+            &self.record,
+        );
         let write = self.chat.write_prompt();
         self.screen.draw(|frame| {
             draw(
@@ -667,10 +678,7 @@ impl<S: Screen, P: Wired + Agent, C: Converses, B: Clip> Session<S, P, C, B> {
                 confirm,
                 prompt,
                 write,
-                // Closed on every frame, because this loop holds no record
-                // prompt yet: the window is drawn from here as soon as the slice
-                // that routes keys into it gives the session one to hold.
-                &RecordPrompt::Closed,
+                record,
                 field,
             );
         })
@@ -696,6 +704,7 @@ impl<S: Screen, P: Wired + Agent, C: Converses, B: Clip> Session<S, P, C, B> {
             &self.app,
             self.confirm,
             &self.prompt,
+            &self.record,
             self.chat.write_prompt(),
             field,
         );
@@ -805,6 +814,7 @@ impl<S: Screen, P: Wired + Agent, C: Converses, B: Clip> Session<S, P, C, B> {
             key,
             self.confirm,
             &self.prompt,
+            &self.record,
             self.chat.write_prompt(),
             typing,
             running,
@@ -1062,13 +1072,35 @@ impl<S: Screen, P: Wired + Agent, C: Converses, B: Clip> Session<S, P, C, B> {
                     &self.prompt,
                     edited,
                 );
-                self.prompt = match asking {
-                    Asking::Scope(prompt) => prompt,
-                    // This loop has nowhere to put the record window yet — it is
-                    // drawn and routed a slice later — so a brand-new scope name
-                    // closes the window and writes nothing for now.
-                    Asking::Record(_) => ScopePrompt::Closed,
+                // Both windows are set from the one answer, and exactly one of
+                // them is left open: `Asking` cannot say "ask for the name and
+                // the record at once", so the question moves from the first
+                // window to the second rather than stacking on top of it —
+                // which is what lets `press_for` route a keystroke by asking
+                // each window in turn.
+                (self.prompt, self.record) = match asking {
+                    Asking::Scope(prompt) => (prompt, RecordPrompt::Closed),
+                    Asking::Record(fields) => (ScopePrompt::Closed, RecordPrompt::Open(fields)),
                 };
+            }
+            // Somebody typing into the window the name opened: the same three
+            // answers over three fields instead of one, with Tab moving between
+            // them rather than reaching the tree. Enter writes the pact's scope
+            // and the new `[[scope]]` record in a single save, on this thread
+            // and between two frames for `Pressed::Scope`'s reasons; Esc writes
+            // nothing at all, and the name accepted by the first window goes
+            // with it. What comes back is this window from here on — down for a
+            // record that was saved and for an abandoned one, still up over the
+            // typed text for a field refused as blank. See
+            // `scoping::record_edit`.
+            Pressed::Record(recorded) => {
+                self.record = record_edit(
+                    &mut self.app,
+                    &mut self.manifest,
+                    &self.scope.repo_root,
+                    &self.record,
+                    recorded,
+                );
             }
             // Somebody typing into the other window: a character more or less in
             // the path, the window abandoned, or — on Enter — the document

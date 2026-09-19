@@ -130,10 +130,6 @@ pub(crate) fn scope_edit(
 // the same reasons. It never reopens the name: the string it is recording was
 // accepted by the window before it, and a second chance at typing it would be a
 // second chance for the record's name and the pact's scope to disagree.
-#[allow(
-    dead_code,
-    reason = "the event loop has no record window to route keys into yet; the slice that draws and wires it takes this off"
-)]
 pub(crate) fn record_edit(
     app: &mut App,
     manifest: &mut Manifest,

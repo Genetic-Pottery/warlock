@@ -16,8 +16,9 @@ use ratatui::crossterm::event::{
 };
 use ratatui::layout::Size;
 use warlock_tui::{
-    Answered, App, Cell, Composed, Composer, Edited, Focus, Hit, QuitConfirm, Reach, ScopePrompt,
-    answer_for, compose_for, edit_for, hit_test, panel_reach,
+    Answered, App, Cell, Composed, Composer, Edited, Focus, Hit, QuitConfirm, Reach, RecordPrompt,
+    Recorded, ScopePrompt, answer_for, compose_for, edit_for, hit_test, panel_reach,
+    record_edit_for,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -106,12 +107,21 @@ pub(crate) fn action_for(key: KeyEvent, in_flight: bool) -> Option<Action> {
 // over one `Edited` from one `edit_for` because the loop does different things
 // with a submit from each, and an `Edited` arriving with no way to say which
 // window it came from is exactly the confusion this type exists to prevent.
+// `Record` is a variant of its own for that same reason and not because it
+// carries a different type: a submit from the record window saves a `[[scope]]`
+// record as well as a pact, so one that arrived spelled as a `Scope` would
+// write the wrong half of the question.
+#[allow(
+    clippy::large_enum_variant,
+    reason = "`Recorded`'s own reason: three text fields, built once per keystroke on the event loop's own thread, and a `Box` would buy an allocation and an indirection between the answer and the text it is about"
+)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Pressed {
     Leave,
     CancelTurn,
     Confirm(QuitConfirm),
     Scope(Edited),
+    Record(Recorded),
     Write(Edited),
     Compose(Composed),
     Act(Action),
@@ -137,7 +147,8 @@ fn is_tab(key: KeyEvent) -> bool {
 }
 
 // The order of the tests below is the precedence, and it is the whole of what
-// this function decides.
+// this function decides: Ctrl-C, the quit question, the scope window, the
+// record window, the write window, the composer, then the keys.
 //
 // Ctrl-C first, before the windows: raw mode is exactly the mode in which the
 // terminal stops turning it into `SIGINT`, so if nothing here answers it
@@ -149,20 +160,32 @@ fn is_tab(key: KeyEvent) -> bool {
 // things and the key that stops one must not stop the other.
 //
 // Then each window, and on those roads `action_for` is not called at all, which
-// is the plain statement of "nothing leaks through to the tree underneath". The
-// scope prompt is asked before the write prompt because both can be up at once
-// — `s` opens one from the tree while a `/write` turn is still out, and the
-// answer to that turn opens the other with no keystroke — and the scope prompt
-// is the one somebody is typing in now.
+// is the plain statement of "nothing leaks through to the tree underneath".
+// Only the write window can be up alongside another, so it is the only place
+// the order decides anything: `s` opens the scope window from the tree while a
+// `/write` turn is still out, and the answer to that turn opens the write
+// window with no keystroke, so `s`'s two windows are asked first because one of
+// them is what somebody is typing in now. The scope window and the record
+// window are two halves of the one `s` — the second is asked *instead of* the
+// first, over a name it has already accepted — so their order between
+// themselves settles nothing and costs nothing either way.
 //
-// The composer is asked last of the four, because a window is drawn over it: a
+// The composer is asked last of the five, because a window is drawn over it: a
 // key cannot be both typed into a field on the frame and answered by the dialog
 // covering it. `composer` is `Some` only when the focus is on the field, which
 // is the caller's line, not a lookup here.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the situation a key is read against, and the point of it is that \
+              every part of it arrives rather than being looked up: the four \
+              windows are four parameters here, and bundling them would be a \
+              type whose only reader is this one function"
+)]
 pub(crate) fn press_for(
     key: KeyEvent,
     confirm: QuitConfirm,
     prompt: &ScopePrompt,
+    record: &RecordPrompt,
     write: &ScopePrompt,
     composer: Option<&Composer>,
     in_flight: bool,
@@ -186,6 +209,10 @@ pub(crate) fn press_for(
 
     if let Some(field) = prompt.field() {
         return Pressed::Scope(edit_for(key, field));
+    }
+
+    if let Some(fields) = record.fields() {
+        return Pressed::Record(record_edit_for(key, fields));
     }
 
     if let Some(field) = write.field() {
@@ -284,19 +311,26 @@ pub(crate) struct Drag {
 // `PanelLine` for a point on the composer and scrolls a window the pointer is
 // not over.
 //
-// None of the three windows has anything clickable in it, so while any is up
+// None of the four windows has anything clickable in it, so while any is up
 // every event is dropped, wheel and click alike: a click that reached the tree
 // behind one would select a row the reader cannot see.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "[`press_for`]'s reason, over the same four windows: a pointer \
+              event is read against the frame it landed on, and every piece of \
+              that frame arrives here rather than being looked up"
+)]
 pub(crate) fn mouse_action(
     mouse: MouseEvent,
     size: Size,
     app: &App,
     confirm: QuitConfirm,
     prompt: &ScopePrompt,
+    record: &RecordPrompt,
     write: &ScopePrompt,
     composer: Option<&Composer>,
 ) -> Option<MouseAction> {
-    if confirm.is_open() || prompt.is_open() || write.is_open() {
+    if confirm.is_open() || prompt.is_open() || record.is_open() || write.is_open() {
         return None;
     }
 
