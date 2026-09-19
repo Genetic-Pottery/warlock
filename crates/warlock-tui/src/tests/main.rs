@@ -324,6 +324,133 @@ fn the_two_scope_writes_are_a_noun_and_a_verb_rather_than_two_words_run_together
     );
 }
 
+// `warlock scope add crates/engine data-plane` with whichever of the three
+// record flags a case is about, so each assertion below reads as the flags and
+// not as the two positionals under them.
+fn added(team: Option<&str>, review_state: Option<&str>, label: Option<&str>) -> Command {
+    Command::Scope {
+        command: ScopeCommand::Add {
+            path: PathBuf::from("crates/engine"),
+            scope: "data-plane".to_owned(),
+            team: team.map(str::to_owned),
+            review_state: review_state.map(str::to_owned),
+            label: label.map(str::to_owned),
+        },
+    }
+}
+
+#[test]
+fn the_three_record_flags_reach_the_add_exactly_as_they_were_typed() {
+    assert_eq!(
+        parse(&[
+            "scope",
+            "add",
+            "crates/engine",
+            "data-plane",
+            "--team",
+            "Data Plane",
+            "--review-state",
+            "In Review",
+            "--label",
+            "area/data-plane",
+        ])
+        .unwrap()
+        .command,
+        Some(added(
+            Some("Data Plane"),
+            Some("In Review"),
+            Some("area/data-plane")
+        ))
+    );
+    // The same invocation with the flags ahead of the positionals, because a
+    // person retyping the command from the refusal that named them will put
+    // them wherever the cursor was.
+    assert_eq!(
+        parse(&[
+            "scope",
+            "add",
+            "--label",
+            "area/data-plane",
+            "--review-state",
+            "In Review",
+            "--team",
+            "Data Plane",
+            "crates/engine",
+            "data-plane",
+        ])
+        .unwrap()
+        .command,
+        Some(added(
+            Some("Data Plane"),
+            Some("In Review"),
+            Some("area/data-plane")
+        ))
+    );
+    // Nothing is trimmed and nothing is judged here, for the scope
+    // positional's reason: a team, a review state and a label belong to
+    // somebody else's tracker, and blank is warlock's refusal to word, past
+    // the boundary, with the file untouched.
+    assert_eq!(
+        parse(&[
+            "scope",
+            "add",
+            "crates/engine",
+            "data-plane",
+            "--team",
+            "  ",
+            "--review-state",
+            "",
+            "--label",
+            " area/data-plane ",
+        ])
+        .unwrap()
+        .command,
+        Some(added(Some("  "), Some(""), Some(" area/data-plane ")))
+    );
+    // And a subset parses, because whether the three are required depends on
+    // what `.warlock/pacts.toml` already records and clap has not read it. A
+    // `required = true` here would refuse the flagless run that writes an
+    // already-recorded scope.
+    assert_eq!(
+        parse(&[
+            "scope",
+            "add",
+            "crates/engine",
+            "data-plane",
+            "--team",
+            "Data Plane",
+        ])
+        .unwrap()
+        .command,
+        Some(added(Some("Data Plane"), None, None))
+    );
+}
+
+#[test]
+fn a_record_flag_wants_a_value_on_an_add_and_buys_no_other_word() {
+    // Each of the three takes a value, so the flag on its own is a value that
+    // went missing rather than a switch; a clear records nothing, so none of
+    // them is a word `remove` knows; and having passed them buys nothing at
+    // the boundary — `--force`, `--yes` and `--json` are refused beside a
+    // filled-in record exactly as they are without one.
+    let malformed: [&[&str]; 8] = [
+        &["scope", "add", "crates", "web", "--team"],
+        &["scope", "add", "crates", "web", "--review-state"],
+        &["scope", "add", "crates", "web", "--label"],
+        &["scope", "remove", "crates", "--team", "Data Plane"],
+        &["scope", "remove", "crates", "--review-state", "In Review"],
+        &["scope", "add", "crates", "web", "--team", "Web", "--force"],
+        &["scope", "add", "crates", "web", "--team", "Web", "--yes"],
+        &["scope", "add", "crates", "web", "--team", "Web", "--json"],
+    ];
+
+    for args in malformed {
+        let error = parse(args).unwrap_err();
+        assert!(error.use_stderr(), "{args:?}");
+        assert_eq!(error.exit_code(), 2, "{args:?}");
+    }
+}
+
 #[test]
 fn a_scope_is_taken_as_it_was_typed_and_judged_by_the_engine_rather_than_by_clap() {
     // Both of these are refusals — one is not a scope, the other is the

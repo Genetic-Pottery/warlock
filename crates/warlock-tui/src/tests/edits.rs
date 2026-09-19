@@ -2,8 +2,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use warlock_engine::{
-    Manifest, Node, NodeState, PactEntry, ScopeRecord, Tree, manifest_path, save_sigils,
-    validate_scope,
+    Manifest, Node, NodeState, PactEntry, ScopeRecord, Tree, manifest_path, route_facts,
+    save_sigils, validate_scope,
 };
 use warlock_tui::App;
 
@@ -605,6 +605,357 @@ fn an_unpact_keeps_the_records_including_the_one_it_orphaned() {
     );
     assert_eq!(after.scopes(), records());
     assert_eq!(record_bytes(repo.path()), before);
+}
+
+// Spaces on both ends and kept there: blank is judged on a trimmed copy while
+// the untrimmed string is what gets stored, so a team named as it is named in
+// somebody's tracker is written back exactly.
+const TEAM: &str = " Billing Team ";
+
+#[test]
+fn a_name_nothing_records_names_every_flag_that_was_not_given() {
+    let repo = a_repository_of_records();
+    let home = a_dir();
+    let before = manifest_bytes(repo.path()).expect("a manifest on disk");
+
+    for (flags, missing) in [
+        (
+            Flags::default(),
+            vec!["--team", "--review-state", "--label"],
+        ),
+        (
+            Flags {
+                review_state: None,
+                label: None,
+                ..a_record()
+            },
+            vec!["--review-state", "--label"],
+        ),
+        (
+            Flags {
+                team: None,
+                ..a_record()
+            },
+            vec!["--team"],
+        ),
+    ] {
+        let error = scope_add(repo.path(), home.path(), "docs", "billing", flags)
+            .expect_err("nothing records `billing`");
+
+        let Error::UnrecordedScope {
+            scope,
+            missing: named,
+        } = &error
+        else {
+            panic!("a name with no record was refused as something else: {error:?}");
+        };
+        assert_eq!(scope, "billing");
+        // All of them and in the window's field order, because the point of
+        // the refusal is that the command is retyped once rather than three
+        // times.
+        assert_eq!(named, &missing, "{flags:?}");
+        let said = error.to_string();
+        for flag in &missing {
+            assert!(said.contains(&format!("`{flag}`")), "{said}");
+        }
+        assert!(!said.contains('\n'), "`main` prints one line");
+        // Not clap's 2 — the command line parsed — and not the boundary's 3,
+        // which is the one refusal re-running can never fix.
+        assert_eq!(status_for(&Err(error)), 1, "{flags:?}");
+    }
+
+    assert_eq!(manifest_bytes(repo.path()).as_deref(), Some(&before[..]));
+}
+
+#[test]
+fn a_blank_value_is_refused_rather_than_trimmed_into_acceptability() {
+    let repo = a_repository_of_records();
+    let home = a_dir();
+    let before = manifest_bytes(repo.path()).expect("a manifest on disk");
+
+    for (flags, blank) in [
+        (
+            Flags {
+                team: Some(""),
+                ..a_record()
+            },
+            vec!["--team"],
+        ),
+        (
+            Flags {
+                review_state: Some("   "),
+                ..a_record()
+            },
+            vec!["--review-state"],
+        ),
+        (
+            Flags {
+                label: Some("\t"),
+                ..a_record()
+            },
+            vec!["--label"],
+        ),
+        (
+            Flags {
+                team: Some(" "),
+                review_state: Some(""),
+                label: Some("\t "),
+            },
+            vec!["--team", "--review-state", "--label"],
+        ),
+    ] {
+        let error = scope_add(repo.path(), home.path(), "docs", "billing", flags)
+            .expect_err("a blank value is not a record");
+
+        let Error::BlankRecord { flags: named } = &error else {
+            // Apart from the missing-flag refusal on purpose: a flag nobody
+            // passed and a flag passed an empty string are different
+            // mistakes, and the second one is not a shell problem.
+            panic!("a blank value was refused as something else: {error:?}");
+        };
+        assert_eq!(named, &blank, "{flags:?}");
+        let said = error.to_string();
+        for flag in &blank {
+            assert!(said.contains(&format!("`{flag}`")), "{said}");
+        }
+        assert!(!said.contains('\n'), "`main` prints one line");
+        assert_eq!(status_for(&Err(error)), 1, "{flags:?}");
+    }
+
+    assert_eq!(manifest_bytes(repo.path()).as_deref(), Some(&before[..]));
+}
+
+#[test]
+fn a_flag_at_a_name_something_already_records_is_refused_rather_than_dropped() {
+    // The rule the `s` key follows, at the shell: a record in the file is
+    // never rewritten, merged or deleted from here, so a value handed to one
+    // is a value that would be dropped on the floor — and a run that believes
+    // it wrote something it did not is the outcome this refusal exists for.
+    let repo = a_repository_of_records();
+    let home = a_dir();
+    let before = manifest_bytes(repo.path()).expect("a manifest on disk");
+
+    for flags in [
+        a_record(),
+        Flags {
+            team: Some("Someone Else"),
+            ..Flags::default()
+        },
+        Flags {
+            review_state: Some("Done"),
+            ..Flags::default()
+        },
+        Flags {
+            label: Some("area/other"),
+            ..Flags::default()
+        },
+        // Blank and unwanted at once, which is this refusal rather than the
+        // one above: what the file already records is asked first, so the
+        // answer names the record instead of the spelling of a value that was
+        // never going to be stored.
+        Flags {
+            team: Some(""),
+            ..Flags::default()
+        },
+    ] {
+        let error = scope_add(repo.path(), home.path(), "docs", "data-plane", flags)
+            .expect_err("`data-plane` already has a record");
+
+        assert!(
+            matches!(error, Error::RecordedScope { .. }),
+            "{flags:?}: {error:?}"
+        );
+        let said = error.to_string();
+        assert!(said.contains("`data-plane`"), "{said}");
+        assert!(!said.contains('\n'), "`main` prints one line");
+        assert_eq!(status_for(&Err(error)), 1, "{flags:?}");
+    }
+
+    assert_eq!(manifest_bytes(repo.path()).as_deref(), Some(&before[..]));
+}
+
+#[test]
+fn a_name_nothing_records_gets_its_scope_and_its_record_from_one_write() {
+    let repo = a_repository_of_records();
+    let home = a_dir();
+    let before = record_bytes(repo.path());
+
+    let said = scope_add(
+        repo.path(),
+        home.path(),
+        "docs",
+        "billing",
+        Flags {
+            team: Some(TEAM),
+            review_state: Some("In Review"),
+            label: Some("area/billing"),
+        },
+    )
+    .expect("nothing records `billing`");
+
+    assert_eq!(said, "docs is scoped `billing`");
+    assert_eq!(status_for(&Ok(())), 0);
+    let after = load_manifest(repo.path()).expect("a manifest that reads");
+    assert_eq!(
+        after.entry("docs").and_then(PactEntry::scope),
+        Some("billing")
+    );
+    // The name on the record is the folded name on the pact, and the three
+    // values are what was typed — including the spaces around the team, which
+    // nothing here is entitled to correct.
+    assert_eq!(
+        after.scopes(),
+        [
+            records(),
+            vec![ScopeRecord::new(
+                "billing",
+                TEAM,
+                "In Review",
+                "area/billing"
+            )]
+        ]
+        .concat()
+    );
+    // The two records the fixture had, still first and still byte for byte
+    // what they were: a record already in the file is neither rewritten nor
+    // moved by one being created beside it.
+    assert!(
+        record_bytes(repo.path()).starts_with(&before),
+        "a record that was there moved or changed"
+    );
+
+    // And every row the write did not set out to change, including the run's
+    // own fields on the row it did.
+    let untouched = a_manifest();
+    assert_eq!(
+        after
+            .entries()
+            .iter()
+            .map(PactEntry::module)
+            .collect::<Vec<_>>(),
+        untouched
+            .entries()
+            .iter()
+            .map(PactEntry::module)
+            .collect::<Vec<_>>(),
+    );
+    for module in ["crates", "crates/engine", "crates/engine/src"] {
+        assert_eq!(after.entry(module), untouched.entry(module), "{module}");
+    }
+    let docs = stored(repo.path(), "docs");
+    assert_eq!(docs.document(), "docs/WARLOCK.md");
+    assert_eq!(docs.granted_hash(), Some(HASH));
+    assert_eq!(docs.granted_at(), Some(AT));
+}
+
+#[test]
+fn a_name_something_records_is_written_flagless_and_gains_no_second_record() {
+    let repo = a_repository_of_records();
+    let home = a_dir();
+    let before = record_bytes(repo.path());
+
+    let said = scope_add(
+        repo.path(),
+        home.path(),
+        "docs",
+        "data-plane",
+        Flags::default(),
+    )
+    .expect("`data-plane` already has a record");
+
+    assert_eq!(said, "docs is scoped `data-plane`");
+    assert_eq!(status_for(&Ok(())), 0);
+    let after = load_manifest(repo.path()).expect("a manifest that reads");
+    assert_eq!(
+        after.entry("docs").and_then(PactEntry::scope),
+        Some("data-plane")
+    );
+    assert_eq!(after.scopes(), records());
+    assert_eq!(record_bytes(repo.path()), before);
+
+    // And the road is chosen by the folded name rather than by what was
+    // typed, so a capital does not send an already-recorded scope down the
+    // recording road to be refused for flags it should not be asked for. The
+    // sigil is held now because the write above drew the boundary: `docs` is
+    // scoped `data-plane` from here on, and a second write at it is a write
+    // inside somebody's scope.
+    holding(home.path(), repo.path(), &["data-plane"]);
+    assert_eq!(
+        scope_add(
+            repo.path(),
+            home.path(),
+            "docs",
+            "Data-Plane",
+            Flags::default(),
+        )
+        .expect("`data-plane` is the same name folded"),
+        "docs is scoped `data-plane`"
+    );
+    assert_eq!(record_bytes(repo.path()), before);
+}
+
+#[test]
+fn a_closed_boundary_answers_before_a_single_flag_is_looked_at() {
+    // The ordering the acceptance criteria turn on: whatever the flags said,
+    // a scope this machine does not hold is the same refusal it was before
+    // they existed. The four shapes below are the four different answers the
+    // new checks give, none of which is reached from out here — a refusal
+    // naming a record would be a fact about the inside of a manifest the
+    // reader has just been told they may not work in.
+    let repo = a_repository_of_records();
+    let home = a_dir();
+    holding(home.path(), repo.path(), &["platform"]);
+    let before = manifest_bytes(repo.path()).expect("a manifest on disk");
+
+    for (scope, flags) in [
+        ("billing", Flags::default()),
+        ("billing", a_record()),
+        (
+            "billing",
+            Flags {
+                team: Some("  "),
+                ..a_record()
+            },
+        ),
+        ("data-plane", a_record()),
+    ] {
+        let error = scope_add(repo.path(), home.path(), "crates/engine", scope, flags)
+            .expect_err("a scope this machine does not hold refuses an add");
+
+        assert!(
+            matches!(error, Error::ClosedScope { .. }),
+            "{scope} {flags:?}: {error:?}"
+        );
+        assert_eq!(
+            error.to_string(),
+            closed_scope_message("crates/engine", "data-plane")
+        );
+        assert_eq!(status_for(&Err(error)), 3, "{scope} {flags:?}");
+    }
+
+    assert_eq!(manifest_bytes(repo.path()).as_deref(), Some(&before[..]));
+}
+
+#[test]
+fn the_router_finds_the_team_review_state_and_label_the_flags_wrote() {
+    // What `warlock check` prints for the directory just scoped, asked of the
+    // router itself rather than of the manifest: a record filed under a name
+    // the pact does not carry would route nowhere, which is the whole reason
+    // the flags are asked for in the same act that writes the name.
+    let repo = a_repository_of_records();
+    let home = a_dir();
+
+    scope_add(repo.path(), home.path(), "docs", "billing", a_record())
+        .expect("nothing records `billing`");
+
+    let written = load_manifest(repo.path()).expect("a manifest that reads");
+    let facts = route_facts("docs", repo.path(), &written, None)
+        .expect("the module path is inside the root");
+    assert_eq!(facts.scope(), Some("billing"));
+    let record = facts.record().expect("the router found no record");
+    assert_eq!(record.team(), "Billing");
+    assert_eq!(record.review_state(), "In Review");
+    assert_eq!(record.label(), "area/billing");
 }
 
 #[test]
