@@ -1,7 +1,9 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use warlock_engine::{Manifest, PactEntry, save_sigils, sigils_path};
+use warlock_engine::{
+    Manifest, PactEntry, ScopeRecord, save_key, save_key_binding, save_sigils, sigils_path,
+};
 use warlock_tui::Sigils;
 
 use super::{Checked, checked, checked_onto, object, prose};
@@ -118,13 +120,28 @@ fn entry(module: &str) -> PactEntry {
         .expect("a relative module path is inside the root")
 }
 
+// `data-plane` has a `[[scope]]` record and `platform` deliberately has none:
+// a scope somebody pacted before anybody filed a routing record for it is the
+// ordinary half-finished state, and every test below can reach both from one
+// manifest.
 fn a_manifest() -> Manifest {
     Manifest::with_entries([
         entry("crates").with_scope("platform"),
         entry("crates/engine").with_scope("data-plane"),
         entry("docs"),
     ])
+    .with_scopes([ScopeRecord::new(
+        "data-plane",
+        "Data Plane",
+        "In Review",
+        "area/data-plane",
+    )])
 }
+
+// Not a key, and named so nothing reading this file mistakes it for one. It is
+// written only so a bound name can be made to resolve, and the tests below
+// assert it is nowhere in what warlock prints.
+const NOT_A_KEY: &str = "not-a-real-key-value";
 
 fn answer(home: &Path, path: &str) -> Checked {
     checked(
@@ -139,6 +156,14 @@ fn answer(home: &Path, path: &str) -> Checked {
 fn holding(home: &Path, sigils: &[&str]) {
     let sigils: Vec<String> = sigils.iter().map(|sigil| (*sigil).to_owned()).collect();
     save_sigils(home, Path::new(REPO), &sigils).expect("a config that writes");
+}
+
+fn bound(home: &Path, name: &str) {
+    save_key_binding(home, Path::new(REPO), name).expect("a binding that writes");
+}
+
+fn keeping(home: &Path, name: &str) {
+    save_key(home, name, NOT_A_KEY).expect("a key store that writes");
 }
 
 fn a_broken_config(home: &Path) {
@@ -184,12 +209,6 @@ fn a_path_nothing_covers_says_so_rather_than_naming_a_scope() {
     // And an unscoped path is open to a machine holding nothing at all:
     // the permissive default is on the directory and only there.
     assert!(answer(home.path(), "docs/adr").opens);
-    assert_eq!(
-        prose(&answer(home.path(), "docs/adr")),
-        "nothing scopes `docs/adr`\n\
-             holding nothing\n\
-             an unscoped path is open to anyone, so this machine may work here"
-    );
 }
 
 #[test]
@@ -200,12 +219,7 @@ fn a_held_sigil_opens_the_scope_it_matches_and_nothing_else() {
     let open = answer(home.path(), "crates/tui/src");
     assert_eq!(open.sigils, Sigils::Held(vec!["platform".to_owned()]));
     assert!(open.opens);
-    assert_eq!(
-        prose(&open),
-        "`crates/tui/src` is scoped `platform`\n\
-             holding `platform`\n\
-             `platform` is open to this machine"
-    );
+    assert!(prose(&open).contains("`platform` is open to this machine"));
 
     // The nearer scope replaces the outer one outright, so holding
     // `platform` does not open what `data-plane` covers.
@@ -229,13 +243,10 @@ fn a_held_sigil_opens_the_scope_it_matches_and_nothing_else() {
         ),
         0
     );
-    assert_eq!(
-        prose(&closed),
-        "`crates/engine` is scoped `data-plane`\n\
-             holding `platform`\n\
-             `data-plane` is closed to this machine — hold that sigil to work \
-             here, with `warlock config`"
-    );
+    assert!(prose(&closed).contains(
+        "`data-plane` is closed to this machine — hold that sigil to work here, \
+         with `warlock config`"
+    ));
 }
 
 #[test]
@@ -249,7 +260,7 @@ fn a_machine_that_holds_nothing_is_closed_by_every_scope_and_still_answers() {
     assert!(!closed.opens);
     assert_eq!(
         object(&closed).to_string(),
-        r#"{"command":"check","path":"crates/engine","scope":"data-plane","sigils":[],"opens":false}"#
+        r#"{"command":"check","path":"crates/engine","scope":"data-plane","sigils":[],"opens":false,"team":"Data Plane","review_state":"In Review","label":"area/data-plane","key":null,"key_found":false}"#
     );
 }
 
@@ -268,7 +279,7 @@ fn a_config_that_will_not_parse_is_unknown_and_never_an_empty_holding() {
     );
     assert_eq!(
         object(&unknown).to_string(),
-        r#"{"command":"check","path":"crates/engine","scope":"data-plane","sigils":null,"opens":false}"#
+        r#"{"command":"check","path":"crates/engine","scope":"data-plane","sigils":null,"opens":false,"team":"Data Plane","review_state":"In Review","label":"area/data-plane","key":null,"key_found":false}"#
     );
     // And the prose names the file, which is the one thing a reader needs
     // in order to fix it.
@@ -296,6 +307,13 @@ fn a_missing_home_is_nothing_held_rather_than_a_config_that_would_not_read() {
     assert_eq!(nowhere.config, None);
     assert!(!nowhere.opens);
     assert!(prose(&nowhere).contains("holding nothing"));
+    // No home is nothing bound rather than unknown, for a reason of its own: a
+    // machine with no home has no key store to bind a name to either, so
+    // `warlock key use` is the fix here as it is for a home that simply has
+    // no binding in it yet. The route the manifest knows is still answered.
+    assert_eq!(nowhere.key, None);
+    assert!(!nowhere.key_found);
+    assert_eq!(nowhere.team.as_deref(), Some("Data Plane"));
 }
 
 #[test]
@@ -331,7 +349,7 @@ fn the_object_is_the_shape_a_consumer_was_promised() {
 
     assert_eq!(
         object(&answer(home.path(), "crates/engine")).to_string(),
-        r#"{"command":"check","path":"crates/engine","scope":"data-plane","sigils":["billing"],"opens":false}"#
+        r#"{"command":"check","path":"crates/engine","scope":"data-plane","sigils":["billing"],"opens":false,"team":"Data Plane","review_state":"In Review","label":"area/data-plane","key":null,"key_found":false}"#
     );
 }
 
@@ -341,7 +359,7 @@ fn nothing_covering_the_path_is_a_null_scope_rather_than_a_missing_field() {
 
     assert_eq!(
         object(&answer(home.path(), "docs/adr")).to_string(),
-        r#"{"command":"check","path":"docs/adr","scope":null,"sigils":[],"opens":true}"#
+        r#"{"command":"check","path":"docs/adr","scope":null,"sigils":[],"opens":true,"team":null,"review_state":null,"label":null,"key":null,"key_found":false}"#
     );
 }
 
@@ -370,4 +388,252 @@ fn no_object_carries_a_root_or_a_home() {
         !printed.contains(&broken.path().display().to_string()),
         "{printed}"
     );
+}
+
+#[test]
+fn the_whole_answer_for_a_scoped_recorded_and_bound_checkout_is_one_flat_object() {
+    // The shape a consumer is promised, asserted whole rather than field by
+    // field: the five route fields sit flat beside the four that were here
+    // first, with no nested object to reach through, and `review_state` is
+    // spelled as the `[[scope]]` record spells it.
+    let home = a_dir();
+    holding(home.path(), &["data-plane"]);
+    bound(home.path(), "work");
+    keeping(home.path(), "work");
+
+    let printed = object(&answer(home.path(), "crates/engine/src")).to_string();
+
+    assert_eq!(
+        printed,
+        r#"{"command":"check","path":"crates/engine/src","scope":"data-plane","sigils":["data-plane"],"opens":true,"team":"Data Plane","review_state":"In Review","label":"area/data-plane","key":"work","key_found":true}"#
+    );
+    // The name is printed and the value it stands for never is. Asserted on
+    // the one answer that had to read the store to say `true`, because that is
+    // the answer a leak could come through.
+    assert!(!printed.contains(NOT_A_KEY), "{printed}");
+}
+
+#[test]
+fn a_covering_scope_with_no_record_routes_to_null_rather_than_to_empty_strings() {
+    // `platform` covers this and nobody has filed a `[[scope]]` record for it.
+    // `""` would tell a script the work is filed to a team whose name is the
+    // empty string, which is a thing a tracker will accept.
+    let home = a_dir();
+    bound(home.path(), "work");
+    keeping(home.path(), "work");
+
+    assert_eq!(
+        object(&answer(home.path(), "crates/tui/src")).to_string(),
+        r#"{"command":"check","path":"crates/tui/src","scope":"platform","sigils":[],"opens":false,"team":null,"review_state":null,"label":null,"key":"work","key_found":true}"#
+    );
+}
+
+#[test]
+fn the_three_key_states_are_told_apart_by_the_name_and_never_by_the_boolean() {
+    // Nothing bound and a name nothing answers to are both `key_found: false`
+    // and are fixed in different places — `warlock key use` against the
+    // checkout's config, `warlock key add` against the store — so `key` is
+    // what tells them apart.
+    let unbound = a_dir();
+    let checked = answer(unbound.path(), "crates/engine");
+    assert_eq!(checked.key, None);
+    assert!(!checked.key_found);
+
+    // Bound to a name this machine has never stored: the store is not there at
+    // all, which is the same answer as a store without that name in it.
+    let dangling = a_dir();
+    bound(dangling.path(), "work");
+    let checked = answer(dangling.path(), "crates/engine");
+    assert_eq!(checked.key.as_deref(), Some("work"));
+    assert!(!checked.key_found);
+
+    // A store that holds other names and not this one.
+    keeping(dangling.path(), "personal");
+    let checked = answer(dangling.path(), "crates/engine");
+    assert_eq!(checked.key.as_deref(), Some("work"));
+    assert!(!checked.key_found);
+
+    keeping(dangling.path(), "work");
+    let checked = answer(dangling.path(), "crates/engine");
+    assert_eq!(checked.key.as_deref(), Some("work"));
+    assert!(checked.key_found);
+}
+
+#[test]
+fn a_closed_scope_still_carries_the_whole_route_beside_the_closed_verdict() {
+    // The decision this implements: warlock says what is being crossed and
+    // goes on saying everything else it knows. Blanking the route because the
+    // machine holds no sigil for it would leave somebody covering for a
+    // colleague with a verdict and nowhere to file.
+    let home = a_dir();
+    holding(home.path(), &["platform"]);
+    bound(home.path(), "work");
+    keeping(home.path(), "work");
+
+    let closed = answer(home.path(), "crates/engine");
+
+    assert!(!closed.opens);
+    assert_eq!(closed.team.as_deref(), Some("Data Plane"));
+    assert_eq!(closed.review_state.as_deref(), Some("In Review"));
+    assert_eq!(closed.label.as_deref(), Some("area/data-plane"));
+    assert_eq!(closed.key.as_deref(), Some("work"));
+    assert!(closed.key_found);
+}
+
+// The six prose cases below assert the whole answer rather than a line of it,
+// because the composition is the thing under test: five lines, always in that
+// order, with the repository's two facts above this checkout's two. A
+// `contains` would pass on an answer that had silently lost a line.
+#[test]
+fn the_prose_for_a_scoped_recorded_and_bound_checkout_says_the_route_and_the_key() {
+    let home = a_dir();
+    holding(home.path(), &["data-plane"]);
+    bound(home.path(), "work");
+    keeping(home.path(), "work");
+
+    let answered = answer(home.path(), "crates/engine/src");
+
+    assert_eq!(
+        prose(&answered),
+        "`crates/engine/src` is scoped `data-plane`\n\
+         work here is filed to `Data Plane`, as `In Review`, labelled `area/data-plane`\n\
+         holding `data-plane`\n\
+         `data-plane` is open to this machine\n\
+         filing to `Data Plane` would use the key `work`, which this machine stores"
+    );
+    // The one answer that had to read the key store to say the name resolves,
+    // which is the answer a leak would come through.
+    assert!(
+        !prose(&answered).contains(NOT_A_KEY),
+        "{}",
+        prose(&answered)
+    );
+}
+
+#[test]
+fn a_closed_scope_keeps_its_whole_route_in_the_prose_beside_the_closed_line() {
+    // The decision this implements: the closed line sits beside the route and
+    // never in place of it. Somebody covering for a colleague is told what they
+    // would be crossing and still where the work files.
+    let home = a_dir();
+    holding(home.path(), &["platform"]);
+    bound(home.path(), "work");
+    keeping(home.path(), "work");
+
+    assert_eq!(
+        prose(&answer(home.path(), "crates/engine")),
+        "`crates/engine` is scoped `data-plane`\n\
+         work here is filed to `Data Plane`, as `In Review`, labelled `area/data-plane`\n\
+         holding `platform`\n\
+         `data-plane` is closed to this machine — hold that sigil to work here, \
+         with `warlock config`\n\
+         filing to `Data Plane` would use the key `work`, which this machine stores"
+    );
+}
+
+#[test]
+fn a_path_no_scope_covers_says_there_is_nothing_to_route_to() {
+    let home = a_dir();
+
+    assert_eq!(
+        prose(&answer(home.path(), "docs/adr")),
+        "nothing scopes `docs/adr`\n\
+         there is nothing to route to: a scope covering this path is what would fix it, \
+         with `warlock scope add`\n\
+         holding nothing\n\
+         an unscoped path is open to anyone, so this machine may work here\n\
+         no key is bound to this checkout: `warlock key use <name>` binds a name this \
+         machine stores, and `warlock key add <name>` stores a new one"
+    );
+}
+
+#[test]
+fn a_covering_scope_nobody_recorded_says_which_scope_is_missing_a_record() {
+    // `platform` covers this and has no `[[scope]]` record. The line names the
+    // scope and the file, because those are the two things somebody filing the
+    // record needs and neither is in the rest of the answer.
+    let home = a_dir();
+    bound(home.path(), "work");
+    keeping(home.path(), "work");
+
+    assert_eq!(
+        prose(&answer(home.path(), "crates/tui/src")),
+        "`crates/tui/src` is scoped `platform`\n\
+         `platform` has no `[[scope]]` record, so there is nothing to route to: a record \
+         in `.warlock/pacts.toml` is what would fix it\n\
+         holding nothing\n\
+         `platform` is closed to this machine — hold that sigil to work here, \
+         with `warlock config`\n\
+         the key `work` is bound here and stored on this machine"
+    );
+}
+
+#[test]
+fn an_unbound_checkout_is_sent_to_key_use_and_key_add_and_a_dangling_name_to_key_add() {
+    // The two absences are fixed in different files by different commands, so
+    // the lines differ: nothing bound is the checkout's config, a name the
+    // store has never heard of is the store. Both are exit 0 and both print the
+    // route above them.
+    let unbound = a_dir();
+    holding(unbound.path(), &["data-plane"]);
+
+    assert_eq!(
+        prose(&answer(unbound.path(), "crates/engine")),
+        "`crates/engine` is scoped `data-plane`\n\
+         work here is filed to `Data Plane`, as `In Review`, labelled `area/data-plane`\n\
+         holding `data-plane`\n\
+         `data-plane` is open to this machine\n\
+         no key is bound to this checkout: `warlock key use <name>` binds a name this \
+         machine stores, and `warlock key add <name>` stores a new one"
+    );
+
+    let dangling = a_dir();
+    holding(dangling.path(), &["data-plane"]);
+    bound(dangling.path(), "work");
+    keeping(dangling.path(), "personal");
+
+    assert_eq!(
+        prose(&answer(dangling.path(), "crates/engine")),
+        "`crates/engine` is scoped `data-plane`\n\
+         work here is filed to `Data Plane`, as `In Review`, labelled `area/data-plane`\n\
+         holding `data-plane`\n\
+         `data-plane` is open to this machine\n\
+         the key `work` is bound here and this machine has not stored it: \
+         `warlock key add work` stores it, `warlock key use <name>` binds another"
+    );
+}
+
+#[test]
+fn every_half_finished_route_is_still_a_zero() {
+    // A check answers; it does not gate. The non-zero status is left for `jq
+    // -e '.opens and .key_found'` to spend, so each of these four — a scope
+    // this machine does not hold, nothing bound, a name the store has never
+    // heard of, a path no scope covers — is output and a 0.
+    let closed = a_dir();
+    holding(closed.path(), &["platform"]);
+
+    let dangling = a_dir();
+    bound(dangling.path(), "work");
+
+    for (home, path) in [
+        (&closed, "crates/engine"),
+        (&a_dir(), "crates/engine"),
+        (&dangling, "crates/engine"),
+        (&a_dir(), "docs/adr"),
+    ] {
+        assert_eq!(
+            status_for(
+                &checked(
+                    Path::new(REPO),
+                    Some(home.path()),
+                    &a_manifest(),
+                    &Path::new(REPO).join(path),
+                )
+                .map(|_| ())
+            ),
+            0,
+            "{path} under {}",
+            home.path().display()
+        );
+    }
 }

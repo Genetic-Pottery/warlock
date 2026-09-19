@@ -16,7 +16,7 @@ repaint.
 | `warlock key forget <name>` | Remove a stored key from this machine by name | one key-store write |
 | `warlock stale [path]` | List the pacted directories at or below `path` that are stale | nothing |
 | `warlock fresh [path]` | The same for the fresh ones | nothing |
-| `warlock check <path>` | Say which scope covers `path`, what this machine holds, and whether the two meet | nothing |
+| `warlock check <path>` | Say which scope covers `path`, where work under it is filed, what this machine holds, and whether the two meet | nothing |
 | `warlock unpact <path>` | Drop the pact on a directory and every pact below it | one manifest write |
 | `warlock scope add <path> <scope>` | Write a scope onto a pacted directory | one manifest write |
 | `warlock scope remove <path>` | Clear the scope on a pacted directory | one manifest write |
@@ -137,15 +137,29 @@ crates/warlock-engine/src
 $ test -z "$(warlock stale crates/warlock-engine)"
 ```
 
-`check` walks up from one path and answers in three lines — the scope covering
-it, what this machine holds, and whether the two meet:
+`check` walks up from one path and answers in five lines — the scope covering
+it, where work under that scope is filed, what this machine holds, whether the
+scope and the sigils meet, and which stored key name this checkout is bound to:
 
 ```sh
-$ warlock check crates
-nothing scopes `crates`
+$ warlock check crates/engine
+`crates/engine` is scoped `data-plane`
+work here is filed to `Data Plane`, as `In Review`, labelled `area/data-plane`
 holding `data-plane`
-an unscoped path is open to anyone, so this machine may work here
+`data-plane` is open to this machine
+filing to `Data Plane` would use the key `work`, which this machine stores
 ```
+
+The first two lines are the repository's and true for anyone who clones it; the
+last three are this machine's. All five print every time, so an answer with
+something missing is a line that says what is missing rather than one fewer
+line to count: a scope with no `[[scope]]` record names the scope and
+`.warlock/pacts.toml`, a path no scope covers says there is nothing to route to
+and that a scope would fix it, and an unbound checkout is sent to
+`warlock key use` and `warlock key add`. A closed scope keeps its whole route,
+with the closed line beside it rather than in place of it — somebody covering
+for a colleague is told both what they would be crossing and where the work
+files. Only key *names* are ever printed, here and everywhere else.
 
 All three take `--json` and answer as one object on one line instead:
 
@@ -153,16 +167,41 @@ All three take `--json` and answer as one object on one line instead:
 $ warlock stale --json
 {"command":"stale","directories":[{"path":".","state":"stale"}]}
 
-$ warlock check crates --json
-{"command":"check","path":"crates","scope":null,"sigils":["data-plane"],"opens":true}
+$ warlock check crates/engine --json
+{"command":"check","path":"crates/engine","scope":"data-plane","sigils":["data-plane"],"opens":true,"team":"Data Plane","review_state":"In Review","label":"area/data-plane","key":"work","key_found":true}
 ```
 
+`path` is repository-root-relative, `scope` is the covering scope or `null`,
+`sigils` is what this machine holds (`null`, and never `[]`, when the config
+would not read), and `opens` is whether the two meet. The five beside them are
+the route and the key, flat in the same object rather than nested, so nothing
+has to know which half of the answer a field was added with:
+
+| Field | What it says | When it is `null` |
+| --- | --- | --- |
+| `team` | The team slug in the covering scope's `[[scope]]` record | No scope covers the path, or the covering scope has no record |
+| `review_state` | The review state that record files work in — spelled as the record spells it, never `state` | The same two cases |
+| `label` | The label that record puts on work | The same two cases |
+| `key` | The name this checkout's key is bound to, never a key | Nothing is bound to this checkout |
+| `key_found` | Whether that name resolves in `~/.warlock/keys.toml` — a `bool`, never `null` | — |
+
+The three record fields are one record spread flat, so they are `null`
+together and never `""`: an empty string would tell a script it was filed to a
+team whose name is the empty string. `key` and `key_found` tell the two ways of
+having no usable key apart, because they are fixed in different places:
+`key: null, key_found: false` is nothing bound and `warlock key use` is the
+fix, while `key: "work", key_found: false` is a name this machine has never
+stored and `warlock key add work` is.
+
 The verdict is a field and never a status. A closed scope is the answer to the
-question rather than a failure to reach one, so `check` exits 0 either way,
-which is what leaves the exit status free:
+question rather than a failure to reach one, so `check` exits 0 either way, and
+so do an unbound checkout, a bound name the store has never heard of and a path
+no scope covers. That is what leaves the exit status free:
 `warlock check <path> --json | jq -e '.opens'` spends `jq`'s status on the
-verdict and warlock spends none of its own on saying no. The same goes for an
-empty listing — nothing stale is an answer, and it is a 0.
+verdict, and `warlock check <path> --json | jq -e '.opens and .key_found'`
+spends it on "this machine may work here and can file the ticket" — warlock
+spends none of its own on saying no either way. The same goes for an empty
+listing — nothing stale is an answer, and it is a 0.
 
 ## Writing
 

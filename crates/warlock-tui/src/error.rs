@@ -6,7 +6,7 @@
 use std::path::PathBuf;
 use std::{fmt, io};
 
-use warlock_engine::{claude_md, keys, load, manifest, pact, scope, sigils};
+use warlock_engine::{claude_md, keys, load, manifest, pact, route, scope, sigils};
 
 use crate::boundary::{blocking_scopes_message, closed_scope_message};
 
@@ -134,6 +134,15 @@ pub(crate) enum Error {
     // error, whose diagnostic would quote the line the key is on.
     Keys {
         source: keys::Error,
+    },
+    // Only the engine's *reporting* route errors reach this, and neither of
+    // them is an absence: `route_facts` answers "no scope", "no record",
+    // "nothing bound" and "no such key" as values, so what is left is a path
+    // with no place in the manifest and a key store that will not read. Which
+    // is why `warlock check` can carry this variant and still exit 0 on every
+    // route a person has yet to finish setting up.
+    Route {
+        source: route::Error,
     },
     Terminal {
         source: io::Error,
@@ -332,6 +341,9 @@ impl fmt::Display for Error {
             // carries a position rather than the parser's own diagnostic, and
             // the rest is the filesystem's, which can still run to two lines.
             Self::Keys { source } => write!(f, "{}", one_line(&source.to_string())),
+            // Flattened for the same reason again: what reaches here wraps a
+            // manifest or key-store error whose text can run to two lines.
+            Self::Route { source } => write!(f, "{}", one_line(&source.to_string())),
             Self::Problems { first, rest: 0 } => write!(f, "{first}"),
             Self::Problems { first, rest } => {
                 write!(f, "{first} (and {rest} more like it)")
@@ -356,6 +368,7 @@ impl std::error::Error for Error {
             }
             Self::Sigils { source } => Some(source),
             Self::Keys { source } => Some(source),
+            Self::Route { source } => Some(source),
             Self::Signal { source } => Some(source),
             Self::Clipboard { source } => Some(source),
             // No source, and there is none to have: a boundary this machine

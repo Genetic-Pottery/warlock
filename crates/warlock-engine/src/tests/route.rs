@@ -2,7 +2,7 @@ use std::fs;
 use std::mem::discriminant;
 use std::path::Path;
 
-use super::{Error, resolve_route};
+use super::{Error, resolve_route, route_facts};
 use crate::keys::{keys_path, save_key};
 use crate::manifest::{Manifest, PactEntry, ScopeRecord, manifest_path};
 use crate::scope::scope_opens_to;
@@ -259,6 +259,151 @@ fn a_path_outside_the_root_is_not_a_path_nothing_scopes() {
         matches!(error, Error::Path { .. }),
         "adding a scope would not fix this one: {error:?}"
     );
+}
+
+#[test]
+fn a_recorded_scope_and_a_stored_key_report_every_fact() {
+    let (home, root) = (a_dir(), a_dir());
+    bound(home.path(), root.path());
+    save_sigils(home.path(), root.path(), &owned(&["data-plane"])).expect("records a sigil");
+    let manifest = a_manifest();
+
+    let facts = route_facts(
+        "crates/engine/src",
+        root.path(),
+        &manifest,
+        Some(home.path()),
+    )
+    .expect("the reporting form refuses nothing an answer can be given for");
+
+    assert_eq!(facts.scope(), Some("data-plane"));
+    let record = facts
+        .record()
+        .expect("the scope carries a `[[scope]]` record");
+    assert_eq!(record.team(), "Data Plane");
+    assert_eq!(record.review_state(), "In Review");
+    assert_eq!(record.label(), "area/data-plane");
+    assert_eq!(facts.key(), Some("work"));
+    assert!(facts.stored());
+    assert!(
+        !format!("{facts:?}").contains(KEY),
+        "the facts carry the key's name and never its value"
+    );
+}
+
+#[test]
+fn a_covering_scope_with_no_record_still_reports_the_scope_and_the_key() {
+    let (home, root) = (a_dir(), a_dir());
+    bound(home.path(), root.path());
+    // The same manifest the `Unrecorded` refusal is built on: a scope written on
+    // a pact that no `[[scope]]` record names.
+    let manifest = Manifest::with_entries([entry("crates").with_scope("data-plane")]);
+
+    let facts = route_facts("crates/engine", root.path(), &manifest, Some(home.path()))
+        .expect("a scope nobody recorded is an absent record, not a refusal");
+
+    assert_eq!(facts.scope(), Some("data-plane"));
+    assert!(facts.record().is_none());
+    assert_eq!(
+        facts.key(),
+        Some("work"),
+        "the refusing form never reaches the binding on this input, which is \
+         the reason this function exists"
+    );
+    assert!(facts.stored());
+
+    // And the wrapper still turns exactly this into `Unrecorded`.
+    let error = resolve_route("crates/engine", root.path(), &manifest, home.path())
+        .expect_err("no `[[scope]]` record carries that name");
+    assert!(matches!(error, Error::Unrecorded { .. }), "{error:?}");
+}
+
+#[test]
+fn a_path_nothing_covers_still_reports_the_key_half() {
+    let (home, root) = (a_dir(), a_dir());
+    bound(home.path(), root.path());
+    let manifest = a_manifest();
+
+    let facts = route_facts("docs/adr", root.path(), &manifest, Some(home.path()))
+        .expect("nothing to route to is an answer here");
+
+    assert_eq!(facts.scope(), None);
+    assert!(facts.record().is_none());
+    assert_eq!(facts.key(), Some("work"));
+    assert!(facts.stored());
+}
+
+#[test]
+fn a_checkout_bound_to_nothing_reports_no_key() {
+    let (home, root) = (a_dir(), a_dir());
+    save_sigils(home.path(), root.path(), &owned(&["data-plane"]))
+        .expect("a configured checkout that is bound to nothing");
+    save_key(home.path(), "work", KEY).expect("a key this machine holds, bound to no checkout");
+    let manifest = a_manifest();
+
+    let facts = route_facts("crates/engine", root.path(), &manifest, Some(home.path()))
+        .expect("an unbound checkout still routes as far as the scope");
+
+    assert_eq!(facts.scope(), Some("data-plane"));
+    assert_eq!(facts.key(), None);
+    assert!(
+        !facts.stored(),
+        "a checkout bound to no name resolves no name, whatever is in the store"
+    );
+
+    // A checkout nobody configured at all reads the same, and so does a caller
+    // that could resolve no home: each of the three is `warlock key use`, and a
+    // person with no home has no key store to bind against either.
+    let (fresh_home, fresh_root) = (a_dir(), a_dir());
+    for facts in [
+        route_facts(
+            "crates/engine",
+            fresh_root.path(),
+            &manifest,
+            Some(fresh_home.path()),
+        ),
+        route_facts("crates/engine", fresh_root.path(), &manifest, None),
+    ] {
+        let facts = facts.expect("no config and no home are both answers");
+        assert_eq!(facts.scope(), Some("data-plane"));
+        assert_eq!(facts.key(), None);
+        assert!(!facts.stored());
+    }
+}
+
+#[test]
+fn a_bound_name_that_is_in_no_store_is_reported_by_name() {
+    let (home, root) = (a_dir(), a_dir());
+    save_key_binding(home.path(), root.path(), "work").expect("binds this checkout");
+    save_key(home.path(), "personal", KEY).expect("stores a different name's key");
+    let manifest = a_manifest();
+
+    let facts = route_facts("crates/engine", root.path(), &manifest, Some(home.path()))
+        .expect("a name in no store is a fact about the name");
+
+    assert_eq!(
+        facts.key(),
+        Some("work"),
+        "the name is what a person types at `warlock key add`"
+    );
+    assert!(!facts.stored());
+    assert!(
+        !format!("{facts:?}").contains(KEY),
+        "a stored key belonging to another name reached the facts: {facts:?}"
+    );
+
+    // An empty store and no store at all are the same answer as the wrong name.
+    let (bare_home, bare_root) = (a_dir(), a_dir());
+    save_key_binding(bare_home.path(), bare_root.path(), "work").expect("binds this checkout");
+    let facts = route_facts(
+        "crates/engine",
+        bare_root.path(),
+        &manifest,
+        Some(bare_home.path()),
+    )
+    .expect("a machine with no key store has stored no names");
+    assert_eq!(facts.key(), Some("work"));
+    assert!(!facts.stored());
 }
 
 #[test]
