@@ -29,7 +29,7 @@ use crate::colour::{CONVERSATION_COLOUR, FOCUS_COLOUR, GUIDE_COLOUR, SYSTEM_COLO
 use crate::composer::Composer;
 use crate::confirm::{Answer, QuitConfirm};
 use crate::panel::Mode;
-use crate::prompt::{ScopeField, ScopePrompt};
+use crate::prompt::{RecordAsk, RecordFields, RecordPrompt, ScopeField, ScopePrompt};
 // Renamed for the reason `Entry` above is: `Span` here is ratatui's piece of a
 // drawn line, and the selection's is the cells of one row the highlight covers;
 // its `Window` is the panel's view of the card, which is neither of the
@@ -264,6 +264,25 @@ const SCOPE_LINES: u16 = 5;
 
 const SCOPE_HEIGHT: u16 = SCOPE_LINES + 2 * SCOPE_MARGIN_ROWS + 2 * BORDER_THICKNESS;
 
+const RECORD_HEADING: &str = "Record for ";
+
+const RECORD_RULES: &str = "Tab moves between fields, Enter writes the record, Esc writes nothing";
+
+const RECORD_LABEL_GAP: &str = "  ";
+
+/// How many fields the record window draws, which is
+/// [`RecordAsk::ORDER`]'s length and is checked against it by a test: this is
+/// here because [`RECORD_LINES`] is a `const` and `u16::try_from` is not.
+const RECORD_FIELDS: u16 = 3;
+
+/// The heading, a blank, then a row per field with a row under each for a
+/// refusal, and the rules last. Every one of those rows is drawn whether or not
+/// anything was refused, so a refusal about one field does not move the other
+/// two out from under the reader's eye.
+const RECORD_LINES: u16 = 2 + 2 * RECORD_FIELDS + 1;
+
+const RECORD_HEIGHT: u16 = RECORD_LINES + 2 * SCOPE_MARGIN_ROWS + 2 * BORDER_THICKNESS;
+
 /// Reversed rather than a background colour of its own. Colour on the thread
 /// already means whose words these are — the model's, the reader's, warlock's —
 /// and painting over it would take that away from exactly the rows somebody is
@@ -278,8 +297,8 @@ const COMPOSER_MIN_HEIGHT: u16 = 1 + 2 * BORDER_THICKNESS;
 #[expect(
     clippy::too_many_arguments,
     reason = "one frame's worth of state, and the point of it is that the binary \
-              draws a frame in one call: the three windows that can be over the \
-              app are three parameters here rather than three entry points"
+              draws a frame in one call: the four windows that can be over the \
+              app are four parameters here rather than four entry points"
 )]
 pub fn draw(
     frame: &mut Frame<'_>,
@@ -289,6 +308,7 @@ pub fn draw(
     confirm: QuitConfirm,
     scope: &ScopePrompt,
     path: &ScopePrompt,
+    record: &RecordPrompt,
     composer: Option<&Composer>,
 ) {
     let screen = frame.area();
@@ -329,6 +349,13 @@ pub fn draw(
     }
     if let Some(field) = scope.field() {
         draw_scope(frame, screen, field, SCOPE_HEADING, scope::RULES);
+    }
+    // Last, so that a record window is over the scope window and not under it:
+    // the record is asked *instead of* the name, over a name already accepted,
+    // and a loop that somehow held both open would be showing the older
+    // question on top of the one it is waiting on.
+    if let Some(fields) = record.fields() {
+        draw_record(frame, screen, fields);
     }
 }
 
@@ -1273,41 +1300,119 @@ fn draw_scope(frame: &mut Frame<'_>, screen: Rect, field: &ScopeField, heading: 
 }
 
 fn scope_lines<'a>(field: &'a ScopeField, heading: &'a str, rules: &'a str) -> Vec<Line<'a>> {
-    let text = field.text();
-    let (before, rest) = text.split_at(field.cursor());
-    // The character the cursor is on is the caret, and past the last one it is a
-    // blank of its own — `scope_size` leaves the column for it either way, so
-    // the window does not change width as the cursor walks the text.
-    let (at, after) = match rest.chars().next() {
-        Some(character) => rest.split_at(character.len_utf8()),
-        None => (SCOPE_CURSOR, ""),
-    };
-
     vec![
         Line::from(vec![
             Span::raw(heading),
             Span::raw(field.directory()).bold(),
         ]),
         Line::default(),
-        Line::from(vec![
-            Span::raw(before),
-            Span::styled(at, Style::new().add_modifier(Modifier::REVERSED)),
-            Span::raw(after),
-        ]),
+        Line::from(typed_spans(field)),
         Line::from(field.rule().unwrap_or_default()),
         Line::from(rules).dim(),
     ]
 }
 
+fn typed_spans(field: &ScopeField) -> Vec<Span<'_>> {
+    let text = field.text();
+    let (before, rest) = text.split_at(field.cursor());
+    // The character the cursor is on is the caret, and past the last one it is a
+    // blank of its own — every size below leaves the column for it either way,
+    // so a window does not change width as the cursor walks the text.
+    let (at, after) = match rest.chars().next() {
+        Some(character) => rest.split_at(character.len_utf8()),
+        None => (SCOPE_CURSOR, ""),
+    };
+
+    vec![
+        Span::raw(before),
+        Span::styled(at, Style::new().add_modifier(Modifier::REVERSED)),
+        Span::raw(after),
+    ]
+}
+
+fn typed_width(field: &ScopeField) -> usize {
+    display_width(field.text()) + display_width(SCOPE_CURSOR)
+}
+
 fn scope_size(field: &ScopeField, heading: &str, rules: &str) -> Size {
     let heading = display_width(heading) + display_width(field.directory());
-    let typed = display_width(field.text()) + display_width(SCOPE_CURSOR);
     let widest = heading
-        .max(typed)
+        .max(typed_width(field))
         .max(field.rule().map_or(0, display_width))
         .max(display_width(rules));
 
     Size::new(padded_width(widest, SCOPE_MARGIN), SCOPE_HEIGHT)
+}
+
+fn draw_record(frame: &mut Frame<'_>, screen: Rect, fields: &RecordFields) {
+    draw_over(
+        frame,
+        centred(screen, record_size(fields)),
+        Padding::symmetric(SCOPE_MARGIN, SCOPE_MARGIN_ROWS),
+        record_lines(fields),
+    );
+}
+
+fn record_lines(fields: &RecordFields) -> Vec<Line<'_>> {
+    let mut lines = vec![
+        Line::from(vec![
+            Span::raw(RECORD_HEADING),
+            Span::raw(fields.name()).bold(),
+        ]),
+        Line::default(),
+    ];
+    for ask in RecordAsk::ORDER {
+        let field = fields.field(ask);
+        let mut spans = vec![Span::raw(label(ask)).dim()];
+        // The caret goes in the one field the keys are going into, and the other
+        // two are drawn as the text they hold: two carets on screen would be two
+        // places the next character could land.
+        if ask == fields.asking() {
+            spans.extend(typed_spans(field));
+        } else {
+            spans.push(Span::raw(field.text()));
+        }
+        lines.push(Line::from(spans));
+        lines.push(Line::from(field.rule().unwrap_or_default()));
+    }
+    lines.push(Line::from(RECORD_RULES).dim());
+
+    lines
+}
+
+fn label(ask: RecordAsk) -> String {
+    format!("{:<width$}", ask.heading(), width = label_width())
+}
+
+/// The column every field's text starts in: the widest of the three names plus
+/// the gap after it, so the three values line up under each other and none of
+/// them moves when another field is asked.
+fn label_width() -> usize {
+    RecordAsk::ORDER
+        .iter()
+        .map(|ask| display_width(ask.heading()))
+        .max()
+        .unwrap_or(0)
+        + display_width(RECORD_LABEL_GAP)
+}
+
+fn record_size(fields: &RecordFields) -> Size {
+    let heading = display_width(RECORD_HEADING) + display_width(fields.name());
+    let widest =
+        RecordAsk::ORDER
+            .iter()
+            .fold(heading.max(display_width(RECORD_RULES)), |widest, ask| {
+                let field = fields.field(*ask);
+                // Every field is measured with a caret column whether or not it is
+                // the one being typed in, for the reason `typed_spans` reserves one:
+                // a window that grew as Tab moved between fields would shuffle the
+                // text sideways under the reader.
+                widest
+                    .max(label_width() + typed_width(field))
+                    .max(field.rule().map_or(0, display_width))
+            });
+
+    Size::new(padded_width(widest, SCOPE_MARGIN), RECORD_HEIGHT)
 }
 
 #[cfg(test)]

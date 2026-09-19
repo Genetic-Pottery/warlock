@@ -4,6 +4,7 @@ use std::time::{Duration, Instant};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::buffer::Buffer;
+use ratatui::crossterm::event::{KeyCode, KeyEvent};
 use ratatui::layout::{Position, Rect, Size};
 use ratatui::style::{Color, Modifier};
 use ratatui::widgets::{Paragraph, Widget};
@@ -16,14 +17,15 @@ use super::{
     ELLIPSIS, FILES_KEY, FOOTER_HEIGHT, GUIDE, GUIDE_BRANCH, GUIDE_LAST, HEADER_GAP, HEADER_HEIGHT,
     Hit, INDENT, KEY_DROP_ORDER, KEY_GAP, KEYS, LIVE_KEY, MARK, MARK_MARGIN, MARK_MARGIN_ROWS,
     MOVE_KEYS, NO_MARKER, NOTE_MARKER, PACTING_KEYS, PACTING_QUIT_KEY, PACTING_RUN, PANEL_INDENT,
-    PATH_HEADING, PATH_RULES, PERCENT_WIDTH, QUIT_KEY, REFRESHING_RUN, ROW_KEY, RUN_HEADER_HEIGHT,
-    Reach, SAID_MARKER, SCOPE_CURSOR, SCOPE_HEADING, SCOPE_HEIGHT, SCOPE_LINES, SCOPE_MARGIN,
+    PATH_HEADING, PATH_RULES, PERCENT_WIDTH, QUIT_KEY, RECORD_FIELDS, RECORD_HEADING,
+    RECORD_HEIGHT, RECORD_LINES, RECORD_RULES, REFRESHING_RUN, ROW_KEY, RUN_HEADER_HEIGHT, Reach,
+    SAID_MARKER, SCOPE_CURSOR, SCOPE_HEADING, SCOPE_HEIGHT, SCOPE_LINES, SCOPE_MARGIN,
     SCOPE_MARGIN_ROWS, SCROLLBACK_ARROW, SELECTED, SELECTION_MARKER, THREAD_TITLE, TREE_MIN_WIDTH,
     TREE_PERCENT, areas, centred, composer_height, composer_on_screen, confirm_area, confirm_size,
-    display_width, draw, footer_text_area, guide_prefixes, hit_test, keys_line, mark_area,
-    pacting_keys_line, pane_inner, panel_height, panel_reach, panel_row, panel_rows_area,
-    panel_width, run_header_height, run_header_line, scope_size, tree_height, tree_rows_area,
-    tree_width, truncated,
+    display_width, draw, footer_text_area, guide_prefixes, hit_test, keys_line, label_width,
+    mark_area, pacting_keys_line, pane_inner, panel_height, panel_reach, panel_row,
+    panel_rows_area, panel_width, record_size, run_header_height, run_header_line, scope_size,
+    tree_height, tree_rows_area, tree_width, truncated,
 };
 use crate::COMPOSER_MAX_ROWS;
 use crate::account::{Line as Entry, Outcome};
@@ -34,7 +36,9 @@ use crate::composer::Composer;
 use crate::confirm::{Answer, QuitConfirm};
 use crate::fixture;
 use crate::panel::Mode;
-use crate::prompt::{ScopeField, ScopePrompt};
+use crate::prompt::{
+    RecordAsk, RecordFields, RecordPrompt, Recorded, ScopeField, ScopePrompt, record_edit_for,
+};
 // Renamed because `Position` in here is ratatui's point on the screen, and a
 // selection's is a byte of the thread's text.
 use crate::selection::Position as Spot;
@@ -329,6 +333,28 @@ fn render_path(app: &App, width: u16, height: u16, now: Instant, path: &ScopePro
         QuitConfirm::Closed,
         &ScopePrompt::Closed,
         path,
+        &RecordPrompt::Closed,
+        None,
+    )
+}
+
+fn render_record(
+    app: &App,
+    width: u16,
+    height: u16,
+    now: Instant,
+    record: &RecordPrompt,
+) -> Buffer {
+    render_all(
+        app,
+        &Chrome::default(),
+        width,
+        height,
+        now,
+        QuitConfirm::Closed,
+        &ScopePrompt::Closed,
+        &ScopePrompt::Closed,
+        record,
         None,
     )
 }
@@ -355,6 +381,7 @@ fn render_composer(app: &App, composer: &Composer, width: u16, height: u16) -> B
         QuitConfirm::Closed,
         &ScopePrompt::Closed,
         &ScopePrompt::Closed,
+        &RecordPrompt::Closed,
         Some(composer),
     )
 }
@@ -377,6 +404,7 @@ fn render_windows(
         confirm,
         scope,
         &ScopePrompt::Closed,
+        &RecordPrompt::Closed,
         None,
     )
 }
@@ -395,12 +423,17 @@ fn render_all(
     confirm: QuitConfirm,
     scope: &ScopePrompt,
     path: &ScopePrompt,
+    record: &RecordPrompt,
     composer: Option<&Composer>,
 ) -> Buffer {
     let mut terminal =
         Terminal::new(TestBackend::new(width, height)).expect("test backend never fails");
     terminal
-        .draw(|frame| draw(frame, app, chrome, now, confirm, scope, path, composer))
+        .draw(|frame| {
+            draw(
+                frame, app, chrome, now, confirm, scope, path, record, composer,
+            );
+        })
         .expect("test backend never fails");
     terminal.backend().buffer().clone()
 }
@@ -5528,6 +5561,7 @@ fn a_field_under_a_conversation_is_drawn_the_same_whatever_a_run_is_doing() {
             QuitConfirm::Closed,
             &ScopePrompt::Closed,
             &ScopePrompt::Closed,
+            &RecordPrompt::Closed,
             Some(composer),
         );
         let field = areas(buffer.area, Some(composer))
@@ -5630,6 +5664,7 @@ fn a_document_read_during_a_run_hides_the_muted_field_and_gives_the_rows_back() 
             QuitConfirm::Closed,
             &ScopePrompt::Closed,
             &ScopePrompt::Closed,
+            &RecordPrompt::Closed,
             Some(&muted),
         ),
         render_all(
@@ -5641,6 +5676,7 @@ fn a_document_read_during_a_run_hides_the_muted_field_and_gives_the_rows_back() 
             QuitConfirm::Closed,
             &ScopePrompt::Closed,
             &ScopePrompt::Closed,
+            &RecordPrompt::Closed,
             None,
         ),
         "a muted draft reached a frame the document card has"
@@ -6681,4 +6717,440 @@ fn the_path_window_heads_itself_holds_the_proposal_and_takes_a_refusal_under_it(
             .trim(),
         ""
     );
+}
+
+const RECORDED_NAME: &str = "data-plane";
+
+const RECORDED: [&str; 3] = ["Platform", "In Review", "area/data-plane"];
+
+fn record_rect(buffer: &Buffer, fields: &RecordFields) -> Rect {
+    centred(buffer.area, record_size(fields))
+}
+
+fn record_rows(buffer: &Buffer, fields: &RecordFields) -> Vec<String> {
+    let area = record_rect(buffer, fields);
+    (0..area.height)
+        .map(|index| text_in(buffer, area, area.y + index))
+        .collect()
+}
+
+// Which row of the window a field is drawn on, counted from the first line
+// inside the padding: the heading, a blank, and then each field with a row under
+// it for a refusal.
+fn record_field_line(ask: RecordAsk) -> u16 {
+    let index = RecordAsk::ORDER
+        .iter()
+        .position(|other| *other == ask)
+        .expect("every ask is in the order");
+
+    FIELD_LINE + 2 * u16::try_from(index).expect("three fields")
+}
+
+// One column past the text of the field being asked, which is where the next
+// character lands on a prompt whose cursor nobody has moved.
+fn record_cursor(buffer: &Buffer, fields: &RecordFields) -> Position {
+    let area = record_rect(buffer, fields);
+    let typed = u16::try_from(label_width() + display_width(fields.current().text()))
+        .expect("a short line");
+
+    Position::new(
+        area.x + BORDER_THICKNESS + SCOPE_MARGIN + typed,
+        area.y + BORDER_THICKNESS + SCOPE_MARGIN_ROWS + record_field_line(fields.asking()),
+    )
+}
+
+fn reversed_columns(buffer: &Buffer, area: Rect, y: u16) -> Vec<u16> {
+    (area.x..area.x + area.width)
+        .filter(|x| buffer[(*x, y)].modifier.contains(Modifier::REVERSED))
+        .collect()
+}
+
+fn pressed(fields: &RecordFields, code: KeyCode) -> RecordFields {
+    match record_edit_for(KeyEvent::from(code), fields) {
+        Recorded::Open(next) => next,
+        other => panic!("a key closed or submitted the record prompt: {other:?}"),
+    }
+}
+
+// Driven through the keys rather than built by hand, because the text and the
+// cursor a field is drawn from are `record_edit_for`'s to put there.
+fn typed_record(values: [&str; 3]) -> RecordFields {
+    let mut fields = RecordFields::new(SCOPED, RECORDED_NAME);
+    for value in values {
+        for character in value.chars() {
+            fields = pressed(&fields, KeyCode::Char(character));
+        }
+        fields = pressed(&fields, KeyCode::Tab);
+    }
+
+    // Three Tabs from the first field is back at the first field: the fields
+    // wrap, so what is typed decides nothing about which one is being asked.
+    fields
+}
+
+fn asking(fields: &RecordFields, ask: RecordAsk) -> RecordFields {
+    let mut fields = fields.clone();
+    while fields.asking() != ask {
+        fields = pressed(&fields, KeyCode::Tab);
+    }
+    fields
+}
+
+#[test]
+fn the_record_window_is_sized_by_what_it_says_plus_its_margins_and_its_border() {
+    // The one place the field count is a `const` rather than the order's own
+    // length, kept honest here because `RECORD_LINES` is built from it.
+    assert_eq!(usize::from(RECORD_FIELDS), RecordAsk::ORDER.len());
+
+    let typed = typed_record(RECORDED);
+    let refused = typed
+        .clone()
+        .refused(RecordAsk::Label, "a very long line about a blank label");
+    for fields in [
+        RecordFields::new(SCOPED, RECORDED_NAME),
+        typed.clone(),
+        refused,
+    ] {
+        let Size { width, height } = record_size(&fields);
+        let widest = RecordAsk::ORDER.iter().fold(
+            (display_width(RECORD_HEADING) + display_width(fields.name()))
+                .max(display_width(RECORD_RULES)),
+            |widest, ask| {
+                let field = fields.field(*ask);
+                widest
+                    .max(label_width() + display_width(field.text()) + display_width(SCOPE_CURSOR))
+                    .max(field.rule().map_or(0, display_width))
+            },
+        );
+
+        assert_eq!(
+            usize::from(width),
+            widest + usize::from(2 * SCOPE_MARGIN + 2 * BORDER_THICKNESS),
+            "{fields:?}"
+        );
+        // And the same height whatever is in it, for the reason the scope
+        // window is: every row a refusal could want is there before one is
+        // broken, so a refusal moves no field out from under the reader's eye.
+        assert_eq!(height, RECORD_HEIGHT, "{fields:?}");
+        assert_eq!(
+            height,
+            RECORD_LINES + 2 * SCOPE_MARGIN_ROWS + 2 * BORDER_THICKNESS
+        );
+    }
+
+    // The width does not move as the cursor walks a field, nor as Tab moves
+    // between fields: every field is measured with the caret's column whether
+    // or not it is the one holding the caret.
+    let walked = pressed(&pressed(&typed, KeyCode::Left), KeyCode::Left);
+    assert_eq!(record_size(&walked).width, record_size(&typed).width);
+    for ask in RecordAsk::ORDER {
+        assert_eq!(
+            record_size(&asking(&typed, ask)).width,
+            record_size(&typed).width,
+            "{ask:?}"
+        );
+    }
+}
+
+#[test]
+fn the_record_prompt_names_the_scope_its_three_fields_and_the_rules() {
+    let base = Instant::now();
+    let app = busy_app(base, WIDTH, FIXTURE_HEIGHT);
+    let fields = typed_record(RECORDED);
+
+    let buffer = render_record(
+        &app,
+        WIDTH,
+        FIXTURE_HEIGHT,
+        base,
+        &RecordPrompt::Open(fields.clone()),
+    );
+
+    // The same window the other two questions are asked in: bordered all the
+    // way round, over the middle of the frame.
+    let rows = record_rows(&buffer, &fields);
+    assert!(
+        rows[0].starts_with('┌') && rows[0].ends_with('┐'),
+        "{rows:?}"
+    );
+    let last = rows.last().expect("the window has rows");
+    assert!(last.starts_with('└') && last.ends_with('┘'), "{rows:?}");
+    // The scope the record is about, which is the name the first window
+    // already accepted and nothing here can retype.
+    let heading = usize::from(BORDER_THICKNESS + SCOPE_MARGIN_ROWS);
+    assert!(
+        rows[heading].contains(RECORD_HEADING.trim()) && rows[heading].contains(RECORDED_NAME),
+        "{rows:?}"
+    );
+    // Three fields, each on its own row, each named by `RecordAsk::heading`
+    // and holding exactly what was typed into it — capitals and spaces
+    // included, because a review state is Linear's vocabulary and not this
+    // crate's to fold.
+    for (ask, value) in RecordAsk::ORDER.iter().zip(RECORDED) {
+        let row = inside_the_border(&rows[heading + usize::from(record_field_line(*ask))]);
+        assert!(row.starts_with(ask.heading()), "{ask:?}: {row:?}");
+        assert!(row.ends_with(value), "{ask:?}: {row:?}");
+    }
+    // And the rules on the last line of the window, under all three.
+    let rules = heading + usize::from(RECORD_LINES) - 1;
+    assert!(rows[rules].contains(RECORD_RULES), "{rows:?}");
+    // The caret is in the field the keys are going into, one column past its
+    // text, and the field either side of it has none: two carets would be two
+    // places the next character could land.
+    let area = record_rect(&buffer, &fields);
+    let cursor = record_cursor(&buffer, &fields);
+    assert!(
+        buffer[cursor].modifier.contains(Modifier::REVERSED),
+        "no caret at {cursor:?}: {rows:?}"
+    );
+    for ask in RecordAsk::ORDER {
+        let y = area.y + BORDER_THICKNESS + SCOPE_MARGIN_ROWS + record_field_line(ask);
+        let lit = reversed_columns(&buffer, area, y);
+        if ask == fields.asking() {
+            assert_eq!(lit, vec![cursor.x], "{ask:?}: {rows:?}");
+        } else {
+            assert!(lit.is_empty(), "a caret on {ask:?} as well: {rows:?}");
+        }
+    }
+}
+
+#[test]
+fn the_caret_follows_the_field_the_record_prompt_is_asking_for() {
+    let base = Instant::now();
+    let app = busy_app(base, WIDTH, FIXTURE_HEIGHT);
+    let typed = typed_record(RECORDED);
+
+    for ask in RecordAsk::ORDER {
+        let fields = asking(&typed, ask);
+        let buffer = render_record(
+            &app,
+            WIDTH,
+            FIXTURE_HEIGHT,
+            base,
+            &RecordPrompt::Open(fields.clone()),
+        );
+
+        let rows = record_rows(&buffer, &fields);
+        let cursor = record_cursor(&buffer, &fields);
+        assert_eq!(
+            cursor.y,
+            record_rect(&buffer, &fields).y
+                + BORDER_THICKNESS
+                + SCOPE_MARGIN_ROWS
+                + record_field_line(ask),
+            "{ask:?}: {rows:?}"
+        );
+        assert!(
+            buffer[cursor].modifier.contains(Modifier::REVERSED),
+            "no caret at {cursor:?} for {ask:?}: {rows:?}"
+        );
+        // Over the blank past the text rather than over the last character of
+        // it: nothing has moved this cursor.
+        let before = Position::new(cursor.x - 1, cursor.y);
+        assert!(
+            !buffer[before].modifier.contains(Modifier::REVERSED),
+            "{ask:?}: the caret is over the text rather than after it"
+        );
+        // And what is typed in the other two fields is still on screen: Tab
+        // moves the question, not the text.
+        for (other, value) in RecordAsk::ORDER.iter().zip(RECORDED) {
+            let row = inside_the_border(
+                &rows
+                    [usize::from(BORDER_THICKNESS + SCOPE_MARGIN_ROWS + record_field_line(*other))],
+            );
+            assert!(row.ends_with(value), "{ask:?} then {other:?}: {row:?}");
+        }
+    }
+}
+
+#[test]
+fn a_refused_record_field_keeps_its_text_and_takes_the_reason_under_it() {
+    let base = Instant::now();
+    let app = busy_app(base, WIDTH, FIXTURE_HEIGHT);
+    // Worded by whoever refused — `scoping::record_submit`, in the loop — and
+    // printed here without being read: this window judges nothing.
+    let broken = "a review state cannot be blank";
+    let typed = typed_record(["Platform", "   ", "area/data-plane"]);
+    let refused = typed.clone().refused(RecordAsk::ReviewState, broken);
+
+    let opened = render_record(
+        &app,
+        WIDTH,
+        FIXTURE_HEIGHT,
+        base,
+        &RecordPrompt::Open(typed.clone()),
+    );
+    let reopened = render_record(
+        &app,
+        WIDTH,
+        FIXTURE_HEIGHT,
+        base,
+        &RecordPrompt::Open(refused.clone()),
+    );
+
+    let rows = record_rows(&reopened, &refused);
+    let line = usize::from(
+        BORDER_THICKNESS + SCOPE_MARGIN_ROWS + record_field_line(RecordAsk::ReviewState),
+    );
+    // The reason is on the row under the field it is about, and not under one
+    // of the other two: a complaint about the review state under the label is
+    // one a reader fixes in the wrong place.
+    assert!(rows[line + 1].contains(broken), "{rows:?}");
+    for ask in [RecordAsk::Team, RecordAsk::Label] {
+        let under = usize::from(BORDER_THICKNESS + SCOPE_MARGIN_ROWS + record_field_line(ask)) + 1;
+        assert_eq!(
+            rows[under].trim_matches('│').trim(),
+            "",
+            "{ask:?}: {rows:?}"
+        );
+    }
+    // The caret is in the refused field, so the next character typed lands in
+    // the one that has to change.
+    let cursor = record_cursor(&reopened, &refused);
+    assert_eq!(refused.asking(), RecordAsk::ReviewState);
+    assert!(
+        reopened[cursor].modifier.contains(Modifier::REVERSED),
+        "no caret at {cursor:?}: {rows:?}"
+    );
+    // Nothing moved: every field is on the row it was on before the submit
+    // was refused, that row was blank until it was, and the rules are still
+    // the last line of the window.
+    let before = record_rows(&opened, &typed);
+    for ask in RecordAsk::ORDER {
+        let at = usize::from(BORDER_THICKNESS + SCOPE_MARGIN_ROWS + record_field_line(ask));
+        assert_eq!(
+            inside_the_border(&rows[at]),
+            inside_the_border(&before[at]),
+            "{ask:?}: {rows:?}"
+        );
+    }
+    assert_eq!(before[line + 1].trim_matches('│').trim(), "");
+    let rules = usize::from(BORDER_THICKNESS + SCOPE_MARGIN_ROWS + RECORD_LINES) - 1;
+    assert!(rows[rules].contains(RECORD_RULES), "{rows:?}");
+}
+
+// A terminal of its own rather than the scope window's, because this window is
+// six rows taller: on `SCOPE_COVER_HEIGHT` it is clamped to the whole screen,
+// and a test that covers every row proves nothing about covering.
+const RECORD_COVER_WIDTH: u16 = 100;
+const RECORD_COVER_HEIGHT: u16 = 20;
+
+#[test]
+fn nothing_from_the_frame_underneath_shows_through_the_record_window() {
+    let base = Instant::now();
+    let app = busy_app(base, RECORD_COVER_WIDTH, RECORD_COVER_HEIGHT);
+    let fields = typed_record(RECORDED);
+
+    let closed = render_record(
+        &app,
+        RECORD_COVER_WIDTH,
+        RECORD_COVER_HEIGHT,
+        base,
+        &RecordPrompt::Closed,
+    );
+    let open = render_record(
+        &app,
+        RECORD_COVER_WIDTH,
+        RECORD_COVER_HEIGHT,
+        base,
+        &RecordPrompt::Open(fields.clone()),
+    );
+
+    // The whole window is on screen with frame around it, so what is asserted
+    // below is a cover and not a clamp.
+    let over = record_rect(&open, &fields);
+    assert_eq!(
+        over.height, RECORD_HEIGHT,
+        "the window was clamped by the terminal"
+    );
+    assert!(
+        over.x > 0 && over.y > 0 && over.bottom() < RECORD_COVER_HEIGHT,
+        "{over:?}"
+    );
+
+    // Every row behind the window has something on it, without which the
+    // assertions below would pass on a blank screen.
+    for (index, row) in record_rows(&closed, &fields).iter().enumerate() {
+        assert!(
+            !row.trim().is_empty(),
+            "row {index} behind the window is blank, so this proves nothing"
+        );
+    }
+    for (index, row) in record_rows(&open, &fields).iter().enumerate() {
+        for leaked in [UNDERNEATH, "unpacted", "module"] {
+            assert!(
+                !row.contains(leaked),
+                "window row {index} shows {leaked:?} through: {row:?}"
+            );
+        }
+    }
+    // Outside it, cell for cell, the frame is the one that was there before
+    // the prompt opened.
+    let area = record_rect(&open, &fields);
+    for y in 0..open.area.height {
+        for x in 0..open.area.width {
+            if area.contains(Position::new(x, y)) {
+                continue;
+            }
+            assert_eq!(
+                open[(x, y)],
+                closed[(x, y)],
+                "the frame changed at column {x}, row {y}, outside the window"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_closed_record_prompt_leaves_no_trace_of_itself_on_the_frame() {
+    let base = Instant::now();
+    let app = busy_app(base, WIDTH, FIXTURE_HEIGHT);
+
+    let closed = render_record(&app, WIDTH, FIXTURE_HEIGHT, base, &RecordPrompt::Closed);
+
+    // Not a word of it anywhere, and the frame is the one every other test in
+    // this module draws.
+    for (index, row) in rows_text(&closed).iter().enumerate() {
+        assert!(!row.contains(RECORD_HEADING.trim()), "row {index}: {row:?}");
+        assert!(!row.contains(RECORD_RULES), "row {index}: {row:?}");
+        for ask in RecordAsk::ORDER {
+            assert!(!row.contains(ask.heading()), "row {index}: {row:?}");
+        }
+    }
+    assert_eq!(
+        rows_text(&closed),
+        rows_text(&render_at(&app, WIDTH, FIXTURE_HEIGHT, base))
+    );
+}
+
+#[test]
+fn a_terminal_too_small_for_the_record_window_clamps_it_and_still_shows_it() {
+    let base = Instant::now();
+    let fields = typed_record(RECORDED);
+
+    // Down to one cell, for the reason the other two windows clamp: a prompt
+    // that declined to draw would leave the reader typing into a window they
+    // cannot see.
+    for (width, height) in [(20, 5), (4, 2), (1, 1), (2, 20), (30, 1)] {
+        let app = busy_app(base, width, height);
+        let closed = render_record(&app, width, height, base, &RecordPrompt::Closed);
+        let open = render_record(
+            &app,
+            width,
+            height,
+            base,
+            &RecordPrompt::Open(fields.clone()),
+        );
+        let area = record_rect(&open, &fields);
+        let size = format!("{width}x{height}");
+
+        assert!(area.width > 0 && area.height > 0, "nothing drawn at {size}");
+        assert!(area.x + area.width <= width, "off the right at {size}");
+        assert!(area.y + area.height <= height, "off the bottom at {size}");
+        assert_ne!(
+            rows_text(&open),
+            rows_text(&closed),
+            "the prompt changed nothing on screen at {size}"
+        );
+    }
 }

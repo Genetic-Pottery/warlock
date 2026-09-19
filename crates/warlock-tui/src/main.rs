@@ -26,9 +26,9 @@ use ratatui::crossterm::event::{self, Event, KeyEvent, MouseEvent};
 use ratatui::layout::Size;
 use warlock_engine::{Agent, Manifest, Written, write_claude_md};
 use warlock_tui::{
-    App, Cell, Converses, Focus, Position, QuitConfirm, Reach, Run, ScopePrompt, Wired,
-    composer_on_screen, copied_text, draw, panel_height, panel_width, paste_for, position_at,
-    tree_height,
+    App, Cell, Converses, Focus, Position, QuitConfirm, Reach, RecordPrompt, Run, ScopePrompt,
+    Wired, composer_on_screen, copied_text, draw, panel_height, panel_width, paste_for,
+    position_at, tree_height,
 };
 
 mod boundary;
@@ -667,6 +667,10 @@ impl<S: Screen, P: Wired + Agent, C: Converses, B: Clip> Session<S, P, C, B> {
                 confirm,
                 prompt,
                 write,
+                // Closed on every frame, because this loop holds no record
+                // prompt yet: the window is drawn from here as soon as the slice
+                // that routes keys into it gives the session one to hold.
+                &RecordPrompt::Closed,
                 field,
             );
         })
