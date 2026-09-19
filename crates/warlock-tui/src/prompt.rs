@@ -1,15 +1,23 @@
-//! The scope prompt: the directory being scoped, the text typed into the field,
-//! and the one line under it saying why the last submit was refused.
+//! The two prompts the `s` key puts up: the scope prompt — the directory being
+//! scoped and the text typed into its one field — and the record prompt behind
+//! it, which asks for the three values a brand-new scope name routes work by.
+//! Both carry a line under the field saying why the last submit was refused.
 //!
-//! [`ScopePrompt`] is a value of its own and *not* a field on
-//! [`App`](crate::App), because Esc has to leave the app exactly as it was and
+//! [`ScopePrompt`] and [`RecordPrompt`] are values of their own and *not* fields
+//! on [`App`](crate::App), because Esc has to leave the app exactly as it was and
 //! an app that never heard of the prompt is a cheaper guarantee of that than
 //! putting every field back. The cursor is a byte offset into that text and
 //! every key here keeps it on a character boundary, because the text is sliced
 //! at it — by the edits below and by the frame, which draws the caret on the
 //! character it names. Nothing here judges the text either — Enter comes back as
-//! [`Edited::Submit`] whatever has been typed, empty included, because that is
-//! how a scope is cleared.
+//! [`Edited::Submit`] or [`Recorded::Submit`] whatever has been typed, empty
+//! included, because that is how a scope is cleared and because blankness in a
+//! record is the caller's refusal to make, alongside the engine's.
+//!
+//! There is one cursor implementation, [`edit_for`], and [`record_edit_for`]
+//! hands it the field being typed in rather than keeping a second copy: a
+//! Backspace that took a byte in one window and a character in the other would
+//! be the same bug twice.
 //!
 //! Ctrl-C is deliberately not answered here. Raw mode is exactly the mode in
 //! which the terminal stops turning it into `SIGINT`, so the loop takes it
@@ -236,6 +244,242 @@ pub fn edit_for(key: KeyEvent, field: &ScopeField) -> Edited {
             edited(text, field.cursor + character.len_utf8())
         }
         _ => unchanged(),
+    }
+}
+
+/// Which of the record's three fields the keys are going into.
+///
+/// The order is the order they are asked in and the order they are drawn in,
+/// and [`RecordAsk::ORDER`] is the one place it is written down.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub enum RecordAsk {
+    #[default]
+    Team,
+    ReviewState,
+    Label,
+}
+
+impl RecordAsk {
+    pub const ORDER: [Self; 3] = [Self::Team, Self::ReviewState, Self::Label];
+
+    /// What the field is called on screen.
+    #[must_use]
+    pub const fn heading(self) -> &'static str {
+        match self {
+            Self::Team => "team",
+            Self::ReviewState => "review state",
+            Self::Label => "label",
+        }
+    }
+
+    // Both wrap, because these two keys are the whole of the movement: a Tab
+    // that stopped dead on the last field would leave a reader who overshot
+    // with nowhere to go but Shift-Tab, which not every terminal sends.
+    #[must_use]
+    pub const fn next(self) -> Self {
+        match self {
+            Self::Team => Self::ReviewState,
+            Self::ReviewState => Self::Label,
+            Self::Label => Self::Team,
+        }
+    }
+
+    #[must_use]
+    pub const fn previous(self) -> Self {
+        match self {
+            Self::Team => Self::Label,
+            Self::ReviewState => Self::Team,
+            Self::Label => Self::ReviewState,
+        }
+    }
+}
+
+/// The scope being recorded and the three values it will route work by.
+///
+/// `name` is the folded scope name already accepted by the first prompt, held
+/// so the record that is written carries the same string that went onto the
+/// pact; nothing typed here can move it, exactly as nothing typed into a
+/// [`ScopeField`] can move the directory it is about.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
+pub struct RecordFields {
+    module: String,
+    name: String,
+    // Three [`ScopeField`]s rather than three texts and three cursors, so the
+    // editing keys are `edit_for`'s and there is no second implementation of
+    // them. Each is built over `module`, because that is the directory a
+    // `ScopeField` is about and `edit_for` hands it back untouched; what is
+    // drawn over each field is [`RecordAsk::heading`], so there is no second
+    // spelling of the three names to keep in step.
+    team: ScopeField,
+    review_state: ScopeField,
+    label: ScopeField,
+    asking: RecordAsk,
+}
+
+impl RecordFields {
+    // Empty, because there is nothing true to open on: the manifest holds no
+    // record for this name, which is the only reason this question is being
+    // asked at all.
+    #[must_use]
+    pub fn new(module: impl Into<String>, name: impl Into<String>) -> Self {
+        let module = module.into();
+        Self {
+            team: ScopeField::new(module.as_str(), ""),
+            review_state: ScopeField::new(module.as_str(), ""),
+            label: ScopeField::new(module.as_str(), ""),
+            module,
+            name: name.into(),
+            asking: RecordAsk::default(),
+        }
+    }
+
+    #[must_use]
+    pub fn module(&self) -> &str {
+        &self.module
+    }
+
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    #[must_use]
+    pub const fn asking(&self) -> RecordAsk {
+        self.asking
+    }
+
+    #[must_use]
+    pub const fn field(&self, ask: RecordAsk) -> &ScopeField {
+        match ask {
+            RecordAsk::Team => &self.team,
+            RecordAsk::ReviewState => &self.review_state,
+            RecordAsk::Label => &self.label,
+        }
+    }
+
+    /// The field the keys are going into, which is the one the caret is drawn
+    /// in.
+    #[must_use]
+    pub const fn current(&self) -> &ScopeField {
+        self.field(self.asking)
+    }
+
+    // The refusal moves the question to the field it is about as well as
+    // putting the line under it: a complaint about the label while the caret
+    // sits in the team field is one a reader fixes by typing in the wrong
+    // place. Text and cursor are `ScopeField::refused`'s to keep, and the other
+    // two fields are carried across whatever was typed into them, so a blank
+    // third field costs nobody the first two.
+    #[must_use]
+    pub fn refused(self, ask: RecordAsk, rule: impl Into<String>) -> Self {
+        let refused = self.field(ask).clone().refused(rule);
+        Self {
+            asking: ask,
+            ..self.with(ask, refused)
+        }
+    }
+
+    fn with(self, ask: RecordAsk, field: ScopeField) -> Self {
+        match ask {
+            RecordAsk::Team => Self {
+                team: field,
+                ..self
+            },
+            RecordAsk::ReviewState => Self {
+                review_state: field,
+                ..self
+            },
+            RecordAsk::Label => Self {
+                label: field,
+                ..self
+            },
+        }
+    }
+
+    fn asked(self, asking: RecordAsk) -> Self {
+        Self { asking, ..self }
+    }
+}
+
+// The fields live inside `Open` for the reason [`ScopePrompt`]'s do: half a
+// record typed into a closed prompt is not a state that can be written down.
+#[allow(
+    clippy::large_enum_variant,
+    reason = "three text fields, moved once per keystroke on the event loop's own thread; a `Box` would buy a heap allocation and an indirection between the prompt and the text it is about"
+)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
+pub enum RecordPrompt {
+    #[default]
+    Closed,
+    Open(RecordFields),
+}
+
+impl RecordPrompt {
+    #[must_use]
+    pub fn open(module: impl Into<String>, name: impl Into<String>) -> Self {
+        Self::Open(RecordFields::new(module, name))
+    }
+
+    #[must_use]
+    pub const fn is_open(&self) -> bool {
+        matches!(self, Self::Open(_))
+    }
+
+    // The one way into `record_edit_for`, as `ScopePrompt::field` is into
+    // `edit_for`.
+    #[must_use]
+    pub const fn fields(&self) -> Option<&RecordFields> {
+        match self {
+            Self::Closed => None,
+            Self::Open(fields) => Some(fields),
+        }
+    }
+}
+
+/// What a keystroke comes to while the record prompt is open.
+///
+/// The same three answers as [`Edited`] and for the same reasons — a key that
+/// means nothing leaves the prompt where it was, and a submit carries no text
+/// of its own so there is one copy of what was typed.
+#[allow(
+    clippy::large_enum_variant,
+    reason = "the same three fields as `RecordPrompt`, and boxed here for the size of `Close` would be a heap allocation per keystroke"
+)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum Recorded {
+    Open(RecordFields),
+    Close,
+    Submit,
+}
+
+/// What `key` does to a record prompt open over `fields`.
+///
+/// Tab and Down go to the next field, Shift-Tab and Up to the previous one, and
+/// both wrap; everything else is [`edit_for`]'s answer for the field being typed
+/// in, Enter and Esc included. So there is no new global binding here and none
+/// is wanted: while this is up the loop consults this module *instead of* the
+/// app, so Tab is not the tree's Tab any more than `j` is the tree's `j`.
+///
+/// Moving is not an edit, so it leaves the refusal line where it is — the line
+/// names something wrong with text that walking away from has not changed. Only
+/// Enter submits and only Esc closes, whichever of the three fields is being
+/// typed in: a record is written or abandoned whole, because a scope routing
+/// work by two of the three values is the state this question exists to prevent.
+#[must_use]
+pub fn record_edit_for(key: KeyEvent, fields: &RecordFields) -> Recorded {
+    if key.kind != KeyEventKind::Press {
+        return Recorded::Open(fields.clone());
+    }
+
+    let asking = fields.asking;
+    match key.code {
+        KeyCode::Tab | KeyCode::Down => Recorded::Open(fields.clone().asked(asking.next())),
+        KeyCode::BackTab | KeyCode::Up => Recorded::Open(fields.clone().asked(asking.previous())),
+        _ => match edit_for(key, fields.current()) {
+            Edited::Open(field) => Recorded::Open(fields.clone().with(asking, field)),
+            Edited::Close => Recorded::Close,
+            Edited::Submit => Recorded::Submit,
+        },
     }
 }
 

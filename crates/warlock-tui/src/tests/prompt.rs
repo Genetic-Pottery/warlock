@@ -1,6 +1,9 @@
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
 
-use super::{Edited, ScopeField, ScopePrompt, edit_for};
+use super::{
+    Edited, RecordAsk, RecordFields, RecordPrompt, Recorded, ScopeField, ScopePrompt, edit_for,
+    record_edit_for,
+};
 
 // Every field below is opened over this, so a test that meant to change the
 // text cannot pass by changing the directory instead.
@@ -437,4 +440,374 @@ fn a_move_leaves_the_rule_line_up_and_an_edit_takes_it_down() {
         "a move made the complaint stale"
     );
     assert_eq!(after(press(KeyCode::Backspace), &refused).rule(), None);
+}
+
+// The scope the record is being written for: already folded by the first
+// prompt, because the record's name has to be the string that went onto the
+// pact.
+const NAME: &str = "data-plane";
+
+fn record() -> RecordFields {
+    RecordFields::new(DIRECTORY, NAME)
+}
+
+fn recorded(key: KeyEvent, fields: &RecordFields) -> RecordFields {
+    match record_edit_for(key, fields) {
+        Recorded::Open(next) => next,
+        other => panic!("{key:?} should have left the record open, and gave {other:?}"),
+    }
+}
+
+fn record_walked(fields: RecordFields, keys: &[KeyCode]) -> RecordFields {
+    keys.iter()
+        .fold(fields, |current, code| recorded(press(*code), &current))
+}
+
+fn record_typed(fields: RecordFields, text: &str) -> RecordFields {
+    record_walked(fields, &text.chars().map(KeyCode::Char).collect::<Vec<_>>())
+}
+
+fn texts(fields: &RecordFields) -> [&str; 3] {
+    RecordAsk::ORDER.map(|ask| fields.field(ask).text())
+}
+
+#[test]
+fn a_fresh_record_prompt_is_up_over_the_module_and_the_folded_name() {
+    let prompt = RecordPrompt::open(DIRECTORY, NAME);
+
+    assert_eq!(prompt, RecordPrompt::Open(record()));
+    assert!(prompt.is_open());
+
+    let fields = prompt.fields().expect("a fresh prompt is open");
+    assert_eq!(fields.module(), DIRECTORY);
+    assert_eq!(fields.name(), NAME);
+    // Nothing true to open on: the manifest holds no record for this name,
+    // which is the only reason the question is being asked.
+    assert_eq!(texts(fields), ["", "", ""]);
+    assert_eq!(fields.asking(), RecordAsk::Team);
+    assert_eq!(fields.current().text(), "");
+    assert!(
+        RecordAsk::ORDER
+            .iter()
+            .all(|ask| fields.field(*ask).rule().is_none())
+    );
+}
+
+#[test]
+fn a_closed_record_prompt_is_the_default_and_holds_no_fields() {
+    assert_eq!(RecordPrompt::default(), RecordPrompt::Closed);
+    assert!(!RecordPrompt::Closed.is_open());
+    assert_eq!(RecordPrompt::Closed.fields(), None);
+}
+
+#[test]
+fn typing_goes_into_the_field_being_asked_and_leaves_the_other_two_alone() {
+    let fields = record_typed(record(), "Data Plane");
+
+    assert_eq!(texts(&fields), ["Data Plane", "", ""]);
+    assert_eq!(
+        fields.field(RecordAsk::Team).cursor(),
+        "Data Plane".len(),
+        "the cursor followed what was typed"
+    );
+}
+
+#[test]
+fn each_of_the_three_fields_is_typed_into_in_turn() {
+    // The whole record, entered the way somebody enters it: type, move, type.
+    let fields = record_typed(record(), "Data Plane");
+    let fields = record_typed(recorded(press(KeyCode::Tab), &fields), "In Review");
+    let fields = record_typed(recorded(press(KeyCode::Tab), &fields), "area/data");
+
+    assert_eq!(texts(&fields), ["Data Plane", "In Review", "area/data"]);
+    assert_eq!(fields.asking(), RecordAsk::Label);
+    assert_eq!(fields.current().text(), "area/data");
+}
+
+#[test]
+fn values_are_kept_exactly_as_typed_and_are_not_folded_or_refused() {
+    // Judging is the caller's, and what a team, a review state or a label may
+    // contain is the tracker's business: a field that dropped a capital or a
+    // slash would be arguing with somebody's tracker.
+    let fields = record_typed(record(), "Data Plane / EU, 9");
+
+    assert_eq!(fields.field(RecordAsk::Team).text(), "Data Plane / EU, 9");
+}
+
+#[test]
+fn tab_and_down_go_forward_through_the_fields_and_wrap() {
+    for code in [KeyCode::Tab, KeyCode::Down] {
+        let mut current = record();
+        for ask in [
+            RecordAsk::ReviewState,
+            RecordAsk::Label,
+            // Wrapped: these two keys are the whole of the movement, so the
+            // last field has to lead back to the first.
+            RecordAsk::Team,
+        ] {
+            current = recorded(press(code), &current);
+            assert_eq!(current.asking(), ask, "{code:?} should reach {ask:?}");
+        }
+    }
+}
+
+#[test]
+fn shift_tab_and_up_go_back_through_the_fields_and_wrap() {
+    for code in [KeyCode::BackTab, KeyCode::Up] {
+        let mut current = record();
+        for ask in [RecordAsk::Label, RecordAsk::ReviewState, RecordAsk::Team] {
+            current = recorded(press(code), &current);
+            assert_eq!(current.asking(), ask, "{code:?} should reach {ask:?}");
+        }
+    }
+}
+
+#[test]
+fn moving_between_fields_keeps_what_was_typed_and_where_the_cursor_was() {
+    let fields = record_typed(record(), "Data Plane");
+    let fields = record_walked(fields, &[KeyCode::Home, KeyCode::Right]);
+    let there_and_back = record_walked(fields.clone(), &[KeyCode::Tab, KeyCode::BackTab]);
+
+    assert_eq!(there_and_back, fields, "a round trip moved nothing at all");
+    assert_eq!(there_and_back.field(RecordAsk::Team).cursor(), 1);
+}
+
+#[test]
+fn moving_between_fields_needs_no_key_the_scope_prompt_swallows_as_text() {
+    // Said out loud because it is the promise: the keys that move are keys
+    // that typed nothing anywhere, so nothing a reader could have typed into
+    // the first prompt moves the question in this one.
+    for code in [KeyCode::Tab, KeyCode::BackTab, KeyCode::Up, KeyCode::Down] {
+        assert_eq!(
+            edit_for(press(code), &field("web")),
+            Edited::Open(field("web")),
+            "{code:?} types into the scope prompt, so it cannot move a field here"
+        );
+    }
+}
+
+#[test]
+fn every_tree_binding_is_swallowed_as_text_or_as_a_move() {
+    // The same promise the scope prompt makes: while this is up, nothing
+    // reaches the app underneath, whichever of the three fields is being
+    // typed in.
+    for code in BINDINGS {
+        let next = recorded(press(code), &record());
+
+        match typed(code) {
+            Some(character) => {
+                assert_eq!(
+                    texts(&next),
+                    [character.to_string().as_str(), "", ""],
+                    "{code:?} should be text in the field being asked"
+                );
+            }
+            None => assert_eq!(texts(&next), ["", "", ""], "{code:?} typed nothing"),
+        }
+        assert_eq!(next.module(), DIRECTORY);
+        assert_eq!(next.name(), NAME);
+    }
+}
+
+#[test]
+fn enter_submits_from_any_field_and_whatever_is_in_them() {
+    // Written or abandoned whole: a record routing work by two of its three
+    // values is the state this question exists to prevent, so blankness is
+    // refused by the caller rather than by the key.
+    assert_eq!(
+        record_edit_for(press(KeyCode::Enter), &record()),
+        Recorded::Submit,
+        "three empty fields are an answer the caller refuses, not a key that does nothing"
+    );
+
+    for ask in RecordAsk::ORDER {
+        let fields = record_typed(record().refused(ask, "a team cannot be blank"), "x");
+
+        assert_eq!(
+            record_edit_for(press(KeyCode::Enter), &fields),
+            Recorded::Submit,
+            "Enter from {ask:?} should submit"
+        );
+    }
+}
+
+#[test]
+fn esc_closes_from_any_field_and_from_a_part_typed_record() {
+    assert_eq!(
+        record_edit_for(press(KeyCode::Esc), &record()),
+        Recorded::Close
+    );
+
+    for ask in RecordAsk::ORDER {
+        let fields = record_typed(record().refused(ask, "a label cannot be blank"), "half");
+
+        assert_eq!(
+            record_edit_for(press(KeyCode::Esc), &fields),
+            Recorded::Close,
+            "Esc from {ask:?} should close"
+        );
+    }
+}
+
+#[test]
+fn a_refusal_keeps_the_typed_text_and_cursor_and_asks_the_field_it_is_about() {
+    let fields = record_typed(record(), "Data Plane");
+    let fields = record_walked(fields, &[KeyCode::Tab, KeyCode::Tab]);
+    let fields = record_typed(fields, "area/data");
+    let refused = fields.refused(RecordAsk::ReviewState, "a review state cannot be blank");
+
+    assert_eq!(
+        refused.field(RecordAsk::ReviewState).rule(),
+        Some("a review state cannot be blank")
+    );
+    assert_eq!(
+        refused.asking(),
+        RecordAsk::ReviewState,
+        "the caret is in the field the complaint is about"
+    );
+    // The other two are carried across as they stand, complaint-free: a blank
+    // third field costs nobody the first two.
+    assert_eq!(texts(&refused), ["Data Plane", "", "area/data"]);
+    assert_eq!(refused.field(RecordAsk::Team).cursor(), "Data Plane".len());
+    assert_eq!(refused.field(RecordAsk::Team).rule(), None);
+    assert_eq!(refused.field(RecordAsk::Label).rule(), None);
+}
+
+#[test]
+fn a_refusal_over_typed_text_leaves_it_exactly_as_it_was() {
+    let fields = record_typed(record(), "   ");
+    let refused = fields
+        .clone()
+        .refused(RecordAsk::Team, "a team cannot be blank");
+
+    assert_eq!(refused.field(RecordAsk::Team).text(), "   ");
+    assert_eq!(refused.field(RecordAsk::Team).cursor(), 3);
+    assert_eq!(
+        refused.field(RecordAsk::Team),
+        &fields
+            .field(RecordAsk::Team)
+            .clone()
+            .refused("a team cannot be blank"),
+        "the line went on, and nothing else about the field moved"
+    );
+}
+
+#[test]
+fn an_edit_clears_the_rule_line_and_a_move_between_fields_leaves_it() {
+    let refused = record().refused(RecordAsk::Team, "a team cannot be blank");
+
+    assert_eq!(
+        recorded(press(KeyCode::Char('D')), &refused)
+            .field(RecordAsk::Team)
+            .rule(),
+        None
+    );
+    assert_eq!(
+        record_walked(refused, &[KeyCode::Tab, KeyCode::BackTab])
+            .field(RecordAsk::Team)
+            .rule(),
+        Some("a team cannot be blank"),
+        "walking away from the text has not made the complaint stale"
+    );
+}
+
+#[test]
+fn releases_and_repeats_move_nothing_and_type_nothing() {
+    // Tab among them: a release acted on would move the question a field on
+    // from the press that already moved it.
+    let before = record_typed(record(), "Data");
+
+    for code in [
+        KeyCode::Char('s'),
+        KeyCode::Tab,
+        KeyCode::BackTab,
+        KeyCode::Up,
+        KeyCode::Down,
+        KeyCode::Enter,
+        KeyCode::Esc,
+    ] {
+        for kind in [KeyEventKind::Release, KeyEventKind::Repeat] {
+            let event = KeyEvent::new_with_kind_and_state(
+                code,
+                KeyModifiers::NONE,
+                kind,
+                KeyEventState::NONE,
+            );
+
+            assert_eq!(
+                record_edit_for(event, &before),
+                Recorded::Open(before.clone()),
+                "{kind:?} of {code:?} should do nothing"
+            );
+        }
+    }
+}
+
+#[test]
+fn no_key_ever_changes_the_module_or_the_name_being_recorded() {
+    // The name is the string already written onto the pact, and the record has
+    // to carry that one: nothing typed into these three fields can move it.
+    let before = record().refused(RecordAsk::Label, "a label cannot be blank");
+
+    for code in BINDINGS.into_iter().chain([
+        KeyCode::Backspace,
+        KeyCode::Delete,
+        KeyCode::Left,
+        KeyCode::Right,
+        KeyCode::Home,
+        KeyCode::End,
+        KeyCode::BackTab,
+    ]) {
+        let next = recorded(press(code), &before);
+
+        assert_eq!(next.module(), DIRECTORY);
+        assert_eq!(next.name(), NAME);
+    }
+}
+
+#[test]
+fn the_fields_answer_the_cursor_keys_the_scope_field_does() {
+    // Reused rather than reimplemented, so this asserts the reuse: the same
+    // keys over the same text come to the same field either way round.
+    let through_record = record_walked(
+        record_typed(record(), "Data Plane"),
+        &[
+            KeyCode::Home,
+            KeyCode::Right,
+            KeyCode::Delete,
+            KeyCode::Char('u'),
+        ],
+    );
+    let through_field = [
+        KeyCode::Home,
+        KeyCode::Right,
+        KeyCode::Delete,
+        KeyCode::Char('u'),
+    ]
+    .iter()
+    .fold(ScopeField::new(DIRECTORY, "Data Plane"), |current, code| {
+        after(press(*code), &current)
+    });
+
+    assert_eq!(through_record.field(RecordAsk::Team), &through_field);
+    assert_eq!(through_field.text(), "Duta Plane");
+}
+
+#[test]
+fn a_chord_is_not_text_here_either() {
+    let before = record();
+
+    for modifiers in [
+        KeyModifiers::CONTROL,
+        KeyModifiers::ALT,
+        KeyModifiers::SUPER,
+    ] {
+        let key = KeyEvent::new(KeyCode::Char('u'), modifiers);
+
+        assert_eq!(
+            record_edit_for(key, &before),
+            Recorded::Open(before.clone()),
+            "{modifiers:?} makes `u` a command, not a letter"
+        );
+    }
 }
