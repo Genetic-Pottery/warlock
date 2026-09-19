@@ -186,14 +186,37 @@ fn checked(
     })
 }
 
-// Three lines rather than a paragraph, because the three facts answer three
-// questions and a reader looking for one should find it on a line of its own.
+// One line per fact rather than a paragraph, because a reader looking for one
+// of them should find it on a line of its own, and all five are printed every
+// time: an answer whose shape changes with what is missing is one a reader has
+// to count lines in before they can read it, and each line below has something
+// to say about an absence.
+//
+// The repository's two facts lead — what covers the path and where work under
+// it is filed are true for anyone who clones this — then what this machine
+// holds, then the verdict where those two meet, then the key this checkout is
+// bound to.
+//
+// Every line is composed from the same `Checked` the object is rendered from,
+// with no lookup of its own, which is what keeps `prose` and `object` two
+// renderings of one answer rather than two answers that can disagree.
 fn prose(checked: &Checked) -> String {
     format!(
-        "{}\n{}\n{}",
+        "{}\n{}\n{}\n{}\n{}",
         covering_line(&checked.path, checked.scope.as_deref()),
+        route_line(
+            checked.scope.as_deref(),
+            checked.team.as_deref(),
+            checked.review_state.as_deref(),
+            checked.label.as_deref(),
+        ),
         holding_line(&checked.sigils, checked.config.as_deref()),
         verdict_line(checked.scope.as_deref(), checked.opens),
+        key_line(
+            checked.key.as_deref(),
+            checked.key_found,
+            checked.team.as_deref(),
+        ),
     )
 }
 
@@ -205,6 +228,39 @@ fn covering_line(path: &str, scope: Option<&str>) -> String {
     match scope {
         Some(scope) => format!("`{path}` is scoped `{scope}`"),
         None => format!("nothing scopes `{path}`"),
+    }
+}
+
+// `opens` is deliberately not a parameter: a scope this machine holds no sigil
+// for still files where it files, and blanking the route for a closed one would
+// leave somebody covering for a colleague with a verdict and nowhere to file.
+// The closed line below sits beside this one instead.
+//
+// The three record fields arrive as three `Option`s and are matched as one,
+// because they are one `[[scope]]` record spread flat by `Checked` — a partial
+// combination cannot be built, and the arms below would rather fall through to
+// "no record" than print a line that names two thirds of a route.
+//
+// Neither absent case names a command that writes a record, because there is
+// none: `warlock scope add` puts a scope *name* on a pacted directory, and the
+// `[[scope]]` record it routes with is hand-written in the manifest.
+fn route_line(
+    scope: Option<&str>,
+    team: Option<&str>,
+    review_state: Option<&str>,
+    label: Option<&str>,
+) -> String {
+    match (scope, team, review_state, label) {
+        (_, Some(team), Some(review_state), Some(label)) => {
+            format!("work here is filed to `{team}`, as `{review_state}`, labelled `{label}`")
+        }
+        (Some(scope), ..) => format!(
+            "`{scope}` has no `[[scope]]` record, so there is nothing to route to: a record \
+             in `.warlock/pacts.toml` is what would fix it"
+        ),
+        (None, ..) => "there is nothing to route to: a scope covering this path is what would \
+             fix it, with `warlock scope add`"
+            .to_owned(),
     }
 }
 
@@ -245,6 +301,38 @@ fn verdict_line(scope: Option<&str>, opens: bool) -> String {
             "`{scope}` is closed to this machine — hold that sigil to work here, \
              with `warlock config`"
         ),
+    }
+}
+
+// The name a key is stored under and never a key: nothing in this module holds
+// a value, so there is none for a format string to reach.
+//
+// The two ways of having no usable key are fixed in different files by
+// different commands, so they get different lines rather than one line hedging
+// between them — `warlock key use` writes the checkout's binding, `warlock key
+// add` writes the machine's store, and sending somebody to the wrong one costs
+// them a read of both.
+//
+// A bound name that resolves is said together with the team it would file to,
+// because that pairing is the question being asked: "where does work here go,
+// and can this checkout file it". Naming the key alone would answer half of it
+// on a line that looks like the whole answer. With no record there is no team
+// to pair it with, and the line says only what is true.
+fn key_line(key: Option<&str>, found: bool, team: Option<&str>) -> String {
+    match (key, found) {
+        (None, _) => "no key is bound to this checkout: `warlock key use <name>` binds a name \
+             this machine stores, and `warlock key add <name>` stores a new one"
+            .to_owned(),
+        (Some(key), false) => format!(
+            "the key `{key}` is bound here and this machine has not stored it: \
+             `warlock key add {key}` stores it, `warlock key use <name>` binds another"
+        ),
+        (Some(key), true) => match team {
+            Some(team) => {
+                format!("filing to `{team}` would use the key `{key}`, which this machine stores")
+            }
+            None => format!("the key `{key}` is bound here and stored on this machine"),
+        },
     }
 }
 
