@@ -16,7 +16,7 @@
 
 use std::path::Path;
 
-use warlock_engine::{Manifest, PactEntry, to_manifest_path, validate_scope};
+use warlock_engine::{Manifest, PactEntry, ScopeRecord, to_manifest_path, validate_scope};
 use warlock_tui::{App, Edited, ScopeField, ScopePrompt, Sigils};
 
 use crate::error::Error;
@@ -175,6 +175,56 @@ pub(crate) fn with_scope_on(manifest: &Manifest, module: &str, scope: Option<&st
             None => entry.without_scope(),
         }
     }))
+}
+
+// The same comparison [`route_facts`](warlock_engine::route_facts) routes by,
+// and it has to stay that way: a lookup that folded, trimmed or matched loosely
+// here would answer "no record" for a name `warlock check` then routes through,
+// and the caller below would write a second record the router never reads.
+//
+// Used from the TUI and the headless `scope add` in the slices that follow this
+// one; until then only the tests beneath call it.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn records_scope(manifest: &Manifest, name: &str) -> bool {
+    manifest.scopes().iter().any(|record| record.name() == name)
+}
+
+// `None` is the refusal, and it is the only one: a name already recorded is
+// handed back untouched rather than overwritten or merged, because editing and
+// deleting records from warlock is not a thing this binary does — a record is
+// hand-written prose about somebody's tracker, and the one destructive edit
+// available here would be the one nobody asked for.
+//
+// `scope` is written in both places from the one string, so the pact cannot come
+// to name a record spelled differently from the one this call created. Folding
+// and validating happened in the caller (`scope_submit`,
+// [`Opened::scoped`](crate::edits)); the three record values are passed to
+// `ScopeRecord::new` exactly as given, which is what its own comment requires.
+//
+// Both halves of the write are one returned `Manifest` so the caller saves once:
+// a scope on disk whose record failed to write is the half-state this exists to
+// make impossible.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn with_scope_recorded(
+    manifest: &Manifest,
+    module: &str,
+    scope: &str,
+    team: &str,
+    review_state: &str,
+    label: &str,
+) -> Option<Manifest> {
+    if records_scope(manifest, scope) {
+        return None;
+    }
+
+    let recorded = manifest.scopes().iter().cloned().chain([ScopeRecord::new(
+        scope,
+        team,
+        review_state,
+        label,
+    )]);
+
+    Some(with_scope_on(manifest, module, Some(scope)).with_scopes(recorded))
 }
 
 // Reachable only when the manifest was edited in another window since warlock

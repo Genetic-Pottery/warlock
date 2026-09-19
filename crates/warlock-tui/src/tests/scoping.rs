@@ -4,11 +4,11 @@ use std::{fs, io};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use tempfile::TempDir;
 use warlock_engine::{
-    Manifest, Node, NodeState, PactEntry, ScopeRecord, Tree, manifest, validate_scope,
+    Manifest, Node, NodeState, PactEntry, ScopeRecord, Tree, manifest, route_facts, validate_scope,
 };
 use warlock_tui::{App, Edited, ScopeField, ScopePrompt, Sigils, edit_for};
 
-use super::{scope_edit, scope_submit};
+use super::{records_scope, scope_edit, scope_submit, with_scope_recorded};
 
 // `super::scope_press` with no boundary in the way, so these tests are about
 // the prompt rather than about being refused. The wildcard rather than
@@ -906,4 +906,212 @@ fn a_refusal_typed_out_can_be_fixed_and_written_without_reopening_the_window() {
 
     assert_eq!(prompt, ScopePrompt::Closed);
     assert_eq!(scope_on(&manifest, "crates/tui"), Some("web"));
+}
+
+/// Every `\n\n`-separated block of the saved file that mentions none of
+/// `written`, as the bytes on disk spell them.
+///
+/// The assertion below is over the file rather than over the `Manifest`,
+/// because the defect this guards against — records dropped by a rebuild —
+/// is invisible in a value compared against the value that dropped them.
+///
+/// The file's own final newline is taken off first: it belongs to whichever
+/// block happens to be last, and a block gaining one because something was
+/// appended after it is not a change to that block.
+fn blocks_apart_from(root: &Path, written: &[&str]) -> Vec<String> {
+    fs::read_to_string(root.join(".warlock").join("pacts.toml"))
+        .expect("the manifest was saved")
+        .trim_end_matches('\n')
+        .split("\n\n")
+        .filter(|block| !written.iter().any(|needle| block.contains(needle)))
+        .map(str::to_owned)
+        .collect()
+}
+
+/// What the write below creates and changes: the pact row it scopes, and the
+/// record it adds.
+const TOUCHED: [&str; 2] = ["crates/tui", "billing"];
+
+/// A repository with more in it than the write touches: three `[[pact]]`
+/// rows and three `[[scope]]` records, only one of each of which the write
+/// below is allowed to reach.
+///
+/// Bigger than [`pacts`] on purpose. A rebuild that dropped everything it
+/// did not write would pass over a file holding one untouched block, and the
+/// defect this fixture exists for dropped a whole section at once.
+fn recorded() -> Manifest {
+    Manifest::with_entries([
+        entry("crates/engine").with_scope("data-plane"),
+        entry("crates/tui"),
+        entry("docs").with_scope("third-party"),
+    ])
+    .with_scopes(records().into_iter().chain([ScopeRecord::new(
+        "platform",
+        "Platform",
+        "Backlog",
+        "area/platform",
+    )]))
+}
+
+#[test]
+fn recording_a_scope_leaves_every_row_and_record_it_did_not_touch_byte_identical() {
+    let repo = a_repo();
+    let manifest = recorded();
+    manifest.save(repo.path()).expect("the fixture was written");
+    let before = blocks_apart_from(repo.path(), &TOUCHED);
+
+    let next = with_scope_recorded(
+        &manifest,
+        "crates/tui",
+        "billing",
+        "Billing",
+        "In Review",
+        "area/billing",
+    )
+    .expect("no record in the fixture is named `billing`");
+    next.save(repo.path()).expect("the write was saved");
+
+    let after = blocks_apart_from(repo.path(), &TOUCHED);
+    assert_eq!(
+        after, before,
+        "the write reordered, reformatted or dropped something it did not set out to change",
+    );
+    // The version header, two pact rows and three records, so the comparison
+    // above is over blocks that are really there rather than over two empty
+    // lists agreeing.
+    assert_eq!(after.len(), 6, "{after:#?}");
+    // And the records themselves, read back rather than spelled: the three that
+    // were there come first and unedited, with the new one after them.
+    let written = saved(repo.path()).expect("the write was saved");
+    assert_eq!(written.scopes()[..3], recorded().scopes()[..]);
+    assert_eq!(written.scopes().len(), 4);
+    assert_eq!(
+        written
+            .entries()
+            .iter()
+            .map(PactEntry::module)
+            .collect::<Vec<_>>(),
+        ["crates/engine", "crates/tui", "docs"],
+        "the write reordered the pact rows",
+    );
+}
+
+#[test]
+fn the_new_record_is_stored_as_passed_and_the_pact_row_keeps_its_document_and_grant() {
+    let repo = a_repo();
+    let manifest = recorded();
+
+    // Spaced and capitalised on purpose: a team, a review state and a label
+    // belong to somebody's tracker, and anything trimmed or folded on the way
+    // through here is a name that no longer matches the one over there.
+    let next = with_scope_recorded(
+        &manifest,
+        "crates/tui",
+        "billing",
+        " Billing Squad ",
+        "In Review",
+        "Area/Billing",
+    )
+    .expect("no record in the fixture is named `billing`");
+    next.save(repo.path()).expect("the write was saved");
+
+    let written = saved(repo.path()).expect("the write was saved");
+    let record = written.scopes().last().expect("the record was written");
+    assert_eq!(record.name(), "billing");
+    assert_eq!(record.team(), " Billing Squad ");
+    assert_eq!(record.review_state(), "In Review");
+    assert_eq!(record.label(), "Area/Billing");
+
+    // The scope on the pact is the string the record is filed under, so
+    // routing finds one from the other.
+    assert_eq!(scope_on(&written, "crates/tui"), Some(record.name()));
+    let tui = written
+        .entry("crates/tui")
+        .expect("the entry is still there");
+    assert_eq!(tui.document(), "crates/tui/WARLOCK.md");
+    assert_eq!(tui.granted_hash(), Some(HASH));
+    assert_eq!(tui.granted_at(), Some(AT));
+    assert_eq!(
+        written.entry("crates/engine"),
+        pacts().entry("crates/engine")
+    );
+}
+
+#[test]
+fn a_name_already_recorded_is_refused_rather_than_overwritten_or_merged() {
+    let repo = a_repo();
+    let manifest = recorded();
+
+    assert!(records_scope(&manifest, "data-plane"));
+    assert!(records_scope(&manifest, "third-party"));
+    assert!(!records_scope(&manifest, "billing"));
+    // Compared as `route_facts` compares it: a fold here would answer "already
+    // recorded" for a name the router treats as another one.
+    assert!(!records_scope(&manifest, "Data-Plane"));
+
+    assert_eq!(
+        with_scope_recorded(
+            &manifest,
+            "crates/tui",
+            "data-plane",
+            "Someone Else",
+            "Done",
+            "area/other",
+        ),
+        None,
+        "a record already in the file was rewritten",
+    );
+    // Nothing anywhere: no file to hold a merged or deleted record, and the
+    // manifest handed in is still every record and row it arrived with.
+    assert_eq!(saved(repo.path()), None, "a refusal wrote to disk");
+    assert_eq!(manifest, recorded(), "a refusal edited the manifest");
+}
+
+/// Whether `warlock check` would find a record for the scope covering
+/// `module`, asked of the router itself rather than restated here.
+///
+/// No home, which is the key half of the facts and none of this test's
+/// business; the record half is read the same either way.
+fn routes_to_a_record(manifest: &Manifest, module: &str) -> bool {
+    route_facts(module, ".", manifest, None)
+        .expect("the module path is inside the root")
+        .record()
+        .is_some()
+}
+
+#[test]
+fn the_lookup_and_the_router_agree_about_which_names_are_recorded() {
+    // One manifest and three scopes over it: `data-plane` is recorded,
+    // `billing` is recorded by nothing, and `third-party` is recorded only
+    // under a capitalised spelling — a different name to the router, which
+    // compares byte for byte and folds nothing.
+    let manifest = Manifest::with_entries([
+        entry("crates/engine").with_scope("data-plane"),
+        entry("crates/tui").with_scope("billing"),
+        entry("docs").with_scope("third-party"),
+    ])
+    .with_scopes([
+        ScopeRecord::new("data-plane", "Data Plane", "In Review", "area/data-plane"),
+        ScopeRecord::new("Third-Party", "Vendor", "Triage", "area/vendor"),
+    ]);
+
+    for (module, scope, has_a_record) in [
+        ("crates/engine", "data-plane", true),
+        ("crates/tui", "billing", false),
+        ("docs", "third-party", false),
+    ] {
+        // Both answers, from the one fixture: a lookup that disagreed with the
+        // router would have `warlock scope add` either refuse a name nothing
+        // routes through, or write a second record beside a name it does.
+        assert_eq!(
+            records_scope(&manifest, scope),
+            has_a_record,
+            "the lookup disagrees about `{scope}`",
+        );
+        assert_eq!(
+            routes_to_a_record(&manifest, module),
+            has_a_record,
+            "the router disagrees about `{scope}`, which covers {module}",
+        );
+    }
 }
