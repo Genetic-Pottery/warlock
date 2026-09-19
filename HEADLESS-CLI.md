@@ -18,7 +18,7 @@ repaint.
 | `warlock fresh [path]` | The same for the fresh ones | nothing |
 | `warlock check <path>` | Say which scope covers `path`, where work under it is filed, what this machine holds, and whether the two meet | nothing |
 | `warlock unpact <path>` | Drop the pact on a directory and every pact below it | one manifest write |
-| `warlock scope add <path> <scope>` | Write a scope onto a pacted directory | one manifest write |
+| `warlock scope add <path> <scope>` | Write a scope onto a pacted directory, and `--team`, `--review-state` and `--label` with it when the name is new | one manifest write |
 | `warlock scope remove <path>` | Clear the scope on a pacted directory | one manifest write |
 | `warlock pact <path>` | Describe a directory and everything below it, a `WARLOCK.md` each | a model pass per directory |
 | `warlock refresh <path>` | The same over only the directories that are not fresh | a model pass per stale directory |
@@ -222,6 +222,36 @@ not hold, what is being refused is the blast radius rather than the place — so
 it is an ordinary **1**, and the sentence offers the road that needs no sigil:
 un-pact the parts you hold.
 
+`scope add` has two more, and both are about the `[[scope]]` record behind the
+name rather than about the path. A name `.warlock/pacts.toml` records nothing
+for wants `--team`, `--review-state` and `--label`, because a scope with no
+record is one `warlock check` answers has nowhere to route work to — easy to
+create in a hurry and found out about much later. A name that already has a
+record refuses all three instead, and any one of them is enough: warlock does
+not edit a record somebody hand-wrote, and writing the scope while dropping the
+values typed beside it is the one outcome nobody could tell from success.
+`warlock scope add <path> <scope>` with no flags is what a recorded name takes,
+and is what it has always taken.
+
+Both are one line on stderr and an ordinary **1**, with the file byte-identical
+to what was read. The line names the flags it is about — the ones still wanted,
+or the ones to drop — so what follows a refusal is the same command retyped
+once. A value that is blank or only whitespace is no value at all: over a new
+name it is named alongside the flags that were never typed, and over a recorded
+one it is a flag passed like any other and refused as one — `--team ''` is
+somebody asking for a record either way. Past that rule there is no other, and
+the three are stored exactly as typed, capitals, spaces and slashes included,
+because what a team, a review state or a label may be is Linear's to say and
+not warlock's. The values arrive as flags and nowhere else: `scope add` reads
+no stdin and prompts for nothing, like the other two writes here, so a scope
+and its record are as creatable from a CI job as from a shell.
+
+A new name and its record are one save of `.warlock/pacts.toml` and never a
+save each — a scope written onto the pact by the first save and a record the
+second one never reached is the half-routed state this is here to stop. Every
+other `[[scope]]` record and `[[pact]]` row is byte-identical afterwards, and
+`warlock check <path>` prints the full route: team, review state and label.
+
 ## Running
 
 `pact` and `refresh` are the two subcommands that spend anything: minutes, one
@@ -271,7 +301,7 @@ beside and renamed over, so what is on disk is always a whole file.
 | Status | What it means |
 | --- | --- |
 | `0` | Completed. The question was answered or the write happened, whatever the answer turned out to be — an empty listing and a scope closed to this machine included |
-| `1` | Warlock could not do it: the repository will not resolve, the manifest will not parse or will not save, the path has no repository-relative spelling. The line on stderr is the thing to go and read |
+| `1` | Warlock could not do it: the repository will not resolve, the manifest will not parse or will not save, the path has no repository-relative spelling, the flags do not match what the manifest already records for the scope. The line on stderr is the thing to go and read |
 | `2` | The command line was never a request. Clap's status and its wording, for a word warlock has no place for |
 | `3` | Refused, with nothing spent: this machine's sigils do not open the scope covering the path. No byte moved, retrying changes nothing, and the road out is `warlock config` |
 | `4` | Completed with failures: a run wrote the documents it could and saved the manifest, and the lines above the count name the directories that did not come out of it |
