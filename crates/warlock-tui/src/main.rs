@@ -66,7 +66,7 @@ use key::{key_add, key_forget, key_list, key_use};
 use pacting::{Pact, Reloaded};
 use query::{Listing, list};
 use running::{pact, refresh};
-use scoping::{scope_edit, scope_press};
+use scoping::{Asking, scope_edit, scope_press};
 use session::{Scope, Watched, load_app, start_watching};
 use standing::{FOR_CLAUDE_MD, Standing};
 use terminal::{Screen, TerminalGuard, install_panic_hook};
@@ -1045,17 +1045,26 @@ impl<S: Screen, P: Wired + Agent, C: Converses, B: Clip> Session<S, P, C, B> {
             // The whole of that last one happens here, on this thread, between two
             // frames: no worker, no channel, no account and no reload, because a
             // scope is one string written into one entry of a file already in this
-            // thread's hand (see `mod@scoping`). What comes back is the prompt
-            // from here on — down for a submit that was answered, still up over
-            // the text for one the engine refused. See `scoping::scope_edit`.
+            // thread's hand (see `mod@scoping`). What comes back is which window
+            // is up from here on — this one down for a submit that was answered
+            // and still up over the text for one the engine refused, or the
+            // record window for a scope name the manifest holds no `[[scope]]`
+            // record for. See `scoping::scope_edit`.
             Pressed::Scope(edited) => {
-                self.prompt = scope_edit(
+                let asking = scope_edit(
                     &mut self.app,
                     &mut self.manifest,
                     &self.scope.repo_root,
                     &self.prompt,
                     edited,
                 );
+                self.prompt = match asking {
+                    Asking::Scope(prompt) => prompt,
+                    // This loop has nowhere to put the record window yet — it is
+                    // drawn and routed a slice later — so a brand-new scope name
+                    // closes the window and writes nothing for now.
+                    Asking::Record(_) => ScopePrompt::Closed,
+                };
             }
             // Somebody typing into the other window: a character more or less in
             // the path, the window abandoned, or — on Enter — the document

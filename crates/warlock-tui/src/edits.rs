@@ -229,7 +229,10 @@ impl Opened {
     // and both scope writes inherit that from being one function.
     fn rescoped(&self, module: &str, scope: Option<&str>) -> Result<Option<String>, Error> {
         let was = self.scope_on(module)?.map(str::to_owned);
-        with_scope_on(&self.manifest, module, scope)
+        // No record: these two subcommands take a path and a name and nothing
+        // else, so there is nothing here to write one out of. The records
+        // already in the manifest come through untouched either way.
+        with_scope_on(&self.manifest, module, scope, None)
             .save(&self.repo_root)
             .map_err(|source| Error::Manifest { source })?;
 

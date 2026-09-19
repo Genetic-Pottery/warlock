@@ -13,11 +13,20 @@
 //! character predicate lives in this crate — and case is folded before asking,
 //! so the string judged is the string stored. An empty field clears the scope
 //! rather than being refused.
+//!
+//! A name the manifest holds no `[[scope]]` record for asks a second question —
+//! [`record_submit`] — before anything is written, because a scope with no
+//! record routes work nowhere and `warlock check` on it cannot print a route.
+//! The pact's scope and the new record then go down in one save, so there is no
+//! moment on disk where the boundary exists and the route does not; an Esc in
+//! between writes nothing at all.
 
 use std::path::Path;
 
-use warlock_engine::{Manifest, PactEntry, to_manifest_path, validate_scope};
-use warlock_tui::{App, Edited, ScopeField, ScopePrompt, Sigils};
+use warlock_engine::{Manifest, PactEntry, ScopeRecord, to_manifest_path, validate_scope};
+use warlock_tui::{
+    App, Edited, RecordAsk, RecordFields, RecordPrompt, Recorded, ScopeField, ScopePrompt, Sigils,
+};
 
 use crate::error::Error;
 use crate::session::closed_scope;
@@ -79,6 +88,21 @@ pub(crate) fn scope_press(
     ScopePrompt::open(module, scope)
 }
 
+// Which window the `s` key leaves up, and never both: the record question is
+// asked *instead of* the name, over the name it has already accepted, so two
+// windows open at once is not a state the loop can be put in. A closed `s` has
+// one spelling, `Asking::Scope(ScopePrompt::Closed)`, because the record
+// variant carries its fields rather than a prompt of its own.
+#[allow(
+    clippy::large_enum_variant,
+    reason = "`RecordFields`' own reason: three text fields, returned once per keystroke on the event loop's own thread, and a `Box` would buy an indirection between the answer and the text it is about"
+)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Asking {
+    Scope(ScopePrompt),
+    Record(RecordFields),
+}
+
 // Typing and abandoning move nothing but the prompt: the app was never told
 // the question was asked, so an Esc has nothing to put back.
 //
@@ -91,13 +115,38 @@ pub(crate) fn scope_edit(
     repo_root: &Path,
     prompt: &ScopePrompt,
     edited: Edited,
-) -> ScopePrompt {
+) -> Asking {
     match edited {
-        Edited::Open(field) => ScopePrompt::Open(field),
-        Edited::Close => ScopePrompt::Closed,
+        Edited::Open(field) => Asking::Scope(ScopePrompt::Open(field)),
+        Edited::Close => Asking::Scope(ScopePrompt::Closed),
         Edited::Submit => match prompt.field() {
             Some(field) => scope_submit(app, manifest, repo_root, field),
-            None => ScopePrompt::Closed,
+            None => Asking::Scope(ScopePrompt::Closed),
+        },
+    }
+}
+
+// The record window's half of [`scope_edit`], and the same three answers for
+// the same reasons. It never reopens the name: the string it is recording was
+// accepted by the window before it, and a second chance at typing it would be a
+// second chance for the record's name and the pact's scope to disagree.
+#[allow(
+    dead_code,
+    reason = "the event loop has no record window to route keys into yet; the slice that draws and wires it takes this off"
+)]
+pub(crate) fn record_edit(
+    app: &mut App,
+    manifest: &mut Manifest,
+    repo_root: &Path,
+    prompt: &RecordPrompt,
+    recorded: Recorded,
+) -> RecordPrompt {
+    match recorded {
+        Recorded::Open(fields) => RecordPrompt::Open(fields),
+        Recorded::Close => RecordPrompt::Closed,
+        Recorded::Submit => match prompt.fields() {
+            Some(fields) => record_submit(app, manifest, repo_root, fields),
+            None => RecordPrompt::Closed,
         },
     }
 }
@@ -107,16 +156,15 @@ pub(crate) fn scope_edit(
 // `control-plane, data-plane` one refused string rather than two scopes
 // somebody meant. An empty field is not judged at all: clearing is an answer.
 //
-// The manifest the loop holds is replaced only *after* the save succeeded, so
-// what this thread believes is what is on disk. A save that fails is a line on
-// the footer rather than a return out of the event loop — a manifest that will
-// not write is news, not a reason to tear the screen down.
+// The save and the belief that follows it are [`written`]'s, shared with
+// [`record_submit`] so that the two roads through this file cannot disagree
+// about what a failed write leaves behind.
 pub(crate) fn scope_submit(
     app: &mut App,
     manifest: &mut Manifest,
     repo_root: &Path,
     field: &ScopeField,
-) -> ScopePrompt {
+) -> Asking {
     // `to_ascii_lowercase` rather than `to_lowercase`, for the reason
     // `config::sigils_in` gives: a scope is drawn from ASCII, so folding a
     // non-ASCII capital would produce a character the next line refuses anyway,
@@ -129,7 +177,9 @@ pub(crate) fn scope_submit(
             Ok(()) => Some(typed),
             // The engine's sentence about the one rule that was broken, under
             // the field that broke it.
-            Err(rule) => return ScopePrompt::Open(field.clone().refused(rule.to_string())),
+            Err(rule) => {
+                return Asking::Scope(ScopePrompt::Open(field.clone().refused(rule.to_string())));
+            }
         }
     };
 
@@ -139,16 +189,106 @@ pub(crate) fn scope_submit(
     let module = field.directory();
     if manifest.entry(module).is_none() {
         app.set_message(no_pact_message(module));
-        return ScopePrompt::Closed;
+        return Asking::Scope(ScopePrompt::Closed);
     }
 
-    let next = with_scope_on(manifest, module, scope.as_deref());
+    // Under the two refusals above and over the write, which is the only place
+    // it can go: a name nobody may type here is refused before being asked
+    // about, and a directory with no pact to carry it is refused before a
+    // record is collected for a scope that would then be written onto nothing.
+    // A clear asks nothing — `None` never reaches here — because there is no
+    // name to record, and a name that already has a record asks nothing either:
+    // a record is shared by every directory carrying that scope, so a second
+    // question would be an offer to overwrite somebody else's route.
+    if let Some(name) = scope.as_deref()
+        && !recorded(manifest, name)
+    {
+        return Asking::Record(RecordFields::new(module, name));
+    }
+
+    written(app, manifest, repo_root, |manifest| {
+        with_scope_on(manifest, module, scope.as_deref(), None)
+    });
+    Asking::Scope(ScopePrompt::Closed)
+}
+
+// Blank is the whole of the judgement, and it is this module's rather than the
+// engine's: a team, a review state and a label are somebody else's vocabulary —
+// Linear's — and warlock knows no list of review states to check one against.
+// So what is stored is what was typed, to the byte, and the only string turned
+// down is the one that would write a record routing work nowhere. Whitespace
+// counts as blank because a field holding a space looks empty on screen and a
+// reader would read the record as broken rather than as spelled that way.
+//
+// The three are judged in [`RecordAsk::ORDER`] — the order they are asked in —
+// so a submit with all three blank complains about the first rather than about
+// whichever arm happened to be written first.
+pub(crate) fn record_submit(
+    app: &mut App,
+    manifest: &mut Manifest,
+    repo_root: &Path,
+    fields: &RecordFields,
+) -> RecordPrompt {
+    for ask in RecordAsk::ORDER {
+        if fields.field(ask).text().trim().is_empty() {
+            return RecordPrompt::Open(fields.clone().refused(ask, blank_rule(ask)));
+        }
+    }
+
+    // The same look the scope window took, taken again: the record window is a
+    // second keystroke later, and a pact hand-edited out of the file in between
+    // would otherwise be a record saved for a scope written onto nothing.
+    let module = fields.module();
+    if manifest.entry(module).is_none() {
+        app.set_message(no_pact_message(module));
+        return RecordPrompt::Closed;
+    }
+
+    let record = ScopeRecord::new(
+        fields.name(),
+        fields.field(RecordAsk::Team).text(),
+        fields.field(RecordAsk::ReviewState).text(),
+        fields.field(RecordAsk::Label).text(),
+    );
+    written(app, manifest, repo_root, |manifest| {
+        with_scope_on(manifest, module, Some(fields.name()), Some(record))
+    });
+    RecordPrompt::Closed
+}
+
+fn blank_rule(ask: RecordAsk) -> String {
+    format!("a {} cannot be blank", ask.heading())
+}
+
+// The record is looked up by exactly the string that goes onto the pact, which
+// is the folded one: `resolve_route` matches a record to a scope by `==` on the
+// name, so a record found here by any looser comparison would be a record
+// `warlock check` then failed to find.
+fn recorded(manifest: &Manifest, name: &str) -> bool {
+    manifest.scopes().iter().any(|record| record.name() == name)
+}
+
+// One save, and the manifest the loop holds replaced only *after* it succeeded,
+// so what this thread believes is what is on disk. A save that fails is a line
+// on the footer rather than a return out of the event loop — a manifest that
+// will not write is news, not a reason to tear the screen down.
+//
+// The rebuild is a closure rather than a `Manifest` the caller built, so there
+// is no way to write one manifest and believe another: the value saved and the
+// value stored are the one value, and it is built from the manifest that is
+// about to be replaced.
+fn written(
+    app: &mut App,
+    manifest: &mut Manifest,
+    repo_root: &Path,
+    rebuild: impl FnOnce(&Manifest) -> Manifest,
+) {
+    let next = rebuild(manifest);
     if let Err(source) = next.save(repo_root) {
         app.set_message(Error::Manifest { source }.to_string());
-        return ScopePrompt::Closed;
+        return;
     }
     *manifest = next;
-    ScopePrompt::Closed
 }
 
 // A rebuild rather than a mutation, because [`Manifest`] has no mutating scope
@@ -164,8 +304,21 @@ pub(crate) fn scope_submit(
 //
 // Shared with the headless `warlock scope add`/`remove` rather than copied,
 // since a second rebuild would be a second chance to forget the above.
-pub(crate) fn with_scope_on(manifest: &Manifest, module: &str, scope: Option<&str>) -> Manifest {
-    manifest.rebuilt_with(manifest.entries().iter().map(|entry| {
+//
+// `record` is appended to the records the manifest already holds and nothing
+// there is looked at on the way past, so no existing record is merged with,
+// overwritten or dropped — [`record_submit`] is the caller that decides whether
+// a name wants one, and it only asks for a name no record matches. Appended
+// rather than sorted in, for `rebuilt_with`'s own reason: the file that is
+// saved should differ from the file that was read in the places this edit
+// touched and nowhere else.
+pub(crate) fn with_scope_on(
+    manifest: &Manifest,
+    module: &str,
+    scope: Option<&str>,
+    record: Option<ScopeRecord>,
+) -> Manifest {
+    let next = manifest.rebuilt_with(manifest.entries().iter().map(|entry| {
         let entry = entry.clone();
         if entry.module() != module {
             return entry;
@@ -174,7 +327,12 @@ pub(crate) fn with_scope_on(manifest: &Manifest, module: &str, scope: Option<&st
             Some(scope) => entry.with_scope(scope),
             None => entry.without_scope(),
         }
-    }))
+    }));
+
+    match record {
+        Some(record) => next.with_scopes(manifest.scopes().iter().cloned().chain([record])),
+        None => next,
+    }
 }
 
 // Reachable only when the manifest was edited in another window since warlock

@@ -6,9 +6,12 @@ use tempfile::TempDir;
 use warlock_engine::{
     Manifest, Node, NodeState, PactEntry, ScopeRecord, Tree, manifest, validate_scope,
 };
-use warlock_tui::{App, Edited, ScopeField, ScopePrompt, Sigils, edit_for};
+use warlock_tui::{
+    App, Edited, RecordAsk, RecordFields, RecordPrompt, Recorded, ScopeField, ScopePrompt, Sigils,
+    edit_for, record_edit_for,
+};
 
-use super::{scope_edit, scope_submit};
+use super::{Asking, record_submit};
 
 // `super::scope_press` with no boundary in the way, so these tests are about
 // the prompt rather than about being refused. The wildcard rather than
@@ -22,6 +25,39 @@ fn scope_press(
     in_flight: bool,
 ) -> ScopePrompt {
     super::scope_press(app, manifest, repo_root, &Sigils::held(["*"]), in_flight)
+}
+
+// The scope window as it stands after a submit, for the tests that are about
+// the write. A name the manifest has no record for moves the question to the
+// other window instead, and that is a failure here rather than something to
+// assert around further down: a test that meant to ask it says so by calling
+// `super::scope_submit` and matching on `Asking::Record`.
+fn scope_submit(
+    app: &mut App,
+    manifest: &mut Manifest,
+    repo_root: &Path,
+    field: &ScopeField,
+) -> ScopePrompt {
+    asked(super::scope_submit(app, manifest, repo_root, field))
+}
+
+fn scope_edit(
+    app: &mut App,
+    manifest: &mut Manifest,
+    repo_root: &Path,
+    prompt: &ScopePrompt,
+    edited: Edited,
+) -> ScopePrompt {
+    asked(super::scope_edit(app, manifest, repo_root, prompt, edited))
+}
+
+fn asked(asking: Asking) -> ScopePrompt {
+    match asking {
+        Asking::Scope(prompt) => prompt,
+        Asking::Record(fields) => {
+            panic!("`{}` asked for a record rather than writing", fields.name())
+        }
+    }
 }
 
 // A grant on every entry, so "the write left the grant alone" is an
@@ -99,12 +135,22 @@ fn entry(module: &str) -> PactEntry {
 ///
 /// Named for what it holds rather than for its type, so that a test can
 /// have a `manifest` of its own to edit and still ask what the fixture said.
+///
+/// Every name the tests below type is recorded here, because a submit of a
+/// name with no `[[scope]]` record asks for one instead of writing: these are
+/// the tests about the write, and the ones about the second question type a
+/// name this list does not hold.
 fn pacts() -> Manifest {
     Manifest::with_entries([
         entry("crates/engine").with_scope("data-plane"),
         entry("crates/tui"),
     ])
+    .with_scopes(RECORDED.map(|name| ScopeRecord::new(name, "Platform", "In Review", name)))
 }
+
+/// The scope names [`pacts`] holds a record for, and so the names a submit
+/// writes rather than asking about. Anything else is new.
+const RECORDED: [&str; 3] = ["data-plane", "billing", "web"];
 
 /// The scope stored on `module`, or `None` for an entry with none.
 fn scope_on<'manifest>(manifest: &'manifest Manifest, module: &str) -> Option<&'manifest str> {
@@ -524,11 +570,15 @@ fn enter_sets_the_scope_and_leaves_the_document_and_the_grant_alone() {
 // `third-party` is named by no entry in the fixture and `data-plane` loses its
 // only entry to the clear below: a write that pruned the records to what the
 // entries spell would drop both, and a record is the one thing here that is
-// allowed to outlive the pacts that named it.
+// allowed to outlive the pacts that named it. `billing` is here because the
+// set below writes it and a name with no record asks a second question instead
+// — these three are the whole of the file's records for that test, and the
+// assertion is that they come back unmoved.
 fn records() -> Vec<ScopeRecord> {
     vec![
         ScopeRecord::new("data-plane", "Data Plane", "In Review", "area/data-plane"),
         ScopeRecord::new("third-party", "Vendor", "Triage", "area/vendor"),
+        ScopeRecord::new("billing", "Billing", "In Review", "area/billing"),
     ]
 }
 
@@ -906,4 +956,173 @@ fn a_refusal_typed_out_can_be_fixed_and_written_without_reopening_the_window() {
 
     assert_eq!(prompt, ScopePrompt::Closed);
     assert_eq!(scope_on(&manifest, "crates/tui"), Some("web"));
+}
+
+/// A record window over `module` for `name`, filled one keystroke at a time
+/// through [`record_edit_for`] — which is the only way to fill one, because
+/// the three fields belong to the prompt and nothing else sets them. The
+/// values are typed in [`RecordAsk::ORDER`], a Tab between each, so what is
+/// asserted about afterwards went in the way a person's would.
+fn fields(module: &str, name: &str, values: [&str; 3]) -> RecordFields {
+    let mut fields = RecordFields::new(module, name);
+    for value in values {
+        for character in value.chars() {
+            fields = opened(record_edit_for(press(KeyCode::Char(character)), &fields));
+        }
+        fields = opened(record_edit_for(press(KeyCode::Tab), &fields));
+    }
+    fields
+}
+
+fn opened(recorded: Recorded) -> RecordFields {
+    match recorded {
+        Recorded::Open(fields) => fields,
+        other => panic!("typing into the record window answered {other:?}"),
+    }
+}
+
+#[test]
+fn a_scope_name_the_manifest_has_no_record_for_asks_for_one_and_writes_nothing() {
+    // The whole of the second question: a name nothing routes, so the window
+    // moves rather than the file. Nothing has been decided yet — an Esc from
+    // here leaves a repository with no manifest in it at all.
+    let repo = a_repo();
+    let mut app = app_on(repo.path(), TUI_ROW);
+    let mut manifest = pacts();
+    let before = app.clone();
+
+    let asking = super::scope_submit(
+        &mut app,
+        &mut manifest,
+        repo.path(),
+        &field("crates/tui", "Ledger"),
+    );
+
+    assert_eq!(
+        asking,
+        Asking::Record(RecordFields::new("crates/tui", "ledger")),
+        "the record is asked for under the folded name, on three empty fields",
+    );
+    assert_eq!(saved(repo.path()), None, "asking wrote to disk");
+    assert_eq!(manifest, pacts(), "asking edited the manifest");
+    assert_eq!(app, before, "asking moved the view");
+}
+
+#[test]
+fn a_scope_name_that_already_has_a_record_is_written_with_no_second_question() {
+    // A record is shared by every directory carrying that scope, so a second
+    // question here would be an offer to overwrite somebody else's route.
+    let repo = a_repo();
+    let mut app = app_on(repo.path(), TUI_ROW);
+    let mut manifest = pacts();
+
+    let prompt = scope_submit(
+        &mut app,
+        &mut manifest,
+        repo.path(),
+        &field("crates/tui", "billing"),
+    );
+
+    assert_eq!(prompt, ScopePrompt::Closed, "the window is answered");
+    let written = saved(repo.path()).expect("the submit wrote the manifest");
+    assert_eq!(scope_on(&written, "crates/tui"), Some("billing"));
+    assert_eq!(
+        written.scopes(),
+        pacts().scopes(),
+        "the records moved for a name that already had one",
+    );
+}
+
+#[test]
+fn a_blank_value_in_any_of_the_three_fields_is_refused_and_writes_nothing() {
+    // Blank is the only judgement this window makes, and whitespace counts:
+    // a field holding a space reads as empty on screen, and a record routing
+    // work to ` ` is the one this question exists to prevent.
+    for blank in RecordAsk::ORDER {
+        for typed_blank in ["", "   "] {
+            let repo = a_repo();
+            let mut app = app_on(repo.path(), TUI_ROW);
+            let mut manifest = pacts();
+            let values =
+                RecordAsk::ORDER.map(|ask| if ask == blank { typed_blank } else { "Billing" });
+            let typed = fields("crates/tui", "ledger", values);
+
+            let prompt = record_submit(&mut app, &mut manifest, repo.path(), &typed);
+
+            let RecordPrompt::Open(refused) = prompt else {
+                panic!("a blank {} closed the window", blank.heading())
+            };
+            assert_eq!(
+                refused.asking(),
+                blank,
+                "the question is asked of the field that was refused",
+            );
+            let rule = refused
+                .field(blank)
+                .rule()
+                .expect("the refusal said nothing under the field");
+            assert!(rule.contains(blank.heading()), "{rule}");
+            // Every field byte for byte as it was, cursor included: a refusal
+            // leaves whoever typed it one character away from fixing it.
+            for ask in RecordAsk::ORDER {
+                assert_eq!(refused.field(ask).text(), typed.field(ask).text());
+                assert_eq!(refused.field(ask).cursor(), typed.field(ask).cursor());
+            }
+            assert_eq!(saved(repo.path()), None, "a refusal wrote to disk");
+            assert_eq!(manifest, pacts(), "a refusal edited the manifest");
+        }
+    }
+}
+
+#[test]
+fn an_accepted_record_saves_the_scope_and_the_record_in_one_write() {
+    // One save, both halves: there is no moment on disk where the pact names a
+    // scope nothing routes. The team is typed with spaces around it and a
+    // capital in it, and comes back exactly that way — this window folds,
+    // trims and judges nothing beyond blankness.
+    let repo = a_repo();
+    let mut app = app_on(repo.path(), TUI_ROW);
+    let mut manifest = pacts();
+    let typed = fields(
+        "crates/tui",
+        "ledger",
+        ["  Billing Platform ", "In Review", "area/ledger"],
+    );
+
+    let prompt = record_submit(&mut app, &mut manifest, repo.path(), &typed);
+
+    assert_eq!(prompt, RecordPrompt::Closed, "the window is answered");
+    let written = saved(repo.path()).expect("the submit wrote the manifest");
+    assert_eq!(
+        written, manifest,
+        "what is on disk is what this thread believes"
+    );
+    assert_eq!(
+        scope_on(&written, "crates/tui"),
+        Some("ledger"),
+        "the pact carries the name the record was written under",
+    );
+    assert_eq!(
+        written.scopes().last(),
+        Some(&ScopeRecord::new(
+            "ledger",
+            "  Billing Platform ",
+            "In Review",
+            "area/ledger"
+        )),
+        "the three values are stored as typed",
+    );
+    // And everything the write did not set out to change: the records that
+    // were already there, in order, and the other entry whole.
+    assert_eq!(&written.scopes()[..RECORDED.len()], pacts().scopes());
+    assert_eq!(
+        written.entry("crates/engine"),
+        pacts().entry("crates/engine")
+    );
+    let tui = written
+        .entry("crates/tui")
+        .expect("the entry is still there");
+    assert_eq!(tui.document(), "crates/tui/WARLOCK.md");
+    assert_eq!(tui.granted_hash(), Some(HASH));
+    assert_eq!(tui.granted_at(), Some(AT));
 }
