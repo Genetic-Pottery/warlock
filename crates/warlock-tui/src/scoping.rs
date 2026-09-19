@@ -190,10 +190,6 @@ pub(crate) fn with_scope_on(manifest: &Manifest, module: &str, scope: Option<&st
 //
 // The four record values are stored as passed; folding, trimming and judging
 // all happened before the call, so what was judged is what is written.
-//
-// The `allow` goes when the callers land: the CLI slice calls this from
-// `warlock scope add`, the TUI slice from the second prompt behind `s`.
-#[allow(dead_code)]
 pub(crate) fn with_scope_and_record_on(
     manifest: &Manifest,
     module: &str,
@@ -212,7 +208,6 @@ pub(crate) fn with_scope_and_record_on(
 
 // The same comparison [`route_facts`](warlock_engine::route_facts) routes by, so
 // a name this answers `false` for is a name that would route to nothing.
-#[allow(dead_code)]
 pub(crate) fn records_scope(manifest: &Manifest, name: &str) -> bool {
     manifest.scopes().iter().any(|record| record.name() == name)
 }

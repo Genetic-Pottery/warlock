@@ -62,6 +62,25 @@ pub(crate) enum Error {
     NoPact {
         module: String,
     },
+    // The two `warlock scope add` raises about the `[[scope]]` record behind a
+    // name, and a 1 apiece rather than the boundary's 3: a 3 says this machine
+    // is outside something and re-running will never work, while both of these
+    // are answered by retyping the same command with the flags put right. The
+    // catch-all in `status_for` is what spells that, so there is no arm for
+    // them there — one would be the same number written twice.
+    //
+    // Each carries the flags it is about rather than a fixed sentence, because
+    // the whole point of the line is that a reader retypes the command once:
+    // being told "the three flags are required" when two of them were already
+    // given is a second guess at what is wrong.
+    NoScopeRecord {
+        scope: String,
+        wanted: Vec<&'static str>,
+    },
+    ScopeRecorded {
+        scope: String,
+        passed: Vec<&'static str>,
+    },
     Pact {
         source: pact::Error,
     },
@@ -182,6 +201,46 @@ pub(crate) fn one_line(message: &str) -> String {
     }
 }
 
+// An `and` before the last rather than a bare comma-separated list, because
+// the two refusals this serves are sentences somebody reads and then retypes a
+// command from, not output a script splits on a delimiter.
+fn listed(flags: &[&str]) -> String {
+    let quoted: Vec<String> = flags.iter().map(|flag| format!("`{flag}`")).collect();
+    match quoted.split_last() {
+        Some((last, [])) => last.clone(),
+        Some((last, rest)) => format!("{} and {last}", rest.join(", ")),
+        None => String::new(),
+    }
+}
+
+// What is missing, then why it is wanted: a scope nothing records routes
+// nowhere, and a reader told only that a flag is required learns nothing about
+// what they would have lost. Written here rather than in the `Display` arm
+// because that match is at clippy's line ceiling, and both sentences want the
+// room.
+fn no_record_message(scope: &str, wanted: &[&str]) -> String {
+    format!(
+        "nothing is recorded for the scope `{scope}`, so work filed under it would route \
+         nowhere: nothing was written, and {} {} a value that is not blank",
+        listed(wanted),
+        // Singular for one, as `Failures` counts its directories: a line a
+        // person retypes a command off should not read as if it were
+        // generated.
+        if wanted.len() == 1 { "wants" } else { "want" }
+    )
+}
+
+// Both roads out, because the flags being refused are not a typo: whoever typed
+// them meant to say where this scope files its work, and the record that
+// already says so is a block in a file they can open.
+fn recorded_message(scope: &str, passed: &[&str]) -> String {
+    format!(
+        "`{scope}` already has a `[[scope]]` record and warlock does not edit one, so nothing \
+         was written: drop {} to write the scope, or change the record in `.warlock/pacts.toml`",
+        listed(passed)
+    )
+}
+
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -281,6 +340,12 @@ impl fmt::Display for Error {
                 "`{module}` is not in the manifest, so there is no pact to carry a \
                  scope; pact it in warlock first, with `p`"
             ),
+            Self::NoScopeRecord { scope, wanted } => {
+                write!(f, "{}", no_record_message(scope, wanted))
+            }
+            Self::ScopeRecorded { scope, passed } => {
+                write!(f, "{}", recorded_message(scope, passed))
+            }
             // The engine's `.git` wording, with what it cost the caller on the
             // end: this is a refusal to do the thing that was typed rather than
             // a refusal to draw a tree, and the reader asked for that thing.
@@ -381,6 +446,11 @@ impl std::error::Error for Error {
             | Self::ClosedScope { .. }
             | Self::ClosedScopeBelow { .. }
             | Self::NoPact { .. }
+            // Nor here, for that same reason: what a manifest records under a
+            // name, and which flags a command line carried, are two files
+            // agreeing or failing to.
+            | Self::NoScopeRecord { .. }
+            | Self::ScopeRecorded { .. }
             // Nor here: a prompt answered with a blank line, and a name nobody
             // stored a key under, are a person and not a failure underneath.
             | Self::NoKey { .. }

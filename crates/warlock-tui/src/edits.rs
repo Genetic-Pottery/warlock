@@ -22,9 +22,16 @@ use warlock_engine::{Manifest, PactEntry, unpact_subtree, validate_scope};
 use crate::boundary::{Reach, Verdict, verdict};
 use crate::error::Error;
 use crate::query::spelled;
-use crate::scoping::with_scope_on;
+use crate::scoping::{records_scope, with_scope_and_record_on, with_scope_on};
 use crate::session::sigils_under;
 use crate::standing::{FOR_SCOPE_ADD, FOR_SCOPE_REMOVE, FOR_UNPACT, Standing};
+
+// Spelled as they are typed, because both record refusals name them and a
+// refusal is only one retyped command away from a write if it says the flags
+// the way clap reads them.
+const TEAM: &str = "--team";
+const REVIEW_STATE: &str = "--review-state";
+const LABEL: &str = "--label";
 
 // The type is the gate: the fields are private to this module and the only
 // constructor asks the boundary, so possessing an `Opened` is proof that this
@@ -193,13 +200,37 @@ impl Opened {
     // and nobody else's. Folding is also the *only* thing done to what was typed
     // — nothing is trimmed, split on a comma or repaired into acceptability, so
     // `control-plane, data-plane` is one refused string rather than two scopes
-    // somebody might have meant.
+    // somebody might have meant. The name folded here is the name recorded
+    // below, so a record cannot be filed under a spelling no pact carries.
     //
     // The path is spelled first because the ordering rule stops at the boundary
     // and not at the write: a path with no manifest form is this command's own
     // refusal, and asking first means a run with two things wrong with it answers
-    // about where it was pointed.
-    fn scoped(&self, scope: &str) -> Result<String, Error> {
+    // about where it was pointed. `scope_on` follows for that reason and is
+    // called here rather than left inside a write both scope commands share:
+    // naming three flags to somebody pointed at a directory with no pact would
+    // send them off to retype a command that fails again on the same path.
+    //
+    // Which of the two record refusals can apply is the manifest's answer about
+    // the name and never the operator's. A name nothing records wants all three
+    // values, because the alternative is the state this slice exists to close: a
+    // scope on a pact routing nowhere, which nobody finds out about until they
+    // ask `warlock check`. A name something records refuses all three, because
+    // every way of honouring them edits a `[[scope]]` block somebody
+    // hand-wrote, and a silent no-op is the one answer they could not tell from
+    // having their values written.
+    //
+    // Both are reached past `Opened::new`, so whichever flags were typed, a
+    // closed boundary is still the whole of the answer: what the manifest
+    // records for a name is a fact about the inside of a file the reader has
+    // just been told they may not work in.
+    fn scoped(
+        &self,
+        scope: &str,
+        team: Option<&str>,
+        review_state: Option<&str>,
+        label: Option<&str>,
+    ) -> Result<String, Error> {
         let module = spelled(&self.repo_root, &self.target)?;
         // `to_ascii_lowercase` rather than `to_lowercase`, for `scope_submit`'s
         // reason: a scope is drawn from ASCII, so folding a non-ASCII capital
@@ -207,8 +238,50 @@ impl Opened {
         // is refused is closer to what was typed.
         let folded = scope.to_ascii_lowercase();
         validate_scope(&folded).map_err(|rule| Error::Scope { rule })?;
+        let was = self.scope_on(&module)?.map(str::to_owned);
 
-        let was = self.rescoped(&module, Some(&folded))?;
+        let flags = [(TEAM, team), (REVIEW_STATE, review_state), (LABEL, label)];
+        let next = if records_scope(&self.manifest, &folded) {
+            // Presence and not a value: `--team ''` over a recorded name is
+            // still somebody asking warlock to write a record, and a blank
+            // value quietly doing what no flag at all does is the one outcome
+            // they could not tell from success.
+            let passed = flags_where(flags, |value| value.is_some());
+            if !passed.is_empty() {
+                return Err(Error::ScopeRecorded {
+                    scope: folded,
+                    passed,
+                });
+            }
+            with_scope_on(&self.manifest, &module, Some(&folded))
+        } else if let (Some(team), Some(review_state), Some(label)) =
+            (filled(team), filled(review_state), filled(label))
+        {
+            // One manifest for one save: a scope set on the pact by a first
+            // save and a record a second one never got to write is exactly the
+            // half-written routing this command exists to stop producing.
+            with_scope_and_record_on(&self.manifest, &module, &folded, team, review_state, label)
+                // Unreachable past `records_scope` answering false a few lines
+                // up over this same manifest, which is the only thing that
+                // hands back `None` — so the arm is the refusal that fact
+                // would have been, rather than a panic.
+                .ok_or_else(|| Error::ScopeRecorded {
+                    scope: folded.clone(),
+                    passed: flags_where(flags, |value| value.is_some()),
+                })?
+        } else {
+            // A blank value is named beside a flag that was never typed,
+            // because they are the same thing to warlock — neither is a team,
+            // a state or a label — and one line naming all of what is wanted
+            // is one retyped command rather than three.
+            return Err(Error::NoScopeRecord {
+                scope: folded,
+                wanted: flags_where(flags, |value| filled(value).is_none()),
+            });
+        };
+
+        next.save(&self.repo_root)
+            .map_err(|source| Error::Manifest { source })?;
 
         Ok(scoped_line(&module, &folded, was.as_deref()))
     }
@@ -217,23 +290,21 @@ impl Opened {
     // still happens: one road through this function, and what it writes is a
     // manifest identical to the one it read. A second, quieter road through a
     // write is a thing a caller then has to reason about.
+    //
+    // A clear takes no record values and never will: dropping the scope a pact
+    // carries says nothing about where work under that name is filed, and a
+    // `[[scope]]` record outliving the last pact naming it is a state the
+    // un-pact already leaves behind on purpose.
     fn unscoped(&self) -> Result<String, Error> {
         let module = spelled(&self.repo_root, &self.target)?;
-        let was = self.rescoped(&module, None)?;
-
-        Ok(unscoped_line(&module, was.as_deref()))
-    }
-
-    // `scope_on` is the existence check as well as the old scope, so it stays
-    // above the save: a directory with no entry is refused with nothing written,
-    // and both scope writes inherit that from being one function.
-    fn rescoped(&self, module: &str, scope: Option<&str>) -> Result<Option<String>, Error> {
-        let was = self.scope_on(module)?.map(str::to_owned);
-        with_scope_on(&self.manifest, module, scope)
+        // Above the save, so a directory with no entry is refused with nothing
+        // written; `scoped` asks the same question in the same place.
+        let was = self.scope_on(&module)?.map(str::to_owned);
+        with_scope_on(&self.manifest, &module, None)
             .save(&self.repo_root)
             .map_err(|source| Error::Manifest { source })?;
 
-        Ok(was)
+        Ok(unscoped_line(&module, was.as_deref()))
     }
 
     // The existence check and the "what was there before" both, because they are
@@ -288,9 +359,42 @@ pub(crate) fn unpact(path: &Path) -> Result<(), Error> {
     Ok(())
 }
 
-pub(crate) fn scope_add(path: &Path, scope: &str) -> Result<(), Error> {
-    println!("warlock: {}", opened(FOR_SCOPE_ADD, path)?.scoped(scope)?);
+pub(crate) fn scope_add(
+    path: &Path,
+    scope: &str,
+    team: Option<&str>,
+    review_state: Option<&str>,
+    label: Option<&str>,
+) -> Result<(), Error> {
+    println!(
+        "warlock: {}",
+        opened(FOR_SCOPE_ADD, path)?.scoped(scope, team, review_state, label)?
+    );
     Ok(())
+}
+
+// The one rule the three values are held to, and deliberately the only one:
+// what a team, a state or a label may be is Linear's to say and not warlock's,
+// so anything with more than whitespace in it is stored exactly as typed —
+// capitals, spaces, slashes and all. Trimming would be warlock editing somebody
+// else's team name on the way past, and a blank value is refused rather than
+// written because a record routing to a team called "" routes nowhere while
+// looking like it routes somewhere.
+fn filled(value: Option<&str>) -> Option<&str> {
+    value.filter(|value| !value.trim().is_empty())
+}
+
+// In the order the flags are listed in `--help`, so a line naming several of
+// them reads back as the command line somebody has to type.
+fn flags_where<'a>(
+    flags: [(&'static str, Option<&'a str>); 3],
+    wanted: impl Fn(Option<&'a str>) -> bool,
+) -> Vec<&'static str> {
+    flags
+        .into_iter()
+        .filter(|(_, value)| wanted(*value))
+        .map(|(flag, _)| flag)
+        .collect()
 }
 
 pub(crate) fn scope_remove(path: &Path) -> Result<(), Error> {

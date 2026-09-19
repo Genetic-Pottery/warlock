@@ -303,6 +303,13 @@ fn the_two_scope_writes_are_a_noun_and_a_verb_rather_than_two_words_run_together
             command: ScopeCommand::Add {
                 path: PathBuf::from("crates/engine"),
                 scope: "data-plane".to_owned(),
+                // Not given is `None` and not an empty string: whether the
+                // three are wanted is warlock's answer about what the manifest
+                // records, and a defaulted `""` would arrive there as a blank
+                // value somebody typed.
+                team: None,
+                review_state: None,
+                label: None,
             }
         })
     );
@@ -331,10 +338,84 @@ fn a_scope_is_taken_as_it_was_typed_and_judged_by_the_engine_rather_than_by_clap
                 command: ScopeCommand::Add {
                     path: PathBuf::from("crates"),
                     scope: typed.to_owned(),
+                    team: None,
+                    review_state: None,
+                    label: None,
                 }
             }),
             "{typed:?}"
         );
+    }
+}
+
+#[test]
+fn the_three_record_values_are_flags_clap_hands_over_exactly_as_they_were_typed() {
+    // Spaces, capitals, a slash and a leading blank all survive the parse:
+    // what a team, a state or a label may be is Linear's to say, so clap
+    // judges none of them and neither does anything past it but "not blank".
+    assert_eq!(
+        parse(&[
+            "scope",
+            "add",
+            "crates",
+            "billing",
+            "--team",
+            " Billing Platform ",
+            "--review-state",
+            "In Review",
+            "--label",
+            "area/billing",
+        ])
+        .unwrap()
+        .command,
+        Some(Command::Scope {
+            command: ScopeCommand::Add {
+                path: PathBuf::from("crates"),
+                scope: "billing".to_owned(),
+                team: Some(" Billing Platform ".to_owned()),
+                review_state: Some("In Review".to_owned()),
+                label: Some("area/billing".to_owned()),
+            }
+        })
+    );
+
+    // Given as the empty string parses and is a refusal warlock words, for
+    // the scope argument's reason: the two are told apart past clap, and
+    // `--team ''` over a recorded name is not the same invocation as no
+    // `--team` at all.
+    assert_eq!(
+        parse(&["scope", "add", "crates", "billing", "--team", ""])
+            .unwrap()
+            .command,
+        Some(Command::Scope {
+            command: ScopeCommand::Add {
+                path: PathBuf::from("crates"),
+                scope: "billing".to_owned(),
+                team: Some(String::new()),
+                review_state: None,
+                label: None,
+            }
+        })
+    );
+}
+
+#[test]
+fn a_record_flag_without_its_value_or_spelled_wrong_is_a_malformed_invocation() {
+    // Each takes a value, none of them is a spelling clap invents a near miss
+    // for, and `--state` is the name deliberately not used — the TOML key is
+    // `review_state` and one field with two spellings is what that avoids.
+    let malformed: [&[&str]; 5] = [
+        &["scope", "add", "crates", "billing", "--team"],
+        &["scope", "add", "crates", "billing", "--review-state"],
+        &["scope", "add", "crates", "billing", "--label"],
+        &["scope", "add", "crates", "billing", "--state", "In Review"],
+        &["scope", "add", "crates", "billing", "--teams", "Billing"],
+    ];
+
+    for args in malformed {
+        let error = parse(args).unwrap_err();
+        assert!(error.use_stderr(), "{args:?}");
+        assert_eq!(error.exit_code(), 2, "{args:?}");
     }
 }
 
@@ -647,9 +728,17 @@ fn no_argument_the_parser_accepts_gets_a_write_past_the_boundary() {
     // The absence stated over the parser itself rather than over a list of
     // spellings somebody thought of: `--force` is refused in the test above,
     // and this says there is no word at all — however spelled — that a write
-    // takes besides its path, its scope and clap's own `--help`. The one
-    // road past a boundary is `warlock config`, and an option here would be
-    // a second one.
+    // takes besides its positionals, clap's own `--help` and the three record
+    // values below. The one road past a boundary is `warlock config`, and an
+    // option here would be a second one.
+    //
+    // The three are not that road and never widen anything: they are text
+    // written *into* the file, asked for past the boundary check and refused
+    // with it, so a closed scope answers the same way whether they were typed
+    // or not. What they are named here for is the opposite guarantee — that
+    // the next flag to arrive has to be added to this list deliberately.
+    const RECORD_VALUES: [&str; 3] = ["team", "review-state", "label"];
+
     for names in [
         vec!["unpact"],
         vec!["scope"],
@@ -658,12 +747,15 @@ fn no_argument_the_parser_accepts_gets_a_write_past_the_boundary() {
     ] {
         let mut command = subcommand(&names);
         // The positionals are the path, and the scope on an `add`; every
-        // other argument a write accepts has to be clap's own help.
+        // other argument a write accepts has to be clap's own help or one of
+        // the three values a new scope's record is made of.
         for argument in command.get_arguments().filter(|a| !a.is_positional()) {
-            assert_eq!(
-                argument.get_long(),
-                Some("help"),
-                "{names:?} takes an option other than clap's help"
+            let long = argument.get_long();
+            assert!(
+                long == Some("help")
+                    || (names == ["scope", "add"]
+                        && long.is_some_and(|long| RECORD_VALUES.contains(&long))),
+                "{names:?} takes an option other than clap's help: {long:?}"
             );
         }
 

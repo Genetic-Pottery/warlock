@@ -246,6 +246,28 @@ enum ScopeCommand {
         /// The scope to write, lower-cased before it is judged.
         #[arg(value_name = "SCOPE")]
         scope: String,
+        // Optional to clap and required by warlock, which is the split the
+        // scope argument is already on the other side of: whether these three
+        // are wanted depends on what `.warlock/pacts.toml` records for the
+        // name, and clap's exit status of 2 is for a command line it could not
+        // parse rather than for a rule about the contents of a file. A name
+        // with no `[[scope]]` record wants all three, a name that has one
+        // refuses all three, and neither of those is a shape `required` or a
+        // clap group can spell.
+        //
+        // `Option<String>` rather than a defaulted `String`, because "not
+        // given" and "given as the empty string" are two different refusals
+        // over a recorded name: the first writes the scope and the second says
+        // nothing was written.
+        /// The Linear team work under this scope is filed to.
+        #[arg(long, value_name = "TEAM")]
+        team: Option<String>,
+        /// The state work under this scope is filed as.
+        #[arg(long, value_name = "STATE")]
+        review_state: Option<String>,
+        /// The label work under this scope carries.
+        #[arg(long, value_name = "LABEL")]
+        label: Option<String>,
     },
     #[command(
         about = "Clear the scope on a pacted directory.",
@@ -393,7 +415,19 @@ fn main() -> ExitCode {
         // is clap's and stops here — each arm is one call into [`mod@edits`],
         // with no work done in this match.
         Some(Command::Scope { command }) => match command {
-            ScopeCommand::Add { path, scope } => scope_add(&path, &scope),
+            ScopeCommand::Add {
+                path,
+                scope,
+                team,
+                review_state,
+                label,
+            } => scope_add(
+                &path,
+                &scope,
+                team.as_deref(),
+                review_state.as_deref(),
+                label.as_deref(),
+            ),
             ScopeCommand::Remove { path } => scope_remove(&path),
         },
         // The key store, dispatched here for `config`'s reasons and with one

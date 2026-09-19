@@ -2,8 +2,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use warlock_engine::{
-    Manifest, Node, NodeState, PactEntry, ScopeRecord, Tree, manifest_path, save_sigils,
-    validate_scope,
+    Manifest, Node, NodeState, PactEntry, ScopeRecord, Tree, manifest_path, route_facts,
+    save_sigils, validate_scope,
 };
 use warlock_tui::App;
 
@@ -97,13 +97,61 @@ fn unpact(repo_root: &Path, home: &Path, path: &str) -> Result<String, Error> {
     open(repo_root, home, path)?.unpacted()
 }
 
+// The three values a name nothing records wants, spelled once: most of the
+// writes below are about a boundary, a path or a fold, and only need the record
+// refusal out of their way.
+const TEAM: &str = "Billing";
+
+const REVIEW_STATE: &str = "In Review";
+
+const LABEL: &str = "area/billing";
+
+// The road every test that does not care about the record values takes, so
+// adding a fourth value later is one signature and not thirty call sites.
 fn scope_add(repo_root: &Path, home: &Path, path: &str, scope: &str) -> Result<String, Error> {
-    open(repo_root, home, path)?.scoped(scope)
+    scope_add_with(
+        repo_root,
+        home,
+        path,
+        scope,
+        Some(TEAM),
+        Some(REVIEW_STATE),
+        Some(LABEL),
+    )
+}
+
+// What `warlock scope add <path> <scope>` with no flags is: the shape the
+// existing-record road is written with, and the shape every missing-flag
+// refusal starts from.
+fn scope_add_bare(repo_root: &Path, home: &Path, path: &str, scope: &str) -> Result<String, Error> {
+    scope_add_with(repo_root, home, path, scope, None, None, None)
+}
+
+fn scope_add_with(
+    repo_root: &Path,
+    home: &Path,
+    path: &str,
+    scope: &str,
+    team: Option<&str>,
+    review_state: Option<&str>,
+    label: Option<&str>,
+) -> Result<String, Error> {
+    open(repo_root, home, path)?.scoped(scope, team, review_state, label)
 }
 
 fn scope_remove(repo_root: &Path, home: &Path, path: &str) -> Result<String, Error> {
     open(repo_root, home, path)?.unscoped()
 }
+
+// The three values as a command line carried them, and the flags the refusal
+// they earn has to name: both record refusals below are a table of these, and
+// what each case is really asserting is the second half against the first.
+type Case = (
+    Option<&'static str>,
+    Option<&'static str>,
+    Option<&'static str>,
+    &'static [&'static str],
+);
 
 fn stored(repo_root: &Path, module: &str) -> PactEntry {
     load_manifest(repo_root)
@@ -536,12 +584,17 @@ fn both_scope_writes_leave_the_records_where_they_found_them() {
     let before = record_bytes(repo.path());
     assert!(before.contains("third-party"), "the fixture has records");
 
-    scope_add(repo.path(), home.path(), "docs", "billing").expect("nothing scopes `docs`");
+    // A name the fixture already records, because that is the add that writes
+    // no record at all: the one that files a new one is the test below, and it
+    // asserts the same records are still there under the one it appended.
+    scope_add_bare(repo.path(), home.path(), "docs", "data-plane")
+        .expect("`data-plane` is recorded, so the write wants no values");
     assert_eq!(
         record_bytes(repo.path()),
         before,
         "`scope add` moved a record"
     );
+    assert_eq!(stored(repo.path(), "docs").scope(), Some("data-plane"));
 
     scope_remove(repo.path(), home.path(), "crates/engine").expect("the machine holds the scope");
     assert_eq!(
@@ -573,6 +626,317 @@ fn an_unpact_keeps_the_records_including_the_one_it_orphaned() {
     );
     assert_eq!(after.scopes(), records());
     assert_eq!(record_bytes(repo.path()), before);
+}
+
+#[test]
+fn a_name_nothing_records_wants_all_three_values_and_names_every_one_that_is_missing() {
+    let repo = a_repository_of_records();
+    let home = a_dir();
+    let before = manifest_bytes(repo.path()).expect("a manifest on disk");
+
+    // Every shape of "not all three", including none at all, which is what
+    // `warlock scope add <path> <scope>` was until this slice.
+    let missing: [Case; 5] = [
+        (None, None, None, &["--team", "--review-state", "--label"]),
+        (Some(TEAM), None, None, &["--review-state", "--label"]),
+        (None, Some(REVIEW_STATE), Some(LABEL), &["--team"]),
+        (Some(TEAM), Some(REVIEW_STATE), None, &["--label"]),
+        (Some(TEAM), None, Some(LABEL), &["--review-state"]),
+    ];
+
+    for (team, review_state, label, wanted) in missing {
+        let error = scope_add_with(
+            repo.path(),
+            home.path(),
+            "docs",
+            "billing",
+            team,
+            review_state,
+            label,
+        )
+        .expect_err("`billing` is recorded nowhere");
+
+        assert!(
+            matches!(&error, Error::NoScopeRecord { scope, .. } if scope == "billing"),
+            "{wanted:?}: {error:?}"
+        );
+        let said = error.to_string();
+        // Every missing one named in the one line, and no flag that was
+        // given named beside them: the whole point is a reader retyping the
+        // command once rather than finding out about the next one after the
+        // next run.
+        for flag in wanted {
+            assert!(said.contains(flag), "{wanted:?}: {said}");
+        }
+        for given in ["--team", "--review-state", "--label"] {
+            assert_eq!(
+                said.contains(given),
+                wanted.contains(&given),
+                "{wanted:?} named a flag that was given: {said}"
+            );
+        }
+        assert!(!said.contains('\n'), "`main` prints one line");
+        // A 1 and not the boundary's 3: nothing here is about what this
+        // machine holds, and the same command typed again with the values in
+        // it writes.
+        assert_eq!(status_for(&Err(error)), 1, "{wanted:?}");
+    }
+
+    // And nothing was written on the way to any of them — not the pact's
+    // scope either, which is what "one save" means from outside: there is no
+    // road here that sets the scope and then fails to record it.
+    assert_eq!(manifest_bytes(repo.path()).as_deref(), Some(&before[..]));
+    assert_eq!(stored(repo.path(), "docs").scope(), None);
+}
+
+#[test]
+fn a_blank_value_is_a_missing_one_and_anything_else_is_stored_exactly_as_typed() {
+    let repo = a_repository();
+    let home = a_dir();
+    let before = manifest_bytes(repo.path()).expect("a manifest on disk");
+
+    // Empty, spaces, and a tab: all three are a team, a state or a label
+    // that routes nowhere while looking like it routes somewhere.
+    for blank in ["", "   ", "\t"] {
+        for (team, review_state, label) in [
+            (blank, REVIEW_STATE, LABEL),
+            (TEAM, blank, LABEL),
+            (TEAM, REVIEW_STATE, blank),
+        ] {
+            let error = scope_add_with(
+                repo.path(),
+                home.path(),
+                "docs",
+                "billing",
+                Some(team),
+                Some(review_state),
+                Some(label),
+            )
+            .expect_err("a blank value is not a value");
+
+            assert!(
+                matches!(error, Error::NoScopeRecord { .. }),
+                "{blank:?}: {error:?}"
+            );
+            assert_eq!(status_for(&Err(error)), 1, "{blank:?}");
+        }
+    }
+    assert_eq!(manifest_bytes(repo.path()).as_deref(), Some(&before[..]));
+
+    // Past that one rule warlock judges none of them: what a team, a state or
+    // a label may be is Linear's to say, so the padding and the capitals that
+    // survive a blank check are written back exactly as they arrived.
+    let padded = "  Billing Platform  ";
+    scope_add_with(
+        repo.path(),
+        home.path(),
+        "docs",
+        "billing",
+        Some(padded),
+        Some(REVIEW_STATE),
+        Some(LABEL),
+    )
+    .expect("a value with more than whitespace in it is a value");
+
+    let after = load_manifest(repo.path()).expect("a manifest that reads");
+    let record = after
+        .scopes()
+        .iter()
+        .find(|record| record.name() == "billing")
+        .expect("the write filed a record");
+    assert_eq!(record.team(), padded);
+    assert_eq!(record.review_state(), REVIEW_STATE);
+    assert_eq!(record.label(), LABEL);
+}
+
+#[test]
+fn a_new_name_writes_the_pact_and_its_record_together_and_moves_nothing_else() {
+    let repo = a_repository_of_records();
+    let home = a_dir();
+    let before = record_bytes(repo.path());
+    let entries_before = load_manifest(repo.path()).expect("a manifest that reads");
+
+    let said = scope_add(repo.path(), home.path(), "docs", "billing")
+        .expect("nothing scopes `docs` and nothing records `billing`");
+
+    // The line is the one an add has always printed: the record is a second
+    // thing written, not a second thing said.
+    assert_eq!(said, "docs is scoped `billing`");
+    assert_eq!(stored(repo.path(), "docs").scope(), Some("billing"));
+
+    // The records that were there are still there, byte for byte and in
+    // order, with the new one after them.
+    let after = record_bytes(repo.path());
+    assert!(after.starts_with(&before), "a record that was there moved");
+    let written = load_manifest(repo.path()).expect("a manifest that reads");
+    assert_eq!(&written.scopes()[..records().len()], &records()[..]);
+    let filed = written.scopes().last().expect("the record that was filed");
+    assert_eq!(filed.name(), "billing");
+    assert_eq!(filed.team(), TEAM);
+    assert_eq!(filed.review_state(), REVIEW_STATE);
+    assert_eq!(filed.label(), LABEL);
+
+    // And every pact row the write did not set out to change is the one it
+    // read, grant and document and all.
+    for module in ["crates", "crates/engine", "crates/engine/src"] {
+        assert_eq!(
+            written.entry(module),
+            entries_before.entry(module),
+            "{module}"
+        );
+    }
+
+    // The point of filing the record in the same act: the route is there to
+    // be answered for straight afterwards. This is the one engine call
+    // `warlock check` renders its route line and its object from, so a name
+    // this answers about is a name that command prints in full.
+    let facts = route_facts(
+        repo.path().join("docs"),
+        repo.path(),
+        &written,
+        Some(home.path()),
+    )
+    .expect("a path inside the repository has a manifest form");
+    let routed = facts.record().expect("the scope routes somewhere");
+    assert_eq!(facts.scope(), Some("billing"));
+    assert_eq!(routed.team(), TEAM);
+    assert_eq!(routed.review_state(), REVIEW_STATE);
+    assert_eq!(routed.label(), LABEL);
+}
+
+#[test]
+fn the_name_that_is_recorded_is_the_folded_name_the_pact_carries() {
+    // One boundary however it was typed, and therefore one record: a record
+    // filed under `Billing` would be a record no pact ever names, which is
+    // the unrouted scope this slice exists to stop making.
+    let repo = a_repository();
+    let home = a_dir();
+
+    scope_add(repo.path(), home.path(), "docs", "Billing").expect("the fold happened first");
+
+    let after = load_manifest(repo.path()).expect("a manifest that reads");
+    assert_eq!(
+        after.entry("docs").expect("the entry").scope(),
+        Some("billing")
+    );
+    assert_eq!(
+        after
+            .scopes()
+            .iter()
+            .map(ScopeRecord::name)
+            .collect::<Vec<_>>(),
+        ["billing"]
+    );
+}
+
+#[test]
+fn a_recorded_name_takes_no_values_and_refuses_every_one_it_is_given() {
+    let repo = a_repository_of_records();
+    let home = a_dir();
+    let before = manifest_bytes(repo.path()).expect("a manifest on disk");
+
+    // One at a time and all three together, and the blank ones too: given is
+    // given, and a `--team ''` that quietly did what no `--team` does is the
+    // one outcome a reader could not tell from having their value written.
+    let refused: [Case; 5] = [
+        (Some(TEAM), None, None, &["--team"]),
+        (None, Some(REVIEW_STATE), None, &["--review-state"]),
+        (None, None, Some(LABEL), &["--label"]),
+        (Some(""), None, None, &["--team"]),
+        (
+            Some(TEAM),
+            Some(REVIEW_STATE),
+            Some(LABEL),
+            &["--team", "--review-state", "--label"],
+        ),
+    ];
+
+    for (team, review_state, label, passed) in refused {
+        let error = scope_add_with(
+            repo.path(),
+            home.path(),
+            "docs",
+            "data-plane",
+            team,
+            review_state,
+            label,
+        )
+        .expect_err("`data-plane` already has a record");
+
+        assert!(
+            matches!(&error, Error::ScopeRecorded { scope, .. } if scope == "data-plane"),
+            "{passed:?}: {error:?}"
+        );
+        let said = error.to_string();
+        for flag in passed {
+            assert!(said.contains(flag), "{passed:?}: {said}");
+        }
+        // Both roads out are in the line, because whoever typed the values
+        // meant to say where the work is filed.
+        assert!(said.contains(".warlock/pacts.toml"), "{said}");
+        assert!(!said.contains('\n'), "`main` prints one line");
+        assert_eq!(status_for(&Err(error)), 1, "{passed:?}");
+        // Nothing written, and in particular not the scope: a refusal that
+        // had already saved the pact would be the half-written state.
+        assert_eq!(manifest_bytes(repo.path()).as_deref(), Some(&before[..]));
+        assert_eq!(stored(repo.path(), "docs").scope(), None);
+    }
+
+    // And with none of them, the same command writes the scope exactly as it
+    // did before this slice, leaving the record it found alone.
+    let said = scope_add_bare(repo.path(), home.path(), "docs", "data-plane")
+        .expect("a recorded name wants nothing else");
+    assert_eq!(said, "docs is scoped `data-plane`");
+    assert_eq!(stored(repo.path(), "docs").scope(), Some("data-plane"));
+    assert_eq!(
+        load_manifest(repo.path())
+            .expect("a manifest that reads")
+            .scopes(),
+        records()
+    );
+}
+
+#[test]
+fn a_closed_boundary_is_the_whole_answer_whatever_the_values_were() {
+    // The ordering that is the security property, held over the two new
+    // refusals: whether `.warlock/pacts.toml` records a name, and therefore
+    // which values the command wants, is a fact about the inside of a file
+    // the reader has just been told they may not work in.
+    let repo = a_repository_of_records();
+    let home = a_dir();
+    holding(home.path(), repo.path(), &["platform"]);
+    let before = manifest_bytes(repo.path()).expect("a manifest on disk");
+
+    for (scope, team, review_state, label) in [
+        // A recorded name with values, which would otherwise be refused for
+        // having them, and an unrecorded one with none, which would otherwise
+        // be refused for wanting them.
+        ("data-plane", Some(TEAM), Some(REVIEW_STATE), Some(LABEL)),
+        ("billing", None, None, None),
+    ] {
+        let error = scope_add_with(
+            repo.path(),
+            home.path(),
+            "crates/engine",
+            scope,
+            team,
+            review_state,
+            label,
+        )
+        .expect_err("a scope this machine does not hold refuses an add");
+
+        assert!(
+            matches!(error, Error::ClosedScope { .. }),
+            "a record refusal outranked the boundary: {error:?}"
+        );
+        assert_eq!(
+            error.to_string(),
+            closed_scope_message("crates/engine", "data-plane"),
+            "{scope}"
+        );
+        assert_eq!(status_for(&Err(error)), 3, "{scope}");
+    }
+    assert_eq!(manifest_bytes(repo.path()).as_deref(), Some(&before[..]));
 }
 
 #[test]
@@ -769,7 +1133,9 @@ fn a_path_with_no_manifest_form_is_refused_by_both_scope_writes() {
         };
 
         for refused in [
-            opened().and_then(|opened| opened.scoped("billing")),
+            opened().and_then(|opened| {
+                opened.scoped("billing", Some(TEAM), Some(REVIEW_STATE), Some(LABEL))
+            }),
             opened().and_then(|opened| opened.unscoped()),
         ] {
             let error = refused.expect_err("a path outside the repository has no manifest form");
