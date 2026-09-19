@@ -18,7 +18,7 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
-use warlock_engine::{Manifest, scope_covering, scope_opens_to, sigils_path};
+use warlock_engine::{Manifest, route_facts, scope_covering, scope_opens_to, sigils_path};
 use warlock_tui::Sigils;
 
 use crate::error::Error;
@@ -36,6 +36,20 @@ const SIGILS: &str = "sigils";
 
 const OPENS: &str = "opens";
 
+const TEAM: &str = "team";
+
+// The TOML key in the `[[scope]]` record, to the letter. `state` would read
+// better and would be a second spelling of one field: a consumer reading the
+// manifest and the object side by side should not have to learn that they are
+// the same thing.
+const REVIEW_STATE: &str = "review_state";
+
+const LABEL: &str = "label";
+
+const KEY: &str = "key";
+
+const KEY_FOUND: &str = "key_found";
+
 // A value rather than four things printed as they are worked out, so the prose
 // and the object are two renderings of one answer and cannot disagree about it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -50,6 +64,23 @@ struct Checked {
     // that would not read is only useful to a reader told which file it is.
     config: Option<PathBuf>,
     opens: bool,
+    // The covering scope's `[[scope]]` record, spread flat rather than held as
+    // one `Option<ScopeRecord>`: a covered path whose scope nobody recorded is
+    // three `null`s here, and the object is the same shape either way. An
+    // absent record is not an empty one — `""` would tell a script it was
+    // filed to a team whose name is the empty string.
+    team: Option<String>,
+    review_state: Option<String>,
+    label: Option<String>,
+    // The *name* a key is stored under and never a key. Nothing in this module
+    // reads a value, so there is none to leak into a `Debug`, a panic or an
+    // error, and the never-print-a-secret rule costs no care below.
+    key: Option<String>,
+    // Two fields rather than one, because the absences are fixed in different
+    // places: nothing bound is `warlock key use`, a name the store has never
+    // heard of is `warlock key add`. `key_found` is false for both, so it is
+    // never read on its own.
+    key_found: bool,
 }
 
 // Nothing on disk has to exist for this to answer: coverage is a walk up the
@@ -123,6 +154,23 @@ fn checked(
     // which is what makes `opens` false for both over a scoped path and true for
     // both over an unscoped one.
     let opens = scope_opens_to(scope.as_deref(), sigils.as_slice());
+    // One engine call for the whole route, and the reporting form of it: every
+    // absence `resolve_route` refuses on — an unscoped path, a scope with no
+    // record, nothing bound, a name the store has never heard of — arrives here
+    // as a value, which is what keeps a check's exit status 0 whatever it finds.
+    // The alternative was reading `manifest.scopes()` and the sigil config for
+    // the binding here, which is the `[[scope]]` lookup written a second time
+    // somewhere it can disagree with the first.
+    //
+    // `scope` and `opens` are still the two calls above rather than
+    // `facts.scope()`: the boundary rule is one rule, and a reader checking
+    // that warlock asked it has to find `scope_covering` and `scope_opens_to`
+    // in this function. The two agree by construction — `route_facts` is that
+    // same call followed by a record lookup — and only `opens` needs the held
+    // sigils, which the reporting form deliberately never reads.
+    let facts =
+        route_facts(target, repo_root, manifest, home).map_err(|source| Error::Route { source })?;
+    let record = facts.record();
 
     Ok(Checked {
         path,
@@ -130,6 +178,11 @@ fn checked(
         sigils,
         config: home.map(|home| sigils_path(home, repo_root)),
         opens,
+        team: record.map(|record| record.team().to_owned()),
+        review_state: record.map(|record| record.review_state().to_owned()),
+        label: record.map(|record| record.label().to_owned()),
+        key: facts.key().map(str::to_owned),
+        key_found: facts.stored(),
     })
 }
 
@@ -209,8 +262,21 @@ fn object(checked: &Checked) -> Value {
             ),
             (SIGILS, sigils_value(&checked.sigils)),
             (OPENS, Value::Bool(checked.opens)),
+            (TEAM, text(checked.team.as_deref())),
+            (REVIEW_STATE, text(checked.review_state.as_deref())),
+            (LABEL, text(checked.label.as_deref())),
+            (KEY, text(checked.key.as_deref())),
+            (KEY_FOUND, Value::Bool(checked.key_found)),
         ],
     )
+}
+
+// Flat beside the four fields that were here first, and not a nested `route`
+// object: a consumer asking `.opens and .key_found` should not have to know
+// which half of the answer a field was added with, and nesting would make the
+// unrecorded case a choice between a `null` object and an object of `null`s.
+fn text(value: Option<&str>) -> Value {
+    value.map_or(Value::Null, |value| Value::String(value.to_owned()))
 }
 
 // The three-valuedness is the whole point. `[]` for `Sigils::Unknown` would tell
