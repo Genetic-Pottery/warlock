@@ -14,9 +14,10 @@
 //! so the string judged is the string stored. An empty field clears the scope
 //! rather than being refused.
 
+use std::iter;
 use std::path::Path;
 
-use warlock_engine::{Manifest, PactEntry, to_manifest_path, validate_scope};
+use warlock_engine::{Manifest, PactEntry, ScopeRecord, to_manifest_path, validate_scope};
 use warlock_tui::{App, Edited, ScopeField, ScopePrompt, Sigils};
 
 use crate::error::Error;
@@ -175,6 +176,45 @@ pub(crate) fn with_scope_on(manifest: &Manifest, module: &str, scope: Option<&st
             None => entry.without_scope(),
         }
     }))
+}
+
+// One value for the caller to save once: a scope half-written — set on the pact
+// but routing to no record, or recorded with no pact naming it — is what two
+// saves leave behind when the second one fails.
+//
+// `None` rather than a manifest when the name is already recorded, because the
+// alternative is this function choosing between the record on disk and the one
+// handed in, and every choice it could make edits a `[[scope]]` block somebody
+// hand-wrote. Editing a record is not this crate's to do at all, so the answer
+// is to hand nothing back and let the caller say so.
+//
+// The four record values are stored as passed; folding, trimming and judging
+// all happened before the call, so what was judged is what is written.
+//
+// The `allow` goes when the callers land: the CLI slice calls this from
+// `warlock scope add`, the TUI slice from the second prompt behind `s`.
+#[allow(dead_code)]
+pub(crate) fn with_scope_and_record_on(
+    manifest: &Manifest,
+    module: &str,
+    name: &str,
+    team: &str,
+    review_state: &str,
+    label: &str,
+) -> Option<Manifest> {
+    if records_scope(manifest, name) {
+        return None;
+    }
+    let record = ScopeRecord::new(name, team, review_state, label);
+    let scopes = manifest.scopes().iter().cloned().chain(iter::once(record));
+    Some(with_scope_on(manifest, module, Some(name)).with_scopes(scopes))
+}
+
+// The same comparison [`route_facts`](warlock_engine::route_facts) routes by, so
+// a name this answers `false` for is a name that would route to nothing.
+#[allow(dead_code)]
+pub(crate) fn records_scope(manifest: &Manifest, name: &str) -> bool {
+    manifest.scopes().iter().any(|record| record.name() == name)
 }
 
 // Reachable only when the manifest was edited in another window since warlock
