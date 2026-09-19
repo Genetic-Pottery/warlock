@@ -66,7 +66,7 @@ use key::{key_add, key_forget, key_list, key_use};
 use pacting::{Pact, Reloaded};
 use query::{Listing, list};
 use running::{pact, refresh};
-use scoping::{scope_edit, scope_press};
+use scoping::{record_edit, scope_edit, scope_press};
 use session::{Scope, Watched, load_app, start_watching};
 use standing::{FOR_CLAUDE_MD, Standing};
 use terminal::{Screen, TerminalGuard, install_panic_hook};
@@ -520,6 +520,7 @@ fn run() -> Result<(), Error> {
         clipboard: Clipboard::open(),
         confirm: QuitConfirm::default(),
         prompt: ScopePrompt::default(),
+        record: RecordPrompt::default(),
         drag: None,
         document: None,
         said: None,
@@ -607,6 +608,11 @@ struct Session<S: Screen, P: Wired + Agent, C: Converses, B: Clip> {
     clipboard: B,
     confirm: QuitConfirm,
     prompt: ScopePrompt,
+    /// The second window the `s` key puts up, over a scope name no `[[scope]]`
+    /// record claims. Never up at the same time as [`Session::prompt`]: one goes
+    /// down as the other comes up, in the one [`scoping::Windows`] a submit
+    /// hands back.
+    record: RecordPrompt,
     /// The left button held down over the conversation, if it is: the one piece
     /// of a gesture that outlives the event carrying it, because the rounds
     /// between one drag event and the next are what [`Session::drag_scroll`]
@@ -657,11 +663,8 @@ impl<S: Screen, P: Wired + Agent, C: Converses, B: Clip> Session<S, P, C, B> {
 
         let (app, chrome, confirm, prompt) =
             (&self.app, &self.scope.chrome, self.confirm, &self.prompt);
+        let record = &self.record;
         let write = self.chat.write_prompt();
-        // Always closed: the session has nowhere to keep the record window yet,
-        // so the one `scope_edit` hands back is still dropped where it is
-        // answered. See the `Pressed::Scope` arm.
-        let record = RecordPrompt::Closed;
         self.screen.draw(|frame| {
             draw(
                 frame,
@@ -670,7 +673,7 @@ impl<S: Screen, P: Wired + Agent, C: Converses, B: Clip> Session<S, P, C, B> {
                 Instant::now(),
                 confirm,
                 prompt,
-                &record,
+                record,
                 write,
                 field,
             );
@@ -697,6 +700,7 @@ impl<S: Screen, P: Wired + Agent, C: Converses, B: Clip> Session<S, P, C, B> {
             &self.app,
             self.confirm,
             &self.prompt,
+            &self.record,
             self.chat.write_prompt(),
             field,
         );
@@ -806,6 +810,7 @@ impl<S: Screen, P: Wired + Agent, C: Converses, B: Clip> Session<S, P, C, B> {
             key,
             self.confirm,
             &self.prompt,
+            &self.record,
             self.chat.write_prompt(),
             typing,
             running,
@@ -1044,6 +1049,11 @@ impl<S: Screen, P: Wired + Agent, C: Converses, B: Clip> Session<S, P, C, B> {
                     self.scope.chrome.sigils(),
                     running,
                 );
+                // Put down rather than left as it was, though `press_for` only
+                // lets this key through with it already down: a record window
+                // that outlived the press it belonged to would be three values
+                // filed under a scope name from an earlier one.
+                self.record = RecordPrompt::Closed;
             }
             // Somebody typing into that window: a character more or less in the
             // field, the window abandoned, or — on Enter — the manifest written.
@@ -1051,21 +1061,40 @@ impl<S: Screen, P: Wired + Agent, C: Converses, B: Clip> Session<S, P, C, B> {
             // frames: no worker, no channel, no account and no reload, because a
             // scope is one string written into one entry of a file already in this
             // thread's hand (see `mod@scoping`). What comes back is both windows
-            // from here on: the scope one down for a submit that was answered and
+            // at once: the scope one down for a submit that was answered and
             // still up over the text for one the engine refused, and the record
             // one up in place of a write when the name submitted has no
-            // `[[scope]]` record yet. This loop holds nowhere to put that second
-            // window yet, so it is dropped here and a new name is not written at
-            // all until the loop grows the field. See `scoping::scope_edit`.
+            // `[[scope]]` record yet. Both are taken from the one value, because
+            // a submit that puts the second up is the same submit that takes the
+            // first down. See `scoping::scope_edit`.
             Pressed::Scope(edited) => {
-                self.prompt = scope_edit(
+                let windows = scope_edit(
                     &mut self.app,
                     &mut self.manifest,
                     &self.scope.repo_root,
                     &self.prompt,
                     edited,
-                )
-                .scope;
+                );
+                self.prompt = windows.scope;
+                self.record = windows.record;
+            }
+            // Somebody typing into that second window: a character more or less
+            // in one of the three fields, the focus moved between them, the
+            // window abandoned, or — on Enter — the pact's scope and the new
+            // `[[scope]]` record written together. That last one happens here
+            // too, on this thread, between two frames and in one save: no
+            // worker, no channel and no reload, for the reason the scope key's
+            // own write has none (see `mod@scoping`). An Esc writes nothing at
+            // all and has nothing to put back, because the manifest was never
+            // told the first window was answered. See `scoping::record_edit`.
+            Pressed::Record(edited) => {
+                self.record = record_edit(
+                    &mut self.app,
+                    &mut self.manifest,
+                    &self.scope.repo_root,
+                    &self.record,
+                    edited,
+                );
             }
             // Somebody typing into the other window: a character more or less in
             // the path, the window abandoned, or — on Enter — the document

@@ -18,7 +18,8 @@ use std::path::Path;
 
 use warlock_engine::{Manifest, PactEntry, ScopeRecord, to_manifest_path, validate_scope};
 use warlock_tui::{
-    App, Edited, RecordField, RecordForm, RecordPrompt, ScopeField, ScopePrompt, Sigils,
+    App, Edited, RecordEdited, RecordField, RecordForm, RecordPrompt, ScopeField, ScopePrompt,
+    Sigils,
 };
 
 use crate::error::Error;
@@ -201,6 +202,32 @@ pub(crate) fn scope_submit(
     Windows::closed()
 }
 
+// [`scope_edit`]'s counterpart for the second window, and the same three roads:
+// typing and moving the focus move the window alone, Esc puts it down with
+// nothing written — the app was never told the first window was answered
+// either, so an abandoned record leaves no scope behind — and Enter is the one
+// road to disk.
+//
+// The `None` arm is unreachable for `scope_edit`'s reason: `press_for` only
+// consults [`record_edit_for`](warlock_tui::record_edit_for) while this window
+// is up.
+pub(crate) fn record_edit(
+    app: &mut App,
+    manifest: &mut Manifest,
+    repo_root: &Path,
+    record: &RecordPrompt,
+    edited: RecordEdited,
+) -> RecordPrompt {
+    match edited {
+        RecordEdited::Open(form) => RecordPrompt::Open(form),
+        RecordEdited::Close => RecordPrompt::Closed,
+        RecordEdited::Submit => match record.form() {
+            Some(form) => record_submit(app, manifest, repo_root, form),
+            None => RecordPrompt::Closed,
+        },
+    }
+}
+
 // The other half of a submit that named a scope nothing records: three values
 // and one save, of the pact's scope and the record together.
 //
@@ -216,7 +243,6 @@ pub(crate) fn scope_submit(
 // smoothed over for `no_pact_message`'s reason: a window that came down on a
 // write that never happened is the one outcome a reader cannot tell from
 // success.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn record_submit(
     app: &mut App,
     manifest: &mut Manifest,

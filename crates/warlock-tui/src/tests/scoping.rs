@@ -11,7 +11,10 @@ use warlock_tui::{
     Sigils, edit_for, record_edit_for,
 };
 
-use super::{Windows, record_submit, records_scope, scope_edit, scope_submit, with_scope_recorded};
+use super::{
+    Windows, record_edit, record_submit, records_scope, scope_edit, scope_submit,
+    with_scope_recorded,
+};
 
 // `super::scope_press` with no boundary in the way, so these tests are about
 // the prompt rather than about being refused. The wildcard rather than
@@ -1479,4 +1482,71 @@ fn a_record_that_will_not_save_puts_its_reason_on_the_message_line() {
         "a save that failed said nothing"
     );
     assert_eq!(manifest, pacts(), "the failed write was believed");
+}
+
+#[test]
+fn the_whole_path_through_both_windows_is_one_key_at_a_time() {
+    // The event loop's own arms over both windows, in the order a reader
+    // presses them: `s`, a name nothing records, Enter, the three values with a
+    // Tab between them, Enter. Nothing here is a terminal, a worker or a
+    // `claude` — the whole path is these four functions over a directory of
+    // this test's own, and the two windows are never up together.
+    let repo = a_repo();
+    let mut app = app_on(repo.path(), TUI_ROW);
+    let mut manifest = recorded();
+
+    let mut prompt = scope_press(&mut app, &manifest, repo.path(), false);
+    assert_eq!(prompt, ScopePrompt::open("crates/tui", ""));
+
+    let mut record = RecordPrompt::Closed;
+    for code in "billing".chars().map(KeyCode::Char).chain([KeyCode::Enter]) {
+        let edited = {
+            let field = prompt.field().expect("the first window is still up");
+            edit_for(press(code), field)
+        };
+        let windows = scope_edit(&mut app, &mut manifest, repo.path(), &prompt, edited);
+        prompt = windows.scope;
+        record = windows.record;
+    }
+
+    // The first window down and the second up, out of the one Enter: a name
+    // nothing records is not written by that key at all.
+    assert_eq!(prompt, ScopePrompt::Closed);
+    assert_eq!(record, RecordPrompt::open("crates/tui", "billing"));
+    assert_eq!(saved(repo.path()), None, "the first Enter wrote to disk");
+    assert_eq!(manifest, recorded(), "the first Enter edited the manifest");
+
+    for code in ["Billing Squad", "In Review", "area/billing"]
+        .into_iter()
+        .flat_map(|value| value.chars().map(KeyCode::Char).chain([KeyCode::Tab]))
+        .chain([KeyCode::Enter])
+    {
+        assert_eq!(saved(repo.path()), None, "{code:?} wrote before the submit");
+        let edited = {
+            let form = record.form().expect("the second window is still up");
+            record_edit_for(press(code), form)
+        };
+        record = record_edit(&mut app, &mut manifest, repo.path(), &record, edited);
+    }
+
+    assert_eq!(record, RecordPrompt::Closed, "Enter left the window up");
+    // One file, holding both halves: the pact row carries the folded name and
+    // the record filed under it carries the three values, so `warlock check`
+    // on this directory has a route to print.
+    let written = saved(repo.path()).expect("the keys wrote");
+    assert_eq!(
+        written, manifest,
+        "what is on disk is what the loop believes"
+    );
+    assert_eq!(scope_on(&written, "crates/tui"), Some("billing"));
+    let record = written.scopes().last().expect("the record was written");
+    assert_eq!(record.name(), "billing");
+    assert_eq!(record.team(), "Billing Squad");
+    assert_eq!(record.review_state(), "In Review");
+    assert_eq!(record.label(), "area/billing");
+    // And the run state and the message line came through the whole of it
+    // untouched: not one of those keys was a run.
+    assert!(!app.is_pacting());
+    assert_eq!(app.pact_line(), None);
+    assert_eq!(app.message(), Some(LAST_KEY));
 }
