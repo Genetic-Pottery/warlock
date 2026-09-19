@@ -26,9 +26,9 @@ use ratatui::crossterm::event::{self, Event, KeyEvent, MouseEvent};
 use ratatui::layout::Size;
 use warlock_engine::{Agent, Manifest, Written, write_claude_md};
 use warlock_tui::{
-    App, Cell, Converses, Focus, Position, QuitConfirm, Reach, Run, ScopePrompt, Wired,
-    composer_on_screen, copied_text, draw, panel_height, panel_width, paste_for, position_at,
-    tree_height,
+    App, Cell, Converses, Focus, Position, QuitConfirm, Reach, RecordPrompt, Run, ScopePrompt,
+    Wired, composer_on_screen, copied_text, draw, panel_height, panel_width, paste_for,
+    position_at, tree_height,
 };
 
 mod boundary;
@@ -658,6 +658,10 @@ impl<S: Screen, P: Wired + Agent, C: Converses, B: Clip> Session<S, P, C, B> {
         let (app, chrome, confirm, prompt) =
             (&self.app, &self.scope.chrome, self.confirm, &self.prompt);
         let write = self.chat.write_prompt();
+        // Always closed: the session has nowhere to keep the record window yet,
+        // so the one `scope_edit` hands back is still dropped where it is
+        // answered. See the `Pressed::Scope` arm.
+        let record = RecordPrompt::Closed;
         self.screen.draw(|frame| {
             draw(
                 frame,
@@ -666,6 +670,7 @@ impl<S: Screen, P: Wired + Agent, C: Converses, B: Clip> Session<S, P, C, B> {
                 Instant::now(),
                 confirm,
                 prompt,
+                &record,
                 write,
                 field,
             );

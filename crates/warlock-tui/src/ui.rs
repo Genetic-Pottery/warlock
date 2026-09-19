@@ -29,7 +29,7 @@ use crate::colour::{CONVERSATION_COLOUR, FOCUS_COLOUR, GUIDE_COLOUR, SYSTEM_COLO
 use crate::composer::Composer;
 use crate::confirm::{Answer, QuitConfirm};
 use crate::panel::Mode;
-use crate::prompt::{ScopeField, ScopePrompt};
+use crate::prompt::{RecordField, RecordForm, RecordPrompt, ScopeField, ScopePrompt};
 // Renamed for the reason `Entry` above is: `Span` here is ratatui's piece of a
 // drawn line, and the selection's is the cells of one row the highlight covers;
 // its `Window` is the panel's view of the card, which is neither of the
@@ -264,6 +264,22 @@ const SCOPE_LINES: u16 = 5;
 
 const SCOPE_HEIGHT: u16 = SCOPE_LINES + 2 * SCOPE_MARGIN_ROWS + 2 * BORDER_THICKNESS;
 
+const RECORD_HEADING: &str = "Record for ";
+
+const RECORD_RULES: &str =
+    "Tab moves to the next field, Enter writes the scope and record, Esc writes nothing";
+
+const RECORD_LABEL_GAP: &str = "  ";
+
+/// Heading, directory, a blank, then each of the three fields with the row its
+/// own refusal goes in under it, then the rules: [`record_lines`] asserts it
+/// draws exactly this many. Every field's rule row is there before any rule is
+/// broken, so a refusal moves no field out from under the reader's eye — the
+/// same reason [`SCOPE_LINES`] counts a row nothing is usually in.
+const RECORD_LINES: u16 = 3 + 2 * 3 + 1;
+
+const RECORD_HEIGHT: u16 = RECORD_LINES + 2 * SCOPE_MARGIN_ROWS + 2 * BORDER_THICKNESS;
+
 /// Reversed rather than a background colour of its own. Colour on the thread
 /// already means whose words these are — the model's, the reader's, warlock's —
 /// and painting over it would take that away from exactly the rows somebody is
@@ -278,8 +294,8 @@ const COMPOSER_MIN_HEIGHT: u16 = 1 + 2 * BORDER_THICKNESS;
 #[expect(
     clippy::too_many_arguments,
     reason = "one frame's worth of state, and the point of it is that the binary \
-              draws a frame in one call: the three windows that can be over the \
-              app are three parameters here rather than three entry points"
+              draws a frame in one call: the four windows that can be over the \
+              app are four parameters here rather than four entry points"
 )]
 pub fn draw(
     frame: &mut Frame<'_>,
@@ -288,6 +304,7 @@ pub fn draw(
     now: Instant,
     confirm: QuitConfirm,
     scope: &ScopePrompt,
+    record: &RecordPrompt,
     path: &ScopePrompt,
     composer: Option<&Composer>,
 ) {
@@ -329,6 +346,9 @@ pub fn draw(
     }
     if let Some(field) = scope.field() {
         draw_scope(frame, screen, field, SCOPE_HEADING, scope::RULES);
+    }
+    if let Some(form) = record.form() {
+        draw_record(frame, screen, form);
     }
 }
 
@@ -1273,29 +1293,33 @@ fn draw_scope(frame: &mut Frame<'_>, screen: Rect, field: &ScopeField, heading: 
 }
 
 fn scope_lines<'a>(field: &'a ScopeField, heading: &'a str, rules: &'a str) -> Vec<Line<'a>> {
-    let text = field.text();
-    let (before, rest) = text.split_at(field.cursor());
-    // The character the cursor is on is the caret, and past the last one it is a
-    // blank of its own — `scope_size` leaves the column for it either way, so
-    // the window does not change width as the cursor walks the text.
-    let (at, after) = match rest.chars().next() {
-        Some(character) => rest.split_at(character.len_utf8()),
-        None => (SCOPE_CURSOR, ""),
-    };
-
     vec![
         Line::from(vec![
             Span::raw(heading),
             Span::raw(field.directory()).bold(),
         ]),
         Line::default(),
-        Line::from(vec![
-            Span::raw(before),
-            Span::styled(at, Style::new().add_modifier(Modifier::REVERSED)),
-            Span::raw(after),
-        ]),
+        Line::from(typed_spans(field)),
         Line::from(field.rule().unwrap_or_default()),
         Line::from(rules).dim(),
+    ]
+}
+
+/// The text with the caret on the character the cursor names, and past the last
+/// one a blank of its own. Both sizers leave the column for that blank whether
+/// or not the cursor is in the text, so a window does not change width as the
+/// cursor walks a field.
+fn typed_spans(field: &ScopeField) -> Vec<Span<'_>> {
+    let (before, rest) = field.text().split_at(field.cursor());
+    let (at, after) = match rest.chars().next() {
+        Some(character) => rest.split_at(character.len_utf8()),
+        None => (SCOPE_CURSOR, ""),
+    };
+
+    vec![
+        Span::raw(before),
+        Span::styled(at, Style::new().add_modifier(Modifier::REVERSED)),
+        Span::raw(after),
     ]
 }
 
@@ -1308,6 +1332,87 @@ fn scope_size(field: &ScopeField, heading: &str, rules: &str) -> Size {
         .max(display_width(rules));
 
     Size::new(padded_width(widest, SCOPE_MARGIN), SCOPE_HEIGHT)
+}
+
+// A sibling of `draw_scope` rather than a third heading-and-rules argument to
+// it: three fields, three refusal rows and a column of labels is a different
+// shape of window, and the two share what they are actually the same about —
+// `draw_over`, `centred`, `padded_width` and the margins.
+fn draw_record(frame: &mut Frame<'_>, screen: Rect, form: &RecordForm) {
+    draw_over(
+        frame,
+        centred(screen, record_size(form)),
+        Padding::symmetric(SCOPE_MARGIN, SCOPE_MARGIN_ROWS),
+        record_lines(form),
+    );
+}
+
+fn record_lines(form: &RecordForm) -> Vec<Line<'_>> {
+    let mut lines = vec![
+        Line::from(vec![
+            Span::raw(RECORD_HEADING),
+            Span::raw(form.scope()).bold(),
+        ]),
+        Line::from(form.path()).dim(),
+        Line::default(),
+    ];
+    for which in RecordField::ALL {
+        let field = form.field(which);
+        let mut spans = vec![Span::raw(label_column(which)).dim()];
+        // The caret goes in the focused field and nowhere else: three carets
+        // would say three fields were taking the next character.
+        if which == form.focus() {
+            spans.extend(typed_spans(field));
+        } else {
+            spans.push(Span::raw(field.text()));
+        }
+        lines.push(Line::from(spans));
+        lines.push(Line::from(field.rule().unwrap_or_default()));
+    }
+    lines.push(Line::from(RECORD_RULES).dim());
+
+    debug_assert_eq!(
+        u16::try_from(lines.len()).unwrap_or(u16::MAX),
+        RECORD_LINES,
+        "the record window is no longer {RECORD_LINES} lines tall"
+    );
+
+    lines
+}
+
+fn label_column(which: RecordField) -> String {
+    let width = label_width();
+
+    format!("{:<width$}{RECORD_LABEL_GAP}", which.name())
+}
+
+fn label_width() -> usize {
+    RecordField::ALL
+        .into_iter()
+        .map(|which| display_width(which.name()))
+        .max()
+        .unwrap_or(0)
+}
+
+fn record_size(form: &RecordForm) -> Size {
+    let heading = display_width(RECORD_HEADING) + display_width(form.scope());
+    let label = label_width() + display_width(RECORD_LABEL_GAP);
+    // Every field is measured with a cursor column, focused or not, so that
+    // tabbing between them moves nothing sideways — the window is the width of
+    // the widest thing it could say rather than of what it is saying now.
+    let widest = RecordField::ALL.into_iter().fold(
+        heading
+            .max(display_width(form.path()))
+            .max(display_width(RECORD_RULES)),
+        |widest, which| {
+            let field = form.field(which);
+            widest
+                .max(label + display_width(field.text()) + display_width(SCOPE_CURSOR))
+                .max(field.rule().map_or(0, display_width))
+        },
+    );
+
+    Size::new(padded_width(widest, SCOPE_MARGIN), RECORD_HEIGHT)
 }
 
 #[cfg(test)]
