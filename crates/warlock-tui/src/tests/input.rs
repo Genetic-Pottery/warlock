@@ -915,8 +915,8 @@ mod gate {
     use ratatui::layout::Size;
     use warlock_engine::NodeState;
     use warlock_tui::{
-        Answer, App, Composed, Composer, Edited, Focus, QuitConfirm, Row, ScopeField, ScopePrompt,
-        edit_for, panel_height, tree_height,
+        Answer, App, Composed, Composer, Edited, Focus, QuitConfirm, RecordPrompt, Row, ScopeField,
+        ScopePrompt, edit_for, panel_height, tree_height,
     };
 
     use super::super::{Action, Pressed, action_for, press_for as gate_for};
@@ -933,6 +933,7 @@ mod gate {
             key,
             confirm,
             prompt,
+            &RecordPrompt::Closed,
             &ScopePrompt::Closed,
             composer,
             in_flight,
@@ -1101,6 +1102,12 @@ mod gate {
             // comes back.
             Pressed::Write(edited) => {
                 panic!("{edited:?} came from a write prompt that is not up")
+            }
+            // Unreachable for the same reason and loud for the same reason:
+            // the gate above is handed a closed record window too, and the
+            // record window's own tests call the gate directly.
+            Pressed::Record(edited) => {
+                panic!("{edited:?} came from a record window that is not up")
             }
             // The loop's three composer arms, and the reason the draft is a
             // local here exactly as it is there: nothing about it is ever
@@ -1829,8 +1836,8 @@ mod gate {
 
     mod writing {
         use super::{
-            Action, Composer, Edited, INERT, KeyCode, KeyEvent, Pressed, QuitConfirm, ScopeField,
-            ScopePrompt, action_for, ctrl_c, edit_for, gate_for, press,
+            Action, Composer, Edited, INERT, KeyCode, KeyEvent, Pressed, QuitConfirm, RecordPrompt,
+            ScopeField, ScopePrompt, action_for, ctrl_c, edit_for, gate_for, press,
         };
 
         const PROPOSED: &str = "docs/warlock-brief-13-scopes-and-sigils.md";
@@ -1850,6 +1857,7 @@ mod gate {
                 key,
                 QuitConfirm::Closed,
                 &ScopePrompt::Closed,
+                &RecordPrompt::Closed,
                 write,
                 None,
                 false,
@@ -1912,6 +1920,7 @@ mod gate {
                     ctrl_c(),
                     QuitConfirm::Closed,
                     &ScopePrompt::Closed,
+                    &RecordPrompt::Closed,
                     &write,
                     None,
                     false,
@@ -1939,6 +1948,7 @@ mod gate {
                         key,
                         QuitConfirm::Closed,
                         &ScopePrompt::Closed,
+                        &RecordPrompt::Closed,
                         &write,
                         Some(&draft),
                         false,
@@ -1967,7 +1977,16 @@ mod gate {
                 let key = press(code);
 
                 assert_eq!(
-                    gate_for(key, QuitConfirm::Closed, &scope, &write, None, false, false,),
+                    gate_for(
+                        key,
+                        QuitConfirm::Closed,
+                        &scope,
+                        &RecordPrompt::Closed,
+                        &write,
+                        None,
+                        false,
+                        false,
+                    ),
                     Pressed::Scope(edit_for(key, &scope_field)),
                     "{code:?} was answered by the wrong window"
                 );
@@ -1995,6 +2014,189 @@ mod gate {
                     asked(key, &ScopePrompt::Closed),
                     expected,
                     "{code:?} stopped meaning what it meant"
+                );
+            }
+        }
+    }
+
+    // The fourth window: the three values a brand-new scope name is recorded
+    // with, which `s` puts up as it takes the scope window down.
+    mod recording {
+        use warlock_tui::{RecordEdited, RecordForm, RecordPrompt, record_edit_for};
+
+        use super::{
+            Composer, INERT, KeyCode, KeyEvent, Pressed, QuitConfirm, ScopePrompt, ctrl_c,
+            gate_for, press,
+        };
+
+        const DIRECTORY: &str = "crates/warlock-engine";
+
+        const SCOPE: &str = "data-plane";
+
+        fn open() -> RecordPrompt {
+            RecordPrompt::open(DIRECTORY, SCOPE)
+        }
+
+        fn form() -> RecordForm {
+            open().form().expect("the window is up").clone()
+        }
+
+        fn asked(key: KeyEvent, record: &RecordPrompt) -> Pressed {
+            asked_composing(key, record, None)
+        }
+
+        fn asked_composing(
+            key: KeyEvent,
+            record: &RecordPrompt,
+            composer: Option<&Composer>,
+        ) -> Pressed {
+            gate_for(
+                key,
+                QuitConfirm::Closed,
+                // Closed, and there is no test here of the two being up
+                // together, because they cannot be: the record window opens
+                // exactly as the scope window closes, out of the one value
+                // `scope_submit` hands back.
+                &ScopePrompt::Closed,
+                record,
+                &ScopePrompt::Closed,
+                composer,
+                false,
+                false,
+            )
+        }
+
+        #[test]
+        fn every_binding_goes_into_the_focused_field_and_none_of_them_reaches_the_app() {
+            // The same promise the other two windows make, and the one that
+            // matters most here because `s` is on the list: while a record is
+            // being filled in there is no `s` that reopens the window over the
+            // scope it is already recording, no `p` that pacts and no `j` that
+            // moves a selection nobody can see.
+            let record = open();
+            let form = form();
+
+            for code in INERT {
+                let key = press(code);
+
+                assert_eq!(
+                    asked(key, &record),
+                    Pressed::Record(record_edit_for(key, &form)),
+                    "{code:?} should have gone into the focused field"
+                );
+            }
+        }
+
+        #[test]
+        fn enter_submits_and_esc_closes_and_tab_only_moves_the_focus() {
+            let record = open();
+
+            assert_eq!(
+                asked(press(KeyCode::Enter), &record),
+                Pressed::Record(RecordEdited::Submit)
+            );
+            assert_eq!(
+                asked(press(KeyCode::Esc), &record),
+                Pressed::Record(RecordEdited::Close)
+            );
+            for code in [KeyCode::Tab, KeyCode::BackTab, KeyCode::Down, KeyCode::Up] {
+                let pressed = asked(press(code), &record);
+
+                assert_eq!(
+                    pressed,
+                    Pressed::Record(record_edit_for(press(code), &form())),
+                    "{code:?} should be the window's own move"
+                );
+                assert_ne!(pressed, Pressed::Record(RecordEdited::Submit), "{code:?}");
+                assert_ne!(pressed, Pressed::Record(RecordEdited::Close), "{code:?}");
+            }
+        }
+
+        #[test]
+        fn ctrl_c_is_still_answered_before_the_fields() {
+            // The keystroke of last resort, with this window up as with every
+            // other: it leaves with nothing out, and stops the turn when one is
+            // being answered. Typed into a field it would be a `c` in a team
+            // name.
+            let record = open();
+
+            assert_eq!(asked(ctrl_c(), &record), Pressed::Leave);
+            assert_eq!(
+                gate_for(
+                    ctrl_c(),
+                    QuitConfirm::Closed,
+                    &ScopePrompt::Closed,
+                    &record,
+                    &ScopePrompt::Closed,
+                    None,
+                    false,
+                    true,
+                ),
+                Pressed::CancelTurn
+            );
+        }
+
+        #[test]
+        fn the_quit_confirmation_is_answered_before_the_fields_too() {
+            // Not a situation the loop gets into either — `q` is not a key this
+            // window lets through, so the question cannot come up behind it —
+            // but the order is the gate's and it is asserted where the gate is
+            // read, not inferred from the window that happens to be up.
+            let record = open();
+
+            assert_eq!(
+                gate_for(
+                    press(KeyCode::Char('y')),
+                    QuitConfirm::open(),
+                    &ScopePrompt::Closed,
+                    &record,
+                    &ScopePrompt::Closed,
+                    None,
+                    false,
+                    false,
+                ),
+                Pressed::Leave
+            );
+        }
+
+        #[test]
+        fn the_composer_is_not_consulted_while_the_window_is_up() {
+            // The window is drawn over the draft at the foot of the panel, so a
+            // key cannot be both typed into a field and typed into a draft. Tab
+            // included: here it moves the focus between the three fields, which
+            // is the one place it can go while a window is up.
+            let record = open();
+            let draft = Composer::new("web");
+
+            for code in [KeyCode::Char('j'), KeyCode::Tab, KeyCode::Enter] {
+                let key = press(code);
+
+                assert_eq!(
+                    asked_composing(key, &record, Some(&draft)),
+                    Pressed::Record(record_edit_for(key, &form())),
+                    "{code:?} reached the draft from behind the window"
+                );
+            }
+        }
+
+        #[test]
+        fn the_window_being_down_leaves_every_key_to_the_tree() {
+            // The other half: nothing above is a rule about the key, only about
+            // the window, so with it closed the gate is the gate it always was.
+            for code in INERT {
+                let key = press(code);
+
+                assert_eq!(
+                    asked(key, &RecordPrompt::Closed),
+                    super::press_for(
+                        key,
+                        QuitConfirm::Closed,
+                        &ScopePrompt::Closed,
+                        None,
+                        false,
+                        false
+                    ),
+                    "{code:?} was answered by a window that is not up"
                 );
             }
         }
@@ -2778,8 +2980,8 @@ mod pointer {
     use ratatui::layout::Size;
     use warlock_engine::NodeState;
     use warlock_tui::{
-        App, Cell, Composer, Focus, QuitConfirm, Reach, Row, ScopePrompt, panel_height,
-        panel_width, tree_height,
+        App, Cell, Composer, Focus, QuitConfirm, Reach, RecordPrompt, Row, ScopePrompt,
+        panel_height, panel_width, tree_height,
     };
 
     use super::super::{MouseAction, WHEEL_NOTCH, mouse_action};
@@ -2931,6 +3133,7 @@ mod pointer {
             app,
             QuitConfirm::Closed,
             &ScopePrompt::Closed,
+            &RecordPrompt::Closed,
             &ScopePrompt::Closed,
         )
     }
@@ -2940,9 +3143,10 @@ mod pointer {
         app: &App,
         confirm: QuitConfirm,
         prompt: &ScopePrompt,
+        record: &RecordPrompt,
         write: &ScopePrompt,
     ) -> Option<MouseAction> {
-        mouse_action(mouse, SIZE, app, confirm, prompt, write, None)
+        mouse_action(mouse, SIZE, app, confirm, prompt, record, write, None)
     }
 
     fn asks_composing(mouse: MouseEvent, app: &App, composer: &Composer) -> Option<MouseAction> {
@@ -2952,6 +3156,7 @@ mod pointer {
             app,
             QuitConfirm::Closed,
             &ScopePrompt::Closed,
+            &RecordPrompt::Closed,
             &ScopePrompt::Closed,
             Some(composer),
         )
@@ -2962,6 +3167,7 @@ mod pointer {
             app,
             confirm,
             &ScopePrompt::Closed,
+            &RecordPrompt::Closed,
             &ScopePrompt::Closed,
             mouse,
         );
@@ -2971,10 +3177,11 @@ mod pointer {
         app: &mut App,
         confirm: QuitConfirm,
         prompt: &ScopePrompt,
+        record: &RecordPrompt,
         write: &ScopePrompt,
         mouse: MouseEvent,
     ) {
-        match asks_under(mouse, app, confirm, prompt, write) {
+        match asks_under(mouse, app, confirm, prompt, record, write) {
             Some(MouseAction::SelectNextBy(rows)) => app.select_next_by(rows),
             Some(MouseAction::SelectPreviousBy(rows)) => app.select_previous_by(rows),
             Some(MouseAction::ScrollPanelDown(lines)) => app.scroll_panel_down(lines),
@@ -3746,21 +3953,39 @@ mod pointer {
 
     #[test]
     fn a_window_swallows_the_gesture_as_it_swallows_everything_else() {
-        // The confirmation and both prompts are answered from the keyboard,
-        // and a gesture that got through one would drag a highlight across a
-        // card the reader cannot see, behind a window they are in the middle
-        // of answering. Over a conversation, which is the one card where the
-        // three halves would otherwise mean something.
+        // The confirmation and all three prompts are answered from the
+        // keyboard, and a gesture that got through one would drag a highlight
+        // across a card the reader cannot see, behind a window they are in the
+        // middle of answering. Over a conversation, which is the one card where
+        // the three halves would otherwise mean something.
         let app = app_talking();
         let open = ScopePrompt::open("crates/warlock-engine", "data-plane");
-        for (confirm, scope, write) in [
+        let recording = RecordPrompt::open("crates/warlock-engine", "data-plane");
+        for (confirm, scope, record, write) in [
             (
                 QuitConfirm::open(),
                 &ScopePrompt::Closed,
+                &RecordPrompt::Closed,
                 &ScopePrompt::Closed,
             ),
-            (QuitConfirm::Closed, &open, &ScopePrompt::Closed),
-            (QuitConfirm::Closed, &ScopePrompt::Closed, &open),
+            (
+                QuitConfirm::Closed,
+                &open,
+                &RecordPrompt::Closed,
+                &ScopePrompt::Closed,
+            ),
+            (
+                QuitConfirm::Closed,
+                &ScopePrompt::Closed,
+                &recording,
+                &ScopePrompt::Closed,
+            ),
+            (
+                QuitConfirm::Closed,
+                &ScopePrompt::Closed,
+                &RecordPrompt::Closed,
+                &open,
+            ),
         ] {
             for mouse in [
                 left_click(IN_PANEL, FIRST_PANEL_LINE + 2),
@@ -3768,7 +3993,7 @@ mod pointer {
                 release(IN_PANEL + 3, FIRST_PANEL_LINE + 3),
             ] {
                 assert_eq!(
-                    asks_under(mouse, &app, confirm, scope, write),
+                    asks_under(mouse, &app, confirm, scope, record, write),
                     None,
                     "{mouse:?} should mean nothing while a window is up"
                 );
@@ -3911,6 +4136,7 @@ mod pointer {
                     &app,
                     QuitConfirm::open(),
                     &ScopePrompt::Closed,
+                    &RecordPrompt::Closed,
                     &ScopePrompt::Closed
                 ),
                 None,
@@ -3957,6 +4183,7 @@ mod pointer {
                         &app,
                         QuitConfirm::Closed,
                         &prompt,
+                        &RecordPrompt::Closed,
                         &ScopePrompt::Closed
                     ),
                     None,
@@ -3966,6 +4193,7 @@ mod pointer {
                     &mut app,
                     QuitConfirm::Closed,
                     &prompt,
+                    &RecordPrompt::Closed,
                     &ScopePrompt::Closed,
                     mouse,
                 );
@@ -3992,6 +4220,7 @@ mod pointer {
                     &app,
                     QuitConfirm::Closed,
                     &ScopePrompt::Closed,
+                    &RecordPrompt::Closed,
                     &write
                 ),
                 None,
@@ -4001,12 +4230,52 @@ mod pointer {
                 &mut app,
                 QuitConfirm::Closed,
                 &ScopePrompt::Closed,
+                &RecordPrompt::Closed,
                 &write,
                 mouse,
             );
         }
 
         assert_eq!(app, before, "the pointer moved nothing behind the prompt");
+    }
+
+    #[test]
+    fn the_pointer_is_read_and_dropped_while_the_record_window_is_up() {
+        // The fourth window and the same rule once more: three fields being
+        // typed into, no buttons in any of them, and a tree underneath that a
+        // click would silently move while the reader is filling a record in.
+        let mut app = app_on_screen();
+        app.toggle_files();
+        app.select_row(9);
+        app.scroll_panel_down(4);
+        app.set_focus(Focus::Panel);
+        let before = app.clone();
+        let record = RecordPrompt::open("crates/warlock-engine", "data-plane");
+
+        for mouse in whole_pointer() {
+            assert_eq!(
+                asks_under(
+                    mouse,
+                    &app,
+                    QuitConfirm::Closed,
+                    &ScopePrompt::Closed,
+                    &record,
+                    &ScopePrompt::Closed
+                ),
+                None,
+                "{mouse:?} should mean nothing while the record window is up"
+            );
+            round_under(
+                &mut app,
+                QuitConfirm::Closed,
+                &ScopePrompt::Closed,
+                &record,
+                &ScopePrompt::Closed,
+                mouse,
+            );
+        }
+
+        assert_eq!(app, before, "the pointer moved nothing behind the window");
     }
 }
 

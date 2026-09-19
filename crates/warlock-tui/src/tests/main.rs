@@ -9,7 +9,7 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::Size;
 use ratatui::{Frame, Terminal};
 use warlock_engine::{Loaded, Manifest, Node, NodeState, Tree, load_tree, repository_root};
-use warlock_tui::{App, Chrome, Focus, QuitConfirm, Row, ScopePrompt, tree_height};
+use warlock_tui::{App, Chrome, Focus, QuitConfirm, RecordPrompt, Row, ScopePrompt, tree_height};
 
 use super::{Cli, Command, Error, FOR_CLAUDE_MD, ScopeCommand, Session, status_for};
 use crate::chatting::Chat;
@@ -772,6 +772,7 @@ fn driving(app: App, scope: Scope, tree: &Tree) -> Driven {
         clipboard: Copying::taking(),
         confirm: QuitConfirm::default(),
         prompt: ScopePrompt::default(),
+        record: RecordPrompt::default(),
         drag: None,
         said: None,
         document: None,
@@ -1060,6 +1061,45 @@ fn a_key_the_window_does_not_want_puts_it_down_and_starts_nothing() {
         ScopePrompt::Closed,
         "Esc closes the window rather than quitting warlock"
     );
+}
+
+#[test]
+fn the_record_window_swallows_the_scope_key_itself() {
+    // The one key that could reopen a window over the very scope being
+    // recorded, and it does not: with the second window up `s` is a letter in
+    // the focused field, like every other binding the loop would otherwise
+    // answer.
+    let mut driven = session(vec![directory("/repo/crates")]);
+    driven.record = RecordPrompt::open("crates", "billing");
+
+    assert!(pressed(&mut driven, key(KeyCode::Char('s'))));
+    assert_eq!(
+        driven.prompt,
+        ScopePrompt::Closed,
+        "the first window came back up over the name being recorded"
+    );
+    let form = driven
+        .record
+        .form()
+        .expect("the window is still up over the scope it opened on");
+    assert_eq!(form.focused().text(), "s", "the key was typed, not pressed");
+}
+
+#[test]
+fn esc_puts_the_record_window_down_and_writes_nothing() {
+    let mut driven = session(vec![directory("/repo/crates")]);
+    driven.record = RecordPrompt::open("crates", "billing");
+
+    assert!(pressed(&mut driven, key(KeyCode::Esc)));
+    assert_eq!(
+        driven.record,
+        RecordPrompt::Closed,
+        "Esc closes the window rather than quitting warlock"
+    );
+    // The session's manifest is the empty one `driving` starts it on, and an
+    // Esc that had written would have replaced it. The repository root these
+    // tests run over does not exist, so a write would have failed loudly too.
+    assert_eq!(driven.manifest, Manifest::new());
 }
 
 mod copying {

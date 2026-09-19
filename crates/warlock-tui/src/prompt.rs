@@ -1,8 +1,11 @@
-//! The scope prompt: the directory being scoped, the text typed into the field,
-//! and the one line under it saying why the last submit was refused.
+//! The two prompts the `s` key puts up: the scope itself — the directory being
+//! scoped, the text typed into the field, and the one line under it saying why
+//! the last submit was refused — and, when that name is new, the record it
+//! routes to, which is three of those fields and a cursor saying which one is
+//! being typed in.
 //!
-//! [`ScopePrompt`] is a value of its own and *not* a field on
-//! [`App`](crate::App), because Esc has to leave the app exactly as it was and
+//! [`ScopePrompt`] and [`RecordPrompt`] are values of their own and *not* fields
+//! on [`App`](crate::App), because Esc has to leave the app exactly as it was and
 //! an app that never heard of the prompt is a cheaper guarantee of that than
 //! putting every field back. The cursor is a byte offset into that text and
 //! every key here keeps it on a character boundary, because the text is sliced
@@ -236,6 +239,226 @@ pub fn edit_for(key: KeyEvent, field: &ScopeField) -> Edited {
             edited(text, field.cursor + character.len_utf8())
         }
         _ => unchanged(),
+    }
+}
+
+/// Which of the record's three values is being typed in.
+///
+/// The order is the order [`ScopeRecord::new`](warlock_engine::ScopeRecord::new)
+/// takes them and the order the frame draws them, so a reader tabbing down the
+/// window is filling the record top to bottom.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub enum RecordField {
+    #[default]
+    Team,
+    ReviewState,
+    Label,
+}
+
+impl RecordField {
+    pub const ALL: [Self; 3] = [Self::Team, Self::ReviewState, Self::Label];
+
+    /// What the frame prints beside the field, and what a refusal about it
+    /// names.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Team => "team",
+            Self::ReviewState => "review state",
+            Self::Label => "label",
+        }
+    }
+
+    // Wrapping rather than stopping at the ends: there is no submit button to
+    // fall off the bottom onto, so the only thing past the last field is the
+    // first one.
+    #[must_use]
+    pub const fn next(self) -> Self {
+        match self {
+            Self::Team => Self::ReviewState,
+            Self::ReviewState => Self::Label,
+            Self::Label => Self::Team,
+        }
+    }
+
+    #[must_use]
+    pub const fn previous(self) -> Self {
+        match self {
+            Self::Team => Self::Label,
+            Self::ReviewState => Self::Team,
+            Self::Label => Self::ReviewState,
+        }
+    }
+}
+
+// Three [`ScopeField`]s and not three bare strings: the cursor, the character
+// boundaries and the rule line are the same problem three times over, and
+// reusing the field is what keeps one set of answers to it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
+pub struct RecordForm {
+    path: String,
+    // Already folded by the caller, and stored so the window can show which name
+    // is being recorded: the record written from this form has to be the one the
+    // pact names, and a second read of the first prompt could disagree.
+    scope: String,
+    team: ScopeField,
+    review_state: ScopeField,
+    label: ScopeField,
+    focus: RecordField,
+}
+
+impl RecordForm {
+    // Empty fields, not defaults: nothing here is guessable from the scope name,
+    // and a pre-filled team would be somebody else's team saved by an Enter.
+    #[must_use]
+    pub fn new(path: impl Into<String>, scope: impl Into<String>) -> Self {
+        let path = path.into();
+        let empty = ScopeField::new(path.as_str(), "");
+        Self {
+            scope: scope.into(),
+            team: empty.clone(),
+            review_state: empty.clone(),
+            label: empty,
+            focus: RecordField::Team,
+            path,
+        }
+    }
+
+    #[must_use]
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+
+    #[must_use]
+    pub fn scope(&self) -> &str {
+        &self.scope
+    }
+
+    #[must_use]
+    pub const fn focus(&self) -> RecordField {
+        self.focus
+    }
+
+    #[must_use]
+    pub const fn field(&self, which: RecordField) -> &ScopeField {
+        match which {
+            RecordField::Team => &self.team,
+            RecordField::ReviewState => &self.review_state,
+            RecordField::Label => &self.label,
+        }
+    }
+
+    #[must_use]
+    pub const fn focused(&self) -> &ScopeField {
+        self.field(self.focus)
+    }
+
+    // The cursor moves to the field complained about, so the first keystroke
+    // after a refusal fixes the thing that was refused rather than editing
+    // whichever field the reader happened to leave it in.
+    #[must_use]
+    pub fn refused(mut self, which: RecordField, rule: impl Into<String>) -> Self {
+        let field = std::mem::take(self.slot(which)).refused(rule);
+        *self.slot(which) = field;
+        self.focus = which;
+        self
+    }
+
+    const fn slot(&mut self, which: RecordField) -> &mut ScopeField {
+        match which {
+            RecordField::Team => &mut self.team,
+            RecordField::ReviewState => &mut self.review_state,
+            RecordField::Label => &mut self.label,
+        }
+    }
+}
+
+// `RecordForm` is some 300 bytes against `Closed`'s nothing, which clippy flags
+// and which would be worth boxing in a `Result` or a collection. This is one
+// field of the event loop, alive between two frames of one keystroke, so a `Box`
+// would buy an allocation and a pointer chase — and cost `form` its `const`,
+// because a `Box` cannot be dereferenced in a const fn.
+#[allow(clippy::large_enum_variant)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
+pub enum RecordPrompt {
+    #[default]
+    Closed,
+    Open(RecordForm),
+}
+
+impl RecordPrompt {
+    #[must_use]
+    pub fn open(path: impl Into<String>, scope: impl Into<String>) -> Self {
+        Self::Open(RecordForm::new(path, scope))
+    }
+
+    #[must_use]
+    pub const fn is_open(&self) -> bool {
+        matches!(self, Self::Open(_))
+    }
+
+    #[must_use]
+    pub const fn form(&self) -> Option<&RecordForm> {
+        match self {
+            Self::Closed => None,
+            Self::Open(form) => Some(form),
+        }
+    }
+}
+
+/// What a keystroke comes to while the record prompt is open.
+///
+/// [`RecordEdited::Submit`] carries no text for the reason [`Edited::Submit`]
+/// does not: the caller reads the three fields off the form it already holds, so
+/// there is no second copy of them to disagree with it. Whether any of them is
+/// blank is the caller's refusal to make, through [`RecordForm::refused`].
+// Unboxed for the reason given over `RecordPrompt`, and this one is shorter
+// lived still: it is read by the caller that asked for it and dropped.
+#[allow(clippy::large_enum_variant)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum RecordEdited {
+    Open(RecordForm),
+    Close,
+    Submit,
+}
+
+/// What `key` does to a prompt open over `form`.
+///
+/// Every key that is text, a cursor move or a delete is [`edit_for`]'s answer
+/// about the focused field, so the three fields here type exactly as the scope
+/// field does and cannot drift from it. Tab and Down go to the next field, and
+/// `BackTab` and Up to the previous one: none of the four is text in `edit_for`,
+/// which is what lets the record be filled in without a keystroke that could
+/// have been a letter.
+///
+/// Changing field is a move and not an edit, so the rule line under the field
+/// being left stays up — it names something wrong with text that has not
+/// changed.
+#[must_use]
+pub fn record_edit_for(key: KeyEvent, form: &RecordForm) -> RecordEdited {
+    if key.kind != KeyEventKind::Press {
+        return RecordEdited::Open(form.clone());
+    }
+
+    let refocused = |focus: RecordField| {
+        RecordEdited::Open(RecordForm {
+            focus,
+            ..form.clone()
+        })
+    };
+
+    match key.code {
+        KeyCode::Tab | KeyCode::Down => refocused(form.focus.next()),
+        KeyCode::BackTab | KeyCode::Up => refocused(form.focus.previous()),
+        _ => match edit_for(key, form.focused()) {
+            Edited::Close => RecordEdited::Close,
+            Edited::Submit => RecordEdited::Submit,
+            Edited::Open(field) => {
+                let mut next = form.clone();
+                *next.slot(form.focus) = field;
+                RecordEdited::Open(next)
+            }
+        },
     }
 }
 

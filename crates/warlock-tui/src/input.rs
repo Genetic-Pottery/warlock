@@ -16,8 +16,9 @@ use ratatui::crossterm::event::{
 };
 use ratatui::layout::Size;
 use warlock_tui::{
-    Answered, App, Cell, Composed, Composer, Edited, Focus, Hit, QuitConfirm, Reach, ScopePrompt,
-    answer_for, compose_for, edit_for, hit_test, panel_reach,
+    Answered, App, Cell, Composed, Composer, Edited, Focus, Hit, QuitConfirm, Reach, RecordEdited,
+    RecordPrompt, ScopePrompt, answer_for, compose_for, edit_for, hit_test, panel_reach,
+    record_edit_for,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -106,12 +107,19 @@ pub(crate) fn action_for(key: KeyEvent, in_flight: bool) -> Option<Action> {
 // over one `Edited` from one `edit_for` because the loop does different things
 // with a submit from each, and an `Edited` arriving with no way to say which
 // window it came from is exactly the confusion this type exists to prevent.
+// `Record` is a third window and a `RecordEdited` of its own, so the same holds
+// for it by its type.
+//
+// Unboxed for the reason `RecordEdited` itself is: this value is built by the
+// gate, read by the arm that asked for it and dropped, once per keystroke.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Pressed {
     Leave,
     CancelTurn,
     Confirm(QuitConfirm),
     Scope(Edited),
+    Record(RecordEdited),
     Write(Edited),
     Compose(Composed),
     Act(Action),
@@ -150,19 +158,28 @@ fn is_tab(key: KeyEvent) -> bool {
 //
 // Then each window, and on those roads `action_for` is not called at all, which
 // is the plain statement of "nothing leaks through to the tree underneath". The
-// scope prompt is asked before the write prompt because both can be up at once
-// — `s` opens one from the tree while a `/write` turn is still out, and the
-// answer to that turn opens the other with no keystroke — and the scope prompt
-// is the one somebody is typing in now.
+// two windows the `s` key puts up are asked before the write prompt because
+// either can be up at once with it — `s` opens one from the tree while a
+// `/write` turn is still out, and the answer to that turn opens the other with
+// no keystroke — and the `s` window is the one somebody is typing in now.
+// Between those two themselves there is no precedence to have: the record
+// window opens exactly as the scope window closes, so they are never both up.
 //
-// The composer is asked last of the four, because a window is drawn over it: a
+// The composer is asked after all of them, because a window is drawn over it: a
 // key cannot be both typed into a field on the frame and answered by the dialog
 // covering it. `composer` is `Some` only when the focus is on the field, which
 // is the caller's line, not a lookup here.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the whole of what a keystroke can mean, and the point of it is that \
+              there is one place that decides: each window that can be over the app \
+              is a parameter here rather than a gate of its own somewhere else"
+)]
 pub(crate) fn press_for(
     key: KeyEvent,
     confirm: QuitConfirm,
     prompt: &ScopePrompt,
+    record: &RecordPrompt,
     write: &ScopePrompt,
     composer: Option<&Composer>,
     in_flight: bool,
@@ -186,6 +203,10 @@ pub(crate) fn press_for(
 
     if let Some(field) = prompt.field() {
         return Pressed::Scope(edit_for(key, field));
+    }
+
+    if let Some(form) = record.form() {
+        return Pressed::Record(record_edit_for(key, form));
     }
 
     if let Some(field) = write.field() {
@@ -284,19 +305,26 @@ pub(crate) struct Drag {
 // `PanelLine` for a point on the composer and scrolls a window the pointer is
 // not over.
 //
-// None of the three windows has anything clickable in it, so while any is up
+// None of the four windows has anything clickable in it, so while any is up
 // every event is dropped, wheel and click alike: a click that reached the tree
 // behind one would select a row the reader cannot see.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "`press_for`'s reason, for the pointer: the frame the gesture landed \
+              on is what decides what it meant, and every window that could be \
+              over it has to be asked here"
+)]
 pub(crate) fn mouse_action(
     mouse: MouseEvent,
     size: Size,
     app: &App,
     confirm: QuitConfirm,
     prompt: &ScopePrompt,
+    record: &RecordPrompt,
     write: &ScopePrompt,
     composer: Option<&Composer>,
 ) -> Option<MouseAction> {
-    if confirm.is_open() || prompt.is_open() || write.is_open() {
+    if confirm.is_open() || prompt.is_open() || record.is_open() || write.is_open() {
         return None;
     }
 
