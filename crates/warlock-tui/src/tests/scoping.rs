@@ -4,14 +4,14 @@ use std::{fs, io};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use tempfile::TempDir;
 use warlock_engine::{
-    Manifest, Node, NodeState, PactEntry, ScopeRecord, Tree, manifest, validate_scope,
+    Manifest, Node, NodeState, PactEntry, ScopeRecord, Tree, manifest, route_facts, validate_scope,
 };
 use warlock_tui::{
     App, Edited, RecordAsk, RecordFields, RecordPrompt, Recorded, ScopeField, ScopePrompt, Sigils,
     edit_for, record_edit_for,
 };
 
-use super::{Asking, record_submit};
+use super::{Asking, record_edit, record_submit};
 
 // `super::scope_press` with no boundary in the way, so these tests are about
 // the prompt rather than about being refused. The wildcard rather than
@@ -964,7 +964,12 @@ fn a_refusal_typed_out_can_be_fixed_and_written_without_reopening_the_window() {
 /// values are typed in [`RecordAsk::ORDER`], a Tab between each, so what is
 /// asserted about afterwards went in the way a person's would.
 fn fields(module: &str, name: &str, values: [&str; 3]) -> RecordFields {
-    let mut fields = RecordFields::new(module, name);
+    filled(RecordFields::new(module, name), values)
+}
+
+/// [`fields`] over a window the submit handed back, for the tests that reach
+/// the record question by pressing `s` rather than by building one.
+fn filled(mut fields: RecordFields, values: [&str; 3]) -> RecordFields {
     for value in values {
         for character in value.chars() {
             fields = opened(record_edit_for(press(KeyCode::Char(character)), &fields));
@@ -1125,4 +1130,287 @@ fn an_accepted_record_saves_the_scope_and_the_record_in_one_write() {
     assert_eq!(tui.document(), "crates/tui/WARLOCK.md");
     assert_eq!(tui.granted_hash(), Some(HASH));
     assert_eq!(tui.granted_at(), Some(AT));
+}
+
+/// The bytes of `.warlock/pacts.toml` under `root`, or `None` where the file
+/// is not there.
+///
+/// Read as text and never parsed, because "byte-identical to what was read" is
+/// a claim about the file: two manifests that compare equal can be written two
+/// ways, and a comparison of parsed values would pass through a rewrite that
+/// reordered or reworded every line in the repository's history.
+fn on_disk(root: &Path) -> Option<String> {
+    match fs::read_to_string(root.join(".warlock").join("pacts.toml")) {
+        Ok(text) => Some(text),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+        Err(error) => panic!("the saved manifest could not be read: {error}"),
+    }
+}
+
+/// `text` typed into the scope window one character at a time and Enter
+/// pressed, through the event loop's own two functions — so the record window
+/// these tests go on to answer is the one the keys actually reach, rather than
+/// a [`RecordFields`] built beside the road.
+fn submitted(
+    app: &mut App,
+    manifest: &mut Manifest,
+    repo_root: &Path,
+    mut prompt: ScopePrompt,
+    text: &str,
+) -> Asking {
+    for code in text.chars().map(KeyCode::Char).chain([KeyCode::Enter]) {
+        let edited = {
+            let field = prompt.field().expect("the scope window is still up");
+            edit_for(press(code), field)
+        };
+        match super::scope_edit(app, manifest, repo_root, &prompt, edited) {
+            Asking::Scope(open) => prompt = open,
+            // Only the Enter can ask, and when it does that is the answer this
+            // helper was called for.
+            record @ Asking::Record(_) => return record,
+        }
+    }
+    Asking::Scope(prompt)
+}
+
+fn asking_for(asking: Asking) -> RecordFields {
+    match asking {
+        Asking::Record(fields) => fields,
+        Asking::Scope(prompt) => panic!("the name was written rather than asked about: {prompt:?}"),
+    }
+}
+
+#[test]
+fn esc_on_the_record_window_leaves_the_file_byte_for_byte_as_it_was_read() {
+    // The second window is the one place in this key's path where a person has
+    // already typed a name that nothing on disk routes. Esc there has to be
+    // worth nothing at all: not the scope without the record, not a record
+    // under a scope nobody carries, and not a rewritten file either.
+    let repo = a_repo();
+    let mut manifest = pacts().with_scopes(records());
+    manifest
+        .save(repo.path())
+        .expect("the fixture manifest saves");
+    let file = on_disk(repo.path()).expect("the fixture manifest is on disk");
+    let held = manifest.clone();
+    let mut app = app_on(repo.path(), TUI_ROW);
+    let before = app.clone();
+
+    let prompt = scope_press(&mut app, &manifest, repo.path(), false);
+    let asking = submitted(&mut app, &mut manifest, repo.path(), prompt, "ledger");
+    let typed = filled(asking_for(asking), ["Ledger", "In Review", "area/ledger"]);
+    assert_eq!(
+        record_edit_for(press(KeyCode::Esc), &typed),
+        Recorded::Close,
+        "Esc did something other than close the window",
+    );
+    let prompt = record_edit(
+        &mut app,
+        &mut manifest,
+        repo.path(),
+        &RecordPrompt::Open(typed),
+        Recorded::Close,
+    );
+
+    assert_eq!(prompt, RecordPrompt::Closed, "Esc left the window up");
+    assert_eq!(
+        on_disk(repo.path()).as_deref(),
+        Some(file.as_str()),
+        "Esc rewrote the file",
+    );
+    assert_eq!(manifest, held, "Esc edited the manifest this thread holds");
+    assert_eq!(
+        scope_on(&manifest, "crates/tui"),
+        None,
+        "Esc left the name behind on the pact",
+    );
+    assert_eq!(app, before, "Esc moved the view");
+}
+
+#[test]
+fn esc_on_the_record_window_leaves_a_repository_that_had_no_manifest_without_one() {
+    // The same Esc where there is no file to be identical to: the fixture
+    // manifest lives in this thread alone, as it does in every test above, so
+    // anything at all under `.warlock/` afterwards was written by this press.
+    let repo = a_repo();
+    let mut app = app_on(repo.path(), TUI_ROW);
+    let mut manifest = pacts();
+
+    let prompt = scope_press(&mut app, &manifest, repo.path(), false);
+    let asking = submitted(&mut app, &mut manifest, repo.path(), prompt, "ledger");
+    let typed = filled(asking_for(asking), ["Ledger", "In Review", "area/ledger"]);
+    let prompt = record_edit(
+        &mut app,
+        &mut manifest,
+        repo.path(),
+        &RecordPrompt::Open(typed),
+        Recorded::Close,
+    );
+
+    assert_eq!(prompt, RecordPrompt::Closed);
+    assert_eq!(on_disk(repo.path()), None, "Esc wrote a manifest");
+    assert!(
+        !repo.path().join(".warlock").exists(),
+        "Esc left the manifest directory behind",
+    );
+    assert_eq!(
+        manifest,
+        pacts(),
+        "Esc edited the manifest this thread holds"
+    );
+}
+
+/// The lines of `after` that were not in `before`, or `None` when a line of
+/// `before` is missing from `after` or has moved.
+///
+/// A line-wise subsequence is what "every other record and row is
+/// byte-identical" comes to for a file this write only adds to: a line that
+/// was reworded, reordered, merged or dropped cannot be matched in order, and
+/// whatever is left over is exactly what appeared.
+fn added<'text>(before: &str, after: &'text str) -> Option<Vec<&'text str>> {
+    let mut before = before.lines().peekable();
+    let mut added = Vec::new();
+    for line in after.lines() {
+        if before.peek() == Some(&line) {
+            before.next();
+        } else {
+            added.push(line);
+        }
+    }
+    before.next().is_none().then_some(added)
+}
+
+#[test]
+fn a_record_write_leaves_every_other_record_and_row_byte_for_byte() {
+    // Read off the disk on both sides rather than compared as manifests: the
+    // promise is about the diff a person is going to commit, and the three
+    // records and two pacts that this write has no business touching are in
+    // the file with it.
+    let repo = a_repo();
+    let mut app = app_on(repo.path(), TUI_ROW);
+    let mut manifest = pacts().with_scopes(records());
+    manifest
+        .save(repo.path())
+        .expect("the fixture manifest saves");
+    let before = on_disk(repo.path()).expect("the fixture manifest is on disk");
+
+    let typed = fields(
+        "crates/tui",
+        "ledger",
+        ["Ledger", "In Review", "area/ledger"],
+    );
+    let prompt = record_submit(&mut app, &mut manifest, repo.path(), &typed);
+
+    assert_eq!(prompt, RecordPrompt::Closed, "the window is answered");
+    let after = on_disk(repo.path()).expect("the submit wrote the manifest");
+    let added = added(&before, &after).unwrap_or_else(|| {
+        panic!("the write moved a line it did not write:\n{before}\n---\n{after}")
+    });
+    // And what did appear is the two halves of this one edit and nothing else:
+    // the scope onto the pact that was asked about, and the record appended
+    // after the three that were already there.
+    assert_eq!(
+        added,
+        [
+            "scope = \"ledger\"",
+            "",
+            "[[scope]]",
+            "name = \"ledger\"",
+            "team = \"Ledger\"",
+            "review_state = \"In Review\"",
+            "label = \"area/ledger\"",
+        ],
+    );
+}
+
+#[test]
+fn the_saved_manifest_routes_the_scoped_directory_to_the_record_just_written() {
+    // The fact behind `warlock check` printing a full route where before it
+    // could only print a scope: the route is resolved out of the file rather
+    // than out of the manifest this thread holds, because `check` is another
+    // process and what it can say is what was saved.
+    let repo = a_repo();
+    let mut app = app_on(repo.path(), TUI_ROW);
+    let mut manifest = pacts();
+    let typed = fields(
+        "crates/tui",
+        "ledger",
+        ["Ledger", "In Review", "area/ledger"],
+    );
+
+    record_submit(&mut app, &mut manifest, repo.path(), &typed);
+
+    let written = saved(repo.path()).expect("the submit wrote the manifest");
+    // `None` for the home: the key half of a route is a machine's business and
+    // reading a real one from a test is how a developer's credentials get read.
+    let facts = route_facts(repo.path().join("crates/tui"), repo.path(), &written, None)
+        .expect("the directory is inside the repository");
+
+    assert_eq!(facts.scope(), Some("ledger"));
+    let record = facts
+        .record()
+        .expect("the scope written by the record window routes nowhere");
+    assert_eq!(record.team(), "Ledger");
+    assert_eq!(record.review_state(), "In Review");
+    assert_eq!(record.label(), "area/ledger");
+    // And the boundary covers what is under it, which is where `check` is
+    // usually run from.
+    let below = route_facts(
+        repo.path().join("crates/tui/src/main.rs"),
+        repo.path(),
+        &written,
+        None,
+    )
+    .expect("the file is inside the repository");
+    assert_eq!(below.record(), facts.record());
+}
+
+#[test]
+fn an_empty_name_clears_the_scope_and_opens_no_second_window() {
+    // A clear has no name to route, so there is nothing to record: the second
+    // question is asked about a scope being written and never about one going
+    // away. `data-plane`'s record stays in the file for whatever else carries
+    // it, which is the assertion under the clear.
+    let repo = a_repo();
+    let mut app = app_on(repo.path(), ENGINE_ROW);
+    let mut manifest = pacts();
+
+    let asking = super::scope_submit(
+        &mut app,
+        &mut manifest,
+        repo.path(),
+        &field("crates/engine", ""),
+    );
+
+    assert_eq!(asking, Asking::Scope(ScopePrompt::Closed));
+    let written = saved(repo.path()).expect("the clear wrote the manifest");
+    assert_eq!(scope_on(&written, "crates/engine"), None);
+    assert_eq!(written.scopes(), pacts().scopes());
+}
+
+#[test]
+fn a_name_that_folds_onto_a_recorded_one_is_written_with_no_second_question() {
+    // The record is looked for under the string that goes onto the pact, which
+    // is the folded one. A lookup of `BILLING` would find nothing and ask a
+    // second question about a scope `billing` already routes, and answering it
+    // would write a second record under a name the manifest refuses twice.
+    let repo = a_repo();
+    let mut app = app_on(repo.path(), TUI_ROW);
+    let mut manifest = pacts();
+
+    let asking = super::scope_submit(
+        &mut app,
+        &mut manifest,
+        repo.path(),
+        &field("crates/tui", "BILLING"),
+    );
+
+    assert_eq!(asking, Asking::Scope(ScopePrompt::Closed));
+    let written = saved(repo.path()).expect("the submit wrote the manifest");
+    assert_eq!(scope_on(&written, "crates/tui"), Some("billing"));
+    assert_eq!(
+        written.scopes(),
+        pacts().scopes(),
+        "a name that already had a record grew a second one",
+    );
 }
