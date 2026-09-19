@@ -1,6 +1,9 @@
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
 
-use super::{Edited, ScopeField, ScopePrompt, edit_for};
+use super::{
+    Edited, RecordEdited, RecordField, RecordForm, RecordPrompt, ScopeField, ScopePrompt, edit_for,
+    record_edit_for,
+};
 
 // Every field below is opened over this, so a test that meant to change the
 // text cannot pass by changing the directory instead.
@@ -437,4 +440,313 @@ fn a_move_leaves_the_rule_line_up_and_an_edit_takes_it_down() {
         "a move made the complaint stale"
     );
     assert_eq!(after(press(KeyCode::Backspace), &refused).rule(), None);
+}
+
+// The name the first prompt settled on, already folded, which is what the
+// record is written under.
+const SCOPE: &str = "data-plane";
+
+fn form() -> RecordForm {
+    RecordForm::new(DIRECTORY, SCOPE)
+}
+
+fn after_record(key: KeyEvent, form: &RecordForm) -> RecordForm {
+    match record_edit_for(key, form) {
+        RecordEdited::Open(next) => next,
+        other => panic!("{key:?} should have left the record open, and gave {other:?}"),
+    }
+}
+
+fn typed_into(form: &RecordForm, text: &str) -> RecordForm {
+    text.chars().fold(form.clone(), |current, character| {
+        after_record(press(KeyCode::Char(character)), &current)
+    })
+}
+
+fn texts(form: &RecordForm) -> [&str; 3] {
+    RecordField::ALL.map(|which| form.field(which).text())
+}
+
+#[test]
+fn a_fresh_record_is_up_over_the_path_and_the_scope_with_three_empty_fields() {
+    let prompt = RecordPrompt::open(DIRECTORY, SCOPE);
+
+    assert!(prompt.is_open());
+    assert_eq!(prompt.form(), Some(&form()));
+    assert_eq!(prompt.form().map(RecordForm::path), Some(DIRECTORY));
+    assert_eq!(prompt.form().map(RecordForm::scope), Some(SCOPE));
+    assert_eq!(texts(&form()), ["", "", ""]);
+    assert_eq!(form().focus(), RecordField::Team);
+    // Nothing is guessable from the scope name, so no field opens complaining
+    // about text nobody has typed yet.
+    for which in RecordField::ALL {
+        assert_eq!(form().field(which).rule(), None);
+    }
+}
+
+#[test]
+fn a_closed_record_is_the_default_and_holds_no_form() {
+    assert_eq!(RecordPrompt::default(), RecordPrompt::Closed);
+    assert!(!RecordPrompt::Closed.is_open());
+    assert_eq!(RecordPrompt::Closed.form(), None);
+}
+
+#[test]
+fn a_character_lands_in_the_focused_field_and_in_no_other() {
+    let typed = typed_into(&form(), "platform");
+    assert_eq!(texts(&typed), ["platform", "", ""]);
+
+    let moved = typed_into(&after_record(press(KeyCode::Tab), &typed), "in review");
+    assert_eq!(texts(&moved), ["platform", "in review", ""]);
+
+    let last = typed_into(&after_record(press(KeyCode::Tab), &moved), "WAR-105");
+    assert_eq!(texts(&last), ["platform", "in review", "WAR-105"]);
+}
+
+#[test]
+fn tab_walks_the_fields_forward_and_back_tab_walks_them_back() {
+    let mut current = form();
+    for expected in [
+        RecordField::ReviewState,
+        RecordField::Label,
+        // Wrapped: there is nothing past the last field but the first one.
+        RecordField::Team,
+    ] {
+        current = after_record(press(KeyCode::Tab), &current);
+        assert_eq!(current.focus(), expected);
+    }
+
+    for expected in [
+        RecordField::Label,
+        RecordField::ReviewState,
+        RecordField::Team,
+    ] {
+        current = after_record(press(KeyCode::BackTab), &current);
+        assert_eq!(current.focus(), expected);
+    }
+}
+
+#[test]
+fn the_arrows_that_the_field_itself_ignores_walk_between_the_fields() {
+    // Down and Up are not text and not editing keys in a one-line field, so
+    // the record can be filled in without a keystroke that could have been a
+    // letter.
+    assert_eq!(
+        after_record(press(KeyCode::Down), &form()).focus(),
+        RecordField::ReviewState
+    );
+    assert_eq!(
+        after_record(press(KeyCode::Up), &form()).focus(),
+        RecordField::Label
+    );
+}
+
+#[test]
+fn moving_between_fields_types_nothing_and_edits_nothing() {
+    let typed = typed_into(&form(), "platform");
+
+    for code in [KeyCode::Tab, KeyCode::BackTab, KeyCode::Up, KeyCode::Down] {
+        let next = after_record(press(code), &typed);
+
+        assert_eq!(
+            texts(&next),
+            ["platform", "", ""],
+            "{code:?} typed something"
+        );
+        assert_eq!(next.field(RecordField::Team).cursor(), 8);
+    }
+}
+
+#[test]
+fn a_refusal_names_the_field_it_is_about_and_puts_the_cursor_in_it() {
+    let typed = typed_into(&form(), "platform");
+    let refused = typed.refused(RecordField::Label, "a label cannot be blank");
+
+    assert_eq!(refused.focus(), RecordField::Label);
+    assert_eq!(
+        refused.field(RecordField::Label).rule(),
+        Some("a label cannot be blank")
+    );
+    assert_eq!(refused.field(RecordField::Team).rule(), None);
+    assert_eq!(
+        texts(&refused),
+        ["platform", "", ""],
+        "a refusal leaves every field's text where it was"
+    );
+}
+
+#[test]
+fn a_rule_line_survives_a_move_and_goes_down_on_an_edit_to_that_field() {
+    let refused = form().refused(RecordField::Team, "a team cannot be blank");
+
+    let walked = after_record(press(KeyCode::Tab), &refused);
+    assert_eq!(
+        walked.field(RecordField::Team).rule(),
+        Some("a team cannot be blank"),
+        "walking off the field left the text just as blank"
+    );
+
+    let back = after_record(press(KeyCode::BackTab), &walked);
+    assert_eq!(
+        back.field(RecordField::Team).rule(),
+        Some("a team cannot be blank")
+    );
+    assert_eq!(
+        after_record(press(KeyCode::Home), &back)
+            .field(RecordField::Team)
+            .rule(),
+        Some("a team cannot be blank"),
+        "a cursor move inside the field is not an edit either"
+    );
+
+    let edited = after_record(press(KeyCode::Char('p')), &back);
+    assert_eq!(edited.field(RecordField::Team).rule(), None);
+    // Only the field that was typed into: a complaint about the label is about
+    // text nobody has touched.
+    let elsewhere = form().refused(RecordField::Label, "a label cannot be blank");
+    let elsewhere = typed_into(&after_record(press(KeyCode::Tab), &elsewhere), "x");
+    assert_eq!(
+        elsewhere.field(RecordField::Label).rule(),
+        Some("a label cannot be blank")
+    );
+}
+
+#[test]
+fn the_focused_field_edits_exactly_as_the_scope_field_does() {
+    let typed = typed_into(&form(), "platfrom");
+    let fixed = [
+        KeyCode::Left,
+        KeyCode::Left,
+        KeyCode::Left,
+        KeyCode::Delete,
+        KeyCode::Right,
+        KeyCode::Char('r'),
+        KeyCode::End,
+        KeyCode::Char('!'),
+    ]
+    .iter()
+    .fold(typed, |current, code| after_record(press(*code), &current));
+
+    assert_eq!(texts(&fixed), ["platform!", "", ""]);
+    assert_eq!(fixed.field(RecordField::Team).cursor(), 9);
+}
+
+#[test]
+fn esc_closes_and_enter_submits_from_whichever_field_is_focused() {
+    let mut current = typed_into(&form(), "platform");
+
+    for _ in RecordField::ALL {
+        assert_eq!(
+            record_edit_for(press(KeyCode::Esc), &current),
+            RecordEdited::Close
+        );
+        assert_eq!(
+            record_edit_for(press(KeyCode::Enter), &current),
+            RecordEdited::Submit,
+            "blankness is the caller's refusal, not this module's"
+        );
+        current = after_record(press(KeyCode::Tab), &current);
+    }
+}
+
+#[test]
+fn nothing_but_enter_submits_and_nothing_but_esc_closes_in_the_record() {
+    for code in BINDINGS.into_iter().chain([
+        KeyCode::Backspace,
+        KeyCode::Delete,
+        KeyCode::BackTab,
+        KeyCode::Left,
+        KeyCode::Right,
+    ]) {
+        let outcome = record_edit_for(press(code), &form());
+
+        assert_ne!(outcome, RecordEdited::Submit, "{code:?} should not submit");
+        assert_ne!(outcome, RecordEdited::Close, "{code:?} should not close");
+    }
+}
+
+#[test]
+fn a_chord_or_a_control_character_is_not_text_in_the_record_either() {
+    let before = typed_into(&form(), "platform");
+
+    for modifiers in [
+        KeyModifiers::CONTROL,
+        KeyModifiers::ALT,
+        KeyModifiers::SUPER,
+        KeyModifiers::HYPER,
+        KeyModifiers::META,
+    ] {
+        let key = KeyEvent::new(KeyCode::Char('u'), modifiers);
+
+        assert_eq!(
+            record_edit_for(key, &before),
+            RecordEdited::Open(before.clone()),
+            "{modifiers:?} makes `u` a command, not a letter"
+        );
+    }
+
+    assert_eq!(
+        record_edit_for(press(KeyCode::Char('\u{7}')), &before),
+        RecordEdited::Open(before.clone())
+    );
+    assert_eq!(
+        after_record(
+            KeyEvent::new(KeyCode::Char('W'), KeyModifiers::SHIFT),
+            &before
+        )
+        .field(RecordField::Team)
+        .text(),
+        "platformW",
+        "shift still types"
+    );
+}
+
+#[test]
+fn releases_and_repeats_change_nothing_in_the_record() {
+    let before = typed_into(&form(), "platform");
+
+    for code in [
+        KeyCode::Char('s'),
+        KeyCode::Tab,
+        KeyCode::Backspace,
+        KeyCode::Enter,
+        KeyCode::Esc,
+    ] {
+        for kind in [KeyEventKind::Release, KeyEventKind::Repeat] {
+            let event = KeyEvent::new_with_kind_and_state(
+                code,
+                KeyModifiers::NONE,
+                kind,
+                KeyEventState::NONE,
+            );
+
+            assert_eq!(
+                record_edit_for(event, &before),
+                RecordEdited::Open(before.clone()),
+                "{kind:?} of {code:?} should do nothing"
+            );
+        }
+    }
+}
+
+#[test]
+fn no_key_ever_changes_the_path_or_the_scope_being_recorded() {
+    // Both are settled by the prompt that came before this one: the record
+    // written from here has to be the one the pact names.
+    let before = form().refused(RecordField::Team, "a team cannot be blank");
+
+    for code in BINDINGS.into_iter().chain([
+        KeyCode::Backspace,
+        KeyCode::Delete,
+        KeyCode::Left,
+        KeyCode::Right,
+        KeyCode::Home,
+        KeyCode::End,
+        KeyCode::BackTab,
+    ]) {
+        let next = after_record(press(code), &before);
+
+        assert_eq!(next.path(), DIRECTORY);
+        assert_eq!(next.scope(), SCOPE);
+    }
 }
