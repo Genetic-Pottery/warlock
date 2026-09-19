@@ -59,7 +59,7 @@ use check::check;
 use clipboard::{Clip, Clipboard};
 use config::configure;
 use editing::edit_press;
-use edits::{scope_add, scope_remove, unpact};
+use edits::{Flags, scope_add, scope_remove, unpact};
 use error::Error;
 use input::{Action, Drag, MouseAction, Pressed, drag_after, mouse_action, press_for};
 use key::{key_add, key_forget, key_list, key_use};
@@ -246,6 +246,23 @@ enum ScopeCommand {
         /// The scope to write, lower-cased before it is judged.
         #[arg(value_name = "SCOPE")]
         scope: String,
+        // Optional to clap and required by warlock, because which it is
+        // depends on whether the manifest already records the name: a
+        // `required = true` here would refuse the flagless run that writes an
+        // already-recorded scope, and clap has not read `.warlock/pacts.toml`.
+        // Judged in [`mod@edits`], past the boundary, where what the manifest
+        // holds may be looked at. Values are stored exactly as typed — what a
+        // team, a review state or a label may be belongs to somebody else's
+        // tracker.
+        /// The team a new scope's reviews belong to.
+        #[arg(long, value_name = "TEAM")]
+        team: Option<String>,
+        /// The review state a new scope's issues are routed to.
+        #[arg(long, value_name = "REVIEW_STATE")]
+        review_state: Option<String>,
+        /// The label a new scope's issues carry.
+        #[arg(long, value_name = "LABEL")]
+        label: Option<String>,
     },
     #[command(
         about = "Clear the scope on a pacted directory.",
@@ -393,7 +410,21 @@ fn main() -> ExitCode {
         // is clap's and stops here — each arm is one call into [`mod@edits`],
         // with no work done in this match.
         Some(Command::Scope { command }) => match command {
-            ScopeCommand::Add { path, scope } => scope_add(&path, &scope),
+            ScopeCommand::Add {
+                path,
+                scope,
+                team,
+                review_state,
+                label,
+            } => scope_add(
+                &path,
+                &scope,
+                Flags {
+                    team: team.as_deref(),
+                    review_state: review_state.as_deref(),
+                    label: label.as_deref(),
+                },
+            ),
             ScopeCommand::Remove { path } => scope_remove(&path),
         },
         // The key store, dispatched here for `config`'s reasons and with one
@@ -452,6 +483,15 @@ const fn status_for(outcome: &Result<(), Error>) -> u8 {
         // beside the 4 rather than under the catch-all, and it is the number a
         // shell already spells an interrupted process with.
         Err(Error::Cancelled) => CANCELLED,
+        // Everything else, and that includes `warlock scope add`'s three
+        // refusals about a `[[scope]]` record — deliberately, rather than for
+        // want of somewhere to put them. A **1** and not clap's **2**: which
+        // flags a run needs depends on what the manifest already records, so
+        // the rule is warlock's to word rather than a command line clap could
+        // have parsed, and a scope name the engine refuses already spends this
+        // register. Not a **3** either — that one is the sigil boundary's
+        // alone, and a script reading it as "ask for a sigil" would be sent to
+        // `warlock config` over a missing `--team`.
         Err(_) => 1,
     }
 }

@@ -18,7 +18,7 @@ repaint.
 | `warlock fresh [path]` | The same for the fresh ones | nothing |
 | `warlock check <path>` | Say which scope covers `path`, where work under it is filed, what this machine holds, and whether the two meet | nothing |
 | `warlock unpact <path>` | Drop the pact on a directory and every pact below it | one manifest write |
-| `warlock scope add <path> <scope>` | Write a scope onto a pacted directory | one manifest write |
+| `warlock scope add <path> <scope>` | Write a scope onto a pacted directory, and — `--team`, `--review-state`, `--label` — the `[[scope]]` record routing it, when nothing records the name yet | one manifest write |
 | `warlock scope remove <path>` | Clear the scope on a pacted directory | one manifest write |
 | `warlock pact <path>` | Describe a directory and everything below it, a `WARLOCK.md` each | a model pass per directory |
 | `warlock refresh <path>` | The same over only the directories that are not fresh | a model pass per stale directory |
@@ -222,6 +222,60 @@ not hold, what is being refused is the blast radius rather than the place — so
 it is an ordinary **1**, and the sentence offers the road that needs no sigil:
 un-pact the parts you hold.
 
+`scope add` has two refusals of its own beside the boundary's, both of them
+about the `[[scope]]` record rather than the place. `--team`, `--review-state`
+and `--label` are that record's three values, and whether they are required is a
+fact about the manifest rather than about the command line: a scope name nothing
+records yet is written with all three or not at all, and a name that already has
+a record takes none of them. Both refusals are an ordinary **1** and both leave
+the file byte-identical — not the 3, which is the sigil boundary's alone and
+would send a script to `warlock config` over a missing `--team`.
+
+A new name with a record is one manifest write and not two. The scope on the
+pact and the `[[scope]]` record are built together and saved once, so no run
+leaves a name on a pact with nothing to route it, and there is nothing to undo
+when the second half is the half that fails. The refusal names every flag that
+was left out, so the command is retyped once rather than three times:
+
+```sh
+$ warlock scope add src platform --team 'Platform'
+warlock: nothing records `platform` yet, so nothing was written: writing a scope by that name needs a team, a review state and a label, given as `--review-state` and `--label`
+```
+
+The same refusal, worded for what actually happened, when a flag was given a
+value that holds nothing: a flag nobody passed and a flag passed `''` are
+different mistakes, and one sentence for both would send somebody looking for a
+shell problem they do not have.
+
+```sh
+$ warlock scope add src platform --team ' ' --review-state 'In Review' --label ''
+warlock: `--team` and `--label` cannot be blank, so nothing was written
+```
+
+Not blank is the whole rule. A team, a review state and a label belong to
+somebody else's tracker, so warlock judges blankness on a trimmed copy and
+stores the string exactly as it was typed — nothing is trimmed, folded or
+checked against a list of review states warlock does not have. Only the scope
+*name* is lower-cased and judged, by the same rule the panel's `s` key uses, and
+the record is filed under that folded name.
+
+The other way round, a name the file already records is the flagless run and
+only that:
+
+```sh
+$ warlock scope add src data-plane
+warlock: src is scoped `data-plane`
+
+$ warlock scope add src data-plane --team 'Data Plane'
+warlock: `data-plane` already has a record in `.warlock/pacts.toml`, and warlock does not rewrite one: run without `--team`, `--review-state` and `--label` to write the scope, or edit the file to change the record
+```
+
+A value handed to a name that already routes would be a value dropped on the
+floor, which is why it is refused rather than ignored. Warlock does not rewrite,
+merge or delete a record from here at all: the file is the road to changing one.
+A scope name already in use with no record stays legal and stays unrouted —
+`scope add` offers nothing about the names it did not just create.
+
 ## Running
 
 `pact` and `refresh` are the two subcommands that spend anything: minutes, one
@@ -271,7 +325,7 @@ beside and renamed over, so what is on disk is always a whole file.
 | Status | What it means |
 | --- | --- |
 | `0` | Completed. The question was answered or the write happened, whatever the answer turned out to be — an empty listing and a scope closed to this machine included |
-| `1` | Warlock could not do it: the repository will not resolve, the manifest will not parse or will not save, the path has no repository-relative spelling. The line on stderr is the thing to go and read |
+| `1` | Warlock could not do it, or would not: the repository will not resolve, the manifest will not parse or will not save, the path has no repository-relative spelling, a scope name nothing records yet was given without all three record flags or with a blank one, a name that already has a record was given any of them. The line on stderr is the thing to go and read |
 | `2` | The command line was never a request. Clap's status and its wording, for a word warlock has no place for |
 | `3` | Refused, with nothing spent: this machine's sigils do not open the scope covering the path. No byte moved, retrying changes nothing, and the road out is `warlock config` |
 | `4` | Completed with failures: a run wrote the documents it could and saved the manifest, and the lines above the count name the directories that did not come out of it |

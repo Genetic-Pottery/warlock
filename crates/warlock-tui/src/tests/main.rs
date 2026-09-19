@@ -303,6 +303,12 @@ fn the_two_scope_writes_are_a_noun_and_a_verb_rather_than_two_words_run_together
             command: ScopeCommand::Add {
                 path: PathBuf::from("crates/engine"),
                 scope: "data-plane".to_owned(),
+                // Absent is what clap hands over for a flag nobody passed;
+                // whether that is legal is the manifest's answer and is asked
+                // past the boundary, not here.
+                team: None,
+                review_state: None,
+                label: None,
             }
         })
     );
@@ -318,6 +324,133 @@ fn the_two_scope_writes_are_a_noun_and_a_verb_rather_than_two_words_run_together
     );
 }
 
+// `warlock scope add crates/engine data-plane` with whichever of the three
+// record flags a case is about, so each assertion below reads as the flags and
+// not as the two positionals under them.
+fn added(team: Option<&str>, review_state: Option<&str>, label: Option<&str>) -> Command {
+    Command::Scope {
+        command: ScopeCommand::Add {
+            path: PathBuf::from("crates/engine"),
+            scope: "data-plane".to_owned(),
+            team: team.map(str::to_owned),
+            review_state: review_state.map(str::to_owned),
+            label: label.map(str::to_owned),
+        },
+    }
+}
+
+#[test]
+fn the_three_record_flags_reach_the_add_exactly_as_they_were_typed() {
+    assert_eq!(
+        parse(&[
+            "scope",
+            "add",
+            "crates/engine",
+            "data-plane",
+            "--team",
+            "Data Plane",
+            "--review-state",
+            "In Review",
+            "--label",
+            "area/data-plane",
+        ])
+        .unwrap()
+        .command,
+        Some(added(
+            Some("Data Plane"),
+            Some("In Review"),
+            Some("area/data-plane")
+        ))
+    );
+    // The same invocation with the flags ahead of the positionals, because a
+    // person retyping the command from the refusal that named them will put
+    // them wherever the cursor was.
+    assert_eq!(
+        parse(&[
+            "scope",
+            "add",
+            "--label",
+            "area/data-plane",
+            "--review-state",
+            "In Review",
+            "--team",
+            "Data Plane",
+            "crates/engine",
+            "data-plane",
+        ])
+        .unwrap()
+        .command,
+        Some(added(
+            Some("Data Plane"),
+            Some("In Review"),
+            Some("area/data-plane")
+        ))
+    );
+    // Nothing is trimmed and nothing is judged here, for the scope
+    // positional's reason: a team, a review state and a label belong to
+    // somebody else's tracker, and blank is warlock's refusal to word, past
+    // the boundary, with the file untouched.
+    assert_eq!(
+        parse(&[
+            "scope",
+            "add",
+            "crates/engine",
+            "data-plane",
+            "--team",
+            "  ",
+            "--review-state",
+            "",
+            "--label",
+            " area/data-plane ",
+        ])
+        .unwrap()
+        .command,
+        Some(added(Some("  "), Some(""), Some(" area/data-plane ")))
+    );
+    // And a subset parses, because whether the three are required depends on
+    // what `.warlock/pacts.toml` already records and clap has not read it. A
+    // `required = true` here would refuse the flagless run that writes an
+    // already-recorded scope.
+    assert_eq!(
+        parse(&[
+            "scope",
+            "add",
+            "crates/engine",
+            "data-plane",
+            "--team",
+            "Data Plane",
+        ])
+        .unwrap()
+        .command,
+        Some(added(Some("Data Plane"), None, None))
+    );
+}
+
+#[test]
+fn a_record_flag_wants_a_value_on_an_add_and_buys_no_other_word() {
+    // Each of the three takes a value, so the flag on its own is a value that
+    // went missing rather than a switch; a clear records nothing, so none of
+    // them is a word `remove` knows; and having passed them buys nothing at
+    // the boundary — `--force`, `--yes` and `--json` are refused beside a
+    // filled-in record exactly as they are without one.
+    let malformed: [&[&str]; 8] = [
+        &["scope", "add", "crates", "web", "--team"],
+        &["scope", "add", "crates", "web", "--review-state"],
+        &["scope", "add", "crates", "web", "--label"],
+        &["scope", "remove", "crates", "--team", "Data Plane"],
+        &["scope", "remove", "crates", "--review-state", "In Review"],
+        &["scope", "add", "crates", "web", "--team", "Web", "--force"],
+        &["scope", "add", "crates", "web", "--team", "Web", "--yes"],
+        &["scope", "add", "crates", "web", "--team", "Web", "--json"],
+    ];
+
+    for args in malformed {
+        let error = parse(args).unwrap_err();
+        assert!(error.use_stderr(), "{args:?}");
+        assert_eq!(error.exit_code(), 2, "{args:?}");
+    }
+}
+
 #[test]
 fn a_scope_is_taken_as_it_was_typed_and_judged_by_the_engine_rather_than_by_clap() {
     // Both of these are refusals — one is not a scope, the other is the
@@ -331,6 +464,9 @@ fn a_scope_is_taken_as_it_was_typed_and_judged_by_the_engine_rather_than_by_clap
                 command: ScopeCommand::Add {
                     path: PathBuf::from("crates"),
                     scope: typed.to_owned(),
+                    team: None,
+                    review_state: None,
+                    label: None,
                 }
             }),
             "{typed:?}"
@@ -647,23 +783,30 @@ fn no_argument_the_parser_accepts_gets_a_write_past_the_boundary() {
     // The absence stated over the parser itself rather than over a list of
     // spellings somebody thought of: `--force` is refused in the test above,
     // and this says there is no word at all — however spelled — that a write
-    // takes besides its path, its scope and clap's own `--help`. The one
-    // road past a boundary is `warlock config`, and an option here would be
-    // a second one.
+    // takes besides its positionals, clap's own `--help`, and the three an
+    // `add` writes a `[[scope]]` record from. Those three say where a new
+    // scope's issues go; none of them reaches the boundary, which is asked
+    // and answered before any of them is read. The one road past it is
+    // `warlock config`, and an option here would be a second one.
     for names in [
         vec!["unpact"],
         vec!["scope"],
         vec!["scope", "add"],
         vec!["scope", "remove"],
     ] {
+        let allowed: &[&str] = if names == ["scope", "add"] {
+            &["help", "team", "review-state", "label"]
+        } else {
+            &["help"]
+        };
         let mut command = subcommand(&names);
         // The positionals are the path, and the scope on an `add`; every
-        // other argument a write accepts has to be clap's own help.
+        // other argument a write accepts has to be one of those.
         for argument in command.get_arguments().filter(|a| !a.is_positional()) {
-            assert_eq!(
-                argument.get_long(),
-                Some("help"),
-                "{names:?} takes an option other than clap's help"
+            let long = argument.get_long().unwrap_or_default();
+            assert!(
+                allowed.contains(&long),
+                "{names:?} takes `--{long}`, which is neither clap's help nor a record flag"
             );
         }
 
