@@ -1045,9 +1045,13 @@ impl<S: Screen, P: Wired + Agent, C: Converses, B: Clip> Session<S, P, C, B> {
             // The whole of that last one happens here, on this thread, between two
             // frames: no worker, no channel, no account and no reload, because a
             // scope is one string written into one entry of a file already in this
-            // thread's hand (see `mod@scoping`). What comes back is the prompt
-            // from here on — down for a submit that was answered, still up over
-            // the text for one the engine refused. See `scoping::scope_edit`.
+            // thread's hand (see `mod@scoping`). What comes back is both windows
+            // from here on: the scope one down for a submit that was answered and
+            // still up over the text for one the engine refused, and the record
+            // one up in place of a write when the name submitted has no
+            // `[[scope]]` record yet. This loop holds nowhere to put that second
+            // window yet, so it is dropped here and a new name is not written at
+            // all until the loop grows the field. See `scoping::scope_edit`.
             Pressed::Scope(edited) => {
                 self.prompt = scope_edit(
                     &mut self.app,
@@ -1055,7 +1059,8 @@ impl<S: Screen, P: Wired + Agent, C: Converses, B: Clip> Session<S, P, C, B> {
                     &self.scope.repo_root,
                     &self.prompt,
                     edited,
-                );
+                )
+                .scope;
             }
             // Somebody typing into the other window: a character more or less in
             // the path, the window abandoned, or — on Enter — the document
