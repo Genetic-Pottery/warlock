@@ -3,7 +3,7 @@
 
 # src
 
-The warlock-engine crate's core: the model-call boundary, tree loading and hashing, the two-phase pact engine that describes then grants freshness, and WARLOCK.md/pacts.toml generation and repair.
+Engine library source: builds a module tree from a repo walk and pact manifest, decides per-directory freshness, and drives documentation generation through an Agent boundary. Also holds hashing, scope/sigil/key configuration, routing, and CLAUDE.md writing.
 
 ## Files
 
@@ -16,28 +16,30 @@ The warlock-engine crate's core: the model-call boundary, tree loading and hashi
 - `fitting.rs` (11.1 KB) — Snapshot::take and one_file build agent::Request payloads for a directory or single file, eliding/omitting per PER_FILE_BYTE_CAP; Problem/Omission report skipped files. · declares `PER_FILE_BYTE_CAP`, `Snapshot`, `Measured`, `take`, `directory`, `files`, `synthesis_request`, `accept_synthesis`, `mend`, `render`, `carried_bytes`, `one_file`, `byte_count`, `Problem`, `Omission`, `elided_or_whole` (+5)
 - `hash.rs` (9.0 KB) — Digests: subtree_hash for a directory's paths+contents, file_hash/bytes_hash for one file's bytes, line_hash for a [pact.lines] entry, carry_hash for early-cutoff comparison; Error variants Walk/Read/Path. · declares `file_hash`, `bytes_hash`, `line_hash`, `subtree_hash`, `carry_hash`, `length`, `Error`, `HASH_CONTEXT`, `FILE_CONTEXT`, `LINE_CONTEXT`, `CARRY_HASH_CONTEXT`, `update_section`, `update_prefixed`, `fmt`, `source`
 - `ignores.rs` (3.1 KB) — is_ignored(path) checks whether a directory itself (not its contents) is excluded by .warlockignore, via a one-deep walk of its parent (walk_one_deep); FILENAME = ".warlockignore". · declares `FILENAME`, `is_ignored`, `walk_one_deep`
+- `keys.rs` (11.5 KB) — Persistent key store at ~/.warlock/keys.toml: keys_path, load_key_names, load_key, save_key, forget_key (returns Forgotten), atomic owner-only (0600) writes; Error enum with TOML line reporting (Unparseable). · declares `keys_path`, `load_key_names`, `load_key`, `save_key`, `forget_key`, `Forgotten`, `Error`, `Unparseable`, `KEY_DIR`, `KEY_FILE`, `OWNER_ONLY`, `held`, `write`, `owner_only`, `read`, `Config` (+3)
 - `languages.rs` (25.3 KB) — Per-language table and Language/Comments/Block types plus declared_names, without_comments, and elide, driving comment-stripping and test-body elision by extension. · declares `Block`, `Comments`, `Language`, `declared_names`, `without_comments`, `Elided`, `elide`, `SLASHES`, `HASH`, `is_test_file`, `declares`, `VISIBILITY`, `KEYWORDS`, `outside_blocks`, `closes_after`, `without_visibility` (+8)
-- `lib.rs` (2.1 KB) — Crate root: declares engine modules (agent, briefs, claude_md, clock, decide, document, fitting, hash, load, manifest, pact, scope, sigils, state, tree) and re-exports their public items.
+- `lib.rs` (2.5 KB) — Crate root of the engine library: declares the modules (agent, briefs, decide, document, fitting, pact, route, scope, sigils, tree, etc.) and re-exports their public API, e.g. Tree, Node, Manifest, Route, pact_subtree, load_tree.
 - `load.rs` (15.0 KB) — Builds the module Tree from a repo walk and pact manifest: load_tree, repository_root, and the Loaded/Problem/Error types reporting hash and scope failures. · declares `load_tree`, `Loaded`, `Problem`, `ProblemCause`, `repository_root`, `Error`, `GIT_DIR`, `fmt`, `source`, `walk`, `mark_excluded`, `Directory`, `Builder`, `node`, `children_of`, `state_of` (+2)
-- `manifest.rs` (21.2 KB) — Manifest and PactEntry: pacts.toml schema (SCHEMA_VERSION), atomic save/load, module/document path conversion, and per-entry scope, grant and line hashes. · declares `ROOT_MODULE`, `SCHEMA_VERSION`, `Manifest`, `new`, `with_entries`, `version`, `entries`, `push`, `entry`, `to_toml_string`, `from_toml_str`, `save`, `load`, `PactEntry`, `with_grant`, `with_carry_hash` (+28)
-- `pact.rs` (55.8 KB) — pact.rs — pact_subtree, refresh_subtree, pact_directory, unpact_subtree/unpact_ignored, closed_scopes_at_or_below, view_file, Observer/Pacted/PactedSubtree/Failure/Error: the two-phase describe-then-grant engine writing WARLOCK.md and pacts.toml entries. · declares `pact_subtree`, `refresh_subtree`, `unpact_subtree`, `unpact_ignored`, `closed_scopes_at_or_below`, `pact_directory`, `pactable_directories`, `view_file`, `Observer`, `Pacting`, `Unwatched`, `PactedSubtree`, `Pacted`, `Repaired`, `Viewed`, `Unviewable` (+41)
+- `manifest.rs` (29.5 KB) — Pact manifest model and persistence: Manifest, PactEntry, ScopeRecord, Error, ScopeFault; TOML load/save (pacts.toml, atomic write), schema version check, and to_manifest_path/from_manifest_path conversion. · declares `ROOT_MODULE`, `SCHEMA_VERSION`, `Manifest`, `new`, `with_entries`, `rebuilt_with`, `with_scopes`, `version`, `entries`, `scopes`, `push`, `entry`, `to_toml_string`, `from_toml_str`, `save`, `load` (+38)
+- `pact.rs` (56.1 KB) — Drives documenting directories: pact_subtree, refresh_subtree, unpact_subtree, unpact_ignored, pact_directory, view_file; Observer trait, per-file description with retries, manifest rewrite, and the Error/Failure types. · declares `pact_subtree`, `refresh_subtree`, `unpact_subtree`, `unpact_ignored`, `closed_scopes_at_or_below`, `pact_directory`, `pactable_directories`, `view_file`, `Observer`, `Pacting`, `Unwatched`, `PactedSubtree`, `Pacted`, `Repaired`, `Viewed`, `Unviewable` (+41)
+- `route.rs` (12.9 KB) — Resolves which scope, ScopeRecord and bound key cover a path: resolve_route builds a Route, route_facts gathers RouteFacts without failing; Error enum has Unscoped, Unrecorded, Unbound, Dangling variants. · declares `resolve_route`, `route_facts`, `Route`, `scope`, `record`, `key`, `opens`, `RouteFacts`, `stored`, `Error`, `fmt`, `source`
 - `scope.rs` (8.7 KB) — Defines scope/sigil validation (validate_scope, validate_sigil, Rule), scope_covering for nearest-ancestor lookup, and scope_opens_to for wildcard-aware membership. · declares `RULES`, `Rule`, `validate_scope`, `validate_sigil`, `scope_covering`, `valid_scope`, `scope_opens_to`, `MAXIMUM_CHARACTERS`, `WILDCARD`, `fmt`, `at_or_above`, `is_scope_character`, `is_separator`
-- `sigils.rs` (7.5 KB) — sigils.rs: per-repo sigil storage under ~/.warlock/<project_directory>/config.toml — project_directory, sigils_path, load_sigils, save_sigils, Error · declares `project_directory`, `sigils_path`, `load_sigils`, `save_sigils`, `Error`, `SIGIL_DIR`, `SIGIL_FILE`, `PROJECT_CONTEXT`, `DIGEST_CHARACTERS`, `MAXIMUM_NAME_CHARACTERS`, `UNNAMED_ROOT`, `project_dir`, `readable_name`, `Config`, `fmt`, `source`
+- `sigils.rs` (11.2 KB) — Per-project machine-side config under ~/.warlock/<name>-<digest>/config.toml: project_directory, sigils_path, load/save_sigils, load/save_key_binding, atomic write, and the Error enum (NotFound, Io, Syntax, Serialize, Name). · declares `project_directory`, `sigils_path`, `load_sigils`, `load_key_binding`, `save_key_binding`, `save_sigils`, `Error`, `SIGIL_DIR`, `SIGIL_FILE`, `PROJECT_CONTEXT`, `DIGEST_CHARACTERS`, `MAXIMUM_NAME_CHARACTERS`, `UNNAMED_ROOT`, `project_dir`, `read`, `held` (+5)
 - `state.rs` (1.0 KB) — NodeState enum (Unpacted, PactedStale, PactedFresh) with ALL and is_pacted(); the freshness/pacted status with no null case. · declares `NodeState`, `ALL`, `is_pacted`
 - `tree.rs` (7.7 KB) — tree.rs — Node and Tree types (path, document, state, ignored, scope, children, files), DepthFirst walk iterator, StateCounts, and Tree::find/counts/walk. · declares `Node`, `new`, `with_children`, `with_files`, `with_ignored`, `is_ignored`, `with_scope`, `is_leaf`, `IntoDocument`, `Tree`, `root_path`, `walk`, `counts`, `find`, `DepthFirst`, `StateCounts` (+6)
 - `walk.rs` (5.8 KB) — Shared walker over the filesystem: subtree_files, pactable_directories and own gather files/child WARLOCK.md documents so hash, pact and generation agree on content · declares `DOCUMENT_FILE`, `MANIFEST_DIR`, `listing`, `honouring_ignores`, `subtree_files`, `pactable_directories`, `Own`, `own`, `Error`, `OWN_DEPTH`, `PROSE_EXTENSIONS`, `usable`, `relative`, `is_prose`
 
 ## Structure
 
-- lib.rs — Crate root: declares engine modules (agent, briefs, claude_md, clock, decide, document, fitting, hash, load, manifest, pact, scope, sigils, state, tree) and re-exports their public items.
-- load.rs builds the module Tree from a repo walk and pact manifest via load_tree, repository_root.
-- walk.rs's subtree_files and pactable_directories are shared so hash, pact and generation agree on content.
-- pact.rs's pact_subtree/refresh_subtree/pact_directory write WARLOCK.md via document.rs and pacts.toml entries via manifest.rs.
-- document.rs's fitting and rendering draw on fitting.rs Snapshot/one_file requests and languages.rs elision to build agent.rs Requests.
-- decide.rs's decide_state maps a manifest.rs PactEntry plus a computed hash.rs hash to a state.rs NodeState.
-- tree.rs's Node/Tree carry state.rs NodeState and scope.rs scope per node, walked by DepthFirst.
-- scope.rs's scope_covering and scope_opens_to are used against sigils.rs's per-repo sigil storage to settle boundary rules.
-- briefs.rs's load_briefs reads .warlock/briefs.toml, feeding document.rs's synthesis and file prompts.
-- ignores.rs's is_ignored walks .warlockignore one directory deep, consulted by load.rs and pact.rs before descending.
-- claude_md.rs's write_claude_md splices the warlock section into CLAUDE.md between markers, called after pact.rs grants.
-- clock.rs's now_rfc3339 timestamps manifest.rs entries and document.rs renders.
+- lib.rs is the crate root: it declares the modules and re-exports their public API such as Tree, Node, Manifest, Route, pact_subtree and load_tree.
+- load_tree in load.rs builds the Tree of Node values from a repo walk plus the pact manifest, reporting hash and scope failures.
+- decide_state maps an optional PactEntry and a computed hash to a NodeState, which state.rs defines as Unpacted, PactedStale or PactedFresh.
+- walk.rs gathers files and child WARLOCK.md documents so that hash, pact and generation agree on content.
+- hash.rs supplies subtree_hash, file_hash, line_hash and carry_hash, which feed freshness decisions and early-cutoff comparison.
+- pact.rs drives documentation: pact_subtree, refresh_subtree and pact_directory describe files through the Agent trait and rewrite the manifest.
+- fitting.rs builds agent::Request payloads from a directory or one file via Snapshot::take and one_file, applying PER_FILE_BYTE_CAP.
+- document.rs holds the Fill model, prompts, defect checking, rendering and the mend() repair pass that produce WARLOCK.md.
+- languages.rs drives comment stripping and test-body elision by extension via without_comments and elide.
+- route.rs resolves the covering scope, ScopeRecord and bound key for a path using scope.rs lookups and sigils.rs and keys.rs configuration.
+- ignores.rs checks .warlockignore for a directory via is_ignored, and briefs.rs loads the brief directory setting from .warlock/briefs.toml.
+- claude_md.rs writes the warlock section into CLAUDE.md, and clock.rs renders timestamps via now_rfc3339.

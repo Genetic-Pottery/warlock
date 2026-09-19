@@ -3,7 +3,7 @@
 
 # warlock-engine
 
-warlock-engine is the core crate: the Agent model-call boundary, tree loading and hashing, the two-phase pact engine that describes then grants freshness, and WARLOCK.md/pacts.toml generation and repair.
+Engine crate of the workspace: the library that builds a module tree from a repo walk and pact manifest, decides per-directory freshness, and drives documentation generation through an Agent boundary. Owns the JSON document contract.
 
 ## Files
 
@@ -11,8 +11,9 @@ warlock-engine is the core crate: the Agent model-call boundary, tree loading an
 
 ## Directories
 
-- `src/` — The crate's modules: agent, briefs, claude_md, clock, decide, document, fitting, hash, ignores, languages, lib, load, manifest, pact, scope, sigils, state, tree, walk.
+- `src/` — All engine library source: tree loading, freshness decisions, hashing, pact/refresh drivers, document fill and rendering, scope/sigil/key config, routing, and CLAUDE.md writing. Start here for any engine question.
 
 ## Structure
 
-- Cargo.toml: engine crate manifest — deps blake3, ignore, serde, serde_json, toml; owns the JSON document contract; dev-deps serde_test, tempfile; lints from workspace
+- Cargo.toml declares the crate's dependencies (blake3, ignore, serde, serde_json, toml) and inherits lints from the workspace.
+- Dev-dependencies serde_test and tempfile support tests; the manifest states that this crate owns the JSON document contract.

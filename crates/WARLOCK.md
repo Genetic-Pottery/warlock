@@ -3,9 +3,13 @@
 
 # crates
 
-The workspace's two crates: warlock-engine, the core library for tree loading, hashing, the pact engine and document generation, and warlock-tui, the front end and CLI that builds the `warlock` binary atop it.
+Cargo workspace crates directory holding the engine library (module tree, freshness, JSON document contract, documentation generation) and the front-end crate (the `warlock` binary, CLI subcommands, terminal UI, claude agent).
 
 ## Directories
 
-- `warlock-engine/` — Core crate — Agent boundary, tree loading and hashing, the two-phase pact engine, WARLOCK.md/pacts.toml generation and repair; go here for freshness logic.
-- `warlock-tui/` — Builds the `warlock` binary and warlock_tui library — panel state, boundary/scope enforcement, agent chat, terminal rendering; go here for CLI and UI behavior.
+- `warlock-engine/` — Engine library crate: tree loading, freshness decisions, hashing, pact/refresh drivers, document fill and rendering, config, routing. Go here for core logic and the JSON document contract.
+- `warlock-tui/` — Front-end crate: the `warlock` binary, clap CLI subcommands, ratatui terminal UI, and the claude child-process agent. Go here for command handling, UI behaviour and agent invocation.
+
+## Structure
+
+- warlock-tui depends on warlock-engine for its underlying logic; the engine does not depend on the front-end.
