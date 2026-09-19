@@ -4,11 +4,12 @@ use std::{fs, io};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use tempfile::TempDir;
 use warlock_engine::{
-    Manifest, Node, NodeState, PactEntry, ScopeRecord, Tree, manifest, validate_scope,
+    Manifest, Node, NodeState, PactEntry, ScopeRecord, Tree, manifest, manifest_path,
+    validate_scope,
 };
 use warlock_tui::{App, Edited, ScopeField, ScopePrompt, Sigils, edit_for};
 
-use super::{scope_edit, scope_submit};
+use super::{records_scope, scope_edit, scope_submit, with_scope_and_record_on};
 
 // `super::scope_press` with no boundary in the way, so these tests are about
 // the prompt rather than about being refused. The wildcard rather than
@@ -906,4 +907,163 @@ fn a_refusal_typed_out_can_be_fixed_and_written_without_reopening_the_window() {
 
     assert_eq!(prompt, ScopePrompt::Closed);
     assert_eq!(scope_on(&manifest, "crates/tui"), Some("web"));
+}
+
+/// The three values a record carries, as a caller hands them over.
+const TEAM: &str = "Billing";
+const REVIEW_STATE: &str = "In Review";
+const LABEL: &str = "area/billing";
+
+/// A repository that has been scoped for a while: three pact rows, one of
+/// them already scoped, and the two records of [`records`] — one named by a
+/// pact and one named by none.
+fn recorded() -> Manifest {
+    Manifest::with_entries([
+        entry("crates/engine").with_scope("data-plane"),
+        entry("crates/tui"),
+        entry("."),
+    ])
+    .with_scopes(records())
+}
+
+/// The bytes under `root`, which are what a diff and a hand-reader see.
+fn saved_text(root: &Path) -> String {
+    fs::read_to_string(manifest_path(root)).expect("the saved manifest reads back")
+}
+
+/// The file split where a reader splits it: the header, then one `[[pact]]`
+/// or `[[scope]]` table each, every byte inside a block exactly as written.
+///
+/// The file's closing newline comes off first, so the last block of a file is
+/// the same bytes as that block anywhere else in one — otherwise appending a
+/// record would read as an edit to the record that used to be last.
+fn blocks(text: &str) -> Vec<&str> {
+    text.strip_suffix('\n')
+        .unwrap_or(text)
+        .split("\n\n")
+        .collect()
+}
+
+// The assertion is over the file's text rather than over two `Manifest`
+// values, because the file is committed and hand-read: an equal manifest that
+// saved its rows in another order, or dropped a key it did not understand,
+// would put every row in somebody's diff. This repository has already lost
+// `[[scope]]` records to a rebuild that went through `Manifest::with_entries`,
+// and an in-memory comparison of the part that was written is exactly what
+// would have passed while that happened.
+#[test]
+fn the_write_leaves_every_row_and_record_it_did_not_touch_byte_identical() {
+    let repo = a_repo();
+    let manifest = recorded();
+    let before = manifest.to_toml_string().expect("the fixture serialises");
+
+    let next = with_scope_and_record_on(
+        &manifest,
+        "crates/tui",
+        "billing",
+        TEAM,
+        REVIEW_STATE,
+        LABEL,
+    )
+    .expect("`billing` is recorded by nothing yet");
+    next.save(repo.path()).expect("the manifest saves");
+
+    let after = saved_text(repo.path());
+    assert!(
+        after.ends_with('\n') && !after.ends_with("\n\n"),
+        "the file ends differently from the one it was written over"
+    );
+    let was = blocks(&before);
+    let mut now = blocks(&after);
+
+    // The two blocks this write set out to change: the record it appended,
+    // and the one row it put a scope on.
+    let added = now.pop().expect("the file holds at least one block");
+    assert!(
+        added.starts_with("[[scope]]") && added.contains("name = \"billing\""),
+        "the new record was not appended after everything already in the file: {added:?}"
+    );
+    let edited = now
+        .iter()
+        .position(|block| block.contains("module = \"crates/tui\""))
+        .expect("the edited row is in the file");
+    assert_eq!(
+        now[edited].replace("scope = \"billing\"\n", ""),
+        was[edited],
+        "the edited row came back with more than a scope line on it"
+    );
+
+    assert_eq!(now.len(), was.len(), "the save added or dropped a block");
+    for (index, (was, now)) in was.iter().zip(&now).enumerate() {
+        if index == edited {
+            continue;
+        }
+        assert_eq!(
+            now, was,
+            "block {index} was rewritten by a save that did not set out to touch it"
+        );
+    }
+}
+
+#[test]
+fn the_record_holds_what_was_passed_and_the_edited_row_keeps_its_grant() {
+    let repo = a_repo();
+
+    let next = with_scope_and_record_on(
+        &recorded(),
+        "crates/tui",
+        "billing",
+        TEAM,
+        REVIEW_STATE,
+        LABEL,
+    )
+    .expect("`billing` is recorded by nothing yet");
+    next.save(repo.path()).expect("the manifest saves");
+
+    let written = saved(repo.path()).expect("the save wrote the manifest");
+    assert_eq!(written, next, "what is on disk is not what was handed back");
+    // Exactly as passed: no trimming, folding or judgement of its own, which
+    // is what keeps the name on the record the name written on the pact.
+    assert_eq!(
+        written.scopes().last(),
+        Some(&ScopeRecord::new("billing", TEAM, REVIEW_STATE, LABEL)),
+    );
+    assert_eq!(scope_on(&written, "crates/tui"), Some("billing"));
+
+    let tui = written.entry("crates/tui").expect("the row is still there");
+    assert_eq!(tui.document(), "crates/tui/WARLOCK.md");
+    assert_eq!(tui.granted_hash(), Some(HASH));
+    assert_eq!(tui.granted_at(), Some(AT));
+}
+
+#[test]
+fn a_name_the_manifest_already_records_is_handed_back_nothing() {
+    let manifest = recorded();
+
+    // Every manifest this could return has edited a `[[scope]]` block somebody
+    // hand-wrote — overwritten, merged with what was passed, or dropped for
+    // it. There is no fourth answer, so there is no manifest to hand back.
+    for name in ["data-plane", "third-party"] {
+        assert_eq!(
+            with_scope_and_record_on(&manifest, "crates/tui", name, TEAM, REVIEW_STATE, LABEL),
+            None,
+            "`{name}` is already recorded and a manifest came back anyway",
+        );
+    }
+
+    assert_eq!(manifest.scopes(), records(), "a refusal moved a record");
+    assert_eq!(manifest, recorded(), "a refusal moved the manifest");
+}
+
+#[test]
+fn the_lookup_answers_for_the_names_the_records_spell_and_no_others() {
+    assert!(records_scope(&recorded(), "data-plane"));
+    // Recorded and named by no pact, which is a record all the same: what is
+    // asked here is what the file records, never what the rows carry.
+    assert!(records_scope(&recorded(), "third-party"));
+    assert!(!records_scope(&recorded(), "billing"));
+    // And the same fixture without its records: `crates/engine` carries
+    // `data-plane` and nothing routes it, which is the state this lookup
+    // exists to find.
+    assert!(!records_scope(&pacts(), "data-plane"));
 }
