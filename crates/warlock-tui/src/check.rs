@@ -1,18 +1,26 @@
-//! `warlock check <path>`: which boundary a path sits inside, what this machine
-//! holds, and whether the two meet — printed, and nothing written anywhere.
+//! `warlock check <path>`: which boundary a path sits inside, where work under
+//! it is filed, what this machine holds, and whether the two meet — printed,
+//! and nothing written anywhere.
 //!
-//! Both halves of the answer are the engine's [`scope_covering`] and
-//! [`scope_opens_to`], called once each and neither re-implemented here. That
-//! is the point of the subcommand: the alternative for a script is walking
-//! `.warlock/pacts.toml` upwards by hand, which is the boundary rule written a
-//! second time somewhere it will drift from the first.
+//! The boundary halves of the answer are the engine's [`scope_covering`] and
+//! [`scope_opens_to`], called once each and neither re-implemented here, and
+//! the route is one [`route_facts`] call in its reporting form. That is the
+//! point of the subcommand: the alternative for a script is walking
+//! `.warlock/pacts.toml` upwards by hand, which is the boundary rule and the
+//! `[[scope]]` lookup written a second time somewhere they will drift from the
+//! first. Only the *name* a key is stored under is ever read, so there is no
+//! key value in this module to print.
 //!
 //! A closed scope is an answer, not a failure: `opens` is `false` and the exit
 //! status is 0, which is what makes `warlock check <path> --json | jq -e
 //! '.opens'` the CI recipe, with `jq` and not warlock spending the non-zero
-//! status on the verdict. So is a config that will not read — three-valued for
-//! that reason, because printing `[]` would tell an operator they hold nothing
-//! when the truth is warlock could not read what they hold.
+//! status on the verdict. The same 0 covers every half-finished route — a
+//! scope nobody recorded, nothing bound, a bound name the store has never heard
+//! of — so `warlock check <path> --json | jq -e '.opens and .key_found'` is the
+//! recipe for "may work here and can file the ticket", again on `jq`'s status
+//! and not warlock's. So is a config that will not read — `sigils` is
+//! three-valued for that reason, because printing `[]` would tell an operator
+//! they hold nothing when the truth is warlock could not read what they hold.
 
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
