@@ -7,7 +7,7 @@ use warlock_engine::{
 };
 use warlock_tui::App;
 
-use super::{Opened, scoped_line, unpacted_line, unscoped_line};
+use super::{Flags, Opened, scoped_line, unpacted_line, unscoped_line};
 use crate::error::Error;
 // The other door onto the un-pact rule, pressed here so that the two are
 // held to one answer in one place. See `pressed_p`.
@@ -97,8 +97,24 @@ fn unpact(repo_root: &Path, home: &Path, path: &str) -> Result<String, Error> {
     open(repo_root, home, path)?.unpacted()
 }
 
-fn scope_add(repo_root: &Path, home: &Path, path: &str, scope: &str) -> Result<String, Error> {
-    open(repo_root, home, path)?.scoped(scope)
+fn scope_add(
+    repo_root: &Path,
+    home: &Path,
+    path: &str,
+    scope: &str,
+    flags: Flags<'_>,
+) -> Result<String, Error> {
+    open(repo_root, home, path)?.scoped(scope, flags)
+}
+
+// The three flags a name nothing records has to be given, as one value, so a
+// test about something else says what it is about rather than filling a form.
+fn a_record() -> Flags<'static> {
+    Flags {
+        team: Some("Billing"),
+        review_state: Some("In Review"),
+        label: Some("area/billing"),
+    }
 }
 
 fn scope_remove(repo_root: &Path, home: &Path, path: &str) -> Result<String, Error> {
@@ -383,8 +399,8 @@ fn an_open_boundary_writes_the_scope_and_moves_nothing_else_in_the_file() {
 
     // `docs` carries no scope and nothing above it does, so it is open to a
     // machine that has never run `warlock config`.
-    let said =
-        scope_add(repo.path(), home.path(), "docs", "billing").expect("nothing scopes `docs`");
+    let said = scope_add(repo.path(), home.path(), "docs", "billing", a_record())
+        .expect("nothing scopes `docs`");
 
     assert_eq!(said, "docs is scoped `billing`");
     assert_eq!(status_for(&Ok(())), 0);
@@ -422,8 +438,14 @@ fn a_scope_that_replaces_another_says_whose_boundary_it_moved() {
     let home = a_dir();
     holding(home.path(), repo.path(), &["data-plane"]);
 
-    let said = scope_add(repo.path(), home.path(), "crates/engine", "billing")
-        .expect("the machine holds the scope covering this directory");
+    let said = scope_add(
+        repo.path(),
+        home.path(),
+        "crates/engine",
+        "billing",
+        a_record(),
+    )
+    .expect("the machine holds the scope covering this directory");
 
     // The mitigation the un-pact line is: a boundary that moved is named,
     // because a script that quietly redrew somebody else's says whose.
@@ -448,7 +470,7 @@ fn what_was_given_is_folded_before_it_is_judged_and_stored() {
     let repo = a_repository();
     let home = a_dir();
 
-    let said = scope_add(repo.path(), home.path(), "docs", "Data-Plane")
+    let said = scope_add(repo.path(), home.path(), "docs", "Data-Plane", a_record())
         .expect("the fold happened before the judge");
 
     assert!(validate_scope("Data-Plane").is_err());
@@ -536,7 +558,17 @@ fn both_scope_writes_leave_the_records_where_they_found_them() {
     let before = record_bytes(repo.path());
     assert!(before.contains("third-party"), "the fixture has records");
 
-    scope_add(repo.path(), home.path(), "docs", "billing").expect("nothing scopes `docs`");
+    // A name the fixture already records, so this is the flagless road and the
+    // claim is the one the test makes: a write that had no record to create
+    // leaves the two that were there where it found them.
+    scope_add(
+        repo.path(),
+        home.path(),
+        "docs",
+        "data-plane",
+        Flags::default(),
+    )
+    .expect("nothing scopes `docs`");
     assert_eq!(
         record_bytes(repo.path()),
         before,
@@ -585,8 +617,14 @@ fn a_closed_boundary_refuses_both_scope_writes_and_leaves_the_manifest_byte_iden
     let before = manifest_bytes(repo.path()).expect("a manifest on disk");
 
     let refusals = [
-        scope_add(repo.path(), home.path(), "crates/engine", "billing")
-            .expect_err("a scope this machine does not hold refuses an add"),
+        scope_add(
+            repo.path(),
+            home.path(),
+            "crates/engine",
+            "billing",
+            a_record(),
+        )
+        .expect_err("a scope this machine does not hold refuses an add"),
         scope_remove(repo.path(), home.path(), "crates/engine").expect_err("and refuses a remove"),
     ];
 
@@ -620,8 +658,14 @@ fn the_boundary_is_asked_before_the_path_is_checked_for_an_entry() {
     let home = a_dir();
     let before = manifest_bytes(repo.path()).expect("a manifest on disk");
 
-    let error = scope_add(repo.path(), home.path(), "crates/tui", "billing")
-        .expect_err("holding nothing opens nothing that is scoped");
+    let error = scope_add(
+        repo.path(),
+        home.path(),
+        "crates/tui",
+        "billing",
+        a_record(),
+    )
+    .expect_err("holding nothing opens nothing that is scoped");
 
     assert!(
         matches!(error, Error::ClosedScope { .. }),
@@ -637,8 +681,14 @@ fn the_boundary_is_asked_before_the_path_is_checked_for_an_entry() {
     // manifest holds — so the sentence exists and is only ever reached from
     // inside.
     holding(home.path(), repo.path(), &["platform"]);
-    let error = scope_add(repo.path(), home.path(), "crates/tui", "billing")
-        .expect_err("there is no entry to write a scope on");
+    let error = scope_add(
+        repo.path(),
+        home.path(),
+        "crates/tui",
+        "billing",
+        a_record(),
+    )
+    .expect_err("there is no entry to write a scope on");
     assert!(matches!(error, Error::NoPact { .. }), "{error:?}");
 }
 
@@ -706,8 +756,8 @@ fn a_scope_the_engine_refuses_prints_its_rule_and_writes_nothing() {
         ("", ""),
         ("data-plane-", "data-plane-"),
     ] {
-        let error =
-            scope_add(repo.path(), home.path(), "docs", given).expect_err("this is not a scope");
+        let error = scope_add(repo.path(), home.path(), "docs", given, a_record())
+            .expect_err("this is not a scope");
 
         assert!(matches!(error, Error::Scope { .. }), "{given:?}: {error:?}");
         // The engine's own sentence about the one rule that was broken,
@@ -732,7 +782,7 @@ fn a_directory_with_no_entry_is_refused_past_an_open_boundary_and_writes_nothing
     let before = manifest_bytes(repo.path()).expect("a manifest on disk");
 
     let refusals = [
-        scope_add(repo.path(), home.path(), "docs/adr", "billing")
+        scope_add(repo.path(), home.path(), "docs/adr", "billing", a_record())
             .expect_err("`docs/adr` has no entry"),
         scope_remove(repo.path(), home.path(), "docs/adr")
             .expect_err("and has none to clear either"),
@@ -769,7 +819,7 @@ fn a_path_with_no_manifest_form_is_refused_by_both_scope_writes() {
         };
 
         for refused in [
-            opened().and_then(|opened| opened.scoped("billing")),
+            opened().and_then(|opened| opened.scoped("billing", a_record())),
             opened().and_then(|opened| opened.unscoped()),
         ] {
             let error = refused.expect_err("a path outside the repository has no manifest form");

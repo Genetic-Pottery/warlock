@@ -22,7 +22,7 @@ use warlock_engine::{Manifest, PactEntry, unpact_subtree, validate_scope};
 use crate::boundary::{Reach, Verdict, verdict};
 use crate::error::Error;
 use crate::query::spelled;
-use crate::scoping::with_scope_on;
+use crate::scoping::{records_scope, with_scope_on, with_scope_recorded};
 use crate::session::sigils_under;
 use crate::standing::{FOR_SCOPE_ADD, FOR_SCOPE_REMOVE, FOR_UNPACT, Standing};
 
@@ -198,8 +198,18 @@ impl Opened {
     // The path is spelled first because the ordering rule stops at the boundary
     // and not at the write: a path with no manifest form is this command's own
     // refusal, and asking first means a run with two things wrong with it answers
-    // about where it was pointed.
-    fn scoped(&self, scope: &str) -> Result<String, Error> {
+    // about where it was pointed. `scope_on` — the existence check — comes next
+    // and stays above everything about the flags: three values typed for a
+    // directory nobody has pacted would never have been written whatever they
+    // said, so the pact is the refusal a reader is owed.
+    //
+    // Which of the two roads the flags then take is [`records_scope`]'s answer
+    // and nothing else's: the same comparison
+    // [`route_facts`](warlock_engine::route_facts) routes by and the `s` key
+    // consults. A lookup of its own here that folded or trimmed could send a
+    // name that already routes down the recording road, to write a second
+    // record the router never reads.
+    fn scoped(&self, scope: &str, flags: Flags<'_>) -> Result<String, Error> {
         let module = spelled(&self.repo_root, &self.target)?;
         // `to_ascii_lowercase` rather than `to_lowercase`, for `scope_submit`'s
         // reason: a scope is drawn from ASCII, so folding a non-ASCII capital
@@ -207,8 +217,34 @@ impl Opened {
         // is refused is closer to what was typed.
         let folded = scope.to_ascii_lowercase();
         validate_scope(&folded).map_err(|rule| Error::Scope { rule })?;
+        let was = self.scope_on(&module)?.map(str::to_owned);
 
-        let was = self.rescoped(&module, Some(&folded))?;
+        // Both roads end in one manifest and one save, which is the whole point
+        // of building the thing before writing it: a scope on disk whose record
+        // failed to write is the half-state [`with_scope_recorded`] exists to
+        // make impossible, and a second save here would put it back.
+        let next = if records_scope(&self.manifest, &folded) {
+            flags.unwanted(&folded)?;
+            with_scope_on(&self.manifest, &module, Some(&folded))
+        } else {
+            let record = flags.record(&folded)?;
+            with_scope_recorded(
+                &self.manifest,
+                &module,
+                &folded,
+                record.team,
+                record.review_state,
+                record.label,
+            )
+            // Unreachable: this road is taken because nothing records the
+            // name. Asked rather than unwrapped, because a record that
+            // appeared in between deserves the refusal a flag at a recorded
+            // name gets, and somebody else's edit does not deserve a panic.
+            .ok_or_else(|| Error::RecordedScope {
+                scope: folded.clone(),
+            })?
+        };
+        self.saved(&next)?;
 
         Ok(scoped_line(&module, &folded, was.as_deref()))
     }
@@ -219,21 +255,18 @@ impl Opened {
     // write is a thing a caller then has to reason about.
     fn unscoped(&self) -> Result<String, Error> {
         let module = spelled(&self.repo_root, &self.target)?;
-        let was = self.rescoped(&module, None)?;
+        let was = self.scope_on(&module)?.map(str::to_owned);
+        self.saved(&with_scope_on(&self.manifest, &module, None))?;
 
         Ok(unscoped_line(&module, was.as_deref()))
     }
 
-    // `scope_on` is the existence check as well as the old scope, so it stays
-    // above the save: a directory with no entry is refused with nothing written,
-    // and both scope writes inherit that from being one function.
-    fn rescoped(&self, module: &str, scope: Option<&str>) -> Result<Option<String>, Error> {
-        let was = self.scope_on(module)?.map(str::to_owned);
-        with_scope_on(&self.manifest, module, scope)
-            .save(&self.repo_root)
-            .map_err(|source| Error::Manifest { source })?;
-
-        Ok(was)
+    // Every question is behind us by the time this is called, which is the
+    // ordering the two writes above share: whatever they refuse, they refuse
+    // with nothing written.
+    fn saved(&self, next: &Manifest) -> Result<(), Error> {
+        next.save(&self.repo_root)
+            .map_err(|source| Error::Manifest { source })
     }
 
     // The existence check and the "what was there before" both, because they are
@@ -249,6 +282,91 @@ impl Opened {
                 module: module.to_owned(),
             })
     }
+}
+
+// The three record flags exactly as clap left them: absent, or a value with
+// nothing done to it. Nothing is judged in here — whether they are required,
+// forbidden or blank is a fact about what the manifest already records, so the
+// questions are asked from inside [`Opened`] and never before it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct Flags<'a> {
+    pub(crate) team: Option<&'a str>,
+    pub(crate) review_state: Option<&'a str>,
+    pub(crate) label: Option<&'a str>,
+}
+
+impl<'a> Flags<'a> {
+    // In the record window's field order — team, review state, label — so the
+    // shell and the panel complain about the same three things in the same
+    // order, and the flag names live in exactly one place.
+    fn given(self) -> [(&'static str, Option<&'a str>); 3] {
+        [
+            ("--team", self.team),
+            ("--review-state", self.review_state),
+            ("--label", self.label),
+        ]
+    }
+
+    fn named(self, wrong: impl Fn(Option<&str>) -> bool) -> Vec<&'static str> {
+        self.given()
+            .iter()
+            .filter(|(_, value)| wrong(*value))
+            .map(|(flag, _)| *flag)
+            .collect()
+    }
+
+    // The road for a name nothing records: all three or none of it. The tuple
+    // match is the check and the unwrapping both, so there is no second reading
+    // of `None` further down that could disagree with the refusal above it.
+    //
+    // Blank is judged on a trimmed copy while the untrimmed string is what gets
+    // stored, exactly as [`record_submit`](crate::scoping::record_submit) does
+    // it: a team, a review state and a label belong to somebody's tracker, and
+    // warlock is in no position to correct their spelling.
+    fn record(self, scope: &str) -> Result<Record<'a>, Error> {
+        let (Some(team), Some(review_state), Some(label)) =
+            (self.team, self.review_state, self.label)
+        else {
+            return Err(Error::UnrecordedScope {
+                scope: scope.to_owned(),
+                missing: self.named(|value| value.is_none()),
+            });
+        };
+
+        let blank = self.named(|value| value.is_some_and(|value| value.trim().is_empty()));
+        if !blank.is_empty() {
+            return Err(Error::BlankRecord { flags: blank });
+        }
+
+        Ok(Record {
+            team,
+            review_state,
+            label,
+        })
+    }
+
+    // The road for a name something already records, where the only acceptable
+    // answer is no flags at all: warlock does not rewrite, merge or delete a
+    // record, so a value handed to one would be a value dropped on the floor.
+    fn unwanted(self, scope: &str) -> Result<(), Error> {
+        if self.given().iter().any(|(_, value)| value.is_some()) {
+            return Err(Error::RecordedScope {
+                scope: scope.to_owned(),
+            });
+        }
+
+        Ok(())
+    }
+}
+
+// The three values past the point where `None` is possible. A struct rather
+// than a tuple of three strings, because three fields of one type in a row is
+// somewhere to swap two of them without the compiler minding.
+#[derive(Debug, Clone, Copy)]
+struct Record<'a> {
+    team: &'a str,
+    review_state: &'a str,
+    label: &'a str,
 }
 
 // The one place in the headless writes where the environment becomes a home path
@@ -288,8 +406,11 @@ pub(crate) fn unpact(path: &Path) -> Result<(), Error> {
     Ok(())
 }
 
-pub(crate) fn scope_add(path: &Path, scope: &str) -> Result<(), Error> {
-    println!("warlock: {}", opened(FOR_SCOPE_ADD, path)?.scoped(scope)?);
+pub(crate) fn scope_add(path: &Path, scope: &str, flags: Flags<'_>) -> Result<(), Error> {
+    println!(
+        "warlock: {}",
+        opened(FOR_SCOPE_ADD, path)?.scoped(scope, flags)?
+    );
     Ok(())
 }
 

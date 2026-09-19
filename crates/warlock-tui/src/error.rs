@@ -62,6 +62,33 @@ pub(crate) enum Error {
     NoPact {
         module: String,
     },
+    // The three refusals `warlock scope add` has about a `[[scope]]` record,
+    // and all three are raised past the boundary for `NoPact`'s reason: which
+    // of them applies depends on what the manifest already records, and that is
+    // a fact about the inside of a manifest a closed scope must not leak.
+    //
+    // A name nothing records is written with its record or not at all, so the
+    // missing flags are carried rather than the one that was noticed first: the
+    // fix is to retype the command, and a refusal naming a flag at a time is
+    // three runs.
+    UnrecordedScope {
+        scope: String,
+        missing: Vec<&'static str>,
+    },
+    // Blank kept apart from missing even though the fix rhymes: a flag that was
+    // never passed and a flag passed an empty string are different mistakes,
+    // and saying "you did not pass `--team`" to somebody who just typed
+    // `--team ''` sends them looking for a shell problem they do not have.
+    BlankRecord {
+        flags: Vec<&'static str>,
+    },
+    // The other side of the same rule the `s` key follows: a record already in
+    // the file is never rewritten, merged or deleted from here. A flag passed
+    // at one is refused rather than dropped, because a value silently ignored
+    // is a run that believes it wrote something it did not.
+    RecordedScope {
+        scope: String,
+    },
     Pact {
         source: pact::Error,
     },
@@ -182,6 +209,55 @@ pub(crate) fn one_line(message: &str) -> String {
     }
 }
 
+// `` `--a`, `--b` and `--c` ``, in [`writing::missing_line`](crate::writing)'s
+// shape: a refusal that names more than one thing is read as a sentence, and a
+// comma before the last of them would be read as a fourth flag.
+//
+// An empty slice is the empty string and no caller reaches it: both variants
+// that call this are raised with at least one flag named, since a list of
+// nothing wrong with the command is not a refusal.
+fn naming(flags: &[&str]) -> String {
+    let named: Vec<String> = flags.iter().map(|flag| format!("`{flag}`")).collect();
+    let Some((last, rest)) = named.split_last() else {
+        return String::new();
+    };
+    if rest.is_empty() {
+        last.clone()
+    } else {
+        format!("{} and {last}", rest.join(", "))
+    }
+}
+
+// The fact first, then the whole of the fix: the flags that were not given,
+// named together so the command can be retyped once rather than three times.
+// "nothing was written" is on the end of all three of these sentences, because
+// a refusal about a record is the one place a reader might assume the scope
+// went in and only the record did not.
+fn unrecorded_message(scope: &str, missing: &[&str]) -> String {
+    format!(
+        "nothing records `{scope}` yet, so nothing was written: writing a scope by that name \
+         needs a team, a review state and a label, given as {}",
+        naming(missing)
+    )
+}
+
+// The record window's own wording about an empty field — `a team cannot be
+// blank` — said about whichever flags were handed one here.
+fn blank_message(flags: &[&str]) -> String {
+    format!("{} cannot be blank, so nothing was written", naming(flags))
+}
+
+// What the file already holds, and then both roads out: the scope on its own is
+// one flagless run, and the record is the file's to edit. Warlock does not
+// rewrite, merge or delete a record from here, so there is no flag to reach for.
+fn recorded_message(scope: &str) -> String {
+    format!(
+        "`{scope}` already has a record in `.warlock/pacts.toml`, and warlock does not rewrite \
+         one: run without `--team`, `--review-state` and `--label` to write the scope, or edit \
+         the file to change the record"
+    )
+}
+
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -281,6 +357,15 @@ impl fmt::Display for Error {
                 "`{module}` is not in the manifest, so there is no pact to carry a \
                  scope; pact it in warlock first, with `p`"
             ),
+            // The three record refusals, worded below rather than here: they
+            // are one question asked three ways and read as a set, and the
+            // boundary's two sentences already reach this match through a
+            // function of their own.
+            Self::UnrecordedScope { scope, missing } => {
+                write!(f, "{}", unrecorded_message(scope, missing))
+            }
+            Self::BlankRecord { flags } => write!(f, "{}", blank_message(flags)),
+            Self::RecordedScope { scope } => write!(f, "{}", recorded_message(scope)),
             // The engine's `.git` wording, with what it cost the caller on the
             // end: this is a refusal to do the thing that was typed rather than
             // a refusal to draw a tree, and the reader asked for that thing.
@@ -381,6 +466,12 @@ impl std::error::Error for Error {
             | Self::ClosedScope { .. }
             | Self::ClosedScopeBelow { .. }
             | Self::NoPact { .. }
+            // Nor here: a command line missing a flag, carrying a blank one, or
+            // carrying one over a record warlock will not rewrite, is a person
+            // and two files agreeing rather than a failure underneath.
+            | Self::UnrecordedScope { .. }
+            | Self::BlankRecord { .. }
+            | Self::RecordedScope { .. }
             // Nor here: a prompt answered with a blank line, and a name nobody
             // stored a key under, are a person and not a failure underneath.
             | Self::NoKey { .. }

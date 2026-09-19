@@ -303,6 +303,12 @@ fn the_two_scope_writes_are_a_noun_and_a_verb_rather_than_two_words_run_together
             command: ScopeCommand::Add {
                 path: PathBuf::from("crates/engine"),
                 scope: "data-plane".to_owned(),
+                // Absent is what clap hands over for a flag nobody passed;
+                // whether that is legal is the manifest's answer and is asked
+                // past the boundary, not here.
+                team: None,
+                review_state: None,
+                label: None,
             }
         })
     );
@@ -331,6 +337,9 @@ fn a_scope_is_taken_as_it_was_typed_and_judged_by_the_engine_rather_than_by_clap
                 command: ScopeCommand::Add {
                     path: PathBuf::from("crates"),
                     scope: typed.to_owned(),
+                    team: None,
+                    review_state: None,
+                    label: None,
                 }
             }),
             "{typed:?}"
@@ -647,23 +656,30 @@ fn no_argument_the_parser_accepts_gets_a_write_past_the_boundary() {
     // The absence stated over the parser itself rather than over a list of
     // spellings somebody thought of: `--force` is refused in the test above,
     // and this says there is no word at all — however spelled — that a write
-    // takes besides its path, its scope and clap's own `--help`. The one
-    // road past a boundary is `warlock config`, and an option here would be
-    // a second one.
+    // takes besides its positionals, clap's own `--help`, and the three an
+    // `add` writes a `[[scope]]` record from. Those three say where a new
+    // scope's issues go; none of them reaches the boundary, which is asked
+    // and answered before any of them is read. The one road past it is
+    // `warlock config`, and an option here would be a second one.
     for names in [
         vec!["unpact"],
         vec!["scope"],
         vec!["scope", "add"],
         vec!["scope", "remove"],
     ] {
+        let allowed: &[&str] = if names == ["scope", "add"] {
+            &["help", "team", "review-state", "label"]
+        } else {
+            &["help"]
+        };
         let mut command = subcommand(&names);
         // The positionals are the path, and the scope on an `add`; every
-        // other argument a write accepts has to be clap's own help.
+        // other argument a write accepts has to be one of those.
         for argument in command.get_arguments().filter(|a| !a.is_positional()) {
-            assert_eq!(
-                argument.get_long(),
-                Some("help"),
-                "{names:?} takes an option other than clap's help"
+            let long = argument.get_long().unwrap_or_default();
+            assert!(
+                allowed.contains(&long),
+                "{names:?} takes `--{long}`, which is neither clap's help nor a record flag"
             );
         }
 
