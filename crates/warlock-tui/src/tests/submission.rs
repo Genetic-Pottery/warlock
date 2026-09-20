@@ -5,6 +5,7 @@ fn each_command_word_is_its_own_command() {
     assert_eq!(submitted_for("/brief"), Submitted::Brief);
     assert_eq!(submitted_for("/write"), Submitted::Write);
     assert_eq!(submitted_for("/chat"), Submitted::Chat);
+    assert_eq!(submitted_for("/push"), Submitted::Push);
 }
 
 #[test]
@@ -52,6 +53,7 @@ fn a_second_slash_makes_it_a_path_and_so_a_message() {
         "/home/cole/notes",
         "/home/cole/notes is stale",
         "/brief/notes",
+        "/push/x",
         "//",
     ] {
         assert_eq!(
@@ -63,10 +65,10 @@ fn a_second_slash_makes_it_a_path_and_so_a_message() {
 }
 
 #[test]
-fn a_word_that_is_not_one_of_the_three_is_refused() {
+fn a_word_that_is_not_a_command_is_refused() {
     // A typo, a command another program has, the right word in the wrong
     // case, and the bare slash somebody types to find out what exists.
-    for draft in ["/breif", "/plan", "/BRIEF", "/Brief", "/"] {
+    for draft in ["/breif", "/plan", "/BRIEF", "/Brief", "/PUSH", "/Push", "/"] {
         assert_eq!(
             submitted_for(draft),
             Submitted::Refused,
@@ -85,6 +87,8 @@ fn a_command_word_with_anything_after_it_is_refused() {
         "/brief  now",
         "/write docs/plan.md",
         "/chat please",
+        "/push now",
+        "/push docs/warlock-brief-22-push.md",
         "/brief\nsome text",
         "/brief \n some text ",
     ] {
@@ -101,7 +105,16 @@ fn every_refusal_is_the_same_one_line() {
     // One line and one wording, whichever way the draft missed: the reader
     // gets the list of what exists rather than a diagnosis of what they
     // typed, because the list is the thing that helps.
-    let refusals = ["/breif", "/plan", "/BRIEF", "/", "/brief now", "/brief\nx"];
+    let refusals = [
+        "/breif",
+        "/plan",
+        "/BRIEF",
+        "/",
+        "/brief now",
+        "/brief\nx",
+        "/PUSH",
+        "/push now",
+    ];
 
     for draft in refusals {
         let line = submitted_for(draft)
@@ -112,6 +125,7 @@ fn every_refusal_is_the_same_one_line() {
         assert!(line.contains("/brief"), "{draft:?} did not name /brief");
         assert!(line.contains("/write"), "{draft:?} did not name /write");
         assert!(line.contains("/chat"), "{draft:?} did not name /chat");
+        assert!(line.contains("/push"), "{draft:?} did not name /push");
         assert!(
             line.contains("after it"),
             "{draft:?} did not say commands take nothing after them"
@@ -123,7 +137,7 @@ fn every_refusal_is_the_same_one_line() {
 fn nothing_but_a_refusal_has_a_line_to_say() {
     // A command and a message announce nothing: warlock speaks on the card
     // only when it has refused to do what was asked.
-    for draft in ["/brief", "/write", "/chat", "why nine passes?", ""] {
+    for draft in ["/brief", "/write", "/chat", "/push", "why nine passes?", ""] {
         assert_eq!(
             submitted_for(draft).refusal(),
             None,

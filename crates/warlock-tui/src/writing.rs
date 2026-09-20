@@ -61,19 +61,44 @@ pub(crate) fn write_opened(repo_root: &Path, directory: &str, reply: &str) -> Sc
     ScopePrompt::open(WRITE_HEADING, proposed_path(repo_root, directory, reply))
 }
 
+// What this window hands back: the prompt the loop holds next, and — on the one
+// path that put bytes on a disk — the document that landed. Every other path
+// carries no path at all, which is what makes "the brief this session wrote" a
+// fact about a write that happened rather than about a window that was open.
+//
+// The spelling is the manifest-relative one, the same string the line on the
+// thread names, because that is the form `from_manifest_path` reads back and
+// the form the ledger everywhere else in warlock stores.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Wrote {
+    pub(crate) prompt: ScopePrompt,
+    pub(crate) written: Option<String>,
+}
+
+impl Wrote {
+    // Every path but the successful write, which is most of this file: a prompt
+    // and nothing written.
+    const fn only(prompt: ScopePrompt) -> Self {
+        Self {
+            prompt,
+            written: None,
+        }
+    }
+}
+
 pub(crate) fn write_edit(
     app: &mut App,
     repo_root: &Path,
     prompt: &ScopePrompt,
     edited: Edited,
     now: Instant,
-) -> ScopePrompt {
+) -> Wrote {
     match edited {
-        Edited::Open(field) => ScopePrompt::Open(field),
-        Edited::Close => ScopePrompt::Closed,
+        Edited::Open(field) => Wrote::only(ScopePrompt::Open(field)),
+        Edited::Close => Wrote::only(ScopePrompt::Closed),
         Edited::Submit => match prompt.field() {
             Some(field) => write_submit(app, repo_root, field, now),
-            None => ScopePrompt::Closed,
+            None => Wrote::only(ScopePrompt::Closed),
         },
     }
 }
@@ -94,7 +119,7 @@ pub(crate) fn write_submit(
     repo_root: &Path,
     field: &ScopeField,
     now: Instant,
-) -> ScopePrompt {
+) -> Wrote {
     let typed = field.text().trim();
     if typed.is_empty() {
         return refused(field, NO_PATH);
@@ -140,16 +165,22 @@ pub(crate) fn write_submit(
     // a second way for this line to fail after the write succeeded.
     let bytes = u64::try_from(document.len()).unwrap_or(u64::MAX);
     app.panel_mut().note(wrote_line(&stored, bytes), now);
-    ScopePrompt::Closed
+    // The same string the line was just worded from, handed on rather than
+    // spelled a second time: what the session remembers `/write` wrote and what
+    // the reader was told it wrote cannot come to disagree.
+    Wrote {
+        prompt: ScopePrompt::Closed,
+        written: Some(stored),
+    }
 }
 
-fn refused(field: &ScopeField, rule: impl Into<String>) -> ScopePrompt {
-    ScopePrompt::Open(field.clone().refused(rule))
+fn refused(field: &ScopeField, rule: impl Into<String>) -> Wrote {
+    Wrote::only(ScopePrompt::Open(field.clone().refused(rule)))
 }
 
-fn closed_saying(app: &mut App, line: impl Into<String>) -> ScopePrompt {
+fn closed_saying(app: &mut App, line: impl Into<String>) -> Wrote {
     app.set_message(line);
-    ScopePrompt::Closed
+    Wrote::only(ScopePrompt::Closed)
 }
 
 fn document(reply: &str) -> String {
