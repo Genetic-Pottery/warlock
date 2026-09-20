@@ -55,6 +55,9 @@ pub fn resolve_route(
 ) -> Result<Route<'_>, Error> {
     let (path, root, home) = (path.as_ref(), root.as_ref(), home.as_ref());
 
+    // `Some(home)` even though only the scope half of these facts is read now:
+    // the key store is what `route_facts` can fail on, and passing `None` would
+    // move a `Keys` refusal from here to after the three scope refusals below.
     let facts = route_facts(path, root, manifest, Some(home))?;
 
     let Some(scope) = facts.scope() else {
@@ -85,25 +88,51 @@ pub fn resolve_route(
         other => other.map_err(|source| Error::Sigils { source })?,
     };
 
-    let Some(key) = facts.key() else {
+    let key = bound_key(home, root)?;
+
+    Ok(Route {
+        scope,
+        record,
+        key,
+        opens: scope_opens_to(Some(scope), &held),
+    })
+}
+
+// The two key refusals live here rather than inline above so that `filing.rs`,
+// which asks the same question of a repository with no path to walk up, gets the
+// same two sentences from the same `Display` instead of restating them; a second
+// copy of "bind one with `warlock key use <name>`" would drift from this one.
+//
+// `load_key_names` rather than `load_key`, for the reason `route_facts` gives:
+// no key value is ever held by this module, so nothing here can leak one into an
+// error, a `Debug` or a panic. The name is all a caller gets back, and it fetches
+// the value itself from `keys.rs`.
+//
+// A key store that is unreadable or will not parse is an error, while a binding
+// that cannot be read is nothing bound — the same asymmetry `route_facts`
+// documents, and it has to match, because `resolve_route` reads both through
+// both paths and the earlier one would otherwise decide.
+pub(crate) fn bound_key(home: &Path, root: &Path) -> Result<String, Error> {
+    let Some(key) = load_key_binding(home, root).unwrap_or_default() else {
         return Err(Error::Unbound {
             path: sigils_path(home, root),
         });
     };
 
-    if !facts.stored() {
+    let stored = match load_key_names(home) {
+        Ok(names) => names.contains(&key),
+        Err(keys::Error::NotFound { .. }) => false,
+        Err(source) => return Err(Error::Keys { source }),
+    };
+
+    if !stored {
         return Err(Error::Dangling {
-            key: key.to_owned(),
+            key,
             path: keys_path(home),
         });
     }
 
-    Ok(Route {
-        scope,
-        record,
-        key: key.to_owned(),
-        opens: scope_opens_to(Some(scope), &held),
-    })
+    Ok(key)
 }
 
 /// ```
