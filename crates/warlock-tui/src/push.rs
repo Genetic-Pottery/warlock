@@ -30,14 +30,54 @@ use crate::standing::{FOR_PUSH, Standing};
 
 pub(crate) fn push(path: &Path, scope: Option<&str>, dry_run: bool) -> Result<(), Error> {
     let standing = Standing::here(FOR_PUSH)?;
-    let manifest = standing.manifest()?;
     // The error rather than `check`'s `.ok()`: the sigils under the home pick
     // the board and the key store beside them is what files to it, so a machine
     // with no home has nothing to push with rather than an answer of "nothing
     // held".
     let home = Standing::home()?;
 
-    let target = resolve_filing(&manifest, standing.repo_root(), &home, scope)
+    pushed(
+        &standing,
+        &home,
+        path,
+        scope,
+        dry_run,
+        client,
+        &mut io::stdout(),
+    )
+}
+
+// Named rather than passed as `LinearClient::new`, which is generic over what it
+// is handed and so is only ever a function of one lifetime: the seam below has
+// to take a key borrowed for however long the target lives, and this is the
+// one-line function that says so.
+fn client(key: &str) -> LinearClient {
+    LinearClient::new(key)
+}
+
+// Split from `push` so that the environment — the working directory, the
+// repository root, the home the sigils and the key store sit under — is three
+// parameters rather than three reads, the way `check` splits `checked_onto`:
+// every refusal below can then be run against a temporary repository and a
+// temporary home, and no test in this crate can reach the developer's real key
+// store by standing in the wrong directory.
+//
+// `open` is the socket, as a parameter. It is called on exactly one line — the
+// one marked below — and a test hands in a stand-in that panics when it is
+// called, which is what makes "this refusal opens no socket" an assertion about
+// the order here rather than a reading of it.
+fn pushed<P: Posts, O: FnOnce(&str) -> P, W: Write>(
+    standing: &Standing,
+    home: &Path,
+    path: &Path,
+    scope: Option<&str>,
+    dry_run: bool,
+    open: O,
+    out: &mut W,
+) -> Result<(), Error> {
+    let manifest = standing.manifest()?;
+
+    let target = resolve_filing(&manifest, standing.repo_root(), home, scope)
         .map_err(|source| Error::Filing { source })?;
     let record = target.record();
 
@@ -59,7 +99,6 @@ pub(crate) fn push(path: &Path, scope: Option<&str>, dry_run: bool) -> Result<()
         team: record.team(),
         label: record.label(),
     };
-    let mut out = io::stdout();
     if dry_run {
         drop(writeln!(out, "{}", would(board, target.key(), &brief)));
         return Ok(());
@@ -67,7 +106,7 @@ pub(crate) fn push(path: &Path, scope: Option<&str>, dry_run: bool) -> Result<()
 
     // The key is read here and nowhere else in this module, on the last line
     // before anything leaves the machine.
-    let linear = LinearClient::new(target.value());
+    let linear = open(target.value());
     sent(
         &linear,
         standing.repo_root(),
@@ -75,7 +114,7 @@ pub(crate) fn push(path: &Path, scope: Option<&str>, dry_run: bool) -> Result<()
         &brief,
         &brief_path,
         filed,
-        &mut out,
+        out,
     )
 }
 
@@ -189,3 +228,10 @@ fn would(board: Board<'_>, key: &str, brief: &Brief) -> String {
         size(bytes)
     )
 }
+
+// Every refusal above is driven through the `Posts` seam and a temporary home,
+// so no test of this module opens a socket, reads a key store that is not its
+// own, or names a board anybody holds.
+#[cfg(test)]
+#[path = "tests/push.rs"]
+mod tests;

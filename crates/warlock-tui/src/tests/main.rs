@@ -8,8 +8,14 @@ use ratatui::backend::TestBackend;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::Size;
 use ratatui::{Frame, Terminal};
-use warlock_engine::{Loaded, Manifest, Node, NodeState, Tree, load_tree, repository_root};
-use warlock_tui::{App, Chrome, Focus, QuitConfirm, RecordPrompt, Row, ScopePrompt, tree_height};
+use warlock_engine::{
+    Filed, Loaded, Manifest, Node, NodeState, Tree, load_tree, manifest_path, repository_root,
+    resolve_filing,
+};
+use warlock_tui::{
+    App, Chrome, Focus, LinearError, QuitConfirm, RecordPrompt, Row, ScopePrompt, brief_at,
+    tree_height,
+};
 
 use super::{Cli, Command, Error, FOR_CLAUDE_MD, ScopeCommand, Session, status_for};
 use crate::chatting::Chat;
@@ -496,6 +502,122 @@ fn a_scope_write_with_a_piece_missing_is_a_malformed_invocation() {
     }
 }
 
+// `warlock push docs/brief.md` with whichever of the two flags a case is
+// about, so each assertion below reads as the flags and not as the positional
+// under them.
+fn pushed_brief(scope: Option<&str>, dry_run: bool) -> Command {
+    Command::Push {
+        path: PathBuf::from("docs/brief.md"),
+        scope: scope.map(str::to_owned),
+        dry_run,
+    }
+}
+
+#[test]
+fn a_push_takes_the_brief_it_files_and_the_two_flags_that_go_with_it() {
+    // The path is required, like the check's and the un-pact's: a push is
+    // about one document, and there is no whole-repository answer for an
+    // omitted path to mean.
+    assert_eq!(
+        parse(&["push", "docs/brief.md"]).unwrap().command,
+        Some(pushed_brief(None, false))
+    );
+    assert_eq!(
+        parse(&["push", "docs/brief.md", "--dry-run"])
+            .unwrap()
+            .command,
+        Some(pushed_brief(None, true))
+    );
+    // `--scope` is optional to clap and needed only when this machine can file
+    // to more than one board, which clap has not read `.warlock/pacts.toml` to
+    // know — and the name reaches warlock exactly as it was typed, for the
+    // reason `scope add`'s positional does.
+    assert_eq!(
+        parse(&["push", "docs/brief.md", "--scope", "data-plane"])
+            .unwrap()
+            .command,
+        Some(pushed_brief(Some("data-plane"), false))
+    );
+    // Both flags, in either order and either side of the path, because a
+    // person retyping the command from the refusal that named `--scope` will
+    // put it wherever the cursor was.
+    for args in [
+        [
+            "push",
+            "docs/brief.md",
+            "--scope",
+            "data-plane",
+            "--dry-run",
+        ],
+        [
+            "push",
+            "--dry-run",
+            "--scope",
+            "data-plane",
+            "docs/brief.md",
+        ],
+    ] {
+        assert_eq!(
+            parse(&args).unwrap().command,
+            Some(pushed_brief(Some("data-plane"), true)),
+            "{args:?}"
+        );
+    }
+}
+
+#[test]
+fn a_push_with_no_path_or_with_two_is_a_malformed_invocation() {
+    // Clap's 2, for the check's reason: a push is about one document, so an
+    // omitted path is a command line that was never a request rather than
+    // warlock filing something nobody named.
+    let malformed: [&[&str]; 4] = [
+        &["push"],
+        &["push", "--dry-run"],
+        &["push", "a.md", "b.md"],
+        &["push", "--scope", "data-plane"],
+    ];
+
+    for args in malformed {
+        let error = parse(args).unwrap_err();
+        assert!(error.use_stderr(), "{args:?}");
+        assert_eq!(error.exit_code(), 2, "{args:?}");
+    }
+}
+
+#[test]
+fn a_push_asks_for_no_object_and_takes_no_word_beside_its_two_flags() {
+    // No `--json`, matching the other writing subcommands: the answer worth
+    // parsing is the record in `.warlock/filed.toml`, which is a file rather
+    // than a stream to be caught. `--scope` takes a value, so the flag on its
+    // own is a name that went missing rather than a switch.
+    let malformed: [&[&str]; 6] = [
+        &["push", "docs/brief.md", "--json"],
+        &["push", "--json", "docs/brief.md"],
+        &["push", "docs/brief.md", "--scope"],
+        &["push", "docs/brief.md", "--dry-run=yes"],
+        &["push", "docs/brief.md", "--force"],
+        &["push", "docs/brief.md", "--team", "Data Plane"],
+    ];
+
+    for args in malformed {
+        let error = parse(args).unwrap_err();
+        assert!(error.use_stderr(), "{args:?}");
+        assert_eq!(error.exit_code(), 2, "{args:?}");
+    }
+
+    // And the absence stated over the parser itself rather than over the
+    // spellings above: `--scope` and `--dry-run` are the only words a push
+    // takes beside its path and clap's own help.
+    let command = subcommand(&["push"]);
+    for argument in command.get_arguments().filter(|a| !a.is_positional()) {
+        let long = argument.get_long().unwrap_or_default();
+        assert!(
+            ["help", "scope", "dry-run"].contains(&long),
+            "`push` takes `--{long}`, which is none of its two flags"
+        );
+    }
+}
+
 #[test]
 fn both_spellings_of_help_are_a_help_exit_that_succeeded() {
     // Not an error in the sense that matters: help was asked for, so it
@@ -776,6 +898,128 @@ fn the_six_statuses_a_write_can_leave_are_all_different_numbers() {
                 "two of the outcomes share a status: {vocabulary:?}"
             );
         }
+    }
+}
+
+#[test]
+fn the_statuses_the_older_subcommands_leave_are_where_they_were() {
+    // Pinned as a table rather than left to be noticed, because `status_for`
+    // grows a variant every time warlock grows a verb: a refusal added to the
+    // catch-all must not move anything already sorted above it. One error per
+    // register, each taken from the subcommand that really produces it.
+    let statuses = [
+        (Ok(()), 0),
+        // The three questions and the writes, which are all the ordinary 1.
+        (
+            Err(Error::NoRepository {
+                start: PathBuf::from("/nowhere"),
+                wanted: FOR_CLAUDE_MD,
+            }),
+            1,
+        ),
+        (
+            Err(Error::Problems {
+                first: "`/repo/docs`: `WARLOCK.md` could not be read".to_owned(),
+                rest: 2,
+            }),
+            1,
+        ),
+        (Err(Error::NoHome), 1),
+        (
+            Err(Error::NoPact {
+                module: "crates/engine".to_owned(),
+            }),
+            1,
+        ),
+        (
+            Err(Error::UnknownKey {
+                name: "work".to_owned(),
+                wanted: "bind",
+            }),
+            1,
+        ),
+        // The un-pact's downward refusal, which is deliberately not the
+        // boundary's number.
+        (
+            Err(Error::ClosedScopeBelow {
+                path: ".".to_owned(),
+                scopes: vec!["platform".to_owned()],
+            }),
+            1,
+        ),
+        // The boundary itself, and the two a run leaves behind.
+        (
+            Err(Error::ClosedScope {
+                path: "crates/engine".to_owned(),
+                scope: "data-plane".to_owned(),
+            }),
+            3,
+        ),
+        (
+            Err(Error::Failures {
+                failed: 3,
+                total: 12,
+            }),
+            4,
+        ),
+        (Err(Error::Cancelled), 130),
+    ];
+
+    for (outcome, expected) in statuses {
+        assert_eq!(status_for(&outcome), expected, "{outcome:?}");
+    }
+}
+
+#[test]
+fn every_refusal_a_push_has_is_the_ordinary_one_and_never_the_boundarys_three() {
+    // The one subcommand that sends anything anywhere, and none of what it
+    // refuses is the boundary's **3**: the sigil picks a board rather than
+    // opening a directory, so a script reading a 3 as "ask for a sigil" must
+    // never be sent there by a brief that would not parse or a team key Linear
+    // does not know. Each of these is built by the thing that really produces
+    // it where that is cheap, so a re-wrapping in `push.rs` would fail this.
+    let repo = tempfile::tempdir().expect("a temporary directory");
+    let home = tempfile::tempdir().expect("a temporary directory");
+    let url = "https://linear.app/acme/project/a-brief-1a2b3c";
+    let refusals = [
+        Error::Filing {
+            source: resolve_filing(&Manifest::new(), repo.path(), home.path(), None)
+                .expect_err("a machine that holds no sigil files nowhere"),
+        },
+        Error::Brief {
+            source: brief_at(repo.path(), repo.path().join("docs/brief.md"))
+                .expect_err("there is no document at that path"),
+        },
+        Error::Filed {
+            source: Filed::load(repo.path()).expect_err("this repository has filed nothing"),
+        },
+        Error::AlreadyFiled {
+            path: "docs/brief.md".to_owned(),
+            url: url.to_owned(),
+        },
+        Error::UnknownTeam {
+            team: "WAR".to_owned(),
+            path: manifest_path(repo.path()),
+        },
+        Error::Linear {
+            source: LinearError::Status { code: 401 },
+        },
+        Error::Unfiled {
+            url: url.to_owned(),
+            source: Box::new(
+                Filed::load(repo.path()).expect_err("this repository has filed nothing"),
+            ),
+        },
+    ];
+
+    for refusal in refusals {
+        let said = refusal.to_string();
+        let outcome = Err(refusal);
+        assert_eq!(status_for(&outcome), 1, "{said}");
+        assert_ne!(status_for(&outcome), 3, "{said}");
+        // One line, because `main` prints it as one line with a `warlock: ` in
+        // front of it.
+        assert!(!said.contains('\n'), "{said}");
     }
 }
 
