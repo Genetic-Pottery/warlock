@@ -51,6 +51,11 @@ pub(crate) const FOR_PACT: &str = "pact anything under";
 
 pub(crate) const FOR_REFRESH: &str = "refresh anything under";
 
+// "from" rather than "at", because a push is about a file and the root is what
+// its record spells that file against: the brief itself may be anywhere a path
+// points, and the repository is what says which board it belongs to.
+pub(crate) const FOR_PUSH: &str = "push a brief from";
+
 // The working directory is kept as well as the root because the two answer
 // different questions: the root is what stored paths are spelled against, and
 // the working directory is what a relative argument is joined onto. A subcommand

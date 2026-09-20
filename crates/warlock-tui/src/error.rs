@@ -3,10 +3,11 @@
 //! restored shell looks like a crash. `one_line` is the flattening that rule
 //! leans on, and other modules borrow it because the footer is one line too.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::{fmt, io};
 
-use warlock_engine::{claude_md, keys, load, manifest, pact, route, scope, sigils};
+use warlock_engine::{claude_md, filed, filing, keys, load, manifest, pact, route, scope, sigils};
+use warlock_tui::{BriefError, LinearError};
 
 use crate::boundary::{blocking_scopes_message, closed_scope_message};
 
@@ -171,6 +172,52 @@ pub(crate) enum Error {
     Route {
         source: route::Error,
     },
+    // Which board a push files to, and every way that question has no single
+    // answer: nothing held, nothing recorded, several candidates, a name that
+    // is not one of them, an unbound checkout, a bound name the store has never
+    // heard of. One variant for all of them because the engine has already
+    // worded them and this carries the sentence rather than re-writing it —
+    // `filing::Error` wraps the two key refusals from `route.rs` for that same
+    // reason, and a person meets those first from `warlock check`.
+    Filing {
+        source: filing::Error,
+    },
+    // A file that is not a brief: absent, unreadable, untitled, or missing a
+    // section of the repository's shape. Raised before a socket is opened, like
+    // every other refusal a push has.
+    Brief {
+        source: BriefError,
+    },
+    Filed {
+        source: filed::Error,
+    },
+    // The URL is the point of this refusal: a brief is filed once, so the
+    // answer to pushing it again is the address of the project it already made.
+    AlreadyFiled {
+        path: String,
+        url: String,
+    },
+    // The team key is the manifest's, so the file to fix is named with it. A
+    // team Linear does not know is not a client failure and `linear.rs` does not
+    // word it: that module holds no sentence about `.warlock/pacts.toml`.
+    UnknownTeam {
+        team: String,
+        path: PathBuf,
+    },
+    Linear {
+        source: LinearError,
+    },
+    // A project that exists with no record of it, which is the one failure here
+    // that comes after something was spent. It carries the URL because that is
+    // the thing nothing else on the machine now knows.
+    Unfiled {
+        url: String,
+        // Boxed for the reason `filed::Record` boxes the parser's error: the
+        // variant is this enum's largest otherwise, and every `Result<_, Error>`
+        // in the workspace — which is most of them — would be widened by a
+        // failure only one command can reach.
+        source: Box<filed::Error>,
+    },
     Terminal {
         source: io::Error,
     },
@@ -255,6 +302,37 @@ fn recorded_message(scope: &str) -> String {
         "`{scope}` already has a record in `.warlock/pacts.toml`, and warlock does not rewrite \
          one: run without `--team`, `--review-state` and `--label` to write the scope, or edit \
          the file to change the record"
+    )
+}
+
+// The URL leads, because it is what the reader wants from this line: the brief
+// is filed, and the road from here is the project rather than a second push.
+fn already_filed_message(path: &str, url: &str) -> String {
+    format!(
+        "`{path}` is already filed at {url}, so nothing was sent: a brief that changed after it \
+         was filed is edited where it is"
+    )
+}
+
+// Names the file the key is written in rather than only the key: a `team` in a
+// `[[scope]]` record is a Linear team key — `WAR` — and the usual cause of this
+// is a record carrying a team's *name*.
+fn unknown_team_message(team: &str, path: &Path) -> String {
+    format!(
+        "Linear knows no team with the key `{team}`, so nothing was filed: the `[[scope]]` \
+         record in `{}` is where that key is written",
+        path.display()
+    )
+}
+
+// The URL leads again, and for more than the last one's reason: the project
+// exists, nothing on this machine records it, and this line is the last place
+// that address appears. Flattened like the manifest's — filed records are TOML,
+// and a file that will not parse carries the parser's diagnostic.
+fn unfiled_message(url: &str, source: &filed::Error) -> String {
+    format!(
+        "the project is at {url}, and warlock could not record it: {}",
+        one_line(&source.to_string())
     )
 }
 
@@ -429,6 +507,28 @@ impl fmt::Display for Error {
             // Flattened for the same reason again: what reaches here wraps a
             // manifest or key-store error whose text can run to two lines.
             Self::Route { source } => write!(f, "{}", one_line(&source.to_string())),
+            // The engine's sentence and nothing around it, for `Scope`'s
+            // reason: each of these already says what is missing and what
+            // writes it, and two of them are `route.rs`'s own words about a
+            // key, which a person has already met from `warlock check`.
+            // Flattened because the key store and the manifest underneath can
+            // carry a parser's diagnostic.
+            Self::Filing { source } => write!(f, "{}", one_line(&source.to_string())),
+            // The reader's own sentence about the document, which already ends
+            // in what it cost — nothing was pushed.
+            Self::Brief { source } => write!(f, "{source}"),
+            // Flattened like the manifest's: filed records are TOML and a file
+            // that will not parse carries the parser's diagnostic.
+            Self::Filed { source } => write!(f, "{}", one_line(&source.to_string())),
+            // The three push refusals with wording of their own, said below
+            // rather than here for the record refusals' reason.
+            Self::AlreadyFiled { path, url } => write!(f, "{}", already_filed_message(path, url)),
+            Self::UnknownTeam { team, path } => write!(f, "{}", unknown_team_message(team, path)),
+            // Flattened for the transport's sake: Linear's own refusals are one
+            // line, and what a socket failure carries is whatever the network
+            // stack said.
+            Self::Linear { source } => write!(f, "{}", one_line(&source.to_string())),
+            Self::Unfiled { url, source } => write!(f, "{}", unfiled_message(url, source)),
             Self::Problems { first, rest: 0 } => write!(f, "{first}"),
             Self::Problems { first, rest } => {
                 write!(f, "{first} (and {rest} more like it)")
@@ -454,6 +554,11 @@ impl std::error::Error for Error {
             Self::Sigils { source } => Some(source),
             Self::Keys { source } => Some(source),
             Self::Route { source } => Some(source),
+            Self::Filing { source } => Some(source),
+            Self::Brief { source } => Some(source),
+            Self::Filed { source } => Some(source),
+            Self::Unfiled { source, .. } => Some(source.as_ref()),
+            Self::Linear { source } => Some(source),
             Self::Signal { source } => Some(source),
             Self::Clipboard { source } => Some(source),
             // No source, and there is none to have: a boundary this machine
@@ -476,6 +581,12 @@ impl std::error::Error for Error {
             // stored a key under, are a person and not a failure underneath.
             | Self::NoKey { .. }
             | Self::UnknownKey { .. }
+            // Nor here: a brief this repository has already filed, and a team
+            // key Linear does not know, are two files disagreeing rather than
+            // a failure underneath. The Linear call that answered the second
+            // one worked.
+            | Self::AlreadyFiled { .. }
+            | Self::UnknownTeam { .. }
             // Nor here, and there could not be one: a run's failures are N
             // errors rather than one, they have already been printed in full,
             // and picking a first to be "the" cause would be the summary
