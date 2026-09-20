@@ -10,6 +10,7 @@ pub mod claude_md;
 pub mod clock;
 pub mod decide;
 pub mod document;
+pub mod filing;
 pub mod fitting;
 pub mod hash;
 mod ignores;
@@ -35,6 +36,13 @@ pub use clock::now_rfc3339;
 pub use decide::decide_state;
 pub use document::Fill;
 pub use document::stub_answer;
+// The crate's only unqualified `Error`, and it stays the filing one rather than
+// growing a `FilingError` alias: every other module's error is reached as
+// `route::Error`, `keys::Error` and so on, and a second spelling of one type is
+// how two call sites end up looking like they refuse different things.
+pub use filing::Error;
+pub use filing::Target;
+pub use filing::resolve_filing;
 pub use fitting::Omission;
 pub use fitting::PER_FILE_BYTE_CAP;
 pub use hash::file_hash;
