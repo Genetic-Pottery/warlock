@@ -1,10 +1,14 @@
 # The headless CLI
 
 Warlock with no subcommand opens the tree. With one, it does that one thing and
-exits, and none of the subcommands goes near the terminal: no alternate screen,
-no raw mode, nothing drawn. What each has to say is lines on stdout, so a
-script, a CI job or an agent reads the answer through a pipe rather than into a
-repaint.
+exits: no alternate screen, nothing drawn. What each has to say is lines on
+stdout, so a script, a CI job or an agent reads the answer through a pipe
+rather than into a repaint.
+
+One subcommand takes the terminal, and only when there is a person at it:
+`warlock key add` turns the echo off for the length of the read so a key is not
+typed onto a visible screen. Everywhere a script runs — stdin redirected or
+piped — it reads a plain line and the terminal is never touched.
 
 | Command | What it does | What it spends |
 | --- | --- | --- |
@@ -55,10 +59,26 @@ for one in the envelope and there is not going to be.
 `warlock key add <name>` takes the secret on stdin and never as an argument:
 argv is readable by every process on the box for as long as the command runs,
 and is in a shell history afterwards. It prints the name, the file the key
-lands in and what is stored under that name now, then reads one line. That line
-is echoed — there is no raw mode here, in the one family of subcommands that
-deliberately touches no terminal at all — so the pipe is what keeps a key off
-the screen, and `warlock key add acme < key.txt` is the way to do it:
+lands in and what is stored under that name now, then reads one line.
+
+How that line is read depends on what stdin is. At a terminal the echo is
+turned off for the length of the read and the key is shown as bullets, so
+typing or pasting it is safe on a screen somebody else can see:
+
+```sh
+$ warlock key add acme
+key `acme`
+stored at `/home/you/.warlock/keys.toml`
+no key is stored under this name yet
+what you type is not shown
+Ctrl-C or EOF changes nothing
+key> ••••••••••••••••••••••••••••••••••••••••
+warlock: stored a key for `acme` in `/home/you/.warlock/keys.toml`
+```
+
+Anything else on stdin — a redirect, a pipe, a CI step — is read as a plain
+line in cooked mode, and the preamble says so rather than claiming a hiding it
+is not doing:
 
 ```sh
 $ warlock key add acme < key.txt
@@ -69,6 +89,9 @@ the line is echoed, so `warlock key add acme < key.txt` is how to keep it off th
 Ctrl-C or EOF changes nothing
 key> warlock: stored a key for `acme` in `/home/you/.warlock/keys.toml`
 ```
+
+This is the one place in the family that touches the terminal. It takes raw
+mode for the read and puts it back on every way out, a panic included.
 
 EOF — Ctrl-D at a terminal, an empty pipe everywhere else — writes nothing and
 says so, and a name that is not a name is refused before the preamble is

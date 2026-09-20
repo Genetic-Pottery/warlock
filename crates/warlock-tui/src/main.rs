@@ -279,9 +279,9 @@ enum ScopeCommand {
 ///
 /// There is no argument for the secret and there is not going to be one: argv
 /// is readable by every process on the box while the command runs and is
-/// written into a shell history afterwards, so the key comes in on stdin and
-/// `warlock key add acme < key.txt` is the way to keep it off the screen as
-/// well. See [`mod@key`] for why there is no echo suppression either.
+/// written into a shell history afterwards, so the key comes in on stdin.
+/// Whether it is echoed there depends on what stdin is — a terminal is read
+/// with it off, a pipe exactly as before; see [`mod@key`].
 ///
 /// `add`, `use` and `forget` take no `--json`, matching the other writing
 /// subcommands: an envelope is for an answer a script parses, and the only
@@ -428,9 +428,11 @@ fn main() -> ExitCode {
             ScopeCommand::Remove { path } => scope_remove(&path),
         },
         // The key store, dispatched here for `config`'s reasons and with one
-        // more of its own: `add` reads a line from stdin in cooked mode, so a
-        // program that had taken the terminal would be reading a secret in raw
-        // mode with the panic hook armed over it. The first two verbs stand in
+        // more of its own: `add` takes the terminal itself for the length of
+        // one read, so a program that had already entered the alternate screen
+        // would be prompting for a secret underneath a frame. What it takes it
+        // puts back — see [`mod@key`] — and it arms no panic hook, because the
+        // hook exists to restore a session this path never starts. The first two verbs stand in
         // no repository — a key is a fact about the machine — and the last two
         // stand in one because a binding is a fact about a checkout; each
         // resolves what it needs itself. The nesting is clap's and stops here,

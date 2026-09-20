@@ -3,7 +3,7 @@
 
 # warlock
 
-Root of the Cargo workspace containing the warlock-engine and warlock-tui crates. Holds the workspace manifest with shared lint config and dependency choices, the lockfile, rustfmt settings, and the Apache 2.0 license.
+Root of the Cargo workspace holding the warlock-engine and warlock-tui crates. Carries the workspace manifest, lockfile, license and rustfmt config; the source lives under crates/.
 
 ## Files
 
@@ -14,10 +14,11 @@ Root of the Cargo workspace containing the warlock-engine and warlock-tui crates
 
 ## Directories
 
-- `crates/` — Holds the two workspace crates: warlock-engine (library: tree loading, freshness, hashing, document fill and rendering, JSON contract) and warlock-tui (the `warlock` binary, CLI, terminal UI, agent). Go here for any source code.
+- `crates/` — Workspace member crates: warlock-engine (library: walk, freshness, hashing, document fill/render, JSON contract) and warlock-tui (TUI and the `warlock` CLI binary). Open for any code question.
 
 ## Structure
 
-- Cargo.toml is the workspace manifest for warlock-engine and warlock-tui, and Cargo.lock is the auto-generated lockfile covering those same two crates.
-- Formatting for the whole workspace is set in rustfmt.toml, which pins edition 2024 and style_edition 2024.
-- warlock-tui depends on warlock-engine; the engine does not depend on the front-end.
+- Cargo.toml defines the workspace for warlock-engine and warlock-tui, with shared lint config and inline justification for each dependency choice.
+- Cargo.lock is the auto-generated lockfile for the workspace crates and is not hand-edited.
+- rustfmt.toml sets workspace formatting: edition 2024, style_edition 2024, LF newlines, and field init shorthand.
+- LICENSE is the standard Apache License 2.0 text with no project-specific content.

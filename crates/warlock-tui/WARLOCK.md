@@ -3,7 +3,7 @@
 
 # warlock-tui
 
-Front-end crate that builds the `warlock` binary and the warlock_tui library: the clap CLI subcommands, the ratatui terminal UI, and the claude child-process agent. Depends on warlock-engine for the underlying logic; all code is under src/.
+Crate for the terminal UI and the command-line tool: a clap entry point with subcommands, plus the TUI's state, input, rendering, agent chat and filesystem watching. Builds the `warlock` binary and the warlock_tui library.
 
 ## Files
 
@@ -11,9 +11,9 @@ Front-end crate that builds the `warlock` binary and the warlock_tui library: th
 
 ## Directories
 
-- `src/` — All crate source: clap subcommands in main.rs (init, config, stale, fresh, check, pact, refresh, scope, key), the ratatui UI (app, ui, panel, composer, thread), pact/refresh runs, and the claude agent in claude.rs.
+- `src/` — All the crate's Rust source: CLI subcommands (init, config, stale, fresh, check, pact, refresh, scope, key), TUI state, input, drawing, agent chat, watching. Open for any behaviour question.
 
 ## Structure
 
 - Cargo.toml builds the `warlock` binary from src/main.rs and the warlock_tui library from src/lib.rs.
-- The crate depends on warlock-engine plus arboard, clap, ctrlc, notify, ratatui and serde_json.
+- The crate depends on arboard, clap, ctrlc, notify, ratatui, serde_json and warlock-engine.

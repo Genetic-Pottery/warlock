@@ -3,13 +3,16 @@
 //!
 //! The secret is taken on stdin and never in argv, because an argument is
 //! readable by every process on the box for as long as the command runs and is
-//! written into a shell history file afterwards. Echo suppression was rejected
-//! rather than overlooked: turning the terminal's echo off means raw mode, a
-//! restore on every way out and a panic hook, in the one family of subcommands
-//! that deliberately touches no terminal at all — or a new dependency carrying
-//! all of that inside it. What keeps a key off a screen here is the pipe, which
-//! the preamble names, and `warlock key add acme < key.txt` is the documented
-//! way to do it.
+//! written into a shell history file afterwards.
+//!
+//! How that line is read depends on what stdin is, and nothing else does. A
+//! pipe is read in cooked mode exactly as it always was, so `warlock key add
+//! acme < key.txt` and every script around it are untouched. A terminal is read
+//! a keystroke at a time with echo off, because the alternative was a person
+//! pasting a live credential onto a screen they may be sharing — and a pasted
+//! key cannot be un-pasted. This is the one place in the family that takes the
+//! terminal, which is why the restore in [`read_masked`] sits in a `Drop`: an
+//! early return or a panic between the two would otherwise leave a shell raw.
 //!
 //! No key value reaches a line printed here, an object printed here or an error
 //! raised here, and none can: nothing below reads a value except the line being
@@ -18,9 +21,11 @@
 //! value.
 
 use std::fmt;
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 use std::path::Path;
 
+use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use ratatui::crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 use serde_json::Value;
 use warlock_engine::{
     Forgotten, forget_key, keys, keys_path, load_key_binding, load_key_names, save_key,
@@ -37,6 +42,15 @@ const NAMES: &str = "names";
 
 const PROMPT: &str = "key> ";
 
+// One bullet a character, and the erase that takes one back: a cursor left, a
+// space painted over the bullet, a cursor left again. Length is the only thing
+// the bullets give away, and the feedback is worth it — the usual way in here
+// is a paste, and a prompt that shows nothing cannot be told apart from one
+// where the paste never landed.
+const BULLET: &str = "•";
+
+const ERASE: &str = "\u{8} \u{8}";
+
 // The two tails of `Error::UnknownKey`'s sentence, which is one fact — the
 // store holds no such name — costing the two verbs different things.
 const TO_BIND: &str = "bind";
@@ -50,8 +64,13 @@ const TO_FORGET: &str = "forget";
 // question that never needed one.
 pub(crate) fn key_add(name: &str) -> Result<(), Error> {
     let home = Standing::home()?;
+    // Stdin and not stdout, because stdin is what is about to be read: a
+    // terminal there means a person typing, and anything else means a script
+    // that wants the cooked line it has always had.
+    let masked = io::stdin().is_terminal();
+    let ask: fn() -> Result<Option<String>, Error> = if masked { read_masked } else { read_line };
 
-    added(&home, name, read_line, &mut io::stdout())
+    added(&home, name, masked, ask, &mut io::stdout())
 }
 
 pub(crate) fn key_list(json: bool) -> Result<(), Error> {
@@ -79,8 +98,10 @@ pub(crate) fn key_forget(name: &str) -> Result<(), Error> {
 }
 
 // Split from `key_add` so the order is something a test can run against a
-// temporary home: `ask` is a canned answer under test and `out` collects what a
-// reader would have seen.
+// temporary home: `ask` is a canned answer under test, `masked` is which of the
+// two reads the caller picked, and `out` collects what a reader would have
+// seen. `masked` is passed rather than asked for here because a test has no
+// terminal, and the preamble's wording is the thing under test.
 //
 // That order is the part worth pinning, and it is `config::prompted`'s. The
 // preamble is flushed before anything is read, because the prompt carries no
@@ -90,6 +111,7 @@ pub(crate) fn key_forget(name: &str) -> Result<(), Error> {
 fn added<W: Write>(
     home: &Path,
     name: &str,
+    masked: bool,
     ask: impl FnOnce() -> Result<Option<String>, Error>,
     out: &mut W,
 ) -> Result<(), Error> {
@@ -106,7 +128,7 @@ fn added<W: Write>(
     drop(write!(
         out,
         "{}",
-        preamble(name, &path, &stored_under(home, name))
+        preamble(name, &path, &stored_under(home, name), masked)
     ));
     // Best effort, and the only thing that could be done about it: the prompt
     // has no newline of its own, so it sits in the terminal's buffer until this
@@ -193,17 +215,29 @@ impl fmt::Display for Stored {
 
 // Pure, and it ends *without* a newline, because the last thing it composes is
 // the line the reader types on. The order is fixed by what they need before they
-// can answer: what this is about, where it lands, what is there now, how to
-// answer without the key appearing on the screen, and what changes nothing.
-fn preamble(name: &str, path: &Path, stored: &Stored) -> String {
+// can answer: what this is about, where it lands, what is there now, what the
+// screen will show of the key, and what changes nothing.
+//
+// The fourth line is the only one that moves, and it has to: telling somebody
+// their key is hidden when the terminal is about to echo it is the one lie here
+// that costs them the credential.
+fn preamble(name: &str, path: &Path, stored: &Stored, masked: bool) -> String {
+    let showing = if masked {
+        "what you type is not shown".to_owned()
+    } else {
+        format!(
+            "the line is echoed, so `warlock key add {name} < key.txt` is how to keep it off \
+             the screen"
+        )
+    };
+
     // One `format!` rather than a line at a time, so what is on the screen is
     // read here in the order it is printed in.
     format!(
         "key `{name}`\n\
          stored at `{path}`\n\
          {stored}\n\
-         the line is echoed, so `warlock key add {name} < key.txt` is how to keep it off \
-         the screen\n\
+         {showing}\n\
          Ctrl-C or EOF changes nothing\n\
          {PROMPT}",
         path = path.display(),
@@ -328,6 +362,138 @@ fn forgotten<W: Write>(home: &Path, root: &Path, name: &str, out: &mut W) -> Res
         keys_path(home).display()
     ));
     Ok(())
+}
+
+// The restore, as a `Drop` rather than a line at the end of `read_masked`: a
+// `Drop` also runs while a panic unwinds, and the two reads below both return
+// early. A terminal left in raw mode outlives the process — the person gets a
+// shell with no echo and no line editing, and has to know to type `reset`.
+struct Cooked;
+
+impl Drop for Cooked {
+    fn drop(&mut self) {
+        drop(disable_raw_mode());
+    }
+}
+
+// What one keystroke means at the prompt, decided apart from the reading so it
+// can be tested without a terminal — which is the only way the control arms
+// below get covered at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Typed {
+    Held(char),
+    Erase,
+    Clear,
+    Done,
+    Cancel,
+    Ignored,
+}
+
+// Raw mode turns the echo off and takes the whole line discipline with it, so
+// every key the terminal used to act on arrives here as an ordinary event and
+// has to be answered by name.
+//
+// The `CONTROL`-or-`ALT` arm is the one whose absence bites: without it every
+// chord this does not name falls through to the plain-character arm and pushes
+// its bare letter into the key. Ctrl-U is the example that matters — the
+// habitual "clear the line", which raw mode just took away — quietly storing a
+// `u` in the middle of a credential, with an authentication failure days later
+// as the only symptom. `SHIFT` is deliberately not in that test: a capital
+// arrives as the capital with `SHIFT` set, and filtering on it would drop every
+// upper-case character in the key.
+fn typed(code: KeyCode, modifiers: KeyModifiers) -> Typed {
+    let chord = modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
+    match code {
+        KeyCode::Enter => Typed::Done,
+        KeyCode::Backspace => Typed::Erase,
+        KeyCode::Char(held) if !chord => Typed::Held(held),
+        // Held with a modifier, so every arm here is a chord and the bare
+        // letter above has already been taken. Reading the two as one match
+        // would let `j` submit and `u` wipe the key as somebody typed them,
+        // and `lin_api_` alone carries three of these four letters.
+        KeyCode::Char(held) => match held {
+            // 0x0A. The terminal stopped turning Return into a newline when
+            // raw mode went on, so crossterm reports a literal `\n` as Ctrl-J
+            // rather than as Enter — which is what a pty replaying a file
+            // sends, and it means submit there exactly as Return does here.
+            'j' => Typed::Done,
+            // The preamble's two ways out, no longer a signal and an EOF now
+            // that the terminal has stopped making them.
+            'c' | 'd' => Typed::Cancel,
+            // The line kill, put back by hand because raw mode took it: the
+            // key is invisible, so the alternative to clearing it is holding
+            // Backspace and counting.
+            'u' => Typed::Clear,
+            _ => Typed::Ignored,
+        },
+        _ => Typed::Ignored,
+    }
+}
+
+// The terminal read, which answers the same three things `read_line` does — a
+// key, nothing typed, or no answer at all — from keystrokes instead of a line.
+//
+// A paste arrives as its characters, one `Press` each, because bracketed paste
+// is never enabled here; `Event::Paste` therefore cannot appear.
+fn read_masked() -> Result<Option<String>, Error> {
+    enable_raw_mode().map_err(|source| Error::Prompt { source })?;
+    let _cooked = Cooked;
+
+    let mut out = io::stdout();
+    let mut key = String::new();
+    loop {
+        let event = event::read().map_err(|source| Error::Prompt { source })?;
+        // `Press` only: a terminal reporting releases as well would otherwise
+        // store every character twice.
+        let Event::Key(KeyEvent {
+            code,
+            modifiers,
+            kind: KeyEventKind::Press,
+            ..
+        }) = event
+        else {
+            continue;
+        };
+
+        let mut rub = |count: usize| {
+            for _ in 0..count {
+                drop(write!(out, "{ERASE}"));
+            }
+            drop(out.flush());
+        };
+
+        match typed(code, modifiers) {
+            Typed::Done => break,
+            // Answered as the `None` `read_line` gives back at EOF, so `added`
+            // has one shape of "nobody answered" to handle and prints its own
+            // newline for it once this has dropped back to cooked mode.
+            Typed::Cancel => return Ok(None),
+            Typed::Erase => {
+                if key.pop().is_some() {
+                    rub(1);
+                }
+            }
+            Typed::Clear => {
+                let shown = key.chars().count();
+                key.clear();
+                rub(shown);
+            }
+            Typed::Held(held) => {
+                key.push(held);
+                drop(write!(out, "{BULLET}"));
+                drop(out.flush());
+            }
+            Typed::Ignored => {}
+        }
+    }
+
+    // The newline the echoed Enter would have supplied, and a carriage return
+    // with it: in raw mode a bare `\n` drops a line without returning to column
+    // one, which leaves the confirmation `added` prints next starting under the
+    // last bullet.
+    drop(write!(out, "\r\n"));
+    drop(out.flush());
+    Ok(Some(key))
 }
 
 // `Ok(0)` is EOF and nothing else. It is told apart from an empty line here
