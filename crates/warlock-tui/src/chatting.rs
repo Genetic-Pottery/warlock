@@ -173,7 +173,10 @@ impl<C: Converses> Chat<C> {
         &self.directory
     }
 
-    #[cfg(test)]
+    // What `/push` files, asked of this value every time rather than copied
+    // out of it when the command is typed: the scope field a second board puts
+    // up comes back a round or more later, and a copy parked beside it would be
+    // a second record of what `/write` wrote.
     pub(crate) fn written(&self) -> Option<&str> {
         self.written.as_deref()
     }
@@ -243,15 +246,26 @@ impl<C: Converses> Chat<C> {
         }
     }
 
-    pub(crate) fn compose(&mut self, app: &mut App, outcome: Composed, now: Instant) {
+    // The one thing a draft can hand back to the loop: the brief a `/push`
+    // asks to file. Which board that files to is a manifest, a home and a key
+    // store away, and none of the three is this value's — so the command is
+    // recognised here and answered there.
+    pub(crate) fn compose(
+        &mut self,
+        app: &mut App,
+        outcome: Composed,
+        now: Instant,
+    ) -> Option<String> {
         match outcome {
             Composed::Typing(next) => self.composer = next,
             Composed::Leave => app.set_focus(Focus::Panel),
-            Composed::Submit => self.submit(app, now),
+            Composed::Submit => return self.submit(app, now),
         }
+
+        None
     }
 
-    fn submit(&mut self, app: &mut App, now: Instant) {
+    fn submit(&mut self, app: &mut App, now: Instant) -> Option<String> {
         // Taken before the field is emptied, and emptied by replacing it
         // outright rather than by unmuting: the muting comes back from
         // `settle_field` on the turn alone.
@@ -298,13 +312,13 @@ impl<C: Converses> Chat<C> {
             // A command about a file rather than about the conversation, so it
             // asks nothing of the model and says nothing about the mode: what
             // it files is what `/write` wrote, whichever register the reader
-            // has since gone back to. Only the refusal is here for now — the
-            // push itself is the rest of this slice.
-            Submitted::Push => {
-                if self.written.is_none() {
-                    app.panel_mut().note(nothing_written(), now);
-                }
-            }
+            // has since gone back to. The refusal is the whole of what this
+            // value decides about it; the brief goes up to the loop, which
+            // holds the manifest that says where it files to.
+            Submitted::Push => match self.written.clone() {
+                Some(written) => return Some(written),
+                None => app.panel_mut().note(nothing_written(), now),
+            },
             // The line is asked of the value rather than restated here, so the
             // list of commands that exist is written down in one place.
             said @ Submitted::Refused => {
@@ -313,6 +327,8 @@ impl<C: Converses> Chat<C> {
                 }
             }
         }
+
+        None
     }
 
     pub(crate) fn paste(&mut self, outcome: Pasted) {

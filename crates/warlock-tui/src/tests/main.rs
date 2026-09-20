@@ -13,11 +13,11 @@ use warlock_engine::{
     resolve_filing,
 };
 use warlock_tui::{
-    App, Chrome, Focus, LinearError, PushConfirm, QuitConfirm, RecordPrompt, Row, ScopePrompt,
-    brief_at, tree_height,
+    App, Chrome, Focus, LinearError, QuitConfirm, RecordPrompt, Row, ScopePrompt, brief_at,
+    tree_height,
 };
 
-use super::{Cli, Command, Error, FOR_CLAUDE_MD, ScopeCommand, Session, status_for};
+use super::{Cli, Command, Error, FOR_CLAUDE_MD, Pushing, ScopeCommand, Session, status_for};
 use crate::chatting::Chat;
 use crate::pacting::Pact;
 use crate::query::spelled;
@@ -1159,7 +1159,7 @@ fn driving(app: App, scope: Scope, tree: &Tree) -> Driven {
         chat: Chat::with_agent(root, Saying::answering(ANSWER)),
         clipboard: Copying::taking(),
         confirm: QuitConfirm::default(),
-        push: PushConfirm::default(),
+        pushing: Pushing::closed(),
         prompt: ScopePrompt::default(),
         record: RecordPrompt::default(),
         drag: None,

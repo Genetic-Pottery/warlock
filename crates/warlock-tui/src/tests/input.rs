@@ -921,12 +921,13 @@ mod gate {
 
     use super::super::{Action, Pressed, action_for, press_for as every_window};
 
-    // The gate with the push dialog down, which is every round in this module
-    // bar that dialog's own tests: they call `press_for` itself, with it up.
+    // The gate with both of `/push`'s windows down, which is every round in
+    // this module bar their own tests: those call `press_for` itself, with one
+    // of them up.
     #[expect(
         clippy::too_many_arguments,
-        reason = "the gate's own signature, minus the one window these tests never \
-                  have up"
+        reason = "the gate's own signature, minus the two windows these tests \
+                  never have up"
     )]
     fn gate_for(
         key: KeyEvent,
@@ -942,6 +943,7 @@ mod gate {
             key,
             confirm,
             &PushConfirm::Closed,
+            &ScopePrompt::Closed,
             prompt,
             record,
             write,
@@ -1144,6 +1146,11 @@ mod gate {
             // up, so an answer arriving here is a question nobody asked.
             Pressed::Push(answered) => {
                 panic!("{answered:?} came from a push dialog that is not up")
+            }
+            // And once more for the field that dialog can come up behind,
+            // which is handed in closed by the same shim.
+            Pressed::Filing(edited) => {
+                panic!("{edited:?} came from a scope field that is not up")
             }
             // The loop's three composer arms, and the reason the draft is a
             // local here exactly as it is there: nothing about it is ever
@@ -2249,7 +2256,12 @@ mod gate {
         };
 
         fn open() -> PushConfirm {
-            PushConfirm::open("Push a brief to the board", "Warlock", "work")
+            PushConfirm::open(
+                "Push a brief to the board",
+                "warlock-team",
+                "Warlock",
+                "work",
+            )
         }
 
         // The gate with this window up and every other one down, which is the
@@ -2268,6 +2280,7 @@ mod gate {
                 key,
                 QuitConfirm::Closed,
                 push,
+                &ScopePrompt::Closed,
                 &ScopePrompt::Closed,
                 &RecordPrompt::Closed,
                 &ScopePrompt::Closed,
@@ -2362,6 +2375,7 @@ mod gate {
                         key,
                         QuitConfirm::Closed,
                         &push,
+                        &ScopePrompt::Closed,
                         &scope,
                         &record,
                         &write,
@@ -2394,6 +2408,7 @@ mod gate {
                     QuitConfirm::open(),
                     &push,
                     &ScopePrompt::Closed,
+                    &ScopePrompt::Closed,
                     &RecordPrompt::Closed,
                     &ScopePrompt::Closed,
                     None,
@@ -2413,6 +2428,213 @@ mod gate {
 
                 assert_eq!(
                     asked(key, &PushConfirm::Closed),
+                    super::press_for(
+                        key,
+                        QuitConfirm::Closed,
+                        &ScopePrompt::Closed,
+                        None,
+                        false,
+                        false
+                    ),
+                    "{code:?} was answered by a window that is not up"
+                );
+            }
+        }
+    }
+
+    // The sixth window: the field that comes up in front of that dialog when
+    // this machine can file to more than one board. Nothing but a `/push`
+    // opens it either, so every round in here opens it by hand.
+    mod filing {
+        use super::{
+            Composer, Edited, INERT, KeyCode, KeyEvent, Pressed, PushConfirm, QuitConfirm,
+            RecordPrompt, ScopePrompt, ctrl_c, edit_for, every_window, press,
+        };
+
+        fn open() -> ScopePrompt {
+            ScopePrompt::open("Scope to file the brief to", "dat")
+        }
+
+        fn asked(key: KeyEvent, filing: &ScopePrompt) -> Pressed {
+            asking(key, filing, None, false)
+        }
+
+        fn asking(
+            key: KeyEvent,
+            filing: &ScopePrompt,
+            composer: Option<&Composer>,
+            answered: bool,
+        ) -> Pressed {
+            every_window(
+                key,
+                QuitConfirm::Closed,
+                &PushConfirm::Closed,
+                filing,
+                &ScopePrompt::Closed,
+                &RecordPrompt::Closed,
+                &ScopePrompt::Closed,
+                composer,
+                false,
+                answered,
+            )
+        }
+
+        // What the field itself says about a key, which is what the gate has
+        // to hand back for every one of them.
+        fn typed(key: KeyEvent, filing: &ScopePrompt) -> Pressed {
+            let field = filing.field().expect("the field under test is up");
+            Pressed::Filing(edit_for(key, field))
+        }
+
+        #[test]
+        fn every_tree_binding_is_text_in_the_field_and_none_of_them_reaches_the_app() {
+            // While this is up, `j`, `p`, `r` and the rest are letters
+            // somebody is typing a scope name with.
+            let filing = open();
+
+            for code in INERT
+                .into_iter()
+                .chain([KeyCode::Char('q'), KeyCode::Enter])
+            {
+                let key = press(code);
+
+                assert_eq!(
+                    asked(key, &filing),
+                    typed(key, &filing),
+                    "{code:?} should have been typed into the field"
+                );
+            }
+        }
+
+        #[test]
+        fn ctrl_c_is_still_answered_before_the_field() {
+            // The keystroke of last resort, here as everywhere else: through
+            // the field it would be an inert `c`.
+            let filing = open();
+
+            assert_eq!(asked(ctrl_c(), &filing), Pressed::Leave);
+            assert_eq!(asking(ctrl_c(), &filing, None, true), Pressed::CancelTurn);
+        }
+
+        #[test]
+        fn the_composer_is_not_consulted_while_the_field_is_up() {
+            let filing = open();
+            let draft = Composer::new("web");
+
+            for code in [KeyCode::Char('j'), KeyCode::Tab, KeyCode::Enter] {
+                let key = press(code);
+
+                assert_eq!(
+                    asking(key, &filing, Some(&draft), false),
+                    typed(key, &filing),
+                    "{code:?} reached the draft from behind the field"
+                );
+            }
+        }
+
+        #[test]
+        fn it_has_the_keys_while_any_of_the_other_three_fields_is_up() {
+            // The precedence, written down: a `/write` turn still out opens
+            // the write prompt on no keystroke at all, and a field that came
+            // up under this one does not get to take the keys off it.
+            let filing = open();
+            let scope = ScopePrompt::open("crates/warlock-engine", "data-plane");
+            let record = RecordPrompt::open("crates/warlock-engine", "data-plane");
+            let write = ScopePrompt::open("Write the brief to", "docs/brief.md");
+
+            for code in INERT.into_iter().chain([KeyCode::Enter, KeyCode::Esc]) {
+                let key = press(code);
+
+                assert_eq!(
+                    every_window(
+                        key,
+                        QuitConfirm::Closed,
+                        &PushConfirm::Closed,
+                        &filing,
+                        &scope,
+                        &record,
+                        &write,
+                        None,
+                        false,
+                        false,
+                    ),
+                    typed(key, &filing),
+                    "{code:?} was answered by the wrong window"
+                );
+            }
+        }
+
+        #[test]
+        fn the_dialog_and_the_quit_question_are_both_asked_before_it() {
+            // Neither is a situation a session is in — the submit that takes
+            // this window down is the one that puts the dialog up — but which
+            // window answers has to be decided somewhere rather than by the
+            // order of two `if`s nobody looked at.
+            let filing = open();
+            let push = PushConfirm::open(
+                "Push a brief to the board",
+                "warlock-team",
+                "Warlock",
+                "work",
+            );
+            let key = press(KeyCode::Enter);
+
+            assert!(matches!(
+                every_window(
+                    key,
+                    QuitConfirm::Closed,
+                    &push,
+                    &filing,
+                    &ScopePrompt::Closed,
+                    &RecordPrompt::Closed,
+                    &ScopePrompt::Closed,
+                    None,
+                    false,
+                    false,
+                ),
+                Pressed::Push(_)
+            ));
+            assert_eq!(
+                every_window(
+                    key,
+                    QuitConfirm::open(),
+                    &PushConfirm::Closed,
+                    &filing,
+                    &ScopePrompt::Closed,
+                    &RecordPrompt::Closed,
+                    &ScopePrompt::Closed,
+                    None,
+                    false,
+                    false,
+                ),
+                Pressed::Confirm(QuitConfirm::Closed)
+            );
+        }
+
+        #[test]
+        fn esc_abandons_it_and_enter_offers_the_name_up() {
+            // The two keys that end it, which are the scope prompt's own: what
+            // a submit comes to is the loop's, and all this says is where the
+            // key came from.
+            let filing = open();
+
+            assert_eq!(
+                asked(press(KeyCode::Esc), &filing),
+                Pressed::Filing(Edited::Close)
+            );
+            assert_eq!(
+                asked(press(KeyCode::Enter), &filing),
+                Pressed::Filing(Edited::Submit)
+            );
+        }
+
+        #[test]
+        fn the_keys_mean_what_they_always_did_once_the_field_is_down() {
+            for code in INERT.into_iter().chain([KeyCode::Char('q')]) {
+                let key = press(code);
+
+                assert_eq!(
+                    asked(key, &ScopePrompt::Closed),
                     super::press_for(
                         key,
                         QuitConfirm::Closed,
@@ -3377,6 +3599,7 @@ mod pointer {
             app,
             confirm,
             &PushConfirm::Closed,
+            &ScopePrompt::Closed,
             prompt,
             record,
             write,
@@ -3391,6 +3614,7 @@ mod pointer {
             app,
             QuitConfirm::Closed,
             &PushConfirm::Closed,
+            &ScopePrompt::Closed,
             &ScopePrompt::Closed,
             &RecordPrompt::Closed,
             &ScopePrompt::Closed,
@@ -4238,7 +4462,12 @@ mod pointer {
 
         // And the fifth window, which `asks_under` above cannot put up because
         // every other test in here has it down.
-        let push = PushConfirm::open("Push a brief to the board", "Warlock", "work");
+        let push = PushConfirm::open(
+            "Push a brief to the board",
+            "warlock-team",
+            "Warlock",
+            "work",
+        );
         for mouse in [
             left_click(IN_PANEL, FIRST_PANEL_LINE + 2),
             drag(IN_PANEL + 3, FIRST_PANEL_LINE + 3),
@@ -4252,6 +4481,7 @@ mod pointer {
                     &app,
                     QuitConfirm::Closed,
                     &push,
+                    &ScopePrompt::Closed,
                     &ScopePrompt::Closed,
                     &RecordPrompt::Closed,
                     &ScopePrompt::Closed,

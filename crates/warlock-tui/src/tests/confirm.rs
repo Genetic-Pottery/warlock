@@ -225,12 +225,14 @@ mod push {
 
     const PROJECT: &str = "Push a brief to the board";
 
+    const SCOPE: &str = "warlock-team";
+
     const TEAM: &str = "Warlock";
 
     const KEY: &str = "work";
 
     fn open() -> PushConfirm {
-        PushConfirm::open(PROJECT, TEAM, KEY)
+        PushConfirm::open(PROJECT, SCOPE, TEAM, KEY)
     }
 
     // The dialog answering one key, as the session answers it: the lit answer

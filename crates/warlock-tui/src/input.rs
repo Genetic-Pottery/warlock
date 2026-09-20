@@ -123,6 +123,11 @@ pub(crate) enum Pressed {
     // coming down, and a `PushConfirm::Closed` here could not tell it from the
     // Esc that closes the same window with nothing sent.
     Push(PushAnswered),
+    // The field that comes up in front of that dialog when the machine can file
+    // to more than one board. A fourth variant over `Edited` for `Scope` and
+    // `Write`'s reason: the three are the same keystrokes and three different
+    // things to do with a submit.
+    Filing(Edited),
     Scope(Edited),
     Record(RecordEdited),
     Write(Edited),
@@ -177,6 +182,11 @@ fn is_tab(key: KeyEvent) -> bool {
 // top; after, because the quit dialog is the gate on the way out and the two
 // are never up together anyway (`q` reaches nothing while this is up).
 //
+// The scope field a `/push` puts up when the machine can file to more than one
+// board is asked in the dialog's own place, for the dialog's own reason: it is
+// the other half of the same question and the two are never up together — the
+// submit that takes this one down is what puts that one up.
+//
 // The composer is asked after all of them, because a window is drawn over it: a
 // key cannot be both typed into a field on the frame and answered by the dialog
 // covering it. `composer` is `Some` only when the focus is on the field, which
@@ -191,6 +201,7 @@ pub(crate) fn press_for(
     key: KeyEvent,
     confirm: QuitConfirm,
     push: &PushConfirm,
+    filing: &ScopePrompt,
     prompt: &ScopePrompt,
     record: &RecordPrompt,
     write: &ScopePrompt,
@@ -214,8 +225,12 @@ pub(crate) fn press_for(
         };
     }
 
-    if let Some(filing) = push.filing() {
-        return Pressed::Push(push_answer_for(key, filing.answer()));
+    if let Some(asked) = push.filing() {
+        return Pressed::Push(push_answer_for(key, asked.answer()));
+    }
+
+    if let Some(field) = filing.field() {
+        return Pressed::Filing(edit_for(key, field));
     }
 
     if let Some(field) = prompt.field() {
@@ -322,7 +337,7 @@ pub(crate) struct Drag {
 // `PanelLine` for a point on the composer and scrolls a window the pointer is
 // not over.
 //
-// None of the five windows has anything clickable in it, so while any is up
+// None of the six windows has anything clickable in it, so while any is up
 // every event is dropped, wheel and click alike: a click that reached the tree
 // behind one would select a row the reader cannot see.
 #[expect(
@@ -337,6 +352,7 @@ pub(crate) fn mouse_action(
     app: &App,
     confirm: QuitConfirm,
     push: &PushConfirm,
+    filing: &ScopePrompt,
     prompt: &ScopePrompt,
     record: &RecordPrompt,
     write: &ScopePrompt,
@@ -344,6 +360,7 @@ pub(crate) fn mouse_action(
 ) -> Option<MouseAction> {
     if confirm.is_open()
         || push.is_open()
+        || filing.is_open()
         || prompt.is_open()
         || record.is_open()
         || write.is_open()

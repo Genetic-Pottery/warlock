@@ -44,6 +44,7 @@ mod input;
 mod key;
 mod pacting;
 mod push;
+mod pushing;
 mod query;
 mod running;
 mod scoping;
@@ -66,6 +67,7 @@ use input::{Action, Drag, MouseAction, Pressed, drag_after, mouse_action, press_
 use key::{key_add, key_forget, key_list, key_use};
 use pacting::{Pact, Reloaded};
 use push::push;
+use pushing::{Pushing, push_edit, push_press};
 use query::{Listing, list};
 use running::{pact, refresh};
 use scoping::{record_edit, scope_edit, scope_press};
@@ -595,7 +597,7 @@ fn run() -> Result<(), Error> {
         // text it put on an X11 selection. See `mod@clipboard`.
         clipboard: Clipboard::open(),
         confirm: QuitConfirm::default(),
-        push: PushConfirm::default(),
+        pushing: Pushing::closed(),
         prompt: ScopePrompt::default(),
         record: RecordPrompt::default(),
         drag: None,
@@ -684,10 +686,12 @@ struct Session<S: Screen, P: Wired + Agent, C: Converses, B: Clip> {
     /// returns because a copy does not outlive the handle that made it.
     clipboard: B,
     confirm: QuitConfirm,
-    /// The question a `/push` asks before anything leaves the machine, carrying
-    /// the project name, the team and the *name* of the key it would be sent
-    /// with. Nothing opens it yet.
-    push: PushConfirm,
+    /// What a `/push` has put up: the question asked before anything leaves the
+    /// machine — the project name, the team and the *name* of the key it would
+    /// be sent with — or, on a machine that can file to more than one board,
+    /// the field asking which. One value because they are two halves of one
+    /// question and never both up; see [`mod@pushing`].
+    pushing: Pushing,
     prompt: ScopePrompt,
     /// The second window the `s` key puts up, over a scope name no `[[scope]]`
     /// record claims. Never up at the same time as [`Session::prompt`]: one goes
@@ -746,7 +750,7 @@ impl<S: Screen, P: Wired + Agent, C: Converses, B: Clip> Session<S, P, C, B> {
             (&self.app, &self.scope.chrome, self.confirm, &self.prompt);
         let record = &self.record;
         let write = self.chat.write_prompt();
-        let push = &self.push;
+        let (filing, push) = (&self.pushing.field, &self.pushing.confirm);
         self.screen.draw(|frame| {
             draw(
                 frame,
@@ -757,6 +761,7 @@ impl<S: Screen, P: Wired + Agent, C: Converses, B: Clip> Session<S, P, C, B> {
                 prompt,
                 record,
                 write,
+                filing,
                 push,
                 field,
             );
@@ -782,7 +787,8 @@ impl<S: Screen, P: Wired + Agent, C: Converses, B: Clip> Session<S, P, C, B> {
             size,
             &self.app,
             self.confirm,
-            &self.push,
+            &self.pushing.confirm,
+            &self.pushing.field,
             &self.prompt,
             &self.record,
             self.chat.write_prompt(),
@@ -882,6 +888,12 @@ impl<S: Screen, P: Wired + Agent, C: Converses, B: Clip> Session<S, P, C, B> {
     /// Every arm below is one key. Nothing here re-gates what the module it
     /// dispatches to already refuses, which is why most arms have no error case
     /// — a refusal is a line on the footer and the loop goes round again.
+    // Over the pedantic line count because the arms carry their reasoning, and
+    // the fix the lint is asking for is the one this function exists to refuse:
+    // an arm dispatching on a value computed elsewhere is a key a reader cannot
+    // find here. Splitting by key group would put half the keyboard behind a
+    // name somebody has to guess at, and every line past the limit is a comment.
+    #[allow(clippy::too_many_lines)]
     fn press(&mut self, key: KeyEvent, now: Instant) -> Result<bool, Error> {
         // The composer is offered on exactly the condition that lights its border,
         // which is the keyboard being pointed at it: with the keys anywhere else
@@ -894,7 +906,8 @@ impl<S: Screen, P: Wired + Agent, C: Converses, B: Clip> Session<S, P, C, B> {
         let pressed = press_for(
             key,
             self.confirm,
-            &self.push,
+            &self.pushing.confirm,
+            &self.pushing.field,
             &self.prompt,
             &self.record,
             self.chat.write_prompt(),
@@ -1215,7 +1228,45 @@ impl<S: Screen, P: Wired + Agent, C: Converses, B: Clip> Session<S, P, C, B> {
             // well for the pact key's reason: a turn is as old as the question
             // that asked it, not as old as the first thing the model got round to
             // saying.
-            Pressed::Compose(outcome) => self.chat.compose(&mut self.app, outcome, now),
+            //
+            // The one thing a draft hands back is a `/push`: the brief this
+            // session wrote, which the conversation knows and cannot file,
+            // because which board it files to is the manifest's, the machine's
+            // sigils' and the key store's. That question is answered here and
+            // on this thread — no socket is opened by any of it — and what
+            // comes back is the window the reader is now looking at. See
+            // `pushing::push_press`.
+            Pressed::Compose(outcome) => {
+                if let Some(written) = self.chat.compose(&mut self.app, outcome, now) {
+                    self.pushing = push_press(
+                        &mut self.app,
+                        &self.manifest,
+                        &self.scope.repo_root,
+                        &written,
+                        now,
+                    );
+                }
+            }
+            // Somebody typing into the window a `/push` puts up when this
+            // machine can file to more than one board: a character more or
+            // less in the scope name, the window abandoned, or — on Enter —
+            // that name asked of the engine. A name it recognises takes this
+            // window down and puts the dialog up, and one it does not leaves
+            // the field where it was with the candidates under it; both come
+            // back in the one value, for the reason the scope key's two
+            // windows do. Nothing is sent by any of it. See
+            // `pushing::push_edit`.
+            Pressed::Filing(edited) => {
+                self.pushing = push_edit(
+                    &mut self.app,
+                    &self.manifest,
+                    &self.scope.repo_root,
+                    self.chat.written(),
+                    &self.pushing.field,
+                    edited,
+                    now,
+                );
+            }
             // A key nothing is bound to, or one whose press has already been
             // answered where it was decided.
             Pressed::Nothing => {}
@@ -1225,16 +1276,16 @@ impl<S: Screen, P: Wired + Agent, C: Converses, B: Clip> Session<S, P, C, B> {
     }
 
     /// The push dialog, moved or answered. An arrow re-lights the question that
-    /// is up — the three strings it was opened with ride along unchanged, since
-    /// they are what is being answered about — and either answer takes it down.
+    /// is up — the strings it was opened with ride along unchanged, since they
+    /// are what is being answered about — and either answer takes it down.
     ///
-    /// A Yes sends nothing yet: what opens this window, and what a confirmed
-    /// one files, are the slices after this one. Until then the honest
-    /// behaviour of both answers is the same one — the window comes down and
-    /// the session goes on exactly where it was.
+    /// A Yes sends nothing yet: what a confirmed question files is the slice
+    /// after this one. Until then the honest behaviour of both answers is the
+    /// same one — the window comes down and the session goes on exactly where
+    /// it was.
     fn push_answered(&mut self, answered: PushAnswered) {
-        self.push = match answered {
-            PushAnswered::Open(answer) => self.push.lit(answer),
+        self.pushing.confirm = match answered {
+            PushAnswered::Open(answer) => self.pushing.confirm.lit(answer),
             PushAnswered::Cancel | PushAnswered::Send => PushConfirm::Closed,
         };
     }

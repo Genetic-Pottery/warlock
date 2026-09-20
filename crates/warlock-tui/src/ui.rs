@@ -270,6 +270,13 @@ const PATH_HEADING: &str = "";
 
 const PATH_RULES: &str = "Enter writes the document, Esc writes nothing";
 
+/// Empty for [`PATH_HEADING`]'s reason: what this window is asking is one
+/// phrase, the caller already carries it as the field's own heading line, and
+/// a second one here would put two of them on the row.
+const FILING_HEADING: &str = "";
+
+const FILING_RULES: &str = "Enter files the brief to that scope, Esc files nothing";
+
 const SCOPE_MARGIN: u16 = CONFIRM_MARGIN;
 
 const SCOPE_MARGIN_ROWS: u16 = CONFIRM_MARGIN_ROWS;
@@ -310,8 +317,8 @@ const COMPOSER_MIN_HEIGHT: u16 = 1 + 2 * BORDER_THICKNESS;
 #[expect(
     clippy::too_many_arguments,
     reason = "one frame's worth of state, and the point of it is that the binary \
-              draws a frame in one call: the five windows that can be over the \
-              app are five parameters here rather than five entry points"
+              draws a frame in one call: the six windows that can be over the \
+              app are six parameters here rather than six entry points"
 )]
 pub fn draw(
     frame: &mut Frame<'_>,
@@ -322,6 +329,7 @@ pub fn draw(
     scope: &ScopePrompt,
     record: &RecordPrompt,
     path: &ScopePrompt,
+    filing: &ScopePrompt,
     push: &PushConfirm,
     composer: Option<&Composer>,
 ) {
@@ -367,11 +375,16 @@ pub fn draw(
     if let Some(form) = record.form() {
         draw_record(frame, screen, form);
     }
-    // Last, so it is the window on top, which is the order the keys go in as
-    // well: `press_for` asks it before the three fields above, and a window
-    // taking the keys from underneath another one is a dialog answered blind.
-    if let Some(filing) = push.filing() {
-        draw_push(frame, screen, filing);
+    // The last two are the two halves of one `/push`, drawn after the three
+    // above for the reason the keys go to them first: they are the windows
+    // somebody is looking at while any of those can be up underneath. They are
+    // never both on a frame — the submit that takes the field down is the one
+    // that puts the dialog up.
+    if let Some(field) = filing.field() {
+        draw_scope(frame, screen, field, FILING_HEADING, FILING_RULES);
+    }
+    if let Some(asked) = push.filing() {
+        draw_push(frame, screen, asked);
     }
 }
 

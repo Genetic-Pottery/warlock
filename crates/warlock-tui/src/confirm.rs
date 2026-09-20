@@ -104,9 +104,16 @@ pub fn answer_for(key: KeyEvent, highlighted: Answer) -> Answered {
 }
 
 // The board a `/push` is about to file to, as the three strings the reader is
-// being asked about. The key is here *by name* and there is nowhere in this
-// value for its bytes to sit: a dialog that cannot hold a key cannot draw one,
-// print one or grow one in a `Debug` rendering.
+// being asked about and the one the answer is resolved against again. The key
+// is here *by name* and there is nowhere in this value for its bytes to sit: a
+// dialog that cannot hold a key cannot draw one, print one or grow one in a
+// `Debug` rendering.
+//
+// That fourth string is the scope, which is not drawn: what the board is was
+// worked out from it before this window went up, and a `Target` — the value
+// that answer came in — borrows the manifest and carries the key value, so it
+// cannot be parked here across rounds. The name that found it can, and a Yes
+// asks the same question of it a second time.
 //
 // The lit answer rides along inside it for `QuitConfirm`'s reason — it exists
 // exactly as long as the question does — which is why this is only ever built
@@ -114,6 +121,7 @@ pub fn answer_for(key: KeyEvent, highlighted: Answer) -> Answered {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Filing {
     project: String,
+    scope: String,
     team: String,
     key: String,
     answer: Answer,
@@ -123,6 +131,13 @@ impl Filing {
     #[must_use]
     pub fn project(&self) -> &str {
         &self.project
+    }
+
+    /// The scope the board was resolved from, for the resolution a confirmed
+    /// question does again: see the type's own note.
+    #[must_use]
+    pub fn scope(&self) -> &str {
+        &self.scope
     }
 
     #[must_use]
@@ -143,8 +158,8 @@ impl Filing {
     }
 
     // The one way the highlight moves, so answering re-lights the same question
-    // rather than building a second one from three strings it would have to be
-    // handed again.
+    // rather than building a second one from strings it would have to be handed
+    // again.
     #[must_use]
     pub fn with_answer(&self, answer: Answer) -> Self {
         Self {
@@ -175,11 +190,13 @@ impl PushConfirm {
     #[must_use]
     pub fn open(
         project: impl Into<String>,
+        scope: impl Into<String>,
         team: impl Into<String>,
         key: impl Into<String>,
     ) -> Self {
         Self::Open(Filing {
             project: project.into(),
+            scope: scope.into(),
             team: team.into(),
             key: key.into(),
             answer: Answer::No,
