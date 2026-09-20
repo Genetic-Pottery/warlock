@@ -328,3 +328,7 @@ impl std::error::Error for Error {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "tests/filing.rs"]
+mod tests;
