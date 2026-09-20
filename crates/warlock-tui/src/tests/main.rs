@@ -13,8 +13,8 @@ use warlock_engine::{
     resolve_filing,
 };
 use warlock_tui::{
-    App, Chrome, Focus, LinearError, QuitConfirm, RecordPrompt, Row, ScopePrompt, brief_at,
-    tree_height,
+    App, Chrome, Focus, LinearError, PushConfirm, QuitConfirm, RecordPrompt, Row, ScopePrompt,
+    brief_at, tree_height,
 };
 
 use super::{Cli, Command, Error, FOR_CLAUDE_MD, ScopeCommand, Session, status_for};
@@ -1159,6 +1159,7 @@ fn driving(app: App, scope: Scope, tree: &Tree) -> Driven {
         chat: Chat::with_agent(root, Saying::answering(ANSWER)),
         clipboard: Copying::taking(),
         confirm: QuitConfirm::default(),
+        push: PushConfirm::default(),
         prompt: ScopePrompt::default(),
         record: RecordPrompt::default(),
         drag: None,

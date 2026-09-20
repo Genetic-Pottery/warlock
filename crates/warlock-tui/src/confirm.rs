@@ -103,6 +103,139 @@ pub fn answer_for(key: KeyEvent, highlighted: Answer) -> Answered {
     }
 }
 
+// The board a `/push` is about to file to, as the three strings the reader is
+// being asked about. The key is here *by name* and there is nowhere in this
+// value for its bytes to sit: a dialog that cannot hold a key cannot draw one,
+// print one or grow one in a `Debug` rendering.
+//
+// The lit answer rides along inside it for `QuitConfirm`'s reason — it exists
+// exactly as long as the question does — which is why this is only ever built
+// through [`PushConfirm::open`].
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Filing {
+    project: String,
+    team: String,
+    key: String,
+    answer: Answer,
+}
+
+impl Filing {
+    #[must_use]
+    pub fn project(&self) -> &str {
+        &self.project
+    }
+
+    #[must_use]
+    pub fn team(&self) -> &str {
+        &self.team
+    }
+
+    /// The *name* the key is held under, never a key value: see the type's own
+    /// note.
+    #[must_use]
+    pub fn key(&self) -> &str {
+        &self.key
+    }
+
+    #[must_use]
+    pub const fn answer(&self) -> Answer {
+        self.answer
+    }
+
+    // The one way the highlight moves, so answering re-lights the same question
+    // rather than building a second one from three strings it would have to be
+    // handed again.
+    #[must_use]
+    pub fn with_answer(&self, answer: Answer) -> Self {
+        Self {
+            answer,
+            ..self.clone()
+        }
+    }
+}
+
+/// The question a `/push` asks before anything leaves the machine, drawn over
+/// the frame the way the quit dialog is and answered by the very same rules —
+/// [`push_answer_for`] is [`answer_for`] with the answers renamed.
+///
+/// A separate value from [`QuitConfirm`] because the two are answered about
+/// different things and say so in their types: a confirmed question here sends
+/// a brief and leaves the session exactly where it was.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
+pub enum PushConfirm {
+    #[default]
+    Closed,
+    Open(Filing),
+}
+
+impl PushConfirm {
+    /// No is lit on open, for the reason [`Answer::No`] is the default: the
+    /// keystroke that opened the dialog and an Enter straight after it come to
+    /// nothing at all.
+    #[must_use]
+    pub fn open(
+        project: impl Into<String>,
+        team: impl Into<String>,
+        key: impl Into<String>,
+    ) -> Self {
+        Self::Open(Filing {
+            project: project.into(),
+            team: team.into(),
+            key: key.into(),
+            answer: Answer::No,
+        })
+    }
+
+    #[must_use]
+    pub const fn is_open(&self) -> bool {
+        matches!(self, Self::Open(_))
+    }
+
+    /// The one way into [`push_answer_for`] and into the drawing, for the
+    /// reason [`QuitConfirm::highlighted`] is: the caller cannot invent a
+    /// question that is not up.
+    #[must_use]
+    pub const fn filing(&self) -> Option<&Filing> {
+        match self {
+            Self::Closed => None,
+            Self::Open(filing) => Some(filing),
+        }
+    }
+
+    /// The same question with the other answer lit, and a closed dialog left
+    /// closed: an arrow key pressed at nothing lights nothing.
+    #[must_use]
+    pub fn lit(&self, answer: Answer) -> Self {
+        match self {
+            Self::Closed => Self::Closed,
+            Self::Open(filing) => Self::Open(filing.with_answer(answer)),
+        }
+    }
+}
+
+/// [`Answered`] in this dialog's vocabulary: a confirmed question here means
+/// send, and warlock goes on running either way.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PushAnswered {
+    Open(Answer),
+    Cancel,
+    Send,
+}
+
+/// The quit dialog's rules, renamed rather than restated: Esc and `n` cancel,
+/// Left then Enter sends, an immediate Enter cancels, a release changes
+/// nothing, and every other key leaves the question exactly as it was. Written
+/// over [`answer_for`] so the two cannot drift — a key that moves one moves the
+/// other.
+#[must_use]
+pub fn push_answer_for(key: KeyEvent, highlighted: Answer) -> PushAnswered {
+    match answer_for(key, highlighted) {
+        Answered::Open(answer) => PushAnswered::Open(answer),
+        Answered::Close => PushAnswered::Cancel,
+        Answered::Leave => PushAnswered::Send,
+    }
+}
+
 #[cfg(test)]
 #[path = "tests/confirm.rs"]
 mod tests;

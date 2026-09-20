@@ -26,9 +26,9 @@ use ratatui::crossterm::event::{self, Event, KeyEvent, MouseEvent};
 use ratatui::layout::Size;
 use warlock_engine::{Agent, Manifest, Written, write_claude_md};
 use warlock_tui::{
-    App, Cell, Converses, Focus, Position, QuitConfirm, Reach, RecordPrompt, Run, ScopePrompt,
-    Wired, composer_on_screen, copied_text, draw, panel_height, panel_width, paste_for,
-    position_at, tree_height,
+    App, Cell, Converses, Focus, Position, PushAnswered, PushConfirm, QuitConfirm, Reach,
+    RecordPrompt, Run, ScopePrompt, Wired, composer_on_screen, copied_text, draw, panel_height,
+    panel_width, paste_for, position_at, tree_height,
 };
 
 mod boundary;
@@ -595,6 +595,7 @@ fn run() -> Result<(), Error> {
         // text it put on an X11 selection. See `mod@clipboard`.
         clipboard: Clipboard::open(),
         confirm: QuitConfirm::default(),
+        push: PushConfirm::default(),
         prompt: ScopePrompt::default(),
         record: RecordPrompt::default(),
         drag: None,
@@ -683,6 +684,10 @@ struct Session<S: Screen, P: Wired + Agent, C: Converses, B: Clip> {
     /// returns because a copy does not outlive the handle that made it.
     clipboard: B,
     confirm: QuitConfirm,
+    /// The question a `/push` asks before anything leaves the machine, carrying
+    /// the project name, the team and the *name* of the key it would be sent
+    /// with. Nothing opens it yet.
+    push: PushConfirm,
     prompt: ScopePrompt,
     /// The second window the `s` key puts up, over a scope name no `[[scope]]`
     /// record claims. Never up at the same time as [`Session::prompt`]: one goes
@@ -741,6 +746,7 @@ impl<S: Screen, P: Wired + Agent, C: Converses, B: Clip> Session<S, P, C, B> {
             (&self.app, &self.scope.chrome, self.confirm, &self.prompt);
         let record = &self.record;
         let write = self.chat.write_prompt();
+        let push = &self.push;
         self.screen.draw(|frame| {
             draw(
                 frame,
@@ -751,6 +757,7 @@ impl<S: Screen, P: Wired + Agent, C: Converses, B: Clip> Session<S, P, C, B> {
                 prompt,
                 record,
                 write,
+                push,
                 field,
             );
         })
@@ -775,6 +782,7 @@ impl<S: Screen, P: Wired + Agent, C: Converses, B: Clip> Session<S, P, C, B> {
             size,
             &self.app,
             self.confirm,
+            &self.push,
             &self.prompt,
             &self.record,
             self.chat.write_prompt(),
@@ -880,17 +888,19 @@ impl<S: Screen, P: Wired + Agent, C: Converses, B: Clip> Session<S, P, C, B> {
         // this is `None`, there is no draft to type into, and every letter is the
         // command it has always been.
         let typing = (self.app.focus() == Focus::Composer).then(|| self.chat.composer());
+        // A local because two arms further down are about the same run; what a
+        // turn is doing is asked for once, here, and read nowhere else.
         let running = self.pact.running();
-        let asked = self.chat.answering();
         let pressed = press_for(
             key,
             self.confirm,
+            &self.push,
             &self.prompt,
             &self.record,
             self.chat.write_prompt(),
             typing,
             running,
-            asked,
+            self.chat.answering(),
         );
 
         match pressed {
@@ -914,6 +924,8 @@ impl<S: Screen, P: Wired + Agent, C: Converses, B: Clip> Session<S, P, C, B> {
             // No has nothing to put back, and the top of this loop draws whatever
             // the question now is.
             Pressed::Confirm(next) => self.confirm = next,
+            // The push dialog, moved or answered: see [`Session::push_answered`].
+            Pressed::Push(answered) => self.push_answered(answered),
             // Esc with a run in flight. The handle does both halves at once — it
             // latches, so the descent stops at the next directory instead of
             // starting a pass for it, and it kills the `claude` running right now,
@@ -1210,6 +1222,21 @@ impl<S: Screen, P: Wired + Agent, C: Converses, B: Clip> Session<S, P, C, B> {
         }
 
         Ok(true)
+    }
+
+    /// The push dialog, moved or answered. An arrow re-lights the question that
+    /// is up — the three strings it was opened with ride along unchanged, since
+    /// they are what is being answered about — and either answer takes it down.
+    ///
+    /// A Yes sends nothing yet: what opens this window, and what a confirmed
+    /// one files, are the slices after this one. Until then the honest
+    /// behaviour of both answers is the same one — the window comes down and
+    /// the session goes on exactly where it was.
+    fn push_answered(&mut self, answered: PushAnswered) {
+        self.push = match answered {
+            PushAnswered::Open(answer) => self.push.lit(answer),
+            PushAnswered::Cancel | PushAnswered::Send => PushConfirm::Closed,
+        };
     }
 
     /// A block the terminal handed over whole. Nothing is returned and nothing
