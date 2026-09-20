@@ -10,6 +10,7 @@
 
 mod account;
 mod app;
+mod brief;
 mod claude;
 mod colour;
 mod composer;
@@ -43,6 +44,9 @@ pub use app::Run;
 pub use app::RunHeader;
 pub use app::Sigils;
 pub use app::reseat_on;
+pub use brief::Brief;
+pub use brief::Error as BriefError;
+pub use brief::brief_at;
 pub use claude::Activities;
 pub use claude::Activity;
 pub use claude::BRIEF_EFFORT;
