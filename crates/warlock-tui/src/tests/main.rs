@@ -636,6 +636,7 @@ fn help_prints_a_few_lines_rather_than_this_file() {
     let help = Cli::command().render_long_help().to_string();
     for subcommand in [
         "init", "config", "stale", "fresh", "check", "unpact", "pact", "refresh", "scope", "key",
+        "push",
     ] {
         assert!(help.contains(subcommand), "{subcommand}: {help}");
     }
@@ -643,7 +644,7 @@ fn help_prints_a_few_lines_rather_than_this_file() {
     // A row per subcommand plus the usage and options chrome: the ceiling is
     // what stops an `about` becoming a paragraph, so it moves by one when a
     // subcommand is added and never to make room for prose.
-    assert!(help.lines().count() < 21, "{help}");
+    assert!(help.lines().count() < 22, "{help}");
     // Every doc comment on `Cli` and its variants spells the command in
     // backticks, and no `about` above does, so a backtick reaching the help
     // is a doc comment that got lifted into it.

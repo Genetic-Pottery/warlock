@@ -43,6 +43,7 @@ mod error;
 mod input;
 mod key;
 mod pacting;
+mod push;
 mod query;
 mod running;
 mod scoping;
@@ -64,6 +65,7 @@ use error::Error;
 use input::{Action, Drag, MouseAction, Pressed, drag_after, mouse_action, press_for};
 use key::{key_add, key_forget, key_list, key_use};
 use pacting::{Pact, Reloaded};
+use push::push;
 use query::{Listing, list};
 use running::{pact, refresh};
 use scoping::{record_edit, scope_edit, scope_press};
@@ -219,6 +221,27 @@ enum Command {
     Key {
         #[command(subcommand)]
         command: KeyCommand,
+    },
+    #[command(
+        about = "File a brief as a project on the board this machine's sigil names.",
+        long_about = None
+    )]
+    Push {
+        // Required, like the check's: a push is about one document, and there
+        // is no whole-repository answer for an omitted path to mean.
+        /// Which brief to file.
+        #[arg(value_name = "PATH")]
+        path: PathBuf,
+        // Optional to clap and needed only when this machine holds sigils for
+        // more than one recorded scope, which clap has not read
+        // `.warlock/pacts.toml` to know. A `String` and not a validated type,
+        // for the reason a scope is one on `scope add`.
+        /// Which scope to file under, when this machine can file to several.
+        #[arg(long, value_name = "NAME")]
+        scope: Option<String>,
+        /// Print what would be sent, open no socket and write no record.
+        #[arg(long)]
+        dry_run: bool,
     },
 }
 
@@ -443,6 +466,17 @@ fn main() -> ExitCode {
             KeyCommand::Use { name } => key_use(&name),
             KeyCommand::Forget { name } => key_forget(&name),
         },
+        // The one subcommand that sends anything anywhere, dispatched here for
+        // every reason the writes are — it prints its lines on the ordinary
+        // screen and takes no terminal — and gated by nothing here: the sigil
+        // picks the board rather than opening a directory, so none of what it
+        // refuses is the boundary's **3**. Every refusal it has is reached
+        // before the socket is opened; see [`mod@push`].
+        Some(Command::Push {
+            path,
+            scope,
+            dry_run,
+        }) => push(&path, scope.as_deref(), dry_run),
     };
 
     // `run` has returned, so the guard inside it has already dropped and the
