@@ -147,6 +147,28 @@ ctrlc = { version = "3" }
 arboard = { version = "3", default-features = false, features = [
     "wayland-data-control",
 ] }
+# HTTP, and the only outbound network path in the workspace: filing a brief on
+# the board is a handful of requests against Linear's GraphQL endpoint, and the
+# alternative to a client crate is owning a TLS handshake and an HTTP/1.1
+# writer, which is far more supply chain than it saves. `reqwest` with its
+# `blocking` feature was considered and rejected: that client starts a tokio
+# runtime on a background thread, and warlock has no async runtime anywhere —
+# `claude.rs` states the rule. ureq is blocking all the way down, so a request
+# is a call on the thread that made it.
+#
+# The TLS backend is rustls, which is the default; `native-tls` stays off, so
+# there is no openssl-sys and no system TLS library to link. The provider under
+# rustls is ring rather than aws-lc-rs — also the default, by way of ureq's
+# `rustls` feature — and that is the part worth watching: aws-lc-rs compiles C
+# and assembly through cmake and nasm, neither of which is on this machine,
+# where Rust comes from nixpkgs. Ring builds with cargo alone, which is why
+# `cargo build` needed nothing added here. Turning `native-tls` on, or moving
+# the provider to aws-lc-rs, would each break that.
+#
+# `json` is not on by default: it hands ureq the serde and serde_json already in
+# this tree, so a request body and its reply are typed values rather than
+# strings assembled and re-parsed at the call site. It costs no new crate.
+ureq = { version = "3", features = ["json"] }
 # Dev-only: round-trips a value through serde's own token stream, so the derives
 # can be tested in memory, independently of how any one format spells them.
 serde_test = { version = "1" }

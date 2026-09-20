@@ -1,11 +1,12 @@
 //! The front end minus the terminal. Nothing in this crate opens a terminal,
 //! reads a key or owns an event loop: `src/main.rs` does all of that and hands
 //! values in, which is what keeps the draw path assertable against an in-memory
-//! buffer and everything else against plain values. Two modules reach past that
-//! rule on purpose — `claude` runs the CLI as a child process because the
-//! engine's port spawns nothing, and `watch` holds a filesystem watcher — and
-//! both are built so the decisions made about what they hear are values a test
-//! can drive without either.
+//! buffer and everything else against plain values. Three modules reach past
+//! that rule on purpose — `claude` runs the CLI as a child process because the
+//! engine's port spawns nothing, `linear` opens a socket because the board is
+//! somewhere else, and `watch` holds a filesystem watcher — and all three are
+//! built so the decisions made about what they hear are values a test can drive
+//! without any of them.
 
 mod account;
 mod app;
@@ -15,6 +16,7 @@ mod composer;
 mod confirm;
 #[cfg(test)]
 mod fixture;
+mod linear;
 pub mod panel;
 mod prompt;
 mod selection;
@@ -66,6 +68,16 @@ pub use confirm::Answer;
 pub use confirm::Answered;
 pub use confirm::QuitConfirm;
 pub use confirm::answer_for;
+pub use linear::Client as LinearClient;
+pub use linear::Error as LinearError;
+pub use linear::NewProject;
+pub use linear::Posts;
+pub use linear::Project as LinearProject;
+pub use linear::REQUEST_TIMEOUT;
+pub use linear::backlog_status;
+pub use linear::create_project;
+pub use linear::label_id;
+pub use linear::team_id;
 pub use panel::Mode;
 pub use panel::Panel;
 pub use prompt::Edited;

@@ -34,6 +34,11 @@ ctrlc = { workspace = true }
 notify = { workspace = true }
 ratatui = { workspace = true }
 serde_json = { workspace = true }
+# The only crate here that opens a socket, and the only place in the workspace
+# that may: `src/linear.rs` files a brief on the board, and the boundary with
+# the outside world is the binary's. See the workspace manifest for why the job
+# is worth a crate and for what its TLS settings fix.
+ureq = { workspace = true }
 warlock-engine = { path = "../warlock-engine" }
 
 # Tests only, and already a workspace dependency rather than a new one: the

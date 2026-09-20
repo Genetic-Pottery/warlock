@@ -6,8 +6,12 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 
-# No TUI, terminal, HTTP or Anthropic dependency belongs here: the dependency
-# edge runs TUI -> engine and never back.
+# The dependency edge runs TUI -> engine and never back, so no TUI, terminal or
+# Anthropic dependency belongs here — and no HTTP client either. The engine
+# names a board in `.warlock/pacts.toml` and joins a scope's team and label to a
+# machine's key in `route.rs`, but it never talks to anything: `ureq` and the
+# Linear vocabulary that uses it live in warlock-tui, where the boundary with
+# the outside world already was.
 [dependencies]
 blake3 = { workspace = true }
 ignore = { workspace = true }
