@@ -118,6 +118,167 @@ impl Posts for Client {
     }
 }
 
+/// The project status a brief is filed into. A workspace with no status by this
+/// name takes the project with no status at all, rather than whichever one
+/// happens to sort first.
+const BACKLOG: &str = "Backlog";
+
+/// A team key — `WAR` — as Linear's own team id, or `None` when the workspace
+/// has no team by that key. Not an error: the caller holds the words about
+/// `.warlock/pacts.toml` and this module does not.
+pub fn team_id(linear: &impl Posts, key: &str) -> Result<Option<String>, Error> {
+    let data = linear.post(
+        "query Team($key: String!) {
+            teams(filter: { key: { eq: $key } }, first: 1) { nodes { id } }
+        }",
+        json!({ "key": key }),
+    )?;
+
+    nodes(&data, "teams")?.first().map(node_id).transpose()
+}
+
+/// The id of the [`BACKLOG`] status, or `None` when the workspace has no status
+/// by that name.
+pub fn backlog_status(linear: &impl Posts) -> Result<Option<String>, Error> {
+    // `projectStatuses` takes no filter, so the one request this operation is
+    // allowed asks for Linear's largest page and the match happens here. A
+    // workspace with more than 250 project statuses would need a second page;
+    // paginating for that is a loop around a create path, which this module
+    // does not have.
+    let data = linear.post(
+        "query ProjectStatuses { projectStatuses(first: 250) { nodes { id name } } }",
+        json!({}),
+    )?;
+
+    nodes(&data, "projectStatuses")?
+        .iter()
+        .find(|status| status.get("name").and_then(Value::as_str) == Some(BACKLOG))
+        .map(node_id)
+        .transpose()
+}
+
+/// The id of the label by that name, creating it when the workspace has none.
+///
+/// Two requests at most, one per thing asked, and the create only ever runs
+/// against an empty answer — so a second push finds the label the first one made
+/// rather than adding another of the same name.
+///
+/// A project label is its own type in Linear: `issueLabels` and
+/// `issueLabelCreate` are a different set of labels, and an id from there is not
+/// one a project can carry.
+pub fn label_id(linear: &impl Posts, name: &str) -> Result<String, Error> {
+    let data = linear.post(
+        "query ProjectLabel($name: String!) {
+            projectLabels(filter: { name: { eq: $name } }, first: 1) { nodes { id } }
+        }",
+        json!({ "name": name }),
+    )?;
+
+    if let Some(existing) = nodes(&data, "projectLabels")?.first() {
+        return node_id(existing);
+    }
+
+    let created = linear.post(
+        "mutation ProjectLabelCreate($input: ProjectLabelCreateInput!) {
+            projectLabelCreate(input: $input) { projectLabel { id } }
+        }",
+        json!({ "input": { "name": name } }),
+    )?;
+
+    node_id(payload(&created, "projectLabelCreate", "projectLabel")?)
+}
+
+/// Create the project, with its label resolved first.
+///
+/// The order is the point and not an implementation detail: the label is the
+/// only mark on a project saying warlock filed it, nothing here can take a
+/// project back, and a create that landed before a label that then failed is a
+/// project no pull will ever read. Resolving first means a project that exists
+/// is a project that carries the label.
+pub fn create_project(linear: &impl Posts, project: &NewProject<'_>) -> Result<Project, Error> {
+    let label = label_id(linear, project.label)?;
+
+    let mut input = json!({
+        "name": project.name,
+        "content": project.content,
+        "teamIds": [project.team],
+        "labelIds": [label],
+    });
+
+    // Absent rather than `null`: a status the workspace does not have is a
+    // project filed with no status, and the field is left out entirely to say
+    // that.
+    if let Some(status) = project.status
+        && let Some(fields) = input.as_object_mut()
+    {
+        fields.insert("statusId".to_owned(), json!(status));
+    }
+
+    let data = linear.post(
+        "mutation ProjectCreate($input: ProjectCreateInput!) {
+            projectCreate(input: $input) { project { id url } }
+        }",
+        json!({ "input": input }),
+    )?;
+    let created = payload(&data, "projectCreate", "project")?;
+
+    Ok(Project {
+        id: node_id(created)?,
+        url: text(created, "url")?,
+    })
+}
+
+/// What [`create_project`] is asked for: the label is the name it goes by in the
+/// workspace rather than an id, because the create path is what resolves it.
+#[derive(Debug, Clone, Copy)]
+pub struct NewProject<'a> {
+    name: &'a str,
+    content: &'a str,
+    team: &'a str,
+    status: Option<&'a str>,
+    label: &'a str,
+}
+
+impl<'a> NewProject<'a> {
+    #[must_use]
+    pub const fn new(name: &'a str, content: &'a str, team: &'a str, label: &'a str) -> Self {
+        Self {
+            name,
+            content,
+            team,
+            status: None,
+            label,
+        }
+    }
+
+    #[must_use]
+    pub const fn with_status(mut self, status: Option<&'a str>) -> Self {
+        self.status = status;
+        self
+    }
+}
+
+/// A project that now exists. The URL is the one thing a failure downstream must
+/// never lose, so it comes back from the create rather than being built from the
+/// id here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Project {
+    id: String,
+    url: String,
+}
+
+impl Project {
+    #[must_use]
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    #[must_use]
+    pub fn url(&self) -> &str {
+        &self.url
+    }
+}
+
 /// The key as the whole of the `Authorization` value, with no `Bearer ` prefix:
 /// Linear takes a personal API key bare there, and the prefix an OAuth token
 /// wants is a 401 for a key. This is the only place the key is read.
@@ -168,6 +329,38 @@ fn refusal(body: &Value) -> Option<String> {
             .unwrap_or("no reason given")
             .to_owned(),
     )
+}
+
+fn nodes<'a>(data: &'a Value, connection: &str) -> Result<&'a [Value], Error> {
+    data.get(connection)
+        .and_then(|connection| connection.get("nodes"))
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .ok_or_else(|| Error::Malformed {
+            detail: format!("`{connection}` carried no nodes"),
+        })
+}
+
+fn payload<'a>(data: &'a Value, mutation: &str, created: &str) -> Result<&'a Value, Error> {
+    data.get(mutation)
+        .and_then(|payload| payload.get(created))
+        .filter(|created| !created.is_null())
+        .ok_or_else(|| Error::Malformed {
+            detail: format!("`{mutation}` carried no `{created}`"),
+        })
+}
+
+fn node_id(node: &Value) -> Result<String, Error> {
+    text(node, "id")
+}
+
+fn text(node: &Value, field: &str) -> Result<String, Error> {
+    node.get(field)
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| Error::Malformed {
+            detail: format!("a node carried no `{field}`"),
+        })
 }
 
 /// Nothing here carries the key, and two variants say why they carry what they

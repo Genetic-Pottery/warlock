@@ -5,7 +5,10 @@ use std::sync::Mutex;
 
 use serde_json::{Value, json};
 
-use super::{Client, ENDPOINT, Error, Posts, REQUEST_TIMEOUT, answer, authorization};
+use super::{
+    BACKLOG, Client, ENDPOINT, Error, NewProject, Posts, REQUEST_TIMEOUT, answer, authorization,
+    backlog_status, create_project, label_id, team_id,
+};
 
 const KEY: &str = "lin_api_a_key_nobody_holds_8f3a1c";
 
@@ -224,4 +227,274 @@ fn the_seam_carries_a_refusal_as_well_as_an_answer() {
         .expect_err("the stand-in refused");
 
     assert!(matches!(error, Error::Status { code: 401 }), "{error:?}");
+}
+
+fn label_found() -> Value {
+    json!({ "projectLabels": { "nodes": [{ "id": "label-held" }] } })
+}
+
+fn no_label() -> Value {
+    json!({ "projectLabels": { "nodes": [] } })
+}
+
+fn label_created() -> Value {
+    json!({ "projectLabelCreate": { "projectLabel": { "id": "label-made" } } })
+}
+
+fn project_created() -> Value {
+    json!({
+        "projectCreate": {
+            "project": {
+                "id": "project-1",
+                "url": "https://linear.app/acme/project/a-brief-1a2b3c",
+            },
+        },
+    })
+}
+
+fn brief<'a>() -> NewProject<'a> {
+    NewProject::new(
+        "Repair the answer",
+        "# Repair the answer\n\nBody.\n",
+        "team-1",
+        "warlock",
+    )
+}
+
+// The `input` of the last thing the stand-in was asked, which is the project
+// create in every test that gets this far.
+fn last_input(linear: &Posting) -> Value {
+    linear
+        .variables()
+        .pop()
+        .expect("the stand-in was asked at least once")["input"]
+        .clone()
+}
+
+#[test]
+fn a_team_key_resolves_to_its_id_in_one_request() {
+    let linear = Posting::answering([Ok(json!({ "teams": { "nodes": [{ "id": "team-1" }] } }))]);
+
+    let team = team_id(&linear, "WAR").expect("the stand-in answered");
+
+    assert_eq!(team.as_deref(), Some("team-1"));
+    assert_eq!(linear.variables(), [json!({ "key": "WAR" })]);
+    assert_eq!(linear.documents().len(), 1, "one request per operation");
+}
+
+#[test]
+fn a_team_key_the_api_does_not_know_is_a_none_rather_than_an_error() {
+    let linear = Posting::answering([Ok(json!({ "teams": { "nodes": [] } }))]);
+
+    let team = team_id(&linear, "NOPE").expect("an unknown key is an ordinary answer");
+
+    assert_eq!(team, None, "the caller turns this into its own refusal");
+}
+
+#[test]
+fn a_team_answer_with_no_nodes_is_malformed() {
+    let linear = Posting::answering([Ok(json!({ "teams": {} }))]);
+
+    let error = team_id(&linear, "WAR").expect_err("a connection with no nodes is no answer");
+
+    assert!(matches!(error, Error::Malformed { .. }), "{error:?}");
+}
+
+#[test]
+fn a_team_node_with_no_id_is_malformed() {
+    let linear = Posting::answering([Ok(json!({ "teams": { "nodes": [{ "key": "WAR" }] } }))]);
+
+    let error = team_id(&linear, "WAR").expect_err("a node with no id is no answer");
+
+    assert!(matches!(error, Error::Malformed { .. }), "{error:?}");
+}
+
+#[test]
+fn the_backlog_status_is_found_by_name_among_the_others() {
+    let linear = Posting::answering([Ok(json!({
+        "projectStatuses": {
+            "nodes": [
+                { "id": "status-planned", "name": "Planned" },
+                { "id": "status-backlog", "name": BACKLOG },
+                { "id": "status-done", "name": "Completed" },
+            ],
+        },
+    }))]);
+
+    let status = backlog_status(&linear).expect("the stand-in answered");
+
+    assert_eq!(status.as_deref(), Some("status-backlog"));
+    assert_eq!(linear.documents().len(), 1, "one request per operation");
+}
+
+#[test]
+fn a_workspace_with_no_backlog_status_is_a_none_rather_than_an_error() {
+    let linear = Posting::answering([Ok(json!({
+        "projectStatuses": { "nodes": [{ "id": "status-now", "name": "In Progress" }] },
+    }))]);
+
+    let status = backlog_status(&linear).expect("no `Backlog` is an ordinary answer");
+
+    assert_eq!(status, None, "the caller creates with no status");
+}
+
+#[test]
+fn a_label_the_workspace_already_has_is_reused_by_id() {
+    let linear = Posting::answering([Ok(label_found())]);
+
+    let label = label_id(&linear, "warlock").expect("the stand-in answered");
+
+    assert_eq!(label, "label-held");
+    assert_eq!(
+        linear.documents().len(),
+        1,
+        "a label that exists is not created again"
+    );
+    assert_eq!(linear.variables(), [json!({ "name": "warlock" })]);
+}
+
+#[test]
+fn a_label_the_workspace_lacks_is_created_under_that_name() {
+    let linear = Posting::answering([Ok(no_label()), Ok(label_created())]);
+
+    let label = label_id(&linear, "warlock").expect("the stand-in answered");
+
+    assert_eq!(label, "label-made");
+
+    let asked = linear.documents();
+
+    assert!(asked[0].contains("projectLabels"), "{asked:?}");
+    assert!(asked[1].contains("projectLabelCreate"), "{asked:?}");
+    assert_eq!(
+        linear.variables()[1],
+        json!({ "input": { "name": "warlock" } })
+    );
+}
+
+#[test]
+fn a_label_create_that_answers_nothing_is_malformed() {
+    let linear = Posting::answering([
+        Ok(no_label()),
+        Ok(json!({ "projectLabelCreate": { "projectLabel": null } })),
+    ]);
+
+    let error = label_id(&linear, "warlock").expect_err("a payload with no label is no answer");
+
+    assert!(matches!(error, Error::Malformed { .. }), "{error:?}");
+}
+
+#[test]
+fn the_label_is_resolved_before_the_project_is_created() {
+    let linear = Posting::answering([Ok(label_found()), Ok(project_created())]);
+
+    create_project(&linear, &brief().with_status(Some("status-backlog")))
+        .expect("the stand-in answered");
+
+    let asked = linear.documents();
+
+    assert_eq!(asked.len(), 2);
+    assert!(asked[0].contains("projectLabels"), "{asked:?}");
+    assert!(
+        asked[1].contains("projectCreate"),
+        "the project was created before its label was resolved: {asked:?}"
+    );
+}
+
+#[test]
+fn a_label_that_had_to_be_created_still_precedes_the_project() {
+    let linear = Posting::answering([Ok(no_label()), Ok(label_created()), Ok(project_created())]);
+
+    create_project(&linear, &brief()).expect("the stand-in answered");
+
+    let asked = linear.documents();
+
+    assert_eq!(asked.len(), 3);
+    assert!(asked[0].contains("projectLabels"), "{asked:?}");
+    assert!(asked[1].contains("projectLabelCreate"), "{asked:?}");
+    assert!(
+        asked[2].contains("projectCreate("),
+        "the project was created before its label existed: {asked:?}"
+    );
+    assert_eq!(last_input(&linear)["labelIds"], json!(["label-made"]));
+}
+
+#[test]
+fn a_label_that_cannot_be_resolved_stops_before_the_project_is_created() {
+    let linear = Posting::answering([Err(Error::Refused {
+        message: "Entity not found".to_owned(),
+    })]);
+
+    let error = create_project(&linear, &brief()).expect_err("the stand-in refused");
+
+    assert!(matches!(error, Error::Refused { .. }), "{error:?}");
+    assert_eq!(
+        linear.documents().len(),
+        1,
+        "nothing is created once the label has failed"
+    );
+}
+
+#[test]
+fn the_create_carries_the_name_content_team_status_and_label() {
+    let linear = Posting::answering([Ok(label_found()), Ok(project_created())]);
+
+    create_project(&linear, &brief().with_status(Some("status-backlog")))
+        .expect("the stand-in answered");
+
+    assert_eq!(
+        last_input(&linear),
+        json!({
+            "name": "Repair the answer",
+            "content": "# Repair the answer\n\nBody.\n",
+            "teamIds": ["team-1"],
+            "labelIds": ["label-held"],
+            "statusId": "status-backlog",
+        }),
+        "no field warlock would have to invent"
+    );
+}
+
+#[test]
+fn a_create_with_no_status_leaves_the_field_out_entirely() {
+    let linear = Posting::answering([Ok(label_found()), Ok(project_created())]);
+
+    create_project(&linear, &brief()).expect("the stand-in answered");
+
+    let input = last_input(&linear);
+
+    assert!(
+        input.get("statusId").is_none(),
+        "a workspace with no `Backlog` sends no status at all: {input}"
+    );
+}
+
+#[test]
+fn a_created_project_comes_back_with_its_id_and_url() {
+    let linear = Posting::answering([Ok(label_found()), Ok(project_created())]);
+
+    let project = create_project(&linear, &brief()).expect("the stand-in answered");
+
+    assert_eq!(project.id(), "project-1");
+    assert_eq!(
+        project.url(),
+        "https://linear.app/acme/project/a-brief-1a2b3c"
+    );
+}
+
+#[test]
+fn a_create_that_answers_no_project_is_malformed() {
+    for answer in [
+        json!({ "projectCreate": { "project": null } }),
+        json!({ "projectCreate": { "success": true } }),
+        json!({ "projectCreate": { "project": { "id": "project-1" } } }),
+    ] {
+        let linear = Posting::answering([Ok(label_found()), Ok(answer.clone())]);
+
+        let error = create_project(&linear, &brief()).expect_err("no project is no answer");
+
+        assert!(
+            matches!(error, Error::Malformed { .. }),
+            "{answer}: {error:?}"
+        );
+    }
 }
