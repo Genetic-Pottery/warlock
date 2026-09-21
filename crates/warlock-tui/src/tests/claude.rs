@@ -7,11 +7,14 @@ use std::time::{Duration, Instant};
 use super::stream;
 use super::{
     Activities, Activity, BRIEF_EFFORT, BRIEF_MODEL, CHAT_INSTRUCTION, CHAT_SYSTEM_PROMPT, Cancel,
-    ChatAgent, ClaudeAgent, EFFORT, INVOCATION_TIMEOUT, MODEL, OsString, SYSTEM_PROMPT,
-    WRITE_INSTRUCTION, brief_instruction, or_default, render, session_id,
+    ChatAgent, ClaudeAgent, DRAFT_NOW_INSTRUCTION, DRAFTING_CONTRACT, DRAFTING_ONE_SHOT_CONTRACT,
+    EFFORT, EFFORT_VAR, INVOCATION_TIMEOUT, MODEL, MODEL_VAR, OsString, SYSTEM_PROMPT,
+    WRITE_INSTRUCTION, brief_instruction, drafting_opening, or_default, overridden, render,
+    session_id,
 };
+use crate::brief::scope_block_in;
 use crate::template::DEFAULT_TEMPLATE;
-use warlock_engine::{Agent, agent};
+use warlock_engine::{Agent, agent, drafting};
 
 // A name no directory on `PATH` can hold, so the lookup fails the way it does on
 // a machine with no `claude` installed.
@@ -853,6 +856,189 @@ fn the_write_instruction_asks_for_the_whole_document_in_the_shape() {
             .any(|word| word == WRITE_INSTRUCTION),
         "the write instruction reached the argument vector",
     );
+}
+
+// A brief with two slices in it, so that anything of the second one showing up
+// in the first one's turn is a composition fault rather than a coincidence.
+const TWO_SLICES: &str = "What is wrong now: the knife is blunt.\n\n## Scope\n\n\
+     ### 1. Sharpen the knife\n\ndepends_on: []\n\nThe first slice decides on a \
+     whetstone.\n\n### 2. Sweep the floor\n\ndepends_on: [1]\n\nThe second slice \
+     decides on a broom.\n";
+
+#[test]
+fn a_drafting_session_is_its_own_conversation_at_the_brief_register() {
+    let agent = ChatAgent::drafting();
+    let vector = turn_args(&agent);
+
+    assert_eq!(agent.program(), "claude");
+    assert_eq!(agent.timeout(), INVOCATION_TIMEOUT);
+    // Read through the same seam the constructor did, so a machine with
+    // `WARLOCK_MODEL` or `WARLOCK_EFFORT` set is asserting that the
+    // reader's choice still wins rather than failing on it.
+    let model = overridden(MODEL_VAR, BRIEF_MODEL);
+    let effort = overridden(EFFORT_VAR, BRIEF_EFFORT);
+    assert_eq!(value_of(&vector, "--model"), model.to_str());
+    assert_eq!(value_of(&vector, "--effort"), effort.to_str());
+    // Which, with nothing set, is the register the brief was written in
+    // and not the one a question runs at.
+    assert_ne!(BRIEF_MODEL, MODEL);
+    assert_ne!(BRIEF_EFFORT, EFFORT);
+
+    // Not the chat session under another name: its own id, and a prompt
+    // that is neither the panel's nor a pass's.
+    let session = value_of(&vector, "--session-id").expect("a drafting turn opens a conversation");
+    assert!(is_uuid_shaped(session), "not UUID-shaped: {session}");
+    let chat = turn_args(&ChatAgent::new());
+    assert_ne!(value_of(&chat, "--session-id"), Some(session));
+    let prompt = value_of(&vector, "--system-prompt").expect("a drafting turn brings its own");
+    assert_ne!(prompt, CHAT_SYSTEM_PROMPT);
+    assert_ne!(prompt, SYSTEM_PROMPT);
+    assert!(prompt.contains("tickets") && prompt.contains("WARLOCK.md"));
+
+    // And the panel's own session is exactly where it was.
+    assert_eq!(value_of(&chat, "--system-prompt"), Some(CHAT_SYSTEM_PROMPT));
+    assert_eq!(value_of(&chat, "--model"), Some(MODEL));
+    assert_eq!(value_of(&chat, "--effort"), Some(EFFORT));
+}
+
+#[test]
+fn a_drafting_session_may_read_the_repository_and_do_nothing_whatever_else() {
+    // Named rather than left to a default that could grow: a session that
+    // reads a slice and a repository has no business holding a tool that
+    // writes one, and this is the whole grant it gets.
+    let vector = turn_args(&ChatAgent::drafting());
+    let granted = value_of(&vector, "--tools").expect("a drafting turn says what it may reach for");
+
+    assert_eq!(granted, "Read,Grep,Glob");
+    assert_eq!(granted.split(',').count(), 3);
+
+    // Read over every word of the vector and not only over the grant,
+    // because the system prompt is a word of it too: a prompt that names a
+    // writing tool is a prompt that invites the model to ask for one.
+    for named in [
+        "Write",
+        "Edit",
+        "MultiEdit",
+        "NotebookEdit",
+        "Bash",
+        "BashOutput",
+        "KillShell",
+        "Task",
+        "WebFetch",
+    ] {
+        for word in &vector {
+            assert!(
+                !word
+                    .split(|letter: char| !letter.is_ascii_alphanumeric())
+                    .any(|token| token == named),
+                "{named:?} is named in the vector a drafting turn runs under: {word}",
+            );
+        }
+    }
+}
+
+#[test]
+fn a_drafting_opening_carries_the_brief_and_one_slice_of_it() {
+    let block = scope_block_in(TWO_SLICES).expect("two slices");
+    let first = &block.slices()[0];
+    let opening = drafting_opening(
+        block.brief(),
+        first.heading(),
+        first.prose(),
+        DRAFTING_CONTRACT,
+    );
+
+    assert!(opening.starts_with(DRAFTING_CONTRACT));
+    assert!(opening.contains("the knife is blunt"));
+    assert!(opening.contains("Sharpen the knife"));
+    assert!(opening.contains("whetstone"));
+
+    // The point of the whole builder: a session drafts one slice, so the
+    // rest of the scope is not in the turn to be drafted by accident.
+    for said in ["Sweep the floor", "broom", "## Scope", "depends_on"] {
+        assert!(
+            !opening.contains(said),
+            "{said:?} reached a turn about the first slice: {opening}",
+        );
+    }
+
+    // The caps, the shape and what a ticket may be are the engine's words,
+    // appended rather than restated here.
+    assert!(opening.ends_with(&drafting::drafting_instructions(
+        block.brief(),
+        first.heading(),
+        first.prose(),
+        &[],
+    )));
+    assert!(opening.contains("at most 12 entries"));
+    assert!(opening.contains("\"blocked_by\""));
+
+    // And the headless turn is the same turn on different terms.
+    let one_shot = drafting_opening(
+        block.brief(),
+        first.heading(),
+        first.prose(),
+        DRAFTING_ONE_SHOT_CONTRACT,
+    );
+    assert_ne!(one_shot, opening);
+    assert_eq!(
+        one_shot.strip_prefix(DRAFTING_ONE_SHOT_CONTRACT),
+        opening.strip_prefix(DRAFTING_CONTRACT),
+    );
+}
+
+#[test]
+fn the_three_drafting_instructions_are_each_said_in_their_own_words() {
+    // Three different situations, three different texts. The one-shot
+    // contract is not the interactive one with the asking struck out: a
+    // model told it may ask and then told the limit is zero spends its one
+    // turn asking anyway.
+    assert_ne!(DRAFTING_CONTRACT, DRAFTING_ONE_SHOT_CONTRACT);
+    assert_ne!(DRAFT_NOW_INSTRUCTION, DRAFTING_CONTRACT);
+    assert_ne!(DRAFT_NOW_INSTRUCTION, DRAFTING_ONE_SHOT_CONTRACT);
+
+    // What the interactive contract has to say: how warlock tells a
+    // question from an answer, and how many rounds of it there are.
+    for said in [
+        "JSON object",
+        "is the drafts",
+        "is a question",
+        "at most three questions",
+    ] {
+        assert!(
+            DRAFTING_CONTRACT.contains(said),
+            "{said:?} is missing from the contract a drafting session is held to",
+        );
+    }
+
+    // And what the one-shot one has to: nobody there, one turn, and no
+    // count of rounds to argue about.
+    for said in ["Nobody is reading", "only turn"] {
+        assert!(
+            DRAFTING_ONE_SHOT_CONTRACT.contains(said),
+            "{said:?} is missing from the contract the headless path uses",
+        );
+    }
+    assert!(
+        !DRAFTING_ONE_SHOT_CONTRACT.contains("three"),
+        "the headless contract counts rounds that cannot happen",
+    );
+    assert!(DRAFT_NOW_INSTRUCTION.contains("third question"));
+
+    // None of the three is a system prompt, and none reaches the argument
+    // vector: they go in on stdin as ordinary turns.
+    let vector = turn_args(&ChatAgent::drafting());
+    for instruction in [
+        DRAFTING_CONTRACT,
+        DRAFTING_ONE_SHOT_CONTRACT,
+        DRAFT_NOW_INSTRUCTION,
+    ] {
+        assert_ne!(instruction, CHAT_SYSTEM_PROMPT);
+        assert!(
+            !vector.iter().any(|word| word == instruction),
+            "a drafting instruction reached the argument vector",
+        );
+    }
 }
 
 // The shape is written down twice — as the template, and restated inside

@@ -25,7 +25,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-use warlock_engine::{Agent, agent};
+use warlock_engine::{Agent, agent, drafting};
 
 /// The clock one invocation runs under. A child that outlives it is killed *and*
 /// reaped rather than abandoned.
@@ -169,6 +169,105 @@ and why. No other sections, and no plan of which files to edit.\n\nWrite what we
 decided rather than a summary of how we got there. Where something was left \
 open, say so in a line instead of inventing an answer.";
 
+/// What a drafting session is running under, and the half of its terms that is
+/// not in the opening turn.
+///
+/// Free of any capitalised tool name on purpose: `tests/claude.rs` reads the
+/// whole argument vector word by word looking for one, which is how the
+/// read-only grant is asserted rather than assumed, and a sentence here opening
+/// with `Write` or `Edit` would be a false positive nobody could tell from a
+/// real one.
+const DRAFTING_SYSTEM_PROMPT: &str = "You are cutting a planned change into \
+tickets inside warlock, a terminal program that shows one repository as a tree \
+of directories. A pacted directory has a WARLOCK.md describing it: a purpose, \
+one line per file under `## Files`, one per subdirectory under `## \
+Directories`, and where there is anything to say `## Structure`. The change was \
+planned in a brief about the repository you are running in, and you are given \
+that brief and one slice of its scope. Use the documents to narrow, never to \
+answer: start at the nearest WARLOCK.md above what the slice is about, follow \
+its directory and file lines downward, then open the file it names and check, \
+because a document is a map and where it and the code disagree the code is \
+right. You cannot change that repository: you have no tool that alters a file \
+or runs a command, and nothing you say is put on disk. The drafts you hand back \
+are filed as issues on the board the brief was planned on, so a ticket is read \
+by somebody who has not seen this conversation: no first person, and nothing \
+about this request or about what you were or were not shown.";
+
+/// The rule the interactive session is held to, and the only thing that says a
+/// reply is a question rather than the answer.
+///
+/// It goes above the engine's instructions rather than below them, so that what
+/// the caps are and what shape the object takes are the last words said. The
+/// three rounds are stated here and counted by whoever drives the session, never
+/// by the model: this text is what makes that count expected rather than a
+/// conversation cut off mid-question.
+pub const DRAFTING_CONTRACT: &str = "Somebody is reading your replies and can \
+answer you, and warlock decides what each reply is by its shape. A reply that \
+is the JSON object described below is the drafts, and it ends the conversation. \
+A reply that is anything else is a question, and is put to the person who asked \
+for this cut.\n\nYou get at most three questions, one per reply, and then you \
+draft. Ask only about something the brief and the slice leave open that changes \
+what the tickets are or how they are ordered — never about style, and never \
+about anything you could settle yourself with the tools you have, which you \
+should use first. When you have what you need, reply with the object and \
+nothing else.";
+
+/// The same session with nobody in front of it.
+///
+/// Deliberately not [`DRAFTING_CONTRACT`] with a sentence struck out: a model
+/// told it may ask and then told the asking is capped at zero still spends its
+/// one turn on a question, so the headless path says there is no one there at
+/// all.
+pub const DRAFTING_ONE_SHOT_CONTRACT: &str = "Nobody is reading your replies. \
+This is the only turn there is: no person sees what you say until the tickets \
+are filed, so a question reaches no one and an offer to clarify is thrown \
+away.\n\nDraft from the brief, the slice and what you can read in the \
+repository with the tools you have. Where the brief and the slice genuinely \
+leave something open, say so in the body of the ticket it belongs to, in a \
+line, rather than asking about it or inventing a decision nobody made. Your \
+whole reply is the JSON object described below and nothing else.";
+
+/// The fourth turn, once the three rounds are spent.
+pub const DRAFT_NOW_INSTRUCTION: &str = "That was the third question, which is \
+all there is. Nothing further is coming back to you: draft the tickets now from \
+the brief, the slice and what you have been told and have read. Where something \
+you asked about was left unanswered, say so in a line in the body of the ticket \
+it belongs to rather than asking again or deciding it yourself. Your whole \
+reply is the JSON object you were given the shape of and nothing else.";
+
+/// The opening turn of one slice's drafting session: the terms it is held to,
+/// then the engine's own instructions carrying the brief, this one slice and the
+/// shape of the object.
+///
+/// `brief` is the text above the scope heading and `title`/`prose` are one
+/// slice's — `ScopeBlock::brief`, `Slice::heading` and `Slice::prose` — so the
+/// other slices of the same scope are never in the turn at all. What a ticket
+/// may be, how many there may be and how long each one runs are the engine's to
+/// say, and are appended rather than restated: two copies of a cap is one cap
+/// that will disagree with the check that enforces it.
+///
+/// ```
+/// use warlock_tui::{DRAFTING_CONTRACT, drafting_opening};
+///
+/// let opening = drafting_opening(
+///     "A file is read twice.",
+///     "Read the file once",
+///     "And keep what it said.",
+///     DRAFTING_CONTRACT,
+/// );
+///
+/// assert!(opening.starts_with(DRAFTING_CONTRACT));
+/// assert!(opening.contains("A file is read twice."));
+/// assert!(opening.contains("Read the file once"));
+/// ```
+#[must_use]
+pub fn drafting_opening(brief: &str, title: &str, prose: &str, contract: &str) -> String {
+    format!(
+        "{contract}\n\n{}",
+        drafting::drafting_instructions(brief, title, prose, &[])
+    )
+}
+
 const MODEL_VAR: &str = "WARLOCK_MODEL";
 
 const EFFORT_VAR: &str = "WARLOCK_EFFORT";
@@ -287,6 +386,10 @@ fn default_args() -> Vec<OsString> {
 
 fn chat_args() -> Vec<OsString> {
     args_for(CHAT_TOOLS, CHAT_SYSTEM_PROMPT)
+}
+
+fn drafting_args() -> Vec<OsString> {
+    args_for(CHAT_TOOLS, DRAFTING_SYSTEM_PROMPT)
 }
 
 /// The one id every turn of a [`ChatAgent`] names, and which flag names it.
@@ -832,6 +935,38 @@ impl ChatAgent {
             cancel: Cancel::new(),
             activities: Activities::none(),
         }
+    }
+
+    /// One slice's drafting session: its own conversation, at the register the
+    /// brief it comes from was written in.
+    ///
+    /// A session per slice rather than a mode of the reader's chat, because a
+    /// mode is the same conversation said at a different level and this one has
+    /// heard none of that talk and answers in JSON rather than prose. Raised
+    /// through [`Converses::raised`] rather than by naming the two flags here,
+    /// so that a drafting turn and a brief turn can never drift apart in which
+    /// model they reach for.
+    ///
+    /// ```
+    /// use warlock_tui::{ChatAgent, INVOCATION_TIMEOUT};
+    ///
+    /// let agent = ChatAgent::drafting();
+    ///
+    /// assert_eq!(agent.timeout(), INVOCATION_TIMEOUT);
+    /// // A conversation of its own, and not the one on the panel.
+    /// assert!(agent.args().iter().any(|arg| arg == "--session-id"));
+    /// ```
+    #[must_use]
+    pub fn drafting() -> Self {
+        let agent = Self {
+            program: OsString::from(PROGRAM),
+            args: drafting_args(),
+            session: Some(Session::new()),
+            timeout: INVOCATION_TIMEOUT,
+            cancel: Cancel::new(),
+            activities: Activities::none(),
+        };
+        Converses::raised(&agent, BRIEF_MODEL, BRIEF_EFFORT)
     }
 
     #[must_use]
