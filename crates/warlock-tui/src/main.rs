@@ -1273,7 +1273,7 @@ impl<S: Screen, P: Wired + Agent, C: Converses, B: Clip, O: Opens> Session<S, P,
                     &mut self.app,
                     &self.manifest,
                     &self.scope.repo_root,
-                    self.chat.written(),
+                    self.pushing.brief.as_deref(),
                     &self.pushing.field,
                     edited,
                     now,
@@ -1304,13 +1304,17 @@ impl<S: Screen, P: Wired + Agent, C: Converses, B: Clip, O: Opens> Session<S, P,
             PushAnswered::Open(answer) => self.pushing.confirm = self.pushing.confirm.lit(answer),
             PushAnswered::Cancel => self.pushing.confirm = PushConfirm::Closed,
             PushAnswered::Send => {
-                let answered = mem::take(&mut self.pushing.confirm);
-                if let Some(filing) = answered.filing() {
+                // The window whole, so the brief the question was asked about
+                // goes with the answer: a `/push` that named a file is about
+                // that file, and the session's own `written` is a different
+                // document or none at all.
+                let answered = mem::take(&mut self.pushing);
+                if let Some(filing) = answered.confirm.filing() {
                     self.pushes.send(
                         &mut self.app,
                         &self.manifest,
                         &self.scope.repo_root,
-                        self.chat.written(),
+                        answered.brief.as_deref(),
                         filing,
                         now,
                     );

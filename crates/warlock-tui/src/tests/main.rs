@@ -2937,6 +2937,51 @@ mod filing {
     }
 
     #[test]
+    fn a_named_brief_is_filed_by_a_session_that_wrote_nothing() {
+        // The asynchronous case, and the one a dialog answered Yes used to
+        // swallow: the brief was committed days ago, this session has written
+        // none of its own, and the answer went to a `Chat::written` holding
+        // nothing. What came of it was no request, no record and no line — a
+        // reader who said yes and was told nothing at all.
+        let repo = a_repository();
+        let home = a_home(repo.path());
+        let linear = Boarding::filing(URL);
+        let mut driven = filing_session(repo.path(), home.path(), &linear);
+
+        let named = "docs/a-committed-brief.md";
+        let path = repo.path().join(named);
+        fs::create_dir_all(path.parent().expect("a `docs` directory"))
+            .expect("a scratch directory is writable");
+        fs::write(&path, BRIEF).expect("a scratch file is writable");
+
+        typing(&mut driven, &format!("/push {named}"));
+        assert!(
+            driven.pushing.confirm.is_open(),
+            "the dialog did not come up: {:?}",
+            notes(&driven)
+        );
+        assert!(pressed(&mut driven, key(KeyCode::Left)));
+        assert!(pressed(&mut driven, key(KeyCode::Enter)));
+        landing(&mut driven);
+
+        assert!(
+            said(&driven, URL),
+            "the thread does not carry the project's address: {:?}",
+            notes(&driven)
+        );
+        assert_eq!(linear.requests(), 4, "one push is four requests");
+        let filed = Filed::load(repo.path()).expect("a record that saves and reads back");
+        let record = filed
+            .records()
+            .first()
+            .expect("the push recorded what it filed");
+        // The document the command named. There is no other candidate: this
+        // test never calls `wrote_a_brief`, so the session remembers none, and
+        // before the window carried the brief that was the whole failure.
+        assert_eq!(record.path(), named);
+    }
+
+    #[test]
     fn the_loop_goes_round_while_the_request_is_in_flight() {
         // The point of the worker, and the one thing a push that has already
         // landed cannot show: the first request is held open, and the rounds

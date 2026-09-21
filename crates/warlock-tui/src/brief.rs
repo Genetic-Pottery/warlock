@@ -9,10 +9,14 @@
 //! not be the brief that went up. The file is the document, and it is read here
 //! at the moment of the push.
 //!
-//! Nothing is summarised, wrapped, re-headed or tidied. The name is the title
-//! line with its marker taken off and the content is the rest of the bytes as
-//! they were written, because a body that differs from the file is a board
-//! nobody can diff against the repository.
+//! Nothing is summarised, re-headed or re-ordered, and no word is warlock's:
+//! the name is the title line with its marker taken off and the content is the
+//! rest of the document, because a body that says something the file does not
+//! is a board nobody can diff against the repository.
+//!
+//! Two things are done to the bytes on the way, both of them about the page
+//! rather than about the prose, and both in [`for_the_board`]: the paragraphs
+//! are unwrapped, and the success criteria are made checkable.
 
 use std::path::{Path, PathBuf};
 use std::{fmt, fs, io};
@@ -53,7 +57,7 @@ impl Brief {
 ///
 /// let brief = brief_at("/repo", "/repo/docs/warlock-brief-22-pushing.md")?;
 ///
-/// // The title line, marker stripped, and the rest of the file untouched.
+/// // The title line with its marker stripped, and the document under it.
 /// assert_eq!(brief.name(), "Push a brief to the board");
 /// # Ok::<(), warlock_tui::BriefError>(())
 /// ```
@@ -117,10 +121,10 @@ fn read(path: &Path) -> Result<String, Error> {
 // nothing is refused rather than searched past, since the heading below it is a
 // section and not a title somebody meant.
 //
-// The content is the document's own bytes with that one line lifted out and
-// nothing else done to them: no trim, no newline appended, no heading demoted.
-// Whatever sits above the title stays where it is rather than being dropped on
-// the floor.
+// The content is the document with that one line lifted out, put through
+// `for_the_board` and nothing else: no trim, no newline appended, no heading
+// demoted. Whatever sits above the title stays where it is rather than being
+// dropped on the floor.
 fn titled(document: &str) -> Option<Brief> {
     let mut before = 0;
     for line in document.split_inclusive('\n') {
@@ -131,16 +135,162 @@ fn titled(document: &str) -> Option<Brief> {
             }
             return Some(Brief {
                 name: name.to_owned(),
-                content: format!(
+                content: for_the_board(&format!(
                     "{}{}",
                     &document[..before],
                     &document[before + line.len()..]
-                ),
+                )),
             });
         }
         before += line.len();
     }
     None
+}
+
+/// The section whose bullets become checkable, and the only one: a criterion is
+/// the part of a brief somebody ticks off on the board, where a constraint and
+/// an out-of-scope line are decisions rather than tasks. Spelled as the built-in
+/// template spells it, and matched exactly — a repository that has renamed the
+/// section in its own template gets plain bullets rather than warlock guessing
+/// at which of its headings means this one.
+const CRITERIA: &str = "Success criteria";
+
+// Markdown reads a single newline inside a paragraph as a space. Linear's
+// editor reads it as a line break, and this repository's briefs are hard
+// wrapped at about seventy-six columns for a terminal, so sending the bytes as
+// they sit puts the file's column width onto a page that has its own and every
+// paragraph lands ragged. Joining them is not warlock rewriting the author: it
+// is warlock declining to impose a width the document never meant to carry, and
+// the words, their order and the blank lines between the paragraphs are
+// untouched.
+//
+// A line break is content in a fenced block, a heading, a list item, a table row
+// and a quote, so each of those keeps its own line. An indented code block is
+// deliberately not recognised: telling one from the continuation of a wrapped
+// bullet needs a parser rather than a rule, and the brief template produces
+// fenced blocks.
+//
+// Written over `lines`, so a document with CRLF endings comes back with LF
+// ones. That is the same normalising `.gitattributes` already asks of every
+// text file here, and a body is bytes bound for somebody else's editor rather
+// than for this repository.
+fn for_the_board(content: &str) -> String {
+    let mut board = String::with_capacity(content.len());
+    let mut fence: Option<String> = None;
+    let mut joining = false;
+    let mut criteria = false;
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+
+        if let Some(marker) = &fence {
+            if trimmed.starts_with(marker.as_str()) {
+                fence = None;
+            }
+            board.push_str(line);
+            board.push('\n');
+            continue;
+        }
+
+        if let Some(marker) = fenced(trimmed) {
+            ended(&mut board, &mut joining);
+            fence = Some(marker.to_owned());
+            board.push_str(line);
+            board.push('\n');
+            continue;
+        }
+
+        if trimmed.is_empty() {
+            ended(&mut board, &mut joining);
+            board.push('\n');
+            continue;
+        }
+
+        if let Some(heading) = headed(trimmed) {
+            ended(&mut board, &mut joining);
+            criteria = heading == CRITERIA;
+            board.push_str(trimmed);
+            board.push('\n');
+            continue;
+        }
+
+        // A bullet is left open, because the lines under it are its own wrapped
+        // text; a row and a quote are not, because the line after one of those
+        // is the next row or the next quoted line.
+        if let Some(item) = bulleted(trimmed) {
+            ended(&mut board, &mut joining);
+            board.push_str(&checkable(trimmed, item, criteria));
+            joining = true;
+            continue;
+        }
+
+        if trimmed.starts_with('|') || trimmed.starts_with('>') {
+            ended(&mut board, &mut joining);
+            board.push_str(trimmed);
+            board.push('\n');
+            continue;
+        }
+
+        if joining {
+            board.push(' ');
+        }
+        board.push_str(trimmed);
+        joining = true;
+    }
+
+    ended(&mut board, &mut joining);
+    board
+}
+
+fn ended(board: &mut String, joining: &mut bool) {
+    if *joining {
+        board.push('\n');
+        *joining = false;
+    }
+}
+
+// The marker itself and not just its length, so a block opened with backticks
+// is closed by backticks: a `~~~` inside a ``` block is content.
+fn fenced(trimmed: &str) -> Option<&str> {
+    ["```", "~~~"]
+        .into_iter()
+        .find(|marker| trimmed.starts_with(marker))
+}
+
+fn headed(trimmed: &str) -> Option<&str> {
+    trimmed
+        .strip_prefix('#')
+        .map(|rest| rest.trim_start_matches('#').trim())
+        .filter(|_| trimmed.starts_with('#'))
+}
+
+// The three markers markdown takes, and a numbered item, which is what a
+// `### 1.` slice's prose sometimes sits under.
+fn bulleted(trimmed: &str) -> Option<&str> {
+    for marker in ["- ", "* ", "+ "] {
+        if let Some(rest) = trimmed.strip_prefix(marker) {
+            return Some(rest);
+        }
+    }
+    let digits = trimmed.trim_start_matches(|character: char| character.is_ascii_digit());
+    if digits.len() < trimmed.len() {
+        return digits.strip_prefix(". ");
+    }
+    None
+}
+
+// A box only under the criteria, only on a `-` item, and never on one that
+// already carries one — a document written with boxes in it is a document that
+// keeps them rather than one that grows `- [ ] [ ]`.
+fn checkable(trimmed: &str, item: &str, criteria: bool) -> String {
+    if !criteria
+        || !trimmed.starts_with("- ")
+        || item.starts_with("[ ] ")
+        || item.starts_with("[x] ")
+    {
+        return trimmed.to_owned();
+    }
+    format!("- [ ] {item}")
 }
 
 // `## Outcome and ## Scope`, in `writing::missing_line`'s shape: a refusal

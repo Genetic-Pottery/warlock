@@ -5,7 +5,44 @@ fn each_command_word_is_its_own_command() {
     assert_eq!(submitted_for("/brief"), Submitted::Brief);
     assert_eq!(submitted_for("/write"), Submitted::Write);
     assert_eq!(submitted_for("/chat"), Submitted::Chat);
-    assert_eq!(submitted_for("/push"), Submitted::Push);
+    assert_eq!(submitted_for("/push"), Submitted::Push(None));
+}
+
+#[test]
+fn push_takes_the_brief_to_file_after_it() {
+    // The command a colleague types about a document committed days ago, in a
+    // session that has written nothing of its own.
+    assert_eq!(
+        submitted_for("/push docs/warlock-brief-22-push.md"),
+        Submitted::Push(Some("docs/warlock-brief-22-push.md"))
+    );
+    // Trimmed at both ends and around the word, so the spacing a hand leaves
+    // is not part of the path.
+    assert_eq!(
+        submitted_for("  /push   docs/a.md  "),
+        Submitted::Push(Some("docs/a.md"))
+    );
+    // Whole rather than the next token: a path with a space in it is a path.
+    assert_eq!(
+        submitted_for("/push docs/a brief.md"),
+        Submitted::Push(Some("docs/a brief.md"))
+    );
+    // And nothing after it is still the bare command, which files what this
+    // session wrote.
+    assert_eq!(submitted_for("/push "), Submitted::Push(None));
+}
+
+#[test]
+fn a_push_with_a_second_line_is_refused() {
+    // No path has a newline in it, so this is somebody typing a message under
+    // a command word and expecting it to be read.
+    for draft in ["/push\nsome text", "/push docs/a.md\nand a thought"] {
+        assert_eq!(
+            submitted_for(draft),
+            Submitted::Refused,
+            "{draft:?} is a command with a message under it"
+        );
+    }
 }
 
 #[test]
@@ -79,16 +116,14 @@ fn a_word_that_is_not_a_command_is_refused() {
 
 #[test]
 fn a_command_word_with_anything_after_it_is_refused() {
-    // No command takes an argument, and a second line is an argument by
-    // another route: a `/brief` with a paragraph under it is somebody
-    // expecting the paragraph to be read.
+    // `/push` is the exception and has its own tests. For the other three a
+    // second line is an argument by another route: a `/brief` with a paragraph
+    // under it is somebody expecting the paragraph to be read.
     for draft in [
         "/brief now",
         "/brief  now",
         "/write docs/plan.md",
         "/chat please",
-        "/push now",
-        "/push docs/warlock-brief-22-push.md",
         "/brief\nsome text",
         "/brief \n some text ",
     ] {
@@ -113,7 +148,7 @@ fn every_refusal_is_the_same_one_line() {
         "/brief now",
         "/brief\nx",
         "/PUSH",
-        "/push now",
+        "/push docs/a.md\nand a thought",
     ];
 
     for draft in refusals {
@@ -128,7 +163,7 @@ fn every_refusal_is_the_same_one_line() {
         assert!(line.contains("/push"), "{draft:?} did not name /push");
         assert!(
             line.contains("after it"),
-            "{draft:?} did not say commands take nothing after them"
+            "{draft:?} did not say which command takes something after it"
         );
     }
 }

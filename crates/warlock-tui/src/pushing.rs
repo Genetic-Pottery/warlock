@@ -66,10 +66,18 @@ const PUSH_LOST: &str =
 // Both windows in one value, for `scoping::Windows`'s reason: a submit of the
 // field is the very act that takes it down and puts the dialog up, and two
 // returns would let a caller apply half of that. They are never both open.
+//
+// The brief rides with them because it is the third fact of one `/push` and not
+// a fact about the session: `/push docs/a-brief.md` files a document this
+// session did not write and may have been committed a week ago, so asking
+// `Chat::written` at the end of the question would answer about a different
+// file — or, in a session that has written none, about no file at all, which
+// was a dialog that took a Yes and silently did nothing.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct Pushing {
     pub(crate) confirm: PushConfirm,
     pub(crate) field: ScopePrompt,
+    pub(crate) brief: Option<String>,
 }
 
 impl Pushing {
@@ -77,20 +85,23 @@ impl Pushing {
         Self {
             confirm: PushConfirm::Closed,
             field: ScopePrompt::Closed,
+            brief: None,
         }
     }
 
-    fn asking(field: ScopeField) -> Self {
+    fn asking(brief: &str, field: ScopeField) -> Self {
         Self {
             confirm: PushConfirm::Closed,
             field: ScopePrompt::Open(field),
+            brief: Some(brief.to_owned()),
         }
     }
 
-    fn confirming(confirm: PushConfirm) -> Self {
+    fn confirming(brief: &str, confirm: PushConfirm) -> Self {
         Self {
             confirm,
             field: ScopePrompt::Closed,
+            brief: Some(brief.to_owned()),
         }
     }
 }
@@ -218,11 +229,14 @@ impl<O: Opens> Pushes<O> {
     // Typing and abandoning move nothing but the field: nothing has been
     // resolved and nothing has been sent, so an Esc has nothing to put back.
     //
-    // `written` is asked of the session again rather than carried on the field,
-    // because there is one record of what `/write` wrote and this is not a
-    // second one. It is `None` only in a state the keys cannot reach — the field
-    // is up because a brief was written, and nothing can un-write one — and that
-    // reads as nothing to file rather than as a refusal to word.
+    // `brief` is the one this `/push` named, carried on the window since the
+    // press that opened it. It is not asked of the session: `/push
+    // docs/a-brief.md` files a document this session did not write, so a second
+    // reading of `Chat::written` would resolve a board for one file and file
+    // another — or, with nothing written, resolve for none.
+    //
+    // `None` is a field with no push behind it, which the keys cannot reach,
+    // and it reads as nothing to file rather than as a refusal to word.
     #[expect(
         clippy::too_many_arguments,
         reason = "a submit of this field is a board resolution, so it takes what \
@@ -234,29 +248,33 @@ impl<O: Opens> Pushes<O> {
         app: &mut App,
         manifest: &Manifest,
         repo_root: &Path,
-        written: Option<&str>,
+        brief: Option<&str>,
         prompt: &ScopePrompt,
         edited: Edited,
         now: Instant,
     ) -> Pushing {
+        let Some(brief) = brief else {
+            return Pushing::closed();
+        };
+
         match edited {
-            Edited::Open(field) => Pushing::asking(field),
+            Edited::Open(field) => Pushing::asking(brief, field),
             Edited::Close => Pushing::closed(),
             // An empty field is refused with a line of its own and before the
             // home is so much as looked at: the engine would answer about a
             // scope named nothing, and what is true is that the reader has not
             // typed yet.
-            Edited::Submit => match (prompt.field(), written) {
-                (Some(field), _) if field.text().trim().is_empty() => {
-                    Pushing::asking(field.clone().refused(NO_SCOPE))
+            Edited::Submit => match prompt.field() {
+                Some(field) if field.text().trim().is_empty() => {
+                    Pushing::asking(brief, field.clone().refused(NO_SCOPE))
                 }
-                (Some(field), Some(written)) => match self.home_or_note(app, now) {
+                Some(field) => match self.home_or_note(app, now) {
                     Some(home) => {
-                        filing_to(app, manifest, repo_root, home, written, Some(field), now)
+                        filing_to(app, manifest, repo_root, home, brief, Some(field), now)
                     }
                     None => Pushing::closed(),
                 },
-                _ => Pushing::closed(),
+                None => Pushing::closed(),
             },
         }
     }
@@ -273,7 +291,7 @@ impl<O: Opens> Pushes<O> {
         app: &mut App,
         manifest: &Manifest,
         repo_root: &Path,
-        written: Option<&str>,
+        brief: Option<&str>,
         filing: &Filing,
         now: Instant,
     ) {
@@ -281,11 +299,12 @@ impl<O: Opens> Pushes<O> {
             saying(app, ALREADY_FILING, now);
             return;
         }
-        // Both are `None` only in a state the keys cannot reach: this dialog is
-        // up because a home resolved and because a brief was written, and nothing
-        // can un-write one. That reads as nothing to file rather than as a
-        // refusal to word.
-        let (Some(home), Some(written)) = (self.home.as_deref(), written) else {
+        // The brief is the one the question was asked about, carried on the
+        // window since the press. Both are `None` only in a state the keys
+        // cannot reach — this dialog is up because a home resolved and because a
+        // press named a brief — and that reads as nothing to file rather than as
+        // a refusal to word.
+        let (Some(home), Some(written)) = (self.home.as_deref(), brief) else {
             return;
         };
 
@@ -303,7 +322,7 @@ impl<O: Opens> Pushes<O> {
         let record = target.record();
         let work = Work {
             root: repo_root.to_path_buf(),
-            // The manifest-relative spelling `/write` handed back, resolved
+            // The manifest-relative spelling the press handed over, resolved
             // against the root rather than the working directory, exactly as the
             // read that opened the dialog resolved it.
             path: from_manifest_path(repo_root, written),
@@ -451,18 +470,23 @@ fn filing_to(
     let name = asked.map(|field| field.text().trim());
     match resolve_filing(manifest, repo_root, home, name) {
         Ok(target) => confirming(app, repo_root, written, &target, now),
+        // Every window built below carries the brief it is about, so the answer
+        // is filed against the document the question was asked about.
         // The one sentence of the engine's this does not repeat: its own names
         // `--scope`, which is a flag on the subcommand and nothing a panel has,
         // and here the field that is about to open is the instruction.
-        Err(filing::Error::Several { candidates }) => {
-            Pushing::asking(ScopeField::new(FILING_HEADING, "").refused(pick_one(&candidates)))
-        }
+        Err(filing::Error::Several { candidates }) => Pushing::asking(
+            written,
+            ScopeField::new(FILING_HEADING, "").refused(pick_one(&candidates)),
+        ),
         // Back to the field with the candidates under it and the typing where
         // it was, one character from being right. The other arm cannot happen —
         // there is no unknown name without a name — and answers it the way
         // every other refusal is answered rather than by inventing a window.
         Err(error @ filing::Error::Unknown { .. }) => match asked {
-            Some(field) => Pushing::asking(field.clone().refused(one_line(&error.to_string()))),
+            Some(field) => {
+                Pushing::asking(written, field.clone().refused(one_line(&error.to_string())))
+            }
             None => refused(app, &error, now),
         },
         Err(error) => refused(app, &error, now),
@@ -482,13 +506,17 @@ fn confirming(
 ) -> Pushing {
     let path = from_manifest_path(repo_root, written);
     match brief_at(repo_root, &path) {
-        Ok(brief) => Pushing::confirming(PushConfirm::open(
-            brief.name(),
-            target.scope(),
-            target.record().team(),
-            // The key by name. `Target::value` is not read on this path at all.
-            target.key(),
-        )),
+        Ok(brief) => Pushing::confirming(
+            written,
+            PushConfirm::open(
+                brief.name(),
+                target.scope(),
+                target.record().team(),
+                // The key by name. `Target::value` is not read on this path at
+                // all.
+                target.key(),
+            ),
+        ),
         Err(error) => saying(app, one_line(&error.to_string()), now),
     }
 }

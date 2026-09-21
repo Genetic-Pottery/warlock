@@ -18,7 +18,7 @@ use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread;
 use std::time::Instant;
 
-use warlock_engine::{DEFAULT_BRIEF_DIRECTORY, briefs, load_briefs};
+use warlock_engine::{DEFAULT_BRIEF_DIRECTORY, briefs, load_briefs, to_manifest_path};
 use warlock_tui::{
     Activities, Activity, App, BRIEF_EFFORT, BRIEF_MODEL, CHAT_INSTRUCTION, Cancel, ChatAgent,
     Composed, Composer, Converses, Edited, Ending, Focus, Mode, Pasted, ScopePrompt, Submitted,
@@ -59,13 +59,16 @@ const ALREADY_CHATTING: &str = "already in chat mode — /brief is what changes 
 
 const NOT_BRIEFING: &str = "/write is only in brief mode — /brief enters it";
 
-// The third refusal, and the same kind of line: what `/push` files is the
+// The third refusal, and the same kind of line: a bare `/push` files the
 // document this session wrote, so a session that has written none has nothing
-// to file. Built from the two command words rather than spelled around them, so
+// to file — and is told the other road, because a brief committed yesterday is
+// the ordinary thing to be filing and nothing on the screen says it can be
+// named. Built from the two command words rather than spelled around them, so
 // the sentence cannot name a command by a spelling the card does not use.
 fn nothing_written() -> String {
     format!(
-        "{PUSH_COMMAND} files the brief {WRITE_COMMAND} wrote, and this session has written none"
+        "{PUSH_COMMAND} on its own files the brief {WRITE_COMMAND} wrote, and this session has \
+         written none — name one, as `{PUSH_COMMAND} docs/a-brief.md`"
     )
 }
 
@@ -171,14 +174,6 @@ impl<C: Converses> Chat<C> {
     #[cfg(test)]
     pub(crate) fn directory(&self) -> &str {
         &self.directory
-    }
-
-    // What `/push` files, asked of this value every time rather than copied
-    // out of it when the command is typed: the scope field a second board puts
-    // up comes back a round or more later, and a copy parked beside it would be
-    // a second record of what `/write` wrote.
-    pub(crate) fn written(&self) -> Option<&str> {
-        self.written.as_deref()
     }
 
     // Read twice a round, and both readings come from here so the key and the
@@ -310,15 +305,17 @@ impl<C: Converses> Chat<C> {
                 }
             }
             // A command about a file rather than about the conversation, so it
-            // asks nothing of the model and says nothing about the mode: what
-            // it files is what `/write` wrote, whichever register the reader
-            // has since gone back to. The refusal is the whole of what this
-            // value decides about it; the brief goes up to the loop, which
-            // holds the manifest that says where it files to.
-            Submitted::Push => match self.written.clone() {
-                Some(written) => return Some(written),
-                None => app.panel_mut().note(nothing_written(), now),
-            },
+            // asks nothing of the model and says nothing about the mode: it
+            // files the brief it was handed, or the one `/write` wrote,
+            // whichever register the reader has since gone back to. The
+            // refusals are the whole of what this value decides about it; the
+            // brief goes up to the loop, which holds the manifest that says
+            // where it files to.
+            Submitted::Push(named) => {
+                if let Some(brief) = self.filing(app, named, now) {
+                    return Some(brief);
+                }
+            }
             // The line is asked of the value rather than restated here, so the
             // list of commands that exist is written down in one place.
             said @ Submitted::Refused => {
@@ -329,6 +326,31 @@ impl<C: Converses> Chat<C> {
         }
 
         None
+    }
+
+    // The one spelling of a brief's path, made here for the reason
+    // `write_submit` makes it before it writes: what goes up to the loop is the
+    // manifest's own spelling, so a path somebody typed and a path remembered
+    // from `/write` cannot arrive as two different strings naming one file.
+    //
+    // A typed path is read against the repository root rather than the working
+    // directory, which is what the thread already names files by, and the
+    // engine's own sentence is what refuses one that climbs out of it.
+    fn filing(&self, app: &mut App, named: Option<&str>, now: Instant) -> Option<String> {
+        let Some(named) = named else {
+            if self.written.is_none() {
+                app.panel_mut().note(nothing_written(), now);
+            }
+            return self.written.clone();
+        };
+
+        match to_manifest_path(&self.root, named) {
+            Ok(stored) => Some(stored),
+            Err(source) => {
+                app.panel_mut().note(one_line(&source.to_string()), now);
+                None
+            }
+        }
     }
 
     pub(crate) fn paste(&mut self, outcome: Pasted) {

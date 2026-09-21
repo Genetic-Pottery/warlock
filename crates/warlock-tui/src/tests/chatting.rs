@@ -1360,7 +1360,7 @@ mod submitting {
             assert_eq!(turns(&app), 0, "{draft:?} opened a turn");
             assert!(!chat.answering(), "{draft:?} started something");
             assert!(
-                chat.written().is_none(),
+                chat.written.is_none(),
                 "{draft:?} left the session remembering a document"
             );
             assert!(
@@ -1387,6 +1387,45 @@ mod submitting {
         assert_eq!(turns(&app), before, "/push in brief mode cost a turn");
         assert_eq!(app.panel().mode(), Mode::Brief, "/push moved the register");
         assert_eq!(rows(&app, now).last(), Some(&note(&line)));
+    }
+
+    #[test]
+    fn push_files_the_brief_it_is_named_whatever_this_session_wrote() {
+        // The asynchronous case, and the ordinary one: a brief committed days
+        // ago, read by a colleague, filed from a session that wrote nothing.
+        // It goes up in the manifest's own spelling, says nothing on the card
+        // and leaves the register alone.
+        let now = Instant::now();
+        let root = a_root();
+        let mut app = App::default();
+        let mut chat = conversation_in(root.path());
+
+        chat.compose(
+            &mut app,
+            Composed::Typing(Composer::new("/push docs/a-brief.md")),
+            now,
+        );
+        let filed = chat.compose(&mut app, Composed::Submit, now);
+
+        assert_eq!(filed.as_deref(), Some("docs/a-brief.md"));
+        assert!(rows(&app, now).is_empty(), "a named brief left a line");
+        assert_eq!(turns(&app), 0, "a named brief opened a turn");
+        assert!(
+            chat.written.is_none(),
+            "naming a brief left the session remembering one"
+        );
+
+        // A path that climbs out of the repository is refused in the engine's
+        // own words, with nothing handed up for the loop to file.
+        chat.compose(
+            &mut app,
+            Composed::Typing(Composer::new("/push ../elsewhere/a-brief.md")),
+            now,
+        );
+        let refused = chat.compose(&mut app, Composed::Submit, now);
+
+        assert_eq!(refused, None, "a path outside the repository was filed");
+        assert_eq!(rows(&app, now).len(), 1, "the refusal was not one line");
     }
 
     #[test]

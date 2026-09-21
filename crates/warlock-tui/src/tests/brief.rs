@@ -42,31 +42,39 @@ fn refusal(root: &Path, document: &str) -> String {
     message
 }
 
-// The document with its first line taken off, which is what "the rest of the
-// file" means for every brief in `docs/`: the title is the first line.
-fn without_the_title(document: &str) -> &str {
-    document
-        .split_once('\n')
-        .expect("a document with more than a title line")
-        .1
-}
-
 #[test]
-fn a_brief_is_its_title_line_and_the_bytes_under_it() {
+fn a_brief_is_its_title_line_and_the_document_under_it() {
     let root = a_root();
 
     let brief = read_back(root.path(), BRIEF);
 
     assert_eq!(brief.name(), "Push a brief to the board");
-    // Byte for byte, and that is the whole point of this test: nothing is
-    // summarised, re-wrapped, re-headed or given a trailing newline it did not
-    // have. The blank line that followed the title is still there.
-    assert_eq!(brief.content(), without_the_title(BRIEF));
+    // The words are the document's, the headings are where they were, and the
+    // blank line that followed the title is still there. What the body is not
+    // is the file byte for byte: see the two tests below for the two things
+    // `for_the_board` does and the reasons it does them.
     assert!(brief.content().starts_with('\n'));
-    assert_eq!(
-        brief.name().len() + brief.content().len() + "# \n".len(),
-        BRIEF.len(),
+    assert!(
+        brief
+            .content()
+            .contains("Nothing turns a document on disk into a project."),
+        "{:?}",
+        brief.content()
     );
+    for kept in [
+        "## Outcome",
+        "## Success criteria",
+        "**The reader**",
+        "## Scope",
+        "### 1. Read the file",
+        "depends_on: []",
+    ] {
+        assert!(
+            brief.content().lines().any(|line| line == kept),
+            "{kept} is not a line of its own: {:?}",
+            brief.content()
+        );
+    }
 }
 
 #[test]
@@ -79,10 +87,118 @@ fn a_title_is_the_text_and_not_the_spaces_around_it() {
     );
 
     let brief = read_back(root.path(), &document);
+    // Asserted against the same document with an ordinary title rather than
+    // against a second spelling of what the body should be: the title line is
+    // trimmed and nothing below it is read differently for it.
+    let ordinary = read_back(root.path(), BRIEF);
 
     assert_eq!(brief.name(), "Push a brief to the board");
-    // The title line is trimmed; the document under it is not touched at all.
-    assert_eq!(brief.content(), without_the_title(&document));
+    assert_eq!(brief.content(), ordinary.content());
+}
+
+#[test]
+fn a_wrapped_paragraph_goes_up_as_one_line() {
+    // The defect this exists for: a brief is hard wrapped for a terminal, and
+    // an editor that reads a single newline as a line break renders every
+    // paragraph of it ragged. The words and the paragraph breaks are the
+    // document's; the column width was never part of it.
+    let root = a_root();
+    let document = BRIEF.replacen(
+        "Nothing turns a document on disk into a project.",
+        "Nothing turns a document\non disk into a project.\n\nAnd a second\nparagraph.",
+        1,
+    );
+
+    let brief = read_back(root.path(), &document);
+
+    assert!(
+        brief.content().contains(
+            "\nNothing turns a document on disk into a project.\n\nAnd a second paragraph.\n"
+        ),
+        "{:?}",
+        brief.content()
+    );
+}
+
+#[test]
+fn a_fenced_block_keeps_every_line_it_was_written_with() {
+    // Inside a fence a line break is content, so the rule that joins prose has
+    // to stop at one — a shell session joined into a paragraph is a session
+    // nobody can run.
+    let root = a_root();
+    let session = "```sh\n$ warlock push docs/brief.md\nwarlock: filed to WAR\n```";
+    let document = BRIEF.replacen(
+        "`warlock push docs/brief.md` files it.",
+        &format!("It files it:\n\n{session}"),
+        1,
+    );
+
+    let brief = read_back(root.path(), &document);
+
+    assert!(brief.content().contains(session), "{:?}", brief.content());
+}
+
+#[test]
+fn only_the_success_criteria_are_made_checkable() {
+    // A criterion is ticked off on the board. A constraint and an out-of-scope
+    // line are decisions somebody made once, and a box beside either would ask
+    // a reader to do something about it.
+    let root = a_root();
+    let document = BRIEF
+        .replacen(
+            "## Constraints\n\nNo new dependency.",
+            "## Constraints\n\n- No new dependency.",
+            1,
+        )
+        .replacen(
+            "## Out of scope\n\nPulling anything back.",
+            "## Out of scope\n\n- Pulling anything back.",
+            1,
+        );
+
+    let brief = read_back(root.path(), &document);
+
+    assert!(
+        brief.content().contains("- [ ] sees a URL"),
+        "the criterion is not checkable: {:?}",
+        brief.content()
+    );
+    assert!(
+        brief.content().contains("\n- No new dependency."),
+        "a constraint was made a task: {:?}",
+        brief.content()
+    );
+    assert!(
+        brief.content().contains("\n- Pulling anything back."),
+        "an out-of-scope line was made a task: {:?}",
+        brief.content()
+    );
+}
+
+#[test]
+fn a_criterion_written_with_a_box_keeps_the_one_it_has() {
+    // Written by a hand that already knew, or pushed a second time from a
+    // document somebody edited on the board and pasted back.
+    let root = a_root();
+    let document = BRIEF.replacen("- sees a URL", "- [ ] sees a URL\n- [x] and a done one", 1);
+
+    let brief = read_back(root.path(), &document);
+
+    assert!(
+        brief.content().contains("- [ ] sees a URL"),
+        "{:?}",
+        brief.content()
+    );
+    assert!(
+        brief.content().contains("- [x] and a done one"),
+        "{:?}",
+        brief.content()
+    );
+    assert!(
+        !brief.content().contains("[ ] [ ]"),
+        "a box grew a second box: {:?}",
+        brief.content()
+    );
 }
 
 #[test]
