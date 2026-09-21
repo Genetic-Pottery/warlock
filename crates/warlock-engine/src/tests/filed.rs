@@ -1,7 +1,9 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use super::{Error, FILED_FILE, Filed, FiledRecord, SCHEMA_VERSION, filed_path};
+use super::{
+    CutRecord, Error, FILED_FILE, Filed, FiledRecord, SCHEMA_VERSION, filed_path, fold_title,
+};
 use crate::hash::subtree_hash;
 
 fn a_root() -> tempfile::TempDir {
@@ -66,10 +68,384 @@ fn a_saved_record_loads_back_as_it_went_in() {
 fn an_empty_set_of_records_is_just_the_version() {
     let text = Filed::new().to_toml_string().expect("serialises");
 
-    assert_eq!(text, "version = 1\n");
+    assert_eq!(text, "version = 2\n");
     assert_eq!(
         Filed::from_toml_str(&text).expect("parses"),
         Filed::default()
+    );
+}
+
+#[test]
+fn a_version_1_file_loads_as_the_records_it_spells() {
+    let root = a_root();
+    hand_write(
+        root.path(),
+        concat!(
+            "version = 1\n\n",
+            "[[filed]]\n",
+            "path = \"docs/warlock-brief-21.md\"\n",
+            "project_id = \"legacy-id\"\n",
+            "url = \"https://linear.app/acme/project/warlock-brief-21\"\n",
+            "scope = \" Data Plane \"\n",
+            "team = \"dp\"\n",
+            "filed_at = \"2026-09-19T09:00:00+01:00\"\n",
+        ),
+    );
+
+    let loaded = Filed::load(root.path()).expect("a version 1 file is read, not refused");
+
+    assert_eq!(
+        loaded.version(),
+        SCHEMA_VERSION,
+        "read as this schema, so the next save writes this schema"
+    );
+    let record = loaded
+        .record("docs/warlock-brief-21.md")
+        .expect("the record is found by the path it spells");
+    assert_eq!(record.project_id(), "legacy-id");
+    assert_eq!(
+        record.url(),
+        "https://linear.app/acme/project/warlock-brief-21"
+    );
+    assert_eq!(record.scope(), " Data Plane ");
+    assert_eq!(record.team(), "dp");
+    assert_eq!(record.filed_at(), "2026-09-19T09:00:00+01:00");
+    assert!(
+        record.cuts().is_empty(),
+        "a brief filed before there were cut records is a brief with nothing cut"
+    );
+
+    assert_eq!(
+        Filed::from_toml_str("version = 1\n").expect("and the text path reads it too"),
+        Filed::new(),
+    );
+    assert!(
+        toml::from_str::<Filed>("version = 1\n").is_ok(),
+        "as does the derived path"
+    );
+}
+
+#[test]
+fn a_version_2_file_with_cut_records_round_trips() {
+    let root = a_root();
+    let mut brief = filed_brief();
+    brief.push_cut(CutRecord::new(
+        "  The   Cut Record  ",
+        ["WAR-125", "WAR-126"],
+        "2026-09-21T09:00:00Z",
+    ));
+    brief.push_cut(CutRecord::new(
+        "`warlock pull`",
+        ["WAR-127"],
+        "2026-09-21T09:05:00Z",
+    ));
+    // A second brief with nothing cut, so the file proves both widths of
+    // record read back as they went in.
+    let filed = Filed::with_records([
+        brief,
+        FiledRecord::new(
+            ".",
+            "docs/warlock-brief-21.md",
+            "legacy-id",
+            "https://linear.app/acme/project/warlock-brief-21",
+            "data-plane",
+            "DP",
+            "2026-09-19T09:00:00+01:00",
+        )
+        .expect("inside the root"),
+    ]);
+
+    filed.save(root.path()).expect("saves");
+
+    let text = fs::read_to_string(filed_path(root.path())).expect("reads");
+    assert!(text.starts_with("version = 2\n"), "{text}");
+    assert!(
+        !text.contains("cut = []"),
+        "a record with nothing cut gains no empty array: {text}"
+    );
+
+    let loaded = Filed::load(root.path()).expect("loads");
+    assert_eq!(loaded, filed);
+
+    let cuts = loaded
+        .record("docs/warlock-brief-22.md")
+        .expect("the brief is filed")
+        .cuts();
+    assert_eq!(cuts.len(), 2);
+    assert_eq!(cuts[0].title(), "  The   Cut Record  ", "as spelled");
+    assert_eq!(cuts[0].key(), "the cut record");
+    assert_eq!(cuts[0].issues(), ["WAR-125", "WAR-126"]);
+    assert_eq!(cuts[0].cut_at(), "2026-09-21T09:00:00Z");
+    assert_eq!(cuts[1].title(), "`warlock pull`");
+    assert_eq!(cuts[1].issues(), ["WAR-127"]);
+    assert!(
+        loaded
+            .record("docs/warlock-brief-21.md")
+            .expect("the other brief is filed")
+            .cuts()
+            .is_empty()
+    );
+}
+
+#[test]
+fn titles_that_differ_only_in_case_or_spacing_are_one_key() {
+    let same = [
+        "The cut record",
+        "the cut record",
+        "THE CUT RECORD",
+        "  The cut record  ",
+        "The   cut\trecord",
+        "The cut\nrecord",
+    ];
+    for title in same {
+        assert_eq!(
+            fold_title(title),
+            "the cut record",
+            "`{title}` names the slice that was already cut"
+        );
+        assert_eq!(
+            CutRecord::new(title, ["WAR-125"], "2026-09-21T09:00:00Z").key(),
+            "the cut record",
+            "and a record made from it carries that key"
+        );
+    }
+
+    // Anything past case and whitespace is a different slice: a retitled one,
+    // which brief 23 says is honestly uncut rather than quietly already filed.
+    let different = [
+        "The cut records",
+        "The cut-record",
+        "Thecutrecord",
+        "record cut The",
+        "The cut record.",
+        "",
+    ];
+    for title in different {
+        assert_ne!(fold_title(title), "the cut record", "`{title}`");
+    }
+
+    assert_eq!(
+        CutRecord::new("  The cut record  ", ["WAR-125"], "2026-09-21T09:00:00Z").title(),
+        "  The cut record  ",
+        "the title itself is stored unfolded and untrimmed"
+    );
+}
+
+fn a_brief_with_two_slices_cut() -> Filed {
+    let mut brief = filed_brief();
+    brief.push_cut(CutRecord::new(
+        "The cut record",
+        ["WAR-125"],
+        "2026-09-21T09:00:00Z",
+    ));
+    brief.push_cut(CutRecord::new(
+        "`warlock pull`",
+        ["WAR-127", "WAR-128"],
+        "2026-09-21T09:05:00Z",
+    ));
+    Filed::with_records([brief])
+}
+
+fn titles_of(cuts: &[&CutRecord]) -> Vec<String> {
+    cuts.iter().map(|cut| (*cut).title().to_owned()).collect()
+}
+
+#[test]
+fn a_supplied_title_is_matched_to_its_record_by_the_folded_key() {
+    let filed = a_brief_with_two_slices_cut();
+
+    let state = filed.cut_state(
+        "docs/warlock-brief-22.md",
+        [
+            "  THE   Cut\tRecord ",
+            "Relations and the comment",
+            "`warlock pull`",
+        ],
+    );
+
+    assert_eq!(
+        state
+            .cut()
+            .iter()
+            .map(|(title, cut)| (*title, cut.issues()))
+            .collect::<Vec<_>>(),
+        [
+            ("  THE   Cut\tRecord ", &["WAR-125".to_owned()][..]),
+            (
+                "`warlock pull`",
+                &["WAR-127".to_owned(), "WAR-128".to_owned()][..]
+            ),
+        ],
+        "the title is reported as supplied, beside the record it folded onto"
+    );
+    assert_eq!(state.uncut(), ["Relations and the comment"]);
+    assert!(
+        state.gone().is_empty(),
+        "both records name a slice the list still has"
+    );
+}
+
+#[test]
+fn reordering_the_supplied_titles_changes_neither_answer() {
+    let filed = a_brief_with_two_slices_cut();
+    let forwards = filed.cut_state(
+        "docs/warlock-brief-22.md",
+        ["The cut record", "Relations", "`warlock pull`", "The draft"],
+    );
+    let backwards = filed.cut_state(
+        "docs/warlock-brief-22.md",
+        ["The draft", "`warlock pull`", "Relations", "The cut record"],
+    );
+
+    let sorted = |mut titles: Vec<String>| {
+        titles.sort();
+        titles
+    };
+    let cut_titles = |state: &super::CutState<'_, '_>| {
+        sorted(
+            state
+                .cut()
+                .iter()
+                .map(|(title, _)| (*title).to_owned())
+                .collect(),
+        )
+    };
+    let uncut_titles = |state: &super::CutState<'_, '_>| {
+        sorted(
+            state
+                .uncut()
+                .iter()
+                .map(|title| (*title).to_owned())
+                .collect(),
+        )
+    };
+
+    assert_eq!(cut_titles(&forwards), cut_titles(&backwards));
+    assert_eq!(uncut_titles(&forwards), uncut_titles(&backwards));
+    assert_eq!(titles_of(forwards.gone()), titles_of(backwards.gone()));
+    assert!(forwards.gone().is_empty());
+
+    // The order the project spells is the order it is answered in, which is
+    // what lets a caller walk the slices as they are written.
+    assert_eq!(
+        forwards.uncut(),
+        ["Relations", "The draft"],
+        "and each answer keeps the order it was handed"
+    );
+    assert_eq!(backwards.uncut(), ["The draft", "Relations"]);
+}
+
+#[test]
+fn a_retitled_slice_is_uncut_and_leaves_its_old_record_gone() {
+    let filed = a_brief_with_two_slices_cut();
+
+    let state = filed.cut_state(
+        "docs/warlock-brief-22.md",
+        ["The cut record, revisited", "`warlock pull`"],
+    );
+
+    assert_eq!(
+        state.uncut(),
+        ["The cut record, revisited"],
+        "past case and whitespace it is honestly a new slice"
+    );
+    assert_eq!(titles_of(state.gone()), ["The cut record"]);
+    assert_eq!(
+        state.gone()[0].issues(),
+        ["WAR-125"],
+        "and it still names the issues that do exist on the board"
+    );
+    assert_eq!(
+        state.cut().len(),
+        1,
+        "the slice that kept its title is still cut"
+    );
+}
+
+#[test]
+fn a_brief_with_no_cut_record_has_everything_uncut_and_nothing_gone() {
+    let filed = Filed::with_records([filed_brief()]);
+
+    for path in ["docs/warlock-brief-22.md", "docs/never-filed.md"] {
+        let state = filed.cut_state(path, ["The cut record", "`warlock pull`"]);
+
+        assert!(state.cut().is_empty(), "{path}");
+        assert_eq!(
+            state.uncut(),
+            ["The cut record", "`warlock pull`"],
+            "{path}"
+        );
+        assert!(state.gone().is_empty(), "{path}");
+    }
+
+    let empty = Filed::new();
+    let nothing = empty.cut_state("docs/warlock-brief-22.md", []);
+    assert!(nothing.cut().is_empty() && nothing.uncut().is_empty() && nothing.gone().is_empty());
+}
+
+#[test]
+fn a_cut_appended_to_a_record_this_warlock_did_not_write_leaves_the_rest_byte_for_byte() {
+    let root = a_root();
+    // Two hand-written records, neither in the shape this build emits, and
+    // the cut goes on the second: what warlock adds has to land under the
+    // record it belongs to without moving anything around it.
+    let untouched = concat!(
+        "[[filed]]\n",
+        "path = \"docs/warlock-brief-21.md\"\n",
+        "project_id = \"legacy-id\"\n",
+        "url = \"https://linear.app/acme/project/warlock-brief-21\"\n",
+        "scope = \" Data Plane \"\n",
+        "team = \"dp\"\n",
+        "filed_at = \"2026-09-19T09:00:00+01:00\"\n",
+    );
+    let cut_into = concat!(
+        "[[filed]]\n",
+        "path = \"docs/warlock-brief-23.md\"\n",
+        "project_id = \"another-id\"\n",
+        "url = \"https://linear.app/acme/project/warlock-brief-23\"\n",
+        "scope = \"Cut a planned project\"\n",
+        "team = \"dp\"\n",
+        "filed_at = \"2026-09-21T08:00:00+01:00\"\n",
+    );
+    hand_write(
+        root.path(),
+        &format!("version = 2\n\n{untouched}\n{cut_into}"),
+    );
+
+    let mut loaded = Filed::load(root.path()).expect("loads");
+    loaded
+        .record_mut("docs/warlock-brief-23.md")
+        .expect("the brief is filed")
+        .push_cut(CutRecord::new(
+            "The cut record",
+            ["WAR-125"],
+            "2026-09-21T09:00:00Z",
+        ));
+    loaded.save(root.path()).expect("saves");
+
+    let after = fs::read_to_string(filed_path(root.path())).expect("reads");
+    assert_eq!(
+        after,
+        format!(
+            "version = 2\n\n{untouched}\n{cut_into}\n\
+             [[filed.cut]]\n\
+             title = \"The cut record\"\n\
+             key = \"the cut record\"\n\
+             issues = [\"WAR-125\"]\n\
+             cut_at = \"2026-09-21T09:00:00Z\"\n"
+        ),
+        "both records come back as they were spelled, with the cut appended \
+         under the second"
+    );
+    assert_eq!(
+        Filed::load(root.path()).expect("reloads"),
+        loaded,
+        "and the whole file reloads equal to what was saved"
+    );
+    assert_eq!(
+        warlock_dir_listing(root.path()),
+        [FILED_FILE],
+        "written through the same temporary and renamed, not left beside it"
     );
 }
 
@@ -81,8 +457,7 @@ fn a_record_this_warlock_did_not_write_survives_an_append_byte_for_byte() {
     // itself. The values are deliberately not what this build would emit:
     // an id that is not a UUID, a team key nobody here spells, a timestamp
     // with an offset rather than a `Z`, and an untrimmed scope.
-    let original = concat!(
-        "version = 1\n\n",
+    let body = concat!(
         "[[filed]]\n",
         "path = \"docs/warlock-brief-21.md\"\n",
         "project_id = \"legacy-id\"\n",
@@ -91,7 +466,7 @@ fn a_record_this_warlock_did_not_write_survives_an_append_byte_for_byte() {
         "team = \"dp\"\n",
         "filed_at = \"2026-09-19T09:00:00+01:00\"\n",
     );
-    hand_write(root.path(), original);
+    hand_write(root.path(), &format!("version = 2\n\n{body}"));
 
     let mut loaded = Filed::load(root.path()).expect("loads");
     loaded.push(filed_brief());
@@ -99,7 +474,7 @@ fn a_record_this_warlock_did_not_write_survives_an_append_byte_for_byte() {
 
     let after = fs::read_to_string(filed_path(root.path())).expect("reads");
     assert!(
-        after.starts_with(original),
+        after.starts_with(&format!("version = 2\n\n{body}")),
         "the record that was there is written back unfolded, untrimmed and in \
          place, with the new one after it:\n{after}"
     );
@@ -126,10 +501,8 @@ fn a_record_this_warlock_did_not_write_survives_an_append_byte_for_byte() {
 }
 
 #[test]
-fn a_load_then_save_is_a_no_op_on_the_bytes() {
-    let root = a_root();
-    let original = concat!(
-        "version = 1\n\n",
+fn a_load_then_save_moves_the_version_line_and_nothing_else() {
+    let body = concat!(
         "[[filed]]\n",
         "path = \"docs/warlock-brief-21.md\"\n",
         "project_id = \"legacy-id\"\n",
@@ -138,15 +511,26 @@ fn a_load_then_save_is_a_no_op_on_the_bytes() {
         "team = \"DP\"\n",
         "filed_at = \"2026-09-19T09:00:00+01:00\"\n",
     );
-    hand_write(root.path(), original);
-
-    let loaded = Filed::load(root.path()).expect("loads");
-    loaded.save(root.path()).expect("saves");
+    let round_trip = |declared: u32| {
+        let root = a_root();
+        hand_write(root.path(), &format!("version = {declared}\n\n{body}"));
+        Filed::load(root.path())
+            .expect("loads")
+            .save(root.path())
+            .expect("saves");
+        fs::read_to_string(filed_path(root.path())).expect("reads")
+    };
 
     assert_eq!(
-        fs::read_to_string(filed_path(root.path())).expect("reads"),
-        original,
+        round_trip(SCHEMA_VERSION),
+        format!("version = {SCHEMA_VERSION}\n\n{body}"),
         "so filing something else does not churn the diff of what was filed before"
+    );
+    assert_eq!(
+        round_trip(1),
+        format!("version = {SCHEMA_VERSION}\n\n{body}"),
+        "and a file from the older schema is upgraded at the version line alone: \
+         the record it carried comes back byte for byte"
     );
 }
 
@@ -188,20 +572,24 @@ fn filing_does_not_change_the_repository_roots_subtree_hash() {
 }
 
 #[test]
-fn another_version_is_refused_on_both_reading_paths() {
-    let text = "version = 2\n";
+fn a_newer_version_is_refused_on_both_reading_paths() {
+    let text = "version = 3\n";
 
     assert!(matches!(
         Filed::from_toml_str(text),
         Err(Error::UnsupportedVersion {
             path: None,
-            found: 2,
+            found: 3,
             supported: SCHEMA_VERSION,
         })
     ));
     assert!(
         toml::from_str::<Filed>(text).is_err(),
         "the derived path refuses what the module's reader refuses"
+    );
+    assert!(
+        toml::from_str::<Filed>("version = 999\n").is_err(),
+        "and refuses it however far ahead the file is"
     );
 
     let root = a_root();
@@ -522,7 +910,7 @@ fn every_error_variant_says_what_happened() {
                 supported: SCHEMA_VERSION,
             },
             "filed records at `/repo/.warlock/filed.toml` declare schema version 999, which is \
-             not supported; this build reads version 1",
+             not supported; this build reads version 2 and earlier",
         ),
         (
             // No file behind it: `from_toml_str` was handed text, so the
@@ -534,7 +922,7 @@ fn every_error_variant_says_what_happened() {
                 supported: SCHEMA_VERSION,
             },
             "filed records declare schema version 999, which is not supported; this build reads \
-             version 1",
+             version 2 and earlier",
         ),
         (
             Error::Path {

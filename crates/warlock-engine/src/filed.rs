@@ -11,11 +11,19 @@ const FILED_FILE: &str = "filed.toml";
 
 // Counted apart from the manifest's version on purpose: the two files are saved
 // by different commands and one gaining a key is no reason to restale the
-// other. A file declaring any other version is refused rather than read as if
-// it were this one, for the reason `manifest::SCHEMA_VERSION` gives — an old
-// binary that guesses at a newer file rewrites it with less than it came with,
-// and what it would drop here is the address of a project that exists.
-pub const SCHEMA_VERSION: u32 = 1;
+// other. Every version up to and including this one is read, and read as this
+// one: what the older versions spell is a subset of what this build writes, so
+// nothing is lost by upgrading the header on the next save, and refusing would
+// strand a repository that had filed something. A file declaring anything
+// *newer* is still refused rather than guessed at, for the reason
+// `manifest::SCHEMA_VERSION` gives — an old binary that guesses at a newer file
+// rewrites it with less than it came with, and what it would drop here is the
+// address of a project that exists.
+pub const SCHEMA_VERSION: u32 = 2;
+
+const fn is_supported(version: u32) -> bool {
+    version >= 1 && version <= SCHEMA_VERSION
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -90,11 +98,107 @@ impl Filed {
     }
 
     /// ```
+    /// use warlock_engine::{CutRecord, Filed, FiledRecord};
+    ///
+    /// let mut filed = Filed::with_records([FiledRecord::new(
+    ///     ".",
+    ///     "docs/brief.md",
+    ///     "b229262b-22aa-444a-a8af-0a2a3f4ef100",
+    ///     "https://linear.app/acme/project/brief",
+    ///     "warlock-team",
+    ///     "WAR",
+    ///     "2026-09-20T07:32:00Z",
+    /// )?]);
+    ///
+    /// filed
+    ///     .record_mut("docs/brief.md")
+    ///     .expect("the brief is filed")
+    ///     .push_cut(CutRecord::new(
+    ///         "The cut record",
+    ///         ["WAR-125"],
+    ///         "2026-09-21T09:00:00Z",
+    ///     ));
+    ///
+    /// let cuts = filed.record("docs/brief.md").map(FiledRecord::cuts);
+    /// assert_eq!(cuts.map(<[_]>::len), Some(1));
+    /// # Ok::<(), warlock_engine::filed::Error>(())
+    /// ```
+    pub fn record_mut(&mut self, path: &str) -> Option<&mut FiledRecord> {
+        self.records.iter_mut().find(|record| record.path == path)
+    }
+
+    /// ```
+    /// use warlock_engine::{CutRecord, Filed, FiledRecord};
+    ///
+    /// let mut record = FiledRecord::new(
+    ///     ".",
+    ///     "docs/brief.md",
+    ///     "b229262b-22aa-444a-a8af-0a2a3f4ef100",
+    ///     "https://linear.app/acme/project/brief",
+    ///     "warlock-team",
+    ///     "WAR",
+    ///     "2026-09-20T07:32:00Z",
+    /// )?;
+    /// record.push_cut(CutRecord::new(
+    ///     "The cut record",
+    ///     ["WAR-125"],
+    ///     "2026-09-21T09:00:00Z",
+    /// ));
+    /// record.push_cut(CutRecord::new("An older name", ["WAR-99"], "2026-09-20T09:00:00Z"));
+    /// let filed = Filed::with_records([record]);
+    ///
+    /// let state = filed.cut_state("docs/brief.md", ["  THE   cut record ", "`warlock pull`"]);
+    ///
+    /// assert_eq!(
+    ///     state.cut().iter().map(|(title, cut)| (*title, cut.issues())).collect::<Vec<_>>(),
+    ///     [("  THE   cut record ", &["WAR-125".to_owned()][..])],
+    /// );
+    /// assert_eq!(state.uncut(), ["`warlock pull`"]);
+    /// assert_eq!(
+    ///     state.gone().iter().map(|cut| cut.title()).collect::<Vec<_>>(),
+    ///     ["An older name"],
+    /// );
+    ///
+    /// // A brief nothing was ever filed for answers, rather than panicking.
+    /// let none = filed.cut_state("docs/other.md", ["The cut record"]);
+    /// assert!(none.cut().is_empty() && none.gone().is_empty());
+    /// # Ok::<(), warlock_engine::filed::Error>(())
+    /// ```
+    pub fn cut_state<'a, 'b>(
+        &'a self,
+        path: &str,
+        titles: impl IntoIterator<Item = &'b str>,
+    ) -> CutState<'a, 'b> {
+        let cuts = self.record(path).map_or(&[][..], FiledRecord::cuts);
+
+        let mut state = CutState::default();
+        let mut supplied = Vec::new();
+        for title in titles {
+            let key = fold_title(title);
+            // Matched against the key the file spells, not against a fresh fold
+            // of the record's own title: `CutRecord::key` says why the file
+            // carries it, and refolding here would silently re-match a record
+            // whose key was edited to say something else.
+            match cuts.iter().find(|cut| cut.key == key) {
+                Some(cut) => state.cut.push((title, cut)),
+                None => state.uncut.push(title),
+            }
+            supplied.push(key);
+        }
+
+        state.gone = cuts
+            .iter()
+            .filter(|cut| !supplied.contains(&cut.key))
+            .collect();
+        state
+    }
+
+    /// ```
     /// use warlock_engine::Filed;
     ///
     /// let toml = Filed::new().to_toml_string()?;
     ///
-    /// assert_eq!(toml, "version = 1\n");
+    /// assert_eq!(toml, "version = 2\n");
     /// # Ok::<(), warlock_engine::filed::Error>(())
     /// ```
     pub fn to_toml_string(&self) -> Result<String, Error> {
@@ -116,7 +220,7 @@ impl Filed {
         let raw: RawFiled =
             toml::from_str(text).map_err(|source| Error::Syntax { path: at(), source })?;
 
-        if u32::try_from(raw.version) != Ok(SCHEMA_VERSION) {
+        if !u32::try_from(raw.version).is_ok_and(is_supported) {
             return Err(Error::UnsupportedVersion {
                 path: at(),
                 found: raw.version,
@@ -264,6 +368,15 @@ pub struct FiledRecord {
     // and would take the instant away from the caller, which is the one that
     // knows whether the project was created a moment ago or an hour ago.
     filed_at: String,
+    // `default` so a version 1 record — which has no such key — reads as a
+    // brief filed with nothing cut, and `skip_serializing_if` so a record with
+    // no cuts is written back exactly as wide as it came: an empty `cut` array
+    // in the file would be a line in the diff of somebody who only filed a
+    // brief. The key has to be declared here either way, because `Filed` and
+    // this struct both `deny_unknown_fields` and a file warlock wrote would
+    // otherwise be refused by the build that wrote it.
+    #[serde(rename = "cut", default, skip_serializing_if = "Vec::is_empty")]
+    cuts: Vec<CutRecord>,
 }
 
 impl FiledRecord {
@@ -311,6 +424,7 @@ impl FiledRecord {
             scope: scope.into(),
             team: team.into(),
             filed_at: filed_at.into(),
+            cuts: Vec::new(),
         })
     }
 
@@ -343,6 +457,151 @@ impl FiledRecord {
     pub fn filed_at(&self) -> &str {
         &self.filed_at
     }
+
+    #[must_use]
+    pub fn cuts(&self) -> &[CutRecord] {
+        &self.cuts
+    }
+
+    // Appended, never replaced or de-duplicated: a slice already cut is a
+    // question the caller asks before it drafts anything, and answering it here
+    // by silently dropping the second cut would lose the identifiers of issues
+    // that do exist on the board.
+    pub fn push_cut(&mut self, cut: CutRecord) {
+        self.cuts.push(cut);
+    }
+}
+
+/// ```
+/// use warlock_engine::CutRecord;
+///
+/// let cut = CutRecord::new(
+///     "  The   Cut Record  ",
+///     ["WAR-125", "WAR-126"],
+///     "2026-09-21T09:00:00Z",
+/// );
+///
+/// assert_eq!(cut.title(), "  The   Cut Record  ");
+/// assert_eq!(cut.key(), "the cut record");
+/// assert_eq!(cut.issues(), ["WAR-125", "WAR-126"]);
+/// assert_eq!(cut.cut_at(), "2026-09-21T09:00:00Z");
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CutRecord {
+    // As spelled in the document, unfolded and untrimmed, for the reason the
+    // fields above give: these bytes are committed and this one is also what a
+    // person reads to recognise which slice the identifiers below belong to.
+    title: String,
+    // Stored, and read back as the file spells it, rather than computed from
+    // `title` at load: the file then says on its face what the record is
+    // matched by, so a retitled slice is a visible key mismatch in a diff
+    // instead of something only running the folder reveals. Recomputing it on
+    // the way in would also rewrite a hand-edited key at the next save, which
+    // is exactly the churn the fields above refuse to cause.
+    key: String,
+    // Opaque to this crate: whatever a tracker calls the things it filed. The
+    // engine stores them so a caller can print them and never parses them.
+    issues: Vec<String>,
+    // Supplied by the caller, like `filed_at` above and for the same reason.
+    cut_at: String,
+}
+
+impl CutRecord {
+    #[must_use]
+    pub fn new(
+        title: impl Into<String>,
+        issues: impl IntoIterator<Item = impl Into<String>>,
+        cut_at: impl Into<String>,
+    ) -> Self {
+        let title = title.into();
+        Self {
+            key: fold_title(&title),
+            title,
+            issues: issues.into_iter().map(Into::into).collect(),
+            cut_at: cut_at.into(),
+        }
+    }
+
+    #[must_use]
+    pub fn title(&self) -> &str {
+        &self.title
+    }
+
+    #[must_use]
+    pub fn key(&self) -> &str {
+        &self.key
+    }
+
+    #[must_use]
+    pub fn issues(&self) -> &[String] {
+        &self.issues
+    }
+
+    #[must_use]
+    pub fn cut_at(&self) -> &str {
+        &self.cut_at
+    }
+}
+
+/// What one brief's cut records say about a list of slice titles: which of them
+/// are already cut, which are not, and which records name a slice the list no
+/// longer has. Every title supplied lands in exactly one of `cut` and `uncut`,
+/// both in the order supplied, so a caller can walk the project's slices as the
+/// project spells them.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CutState<'a, 'b> {
+    cut: Vec<(&'b str, &'a CutRecord)>,
+    uncut: Vec<&'b str>,
+    gone: Vec<&'a CutRecord>,
+}
+
+impl<'a, 'b> CutState<'a, 'b> {
+    #[must_use]
+    pub fn cut(&self) -> &[(&'b str, &'a CutRecord)] {
+        &self.cut
+    }
+
+    #[must_use]
+    pub fn uncut(&self) -> &[&'b str] {
+        &self.uncut
+    }
+
+    // Kept and reported rather than dropped or cleaned up: the issues a gone
+    // record names exist on the board, and a title that no longer matches is as
+    // likely to be a slice somebody renamed as one they deleted. Only a person
+    // looking at both can tell, so this layer says what it found.
+    #[must_use]
+    pub fn gone(&self) -> &[&'a CutRecord] {
+        &self.gone
+    }
+}
+
+/// Folds a slice title to the key a cut record is matched by: case, surrounding
+/// whitespace and the width of internal whitespace runs are all discarded, so a
+/// title retyped with different spacing or capitalisation still names the slice
+/// that was already cut.
+///
+/// Anything else — punctuation, wording, order — is a different key, and a
+/// slice whose title is edited that far is honestly a new slice rather than one
+/// warlock quietly treats as already filed.
+///
+/// ```
+/// use warlock_engine::fold_title;
+///
+/// assert_eq!(
+///     fold_title("  The   Cut\tRecord\n"),
+///     fold_title("the cut record"),
+/// );
+/// assert_ne!(fold_title("The cut record"), fold_title("The cut records"));
+/// ```
+#[must_use]
+pub fn fold_title(title: &str) -> String {
+    title
+        .split_whitespace()
+        .map(str::to_lowercase)
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// ```
@@ -426,7 +685,7 @@ impl fmt::Display for Error {
                 }
                 write!(
                     f,
-                    " declare schema version {found}, which is not supported; this build reads version {supported}"
+                    " declare schema version {found}, which is not supported; this build reads version {supported} and earlier"
                 )
             }
             Self::Record {
@@ -480,14 +739,17 @@ struct RawFiled {
 
 // Looks redundant beside the check in `read` and is not: this is the derived
 // path, and without it `toml::from_str::<Filed>` would quietly accept a version
-// `read` refuses.
+// `read` refuses. It answers `SCHEMA_VERSION` rather than the number the file
+// spelled, again as `read` does, so an older file that has been read is an
+// upgraded one and no `Filed` in the process carries a version it would write
+// back.
 fn deserialize_version<'de, D: Deserializer<'de>>(deserializer: D) -> Result<u32, D::Error> {
     let version = u32::deserialize(deserializer)?;
-    if version == SCHEMA_VERSION {
-        Ok(version)
+    if is_supported(version) {
+        Ok(SCHEMA_VERSION)
     } else {
         Err(serde::de::Error::custom(format!(
-            "filed records declare schema version {version}, which is not supported; this build reads version {SCHEMA_VERSION}"
+            "filed records declare schema version {version}, which is not supported; this build reads version {SCHEMA_VERSION} and earlier"
         )))
     }
 }
