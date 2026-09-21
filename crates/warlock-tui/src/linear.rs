@@ -157,6 +157,87 @@ pub fn backlog_status(linear: &impl Posts) -> Result<Option<String>, Error> {
         .transpose()
 }
 
+/// A project already on the board, by the id `.warlock/filed.toml` recorded, or
+/// `None` when the workspace has no project with it.
+///
+/// `None` rather than an error for [`team_id`]'s reason: an id the board no
+/// longer knows is worth words about the file that recorded it, and this module
+/// does not hold them.
+pub fn fetch_project(linear: &impl Posts, id: &str) -> Result<Option<FetchedProject>, Error> {
+    let data = match linear.post(
+        "query Project($id: String!) {
+            project(id: $id) { name content url status { name } }
+        }",
+        json!({ "id": id }),
+    ) {
+        Ok(data) => data,
+        // `project(id:)` answers a `Project!` in Linear's schema, so an id the
+        // workspace does not have arrives as a GraphQL error and never as a
+        // null node. Both shapes are folded into the absence here, because a
+        // caller that had to recognise "Entity not found" itself would be
+        // reading Linear's prose in a second place.
+        Err(Error::Refused { message }) if unknown_entity(&message) => return Ok(None),
+        Err(error) => return Err(error),
+    };
+
+    let Some(project) = data.get("project") else {
+        return Err(Error::Malformed {
+            detail: "the answer carried no `project`".to_owned(),
+        });
+    };
+
+    if project.is_null() {
+        return Ok(None);
+    }
+
+    Ok(Some(FetchedProject {
+        name: text(project, "name")?,
+        content: optional(project, "content")?.unwrap_or_default(),
+        url: text(project, "url")?,
+        status: status_name(project)?,
+    }))
+}
+
+/// A project as [`fetch_project`] reads it back, which is not the [`Project`] a
+/// create answers with: what matters about a project that already exists is what
+/// is written on it, and what matters about one that has just been made is where
+/// to find it.
+///
+/// Two of the four are allowed to be empty and neither is a broken answer. A
+/// project filed into a workspace with no `Backlog` has no status at all, so a
+/// gate on the status has to be able to say that as well as name a wrong one;
+/// and a description can be emptied in Linear after it was filed, which the
+/// caller that parses it will refuse in its own words.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FetchedProject {
+    name: String,
+    content: String,
+    url: String,
+    status: Option<String>,
+}
+
+impl FetchedProject {
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    #[must_use]
+    pub fn content(&self) -> &str {
+        &self.content
+    }
+
+    #[must_use]
+    pub fn url(&self) -> &str {
+        &self.url
+    }
+
+    #[must_use]
+    pub fn status(&self) -> Option<&str> {
+        self.status.as_deref()
+    }
+}
+
 /// The id of the label by that name, creating it when the workspace has none.
 ///
 /// Two requests at most, one per thing asked, and the create only ever runs
@@ -354,13 +435,40 @@ fn node_id(node: &Value) -> Result<String, Error> {
     text(node, "id")
 }
 
+/// A field that was asked for and may be answered `null`. Missing from the
+/// answer altogether is still malformed: a document that named the field and an
+/// answer that does not carry it are not the same call.
+fn optional(node: &Value, field: &str) -> Result<Option<String>, Error> {
+    match node.get(field) {
+        Some(Value::Null) => Ok(None),
+        Some(_) => text(node, field).map(Some),
+        None => Err(missing(field)),
+    }
+}
+
+fn status_name(project: &Value) -> Result<Option<String>, Error> {
+    match project.get("status") {
+        Some(Value::Null) => Ok(None),
+        Some(status) => text(status, "name").map(Some),
+        None => Err(missing("status")),
+    }
+}
+
+fn unknown_entity(message: &str) -> bool {
+    message.to_lowercase().contains("entity not found")
+}
+
 fn text(node: &Value, field: &str) -> Result<String, Error> {
     node.get(field)
         .and_then(Value::as_str)
         .map(str::to_owned)
-        .ok_or_else(|| Error::Malformed {
-            detail: format!("a node carried no `{field}`"),
-        })
+        .ok_or_else(|| missing(field))
+}
+
+fn missing(field: &str) -> Error {
+    Error::Malformed {
+        detail: format!("a node carried no `{field}`"),
+    }
 }
 
 /// Nothing here carries the key, and two variants say why they carry what they
