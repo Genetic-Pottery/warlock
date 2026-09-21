@@ -277,6 +277,7 @@ other three are offered.
 
 ## Scope
 
+<!-- red:scope -->
 ### 1. Reading a project back
 
 depends_on: []
@@ -292,6 +293,7 @@ warlock recorded the id when it filed the project, which makes the lookup exact
 and makes a second project with the same title — the situation this repository is
 already in — something warlock cannot walk into.
 
+<!-- red:scope -->
 ### 2. The scope block as slices
 
 depends_on: []
@@ -308,6 +310,7 @@ why. And a cycle refuses here where Red falls back to document order: a brief
 whose slices depend on each other in a loop is a brief with a mistake in it, and
 filing tickets in an arbitrary order hides it.
 
+<!-- red:scope -->
 ### 3. The drafting contract
 
 depends_on: []
@@ -324,6 +327,7 @@ from what it already measured, and lays out the result itself. The alternative �
 taking the session's prose as the ticket body — is the thing brief 15 removed from
 the document road.
 
+<!-- red:scope -->
 ### 4. The drafting session
 
 depends_on: [3]
@@ -342,6 +346,7 @@ different job. So the question relay is a state of the pull in flight, the way
 `Pushes::sending` is a state of a push, and the composer routes to it while it
 lives.
 
+<!-- red:scope -->
 ### 5. The answer warlock proposes
 
 depends_on: [4]
@@ -358,6 +363,7 @@ keystroke. And a question nothing covers gets the sentence rather than the
 model's best effort, because an answer invented from nothing is the one kind of
 answer that reaches Linear looking like a decision somebody made.
 
+<!-- red:scope -->
 ### 6. Filing the issues
 
 depends_on: []
@@ -372,6 +378,7 @@ thing in this slice worth a comment. The relations go after every issue in the
 slice exists, for the reason Forman writes them the same way: an identifier that
 was never printed is unrecoverable, and a missing edge is a line somebody adds.
 
+<!-- red:scope -->
 ### 7. The cut record
 
 depends_on: []
@@ -387,6 +394,7 @@ and would give two files the chance to disagree about one brief; and that identi
 is the folded title, as Red has it, so that reordering the scope in Linear re-cuts
 nothing and a retitled slice is honestly a new one.
 
+<!-- red:scope -->
 ### 8. `warlock pull`
 
 depends_on: [1, 2, 4, 6, 7]
@@ -400,6 +408,7 @@ ordinary **1**.
 The decision is the one-shot contract. A shell gets no questions, so the CLI is a
 pipeline step and never a thing that waits for somebody who is not there.
 
+<!-- red:scope -->
 ### 9. `/pull` in the panel
 
 depends_on: [1, 2, 4, 5, 6, 7]

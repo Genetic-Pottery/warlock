@@ -7,3 +7,11 @@ url = "https://linear.app/genetic-pottery/project/push-a-brief-to-the-board-the-
 scope = "warlock-team"
 team = "WAR"
 filed_at = "2026-09-21T02:21:07Z"
+
+[[filed]]
+path = "docs/warlock-brief-23-cut-a-planned-project-into-tickets.md"
+project_id = "07a8f75d-03c2-4123-b0ef-9ff3a88f4784"
+url = "https://linear.app/genetic-pottery/project/cut-a-planned-project-into-tickets-aacb761fc284"
+scope = "warlock-team"
+team = "WAR"
+filed_at = "2026-09-21T03:17:39Z"
