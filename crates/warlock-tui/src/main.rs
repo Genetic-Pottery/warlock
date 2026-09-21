@@ -17,6 +17,7 @@
 //! changes what `warlock --help` prints.
 
 use std::io;
+use std::mem;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
@@ -67,7 +68,7 @@ use input::{Action, Drag, MouseAction, Pressed, drag_after, mouse_action, press_
 use key::{key_add, key_forget, key_list, key_use};
 use pacting::{Pact, Reloaded};
 use push::push;
-use pushing::{Pushing, push_edit, push_press};
+use pushing::{Opens, Pushes, Pushing};
 use query::{Listing, list};
 use running::{pact, refresh};
 use scoping::{record_edit, scope_edit, scope_press};
@@ -598,6 +599,11 @@ fn run() -> Result<(), Error> {
         clipboard: Clipboard::open(),
         confirm: QuitConfirm::default(),
         pushing: Pushing::closed(),
+        // Built once, for `Pact::new`'s reason and with none of its cost: the
+        // seam is a unit value and no socket exists until a confirmed dialog
+        // asks for one. The home under which the sigils, the binding and the
+        // key store sit is read here as well, once for the session.
+        pushes: Pushes::new(),
         prompt: ScopePrompt::default(),
         record: RecordPrompt::default(),
         drag: None,
@@ -671,11 +677,12 @@ fn run() -> Result<(), Error> {
 
 /// Everything one interactive session holds, and the seam the tests drive.
 ///
-/// Generic over all four impure things — the screen, the model, the
-/// conversation's model, the clipboard — so a test can press keys at a whole
-/// session with no terminal attached, no `claude` installed and no display.
-/// `warlock` itself only ever instantiates it one way, in [`run`].
-struct Session<S: Screen, P: Wired + Agent, C: Converses, B: Clip> {
+/// Generic over all five impure things — the screen, the model, the
+/// conversation's model, the clipboard, the Linear a push files to — so a test
+/// can press keys at a whole session with no terminal attached, no `claude`
+/// installed, no display and no socket. `warlock` itself only ever instantiates
+/// it one way, in [`run`].
+struct Session<S: Screen, P: Wired + Agent, C: Converses, B: Clip, O: Opens> {
     app: App,
     screen: S,
     scope: Scope,
@@ -692,6 +699,11 @@ struct Session<S: Screen, P: Wired + Agent, C: Converses, B: Clip> {
     /// the field asking which. One value because they are two halves of one
     /// question and never both up; see [`mod@pushing`].
     pushing: Pushing,
+    /// Where a confirmed `/push` gets its client from, the home it resolves the
+    /// board under, and the one request it may have in flight — which is its own
+    /// say-no to a second. The window above is the question; this is the answer
+    /// leaving the machine. See [`Pushes`].
+    pushes: Pushes<O>,
     prompt: ScopePrompt,
     /// The second window the `s` key puts up, over a scope name no `[[scope]]`
     /// record claims. Never up at the same time as [`Session::prompt`]: one goes
@@ -720,7 +732,7 @@ struct Session<S: Screen, P: Wired + Agent, C: Converses, B: Clip> {
     watched: Watched,
 }
 
-impl<S: Screen, P: Wired + Agent, C: Converses, B: Clip> Session<S, P, C, B> {
+impl<S: Screen, P: Wired + Agent, C: Converses, B: Clip, O: Opens> Session<S, P, C, B, O> {
     fn size(&self) -> io::Result<Size> {
         self.screen.size()
     }
@@ -938,7 +950,7 @@ impl<S: Screen, P: Wired + Agent, C: Converses, B: Clip> Session<S, P, C, B> {
             // the question now is.
             Pressed::Confirm(next) => self.confirm = next,
             // The push dialog, moved or answered: see [`Session::push_answered`].
-            Pressed::Push(answered) => self.push_answered(answered),
+            Pressed::Push(answered) => self.push_answered(answered, now),
             // Esc with a run in flight. The handle does both halves at once — it
             // latches, so the descent stops at the next directory instead of
             // starting a pass for it, and it kills the `claude` running right now,
@@ -1235,10 +1247,10 @@ impl<S: Screen, P: Wired + Agent, C: Converses, B: Clip> Session<S, P, C, B> {
             // sigils' and the key store's. That question is answered here and
             // on this thread — no socket is opened by any of it — and what
             // comes back is the window the reader is now looking at. See
-            // `pushing::push_press`.
+            // [`Pushes::press`].
             Pressed::Compose(outcome) => {
                 if let Some(written) = self.chat.compose(&mut self.app, outcome, now) {
-                    self.pushing = push_press(
+                    self.pushing = self.pushes.press(
                         &mut self.app,
                         &self.manifest,
                         &self.scope.repo_root,
@@ -1255,9 +1267,9 @@ impl<S: Screen, P: Wired + Agent, C: Converses, B: Clip> Session<S, P, C, B> {
             // the field where it was with the candidates under it; both come
             // back in the one value, for the reason the scope key's two
             // windows do. Nothing is sent by any of it. See
-            // `pushing::push_edit`.
+            // [`Pushes::edit`].
             Pressed::Filing(edited) => {
-                self.pushing = push_edit(
+                self.pushing = self.pushes.edit(
                     &mut self.app,
                     &self.manifest,
                     &self.scope.repo_root,
@@ -1279,15 +1291,32 @@ impl<S: Screen, P: Wired + Agent, C: Converses, B: Clip> Session<S, P, C, B> {
     /// is up — the strings it was opened with ride along unchanged, since they
     /// are what is being answered about — and either answer takes it down.
     ///
-    /// A Yes sends nothing yet: what a confirmed question files is the slice
-    /// after this one. Until then the honest behaviour of both answers is the
-    /// same one — the window comes down and the session goes on exactly where
-    /// it was.
-    fn push_answered(&mut self, answered: PushAnswered) {
-        self.pushing.confirm = match answered {
-            PushAnswered::Open(answer) => self.pushing.confirm.lit(answer),
-            PushAnswered::Cancel | PushAnswered::Send => PushConfirm::Closed,
-        };
+    /// A Yes takes it down *and* starts the request, on a worker thread: what
+    /// happens on this one is resolving the board again and building the client,
+    /// both of which can only put a line on the thread. Either way the session
+    /// goes on exactly where it was, which is what the dialog promised.
+    ///
+    /// The window is taken rather than read and then closed, so the strings the
+    /// question was asked about are the ones the request is made from and there
+    /// is no round on which both a dialog and its own push are up.
+    fn push_answered(&mut self, answered: PushAnswered, now: Instant) {
+        match answered {
+            PushAnswered::Open(answer) => self.pushing.confirm = self.pushing.confirm.lit(answer),
+            PushAnswered::Cancel => self.pushing.confirm = PushConfirm::Closed,
+            PushAnswered::Send => {
+                let answered = mem::take(&mut self.pushing.confirm);
+                if let Some(filing) = answered.filing() {
+                    self.pushes.send(
+                        &mut self.app,
+                        &self.manifest,
+                        &self.scope.repo_root,
+                        self.chat.written(),
+                        filing,
+                        now,
+                    );
+                }
+            }
+        }
     }
 
     /// A block the terminal handed over whole. Nothing is returned and nothing
@@ -1371,6 +1400,10 @@ impl<S: Screen, P: Wired + Agent, C: Converses, B: Clip> Session<S, P, C, B> {
         // conversation's, so it is opened in there rather than here out of two
         // values this loop would otherwise have to be handed. See [`Chat::keep_up`].
         self.chat.keep_up(&mut self.app, now);
+        // And a brief on its way to the board, which says one thing and is over:
+        // the project's address or one line about why there is none. Drained like
+        // the rest, so the frames keep coming while it is in flight.
+        self.pushes.keep_up(&mut self.app, now);
     }
 }
 

@@ -107,6 +107,9 @@ fn pushed<P: Posts, O: FnOnce(&str) -> P, W: Write>(
     // The key is read here and nowhere else in this module, on the last line
     // before anything leaves the machine.
     let linear = open(target.value());
+    // The address is dropped here and nowhere else: the line above has already
+    // carried it to whoever ran the command, and it comes back for the panel's
+    // sake, which has no `out` to read afterwards. See [`mod@crate::pushing`].
     sent(
         &linear,
         standing.repo_root(),
@@ -116,21 +119,33 @@ fn pushed<P: Posts, O: FnOnce(&str) -> P, W: Write>(
         filed,
         out,
     )
+    .map(drop)
 }
 
 // The three strings a push sends, split out of the `Target` they were read from
 // so the sending half below cannot reach the key value that target carries.
+//
+// `pub(crate)` for the panel's `/push`, which resolves the same three off the
+// same target and hands them to the same [`sent`]: see [`mod@crate::pushing`].
 #[derive(Debug, Clone, Copy)]
-struct Board<'a> {
-    scope: &'a str,
-    team: &'a str,
-    label: &'a str,
+pub(crate) struct Board<'a> {
+    pub(crate) scope: &'a str,
+    pub(crate) team: &'a str,
+    pub(crate) label: &'a str,
 }
 
 // Split from `push` over the `Posts` seam, the way `check` splits its I/O-free
 // core: everything below can be driven by an in-memory stand-in, so the order —
 // team, status, project, record — is assertable without a socket, a key or a
 // board.
+//
+// It is also the whole of what the panel's `/push` sends, called on that push's
+// worker thread with a sink for `out`: the four requests, their order, their
+// wording and the record are one sequence with one caller's worth of reasons
+// behind them, and a second composition of them for the panel would be a second
+// place for the order to drift. The address comes back for that caller — the
+// panel has no `out` to read afterwards, and the URL is the one thing a push
+// must not lose.
 //
 // The label is `create_project`'s own first request and is deliberately not
 // resolved here as well. That ordering is the client's decision (`linear.rs`):
@@ -142,7 +157,7 @@ struct Board<'a> {
 // first there is no such create. So a label that will not resolve is a refusal
 // with nothing sent, nothing recorded and no URL, and that is the honest report
 // of what happened.
-fn sent<W: Write>(
+pub(crate) fn sent<W: Write>(
     linear: &impl Posts,
     root: &Path,
     board: Board<'_>,
@@ -150,7 +165,7 @@ fn sent<W: Write>(
     path: &Path,
     mut filed: Filed,
     out: &mut W,
-) -> Result<(), Error> {
+) -> Result<String, Error> {
     let team = team_id(linear, board.team)
         .map_err(|source| Error::Linear { source })?
         .ok_or_else(|| Error::UnknownTeam {
@@ -198,15 +213,23 @@ fn sent<W: Write>(
     filed.save(root).map_err(|source| Error::Unfiled {
         url: project.url().to_owned(),
         source: Box::new(source),
-    })
+    })?;
+
+    // The address, for a caller with no `out` to read it off. Last, so that a
+    // push which hands one back is one whose record is on disk — and so that the
+    // two failures either side of the create keep carrying it themselves.
+    Ok(project.url().to_owned())
 }
 
+// Shared with the panel's `/push`, which loads the same file on its worker
+// thread and appends through the same [`Filed`]: see [`mod@crate::pushing`].
+//
 // A missing file is an empty one, the reading `Standing::manifest` takes: a
 // repository that has never filed anything records no filing, and that is an
 // answer rather than the absence of one. A file that exists and will not read
 // stays a failure — pushing over records warlock could not read is how a brief
 // that already has a project gets a second one.
-fn records(root: &Path) -> Result<Filed, Error> {
+pub(crate) fn records(root: &Path) -> Result<Filed, Error> {
     match Filed::load(root) {
         Err(filed::Error::NotFound { .. }) => Ok(Filed::new()),
         other => other.map_err(|source| Error::Filed { source }),

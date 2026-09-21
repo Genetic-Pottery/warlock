@@ -9,8 +9,9 @@ use warlock_engine::{
 };
 use warlock_tui::{App, Edited, Line, ScopeField, ScopePrompt, edit_for};
 
-use super::{FILING_HEADING, NO_SCOPE, Pushing, filing_to, push_edit};
+use super::{FILING_HEADING, NO_SCOPE, Pushes, Pushing, filing_to};
 use crate::error::one_line;
+use crate::stubs::Boarding;
 
 // Not a key, and named so that nothing reading this file mistakes it for one:
 // `tests/push.rs` keeps the same rule. Nothing below reads it back — a target
@@ -108,10 +109,18 @@ fn notes(app: &App) -> Vec<String> {
 }
 
 // The half of the module that takes the home as a parameter, which is the half
-// every test drives: `push_press` asks `Standing::home()` for it, and a test
-// that went through there would resolve the board of the machine it runs on.
+// every test drives: a `Pushes` built by `new` reads the machine's own home, and
+// a test that went through there would resolve the board of the machine it runs
+// on.
 fn filing(app: &mut App, repo: &Path, home: &Path, asked: Option<&ScopeField>) -> Pushing {
     filing_to(app, &a_manifest(), repo, home, WRITTEN, asked, now())
+}
+
+// The value the loop keeps, with no home and a Linear nothing here sends
+// anything to: the two paths through `edit` below resolve no board and open no
+// client, and a `Pushes` with no home is what proves the first of those.
+fn typing() -> Pushes<Boarding> {
+    Pushes::with_client(Boarding::filing(""), None)
 }
 
 fn field(text: &str) -> ScopeField {
@@ -310,13 +319,15 @@ fn an_empty_field_is_refused_before_a_home_is_so_much_as_looked_for() {
     // The one refusal this module words itself, and the reason it does: the
     // engine would answer about a scope named nothing, and what is true is
     // that the reader has not typed yet. It is also the one path through
-    // `push_edit`'s submit that reads no home at all, which is what lets this
-    // test drive that function rather than the half below it.
+    // `Pushes::edit`'s submit that reads no home at all, which is what lets
+    // this test drive that method over a value that has none.
     let repo = a_repository();
     let mut app = App::default();
     let prompt = ScopePrompt::Open(field("   "));
 
-    let pushing = push_edit(
+    // No home at all, which is the point: this refusal is answered before one is
+    // so much as looked at.
+    let pushing = typing().edit(
         &mut app,
         &a_manifest(),
         repo.path(),
@@ -340,7 +351,7 @@ fn typing_and_abandoning_move_nothing_but_the_field() {
     let app = App::default();
     let prompt = ScopePrompt::Open(field("da"));
     let edit = |edited| {
-        push_edit(
+        typing().edit(
             &mut App::default(),
             &a_manifest(),
             repo.path(),
