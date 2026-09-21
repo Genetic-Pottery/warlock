@@ -64,6 +64,7 @@ pub use claude::DRAFT_NOW_INSTRUCTION;
 pub use claude::DRAFTING_CONTRACT;
 pub use claude::DRAFTING_ONE_SHOT_CONTRACT;
 pub use claude::DRAFTING_ROUNDS;
+pub use claude::Drafted;
 pub use claude::Drafting;
 pub use claude::INVOCATION_TIMEOUT;
 pub use claude::Replied;

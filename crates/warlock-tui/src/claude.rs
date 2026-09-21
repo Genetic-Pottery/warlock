@@ -25,6 +25,10 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
+// `Defect` lives in `document` and is the drafting contract's defect too: one
+// vocabulary for a slot that was filled wrong, whether the slot is a line of a
+// document or the title of a draft.
+use warlock_engine::document::Defect;
 use warlock_engine::{Agent, agent, drafting};
 
 /// The clock one invocation runs under. A child that outlives it is killed *and*
@@ -1594,17 +1598,43 @@ pub const DRAFTING_ROUNDS: usize = 3;
 /// is a session that asks a question nobody asked or throws away a slice's
 /// tickets.
 ///
-/// [`Replied::Answer`] carries the engine's verdict whole, defects and all,
-/// because a reply that parsed is the end of the asking however badly it filled
-/// the object: an over-cap array or an empty title is something to repair or to
-/// put back to the model as a defect, and neither is a question for the person
-/// who asked for this cut.
+/// [`Replied::Answer`] is the end of the conversation however the object was
+/// filled: an over-cap array or an empty title is something to repair, not a
+/// question for the person who asked for this cut, so the repair has already
+/// happened by the time it is handed back.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Replied {
     /// Prose, with rounds left: the caller's to put to somebody and answer.
     Question(String),
-    /// Read as the answer, in the engine's own vocabulary.
-    Answer(drafting::Accepted),
+    /// The end of the asking: this slice's drafts, or nothing usable.
+    Answer(Drafted),
+}
+
+/// What a slice's drafting ended with, once the attempt loop and the mend have
+/// both had their turn.
+///
+/// The repairs are lines rather than [`warlock_engine::drafting::Mend`] values
+/// because a caller's whole use for them is to say them: the brief asks for
+/// every repair to land on the thread, and `Mend` already writes itself. A
+/// caller that wanted to line a repair up against the slot it answers would want
+/// the value; nothing does, and a line is what the thread takes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Drafted {
+    /// The drafts, mended, with one line per repair warlock made to get them.
+    /// The fill is clean: [`warlock_engine::drafting::check`] over it is empty.
+    Drafts {
+        fill: drafting::Fill,
+        repairs: Vec<String>,
+    },
+    /// Every attempt came back as something that was not the object, carrying
+    /// the last one's defect.
+    ///
+    /// Not mended into a stand-in ticket, though the document road's floor would
+    /// do exactly that: a supplied line in a `WARLOCK.md` is warlock describing a
+    /// directory it could not get described, and a supplied *ticket* is warlock
+    /// filing work nobody planned onto somebody's board. A slice that never
+    /// parsed is reported and left uncut.
+    Unusable(Defect),
 }
 
 /// One slice's drafting conversation, driven a turn at a time by whoever owns
@@ -1623,6 +1653,14 @@ pub enum Replied {
 /// Generic over [`Converses`] for the reason the event loop is: the seam is one
 /// message in and one answer out, so a test drives four whole rounds against a
 /// scripted stand-in with no `claude` on the machine.
+///
+/// Two roads, the same session: [`for_slice`](Drafting::for_slice) with somebody
+/// to ask, [`one_shot`](Drafting::one_shot) with nobody. The difference is the
+/// contract it opens with and how many questions it will relay — three, or none
+/// — and everything after the asking is the same on both: an answer that is not
+/// the object is asked again up to [`warlock_engine::drafting::ATTEMPTS`] with
+/// the last attempt's defects listed back, and an answer that parsed is repaired
+/// rather than refused.
 ///
 /// Each turn is bounded by the agent's own clock — [`INVOCATION_TIMEOUT`] for a
 /// real [`ChatAgent`] — and a turn that fails is the session's end, not
@@ -1651,6 +1689,16 @@ pub struct Drafting<C> {
     /// them mid-conversation reads as a new set of rules rather than the old
     /// ones.
     opening: Option<String>,
+    /// The slice, kept whole: an attempt that has to be asked again is asked
+    /// with [`warlock_engine::drafting::drafting_instructions`] built afresh, and
+    /// "the answer you just gave was not JSON" with nothing after it is a turn
+    /// that has to remember what the question was.
+    brief: String,
+    title: String,
+    prose: String,
+    /// How many questions this road relays at all: three interactively, none at
+    /// all with nobody in front of it.
+    rounds: usize,
     /// Questions relayed so far, never questions the model asked: a fourth one
     /// arriving is what this is here to refuse.
     asked: usize,
@@ -1666,11 +1714,49 @@ impl<C: Converses> Drafting<C> {
     /// the same agent. Nothing is spawned until [`open`](Drafting::open).
     #[must_use]
     pub fn for_slice(agent: &C, brief: &str, title: &str, prose: &str) -> Self {
+        Self::under(
+            agent,
+            brief,
+            title,
+            prose,
+            DRAFTING_CONTRACT,
+            DRAFTING_ROUNDS,
+        )
+    }
+
+    /// The same slice with nobody in front of it: the headless road.
+    ///
+    /// Held to [`DRAFTING_ONE_SHOT_CONTRACT`] and to no rounds at all, which is
+    /// the whole difference. Prose is not a question here — there is no one to
+    /// put it to — so a reply that is not the object is a failed attempt and
+    /// goes straight to the asking again, and [`open`](Drafting::open) either
+    /// comes back with the drafts or with nothing usable.
+    ///
+    /// The rounds are zero rather than the contract being trusted to hold the
+    /// model to one turn: the count is what refuses a question, and a session
+    /// that took the model's word for how many turns it had would have none.
+    #[must_use]
+    pub fn one_shot(agent: &C, brief: &str, title: &str, prose: &str) -> Self {
+        Self::under(agent, brief, title, prose, DRAFTING_ONE_SHOT_CONTRACT, 0)
+    }
+
+    fn under(
+        agent: &C,
+        brief: &str,
+        title: &str,
+        prose: &str,
+        contract: &str,
+        rounds: usize,
+    ) -> Self {
         let cancel = Cancel::new();
         Self {
             agent: agent.wired(cancel.clone(), Activities::none()),
             cancel,
-            opening: Some(drafting_opening(brief, title, prose, DRAFTING_CONTRACT)),
+            opening: Some(drafting_opening(brief, title, prose, contract)),
+            brief: brief.to_owned(),
+            title: title.to_owned(),
+            prose: prose.to_owned(),
+            rounds,
             asked: 0,
             instructed: false,
         }
@@ -1693,10 +1779,11 @@ impl<C: Converses> Drafting<C> {
         self.cancel.clone()
     }
 
-    /// How many more questions would be relayed rather than refused.
+    /// How many more questions would be relayed rather than refused. Zero for
+    /// the whole life of a [`one_shot`](Drafting::one_shot) session.
     #[must_use]
     pub fn questions_left(&self) -> usize {
-        DRAFTING_ROUNDS.saturating_sub(self.asked)
+        self.rounds.saturating_sub(self.asked)
     }
 
     /// The opening turn: the terms, the brief and this one slice.
@@ -1720,8 +1807,11 @@ impl<C: Converses> Drafting<C> {
     /// instruction alone, because the third answer is the last thing the model
     /// learns and a turn that dropped it would be spending a round to ask
     /// something and then throwing the reply away.
+    /// `self.rounds > 0` and not merely `questions_left() == 0`: a one-shot
+    /// session has no rounds to spend, so an instruction opening "that was the
+    /// third question" would be describing a conversation that never happened.
     pub fn answer(&mut self, answer: &str) -> Result<Replied, agent::Error> {
-        let message = if self.questions_left() == 0 && !self.instructed {
+        let message = if self.rounds > 0 && self.questions_left() == 0 && !self.instructed {
             self.instructed = true;
             format!("{answer}\n\n{DRAFT_NOW_INSTRUCTION}")
         } else {
@@ -1734,16 +1824,71 @@ impl<C: Converses> Drafting<C> {
         let reply = self.agent.turn(message)?;
         match drafting::accept(&reply) {
             // Not JSON at all, and there is still a round to spend on it: the
-            // one shape a question can arrive in.
+            // one shape a question can arrive in. The two readings of prose meet
+            // here — it is a question while somebody is being asked, and a
+            // failed attempt once the asking is over, which on the one-shot road
+            // is from the first turn.
             drafting::Accepted::Unparsed(_) if self.questions_left() > 0 => {
                 self.asked += 1;
                 Ok(Replied::Question(reply))
             }
-            // Either the object — however it filled it — or prose after the
-            // rounds ran out, which is the end of the conversation whatever it
-            // says. What to do with an answer that did not parse belongs to
-            // whoever asked for the cut, not to the asking.
-            accepted => Ok(Replied::Answer(accepted)),
+            // Either the object — however it filled it — or prose the asking has
+            // no round left for, which is the attempt loop's to carry on with.
+            accepted => self.settled(accepted),
+        }
+    }
+
+    /// The attempt loop, entered with the reply that ended the asking already in
+    /// hand and counting as the first attempt.
+    ///
+    /// Only `Unparsed` is asked again. A fill that parsed is kept and mended
+    /// however badly it filled itself: the mend is the floor brief 16 put under
+    /// this, [`warlock_engine::drafting::check`] over a mended fill is empty, and
+    /// spending three more turns of a raised-register session on a title that is
+    /// four characters too long buys a title warlock could have cut itself.
+    fn settled(&mut self, first: drafting::Accepted) -> Result<Replied, agent::Error> {
+        let mut accepted = first;
+        // The reply in hand is attempt one, so what is left is the re-asks.
+        for _ in 1..drafting::ATTEMPTS {
+            let rejected = match accepted {
+                drafting::Accepted::Unparsed(defect) => vec![defect],
+                drafting::Accepted::Filled(fill) | drafting::Accepted::Defective { fill, .. } => {
+                    return Ok(Replied::Answer(self.repaired(&fill)));
+                }
+            };
+            // The instructions afresh with the last attempt's defects listed as
+            // things not to repeat, which is how the document road asks again.
+            // The contract is not said a second time: it was the opening of this
+            // same conversation and has not changed.
+            let asked =
+                drafting::drafting_instructions(&self.brief, &self.title, &self.prose, &rejected);
+            let reply = self.agent.turn(&asked)?;
+            accepted = drafting::accept(&reply);
+        }
+
+        Ok(Replied::Answer(match accepted {
+            drafting::Accepted::Filled(fill) | drafting::Accepted::Defective { fill, .. } => {
+                self.repaired(&fill)
+            }
+            // Four answers and not an object among them. Whoever asked for the
+            // cut hears what the last one was wrong about and decides what
+            // happens to the slice.
+            drafting::Accepted::Unparsed(defect) => Drafted::Unusable(defect),
+        }))
+    }
+
+    /// A fill that parsed, put through the engine's repair and handed back with
+    /// what the repair did.
+    ///
+    /// Run over a clean fill too, not only a defective one: `prune` drops a
+    /// reference pointing outside this slice's own drafts, and `check` never
+    /// reports one, so a fill that came back `Filled` can still have a repair to
+    /// name.
+    fn repaired(&self, fill: &drafting::Fill) -> Drafted {
+        let (fill, mends) = drafting::mend(fill, &self.title, &self.prose);
+        Drafted::Drafts {
+            fill,
+            repairs: mends.iter().map(ToString::to_string).collect(),
         }
     }
 }
