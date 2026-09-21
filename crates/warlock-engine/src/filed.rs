@@ -128,6 +128,72 @@ impl Filed {
     }
 
     /// ```
+    /// use warlock_engine::{CutRecord, Filed, FiledRecord};
+    ///
+    /// let mut record = FiledRecord::new(
+    ///     ".",
+    ///     "docs/brief.md",
+    ///     "b229262b-22aa-444a-a8af-0a2a3f4ef100",
+    ///     "https://linear.app/acme/project/brief",
+    ///     "warlock-team",
+    ///     "WAR",
+    ///     "2026-09-20T07:32:00Z",
+    /// )?;
+    /// record.push_cut(CutRecord::new(
+    ///     "The cut record",
+    ///     ["WAR-125"],
+    ///     "2026-09-21T09:00:00Z",
+    /// ));
+    /// record.push_cut(CutRecord::new("An older name", ["WAR-99"], "2026-09-20T09:00:00Z"));
+    /// let filed = Filed::with_records([record]);
+    ///
+    /// let state = filed.cut_state("docs/brief.md", ["  THE   cut record ", "`warlock pull`"]);
+    ///
+    /// assert_eq!(
+    ///     state.cut().iter().map(|(title, cut)| (*title, cut.issues())).collect::<Vec<_>>(),
+    ///     [("  THE   cut record ", &["WAR-125".to_owned()][..])],
+    /// );
+    /// assert_eq!(state.uncut(), ["`warlock pull`"]);
+    /// assert_eq!(
+    ///     state.gone().iter().map(|cut| cut.title()).collect::<Vec<_>>(),
+    ///     ["An older name"],
+    /// );
+    ///
+    /// // A brief nothing was ever filed for answers, rather than panicking.
+    /// let none = filed.cut_state("docs/other.md", ["The cut record"]);
+    /// assert!(none.cut().is_empty() && none.gone().is_empty());
+    /// # Ok::<(), warlock_engine::filed::Error>(())
+    /// ```
+    pub fn cut_state<'a, 'b>(
+        &'a self,
+        path: &str,
+        titles: impl IntoIterator<Item = &'b str>,
+    ) -> CutState<'a, 'b> {
+        let cuts = self.record(path).map_or(&[][..], FiledRecord::cuts);
+
+        let mut state = CutState::default();
+        let mut supplied = Vec::new();
+        for title in titles {
+            let key = fold_title(title);
+            // Matched against the key the file spells, not against a fresh fold
+            // of the record's own title: `CutRecord::key` says why the file
+            // carries it, and refolding here would silently re-match a record
+            // whose key was edited to say something else.
+            match cuts.iter().find(|cut| cut.key == key) {
+                Some(cut) => state.cut.push((title, cut)),
+                None => state.uncut.push(title),
+            }
+            supplied.push(key);
+        }
+
+        state.gone = cuts
+            .iter()
+            .filter(|cut| !supplied.contains(&cut.key))
+            .collect();
+        state
+    }
+
+    /// ```
     /// use warlock_engine::Filed;
     ///
     /// let toml = Filed::new().to_toml_string()?;
@@ -475,6 +541,39 @@ impl CutRecord {
     #[must_use]
     pub fn cut_at(&self) -> &str {
         &self.cut_at
+    }
+}
+
+/// What one brief's cut records say about a list of slice titles: which of them
+/// are already cut, which are not, and which records name a slice the list no
+/// longer has. Every title supplied lands in exactly one of `cut` and `uncut`,
+/// both in the order supplied, so a caller can walk the project's slices as the
+/// project spells them.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CutState<'a, 'b> {
+    cut: Vec<(&'b str, &'a CutRecord)>,
+    uncut: Vec<&'b str>,
+    gone: Vec<&'a CutRecord>,
+}
+
+impl<'a, 'b> CutState<'a, 'b> {
+    #[must_use]
+    pub fn cut(&self) -> &[(&'b str, &'a CutRecord)] {
+        &self.cut
+    }
+
+    #[must_use]
+    pub fn uncut(&self) -> &[&'b str] {
+        &self.uncut
+    }
+
+    // Kept and reported rather than dropped or cleaned up: the issues a gone
+    // record names exist on the board, and a title that no longer matches is as
+    // likely to be a slice somebody renamed as one they deleted. Only a person
+    // looking at both can tell, so this layer says what it found.
+    #[must_use]
+    pub fn gone(&self) -> &[&'a CutRecord] {
+        &self.gone
     }
 }
 

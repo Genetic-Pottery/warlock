@@ -39,6 +39,7 @@ pub use decide::decide_state;
 pub use document::Fill;
 pub use document::stub_answer;
 pub use filed::CutRecord;
+pub use filed::CutState;
 pub use filed::Filed;
 pub use filed::FiledRecord;
 pub use filed::filed_path;

@@ -231,6 +231,158 @@ fn titles_that_differ_only_in_case_or_spacing_are_one_key() {
     );
 }
 
+fn a_brief_with_two_slices_cut() -> Filed {
+    let mut brief = filed_brief();
+    brief.push_cut(CutRecord::new(
+        "The cut record",
+        ["WAR-125"],
+        "2026-09-21T09:00:00Z",
+    ));
+    brief.push_cut(CutRecord::new(
+        "`warlock pull`",
+        ["WAR-127", "WAR-128"],
+        "2026-09-21T09:05:00Z",
+    ));
+    Filed::with_records([brief])
+}
+
+fn titles_of(cuts: &[&CutRecord]) -> Vec<String> {
+    cuts.iter().map(|cut| (*cut).title().to_owned()).collect()
+}
+
+#[test]
+fn a_supplied_title_is_matched_to_its_record_by_the_folded_key() {
+    let filed = a_brief_with_two_slices_cut();
+
+    let state = filed.cut_state(
+        "docs/warlock-brief-22.md",
+        [
+            "  THE   Cut\tRecord ",
+            "Relations and the comment",
+            "`warlock pull`",
+        ],
+    );
+
+    assert_eq!(
+        state
+            .cut()
+            .iter()
+            .map(|(title, cut)| (*title, cut.issues()))
+            .collect::<Vec<_>>(),
+        [
+            ("  THE   Cut\tRecord ", &["WAR-125".to_owned()][..]),
+            (
+                "`warlock pull`",
+                &["WAR-127".to_owned(), "WAR-128".to_owned()][..]
+            ),
+        ],
+        "the title is reported as supplied, beside the record it folded onto"
+    );
+    assert_eq!(state.uncut(), ["Relations and the comment"]);
+    assert!(
+        state.gone().is_empty(),
+        "both records name a slice the list still has"
+    );
+}
+
+#[test]
+fn reordering_the_supplied_titles_changes_neither_answer() {
+    let filed = a_brief_with_two_slices_cut();
+    let forwards = filed.cut_state(
+        "docs/warlock-brief-22.md",
+        ["The cut record", "Relations", "`warlock pull`", "The draft"],
+    );
+    let backwards = filed.cut_state(
+        "docs/warlock-brief-22.md",
+        ["The draft", "`warlock pull`", "Relations", "The cut record"],
+    );
+
+    let sorted = |mut titles: Vec<String>| {
+        titles.sort();
+        titles
+    };
+    let cut_titles = |state: &super::CutState<'_, '_>| {
+        sorted(
+            state
+                .cut()
+                .iter()
+                .map(|(title, _)| (*title).to_owned())
+                .collect(),
+        )
+    };
+    let uncut_titles = |state: &super::CutState<'_, '_>| {
+        sorted(
+            state
+                .uncut()
+                .iter()
+                .map(|title| (*title).to_owned())
+                .collect(),
+        )
+    };
+
+    assert_eq!(cut_titles(&forwards), cut_titles(&backwards));
+    assert_eq!(uncut_titles(&forwards), uncut_titles(&backwards));
+    assert_eq!(titles_of(forwards.gone()), titles_of(backwards.gone()));
+    assert!(forwards.gone().is_empty());
+
+    // The order the project spells is the order it is answered in, which is
+    // what lets a caller walk the slices as they are written.
+    assert_eq!(
+        forwards.uncut(),
+        ["Relations", "The draft"],
+        "and each answer keeps the order it was handed"
+    );
+    assert_eq!(backwards.uncut(), ["The draft", "Relations"]);
+}
+
+#[test]
+fn a_retitled_slice_is_uncut_and_leaves_its_old_record_gone() {
+    let filed = a_brief_with_two_slices_cut();
+
+    let state = filed.cut_state(
+        "docs/warlock-brief-22.md",
+        ["The cut record, revisited", "`warlock pull`"],
+    );
+
+    assert_eq!(
+        state.uncut(),
+        ["The cut record, revisited"],
+        "past case and whitespace it is honestly a new slice"
+    );
+    assert_eq!(titles_of(state.gone()), ["The cut record"]);
+    assert_eq!(
+        state.gone()[0].issues(),
+        ["WAR-125"],
+        "and it still names the issues that do exist on the board"
+    );
+    assert_eq!(
+        state.cut().len(),
+        1,
+        "the slice that kept its title is still cut"
+    );
+}
+
+#[test]
+fn a_brief_with_no_cut_record_has_everything_uncut_and_nothing_gone() {
+    let filed = Filed::with_records([filed_brief()]);
+
+    for path in ["docs/warlock-brief-22.md", "docs/never-filed.md"] {
+        let state = filed.cut_state(path, ["The cut record", "`warlock pull`"]);
+
+        assert!(state.cut().is_empty(), "{path}");
+        assert_eq!(
+            state.uncut(),
+            ["The cut record", "`warlock pull`"],
+            "{path}"
+        );
+        assert!(state.gone().is_empty(), "{path}");
+    }
+
+    let empty = Filed::new();
+    let nothing = empty.cut_state("docs/warlock-brief-22.md", []);
+    assert!(nothing.cut().is_empty() && nothing.uncut().is_empty() && nothing.gone().is_empty());
+}
+
 #[test]
 fn a_cut_appended_to_a_record_this_warlock_did_not_write_leaves_the_rest_byte_for_byte() {
     let root = a_root();
