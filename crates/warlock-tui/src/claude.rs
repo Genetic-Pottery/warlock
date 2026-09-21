@@ -1576,6 +1576,178 @@ impl Converses for ChatAgent {
     }
 }
 
+/// How many times a drafting session may stop and ask before it has to draft.
+///
+/// Counted here rather than by the model. [`DRAFTING_CONTRACT`] states the
+/// number so the fourth turn is the end of something that was announced instead
+/// of a conversation cut off mid-question, but a session that took the model's
+/// word for how many it had spent would have no bound at all.
+pub const DRAFTING_ROUNDS: usize = 3;
+
+/// What one turn of a [`Drafting`] session came back as, and the whole of the
+/// contract in the type: a reply is either a question for somebody or the
+/// answer, and nothing else.
+///
+/// Which one it is, is decided by shape and by [`warlock_engine::drafting::accept`] —
+/// not by a second reader here looking for a question mark. The engine already
+/// owns what the drafts object is, and two readers disagreeing about one reply
+/// is a session that asks a question nobody asked or throws away a slice's
+/// tickets.
+///
+/// [`Replied::Answer`] carries the engine's verdict whole, defects and all,
+/// because a reply that parsed is the end of the asking however badly it filled
+/// the object: an over-cap array or an empty title is something to repair or to
+/// put back to the model as a defect, and neither is a question for the person
+/// who asked for this cut.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Replied {
+    /// Prose, with rounds left: the caller's to put to somebody and answer.
+    Question(String),
+    /// Read as the answer, in the engine's own vocabulary.
+    Answer(drafting::Accepted),
+}
+
+/// One slice's drafting conversation, driven a turn at a time by whoever owns
+/// it.
+///
+/// Not a [`Mode`](crate::Mode): a mode is the panel's one chat session said at a
+/// different level, and this is a second conversation that has heard none of
+/// that talk, runs under its own system prompt and answers in JSON. So it is a
+/// value — the caller holds it, drives it, and drops it when the slice is done.
+///
+/// It hands a question *back* rather than asking anybody itself. Nothing here
+/// knows what a panel, a composer or a headless run is, which is what lets the
+/// same session serve the interactive path and, with the terms changed, the path
+/// with nobody in front of it.
+///
+/// Generic over [`Converses`] for the reason the event loop is: the seam is one
+/// message in and one answer out, so a test drives four whole rounds against a
+/// scripted stand-in with no `claude` on the machine.
+///
+/// Each turn is bounded by the agent's own clock — [`INVOCATION_TIMEOUT`] for a
+/// real [`ChatAgent`] — and a turn that fails is the session's end, not
+/// something to try again: the failures that reach here are a missing binary, a
+/// cancel and a timeout, and none of the three is better the second time.
+///
+/// ```
+/// use warlock_tui::{ChatAgent, Drafting};
+///
+/// let session = Drafting::for_slice(
+///     &ChatAgent::drafting(),
+///     "The knife is blunt.",
+///     "Sharpen the knife",
+///     "On the whetstone in the drawer.",
+/// );
+///
+/// assert_eq!(session.questions_left(), 3);
+/// // Whoever holds the session can stop the turn it is in, from any thread.
+/// session.cancel().cancel();
+/// ```
+#[derive(Debug)]
+pub struct Drafting<C> {
+    agent: C,
+    cancel: Cancel,
+    /// Taken by [`Drafting::open`], so the terms are said once: a second copy of
+    /// them mid-conversation reads as a new set of rules rather than the old
+    /// ones.
+    opening: Option<String>,
+    /// Questions relayed so far, never questions the model asked: a fourth one
+    /// arriving is what this is here to refuse.
+    asked: usize,
+    /// Whether [`DRAFT_NOW_INSTRUCTION`] has gone out, so it goes out once.
+    instructed: bool,
+}
+
+impl<C: Converses> Drafting<C> {
+    /// A session aimed at one slice of one brief's scope.
+    ///
+    /// The agent is wired to a cancel handle minted here, so cancelling reaches
+    /// the child this session is actually running rather than some other copy of
+    /// the same agent. Nothing is spawned until [`open`](Drafting::open).
+    #[must_use]
+    pub fn for_slice(agent: &C, brief: &str, title: &str, prose: &str) -> Self {
+        let cancel = Cancel::new();
+        Self {
+            agent: agent.wired(cancel.clone(), Activities::none()),
+            cancel,
+            opening: Some(drafting_opening(brief, title, prose, DRAFTING_CONTRACT)),
+            asked: 0,
+            instructed: false,
+        }
+    }
+
+    /// The same session reporting what it is seen doing.
+    ///
+    /// Re-wires rather than replaces the agent, so the cancel handle a caller may
+    /// already be holding still reaches the run.
+    #[must_use]
+    pub fn reporting(mut self, activities: Activities) -> Self {
+        self.agent = self.agent.wired(self.cancel.clone(), activities);
+        self
+    }
+
+    /// The handle this session's turns run under. A clone, because the point of
+    /// it is to be pressed from a thread that is not the one waiting.
+    #[must_use]
+    pub fn cancel(&self) -> Cancel {
+        self.cancel.clone()
+    }
+
+    /// How many more questions would be relayed rather than refused.
+    #[must_use]
+    pub fn questions_left(&self) -> usize {
+        DRAFTING_ROUNDS.saturating_sub(self.asked)
+    }
+
+    /// The opening turn: the terms, the brief and this one slice.
+    ///
+    /// # Panics
+    ///
+    /// If the session was already opened. One conversation is opened once, and a
+    /// second opening is a caller bug rather than a state to carry.
+    pub fn open(&mut self) -> Result<Replied, agent::Error> {
+        let opening = self
+            .opening
+            .take()
+            .expect("a drafting session is opened exactly once");
+        self.said(&opening)
+    }
+
+    /// What somebody answered the question just relayed with.
+    ///
+    /// On the turn after the last round is spent, the answer carries
+    /// [`DRAFT_NOW_INSTRUCTION`] after it. Both in one turn rather than the
+    /// instruction alone, because the third answer is the last thing the model
+    /// learns and a turn that dropped it would be spending a round to ask
+    /// something and then throwing the reply away.
+    pub fn answer(&mut self, answer: &str) -> Result<Replied, agent::Error> {
+        let message = if self.questions_left() == 0 && !self.instructed {
+            self.instructed = true;
+            format!("{answer}\n\n{DRAFT_NOW_INSTRUCTION}")
+        } else {
+            answer.to_owned()
+        };
+        self.said(&message)
+    }
+
+    fn said(&mut self, message: &str) -> Result<Replied, agent::Error> {
+        let reply = self.agent.turn(message)?;
+        match drafting::accept(&reply) {
+            // Not JSON at all, and there is still a round to spend on it: the
+            // one shape a question can arrive in.
+            drafting::Accepted::Unparsed(_) if self.questions_left() > 0 => {
+                self.asked += 1;
+                Ok(Replied::Question(reply))
+            }
+            // Either the object — however it filled it — or prose after the
+            // rounds ran out, which is the end of the conversation whatever it
+            // says. What to do with an answer that did not parse belongs to
+            // whoever asked for the cut, not to the asking.
+            accepted => Ok(Replied::Answer(accepted)),
+        }
+    }
+}
+
 #[cfg(test)]
 #[path = "tests/claude.rs"]
 mod tests;
