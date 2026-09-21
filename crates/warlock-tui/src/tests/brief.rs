@@ -5,7 +5,7 @@ use tempfile::TempDir;
 
 use crate::DEFAULT_TEMPLATE;
 
-use super::{Brief, Error, brief_at};
+use super::{Brief, Error, ScopeBlockError, brief_at, scope_block_in};
 
 // Every section the built-in shape asks for, so a repository that has written
 // no template of its own holds this document to something it satisfies.
@@ -365,4 +365,177 @@ fn write_template(root: &Path, text: &str) -> PathBuf {
         .expect("a `.warlock` directory");
     fs::write(&path, text).expect("a template file");
     path
+}
+
+// Reading a project back is a question about bytes, so every document below is
+// a literal: no root, no template, no file and no socket.
+const PROJECT: &str = "The problem, in prose.\n\n\
+                       ## Outcome\n\nWhat somebody sees.\n\n\
+                       ## Scope\n\n\
+                       ### 1. Read the file\n\ndepends_on: []\n\n\
+                       What this slice decides.\n\n\
+                       ### 2) Write it back\n\ndepends_on: [1, 3]\n\n\
+                       And what this one decides.\n\n\
+                       ### An unnumbered slice\n\n\
+                       Nothing depends on it.\n";
+
+#[test]
+fn a_project_is_the_brief_above_the_scope_heading_and_the_slices_under_it() {
+    let block = scope_block_in(PROJECT).expect("a scope block");
+
+    assert_eq!(
+        block.brief(),
+        "The problem, in prose.\n\n## Outcome\n\nWhat somebody sees."
+    );
+    assert_eq!(block.unreadable(), 0);
+
+    let slices = block.slices();
+    assert_eq!(slices.len(), 3);
+    // Both numbering spellings and none at all: a slice is its position first,
+    // and the number it was written with is only what `depends_on` speaks.
+    assert_eq!(
+        slices
+            .iter()
+            .map(|slice| (slice.position(), slice.number(), slice.heading()))
+            .collect::<Vec<_>>(),
+        [
+            (1, Some(1), "Read the file"),
+            (2, Some(2), "Write it back"),
+            (3, None, "An unnumbered slice"),
+        ]
+    );
+    // As written, unresolved: `3` is nobody's number in this document, and
+    // dropping it is a decision about the whole set rather than about a line.
+    assert!(slices[0].depends_on().is_empty());
+    assert_eq!(slices[1].depends_on(), [1, 3]);
+    assert!(slices[2].depends_on().is_empty());
+
+    assert_eq!(slices[0].prose(), "What this slice decides.");
+    assert_eq!(slices[1].prose(), "And what this one decides.");
+    assert_eq!(slices[2].prose(), "Nothing depends on it.");
+}
+
+#[test]
+fn a_paragraph_that_says_the_words_is_not_a_scope_heading() {
+    // The defect this exists for: a substring search for `## Scope` splits a
+    // project in half at a sentence about it, and every slice is lost.
+    let mentioned = "A brief about warlock writes its slices under ## Scope, which is \
+                     what this one is about.\n\n\
+                     ## Scope\n\n### 1. The only slice\n\nProse.\n";
+
+    let block = scope_block_in(mentioned).expect("a scope block");
+
+    assert!(
+        block.brief().contains("under ## Scope, which is"),
+        "{:?}",
+        block.brief()
+    );
+    assert_eq!(block.slices().len(), 1);
+    assert_eq!(block.slices()[0].heading(), "The only slice");
+}
+
+#[test]
+fn a_heading_inside_a_fence_is_a_document_being_quoted() {
+    let quoted = "It writes this:\n\n\
+                  ```md\n## Scope\n\n### 1. Not a slice\n```\n\n\
+                  ## Scope\n\n\
+                  ### 1. The only slice\n\n\
+                  It writes this too:\n\n\
+                  ```md\n### 2. Also not a slice\n```\n";
+
+    let block = scope_block_in(quoted).expect("a scope block");
+
+    assert!(
+        block.brief().contains("### 1. Not a slice"),
+        "split inside a fence: {:?}",
+        block.brief()
+    );
+    assert_eq!(block.slices().len(), 1);
+    assert!(
+        block.slices()[0]
+            .prose()
+            .contains("```md\n### 2. Also not a slice\n```"),
+        "{:?}",
+        block.slices()[0].prose()
+    );
+}
+
+#[test]
+fn depends_on_is_only_the_first_line_under_a_heading() {
+    let document = "Why.\n\n## Scope\n\n\
+                    ### 1. No line of its own\n\n\
+                    The first line of prose.\n\n\
+                    depends_on: [2]\n\n\
+                    More prose.\n\n\
+                    ### 2. One that has one\n\ndepends_on: [1]\n\nProse.\n";
+
+    let block = scope_block_in(document).expect("a scope block");
+
+    // Deeper in the body it is a sentence about dependencies, and it stays in
+    // the prose rather than being lifted out of the middle of a paragraph.
+    assert!(block.slices()[0].depends_on().is_empty());
+    assert_eq!(
+        block.slices()[0].prose(),
+        "The first line of prose.\n\ndepends_on: [2]\n\nMore prose."
+    );
+    // And the line that is a declaration is consumed rather than left to
+    // become the first paragraph of a ticket.
+    assert_eq!(block.slices()[1].depends_on(), [1]);
+    assert_eq!(block.slices()[1].prose(), "Prose.");
+}
+
+#[test]
+fn a_heading_with_nothing_in_it_is_counted_rather_than_dropped() {
+    // Red's parser drops these in silence, and its own docstring says the
+    // cost: a project that fails to parse gives the person no way to see why.
+    let document = "Why.\n\n## Scope\n\n\
+                    ### 1. A real slice\n\nProse.\n\n\
+                    ###\n\n### 4.\n\n### 5)\n";
+
+    let block = scope_block_in(document).expect("a scope block");
+
+    assert_eq!(block.slices().len(), 1);
+    assert_eq!(block.unreadable(), 3);
+    assert_eq!(block.slices()[0].prose(), "Prose.");
+}
+
+#[test]
+fn a_project_with_no_scope_heading_and_one_with_no_slices_are_two_refusals() {
+    let none = scope_block_in("A document about a change, and no scope section.\n")
+        .expect_err("a refusal");
+    let empty = scope_block_in("Why.\n\n## Scope\n\nA sentence where the slices go.\n")
+        .expect_err("a refusal");
+
+    assert!(matches!(none, ScopeBlockError::NoScope));
+    assert!(matches!(empty, ScopeBlockError::NoSlices));
+
+    let none = none.to_string();
+    let empty = empty.to_string();
+    assert!(!none.contains('\n'), "wrapped: {none}");
+    assert!(!empty.contains('\n'), "wrapped: {empty}");
+    // Each says which of the two it is, because the fix is a different edit.
+    assert!(none.contains("## Scope"), "{none}");
+    assert!(empty.contains("### "), "{empty}");
+    assert_ne!(none, empty);
+}
+
+#[test]
+fn a_red_scope_marker_is_neither_required_nor_consumed() {
+    // The markers in `docs/warlock-brief-23` sit immediately above the
+    // headings. Tolerated and nothing more: reading one as warlock's would
+    // make a foreign tool's comment part of this format.
+    let marked = "Why.\n\n## Scope\n\n\
+                  <!-- red:scope -->\n### 1. A slice\n\ndepends_on: []\n\nProse.\n\n\
+                  <!-- red:scope -->\n### 2. Another\n\ndepends_on: [1]\n\nMore prose.\n";
+
+    let block = scope_block_in(marked).expect("a scope block");
+
+    assert_eq!(block.slices().len(), 2);
+    assert_eq!(block.unreadable(), 0);
+    assert_eq!(block.slices()[1].depends_on(), [1]);
+    assert_eq!(
+        block.slices()[0].prose(),
+        "Prose.\n\n<!-- red:scope -->",
+        "a marker was read as warlock's",
+    );
 }
