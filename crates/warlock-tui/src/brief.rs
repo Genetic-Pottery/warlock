@@ -20,6 +20,7 @@
 //! rather than about the prose, and both in [`for_the_board`]: the paragraphs
 //! are unwrapped, and the success criteria are made checkable.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::{fmt, fs, io};
 
@@ -303,6 +304,7 @@ pub struct ScopeBlock {
     brief: String,
     slices: Vec<Slice>,
     unreadable: usize,
+    order: Vec<usize>,
 }
 
 impl ScopeBlock {
@@ -311,9 +313,21 @@ impl ScopeBlock {
         &self.brief
     }
 
+    /// In document order, which is the order the positions count in.
     #[must_use]
     pub fn slices(&self) -> &[Slice] {
         &self.slices
+    }
+
+    /// The same slices, dependency-first: nothing is handed back before
+    /// everything it depends on has been. Ties go to the lower position, so a
+    /// ten-slice scope hands back the ninth before the tenth.
+    #[must_use]
+    pub fn ordered(&self) -> Vec<&Slice> {
+        self.order
+            .iter()
+            .map(|index| &self.slices[*index])
+            .collect()
     }
 
     /// Counted rather than named, because the only heading this parser cannot
@@ -330,8 +344,8 @@ impl ScopeBlock {
 /// The position and the written number are kept apart on purpose: a brief
 /// renumbered by hand, or written `1.`, `2.`, `2.`, still has slices in an
 /// order, and that order is where they sit in the document. The number is kept
-/// only because `depends_on` is written in it, and resolving those references
-/// to positions is the caller's.
+/// only because `depends_on` is written in it; the references themselves arrive
+/// here already resolved to positions.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Slice {
     position: usize,
@@ -358,9 +372,10 @@ impl Slice {
         &self.heading
     }
 
-    /// The numbers as they were written, unresolved: a reference to a slice
-    /// that is not there is still here, because dropping it is a decision
-    /// about the whole document rather than about one line.
+    /// Positions rather than the numbers the document spelled them with, in
+    /// the order they were written and without repeats. A reference nothing
+    /// answers, and a slice's reference to itself, are not here: see
+    /// [`scope_block_in`].
     #[must_use]
     pub fn depends_on(&self) -> &[usize] {
         &self.depends_on
@@ -395,22 +410,102 @@ impl Slice {
 /// be a slice, since both the numbering and the `depends_on` line are optional,
 /// so that is the whole of what [`ScopeBlock::unreadable`] counts.
 ///
+/// A `depends_on` number is read through the numbers the slices were written
+/// with and kept as a position. One that no slice was written with, and one a
+/// slice writes about itself, are dropped: a stale reference is a line to fix
+/// and not a reason to hand a caller nothing.
+///
 /// # Errors
 ///
-/// [`ScopeBlockError`], in the two cases where there is nothing to hand back at
-/// all: content with no scope heading, and a scope block with no slices under
-/// it. Neither is a parse that half worked — a caller gets slices or a reason.
+/// [`ScopeBlockError`], in the three cases where there is nothing to hand back
+/// at all: content with no scope heading, a scope block with no slices under
+/// it, and slices that wait on each other in a circle. None is a parse that
+/// half worked — a caller gets slices in an order, or a reason.
 pub fn scope_block_in(content: &str) -> Result<ScopeBlock, ScopeBlockError> {
     let (brief, block) = split(content).ok_or(ScopeBlockError::NoScope)?;
-    let (slices, unreadable) = sliced(block);
+    let (mut slices, unreadable) = sliced(block);
     if slices.is_empty() {
         return Err(ScopeBlockError::NoSlices);
     }
+    resolved(&mut slices);
+    let order = cutting(&slices)?;
     Ok(ScopeBlock {
         brief,
         slices,
         unreadable,
+        order,
     })
+}
+
+// A slice is its position and never the number beside its heading: a scope
+// renumbered by hand reads `1.`, `3.`, `7.` and still has a first, a second and
+// a third slice, and a document written `1.`, `2.`, `2.` still has three of
+// them. So the written numbers are an index into positions and nothing more —
+// the one place the document's own numbering is believed is in reading what a
+// `depends_on` line points at, and after this nothing downstream can see a
+// number again and mistake it for an identity.
+//
+// Where two slices carry one number the earlier one answers to it, because a
+// reader counting down the document for `3.` stops at the first one too. A
+// reference no slice answers, and a slice's reference to itself, are dropped:
+// either would otherwise be an edge to nowhere or a one-slice cycle, and a
+// document with one stale line in it is still a document worth cutting.
+fn resolved(slices: &mut [Slice]) {
+    let mut positions: HashMap<usize, usize> = HashMap::new();
+    for slice in slices.iter() {
+        if let Some(number) = slice.number {
+            positions.entry(number).or_insert(slice.position);
+        }
+    }
+
+    for slice in slices.iter_mut() {
+        let mut kept: Vec<usize> = Vec::new();
+        for number in std::mem::take(&mut slice.depends_on) {
+            let Some(position) = positions.get(&number).copied() else {
+                continue;
+            };
+            if position != slice.position && !kept.contains(&position) {
+                kept.push(position);
+            }
+        }
+        slice.depends_on = kept;
+    }
+}
+
+// Red's parser falls back to document order when the dependencies form a
+// circle. That is the one fallback this format cannot afford: the order is not
+// a display detail here but the order tickets are filed and blocked in, so a
+// guess lands on somebody's board as a slice waiting on a slice filed after it,
+// and the cost of being wrong is an afternoon of undoing rather than an edit to
+// a line. Which of the two edges the author meant is a question only the author
+// can answer, so it is asked rather than answered.
+//
+// `slices` is in document order and a position is 1-based, so a slice's
+// position is its index here plus one: `placed` is read through that, and
+// sorting this slice of slices anywhere upstream would silently break it.
+fn cutting(slices: &[Slice]) -> Result<Vec<usize>, ScopeBlockError> {
+    let mut order = Vec::with_capacity(slices.len());
+    let mut placed = vec![false; slices.len()];
+
+    while order.len() < slices.len() {
+        let next = slices.iter().enumerate().position(|(index, slice)| {
+            !placed[index] && slice.depends_on.iter().all(|position| placed[position - 1])
+        });
+        let Some(index) = next else {
+            return Err(ScopeBlockError::Circle {
+                slices: slices
+                    .iter()
+                    .zip(&placed)
+                    .filter(|(_, placed)| !**placed)
+                    .map(|(slice, _)| format!("slice {} `{}`", slice.position, slice.heading))
+                    .collect(),
+            });
+        };
+        placed[index] = true;
+        order.push(index);
+    }
+
+    Ok(order)
 }
 
 /// The heading `scope_block_in` splits at, spelled as `DEFAULT_TEMPLATE`
@@ -592,12 +687,18 @@ fn prose(body: &[&str]) -> String {
     body[first..last].join("\n")
 }
 
-/// Two ways content is not a cuttable project, and no third: everything else a
-/// document can get wrong about a slice is read as written.
+/// Three ways content is not a cuttable project, and no fourth: everything
+/// else a document can get wrong about a slice is read as written.
 #[derive(Debug)]
 pub enum ScopeBlockError {
     NoScope,
     NoSlices,
+    /// Every slice left without an order, named as the document shows it — a
+    /// position and a heading, rather than an index of this parser's own that
+    /// a reader would have to count out for themselves.
+    Circle {
+        slices: Vec<String>,
+    },
 }
 
 impl fmt::Display for ScopeBlockError {
@@ -610,6 +711,11 @@ impl fmt::Display for ScopeBlockError {
             Self::NoSlices => write!(
                 f,
                 "this project's `## Scope` section has no `### ` slice headings, so there is nothing to cut"
+            ),
+            Self::Circle { slices } => write!(
+                f,
+                "these slices wait on each other, so there is no order to cut them in: {}",
+                listing(slices)
             ),
         }
     }
@@ -625,6 +731,10 @@ fn naming(missing: &[String]) -> String {
         .iter()
         .map(|section| format!("## {section}"))
         .collect();
+    listing(&named)
+}
+
+fn listing(named: &[String]) -> String {
     let Some((last, rest)) = named.split_last() else {
         return String::new();
     };

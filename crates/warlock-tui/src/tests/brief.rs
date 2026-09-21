@@ -404,10 +404,11 @@ fn a_project_is_the_brief_above_the_scope_heading_and_the_slices_under_it() {
             (3, None, "An unnumbered slice"),
         ]
     );
-    // As written, unresolved: `3` is nobody's number in this document, and
-    // dropping it is a decision about the whole set rather than about a line.
+    // Positions, not the numbers the lines were written with: `3` is nobody's
+    // number here — the third slice is unnumbered — so that reference is gone
+    // and the one beside it is kept.
     assert!(slices[0].depends_on().is_empty());
-    assert_eq!(slices[1].depends_on(), [1, 3]);
+    assert_eq!(slices[1].depends_on(), [1]);
     assert!(slices[2].depends_on().is_empty());
 
     assert_eq!(slices[0].prose(), "What this slice decides.");
@@ -517,6 +518,134 @@ fn a_project_with_no_scope_heading_and_one_with_no_slices_are_two_refusals() {
     assert!(none.contains("## Scope"), "{none}");
     assert!(empty.contains("### "), "{empty}");
     assert_ne!(none, empty);
+}
+
+fn cut_in_order(document: &str) -> Vec<usize> {
+    let block = scope_block_in(document).expect("a scope block");
+    block
+        .ordered()
+        .iter()
+        .map(|slice| slice.position())
+        .collect()
+}
+
+fn scope_refusal(document: &str) -> String {
+    let message = scope_block_in(document).expect_err("a refusal").to_string();
+    assert!(!message.contains('\n'), "wrapped: {message}");
+    message
+}
+
+#[test]
+fn a_reference_is_read_through_the_numbers_the_document_was_written_with() {
+    // Numbered 1, 3, 7 — a scope somebody deleted two slices out of and never
+    // renumbered. `depends_on: [3]` is the second slice, not a third one.
+    let document = "Why.\n\n## Scope\n\n\
+                    ### 1. First\n\ndepends_on: []\n\n\
+                    ### 3. Second\n\ndepends_on: [1]\n\n\
+                    ### 7. Third\n\ndepends_on: [3, 1]\n";
+
+    let block = scope_block_in(document).expect("a scope block");
+
+    let slices = block.slices();
+    assert_eq!(slices[1].depends_on(), [1]);
+    assert_eq!(slices[2].depends_on(), [2, 1]);
+    assert_eq!(cut_in_order(document), [1, 2, 3]);
+}
+
+#[test]
+fn a_reference_to_nothing_and_a_reference_to_itself_are_both_dropped() {
+    let document = "Why.\n\n## Scope\n\n\
+                    ### 1. First\n\ndepends_on: [1, 9]\n\n\
+                    ### 2. Second\n\ndepends_on: [2, 1]\n";
+
+    let block = scope_block_in(document).expect("a scope block");
+
+    // `9` is nobody's, and each slice's reference to itself would be a circle
+    // of one. Dropped rather than refused: the document is still cuttable.
+    assert!(block.slices()[0].depends_on().is_empty());
+    assert_eq!(block.slices()[1].depends_on(), [1]);
+    assert_eq!(cut_in_order(document), [1, 2]);
+}
+
+#[test]
+fn two_slices_written_with_one_number_are_answered_by_the_earlier_one() {
+    let document = "Why.\n\n## Scope\n\n\
+                    ### 1. First\n\ndepends_on: []\n\n\
+                    ### 2. Second\n\ndepends_on: []\n\n\
+                    ### 2. Renumbered by nobody\n\ndepends_on: [2]\n";
+
+    let block = scope_block_in(document).expect("a scope block");
+
+    // A reader counting down the document for `2.` stops at the first one, so
+    // this does too — and the third slice is a slice, not a second second.
+    assert_eq!(block.slices().len(), 3);
+    assert_eq!(block.slices()[2].depends_on(), [2]);
+}
+
+#[test]
+fn the_slices_come_back_dependency_first_rather_than_in_document_order() {
+    let document = "Why.\n\n## Scope\n\n\
+                    ### 1. Written first, cut last\n\ndepends_on: [3]\n\n\
+                    ### 2. On its own\n\ndepends_on: []\n\n\
+                    ### 3. What the first one waits on\n\ndepends_on: []\n";
+
+    let block = scope_block_in(document).expect("a scope block");
+
+    assert_eq!(cut_in_order(document), [2, 3, 1]);
+    // The slices themselves stay as the document has them, so a position still
+    // counts down the page.
+    assert_eq!(block.slices()[0].heading(), "Written first, cut last");
+}
+
+#[test]
+fn a_tenth_slice_is_not_cut_before_the_ninth() {
+    // Positions compared as numbers and never as text: sorted as strings, `10`
+    // comes before `9` and the order is wrong in exactly the scope big enough
+    // for nobody to notice.
+    let mut document =
+        String::from("Why.\n\n## Scope\n\n### 1. Waits for the last one\n\ndepends_on: [10]\n\n");
+    document.extend(
+        (2..=10).map(|number| format!("### {number}. Slice {number}\n\ndepends_on: []\n\n")),
+    );
+
+    assert_eq!(cut_in_order(&document), [2, 3, 4, 5, 6, 7, 8, 9, 10, 1]);
+}
+
+#[test]
+fn two_slices_waiting_on_each_other_refuse_and_are_both_named() {
+    // Red's parser falls back to document order here. Refused instead: the
+    // order is what the tickets are filed and blocked in, so a guess is a
+    // wrong board rather than a wrong line.
+    let document = "Why.\n\n## Scope\n\n\
+                    ### 1. Read it back\n\ndepends_on: [2]\n\n\
+                    ### 2. Write it out\n\ndepends_on: [1]\n";
+
+    let error = scope_block_in(document).expect_err("a refusal");
+    assert!(matches!(error, ScopeBlockError::Circle { .. }));
+
+    let message = scope_refusal(document);
+    assert!(message.contains("slice 1 `Read it back`"), "{message}");
+    assert!(message.contains("slice 2 `Write it out`"), "{message}");
+}
+
+#[test]
+fn a_three_slice_circle_names_the_three_and_not_the_slice_that_is_fine() {
+    let document = "Why.\n\n## Scope\n\n\
+                    ### 1. On its own\n\ndepends_on: []\n\n\
+                    ### 2. Second\n\ndepends_on: [4]\n\n\
+                    ### 3. Third\n\ndepends_on: [2]\n\n\
+                    ### 4. Fourth\n\ndepends_on: [3]\n";
+
+    let message = scope_refusal(document);
+
+    assert!(
+        message.contains("slice 2 `Second`, slice 3 `Third` and slice 4 `Fourth`"),
+        "{message}"
+    );
+    assert!(
+        !message.contains("On its own"),
+        "a slice with an order was named: {message}"
+    );
 }
 
 #[test]
