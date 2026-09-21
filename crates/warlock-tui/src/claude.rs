@@ -25,7 +25,11 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-use warlock_engine::{Agent, agent};
+// `Defect` lives in `document` and is the drafting contract's defect too: one
+// vocabulary for a slot that was filled wrong, whether the slot is a line of a
+// document or the title of a draft.
+use warlock_engine::document::Defect;
+use warlock_engine::{Agent, agent, drafting};
 
 /// The clock one invocation runs under. A child that outlives it is killed *and*
 /// reaped rather than abandoned.
@@ -169,6 +173,105 @@ and why. No other sections, and no plan of which files to edit.\n\nWrite what we
 decided rather than a summary of how we got there. Where something was left \
 open, say so in a line instead of inventing an answer.";
 
+/// What a drafting session is running under, and the half of its terms that is
+/// not in the opening turn.
+///
+/// Free of any capitalised tool name on purpose: `tests/claude.rs` reads the
+/// whole argument vector word by word looking for one, which is how the
+/// read-only grant is asserted rather than assumed, and a sentence here opening
+/// with `Write` or `Edit` would be a false positive nobody could tell from a
+/// real one.
+const DRAFTING_SYSTEM_PROMPT: &str = "You are cutting a planned change into \
+tickets inside warlock, a terminal program that shows one repository as a tree \
+of directories. A pacted directory has a WARLOCK.md describing it: a purpose, \
+one line per file under `## Files`, one per subdirectory under `## \
+Directories`, and where there is anything to say `## Structure`. The change was \
+planned in a brief about the repository you are running in, and you are given \
+that brief and one slice of its scope. Use the documents to narrow, never to \
+answer: start at the nearest WARLOCK.md above what the slice is about, follow \
+its directory and file lines downward, then open the file it names and check, \
+because a document is a map and where it and the code disagree the code is \
+right. You cannot change that repository: you have no tool that alters a file \
+or runs a command, and nothing you say is put on disk. The drafts you hand back \
+are filed as issues on the board the brief was planned on, so a ticket is read \
+by somebody who has not seen this conversation: no first person, and nothing \
+about this request or about what you were or were not shown.";
+
+/// The rule the interactive session is held to, and the only thing that says a
+/// reply is a question rather than the answer.
+///
+/// It goes above the engine's instructions rather than below them, so that what
+/// the caps are and what shape the object takes are the last words said. The
+/// three rounds are stated here and counted by whoever drives the session, never
+/// by the model: this text is what makes that count expected rather than a
+/// conversation cut off mid-question.
+pub const DRAFTING_CONTRACT: &str = "Somebody is reading your replies and can \
+answer you, and warlock decides what each reply is by its shape. A reply that \
+is the JSON object described below is the drafts, and it ends the conversation. \
+A reply that is anything else is a question, and is put to the person who asked \
+for this cut.\n\nYou get at most three questions, one per reply, and then you \
+draft. Ask only about something the brief and the slice leave open that changes \
+what the tickets are or how they are ordered — never about style, and never \
+about anything you could settle yourself with the tools you have, which you \
+should use first. When you have what you need, reply with the object and \
+nothing else.";
+
+/// The same session with nobody in front of it.
+///
+/// Deliberately not [`DRAFTING_CONTRACT`] with a sentence struck out: a model
+/// told it may ask and then told the asking is capped at zero still spends its
+/// one turn on a question, so the headless path says there is no one there at
+/// all.
+pub const DRAFTING_ONE_SHOT_CONTRACT: &str = "Nobody is reading your replies. \
+This is the only turn there is: no person sees what you say until the tickets \
+are filed, so a question reaches no one and an offer to clarify is thrown \
+away.\n\nDraft from the brief, the slice and what you can read in the \
+repository with the tools you have. Where the brief and the slice genuinely \
+leave something open, say so in the body of the ticket it belongs to, in a \
+line, rather than asking about it or inventing a decision nobody made. Your \
+whole reply is the JSON object described below and nothing else.";
+
+/// The fourth turn, once the three rounds are spent.
+pub const DRAFT_NOW_INSTRUCTION: &str = "That was the third question, which is \
+all there is. Nothing further is coming back to you: draft the tickets now from \
+the brief, the slice and what you have been told and have read. Where something \
+you asked about was left unanswered, say so in a line in the body of the ticket \
+it belongs to rather than asking again or deciding it yourself. Your whole \
+reply is the JSON object you were given the shape of and nothing else.";
+
+/// The opening turn of one slice's drafting session: the terms it is held to,
+/// then the engine's own instructions carrying the brief, this one slice and the
+/// shape of the object.
+///
+/// `brief` is the text above the scope heading and `title`/`prose` are one
+/// slice's — `ScopeBlock::brief`, `Slice::heading` and `Slice::prose` — so the
+/// other slices of the same scope are never in the turn at all. What a ticket
+/// may be, how many there may be and how long each one runs are the engine's to
+/// say, and are appended rather than restated: two copies of a cap is one cap
+/// that will disagree with the check that enforces it.
+///
+/// ```
+/// use warlock_tui::{DRAFTING_CONTRACT, drafting_opening};
+///
+/// let opening = drafting_opening(
+///     "A file is read twice.",
+///     "Read the file once",
+///     "And keep what it said.",
+///     DRAFTING_CONTRACT,
+/// );
+///
+/// assert!(opening.starts_with(DRAFTING_CONTRACT));
+/// assert!(opening.contains("A file is read twice."));
+/// assert!(opening.contains("Read the file once"));
+/// ```
+#[must_use]
+pub fn drafting_opening(brief: &str, title: &str, prose: &str, contract: &str) -> String {
+    format!(
+        "{contract}\n\n{}",
+        drafting::drafting_instructions(brief, title, prose, &[])
+    )
+}
+
 const MODEL_VAR: &str = "WARLOCK_MODEL";
 
 const EFFORT_VAR: &str = "WARLOCK_EFFORT";
@@ -287,6 +390,10 @@ fn default_args() -> Vec<OsString> {
 
 fn chat_args() -> Vec<OsString> {
     args_for(CHAT_TOOLS, CHAT_SYSTEM_PROMPT)
+}
+
+fn drafting_args() -> Vec<OsString> {
+    args_for(CHAT_TOOLS, DRAFTING_SYSTEM_PROMPT)
 }
 
 /// The one id every turn of a [`ChatAgent`] names, and which flag names it.
@@ -832,6 +939,38 @@ impl ChatAgent {
             cancel: Cancel::new(),
             activities: Activities::none(),
         }
+    }
+
+    /// One slice's drafting session: its own conversation, at the register the
+    /// brief it comes from was written in.
+    ///
+    /// A session per slice rather than a mode of the reader's chat, because a
+    /// mode is the same conversation said at a different level and this one has
+    /// heard none of that talk and answers in JSON rather than prose. Raised
+    /// through [`Converses::raised`] rather than by naming the two flags here,
+    /// so that a drafting turn and a brief turn can never drift apart in which
+    /// model they reach for.
+    ///
+    /// ```
+    /// use warlock_tui::{ChatAgent, INVOCATION_TIMEOUT};
+    ///
+    /// let agent = ChatAgent::drafting();
+    ///
+    /// assert_eq!(agent.timeout(), INVOCATION_TIMEOUT);
+    /// // A conversation of its own, and not the one on the panel.
+    /// assert!(agent.args().iter().any(|arg| arg == "--session-id"));
+    /// ```
+    #[must_use]
+    pub fn drafting() -> Self {
+        let agent = Self {
+            program: OsString::from(PROGRAM),
+            args: drafting_args(),
+            session: Some(Session::new()),
+            timeout: INVOCATION_TIMEOUT,
+            cancel: Cancel::new(),
+            activities: Activities::none(),
+        };
+        Converses::raised(&agent, BRIEF_MODEL, BRIEF_EFFORT)
     }
 
     #[must_use]
@@ -1438,6 +1577,319 @@ impl Converses for ChatAgent {
 
     fn raised(&self, model: &str, effort: &str) -> Self {
         self.at_effort(effort).at_model(model)
+    }
+}
+
+/// How many times a drafting session may stop and ask before it has to draft.
+///
+/// Counted here rather than by the model. [`DRAFTING_CONTRACT`] states the
+/// number so the fourth turn is the end of something that was announced instead
+/// of a conversation cut off mid-question, but a session that took the model's
+/// word for how many it had spent would have no bound at all.
+pub const DRAFTING_ROUNDS: usize = 3;
+
+/// What one turn of a [`Drafting`] session came back as, and the whole of the
+/// contract in the type: a reply is either a question for somebody or the
+/// answer, and nothing else.
+///
+/// Which one it is, is decided by shape and by [`warlock_engine::drafting::accept`] —
+/// not by a second reader here looking for a question mark. The engine already
+/// owns what the drafts object is, and two readers disagreeing about one reply
+/// is a session that asks a question nobody asked or throws away a slice's
+/// tickets.
+///
+/// [`Replied::Answer`] is the end of the conversation however the object was
+/// filled: an over-cap array or an empty title is something to repair, not a
+/// question for the person who asked for this cut, so the repair has already
+/// happened by the time it is handed back.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Replied {
+    /// Prose, with rounds left: the caller's to put to somebody and answer.
+    Question(String),
+    /// The end of the asking: this slice's drafts, or nothing usable.
+    Answer(Drafted),
+}
+
+/// What a slice's drafting ended with, once the attempt loop and the mend have
+/// both had their turn.
+///
+/// The repairs are lines rather than [`warlock_engine::drafting::Mend`] values
+/// because a caller's whole use for them is to say them: the brief asks for
+/// every repair to land on the thread, and `Mend` already writes itself. A
+/// caller that wanted to line a repair up against the slot it answers would want
+/// the value; nothing does, and a line is what the thread takes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Drafted {
+    /// The drafts, mended, with one line per repair warlock made to get them.
+    /// The fill is clean: [`warlock_engine::drafting::check`] over it is empty.
+    Drafts {
+        fill: drafting::Fill,
+        repairs: Vec<String>,
+    },
+    /// Every attempt came back as something that was not the object, carrying
+    /// the last one's defect.
+    ///
+    /// Not mended into a stand-in ticket, though the document road's floor would
+    /// do exactly that: a supplied line in a `WARLOCK.md` is warlock describing a
+    /// directory it could not get described, and a supplied *ticket* is warlock
+    /// filing work nobody planned onto somebody's board. A slice that never
+    /// parsed is reported and left uncut.
+    Unusable(Defect),
+}
+
+/// One slice's drafting conversation, driven a turn at a time by whoever owns
+/// it.
+///
+/// Not a [`Mode`](crate::Mode): a mode is the panel's one chat session said at a
+/// different level, and this is a second conversation that has heard none of
+/// that talk, runs under its own system prompt and answers in JSON. So it is a
+/// value — the caller holds it, drives it, and drops it when the slice is done.
+///
+/// It hands a question *back* rather than asking anybody itself. Nothing here
+/// knows what a panel, a composer or a headless run is, which is what lets the
+/// same session serve the interactive path and, with the terms changed, the path
+/// with nobody in front of it.
+///
+/// Generic over [`Converses`] for the reason the event loop is: the seam is one
+/// message in and one answer out, so a test drives four whole rounds against a
+/// scripted stand-in with no `claude` on the machine.
+///
+/// Two roads, the same session: [`for_slice`](Drafting::for_slice) with somebody
+/// to ask, [`one_shot`](Drafting::one_shot) with nobody. The difference is the
+/// contract it opens with and how many questions it will relay — three, or none
+/// — and everything after the asking is the same on both: an answer that is not
+/// the object is asked again up to [`warlock_engine::drafting::ATTEMPTS`] with
+/// the last attempt's defects listed back, and an answer that parsed is repaired
+/// rather than refused.
+///
+/// Each turn is bounded by the agent's own clock — [`INVOCATION_TIMEOUT`] for a
+/// real [`ChatAgent`] — and a turn that fails is the session's end, not
+/// something to try again: the failures that reach here are a missing binary, a
+/// cancel and a timeout, and none of the three is better the second time.
+///
+/// ```
+/// use warlock_tui::{ChatAgent, Drafting};
+///
+/// let session = Drafting::for_slice(
+///     &ChatAgent::drafting(),
+///     "The knife is blunt.",
+///     "Sharpen the knife",
+///     "On the whetstone in the drawer.",
+/// );
+///
+/// assert_eq!(session.questions_left(), 3);
+/// // Whoever holds the session can stop the turn it is in, from any thread.
+/// session.cancel().cancel();
+/// ```
+#[derive(Debug)]
+pub struct Drafting<C> {
+    agent: C,
+    cancel: Cancel,
+    /// Taken by [`Drafting::open`], so the terms are said once: a second copy of
+    /// them mid-conversation reads as a new set of rules rather than the old
+    /// ones.
+    opening: Option<String>,
+    /// The slice, kept whole: an attempt that has to be asked again is asked
+    /// with [`warlock_engine::drafting::drafting_instructions`] built afresh, and
+    /// "the answer you just gave was not JSON" with nothing after it is a turn
+    /// that has to remember what the question was.
+    brief: String,
+    title: String,
+    prose: String,
+    /// How many questions this road relays at all: three interactively, none at
+    /// all with nobody in front of it.
+    rounds: usize,
+    /// Questions relayed so far, never questions the model asked: a fourth one
+    /// arriving is what this is here to refuse.
+    asked: usize,
+    /// Whether [`DRAFT_NOW_INSTRUCTION`] has gone out, so it goes out once.
+    instructed: bool,
+}
+
+impl<C: Converses> Drafting<C> {
+    /// A session aimed at one slice of one brief's scope.
+    ///
+    /// The agent is wired to a cancel handle minted here, so cancelling reaches
+    /// the child this session is actually running rather than some other copy of
+    /// the same agent. Nothing is spawned until [`open`](Drafting::open).
+    #[must_use]
+    pub fn for_slice(agent: &C, brief: &str, title: &str, prose: &str) -> Self {
+        Self::under(
+            agent,
+            brief,
+            title,
+            prose,
+            DRAFTING_CONTRACT,
+            DRAFTING_ROUNDS,
+        )
+    }
+
+    /// The same slice with nobody in front of it: the headless road.
+    ///
+    /// Held to [`DRAFTING_ONE_SHOT_CONTRACT`] and to no rounds at all, which is
+    /// the whole difference. Prose is not a question here — there is no one to
+    /// put it to — so a reply that is not the object is a failed attempt and
+    /// goes straight to the asking again, and [`open`](Drafting::open) either
+    /// comes back with the drafts or with nothing usable.
+    ///
+    /// The rounds are zero rather than the contract being trusted to hold the
+    /// model to one turn: the count is what refuses a question, and a session
+    /// that took the model's word for how many turns it had would have none.
+    #[must_use]
+    pub fn one_shot(agent: &C, brief: &str, title: &str, prose: &str) -> Self {
+        Self::under(agent, brief, title, prose, DRAFTING_ONE_SHOT_CONTRACT, 0)
+    }
+
+    fn under(
+        agent: &C,
+        brief: &str,
+        title: &str,
+        prose: &str,
+        contract: &str,
+        rounds: usize,
+    ) -> Self {
+        let cancel = Cancel::new();
+        Self {
+            agent: agent.wired(cancel.clone(), Activities::none()),
+            cancel,
+            opening: Some(drafting_opening(brief, title, prose, contract)),
+            brief: brief.to_owned(),
+            title: title.to_owned(),
+            prose: prose.to_owned(),
+            rounds,
+            asked: 0,
+            instructed: false,
+        }
+    }
+
+    /// The same session reporting what it is seen doing.
+    ///
+    /// Re-wires rather than replaces the agent, so the cancel handle a caller may
+    /// already be holding still reaches the run.
+    #[must_use]
+    pub fn reporting(mut self, activities: Activities) -> Self {
+        self.agent = self.agent.wired(self.cancel.clone(), activities);
+        self
+    }
+
+    /// The handle this session's turns run under. A clone, because the point of
+    /// it is to be pressed from a thread that is not the one waiting.
+    #[must_use]
+    pub fn cancel(&self) -> Cancel {
+        self.cancel.clone()
+    }
+
+    /// How many more questions would be relayed rather than refused. Zero for
+    /// the whole life of a [`one_shot`](Drafting::one_shot) session.
+    #[must_use]
+    pub fn questions_left(&self) -> usize {
+        self.rounds.saturating_sub(self.asked)
+    }
+
+    /// The opening turn: the terms, the brief and this one slice.
+    ///
+    /// # Panics
+    ///
+    /// If the session was already opened. One conversation is opened once, and a
+    /// second opening is a caller bug rather than a state to carry.
+    pub fn open(&mut self) -> Result<Replied, agent::Error> {
+        let opening = self
+            .opening
+            .take()
+            .expect("a drafting session is opened exactly once");
+        self.said(&opening)
+    }
+
+    /// What somebody answered the question just relayed with.
+    ///
+    /// On the turn after the last round is spent, the answer carries
+    /// [`DRAFT_NOW_INSTRUCTION`] after it. Both in one turn rather than the
+    /// instruction alone, because the third answer is the last thing the model
+    /// learns and a turn that dropped it would be spending a round to ask
+    /// something and then throwing the reply away.
+    /// `self.rounds > 0` and not merely `questions_left() == 0`: a one-shot
+    /// session has no rounds to spend, so an instruction opening "that was the
+    /// third question" would be describing a conversation that never happened.
+    pub fn answer(&mut self, answer: &str) -> Result<Replied, agent::Error> {
+        let message = if self.rounds > 0 && self.questions_left() == 0 && !self.instructed {
+            self.instructed = true;
+            format!("{answer}\n\n{DRAFT_NOW_INSTRUCTION}")
+        } else {
+            answer.to_owned()
+        };
+        self.said(&message)
+    }
+
+    fn said(&mut self, message: &str) -> Result<Replied, agent::Error> {
+        let reply = self.agent.turn(message)?;
+        match drafting::accept(&reply) {
+            // Not JSON at all, and there is still a round to spend on it: the
+            // one shape a question can arrive in. The two readings of prose meet
+            // here — it is a question while somebody is being asked, and a
+            // failed attempt once the asking is over, which on the one-shot road
+            // is from the first turn.
+            drafting::Accepted::Unparsed(_) if self.questions_left() > 0 => {
+                self.asked += 1;
+                Ok(Replied::Question(reply))
+            }
+            // Either the object — however it filled it — or prose the asking has
+            // no round left for, which is the attempt loop's to carry on with.
+            accepted => self.settled(accepted),
+        }
+    }
+
+    /// The attempt loop, entered with the reply that ended the asking already in
+    /// hand and counting as the first attempt.
+    ///
+    /// Only `Unparsed` is asked again. A fill that parsed is kept and mended
+    /// however badly it filled itself: the mend is the floor brief 16 put under
+    /// this, [`warlock_engine::drafting::check`] over a mended fill is empty, and
+    /// spending three more turns of a raised-register session on a title that is
+    /// four characters too long buys a title warlock could have cut itself.
+    fn settled(&mut self, first: drafting::Accepted) -> Result<Replied, agent::Error> {
+        let mut accepted = first;
+        // The reply in hand is attempt one, so what is left is the re-asks.
+        for _ in 1..drafting::ATTEMPTS {
+            let rejected = match accepted {
+                drafting::Accepted::Unparsed(defect) => vec![defect],
+                drafting::Accepted::Filled(fill) | drafting::Accepted::Defective { fill, .. } => {
+                    return Ok(Replied::Answer(self.repaired(&fill)));
+                }
+            };
+            // The instructions afresh with the last attempt's defects listed as
+            // things not to repeat, which is how the document road asks again.
+            // The contract is not said a second time: it was the opening of this
+            // same conversation and has not changed.
+            let asked =
+                drafting::drafting_instructions(&self.brief, &self.title, &self.prose, &rejected);
+            let reply = self.agent.turn(&asked)?;
+            accepted = drafting::accept(&reply);
+        }
+
+        Ok(Replied::Answer(match accepted {
+            drafting::Accepted::Filled(fill) | drafting::Accepted::Defective { fill, .. } => {
+                self.repaired(&fill)
+            }
+            // Four answers and not an object among them. Whoever asked for the
+            // cut hears what the last one was wrong about and decides what
+            // happens to the slice.
+            drafting::Accepted::Unparsed(defect) => Drafted::Unusable(defect),
+        }))
+    }
+
+    /// A fill that parsed, put through the engine's repair and handed back with
+    /// what the repair did.
+    ///
+    /// Run over a clean fill too, not only a defective one: `prune` drops a
+    /// reference pointing outside this slice's own drafts, and `check` never
+    /// reports one, so a fill that came back `Filled` can still have a repair to
+    /// name.
+    fn repaired(&self, fill: &drafting::Fill) -> Drafted {
+        let (fill, mends) = drafting::mend(fill, &self.title, &self.prose);
+        Drafted::Drafts {
+            fill,
+            repairs: mends.iter().map(ToString::to_string).collect(),
+        }
     }
 }
 

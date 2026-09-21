@@ -1,17 +1,21 @@
 use std::fmt::Write as _;
 use std::io;
-use std::sync::mpsc;
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use super::stream;
 use super::{
     Activities, Activity, BRIEF_EFFORT, BRIEF_MODEL, CHAT_INSTRUCTION, CHAT_SYSTEM_PROMPT, Cancel,
-    ChatAgent, ClaudeAgent, EFFORT, INVOCATION_TIMEOUT, MODEL, OsString, SYSTEM_PROMPT,
-    WRITE_INSTRUCTION, brief_instruction, or_default, render, session_id,
+    ChatAgent, ClaudeAgent, Converses, DRAFT_NOW_INSTRUCTION, DRAFTING_CONTRACT,
+    DRAFTING_ONE_SHOT_CONTRACT, DRAFTING_ROUNDS, Drafted, Drafting, EFFORT, EFFORT_VAR,
+    INVOCATION_TIMEOUT, MODEL, MODEL_VAR, OsString, Replied, SYSTEM_PROMPT, WRITE_INSTRUCTION,
+    Wired, brief_instruction, drafting_opening, or_default, overridden, render, session_id,
 };
+use crate::brief::scope_block_in;
+use crate::panel::Mode;
 use crate::template::DEFAULT_TEMPLATE;
-use warlock_engine::{Agent, agent};
+use warlock_engine::{Agent, agent, drafting};
 
 // A name no directory on `PATH` can hold, so the lookup fails the way it does on
 // a machine with no `claude` installed.
@@ -853,6 +857,560 @@ fn the_write_instruction_asks_for_the_whole_document_in_the_shape() {
             .any(|word| word == WRITE_INSTRUCTION),
         "the write instruction reached the argument vector",
     );
+}
+
+// A brief with two slices in it, so that anything of the second one showing up
+// in the first one's turn is a composition fault rather than a coincidence.
+const TWO_SLICES: &str = "What is wrong now: the knife is blunt.\n\n## Scope\n\n\
+     ### 1. Sharpen the knife\n\ndepends_on: []\n\nThe first slice decides on a \
+     whetstone.\n\n### 2. Sweep the floor\n\ndepends_on: [1]\n\nThe second slice \
+     decides on a broom.\n";
+
+#[test]
+fn a_drafting_session_is_its_own_conversation_at_the_brief_register() {
+    let agent = ChatAgent::drafting();
+    let vector = turn_args(&agent);
+
+    assert_eq!(agent.program(), "claude");
+    assert_eq!(agent.timeout(), INVOCATION_TIMEOUT);
+    // Read through the same seam the constructor did, so a machine with
+    // `WARLOCK_MODEL` or `WARLOCK_EFFORT` set is asserting that the
+    // reader's choice still wins rather than failing on it.
+    let model = overridden(MODEL_VAR, BRIEF_MODEL);
+    let effort = overridden(EFFORT_VAR, BRIEF_EFFORT);
+    assert_eq!(value_of(&vector, "--model"), model.to_str());
+    assert_eq!(value_of(&vector, "--effort"), effort.to_str());
+    // Which, with nothing set, is the register the brief was written in
+    // and not the one a question runs at.
+    assert_ne!(BRIEF_MODEL, MODEL);
+    assert_ne!(BRIEF_EFFORT, EFFORT);
+
+    // Not the chat session under another name: its own id, and a prompt
+    // that is neither the panel's nor a pass's.
+    let session = value_of(&vector, "--session-id").expect("a drafting turn opens a conversation");
+    assert!(is_uuid_shaped(session), "not UUID-shaped: {session}");
+    let chat = turn_args(&ChatAgent::new());
+    assert_ne!(value_of(&chat, "--session-id"), Some(session));
+    let prompt = value_of(&vector, "--system-prompt").expect("a drafting turn brings its own");
+    assert_ne!(prompt, CHAT_SYSTEM_PROMPT);
+    assert_ne!(prompt, SYSTEM_PROMPT);
+    assert!(prompt.contains("tickets") && prompt.contains("WARLOCK.md"));
+
+    // And the panel's own session is exactly where it was.
+    assert_eq!(value_of(&chat, "--system-prompt"), Some(CHAT_SYSTEM_PROMPT));
+    assert_eq!(value_of(&chat, "--model"), Some(MODEL));
+    assert_eq!(value_of(&chat, "--effort"), Some(EFFORT));
+}
+
+#[test]
+fn a_drafting_session_may_read_the_repository_and_do_nothing_whatever_else() {
+    // Named rather than left to a default that could grow: a session that
+    // reads a slice and a repository has no business holding a tool that
+    // writes one, and this is the whole grant it gets.
+    let vector = turn_args(&ChatAgent::drafting());
+    let granted = value_of(&vector, "--tools").expect("a drafting turn says what it may reach for");
+
+    assert_eq!(granted, "Read,Grep,Glob");
+    assert_eq!(granted.split(',').count(), 3);
+
+    // Read over every word of the vector and not only over the grant,
+    // because the system prompt is a word of it too: a prompt that names a
+    // writing tool is a prompt that invites the model to ask for one.
+    for named in [
+        "Write",
+        "Edit",
+        "MultiEdit",
+        "NotebookEdit",
+        "Bash",
+        "BashOutput",
+        "KillShell",
+        "Task",
+        "WebFetch",
+    ] {
+        for word in &vector {
+            assert!(
+                !word
+                    .split(|letter: char| !letter.is_ascii_alphanumeric())
+                    .any(|token| token == named),
+                "{named:?} is named in the vector a drafting turn runs under: {word}",
+            );
+        }
+    }
+}
+
+#[test]
+fn a_drafting_opening_carries_the_brief_and_one_slice_of_it() {
+    let block = scope_block_in(TWO_SLICES).expect("two slices");
+    let first = &block.slices()[0];
+    let opening = drafting_opening(
+        block.brief(),
+        first.heading(),
+        first.prose(),
+        DRAFTING_CONTRACT,
+    );
+
+    assert!(opening.starts_with(DRAFTING_CONTRACT));
+    assert!(opening.contains("the knife is blunt"));
+    assert!(opening.contains("Sharpen the knife"));
+    assert!(opening.contains("whetstone"));
+
+    // The point of the whole builder: a session drafts one slice, so the
+    // rest of the scope is not in the turn to be drafted by accident.
+    for said in ["Sweep the floor", "broom", "## Scope", "depends_on"] {
+        assert!(
+            !opening.contains(said),
+            "{said:?} reached a turn about the first slice: {opening}",
+        );
+    }
+
+    // The caps, the shape and what a ticket may be are the engine's words,
+    // appended rather than restated here.
+    assert!(opening.ends_with(&drafting::drafting_instructions(
+        block.brief(),
+        first.heading(),
+        first.prose(),
+        &[],
+    )));
+    assert!(opening.contains("at most 12 entries"));
+    assert!(opening.contains("\"blocked_by\""));
+
+    // And the headless turn is the same turn on different terms.
+    let one_shot = drafting_opening(
+        block.brief(),
+        first.heading(),
+        first.prose(),
+        DRAFTING_ONE_SHOT_CONTRACT,
+    );
+    assert_ne!(one_shot, opening);
+    assert_eq!(
+        one_shot.strip_prefix(DRAFTING_ONE_SHOT_CONTRACT),
+        opening.strip_prefix(DRAFTING_CONTRACT),
+    );
+}
+
+#[test]
+fn the_three_drafting_instructions_are_each_said_in_their_own_words() {
+    // Three different situations, three different texts. The one-shot
+    // contract is not the interactive one with the asking struck out: a
+    // model told it may ask and then told the limit is zero spends its one
+    // turn asking anyway.
+    assert_ne!(DRAFTING_CONTRACT, DRAFTING_ONE_SHOT_CONTRACT);
+    assert_ne!(DRAFT_NOW_INSTRUCTION, DRAFTING_CONTRACT);
+    assert_ne!(DRAFT_NOW_INSTRUCTION, DRAFTING_ONE_SHOT_CONTRACT);
+
+    // What the interactive contract has to say: how warlock tells a
+    // question from an answer, and how many rounds of it there are.
+    for said in [
+        "JSON object",
+        "is the drafts",
+        "is a question",
+        "at most three questions",
+    ] {
+        assert!(
+            DRAFTING_CONTRACT.contains(said),
+            "{said:?} is missing from the contract a drafting session is held to",
+        );
+    }
+
+    // And what the one-shot one has to: nobody there, one turn, and no
+    // count of rounds to argue about.
+    for said in ["Nobody is reading", "only turn"] {
+        assert!(
+            DRAFTING_ONE_SHOT_CONTRACT.contains(said),
+            "{said:?} is missing from the contract the headless path uses",
+        );
+    }
+    assert!(
+        !DRAFTING_ONE_SHOT_CONTRACT.contains("three"),
+        "the headless contract counts rounds that cannot happen",
+    );
+    assert!(DRAFT_NOW_INSTRUCTION.contains("third question"));
+
+    // None of the three is a system prompt, and none reaches the argument
+    // vector: they go in on stdin as ordinary turns.
+    let vector = turn_args(&ChatAgent::drafting());
+    for instruction in [
+        DRAFTING_CONTRACT,
+        DRAFTING_ONE_SHOT_CONTRACT,
+        DRAFT_NOW_INSTRUCTION,
+    ] {
+        assert_ne!(instruction, CHAT_SYSTEM_PROMPT);
+        assert!(
+            !vector.iter().any(|word| word == instruction),
+            "a drafting instruction reached the argument vector",
+        );
+    }
+}
+
+// A conversation written down in advance: what it was sent is kept, and what it
+// says back was decided by the test. Here rather than in `stubs.rs` because that
+// module belongs to the binary crate and this one is `claude.rs`'s own.
+//
+// Shared through `Arc` so that a copy handed out by `wired` is the same
+// stand-in: a session wires the agent it was given before it sends anything,
+// and a double that recorded into its own clone would record nothing the test
+// could read.
+#[derive(Debug, Clone, Default)]
+struct Scripted {
+    sent: Arc<Mutex<Vec<String>>>,
+    answers: Arc<Mutex<Vec<String>>>,
+}
+
+impl Scripted {
+    fn answering<S: Into<String>>(answers: impl IntoIterator<Item = S>) -> Self {
+        let answers = answers.into_iter().map(Into::into).collect();
+        Self {
+            sent: Arc::new(Mutex::new(Vec::new())),
+            answers: Arc::new(Mutex::new(answers)),
+        }
+    }
+
+    fn sent(&self) -> Vec<String> {
+        self.sent
+            .lock()
+            .expect("the script is not poisoned")
+            .clone()
+    }
+}
+
+impl Wired for Scripted {
+    fn wired(&self, _cancel: Cancel, _activities: Activities) -> Self {
+        self.clone()
+    }
+}
+
+impl Converses for Scripted {
+    fn turn(&self, message: &str) -> Result<String, agent::Error> {
+        self.sent
+            .lock()
+            .expect("the script is not poisoned")
+            .push(message.to_owned());
+        let mut answers = self.answers.lock().expect("the script is not poisoned");
+        assert!(
+            !answers.is_empty(),
+            "a turn was taken the script has no answer for: {message}",
+        );
+        Ok(answers.remove(0))
+    }
+
+    fn raised(&self, _model: &str, _effort: &str) -> Self {
+        self.clone()
+    }
+}
+
+fn asking(replied: Replied) -> String {
+    match replied {
+        Replied::Question(question) => question,
+        Replied::Answer(accepted) => panic!("a reply was taken as the answer: {accepted:?}"),
+    }
+}
+
+fn answered(replied: Replied) -> Drafted {
+    match replied {
+        Replied::Answer(drafted) => drafted,
+        Replied::Question(question) => panic!("a reply was relayed as a question: {question}"),
+    }
+}
+
+// The drafts and what warlock had to repair to get them, or a panic saying which
+// other ending arrived.
+fn drafts(replied: Replied) -> (drafting::Fill, Vec<String>) {
+    match answered(replied) {
+        Drafted::Drafts { fill, repairs } => (fill, repairs),
+        Drafted::Unusable(defect) => panic!("nothing was drafted: {defect}"),
+    }
+}
+
+fn drafting_with(agent: &Scripted) -> Drafting<Scripted> {
+    let block = scope_block_in(TWO_SLICES).expect("two slices");
+    let first = &block.slices()[0];
+    Drafting::for_slice(agent, block.brief(), first.heading(), first.prose())
+}
+
+fn one_shot_with(agent: &Scripted) -> Drafting<Scripted> {
+    let block = scope_block_in(TWO_SLICES).expect("two slices");
+    let first = &block.slices()[0];
+    Drafting::one_shot(agent, block.brief(), first.heading(), first.prose())
+}
+
+// One draft, every field inside its caps and no reference to another: an answer
+// the contract accepts as it stands, so a test that uses it is asserting about
+// the road it took and not about the repair.
+const ONE_DRAFT: &str = "{\"drafts\":[{\"title\":\"Sharpen the knife on the \
+                         whetstone\",\"body\":\"The knife is blunt and the \
+                         whetstone is in the drawer.\"}]}";
+
+// Four replies with not a brace between them, so every one of them is prose to
+// `drafting::accept` and the count is the only thing deciding what happens to
+// it.
+const FOUR_QUESTIONS: [&str; 4] = [
+    "Which of the two knives is the slice about?",
+    "And is the whetstone the one in the drawer?",
+    "Should sharpening come before sweeping?",
+    "Thank you - one last thing before I draft?",
+];
+
+#[test]
+fn three_questions_are_relayed_and_the_fourth_turn_says_to_draft_with_what_it_has() {
+    // Four questions, and then the object: the fourth is past the rounds, so
+    // it is a failed attempt rather than a question, and the session asks
+    // again rather than stopping there.
+    let agent = Scripted::answering(FOUR_QUESTIONS.into_iter().chain([ONE_DRAFT]));
+    let mut session = drafting_with(&agent);
+
+    assert_eq!(session.questions_left(), DRAFTING_ROUNDS);
+    assert_eq!(asking(session.open().expect("a turn")), FOUR_QUESTIONS[0]);
+    assert_eq!(session.questions_left(), 2);
+    assert_eq!(
+        asking(session.answer("the first one").expect("a turn")),
+        FOUR_QUESTIONS[1],
+    );
+    assert_eq!(
+        asking(session.answer("yes, the drawer").expect("a turn")),
+        FOUR_QUESTIONS[2],
+    );
+    // Three rounds, and the session is out of them.
+    assert_eq!(session.questions_left(), 0);
+
+    // The fourth reply is prose again, and prose is a question only while
+    // there is somebody being asked. This one is a failed attempt instead:
+    // asked again with what was wrong with it, the session ends in drafts and
+    // nothing is put to anybody.
+    let (fill, repairs) = drafts(session.answer("sharpening first").expect("a turn"));
+    assert_eq!(fill.drafts.len(), 1);
+    assert!(
+        repairs.is_empty(),
+        "a clean object was repaired: {repairs:?}"
+    );
+
+    let sent = agent.sent();
+    assert_eq!(
+        sent.len(),
+        5,
+        "one turn per round, then the one it took to get an object: {sent:?}",
+    );
+    assert!(sent[0].starts_with(DRAFTING_CONTRACT));
+    assert!(sent[0].contains("the knife is blunt"));
+    assert_eq!(sent[1], "the first one");
+    assert_eq!(sent[2], "yes, the drawer");
+    // The answer to the third question is carried with the instruction and
+    // not dropped: a round spent asking that throws the reply away is a
+    // round wasted.
+    assert!(sent[3].starts_with("sharpening first"));
+    assert!(sent[3].ends_with(DRAFT_NOW_INSTRUCTION));
+    for earlier in &sent[..3] {
+        assert!(
+            !earlier.contains(DRAFT_NOW_INSTRUCTION),
+            "the session gave up before its rounds were spent: {earlier}",
+        );
+    }
+    // And the fifth turn is the attempt loop's, not a fourth question's: the
+    // request again, with what the last reply was wrong about.
+    assert!(sent[4].contains("turned down"));
+    assert!(sent[4].contains("not a JSON object"));
+}
+
+#[test]
+fn a_reply_shaped_like_the_drafts_object_is_the_answer_and_ends_the_asking() {
+    let agent = Scripted::answering([ONE_DRAFT, "And now, a question?"]);
+    let mut session = drafting_with(&agent);
+
+    let (fill, repairs) = drafts(session.open().expect("a turn"));
+
+    assert!(
+        repairs.is_empty(),
+        "a clean object was repaired: {repairs:?}"
+    );
+    assert_eq!(fill.drafts.len(), 1);
+    assert_eq!(fill.drafts[0].title, "Sharpen the knife on the whetstone");
+    // One turn: the object ends the conversation on the spot, with all
+    // three rounds unspent, so the second answer in the script is never
+    // reached.
+    assert_eq!(agent.sent().len(), 1);
+    assert_eq!(session.questions_left(), DRAFTING_ROUNDS);
+}
+
+#[test]
+fn an_object_that_filled_itself_badly_is_still_the_answer_rather_than_a_question() {
+    // It parsed, so it is the drafts however badly it filled them: a slice
+    // nobody drafted is something to repair, and a repair is not a question
+    // for the person who asked for this cut.
+    let agent = Scripted::answering(["Here you go:\n\n{\"drafts\": []}"]);
+    let mut session = drafting_with(&agent);
+
+    let (fill, repairs) = drafts(session.open().expect("a turn"));
+
+    assert_eq!(fill.drafts.len(), 1, "the mend left the slice uncut");
+    assert!(!repairs.is_empty(), "a repair went unreported");
+    // One turn: it was repaired, not asked again, and not put to anybody.
+    assert_eq!(agent.sent().len(), 1);
+    assert_eq!(session.questions_left(), DRAFTING_ROUNDS);
+}
+
+// Parses, and is wrong in four ways at once: a title over two lines, a body
+// nobody wrote, a title too short to name a ticket, and an order pointing at a
+// draft this slice does not hold.
+const A_BAD_OBJECT: &str = "{\"drafts\":[\
+    {\"title\":\"Sharpen the knife on the whetstone\\nand then sweep\",\
+     \"body\":\"\",\"blocked_by\":[],\"blocks\":[]},\
+    {\"title\":\"Sweep\",\"body\":\"The floor, afterwards.\",\
+     \"blocked_by\":[],\"blocks\":[7]}]}";
+
+#[test]
+fn a_defective_answer_comes_back_repaired_with_a_line_for_every_repair() {
+    let agent = Scripted::answering([A_BAD_OBJECT]);
+    let mut session = drafting_with(&agent);
+
+    let (fill, repairs) = drafts(session.open().expect("a turn"));
+
+    // Repaired, not refused and not asked again: one turn, and what comes
+    // back is clean by the contract's own check.
+    assert_eq!(agent.sent().len(), 1);
+    assert!(
+        drafting::check(&fill).is_empty(),
+        "a defective fill was handed back unmended: {fill:?}",
+    );
+    assert_eq!(fill.drafts[0].title, "Sharpen the knife on the whetstone");
+    assert!(!fill.drafts[0].body.trim().is_empty());
+    assert!(fill.drafts[1].blocks.is_empty());
+
+    // Every mend the engine made, in its own words and in its own order.
+    // Derived from the engine rather than written out here, because the
+    // assertion is that nothing was dropped on the way to the caller — what
+    // a repair is called is `Mend`'s to say.
+    let drafting::Accepted::Defective { fill: raw, .. } = drafting::accept(A_BAD_OBJECT) else {
+        panic!("the fixture is no longer a defective object");
+    };
+    let block = scope_block_in(TWO_SLICES).expect("two slices");
+    let slice = &block.slices()[0];
+    let (_, mends) = drafting::mend(&raw, slice.heading(), slice.prose());
+    let said: Vec<String> = mends.iter().map(ToString::to_string).collect();
+
+    assert_eq!(repairs, said);
+    assert_eq!(repairs.len(), 4, "a repair went unreported: {repairs:?}");
+    assert!(
+        repairs
+            .iter()
+            .any(|line| line.contains("drafts[0].title") && line.contains("keeps its first")),
+        "the repairs do not say what was done to the title: {repairs:?}",
+    );
+}
+
+#[test]
+fn an_answer_that_is_not_the_object_is_asked_again_with_what_was_wrong_with_it() {
+    const PROSE: &str = "I would start with the whetstone, I think.";
+    // The one-shot road, where there are no rounds at all, so the first
+    // reply that is not the object is a failed attempt and nothing else.
+    let agent = Scripted::answering([PROSE, ONE_DRAFT]);
+    let mut session = one_shot_with(&agent);
+
+    let (fill, _) = drafts(session.open().expect("a turn"));
+    assert_eq!(fill.drafts.len(), 1);
+
+    let sent = agent.sent();
+    assert_eq!(sent.len(), 2, "the attempt was not made again: {sent:?}");
+
+    // The second message is the request again, carrying the first attempt's
+    // own defect as something not to repeat.
+    let drafting::Accepted::Unparsed(defect) = drafting::accept(PROSE) else {
+        panic!("prose is no longer unparseable");
+    };
+    assert!(sent[1].contains("turned down"));
+    assert!(
+        sent[1].contains(&defect.to_string()),
+        "the re-ask does not carry the defect: {}",
+        sent[1],
+    );
+    // A request and not a scolding: the brief and the slice are in it, so
+    // the attempt has what it needs to be made again.
+    assert!(sent[1].contains("the knife is blunt"));
+    assert!(sent[1].contains("Sharpen the knife"));
+    // And the terms were said once, at the opening, where they still are.
+    assert!(sent[0].starts_with(DRAFTING_ONE_SHOT_CONTRACT));
+    assert!(!sent[1].contains(DRAFTING_ONE_SHOT_CONTRACT));
+}
+
+#[test]
+fn the_one_shot_road_puts_nothing_to_anybody_and_stops_at_the_attempt_count() {
+    // Every reply prose, which on the interactive road is three questions
+    // and then the instruction. Here there is nobody to ask, so all of it is
+    // the attempt loop.
+    let agent = Scripted::answering(
+        (1..=drafting::ATTEMPTS).map(|round| format!("Question {round}, since nobody said?")),
+    );
+    let mut session = one_shot_with(&agent);
+
+    assert_eq!(session.questions_left(), 0);
+    // `answered` is the assertion: it panics on anything relayed as a
+    // question, and every turn of this session went through it.
+    let ending = answered(session.open().expect("a turn"));
+    assert!(
+        matches!(ending, Drafted::Unusable(_)),
+        "four unparseable answers ended somewhere else: {ending:?}",
+    );
+    assert_eq!(session.questions_left(), 0);
+
+    let sent = agent.sent();
+    assert_eq!(
+        sent.len(),
+        drafting::ATTEMPTS,
+        "the loop is bounded by the engine's count and nothing else: {sent:?}",
+    );
+    for message in &sent {
+        // Neither the interactive terms nor the instruction that ends them:
+        // both talk about questions this road cannot have.
+        assert!(!message.contains(DRAFTING_CONTRACT));
+        assert!(!message.contains(DRAFT_NOW_INSTRUCTION));
+    }
+}
+
+#[test]
+fn a_session_is_a_value_its_caller_holds_and_can_stop() {
+    let agent = Scripted::answering(["a question?"]);
+    let session = drafting_with(&agent);
+    let cancel = session.cancel();
+
+    assert!(!cancel.is_cancelled());
+    // From somewhere that is not the thread waiting on the turn, which is
+    // the whole point of handing the handle out.
+    thread::spawn(move || cancel.cancel())
+        .join()
+        .expect("the thread ran");
+
+    assert!(session.cancel().is_cancelled());
+    assert!(
+        agent.sent().is_empty(),
+        "a session spawns nothing until it is opened"
+    );
+}
+
+#[test]
+fn drafting_is_a_session_of_its_own_rather_than_a_register_of_the_panels() {
+    // Exhaustive on purpose and not a wildcard: a `Mode` variant added for
+    // drafting stops this compiling, which is the assertion. A mode is the
+    // one chat session said at a different level, and a conversation with
+    // its own prompt, its own id and a JSON answer is not that.
+    for mode in [Mode::Chat, Mode::Brief] {
+        let named = match mode {
+            Mode::Chat => "chat",
+            Mode::Brief => "brief",
+        };
+        assert!(!named.contains("draft"));
+    }
+    assert_eq!(Mode::default(), Mode::Chat);
+
+    // And the panel's conversation runs under the prompt it always did:
+    // nothing about tickets, slices or an object to fill reached it.
+    assert_eq!(
+        value_of(&turn_args(&ChatAgent::new()), "--system-prompt"),
+        Some(CHAT_SYSTEM_PROMPT),
+    );
+    for said in ["ticket", "slice", "draft", "JSON", "drafts"] {
+        assert!(
+            !CHAT_SYSTEM_PROMPT.contains(said),
+            "{said:?} reached the prompt the panel's chat runs under",
+        );
+    }
 }
 
 // The shape is written down twice — as the template, and restated inside
