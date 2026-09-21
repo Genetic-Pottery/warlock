@@ -529,7 +529,7 @@ Every value is one line. Write about the directory in its own voice: no first \
 person, and nothing about this request or about what you were or were not \
 shown.";
 
-fn turned_down(text: &mut String, rejected: &[Defect]) {
+pub(crate) fn turned_down(text: &mut String, rejected: &[Defect]) {
     if rejected.is_empty() {
         return;
     }

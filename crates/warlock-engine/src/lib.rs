@@ -10,6 +10,7 @@ pub mod claude_md;
 pub mod clock;
 pub mod decide;
 pub mod document;
+pub mod drafting;
 pub mod filed;
 pub mod filing;
 pub mod fitting;
