@@ -648,6 +648,153 @@ fn a_three_slice_circle_names_the_three_and_not_the_slice_that_is_fine() {
     );
 }
 
+// Everything `for_the_board` does to a page, gathered into one brief's scope
+// block: paragraphs hard wrapped for a terminal, a fenced block quoting the
+// very format being parsed, and boxes written by hand. The body above the
+// scope heading says the words `## Scope` mid-sentence, which is the mis-parse
+// the split exists for.
+const PUSHED: &str = "# Cut a planned project into tickets\n\n\
+                      Nothing reads a project's content back, and a brief about\n\
+                      the format quotes ## Scope mid-sentence where a substring\n\
+                      search would cut the document in half.\n\n\
+                      ## Outcome\n\n`warlock pull` files a ticket per slice.\n\n\
+                      ## Success criteria\n\n**The reader**\n\n- sees a ticket per slice\n\n\
+                      ## Constraints\n\nNo new dependency.\n\n\
+                      ## Out of scope\n\nAny Linear call.\n\n\
+                      ## Scope\n\n\
+                      ### 1. Read the scope block\n\n\
+                      depends_on: []\n\n\
+                      A paragraph hard wrapped for a terminal at about\n\
+                      seventy-six columns, which is a width this file has and\n\
+                      the board has not.\n\n\
+                      It quotes the format it reads:\n\n\
+                      ```md\n## Scope\n\n### 1. Not a slice\n```\n\n\
+                      And the boxes it carries:\n\n\
+                      - [ ] one written by hand\n\
+                      - [x] and one already ticked\n\n\
+                      ### 2) Order them\n\n\
+                      depends_on: [1]\n\n\
+                      What this slice decides.\n\n\
+                      ### An unnumbered slice\n\n\
+                      depends_on: [2]\n\n\
+                      Prose.\n";
+
+#[test]
+fn a_brief_pushed_to_the_board_reads_back_as_the_slices_it_was_written_with() {
+    // The round trip itself: a file on disk through `brief_at`, which is the
+    // path `warlock push` and `/push` both take, and back through the parser.
+    // Writer and reader of one format, asked to agree on one document.
+    let root = a_root();
+    let brief = read_back(root.path(), PUSHED);
+
+    let block = scope_block_in(brief.content()).expect("a scope block");
+
+    // The split landed at the heading and not at the sentence, which is only
+    // visible from both sides: the mention is still in the brief, reflowed
+    // onto one line, and the sections under it are all there.
+    assert!(
+        block
+            .brief()
+            .contains("a brief about the format quotes ## Scope mid-sentence where"),
+        "{:?}",
+        block.brief()
+    );
+    assert!(
+        block.brief().ends_with("Any Linear call."),
+        "{:?}",
+        block.brief()
+    );
+
+    assert_eq!(
+        block
+            .slices()
+            .iter()
+            .map(|slice| (slice.position(), slice.number(), slice.heading()))
+            .collect::<Vec<_>>(),
+        [
+            (1, Some(1), "Read the scope block"),
+            (2, Some(2), "Order them"),
+            (3, None, "An unnumbered slice"),
+        ]
+    );
+    // The `### 1. Not a slice` in the fence is neither a slice nor a heading
+    // this parser failed to read.
+    assert_eq!(block.unreadable(), 0);
+
+    let first = block.slices()[0].prose();
+    assert!(
+        first.contains(
+            "A paragraph hard wrapped for a terminal at about seventy-six columns, \
+             which is a width this file has and the board has not."
+        ),
+        "{first:?}"
+    );
+    assert!(
+        first.contains("```md\n## Scope\n\n### 1. Not a slice\n```"),
+        "the fence did not come back line for line: {first:?}"
+    );
+    assert!(
+        first.contains("- [ ] one written by hand\n- [x] and one already ticked"),
+        "{first:?}"
+    );
+
+    assert_eq!(block.slices()[1].depends_on(), [1]);
+    assert_eq!(block.slices()[2].depends_on(), [2]);
+    assert_eq!(
+        block
+            .ordered()
+            .iter()
+            .map(|slice| slice.position())
+            .collect::<Vec<_>>(),
+        [1, 2, 3]
+    );
+}
+
+#[test]
+fn a_brief_written_with_crlf_endings_pushes_and_reads_back_the_same() {
+    let root = a_root();
+
+    let written = read_back(root.path(), &PUSHED.replace('\n', "\r\n"));
+    let same = read_back(root.path(), PUSHED);
+
+    // `for_the_board` normalises the endings, so the two documents are one
+    // body on the board and the parser never sees a `\r` to trip over.
+    assert!(!written.content().contains('\r'), "{:?}", written.content());
+    assert_eq!(written.content(), same.content());
+    assert_eq!(
+        scope_block_in(written.content())
+            .expect("a scope block")
+            .slices()
+            .len(),
+        3
+    );
+}
+
+#[test]
+fn a_depends_on_line_needs_the_blank_line_under_it_that_the_template_asks_for() {
+    // The one thing the round trip does not carry, found rather than papered
+    // over. `for_the_board` joins consecutive non-blank prose lines, so a
+    // `depends_on:` written hard against the paragraph below it goes to the
+    // board as one line, and comes back a declaration that swallowed a
+    // paragraph. Left as it is at both ends: the template asks for the blank
+    // line and every brief in `docs/` is written with one, so the fix is a
+    // document's, and teaching either side to split that line would be warlock
+    // guessing where a sentence ends.
+    let spaced = "Why.\n\n## Scope\n\n### 1. First\n\ndepends_on: []\n\nProse.\n\n\
+                  ### 2. Second\n\ndepends_on: [1]\n\nMore prose.\n";
+    let glued = "Why.\n\n## Scope\n\n### 1. First\ndepends_on: []\nProse.\n\n\
+                 ### 2. Second\ndepends_on: [1]\nMore prose.\n";
+
+    let kept = scope_block_in(&super::for_the_board(spaced)).expect("a scope block");
+    let lost = scope_block_in(&super::for_the_board(glued)).expect("a scope block");
+
+    assert_eq!(kept.slices()[1].depends_on(), [1]);
+    assert_eq!(kept.slices()[1].prose(), "More prose.");
+
+    assert!(lost.slices()[1].depends_on().is_empty());
+    assert_eq!(lost.slices()[1].prose(), "");
+}
+
 #[test]
 fn a_red_scope_marker_is_neither_required_nor_consumed() {
     // The markers in `docs/warlock-brief-23` sit immediately above the
