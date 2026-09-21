@@ -11,11 +11,19 @@ const FILED_FILE: &str = "filed.toml";
 
 // Counted apart from the manifest's version on purpose: the two files are saved
 // by different commands and one gaining a key is no reason to restale the
-// other. A file declaring any other version is refused rather than read as if
-// it were this one, for the reason `manifest::SCHEMA_VERSION` gives — an old
-// binary that guesses at a newer file rewrites it with less than it came with,
-// and what it would drop here is the address of a project that exists.
-pub const SCHEMA_VERSION: u32 = 1;
+// other. Every version up to and including this one is read, and read as this
+// one: what the older versions spell is a subset of what this build writes, so
+// nothing is lost by upgrading the header on the next save, and refusing would
+// strand a repository that had filed something. A file declaring anything
+// *newer* is still refused rather than guessed at, for the reason
+// `manifest::SCHEMA_VERSION` gives — an old binary that guesses at a newer file
+// rewrites it with less than it came with, and what it would drop here is the
+// address of a project that exists.
+pub const SCHEMA_VERSION: u32 = 2;
+
+const fn is_supported(version: u32) -> bool {
+    version >= 1 && version <= SCHEMA_VERSION
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -94,7 +102,7 @@ impl Filed {
     ///
     /// let toml = Filed::new().to_toml_string()?;
     ///
-    /// assert_eq!(toml, "version = 1\n");
+    /// assert_eq!(toml, "version = 2\n");
     /// # Ok::<(), warlock_engine::filed::Error>(())
     /// ```
     pub fn to_toml_string(&self) -> Result<String, Error> {
@@ -116,7 +124,7 @@ impl Filed {
         let raw: RawFiled =
             toml::from_str(text).map_err(|source| Error::Syntax { path: at(), source })?;
 
-        if u32::try_from(raw.version) != Ok(SCHEMA_VERSION) {
+        if !u32::try_from(raw.version).is_ok_and(is_supported) {
             return Err(Error::UnsupportedVersion {
                 path: at(),
                 found: raw.version,
@@ -426,7 +434,7 @@ impl fmt::Display for Error {
                 }
                 write!(
                     f,
-                    " declare schema version {found}, which is not supported; this build reads version {supported}"
+                    " declare schema version {found}, which is not supported; this build reads version {supported} and earlier"
                 )
             }
             Self::Record {
@@ -480,14 +488,17 @@ struct RawFiled {
 
 // Looks redundant beside the check in `read` and is not: this is the derived
 // path, and without it `toml::from_str::<Filed>` would quietly accept a version
-// `read` refuses.
+// `read` refuses. It answers `SCHEMA_VERSION` rather than the number the file
+// spelled, again as `read` does, so an older file that has been read is an
+// upgraded one and no `Filed` in the process carries a version it would write
+// back.
 fn deserialize_version<'de, D: Deserializer<'de>>(deserializer: D) -> Result<u32, D::Error> {
     let version = u32::deserialize(deserializer)?;
-    if version == SCHEMA_VERSION {
-        Ok(version)
+    if is_supported(version) {
+        Ok(SCHEMA_VERSION)
     } else {
         Err(serde::de::Error::custom(format!(
-            "filed records declare schema version {version}, which is not supported; this build reads version {SCHEMA_VERSION}"
+            "filed records declare schema version {version}, which is not supported; this build reads version {SCHEMA_VERSION} and earlier"
         )))
     }
 }

@@ -66,10 +66,56 @@ fn a_saved_record_loads_back_as_it_went_in() {
 fn an_empty_set_of_records_is_just_the_version() {
     let text = Filed::new().to_toml_string().expect("serialises");
 
-    assert_eq!(text, "version = 1\n");
+    assert_eq!(text, "version = 2\n");
     assert_eq!(
         Filed::from_toml_str(&text).expect("parses"),
         Filed::default()
+    );
+}
+
+#[test]
+fn a_version_1_file_loads_as_the_records_it_spells() {
+    let root = a_root();
+    hand_write(
+        root.path(),
+        concat!(
+            "version = 1\n\n",
+            "[[filed]]\n",
+            "path = \"docs/warlock-brief-21.md\"\n",
+            "project_id = \"legacy-id\"\n",
+            "url = \"https://linear.app/acme/project/warlock-brief-21\"\n",
+            "scope = \" Data Plane \"\n",
+            "team = \"dp\"\n",
+            "filed_at = \"2026-09-19T09:00:00+01:00\"\n",
+        ),
+    );
+
+    let loaded = Filed::load(root.path()).expect("a version 1 file is read, not refused");
+
+    assert_eq!(
+        loaded.version(),
+        SCHEMA_VERSION,
+        "read as this schema, so the next save writes this schema"
+    );
+    let record = loaded
+        .record("docs/warlock-brief-21.md")
+        .expect("the record is found by the path it spells");
+    assert_eq!(record.project_id(), "legacy-id");
+    assert_eq!(
+        record.url(),
+        "https://linear.app/acme/project/warlock-brief-21"
+    );
+    assert_eq!(record.scope(), " Data Plane ");
+    assert_eq!(record.team(), "dp");
+    assert_eq!(record.filed_at(), "2026-09-19T09:00:00+01:00");
+
+    assert_eq!(
+        Filed::from_toml_str("version = 1\n").expect("and the text path reads it too"),
+        Filed::new(),
+    );
+    assert!(
+        toml::from_str::<Filed>("version = 1\n").is_ok(),
+        "as does the derived path"
     );
 }
 
@@ -81,8 +127,7 @@ fn a_record_this_warlock_did_not_write_survives_an_append_byte_for_byte() {
     // itself. The values are deliberately not what this build would emit:
     // an id that is not a UUID, a team key nobody here spells, a timestamp
     // with an offset rather than a `Z`, and an untrimmed scope.
-    let original = concat!(
-        "version = 1\n\n",
+    let body = concat!(
         "[[filed]]\n",
         "path = \"docs/warlock-brief-21.md\"\n",
         "project_id = \"legacy-id\"\n",
@@ -91,7 +136,7 @@ fn a_record_this_warlock_did_not_write_survives_an_append_byte_for_byte() {
         "team = \"dp\"\n",
         "filed_at = \"2026-09-19T09:00:00+01:00\"\n",
     );
-    hand_write(root.path(), original);
+    hand_write(root.path(), &format!("version = 2\n\n{body}"));
 
     let mut loaded = Filed::load(root.path()).expect("loads");
     loaded.push(filed_brief());
@@ -99,7 +144,7 @@ fn a_record_this_warlock_did_not_write_survives_an_append_byte_for_byte() {
 
     let after = fs::read_to_string(filed_path(root.path())).expect("reads");
     assert!(
-        after.starts_with(original),
+        after.starts_with(&format!("version = 2\n\n{body}")),
         "the record that was there is written back unfolded, untrimmed and in \
          place, with the new one after it:\n{after}"
     );
@@ -126,10 +171,8 @@ fn a_record_this_warlock_did_not_write_survives_an_append_byte_for_byte() {
 }
 
 #[test]
-fn a_load_then_save_is_a_no_op_on_the_bytes() {
-    let root = a_root();
-    let original = concat!(
-        "version = 1\n\n",
+fn a_load_then_save_moves_the_version_line_and_nothing_else() {
+    let body = concat!(
         "[[filed]]\n",
         "path = \"docs/warlock-brief-21.md\"\n",
         "project_id = \"legacy-id\"\n",
@@ -138,15 +181,26 @@ fn a_load_then_save_is_a_no_op_on_the_bytes() {
         "team = \"DP\"\n",
         "filed_at = \"2026-09-19T09:00:00+01:00\"\n",
     );
-    hand_write(root.path(), original);
-
-    let loaded = Filed::load(root.path()).expect("loads");
-    loaded.save(root.path()).expect("saves");
+    let round_trip = |declared: u32| {
+        let root = a_root();
+        hand_write(root.path(), &format!("version = {declared}\n\n{body}"));
+        Filed::load(root.path())
+            .expect("loads")
+            .save(root.path())
+            .expect("saves");
+        fs::read_to_string(filed_path(root.path())).expect("reads")
+    };
 
     assert_eq!(
-        fs::read_to_string(filed_path(root.path())).expect("reads"),
-        original,
+        round_trip(SCHEMA_VERSION),
+        format!("version = {SCHEMA_VERSION}\n\n{body}"),
         "so filing something else does not churn the diff of what was filed before"
+    );
+    assert_eq!(
+        round_trip(1),
+        format!("version = {SCHEMA_VERSION}\n\n{body}"),
+        "and a file from the older schema is upgraded at the version line alone: \
+         the record it carried comes back byte for byte"
     );
 }
 
@@ -188,20 +242,24 @@ fn filing_does_not_change_the_repository_roots_subtree_hash() {
 }
 
 #[test]
-fn another_version_is_refused_on_both_reading_paths() {
-    let text = "version = 2\n";
+fn a_newer_version_is_refused_on_both_reading_paths() {
+    let text = "version = 3\n";
 
     assert!(matches!(
         Filed::from_toml_str(text),
         Err(Error::UnsupportedVersion {
             path: None,
-            found: 2,
+            found: 3,
             supported: SCHEMA_VERSION,
         })
     ));
     assert!(
         toml::from_str::<Filed>(text).is_err(),
         "the derived path refuses what the module's reader refuses"
+    );
+    assert!(
+        toml::from_str::<Filed>("version = 999\n").is_err(),
+        "and refuses it however far ahead the file is"
     );
 
     let root = a_root();
@@ -522,7 +580,7 @@ fn every_error_variant_says_what_happened() {
                 supported: SCHEMA_VERSION,
             },
             "filed records at `/repo/.warlock/filed.toml` declare schema version 999, which is \
-             not supported; this build reads version 1",
+             not supported; this build reads version 2 and earlier",
         ),
         (
             // No file behind it: `from_toml_str` was handed text, so the
@@ -534,7 +592,7 @@ fn every_error_variant_says_what_happened() {
                 supported: SCHEMA_VERSION,
             },
             "filed records declare schema version 999, which is not supported; this build reads \
-             version 1",
+             version 2 and earlier",
         ),
         (
             Error::Path {
