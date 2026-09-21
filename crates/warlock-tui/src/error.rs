@@ -218,6 +218,26 @@ pub(crate) enum Error {
         // failure only one command can reach.
         source: Box<filed::Error>,
     },
+    // The three refusals a pull has before it reads anything: a brief nothing
+    // filed, an id the workspace does not have, and a project that is not
+    // planned. Each names what it read and where that came from, because all
+    // three are a file on this machine and the board disagreeing rather than a
+    // failure underneath.
+    NoRecord {
+        path: String,
+    },
+    UnknownProject {
+        id: String,
+        path: PathBuf,
+    },
+    // `None` is a project with no status at all, which a workspace without the
+    // status warlock files into leaves behind: it is not `Planned` either, so it
+    // refuses with the rest, and the sentence has to be able to say that as well
+    // as name a wrong one.
+    NotPlanned {
+        path: String,
+        status: Option<String>,
+    },
     Terminal {
         source: io::Error,
     },
@@ -336,7 +356,47 @@ fn unfiled_message(url: &str, source: &filed::Error) -> String {
     )
 }
 
+// The command that would make the record is the whole of the fix, so it is
+// spelled out with the path already in it rather than named in the abstract.
+fn no_record_message(path: &str) -> String {
+    format!(
+        "nothing in `.warlock/filed.toml` records `{path}`, so there is no project to read: \
+         `warlock push {path}` files it"
+    )
+}
+
+// Named against the file the id is written in, like the unknown team above: the
+// usual cause is a record for a project somebody deleted in Linear, and that
+// file is the only place this machine keeps the id.
+fn unknown_project_message(id: &str, path: &Path) -> String {
+    format!(
+        "Linear knows no project with the id `{id}`, so nothing was read: the record in `{}` is \
+         where that id is written",
+        path.display()
+    )
+}
+
+fn not_planned_message(path: &str, status: Option<&str>) -> String {
+    let found = match status {
+        Some(status) => format!("is in `{status}`"),
+        None => "has no status".to_owned(),
+    };
+    format!(
+        "the project filed for `{path}` {found} rather than `Planned`, so nothing was read: \
+         warlock reads a project back once it is planned"
+    )
+}
+
 impl fmt::Display for Error {
+    // Over the pedantic line count because it is one arm per variant and the
+    // enum is the whole vocabulary: the split the lint asks for would put half
+    // the sentences behind a name, and a reader asking what warlock says about
+    // one failure would have two places to look. The wordings themselves are
+    // already free functions above.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one arm per variant, and every variant of this enum prints"
+    )]
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::WorkingDirectory { source } => {
@@ -529,6 +589,15 @@ impl fmt::Display for Error {
             // stack said.
             Self::Linear { source } => write!(f, "{}", one_line(&source.to_string())),
             Self::Unfiled { url, source } => write!(f, "{}", unfiled_message(url, source)),
+            // The three pull refusals with wording of their own, said below for
+            // the push refusals' reason.
+            Self::NoRecord { path } => write!(f, "{}", no_record_message(path)),
+            Self::UnknownProject { id, path } => {
+                write!(f, "{}", unknown_project_message(id, path))
+            }
+            Self::NotPlanned { path, status } => {
+                write!(f, "{}", not_planned_message(path, status.as_deref()))
+            }
             Self::Problems { first, rest: 0 } => write!(f, "{first}"),
             Self::Problems { first, rest } => {
                 write!(f, "{first} (and {rest} more like it)")
@@ -587,6 +656,13 @@ impl std::error::Error for Error {
             // one worked.
             | Self::AlreadyFiled { .. }
             | Self::UnknownTeam { .. }
+            // Nor here, for that reason again: a brief no record names, an id
+            // the workspace does not have and a project that is not planned are
+            // this machine and the board disagreeing. The Linear call that
+            // answered the last two worked.
+            | Self::NoRecord { .. }
+            | Self::UnknownProject { .. }
+            | Self::NotPlanned { .. }
             // Nor here, and there could not be one: a run's failures are N
             // errors rather than one, they have already been printed in full,
             // and picking a first to be "the" cause would be the summary

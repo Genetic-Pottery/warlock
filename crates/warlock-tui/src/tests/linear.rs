@@ -7,7 +7,7 @@ use serde_json::{Value, json};
 
 use super::{
     BACKLOG, Client, ENDPOINT, Error, NewProject, Posts, REQUEST_TIMEOUT, answer, authorization,
-    backlog_status, create_project, label_id, team_id,
+    backlog_status, create_project, fetch_project, label_id, team_id,
 };
 
 const KEY: &str = "lin_api_a_key_nobody_holds_8f3a1c";
@@ -227,6 +227,154 @@ fn the_seam_carries_a_refusal_as_well_as_an_answer() {
         .expect_err("the stand-in refused");
 
     assert!(matches!(error, Error::Status { code: 401 }), "{error:?}");
+}
+
+const PROJECT: &str = "65fcabef-373b-4c2e-82bc-3e98fe7accbe";
+
+fn project_on_the_board() -> Value {
+    json!({
+        "project": {
+            "name": "Push a brief to the board",
+            "content": "# Push a brief to the board\n\n## Scope\n",
+            "url": "https://linear.app/acme/project/a-brief-1a2b3c",
+            "status": { "name": "Planned" },
+        },
+    })
+}
+
+#[test]
+fn a_project_is_read_back_by_id_in_one_request() {
+    let linear = Posting::answering([Ok(project_on_the_board())]);
+
+    let project = fetch_project(&linear, PROJECT)
+        .expect("the stand-in answered")
+        .expect("the stand-in knows the project");
+
+    assert_eq!(project.name(), "Push a brief to the board");
+    assert_eq!(
+        project.content(),
+        "# Push a brief to the board\n\n## Scope\n"
+    );
+    assert_eq!(
+        project.url(),
+        "https://linear.app/acme/project/a-brief-1a2b3c"
+    );
+    assert_eq!(project.status(), Some("Planned"));
+    assert_eq!(linear.variables(), [json!({ "id": PROJECT })]);
+    assert_eq!(linear.documents().len(), 1, "one request per operation");
+}
+
+#[test]
+fn the_id_is_the_only_selector_and_nothing_is_listed() {
+    let linear = Posting::answering([Ok(project_on_the_board())]);
+
+    fetch_project(&linear, PROJECT).expect("the stand-in answered");
+
+    let asked = linear.documents().pop().expect("one request was made");
+
+    assert!(asked.contains("project(id: $id)"), "{asked}");
+    // A workspace walk and a name match are what this operation exists not to
+    // be: brief 22 is on this repository's board twice under one title.
+    assert!(!asked.contains("projects("), "{asked}");
+    assert!(!asked.contains("filter"), "{asked}");
+    assert!(!asked.contains("first:"), "{asked}");
+}
+
+#[test]
+fn a_project_id_the_api_does_not_know_is_a_none_rather_than_an_error() {
+    // Both shapes an unknown id can arrive as: Linear's own refusal, and the
+    // null node a nullable field would give.
+    let answers = [
+        Err(Error::Refused {
+            message: "Entity not found - could not find referenced Project.".to_owned(),
+        }),
+        Ok(json!({ "project": null })),
+    ];
+
+    for answer in answers {
+        let linear = Posting::answering([answer]);
+
+        let project = fetch_project(&linear, PROJECT).expect("an unknown id is an ordinary answer");
+
+        assert_eq!(project, None, "the caller names the id and the file");
+    }
+}
+
+#[test]
+fn any_other_refusal_is_still_linears_to_word() {
+    let linear = Posting::answering([Err(Error::Refused {
+        message: "Access denied".to_owned(),
+    })]);
+
+    let error = fetch_project(&linear, PROJECT).expect_err("the stand-in refused");
+
+    assert!(matches!(error, Error::Refused { .. }), "{error:?}");
+}
+
+#[test]
+fn a_project_with_no_status_comes_back_without_one() {
+    let mut answer = project_on_the_board();
+    answer["project"]["status"] = Value::Null;
+    let linear = Posting::answering([Ok(answer)]);
+
+    let project = fetch_project(&linear, PROJECT)
+        .expect("a project with no status is an ordinary answer")
+        .expect("the stand-in knows the project");
+
+    // A workspace with no `Backlog` takes the project with no status at all, so
+    // this is a project warlock itself can have filed.
+    assert_eq!(project.status(), None);
+}
+
+#[test]
+fn a_project_whose_description_was_emptied_comes_back_empty() {
+    let mut answer = project_on_the_board();
+    answer["project"]["content"] = Value::Null;
+    let linear = Posting::answering([Ok(answer)]);
+
+    let project = fetch_project(&linear, PROJECT)
+        .expect("an emptied description is an ordinary answer")
+        .expect("the stand-in knows the project");
+
+    assert_eq!(project.content(), "");
+}
+
+#[test]
+fn a_project_answer_missing_a_field_is_malformed() {
+    for field in ["name", "content", "url", "status"] {
+        let mut answer = project_on_the_board();
+        answer["project"]
+            .as_object_mut()
+            .expect("the fixture is an object")
+            .remove(field);
+
+        let linear = Posting::answering([Ok(answer)]);
+
+        let error =
+            fetch_project(&linear, PROJECT).expect_err("a field that was asked for is answered");
+
+        assert!(
+            matches!(error, Error::Malformed { .. }),
+            "{field}: {error:?}"
+        );
+    }
+}
+
+#[test]
+fn a_status_with_no_name_and_an_answer_with_no_project_are_malformed() {
+    for answer in [
+        json!({ "project": { "name": "A", "content": "", "url": "u", "status": {} } }),
+        json!({ "projects": { "nodes": [] } }),
+    ] {
+        let linear = Posting::answering([Ok(answer.clone())]);
+
+        let error = fetch_project(&linear, PROJECT).expect_err("that is not the answer asked for");
+
+        assert!(
+            matches!(error, Error::Malformed { .. }),
+            "{answer}: {error:?}"
+        );
+    }
 }
 
 fn label_found() -> Value {
