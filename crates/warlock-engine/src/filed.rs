@@ -98,6 +98,36 @@ impl Filed {
     }
 
     /// ```
+    /// use warlock_engine::{CutRecord, Filed, FiledRecord};
+    ///
+    /// let mut filed = Filed::with_records([FiledRecord::new(
+    ///     ".",
+    ///     "docs/brief.md",
+    ///     "b229262b-22aa-444a-a8af-0a2a3f4ef100",
+    ///     "https://linear.app/acme/project/brief",
+    ///     "warlock-team",
+    ///     "WAR",
+    ///     "2026-09-20T07:32:00Z",
+    /// )?]);
+    ///
+    /// filed
+    ///     .record_mut("docs/brief.md")
+    ///     .expect("the brief is filed")
+    ///     .push_cut(CutRecord::new(
+    ///         "The cut record",
+    ///         ["WAR-125"],
+    ///         "2026-09-21T09:00:00Z",
+    ///     ));
+    ///
+    /// let cuts = filed.record("docs/brief.md").map(FiledRecord::cuts);
+    /// assert_eq!(cuts.map(<[_]>::len), Some(1));
+    /// # Ok::<(), warlock_engine::filed::Error>(())
+    /// ```
+    pub fn record_mut(&mut self, path: &str) -> Option<&mut FiledRecord> {
+        self.records.iter_mut().find(|record| record.path == path)
+    }
+
+    /// ```
     /// use warlock_engine::Filed;
     ///
     /// let toml = Filed::new().to_toml_string()?;
@@ -272,6 +302,15 @@ pub struct FiledRecord {
     // and would take the instant away from the caller, which is the one that
     // knows whether the project was created a moment ago or an hour ago.
     filed_at: String,
+    // `default` so a version 1 record — which has no such key — reads as a
+    // brief filed with nothing cut, and `skip_serializing_if` so a record with
+    // no cuts is written back exactly as wide as it came: an empty `cut` array
+    // in the file would be a line in the diff of somebody who only filed a
+    // brief. The key has to be declared here either way, because `Filed` and
+    // this struct both `deny_unknown_fields` and a file warlock wrote would
+    // otherwise be refused by the build that wrote it.
+    #[serde(rename = "cut", default, skip_serializing_if = "Vec::is_empty")]
+    cuts: Vec<CutRecord>,
 }
 
 impl FiledRecord {
@@ -319,6 +358,7 @@ impl FiledRecord {
             scope: scope.into(),
             team: team.into(),
             filed_at: filed_at.into(),
+            cuts: Vec::new(),
         })
     }
 
@@ -351,6 +391,118 @@ impl FiledRecord {
     pub fn filed_at(&self) -> &str {
         &self.filed_at
     }
+
+    #[must_use]
+    pub fn cuts(&self) -> &[CutRecord] {
+        &self.cuts
+    }
+
+    // Appended, never replaced or de-duplicated: a slice already cut is a
+    // question the caller asks before it drafts anything, and answering it here
+    // by silently dropping the second cut would lose the identifiers of issues
+    // that do exist on the board.
+    pub fn push_cut(&mut self, cut: CutRecord) {
+        self.cuts.push(cut);
+    }
+}
+
+/// ```
+/// use warlock_engine::CutRecord;
+///
+/// let cut = CutRecord::new(
+///     "  The   Cut Record  ",
+///     ["WAR-125", "WAR-126"],
+///     "2026-09-21T09:00:00Z",
+/// );
+///
+/// assert_eq!(cut.title(), "  The   Cut Record  ");
+/// assert_eq!(cut.key(), "the cut record");
+/// assert_eq!(cut.issues(), ["WAR-125", "WAR-126"]);
+/// assert_eq!(cut.cut_at(), "2026-09-21T09:00:00Z");
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CutRecord {
+    // As spelled in the document, unfolded and untrimmed, for the reason the
+    // fields above give: these bytes are committed and this one is also what a
+    // person reads to recognise which slice the identifiers below belong to.
+    title: String,
+    // Stored, and read back as the file spells it, rather than computed from
+    // `title` at load: the file then says on its face what the record is
+    // matched by, so a retitled slice is a visible key mismatch in a diff
+    // instead of something only running the folder reveals. Recomputing it on
+    // the way in would also rewrite a hand-edited key at the next save, which
+    // is exactly the churn the fields above refuse to cause.
+    key: String,
+    // Opaque to this crate: whatever a tracker calls the things it filed. The
+    // engine stores them so a caller can print them and never parses them.
+    issues: Vec<String>,
+    // Supplied by the caller, like `filed_at` above and for the same reason.
+    cut_at: String,
+}
+
+impl CutRecord {
+    #[must_use]
+    pub fn new(
+        title: impl Into<String>,
+        issues: impl IntoIterator<Item = impl Into<String>>,
+        cut_at: impl Into<String>,
+    ) -> Self {
+        let title = title.into();
+        Self {
+            key: fold_title(&title),
+            title,
+            issues: issues.into_iter().map(Into::into).collect(),
+            cut_at: cut_at.into(),
+        }
+    }
+
+    #[must_use]
+    pub fn title(&self) -> &str {
+        &self.title
+    }
+
+    #[must_use]
+    pub fn key(&self) -> &str {
+        &self.key
+    }
+
+    #[must_use]
+    pub fn issues(&self) -> &[String] {
+        &self.issues
+    }
+
+    #[must_use]
+    pub fn cut_at(&self) -> &str {
+        &self.cut_at
+    }
+}
+
+/// Folds a slice title to the key a cut record is matched by: case, surrounding
+/// whitespace and the width of internal whitespace runs are all discarded, so a
+/// title retyped with different spacing or capitalisation still names the slice
+/// that was already cut.
+///
+/// Anything else — punctuation, wording, order — is a different key, and a
+/// slice whose title is edited that far is honestly a new slice rather than one
+/// warlock quietly treats as already filed.
+///
+/// ```
+/// use warlock_engine::fold_title;
+///
+/// assert_eq!(
+///     fold_title("  The   Cut\tRecord\n"),
+///     fold_title("the cut record"),
+/// );
+/// assert_ne!(fold_title("The cut record"), fold_title("The cut records"));
+/// ```
+#[must_use]
+pub fn fold_title(title: &str) -> String {
+    title
+        .split_whitespace()
+        .map(str::to_lowercase)
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// ```

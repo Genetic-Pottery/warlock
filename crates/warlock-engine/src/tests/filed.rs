@@ -1,7 +1,9 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use super::{Error, FILED_FILE, Filed, FiledRecord, SCHEMA_VERSION, filed_path};
+use super::{
+    CutRecord, Error, FILED_FILE, Filed, FiledRecord, SCHEMA_VERSION, filed_path, fold_title,
+};
 use crate::hash::subtree_hash;
 
 fn a_root() -> tempfile::TempDir {
@@ -108,6 +110,10 @@ fn a_version_1_file_loads_as_the_records_it_spells() {
     assert_eq!(record.scope(), " Data Plane ");
     assert_eq!(record.team(), "dp");
     assert_eq!(record.filed_at(), "2026-09-19T09:00:00+01:00");
+    assert!(
+        record.cuts().is_empty(),
+        "a brief filed before there were cut records is a brief with nothing cut"
+    );
 
     assert_eq!(
         Filed::from_toml_str("version = 1\n").expect("and the text path reads it too"),
@@ -116,6 +122,178 @@ fn a_version_1_file_loads_as_the_records_it_spells() {
     assert!(
         toml::from_str::<Filed>("version = 1\n").is_ok(),
         "as does the derived path"
+    );
+}
+
+#[test]
+fn a_version_2_file_with_cut_records_round_trips() {
+    let root = a_root();
+    let mut brief = filed_brief();
+    brief.push_cut(CutRecord::new(
+        "  The   Cut Record  ",
+        ["WAR-125", "WAR-126"],
+        "2026-09-21T09:00:00Z",
+    ));
+    brief.push_cut(CutRecord::new(
+        "`warlock pull`",
+        ["WAR-127"],
+        "2026-09-21T09:05:00Z",
+    ));
+    // A second brief with nothing cut, so the file proves both widths of
+    // record read back as they went in.
+    let filed = Filed::with_records([
+        brief,
+        FiledRecord::new(
+            ".",
+            "docs/warlock-brief-21.md",
+            "legacy-id",
+            "https://linear.app/acme/project/warlock-brief-21",
+            "data-plane",
+            "DP",
+            "2026-09-19T09:00:00+01:00",
+        )
+        .expect("inside the root"),
+    ]);
+
+    filed.save(root.path()).expect("saves");
+
+    let text = fs::read_to_string(filed_path(root.path())).expect("reads");
+    assert!(text.starts_with("version = 2\n"), "{text}");
+    assert!(
+        !text.contains("cut = []"),
+        "a record with nothing cut gains no empty array: {text}"
+    );
+
+    let loaded = Filed::load(root.path()).expect("loads");
+    assert_eq!(loaded, filed);
+
+    let cuts = loaded
+        .record("docs/warlock-brief-22.md")
+        .expect("the brief is filed")
+        .cuts();
+    assert_eq!(cuts.len(), 2);
+    assert_eq!(cuts[0].title(), "  The   Cut Record  ", "as spelled");
+    assert_eq!(cuts[0].key(), "the cut record");
+    assert_eq!(cuts[0].issues(), ["WAR-125", "WAR-126"]);
+    assert_eq!(cuts[0].cut_at(), "2026-09-21T09:00:00Z");
+    assert_eq!(cuts[1].title(), "`warlock pull`");
+    assert_eq!(cuts[1].issues(), ["WAR-127"]);
+    assert!(
+        loaded
+            .record("docs/warlock-brief-21.md")
+            .expect("the other brief is filed")
+            .cuts()
+            .is_empty()
+    );
+}
+
+#[test]
+fn titles_that_differ_only_in_case_or_spacing_are_one_key() {
+    let same = [
+        "The cut record",
+        "the cut record",
+        "THE CUT RECORD",
+        "  The cut record  ",
+        "The   cut\trecord",
+        "The cut\nrecord",
+    ];
+    for title in same {
+        assert_eq!(
+            fold_title(title),
+            "the cut record",
+            "`{title}` names the slice that was already cut"
+        );
+        assert_eq!(
+            CutRecord::new(title, ["WAR-125"], "2026-09-21T09:00:00Z").key(),
+            "the cut record",
+            "and a record made from it carries that key"
+        );
+    }
+
+    // Anything past case and whitespace is a different slice: a retitled one,
+    // which brief 23 says is honestly uncut rather than quietly already filed.
+    let different = [
+        "The cut records",
+        "The cut-record",
+        "Thecutrecord",
+        "record cut The",
+        "The cut record.",
+        "",
+    ];
+    for title in different {
+        assert_ne!(fold_title(title), "the cut record", "`{title}`");
+    }
+
+    assert_eq!(
+        CutRecord::new("  The cut record  ", ["WAR-125"], "2026-09-21T09:00:00Z").title(),
+        "  The cut record  ",
+        "the title itself is stored unfolded and untrimmed"
+    );
+}
+
+#[test]
+fn a_cut_appended_to_a_record_this_warlock_did_not_write_leaves_the_rest_byte_for_byte() {
+    let root = a_root();
+    // Two hand-written records, neither in the shape this build emits, and
+    // the cut goes on the second: what warlock adds has to land under the
+    // record it belongs to without moving anything around it.
+    let untouched = concat!(
+        "[[filed]]\n",
+        "path = \"docs/warlock-brief-21.md\"\n",
+        "project_id = \"legacy-id\"\n",
+        "url = \"https://linear.app/acme/project/warlock-brief-21\"\n",
+        "scope = \" Data Plane \"\n",
+        "team = \"dp\"\n",
+        "filed_at = \"2026-09-19T09:00:00+01:00\"\n",
+    );
+    let cut_into = concat!(
+        "[[filed]]\n",
+        "path = \"docs/warlock-brief-23.md\"\n",
+        "project_id = \"another-id\"\n",
+        "url = \"https://linear.app/acme/project/warlock-brief-23\"\n",
+        "scope = \"Cut a planned project\"\n",
+        "team = \"dp\"\n",
+        "filed_at = \"2026-09-21T08:00:00+01:00\"\n",
+    );
+    hand_write(
+        root.path(),
+        &format!("version = 2\n\n{untouched}\n{cut_into}"),
+    );
+
+    let mut loaded = Filed::load(root.path()).expect("loads");
+    loaded
+        .record_mut("docs/warlock-brief-23.md")
+        .expect("the brief is filed")
+        .push_cut(CutRecord::new(
+            "The cut record",
+            ["WAR-125"],
+            "2026-09-21T09:00:00Z",
+        ));
+    loaded.save(root.path()).expect("saves");
+
+    let after = fs::read_to_string(filed_path(root.path())).expect("reads");
+    assert_eq!(
+        after,
+        format!(
+            "version = 2\n\n{untouched}\n{cut_into}\n\
+             [[filed.cut]]\n\
+             title = \"The cut record\"\n\
+             key = \"the cut record\"\n\
+             issues = [\"WAR-125\"]\n\
+             cut_at = \"2026-09-21T09:00:00Z\"\n"
+        ),
+        "both records come back as they were spelled, with the cut appended \
+         under the second"
+    );
+    assert_eq!(
+        Filed::load(root.path()).expect("reloads"),
+        loaded,
+        "and the whole file reloads equal to what was saved"
+    );
+    assert_eq!(
+        warlock_dir_listing(root.path()),
+        [FILED_FILE],
+        "written through the same temporary and renamed, not left beside it"
     );
 }
 
