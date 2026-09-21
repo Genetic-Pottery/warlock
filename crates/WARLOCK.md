@@ -3,14 +3,13 @@
 
 # crates
 
-Cargo workspace members for the project: the warlock-engine library (module tree, freshness decisions, documentation generation, JSON document contract) and the warlock-tui crate (terminal UI and the `warlock` command-line binary).
+Cargo workspace members for warlock: the core engine library (warlock-engine) and the command-line tool with its terminal panel (warlock-tui). Go here to choose between engine logic and the CLI/panel front end.
 
 ## Directories
 
-- `warlock-engine/` — Engine library crate: repo-walk module tree, pact manifest, per-directory freshness, hashing, document fill and rendering, scope/sigil/key config. Open for logic and JSON document contract questions.
-- `warlock-tui/` — Terminal UI and CLI crate: builds the `warlock` binary with clap subcommands (init, config, stale, fresh, check, pact, refresh, scope, key), TUI state, input, drawing, agent chat, watching.
+- `warlock-engine/` — Core engine crate: tree and manifest models, hashing and freshness state, pact/refresh drivers, Agent boundary, document rendering, scopes, sigils, keys, filing. Go here for engine behaviour questions.
+- `warlock-tui/` — CLI and ratatui panel crate that builds the `warlock` binary and `warlock_tui` library: subcommands, panel state and drawing, chat, push to Linear, scope prompts. Go here for front-end questions.
 
 ## Structure
 
-- warlock-tui depends on warlock-engine, so the dependency runs from the UI/CLI crate to the engine library.
-- warlock-engine owns the JSON document contract, and warlock-tui also depends on serde_json.
+- warlock-tui depends on warlock-engine for the core logic, so the dependency runs from the front end to the engine and not the other way.

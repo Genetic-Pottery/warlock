@@ -3,17 +3,16 @@
 
 # warlock-engine
 
-Engine crate of the workspace: the library that builds a module tree from a repo walk and pact manifest, decides per-directory freshness, and drives documentation generation through an Agent boundary. Owns the JSON document contract.
+Cargo crate for the core engine library: the module tree, pact manifest, hashing and freshness state, documenting directories through an Agent boundary, and scopes, sigils, keys, filing, briefs and CLAUDE.md output. Source is in src/.
 
 ## Files
 
-- `Cargo.toml` (1.1 KB) — Cargo.toml: engine crate manifest — deps blake3, ignore, serde, serde_json, toml; owns the JSON document contract; dev-deps serde_test, tempfile; lints from workspace
+- `Cargo.toml` (1.4 KB) — Cargo manifest for the warlock-engine crate: workspace-inherited package metadata and lints; depends on blake3, ignore, serde (derive), serde_json and toml; dev-depends on serde_test and tempfile.
 
 ## Directories
 
-- `src/` — All engine library source: tree loading, freshness decisions, hashing, pact/refresh drivers, document fill and rendering, scope/sigil/key config, routing, and CLAUDE.md writing. Start here for any engine question.
+- `src/` — All engine source: tree and manifest models, hashing, pact/refresh drivers, Agent boundary, document rendering, scope/sigil/key/filing resolution. Go here for any engine behaviour question.
 
 ## Structure
 
-- Cargo.toml declares the crate's dependencies (blake3, ignore, serde, serde_json, toml) and inherits lints from the workspace.
-- Dev-dependencies serde_test and tempfile support tests; the manifest states that this crate owns the JSON document contract.
+- Cargo.toml is the crate manifest, inheriting workspace package metadata and lints; it depends on blake3, ignore, serde, serde_json and toml, with serde_test and tempfile as dev-dependencies.

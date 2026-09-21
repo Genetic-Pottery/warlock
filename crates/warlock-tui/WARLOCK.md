@@ -3,17 +3,17 @@
 
 # warlock-tui
 
-Crate for the terminal UI and the command-line tool: a clap entry point with subcommands, plus the TUI's state, input, rendering, agent chat and filesystem watching. Builds the `warlock` binary and the warlock_tui library.
+Cargo crate for the warlock command-line tool and its ratatui terminal panel. Builds the `warlock` binary and the `warlock_tui` library; ask here about subcommands, the panel front end, chat, push to Linear, scopes and sigils.
 
 ## Files
 
-- `Cargo.toml` (1.8 KB) — Cargo.toml for warlock-tui: builds the `warlock` binary from src/main.rs and the warlock_tui library from src/lib.rs, depending on arboard, clap, ctrlc, notify, ratatui, serde_json and warlock-engine.
+- `Cargo.toml` (2.2 KB) — Cargo manifest for the warlock-tui crate: builds the `warlock` binary (src/main.rs) and the `warlock_tui` library (src/lib.rs); depends on warlock-engine, ratatui, clap, notify, arboard, ureq, ctrlc, serde_json.
 
 ## Directories
 
-- `src/` — All the crate's Rust source: CLI subcommands (init, config, stale, fresh, check, pact, refresh, scope, key), TUI state, input, drawing, agent chat, watching. Open for any behaviour question.
+- `src/` — All crate source: main.rs entry and subcommands, panel state, input, drawing, chat, push, scope prompts, Claude and Linear clients, boundary logic. Go here for any code question.
 
 ## Structure
 
-- Cargo.toml builds the `warlock` binary from src/main.rs and the warlock_tui library from src/lib.rs.
-- The crate depends on arboard, clap, ctrlc, notify, ratatui, serde_json and warlock-engine.
+- Cargo.toml builds the `warlock` binary from src/main.rs and the `warlock_tui` library from src/lib.rs.
+- The crate depends on warlock-engine for the core logic and on ratatui, clap, notify, arboard, ureq, ctrlc and serde_json for terminal UI, argument parsing, watching, clipboard, HTTP, signals and JSON.
