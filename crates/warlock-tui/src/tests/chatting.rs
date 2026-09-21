@@ -1164,7 +1164,7 @@ mod submitting {
 
     use super::super::{
         ALREADY_CHATTING, BRIEF_COMMAND, BRIEF_NOTE, CHAT_COMMAND, CHAT_NOTE, Chat, NOT_BRIEFING,
-        WRITE_COMMAND, brief_asking,
+        WRITE_COMMAND, brief_asking, nothing_written,
     };
     use crate::error::one_line;
     use crate::writing::write_opened;
@@ -1334,6 +1334,59 @@ mod submitting {
 
         assert_eq!(turns(&app), before, "/write out of the mode cost a turn");
         assert_eq!(rows(&app, now).last(), Some(&note(NOT_BRIEFING)));
+    }
+
+    #[test]
+    fn push_with_nothing_written_is_one_note_naming_write() {
+        // There is no document to file, so the refusal names the command that
+        // would make one. Unlike `/write`, `/push` is about a file rather than
+        // a register: the same line comes in either mode, and neither the mode
+        // nor a turn moves.
+        let now = Instant::now();
+
+        for draft in ["/push", "  /push  "] {
+            let (app, chat) = submit(draft, now);
+
+            assert_eq!(
+                app.panel().mode(),
+                Mode::Chat,
+                "{draft:?} moved the register"
+            );
+            assert_eq!(
+                rows(&app, now),
+                vec![note(&nothing_written())],
+                "{draft:?} did not leave exactly one note"
+            );
+            assert_eq!(turns(&app), 0, "{draft:?} opened a turn");
+            assert!(!chat.answering(), "{draft:?} started something");
+            assert!(
+                chat.written().is_none(),
+                "{draft:?} left the session remembering a document"
+            );
+            assert!(
+                chat.composer().draft().is_empty(),
+                "{draft:?} was left in the field"
+            );
+        }
+
+        // The line names both words, because a reader who has just been told
+        // no needs to be told what to do instead.
+        let line = nothing_written();
+
+        assert!(line.contains(WRITE_COMMAND), "{line:?} did not name /write");
+        assert!(!line.contains('\n'), "{line:?} is more than one line");
+
+        // And brief mode changes none of it: the register is not what is
+        // missing.
+        let mut app = App::default();
+        let mut chat = conversation();
+        submit_into(&mut app, &mut chat, "/brief", now);
+        let before = turns(&app);
+        submit_into(&mut app, &mut chat, "/push", now);
+
+        assert_eq!(turns(&app), before, "/push in brief mode cost a turn");
+        assert_eq!(app.panel().mode(), Mode::Brief, "/push moved the register");
+        assert_eq!(rows(&app, now).last(), Some(&note(&line)));
     }
 
     #[test]

@@ -17,12 +17,13 @@ use warlock_tui::{
     tree_height,
 };
 
-use super::{Cli, Command, Error, FOR_CLAUDE_MD, ScopeCommand, Session, status_for};
+use super::{Cli, Command, Error, FOR_CLAUDE_MD, Pushing, ScopeCommand, Session, status_for};
 use crate::chatting::Chat;
 use crate::pacting::Pact;
+use crate::pushing::Pushes;
 use crate::query::spelled;
 use crate::session::{Scope, Watched};
-use crate::stubs::{Copying, Passing, Saying};
+use crate::stubs::{Boarding, Copying, Passing, Saying};
 use crate::terminal::Screen;
 
 // `try_parse_from` wants argv as the process gets it, program name and all,
@@ -1145,7 +1146,7 @@ impl Screen for FakeScreen {
     }
 }
 
-type Driven = Session<FakeScreen, Passing, Saying, Copying>;
+type Driven = Session<FakeScreen, Passing, Saying, Copying, Boarding>;
 
 fn driving(app: App, scope: Scope, tree: &Tree) -> Driven {
     let watched = Watched::start(&scope, tree);
@@ -1159,6 +1160,12 @@ fn driving(app: App, scope: Scope, tree: &Tree) -> Driven {
         chat: Chat::with_agent(root, Saying::answering(ANSWER)),
         clipboard: Copying::taking(),
         confirm: QuitConfirm::default(),
+        pushing: Pushing::closed(),
+        // No home, so a `/push` in any test but the ones in `filing` below is
+        // refused before a board is resolved and no test in this file can read
+        // the sigils of the machine it runs on. The tests that do push replace
+        // this whole value with one over a temporary home.
+        pushes: Pushes::with_client(Boarding::filing(""), None),
         prompt: ScopePrompt::default(),
         record: RecordPrompt::default(),
         drag: None,
@@ -2696,6 +2703,393 @@ mod pasting {
         assert!(
             !driven.chat.composer().is_muted(),
             "a paste muted the field"
+        );
+    }
+}
+
+// A `/push` driven the whole way through a session — `/brief`, `/write`, the
+// path window, `/push`, Left, Enter — over a Linear that answers out of memory
+// and a home this module made. Nothing here opens a socket, reads a real
+// credential or looks at the machine's own sigils, binding or key store.
+mod filing {
+    use std::fs;
+    use std::path::Path;
+    use std::time::Instant;
+
+    use ratatui::crossterm::event::KeyCode;
+    use tempfile::TempDir;
+    use warlock_engine::{
+        Filed, Manifest, PactEntry, ScopeRecord, filed_path, save_key, save_key_binding,
+        save_sigils,
+    };
+    use warlock_tui::{Focus, Line};
+
+    use super::{AT_MOST, Driven, key, pressed, session_over};
+    use crate::chatting::Chat;
+    use crate::pushing::{ALREADY_FILING, Pushes};
+    use crate::stubs::{Boarding, Gate, Saying};
+
+    // Not a key, and named so that nothing reading this file mistakes it for
+    // one. It is stored so that a bound name resolves and the client is built
+    // from something, and every test below asserts it is in nothing warlock
+    // said or holds.
+    const NOT_A_KEY: &str = "not-a-real-key-value";
+
+    // A name no real key store would be holding, so a session that reached the
+    // machine's own home could not pass for one that reached this home.
+    const KEY_NAME: &str = "this-tests-own-name";
+
+    const SCOPE: &str = "data-plane";
+
+    // A Linear team *key*, which is what a `[[scope]]` record carries.
+    const TEAM: &str = "WAR";
+
+    const URL: &str = "https://linear.app/acme/project/push-a-brief-1a2b3c";
+
+    // Linear's own words for a request it understood and would not do, which is
+    // the failure the session has to survive with a line.
+    const REFUSED: &str = "Entity not found";
+
+    // Rounds taken with a request held open: more than one, so what is being
+    // asserted is a loop going round rather than a single frame.
+    const ROUNDS: usize = 3;
+
+    // What the stand-in model answers with, and so what `/write` puts on disk:
+    // every section the built-in shape asks for, so the document the push files
+    // is one `brief_at` reads.
+    const BRIEF: &str = "# Push a brief to the board\n\n\
+                         Nothing turns a document on disk into a project.\n\n\
+                         ## Outcome\n\n`/push` files it.\n\n\
+                         ## Success criteria\n\n**The reader**\n\n- sees a URL\n\n\
+                         ## Constraints\n\nNo new dependency.\n\n\
+                         ## Out of scope\n\nPulling anything back.\n\n\
+                         ## Scope\n\n### 1. Read the file\n\ndepends_on: []\n";
+
+    fn a_manifest() -> Manifest {
+        Manifest::with_entries([PactEntry::new(".", "docs", "docs/WARLOCK.md")
+            .expect("a relative module path is inside the root")
+            .with_scope(SCOPE)])
+        .with_scopes([ScopeRecord::new(SCOPE, TEAM, "In Review", "warlock")])
+    }
+
+    // Enough of a repository for the load the session is built over: the rest
+    // of it — the document, the manifest, the record — is what the drive below
+    // produces.
+    fn a_repository() -> TempDir {
+        let repo = tempfile::tempdir().expect("a temporary directory");
+        let head = repo.path().join(".git/HEAD");
+        fs::create_dir_all(head.parent().expect("`.git` is a directory"))
+            .expect("a scratch directory is writable");
+        fs::write(&head, "ref: refs/heads/main\n").expect("a scratch file is writable");
+        repo
+    }
+
+    // One sigil and one record of that name, so nothing is ambiguous and the
+    // dialog comes straight up.
+    fn a_home(root: &Path) -> TempDir {
+        let home = tempfile::tempdir().expect("a temporary directory");
+        save_sigils(home.path(), root, &[SCOPE.to_owned()]).expect("a config that writes");
+        save_key_binding(home.path(), root, KEY_NAME).expect("a binding that writes");
+        save_key(home.path(), KEY_NAME, NOT_A_KEY).expect("a key store that writes");
+        home
+    }
+
+    // The session `run` builds, with its three impure things replaced: a model
+    // that answers a brief out of memory, the manifest that would have been
+    // loaded, and a Linear reached through a home of this test's own.
+    fn filing_session(repo: &Path, home: &Path, linear: &Boarding) -> Driven {
+        let mut driven = session_over(repo);
+        driven.manifest = a_manifest();
+        driven.chat = Chat::with_agent(repo, Saying::answering(BRIEF));
+        driven.pushes = Pushes::with_client(linear.clone(), Some(home.to_path_buf()));
+        driven
+    }
+
+    fn notes(driven: &Driven) -> Vec<String> {
+        driven
+            .app
+            .panel()
+            .thread()
+            .map(|thread| thread.lines(Instant::now()))
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|line| match line {
+                Line::Note { text } => Some(text),
+                _ => None,
+            })
+            .collect()
+    }
+
+    // A command typed into the composer the way a reader types one: the block
+    // arrives whole, as a terminal with bracketed paste hands it over, and the
+    // Enter after it is the submit.
+    fn typing(driven: &mut Driven, command: &str) {
+        driven.app.set_focus(Focus::Composer);
+        assert!(
+            !driven.chat.composer().is_muted(),
+            "the field is muted: a turn is still out"
+        );
+        driven.paste(command);
+        assert!(
+            pressed(driven, key(KeyCode::Enter)),
+            "typing {command} ended the session"
+        );
+    }
+
+    // Rounds until the turn is in, drawn every time: the loop draws and then
+    // waits, and a test that only drained would be a test of half a round.
+    fn answering(driven: &mut Driven) {
+        let waited = Instant::now();
+        while driven.chat.answering() && waited.elapsed() < AT_MOST {
+            round(driven);
+        }
+        assert!(!driven.chat.answering(), "the turn never finished");
+    }
+
+    // The same rounds, for the push.
+    fn landing(driven: &mut Driven) {
+        let waited = Instant::now();
+        while driven.pushes.sending() && waited.elapsed() < AT_MOST {
+            round(driven);
+        }
+        assert!(!driven.pushes.sending(), "the push never reported");
+    }
+
+    // One turn of `run`'s loop with no event in it: draw, then everything that
+    // happened off this thread.
+    fn round(driven: &mut Driven) {
+        let size = driven.size().expect("the fake screen has a size");
+        driven.draw(size).expect("the fake screen draws");
+        driven.keep_up();
+    }
+
+    // `/brief` to enter the register `/write` is only in, `/write` for the
+    // document, and the Enter that takes the path the window proposes: what the
+    // path window itself does is `tests/writing_writes.rs`'s business.
+    fn wrote_a_brief(driven: &mut Driven) {
+        typing(driven, "/brief");
+        answering(driven);
+        typing(driven, "/write");
+        answering(driven);
+        assert!(
+            pressed(driven, key(KeyCode::Enter)),
+            "the write window ended the session"
+        );
+    }
+
+    // `/push` and the two keys that answer its dialog Yes: No is lit when it
+    // opens, so Left is what moves onto Yes and Enter is what sends.
+    fn confirmed(driven: &mut Driven) {
+        typing(driven, "/push");
+        assert!(
+            driven.pushing.confirm.is_open(),
+            "the dialog did not come up: {:?}",
+            notes(driven)
+        );
+        assert!(pressed(driven, key(KeyCode::Left)));
+        assert!(pressed(driven, key(KeyCode::Enter)));
+    }
+
+    fn said(driven: &Driven, text: &str) -> bool {
+        notes(driven).iter().any(|note| note.contains(text))
+    }
+
+    #[test]
+    fn a_confirmed_push_files_the_brief_on_a_worker_and_says_where_it_landed() {
+        let repo = a_repository();
+        let home = a_home(repo.path());
+        let linear = Boarding::filing(URL);
+        let mut driven = filing_session(repo.path(), home.path(), &linear);
+
+        wrote_a_brief(&mut driven);
+        confirmed(&mut driven);
+
+        // Said on the round the request started, before any of it came back:
+        // the reader has just answered a question and is looking at the
+        // conversation.
+        assert!(
+            said(&driven, &format!("filing to {TEAM}")),
+            "the thread does not say the push started: {:?}",
+            notes(&driven)
+        );
+        landing(&mut driven);
+
+        assert!(
+            said(&driven, URL),
+            "the thread does not carry the project's address: {:?}",
+            notes(&driven)
+        );
+        assert_eq!(linear.requests(), 4, "one push is four requests");
+        let filed = Filed::load(repo.path()).expect("a record that saves and reads back");
+        let record = filed
+            .records()
+            .first()
+            .expect("the push recorded what it filed");
+        assert_eq!(filed.records().len(), 1, "{:?}", filed.records());
+        assert_eq!(record.url(), URL);
+        assert_eq!(record.team(), TEAM);
+        assert_eq!(record.scope(), SCOPE);
+        assert!(
+            said(&driven, record.path()),
+            "the document the record names is not the one the thread named: {:?}",
+            notes(&driven)
+        );
+    }
+
+    #[test]
+    fn the_loop_goes_round_while_the_request_is_in_flight() {
+        // The point of the worker, and the one thing a push that has already
+        // landed cannot show: the first request is held open, and the rounds
+        // the loop takes while it sits there draw frames and answer keys.
+        let repo = a_repository();
+        let home = a_home(repo.path());
+        let gate = Gate::shut();
+        let linear = Boarding::filing(URL).held_at(&gate);
+        let mut driven = filing_session(repo.path(), home.path(), &linear);
+
+        wrote_a_brief(&mut driven);
+        confirmed(&mut driven);
+        for _ in 0..ROUNDS {
+            round(&mut driven);
+        }
+
+        assert!(
+            driven.pushes.sending(),
+            "the held request reported anyway: {:?}",
+            notes(&driven)
+        );
+        assert!(
+            said(&driven, &format!("filing to {TEAM}")),
+            "the thread does not say the push started: {:?}",
+            notes(&driven)
+        );
+        assert!(
+            !said(&driven, URL),
+            "a request nobody has answered came back"
+        );
+        // And the keys still mean what they meant: a push in flight is not a
+        // window and holds nothing.
+        assert!(
+            pressed(&mut driven, key(KeyCode::Esc)),
+            "a push in flight ended the session"
+        );
+
+        gate.open();
+        landing(&mut driven);
+
+        assert!(
+            said(&driven, URL),
+            "the released push never said where it landed: {:?}",
+            notes(&driven)
+        );
+    }
+
+    #[test]
+    fn a_linear_that_refuses_lands_one_line_and_the_session_goes_on() {
+        let repo = a_repository();
+        let home = a_home(repo.path());
+        let linear = Boarding::refusing(REFUSED);
+        let mut driven = filing_session(repo.path(), home.path(), &linear);
+
+        wrote_a_brief(&mut driven);
+        confirmed(&mut driven);
+        let before = notes(&driven).len();
+        landing(&mut driven);
+
+        let notes = notes(&driven);
+        assert_eq!(
+            notes.len(),
+            before + 1,
+            "a refusal is one line on the thread: {notes:?}"
+        );
+        let line = notes.last().expect("a refusal said something");
+        assert!(line.contains(REFUSED), "{line} is not Linear's own words");
+        assert_eq!(line.lines().count(), 1, "{line} is more than one line");
+        assert!(
+            !filed_path(repo.path()).exists(),
+            "a push that sent nothing recorded something"
+        );
+        // The session is where it was: the dialog is down, no push is in flight,
+        // and the keyboard still works.
+        assert!(!driven.pushing.confirm.is_open());
+        assert!(!driven.pushes.sending());
+        assert!(
+            pressed(&mut driven, key(KeyCode::Esc)),
+            "a refused push ended the session"
+        );
+    }
+
+    #[test]
+    fn a_second_push_while_one_is_in_flight_sends_nothing_and_says_so() {
+        let repo = a_repository();
+        let home = a_home(repo.path());
+        let linear = Boarding::filing(URL);
+        let mut driven = filing_session(repo.path(), home.path(), &linear);
+
+        wrote_a_brief(&mut driven);
+        confirmed(&mut driven);
+        // Not a round in between, so the run is still the session's however fast
+        // the worker was: what ends one is the drain, and this is a `/push`
+        // typed before it.
+        typing(&mut driven, "/push");
+
+        assert!(
+            said(&driven, ALREADY_FILING),
+            "the second `/push` said nothing: {:?}",
+            notes(&driven)
+        );
+        assert!(
+            !driven.pushing.confirm.is_open(),
+            "the second `/push` put a dialog up"
+        );
+        landing(&mut driven);
+        assert_eq!(
+            linear.requests(),
+            4,
+            "the second `/push` sent something after all"
+        );
+        assert_eq!(
+            Filed::load(repo.path())
+                .expect("a record that saves and reads back")
+                .records()
+                .len(),
+            1,
+            "the brief was filed twice"
+        );
+    }
+
+    #[test]
+    fn no_key_value_reaches_the_thread_or_anything_the_session_holds() {
+        // The one thing on this path that must never be printed: it is in the
+        // key store this home holds, the client was built from it, and it is in
+        // nothing the reader or a failing assertion anywhere else in the suite
+        // would see.
+        let repo = a_repository();
+        let home = a_home(repo.path());
+        let mut driven = filing_session(repo.path(), home.path(), &Boarding::filing(URL));
+
+        wrote_a_brief(&mut driven);
+        confirmed(&mut driven);
+        let in_flight = format!("{:?}", driven.pushes);
+        landing(&mut driven);
+
+        assert!(!in_flight.contains(NOT_A_KEY), "the run carries the key");
+        assert!(
+            !format!("{:?}", driven.pushes).contains(NOT_A_KEY),
+            "the session's push state carries the key"
+        );
+        assert!(
+            !format!("{:?}", driven.pushing).contains(NOT_A_KEY),
+            "the window carries the key"
+        );
+        for note in notes(&driven) {
+            assert!(!note.contains(NOT_A_KEY), "{note} carries the key");
+        }
+        assert!(
+            !fs::read_to_string(filed_path(repo.path()))
+                .expect("the record this push wrote")
+                .contains(NOT_A_KEY),
+            "the record carries the key"
         );
     }
 }

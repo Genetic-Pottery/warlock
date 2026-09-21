@@ -5,10 +5,14 @@
 //! `pacting.rs` and `chatting.rs`. A second record of them here would be a copy
 //! for the two to disagree over.
 
+use std::sync::{Arc, Condvar, Mutex};
+
+use serde_json::{Value, json};
 use warlock_engine::{Agent, agent, stub_answer};
-use warlock_tui::{Activities, Cancel, Converses, Wired};
+use warlock_tui::{Activities, Cancel, Converses, LinearError, Posts, Wired};
 
 use crate::clipboard::Clip;
+use crate::pushing::Opens;
 
 // A clipboard nothing on the machine has to provide. The refusal is kept as the
 // description rather than as an `arboard::Error`, because that type is not
@@ -96,5 +100,143 @@ impl Converses for Saying {
 
     fn raised(&self, _model: &str, _effort: &str) -> Self {
         self.clone()
+    }
+}
+
+/// A Linear that answers the four requests a push makes out of memory, and the
+/// seam it arrives through: a `Boarding` is its own [`Opens::Client`], so a test
+/// keeps a handle on the very client the session opened and can read afterwards
+/// what was asked of it.
+///
+/// `Arc<Mutex<_>>` and not the `Rc<RefCell<_>>` of `tests/push.rs`'s stand-in,
+/// for the difference this path has: the panel's push runs on a worker thread,
+/// so a client that could not cross one would not be a stand-in for the thing
+/// being tested.
+///
+/// The key it is opened with is taken and dropped, never stored. A stand-in
+/// holding it would put it back into a `Debug` rendering, which is the one thing
+/// every test on this path asserts is nowhere.
+#[derive(Debug, Clone)]
+pub(crate) struct Boarding {
+    asked: Arc<Mutex<Vec<String>>>,
+    url: String,
+    refusing: Option<String>,
+    held: Option<Arc<Gate>>,
+}
+
+impl Boarding {
+    /// A workspace that has the team, the backlog status and the label already,
+    /// and creates the project at `url`.
+    pub(crate) fn filing(url: impl Into<String>) -> Self {
+        Self {
+            asked: Arc::new(Mutex::new(Vec::new())),
+            url: url.into(),
+            refusing: None,
+            held: None,
+        }
+    }
+
+    /// The same workspace, answering nothing until the gate is opened: what a
+    /// slow request looks like from the loop's side, without a clock.
+    pub(crate) fn held_at(mut self, gate: &Arc<Gate>) -> Self {
+        self.held = Some(Arc::clone(gate));
+        self
+    }
+
+    /// Linear's own words for a request it understood and would not do, on
+    /// whichever request comes first: the failure the panel has to survive.
+    pub(crate) fn refusing(message: impl Into<String>) -> Self {
+        Self {
+            refusing: Some(message.into()),
+            ..Self::filing("")
+        }
+    }
+
+    /// How many requests reached the workspace, which is how a test says that a
+    /// second `/push` sent nothing: one push is four.
+    pub(crate) fn requests(&self) -> usize {
+        self.asked
+            .lock()
+            .expect("no test panics holding this")
+            .len()
+    }
+}
+
+impl Opens for Boarding {
+    type Client = Self;
+
+    fn open(&self, _key: &str) -> Self {
+        self.clone()
+    }
+}
+
+impl Posts for Boarding {
+    fn post(&self, document: &str, _variables: Value) -> Result<Value, LinearError> {
+        self.asked
+            .lock()
+            .expect("no test panics holding this")
+            .push(document.to_owned());
+        if let Some(gate) = &self.held {
+            gate.wait();
+        }
+
+        if let Some(message) = &self.refusing {
+            return Err(LinearError::Refused {
+                message: message.clone(),
+            });
+        }
+        Ok(answered(document, &self.url))
+    }
+}
+
+// The `data` object of each answer, by the operation that asked for it: the
+// client unwraps `data` before its callers see it, so this is the shape they
+// read. A document this does not know is a fifth request nobody meant to send.
+fn answered(document: &str, url: &str) -> Value {
+    if document.contains("teams(") {
+        json!({ "teams": { "nodes": [{ "id": "team-held" }] } })
+    } else if document.contains("projectStatuses") {
+        json!({ "projectStatuses": { "nodes": [{ "id": "status-backlog", "name": "Backlog" }] } })
+    } else if document.contains("projectLabels(") {
+        json!({ "projectLabels": { "nodes": [{ "id": "label-held" }] } })
+    } else if document.contains("projectCreate(") {
+        json!({ "projectCreate": { "project": { "id": "project-filed", "url": url } } })
+    } else {
+        panic!("a push asked for something no workspace was given: {document}");
+    }
+}
+
+/// A request held open, for the one thing about a worker a finished push cannot
+/// show: that the loop goes round — drawing, answering keys — while it is in
+/// flight. A test holds the gate shut, counts rounds, and opens it.
+#[derive(Debug, Default)]
+pub(crate) struct Gate {
+    open: Mutex<bool>,
+    changed: Condvar,
+}
+
+impl Gate {
+    pub(crate) fn shut() -> Arc<Self> {
+        Arc::new(Self::default())
+    }
+
+    /// Notified rather than dropped, so the worker goes on to answer and the
+    /// test can then assert what the push said: a gate nobody opens is a thread
+    /// parked until the test binary exits.
+    pub(crate) fn open(&self) {
+        *self.open.lock().expect("no test panics holding this") = true;
+        self.changed.notify_all();
+    }
+
+    // Looped for the spurious wakeup `Condvar` is allowed, which is the whole of
+    // why this is not a bare `park`.
+    fn wait(&self) {
+        let mut open = self.open.lock().expect("no test panics holding this");
+        while !*open {
+            open = self
+                .changed
+                .wait(open)
+                .expect("no test panics holding this");
+        }
     }
 }

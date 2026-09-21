@@ -35,13 +35,14 @@ use crate::writing::{write_edit, write_opened};
 // other failed turn.
 const TURN_LOST: &str = "it stopped without saying how it went";
 
-// What the three commands are shown as on the card — never what is sent, which
-// is a paragraph warlock wrote. Spelled here rather than taken from the draft
-// because `submitted_for` trims, so `"  /brief  "` and `"/brief"` are one
-// command and have to draw as one row.
+// What the commands are shown as on the card — never what is sent, which for
+// the three that open a turn is a paragraph warlock wrote. Spelled here rather
+// than taken from the draft because `submitted_for` trims, so `"  /brief  "`
+// and `"/brief"` are one command and have to draw as one row.
 const BRIEF_COMMAND: &str = "/brief";
 const CHAT_COMMAND: &str = "/chat";
 const WRITE_COMMAND: &str = "/write";
+const PUSH_COMMAND: &str = "/push";
 
 // Said on a *change* of register only, so a `/brief` typed in brief mode costs a
 // turn and no line. Each names the way out, because that is the one thing a
@@ -57,6 +58,16 @@ const CHAT_NOTE: &str = "chat mode — the brief is over and nothing is being co
 const ALREADY_CHATTING: &str = "already in chat mode — /brief is what changes that.";
 
 const NOT_BRIEFING: &str = "/write is only in brief mode — /brief enters it";
+
+// The third refusal, and the same kind of line: what `/push` files is the
+// document this session wrote, so a session that has written none has nothing
+// to file. Built from the two command words rather than spelled around them, so
+// the sentence cannot name a command by a spelling the card does not use.
+fn nothing_written() -> String {
+    format!(
+        "{PUSH_COMMAND} files the brief {WRITE_COMMAND} wrote, and this session has written none"
+    )
+}
 
 fn unreadable_template(error: &TemplateError) -> String {
     format!("{error} — /brief did nothing, so fix or remove the file and type it again")
@@ -109,6 +120,13 @@ pub(crate) struct Chat<C> {
     // never fail for want of a file.
     directory: String,
     prompt: ScopePrompt,
+    // What `/write` last put on disk in this session, manifest-relative, and
+    // what `/push` would file. The most recent write and not the first: a
+    // reader who wrote the document twice meant the second one, and the file
+    // they are looking at is the one they just watched land. Nothing but a
+    // write that really happened sets this, so a refused path, a missing
+    // section and a disk that would not take the file all leave it as it was.
+    written: Option<String>,
 }
 
 impl Chat<ChatAgent> {
@@ -129,6 +147,7 @@ impl<C: Converses> Chat<C> {
             composer: Composer::default(),
             directory: DEFAULT_BRIEF_DIRECTORY.to_owned(),
             prompt: ScopePrompt::default(),
+            written: None,
         }
     }
 
@@ -152,6 +171,14 @@ impl<C: Converses> Chat<C> {
     #[cfg(test)]
     pub(crate) fn directory(&self) -> &str {
         &self.directory
+    }
+
+    // What `/push` files, asked of this value every time rather than copied
+    // out of it when the command is typed: the scope field a second board puts
+    // up comes back a round or more later, and a copy parked beside it would be
+    // a second record of what `/write` wrote.
+    pub(crate) fn written(&self) -> Option<&str> {
+        self.written.as_deref()
     }
 
     // Read twice a round, and both readings come from here so the key and the
@@ -219,15 +246,26 @@ impl<C: Converses> Chat<C> {
         }
     }
 
-    pub(crate) fn compose(&mut self, app: &mut App, outcome: Composed, now: Instant) {
+    // The one thing a draft can hand back to the loop: the brief a `/push`
+    // asks to file. Which board that files to is a manifest, a home and a key
+    // store away, and none of the three is this value's — so the command is
+    // recognised here and answered there.
+    pub(crate) fn compose(
+        &mut self,
+        app: &mut App,
+        outcome: Composed,
+        now: Instant,
+    ) -> Option<String> {
         match outcome {
             Composed::Typing(next) => self.composer = next,
             Composed::Leave => app.set_focus(Focus::Panel),
-            Composed::Submit => self.submit(app, now),
+            Composed::Submit => return self.submit(app, now),
         }
+
+        None
     }
 
-    fn submit(&mut self, app: &mut App, now: Instant) {
+    fn submit(&mut self, app: &mut App, now: Instant) -> Option<String> {
         // Taken before the field is emptied, and emptied by replacing it
         // outright rather than by unmuting: the muting comes back from
         // `settle_field` on the turn alone.
@@ -271,6 +309,16 @@ impl<C: Converses> Chat<C> {
                     app.panel_mut().note(NOT_BRIEFING, now);
                 }
             }
+            // A command about a file rather than about the conversation, so it
+            // asks nothing of the model and says nothing about the mode: what
+            // it files is what `/write` wrote, whichever register the reader
+            // has since gone back to. The refusal is the whole of what this
+            // value decides about it; the brief goes up to the loop, which
+            // holds the manifest that says where it files to.
+            Submitted::Push => match self.written.clone() {
+                Some(written) => return Some(written),
+                None => app.panel_mut().note(nothing_written(), now),
+            },
             // The line is asked of the value rather than restated here, so the
             // list of commands that exist is written down in one place.
             said @ Submitted::Refused => {
@@ -279,6 +327,8 @@ impl<C: Converses> Chat<C> {
                 }
             }
         }
+
+        None
     }
 
     pub(crate) fn paste(&mut self, outcome: Pasted) {
@@ -297,8 +347,15 @@ impl<C: Converses> Chat<C> {
         self.settle_field();
     }
 
+    // Assigned rather than replaced: a keystroke that wrote nothing — which is
+    // every keystroke but the Enter that lands the file — leaves the session
+    // remembering the document written before it.
     pub(crate) fn write(&mut self, app: &mut App, edited: Edited, now: Instant) {
-        self.prompt = write_edit(app, &self.root, &self.prompt, edited, now);
+        let wrote = write_edit(app, &self.root, &self.prompt, edited, now);
+        self.prompt = wrote.prompt;
+        if let Some(written) = wrote.written {
+            self.written = Some(written);
+        }
     }
 }
 

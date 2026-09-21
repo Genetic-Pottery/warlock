@@ -6,7 +6,14 @@ use tempfile::TempDir;
 use warlock_engine::{Node, NodeState, Tree, manifest_path, to_manifest_path};
 use warlock_tui::{App, Line, ScopeField, ScopePrompt};
 
-use super::{NO_PATH, write_submit};
+use super::NO_PATH;
+
+// The prompt half of what a write answers with, which is what every test below
+// but `what_was_written_is_remembered_…` is about. The path it hands back is
+// asserted there, against the same function.
+fn write_submit(app: &mut App, root: &Path, field: &ScopeField, now: Instant) -> ScopePrompt {
+    super::write_submit(app, root, field, now).prompt
+}
 
 const BRIEF: &str = "docs/warlock-brief-13-scopes-and-sigils.md";
 
@@ -93,6 +100,40 @@ fn shapeless(root: &Path) {
     fs::create_dir_all(template.parent().expect("the template sits in a directory"))
         .expect("makes .warlock");
     fs::write(template, "").expect("writes an empty template");
+}
+
+#[test]
+fn what_was_written_is_handed_back_and_a_second_write_replaces_it() {
+    // The one thing a write tells the session about itself: the path of the
+    // file, in the spelling the line on the thread used, so a later `/push`
+    // files the document the reader just watched land. A path typed as
+    // something else — a leading `./`, the absolute path — comes back
+    // manifest-relative, because that is the spelling the ledger stores and
+    // the one `from_manifest_path` reads back.
+    let repo = a_repo();
+    let second = "docs/warlock-brief-14-sigils.md";
+    let mut app = app_answering(repo.path(), WHOLE);
+
+    let wrote = super::write_submit(&mut app, repo.path(), &field(&format!("./{BRIEF}")), now());
+
+    assert_eq!(wrote.prompt, ScopePrompt::Closed);
+    assert_eq!(wrote.written.as_deref(), Some(BRIEF));
+    assert_eq!(
+        notes(&app),
+        [format!("wrote {BRIEF} — {} bytes", WHOLE.len())],
+        "the line names a path the session does not remember",
+    );
+
+    // A refusal in between leaves nothing behind for a caller to mistake for
+    // a write: the file is already there, so this one writes nothing.
+    let refused = super::write_submit(&mut app, repo.path(), &field(BRIEF), now());
+    assert!(refused.prompt.is_open());
+    assert_eq!(refused.written, None);
+
+    // And the second document is the one a session keeping only the most
+    // recent would remember.
+    let again = super::write_submit(&mut app, repo.path(), &field(second), now());
+    assert_eq!(again.written.as_deref(), Some(second));
 }
 
 #[test]
@@ -471,7 +512,7 @@ mod rounds {
             let field = prompt.field().expect("the window is still up");
             edit_for(press(code), field)
         };
-        write_edit(app, repo.path(), prompt, edited, now)
+        write_edit(app, repo.path(), prompt, edited, now).prompt
     }
 
     #[test]
@@ -618,7 +659,8 @@ mod rounds {
             &ScopePrompt::Closed,
             warlock_tui::Edited::Submit,
             now(),
-        );
+        )
+        .prompt;
 
         assert_eq!(prompt, ScopePrompt::Closed);
         assert_eq!(everything_under(repo.path()), Vec::<String>::new());

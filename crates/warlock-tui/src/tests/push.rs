@@ -696,6 +696,9 @@ fn a_create_that_landed_with_a_record_that_will_not_save_still_prints_the_url() 
     );
 
     let mut out = Vec::new();
+    // The address is dropped here for `status_for`'s sake, which is the question
+    // this test asks of the outcome: what `sent` hands back on the way out is
+    // the panel's business and is asserted in `tests/pushing.rs`.
     let outcome = sent(
         &linear,
         &root,
@@ -704,7 +707,8 @@ fn a_create_that_landed_with_a_record_that_will_not_save_still_prints_the_url() 
         &root.join(BRIEF_PATH),
         Filed::new(),
         &mut out,
-    );
+    )
+    .map(drop);
     let printed = String::from_utf8(out).expect("warlock writes its own text");
 
     assert_eq!(

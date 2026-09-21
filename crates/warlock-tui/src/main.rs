@@ -17,6 +17,7 @@
 //! changes what `warlock --help` prints.
 
 use std::io;
+use std::mem;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
@@ -26,9 +27,9 @@ use ratatui::crossterm::event::{self, Event, KeyEvent, MouseEvent};
 use ratatui::layout::Size;
 use warlock_engine::{Agent, Manifest, Written, write_claude_md};
 use warlock_tui::{
-    App, Cell, Converses, Focus, Position, QuitConfirm, Reach, RecordPrompt, Run, ScopePrompt,
-    Wired, composer_on_screen, copied_text, draw, panel_height, panel_width, paste_for,
-    position_at, tree_height,
+    App, Cell, Converses, Focus, Position, PushAnswered, PushConfirm, QuitConfirm, Reach,
+    RecordPrompt, Run, ScopePrompt, Wired, composer_on_screen, copied_text, draw, panel_height,
+    panel_width, paste_for, position_at, tree_height,
 };
 
 mod boundary;
@@ -44,6 +45,7 @@ mod input;
 mod key;
 mod pacting;
 mod push;
+mod pushing;
 mod query;
 mod running;
 mod scoping;
@@ -66,6 +68,7 @@ use input::{Action, Drag, MouseAction, Pressed, drag_after, mouse_action, press_
 use key::{key_add, key_forget, key_list, key_use};
 use pacting::{Pact, Reloaded};
 use push::push;
+use pushing::{Opens, Pushes, Pushing};
 use query::{Listing, list};
 use running::{pact, refresh};
 use scoping::{record_edit, scope_edit, scope_press};
@@ -595,6 +598,12 @@ fn run() -> Result<(), Error> {
         // text it put on an X11 selection. See `mod@clipboard`.
         clipboard: Clipboard::open(),
         confirm: QuitConfirm::default(),
+        pushing: Pushing::closed(),
+        // Built once, for `Pact::new`'s reason and with none of its cost: the
+        // seam is a unit value and no socket exists until a confirmed dialog
+        // asks for one. The home under which the sigils, the binding and the
+        // key store sit is read here as well, once for the session.
+        pushes: Pushes::new(),
         prompt: ScopePrompt::default(),
         record: RecordPrompt::default(),
         drag: None,
@@ -668,11 +677,12 @@ fn run() -> Result<(), Error> {
 
 /// Everything one interactive session holds, and the seam the tests drive.
 ///
-/// Generic over all four impure things — the screen, the model, the
-/// conversation's model, the clipboard — so a test can press keys at a whole
-/// session with no terminal attached, no `claude` installed and no display.
-/// `warlock` itself only ever instantiates it one way, in [`run`].
-struct Session<S: Screen, P: Wired + Agent, C: Converses, B: Clip> {
+/// Generic over all five impure things — the screen, the model, the
+/// conversation's model, the clipboard, the Linear a push files to — so a test
+/// can press keys at a whole session with no terminal attached, no `claude`
+/// installed, no display and no socket. `warlock` itself only ever instantiates
+/// it one way, in [`run`].
+struct Session<S: Screen, P: Wired + Agent, C: Converses, B: Clip, O: Opens> {
     app: App,
     screen: S,
     scope: Scope,
@@ -683,6 +693,17 @@ struct Session<S: Screen, P: Wired + Agent, C: Converses, B: Clip> {
     /// returns because a copy does not outlive the handle that made it.
     clipboard: B,
     confirm: QuitConfirm,
+    /// What a `/push` has put up: the question asked before anything leaves the
+    /// machine — the project name, the team and the *name* of the key it would
+    /// be sent with — or, on a machine that can file to more than one board,
+    /// the field asking which. One value because they are two halves of one
+    /// question and never both up; see [`mod@pushing`].
+    pushing: Pushing,
+    /// Where a confirmed `/push` gets its client from, the home it resolves the
+    /// board under, and the one request it may have in flight — which is its own
+    /// say-no to a second. The window above is the question; this is the answer
+    /// leaving the machine. See [`Pushes`].
+    pushes: Pushes<O>,
     prompt: ScopePrompt,
     /// The second window the `s` key puts up, over a scope name no `[[scope]]`
     /// record claims. Never up at the same time as [`Session::prompt`]: one goes
@@ -711,7 +732,7 @@ struct Session<S: Screen, P: Wired + Agent, C: Converses, B: Clip> {
     watched: Watched,
 }
 
-impl<S: Screen, P: Wired + Agent, C: Converses, B: Clip> Session<S, P, C, B> {
+impl<S: Screen, P: Wired + Agent, C: Converses, B: Clip, O: Opens> Session<S, P, C, B, O> {
     fn size(&self) -> io::Result<Size> {
         self.screen.size()
     }
@@ -741,6 +762,7 @@ impl<S: Screen, P: Wired + Agent, C: Converses, B: Clip> Session<S, P, C, B> {
             (&self.app, &self.scope.chrome, self.confirm, &self.prompt);
         let record = &self.record;
         let write = self.chat.write_prompt();
+        let (filing, push) = (&self.pushing.field, &self.pushing.confirm);
         self.screen.draw(|frame| {
             draw(
                 frame,
@@ -751,6 +773,8 @@ impl<S: Screen, P: Wired + Agent, C: Converses, B: Clip> Session<S, P, C, B> {
                 prompt,
                 record,
                 write,
+                filing,
+                push,
                 field,
             );
         })
@@ -775,6 +799,8 @@ impl<S: Screen, P: Wired + Agent, C: Converses, B: Clip> Session<S, P, C, B> {
             size,
             &self.app,
             self.confirm,
+            &self.pushing.confirm,
+            &self.pushing.field,
             &self.prompt,
             &self.record,
             self.chat.write_prompt(),
@@ -874,23 +900,32 @@ impl<S: Screen, P: Wired + Agent, C: Converses, B: Clip> Session<S, P, C, B> {
     /// Every arm below is one key. Nothing here re-gates what the module it
     /// dispatches to already refuses, which is why most arms have no error case
     /// — a refusal is a line on the footer and the loop goes round again.
+    // Over the pedantic line count because the arms carry their reasoning, and
+    // the fix the lint is asking for is the one this function exists to refuse:
+    // an arm dispatching on a value computed elsewhere is a key a reader cannot
+    // find here. Splitting by key group would put half the keyboard behind a
+    // name somebody has to guess at, and every line past the limit is a comment.
+    #[allow(clippy::too_many_lines)]
     fn press(&mut self, key: KeyEvent, now: Instant) -> Result<bool, Error> {
         // The composer is offered on exactly the condition that lights its border,
         // which is the keyboard being pointed at it: with the keys anywhere else
         // this is `None`, there is no draft to type into, and every letter is the
         // command it has always been.
         let typing = (self.app.focus() == Focus::Composer).then(|| self.chat.composer());
+        // A local because two arms further down are about the same run; what a
+        // turn is doing is asked for once, here, and read nowhere else.
         let running = self.pact.running();
-        let asked = self.chat.answering();
         let pressed = press_for(
             key,
             self.confirm,
+            &self.pushing.confirm,
+            &self.pushing.field,
             &self.prompt,
             &self.record,
             self.chat.write_prompt(),
             typing,
             running,
-            asked,
+            self.chat.answering(),
         );
 
         match pressed {
@@ -914,6 +949,8 @@ impl<S: Screen, P: Wired + Agent, C: Converses, B: Clip> Session<S, P, C, B> {
             // No has nothing to put back, and the top of this loop draws whatever
             // the question now is.
             Pressed::Confirm(next) => self.confirm = next,
+            // The push dialog, moved or answered: see [`Session::push_answered`].
+            Pressed::Push(answered) => self.push_answered(answered, now),
             // Esc with a run in flight. The handle does both halves at once — it
             // latches, so the descent stops at the next directory instead of
             // starting a pass for it, and it kills the `claude` running right now,
@@ -1203,13 +1240,83 @@ impl<S: Screen, P: Wired + Agent, C: Converses, B: Clip> Session<S, P, C, B> {
             // well for the pact key's reason: a turn is as old as the question
             // that asked it, not as old as the first thing the model got round to
             // saying.
-            Pressed::Compose(outcome) => self.chat.compose(&mut self.app, outcome, now),
+            //
+            // The one thing a draft hands back is a `/push`: the brief this
+            // session wrote, which the conversation knows and cannot file,
+            // because which board it files to is the manifest's, the machine's
+            // sigils' and the key store's. That question is answered here and
+            // on this thread — no socket is opened by any of it — and what
+            // comes back is the window the reader is now looking at. See
+            // [`Pushes::press`].
+            Pressed::Compose(outcome) => {
+                if let Some(written) = self.chat.compose(&mut self.app, outcome, now) {
+                    self.pushing = self.pushes.press(
+                        &mut self.app,
+                        &self.manifest,
+                        &self.scope.repo_root,
+                        &written,
+                        now,
+                    );
+                }
+            }
+            // Somebody typing into the window a `/push` puts up when this
+            // machine can file to more than one board: a character more or
+            // less in the scope name, the window abandoned, or — on Enter —
+            // that name asked of the engine. A name it recognises takes this
+            // window down and puts the dialog up, and one it does not leaves
+            // the field where it was with the candidates under it; both come
+            // back in the one value, for the reason the scope key's two
+            // windows do. Nothing is sent by any of it. See
+            // [`Pushes::edit`].
+            Pressed::Filing(edited) => {
+                self.pushing = self.pushes.edit(
+                    &mut self.app,
+                    &self.manifest,
+                    &self.scope.repo_root,
+                    self.chat.written(),
+                    &self.pushing.field,
+                    edited,
+                    now,
+                );
+            }
             // A key nothing is bound to, or one whose press has already been
             // answered where it was decided.
             Pressed::Nothing => {}
         }
 
         Ok(true)
+    }
+
+    /// The push dialog, moved or answered. An arrow re-lights the question that
+    /// is up — the strings it was opened with ride along unchanged, since they
+    /// are what is being answered about — and either answer takes it down.
+    ///
+    /// A Yes takes it down *and* starts the request, on a worker thread: what
+    /// happens on this one is resolving the board again and building the client,
+    /// both of which can only put a line on the thread. Either way the session
+    /// goes on exactly where it was, which is what the dialog promised.
+    ///
+    /// The window is taken rather than read and then closed, so the strings the
+    /// question was asked about are the ones the request is made from and there
+    /// is no round on which both a dialog and its own push are up.
+    fn push_answered(&mut self, answered: PushAnswered, now: Instant) {
+        match answered {
+            PushAnswered::Open(answer) => self.pushing.confirm = self.pushing.confirm.lit(answer),
+            PushAnswered::Cancel => self.pushing.confirm = PushConfirm::Closed,
+            PushAnswered::Send => {
+                let answered = mem::take(&mut self.pushing.confirm);
+                if let Some(filing) = answered.filing() {
+                    self.pushes.send(
+                        &mut self.app,
+                        &self.manifest,
+                        &self.scope.repo_root,
+                        self.chat.written(),
+                        filing,
+                        now,
+                    );
+                }
+            }
+        }
     }
 
     /// A block the terminal handed over whole. Nothing is returned and nothing
@@ -1293,6 +1400,10 @@ impl<S: Screen, P: Wired + Agent, C: Converses, B: Clip> Session<S, P, C, B> {
         // conversation's, so it is opened in there rather than here out of two
         // values this loop would otherwise have to be handed. See [`Chat::keep_up`].
         self.chat.keep_up(&mut self.app, now);
+        // And a brief on its way to the board, which says one thing and is over:
+        // the project's address or one line about why there is none. Drained like
+        // the rest, so the frames keep coming while it is in flight.
+        self.pushes.keep_up(&mut self.app, now);
     }
 }
 

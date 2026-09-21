@@ -16,9 +16,9 @@ use ratatui::crossterm::event::{
 };
 use ratatui::layout::Size;
 use warlock_tui::{
-    Answered, App, Cell, Composed, Composer, Edited, Focus, Hit, QuitConfirm, Reach, RecordEdited,
-    RecordPrompt, ScopePrompt, answer_for, compose_for, edit_for, hit_test, panel_reach,
-    record_edit_for,
+    Answered, App, Cell, Composed, Composer, Edited, Focus, Hit, PushAnswered, PushConfirm,
+    QuitConfirm, Reach, RecordEdited, RecordPrompt, ScopePrompt, answer_for, compose_for, edit_for,
+    hit_test, panel_reach, push_answer_for, record_edit_for,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -118,6 +118,16 @@ pub(crate) enum Pressed {
     Leave,
     CancelTurn,
     Confirm(QuitConfirm),
+    // The push dialog's answer rather than its next state, because one of the
+    // three is not a state at all: `Send` is a request going out and the window
+    // coming down, and a `PushConfirm::Closed` here could not tell it from the
+    // Esc that closes the same window with nothing sent.
+    Push(PushAnswered),
+    // The field that comes up in front of that dialog when the machine can file
+    // to more than one board. A fourth variant over `Edited` for `Scope` and
+    // `Write`'s reason: the three are the same keystrokes and three different
+    // things to do with a submit.
+    Filing(Edited),
     Scope(Edited),
     Record(RecordEdited),
     Write(Edited),
@@ -165,6 +175,18 @@ fn is_tab(key: KeyEvent) -> bool {
 // Between those two themselves there is no precedence to have: the record
 // window opens exactly as the scope window closes, so they are never both up.
 //
+// The push dialog is asked before those three and after the quit one. Before,
+// because the three fields can come up underneath it with nobody asking — a
+// `/write` turn still out answers into the write prompt on no keystroke at all
+// — and the dialog is the window somebody is looking at and the one drawn on
+// top; after, because the quit dialog is the gate on the way out and the two
+// are never up together anyway (`q` reaches nothing while this is up).
+//
+// The scope field a `/push` puts up when the machine can file to more than one
+// board is asked in the dialog's own place, for the dialog's own reason: it is
+// the other half of the same question and the two are never up together — the
+// submit that takes this one down is what puts that one up.
+//
 // The composer is asked after all of them, because a window is drawn over it: a
 // key cannot be both typed into a field on the frame and answered by the dialog
 // covering it. `composer` is `Some` only when the focus is on the field, which
@@ -178,6 +200,8 @@ fn is_tab(key: KeyEvent) -> bool {
 pub(crate) fn press_for(
     key: KeyEvent,
     confirm: QuitConfirm,
+    push: &PushConfirm,
+    filing: &ScopePrompt,
     prompt: &ScopePrompt,
     record: &RecordPrompt,
     write: &ScopePrompt,
@@ -199,6 +223,14 @@ pub(crate) fn press_for(
             Answered::Close => Pressed::Confirm(QuitConfirm::Closed),
             Answered::Leave => Pressed::Leave,
         };
+    }
+
+    if let Some(asked) = push.filing() {
+        return Pressed::Push(push_answer_for(key, asked.answer()));
+    }
+
+    if let Some(field) = filing.field() {
+        return Pressed::Filing(edit_for(key, field));
     }
 
     if let Some(field) = prompt.field() {
@@ -305,7 +337,7 @@ pub(crate) struct Drag {
 // `PanelLine` for a point on the composer and scrolls a window the pointer is
 // not over.
 //
-// None of the four windows has anything clickable in it, so while any is up
+// None of the six windows has anything clickable in it, so while any is up
 // every event is dropped, wheel and click alike: a click that reached the tree
 // behind one would select a row the reader cannot see.
 #[expect(
@@ -319,12 +351,20 @@ pub(crate) fn mouse_action(
     size: Size,
     app: &App,
     confirm: QuitConfirm,
+    push: &PushConfirm,
+    filing: &ScopePrompt,
     prompt: &ScopePrompt,
     record: &RecordPrompt,
     write: &ScopePrompt,
     composer: Option<&Composer>,
 ) -> Option<MouseAction> {
-    if confirm.is_open() || prompt.is_open() || record.is_open() || write.is_open() {
+    if confirm.is_open()
+        || push.is_open()
+        || filing.is_open()
+        || prompt.is_open()
+        || record.is_open()
+        || write.is_open()
+    {
         return None;
     }
 

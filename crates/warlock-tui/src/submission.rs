@@ -5,8 +5,8 @@
 //! costs are that lopsided the cheap failure is the right one.
 //!
 //! `Submitted::refusal` is the entire discovery mechanism, which is why there
-//! is no `/help`: a fourth command whose job was to print the list would be a
-//! thing to discover before you could discover anything. Nothing here carries
+//! is no `/help`: a command whose job was to print the list would be a thing to
+//! discover before you could discover anything. Nothing here carries
 //! the draft's text, exactly as `Composed::Submit` carries none — the draft is
 //! already in the caller's hand, and a copy would be free to disagree with it —
 //! and nothing here enters a mode, writes a file or opens a turn.
@@ -14,9 +14,9 @@
 // Stated once, here, because it is the only place warlock says which commands
 // exist: a second copy of this sentence in the loop or in a test fixture would
 // be a second list to keep true.
-const REFUSAL: &str = "warlock has three commands — /brief, /write and /chat — and none of them takes anything after it.";
+const REFUSAL: &str = "warlock has four commands — /brief, /write, /chat and /push — and none of them takes anything after it.";
 
-// Five variants and no sixth for "empty", because an empty draft never gets
+// Six variants and no seventh for "empty", because an empty draft never gets
 // here — `Composer::is_submittable` declines to offer one up — and a function
 // that is total anyway is worth more than a variant every caller must match on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -24,6 +24,7 @@ pub enum Submitted {
     Brief,
     Write,
     Chat,
+    Push,
     Message,
     // An unknown word, a bare `/`, or a command word with something after it.
     // It never reaches the model: the point of refusing rather than sending is
@@ -44,9 +45,9 @@ impl Submitted {
 }
 
 // The order is the whole design: trim, then the first token, then "does it start
-// with a slash", then "is it a path", and only then the match against the three
-// words. Everything not caught by one of the first four steps is a message, so a
-// draft of ordinary prose is never examined at all.
+// with a slash", then "is it a path", and only then the match against the
+// command words. Everything not caught by one of the first four steps is a
+// message, so a draft of ordinary prose is never examined at all.
 //
 // Trailing trim is not tidiness. `"/brief "` is how the command is actually
 // typed, because a space after a word is what a hand does before it notices
@@ -78,6 +79,7 @@ pub fn submitted_for(draft: &str) -> Submitted {
         "/brief" => Submitted::Brief,
         "/write" => Submitted::Write,
         "/chat" => Submitted::Chat,
+        "/push" => Submitted::Push,
         // Case-sensitively, so `/BRIEF` lands here: see the module docs.
         _ => Submitted::Refused,
     }

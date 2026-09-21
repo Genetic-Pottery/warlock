@@ -27,7 +27,7 @@ use crate::account::{Account, Line as Entry, Voice};
 use crate::app::{App, Chrome, Focus, Row, Run, RunHeader};
 use crate::colour::{CONVERSATION_COLOUR, FOCUS_COLOUR, GUIDE_COLOUR, SYSTEM_COLOUR, colour_for};
 use crate::composer::Composer;
-use crate::confirm::{Answer, QuitConfirm};
+use crate::confirm::{Answer, Filing, PushConfirm, QuitConfirm};
 use crate::panel::Mode;
 use crate::prompt::{RecordField, RecordForm, RecordPrompt, ScopeField, ScopePrompt};
 // Renamed for the reason `Entry` above is: `Span` here is ratatui's piece of a
@@ -248,11 +248,34 @@ const CONFIRM_LINES: u16 = 3;
 
 const CONFIRM_HEIGHT: u16 = CONFIRM_LINES + 2 * CONFIRM_MARGIN_ROWS + 2 * BORDER_THICKNESS;
 
+const PUSH_QUESTION: &str = "File this brief to the board?";
+
+const PUSH_TEAM: &str = "team ";
+
+/// The key is named and never shown, here as everywhere else warlock mentions
+/// one: the dialog's value carries no key bytes at all, so this label can only
+/// ever be followed by the name it is held under.
+const PUSH_KEY: &str = "key ";
+
+/// Question, a blank, the project, the team, the key, a blank, the answers:
+/// [`push_lines`] asserts it draws exactly this many, the way [`RECORD_LINES`]
+/// does.
+const PUSH_LINES: u16 = 7;
+
+const PUSH_HEIGHT: u16 = PUSH_LINES + 2 * CONFIRM_MARGIN_ROWS + 2 * BORDER_THICKNESS;
+
 const SCOPE_HEADING: &str = "Scope for ";
 
 const PATH_HEADING: &str = "";
 
 const PATH_RULES: &str = "Enter writes the document, Esc writes nothing";
+
+/// Empty for [`PATH_HEADING`]'s reason: what this window is asking is one
+/// phrase, the caller already carries it as the field's own heading line, and
+/// a second one here would put two of them on the row.
+const FILING_HEADING: &str = "";
+
+const FILING_RULES: &str = "Enter files the brief to that scope, Esc files nothing";
 
 const SCOPE_MARGIN: u16 = CONFIRM_MARGIN;
 
@@ -294,8 +317,8 @@ const COMPOSER_MIN_HEIGHT: u16 = 1 + 2 * BORDER_THICKNESS;
 #[expect(
     clippy::too_many_arguments,
     reason = "one frame's worth of state, and the point of it is that the binary \
-              draws a frame in one call: the four windows that can be over the \
-              app are four parameters here rather than four entry points"
+              draws a frame in one call: the six windows that can be over the \
+              app are six parameters here rather than six entry points"
 )]
 pub fn draw(
     frame: &mut Frame<'_>,
@@ -306,6 +329,8 @@ pub fn draw(
     scope: &ScopePrompt,
     record: &RecordPrompt,
     path: &ScopePrompt,
+    filing: &ScopePrompt,
+    push: &PushConfirm,
     composer: Option<&Composer>,
 ) {
     let screen = frame.area();
@@ -349,6 +374,17 @@ pub fn draw(
     }
     if let Some(form) = record.form() {
         draw_record(frame, screen, form);
+    }
+    // The last two are the two halves of one `/push`, drawn after the three
+    // above for the reason the keys go to them first: they are the windows
+    // somebody is looking at while any of those can be up underneath. They are
+    // never both on a frame — the submit that takes the field down is the one
+    // that puts the dialog up.
+    if let Some(field) = filing.field() {
+        draw_scope(frame, screen, field, FILING_HEADING, FILING_RULES);
+    }
+    if let Some(asked) = push.filing() {
+        draw_push(frame, screen, asked);
     }
 }
 
@@ -1227,6 +1263,59 @@ fn draw_confirm(frame: &mut Frame<'_>, screen: Rect, highlighted: Answer) {
     );
 }
 
+// The quit dialog's window with four more lines in it, and deliberately the
+// same everything else: `draw_over`, `centred`, `padded_width`, the confirm
+// margins and `answers_line`, so the two questions are answered in the same
+// place on the screen with the answers in the same order.
+fn draw_push(frame: &mut Frame<'_>, screen: Rect, filing: &Filing) {
+    draw_over(
+        frame,
+        push_area(screen, filing),
+        Padding::symmetric(CONFIRM_MARGIN, CONFIRM_MARGIN_ROWS),
+        push_lines(filing),
+    );
+}
+
+fn push_lines(filing: &Filing) -> Vec<Line<'_>> {
+    let lines = vec![
+        Line::from(PUSH_QUESTION).centered(),
+        Line::default(),
+        Line::from(filing.project()).bold().centered(),
+        Line::from(team_line(filing)).dim().centered(),
+        Line::from(key_line(filing)).dim().centered(),
+        Line::default(),
+        answers_line(filing.answer()),
+    ];
+
+    debug_assert_eq!(
+        u16::try_from(lines.len()).unwrap_or(u16::MAX),
+        PUSH_LINES,
+        "the push dialog is no longer {PUSH_LINES} lines tall"
+    );
+
+    lines
+}
+
+fn team_line(filing: &Filing) -> String {
+    format!("{PUSH_TEAM}{}", filing.team())
+}
+
+fn key_line(filing: &Filing) -> String {
+    format!("{PUSH_KEY}{}", filing.key())
+}
+
+fn push_size(filing: &Filing) -> Size {
+    let answers =
+        display_width(CONFIRM_YES) + display_width(CONFIRM_ANSWER_GAP) + display_width(CONFIRM_NO);
+    let widest = display_width(PUSH_QUESTION)
+        .max(answers)
+        .max(display_width(filing.project()))
+        .max(display_width(&team_line(filing)))
+        .max(display_width(&key_line(filing)));
+
+    Size::new(padded_width(widest, CONFIRM_MARGIN), PUSH_HEIGHT)
+}
+
 fn draw_over(frame: &mut Frame<'_>, area: Rect, padding: Padding, lines: Vec<Line<'_>>) {
     let block = Block::bordered().padding(padding);
     let inner = block.inner(area);
@@ -1253,6 +1342,12 @@ fn answers_line(highlighted: Answer) -> Line<'static> {
 
 fn confirm_area(screen: Rect) -> Rect {
     centred(screen, confirm_size())
+}
+
+// Where the push dialog lands, which is where the quit question lands: the
+// same `centred`, over a window sized by what this one has to say.
+fn push_area(screen: Rect, filing: &Filing) -> Rect {
+    centred(screen, push_size(filing))
 }
 
 fn centred(screen: Rect, size: Size) -> Rect {
