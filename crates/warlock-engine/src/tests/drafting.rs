@@ -1,8 +1,8 @@
 use crate::document::Defect;
 
 use super::{
-    Accepted, BODY_CHARS, DRAFTS_PER_SLICE, Draft, Fill, REFERENCES_PER_LIST, TITLE_CHARS,
-    TITLE_MINIMUM, accept, check, stub_answer,
+    Accepted, BODY_CHARS, DRAFTING_PROMPT, DRAFTS_PER_SLICE, Draft, Fill, REFERENCES_PER_LIST,
+    TITLE_CHARS, TITLE_MINIMUM, accept, check, drafting_instructions, stub_answer,
 };
 
 const BODY: &str = "What the ticket asks for, and what it does not.";
@@ -236,4 +236,68 @@ fn more_references_than_the_list_cap_are_reported_against_the_list() {
         }],
         "the list over the cap is named, and an index outside the slice is the repair's business"
     );
+}
+
+#[test]
+fn the_prompt_states_every_cap_it_is_checked_against() {
+    // Each number in the phrase that carries it, not on its own: three of the
+    // caps are 12, so a bare `contains("12")` would pass for all three with one
+    // of them written into the prose and the other two forgotten.
+    for stated in [
+        format!("at most {DRAFTS_PER_SLICE} entries"),
+        format!("between {TITLE_MINIMUM} and {TITLE_CHARS} characters"),
+        format!("at most {BODY_CHARS} characters"),
+        format!("at most {REFERENCES_PER_LIST} positions"),
+    ] {
+        assert!(
+            DRAFTING_PROMPT.contains(&stated),
+            "the prompt does not say {stated:?}:\n{DRAFTING_PROMPT}"
+        );
+    }
+}
+
+#[test]
+fn the_instructions_carry_the_brief_the_slice_and_the_shape() {
+    let text = drafting_instructions(
+        "# The brief\n\nCut a planned project into tickets.\n",
+        "  The drafting contract  ",
+        "A slice's drafts, filled by a pass and checked by warlock.",
+        &[],
+    );
+
+    assert!(text.starts_with(DRAFTING_PROMPT));
+    assert!(text.contains("Cut a planned project into tickets."));
+    assert!(text.contains("`The drafting contract`"), "{text}");
+    assert!(text.contains("A slice's drafts, filled by a pass and checked by warlock."));
+    assert!(
+        text.ends_with(
+            "{\"drafts\":[{\"title\":\"\",\"body\":\"\",\"blocked_by\":[],\"blocks\":[]}]}"
+        ),
+        "{text}"
+    );
+    assert!(
+        !text.contains("turned down"),
+        "nothing was rejected, so nothing is listed back"
+    );
+}
+
+#[test]
+fn a_rejected_defect_is_listed_back_as_one_not_to_repeat() {
+    let rejected = vec![
+        Defect::Empty {
+            field: "drafts[2].title".to_owned(),
+        },
+        Defect::TooLong {
+            field: "drafts[0].body".to_owned(),
+            chars: BODY_CHARS + 40,
+            cap: BODY_CHARS,
+        },
+    ];
+
+    let text = drafting_instructions("The brief.", "A slice", "What it asks for.", &rejected);
+
+    assert!(text.contains("Do not repeat these defects:"), "{text}");
+    for defect in &rejected {
+        assert!(text.contains(&format!("\n- {defect}")), "{text}");
+    }
 }

@@ -1,6 +1,12 @@
+use std::fmt::Write as _;
+
 use serde::{Deserialize, Serialize};
 
-use crate::document::Defect;
+use crate::document::{Defect, turned_down};
+
+// The drafting road asks again exactly as often as the document road does, and
+// a second bound would be a number to keep in step with this one for no gain.
+pub use crate::document::ATTEMPTS;
 
 pub const DRAFTS_PER_SLICE: usize = 12;
 
@@ -253,6 +259,72 @@ fn references(field: &str, given: &[usize], defects: &mut Vec<Defect>) {
             cap: REFERENCES_PER_LIST,
         });
     }
+}
+
+// The caps are written into the prose rather than asked about, and the numbers
+// themselves are arbitrary: what is permanent is that there is a ceiling at
+// all. A pass told the number answers inside it; a pass asked to be brief
+// answers at whatever length it likes and is then repaired, which costs an
+// attempt and loses whatever it wrote past the cut. The test below reads the
+// constants, so moving one and leaving the prose behind fails rather than
+// silently instructing the model to break the cap it is checked against.
+pub const DRAFTING_PROMPT: &str = "\
+Fill in the JSON object at the end of these instructions, cutting the one \
+slice of work described below it into tickets, and output the filled object \
+and nothing else.
+
+You are shown the brief the work was planned in and one slice of that brief. \
+Draft the tickets that slice is worth and no others: a ticket is a piece of \
+work one person can pick up, finish and check. Everything you write comes from \
+the brief and the slice — do not plan work neither of them asked for, and do \
+not draft the rest of the brief.
+
+\"drafts\": one entry per ticket, in the order the work would be done, at most \
+12 entries. Each entry is {\"title\": ..., \"body\": ..., \"blocked_by\": \
+[...], \"blocks\": [...]}.
+
+\"title\": one line, between 12 and 120 characters, saying what the ticket does \
+in the words the brief uses for it.
+
+\"body\": what the ticket asks for, what would show it was done, and what it \
+leaves alone. It may run to several paragraphs, at most 4000 characters.
+
+\"blocked_by\" and \"blocks\": the order the drafts have to be done in, given \
+as positions in the array above, counting from 0, at most 12 positions per \
+list. A draft refers only to the other drafts of this slice: never to itself, \
+never to a position the array does not hold, and never to work outside the \
+slice. Where nothing is ordered, both lists are empty.
+
+Write each ticket in its own voice: no first person, and nothing about this \
+request or about what you were or were not shown.";
+
+/// The drafting prompt with the brief, the one slice and the shape to fill
+/// appended, in the layout [`crate::document::synthesis_instructions`] uses.
+///
+/// The slice arrives as its plain title and prose, so nothing about where a
+/// slice came from or where its drafts are going reaches the engine.
+#[must_use]
+pub fn drafting_instructions(brief: &str, title: &str, prose: &str, rejected: &[Defect]) -> String {
+    let mut text = DRAFTING_PROMPT.to_owned();
+    turned_down(&mut text, rejected);
+    let _ = write!(
+        text,
+        "\n\nThe brief:\n\n{}\n\nThe one slice to cut into tickets is `{}`, and the brief says \
+         of it:\n\n{}",
+        brief.trim(),
+        title.trim(),
+        prose.trim(),
+    );
+    let shape = serde_json::json!({
+        "drafts": [{"title": "", "body": "", "blocked_by": [], "blocks": []}],
+    });
+    let _ = write!(
+        text,
+        "\n\nReturn an object of exactly this shape, carrying one entry per ticket with every \
+         empty string filled in, as JSON, with no code fence and nothing before or after \
+         it:\n\n{shape}",
+    );
+    text
 }
 
 /// The answer a test double hands back for a drafting pass, as
