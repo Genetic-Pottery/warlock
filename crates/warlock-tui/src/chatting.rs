@@ -316,6 +316,10 @@ impl<C: Converses> Chat<C> {
                     return Some(brief);
                 }
             }
+            // Parsed but not yet run: the pull itself is the next slice of the
+            // work, and a variant the composer can produce has to be matched
+            // here for the crate to compile at all.
+            Submitted::Pull(_) => {}
             // The line is asked of the value rather than restated here, so the
             // list of commands that exist is written down in one place.
             said @ Submitted::Refused => {
