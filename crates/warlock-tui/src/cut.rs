@@ -3,22 +3,25 @@
 //!
 //! The order in [`cut`] is the promise rather than an arrangement, as it is in
 //! [`mod@crate::push`]: a slice the record already names sends nothing at all,
-//! and a team with no `Backlog` state is refused while the slice is still
-//! nothing rather than half filed. The record is saved for this slice as soon
-//! as its issues exist and not once at the end, because an issue nothing
-//! records is exactly what the next run files a second time.
+//! a team with no `Backlog` state is refused while the slice is still nothing
+//! rather than half filed, and no relation is written until every issue it
+//! could name exists. The record is saved for this slice as soon as its issues
+//! exist and not once at the end, because an issue nothing records is exactly
+//! what the next run files a second time.
 //!
 //! Its own module rather than [`mod@crate::pull`]'s, which writes nothing.
 //! No key is read here and none can be: the seam arrives built, as it does for
 //! a pull.
 
+use std::collections::HashSet;
 use std::io::Write;
 use std::path::Path;
 
 use warlock_engine::drafting::Draft;
 use warlock_engine::{CutRecord, fold_title, manifest_path, now_rfc3339};
 use warlock_tui::{
-    LinearIssue, NewIssue, Posts, backlog_state, create_issue, issue_label_id, team_id,
+    LinearIssue, NewIssue, Posts, backlog_state, comment_on_project, create_issue, create_relation,
+    issue_label_id, team_id,
 };
 
 use crate::error::Error;
@@ -38,11 +41,19 @@ pub(crate) struct Filing<'a> {
     pub(crate) label: &'a str,
 }
 
-/// One slice of the project's scope, with the drafts a session settled for it.
+/// One slice of the project's scope, with the drafts a session settled for it
+/// and the issues it waits on.
+///
+/// `needs` is one entry per slice this slice's `depends_on` names, holding the
+/// issues that slice became: the references are written as positions in a
+/// document this module never reads, and a cut record keeps identifiers rather
+/// than the ids a relation is written with — so the run that filed them hands
+/// the issues over itself rather than anything here reading the board back.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Slice<'a> {
     pub(crate) title: &'a str,
     pub(crate) drafts: &'a [Draft],
+    pub(crate) needs: &'a [&'a [LinearIssue]],
 }
 
 /// What filing one slice came to.
@@ -61,8 +72,16 @@ pub(crate) enum Cut {
     /// keeps of an issue.
     Already(Vec<String>),
     /// The issues created now, whole rather than as identifiers, because the
-    /// relations a slice's drafts ask for are written by issue *id*.
-    Filed(Vec<LinearIssue>),
+    /// relations a later slice asks for are written by issue *id*, with one
+    /// line per edge Linear turned down.
+    ///
+    /// The lines are the caller's to say: an issue that exists with a missing
+    /// edge is something a person can fix on the board, so a refused relation
+    /// is reported beside the identifiers rather than taking them down with it.
+    Filed {
+        issues: Vec<LinearIssue>,
+        reported: Vec<String>,
+    },
 }
 
 #[cfg_attr(
@@ -145,6 +164,11 @@ pub(crate) fn cut<W: Write>(
         issues.push(issue);
     }
 
+    // After the loop above and never inside it: an edge can only be written
+    // between two issues that exist, and a draft is blocked by drafts on either
+    // side of it in the slice.
+    let reported = relate(linear, &edges(slice, &issues));
+
     let identifiers: Vec<String> = issues
         .iter()
         .map(|issue| issue.identifier().to_owned())
@@ -170,7 +194,90 @@ pub(crate) fn cut<W: Write>(
         source: Box::new(source),
     })?;
 
-    Ok(Cut::Filed(issues))
+    Ok(Cut::Filed { issues, reported })
+}
+
+/// Every edge this slice asks for, as the pair of issues it is written between:
+/// the blocker first, then the issue it holds up.
+///
+/// De-duplicated, because two drafts naming each other — one's `blocks` and the
+/// other's `blocked_by` — are one edge said twice, and Linear would take both.
+fn edges<'a>(
+    slice: Slice<'a>,
+    issues: &'a [LinearIssue],
+) -> Vec<(&'a LinearIssue, &'a LinearIssue)> {
+    let mut edges = Vec::new();
+
+    for (position, draft) in slice.drafts.iter().enumerate() {
+        // Indices into this slice's own drafts, already pruned to the ones that
+        // are in it by `warlock_engine::drafting::mend` — read through `get`
+        // anyway, because the alternative to an edge nobody can write is a
+        // panic in the middle of a slice that is already half related.
+        let Some(waiting) = issues.get(position) else {
+            continue;
+        };
+
+        for blocker in draft.blocked_by.iter().filter_map(|at| issues.get(*at)) {
+            edges.push((blocker, waiting));
+        }
+        for blocked in draft.blocks.iter().filter_map(|at| issues.get(*at)) {
+            edges.push((waiting, blocked));
+        }
+    }
+
+    for earlier in slice.needs {
+        for blocker in *earlier {
+            for waiting in issues {
+                edges.push((blocker, waiting));
+            }
+        }
+    }
+
+    let mut seen = HashSet::new();
+    edges.retain(|(blocker, waiting)| seen.insert((blocker.id(), waiting.id())));
+    edges
+}
+
+fn relate(linear: &impl Posts, edges: &[(&LinearIssue, &LinearIssue)]) -> Vec<String> {
+    edges
+        .iter()
+        .filter_map(|(blocker, waiting)| {
+            create_relation(linear, blocker.id(), waiting.id())
+                .err()
+                .map(|error| {
+                    format!(
+                        "`{}` was not written as blocking `{}`: {error}",
+                        blocker.identifier(),
+                        waiting.identifier()
+                    )
+                })
+        })
+        .collect()
+}
+
+/// Say on the project what was filed out of it, answering with the one line to
+/// report when Linear turns the comment down.
+///
+/// Nothing here decides *when* to say it: the brief's one comment lands after
+/// the last slice settles and only when something was filed, which is the run's
+/// question and not this operation's.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the operation lands before the run that sequences it: `warlock \
+                  pull` and the panel are later slices of brief 23"
+    )
+)]
+pub(crate) fn announce(linear: &impl Posts, project: &str, issues: &[String]) -> Option<String> {
+    let body = format!(
+        "Warlock cut this project into {}.\n\nThe project's status was not moved.",
+        listed(issues)
+    );
+
+    comment_on_project(linear, project, &body)
+        .err()
+        .map(|error| format!("the project was not commented on: {error}"))
 }
 
 // Shared with `error.rs`, which names the same identifiers in the refusal that

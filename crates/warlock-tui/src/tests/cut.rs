@@ -7,9 +7,9 @@ use serde_json::{Value, json};
 use tempfile::TempDir;
 use warlock_engine::drafting::Draft;
 use warlock_engine::{CutRecord, Filed, FiledRecord, filed_path};
-use warlock_tui::{LinearError, Posts};
+use warlock_tui::{LinearError, LinearIssue, Posts};
 
-use super::{Cut, Filing, Slice, cut};
+use super::{Cut, Filing, Slice, announce, cut};
 use crate::error::Error;
 use crate::status_for;
 
@@ -54,11 +54,36 @@ impl Posting {
     }
 
     fn creates(&self) -> Vec<Value> {
+        self.inputs("issueCreate")
+    }
+
+    fn relations(&self) -> Vec<Value> {
+        self.inputs("issueRelationCreate")
+    }
+
+    fn comments(&self) -> Vec<Value> {
+        self.inputs("commentCreate")
+    }
+
+    fn inputs(&self, mutation: &str) -> Vec<Value> {
         self.asked
             .borrow()
             .iter()
-            .filter(|(document, _)| document.contains("issueCreate"))
+            .filter(|(document, _)| document.contains(mutation))
             .map(|(_, variables)| variables["input"].clone())
+            .collect()
+    }
+
+    // Where in the whole conversation each of these documents was asked, so an
+    // ordering promise is an assertion about positions rather than about the
+    // order this test handed its answers over in.
+    fn positions_of(&self, mutation: &str) -> Vec<usize> {
+        self.asked
+            .borrow()
+            .iter()
+            .enumerate()
+            .filter(|(_, (document, _))| document.contains(mutation))
+            .map(|(at, _)| at)
             .collect()
     }
 }
@@ -221,6 +246,35 @@ fn two_drafts() -> Vec<Draft> {
     ]
 }
 
+// Three drafts in a chain, with the middle pair saying the same edge from both
+// ends: the first `blocks` the second and the second is `blocked_by` the first.
+fn ordered_drafts() -> Vec<Draft> {
+    let mut drafts = two_drafts();
+    drafts.push(a_draft("Write the record", "Beside the brief."));
+    drafts[0].blocks = vec![1];
+    drafts[1].blocked_by = vec![0];
+    drafts[2].blocked_by = vec![1];
+    drafts
+}
+
+fn relation(number: u32) -> Value {
+    json!({ "issueRelationCreate": { "issueRelation": { "id": format!("relation-{number}") } } })
+}
+
+fn edge(blocker: &str, waiting: &str) -> Value {
+    json!({ "issueId": blocker, "relatedIssueId": waiting, "type": "blocks" })
+}
+
+fn commented() -> Value {
+    json!({ "commentCreate": { "comment": { "id": "comment-1" } } })
+}
+
+fn refused(message: &str) -> Result<Value, LinearError> {
+    Err(LinearError::Refused {
+        message: message.to_owned(),
+    })
+}
+
 // The whole operation, less the environment: the repository root is this test's
 // temporary directory and the seam is whatever was handed in.
 fn cut_into(
@@ -229,8 +283,29 @@ fn cut_into(
     title: &str,
     drafts: &[Draft],
 ) -> (Result<Cut, Error>, String) {
+    cut_after(repo, linear, title, drafts, &[])
+}
+
+// The same, for a slice whose `depends_on` names slices this run already filed.
+fn cut_after(
+    repo: &Path,
+    linear: &impl Posts,
+    title: &str,
+    drafts: &[Draft],
+    needs: &[&[LinearIssue]],
+) -> (Result<Cut, Error>, String) {
     let mut out = Vec::new();
-    let outcome = cut(linear, repo, filing(), Slice { title, drafts }, &mut out);
+    let outcome = cut(
+        linear,
+        repo,
+        filing(),
+        Slice {
+            title,
+            drafts,
+            needs,
+        },
+        &mut out,
+    );
 
     (
         outcome,
@@ -273,13 +348,47 @@ fn cuts_of(root: &Path) -> Vec<CutRecord> {
 }
 
 fn filed(outcome: Result<Cut, Error>) -> Vec<String> {
+    issues_of(outcome)
+        .iter()
+        .map(|issue| issue.identifier().to_owned())
+        .collect()
+}
+
+fn issues_of(outcome: Result<Cut, Error>) -> Vec<LinearIssue> {
     match outcome.expect("a slice that files") {
-        Cut::Filed(issues) => issues
-            .iter()
-            .map(|issue| issue.identifier().to_owned())
-            .collect(),
+        Cut::Filed { issues, .. } => issues,
         Cut::Already(issues) => panic!("nothing was sent: {issues:?}"),
     }
+}
+
+fn reported(outcome: Result<Cut, Error>) -> Vec<String> {
+    match outcome.expect("a slice that files") {
+        Cut::Filed { reported, .. } => reported,
+        Cut::Already(issues) => panic!("nothing was sent: {issues:?}"),
+    }
+}
+
+// One earlier slice of this same run, filed against its own stand-in so the
+// conversation the slice under test has is only its own. This is the road the
+// issues of a `depends_on` arrive by: they are kept from the cut that made
+// them, because a cut record holds identifiers and a relation is written by id.
+fn an_earlier_slice(repo: &Path) -> Vec<LinearIssue> {
+    let linear = Posting::answering([
+        Ok(team_found()),
+        Ok(backlog()),
+        Ok(label_found()),
+        Ok(issue(100)),
+    ]);
+
+    let outcome = cut_into(
+        repo,
+        &linear,
+        "An earlier slice",
+        &[a_draft("Walk the tree", "Every directory.")],
+    )
+    .0;
+
+    issues_of(outcome)
 }
 
 #[test]
@@ -533,5 +642,266 @@ fn the_identifiers_come_back_when_the_record_cannot_be_written() {
     assert!(
         cuts_of(repo.path()).is_empty(),
         "the record the save failed on was written anyway"
+    );
+}
+
+#[test]
+fn every_issue_exists_before_the_first_relation_is_written() {
+    let repo = a_repository();
+    let earlier = an_earlier_slice(repo.path());
+    let linear = Posting::answering([
+        Ok(team_found()),
+        Ok(backlog()),
+        Ok(label_found()),
+        Ok(issue(125)),
+        Ok(issue(126)),
+        Ok(issue(127)),
+        Ok(relation(1)),
+        Ok(relation(2)),
+        Ok(relation(3)),
+        Ok(relation(4)),
+        Ok(relation(5)),
+    ]);
+
+    let outcome = cut_after(
+        repo.path(),
+        &linear,
+        TITLE,
+        &ordered_drafts(),
+        &[earlier.as_slice()],
+    )
+    .0;
+
+    assert_eq!(filed(outcome), ["WAR-125", "WAR-126", "WAR-127"]);
+    let creates = linear.positions_of("issueCreate");
+    let relations = linear.positions_of("issueRelationCreate");
+    assert_eq!(creates.len(), 3, "{creates:?}");
+    assert_eq!(relations.len(), 5, "{relations:?}");
+    assert!(
+        creates.iter().max() < relations.iter().min(),
+        "an edge was written before every issue of the slice existed: \
+         creates {creates:?}, relations {relations:?}"
+    );
+}
+
+#[test]
+fn a_slice_writes_its_own_edges_and_one_from_every_issue_it_waits_on() {
+    let repo = a_repository();
+    let earlier = an_earlier_slice(repo.path());
+    let linear = Posting::answering([
+        Ok(team_found()),
+        Ok(backlog()),
+        Ok(label_found()),
+        Ok(issue(125)),
+        Ok(issue(126)),
+        Ok(issue(127)),
+        Ok(relation(1)),
+        Ok(relation(2)),
+        Ok(relation(3)),
+        Ok(relation(4)),
+        Ok(relation(5)),
+    ]);
+
+    cut_after(
+        repo.path(),
+        &linear,
+        TITLE,
+        &ordered_drafts(),
+        &[earlier.as_slice()],
+    )
+    .0
+    .expect("a slice that files");
+
+    assert_eq!(
+        linear.relations(),
+        [
+            // The drafts' own chain, said once though the middle pair names it
+            // from both ends.
+            edge("issue-125", "issue-126"),
+            edge("issue-126", "issue-127"),
+            // Then the slice this one waits on, to every issue of this one.
+            edge("issue-100", "issue-125"),
+            edge("issue-100", "issue-126"),
+            edge("issue-100", "issue-127"),
+        ],
+    );
+    assert_eq!(
+        linear.documents().len(),
+        11,
+        "one request per operation and no retry"
+    );
+}
+
+#[test]
+fn a_pair_of_drafts_naming_each_other_is_one_edge() {
+    let repo = a_repository();
+    let mut drafts = two_drafts();
+    drafts[0].blocks = vec![1];
+    drafts[1].blocked_by = vec![0];
+    let linear = Posting::answering([
+        Ok(team_found()),
+        Ok(backlog()),
+        Ok(label_found()),
+        Ok(issue(125)),
+        Ok(issue(126)),
+        Ok(relation(1)),
+    ]);
+
+    cut_into(repo.path(), &linear, TITLE, &drafts)
+        .0
+        .expect("a slice that files");
+
+    assert_eq!(linear.relations(), [edge("issue-125", "issue-126")]);
+}
+
+#[test]
+fn a_slice_that_waits_on_nothing_and_orders_nothing_writes_no_relations() {
+    let repo = a_repository();
+    let linear = a_whole_cut();
+
+    cut_into(repo.path(), &linear, TITLE, &two_drafts())
+        .0
+        .expect("a slice that files");
+
+    assert!(linear.relations().is_empty(), "{:?}", linear.relations());
+}
+
+#[test]
+fn a_refused_relation_is_a_reported_line_and_the_slice_still_files() {
+    let repo = a_repository();
+    let mut drafts = two_drafts();
+    drafts[1].blocked_by = vec![0];
+    let linear = Posting::answering([
+        Ok(team_found()),
+        Ok(backlog()),
+        Ok(label_found()),
+        Ok(issue(125)),
+        Ok(issue(126)),
+        refused("Entity not found"),
+    ]);
+
+    let outcome = cut_into(repo.path(), &linear, TITLE, &drafts).0;
+
+    let Ok(Cut::Filed { issues, reported }) = outcome else {
+        panic!("a refused edge failed the slice: {outcome:?}");
+    };
+    let identifiers: Vec<&str> = issues.iter().map(LinearIssue::identifier).collect();
+    assert_eq!(identifiers, ["WAR-125", "WAR-126"]);
+    assert_eq!(reported.len(), 1, "{reported:?}");
+    assert!(reported[0].contains("`WAR-125`"), "{}", reported[0]);
+    assert!(reported[0].contains("`WAR-126`"), "{}", reported[0]);
+    assert!(reported[0].contains("Entity not found"), "{}", reported[0]);
+    assert_eq!(
+        linear.documents().len(),
+        6,
+        "the refused edge was tried a second time"
+    );
+
+    let cuts = cuts_of(repo.path());
+    assert_eq!(cuts.len(), 1, "a missing edge left the slice unrecorded");
+    assert_eq!(cuts[0].issues(), ["WAR-125", "WAR-126"]);
+}
+
+#[test]
+fn every_refused_edge_of_a_slice_is_reported_and_the_rest_are_still_written() {
+    let repo = a_repository();
+    let earlier = an_earlier_slice(repo.path());
+    let linear = Posting::answering([
+        Ok(team_found()),
+        Ok(backlog()),
+        Ok(label_found()),
+        Ok(issue(125)),
+        Ok(issue(126)),
+        Ok(issue(127)),
+        refused("Entity not found"),
+        Ok(relation(2)),
+        refused("Related issue is required"),
+        Ok(relation(4)),
+        Ok(relation(5)),
+    ]);
+
+    let outcome = cut_after(
+        repo.path(),
+        &linear,
+        TITLE,
+        &ordered_drafts(),
+        &[earlier.as_slice()],
+    )
+    .0;
+
+    let reported = reported(outcome);
+    assert_eq!(reported.len(), 2, "{reported:?}");
+    assert!(reported[0].contains("Entity not found"), "{reported:?}");
+    assert!(
+        reported[1].contains("Related issue is required"),
+        "{reported:?}"
+    );
+    assert_eq!(
+        linear.relations().len(),
+        5,
+        "an edge after a refused one was skipped"
+    );
+}
+
+#[test]
+fn the_project_comment_names_every_issue_and_says_the_status_was_not_moved() {
+    let linear = Posting::answering([Ok(commented())]);
+
+    let line = announce(
+        &linear,
+        PROJECT_ID,
+        &["WAR-125".to_owned(), "WAR-126".to_owned()],
+    );
+
+    assert!(line.is_none(), "{line:?}");
+    let comments = linear.comments();
+    assert_eq!(comments.len(), 1, "{comments:?}");
+    assert_eq!(comments[0]["projectId"], json!(PROJECT_ID));
+    let body = comments[0]["body"].as_str().expect("a comment body");
+    assert!(body.contains("`WAR-125`, `WAR-126`"), "{body}");
+    assert!(body.contains("status was not moved"), "{body}");
+    assert_eq!(
+        comments[0]
+            .as_object()
+            .expect("a comment input")
+            .keys()
+            .collect::<Vec<_>>(),
+        ["projectId", "body"],
+        "the comment carried something other than the project and its text",
+    );
+    assert_eq!(
+        linear.documents().len(),
+        1,
+        "one request per operation and no retry"
+    );
+}
+
+#[test]
+fn a_refused_comment_is_a_reported_line_and_leaves_the_slice_filed() {
+    let repo = a_repository();
+    let linear = Posting::answering([
+        Ok(team_found()),
+        Ok(backlog()),
+        Ok(label_found()),
+        Ok(issue(125)),
+        Ok(issue(126)),
+        refused("Comment is required"),
+    ]);
+
+    let identifiers = filed(cut_into(repo.path(), &linear, TITLE, &two_drafts()).0);
+    let line = announce(&linear, PROJECT_ID, &identifiers).expect("a refused comment is a line");
+
+    assert_eq!(identifiers, ["WAR-125", "WAR-126"]);
+    assert!(line.contains("Comment is required"), "{line}");
+    assert!(!line.contains('\n'), "a reported line is one line: {line}");
+    assert_eq!(
+        linear.documents().len(),
+        6,
+        "the refused comment was tried a second time"
+    );
+    assert_eq!(
+        cuts_of(repo.path())[0].issues(),
+        ["WAR-125", "WAR-126"],
+        "a refused comment took the cut record with it"
     );
 }
