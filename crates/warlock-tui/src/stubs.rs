@@ -180,6 +180,16 @@ impl Scripted {
         self.said.lock().expect("a stand-in nothing poisoned").len()
     }
 
+    /// Everything this model was asked, in the order it was asked: what a test
+    /// reads to say that an answer somebody sent reached the session that had
+    /// asked for it, in the words it was sent in.
+    pub(crate) fn said(&self) -> Vec<String> {
+        self.said
+            .lock()
+            .expect("a stand-in nothing poisoned")
+            .clone()
+    }
+
     /// Whether anything that was given a handle on a turn of this model has been
     /// told to stop.
     pub(crate) fn cancelled(&self) -> bool {

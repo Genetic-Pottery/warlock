@@ -36,6 +36,23 @@
 //! that takes minutes, with no second long-lived session and no runtime to
 //! carry it. A turn driven from [`Pulls::keep_up`] instead would freeze the
 //! frame for as long as `claude` took to think.
+//!
+//! A slice that asks something is a *state of that run* — [`Stage::Waiting`] —
+//! and never a [`Mode`](warlock_tui::Mode): a mode is the panel's one chat
+//! session said at a different level, and this is a second session under its own
+//! prompt with a question of its own out. So the relay is held here, beside the
+//! session that asked, and the loop routes the field to it for exactly as long
+//! as it lives. Nothing in this module knows what a composer is: it says what is
+//! being answered ([`Pulls::answering`]), it takes an answer
+//! ([`Pulls::answered`]) and it hands back warlock's attempt for the field
+//! ([`Pulls::keep_up`]), and which value holds the draft is the loop's business.
+//!
+//! That attempt runs on a worker of its own, off a second conversation at the
+//! register the brief was written in — one turn, read-only, and nothing of the
+//! reader's talk in it. It is offered as an ordinary draft and never sent: what
+//! reaches the slice is whatever the field holds when somebody presses Enter, so
+//! a proposal that failed, that settled nothing, or that somebody cleared and
+//! typed over costs the question nothing at all.
 
 use std::mem;
 use std::path::{Path, PathBuf};
@@ -45,8 +62,8 @@ use std::time::Instant;
 
 use warlock_engine::{Manifest, agent, filed_path, resolve_filing};
 use warlock_tui::{
-    Answer, App, Cancel, ChatAgent, Converses, Drafted, Drafting, PullConfirm, Replied, Slice,
-    fetch_project, scope_block_in,
+    Answer, App, Cancel, ChatAgent, Converses, Drafted, Drafting, NOTHING_SETTLES_IT, PullConfirm,
+    Replied, Slice, fetch_project, propose_answer, scope_block_in,
 };
 
 use crate::cut::listed;
@@ -75,6 +92,9 @@ const PULL_LOST: &str = "the pull stopped without saying how it went; nothing wa
 // slice is one session and one thread, so a channel that closed with nothing on
 // it took that slice down and nothing else — which is why this is a line about
 // the slice and the run carries on to the next.
+//
+// A proposal's worker is worded the same way for the same reason, and costs even
+// less: the question is still up and the field is still somebody's to type into.
 const SLICE_LOST: &str = "it stopped without saying how it went";
 
 /// What a pull has to say for itself once the board has answered: one line, or
@@ -167,6 +187,11 @@ pub(crate) struct Pulls<O: Opens, A: Converses> {
     // no `claude` exists until a confirmed question asks a slice for drafts.
     // `warlock pull` builds its one the same way and for the same reason.
     agent: A,
+    // And the conversation warlock's attempt at a question is asked in, which is
+    // a different one: not the slice's own session, whose next turn is the
+    // answer, and not the panel's chat, which has heard the reader's talk and
+    // none of the brief. See [`ChatAgent::proposing`].
+    proposer: A,
     fetching: Option<Fetching>,
     // The question between the fetch and the run, held here rather than beside
     // the session's other windows because it is a state of the pull and not of
@@ -205,9 +230,9 @@ struct Fetching {
 }
 
 /// The run a Yes started: the slices left to cut, which one of them is being
-/// drafted, and the session drafting it.
+/// drafted, and where that slice's session has got to.
 ///
-/// There is always exactly one slice in flight while this lives — the reply
+/// There is always exactly one slice under way while this lives — the reply
 /// that ends one slice starts the next, or ends the run — so "a pull is
 /// drafting" needs no flag beside it.
 #[derive(Debug)]
@@ -218,7 +243,44 @@ struct Slicing<A: Converses> {
     // cannot come apart: a count kept beside the index would be a second answer
     // to which slice this is.
     at: usize,
-    asking: Asking<A>,
+    stage: Stage<A>,
+}
+
+/// The two things a slice can be doing: talking to the model, or waiting on
+/// somebody.
+///
+/// One value rather than a session and a flag beside it, because the session is
+/// in exactly one of the two places — on a worker, or parked here with a
+/// question out — and a pair would have a fourth state for every caller to read
+/// and none of them to produce.
+#[derive(Debug)]
+enum Stage<A: Converses> {
+    /// A turn on a worker, with the session riding along.
+    Drafting(Asking<A>),
+    /// A question relayed, the session parked until somebody answers it.
+    Waiting(Waiting<A>),
+}
+
+/// A question put to whoever is at the panel: the session that asked it, and
+/// warlock's attempt at it while that attempt is still being made.
+///
+/// The session is held rather than dropped and re-opened, because it is the
+/// conversation that asked: a slice answered by a fresh session would be one
+/// answering a question nobody in it had heard. Nothing is in flight for it
+/// here — its next turn starts when the answer arrives.
+#[derive(Debug)]
+struct Waiting<A> {
+    session: Drafting<A>,
+    /// The proposal, for as long as it is being made. `None` once it has landed
+    /// however it landed, so a question is only ever attempted once: the
+    /// failures that reach here are a missing binary, a cancel and a timeout,
+    /// and none of the three is better the second time.
+    ///
+    /// There is no cancel handle beside it. [`propose_answer`] mints its own and
+    /// keeps it, which is the honest shape for one turn nothing else can reach:
+    /// quitting drops the receiver and the worker finishes into nowhere, having
+    /// read a brief, a slice and a repository and written nothing.
+    proposing: Option<Receiver<Result<String, agent::Error>>>,
 }
 
 // One slice's session, from the panel's side: what the worker will say, and the
@@ -245,23 +307,34 @@ type Turned<A> = (Drafting<A>, Result<Replied, agent::Error>);
 
 impl Pulls<Linear, ChatAgent> {
     pub(crate) fn new() -> Self {
-        // A conversation of its own at the register the brief was written in,
-        // not the panel's: a drafting session has heard none of the reader's
-        // talk and answers in JSON. `warlock pull` opens its sessions off the
-        // same value for the same reason.
-        Self::with_client(Linear, Standing::home().ok(), ChatAgent::drafting())
+        // Two conversations of its own at the register the brief was written in,
+        // neither of them the panel's: a drafting session has heard none of the
+        // reader's talk and answers in JSON, and a proposing one is read-only
+        // and one turn long. `warlock pull` opens its sessions off the same
+        // value for the same reason.
+        Self::with_client(
+            Linear,
+            Standing::home().ok(),
+            ChatAgent::drafting(),
+            ChatAgent::proposing(),
+        )
     }
 }
 
 impl<O: Opens, A: Converses> Pulls<O, A> {
-    // The seam a test drives the real value over a stand-in client and a
-    // stand-in model through, rather than assembling the pieces underneath and
+    // The seam a test drives the real value over a stand-in client and two
+    // stand-in models through, rather than assembling the pieces underneath and
     // proving something about an arrangement the event loop never has.
-    pub(crate) const fn with_client(open: O, home: Option<PathBuf>, agent: A) -> Self {
+    //
+    // Two agents and not one, because the two are two conversations: a test that
+    // scripted them as one would be proving something about a session warlock
+    // does not open.
+    pub(crate) const fn with_client(open: O, home: Option<PathBuf>, agent: A, proposer: A) -> Self {
         Self {
             open,
             home,
             agent,
+            proposer,
             fetching: None,
             confirm: PullConfirm::Closed,
             ready: None,
@@ -348,9 +421,17 @@ impl<O: Opens, A: Converses> Pulls<O, A> {
     /// here blocks, so frames keep being drawn, the tree keeps scrolling and the
     /// composer stays usable while a request is in flight and while a slice is
     /// being drafted — which for a slice is minutes rather than seconds.
-    pub(crate) fn keep_up(&mut self, app: &mut App, now: Instant) {
+    ///
+    /// What comes back is warlock's attempt at a question, on the one round the
+    /// attempt landed in and on no other. It is handed up rather than put
+    /// anywhere, because the field it goes in is the conversation's and this
+    /// value has no business knowing that; the loop puts it there as an ordinary
+    /// draft. Every other ending — nothing settled it, the attempt failed, its
+    /// worker said nothing — is a line on the thread and no draft at all, so the
+    /// field is left empty and the question is still somebody's to answer.
+    pub(crate) fn keep_up(&mut self, app: &mut App, now: Instant) -> Option<String> {
         self.landed(app, now);
-        self.drafted(app, now);
+        self.drafted(app, now)
     }
 
     fn landed(&mut self, app: &mut App, now: Instant) {
@@ -387,17 +468,32 @@ impl<O: Opens, A: Converses> Pulls<O, A> {
         }
     }
 
+    // Whichever of the two things the slice under way is doing. One drain per
+    // round and never both: a session is on a worker or it is parked with a
+    // question out, and the stage is the one record of which.
+    fn drafted(&mut self, app: &mut App, now: Instant) -> Option<String> {
+        if matches!(self.slicing.as_ref()?.stage, Stage::Waiting(_)) {
+            return self.proposed(app, now);
+        }
+        self.turned(app, now);
+        None
+    }
+
     // One slice's turn, when its worker has one to report, and the next slice
     // started on the same round: a run that waited for the round after would
     // spend a poll interval of nothing between every two sessions.
     //
     // The run is taken out rather than borrowed because the agent the next
     // session is opened off sits beside it on this value.
-    fn drafted(&mut self, app: &mut App, now: Instant) {
+    fn turned(&mut self, app: &mut App, now: Instant) {
         let Some(mut slicing) = self.slicing.take() else {
             return;
         };
-        let turned = match slicing.asking.replies.try_recv() {
+        let Stage::Drafting(asking) = &slicing.stage else {
+            self.slicing = Some(slicing);
+            return;
+        };
+        let turned = match asking.replies.try_recv() {
             Ok(turned) => Some(turned),
             // Still drafting, and nothing new to say.
             Err(TryRecvError::Empty) => {
@@ -409,8 +505,28 @@ impl<O: Opens, A: Converses> Pulls<O, A> {
             Err(TryRecvError::Disconnected) => None,
         };
 
-        for line in said(&slicing.slices[slicing.at], turned) {
-            app.panel_mut().note(line, now);
+        match ended(&slicing.slices[slicing.at], turned) {
+            // A question, which is the one ending that leaves the slice where it
+            // is: the session is parked with the question on the thread in the
+            // words it was asked, and warlock starts on an attempt at it. The
+            // run goes no further until somebody has answered, because the next
+            // thing this slice says depends on what they say.
+            Ended::Asked { session, question } => {
+                let slice = &slicing.slices[slicing.at];
+                app.panel_mut().note(question_line(slice, &question), now);
+                let proposing = spawn_proposal(&self.proposer, &slicing.brief, slice, &question);
+                slicing.stage = Stage::Waiting(Waiting {
+                    session,
+                    proposing: Some(proposing),
+                });
+                self.slicing = Some(slicing);
+                return;
+            }
+            Ended::Over(lines) => {
+                for line in lines {
+                    app.panel_mut().note(line, now);
+                }
+            }
         }
 
         slicing.at += 1;
@@ -419,7 +535,7 @@ impl<O: Opens, A: Converses> Pulls<O, A> {
         // The last slice leaves the run taken down, which is what makes the
         // next `/pull` allowed on the round the last one reported.
         if at < total {
-            slicing.asking = started(
+            slicing.stage = Stage::Drafting(started(
                 &self.agent,
                 app,
                 &slicing.brief,
@@ -427,9 +543,104 @@ impl<O: Opens, A: Converses> Pulls<O, A> {
                 at,
                 total,
                 now,
-            );
+            ));
             self.slicing = Some(slicing);
         }
+    }
+
+    // Warlock's attempt at the question that is up, when its worker has one to
+    // report. The attempt is over however it went — there is no second try —
+    // and the question is not: whatever lands here, the field is somebody's and
+    // the session is still parked waiting on it.
+    fn proposed(&mut self, app: &mut App, now: Instant) -> Option<String> {
+        let slicing = self.slicing.as_mut()?;
+        let Stage::Waiting(waiting) = &mut slicing.stage else {
+            return None;
+        };
+        let proposal = match waiting.proposing.as_ref()?.try_recv() {
+            Ok(Ok(proposal)) => Ok(proposal),
+            Ok(Err(error)) => Err(one_line(&error.to_string())),
+            // Still thinking, and nothing new to say.
+            Err(TryRecvError::Empty) => return None,
+            // The worker panicked: the hook has already printed it, and the
+            // question is still up with nothing in the field.
+            Err(TryRecvError::Disconnected) => Err(SLICE_LOST.to_owned()),
+        };
+        waiting.proposing = None;
+
+        let slice = &slicing.slices[slicing.at];
+        match proposal {
+            // Recognised by [`propose_answer`] and not re-read here: the one
+            // place that sentence is told from a proposal is the one that asked
+            // for it, and a second reader would eventually disagree with it.
+            Ok(proposal) if proposal == NOTHING_SETTLES_IT => {
+                app.panel_mut().note(settled_line(slice, &proposal), now);
+                None
+            }
+            // Handed up for the field and deliberately not said on the thread:
+            // it is a draft nobody has sent, and a thread that reported it would
+            // read tomorrow as though warlock had answered the question itself.
+            Ok(proposal) => Some(proposal),
+            Err(why) => {
+                app.panel_mut().note(unproposed_line(slice, &why), now);
+                None
+            }
+        }
+    }
+
+    /// Whether a slice is waiting on an answer, which is the whole of what the
+    /// loop asks before it routes a submitted draft here rather than into the
+    /// conversation.
+    ///
+    /// A state of the pull and not a mode: it is true for exactly as long as one
+    /// session has one question out, and it goes false on the round the answer
+    /// is taken.
+    pub(crate) fn relaying(&self) -> bool {
+        self.waiting().is_some()
+    }
+
+    /// What the field is answering for, as a sentence to draw on it, or `None`
+    /// while nothing is waiting.
+    ///
+    /// Named the way every other line about a slice names it, so a reader whose
+    /// eye is on the border and a reader whose eye is on the thread are being
+    /// told about the same slice in the same words.
+    pub(crate) fn answering(&self) -> Option<String> {
+        self.waiting()
+            .map(|slicing| format!("answering {}", named(&slicing.slices[slicing.at])))
+    }
+
+    fn waiting(&self) -> Option<&Slicing<A>> {
+        self.slicing
+            .as_ref()
+            .filter(|slicing| matches!(slicing.stage, Stage::Waiting(_)))
+    }
+
+    /// The answer somebody sent, put to the session that asked for it.
+    ///
+    /// The text goes up exactly as it was handed over: nothing here reads it,
+    /// no command in it is recognised and warlock's own attempt has no standing
+    /// over anything typed in its place — what was in the field is what was
+    /// sent, and the thread says so.
+    ///
+    /// A no-op with nothing waiting, which is how the loop's one question
+    /// ([`Pulls::relaying`]) stays the only one: a submitted draft that arrived
+    /// a round late cannot start a turn of a session that has moved on.
+    pub(crate) fn answered(&mut self, app: &mut App, answer: &str, now: Instant) {
+        let Some(mut slicing) = self.slicing.take() else {
+            return;
+        };
+        slicing.stage = match slicing.stage {
+            // Not waiting on anybody, so there is nothing this answers: the
+            // stage goes back exactly as it was.
+            stage @ Stage::Drafting(_) => stage,
+            Stage::Waiting(waiting) => {
+                let slice = &slicing.slices[slicing.at];
+                app.panel_mut().note(answer_line(slice, answer), now);
+                Stage::Drafting(asked(waiting.session, answer))
+            }
+        };
+        self.slicing = Some(slicing);
     }
 
     /// The same question with the other answer lit. A closed dialog stays
@@ -475,7 +686,7 @@ impl<O: Opens, A: Converses> Pulls<O, A> {
             brief: ready.brief,
             slices: ready.slices,
             at: 0,
-            asking,
+            stage: Stage::Drafting(asking),
         });
     }
 }
@@ -501,14 +712,27 @@ fn started<A: Converses>(
     app.panel_mut()
         .note(format!("{} — drafting", heading(place, total, slice)), now);
     let session = Drafting::for_slice(agent, brief, slice.heading(), slice.prose());
-    let cancel = CancelGuard::over(session.cancel());
 
-    Asking {
-        replies: spawn_open(session),
-        cancel,
-    }
+    turning(session, Drafting::open)
 }
 
+// The same session told what somebody answered, back on a worker. Nothing is
+// said on the thread here: the answer was put there as it was taken, and the
+// slice is already named as the one being drafted.
+//
+// The answer is the session's to word from here on — an answer given after the
+// last round carries [`Drafting`]'s own instruction to draft now — so nothing on
+// this side counts rounds or decides when the asking is over.
+fn asked<A: Converses>(session: Drafting<A>, answer: &str) -> Asking<A> {
+    let answer = answer.to_owned();
+    turning(session, move |session| session.answer(&answer))
+}
+
+// A session handed to a worker for one turn, with the handle that stops the turn
+// it is in taken before it goes: the handle is the session's own — see
+// [`CancelGuard::over`] — so it reaches the `claude` this turn is actually
+// running.
+//
 // The `JoinHandle` is dropped on purpose, as every other worker's is: joining is
 // waiting, and this thread exists precisely so nobody waits for it. The guard
 // the caller keeps is what stops it.
@@ -517,10 +741,27 @@ fn started<A: Converses>(
 // behind a lock: it is the one thing that carries what this slice's
 // conversation has already said, and the event loop's thread has no business
 // touching it while a turn is running.
-fn spawn_open<A: Converses>(mut session: Drafting<A>) -> Receiver<Turned<A>> {
+fn turning<A, F>(session: Drafting<A>, turn: F) -> Asking<A>
+where
+    A: Converses,
+    F: FnOnce(&mut Drafting<A>) -> Result<Replied, agent::Error> + Send + 'static,
+{
+    let cancel = CancelGuard::over(session.cancel());
+
+    Asking {
+        replies: spawn_turn(session, turn),
+        cancel,
+    }
+}
+
+fn spawn_turn<A, F>(mut session: Drafting<A>, turn: F) -> Receiver<Turned<A>>
+where
+    A: Converses,
+    F: FnOnce(&mut Drafting<A>) -> Result<Replied, agent::Error> + Send + 'static,
+{
     let (events, received) = mpsc::channel();
     thread::spawn(move || {
-        let replied = session.open();
+        let replied = turn(&mut session);
         // Ignored for the reason every other worker's send is: a receiver that
         // has gone away is an application that is quitting, which is also the
         // one thing that cancels a run.
@@ -530,20 +771,66 @@ fn spawn_open<A: Converses>(mut session: Drafting<A>) -> Receiver<Turned<A>> {
     received
 }
 
-// What one slice's turn comes to on the thread: every ending is lines and the
-// next slice, never the end of the run. The slices left are other work, they
-// were ordered so that nothing is drafted before what it waits on, and a run
-// that stopped would leave the reader typing `/pull` again to reach them.
+// Warlock's attempt at one question, on a worker of its own for the reason a
+// turn is on one: it is a whole `claude` invocation, and a panel that waited for
+// it would stop drawing for as long as it thought.
 //
-// The session is dropped here however the turn went. A question is noted and the
-// slice left, which is what the conversation can do with one until the relay
-// exists to answer it.
-fn said<A>(slice: &Slice, turned: Option<Turned<A>>) -> Vec<String> {
-    let Some((_session, replied)) = turned else {
-        return vec![format!("{} was not drafted: {SLICE_LOST}", named(slice))];
+// Everything it needs is copied in — the brief, the one slice, the question —
+// because the run on this side goes on living while it thinks, and a worker
+// borrowing from it would be a worker the next round could not move past.
+//
+// `propose_answer` is called whole rather than assembled here: it is what knows
+// the register, the one turn, and which replies are the session saying it has
+// nothing.
+fn spawn_proposal<A: Converses>(
+    agent: &A,
+    brief: &str,
+    slice: &Slice,
+    question: &str,
+) -> Receiver<Result<String, agent::Error>> {
+    let (events, received) = mpsc::channel();
+    let (agent, brief, question) = (agent.clone(), brief.to_owned(), question.to_owned());
+    let (title, prose) = (slice.heading().to_owned(), slice.prose().to_owned());
+    thread::spawn(move || {
+        let proposed = propose_answer(&agent, &brief, &title, &prose, &question);
+        // Ignored for the reason above: a receiver that has gone away is a
+        // question nobody is waiting on any more.
+        let _ = events.send(proposed);
+    });
+
+    received
+}
+
+/// What one slice's turn came to: a question to put to somebody, or the lines
+/// that end this slice.
+///
+/// The session rides out on the question and nowhere else, which is the whole
+/// distinction: an ending that is lines is an ending, and the slices left are
+/// other work — they were ordered so that nothing is drafted before what it
+/// waits on, and a run that stopped would leave the reader typing `/pull` again
+/// to reach them.
+enum Ended<A> {
+    Asked {
+        session: Drafting<A>,
+        question: String,
+    },
+    Over(Vec<String>),
+}
+
+// The session is dropped on every path but the question's. Nothing after the
+// asking has anything more to say to it: the drafts are in hand, or the slice is
+// uncut and asking again is a turn spent on an answer that was not better the
+// first time.
+fn ended<A>(slice: &Slice, turned: Option<Turned<A>>) -> Ended<A> {
+    let Some((session, replied)) = turned else {
+        return Ended::Over(vec![format!(
+            "{} was not drafted: {SLICE_LOST}",
+            named(slice)
+        )]);
     };
 
-    match replied {
+    // Questions apart, every arm below is lines about a slice that is over.
+    let lines = match replied {
         Ok(Replied::Answer(Drafted::Drafts { fill, repairs })) => {
             let titles: Vec<String> = fill
                 .drafts
@@ -565,12 +852,16 @@ fn said<A>(slice: &Slice, turned: Option<Turned<A>>) -> Vec<String> {
         Ok(Replied::Answer(Drafted::Unusable(defect))) => {
             vec![format!("{} was not drafted: {defect}", named(slice))]
         }
-        Ok(Replied::Question(question)) => vec![question_line(slice, &question)],
+        // The one ending that is not an ending: the session goes back to the
+        // caller with it, because its next turn is whatever somebody answers.
+        Ok(Replied::Question(question)) => return Ended::Asked { session, question },
         // A missing binary, a timeout or a cancel, none of which is better the
         // second time — see [`Drafting`]'s own note — so the slice is left
         // uncut rather than asked again.
         Err(error) => vec![format!("{} was not drafted: {error}", named(slice))],
-    }
+    };
+
+    Ended::Over(lines)
 }
 
 fn repair_line(slice: &Slice, repair: &str) -> String {
@@ -578,15 +869,35 @@ fn repair_line(slice: &Slice, repair: &str) -> String {
 }
 
 // The question in the words it was asked, flattened as the thread takes a line.
-// Nothing here can answer one — the relay that can is the next slice of this
-// work — so what is said is that the slice was left, and a reader who wants it
-// cut has the question in front of them.
+// Whoever is at the panel answers it, so this line and [`answer_line`] are the
+// pair a conversation is read back by: `asked` is the slice talking and
+// `answered` is the panel, and the two verbs are the whole of how a reader
+// tomorrow tells one from the other.
 fn question_line(slice: &Slice, question: &str) -> String {
-    format!(
-        "{} asked, and was left uncut: {}",
-        named(slice),
-        one_line(question)
-    )
+    format!("{} asked: {}", named(slice), one_line(question))
+}
+
+// What was sent, in the words it was sent in, and the other half of that pair.
+// Warlock's attempt and something typed over it land here identically on
+// purpose: what went to the session is what was in the field, and a line that
+// said which of the two it was would be warlock reporting its own draft rather
+// than the answer.
+fn answer_line(slice: &Slice, answer: &str) -> String {
+    format!("{} was answered: {}", named(slice), one_line(answer))
+}
+
+// The session having nothing to offer, said in the sentence `propose_answer`
+// hands back and no other words: the question is still up, the field is still
+// empty, and the answer is entirely whoever is reading's.
+fn settled_line(slice: &Slice, settles: &str) -> String {
+    format!("{} — {settles}", named(slice))
+}
+
+// An attempt that never came back with anything. One line and the question left
+// standing: nothing was sent, the session is still waiting, and the field is
+// empty for somebody to answer in their own words.
+fn unproposed_line(slice: &Slice, why: &str) -> String {
+    format!("{} — no answer was proposed: {why}", named(slice))
 }
 
 // Everything the worker owns, and the whole of what crosses the thread

@@ -220,10 +220,22 @@ fn asked_over(
     linear: Reading,
     agent: Scripted,
 ) -> (App, Pulls<Reading, Scripted>, TempDir, TempDir) {
+    asked_proposing(linear, agent, unasked())
+}
+
+// The same, with the second conversation scripted as well: the one warlock's
+// attempt at a question is asked in. Separate from the slice's own script
+// because they are separate sessions, so a test that scripts one and leaves the
+// other empty is a test that says which of the two was asked.
+fn asked_proposing(
+    linear: Reading,
+    agent: Scripted,
+    proposer: Scripted,
+) -> (App, Pulls<Reading, Scripted>, TempDir, TempDir) {
     let repo = a_repository();
     let home = a_home(repo.path());
     filed(repo.path(), &[]);
-    let mut pulls = Pulls::with_client(linear, Some(home.path().to_path_buf()), agent);
+    let mut pulls = Pulls::with_client(linear, Some(home.path().to_path_buf()), agent, proposer);
     let mut app = App::default();
     press(&mut app, &mut pulls, repo.path());
     landing(&mut app, &mut pulls);
@@ -240,7 +252,12 @@ fn a_pull_reports_the_project_its_status_and_how_many_slices_are_left() {
     let home = a_home(repo.path());
     filed(repo.path(), &[]);
     let linear = Reading::holding(NAME, Some(STATUS), SLICED);
-    let mut pulls = Pulls::with_client(linear.clone(), Some(home.path().to_path_buf()), unasked());
+    let mut pulls = Pulls::with_client(
+        linear.clone(),
+        Some(home.path().to_path_buf()),
+        unasked(),
+        unasked(),
+    );
     let mut app = App::default();
 
     press(&mut app, &mut pulls, repo.path());
@@ -276,6 +293,7 @@ fn slices_already_cut_are_left_out_of_what_is_still_to_cut() {
         Reading::holding(NAME, Some(STATUS), SLICED),
         Some(home.path().to_path_buf()),
         unasked(),
+        unasked(),
     );
     let mut app = App::default();
 
@@ -299,7 +317,12 @@ fn a_project_that_is_not_planned_is_one_line_with_nothing_torn_down() {
     let home = a_home(repo.path());
     filed(repo.path(), &[]);
     let linear = Reading::holding(NAME, Some("Backlog"), SLICED);
-    let mut pulls = Pulls::with_client(linear.clone(), Some(home.path().to_path_buf()), unasked());
+    let mut pulls = Pulls::with_client(
+        linear.clone(),
+        Some(home.path().to_path_buf()),
+        unasked(),
+        unasked(),
+    );
     let mut app = App::default();
 
     press(&mut app, &mut pulls, repo.path());
@@ -328,6 +351,7 @@ fn a_project_in_no_status_at_all_is_refused_in_the_same_words() {
         Reading::holding(NAME, None, SLICED),
         Some(home.path().to_path_buf()),
         unasked(),
+        unasked(),
     );
     let mut app = App::default();
 
@@ -350,7 +374,12 @@ fn a_brief_no_record_claims_is_refused_before_a_key_is_read() {
     // seam here asserts by panicking if one is.
     let repo = a_repository();
     let home = a_home(repo.path());
-    let mut pulls = Pulls::with_client(Unreachable, Some(home.path().to_path_buf()), unasked());
+    let mut pulls = Pulls::with_client(
+        Unreachable,
+        Some(home.path().to_path_buf()),
+        unasked(),
+        unasked(),
+    );
     let mut app = App::default();
 
     press(&mut app, &mut pulls, repo.path());
@@ -376,6 +405,7 @@ fn a_description_with_no_scope_block_is_the_parsers_own_line() {
         Reading::holding(NAME, Some(STATUS), NO_SCOPE),
         Some(home.path().to_path_buf()),
         unasked(),
+        unasked(),
     );
     let mut app = App::default();
 
@@ -398,6 +428,7 @@ fn a_project_with_every_slice_cut_is_refused_rather_than_reported() {
         Reading::holding(NAME, Some(STATUS), SLICED),
         Some(home.path().to_path_buf()),
         unasked(),
+        unasked(),
     );
     let mut app = App::default();
 
@@ -419,7 +450,7 @@ fn a_machine_with_no_home_is_refused_before_anything_is_read() {
     // there is no board to resolve and nothing to read the record for.
     let repo = a_repository();
     filed(repo.path(), &[]);
-    let mut pulls = Pulls::with_client(Unreachable, None, unasked());
+    let mut pulls = Pulls::with_client(Unreachable, None, unasked(), unasked());
     let mut app = App::default();
 
     pulls.press(&mut app, &a_manifest(), repo.path(), BRIEF, now());
@@ -438,7 +469,12 @@ fn a_second_pull_with_one_in_flight_is_one_line_and_reads_nothing() {
     filed(repo.path(), &[]);
     let gate = Gate::shut();
     let linear = Reading::holding(NAME, Some(STATUS), SLICED).held_at(&gate);
-    let mut pulls = Pulls::with_client(linear.clone(), Some(home.path().to_path_buf()), unasked());
+    let mut pulls = Pulls::with_client(
+        linear.clone(),
+        Some(home.path().to_path_buf()),
+        unasked(),
+        unasked(),
+    );
     let mut app = App::default();
 
     press(&mut app, &mut pulls, repo.path());
@@ -466,6 +502,7 @@ fn the_rounds_go_on_while_the_request_is_in_flight() {
     let mut pulls = Pulls::with_client(
         Reading::holding(NAME, Some(STATUS), SLICED).held_at(&gate),
         Some(home.path().to_path_buf()),
+        unasked(),
         unasked(),
     );
     let mut app = App::default();
@@ -501,6 +538,7 @@ fn a_pull_says_which_document_it_is_reading_before_the_board_answers() {
         Reading::holding(NAME, Some(STATUS), SLICED).held_at(&gate),
         Some(home.path().to_path_buf()),
         unasked(),
+        unasked(),
     );
     let mut app = App::default();
 
@@ -526,6 +564,7 @@ fn dropping_the_session_ends_the_pull_without_waiting_for_it() {
     let mut pulls = Pulls::with_client(
         Reading::holding(NAME, Some(STATUS), SLICED).held_at(&gate),
         Some(home.path().to_path_buf()),
+        unasked(),
         unasked(),
     );
     let mut app = App::default();
@@ -591,6 +630,7 @@ mod asking {
         let mut pulls = Pulls::with_client(
             Reading::holding(NAME, Some("Backlog"), SLICED),
             Some(home.path().to_path_buf()),
+            unasked(),
             unasked(),
         );
         let mut app = App::default();
@@ -683,6 +723,7 @@ mod asking {
             Reading::holding(NAME, Some(STATUS), SLICED),
             Some(home.path().to_path_buf()),
             unasked(),
+            unasked(),
         );
         let mut app = App::default();
 
@@ -708,6 +749,7 @@ mod cutting {
     use super::{
         AT_MOST, Answering, App, FIRST, Gate, Instant, NAME, Pulls, Reading, SECOND, Scripted,
         THIRD, a_home, a_project, a_repository, asked_over, filed, landing, notes, now, press,
+        unasked,
     };
 
     // The three `[n/total]` prefixes a run over this project says, in the order
@@ -792,8 +834,12 @@ mod cutting {
         let home = a_home(repo.path());
         filed(repo.path(), &[FIRST]);
         let agent = Scripted::saying([Answering::drafts(SECOND), Answering::drafts(THIRD)]);
-        let mut pulls =
-            Pulls::with_client(a_project(), Some(home.path().to_path_buf()), agent.clone());
+        let mut pulls = Pulls::with_client(
+            a_project(),
+            Some(home.path().to_path_buf()),
+            agent.clone(),
+            unasked(),
+        );
         let mut app = App::default();
         press(&mut app, &mut pulls, repo.path());
         landing(&mut app, &mut pulls);
@@ -916,41 +962,6 @@ mod cutting {
     }
 
     #[test]
-    fn a_question_is_said_in_the_words_it_was_asked_and_the_slice_is_left() {
-        // Prose with rounds left is a question, and there is nothing here to
-        // answer one with yet — so it is said and the slice is left uncut, which
-        // is what the relay replaces.
-        const ASKED: &str = "Which of the two records does this slice write?";
-        let (mut app, mut pulls, _repo, _home) = cut(
-            a_project(),
-            Scripted::saying([
-                Answering::says(ASKED),
-                Answering::drafts(SECOND),
-                Answering::drafts(THIRD),
-            ]),
-        );
-
-        through(&mut app, &mut pulls);
-
-        let said = notes(&app);
-        let asked = about(&said, FIRST);
-        assert!(
-            asked.iter().any(|line| line.contains(ASKED)),
-            "the question is not on the thread in the words it was asked: {said:?}"
-        );
-        assert!(
-            !asked.iter().any(|line| line.contains("drafted `")),
-            "a slice that asked a question was drafted anyway: {said:?}"
-        );
-        assert!(
-            about(&said, SECOND)
-                .iter()
-                .any(|line| line.contains("drafted `")),
-            "the run stopped at the question: {said:?}"
-        );
-    }
-
-    #[test]
     fn the_rounds_go_on_while_a_slice_is_drafting() {
         // The whole reason a turn is on a worker: a drain that blocked would
         // freeze the panel for as long as the model took to think, which for a
@@ -1052,6 +1063,415 @@ mod cutting {
         assert!(
             said.iter().any(|line| line.contains(NAME)),
             "the run never named the project"
+        );
+    }
+}
+
+// The relay: a slice that asks something, the question on the thread, warlock's
+// attempt at it in whoever's hand the field is in, and whatever they send going
+// back to the session that asked. Driven in rounds at the value the loop holds,
+// exactly as the loop drives it, over two scripted conversations — the slice's
+// and the one the attempt is made in — so which of the two was asked for what is
+// something these tests can say.
+mod relaying {
+    use tempfile::TempDir;
+    use warlock_tui::NOTHING_SETTLES_IT;
+
+    use super::{
+        AT_MOST, Answering, App, FIRST, Gate, Instant, Pulls, Reading, SECOND, Scripted, THIRD,
+        a_project, asked_proposing, notes, now,
+    };
+
+    // The question the first slice comes back with, and warlock's attempt at it:
+    // prose with a round left is a question, and the model that answers it is a
+    // second session, so the two strings can never be confused for each other.
+    const ASKED: &str = "Which of the two records does this slice write?";
+
+    const PROPOSED: &str = "The cut record. `filed.toml` is written once, by the filing path.";
+
+    // What somebody types over the attempt, which is what the session has to
+    // hear: warlock's draft has no standing over it at all.
+    const TYPED: &str = "Neither — it writes the cut record and nothing else.";
+
+    // A confirmed run whose first slice asks, with the whole of both scripts
+    // written down: the slice asks, is answered, and drafts, and the two after
+    // it draft first time.
+    fn asking(proposer: Scripted) -> (App, Pulls<Reading, Scripted>, TempDir, TempDir) {
+        let (mut app, mut pulls, repo, home) = asked_proposing(
+            a_project(),
+            Scripted::saying([
+                Answering::says(ASKED),
+                Answering::drafts(FIRST),
+                Answering::drafts(SECOND),
+                Answering::drafts(THIRD),
+            ]),
+            proposer,
+        );
+        pulls.cut(&mut app, now());
+        waiting(&mut app, &mut pulls);
+        (app, pulls, repo, home)
+    }
+
+    // Rounds until the slice under way is waiting on an answer, drained and
+    // never blocked on: the loop draws and then drains, so a test that waited on
+    // a channel would be a test of something the panel does not do.
+    fn waiting(app: &mut App, pulls: &mut Pulls<Reading, Scripted>) {
+        let waited = Instant::now();
+        while !pulls.relaying() && waited.elapsed() < AT_MOST {
+            round(app, pulls);
+        }
+        assert!(pulls.relaying(), "no question was ever put");
+    }
+
+    // Rounds until warlock's attempt has come to something, and whatever it came
+    // to: a draft for the field, or `None` and a line on the thread instead.
+    // Both are one round in the panel's life, which is why one helper waits for
+    // either.
+    fn attempted(app: &mut App, pulls: &mut Pulls<Reading, Scripted>) -> Option<String> {
+        let waited = Instant::now();
+        let said = notes(app).len();
+        while waited.elapsed() < AT_MOST {
+            if let Some(draft) = pulls.keep_up(app, now()) {
+                return Some(draft);
+            }
+            if notes(app).len() > said {
+                return None;
+            }
+        }
+        panic!("the attempt at the question never came to anything");
+    }
+
+    // One round of the loop's drain, with whatever it had for the field thrown
+    // away: the tests that care about the draft ask for it through `attempted`.
+    fn round(app: &mut App, pulls: &mut Pulls<Reading, Scripted>) {
+        drop(pulls.keep_up(app, now()));
+    }
+
+    // Rounds until the run is over, which after an answer is the three slices
+    // drafting one after another.
+    fn through(app: &mut App, pulls: &mut Pulls<Reading, Scripted>) {
+        let waited = Instant::now();
+        while pulls.drafting() && waited.elapsed() < AT_MOST {
+            round(app, pulls);
+        }
+        assert!(!pulls.drafting(), "the run never finished");
+    }
+
+    fn answered(said: &[String]) -> Vec<String> {
+        said.iter()
+            .filter(|line| line.contains("was answered:"))
+            .cloned()
+            .collect()
+    }
+
+    #[test]
+    fn a_question_lands_on_the_thread_in_the_words_it_was_asked_and_the_slice_waits() {
+        // The question is the slice's, said as it was said: nothing summarises
+        // it, and the run goes no further, because what this slice says next
+        // depends on what it is told.
+        let (app, pulls, _repo, _home) = asking(Scripted::saying([Answering::says(PROPOSED)]));
+
+        let said = notes(&app);
+        let asked: Vec<&String> = said.iter().filter(|line| line.contains(ASKED)).collect();
+        assert_eq!(
+            asked.len(),
+            1,
+            "the question is not on the thread: {said:?}"
+        );
+        assert!(
+            asked[0].starts_with(&format!("slice 1 `{FIRST}` asked:")),
+            "{:?} does not mark the slice as having asked",
+            asked[0]
+        );
+        assert!(
+            !said.iter().any(|line| line.contains(SECOND)),
+            "the run walked past a question: {said:?}"
+        );
+        assert!(pulls.drafting(), "the run was taken down by a question");
+    }
+
+    #[test]
+    fn the_panel_says_which_slice_the_field_is_answering_for() {
+        // The one thing about the field that cannot be read off the field: a
+        // draft that answers somewhere else looks exactly like one that answers
+        // here. Named the way every line about this slice names it.
+        let (mut app, mut pulls, _repo, _home) =
+            asking(Scripted::saying([Answering::says(PROPOSED)]));
+
+        assert_eq!(
+            pulls.answering(),
+            Some(format!("answering slice 1 `{FIRST}`"))
+        );
+
+        pulls.answered(&mut app, TYPED, now());
+
+        assert_eq!(
+            pulls.answering(),
+            None,
+            "the field is still labelled for a question that is over"
+        );
+    }
+
+    #[test]
+    fn warlocks_attempt_comes_back_for_the_field_and_is_not_said_on_the_thread() {
+        // It is a draft nobody has sent. A thread that reported it would read
+        // tomorrow as though warlock had answered the question itself.
+        let (mut app, mut pulls, _repo, _home) =
+            asking(Scripted::saying([Answering::says(PROPOSED)]));
+
+        let offered = attempted(&mut app, &mut pulls);
+
+        assert_eq!(offered.as_deref(), Some(PROPOSED));
+        let said = notes(&app);
+        assert!(
+            !said.iter().any(|line| line.contains(PROPOSED)),
+            "an unsent draft was put on the thread: {said:?}"
+        );
+        assert!(pulls.relaying(), "the attempt answered the question itself");
+    }
+
+    #[test]
+    fn the_attempt_is_made_in_the_other_conversation_and_asks_about_this_slice() {
+        // Not the slice's own session — whose next turn is the answer — and not
+        // the panel's chat: a third conversation, told the brief, the one slice
+        // and the question, and told to say so when the three do not settle it.
+        let proposer = Scripted::saying([Answering::says(PROPOSED)]);
+        let (mut app, mut pulls, _repo, _home) = asking(proposer.clone());
+
+        attempted(&mut app, &mut pulls);
+
+        let asked = proposer.said();
+        assert_eq!(asked.len(), 1, "the attempt was not one turn: {asked:?}");
+        assert!(asked[0].contains(ASKED), "the question was not put to it");
+        assert!(asked[0].contains(FIRST), "the slice was not put to it");
+        assert!(
+            asked[0].contains(NOTHING_SETTLES_IT),
+            "it was never told what to say when nothing settles it"
+        );
+    }
+
+    #[test]
+    fn the_rounds_go_on_while_the_attempt_is_being_made() {
+        // The whole reason the attempt is on a worker: a drain that blocked
+        // would freeze the panel for as long as a second `claude` took to read a
+        // repository, with a question up and nobody able to type an answer.
+        let gate = Gate::shut();
+        let (mut app, mut pulls, _repo, _home) =
+            asking(Scripted::saying([Answering::says(PROPOSED)]).held_at(&gate));
+        let held = notes(&app).len();
+
+        for _ in 0..3 {
+            round(&mut app, &mut pulls);
+            assert!(pulls.relaying(), "a held attempt took the question down");
+        }
+
+        assert_eq!(
+            notes(&app).len(),
+            held,
+            "a round with nothing to report said something"
+        );
+        gate.open();
+        attempted(&mut app, &mut pulls);
+    }
+
+    #[test]
+    fn what_was_sent_reaches_the_session_that_asked_and_the_run_carries_on() {
+        // The answer goes to the session mid-question rather than to a fresh
+        // one, which is the whole point of parking it: the slice drafts on the
+        // turn after, and the two slices behind it are reached.
+        let agent = Scripted::saying([
+            Answering::says(ASKED),
+            Answering::drafts(FIRST),
+            Answering::drafts(SECOND),
+            Answering::drafts(THIRD),
+        ]);
+        let (mut app, mut pulls, _repo, _home) = asked_proposing(
+            a_project(),
+            agent.clone(),
+            Scripted::saying([Answering::says(PROPOSED)]),
+        );
+        pulls.cut(&mut app, now());
+        waiting(&mut app, &mut pulls);
+        attempted(&mut app, &mut pulls);
+
+        pulls.answered(&mut app, TYPED, now());
+        through(&mut app, &mut pulls);
+
+        assert!(
+            agent.said().iter().any(|turn| turn == TYPED),
+            "what was sent did not reach the session in the words it was sent: {:?}",
+            agent.said()
+        );
+        let said = notes(&app);
+        assert!(
+            said.iter()
+                .any(|line| line.contains(THIRD) && line.contains("drafted `")),
+            "the run did not reach the last slice: {said:?}"
+        );
+    }
+
+    #[test]
+    fn a_question_and_what_was_sent_are_marked_apart_from_each_other() {
+        // Read back tomorrow, the pair says who answered: the slice asked, and
+        // the panel answered. Warlock's attempt and something typed over it land
+        // identically, because what went to the session is what was in the
+        // field.
+        let (mut app, mut pulls, _repo, _home) =
+            asking(Scripted::saying([Answering::says(PROPOSED)]));
+        let offered = attempted(&mut app, &mut pulls).expect("an attempt for the field");
+
+        pulls.answered(&mut app, &offered, now());
+
+        let said = notes(&app);
+        let sent = answered(&said);
+        assert_eq!(
+            sent.len(),
+            1,
+            "what was sent is not on the thread: {said:?}"
+        );
+        assert_eq!(
+            sent[0],
+            format!("slice 1 `{FIRST}` was answered: {PROPOSED}")
+        );
+        assert!(
+            said.iter().any(|line| line.contains("asked:")),
+            "the question it answers is not on the thread: {said:?}"
+        );
+        assert!(
+            !pulls.relaying(),
+            "the question is still waiting on an answer"
+        );
+    }
+
+    #[test]
+    fn a_draft_cleared_and_typed_over_is_what_is_sent() {
+        // Whatever the field holds at the Enter, and nothing else: the attempt
+        // is an offer, not a decision, and a relay that preferred its own words
+        // would be warlock answering for somebody.
+        let agent = Scripted::saying([
+            Answering::says(ASKED),
+            Answering::drafts(FIRST),
+            Answering::drafts(SECOND),
+            Answering::drafts(THIRD),
+        ]);
+        let (mut app, mut pulls, _repo, _home) = asked_proposing(
+            a_project(),
+            agent.clone(),
+            Scripted::saying([Answering::says(PROPOSED)]),
+        );
+        pulls.cut(&mut app, now());
+        waiting(&mut app, &mut pulls);
+        attempted(&mut app, &mut pulls);
+
+        pulls.answered(&mut app, TYPED, now());
+        through(&mut app, &mut pulls);
+
+        assert!(
+            !agent.said().iter().any(|turn| turn.contains(PROPOSED)),
+            "warlock's own draft was sent over what was typed: {:?}",
+            agent.said()
+        );
+        assert!(
+            notes(&app).iter().any(|line| line.contains(TYPED)),
+            "the thread does not say what was sent"
+        );
+    }
+
+    #[test]
+    fn a_question_nothing_settles_is_that_sentence_on_the_thread_and_an_empty_field() {
+        // The one sentence, recognised by the session that asked for it and put
+        // through untouched: a guess is the one kind of answer that reaches the
+        // board looking like a decision somebody made.
+        let (mut app, mut pulls, _repo, _home) =
+            asking(Scripted::saying([Answering::says(NOTHING_SETTLES_IT)]));
+
+        let offered = attempted(&mut app, &mut pulls);
+
+        assert_eq!(offered, None, "a refusal was offered as a draft");
+        let said = notes(&app);
+        assert!(
+            said.iter().any(|line| line.contains(NOTHING_SETTLES_IT)),
+            "the sentence is not on the thread: {said:?}"
+        );
+        assert!(
+            pulls.relaying(),
+            "a question nothing settles stopped being a question"
+        );
+    }
+
+    #[test]
+    fn a_failed_attempt_is_one_line_and_the_question_is_still_somebodys_to_answer() {
+        // A missing `claude` on the second conversation costs the question
+        // nothing: the session that asked is still parked, the field is empty,
+        // and an answer typed into it goes where it always would.
+        let agent = Scripted::saying([
+            Answering::says(ASKED),
+            Answering::drafts(FIRST),
+            Answering::drafts(SECOND),
+            Answering::drafts(THIRD),
+        ]);
+        let (mut app, mut pulls, _repo, _home) = asked_proposing(
+            a_project(),
+            agent.clone(),
+            Scripted::saying([Answering::missing()]),
+        );
+        pulls.cut(&mut app, now());
+        waiting(&mut app, &mut pulls);
+
+        let offered = attempted(&mut app, &mut pulls);
+
+        assert_eq!(offered, None, "a failed attempt filled the field");
+        let said = notes(&app);
+        let failed: Vec<&String> = said
+            .iter()
+            .filter(|line| line.contains("no answer was proposed"))
+            .collect();
+        assert_eq!(failed.len(), 1, "a failure cost more than a line: {said:?}");
+        assert!(pulls.relaying(), "a failed attempt took the question down");
+
+        pulls.answered(&mut app, TYPED, now());
+        through(&mut app, &mut pulls);
+
+        assert!(
+            agent.said().iter().any(|turn| turn == TYPED),
+            "the session was not alive to be answered: {:?}",
+            agent.said()
+        );
+    }
+
+    #[test]
+    fn an_answer_sent_before_the_attempt_lands_is_the_answer() {
+        // Somebody who knows the answer does not wait for warlock's: the
+        // question is over the moment they send, and the attempt still out has
+        // nowhere left to be put.
+        let gate = Gate::shut();
+        let agent = Scripted::saying([
+            Answering::says(ASKED),
+            Answering::drafts(FIRST),
+            Answering::drafts(SECOND),
+            Answering::drafts(THIRD),
+        ]);
+        let (mut app, mut pulls, _repo, _home) = asked_proposing(
+            a_project(),
+            agent.clone(),
+            Scripted::saying([Answering::says(PROPOSED)]).held_at(&gate),
+        );
+        pulls.cut(&mut app, now());
+        waiting(&mut app, &mut pulls);
+
+        pulls.answered(&mut app, TYPED, now());
+        gate.open();
+        through(&mut app, &mut pulls);
+
+        assert!(
+            !agent.said().iter().any(|turn| turn.contains(PROPOSED)),
+            "an attempt that landed late was sent: {:?}",
+            agent.said()
+        );
+        let said = notes(&app);
+        assert!(
+            !said.iter().any(|line| line.contains(PROPOSED)),
+            "an attempt nobody was waiting for was said: {said:?}"
         );
     }
 }

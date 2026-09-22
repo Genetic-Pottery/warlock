@@ -201,6 +201,41 @@ impl<C: Converses> Chat<C> {
         self.composer.set_width(width);
     }
 
+    // The other thing told once a round from the draw, and the whole of what
+    // this value knows about a draft that is not its own: a sentence to draw on
+    // the field's border. Who is waiting on the draft, and what is done with it
+    // when it is sent, are the loop's — see [`Chat::taken`].
+    pub(crate) fn set_composer_answering(&mut self, answering: Option<String>) {
+        self.composer.set_answering(answering);
+    }
+
+    // The draft taken whole and the field emptied, for a submission that is not
+    // a turn of this conversation. Nothing is asked, nothing is parsed and no
+    // command is recognised: the text goes up exactly as it was typed, because
+    // whoever is waiting on it asked a question of their own and the answer is
+    // not warlock's to read.
+    //
+    // Emptied by replacing the value outright, as `submit` empties it, and for
+    // the same reason: the width, the muting and the label are told again by
+    // the round that draws next.
+    pub(crate) fn taken(&mut self) -> String {
+        let draft = self.composer.draft().to_owned();
+        self.composer = Composer::default();
+        draft
+    }
+
+    // A draft put into the field from outside, cursor at the end. It is an
+    // ordinary draft from that moment on — every editing key works on it, Enter
+    // sends whatever the field then holds, and clearing it and typing sends
+    // that instead — because it *is* the value a typed draft is.
+    //
+    // Whatever was in the field is replaced. What is offered here was asked for
+    // by the round that put the question up, and a field that refused it would
+    // leave the offer nowhere to be read.
+    pub(crate) fn offer(&mut self, draft: &str) {
+        self.composer = Composer::new(draft);
+    }
+
     pub(crate) const fn write_prompt(&self) -> &ScopePrompt {
         &self.prompt
     }

@@ -13,18 +13,18 @@ use warlock_engine::{
     resolve_filing,
 };
 use warlock_tui::{
-    App, Chrome, Focus, LinearError, QuitConfirm, RecordPrompt, Row, ScopePrompt, brief_at,
-    tree_height,
+    App, Chrome, Converses, Focus, LinearError, QuitConfirm, RecordPrompt, Row, ScopePrompt,
+    brief_at, tree_height,
 };
 
 use super::{Cli, Command, Error, FOR_CLAUDE_MD, Pushing, ScopeCommand, Session, status_for};
 use crate::chatting::Chat;
 use crate::pacting::Pact;
 use crate::pulling::Pulls;
-use crate::pushing::Pushes;
+use crate::pushing::{Opens, Pushes};
 use crate::query::spelled;
 use crate::session::{Scope, Watched};
-use crate::stubs::{Boarding, Copying, Passing, Saying, Scripted};
+use crate::stubs::{Boarding, Copying, Passing, Reading, Saying, Scripted};
 use crate::terminal::Screen;
 
 // `try_parse_from` wants argv as the process gets it, program name and all,
@@ -1295,7 +1295,46 @@ impl Screen for FakeScreen {
 // be.
 type Driven = Session<FakeScreen, Passing, Saying, Copying, Boarding, Scripted>;
 
+/// The same session over the other stand-in board: a Linear that answers the
+/// one request a `/pull` makes rather than the four a `/push` makes.
+///
+/// A second alias and not a second `Session`: the board is one type parameter of
+/// the value the loop holds, so a test that drives a pull the whole way through
+/// drives the very same session under a different seam.
+type Cutting = Session<FakeScreen, Passing, Saying, Copying, Reading, Scripted>;
+
 fn driving(app: App, scope: Scope, tree: &Tree) -> Driven {
+    driving_over(
+        app,
+        scope,
+        tree,
+        // No home, so a `/push` in any test but the ones in `filing` below is
+        // refused before a board is resolved and no test in this file can read
+        // the sigils of the machine it runs on. The tests that do push replace
+        // this whole value with one over a temporary home.
+        Pushes::with_client(Boarding::filing(""), None),
+        // And the same for a `/pull`, for the same reason: with no home there
+        // is nothing for one to resolve a board under, so no test in this file
+        // can read the machine's own sigils by typing the command.
+        Pulls::with_client(
+            Boarding::filing(""),
+            None,
+            Scripted::saying([]),
+            Scripted::saying([]),
+        ),
+    )
+}
+
+// The two values that decide which board a session reaches and which models it
+// opens are parameters, because that is the whole difference between a session
+// that files and one that cuts: everything else here is the same loop.
+fn driving_over<O: Opens, A: Converses>(
+    app: App,
+    scope: Scope,
+    tree: &Tree,
+    pushes: Pushes<O>,
+    pulls: Pulls<O, A>,
+) -> Session<FakeScreen, Passing, Saying, Copying, O, A> {
     let watched = Watched::start(&scope, tree);
     let root = scope.repo_root.clone();
     Session {
@@ -1308,15 +1347,8 @@ fn driving(app: App, scope: Scope, tree: &Tree) -> Driven {
         clipboard: Copying::taking(),
         confirm: QuitConfirm::default(),
         pushing: Pushing::closed(),
-        // No home, so a `/push` in any test but the ones in `filing` below is
-        // refused before a board is resolved and no test in this file can read
-        // the sigils of the machine it runs on. The tests that do push replace
-        // this whole value with one over a temporary home.
-        pushes: Pushes::with_client(Boarding::filing(""), None),
-        // And the same for a `/pull`, for the same reason: with no home there
-        // is nothing for one to resolve a board under, so no test in this file
-        // can read the machine's own sigils by typing the command.
-        pulls: Pulls::with_client(Boarding::filing(""), None, Scripted::saying([])),
+        pushes,
+        pulls,
         prompt: ScopePrompt::default(),
         record: RecordPrompt::default(),
         drag: None,
@@ -1377,6 +1409,21 @@ fn a_repository() -> tempfile::TempDir {
 // `session` over a real scratch repository, built the way `run` builds one
 // and, like it, with the tree read first.
 fn session_over(root: &Path) -> Driven {
+    let (app, scope, tree) = loading(root);
+    driving(app, scope, &tree)
+}
+
+// The same, over whichever board and models the caller is driving.
+fn session_reading<O: Opens, A: Converses>(
+    root: &Path,
+    pushes: Pushes<O>,
+    pulls: Pulls<O, A>,
+) -> Session<FakeScreen, Passing, Saying, Copying, O, A> {
+    let (app, scope, tree) = loading(root);
+    driving_over(app, scope, &tree, pushes, pulls)
+}
+
+fn loading(root: &Path) -> (App, Scope, Tree) {
     let Loaded { tree, .. } = load_tree(root).expect("a scratch repository loads");
     let repo_root = repository_root(tree.root_path()).expect("the load found a repository");
     let scope = Scope {
@@ -1384,7 +1431,7 @@ fn session_over(root: &Path) -> Driven {
         root: tree.root_path().to_path_buf(),
         repo_root,
     };
-    driving(App::from_tree(&tree), scope, &tree)
+    (App::from_tree(&tree), scope, tree)
 }
 
 fn rounds_until_settled(driven: &mut Driven) {
@@ -2962,6 +3009,7 @@ mod filing {
             linear.clone(),
             Some(home.to_path_buf()),
             Scripted::saying([]),
+            Scripted::saying([]),
         );
         driven
     }
@@ -3403,5 +3451,454 @@ mod filing {
                 .contains(NOT_A_KEY),
             "the record carries the key"
         );
+    }
+}
+
+// A `/pull` driven the whole way through a session — the command, the dialog's
+// Yes, a slice that asks something, and the keys that edit and send the answer —
+// over a Linear that answers one project out of memory and a home this module
+// made. Nothing here opens a socket, reads a real credential or looks at the
+// machine's own sigils, binding or key store.
+//
+// What is asserted is the routing, which is the half `tests/pulling.rs` cannot
+// see: that the field is the composer's own value, that an Enter in it while a
+// slice is waiting reaches that slice instead of starting a turn of the
+// conversation, and that every editing key works on what warlock put there.
+mod cutting {
+    use std::fs;
+    use std::path::Path;
+    use std::time::Instant;
+
+    use ratatui::crossterm::event::KeyCode;
+    use tempfile::TempDir;
+    use warlock_engine::{
+        Filed, FiledRecord, Manifest, PactEntry, ScopeRecord, save_key, save_key_binding,
+        save_sigils,
+    };
+    use warlock_tui::{Focus, Line};
+
+    use super::{AT_MOST, Cutting, key, session_reading};
+    use crate::pulling::Pulls;
+    use crate::pushing::Pushes;
+    use crate::stubs::{Answering, Reading, Scripted};
+
+    // Not a key, and named so that nothing reading this file mistakes it for
+    // one: it is stored so that a bound name resolves and the client is built
+    // from something.
+    const NOT_A_KEY: &str = "not-a-real-key-value";
+
+    const KEY_NAME: &str = "this-tests-own-name";
+
+    const SCOPE: &str = "data-plane";
+
+    const TEAM: &str = "WAR";
+
+    // The manifest's own spelling of the brief, which is what a record is keyed
+    // by and so what the command carries.
+    const BRIEF: &str = "docs/brief.md";
+
+    const PROJECT_ID: &str = "b229262b-22aa-444a-a8af-0a2a3f4ef100";
+
+    const URL: &str = "https://linear.app/acme/project/pull-a-brief-1a2b3c";
+
+    const NAME: &str = "Cut a planned project into tickets";
+
+    // Two slices, so that what the run does after the question is something the
+    // thread can be read for.
+    const SLICED: &str = "Nothing cuts a planned project into tickets.\n\n## Scope\n\n\
+                          ### 1. Read the project back\n\ndepends_on: []\n\n\
+                          What it resolves.\n\n\
+                          ### 2. Parse the scope block\n\ndepends_on: [1]\n\n\
+                          What it parses.\n";
+
+    const FIRST: &str = "Read the project back";
+
+    const SECOND: &str = "Parse the scope block";
+
+    const ASKED: &str = "Which of the two records does this slice write?";
+
+    // Warlock's attempt, which the field is to hold as an ordinary draft: long
+    // enough that a cursor at its end and a cursor anywhere else are different
+    // places.
+    const PROPOSED: &str = "The cut record, and nothing else.";
+
+    fn a_manifest() -> Manifest {
+        Manifest::with_entries([PactEntry::new(".", "docs", "docs/WARLOCK.md")
+            .expect("a relative module path is inside the root")
+            .with_scope(SCOPE)])
+        .with_scopes([ScopeRecord::new(SCOPE, TEAM, "In Review", "warlock")])
+    }
+
+    // A repository the session loads, with the brief on disk and the record a
+    // `/push` of it would have left behind: what a pull reads is the project,
+    // and the file is what the record is keyed by.
+    fn a_repository() -> TempDir {
+        let repo = tempfile::tempdir().expect("a temporary directory");
+        let head = repo.path().join(".git/HEAD");
+        fs::create_dir_all(head.parent().expect("`.git` is a directory"))
+            .expect("a scratch directory is writable");
+        fs::write(&head, "ref: refs/heads/main\n").expect("a scratch file is writable");
+        a_manifest()
+            .save(repo.path())
+            .expect("a manifest that saves");
+        let brief = repo.path().join(BRIEF);
+        fs::create_dir_all(brief.parent().expect("a `docs` directory"))
+            .expect("a scratch directory is writable");
+        fs::write(&brief, "# A brief\n").expect("a scratch file is writable");
+        let record = FiledRecord::new(
+            repo.path(),
+            brief,
+            PROJECT_ID,
+            URL,
+            SCOPE,
+            TEAM,
+            "2026-09-20T07:32:00Z",
+        )
+        .expect("a path inside the repository");
+        Filed::with_records([record])
+            .save(repo.path())
+            .expect("a record file that saves");
+        repo
+    }
+
+    // A home of this test's own: the sigils that pick the board, the binding and
+    // the key store all sit under it.
+    fn a_home(root: &Path) -> TempDir {
+        let home = tempfile::tempdir().expect("a temporary directory");
+        save_sigils(home.path(), root, &[SCOPE.to_owned()]).expect("a config that writes");
+        save_key_binding(home.path(), root, KEY_NAME).expect("a binding that writes");
+        save_key(home.path(), KEY_NAME, NOT_A_KEY).expect("a key store that writes");
+        home
+    }
+
+    // The session `run` builds, with its impure things replaced: the manifest
+    // that would have been loaded, a board that answers one project out of
+    // memory, and the two conversations a cut opens.
+    fn cutting_session(repo: &Path, home: &Path, agent: Scripted, proposer: Scripted) -> Cutting {
+        let linear = Reading::holding(NAME, Some("Planned"), SLICED);
+        let mut driven = session_reading(
+            repo,
+            Pushes::with_client(linear.clone(), Some(home.to_path_buf())),
+            Pulls::with_client(linear, Some(home.to_path_buf()), agent, proposer),
+        );
+        driven.manifest = a_manifest();
+        driven
+    }
+
+    // The slice's own script: it asks, it is answered, it drafts, and the slice
+    // behind it drafts first time.
+    fn a_slice_that_asks() -> Scripted {
+        Scripted::saying([
+            Answering::says(ASKED),
+            Answering::drafts(FIRST),
+            Answering::drafts(SECOND),
+        ])
+    }
+
+    fn notes(driven: &Cutting) -> Vec<String> {
+        driven
+            .app
+            .panel()
+            .thread()
+            .map(|thread| thread.lines(Instant::now()))
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|line| match line {
+                Line::Note { text } => Some(text),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn pressed(driven: &mut Cutting, code: KeyCode) -> bool {
+        driven
+            .press(key(code), Instant::now())
+            .expect("no key pressed here writes to a terminal")
+    }
+
+    // One turn of `run`'s loop with no event in it: draw, then everything that
+    // happened off this thread. The draw is what tells the field its width and
+    // what it is answering for, so a test that only drained would be a test of
+    // half a round.
+    fn round(driven: &mut Cutting) {
+        let size = driven.size().expect("the fake screen has a size");
+        driven.draw(size).expect("the fake screen draws");
+        driven.keep_up();
+    }
+
+    // The command typed the way a reader types one: the block arrives whole, as
+    // a terminal with bracketed paste hands it over, and the Enter after it is
+    // the submit.
+    fn typing(driven: &mut Cutting, command: &str) {
+        driven.app.set_focus(Focus::Composer);
+        driven.paste(command);
+        assert!(
+            pressed(driven, KeyCode::Enter),
+            "typing {command} ended the session"
+        );
+    }
+
+    // `/pull`, the rounds the fetch takes, and the two keys that answer its
+    // dialog Yes: No is lit when it opens, so Left is what moves onto Yes.
+    fn confirmed(driven: &mut Cutting) {
+        typing(driven, &format!("/pull {BRIEF}"));
+        let waited = Instant::now();
+        while driven.pulls.fetching() && waited.elapsed() < AT_MOST {
+            round(driven);
+        }
+        assert!(
+            driven.pulls.confirm().is_open(),
+            "the dialog did not come up: {:?}",
+            notes(driven)
+        );
+        assert!(pressed(driven, KeyCode::Left));
+        assert!(pressed(driven, KeyCode::Enter));
+    }
+
+    // Rounds until warlock's attempt at the question is in the field, which is
+    // two things arriving on two rounds: the question, and then the attempt.
+    fn offered(driven: &mut Cutting) {
+        let waited = Instant::now();
+        while driven.chat.composer().draft().is_empty() && waited.elapsed() < AT_MOST {
+            round(driven);
+        }
+        assert!(
+            !driven.chat.composer().draft().is_empty(),
+            "nothing was ever offered for the field: {:?}",
+            notes(driven)
+        );
+    }
+
+    // Rounds until the run is over, so the suite leaves no worker parked.
+    fn through(driven: &mut Cutting) {
+        let waited = Instant::now();
+        while driven.pulls.drafting() && waited.elapsed() < AT_MOST {
+            round(driven);
+        }
+        assert!(!driven.pulls.drafting(), "the run never finished");
+    }
+
+    #[test]
+    fn warlocks_attempt_is_an_ordinary_draft_with_the_cursor_at_its_end() {
+        // It is the value a typed draft is, so every editing key works on it:
+        // Backspace takes the last character, Home goes to the start, and a
+        // character typed there lands there.
+        let repo = a_repository();
+        let home = a_home(repo.path());
+        let mut driven = cutting_session(
+            repo.path(),
+            home.path(),
+            a_slice_that_asks(),
+            Scripted::saying([Answering::says(PROPOSED)]),
+        );
+
+        confirmed(&mut driven);
+        offered(&mut driven);
+
+        assert_eq!(driven.chat.composer().draft(), PROPOSED);
+        assert_eq!(
+            driven.chat.composer().cursor(),
+            PROPOSED.len(),
+            "the cursor is not at the end of what was offered"
+        );
+        assert!(pressed(&mut driven, KeyCode::Backspace));
+        assert_eq!(
+            driven.chat.composer().draft(),
+            &PROPOSED[..PROPOSED.len() - 1]
+        );
+        assert!(pressed(&mut driven, KeyCode::Home));
+        assert_eq!(driven.chat.composer().cursor(), 0);
+        assert!(pressed(&mut driven, KeyCode::Char('B')));
+        assert!(
+            driven.chat.composer().draft().starts_with('B'),
+            "a character typed at the start did not land there: {:?}",
+            driven.chat.composer().draft()
+        );
+        assert!(
+            !driven.chat.answering(),
+            "editing the offer started a turn of the conversation"
+        );
+    }
+
+    #[test]
+    fn an_enter_while_a_slice_waits_answers_it_rather_than_starting_a_turn() {
+        // The whole of the routing: the field is the conversation's, and what
+        // decides where a submission goes is the pull in flight and nothing on
+        // the chat at all.
+        let repo = a_repository();
+        let home = a_home(repo.path());
+        let agent = a_slice_that_asks();
+        let mut driven = cutting_session(
+            repo.path(),
+            home.path(),
+            agent.clone(),
+            Scripted::saying([Answering::says(PROPOSED)]),
+        );
+
+        confirmed(&mut driven);
+        offered(&mut driven);
+        assert!(pressed(&mut driven, KeyCode::Enter));
+
+        assert!(
+            !driven.chat.answering(),
+            "the answer started a turn of the conversation"
+        );
+        assert_eq!(
+            driven.chat.composer().draft(),
+            "",
+            "the field kept the answer that was sent"
+        );
+        through(&mut driven);
+        assert!(
+            agent.said().iter().any(|turn| turn == PROPOSED),
+            "the answer did not reach the session that asked: {:?}",
+            agent.said()
+        );
+        let said = notes(&driven);
+        assert!(
+            said.iter()
+                .any(|line| line.contains("asked:") && line.contains(ASKED)),
+            "the question is not on the thread: {said:?}"
+        );
+        assert!(
+            said.iter()
+                .any(|line| line.contains("was answered:") && line.contains(PROPOSED)),
+            "what was sent is not on the thread: {said:?}"
+        );
+    }
+
+    #[test]
+    fn a_draft_cleared_and_typed_over_is_what_the_slice_is_told() {
+        // Enter sends whatever the field holds. Warlock's attempt has no
+        // standing over it: cleared and typed over, it is the typing that goes.
+        let repo = a_repository();
+        let home = a_home(repo.path());
+        let agent = a_slice_that_asks();
+        let mut driven = cutting_session(
+            repo.path(),
+            home.path(),
+            agent.clone(),
+            Scripted::saying([Answering::says(PROPOSED)]),
+        );
+
+        confirmed(&mut driven);
+        offered(&mut driven);
+        for _ in 0..PROPOSED.len() {
+            assert!(pressed(&mut driven, KeyCode::Backspace));
+        }
+        assert_eq!(driven.chat.composer().draft(), "");
+        assert!(pressed(&mut driven, KeyCode::Char('N')));
+        assert!(pressed(&mut driven, KeyCode::Char('o')));
+        assert!(pressed(&mut driven, KeyCode::Enter));
+        through(&mut driven);
+
+        assert!(
+            agent.said().iter().any(|turn| turn == "No"),
+            "what was typed did not reach the session: {:?}",
+            agent.said()
+        );
+        assert!(
+            !agent.said().iter().any(|turn| turn == PROPOSED),
+            "warlock's own draft was sent instead: {:?}",
+            agent.said()
+        );
+    }
+
+    #[test]
+    fn the_field_says_which_slice_it_is_answering_for_and_stops_when_it_is_over() {
+        // Told once a round by the draw, off the pull, so a field cannot be left
+        // labelled for a question that is over.
+        let repo = a_repository();
+        let home = a_home(repo.path());
+        let mut driven = cutting_session(
+            repo.path(),
+            home.path(),
+            a_slice_that_asks(),
+            Scripted::saying([Answering::says(PROPOSED)]),
+        );
+
+        confirmed(&mut driven);
+        offered(&mut driven);
+        // `offered` stops on the round the attempt lands, and the label is told
+        // by the draw at the top of a round. The loop always draws again before
+        // anybody sees the field, so this is that draw and not a second beat.
+        round(&mut driven);
+
+        assert_eq!(
+            driven.chat.composer().answering(),
+            Some(format!("answering slice 1 `{FIRST}`").as_str())
+        );
+        assert!(pressed(&mut driven, KeyCode::Enter));
+        round(&mut driven);
+        assert_eq!(
+            driven.chat.composer().answering(),
+            None,
+            "the field is still labelled for a question that is over"
+        );
+        through(&mut driven);
+    }
+
+    #[test]
+    fn a_command_typed_into_the_field_while_a_slice_waits_is_the_answer() {
+        // Nothing reads what is sent: the slice asked a question of its own, and
+        // a `/chat` in the answer is the reader's word rather than a register to
+        // change.
+        let repo = a_repository();
+        let home = a_home(repo.path());
+        let agent = a_slice_that_asks();
+        let mut driven = cutting_session(
+            repo.path(),
+            home.path(),
+            agent.clone(),
+            Scripted::saying([Answering::says(PROPOSED)]),
+        );
+
+        confirmed(&mut driven);
+        offered(&mut driven);
+        for _ in 0..PROPOSED.len() {
+            assert!(pressed(&mut driven, KeyCode::Backspace));
+        }
+        driven.paste("/chat");
+        assert!(pressed(&mut driven, KeyCode::Enter));
+        through(&mut driven);
+
+        assert!(
+            agent.said().iter().any(|turn| turn == "/chat"),
+            "the command was not sent as the answer it was: {:?}",
+            agent.said()
+        );
+        assert!(
+            !driven.chat.answering(),
+            "a command in an answer started a turn of the conversation"
+        );
+    }
+
+    #[test]
+    fn the_second_slice_is_drafted_once_the_first_has_been_answered() {
+        // The run goes on where it left off: the slice that asked drafts on the
+        // turn after the answer, and the slice behind it is reached.
+        let repo = a_repository();
+        let home = a_home(repo.path());
+        let mut driven = cutting_session(
+            repo.path(),
+            home.path(),
+            a_slice_that_asks(),
+            Scripted::saying([Answering::says(PROPOSED)]),
+        );
+
+        confirmed(&mut driven);
+        offered(&mut driven);
+        assert!(pressed(&mut driven, KeyCode::Enter));
+        through(&mut driven);
+
+        let said = notes(&driven);
+        assert!(
+            said.iter()
+                .any(|line| line.contains(SECOND) && line.contains("drafted `")),
+            "the run did not reach the second slice: {said:?}"
+        );
+        for note in &said {
+            assert!(!note.contains(NOT_A_KEY), "{note} carries the key");
+        }
     }
 }

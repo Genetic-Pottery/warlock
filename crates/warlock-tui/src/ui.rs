@@ -927,7 +927,16 @@ fn mark_area(inner: Rect) -> Option<Rect> {
 
 fn draw_composer(frame: &mut Frame<'_>, area: Rect, composer: &Composer, live: bool) {
     let inner = pane_inner(area);
-    frame.render_widget(pane_block(live), area);
+    let mut block = pane_block(live);
+    // The one thing about the field that is not on the field: while something
+    // other than the conversation is waiting on a draft, what it is waiting for
+    // is written on the border, because a draft that answers somewhere else is
+    // otherwise indistinguishable from one that answers here. A title costs no
+    // row — it is drawn in the border the field already has.
+    if let Some(answering) = composer.answering() {
+        block = block.title_top(Line::from(answering.to_owned()).bold());
+    }
+    frame.render_widget(block, area);
 
     let window = composer.window(inner.width, inner.height);
     let mut lines: Vec<Line<'static>> = window

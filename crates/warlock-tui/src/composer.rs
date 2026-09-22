@@ -42,11 +42,11 @@ const CHORD: KeyModifiers = KeyModifiers::CONTROL
 /// a `char` boundary of `draft` and at most its length. [`Composer::at`] is the
 /// only road in from outside and it panics rather than clamps.
 ///
-/// `width` and `muted` are facts about the session rather than about the draft,
-/// told in once a round by whoever is about to draw. Both take part in
-/// [`PartialEq`] and [`Hash`] with everything else, so every value built here
-/// must carry the incoming pair through untouched — a keystroke that dropped
-/// one would read as a redraw to any whole-value comparison.
+/// `width`, `muted` and `answering` are facts about the session rather than
+/// about the draft, told in once a round by whoever is about to draw. All three
+/// take part in [`PartialEq`] and [`Hash`] with everything else, so every value
+/// built here must carry the incoming three through untouched — a keystroke
+/// that dropped one would read as a redraw to any whole-value comparison.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
 pub struct Composer {
     draft: String,
@@ -58,9 +58,20 @@ pub struct Composer {
     /// keystroke is answered in that state.
     width: u16,
     muted: bool,
+    /// Who the draft is for, when it is not for this conversation: the one
+    /// sentence naming whatever the next submission answers. `None` is the
+    /// ordinary field, which is the conversation's own.
+    ///
+    /// A line to draw and not a destination: nothing here knows where a
+    /// submission goes, and whoever routes it is the same value that says this.
+    answering: Option<String>,
 }
 
 impl Composer {
+    /// A field holding that draft with the cursor at the end of it, which is
+    /// where somebody about to edit what is there starts from: every editing
+    /// key works on it exactly as it works on something they typed, because it
+    /// is the same value a typed draft is.
     #[must_use]
     pub fn new(draft: impl Into<String>) -> Self {
         let draft = draft.into();
@@ -71,6 +82,7 @@ impl Composer {
             cursor,
             width: 0,
             muted: false,
+            answering: None,
         }
     }
 
@@ -133,6 +145,22 @@ impl Composer {
     #[must_use]
     pub const fn is_muted(&self) -> bool {
         self.muted
+    }
+
+    /// Told every round for [`Composer::set_muted`]'s reason, off whatever is
+    /// waiting on a draft: a field that had to be told at the two edges would
+    /// be one somebody could leave labelled for a question that is over.
+    ///
+    /// The draft does not move. What this changes is what the field is drawn as
+    /// and nothing about what is in it, because a question relayed into the
+    /// field is answered with whatever somebody sends — theirs or warlock's.
+    pub fn set_answering(&mut self, answering: Option<String>) {
+        self.answering = answering;
+    }
+
+    #[must_use]
+    pub fn answering(&self) -> Option<&str> {
+        self.answering.as_deref()
     }
 
     #[must_use]
@@ -332,14 +360,16 @@ pub fn compose_for(key: KeyEvent, composer: &Composer) -> Composed {
     // construction: `composer.cursor` is a boundary of the draft, so the halves
     // it splits into are whole strings and the offset after a whole character of
     // the result is a boundary of the result. `typing` is the one place
-    // `width` and `muted` are carried through, and it carries them untouched —
-    // this function is neither a redraw nor where a turn starts or ends.
+    // `width`, `muted` and `answering` are carried through, and it carries them
+    // untouched — this function is neither a redraw, nor where a turn starts or
+    // ends, nor where a question is relayed or answered.
     let typing = |draft: String, cursor: usize| {
         Composed::Typing(Composer {
             draft,
             cursor,
             width: composer.width,
             muted: composer.muted,
+            answering: composer.answering.clone(),
         })
     };
     let inserted = |character: char| {
@@ -478,12 +508,14 @@ pub fn paste_for(text: &str, composer: &Composer) -> Pasted {
     let mut draft = composer.draft.clone();
     draft.push_str(text);
 
-    // The width and the flag come through untouched, as they do at a keystroke.
+    // The width and the two flags come through untouched, as they do at a
+    // keystroke.
     Pasted::Typing(Composer {
         cursor: draft.len(),
         draft,
         width: composer.width,
         muted: composer.muted,
+        answering: composer.answering.clone(),
     })
 }
 
