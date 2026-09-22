@@ -7,7 +7,8 @@ use serde_json::{Value, json};
 
 use super::{
     BACKLOG, Client, ENDPOINT, Error, NewProject, Posts, REQUEST_TIMEOUT, answer, authorization,
-    backlog_status, create_project, fetch_project, label_id, team_id,
+    backlog_state, backlog_status, create_project, fetch_project, issue_label_id, label_id,
+    team_id,
 };
 
 const KEY: &str = "lin_api_a_key_nobody_holds_8f3a1c";
@@ -377,6 +378,107 @@ fn a_status_with_no_name_and_an_answer_with_no_project_are_malformed() {
     }
 }
 
+fn issue_label_found() -> Value {
+    json!({ "issueLabels": { "nodes": [{ "id": "issue-label-held" }] } })
+}
+
+fn no_issue_label() -> Value {
+    json!({ "issueLabels": { "nodes": [] } })
+}
+
+fn issue_label_created() -> Value {
+    json!({ "issueLabelCreate": { "issueLabel": { "id": "issue-label-made" } } })
+}
+
+#[test]
+fn an_issue_label_the_team_already_has_is_reused_by_id() {
+    let linear = Posting::answering([Ok(issue_label_found())]);
+
+    let label = issue_label_id(&linear, "warlock", "team-1").expect("the stand-in answered");
+
+    assert_eq!(label, "issue-label-held");
+    assert_eq!(
+        linear.documents().len(),
+        1,
+        "a label that exists is not created again"
+    );
+    assert_eq!(
+        linear.variables(),
+        [json!({ "name": "warlock", "team": "team-1" })]
+    );
+}
+
+#[test]
+fn an_issue_label_the_team_lacks_is_created_on_that_team() {
+    let linear = Posting::answering([Ok(no_issue_label()), Ok(issue_label_created())]);
+
+    let label = issue_label_id(&linear, "warlock", "team-1").expect("the stand-in answered");
+
+    assert_eq!(label, "issue-label-made");
+
+    let asked = linear.documents();
+
+    assert_eq!(asked.len(), 2, "one request per thing asked");
+    assert!(asked[0].contains("issueLabels("), "{asked:?}");
+    assert!(asked[1].contains("issueLabelCreate("), "{asked:?}");
+    assert_eq!(
+        linear.variables()[1],
+        json!({ "input": { "name": "warlock", "teamId": "team-1" } })
+    );
+}
+
+#[test]
+fn an_issue_label_never_reaches_the_project_label_queries() {
+    let linear = Posting::answering([Ok(no_issue_label()), Ok(issue_label_created())]);
+
+    issue_label_id(&linear, "warlock", "team-1").expect("the stand-in answered");
+
+    // The two are different types in Linear's schema, and an id from one is not
+    // usable by the other, so neither resolver may drift onto the other's
+    // queries.
+    for asked in linear.documents() {
+        assert!(!asked.contains("projectLabel"), "{asked}");
+    }
+}
+
+#[test]
+fn a_project_label_never_reaches_the_issue_label_queries() {
+    let linear = Posting::answering([Ok(no_label()), Ok(label_created())]);
+
+    label_id(&linear, "warlock").expect("the stand-in answered");
+
+    for asked in linear.documents() {
+        assert!(!asked.contains("issueLabel"), "{asked}");
+    }
+}
+
+#[test]
+fn an_issue_label_answer_that_is_not_the_one_asked_for_is_malformed() {
+    for answers in [
+        vec![Ok(json!({ "issueLabels": {} }))],
+        vec![Ok(
+            json!({ "issueLabels": { "nodes": [{ "name": "warlock" }] } }),
+        )],
+        vec![
+            Ok(no_issue_label()),
+            Ok(json!({ "issueLabelCreate": { "issueLabel": null } })),
+        ],
+        vec![
+            Ok(no_issue_label()),
+            Ok(json!({ "issueLabelCreate": { "success": true } })),
+        ],
+    ] {
+        let asked = answers.len();
+        let linear = Posting::answering(answers);
+
+        let error = issue_label_id(&linear, "warlock", "team-1")
+            .expect_err("that is not the answer asked for");
+
+        assert!(matches!(error, Error::Malformed { .. }), "{error:?}");
+        assert_eq!(linear.documents().len(), asked, "no retry and no backoff");
+    }
+}
+
 fn label_found() -> Value {
     json!({ "projectLabels": { "nodes": [{ "id": "label-held" }] } })
 }
@@ -484,6 +586,71 @@ fn a_workspace_with_no_backlog_status_is_a_none_rather_than_an_error() {
     let status = backlog_status(&linear).expect("no `Backlog` is an ordinary answer");
 
     assert_eq!(status, None, "the caller creates with no status");
+}
+
+fn workflow_states() -> Value {
+    json!({
+        "workflowStates": {
+            "nodes": [
+                { "id": "state-todo", "name": "Todo" },
+                { "id": "state-backlog", "name": BACKLOG },
+                { "id": "state-doing", "name": "In Progress" },
+            ],
+        },
+    })
+}
+
+#[test]
+fn the_backlog_workflow_state_is_found_by_name_among_the_teams_others() {
+    let linear = Posting::answering([Ok(workflow_states())]);
+
+    let state = backlog_state(&linear, "team-1").expect("the stand-in answered");
+
+    assert_eq!(state.as_deref(), Some("state-backlog"));
+    assert_eq!(linear.variables(), [json!({ "team": "team-1" })]);
+    assert_eq!(linear.documents().len(), 1, "one request per operation");
+}
+
+#[test]
+fn the_workflow_states_asked_for_are_the_resolved_teams_own() {
+    let linear = Posting::answering([Ok(workflow_states())]);
+
+    backlog_state(&linear, "team-1").expect("the stand-in answered");
+
+    let asked = linear.documents().pop().expect("one request was made");
+
+    // Workflow states belong to a team, so a workspace-wide list would find
+    // another team's `Backlog` and file the issue somewhere nobody asked for.
+    assert!(asked.contains("workflowStates("), "{asked}");
+    assert!(asked.contains("team: { id: { eq: $team } }"), "{asked}");
+}
+
+#[test]
+fn a_team_with_no_backlog_workflow_state_is_a_none_rather_than_an_error() {
+    let linear = Posting::answering([Ok(json!({
+        "workflowStates": { "nodes": [{ "id": "state-doing", "name": "In Progress" }] },
+    }))]);
+
+    let state = backlog_state(&linear, "team-1").expect("no `Backlog` is an ordinary answer");
+
+    assert_eq!(state, None, "the caller refuses naming the team");
+}
+
+#[test]
+fn a_workflow_state_answer_that_is_not_the_one_asked_for_is_malformed() {
+    for answer in [
+        json!({ "workflowStates": {} }),
+        json!({ "workflowStates": { "nodes": [{ "name": BACKLOG }] } }),
+    ] {
+        let linear = Posting::answering([Ok(answer.clone())]);
+
+        let error = backlog_state(&linear, "team-1").expect_err("that is not the answer asked for");
+
+        assert!(
+            matches!(error, Error::Malformed { .. }),
+            "{answer}: {error:?}"
+        );
+    }
 }
 
 #[test]

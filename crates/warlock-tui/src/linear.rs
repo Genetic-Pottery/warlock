@@ -118,9 +118,11 @@ impl Posts for Client {
     }
 }
 
-/// The project status a brief is filed into. A workspace with no status by this
-/// name takes the project with no status at all, rather than whichever one
-/// happens to sort first.
+/// The name a brief and its issues are filed under: a project status for a
+/// project, a team's workflow state for an issue. Two unrelated types in
+/// Linear's schema that a workspace spells the same way. A workspace or team
+/// with nothing by this name takes the thing with no status at all, rather than
+/// whichever one happens to sort first.
 const BACKLOG: &str = "Backlog";
 
 /// A team key — `WAR` — as Linear's own team id, or `None` when the workspace
@@ -153,6 +155,31 @@ pub fn backlog_status(linear: &impl Posts) -> Result<Option<String>, Error> {
     nodes(&data, "projectStatuses")?
         .iter()
         .find(|status| status.get("name").and_then(Value::as_str) == Some(BACKLOG))
+        .map(node_id)
+        .transpose()
+}
+
+/// The id of the team's workflow state named [`BACKLOG`], or `None` when that
+/// team has none. `None` rather than an error for [`team_id`]'s reason: a team
+/// that cannot take an issue is worth words about the team, and this module does
+/// not hold them.
+///
+/// Workflow states belong to a team and not to the workspace, so this takes the
+/// id [`team_id`] answered rather than the team key. One request, asking for
+/// Linear's largest page and matching here, as [`backlog_status`] does.
+pub fn backlog_state(linear: &impl Posts, team: &str) -> Result<Option<String>, Error> {
+    let data = linear.post(
+        "query WorkflowStates($team: ID!) {
+            workflowStates(filter: { team: { id: { eq: $team } } }, first: 250) {
+                nodes { id name }
+            }
+        }",
+        json!({ "team": team }),
+    )?;
+
+    nodes(&data, "workflowStates")?
+        .iter()
+        .find(|state| state.get("name").and_then(Value::as_str) == Some(BACKLOG))
         .map(node_id)
         .transpose()
 }
@@ -267,6 +294,45 @@ pub fn label_id(linear: &impl Posts, name: &str) -> Result<String, Error> {
     )?;
 
     node_id(payload(&created, "projectLabelCreate", "projectLabel")?)
+}
+
+/// The id of the issue label by that name on the team, creating it there when
+/// the team has none.
+///
+/// Issue labels and project labels are different types in Linear's schema,
+/// reached by different queries: `issueLabels`/`issueLabelCreate` here,
+/// `projectLabels`/`projectLabelCreate` in [`label_id`]. An id from one is not
+/// usable by the other — a project cannot carry an issue label and an issue
+/// cannot carry a project label — so the two resolvers stay separate and neither
+/// answer may be handed to the other's create, however alike the two names look
+/// at the call site.
+///
+/// Two requests at most, one per thing asked, and the create only ever runs
+/// against an empty answer — so a second cut finds the label the first one made
+/// rather than adding another of the same name.
+pub fn issue_label_id(linear: &impl Posts, name: &str, team: &str) -> Result<String, Error> {
+    let data = linear.post(
+        "query IssueLabel($name: String!, $team: ID!) {
+            issueLabels(
+                filter: { name: { eq: $name }, team: { id: { eq: $team } } }
+                first: 1
+            ) { nodes { id } }
+        }",
+        json!({ "name": name, "team": team }),
+    )?;
+
+    if let Some(existing) = nodes(&data, "issueLabels")?.first() {
+        return node_id(existing);
+    }
+
+    let created = linear.post(
+        "mutation IssueLabelCreate($input: IssueLabelCreateInput!) {
+            issueLabelCreate(input: $input) { issueLabel { id } }
+        }",
+        json!({ "input": { "name": name, "teamId": team } }),
+    )?;
+
+    node_id(payload(&created, "issueLabelCreate", "issueLabel")?)
 }
 
 /// Create the project, with its label resolved first.
