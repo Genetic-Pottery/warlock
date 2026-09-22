@@ -5,6 +5,21 @@ This means its not a document of current state or facts about the system.
 Its a general direction about decisions made in the past and iterated on up to the present.
 Ideas can be referenced from here but they should not be viewed as currently corrects or as a source of truth.
 
+## Before you report work finished
+
+Run all three, and read each exit status:
+
+    cargo fmt
+    cargo clippy --all-targets -- -D warnings
+    cargo test
+
+Never pipe one of them into `tail`, `head` or `grep` to shorten the output. The
+shell reports the last command's status, so `cargo clippy … | tail -5` passes
+whether clippy passed or not, and work checked that way is reported done on a red
+tree. Read the whole output, or redirect it to a file and read the file.
+
+`cargo fmt` is the one that gets skipped, and the first thing CI fails on.
+
 ## Comments
 
 Every line here was written by a model and will be read by one. A comment that
