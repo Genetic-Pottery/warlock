@@ -1485,12 +1485,12 @@ mod relaying {
 // a create sent and what a skip did not are both things these tests can say.
 mod reviewing {
     use tempfile::TempDir;
-    use warlock_engine::{CutRecord, Filed};
+    use warlock_engine::{CutRecord, Filed, filed_path};
     use warlock_tui::{Answer, Choice};
 
     use super::{
-        AT_MOST, Answering, App, BRIEF, FIRST, Instant, Pulls, SECOND, Scripted, THIRD, a_project,
-        asked_over, notes, now,
+        AT_MOST, Answering, App, BRIEF, FIRST, Instant, NOT_A_KEY, Pulls, SECOND, Scripted, THIRD,
+        a_project, asked_over, fs, notes, now,
     };
     use crate::stubs::Filling;
 
@@ -2022,6 +2022,56 @@ mod reviewing {
             assert!(
                 !document.contains("project"),
                 "a run sent a mutation naming the project: {document}"
+            );
+        }
+    }
+
+    #[test]
+    fn no_key_value_reaches_the_thread_the_record_or_anything_the_run_holds() {
+        // The pull's half of the claim `tests/pushing.rs` makes for a push, and
+        // it is made here because this is the only module that drives a run the
+        // whole way to a written record: the key store this home holds is what
+        // the filing worker built its client from, so the value has been through
+        // every step below. It is to be in none of them — not on a line
+        // somebody reads, not in the record beside the brief, and not in the
+        // `Debug` rendering that a failing assertion anywhere else in the suite
+        // would print.
+        let linear = Filling::over(a_project());
+        let (mut app, mut pulls, repo, _home) = cut(linear.clone(), drafting_each());
+        offered(&mut app, &mut pulls);
+        // Read while the window is up, so what is asserted is the run in
+        // flight as well as the run that is over.
+        let in_flight = format!("{pulls:?}");
+
+        for _ in 0..3 {
+            offered(&mut app, &mut pulls);
+            pulls.create(&mut app, now());
+            settled(&mut app, &mut pulls);
+        }
+
+        assert!(!pulls.drafting(), "the run never finished");
+        assert!(!in_flight.contains(NOT_A_KEY), "the run carries the key");
+        assert!(
+            !format!("{pulls:?}").contains(NOT_A_KEY),
+            "the session's pull state carries the key"
+        );
+        let said = notes(&app);
+        assert!(!said.is_empty(), "the run said nothing at all");
+        for line in &said {
+            assert!(!line.contains(NOT_A_KEY), "{line} carries the key");
+        }
+        assert!(
+            !fs::read_to_string(filed_path(repo.path()))
+                .expect("the record this run wrote")
+                .contains(NOT_A_KEY),
+            "the record carries the key"
+        );
+        // And nothing the run sent carried it either: the key belongs in the
+        // `Authorization` header and in no document.
+        for document in linear.documents() {
+            assert!(
+                !document.contains(NOT_A_KEY),
+                "a document carries the key: {document}"
             );
         }
     }

@@ -3136,6 +3136,39 @@ mod filing {
     }
 
     #[test]
+    fn a_bare_pull_in_a_session_that_wrote_nothing_is_one_line_and_reads_nothing() {
+        // The refusal as the loop reaches it rather than as `chatting.rs` words
+        // it: a `/pull` with no document behind it and none named never gets as
+        // far as a home, a key or a request. The sentence itself is asserted
+        // where it is built, so what is pinned here is that the loop stops —
+        // one line, no fetch and a board nobody opened.
+        let repo = a_repository();
+        let home = a_home(repo.path());
+        let linear = Boarding::filing(URL);
+        let mut driven = filing_session(repo.path(), home.path(), &linear);
+
+        typing(&mut driven, "/pull");
+        round(&mut driven);
+
+        let said = notes(&driven);
+        assert_eq!(
+            said.len(),
+            1,
+            "a bare pull said more than one line: {said:?}"
+        );
+        assert!(
+            said[0].contains("/write") && said[0].contains("/pull"),
+            "the line does not name the command that would make a brief: {said:?}"
+        );
+        assert!(!driven.pulls.fetching(), "a bare pull started a fetch");
+        assert!(
+            !driven.pulls.confirm().is_open(),
+            "a bare pull put the dialog up"
+        );
+        assert_eq!(linear.requests(), 0, "a bare pull was sent");
+    }
+
+    #[test]
     fn a_confirmed_push_files_the_brief_on_a_worker_and_says_where_it_landed() {
         let repo = a_repository();
         let home = a_home(repo.path());
@@ -3638,9 +3671,9 @@ mod cutting {
         );
     }
 
-    // `/pull`, the rounds the fetch takes, and the two keys that answer its
-    // dialog Yes: No is lit when it opens, so Left is what moves onto Yes.
-    fn confirmed(driven: &mut Cutting) {
+    // `/pull` and the rounds the fetch takes, up to the dialog it puts on the
+    // screen and no further: which key is pressed at it is the caller's.
+    fn fetched(driven: &mut Cutting) {
         typing(driven, &format!("/pull {BRIEF}"));
         let waited = Instant::now();
         while driven.pulls.fetching() && waited.elapsed() < AT_MOST {
@@ -3651,6 +3684,12 @@ mod cutting {
             "the dialog did not come up: {:?}",
             notes(driven)
         );
+    }
+
+    // The same, with the two keys that answer the dialog Yes: No is lit when it
+    // opens, so Left is what moves onto Yes.
+    fn confirmed(driven: &mut Cutting) {
+        fetched(driven);
         assert!(pressed(driven, KeyCode::Left));
         assert!(pressed(driven, KeyCode::Enter));
     }
@@ -3689,6 +3728,49 @@ mod cutting {
             }
         }
         assert!(!driven.pulls.drafting(), "the run never finished");
+    }
+
+    #[test]
+    fn a_no_at_the_dialog_ends_the_pull_and_opens_no_session_at_all() {
+        // The dialog's two No paths as a reader reaches them through the loop:
+        // Esc, and the reflex Enter on the round it came up. Both are the same
+        // answer, and what it costs is the window — nothing is drafted, neither
+        // conversation is opened, and the session is where it was, so the next
+        // `/pull` asks the same question again.
+        for code in [KeyCode::Esc, KeyCode::Enter] {
+            let repo = a_repository();
+            let home = a_home(repo.path());
+            let agent = a_slice_that_asks();
+            let proposer = Scripted::saying([Answering::says(PROPOSED)]);
+            let mut driven =
+                cutting_session(repo.path(), home.path(), agent.clone(), proposer.clone());
+
+            fetched(&mut driven);
+            let said = notes(&driven).len();
+            assert!(pressed(&mut driven, code), "{code:?} ended the session");
+
+            assert!(
+                !driven.pulls.confirm().is_open(),
+                "{code:?} left the dialog up"
+            );
+            assert!(!driven.pulls.drafting(), "{code:?} started a run");
+            // A round after it, because a run that started would start on the
+            // loop's next pass rather than on the key.
+            round(&mut driven);
+            assert!(
+                !driven.pulls.drafting(),
+                "{code:?} started a run a beat later"
+            );
+            assert_eq!(agent.turns(), 0, "{code:?} opened a drafting session");
+            assert_eq!(
+                proposer.turns(),
+                0,
+                "{code:?} opened the other conversation"
+            );
+            assert_eq!(notes(&driven).len(), said, "{code:?} said something");
+            // And the value is back where a session with no pull in it sits.
+            fetched(&mut driven);
+        }
     }
 
     #[test]
@@ -3911,6 +3993,44 @@ mod cutting {
             "the run did not reach the second slice: {said:?}"
         );
         for note in &said {
+            assert!(!note.contains(NOT_A_KEY), "{note} carries the key");
+        }
+    }
+
+    #[test]
+    fn no_key_value_reaches_the_thread_or_anything_the_session_holds() {
+        // `filing`'s claim, made again for the other command and for the one
+        // place only a pull has: the field. Warlock's attempt is put there by
+        // the run, so the composer is on this path as much as the thread is,
+        // and the value out of this home's key store is to be in neither — nor
+        // in the `Debug` rendering a failing assertion elsewhere would print.
+        let repo = a_repository();
+        let home = a_home(repo.path());
+        let mut driven = cutting_session(
+            repo.path(),
+            home.path(),
+            a_slice_that_asks(),
+            Scripted::saying([Answering::says(PROPOSED)]),
+        );
+
+        confirmed(&mut driven);
+        offered(&mut driven);
+        // Read with a slice still waiting, so what is asserted is the run in
+        // flight as well as the run that is over.
+        let in_flight = format!("{:?}", driven.pulls);
+        assert!(pressed(&mut driven, KeyCode::Enter));
+        through(&mut driven);
+
+        assert!(!in_flight.contains(NOT_A_KEY), "the run carries the key");
+        assert!(
+            !format!("{:?}", driven.pulls).contains(NOT_A_KEY),
+            "the session's pull state carries the key"
+        );
+        assert!(
+            !driven.chat.composer().draft().contains(NOT_A_KEY),
+            "the field carries the key"
+        );
+        for note in notes(&driven) {
             assert!(!note.contains(NOT_A_KEY), "{note} carries the key");
         }
     }

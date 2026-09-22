@@ -98,17 +98,29 @@ struct Checked {
 // one as it stands, and a `..` that climbs out of the repository is refused by
 // the spelling below rather than resolved into something inside it.
 pub(crate) fn check(path: PathBuf, json: bool) -> Result<(), Error> {
-    checked_onto(&Standing::here(FOR_CHECK)?, path, json, &mut io::stdout())
+    // A home that cannot be resolved is `None` and reads as nothing held — see
+    // the module docs for why it is not `Unknown`.
+    checked_onto(
+        &Standing::here(FOR_CHECK)?,
+        Standing::home().ok().as_deref(),
+        path,
+        json,
+        &mut io::stdout(),
+    )
 }
 
-// Split from `check` so the order — manifest, then home, then the answer, then
-// one line — is something a test can run against a temporary repository and a
-// temporary home. It is where the two readings that are easy to get backwards
-// live: a *missing* manifest is an empty one and answers "nothing covers this",
-// while a manifest that will not *parse* is a failure; and a home that will not
-// resolve is nothing held, which is a state of the answer.
+// Split from `check` so the order — manifest, then the answer, then one line —
+// is something a test can run against a temporary repository and a temporary
+// home. It is where the reading that is easy to get backwards lives: a *missing*
+// manifest is an empty one and answers "nothing covers this", while a manifest
+// that will not *parse* is a failure.
+//
+// The home is a parameter for the working directory's reason: resolved in here,
+// a test running against a scratch repository would read the sigil store of the
+// machine it runs on, and `check` is the one caller no test has.
 fn checked_onto<W: Write>(
     standing: &Standing,
+    home: Option<&Path>,
     path: PathBuf,
     json: bool,
     out: &mut W,
@@ -117,13 +129,10 @@ fn checked_onto<W: Write>(
     // has never pacted anything has never scoped anything either, and "nothing
     // covers this path" is the answer rather than the absence of one.
     let manifest = standing.manifest()?;
-    // A home that cannot be resolved is `None` and reads as nothing held — see
-    // the module docs for why it is not `Unknown`.
-    let home = Standing::home().ok();
 
     let checked = checked(
         standing.repo_root(),
-        home.as_deref(),
+        home,
         &manifest,
         &standing.target(path),
     )?;

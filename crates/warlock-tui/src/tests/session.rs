@@ -349,7 +349,7 @@ fn the_first_load_of_the_session_drops_the_entries_the_repository_has_since_excl
         .expect("a manifest that writes");
 
     let (app, scope, _tree, _manifest) =
-        load_app_in(&scratch.root).expect("a repository that loads");
+        load_app_in(&scratch.root, None).expect("a repository that loads");
 
     assert_eq!(
         modules_on_disk(&scratch),
@@ -383,7 +383,7 @@ fn a_cleanup_that_cannot_be_finished_at_startup_is_a_line_rather_than_a_refusal_
     fs::set_permissions(&directory, fs::Permissions::from_mode(0o555))
         .expect("chmods the manifest directory read-only");
 
-    let started = load_app_in(&scratch.root);
+    let started = load_app_in(&scratch.root, None);
 
     // Back to writable before anything can fail, so the scratch repository
     // can still be removed.

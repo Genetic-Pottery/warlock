@@ -325,12 +325,17 @@ pub(crate) fn closed_scope(
 // find that this did not, and re-reading it every round would be a file opened
 // ten times a second to answer a question that cannot have changed.
 //
-// A home that cannot be resolved reads as nothing held rather than as a config
-// that would not read: there is no file in that case and no path to name one by,
-// so `Sigils::Unknown` would be claiming something on disk is broken when nothing
-// on disk was ever looked at.
-fn sigils_held(repo_root: &Path) -> Sigils {
-    Standing::home().map_or(Sigils::Nothing, |home| sigils_under(&home, repo_root))
+// No home reads as nothing held rather than as a config that would not read:
+// there is no file in that case and no path to name one by, so `Sigils::Unknown`
+// would be claiming something on disk is broken when nothing on disk was ever
+// looked at.
+//
+// The home is a parameter for the same reason the working directory is: with it
+// resolved here, a test that loads a scratch repository would open a file under
+// the sigil store of the machine it runs on, and the one place that resolves one
+// is the caller no test has.
+fn sigils_held(home: Option<&Path>, repo_root: &Path) -> Sigils {
+    home.map_or(Sigils::Nothing, |home| sigils_under(home, repo_root))
 }
 
 // Never an error, and that is the whole reason it is a function of its own: what
@@ -374,14 +379,18 @@ pub(crate) fn load_manifest(repo_root: &Path) -> Result<Manifest, Error> {
 // problems.
 pub(crate) fn load_app() -> Result<(App, Scope, Tree, Manifest), Error> {
     let working_dir = env::current_dir().map_err(|source| Error::WorkingDirectory { source })?;
-    load_app_in(&working_dir)
+    load_app_in(&working_dir, Standing::home().ok().as_deref())
 }
 
-// The working directory is a parameter so a test can load a repository it wrote
-// without calling `env::set_current_dir`, which is process-wide and would reach
-// into every other test running beside it. `load_app` is still the only caller
-// outside this module and still reads the directory itself.
-fn load_app_in(working_dir: &Path) -> Result<(App, Scope, Tree, Manifest), Error> {
+// The working directory and the home are parameters so a test can load a
+// repository it wrote without calling `env::set_current_dir`, which is
+// process-wide and would reach into every other test running beside it, and
+// without opening anything under the home of the machine it runs on. `load_app`
+// is still the only caller outside this module and still resolves both itself.
+fn load_app_in(
+    working_dir: &Path,
+    home: Option<&Path>,
+) -> Result<(App, Scope, Tree, Manifest), Error> {
     // Asked before the load rather than after it, because the cleanup has to
     // run first and it is written under this root. A working directory with no
     // repository above it is not refused here — `load_tree` is the one place
@@ -417,7 +426,8 @@ fn load_app_in(working_dir: &Path) -> Result<(App, Scope, Tree, Manifest), Error
     // beside the roots it was built from, and handed to the renderer every
     // frame. A reload does not touch it, which is why `reseat_on` no longer
     // carries it and `reload` no longer puts it back afterwards.
-    let chrome = Chrome::of(&repo_root, tree.root_path()).with_sigils(sigils_held(&repo_root));
+    let chrome =
+        Chrome::of(&repo_root, tree.root_path()).with_sigils(sigils_held(home, &repo_root));
     let scope = Scope {
         root: tree.root_path().to_path_buf(),
         repo_root,
