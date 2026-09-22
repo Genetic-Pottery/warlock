@@ -28,14 +28,19 @@
 //!
 //! What the worker then does is the subcommand's own [`sent`]: the document, the
 //! four requests in their order, the wording of every failure and the record
-//! appended to `.warlock/filed.toml`. Nothing about a push is composed twice.
+//! appended to `.warlock/filed.toml`. Nothing about a push is composed twice —
+//! including the last refusal, which the worker asks in front of that call:
+//! a brief `.warlock/filed.toml` already records is answered with the address of
+//! the project it already made, in `push.rs`'s words, with nothing sent.
 
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::Instant;
 use std::{io, thread};
 
-use warlock_engine::{Manifest, Target, filing, from_manifest_path, resolve_filing};
+use warlock_engine::{
+    Manifest, Target, filing, from_manifest_path, resolve_filing, to_manifest_path,
+};
 use warlock_tui::{
     App, Edited, Filing, LinearClient, Posts, PushConfirm, ScopeField, ScopePrompt, brief_at,
 };
@@ -424,9 +429,28 @@ fn spawn_push<P: Posts + Send + 'static>(client: P, work: Work) -> Receiver<Land
 // The brief is read here rather than on the event loop's thread, so a document
 // edited or deleted between the dialog and the answer is reported by the same
 // worker as everything else: one line, from one place, however the push went.
+//
+// The records are asked first, and about the same question `push.rs` asks them
+// before it builds its client: a brief is filed once, so a second `/push` of one
+// this repository has already filed is the address of the project it already
+// made and not a second project on the board under one title. Nothing on this
+// side can take a project back, which is why the refusal is here — in front of
+// [`sent`] and so in front of every request — rather than reported after one.
 fn filed(client: &impl Posts, work: &Work) -> Result<String, Error> {
-    let brief = brief_at(&work.root, &work.path).map_err(|source| Error::Brief { source })?;
+    // The spelling `Standing::spelled` gives the subcommand, out of the path the
+    // press resolved against the root: it is what a record is keyed by, so it is
+    // what the records are asked about.
+    let spelled =
+        to_manifest_path(&work.root, &work.path).map_err(|source| Error::Unspellable { source })?;
     let records = records(&work.root)?;
+    if let Some(already) = records.record(&spelled) {
+        return Err(Error::AlreadyFiled {
+            path: spelled,
+            url: already.url().to_owned(),
+        });
+    }
+
+    let brief = brief_at(&work.root, &work.path).map_err(|source| Error::Brief { source })?;
 
     sent(
         client,

@@ -3104,6 +3104,80 @@ mod filing {
     }
 
     #[test]
+    fn a_second_push_of_a_filed_brief_says_where_it_already_is_and_sends_nothing() {
+        // Not the in-flight case above: the first push has landed, the record
+        // is on disk, and this is the same brief offered again a moment later.
+        // What used to come of it was a second project on the board under one
+        // title, which nothing on this side can take back.
+        let repo = a_repository();
+        let home = a_home(repo.path());
+        let linear = Boarding::filing(URL);
+        let mut driven = filing_session(repo.path(), home.path(), &linear);
+
+        wrote_a_brief(&mut driven);
+        confirmed(&mut driven);
+        landing(&mut driven);
+        let filed = Filed::load(repo.path()).expect("a record that saves and reads back");
+        let path = filed
+            .records()
+            .first()
+            .expect("the first push recorded what it filed")
+            .path()
+            .to_owned();
+
+        confirmed(&mut driven);
+        // Counted here rather than before the dialog was answered, the way the
+        // refusal above counts: the check is the worker's, so the "filing to"
+        // line is already said when the work is handed off, and what is being
+        // asserted is that the answer coming back is one line and not a second
+        // project.
+        let before = notes(&driven).len();
+        landing(&mut driven);
+
+        let notes = notes(&driven);
+        // The line the dialog's Yes is answered with, and the only one: a
+        // refusal off the worker is one note however it was worded.
+        assert_eq!(
+            notes.len(),
+            before + 1,
+            "an already-filed push is one line on the thread: {notes:?}"
+        );
+        // Not a hand-copied sentence: what the reader needs out of this line is
+        // the document it is about and the address of the project already
+        // holding it, and those are the two facts asserted.
+        let line = notes.last().expect("the refusal said something");
+        assert!(line.contains(&path), "{line} does not name `{path}`");
+        assert!(line.contains(URL), "{line} does not carry the address");
+        assert_eq!(line.lines().count(), 1, "{line} is more than one line");
+
+        // Nothing left this machine the second time: the stand-in counts every
+        // request it was asked for, and these are the first push's four.
+        assert_eq!(
+            linear.requests(),
+            4,
+            "the second `/push` sent something after all"
+        );
+        // And the session is where it was: no push in flight, one record, and
+        // the keyboard still answering.
+        assert!(!driven.pushing.confirm.is_open());
+        assert!(!driven.pushes.sending());
+        let filed = Filed::load(repo.path()).expect("a record that saves and reads back");
+        assert_eq!(filed.records().len(), 1, "{:?}", filed.records());
+        assert_eq!(
+            filed
+                .records()
+                .first()
+                .expect("the record the first push wrote")
+                .url(),
+            URL
+        );
+        assert!(
+            pressed(&mut driven, key(KeyCode::Esc)),
+            "a refused push ended the session"
+        );
+    }
+
+    #[test]
     fn no_key_value_reaches_the_thread_or_anything_the_session_holds() {
         // The one thing on this path that must never be printed: it is in the
         // key store this home holds, the client was built from it, and it is in
