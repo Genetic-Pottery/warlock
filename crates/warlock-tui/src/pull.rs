@@ -50,16 +50,6 @@ use crate::standing::{FOR_PULL, Standing};
 // this and `Backlog` is not.
 const PLANNED: &str = "Planned";
 
-// Unconditional rather than `cfg_attr(not(test), …)`, unlike the refusals this
-// module raises: the tests below drive [`pulled`], which is the half with the
-// environment as parameters, so nothing reaches this one until the clap
-// subcommand does.
-#[expect(
-    dead_code,
-    reason = "the verb lands before the door that dispatches it: the clap \
-              subcommand is a later slice of brief 23, and this is what its arm \
-              will call"
-)]
 pub(crate) fn pull(path: &Path, scope: Option<&str>, dry_run: bool) -> Result<(), Error> {
     let standing = Standing::here(FOR_PULL)?;
     // The error rather than `check`'s `.ok()`, for [`mod@crate::push`]'s reason:

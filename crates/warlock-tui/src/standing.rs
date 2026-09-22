@@ -60,15 +60,6 @@ pub(crate) const FOR_PUSH: &str = "push a brief from";
 // resolves is not the brief's text but the record spelled against the root that
 // says which project it became, so the repository is what turns a path into
 // something to cut rather than where the file happens to sit.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the tail lands before the door that stands on it: `warlock \
-                  pull` is a later slice of brief 23, and this is the wording \
-                  it will refuse outside a repository with"
-    )
-)]
 pub(crate) const FOR_PULL: &str = "cut a brief from";
 
 // The working directory is kept as well as the root because the two answer

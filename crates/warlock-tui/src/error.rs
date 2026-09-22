@@ -245,14 +245,6 @@ pub(crate) enum Error {
     // and this carries the sentence rather than re-writing it, the way `Filing`
     // above carries the engine's. What it is about is the project's content on
     // the board rather than a file here, so there is no path to name with it.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the refusal lands before the verb that raises it: `warlock \
-                      pull` is a later slice of brief 23"
-        )
-    )]
     ScopeBlock {
         source: ScopeBlockError,
     },
@@ -260,14 +252,6 @@ pub(crate) enum Error {
     // the repository is read: a run with nothing to draft is not a run that
     // succeeded quietly. Named against the brief like `NoRecord` and
     // `NotPlanned`, because the records it read are that path's.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the refusal lands before the verb that raises it: `warlock \
-                      pull` is a later slice of brief 23"
-        )
-    )]
     AllCut {
         path: String,
     },
