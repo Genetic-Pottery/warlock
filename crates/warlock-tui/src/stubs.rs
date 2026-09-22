@@ -206,6 +206,94 @@ fn answered(document: &str, url: &str) -> Value {
     }
 }
 
+/// The other direction over the same seam: a Linear that answers the one
+/// request a `/pull` makes — `project(id:)` — out of memory, and is its own
+/// [`Opens::Client`] for [`Boarding`]'s reason.
+///
+/// A sibling rather than a fifth arm on `answered` above, because the two are
+/// stand-ins for two different conversations: a push's workspace has a team, a
+/// status and a label and creates something, a pull's has one project and is
+/// only read. Folding them into one value would make every test set fields the
+/// path it drives never looks at.
+#[derive(Debug, Clone)]
+pub(crate) struct Reading {
+    asked: Arc<Mutex<Vec<String>>>,
+    name: String,
+    // `None` is a project sitting in no status at all, which is a workspace
+    // whose board has none rather than a broken answer — so the gate has to be
+    // able to say it, and a test has to be able to make it.
+    status: Option<String>,
+    content: String,
+    held: Option<Arc<Gate>>,
+}
+
+impl Reading {
+    /// A workspace holding one project, under that name, in that status, with
+    /// that description — which is where the scope block a pull parses lives.
+    pub(crate) fn holding(
+        name: impl Into<String>,
+        status: Option<&str>,
+        content: impl Into<String>,
+    ) -> Self {
+        Self {
+            asked: Arc::new(Mutex::new(Vec::new())),
+            name: name.into(),
+            status: status.map(ToOwned::to_owned),
+            content: content.into(),
+            held: None,
+        }
+    }
+
+    /// The same workspace, answering nothing until the gate is opened: a slow
+    /// request, without a clock.
+    pub(crate) fn held_at(mut self, gate: &Arc<Gate>) -> Self {
+        self.held = Some(Arc::clone(gate));
+        self
+    }
+
+    /// How many requests reached the workspace, which is how a test says that a
+    /// refusal read nothing: one pull is one request.
+    pub(crate) fn requests(&self) -> usize {
+        self.asked
+            .lock()
+            .expect("no test panics holding this")
+            .len()
+    }
+}
+
+impl Opens for Reading {
+    type Client = Self;
+
+    fn open(&self, _key: &str) -> Self {
+        self.clone()
+    }
+}
+
+impl Posts for Reading {
+    fn post(&self, document: &str, _variables: Value) -> Result<Value, LinearError> {
+        self.asked
+            .lock()
+            .expect("no test panics holding this")
+            .push(document.to_owned());
+        if let Some(gate) = &self.held {
+            gate.wait();
+        }
+
+        assert!(
+            document.contains("project(id:"),
+            "a pull asked for something no workspace was given: {document}"
+        );
+        Ok(json!({
+            "project": {
+                "name": self.name,
+                "content": self.content,
+                "url": "https://linear.app/acme/project/pulled-1a2b3c",
+                "status": self.status.as_ref().map(|status| json!({ "name": status })),
+            }
+        }))
+    }
+}
+
 /// A request held open, for the one thing about a worker a finished push cannot
 /// show: that the loop goes round — drawing, answering keys — while it is in
 /// flight. A test holds the gate shut, counts rounds, and opens it.

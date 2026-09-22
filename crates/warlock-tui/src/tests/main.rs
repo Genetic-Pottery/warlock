@@ -20,6 +20,7 @@ use warlock_tui::{
 use super::{Cli, Command, Error, FOR_CLAUDE_MD, Pushing, ScopeCommand, Session, status_for};
 use crate::chatting::Chat;
 use crate::pacting::Pact;
+use crate::pulling::Pulls;
 use crate::pushing::Pushes;
 use crate::query::spelled;
 use crate::session::{Scope, Watched};
@@ -1308,6 +1309,10 @@ fn driving(app: App, scope: Scope, tree: &Tree) -> Driven {
         // the sigils of the machine it runs on. The tests that do push replace
         // this whole value with one over a temporary home.
         pushes: Pushes::with_client(Boarding::filing(""), None),
+        // And the same for a `/pull`, for the same reason: with no home there
+        // is nothing for one to resolve a board under, so no test in this file
+        // can read the machine's own sigils by typing the command.
+        pulls: Pulls::with_client(Boarding::filing(""), None),
         prompt: ScopePrompt::default(),
         record: RecordPrompt::default(),
         drag: None,
@@ -2868,6 +2873,7 @@ mod filing {
 
     use super::{AT_MOST, Driven, key, pressed, session_over};
     use crate::chatting::Chat;
+    use crate::pulling::Pulls;
     use crate::pushing::{ALREADY_FILING, Pushes};
     use crate::stubs::{Boarding, Gate, Saying};
 
@@ -2944,6 +2950,11 @@ mod filing {
         driven.manifest = a_manifest();
         driven.chat = Chat::with_agent(repo, Saying::answering(BRIEF));
         driven.pushes = Pushes::with_client(linear.clone(), Some(home.to_path_buf()));
+        // The same home for a `/pull`, so the command reaches the board through
+        // this test's sigils rather than being refused for want of one. The
+        // client is the same stand-in because the session opens both through
+        // one seam; the pull below is refused before it is built.
+        driven.pulls = Pulls::with_client(linear.clone(), Some(home.to_path_buf()));
         driven
     }
 
@@ -3034,6 +3045,38 @@ mod filing {
 
     fn said(driven: &Driven, text: &str) -> bool {
         notes(driven).iter().any(|note| note.contains(text))
+    }
+
+    #[test]
+    fn a_pull_typed_into_the_composer_reaches_the_board_and_reports_on_the_thread() {
+        // The routing rather than the fetch: a `/pull` naming a path is a
+        // different thing from a `/push` naming one, and the loop has to answer
+        // it somewhere else. This repository has filed nothing, so the pull is
+        // refused on the far side of a worker thread — which is the half being
+        // asserted, because the line only reaches the thread if the loop drains
+        // the pull every round. No dialog comes up and nothing is sent.
+        let repo = a_repository();
+        let home = a_home(repo.path());
+        let linear = Boarding::filing(URL);
+        let mut driven = filing_session(repo.path(), home.path(), &linear);
+
+        typing(&mut driven, "/pull docs/brief.md");
+        let waited = Instant::now();
+        while driven.pulls.fetching() && waited.elapsed() < AT_MOST {
+            round(&mut driven);
+        }
+
+        assert!(!driven.pulls.fetching(), "the pull never reported");
+        assert!(
+            said(&driven, "docs/brief.md"),
+            "the thread does not name the document the pull read for: {:?}",
+            notes(&driven)
+        );
+        assert_eq!(linear.requests(), 0, "a pull of an unfiled brief was sent");
+        assert!(
+            !driven.pushing.confirm.is_open(),
+            "a pull put the push dialog up"
+        );
     }
 
     #[test]

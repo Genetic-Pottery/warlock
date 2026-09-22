@@ -479,8 +479,8 @@ fn heading(place: usize, total: usize, slice: &Slice) -> String {
 }
 
 // `1 slice`, `9 slices`, so the line above is not worded twice or read as
-// `1 slices`.
-fn counted(count: usize) -> String {
+// `1 slices`. `pub(crate)` for the panel's line about the same count.
+pub(crate) fn counted(count: usize) -> String {
     let noun = if count == 1 { "slice" } else { "slices" };
     format!("{count} {noun}")
 }
@@ -511,7 +511,7 @@ pub(crate) fn planned(
             path: filed_path(standing.repo_root()),
         })?;
 
-    if !is_planned(project.status()) {
+    if !project.status().is_some_and(is_planned) {
         return Err(Error::NotPlanned {
             path: spelled,
             status: project.status().map(ToOwned::to_owned),
@@ -526,8 +526,17 @@ pub(crate) fn planned(
 // filed it under. Nothing wider than that: `Planned` is the gate, so a workspace
 // that spells its planned column something else is a refusal rather than a
 // guess.
-fn is_planned(status: Option<&str>) -> bool {
-    status.is_some_and(|status| status.trim().eq_ignore_ascii_case(PLANNED))
+//
+// A project with no status at all is the caller's `is_some_and` rather than an
+// arm here, so that a caller with the string in hand — the panel's, which puts
+// the board's own spelling on the thread — asks the same question without
+// unwrapping an answer this function has already looked at.
+//
+// `pub(crate)` for [`mod@crate::pulling`], which gates the same project read
+// back over the same wire: a second fold of `Planned` there would be a second
+// opinion about which column warlock reads from.
+pub(crate) fn is_planned(status: &str) -> bool {
+    status.trim().eq_ignore_ascii_case(PLANNED)
 }
 
 #[cfg(test)]

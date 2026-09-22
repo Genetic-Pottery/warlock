@@ -46,6 +46,7 @@ mod input;
 mod key;
 mod pacting;
 mod pull;
+mod pulling;
 mod push;
 mod pushing;
 mod query;
@@ -59,7 +60,7 @@ mod terminal;
 mod viewing;
 mod writing;
 
-use chatting::Chat;
+use chatting::{Chat, Wanted};
 use check::check;
 use clipboard::{Clip, Clipboard};
 use config::configure;
@@ -70,6 +71,7 @@ use input::{Action, Drag, MouseAction, Pressed, drag_after, mouse_action, press_
 use key::{key_add, key_forget, key_list, key_use};
 use pacting::{Pact, Reloaded};
 use pull::pull;
+use pulling::Pulls;
 use push::push;
 use pushing::{Opens, Pushes, Pushing};
 use query::{Listing, list};
@@ -642,6 +644,11 @@ fn run() -> Result<(), Error> {
         // asks for one. The home under which the sigils, the binding and the
         // key store sit is read here as well, once for the session.
         pushes: Pushes::new(),
+        // The same two facts, read a second time rather than shared with the
+        // value above: a pull opens its own client on its own worker, and a
+        // `Pulls` that borrowed a `Pushes`'s home would tie the two together
+        // for nothing but the four bytes it saves.
+        pulls: Pulls::new(),
         prompt: ScopePrompt::default(),
         record: RecordPrompt::default(),
         drag: None,
@@ -742,6 +749,11 @@ struct Session<S: Screen, P: Wired + Agent, C: Converses, B: Clip, O: Opens> {
     /// say-no to a second. The window above is the question; this is the answer
     /// leaving the machine. See [`Pushes`].
     pushes: Pushes<O>,
+    /// The same three things for a `/pull`, and in the other order: a pull has
+    /// nothing to put a window up about until the board has answered, so the
+    /// request comes first and the reading is what it has to say. Its own
+    /// [`Option`] is its own say-no to a second pull. See [`Pulls`].
+    pulls: Pulls<O>,
     prompt: ScopePrompt,
     /// The second window the `s` key puts up, over a scope name no `[[scope]]`
     /// record claims. Never up at the same time as [`Session::prompt`]: one goes
@@ -1279,24 +1291,39 @@ impl<S: Screen, P: Wired + Agent, C: Converses, B: Clip, O: Opens> Session<S, P,
             // that asked it, not as old as the first thing the model got round to
             // saying.
             //
-            // The one thing a draft hands back is a `/push`: the brief this
-            // session wrote, which the conversation knows and cannot file,
-            // because which board it files to is the manifest's, the machine's
-            // sigils' and the key store's. That question is answered here and
-            // on this thread — no socket is opened by any of it — and what
-            // comes back is the window the reader is now looking at. See
-            // [`Pushes::press`].
-            Pressed::Compose(outcome) => {
-                if let Some(written) = self.chat.compose(&mut self.app, outcome, now) {
+            // The one thing a draft hands back is a brief and what is wanted of
+            // it: the document this session wrote or the one the command named,
+            // which the conversation knows and can do neither thing with,
+            // because which board it reaches is the manifest's, the machine's
+            // sigils' and the key store's.
+            //
+            // A `/push` is answered on this thread — no socket is opened by any
+            // of it — and what comes back is the window the reader is now
+            // looking at. A `/pull` has nothing to put up until a project has
+            // been read back, so it goes straight onto a worker and what comes
+            // back arrives at the bottom of a later round. See
+            // [`Pushes::press`] and [`Pulls::press`].
+            Pressed::Compose(outcome) => match self.chat.compose(&mut self.app, outcome, now) {
+                Some(Wanted::Filed(brief)) => {
                     self.pushing = self.pushes.press(
                         &mut self.app,
                         &self.manifest,
                         &self.scope.repo_root,
-                        &written,
+                        &brief,
                         now,
                     );
                 }
-            }
+                Some(Wanted::Cut(brief)) => {
+                    self.pulls.press(
+                        &mut self.app,
+                        &self.manifest,
+                        &self.scope.repo_root,
+                        &brief,
+                        now,
+                    );
+                }
+                None => {}
+            },
             // Somebody typing into the window a `/push` puts up when this
             // machine can file to more than one board: a character more or
             // less in the scope name, the window abandoned, or — on Enter —
@@ -1446,6 +1473,11 @@ impl<S: Screen, P: Wired + Agent, C: Converses, B: Clip, O: Opens> Session<S, P,
         // the project's address or one line about why there is none. Drained like
         // the rest, so the frames keep coming while it is in flight.
         self.pushes.keep_up(&mut self.app, now);
+        // And a project being read back off the board, which says one thing and
+        // is over as well: what it found, or one line about why there is
+        // nothing to cut. Nothing here writes, so a pull that never reports has
+        // left the board exactly as it was.
+        self.pulls.keep_up(&mut self.app, now);
     }
 }
 

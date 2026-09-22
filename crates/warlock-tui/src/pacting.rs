@@ -186,6 +186,7 @@ impl Work {
     }
 }
 
+#[derive(Debug)]
 pub(crate) struct CancelGuard {
     cancel: Cancel,
 }
