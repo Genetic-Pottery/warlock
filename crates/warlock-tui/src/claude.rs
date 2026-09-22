@@ -272,6 +272,70 @@ pub fn proposing_instruction(brief: &str, title: &str, prose: &str, question: &s
     )
 }
 
+/// Whether a reply is the session saying it has nothing, and the one place that
+/// question is answered.
+///
+/// `contains` rather than `==`, and the constant handed back rather than the
+/// reply: the instruction asks for exactly that sentence and nothing else, but a
+/// reply that copies it and then adds a line of its own is the same refusal
+/// wearing a guess, and the guess is the thing that must not reach the board.
+/// A reply with nothing in it goes the same way — a proposal nobody can read is
+/// not an answer either, and the caller has one sentence to render instead of a
+/// blank one.
+fn proposed(reply: &str) -> String {
+    let reply = reply.trim();
+    if reply.is_empty() || reply.contains(NOTHING_SETTLES_IT) {
+        return NOTHING_SETTLES_IT.to_owned();
+    }
+    reply.to_owned()
+}
+
+/// One read-only session, one turn, one proposed answer to the question a
+/// slice's drafting came back with.
+///
+/// Not a value the caller holds, because there is nothing to hold: the session
+/// is a single turn with nothing persisted between calls, so a proposal that
+/// failed is made again by calling this again rather than by driving a state
+/// machine. One turn and no retry for the same reason a [`Drafting`] turn has
+/// none — the failures that reach here are a missing binary, a cancel and a
+/// timeout, and none of the three is better the second time.
+///
+/// Generic over [`Converses`], the seam [`Drafting`] uses, so the success, the
+/// nothing-settles-it and the failure paths are all driven by a stand-in with no
+/// `claude` on the machine. The agent is wired to a [`Cancel`] minted here and
+/// held by nobody: this call touches no other session, and cancelling the slice's
+/// own drafting cannot reach it or be reached by it.
+///
+/// Where the brief, the slice and the repository do not settle the question, what
+/// comes back is [`NOTHING_SETTLES_IT`] verbatim rather than the model's words.
+///
+/// ```no_run
+/// use warlock_tui::{ChatAgent, propose_answer};
+///
+/// // Runs a real `claude`, so this example is not executed by the test suite.
+/// let proposal = propose_answer(
+///     &ChatAgent::proposing(),
+///     "The knife is blunt.",
+///     "Sharpen the knife",
+///     "On the whetstone in the drawer.",
+///     "Which of the two whetstones is meant?",
+/// )?;
+///
+/// println!("{proposal}");
+/// # Ok::<(), warlock_engine::agent::Error>(())
+/// ```
+pub fn propose_answer<C: Converses>(
+    agent: &C,
+    brief: &str,
+    title: &str,
+    prose: &str,
+    question: &str,
+) -> Result<String, agent::Error> {
+    let agent = agent.wired(Cancel::new(), Activities::none());
+    let reply = agent.turn(&proposing_instruction(brief, title, prose, question))?;
+    Ok(proposed(&reply))
+}
+
 /// The rule the interactive session is held to, and the only thing that says a
 /// reply is a question rather than the answer.
 ///

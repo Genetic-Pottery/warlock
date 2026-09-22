@@ -11,7 +11,7 @@ use super::{
     DRAFTING_ONE_SHOT_CONTRACT, DRAFTING_ROUNDS, Drafted, Drafting, EFFORT, EFFORT_VAR,
     INVOCATION_TIMEOUT, MODEL, MODEL_VAR, NOTHING_SETTLES_IT, OsString, PROPOSING_SYSTEM_PROMPT,
     Replied, SYSTEM_PROMPT, WRITE_INSTRUCTION, Wired, brief_instruction, drafting_opening,
-    or_default, overridden, proposing_instruction, render, session_id,
+    or_default, overridden, propose_answer, proposing_instruction, render, session_id,
 };
 use crate::brief::scope_block_in;
 use crate::panel::Mode;
@@ -1490,6 +1490,193 @@ fn a_session_is_a_value_its_caller_holds_and_can_stop() {
         agent.sent().is_empty(),
         "a session spawns nothing until it is opened"
     );
+}
+
+// A stand-in that comes back with nothing at all: it keeps what it was asked and
+// then fails the way a child that ran out of clock does.
+#[derive(Debug, Clone, Default)]
+struct Failing {
+    sent: Arc<Mutex<Vec<String>>>,
+}
+
+impl Failing {
+    fn turns(&self) -> usize {
+        self.sent.lock().expect("the count is not poisoned").len()
+    }
+}
+
+impl Wired for Failing {
+    fn wired(&self, _cancel: Cancel, _activities: Activities) -> Self {
+        self.clone()
+    }
+}
+
+impl Converses for Failing {
+    fn turn(&self, message: &str) -> Result<String, agent::Error> {
+        self.sent
+            .lock()
+            .expect("the count is not poisoned")
+            .push(message.to_owned());
+        Err(agent::Error::TimedOut {
+            after: INVOCATION_TIMEOUT,
+        })
+    }
+
+    fn raised(&self, _model: &str, _effort: &str) -> Self {
+        self.clone()
+    }
+}
+
+const A_QUESTION: &str = "Is the whetstone the one in the drawer or a new one?";
+
+// The proposing call put to a stand-in, over the same brief and first slice the
+// drafting tests use, so what is asserted is the road and not the fixture.
+fn proposal_from<C: Converses>(agent: &C) -> Result<String, agent::Error> {
+    let block = scope_block_in(TWO_SLICES).expect("two slices");
+    let first = &block.slices()[0];
+    propose_answer(
+        agent,
+        block.brief(),
+        first.heading(),
+        first.prose(),
+        A_QUESTION,
+    )
+}
+
+#[test]
+fn a_proposal_is_one_turn_carrying_the_question_and_the_slice_and_nothing_kept_after_it() {
+    const PROPOSED: &str = "The one in the drawer: the brief names it and the slice \
+                            adds no other.";
+    let agent = Scripted::answering([PROPOSED, "A second answer, to a second call."]);
+
+    assert_eq!(proposal_from(&agent).expect("a turn"), PROPOSED);
+
+    let sent = agent.sent();
+    assert_eq!(
+        sent.len(),
+        1,
+        "a proposal took more than its turn: {sent:?}"
+    );
+    // The question, this one slice and the brief above it, which is the whole
+    // of what the session is allowed to answer from.
+    assert!(sent[0].contains(A_QUESTION));
+    assert!(sent[0].contains("Sharpen the knife"));
+    assert!(sent[0].contains("the knife is blunt"));
+    // And no other slice of the same scope.
+    assert!(!sent[0].contains("Sweep the floor"));
+    // Not the drafting conversation wearing another hat: none of its terms and
+    // no object to fill.
+    assert!(!sent[0].contains(DRAFTING_CONTRACT));
+    assert!(!sent[0].contains(DRAFTING_ONE_SHOT_CONTRACT));
+
+    // A second call is a second session: it says the same thing over again
+    // rather than carrying on from the first, because nothing was kept.
+    assert_eq!(
+        proposal_from(&agent).expect("a turn"),
+        "A second answer, to a second call.",
+    );
+    let sent = agent.sent();
+    assert_eq!(sent.len(), 2);
+    assert_eq!(sent[1], sent[0], "the second call remembered the first");
+}
+
+#[test]
+fn a_reply_that_settles_nothing_comes_back_as_the_fixed_sentence_and_not_the_models_words() {
+    // Every one of these is the session saying it has nothing: the sentence it
+    // was asked for, the sentence with a guess bolted onto it, the sentence
+    // with whitespace around it, and a reply with nothing in it at all.
+    let invented = format!("{NOTHING_SETTLES_IT} I would use the one in `tools/` myself.");
+    let replies = [
+        NOTHING_SETTLES_IT.to_owned(),
+        invented.clone(),
+        format!("\n\n{NOTHING_SETTLES_IT}\n"),
+        "   \n".to_owned(),
+    ];
+
+    for reply in replies {
+        let agent = Scripted::answering([reply.clone()]);
+
+        let proposal = proposal_from(&agent).expect("a turn");
+
+        assert_eq!(
+            proposal, NOTHING_SETTLES_IT,
+            "a reply settling nothing came back as something else: {reply:?}",
+        );
+        assert_eq!(agent.sent().len(), 1);
+    }
+
+    // The guess that rode in with the sentence is gone, rather than handed on
+    // for somebody to send to the board as a decision.
+    let agent = Scripted::answering([invented]);
+    assert!(
+        !proposal_from(&agent)
+            .expect("a turn")
+            .contains("I would use"),
+        "the model's own words came back with the fixed sentence",
+    );
+
+    // And an answer that does not say it is what it says: the sentence is
+    // recognised, not every reply that mentions the brief.
+    let agent = Scripted::answering(["The brief settles it: the one in the drawer."]);
+    assert_eq!(
+        proposal_from(&agent).expect("a turn"),
+        "The brief settles it: the one in the drawer.",
+    );
+}
+
+#[test]
+fn a_turn_that_failed_is_the_callers_to_report_and_is_not_taken_again() {
+    let agent = Failing::default();
+
+    let error = proposal_from(&agent).expect_err("the stand-in fails every turn");
+
+    match error {
+        agent::Error::TimedOut { after } => assert_eq!(after, INVOCATION_TIMEOUT),
+        other => panic!("a failed turn came back as something else: {other:?}"),
+    }
+    assert_eq!(
+        agent.turns(),
+        1,
+        "a failed proposal was tried again rather than reported",
+    );
+}
+
+#[test]
+fn a_proposal_and_a_live_drafting_session_leave_each_other_alone() {
+    let drafter = Scripted::answering(["Which whetstone is meant?", ONE_DRAFT]);
+    let proposer = Scripted::answering(["The one in the drawer."]);
+    let mut session = drafting_with(&drafter);
+
+    let question = asking(session.open().expect("a turn"));
+    assert_eq!(question, "Which whetstone is meant?");
+
+    // A whole session of its own, over its own stand-in, while the slice's own
+    // conversation sits mid-question.
+    assert_eq!(
+        proposal_from(&proposer).expect("a turn"),
+        "The one in the drawer.",
+    );
+    assert_eq!(proposer.sent().len(), 1);
+
+    // Nothing the proposal did reached the drafting session: not a turn, not
+    // the cancel it runs under, and not the count of rounds it has left.
+    assert_eq!(drafter.sent().len(), 1);
+    assert!(!session.cancel().is_cancelled());
+    assert_eq!(session.questions_left(), DRAFTING_ROUNDS - 1);
+
+    // And the session still answers its next turn, which is the drafts.
+    let (fill, _) = drafts(session.answer("the one in the drawer").expect("a turn"));
+    assert_eq!(fill.drafts.len(), 1);
+    let sent = drafter.sent();
+    assert_eq!(sent.len(), 2);
+    assert_eq!(sent[1], "the one in the drawer");
+    for message in &sent {
+        assert!(
+            !message.contains(A_QUESTION) && !message.contains(NOTHING_SETTLES_IT),
+            "a proposing turn reached the drafting session: {message}",
+        );
+    }
+    assert_eq!(proposer.sent().len(), 1);
 }
 
 #[test]

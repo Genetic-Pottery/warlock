@@ -73,6 +73,7 @@ pub use claude::WRITE_INSTRUCTION;
 pub use claude::Wired;
 pub use claude::brief_instruction;
 pub use claude::drafting_opening;
+pub use claude::propose_answer;
 pub use claude::proposing_instruction;
 pub use colour::colour_for;
 pub use composer::COMPOSER_MAX_ROWS;
