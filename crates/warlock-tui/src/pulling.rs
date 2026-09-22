@@ -27,6 +27,15 @@
 //! line it is said in — and every one of those lines is the sentence
 //! [`crate::error::Error`] already words for `warlock pull`, so a reader who
 //! has met one at a shell meets the same words in the panel.
+//!
+//! The run a Yes starts is one [`Drafting`] session per uncut slice, in cut
+//! order and one at a time, and every turn of it happens on a worker: a
+//! [`Drafting`] is stateful across turns and each turn blocks on a subprocess,
+//! so the session is *moved* onto the thread and handed back through the
+//! channel with its reply. That is what keeps the panel drawing through a run
+//! that takes minutes, with no second long-lived session and no runtime to
+//! carry it. A turn driven from [`Pulls::keep_up`] instead would freeze the
+//! frame for as long as `claude` took to think.
 
 use std::mem;
 use std::path::{Path, PathBuf};
@@ -34,12 +43,16 @@ use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::thread;
 use std::time::Instant;
 
-use warlock_engine::{Manifest, filed_path, resolve_filing};
-use warlock_tui::{Answer, App, Cancel, PullConfirm, fetch_project, scope_block_in};
+use warlock_engine::{Manifest, agent, filed_path, resolve_filing};
+use warlock_tui::{
+    Answer, App, Cancel, ChatAgent, Converses, Drafted, Drafting, PullConfirm, Replied, Slice,
+    fetch_project, scope_block_in,
+};
 
+use crate::cut::listed;
 use crate::error::{Error, one_line};
 use crate::pacting::CancelGuard;
-use crate::pull::{counted, is_planned};
+use crate::pull::{counted, heading, is_planned, named};
 use crate::push::records;
 use crate::pushing::{Linear, Opens};
 use crate::standing::Standing;
@@ -57,6 +70,12 @@ pub(crate) const ALREADY_PULLING: &str = "a pull is already running; this one re
 // only reads, and the reason this sentence promises more than a lost push's
 // does.
 const PULL_LOST: &str = "the pull stopped without saying how it went; nothing was read or changed";
+
+// The same for a slice's worker, which also sends on every path it takes. One
+// slice is one session and one thread, so a channel that closed with nothing on
+// it took that slice down and nothing else — which is why this is a line about
+// the slice and the run carries on to the next.
+const SLICE_LOST: &str = "it stopped without saying how it went";
 
 /// What a pull has to say for itself once the board has answered: one line, or
 /// the facts a line is worded from.
@@ -87,9 +106,22 @@ pub(crate) struct Fetched {
     // trims, so the two need not match.
     status: String,
     slices: usize,
-    uncut: usize,
     team: String,
     key: String,
+    ready: Ready,
+}
+
+/// What a Yes would run: the brief the slices were cut out of, and the slices
+/// no cut record claims, in the order a run walks them.
+///
+/// Carried from the fetch rather than read again when the question is answered,
+/// because there is no second reading: the project's description came off the
+/// one request, and asking the board again between the question and the answer
+/// would be a second project to disagree with the one the reader confirmed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Ready {
+    brief: String,
+    slices: Vec<Slice>,
 }
 
 impl Fetched {
@@ -99,7 +131,7 @@ impl Fetched {
             self.project,
             self.status,
             counted(self.slices),
-            self.uncut
+            self.ready.slices.len()
         )
     }
 
@@ -127,15 +159,29 @@ impl Fetched {
 /// own — a `Pulls` is built with the home it is to use, so nothing below this
 /// line asks the environment.
 #[derive(Debug)]
-pub(crate) struct Pulls<O: Opens> {
+pub(crate) struct Pulls<O: Opens, A: Converses> {
     open: O,
     home: Option<PathBuf>,
+    // The conversation every slice's session is opened off, built once for the
+    // session and cheap to build: an agent is a command line and a timeout, so
+    // no `claude` exists until a confirmed question asks a slice for drafts.
+    // `warlock pull` builds its one the same way and for the same reason.
+    agent: A,
     fetching: Option<Fetching>,
     // The question between the fetch and the run, held here rather than beside
     // the session's other windows because it is a state of the pull and not of
     // the app: what it is asked about came off the wire on the round it went
     // up, and nothing else in the panel can answer it.
     confirm: PullConfirm,
+    // The material the question above is asked about, parked beside it: the
+    // dialog names counts and a board, and a Yes needs the slices themselves.
+    // Taken by the Yes and dropped by the No, so it lives exactly as long as the
+    // question does.
+    ready: Option<Ready>,
+    // The run, which is its own say-no to a second `/pull` for as long as it
+    // lasts: a slice in flight is a session spending on this conversation's
+    // behalf, and two sets of them would be two runs cutting one project.
+    slicing: Option<Slicing<A>>,
 }
 
 // The channel, and the handle that is the whole of how a pull is stopped.
@@ -158,22 +204,68 @@ struct Fetching {
     cancel: CancelGuard,
 }
 
-impl Pulls<Linear> {
+/// The run a Yes started: the slices left to cut, which one of them is being
+/// drafted, and the session drafting it.
+///
+/// There is always exactly one slice in flight while this lives — the reply
+/// that ends one slice starts the next, or ends the run — so "a pull is
+/// drafting" needs no flag beside it.
+#[derive(Debug)]
+struct Slicing<A: Converses> {
+    brief: String,
+    slices: Vec<Slice>,
+    // Into `slices`, so the fraction on the thread and the session in flight
+    // cannot come apart: a count kept beside the index would be a second answer
+    // to which slice this is.
+    at: usize,
+    asking: Asking<A>,
+}
+
+// One slice's session, from the panel's side: what the worker will say, and the
+// handle that stops the turn it is in.
+//
+// The handle is the session's own — see [`CancelGuard::over`] — because the
+// session wired its agent to it before the turn started, so this is the flag the
+// child is listening to. Dropping the guard is the whole of how quitting stops
+// a run: losing the session loses the run, and losing the run cancels.
+#[derive(Debug)]
+struct Asking<A> {
+    replies: Receiver<Turned<A>>,
+    #[expect(
+        dead_code,
+        reason = "held for its drop, which is what cancels the slice in flight"
+    )]
+    cancel: CancelGuard,
+}
+
+/// A turn's answer with the session that gave it: the session rides onto the
+/// worker, because a [`Drafting`] is stateful across turns and each turn blocks
+/// on a subprocess, and it has to come back for the next one.
+type Turned<A> = (Drafting<A>, Result<Replied, agent::Error>);
+
+impl Pulls<Linear, ChatAgent> {
     pub(crate) fn new() -> Self {
-        Self::with_client(Linear, Standing::home().ok())
+        // A conversation of its own at the register the brief was written in,
+        // not the panel's: a drafting session has heard none of the reader's
+        // talk and answers in JSON. `warlock pull` opens its sessions off the
+        // same value for the same reason.
+        Self::with_client(Linear, Standing::home().ok(), ChatAgent::drafting())
     }
 }
 
-impl<O: Opens> Pulls<O> {
-    // The seam a test drives the real value over a stand-in client through,
-    // rather than assembling the pieces underneath and proving something about
-    // an arrangement the event loop never has.
-    pub(crate) const fn with_client(open: O, home: Option<PathBuf>) -> Self {
+impl<O: Opens, A: Converses> Pulls<O, A> {
+    // The seam a test drives the real value over a stand-in client and a
+    // stand-in model through, rather than assembling the pieces underneath and
+    // proving something about an arrangement the event loop never has.
+    pub(crate) const fn with_client(open: O, home: Option<PathBuf>, agent: A) -> Self {
         Self {
             open,
             home,
+            agent,
             fetching: None,
             confirm: PullConfirm::Closed,
+            ready: None,
+            slicing: None,
         }
     }
 
@@ -188,6 +280,19 @@ impl<O: Opens> Pulls<O> {
     // whether a project is being read back.
     pub(crate) const fn fetching(&self) -> bool {
         self.fetching.is_some()
+    }
+
+    // Read once a round by the loop and once per `/pull` by this value itself,
+    // off the one run it keeps, for the reason above.
+    pub(crate) const fn drafting(&self) -> bool {
+        self.slicing.is_some()
+    }
+
+    // What a second `/pull` is refused against: a project being read back and a
+    // project being cut are both this session's one pull, and the run is by far
+    // the longer of the two.
+    const fn running(&self) -> bool {
+        self.fetching() || self.drafting()
     }
 
     /// `/pull` typed into the composer, with the brief it is about already
@@ -206,7 +311,7 @@ impl<O: Opens> Pulls<O> {
         brief: &str,
         now: Instant,
     ) {
-        if self.fetching() {
+        if self.running() {
             app.panel_mut().note(ALREADY_PULLING, now);
             return;
         }
@@ -236,13 +341,19 @@ impl<O: Opens> Pulls<O> {
         });
     }
 
-    /// What the pull has said since the last round, which is one thing at most
-    /// and ends the fetch either way.
+    /// What the pull has said since the last round: what the board answered, or
+    /// what the slice being drafted came to.
     ///
     /// Drained rather than received, for [`crate::pacting`]'s reason: nothing
     /// here blocks, so frames keep being drawn, the tree keeps scrolling and the
-    /// clocks keep ticking while the request is in flight.
+    /// composer stays usable while a request is in flight and while a slice is
+    /// being drafted — which for a slice is minutes rather than seconds.
     pub(crate) fn keep_up(&mut self, app: &mut App, now: Instant) {
+        self.landed(app, now);
+        self.drafted(app, now);
+    }
+
+    fn landed(&mut self, app: &mut App, now: Instant) {
         let Some(fetching) = self.fetching.as_ref() else {
             return;
         };
@@ -272,6 +383,52 @@ impl<O: Opens> Pulls<O> {
         // thread and there is nothing to ask about, so nothing opens.
         if let Ok(fetched) = landing {
             self.confirm = fetched.asking();
+            self.ready = Some(fetched.ready);
+        }
+    }
+
+    // One slice's turn, when its worker has one to report, and the next slice
+    // started on the same round: a run that waited for the round after would
+    // spend a poll interval of nothing between every two sessions.
+    //
+    // The run is taken out rather than borrowed because the agent the next
+    // session is opened off sits beside it on this value.
+    fn drafted(&mut self, app: &mut App, now: Instant) {
+        let Some(mut slicing) = self.slicing.take() else {
+            return;
+        };
+        let turned = match slicing.asking.replies.try_recv() {
+            Ok(turned) => Some(turned),
+            // Still drafting, and nothing new to say.
+            Err(TryRecvError::Empty) => {
+                self.slicing = Some(slicing);
+                return;
+            }
+            // The worker panicked: the hook has already printed it, and what is
+            // left to say is that this slice came to nothing.
+            Err(TryRecvError::Disconnected) => None,
+        };
+
+        for line in said(&slicing.slices[slicing.at], turned) {
+            app.panel_mut().note(line, now);
+        }
+
+        slicing.at += 1;
+        let at = slicing.at;
+        let total = slicing.slices.len();
+        // The last slice leaves the run taken down, which is what makes the
+        // next `/pull` allowed on the round the last one reported.
+        if at < total {
+            slicing.asking = started(
+                &self.agent,
+                app,
+                &slicing.brief,
+                &slicing.slices[at],
+                at,
+                total,
+                now,
+            );
+            self.slicing = Some(slicing);
         }
     }
 
@@ -284,21 +441,152 @@ impl<O: Opens> Pulls<O> {
     /// The question taken down with nothing started: no request is made, no
     /// record is read and the session is left exactly where it was, which is
     /// the whole of what a No costs.
+    ///
+    /// The slices go down with it. They were the answer to one reading of one
+    /// project, and the next `/pull` reads it again.
     pub(crate) fn cancelled(&mut self) {
         self.confirm = PullConfirm::Closed;
+        self.ready = None;
     }
 
-    /// The confirmed question: the window down and the run begun.
+    /// The confirmed question: the window down, the first slice's session
+    /// opened, and the run running.
     ///
     /// Taken rather than read and then closed, so there is no round on which
     /// both the question and its own run are up.
+    ///
+    /// A fetch that found nothing to cut is refused before it is ever reported,
+    /// so the empty run below cannot happen; it is answered by starting nothing
+    /// rather than by an `expect`, because a panic in a panel that is otherwise
+    /// running is a worse answer than a Yes that did nothing.
     pub(crate) fn cut(&mut self, app: &mut App, now: Instant) {
         let confirm = mem::replace(&mut self.confirm, PullConfirm::Closed);
-        let Some(cutting) = confirm.cutting() else {
+        let (Some(cutting), Some(ready)) = (confirm.cutting(), self.ready.take()) else {
             return;
         };
         app.panel_mut().note(cutting_line(cutting.project()), now);
+
+        let total = ready.slices.len();
+        let Some(first) = ready.slices.first() else {
+            return;
+        };
+        let asking = started(&self.agent, app, &ready.brief, first, 0, total, now);
+        self.slicing = Some(Slicing {
+            brief: ready.brief,
+            slices: ready.slices,
+            at: 0,
+            asking,
+        });
     }
+}
+
+// One slice's session opened and handed to a worker, with the thread told which
+// slice it is and how many there are first: the answer is minutes away and a
+// reader who has just said yes is looking at the conversation.
+//
+// `heading` is `pull.rs`'s, so the panel and the subcommand cannot come to name
+// the same work differently — a reader who has watched a `warlock pull` is
+// looking for the same fractions here.
+//
+// `for_slice` and not `one_shot`: this is the road with somebody to ask.
+fn started<A: Converses>(
+    agent: &A,
+    app: &mut App,
+    brief: &str,
+    slice: &Slice,
+    place: usize,
+    total: usize,
+    now: Instant,
+) -> Asking<A> {
+    app.panel_mut()
+        .note(format!("{} — drafting", heading(place, total, slice)), now);
+    let session = Drafting::for_slice(agent, brief, slice.heading(), slice.prose());
+    let cancel = CancelGuard::over(session.cancel());
+
+    Asking {
+        replies: spawn_open(session),
+        cancel,
+    }
+}
+
+// The `JoinHandle` is dropped on purpose, as every other worker's is: joining is
+// waiting, and this thread exists precisely so nobody waits for it. The guard
+// the caller keeps is what stops it.
+//
+// The session is moved in and sent back out with the reply rather than shared
+// behind a lock: it is the one thing that carries what this slice's
+// conversation has already said, and the event loop's thread has no business
+// touching it while a turn is running.
+fn spawn_open<A: Converses>(mut session: Drafting<A>) -> Receiver<Turned<A>> {
+    let (events, received) = mpsc::channel();
+    thread::spawn(move || {
+        let replied = session.open();
+        // Ignored for the reason every other worker's send is: a receiver that
+        // has gone away is an application that is quitting, which is also the
+        // one thing that cancels a run.
+        let _ = events.send((session, replied));
+    });
+
+    received
+}
+
+// What one slice's turn comes to on the thread: every ending is lines and the
+// next slice, never the end of the run. The slices left are other work, they
+// were ordered so that nothing is drafted before what it waits on, and a run
+// that stopped would leave the reader typing `/pull` again to reach them.
+//
+// The session is dropped here however the turn went. A question is noted and the
+// slice left, which is what the conversation can do with one until the relay
+// exists to answer it.
+fn said<A>(slice: &Slice, turned: Option<Turned<A>>) -> Vec<String> {
+    let Some((_session, replied)) = turned else {
+        return vec![format!("{} was not drafted: {SLICE_LOST}", named(slice))];
+    };
+
+    match replied {
+        Ok(Replied::Answer(Drafted::Drafts { fill, repairs })) => {
+            let titles: Vec<String> = fill
+                .drafts
+                .iter()
+                .map(|draft| draft.title.clone())
+                .collect();
+            let mut lines = vec![format!("{} — drafted {}", named(slice), listed(&titles))];
+            // Beside the titles for `pull.rs`'s reason: a repaired draft is a
+            // ticket that was drafted, not one that was missed, and a
+            // conversation read back tomorrow should be able to tell the two
+            // apart.
+            lines.extend(repairs.iter().map(|repair| repair_line(slice, repair)));
+            lines
+        }
+        // Four answers and not an object among them, which on this road takes
+        // the whole of the asking first. Reported and left uncut rather than
+        // filed as the document road's floor would supply: a supplied ticket is
+        // warlock putting work nobody planned on somebody's board.
+        Ok(Replied::Answer(Drafted::Unusable(defect))) => {
+            vec![format!("{} was not drafted: {defect}", named(slice))]
+        }
+        Ok(Replied::Question(question)) => vec![question_line(slice, &question)],
+        // A missing binary, a timeout or a cancel, none of which is better the
+        // second time — see [`Drafting`]'s own note — so the slice is left
+        // uncut rather than asked again.
+        Err(error) => vec![format!("{} was not drafted: {error}", named(slice))],
+    }
+}
+
+fn repair_line(slice: &Slice, repair: &str) -> String {
+    format!("{} — {repair}", named(slice))
+}
+
+// The question in the words it was asked, flattened as the thread takes a line.
+// Nothing here can answer one — the relay that can is the next slice of this
+// work — so what is said is that the slice was left, and a reader who wants it
+// cut has the question in front of them.
+fn question_line(slice: &Slice, question: &str) -> String {
+    format!(
+        "{} asked, and was left uncut: {}",
+        named(slice),
+        one_line(question)
+    )
 }
 
 // Everything the worker owns, and the whole of what crosses the thread
@@ -399,12 +687,23 @@ fn fetched<O: Opens>(open: &O, work: &Work, cancel: &Cancel) -> Result<Fetched, 
             path: work.brief.clone(),
         });
     }
+    // Filtered out of `ordered` rather than collected from `cut_state`, so the
+    // slices a run walks arrive in the cut order and not in the order the file
+    // happened to list them: what a slice waits on has to be reached first.
+    let uncut: Vec<Slice> = slices
+        .iter()
+        .filter(|slice| state.uncut().contains(&slice.heading()))
+        .map(|slice| (*slice).clone())
+        .collect();
 
     Ok(Fetched {
         project: project.name().to_owned(),
         status,
         slices: slices.len(),
-        uncut: state.uncut().len(),
+        ready: Ready {
+            brief: block.brief().to_owned(),
+            slices: uncut,
+        },
         team: target.record().team().to_owned(),
         // The key by name. `Target::value` is read on one line above and
         // nowhere else on this path.
@@ -412,9 +711,9 @@ fn fetched<O: Opens>(open: &O, work: &Work, cancel: &Cancel) -> Result<Fetched, 
     })
 }
 
-// What a Yes has to say for itself so far. The run it starts is the next slice
-// of this work; what is true already is that the question was answered and the
-// project it named is the one being cut.
+// The line the run opens with, over the first slice's own: the project named
+// once, so everything under it is read as one cut of one project rather than as
+// slices of nothing in particular.
 fn cutting_line(project: &str) -> String {
     format!("cutting `{project}` into tickets")
 }

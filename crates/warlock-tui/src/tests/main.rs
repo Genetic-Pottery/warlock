@@ -24,7 +24,7 @@ use crate::pulling::Pulls;
 use crate::pushing::Pushes;
 use crate::query::spelled;
 use crate::session::{Scope, Watched};
-use crate::stubs::{Boarding, Copying, Passing, Saying};
+use crate::stubs::{Boarding, Copying, Passing, Saying, Scripted};
 use crate::terminal::Screen;
 
 // `try_parse_from` wants argv as the process gets it, program name and all,
@@ -1289,7 +1289,11 @@ impl Screen for FakeScreen {
     }
 }
 
-type Driven = Session<FakeScreen, Passing, Saying, Copying, Boarding>;
+// The last of the six is the model a slice's drafting session would be opened
+// off. It is a script with nothing in it: no test in this file confirms a pull,
+// so a turn being asked for at all is a session opened where none was meant to
+// be.
+type Driven = Session<FakeScreen, Passing, Saying, Copying, Boarding, Scripted>;
 
 fn driving(app: App, scope: Scope, tree: &Tree) -> Driven {
     let watched = Watched::start(&scope, tree);
@@ -1312,7 +1316,7 @@ fn driving(app: App, scope: Scope, tree: &Tree) -> Driven {
         // And the same for a `/pull`, for the same reason: with no home there
         // is nothing for one to resolve a board under, so no test in this file
         // can read the machine's own sigils by typing the command.
-        pulls: Pulls::with_client(Boarding::filing(""), None),
+        pulls: Pulls::with_client(Boarding::filing(""), None, Scripted::saying([])),
         prompt: ScopePrompt::default(),
         record: RecordPrompt::default(),
         drag: None,
@@ -2875,7 +2879,7 @@ mod filing {
     use crate::chatting::Chat;
     use crate::pulling::Pulls;
     use crate::pushing::{ALREADY_FILING, Pushes};
-    use crate::stubs::{Boarding, Gate, Saying};
+    use crate::stubs::{Boarding, Gate, Saying, Scripted};
 
     // Not a key, and named so that nothing reading this file mistakes it for
     // one. It is stored so that a bound name resolves and the client is built
@@ -2954,7 +2958,11 @@ mod filing {
         // this test's sigils rather than being refused for want of one. The
         // client is the same stand-in because the session opens both through
         // one seam; the pull below is refused before it is built.
-        driven.pulls = Pulls::with_client(linear.clone(), Some(home.to_path_buf()));
+        driven.pulls = Pulls::with_client(
+            linear.clone(),
+            Some(home.to_path_buf()),
+            Scripted::saying([]),
+        );
         driven
     }
 

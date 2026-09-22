@@ -1,14 +1,20 @@
-//! Neither agent here honours the say-when, reports activities, or records the
-//! model it was raised at, and that is what says which tests they are not for:
-//! cancelling a run, attaching the activity port, and the argv a brief runs at
-//! are facts about a child process, asserted on the real adapter in
+//! No agent here stops a turn on the say-when, reports activities, or records
+//! the model it was raised at, and that is what says which tests they are not
+//! for: cancelling a run, attaching the activity port, and the argv a brief
+//! runs at are facts about a child process, asserted on the real adapter in
 //! `pacting.rs` and `chatting.rs`. A second record of them here would be a copy
 //! for the two to disagree over.
+//!
+//! [`Scripted`] keeping the handles it was wired to is not that record: what it
+//! answers never depends on them, and what they buy is the one question the
+//! real adapter cannot be asked from the panel's side — whether the session in
+//! flight was told to stop.
 
+use std::collections::VecDeque;
 use std::sync::{Arc, Condvar, Mutex};
 
 use serde_json::{Value, json};
-use warlock_engine::{Agent, agent, stub_answer};
+use warlock_engine::{Agent, agent, drafting, stub_answer};
 use warlock_tui::{Activities, Cancel, Converses, LinearError, Posts, Wired};
 
 use crate::clipboard::Clip;
@@ -96,6 +102,130 @@ impl Wired for Saying {
 impl Converses for Saying {
     fn turn(&self, _message: &str) -> Result<String, agent::Error> {
         Ok(self.answer.clone())
+    }
+
+    fn raised(&self, _model: &str, _effort: &str) -> Self {
+        self.clone()
+    }
+}
+
+/// One turn's answer, written down before the run starts.
+///
+/// Prose and the drafts object are one variant because the session decides
+/// which is which — prose is a question while a round is left and a failed
+/// attempt once the asking is over — and a stand-in that named the two apart
+/// would be a second opinion about what it had just said.
+#[derive(Debug, Clone)]
+pub(crate) enum Answering {
+    Says(String),
+    /// No `claude` on the machine, which is one of the three ways a session's
+    /// turn ends in a failure rather than an answer.
+    Missing,
+}
+
+impl Answering {
+    pub(crate) fn says(text: impl Into<String>) -> Self {
+        Self::Says(text.into())
+    }
+
+    /// The drafting road's own stub object, named for the slice it stands in
+    /// for: two drafts inside every cap, so it is accepted rather than
+    /// repaired.
+    pub(crate) fn drafts(slice: &str) -> Self {
+        Self::Says(drafting::stub_answer(slice))
+    }
+
+    pub(crate) const fn missing() -> Self {
+        Self::Missing
+    }
+}
+
+/// A model that answers a written-down sequence, one entry per turn, and keeps
+/// what it was asked and every cancel handle it was wired to.
+///
+/// The cancels are the point of the record: a drafting session mints its own
+/// and wires its agent to it, so a test that wants to know whether quitting
+/// reached the turn in flight has nowhere else to look.
+///
+/// `Arc<Mutex<_>>` rather than the `Rc<RefCell<_>>` a subcommand's stand-in
+/// uses, for the difference this path has: a slice's turn runs on a worker
+/// thread, so a model that could not cross one would not stand in for the thing
+/// being tested.
+#[derive(Debug, Clone)]
+pub(crate) struct Scripted {
+    answers: Arc<Mutex<VecDeque<Answering>>>,
+    said: Arc<Mutex<Vec<String>>>,
+    cancels: Arc<Mutex<Vec<Cancel>>>,
+    held: Option<Arc<Gate>>,
+}
+
+impl Scripted {
+    pub(crate) fn saying(answers: impl IntoIterator<Item = Answering>) -> Self {
+        Self {
+            answers: Arc::new(Mutex::new(answers.into_iter().collect())),
+            said: Arc::new(Mutex::new(Vec::new())),
+            cancels: Arc::new(Mutex::new(Vec::new())),
+            held: None,
+        }
+    }
+
+    /// The same model, answering nothing until the gate is opened: what a turn
+    /// that takes minutes looks like from the loop's side, without a clock.
+    pub(crate) fn held_at(mut self, gate: &Arc<Gate>) -> Self {
+        self.held = Some(Arc::clone(gate));
+        self
+    }
+
+    pub(crate) fn turns(&self) -> usize {
+        self.said.lock().expect("a stand-in nothing poisoned").len()
+    }
+
+    /// Whether anything that was given a handle on a turn of this model has been
+    /// told to stop.
+    pub(crate) fn cancelled(&self) -> bool {
+        self.cancels
+            .lock()
+            .expect("a stand-in nothing poisoned")
+            .iter()
+            .any(Cancel::is_cancelled)
+    }
+}
+
+impl Wired for Scripted {
+    fn wired(&self, cancel: Cancel, _activities: Activities) -> Self {
+        self.cancels
+            .lock()
+            .expect("a stand-in nothing poisoned")
+            .push(cancel);
+        self.clone()
+    }
+}
+
+impl Converses for Scripted {
+    fn turn(&self, message: &str) -> Result<String, agent::Error> {
+        self.said
+            .lock()
+            .expect("a stand-in nothing poisoned")
+            .push(message.to_owned());
+        if let Some(gate) = &self.held {
+            gate.wait();
+        }
+
+        let answer = self
+            .answers
+            .lock()
+            .expect("a stand-in nothing poisoned")
+            .pop_front();
+        match answer {
+            Some(Answering::Says(text)) => Ok(text),
+            Some(Answering::Missing) => Err(agent::Error::NotFound {
+                program: "claude".into(),
+            }),
+            // A turn the script has no answer for is a session opened where the
+            // test meant none to be, which is worth failing over rather than
+            // answering.
+            None => panic!("a turn this model was not scripted for: {message}"),
+        }
     }
 
     fn raised(&self, _model: &str, _effort: &str) -> Self {

@@ -722,12 +722,17 @@ fn run() -> Result<(), Error> {
 
 /// Everything one interactive session holds, and the seam the tests drive.
 ///
-/// Generic over all five impure things — the screen, the model, the
-/// conversation's model, the clipboard, the Linear a push files to — so a test
-/// can press keys at a whole session with no terminal attached, no `claude`
-/// installed, no display and no socket. `warlock` itself only ever instantiates
-/// it one way, in [`run`].
-struct Session<S: Screen, P: Wired + Agent, C: Converses, B: Clip, O: Opens> {
+/// Generic over all six impure things — the screen, the model, the
+/// conversation's model, the clipboard, the Linear a push files to and the
+/// model a pull drafts a slice with — so a test can press keys at a whole
+/// session with no terminal attached, no `claude` installed, no display and no
+/// socket. `warlock` itself only ever instantiates it one way, in [`run`].
+///
+/// The two models are two parameters because they are two conversations: the
+/// panel's has heard the reader's talk and answers in prose, and a slice's has
+/// heard none of it and answers in JSON. A test drives each with the stand-in
+/// its own path needs.
+struct Session<S: Screen, P: Wired + Agent, C: Converses, B: Clip, O: Opens, A: Converses> {
     app: App,
     screen: S,
     scope: Scope,
@@ -753,7 +758,7 @@ struct Session<S: Screen, P: Wired + Agent, C: Converses, B: Clip, O: Opens> {
     /// nothing to put a window up about until the board has answered, so the
     /// request comes first and the reading is what it has to say. Its own
     /// [`Option`] is its own say-no to a second pull. See [`Pulls`].
-    pulls: Pulls<O>,
+    pulls: Pulls<O, A>,
     prompt: ScopePrompt,
     /// The second window the `s` key puts up, over a scope name no `[[scope]]`
     /// record claims. Never up at the same time as [`Session::prompt`]: one goes
@@ -782,7 +787,9 @@ struct Session<S: Screen, P: Wired + Agent, C: Converses, B: Clip, O: Opens> {
     watched: Watched,
 }
 
-impl<S: Screen, P: Wired + Agent, C: Converses, B: Clip, O: Opens> Session<S, P, C, B, O> {
+impl<S: Screen, P: Wired + Agent, C: Converses, B: Clip, O: Opens, A: Converses>
+    Session<S, P, C, B, O, A>
+{
     fn size(&self) -> io::Result<Size> {
         self.screen.size()
     }

@@ -400,7 +400,11 @@ fn drafted<A: Converses, W: Write>(
 // The prefix of every line about one slice that is not its place in the run: the
 // position in the document and the heading, which is what a reader takes back to
 // the brief.
-fn named(slice: &Slice) -> String {
+//
+// `pub(crate)` for [`mod@crate::pulling`], which runs the same slices past
+// somebody watching: two spellings of "which slice this is" would let the panel
+// and the subcommand name the same work differently.
+pub(crate) fn named(slice: &Slice) -> String {
     format!("slice {} `{}`", slice.position(), slice.heading())
 }
 
@@ -466,15 +470,17 @@ fn would(board: Board<'_>, project: &FetchedProject, cutting: &[Cutting<'_>]) ->
     lines
 }
 
-// One slice's line, shared by the dry run's report and the run itself so that
-// the two read alike: a person who has read a `--dry-run` is looking for the
-// same slices in the same order when they take the flag off.
+// One slice's line, shared by the dry run's report, the run itself and
+// [`mod@crate::pulling`]'s run in the panel, so that all three read alike: a
+// person who has read a `--dry-run` is looking for the same slices in the same
+// order when they take the flag off, and a person watching the panel is looking
+// for the ones they have seen at a shell.
 //
 // The fraction is the place in the cut order, one-based as `running.rs`'s is,
 // and the position is where the slice sits in the document — the two differ
 // exactly when a `depends_on` line moved something, and the second is what finds
 // the slice in the brief.
-fn heading(place: usize, total: usize, slice: &Slice) -> String {
+pub(crate) fn heading(place: usize, total: usize, slice: &Slice) -> String {
     format!("[{}/{total}] {}", place + 1, named(slice))
 }
 
