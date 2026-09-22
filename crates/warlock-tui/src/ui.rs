@@ -27,7 +27,9 @@ use crate::account::{Account, Line as Entry, Voice};
 use crate::app::{App, Chrome, Focus, Row, Run, RunHeader};
 use crate::colour::{CONVERSATION_COLOUR, FOCUS_COLOUR, GUIDE_COLOUR, SYSTEM_COLOUR, colour_for};
 use crate::composer::Composer;
-use crate::confirm::{Answer, Filing, PushConfirm, QuitConfirm};
+use crate::confirm::{
+    Answer, Carry, Choice, Cutting, Filing, PullConfirm, PushConfirm, QuitConfirm, Review,
+};
 use crate::panel::Mode;
 use crate::prompt::{RecordField, RecordForm, RecordPrompt, ScopeField, ScopePrompt};
 // Renamed for the reason `Entry` above is: `Span` here is ratatui's piece of a
@@ -264,6 +266,59 @@ const PUSH_LINES: u16 = 7;
 
 const PUSH_HEIGHT: u16 = PUSH_LINES + 2 * CONFIRM_MARGIN_ROWS + 2 * BORDER_THICKNESS;
 
+const PULL_QUESTION: &str = "Cut this project into tickets?";
+
+/// The status the board answered with, labelled rather than left to be read as
+/// a second name: the project above it is a title and this is a column value,
+/// and the two would otherwise be two bare strings under one another.
+const PULL_STATUS: &str = "status ";
+
+const PULL_SLICES: &str = "slices ";
+
+/// The same two labels the push dialog uses, because they label the same two
+/// facts: the board a run would file to, and the name the key that signs it is
+/// held under. Two spellings for one fact would read as two facts.
+const PULL_TEAM: &str = PUSH_TEAM;
+
+const PULL_KEY: &str = PUSH_KEY;
+
+/// Question, a blank, the project, the status, the slices, the team, the key, a
+/// blank, the answers: [`pull_lines`] asserts it draws exactly this many, as
+/// [`push_lines`] does.
+const PULL_LINES: u16 = 9;
+
+const PULL_HEIGHT: u16 = PULL_LINES + 2 * CONFIRM_MARGIN_ROWS + 2 * BORDER_THICKNESS;
+
+const REVIEW_QUESTION: &str = "File these drafts as issues?";
+
+/// The three answers, each with the space around it the other windows' two
+/// carry, so a reader who has answered one of those is looking at the same
+/// shapes in the same place.
+const REVIEW_CREATE: &str = " Create ";
+
+const REVIEW_SKIP: &str = " Skip ";
+
+const REVIEW_FEEDBACK: &str = " Feedback ";
+
+const REVIEW_ANSWER_GAP: &str = CONFIRM_ANSWER_GAP;
+
+/// Question, a blank, the slice, a blank, the answers — and one row per draft
+/// title, which is why this window's height is worked out rather than fixed:
+/// what is being answered about is a list, and a window that cut it off would be
+/// asking about drafts it had not shown.
+const REVIEW_FIXED_LINES: u16 = 5;
+
+const CARRY_QUESTION: &str = "Carry on to the next slice?";
+
+/// Question, a blank, what is left, a blank, the answers.
+const CARRY_LINES: u16 = 5;
+
+const CARRY_HEIGHT: u16 = CARRY_LINES + 2 * CONFIRM_MARGIN_ROWS + 2 * BORDER_THICKNESS;
+
+/// Said after the count the run handed over, which words the noun: `3 slices`
+/// becomes `3 slices left`.
+const CARRY_LEFT: &str = " left";
+
 const SCOPE_HEADING: &str = "Scope for ";
 
 const PATH_HEADING: &str = "";
@@ -317,8 +372,8 @@ const COMPOSER_MIN_HEIGHT: u16 = 1 + 2 * BORDER_THICKNESS;
 #[expect(
     clippy::too_many_arguments,
     reason = "one frame's worth of state, and the point of it is that the binary \
-              draws a frame in one call: the six windows that can be over the \
-              app are six parameters here rather than six entry points"
+              draws a frame in one call: the seven windows that can be over the \
+              app are seven parameters here rather than seven entry points"
 )]
 pub fn draw(
     frame: &mut Frame<'_>,
@@ -331,6 +386,9 @@ pub fn draw(
     path: &ScopePrompt,
     filing: &ScopePrompt,
     push: &PushConfirm,
+    pull: &PullConfirm,
+    review: Option<&Review>,
+    carry: Option<&Carry>,
     composer: Option<&Composer>,
 ) {
     let screen = frame.area();
@@ -385,6 +443,23 @@ pub fn draw(
     }
     if let Some(asked) = push.filing() {
         draw_push(frame, screen, asked);
+    }
+    // Last, with the same claim to the frame the push dialog has and for the
+    // same reason — while a question is up it is the thing being looked at.
+    // The two are never on one frame either: a `/pull` cannot be typed while
+    // the other is up, since the keys go to the dialog before the composer.
+    if let Some(asked) = pull.cutting() {
+        draw_pull(frame, screen, asked);
+    }
+    // The two windows a run puts up once it is going, which is after the dialog
+    // above has been answered and taken down: they are never on a frame with it
+    // or with each other, since a slice is being reviewed, or asking whether to
+    // carry on, or neither.
+    if let Some(drafts) = review {
+        draw_review(frame, screen, drafts);
+    }
+    if let Some(asked) = carry {
+        draw_carry(frame, screen, asked);
     }
 }
 
@@ -896,7 +971,16 @@ fn mark_area(inner: Rect) -> Option<Rect> {
 
 fn draw_composer(frame: &mut Frame<'_>, area: Rect, composer: &Composer, live: bool) {
     let inner = pane_inner(area);
-    frame.render_widget(pane_block(live), area);
+    let mut block = pane_block(live);
+    // The one thing about the field that is not on the field: while something
+    // other than the conversation is waiting on a draft, what it is waiting for
+    // is written on the border, because a draft that answers somewhere else is
+    // otherwise indistinguishable from one that answers here. A title costs no
+    // row — it is drawn in the border the field already has.
+    if let Some(answering) = composer.answering() {
+        block = block.title_top(Line::from(answering.to_owned()).bold());
+    }
+    frame.render_widget(block, area);
 
     let window = composer.window(inner.width, inner.height);
     let mut lines: Vec<Line<'static>> = window
@@ -1316,6 +1400,231 @@ fn push_size(filing: &Filing) -> Size {
     Size::new(padded_width(widest, CONFIRM_MARGIN), PUSH_HEIGHT)
 }
 
+// The push dialog's window with two more lines in it, and deliberately the
+// same everything else, for the reason that one is the quit question's window:
+// three questions answered in the same place on the screen with the answers in
+// the same order.
+fn draw_pull(frame: &mut Frame<'_>, screen: Rect, cutting: &Cutting) {
+    draw_over(
+        frame,
+        pull_area(screen, cutting),
+        Padding::symmetric(CONFIRM_MARGIN, CONFIRM_MARGIN_ROWS),
+        pull_lines(cutting),
+    );
+}
+
+fn pull_lines(cutting: &Cutting) -> Vec<Line<'_>> {
+    let lines = vec![
+        Line::from(PULL_QUESTION).centered(),
+        Line::default(),
+        Line::from(cutting.project()).bold().centered(),
+        Line::from(status_line(cutting)).dim().centered(),
+        Line::from(slices_line(cutting)).dim().centered(),
+        Line::from(pull_team_line(cutting)).dim().centered(),
+        Line::from(pull_key_line(cutting)).dim().centered(),
+        Line::default(),
+        answers_line(cutting.answer()),
+    ];
+
+    debug_assert_eq!(
+        u16::try_from(lines.len()).unwrap_or(u16::MAX),
+        PULL_LINES,
+        "the pull dialog is no longer {PULL_LINES} lines tall"
+    );
+
+    lines
+}
+
+fn status_line(cutting: &Cutting) -> String {
+    format!("{PULL_STATUS}{}", cutting.status())
+}
+
+fn slices_line(cutting: &Cutting) -> String {
+    format!("{PULL_SLICES}{}", cutting.slices())
+}
+
+fn pull_team_line(cutting: &Cutting) -> String {
+    format!("{PULL_TEAM}{}", cutting.team())
+}
+
+fn pull_key_line(cutting: &Cutting) -> String {
+    format!("{PULL_KEY}{}", cutting.key())
+}
+
+fn pull_size(cutting: &Cutting) -> Size {
+    let answers =
+        display_width(CONFIRM_YES) + display_width(CONFIRM_ANSWER_GAP) + display_width(CONFIRM_NO);
+    let widest = display_width(PULL_QUESTION)
+        .max(answers)
+        .max(display_width(cutting.project()))
+        .max(display_width(&status_line(cutting)))
+        .max(display_width(&slices_line(cutting)))
+        .max(display_width(&pull_team_line(cutting)))
+        .max(display_width(&pull_key_line(cutting)));
+
+    Size::new(padded_width(widest, CONFIRM_MARGIN), PULL_HEIGHT)
+}
+
+// The pull dialog's window with the drafts in it instead of the board, and
+// deliberately the same everything else, for the reason that one is the quit
+// question's window: every question warlock asks is answered in the same place
+// on the screen.
+fn draw_review(frame: &mut Frame<'_>, screen: Rect, review: &Review) {
+    draw_over(
+        frame,
+        review_area(screen, review),
+        Padding::symmetric(CONFIRM_MARGIN, CONFIRM_MARGIN_ROWS),
+        review_lines(review),
+    );
+}
+
+// Where the review window lands, which is where every other question lands.
+fn review_area(screen: Rect, review: &Review) -> Rect {
+    centred(screen, review_size(review))
+}
+
+fn review_lines(review: &Review) -> Vec<Line<'_>> {
+    let mut lines = vec![
+        Line::from(REVIEW_QUESTION).centered(),
+        Line::default(),
+        Line::from(review.slice()).bold().centered(),
+    ];
+    // Every title and not the first few: they are what the answer is about, and
+    // a window that showed three of five would be asking about two drafts
+    // nobody had read.
+    lines.extend(
+        review
+            .titles()
+            .iter()
+            .map(|title| Line::from(title.as_str()).dim().centered()),
+    );
+    lines.push(Line::default());
+    lines.push(review_answers_line(review));
+
+    debug_assert_eq!(
+        u16::try_from(lines.len()).unwrap_or(u16::MAX),
+        review_height(review) - 2 * CONFIRM_MARGIN_ROWS - 2 * BORDER_THICKNESS,
+        "the review window is not as tall as what it draws"
+    );
+
+    lines
+}
+
+// The answers line with three answers on it: the same lit and unlit styles as
+// every other question's, so what is under the finger reads the same way, and
+// the third answer left off entirely when this slice has spent its redraft — an
+// answer that is drawn is one that can be pressed.
+fn review_answers_line(review: &Review) -> Line<'static> {
+    let lit = Style::new()
+        .fg(FOCUS_COLOUR)
+        .add_modifier(Modifier::REVERSED | Modifier::BOLD);
+    let unlit = Style::new().add_modifier(Modifier::DIM);
+    let style = |choice: Choice| {
+        if choice == review.choice() {
+            lit
+        } else {
+            unlit
+        }
+    };
+
+    let mut spans = vec![
+        Span::styled(REVIEW_CREATE, style(Choice::Create)),
+        Span::raw(REVIEW_ANSWER_GAP),
+        Span::styled(REVIEW_SKIP, style(Choice::Skip)),
+    ];
+    if review.feedback() {
+        spans.push(Span::raw(REVIEW_ANSWER_GAP));
+        spans.push(Span::styled(REVIEW_FEEDBACK, style(Choice::Feedback)));
+    }
+
+    Line::from(spans).centered()
+}
+
+fn review_size(review: &Review) -> Size {
+    let widest = display_width(REVIEW_QUESTION)
+        .max(review_answers_width(review))
+        .max(display_width(review.slice()))
+        .max(
+            review
+                .titles()
+                .iter()
+                .map(|title| display_width(title))
+                .max()
+                .unwrap_or_default(),
+        );
+
+    Size::new(padded_width(widest, CONFIRM_MARGIN), review_height(review))
+}
+
+fn review_answers_width(review: &Review) -> usize {
+    let two = display_width(REVIEW_CREATE)
+        + display_width(REVIEW_ANSWER_GAP)
+        + display_width(REVIEW_SKIP);
+    if review.feedback() {
+        two + display_width(REVIEW_ANSWER_GAP) + display_width(REVIEW_FEEDBACK)
+    } else {
+        two
+    }
+}
+
+// One row per title on top of the fixed five: a slice is drafted into a handful
+// of tickets, and `centred` clamps the window to the screen either way.
+fn review_height(review: &Review) -> u16 {
+    let titles = u16::try_from(review.titles().len()).unwrap_or(u16::MAX);
+    REVIEW_FIXED_LINES
+        .saturating_add(titles)
+        .saturating_add(2 * CONFIRM_MARGIN_ROWS)
+        .saturating_add(2 * BORDER_THICKNESS)
+}
+
+// The quit question's window with what is left named in it, and answered by the
+// same two answers in the same order.
+fn draw_carry(frame: &mut Frame<'_>, screen: Rect, carry: &Carry) {
+    draw_over(
+        frame,
+        carry_area(screen, carry),
+        Padding::symmetric(CONFIRM_MARGIN, CONFIRM_MARGIN_ROWS),
+        carry_lines(carry),
+    );
+}
+
+// And where the question behind a skipped slice lands, likewise.
+fn carry_area(screen: Rect, carry: &Carry) -> Rect {
+    centred(screen, carry_size(carry))
+}
+
+fn carry_lines(carry: &Carry) -> Vec<Line<'_>> {
+    let lines = vec![
+        Line::from(CARRY_QUESTION).centered(),
+        Line::default(),
+        Line::from(carry_left_line(carry)).dim().centered(),
+        Line::default(),
+        answers_line(carry.answer()),
+    ];
+
+    debug_assert_eq!(
+        u16::try_from(lines.len()).unwrap_or(u16::MAX),
+        CARRY_LINES,
+        "the carry-on question is no longer {CARRY_LINES} lines tall"
+    );
+
+    lines
+}
+
+fn carry_left_line(carry: &Carry) -> String {
+    format!("{}{CARRY_LEFT}", carry.left())
+}
+
+fn carry_size(carry: &Carry) -> Size {
+    let answers =
+        display_width(CONFIRM_YES) + display_width(CONFIRM_ANSWER_GAP) + display_width(CONFIRM_NO);
+    let widest = display_width(CARRY_QUESTION)
+        .max(answers)
+        .max(display_width(&carry_left_line(carry)));
+
+    Size::new(padded_width(widest, CONFIRM_MARGIN), CARRY_HEIGHT)
+}
+
 fn draw_over(frame: &mut Frame<'_>, area: Rect, padding: Padding, lines: Vec<Line<'_>>) {
     let block = Block::bordered().padding(padding);
     let inner = block.inner(area);
@@ -1348,6 +1657,12 @@ fn confirm_area(screen: Rect) -> Rect {
 // same `centred`, over a window sized by what this one has to say.
 fn push_area(screen: Rect, filing: &Filing) -> Rect {
     centred(screen, push_size(filing))
+}
+
+// Where the pull dialog lands, which is where the other two land: the same
+// `centred`, over a window sized by what this one has to say.
+fn pull_area(screen: Rect, cutting: &Cutting) -> Rect {
+    centred(screen, pull_size(cutting))
 }
 
 fn centred(screen: Rect, size: Size) -> Rect {

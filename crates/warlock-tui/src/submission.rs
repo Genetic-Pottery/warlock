@@ -7,23 +7,23 @@
 //! `Submitted::refusal` is the entire discovery mechanism, which is why there
 //! is no `/help`: a command whose job was to print the list would be a thing to
 //! discover before you could discover anything. Nothing here *copies* the
-//! draft's text: `Submitted::Push` borrows the path out of it, so there is
-//! still one owner and no second string free to disagree with the first. And
-//! nothing here enters a mode, writes a file or opens a turn.
+//! draft's text: the two path-taking variants borrow the path out of it, so
+//! there is still one owner and no second string free to disagree with the
+//! first. And nothing here enters a mode, writes a file or opens a turn.
 
 // Stated once, here, because it is the only place warlock says which commands
 // exist: a second copy of this sentence in the loop or in a test fixture would
 // be a second list to keep true.
-const REFUSAL: &str = "warlock has four commands — /brief, /write, /chat and /push — and only /push takes anything after it, the brief to file.";
+const REFUSAL: &str = "warlock has five commands — /brief, /write, /chat, /push and /pull — and only /push and /pull take a path after them, the brief to file and the brief to cut.";
 
-// Six variants and no seventh for "empty", because an empty draft never gets
+// Seven variants and no eighth for "empty", because an empty draft never gets
 // here — `Composer::is_submittable` declines to offer one up — and a function
 // that is total anyway is worth more than a variant every caller must match on.
 //
-// The borrow in `Push` is what keeps the module's promise that nothing here
-// copies the draft: the path is a slice of the draft the caller still owns, and
-// `&str` is `Copy`, so the value stays as cheap to pass around as it was when
-// no variant carried anything.
+// The borrows in `Push` and `Pull` are what keep the module's promise that
+// nothing here copies the draft: the path is a slice of the draft the caller
+// still owns, and `&str` is `Copy`, so the value stays as cheap to pass around
+// as it was when no variant carried anything.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Submitted<'a> {
     Brief,
@@ -31,6 +31,8 @@ pub enum Submitted<'a> {
     Chat,
     // `None` is `/push` on its own, which files what this session wrote.
     Push(Option<&'a str>),
+    // `None` is `/pull` on its own, which cuts what this session wrote.
+    Pull(Option<&'a str>),
     Message,
     // An unknown word, a bare `/`, or one of the other three command words with
     // something after it. It never reaches the model: the point of refusing
@@ -80,18 +82,29 @@ pub fn submitted_for(draft: &str) -> Submitted<'_> {
     // eat it.
     let after = &draft[word.len()..];
 
-    // The one command that takes an argument, because it is the one command
+    // The two commands that take an argument, because they are the commands
     // about a file rather than about the conversation: a brief is committed,
-    // read for a day and filed by whoever gets to it, quite possibly in a
-    // session that wrote nothing and by somebody who did not write it.
+    // read for a day, and then filed and cut by whoever gets to it, quite
+    // possibly in a session that wrote nothing and by somebody who did not
+    // write it.
+    //
+    // One branch for the two of them, with only the variant chosen from the
+    // word, rather than a branch each: a second copy of the lines below would be
+    // a second place for "a path with a space in it" and "never across a
+    // newline" to stop agreeing, and the two commands take the same argument.
     //
     // Taken whole rather than as a second token, so a path with a space in it
     // arrives as the path it is — but never across a line break, which is
     // somebody typing a message under a command word rather than naming a file
     // no path has a newline in.
-    if word == PUSH && !after.contains('\n') {
+    if matches!(word, PUSH | PULL) && !after.contains('\n') {
         let named = after.trim();
-        return Submitted::Push((!named.is_empty()).then_some(named));
+        let named = (!named.is_empty()).then_some(named);
+        return if word == PULL {
+            Submitted::Pull(named)
+        } else {
+            Submitted::Push(named)
+        };
     }
     // The trimmed draft *is* the word when nothing follows it — which covers a
     // second token and a second line in the one comparison, since both leave
@@ -109,9 +122,10 @@ pub fn submitted_for(draft: &str) -> Submitted<'_> {
     }
 }
 
-// Named because it is compared before the match below rather than inside it,
-// and a literal in two places is two places to change.
+// Named because they are matched on before the match below rather than inside
+// it, and a literal in two places is two places to change.
 const PUSH: &str = "/push";
+const PULL: &str = "/pull";
 
 #[cfg(test)]
 #[path = "tests/submission.rs"]

@@ -1,0 +1,2078 @@
+//! Every test here drives [`Pulls`] over a temporary repository and a temporary
+//! home, through the seam the event loop uses: a stand-in Linear handed in as
+//! the [`Opens`] the value was built with. Nothing below reads the sigils, the
+//! binding or the key store of the machine the suite runs on, and the one key
+//! any of it stores is not one.
+
+use std::fs;
+use std::path::Path;
+use std::time::{Duration, Instant};
+
+use serde_json::Value;
+use tempfile::TempDir;
+use warlock_engine::{
+    CutRecord, Filed, FiledRecord, Manifest, PactEntry, ScopeRecord, save_key, save_key_binding,
+    save_sigils,
+};
+use warlock_tui::{App, Converses, Line, LinearError, Posts};
+
+use super::{ALREADY_PULLING, Pulls};
+use crate::error::{Error, one_line};
+use crate::pushing::Opens;
+use crate::stubs::{Answering, Gate, Reading, Scripted};
+
+// Not a key, and named so that nothing reading this file mistakes it for one:
+// it is stored only so that a bound name resolves and the worker has something
+// to build a client from, which is the one line that sees it.
+const NOT_A_KEY: &str = "not-a-real-key-value";
+
+// A name no real key store would be holding, so a pull that reached the
+// machine's own home could not pass for one that reached this test's.
+const KEY_NAME: &str = "this-tests-own-name";
+
+const SCOPE: &str = "warlock-team";
+
+const TEAM: &str = "WAR";
+
+const LABEL: &str = "warlock";
+
+// The manifest's own spelling of the brief, which is what a filed record is
+// keyed by and so what a `/pull` carries.
+const BRIEF: &str = "docs/brief.md";
+
+const PROJECT_ID: &str = "b229262b-22aa-444a-a8af-0a2a3f4ef100";
+
+const URL: &str = "https://linear.app/acme/project/pull-a-brief-1a2b3c";
+
+const NAME: &str = "Cut a planned project into tickets";
+
+// The board's own spelling, which is not `Planned`: the gate folds case, and
+// the line reports what somebody sent to look would find written there.
+const STATUS: &str = "planned";
+
+// Three slices in document order, each waiting on the one before it: the
+// description a project carries once somebody has edited the scope in Linear.
+const SLICED: &str = "Nothing cuts a planned project into tickets.\n\n## Scope\n\n\
+                      ### 1. Read the project back\n\ndepends_on: []\n\n\
+                      What it resolves.\n\n\
+                      ### 2. Parse the scope block\n\ndepends_on: [1]\n\n\
+                      What it parses.\n\n\
+                      ### 3. File the drafts\n\ndepends_on: [2]\n\n\
+                      What it writes.\n";
+
+const FIRST: &str = "Read the project back";
+
+const SECOND: &str = "Parse the scope block";
+
+const THIRD: &str = "File the drafts";
+
+// A description with no scope block in it at all, which is the project somebody
+// filed and never edited.
+const NO_SCOPE: &str = "Nothing cuts a planned project into tickets.\n\n\
+                        ## Out of scope\n\nEverything.\n";
+
+// Long enough that a worker which never reports fails the test rather than
+// hanging the suite, and short enough that it is a failure rather than a wait.
+const AT_MOST: Duration = Duration::from_secs(10);
+
+fn now() -> Instant {
+    Instant::now()
+}
+
+fn a_dir() -> TempDir {
+    tempfile::tempdir().expect("a temporary directory")
+}
+
+fn a_manifest() -> Manifest {
+    Manifest::with_entries([PactEntry::new(".", "docs", "docs/WARLOCK.md")
+        .expect("a relative module path is inside the root")
+        .with_scope(SCOPE)])
+    .with_scopes([ScopeRecord::new(SCOPE, TEAM, "In Review", LABEL)])
+}
+
+// A repository with the manifest saved and the brief on disk. The document's
+// own text is beside the point here — what a pull reads is the project, and the
+// file is what the record is keyed by.
+fn a_repository() -> TempDir {
+    let repo = a_dir();
+    a_manifest()
+        .save(repo.path())
+        .expect("a manifest that saves");
+    let path = repo.path().join(BRIEF);
+    fs::create_dir_all(path.parent().expect("a `docs` directory")).expect("a `docs` directory");
+    fs::write(&path, "# A brief\n").expect("a brief file");
+    repo
+}
+
+// A home of this test's own: the sigils that pick the board, the binding and
+// the key store all sit under it, and the value under test is only ever handed
+// the one built here.
+fn a_home(root: &Path) -> TempDir {
+    let home = a_dir();
+    save_sigils(home.path(), root, &[SCOPE.to_owned()]).expect("a config that writes");
+    save_key_binding(home.path(), root, KEY_NAME).expect("a binding that writes");
+    save_key(home.path(), KEY_NAME, NOT_A_KEY).expect("a key store that writes");
+    home
+}
+
+// The record a `/push` of this brief left behind, with whichever slices have
+// already been cut written under it.
+fn filed(root: &Path, cuts: &[&str]) {
+    let mut record = FiledRecord::new(
+        root,
+        root.join(BRIEF),
+        PROJECT_ID,
+        URL,
+        SCOPE,
+        TEAM,
+        "2026-09-20T07:32:00Z",
+    )
+    .expect("a path inside the repository");
+    for (place, title) in cuts.iter().enumerate() {
+        record.push_cut(CutRecord::new(
+            *title,
+            [format!("WAR-{}", place + 1)],
+            "2026-09-21T09:00:00Z",
+        ));
+    }
+    Filed::with_records([record])
+        .save(root)
+        .expect("a record file that saves");
+}
+
+fn notes(app: &App) -> Vec<String> {
+    app.panel()
+        .thread()
+        .map(|thread| thread.lines(now()))
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|line| match line {
+            Line::Note { text } => Some(text),
+            _ => None,
+        })
+        .collect()
+}
+
+// A client the worker may never reach: the refusals below are decided before a
+// key is read, so being posted to at all is the failure the test is about.
+#[derive(Debug, Clone, Copy)]
+struct Unreachable;
+
+impl Opens for Unreachable {
+    type Client = Self;
+
+    fn open(&self, _key: &str) -> Self {
+        panic!("the key was read and a client was built");
+    }
+}
+
+impl Posts for Unreachable {
+    fn post(&self, document: &str, _variables: Value) -> Result<Value, LinearError> {
+        panic!("a request was sent: {document}");
+    }
+}
+
+// A `/pull` pressed at the value the loop holds. The home is the value's own,
+// handed to it when it was built, which is what keeps every test here off the
+// machine's.
+fn press<O: Opens, A: Converses>(app: &mut App, pulls: &mut Pulls<O, A>, repo: &Path) {
+    pulls.press(app, &a_manifest(), repo, BRIEF, now());
+}
+
+// Rounds until the fetch has reported, drained and never blocked on: the loop
+// draws and then drains, so a test that waited on the channel would be a test
+// of something the panel does not do.
+fn landing<O: Opens, A: Converses>(app: &mut App, pulls: &mut Pulls<O, A>) -> usize {
+    let waited = Instant::now();
+    let mut rounds = 0;
+    while pulls.fetching() && waited.elapsed() < AT_MOST {
+        pulls.keep_up(app, now());
+        rounds += 1;
+    }
+    assert!(!pulls.fetching(), "the pull never reported");
+    rounds
+}
+
+// Rounds until the run is over, drained and never blocked on — the loop draws
+// and then drains, so a test that waited on a channel would be a test of
+// something the panel does not do — with the window each slice's drafts stop
+// behind answered the way somebody at the panel would answer it: Skip, which
+// sends nothing at all, and a Yes to the carry-on question behind it.
+//
+// Skip and not Create, because what a run drafts and what becomes of the drafts
+// are two questions: every test that drives this one is about the first, and the
+// second is `reviewing`'s own.
+fn through<O: Opens, A: Converses>(app: &mut App, pulls: &mut Pulls<O, A>) {
+    let waited = Instant::now();
+    while pulls.drafting() && waited.elapsed() < AT_MOST {
+        drop(pulls.keep_up(app, now()));
+        if pulls.reviewing().is_some() {
+            pulls.skip(app, now());
+        }
+        if pulls.carrying().is_some() {
+            pulls.carry_on(app, now());
+        }
+    }
+    assert!(!pulls.drafting(), "the run never finished");
+}
+
+// The engine's own sentence for a refusal, flattened as the thread takes it:
+// these tests assert the line *is* that sentence rather than restating it.
+fn refusal(error: &Error) -> String {
+    one_line(&error.to_string())
+}
+
+// The workspace every test here reads back: one project, planned, with three
+// slices under its scope block.
+fn a_project() -> Reading {
+    Reading::holding(NAME, Some(STATUS), SLICED)
+}
+
+// A model no slice may reach. Every test above the run is decided before a
+// session is opened, so a turn being asked for at all is the failure — which is
+// what an empty script panics over.
+fn unasked() -> Scripted {
+    Scripted::saying([])
+}
+
+// A fetch carried all the way to the question, which is the only way the dialog
+// is ever up and so the only way a run ever starts. The two directories come
+// back with it because they are the repository and the home the value is
+// reading: dropped here, every path under test would be gone before the answer.
+//
+// Generic over the workspace for the one difference a run that files has: a
+// create sends over the same seam the fetch read over, so the tests below that
+// answer a window hand in a board that can answer both.
+fn asked_over<O: Opens>(linear: O, agent: Scripted) -> (App, Pulls<O, Scripted>, TempDir, TempDir) {
+    asked_proposing(linear, agent, unasked())
+}
+
+// The same, with the second conversation scripted as well: the one warlock's
+// attempt at a question is asked in. Separate from the slice's own script
+// because they are separate sessions, so a test that scripts one and leaves the
+// other empty is a test that says which of the two was asked.
+fn asked_proposing<O: Opens>(
+    linear: O,
+    agent: Scripted,
+    proposer: Scripted,
+) -> (App, Pulls<O, Scripted>, TempDir, TempDir) {
+    let repo = a_repository();
+    let home = a_home(repo.path());
+    filed(repo.path(), &[]);
+    let mut pulls = Pulls::with_client(linear, Some(home.path().to_path_buf()), agent, proposer);
+    let mut app = App::default();
+    press(&mut app, &mut pulls, repo.path());
+    landing(&mut app, &mut pulls);
+    (app, pulls, repo, home)
+}
+
+#[test]
+fn a_pull_reports_the_project_its_status_and_how_many_slices_are_left() {
+    // The whole sequence with nothing in its way: the board resolved, the
+    // record read, the project fetched, the gate passed, the scope block
+    // parsed. One request, and the line names what the reader is about to be
+    // asked about.
+    let repo = a_repository();
+    let home = a_home(repo.path());
+    filed(repo.path(), &[]);
+    let linear = Reading::holding(NAME, Some(STATUS), SLICED);
+    let mut pulls = Pulls::with_client(
+        linear.clone(),
+        Some(home.path().to_path_buf()),
+        unasked(),
+        unasked(),
+    );
+    let mut app = App::default();
+
+    press(&mut app, &mut pulls, repo.path());
+    landing(&mut app, &mut pulls);
+
+    let notes = notes(&app);
+    let said = notes.last().expect("the pull said nothing");
+    assert!(said.contains(NAME), "{said:?} does not name the project");
+    assert!(
+        said.contains(STATUS),
+        "{said:?} does not say the board's own spelling of the status"
+    );
+    assert!(said.contains("3 slices"), "{said:?} does not count slices");
+    assert_eq!(linear.requests(), 1, "one pull is one request");
+    assert!(
+        !format!("{pulls:?}").contains(NOT_A_KEY),
+        "the key value is in the value the session holds"
+    );
+    assert!(
+        notes.iter().all(|line| !line.contains(NOT_A_KEY)),
+        "the key value is on the thread"
+    );
+}
+
+#[test]
+fn slices_already_cut_are_left_out_of_what_is_still_to_cut() {
+    // The count of what is left comes off `.warlock/filed.toml` rather than off
+    // the block, so a brief two slices into being cut says so.
+    let repo = a_repository();
+    let home = a_home(repo.path());
+    filed(repo.path(), &[FIRST, SECOND]);
+    let mut pulls = Pulls::with_client(
+        Reading::holding(NAME, Some(STATUS), SLICED),
+        Some(home.path().to_path_buf()),
+        unasked(),
+        unasked(),
+    );
+    let mut app = App::default();
+
+    press(&mut app, &mut pulls, repo.path());
+    landing(&mut app, &mut pulls);
+
+    let said = notes(&app).last().cloned().expect("the pull said nothing");
+    assert!(said.contains("3 slices"), "{said:?} miscounts the block");
+    assert!(
+        said.contains('1'),
+        "{said:?} does not say that one slice is left"
+    );
+    assert!(!said.contains(THIRD), "{said:?} names a slice");
+}
+
+#[test]
+fn a_project_that_is_not_planned_is_one_line_with_nothing_torn_down() {
+    // The gate, asked of what the board answered with. The request was made —
+    // there is no other way to know the status — and nothing else happened.
+    let repo = a_repository();
+    let home = a_home(repo.path());
+    filed(repo.path(), &[]);
+    let linear = Reading::holding(NAME, Some("Backlog"), SLICED);
+    let mut pulls = Pulls::with_client(
+        linear.clone(),
+        Some(home.path().to_path_buf()),
+        unasked(),
+        unasked(),
+    );
+    let mut app = App::default();
+
+    press(&mut app, &mut pulls, repo.path());
+    landing(&mut app, &mut pulls);
+
+    assert_eq!(
+        notes(&app).last(),
+        Some(&refusal(&Error::NotPlanned {
+            path: BRIEF.to_owned(),
+            status: Some("Backlog".to_owned()),
+        })),
+        "the line is not the engine's own sentence",
+    );
+    assert_eq!(linear.requests(), 1, "the gate sent a second request");
+    assert!(!pulls.fetching(), "a refusal left a pull running");
+}
+
+#[test]
+fn a_project_in_no_status_at_all_is_refused_in_the_same_words() {
+    // A workspace whose board has no statuses answers `null`, which is not a
+    // broken answer and is not `Planned` either.
+    let repo = a_repository();
+    let home = a_home(repo.path());
+    filed(repo.path(), &[]);
+    let mut pulls = Pulls::with_client(
+        Reading::holding(NAME, None, SLICED),
+        Some(home.path().to_path_buf()),
+        unasked(),
+        unasked(),
+    );
+    let mut app = App::default();
+
+    press(&mut app, &mut pulls, repo.path());
+    landing(&mut app, &mut pulls);
+
+    assert_eq!(
+        notes(&app).last(),
+        Some(&refusal(&Error::NotPlanned {
+            path: BRIEF.to_owned(),
+            status: None,
+        })),
+    );
+}
+
+#[test]
+fn a_brief_no_record_claims_is_refused_before_a_key_is_read() {
+    // `.warlock/filed.toml` is what turns a path into a project id, so a brief
+    // nothing filed is answered on this machine: no client is built, which the
+    // seam here asserts by panicking if one is.
+    let repo = a_repository();
+    let home = a_home(repo.path());
+    let mut pulls = Pulls::with_client(
+        Unreachable,
+        Some(home.path().to_path_buf()),
+        unasked(),
+        unasked(),
+    );
+    let mut app = App::default();
+
+    press(&mut app, &mut pulls, repo.path());
+    landing(&mut app, &mut pulls);
+
+    assert_eq!(
+        notes(&app).last(),
+        Some(&refusal(&Error::NoRecord {
+            path: BRIEF.to_owned(),
+        })),
+    );
+}
+
+#[test]
+fn a_description_with_no_scope_block_is_the_parsers_own_line() {
+    // The project is planned and the request was answered; what came back is
+    // not a brief. The sentence is the scope parser's, because it is the one
+    // that knows what it was looking for.
+    let repo = a_repository();
+    let home = a_home(repo.path());
+    filed(repo.path(), &[]);
+    let mut pulls = Pulls::with_client(
+        Reading::holding(NAME, Some(STATUS), NO_SCOPE),
+        Some(home.path().to_path_buf()),
+        unasked(),
+        unasked(),
+    );
+    let mut app = App::default();
+
+    press(&mut app, &mut pulls, repo.path());
+    landing(&mut app, &mut pulls);
+
+    let said = notes(&app).last().cloned().expect("the pull said nothing");
+    assert!(!said.contains('\n'), "{said:?} is more than one line");
+    assert_ne!(said.as_str(), NAME, "a project with no scope was reported");
+}
+
+#[test]
+fn a_project_with_every_slice_cut_is_refused_rather_than_reported() {
+    // Nothing to do is not a run of nothing: the record says all three are
+    // filed, so the pull says so and stops.
+    let repo = a_repository();
+    let home = a_home(repo.path());
+    filed(repo.path(), &[FIRST, SECOND, THIRD]);
+    let mut pulls = Pulls::with_client(
+        Reading::holding(NAME, Some(STATUS), SLICED),
+        Some(home.path().to_path_buf()),
+        unasked(),
+        unasked(),
+    );
+    let mut app = App::default();
+
+    press(&mut app, &mut pulls, repo.path());
+    landing(&mut app, &mut pulls);
+
+    assert_eq!(
+        notes(&app).last(),
+        Some(&refusal(&Error::AllCut {
+            path: BRIEF.to_owned(),
+        })),
+    );
+}
+
+#[test]
+fn a_machine_with_no_home_is_refused_before_anything_is_read() {
+    // The one refusal this value answers itself, in `Standing::home`'s own
+    // words: with no home there are no sigils, no binding and no key store, so
+    // there is no board to resolve and nothing to read the record for.
+    let repo = a_repository();
+    filed(repo.path(), &[]);
+    let mut pulls = Pulls::with_client(Unreachable, None, unasked(), unasked());
+    let mut app = App::default();
+
+    pulls.press(&mut app, &a_manifest(), repo.path(), BRIEF, now());
+
+    assert_eq!(notes(&app), vec![refusal(&Error::NoHome)]);
+    assert!(!pulls.fetching(), "a refusal started a pull");
+}
+
+#[test]
+fn a_second_pull_with_one_in_flight_is_one_line_and_reads_nothing() {
+    // One pull at a time, and the say-no is the run itself. The first is held
+    // open at the gate, so the second arrives while it is genuinely in flight;
+    // what it costs is a line.
+    let repo = a_repository();
+    let home = a_home(repo.path());
+    filed(repo.path(), &[]);
+    let gate = Gate::shut();
+    let linear = Reading::holding(NAME, Some(STATUS), SLICED).held_at(&gate);
+    let mut pulls = Pulls::with_client(
+        linear.clone(),
+        Some(home.path().to_path_buf()),
+        unasked(),
+        unasked(),
+    );
+    let mut app = App::default();
+
+    press(&mut app, &mut pulls, repo.path());
+    press(&mut app, &mut pulls, repo.path());
+
+    assert_eq!(
+        notes(&app).last(),
+        Some(&ALREADY_PULLING.to_owned()),
+        "the second pull did not say no",
+    );
+    gate.open();
+    landing(&mut app, &mut pulls);
+    assert_eq!(linear.requests(), 1, "the second pull sent something");
+}
+
+#[test]
+fn the_rounds_go_on_while_the_request_is_in_flight() {
+    // The whole reason the fetch is on a worker: a drain that blocked would
+    // freeze the panel for as long as Linear took to answer. The gate holds the
+    // request open, the rounds are counted, and the pull reports afterwards.
+    let repo = a_repository();
+    let home = a_home(repo.path());
+    filed(repo.path(), &[]);
+    let gate = Gate::shut();
+    let mut pulls = Pulls::with_client(
+        Reading::holding(NAME, Some(STATUS), SLICED).held_at(&gate),
+        Some(home.path().to_path_buf()),
+        unasked(),
+        unasked(),
+    );
+    let mut app = App::default();
+
+    press(&mut app, &mut pulls, repo.path());
+    let held = notes(&app).len();
+    for _ in 0..3 {
+        pulls.keep_up(&mut app, now());
+        assert!(pulls.fetching(), "the drain answered a held request");
+    }
+
+    assert_eq!(
+        notes(&app).len(),
+        held,
+        "a round with nothing to report said something",
+    );
+    gate.open();
+    landing(&mut app, &mut pulls);
+    let said = notes(&app).last().cloned().expect("the pull said nothing");
+    assert!(said.contains(NAME), "{said:?} does not name the project");
+}
+
+#[test]
+fn a_pull_says_which_document_it_is_reading_before_the_board_answers() {
+    // The answer is a request away and the reader has just typed the command,
+    // so the thread names the document at once — by the document, because the
+    // project has no name on this side of the request.
+    let repo = a_repository();
+    let home = a_home(repo.path());
+    filed(repo.path(), &[]);
+    let gate = Gate::shut();
+    let mut pulls = Pulls::with_client(
+        Reading::holding(NAME, Some(STATUS), SLICED).held_at(&gate),
+        Some(home.path().to_path_buf()),
+        unasked(),
+        unasked(),
+    );
+    let mut app = App::default();
+
+    press(&mut app, &mut pulls, repo.path());
+
+    let said = notes(&app).last().cloned().expect("the pull said nothing");
+    assert!(said.contains(BRIEF), "{said:?} does not name the document");
+    assert!(pulls.fetching(), "the pull is not running");
+    gate.open();
+    landing(&mut app, &mut pulls);
+}
+
+#[test]
+fn dropping_the_session_ends_the_pull_without_waiting_for_it() {
+    // What quitting does: the guard goes with the value, the worker is
+    // cancelled, and nothing on this side waits for the request it is sitting
+    // in. A pull that had to be joined would hold the terminal until Linear
+    // answered.
+    let repo = a_repository();
+    let home = a_home(repo.path());
+    filed(repo.path(), &[]);
+    let gate = Gate::shut();
+    let mut pulls = Pulls::with_client(
+        Reading::holding(NAME, Some(STATUS), SLICED).held_at(&gate),
+        Some(home.path().to_path_buf()),
+        unasked(),
+        unasked(),
+    );
+    let mut app = App::default();
+    press(&mut app, &mut pulls, repo.path());
+
+    let dropped = Instant::now();
+    drop(pulls);
+
+    assert!(
+        dropped.elapsed() < AT_MOST,
+        "dropping the value waited for the request"
+    );
+    // Opened afterwards so the worker finishes and the suite leaves no thread
+    // parked: a gate nobody opens is a thread held until the binary exits.
+    gate.open();
+}
+
+// The question between the fetch and the run, asked of the value the loop
+// holds: the session answers it through `Pulls` and not through the dialog, so
+// these drive the same three calls `Session::pull_answered` makes.
+mod asking {
+    use tempfile::TempDir;
+    use warlock_tui::Answer;
+
+    use super::{
+        Answering, App, BRIEF, FIRST, Instant, KEY_NAME, NAME, NOT_A_KEY, Pulls, Reading, SLICED,
+        STATUS, Scripted, TEAM, a_home, a_project, a_repository, asked_over, filed, landing, notes,
+        now, press, refusal, unasked,
+    };
+    use crate::error::Error;
+
+    fn asked() -> (App, Pulls<Reading, Scripted>, TempDir, TempDir) {
+        asked_over(a_project(), unasked())
+    }
+
+    #[test]
+    fn a_landed_fetch_puts_the_question_up_carrying_what_it_read() {
+        // The five facts come off the one request rather than out of a second
+        // one, which is why they are parked on the question at all.
+        let (_app, pulls, _repo, _home) = asked();
+
+        let cutting = pulls.confirm().cutting().expect("the question is not up");
+        assert_eq!(cutting.project(), NAME);
+        assert_eq!(cutting.status(), STATUS);
+        assert_eq!(cutting.slices(), 3);
+        assert_eq!(cutting.team(), TEAM);
+        // The key by name, and nowhere in the question for its bytes.
+        assert_eq!(cutting.key(), KEY_NAME);
+        assert_eq!(cutting.answer(), Answer::No);
+        assert!(
+            !format!("{cutting:?}").contains(NOT_A_KEY),
+            "the key value is on the question"
+        );
+    }
+
+    #[test]
+    fn a_refused_pull_asks_nothing() {
+        // There is nothing to confirm about a project the gate turned away, so
+        // the refusal is the whole of what the round does.
+        let repo = a_repository();
+        let home = a_home(repo.path());
+        filed(repo.path(), &[]);
+        let mut pulls = Pulls::with_client(
+            Reading::holding(NAME, Some("Backlog"), SLICED),
+            Some(home.path().to_path_buf()),
+            unasked(),
+            unasked(),
+        );
+        let mut app = App::default();
+
+        press(&mut app, &mut pulls, repo.path());
+        landing(&mut app, &mut pulls);
+
+        assert!(
+            !pulls.confirm().is_open(),
+            "a refused pull asked to be confirmed"
+        );
+        assert_eq!(
+            notes(&app).last(),
+            Some(&refusal(&Error::NotPlanned {
+                path: BRIEF.to_owned(),
+                status: Some("Backlog".to_owned()),
+            })),
+        );
+    }
+
+    #[test]
+    fn an_arrow_lights_the_other_answer_and_leaves_the_facts_where_they_were() {
+        let (_app, mut pulls, _repo, _home) = asked();
+
+        pulls.lit(Answer::Yes);
+
+        let cutting = pulls.confirm().cutting().expect("the question came down");
+        assert_eq!(cutting.answer(), Answer::Yes);
+        assert_eq!(cutting.project(), NAME);
+        assert_eq!(cutting.slices(), 3);
+    }
+
+    #[test]
+    fn a_no_takes_the_question_down_and_leaves_the_session_where_it_was() {
+        // What a No costs: the window, and nothing else. No second request, no
+        // line on the thread and nothing written.
+        let (mut app, mut pulls, repo, _home) = asked();
+        let said = notes(&app);
+
+        pulls.cancelled();
+
+        assert!(!pulls.confirm().is_open(), "the question is still up");
+        assert_eq!(notes(&app), said, "a No said something");
+        assert!(!pulls.fetching(), "a No started a pull");
+        // And the value is back where a session with no pull in it sits, so the
+        // next `/pull` is allowed.
+        press(&mut app, &mut pulls, repo.path());
+        landing(&mut app, &mut pulls);
+        assert!(pulls.confirm().is_open(), "the next pull could not ask");
+    }
+
+    #[test]
+    fn a_yes_takes_the_question_down_and_starts_the_run() {
+        // The window down, the project named and the first slice already being
+        // drafted, all on the round the question was answered: a Yes that only
+        // said something would leave the run to start on whatever round the
+        // loop next came by.
+        let (mut app, mut pulls, _repo, _home) =
+            asked_over(a_project(), Scripted::saying([Answering::drafts(FIRST)]));
+        let said = notes(&app).len();
+
+        pulls.cut(&mut app, Instant::now());
+
+        assert!(
+            !pulls.confirm().is_open(),
+            "the question is up over its own run"
+        );
+        assert!(pulls.drafting(), "a Yes started no run");
+        let notes = notes(&app);
+        assert_eq!(notes.len(), said + 2, "a Yes said nothing");
+        assert!(
+            notes[said].contains(NAME),
+            "{:?} does not name the project",
+            notes[said]
+        );
+        assert!(
+            notes[said + 1].starts_with("[1/3] slice 1 "),
+            "{:?} does not say which slice is running",
+            notes[said + 1]
+        );
+    }
+
+    #[test]
+    fn an_answer_to_a_question_that_is_not_up_does_nothing_at_all() {
+        // The three calls again with the dialog closed, which is where a key
+        // that reached the wrong window would land.
+        let repo = a_repository();
+        let home = a_home(repo.path());
+        let mut pulls = Pulls::with_client(
+            Reading::holding(NAME, Some(STATUS), SLICED),
+            Some(home.path().to_path_buf()),
+            unasked(),
+            unasked(),
+        );
+        let mut app = App::default();
+
+        pulls.lit(Answer::Yes);
+        pulls.cancelled();
+        pulls.cut(&mut app, now());
+
+        assert!(!pulls.confirm().is_open());
+        assert!(notes(&app).is_empty(), "a closed question said something");
+    }
+}
+
+// The run a Yes starts, driven the way the loop drives it: rounds at the value
+// the session holds, over a model that answers out of memory and a board that
+// is only ever read. Nothing below files anything — that is the next slice of
+// this work — so what is asserted is what lands on the thread and what the
+// board was asked for.
+mod cutting {
+    use serde_json::{Value, json};
+    use tempfile::TempDir;
+    use warlock_engine::drafting::stub_answer;
+
+    use super::{
+        AT_MOST, Answering, App, FIRST, Gate, Instant, NAME, Pulls, Reading, SECOND, Scripted,
+        THIRD, a_home, a_project, a_repository, asked_over, filed, landing, notes, now, press,
+        through, unasked,
+    };
+
+    // The three `[n/total]` prefixes a run over this project says, in the order
+    // it says them: the fraction is the place in the cut order and the position
+    // is where the slice sits in the document, which is `pull.rs`'s register and
+    // not a second one.
+    const RUNNING: [&str; 3] = [
+        "[1/3] slice 1 `Read the project back` — drafting",
+        "[2/3] slice 2 `Parse the scope block` — drafting",
+        "[3/3] slice 3 `File the drafts` — drafting",
+    ];
+
+    // A confirmed question and the run it starts, over a scripted model.
+    fn cut(linear: Reading, agent: Scripted) -> (App, Pulls<Reading, Scripted>, TempDir, TempDir) {
+        let (mut app, mut pulls, repo, home) = asked_over(linear, agent);
+        pulls.cut(&mut app, now());
+        (app, pulls, repo, home)
+    }
+
+    // The stub object with a reference pointing at a draft this slice does not
+    // have, which is the repair `prune` makes to every fill and the one thing
+    // `check` never reports: an answer the model could give, mended rather than
+    // refused.
+    fn a_stray_reference(slice: &str) -> String {
+        let mut fill: Value =
+            serde_json::from_str(&stub_answer(slice)).expect("the stub answer is JSON");
+        fill["drafts"][0]["blocked_by"] = json!([7]);
+        fill.to_string()
+    }
+
+    // Which of the run's lines is about a slice, by the prefix every line about
+    // one carries.
+    fn about(said: &[String], slice: &str) -> Vec<String> {
+        said.iter()
+            .filter(|line| line.contains(&format!("`{slice}`")))
+            .cloned()
+            .collect()
+    }
+
+    #[test]
+    fn every_uncut_slice_is_drafted_in_cut_order_and_the_board_is_only_read() {
+        // One session per slice, one at a time, in the order the slices are to
+        // be cut — and the project is left exactly as it was found, because
+        // nothing on this path sends a mutation at all.
+        let linear = a_project();
+        let agent = Scripted::saying([
+            Answering::drafts(FIRST),
+            Answering::drafts(SECOND),
+            Answering::drafts(THIRD),
+        ]);
+        let (mut app, mut pulls, _repo, _home) = cut(linear.clone(), agent.clone());
+
+        through(&mut app, &mut pulls);
+
+        let said = notes(&app);
+        let running: Vec<&String> = said
+            .iter()
+            .filter(|line| line.ends_with("— drafting"))
+            .collect();
+        assert_eq!(running, RUNNING.iter().collect::<Vec<_>>());
+        assert_eq!(agent.turns(), 3, "a slice was drafted twice or not at all");
+        assert_eq!(linear.requests(), 1, "the run sent something to the board");
+    }
+
+    #[test]
+    fn a_slice_a_record_already_claims_is_not_drafted_again() {
+        // The run is over what is left to cut, so the fraction counts those and
+        // the position still finds the slice in the document — the two differ
+        // exactly here, which is the whole reason both are on the line.
+        let repo = a_repository();
+        let home = a_home(repo.path());
+        filed(repo.path(), &[FIRST]);
+        let agent = Scripted::saying([Answering::drafts(SECOND), Answering::drafts(THIRD)]);
+        let mut pulls = Pulls::with_client(
+            a_project(),
+            Some(home.path().to_path_buf()),
+            agent.clone(),
+            unasked(),
+        );
+        let mut app = App::default();
+        press(&mut app, &mut pulls, repo.path());
+        landing(&mut app, &mut pulls);
+
+        pulls.cut(&mut app, now());
+        through(&mut app, &mut pulls);
+
+        let said = notes(&app);
+        let running: Vec<&String> = said
+            .iter()
+            .filter(|line| line.ends_with("— drafting"))
+            .collect();
+        assert_eq!(
+            running,
+            vec![
+                &"[1/2] slice 2 `Parse the scope block` — drafting".to_owned(),
+                &"[2/2] slice 3 `File the drafts` — drafting".to_owned(),
+            ]
+        );
+        assert_eq!(agent.turns(), 2, "a slice already cut was drafted again");
+    }
+
+    #[test]
+    fn the_titles_a_slice_was_drafted_into_land_on_the_thread() {
+        // What the reader is about to be offered, said as it arrives: a run
+        // that only reported progress would leave them watching a bar.
+        let (mut app, mut pulls, _repo, _home) = cut(
+            a_project(),
+            Scripted::saying([
+                Answering::drafts(FIRST),
+                Answering::drafts(SECOND),
+                Answering::drafts(THIRD),
+            ]),
+        );
+
+        through(&mut app, &mut pulls);
+
+        let said = notes(&app);
+        let drafted = about(&said, FIRST);
+        let line = drafted
+            .iter()
+            .find(|line| line.contains("drafted `"))
+            .unwrap_or_else(|| panic!("no titles were said for the first slice: {drafted:?}"));
+        // The stub's own two titles, which name the slice they stand in for.
+        assert!(
+            line.contains(&format!("`Stand in for {FIRST}`")),
+            "{line:?} is missing a draft's title"
+        );
+        assert!(
+            line.contains(&format!("`Follow on from {FIRST}`")),
+            "{line:?} is missing a draft's title"
+        );
+    }
+
+    #[test]
+    fn every_repair_the_drafting_path_reported_lands_on_the_thread() {
+        // A repaired draft is a ticket that was drafted, not one that was
+        // missed, and a conversation read back tomorrow has to be able to tell
+        // the two apart.
+        let (mut app, mut pulls, _repo, _home) = cut(
+            a_project(),
+            Scripted::saying([
+                Answering::says(a_stray_reference(FIRST)),
+                Answering::drafts(SECOND),
+                Answering::drafts(THIRD),
+            ]),
+        );
+
+        through(&mut app, &mut pulls);
+
+        let said = notes(&app);
+        let mended: Vec<String> = about(&said, FIRST)
+            .into_iter()
+            .filter(|line| line.contains("blocked_by"))
+            .collect();
+        assert_eq!(mended.len(), 1, "the repair is not on the thread: {said:?}");
+        assert!(
+            mended[0].contains("outside this slice's drafts"),
+            "{:?} is not the engine's own wording of the repair",
+            mended[0]
+        );
+        // And the drafts themselves still arrived: a mend is not a refusal.
+        assert_eq!(
+            about(&said, FIRST)
+                .iter()
+                .filter(|line| line.contains("drafted `"))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn a_failed_attempt_is_one_line_and_the_run_carries_on() {
+        // A missing `claude` is not better the second time, so the slice is left
+        // and the slices after it are other work: a run that stopped would leave
+        // the reader typing the command again to reach them.
+        let (mut app, mut pulls, _repo, _home) = cut(
+            a_project(),
+            Scripted::saying([
+                Answering::missing(),
+                Answering::drafts(SECOND),
+                Answering::drafts(THIRD),
+            ]),
+        );
+
+        through(&mut app, &mut pulls);
+
+        let said = notes(&app);
+        let failed: Vec<String> = about(&said, FIRST)
+            .into_iter()
+            .filter(|line| line.contains("was not drafted"))
+            .collect();
+        assert_eq!(failed.len(), 1, "a failure cost more than a line: {said:?}");
+        assert!(
+            about(&said, THIRD)
+                .iter()
+                .any(|line| line.contains("drafted `")),
+            "the run did not reach the last slice: {said:?}"
+        );
+    }
+
+    #[test]
+    fn the_rounds_go_on_while_a_slice_is_drafting() {
+        // The whole reason a turn is on a worker: a drain that blocked would
+        // freeze the panel for as long as the model took to think, which for a
+        // slice is minutes.
+        let gate = Gate::shut();
+        let agent = Scripted::saying([
+            Answering::drafts(FIRST),
+            Answering::drafts(SECOND),
+            Answering::drafts(THIRD),
+        ])
+        .held_at(&gate);
+        let (mut app, mut pulls, _repo, _home) = cut(a_project(), agent);
+        let held = notes(&app).len();
+
+        for _ in 0..3 {
+            pulls.keep_up(&mut app, now());
+            assert!(pulls.drafting(), "the drain answered a held turn");
+        }
+
+        assert_eq!(
+            notes(&app).len(),
+            held,
+            "a round with nothing to report said something"
+        );
+        gate.open();
+        through(&mut app, &mut pulls);
+    }
+
+    #[test]
+    fn a_second_pull_while_a_slice_is_drafting_reads_nothing() {
+        // One pull at a time, and the run is its own say-no: two sets of
+        // sessions would be two runs cutting one project.
+        let gate = Gate::shut();
+        let linear = a_project();
+        let (mut app, mut pulls, repo, _home) = cut(
+            linear.clone(),
+            Scripted::saying([Answering::drafts(FIRST)]).held_at(&gate),
+        );
+
+        press(&mut app, &mut pulls, repo.path());
+
+        assert_eq!(
+            notes(&app).last(),
+            Some(&super::ALREADY_PULLING.to_owned()),
+            "the second pull did not say no"
+        );
+        assert_eq!(linear.requests(), 1, "the second pull read the board");
+        gate.open();
+    }
+
+    #[test]
+    fn dropping_the_session_cancels_the_slice_in_flight_without_waiting() {
+        // What quitting does: the guard goes with the value and the handle it
+        // latches is the session's own, so the `claude` the turn is waiting on
+        // is told to stop — and nothing on this side waits to find out that it
+        // did.
+        let gate = Gate::shut();
+        let agent = Scripted::saying([Answering::drafts(FIRST)]).held_at(&gate);
+        let (_app, pulls, _repo, _home) = cut(a_project(), agent.clone());
+        assert!(pulls.drafting(), "there is no run to cancel");
+
+        let dropped = Instant::now();
+        drop(pulls);
+
+        assert!(
+            dropped.elapsed() < AT_MOST,
+            "dropping the value waited for the turn"
+        );
+        assert!(
+            agent.cancelled(),
+            "the session in flight was not told to stop"
+        );
+        // Opened afterwards so the worker finishes and the suite leaves no
+        // thread parked.
+        gate.open();
+    }
+
+    #[test]
+    fn a_worker_that_says_nothing_costs_its_slice_and_no_more() {
+        // The one ending a session cannot word for itself, made here by leaving
+        // the last slice off the script: the stand-in panics, which is a worker
+        // that closed its channel with nothing on it. The panic it prints is the
+        // point of the test and not a failure in it — what is asserted is that
+        // the slice is reported rather than silently counted as drafted.
+        let (mut app, mut pulls, _repo, _home) = cut(
+            a_project(),
+            Scripted::saying([Answering::drafts(FIRST), Answering::drafts(SECOND)]),
+        );
+
+        through(&mut app, &mut pulls);
+
+        let said = notes(&app);
+        assert!(
+            about(&said, THIRD)
+                .iter()
+                .any(|line| line.contains("was not drafted")),
+            "the slice whose worker said nothing was reported as drafted: {said:?}"
+        );
+        assert!(
+            said.iter().any(|line| line.contains(NAME)),
+            "the run never named the project"
+        );
+    }
+}
+
+// The relay: a slice that asks something, the question on the thread, warlock's
+// attempt at it in whoever's hand the field is in, and whatever they send going
+// back to the session that asked. Driven in rounds at the value the loop holds,
+// exactly as the loop drives it, over two scripted conversations — the slice's
+// and the one the attempt is made in — so which of the two was asked for what is
+// something these tests can say.
+mod relaying {
+    use tempfile::TempDir;
+    use warlock_tui::NOTHING_SETTLES_IT;
+
+    use super::{
+        AT_MOST, Answering, App, FIRST, Gate, Instant, Pulls, Reading, SECOND, Scripted, THIRD,
+        a_project, asked_proposing, notes, now, through,
+    };
+
+    // The question the first slice comes back with, and warlock's attempt at it:
+    // prose with a round left is a question, and the model that answers it is a
+    // second session, so the two strings can never be confused for each other.
+    const ASKED: &str = "Which of the two records does this slice write?";
+
+    const PROPOSED: &str = "The cut record. `filed.toml` is written once, by the filing path.";
+
+    // What somebody types over the attempt, which is what the session has to
+    // hear: warlock's draft has no standing over it at all.
+    const TYPED: &str = "Neither — it writes the cut record and nothing else.";
+
+    // A confirmed run whose first slice asks, with the whole of both scripts
+    // written down: the slice asks, is answered, and drafts, and the two after
+    // it draft first time.
+    fn asking(proposer: Scripted) -> (App, Pulls<Reading, Scripted>, TempDir, TempDir) {
+        let (mut app, mut pulls, repo, home) = asked_proposing(
+            a_project(),
+            Scripted::saying([
+                Answering::says(ASKED),
+                Answering::drafts(FIRST),
+                Answering::drafts(SECOND),
+                Answering::drafts(THIRD),
+            ]),
+            proposer,
+        );
+        pulls.cut(&mut app, now());
+        waiting(&mut app, &mut pulls);
+        (app, pulls, repo, home)
+    }
+
+    // Rounds until the slice under way is waiting on an answer, drained and
+    // never blocked on: the loop draws and then drains, so a test that waited on
+    // a channel would be a test of something the panel does not do.
+    fn waiting(app: &mut App, pulls: &mut Pulls<Reading, Scripted>) {
+        let waited = Instant::now();
+        while !pulls.relaying() && waited.elapsed() < AT_MOST {
+            round(app, pulls);
+        }
+        assert!(pulls.relaying(), "no question was ever put");
+    }
+
+    // Rounds until warlock's attempt has come to something, and whatever it came
+    // to: a draft for the field, or `None` and a line on the thread instead.
+    // Both are one round in the panel's life, which is why one helper waits for
+    // either.
+    fn attempted(app: &mut App, pulls: &mut Pulls<Reading, Scripted>) -> Option<String> {
+        let waited = Instant::now();
+        let said = notes(app).len();
+        while waited.elapsed() < AT_MOST {
+            if let Some(draft) = pulls.keep_up(app, now()) {
+                return Some(draft);
+            }
+            if notes(app).len() > said {
+                return None;
+            }
+        }
+        panic!("the attempt at the question never came to anything");
+    }
+
+    // One round of the loop's drain, with whatever it had for the field thrown
+    // away: the tests that care about the draft ask for it through `attempted`.
+    fn round(app: &mut App, pulls: &mut Pulls<Reading, Scripted>) {
+        drop(pulls.keep_up(app, now()));
+    }
+
+    fn answered(said: &[String]) -> Vec<String> {
+        said.iter()
+            .filter(|line| line.contains("was answered:"))
+            .cloned()
+            .collect()
+    }
+
+    #[test]
+    fn a_question_lands_on_the_thread_in_the_words_it_was_asked_and_the_slice_waits() {
+        // The question is the slice's, said as it was said: nothing summarises
+        // it, and the run goes no further, because what this slice says next
+        // depends on what it is told.
+        let (app, pulls, _repo, _home) = asking(Scripted::saying([Answering::says(PROPOSED)]));
+
+        let said = notes(&app);
+        let asked: Vec<&String> = said.iter().filter(|line| line.contains(ASKED)).collect();
+        assert_eq!(
+            asked.len(),
+            1,
+            "the question is not on the thread: {said:?}"
+        );
+        assert!(
+            asked[0].starts_with(&format!("slice 1 `{FIRST}` asked:")),
+            "{:?} does not mark the slice as having asked",
+            asked[0]
+        );
+        assert!(
+            !said.iter().any(|line| line.contains(SECOND)),
+            "the run walked past a question: {said:?}"
+        );
+        assert!(pulls.drafting(), "the run was taken down by a question");
+    }
+
+    #[test]
+    fn the_panel_says_which_slice_the_field_is_answering_for() {
+        // The one thing about the field that cannot be read off the field: a
+        // draft that answers somewhere else looks exactly like one that answers
+        // here. Named the way every line about this slice names it.
+        let (mut app, mut pulls, _repo, _home) =
+            asking(Scripted::saying([Answering::says(PROPOSED)]));
+
+        assert_eq!(
+            pulls.answering(),
+            Some(format!("answering slice 1 `{FIRST}`"))
+        );
+
+        pulls.answered(&mut app, TYPED, now());
+
+        assert_eq!(
+            pulls.answering(),
+            None,
+            "the field is still labelled for a question that is over"
+        );
+    }
+
+    #[test]
+    fn warlocks_attempt_comes_back_for_the_field_and_is_not_said_on_the_thread() {
+        // It is a draft nobody has sent. A thread that reported it would read
+        // tomorrow as though warlock had answered the question itself.
+        let (mut app, mut pulls, _repo, _home) =
+            asking(Scripted::saying([Answering::says(PROPOSED)]));
+
+        let offered = attempted(&mut app, &mut pulls);
+
+        assert_eq!(offered.as_deref(), Some(PROPOSED));
+        let said = notes(&app);
+        assert!(
+            !said.iter().any(|line| line.contains(PROPOSED)),
+            "an unsent draft was put on the thread: {said:?}"
+        );
+        assert!(pulls.relaying(), "the attempt answered the question itself");
+    }
+
+    #[test]
+    fn the_attempt_is_made_in_the_other_conversation_and_asks_about_this_slice() {
+        // Not the slice's own session — whose next turn is the answer — and not
+        // the panel's chat: a third conversation, told the brief, the one slice
+        // and the question, and told to say so when the three do not settle it.
+        let proposer = Scripted::saying([Answering::says(PROPOSED)]);
+        let (mut app, mut pulls, _repo, _home) = asking(proposer.clone());
+
+        attempted(&mut app, &mut pulls);
+
+        let asked = proposer.said();
+        assert_eq!(asked.len(), 1, "the attempt was not one turn: {asked:?}");
+        assert!(asked[0].contains(ASKED), "the question was not put to it");
+        assert!(asked[0].contains(FIRST), "the slice was not put to it");
+        assert!(
+            asked[0].contains(NOTHING_SETTLES_IT),
+            "it was never told what to say when nothing settles it"
+        );
+    }
+
+    #[test]
+    fn the_rounds_go_on_while_the_attempt_is_being_made() {
+        // The whole reason the attempt is on a worker: a drain that blocked
+        // would freeze the panel for as long as a second `claude` took to read a
+        // repository, with a question up and nobody able to type an answer.
+        let gate = Gate::shut();
+        let (mut app, mut pulls, _repo, _home) =
+            asking(Scripted::saying([Answering::says(PROPOSED)]).held_at(&gate));
+        let held = notes(&app).len();
+
+        for _ in 0..3 {
+            round(&mut app, &mut pulls);
+            assert!(pulls.relaying(), "a held attempt took the question down");
+        }
+
+        assert_eq!(
+            notes(&app).len(),
+            held,
+            "a round with nothing to report said something"
+        );
+        gate.open();
+        attempted(&mut app, &mut pulls);
+    }
+
+    #[test]
+    fn what_was_sent_reaches_the_session_that_asked_and_the_run_carries_on() {
+        // The answer goes to the session mid-question rather than to a fresh
+        // one, which is the whole point of parking it: the slice drafts on the
+        // turn after, and the two slices behind it are reached.
+        let agent = Scripted::saying([
+            Answering::says(ASKED),
+            Answering::drafts(FIRST),
+            Answering::drafts(SECOND),
+            Answering::drafts(THIRD),
+        ]);
+        let (mut app, mut pulls, _repo, _home) = asked_proposing(
+            a_project(),
+            agent.clone(),
+            Scripted::saying([Answering::says(PROPOSED)]),
+        );
+        pulls.cut(&mut app, now());
+        waiting(&mut app, &mut pulls);
+        attempted(&mut app, &mut pulls);
+
+        pulls.answered(&mut app, TYPED, now());
+        through(&mut app, &mut pulls);
+
+        assert!(
+            agent.said().iter().any(|turn| turn == TYPED),
+            "what was sent did not reach the session in the words it was sent: {:?}",
+            agent.said()
+        );
+        let said = notes(&app);
+        assert!(
+            said.iter()
+                .any(|line| line.contains(THIRD) && line.contains("drafted `")),
+            "the run did not reach the last slice: {said:?}"
+        );
+    }
+
+    #[test]
+    fn a_question_and_what_was_sent_are_marked_apart_from_each_other() {
+        // Read back tomorrow, the pair says who answered: the slice asked, and
+        // the panel answered. Warlock's attempt and something typed over it land
+        // identically, because what went to the session is what was in the
+        // field.
+        let (mut app, mut pulls, _repo, _home) =
+            asking(Scripted::saying([Answering::says(PROPOSED)]));
+        let offered = attempted(&mut app, &mut pulls).expect("an attempt for the field");
+
+        pulls.answered(&mut app, &offered, now());
+
+        let said = notes(&app);
+        let sent = answered(&said);
+        assert_eq!(
+            sent.len(),
+            1,
+            "what was sent is not on the thread: {said:?}"
+        );
+        assert_eq!(
+            sent[0],
+            format!("slice 1 `{FIRST}` was answered: {PROPOSED}")
+        );
+        assert!(
+            said.iter().any(|line| line.contains("asked:")),
+            "the question it answers is not on the thread: {said:?}"
+        );
+        assert!(
+            !pulls.relaying(),
+            "the question is still waiting on an answer"
+        );
+    }
+
+    #[test]
+    fn a_draft_cleared_and_typed_over_is_what_is_sent() {
+        // Whatever the field holds at the Enter, and nothing else: the attempt
+        // is an offer, not a decision, and a relay that preferred its own words
+        // would be warlock answering for somebody.
+        let agent = Scripted::saying([
+            Answering::says(ASKED),
+            Answering::drafts(FIRST),
+            Answering::drafts(SECOND),
+            Answering::drafts(THIRD),
+        ]);
+        let (mut app, mut pulls, _repo, _home) = asked_proposing(
+            a_project(),
+            agent.clone(),
+            Scripted::saying([Answering::says(PROPOSED)]),
+        );
+        pulls.cut(&mut app, now());
+        waiting(&mut app, &mut pulls);
+        attempted(&mut app, &mut pulls);
+
+        pulls.answered(&mut app, TYPED, now());
+        through(&mut app, &mut pulls);
+
+        assert!(
+            !agent.said().iter().any(|turn| turn.contains(PROPOSED)),
+            "warlock's own draft was sent over what was typed: {:?}",
+            agent.said()
+        );
+        assert!(
+            notes(&app).iter().any(|line| line.contains(TYPED)),
+            "the thread does not say what was sent"
+        );
+    }
+
+    #[test]
+    fn a_question_nothing_settles_is_that_sentence_on_the_thread_and_an_empty_field() {
+        // The one sentence, recognised by the session that asked for it and put
+        // through untouched: a guess is the one kind of answer that reaches the
+        // board looking like a decision somebody made.
+        let (mut app, mut pulls, _repo, _home) =
+            asking(Scripted::saying([Answering::says(NOTHING_SETTLES_IT)]));
+
+        let offered = attempted(&mut app, &mut pulls);
+
+        assert_eq!(offered, None, "a refusal was offered as a draft");
+        let said = notes(&app);
+        assert!(
+            said.iter().any(|line| line.contains(NOTHING_SETTLES_IT)),
+            "the sentence is not on the thread: {said:?}"
+        );
+        assert!(
+            pulls.relaying(),
+            "a question nothing settles stopped being a question"
+        );
+    }
+
+    #[test]
+    fn a_failed_attempt_is_one_line_and_the_question_is_still_somebodys_to_answer() {
+        // A missing `claude` on the second conversation costs the question
+        // nothing: the session that asked is still parked, the field is empty,
+        // and an answer typed into it goes where it always would.
+        let agent = Scripted::saying([
+            Answering::says(ASKED),
+            Answering::drafts(FIRST),
+            Answering::drafts(SECOND),
+            Answering::drafts(THIRD),
+        ]);
+        let (mut app, mut pulls, _repo, _home) = asked_proposing(
+            a_project(),
+            agent.clone(),
+            Scripted::saying([Answering::missing()]),
+        );
+        pulls.cut(&mut app, now());
+        waiting(&mut app, &mut pulls);
+
+        let offered = attempted(&mut app, &mut pulls);
+
+        assert_eq!(offered, None, "a failed attempt filled the field");
+        let said = notes(&app);
+        let failed: Vec<&String> = said
+            .iter()
+            .filter(|line| line.contains("no answer was proposed"))
+            .collect();
+        assert_eq!(failed.len(), 1, "a failure cost more than a line: {said:?}");
+        assert!(pulls.relaying(), "a failed attempt took the question down");
+
+        pulls.answered(&mut app, TYPED, now());
+        through(&mut app, &mut pulls);
+
+        assert!(
+            agent.said().iter().any(|turn| turn == TYPED),
+            "the session was not alive to be answered: {:?}",
+            agent.said()
+        );
+    }
+
+    #[test]
+    fn an_answer_sent_before_the_attempt_lands_is_the_answer() {
+        // Somebody who knows the answer does not wait for warlock's: the
+        // question is over the moment they send, and the attempt still out has
+        // nowhere left to be put.
+        let gate = Gate::shut();
+        let agent = Scripted::saying([
+            Answering::says(ASKED),
+            Answering::drafts(FIRST),
+            Answering::drafts(SECOND),
+            Answering::drafts(THIRD),
+        ]);
+        let (mut app, mut pulls, _repo, _home) = asked_proposing(
+            a_project(),
+            agent.clone(),
+            Scripted::saying([Answering::says(PROPOSED)]).held_at(&gate),
+        );
+        pulls.cut(&mut app, now());
+        waiting(&mut app, &mut pulls);
+
+        pulls.answered(&mut app, TYPED, now());
+        gate.open();
+        through(&mut app, &mut pulls);
+
+        assert!(
+            !agent.said().iter().any(|turn| turn.contains(PROPOSED)),
+            "an attempt that landed late was sent: {:?}",
+            agent.said()
+        );
+        let said = notes(&app);
+        assert!(
+            !said.iter().any(|line| line.contains(PROPOSED)),
+            "an attempt nobody was waiting for was said: {said:?}"
+        );
+    }
+}
+
+// The window between a slice's drafts and the board: the titles offered, the
+// three answers, and what each of them costs. Driven at the value the loop
+// holds, over a workspace that answers the writes as well as the read, so what
+// a create sent and what a skip did not are both things these tests can say.
+mod reviewing {
+    use tempfile::TempDir;
+    use warlock_engine::{CutRecord, Filed, filed_path};
+    use warlock_tui::{Answer, Choice};
+
+    use super::{
+        AT_MOST, Answering, App, BRIEF, FIRST, Instant, NOT_A_KEY, Pulls, SECOND, Scripted, THIRD,
+        a_project, asked_over, fs, notes, now,
+    };
+    use crate::stubs::Filling;
+
+    // What somebody types about drafts they have just read, which is the one
+    // thing a redrafting session hears.
+    const FEEDBACK: &str = "Two tickets is one too many — say it in one.";
+
+    // What the redraft comes back as, named so that a window offering it cannot
+    // be mistaken for the window that was up before the feedback.
+    const REDRAFTED: &str = "Read the project back, said again";
+
+    // A confirmed run over a board that can be filed into as well as read.
+    fn cut(linear: Filling, agent: Scripted) -> (App, Pulls<Filling, Scripted>, TempDir, TempDir) {
+        let (mut app, mut pulls, repo, home) = asked_over(linear, agent);
+        pulls.cut(&mut app, now());
+        (app, pulls, repo, home)
+    }
+
+    // The whole of the project's three slices, each drafted first time: the
+    // scripts below add to this only when a slice is to be redrafted.
+    fn drafting_each() -> Scripted {
+        Scripted::saying([
+            Answering::drafts(FIRST),
+            Answering::drafts(SECOND),
+            Answering::drafts(THIRD),
+        ])
+    }
+
+    // The same three slices with a redraft of the first written into the script:
+    // it drafts, the reader says what is wrong with what it drafted, and it
+    // answers again in its own words.
+    fn redrafting() -> Scripted {
+        Scripted::saying([
+            Answering::drafts(FIRST),
+            Answering::drafts(REDRAFTED),
+            Answering::drafts(SECOND),
+            Answering::drafts(THIRD),
+        ])
+    }
+
+    // Rounds until the slice under way is waiting behind the window, drained and
+    // never blocked on, for the reason every other helper here is.
+    fn offered(app: &mut App, pulls: &mut Pulls<Filling, Scripted>) {
+        let waited = Instant::now();
+        while pulls.reviewing().is_none() && waited.elapsed() < AT_MOST {
+            drop(pulls.keep_up(app, now()));
+        }
+        assert!(
+            pulls.reviewing().is_some(),
+            "no drafts were ever offered: {:?}",
+            notes(app)
+        );
+    }
+
+    // Rounds until the answer that was given has come to whatever it comes to:
+    // the next slice's window, or a run that is over. Both are endings, and a
+    // helper per ending would be two ways of saying the same wait.
+    fn settled(app: &mut App, pulls: &mut Pulls<Filling, Scripted>) {
+        let waited = Instant::now();
+        while pulls.drafting() && pulls.reviewing().is_none() && waited.elapsed() < AT_MOST {
+            drop(pulls.keep_up(app, now()));
+        }
+        assert!(
+            !pulls.drafting() || pulls.reviewing().is_some(),
+            "the answer never came to anything: {:?}",
+            notes(app)
+        );
+    }
+
+    // The window's three answers, taken off the value that is up rather than
+    // pressed: which key means which is `confirm.rs`'s, asserted there.
+    fn titles(pulls: &Pulls<Filling, Scripted>) -> Vec<String> {
+        pulls.reviewing().expect("a window is up").titles().to_vec()
+    }
+
+    // What the record beside the brief claims, which is the one thing that stops
+    // the next run filing the same drafts again.
+    fn cuts(root: &std::path::Path) -> Vec<CutRecord> {
+        Filed::load(root)
+            .expect("a record file that loads")
+            .record(BRIEF)
+            .expect("the brief is filed")
+            .cuts()
+            .to_vec()
+    }
+
+    // Which of the run's lines is about a slice, by the prefix every line about
+    // one carries.
+    fn about(said: &[String], slice: &str) -> Vec<String> {
+        said.iter()
+            .filter(|line| line.contains(&format!("`{slice}`")))
+            .cloned()
+            .collect()
+    }
+
+    #[test]
+    fn a_slices_drafts_wait_behind_a_window_with_their_titles_on_the_thread() {
+        // Nothing a run drafts becomes an issue on its own: the titles are said
+        // as they arrive and then the slice stops, with the board still holding
+        // the one request the fetch made.
+        let linear = Filling::over(a_project());
+        let (mut app, mut pulls, _repo, _home) = cut(linear.clone(), drafting_each());
+
+        offered(&mut app, &mut pulls);
+
+        let review = pulls.reviewing().expect("a window is up");
+        assert_eq!(review.slice(), format!("slice 1 `{FIRST}`"));
+        assert_eq!(
+            review.titles(),
+            [
+                format!("Stand in for {FIRST}"),
+                format!("Follow on from {FIRST}"),
+            ]
+        );
+        // Skip is lit, so the round that put this up and an Enter straight
+        // after it file nothing at all.
+        assert_eq!(review.choice(), Choice::Skip);
+        assert!(review.feedback(), "the one redraft is not offered");
+        let said = notes(&app);
+        assert!(
+            about(&said, FIRST)
+                .iter()
+                .any(|line| line.contains("drafted `")),
+            "the titles are not on the thread: {said:?}"
+        );
+        assert_eq!(linear.requests(), 1, "the drafts were filed unasked");
+        assert!(
+            !said.iter().any(|line| line.contains(SECOND)),
+            "the run walked past a window: {said:?}"
+        );
+    }
+
+    #[test]
+    fn create_files_the_slice_and_reports_what_it_became_by_identifier() {
+        // The one thing about an issue that must not be lost, said in the words
+        // the cut record keeps it in — and the record itself is written by the
+        // filing path, which is what stops the next run filing these again.
+        let linear = Filling::over(a_project());
+        let (mut app, mut pulls, repo, _home) = cut(linear.clone(), drafting_each());
+        offered(&mut app, &mut pulls);
+
+        pulls.create(&mut app, now());
+        settled(&mut app, &mut pulls);
+
+        let said = notes(&app);
+        let filed: Vec<String> = about(&said, FIRST)
+            .into_iter()
+            .filter(|line| line.contains("cut into"))
+            .collect();
+        assert_eq!(
+            filed,
+            vec![format!("slice 1 `{FIRST}` — cut into `WAR-1`, `WAR-2`")],
+            "the identifiers are not on the thread: {said:?}"
+        );
+        let cuts = cuts(repo.path());
+        assert_eq!(cuts.len(), 1, "the cut record was not written: {cuts:?}");
+        assert_eq!(cuts[0].issues(), ["WAR-1".to_owned(), "WAR-2".to_owned()]);
+        assert_eq!(
+            linear
+                .documents()
+                .iter()
+                .filter(|document| document.contains("issueCreate("))
+                .count(),
+            2,
+            "one issue per draft, and no more"
+        );
+        // And the run goes on: the window up now is the next slice's.
+        assert_eq!(
+            pulls.reviewing().map(|review| review.slice().to_owned()),
+            Some(format!("slice 2 `{SECOND}`"))
+        );
+    }
+
+    #[test]
+    fn an_edge_linear_turned_down_is_its_own_line_beside_the_identifiers() {
+        // The issues exist either way, and an issue with a missing edge is
+        // something a person can fix on the board — if they are told.
+        let linear = Filling::refusing_relations(a_project(), "that relation already exists");
+        let (mut app, mut pulls, _repo, _home) = cut(linear, drafting_each());
+        offered(&mut app, &mut pulls);
+
+        pulls.create(&mut app, now());
+        settled(&mut app, &mut pulls);
+
+        let said = notes(&app);
+        let refused: Vec<String> = about(&said, FIRST)
+            .into_iter()
+            .filter(|line| line.contains("was not written as blocking"))
+            .collect();
+        assert_eq!(
+            refused.len(),
+            1,
+            "the edge Linear turned down is not on the thread: {said:?}"
+        );
+        assert!(
+            refused[0].contains("that relation already exists"),
+            "{:?} does not carry Linear's own words",
+            refused[0]
+        );
+        assert!(
+            about(&said, FIRST)
+                .iter()
+                .any(|line| line.contains("cut into `WAR-1`, `WAR-2`")),
+            "a refused edge took the issues down with it: {said:?}"
+        );
+    }
+
+    #[test]
+    fn a_create_that_came_to_nothing_is_one_line_and_the_run_carries_on() {
+        // A team with nowhere to put an issue is refused while the slice is
+        // still nothing on the board. One line, the session alive, the panel
+        // usable, and the next slice offered.
+        let linear = Filling::without_the_team(a_project());
+        let (mut app, mut pulls, repo, _home) = cut(linear, drafting_each());
+        offered(&mut app, &mut pulls);
+
+        pulls.create(&mut app, now());
+        settled(&mut app, &mut pulls);
+
+        let said = notes(&app);
+        let unfiled: Vec<String> = about(&said, FIRST)
+            .into_iter()
+            .filter(|line| line.contains("was not filed"))
+            .collect();
+        assert_eq!(
+            unfiled.len(),
+            1,
+            "a refusal cost more than a line: {said:?}"
+        );
+        assert!(
+            cuts(repo.path()).is_empty(),
+            "a slice nothing was filed for was recorded as cut"
+        );
+        assert!(pulls.drafting(), "a refused create took the run down");
+        assert_eq!(
+            pulls.reviewing().map(|review| review.slice().to_owned()),
+            Some(format!("slice 2 `{SECOND}`")),
+            "the run did not reach the next slice: {said:?}"
+        );
+    }
+
+    #[test]
+    fn a_skip_records_nothing_and_asks_whether_to_carry_on() {
+        // A skipped slice is one the next `/pull` offers again, which is the
+        // whole difference between skipping drafts and filing them.
+        let linear = Filling::over(a_project());
+        let (mut app, mut pulls, repo, _home) = cut(linear.clone(), drafting_each());
+        offered(&mut app, &mut pulls);
+
+        pulls.skip(&mut app, now());
+
+        let said = notes(&app);
+        assert!(
+            about(&said, FIRST)
+                .iter()
+                .any(|line| line.contains("was skipped; nothing was recorded for it")),
+            "the skip is not on the thread: {said:?}"
+        );
+        assert_eq!(linear.requests(), 1, "a skip sent something to the board");
+        assert!(cuts(repo.path()).is_empty(), "a skip wrote a cut record");
+        let carry = pulls.carrying().expect("the carry-on question is up");
+        assert_eq!(carry.left(), "2 slices");
+        // No is lit, so the answer that is under the finger is the one that
+        // leaves the rest of the project alone.
+        assert_eq!(carry.answer(), Answer::No);
+        assert!(
+            pulls.reviewing().is_none(),
+            "the window is up behind its own answer"
+        );
+    }
+
+    #[test]
+    fn a_no_to_the_carry_on_question_leaves_the_slices_after_it_unoffered() {
+        // The run ends here and the slices behind it are untouched: nothing was
+        // drafted for them, nothing was sent about them, and the next `/pull`
+        // finds them exactly as this one did.
+        let linear = Filling::over(a_project());
+        let agent = drafting_each();
+        let (mut app, mut pulls, _repo, _home) = cut(linear.clone(), agent.clone());
+        offered(&mut app, &mut pulls);
+        pulls.skip(&mut app, now());
+
+        pulls.stop(&mut app, now());
+
+        assert!(!pulls.drafting(), "a No left the run running");
+        assert_eq!(agent.turns(), 1, "a slice past the No was drafted");
+        let said = notes(&app);
+        assert!(
+            said.iter()
+                .any(|line| line == "the run stopped; 2 slices left for another pull"),
+            "the run did not say what it left: {said:?}"
+        );
+        assert!(
+            !said.iter().any(|line| line.contains(SECOND)),
+            "a slice that was never offered was named: {said:?}"
+        );
+        assert_eq!(linear.requests(), 1, "a stopped run sent something");
+    }
+
+    #[test]
+    fn a_yes_to_the_carry_on_question_moves_to_the_next_slice() {
+        // The other answer, which is a run that goes on where it left off: the
+        // slice after the skipped one is drafted and offered in its turn.
+        let linear = Filling::over(a_project());
+        let (mut app, mut pulls, _repo, _home) = cut(linear, drafting_each());
+        offered(&mut app, &mut pulls);
+        pulls.skip(&mut app, now());
+
+        pulls.carry_on(&mut app, now());
+        offered(&mut app, &mut pulls);
+
+        assert_eq!(
+            pulls.reviewing().map(|review| review.slice().to_owned()),
+            Some(format!("slice 2 `{SECOND}`"))
+        );
+        assert!(
+            pulls.carrying().is_none(),
+            "the question is up behind its own answer"
+        );
+    }
+
+    #[test]
+    fn the_last_slice_skipped_ends_the_run_without_asking() {
+        // A question whose only answer is "there is nothing left" is one nobody
+        // should have to press a key for.
+        let linear = Filling::over(a_project());
+        let (mut app, mut pulls, _repo, _home) = cut(linear, drafting_each());
+        for _ in 0..2 {
+            offered(&mut app, &mut pulls);
+            pulls.skip(&mut app, now());
+            pulls.carry_on(&mut app, now());
+        }
+        offered(&mut app, &mut pulls);
+
+        pulls.skip(&mut app, now());
+
+        assert!(pulls.carrying().is_none(), "the last slice asked anyway");
+        assert!(!pulls.drafting(), "the run outlived its last slice");
+        let said = notes(&app);
+        assert!(
+            about(&said, THIRD)
+                .iter()
+                .any(|line| line.contains("was skipped")),
+            "the last slice was not reported as skipped: {said:?}"
+        );
+    }
+
+    #[test]
+    fn feedback_redrafts_that_one_slice_and_offers_the_window_again() {
+        // The field takes whatever the reader has to say, it goes to the session
+        // that drafted these — so it is feedback about something that session
+        // said — and what comes back is offered in its turn.
+        let linear = Filling::over(a_project());
+        let agent = redrafting();
+        let (mut app, mut pulls, _repo, _home) = cut(linear, agent.clone());
+        offered(&mut app, &mut pulls);
+
+        pulls.feedback(&mut app, now());
+
+        assert!(pulls.relaying(), "the field is not taking the feedback");
+        assert_eq!(
+            pulls.answering(),
+            Some(format!("redrafting slice 1 `{FIRST}`"))
+        );
+        assert!(
+            pulls.reviewing().is_none(),
+            "the window is up while its own feedback is being typed"
+        );
+        pulls.answered(&mut app, FEEDBACK, now());
+        offered(&mut app, &mut pulls);
+
+        assert!(
+            agent.said().iter().any(|turn| turn == FEEDBACK),
+            "the feedback did not reach the session that drafted: {:?}",
+            agent.said()
+        );
+        assert_eq!(
+            titles(&pulls),
+            [
+                format!("Stand in for {REDRAFTED}"),
+                format!("Follow on from {REDRAFTED}"),
+            ],
+            "the window is not about what came back"
+        );
+        let said = notes(&app);
+        assert!(
+            about(&said, FIRST)
+                .iter()
+                .any(|line| line.contains("is being redrafted:") && line.contains(FEEDBACK)),
+            "the thread does not say what was asked for: {said:?}"
+        );
+    }
+
+    #[test]
+    fn a_second_feedback_is_not_offered_and_answers_nothing() {
+        // One redraft each: the window that comes back from one is drawn with
+        // two answers, and the key that would ask for another reaches a window
+        // that does not have it.
+        let linear = Filling::over(a_project());
+        let agent = redrafting();
+        let (mut app, mut pulls, _repo, _home) = cut(linear, agent.clone());
+        offered(&mut app, &mut pulls);
+        pulls.feedback(&mut app, now());
+        pulls.answered(&mut app, FEEDBACK, now());
+        offered(&mut app, &mut pulls);
+        let said = notes(&app).len();
+
+        assert!(
+            !pulls
+                .reviewing()
+                .expect("the window is up again")
+                .feedback(),
+            "a second redraft is offered"
+        );
+        pulls.feedback(&mut app, now());
+
+        assert!(
+            pulls.reviewing().is_some(),
+            "a second feedback took the window down"
+        );
+        assert!(!pulls.relaying(), "a second feedback asked for text");
+        assert_eq!(agent.turns(), 2, "the slice was redrafted twice");
+        assert_eq!(
+            notes(&app).len(),
+            said,
+            "a key that reached the wrong window said something"
+        );
+    }
+
+    #[test]
+    fn the_run_carries_on_past_a_redraft_with_its_own_redraft_back() {
+        // The redraft is spent by the slice that used it and not by the run: the
+        // slice after a redrafted one is offered its own.
+        let linear = Filling::over(a_project());
+        let (mut app, mut pulls, _repo, _home) = cut(linear, redrafting());
+        offered(&mut app, &mut pulls);
+        pulls.feedback(&mut app, now());
+        pulls.answered(&mut app, FEEDBACK, now());
+        offered(&mut app, &mut pulls);
+
+        pulls.skip(&mut app, now());
+        pulls.carry_on(&mut app, now());
+        offered(&mut app, &mut pulls);
+
+        assert!(
+            pulls
+                .reviewing()
+                .expect("the next slice's window is up")
+                .feedback(),
+            "the next slice has no redraft of its own"
+        );
+    }
+
+    #[test]
+    fn an_answer_to_a_window_that_is_not_up_does_nothing_at_all() {
+        // A key that arrived a round late, which the loop's one question cannot
+        // rule out: every answer here is a no-op with nothing waiting, so a
+        // stale press cannot file drafts nobody was looking at.
+        let linear = Filling::over(a_project());
+        let (mut app, mut pulls, repo, _home) = cut(linear.clone(), drafting_each());
+
+        pulls.create(&mut app, now());
+        pulls.skip(&mut app, now());
+        pulls.feedback(&mut app, now());
+        pulls.carry_on(&mut app, now());
+        pulls.stop(&mut app, now());
+        pulls.review_lit(Choice::Create);
+        pulls.carry_lit(Answer::Yes);
+
+        assert!(pulls.drafting(), "a stale answer took the run down");
+        assert_eq!(linear.requests(), 1, "a stale answer sent something");
+        assert!(
+            cuts(repo.path()).is_empty(),
+            "a stale answer wrote a record"
+        );
+    }
+
+    #[test]
+    fn an_arrow_lights_another_answer_and_leaves_the_drafts_where_they_were() {
+        // Answering re-lights the window rather than building a second one: what
+        // is being answered about rides along, because nothing would hand the
+        // drafts over again.
+        let linear = Filling::over(a_project());
+        let (mut app, mut pulls, _repo, _home) = cut(linear, drafting_each());
+        offered(&mut app, &mut pulls);
+        let offered_titles = titles(&pulls);
+
+        pulls.review_lit(Choice::Create);
+
+        let review = pulls.reviewing().expect("the window is still up");
+        assert_eq!(review.choice(), Choice::Create);
+        assert_eq!(review.titles(), offered_titles.as_slice());
+        assert_eq!(review.slice(), format!("slice 1 `{FIRST}`"));
+
+        pulls.skip(&mut app, now());
+        pulls.carry_lit(Answer::Yes);
+
+        let carry = pulls.carrying().expect("the question is still up");
+        assert_eq!(carry.answer(), Answer::Yes);
+        assert_eq!(carry.left(), "2 slices");
+    }
+
+    #[test]
+    fn nothing_a_run_sends_is_a_mutation_of_the_project() {
+        // The promise the whole command is written around: a pull reads the
+        // project, files issues out of it and edges between them, and leaves the
+        // project exactly as it found it — `Planned`, with nobody assigned to
+        // anything.
+        let linear = Filling::over(a_project());
+        let (mut app, mut pulls, _repo, _home) = cut(linear.clone(), drafting_each());
+        for _ in 0..3 {
+            offered(&mut app, &mut pulls);
+            pulls.create(&mut app, now());
+            settled(&mut app, &mut pulls);
+        }
+
+        assert!(!pulls.drafting(), "the run never finished");
+        let sent: Vec<String> = linear
+            .documents()
+            .into_iter()
+            .filter(|document| document.contains("mutation"))
+            .collect();
+        assert!(!sent.is_empty(), "nothing was filed at all");
+        for document in &sent {
+            assert!(
+                document.contains("IssueCreate") || document.contains("IssueRelationCreate"),
+                "a run sent a mutation that is not an issue or an edge: {document}"
+            );
+            assert!(
+                !document.contains("project"),
+                "a run sent a mutation naming the project: {document}"
+            );
+        }
+    }
+
+    #[test]
+    fn no_key_value_reaches_the_thread_the_record_or_anything_the_run_holds() {
+        // The pull's half of the claim `tests/pushing.rs` makes for a push, and
+        // it is made here because this is the only module that drives a run the
+        // whole way to a written record: the key store this home holds is what
+        // the filing worker built its client from, so the value has been through
+        // every step below. It is to be in none of them — not on a line
+        // somebody reads, not in the record beside the brief, and not in the
+        // `Debug` rendering that a failing assertion anywhere else in the suite
+        // would print.
+        let linear = Filling::over(a_project());
+        let (mut app, mut pulls, repo, _home) = cut(linear.clone(), drafting_each());
+        offered(&mut app, &mut pulls);
+        // Read while the window is up, so what is asserted is the run in
+        // flight as well as the run that is over.
+        let in_flight = format!("{pulls:?}");
+
+        for _ in 0..3 {
+            offered(&mut app, &mut pulls);
+            pulls.create(&mut app, now());
+            settled(&mut app, &mut pulls);
+        }
+
+        assert!(!pulls.drafting(), "the run never finished");
+        assert!(!in_flight.contains(NOT_A_KEY), "the run carries the key");
+        assert!(
+            !format!("{pulls:?}").contains(NOT_A_KEY),
+            "the session's pull state carries the key"
+        );
+        let said = notes(&app);
+        assert!(!said.is_empty(), "the run said nothing at all");
+        for line in &said {
+            assert!(!line.contains(NOT_A_KEY), "{line} carries the key");
+        }
+        assert!(
+            !fs::read_to_string(filed_path(repo.path()))
+                .expect("the record this run wrote")
+                .contains(NOT_A_KEY),
+            "the record carries the key"
+        );
+        // And nothing the run sent carried it either: the key belongs in the
+        // `Authorization` header and in no document.
+        for document in linear.documents() {
+            assert!(
+                !document.contains(NOT_A_KEY),
+                "a document carries the key: {document}"
+            );
+        }
+    }
+}

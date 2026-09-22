@@ -186,6 +186,7 @@ impl Work {
     }
 }
 
+#[derive(Debug)]
 pub(crate) struct CancelGuard {
     cancel: Cancel,
 }
@@ -195,6 +196,13 @@ impl CancelGuard {
         Self {
             cancel: Cancel::new(),
         }
+    }
+
+    // A handle minted somewhere else, guarded here. A drafting session mints its
+    // own, wires its agent to it and runs every turn under it, so a guard built
+    // with `new` beside one would latch a flag no child is listening to.
+    pub(crate) const fn over(cancel: Cancel) -> Self {
+        Self { cancel }
     }
 
     pub(crate) fn handle(&self) -> Cancel {

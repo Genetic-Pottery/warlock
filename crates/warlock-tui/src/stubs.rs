@@ -1,14 +1,20 @@
-//! Neither agent here honours the say-when, reports activities, or records the
-//! model it was raised at, and that is what says which tests they are not for:
-//! cancelling a run, attaching the activity port, and the argv a brief runs at
-//! are facts about a child process, asserted on the real adapter in
+//! No agent here stops a turn on the say-when, reports activities, or records
+//! the model it was raised at, and that is what says which tests they are not
+//! for: cancelling a run, attaching the activity port, and the argv a brief
+//! runs at are facts about a child process, asserted on the real adapter in
 //! `pacting.rs` and `chatting.rs`. A second record of them here would be a copy
 //! for the two to disagree over.
+//!
+//! [`Scripted`] keeping the handles it was wired to is not that record: what it
+//! answers never depends on them, and what they buy is the one question the
+//! real adapter cannot be asked from the panel's side — whether the session in
+//! flight was told to stop.
 
+use std::collections::VecDeque;
 use std::sync::{Arc, Condvar, Mutex};
 
 use serde_json::{Value, json};
-use warlock_engine::{Agent, agent, stub_answer};
+use warlock_engine::{Agent, agent, drafting, stub_answer};
 use warlock_tui::{Activities, Cancel, Converses, LinearError, Posts, Wired};
 
 use crate::clipboard::Clip;
@@ -96,6 +102,140 @@ impl Wired for Saying {
 impl Converses for Saying {
     fn turn(&self, _message: &str) -> Result<String, agent::Error> {
         Ok(self.answer.clone())
+    }
+
+    fn raised(&self, _model: &str, _effort: &str) -> Self {
+        self.clone()
+    }
+}
+
+/// One turn's answer, written down before the run starts.
+///
+/// Prose and the drafts object are one variant because the session decides
+/// which is which — prose is a question while a round is left and a failed
+/// attempt once the asking is over — and a stand-in that named the two apart
+/// would be a second opinion about what it had just said.
+#[derive(Debug, Clone)]
+pub(crate) enum Answering {
+    Says(String),
+    /// No `claude` on the machine, which is one of the three ways a session's
+    /// turn ends in a failure rather than an answer.
+    Missing,
+}
+
+impl Answering {
+    pub(crate) fn says(text: impl Into<String>) -> Self {
+        Self::Says(text.into())
+    }
+
+    /// The drafting road's own stub object, named for the slice it stands in
+    /// for: two drafts inside every cap, so it is accepted rather than
+    /// repaired.
+    pub(crate) fn drafts(slice: &str) -> Self {
+        Self::Says(drafting::stub_answer(slice))
+    }
+
+    pub(crate) const fn missing() -> Self {
+        Self::Missing
+    }
+}
+
+/// A model that answers a written-down sequence, one entry per turn, and keeps
+/// what it was asked and every cancel handle it was wired to.
+///
+/// The cancels are the point of the record: a drafting session mints its own
+/// and wires its agent to it, so a test that wants to know whether quitting
+/// reached the turn in flight has nowhere else to look.
+///
+/// `Arc<Mutex<_>>` rather than the `Rc<RefCell<_>>` a subcommand's stand-in
+/// uses, for the difference this path has: a slice's turn runs on a worker
+/// thread, so a model that could not cross one would not stand in for the thing
+/// being tested.
+#[derive(Debug, Clone)]
+pub(crate) struct Scripted {
+    answers: Arc<Mutex<VecDeque<Answering>>>,
+    said: Arc<Mutex<Vec<String>>>,
+    cancels: Arc<Mutex<Vec<Cancel>>>,
+    held: Option<Arc<Gate>>,
+}
+
+impl Scripted {
+    pub(crate) fn saying(answers: impl IntoIterator<Item = Answering>) -> Self {
+        Self {
+            answers: Arc::new(Mutex::new(answers.into_iter().collect())),
+            said: Arc::new(Mutex::new(Vec::new())),
+            cancels: Arc::new(Mutex::new(Vec::new())),
+            held: None,
+        }
+    }
+
+    /// The same model, answering nothing until the gate is opened: what a turn
+    /// that takes minutes looks like from the loop's side, without a clock.
+    pub(crate) fn held_at(mut self, gate: &Arc<Gate>) -> Self {
+        self.held = Some(Arc::clone(gate));
+        self
+    }
+
+    pub(crate) fn turns(&self) -> usize {
+        self.said.lock().expect("a stand-in nothing poisoned").len()
+    }
+
+    /// Everything this model was asked, in the order it was asked: what a test
+    /// reads to say that an answer somebody sent reached the session that had
+    /// asked for it, in the words it was sent in.
+    pub(crate) fn said(&self) -> Vec<String> {
+        self.said
+            .lock()
+            .expect("a stand-in nothing poisoned")
+            .clone()
+    }
+
+    /// Whether anything that was given a handle on a turn of this model has been
+    /// told to stop.
+    pub(crate) fn cancelled(&self) -> bool {
+        self.cancels
+            .lock()
+            .expect("a stand-in nothing poisoned")
+            .iter()
+            .any(Cancel::is_cancelled)
+    }
+}
+
+impl Wired for Scripted {
+    fn wired(&self, cancel: Cancel, _activities: Activities) -> Self {
+        self.cancels
+            .lock()
+            .expect("a stand-in nothing poisoned")
+            .push(cancel);
+        self.clone()
+    }
+}
+
+impl Converses for Scripted {
+    fn turn(&self, message: &str) -> Result<String, agent::Error> {
+        self.said
+            .lock()
+            .expect("a stand-in nothing poisoned")
+            .push(message.to_owned());
+        if let Some(gate) = &self.held {
+            gate.wait();
+        }
+
+        let answer = self
+            .answers
+            .lock()
+            .expect("a stand-in nothing poisoned")
+            .pop_front();
+        match answer {
+            Some(Answering::Says(text)) => Ok(text),
+            Some(Answering::Missing) => Err(agent::Error::NotFound {
+                program: "claude".into(),
+            }),
+            // A turn the script has no answer for is a session opened where the
+            // test meant none to be, which is worth failing over rather than
+            // answering.
+            None => panic!("a turn this model was not scripted for: {message}"),
+        }
     }
 
     fn raised(&self, _model: &str, _effort: &str) -> Self {
@@ -203,6 +343,251 @@ fn answered(document: &str, url: &str) -> Value {
         json!({ "projectCreate": { "project": { "id": "project-filed", "url": url } } })
     } else {
         panic!("a push asked for something no workspace was given: {document}");
+    }
+}
+
+/// The other direction over the same seam: a Linear that answers the one
+/// request a `/pull` makes — `project(id:)` — out of memory, and is its own
+/// [`Opens::Client`] for [`Boarding`]'s reason.
+///
+/// A sibling rather than a fifth arm on `answered` above, because the two are
+/// stand-ins for two different conversations: a push's workspace has a team, a
+/// status and a label and creates something, a pull's has one project and is
+/// only read. Folding them into one value would make every test set fields the
+/// path it drives never looks at.
+#[derive(Debug, Clone)]
+pub(crate) struct Reading {
+    asked: Arc<Mutex<Vec<String>>>,
+    name: String,
+    // `None` is a project sitting in no status at all, which is a workspace
+    // whose board has none rather than a broken answer — so the gate has to be
+    // able to say it, and a test has to be able to make it.
+    status: Option<String>,
+    content: String,
+    held: Option<Arc<Gate>>,
+}
+
+impl Reading {
+    /// A workspace holding one project, under that name, in that status, with
+    /// that description — which is where the scope block a pull parses lives.
+    pub(crate) fn holding(
+        name: impl Into<String>,
+        status: Option<&str>,
+        content: impl Into<String>,
+    ) -> Self {
+        Self {
+            asked: Arc::new(Mutex::new(Vec::new())),
+            name: name.into(),
+            status: status.map(ToOwned::to_owned),
+            content: content.into(),
+            held: None,
+        }
+    }
+
+    /// The same workspace, answering nothing until the gate is opened: a slow
+    /// request, without a clock.
+    pub(crate) fn held_at(mut self, gate: &Arc<Gate>) -> Self {
+        self.held = Some(Arc::clone(gate));
+        self
+    }
+
+    /// How many requests reached the workspace, which is how a test says that a
+    /// refusal read nothing: one pull is one request.
+    pub(crate) fn requests(&self) -> usize {
+        self.asked
+            .lock()
+            .expect("no test panics holding this")
+            .len()
+    }
+}
+
+impl Opens for Reading {
+    type Client = Self;
+
+    fn open(&self, _key: &str) -> Self {
+        self.clone()
+    }
+}
+
+impl Posts for Reading {
+    fn post(&self, document: &str, _variables: Value) -> Result<Value, LinearError> {
+        self.asked
+            .lock()
+            .expect("no test panics holding this")
+            .push(document.to_owned());
+        if let Some(gate) = &self.held {
+            gate.wait();
+        }
+
+        assert!(
+            document.contains("project(id:"),
+            "a pull asked for something no workspace was given: {document}"
+        );
+        Ok(json!({
+            "project": {
+                "name": self.name,
+                "content": self.content,
+                "url": "https://linear.app/acme/project/pulled-1a2b3c",
+                "status": self.status.as_ref().map(|status| json!({ "name": status })),
+            }
+        }))
+    }
+}
+
+/// The whole of a pull's conversation with a board: the one request the fetch
+/// makes, answered by the [`Reading`] this wraps, and then the requests a create
+/// sends for one slice's drafts.
+///
+/// A wrapper rather than a fourth stand-in with a project of its own, because a
+/// run reads and writes over one seam: the client the fetch was made with and
+/// the one the filing worker builds are both this value, and a second value
+/// holding the same project would be two opinions about one workspace.
+///
+/// Every document is kept whether it was answered or refused, which is how a
+/// test says what a run sent — and, more to the point, what it did not: nothing
+/// a pull may do moves a project's status, and the way to check that is to read
+/// the list.
+#[derive(Debug, Clone)]
+pub(crate) struct Filling {
+    reading: Reading,
+    asked: Arc<Mutex<Vec<String>>>,
+    // Issues are numbered as they are created, so the identifiers a test reads
+    // off the thread are this workspace's own answers in the order it gave them.
+    filed: Arc<Mutex<u32>>,
+    trouble: Option<Trouble>,
+}
+
+/// What this workspace is to go wrong about: the two failures a create has to
+/// survive, and they fail at opposite ends of it.
+///
+/// An edge turned down leaves every issue standing, so what is at stake is
+/// whether the refusal is reported beside the identifiers. A team with nowhere
+/// to put an issue is refused before anything exists at all, so what is at stake
+/// is whether the run carries on.
+#[derive(Debug, Clone)]
+enum Trouble {
+    Relations(String),
+    NoTeam,
+}
+
+impl Filling {
+    /// A workspace that answers everything a create asks for: the team, its
+    /// `Backlog` state, the label, an issue per draft and every edge between
+    /// them.
+    pub(crate) fn over(reading: Reading) -> Self {
+        Self {
+            reading,
+            asked: Arc::new(Mutex::new(Vec::new())),
+            filed: Arc::new(Mutex::new(0)),
+            trouble: None,
+        }
+    }
+
+    /// The same workspace, turning every edge down in Linear's own words while
+    /// the issues themselves are created.
+    pub(crate) fn refusing_relations(reading: Reading, message: impl Into<String>) -> Self {
+        Self {
+            trouble: Some(Trouble::Relations(message.into())),
+            ..Self::over(reading)
+        }
+    }
+
+    /// A workspace with no team by the key the scope record names, which is a
+    /// create refused while the slice is still nothing on the board.
+    pub(crate) fn without_the_team(reading: Reading) -> Self {
+        Self {
+            trouble: Some(Trouble::NoTeam),
+            ..Self::over(reading)
+        }
+    }
+
+    /// Every document this workspace was asked, in the order it was asked.
+    pub(crate) fn documents(&self) -> Vec<String> {
+        self.asked
+            .lock()
+            .expect("no test panics holding this")
+            .clone()
+    }
+
+    pub(crate) fn requests(&self) -> usize {
+        self.asked
+            .lock()
+            .expect("no test panics holding this")
+            .len()
+    }
+
+    // The next identifier, which is what a cut record keeps of an issue and so
+    // what the thread reports.
+    fn next_issue(&self) -> Value {
+        let mut filed = self.filed.lock().expect("no test panics holding this");
+        *filed += 1;
+        let number = *filed;
+
+        json!({
+            "issueCreate": {
+                "issue": {
+                    "id": format!("issue-{number}"),
+                    "identifier": format!("WAR-{number}"),
+                    "url": format!("https://linear.app/acme/issue/WAR-{number}"),
+                },
+            },
+        })
+    }
+}
+
+impl Opens for Filling {
+    type Client = Self;
+
+    fn open(&self, _key: &str) -> Self {
+        self.clone()
+    }
+}
+
+impl Posts for Filling {
+    fn post(&self, document: &str, variables: Value) -> Result<Value, LinearError> {
+        self.asked
+            .lock()
+            .expect("no test panics holding this")
+            .push(document.to_owned());
+
+        // The fetch's own request, answered by the project this was built over:
+        // one workspace, read by the same value that is then filed into.
+        if document.contains("project(id:") {
+            return self.reading.post(document, variables);
+        }
+        if document.contains("teams(") {
+            let nodes = match self.trouble {
+                Some(Trouble::NoTeam) => json!([]),
+                _ => json!([{ "id": "team-held" }]),
+            };
+            return Ok(json!({ "teams": { "nodes": nodes } }));
+        }
+        if document.contains("workflowStates(") {
+            return Ok(json!({
+                "workflowStates": { "nodes": [{ "id": "state-backlog", "name": "Backlog" }] }
+            }));
+        }
+        if document.contains("issueLabels(") {
+            return Ok(json!({ "issueLabels": { "nodes": [{ "id": "label-held" }] } }));
+        }
+        if document.contains("issueCreate(") {
+            return Ok(self.next_issue());
+        }
+        if document.contains("issueRelationCreate(") {
+            if let Some(Trouble::Relations(message)) = &self.trouble {
+                return Err(LinearError::Refused {
+                    message: message.clone(),
+                });
+            }
+            return Ok(json!({
+                "issueRelationCreate": { "issueRelation": { "id": "relation-held" } }
+            }));
+        }
+
+        // A document this does not know is a request no pull was meant to make
+        // — a project's status among them, which this workspace has no answer
+        // for precisely because nothing here may send one.
+        panic!("a pull asked for something no workspace was given: {document}");
     }
 }
 

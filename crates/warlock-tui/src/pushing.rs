@@ -116,10 +116,14 @@ impl Pushing {
 /// that [`Pushes`] — and so [`crate::Session`] — gains one type parameter for it
 /// rather than two.
 ///
-/// The bounds are what the worker needs: a client is built on the event loop's
-/// thread, from a key borrowed for as long as the target lives, and then owned by
-/// a thread that outlives the press.
-pub(crate) trait Opens {
+/// The bounds are what the two workers need. A client is built from a key
+/// borrowed for as long as the target lives and is then owned by a thread that
+/// outlives the press, which is the associated type's side; and the seam itself
+/// crosses onto a thread, because [`crate::pulling::Pulls`] resolves its board
+/// over there and so opens its client there too. Both implementations are
+/// empty or a handle — there is nothing in either to make cloning one cost
+/// anything.
+pub(crate) trait Opens: Clone + Send + 'static {
     type Client: Posts + Send + 'static;
 
     fn open(&self, key: &str) -> Self::Client;

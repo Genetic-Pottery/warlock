@@ -43,6 +43,7 @@ const BRIEF_COMMAND: &str = "/brief";
 const CHAT_COMMAND: &str = "/chat";
 const WRITE_COMMAND: &str = "/write";
 const PUSH_COMMAND: &str = "/push";
+const PULL_COMMAND: &str = "/pull";
 
 // Said on a *change* of register only, so a `/brief` typed in brief mode costs a
 // turn and no line. Each names the way out, because that is the one thing a
@@ -59,17 +60,50 @@ const ALREADY_CHATTING: &str = "already in chat mode — /brief is what changes 
 
 const NOT_BRIEFING: &str = "/write is only in brief mode — /brief enters it";
 
-// The third refusal, and the same kind of line: a bare `/push` files the
-// document this session wrote, so a session that has written none has nothing
-// to file — and is told the other road, because a brief committed yesterday is
-// the ordinary thing to be filing and nothing on the screen says it can be
-// named. Built from the two command words rather than spelled around them, so
-// the sentence cannot name a command by a spelling the card does not use.
-fn nothing_written() -> String {
-    format!(
-        "{PUSH_COMMAND} on its own files the brief {WRITE_COMMAND} wrote, and this session has \
-         written none — name one, as `{PUSH_COMMAND} docs/a-brief.md`"
-    )
+/// The two commands that name a brief rather than the conversation, which is
+/// the whole of what this value distinguishes: they take the same argument,
+/// refuse the same way and hand the same spelling up, and only the word they
+/// are typed as and the verb they do to the document differ.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum About {
+    Push,
+    Pull,
+}
+
+impl About {
+    // The third refusal, and the same kind of line as the two above it: a bare
+    // `/push` or `/pull` is about the document this session wrote, so a session
+    // that has written none has nothing to act on — and is told the other road,
+    // because a brief committed yesterday is the ordinary thing to be filing or
+    // cutting and nothing on the screen says it can be named.
+    //
+    // Built from the command words rather than spelled around them, so the
+    // sentence cannot name a command by a spelling the card does not use, and
+    // worded once for the two of them so that the road out of one refusal
+    // cannot come to read differently from the road out of the other.
+    fn nothing_written(self) -> String {
+        let (command, does) = match self {
+            Self::Push => (PUSH_COMMAND, "files"),
+            Self::Pull => (PULL_COMMAND, "cuts"),
+        };
+        format!(
+            "{command} on its own {does} the brief {WRITE_COMMAND} wrote, and this session has \
+             written none — name one, as `{command} docs/a-brief.md`"
+        )
+    }
+}
+
+/// What a submitted draft hands the loop, which is a brief and what is to be
+/// done with it.
+///
+/// Two variants rather than a second `Option<String>` beside the first: the
+/// loop answers them in two different places, and a pair of options would have
+/// a fourth state — both at once — that a submit cannot produce and every
+/// caller would still have to read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Wanted {
+    Filed(String),
+    Cut(String),
 }
 
 fn unreadable_template(error: &TemplateError) -> String {
@@ -167,6 +201,41 @@ impl<C: Converses> Chat<C> {
         self.composer.set_width(width);
     }
 
+    // The other thing told once a round from the draw, and the whole of what
+    // this value knows about a draft that is not its own: a sentence to draw on
+    // the field's border. Who is waiting on the draft, and what is done with it
+    // when it is sent, are the loop's — see [`Chat::taken`].
+    pub(crate) fn set_composer_answering(&mut self, answering: Option<String>) {
+        self.composer.set_answering(answering);
+    }
+
+    // The draft taken whole and the field emptied, for a submission that is not
+    // a turn of this conversation. Nothing is asked, nothing is parsed and no
+    // command is recognised: the text goes up exactly as it was typed, because
+    // whoever is waiting on it asked a question of their own and the answer is
+    // not warlock's to read.
+    //
+    // Emptied by replacing the value outright, as `submit` empties it, and for
+    // the same reason: the width, the muting and the label are told again by
+    // the round that draws next.
+    pub(crate) fn taken(&mut self) -> String {
+        let draft = self.composer.draft().to_owned();
+        self.composer = Composer::default();
+        draft
+    }
+
+    // A draft put into the field from outside, cursor at the end. It is an
+    // ordinary draft from that moment on — every editing key works on it, Enter
+    // sends whatever the field then holds, and clearing it and typing sends
+    // that instead — because it *is* the value a typed draft is.
+    //
+    // Whatever was in the field is replaced. What is offered here was asked for
+    // by the round that put the question up, and a field that refused it would
+    // leave the offer nowhere to be read.
+    pub(crate) fn offer(&mut self, draft: &str) {
+        self.composer = Composer::new(draft);
+    }
+
     pub(crate) const fn write_prompt(&self) -> &ScopePrompt {
         &self.prompt
     }
@@ -242,15 +311,15 @@ impl<C: Converses> Chat<C> {
     }
 
     // The one thing a draft can hand back to the loop: the brief a `/push`
-    // asks to file. Which board that files to is a manifest, a home and a key
-    // store away, and none of the three is this value's — so the command is
-    // recognised here and answered there.
+    // asks to file or a `/pull` asks to cut. Which board either of them reaches
+    // is a manifest, a home and a key store away, and none of the three is this
+    // value's — so the commands are recognised here and answered there.
     pub(crate) fn compose(
         &mut self,
         app: &mut App,
         outcome: Composed,
         now: Instant,
-    ) -> Option<String> {
+    ) -> Option<Wanted> {
         match outcome {
             Composed::Typing(next) => self.composer = next,
             Composed::Leave => app.set_focus(Focus::Panel),
@@ -260,7 +329,7 @@ impl<C: Converses> Chat<C> {
         None
     }
 
-    fn submit(&mut self, app: &mut App, now: Instant) -> Option<String> {
+    fn submit(&mut self, app: &mut App, now: Instant) -> Option<Wanted> {
         // Taken before the field is emptied, and emptied by replacing it
         // outright rather than by unmuting: the muting comes back from
         // `settle_field` on the turn alone.
@@ -304,17 +373,22 @@ impl<C: Converses> Chat<C> {
                     app.panel_mut().note(NOT_BRIEFING, now);
                 }
             }
-            // A command about a file rather than about the conversation, so it
-            // asks nothing of the model and says nothing about the mode: it
-            // files the brief it was handed, or the one `/write` wrote,
-            // whichever register the reader has since gone back to. The
-            // refusals are the whole of what this value decides about it; the
-            // brief goes up to the loop, which holds the manifest that says
-            // where it files to.
+            // Two commands about a file rather than about the conversation, so
+            // neither asks anything of the model and neither says anything
+            // about the mode: each is about the brief it was handed, or the one
+            // `/write` wrote, whichever register the reader has since gone back
+            // to. The refusals are the whole of what this value decides about
+            // them; the brief goes up to the loop, which holds the manifest
+            // that says which board it reaches.
             Submitted::Push(named) => {
-                if let Some(brief) = self.filing(app, named, now) {
-                    return Some(brief);
-                }
+                return self
+                    .brief_for(app, named, About::Push, now)
+                    .map(Wanted::Filed);
+            }
+            Submitted::Pull(named) => {
+                return self
+                    .brief_for(app, named, About::Pull, now)
+                    .map(Wanted::Cut);
             }
             // The line is asked of the value rather than restated here, so the
             // list of commands that exist is written down in one place.
@@ -336,10 +410,20 @@ impl<C: Converses> Chat<C> {
     // A typed path is read against the repository root rather than the working
     // directory, which is what the thread already names files by, and the
     // engine's own sentence is what refuses one that climbs out of it.
-    fn filing(&self, app: &mut App, named: Option<&str>, now: Instant) -> Option<String> {
+    //
+    // One call for both commands, with `about` deciding nothing but the words
+    // of the refusal: a `/pull` that resolved its path a second way would be a
+    // pull of a document a `/push` would have filed somewhere else.
+    fn brief_for(
+        &self,
+        app: &mut App,
+        named: Option<&str>,
+        about: About,
+        now: Instant,
+    ) -> Option<String> {
         let Some(named) = named else {
             if self.written.is_none() {
-                app.panel_mut().note(nothing_written(), now);
+                app.panel_mut().note(about.nothing_written(), now);
             }
             return self.written.clone();
         };

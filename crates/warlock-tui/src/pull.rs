@@ -400,7 +400,11 @@ fn drafted<A: Converses, W: Write>(
 // The prefix of every line about one slice that is not its place in the run: the
 // position in the document and the heading, which is what a reader takes back to
 // the brief.
-fn named(slice: &Slice) -> String {
+//
+// `pub(crate)` for [`mod@crate::pulling`], which runs the same slices past
+// somebody watching: two spellings of "which slice this is" would let the panel
+// and the subcommand name the same work differently.
+pub(crate) fn named(slice: &Slice) -> String {
     format!("slice {} `{}`", slice.position(), slice.heading())
 }
 
@@ -466,21 +470,23 @@ fn would(board: Board<'_>, project: &FetchedProject, cutting: &[Cutting<'_>]) ->
     lines
 }
 
-// One slice's line, shared by the dry run's report and the run itself so that
-// the two read alike: a person who has read a `--dry-run` is looking for the
-// same slices in the same order when they take the flag off.
+// One slice's line, shared by the dry run's report, the run itself and
+// [`mod@crate::pulling`]'s run in the panel, so that all three read alike: a
+// person who has read a `--dry-run` is looking for the same slices in the same
+// order when they take the flag off, and a person watching the panel is looking
+// for the ones they have seen at a shell.
 //
 // The fraction is the place in the cut order, one-based as `running.rs`'s is,
 // and the position is where the slice sits in the document — the two differ
 // exactly when a `depends_on` line moved something, and the second is what finds
 // the slice in the brief.
-fn heading(place: usize, total: usize, slice: &Slice) -> String {
+pub(crate) fn heading(place: usize, total: usize, slice: &Slice) -> String {
     format!("[{}/{total}] {}", place + 1, named(slice))
 }
 
 // `1 slice`, `9 slices`, so the line above is not worded twice or read as
-// `1 slices`.
-fn counted(count: usize) -> String {
+// `1 slices`. `pub(crate)` for the panel's line about the same count.
+pub(crate) fn counted(count: usize) -> String {
     let noun = if count == 1 { "slice" } else { "slices" };
     format!("{count} {noun}")
 }
@@ -511,7 +517,7 @@ pub(crate) fn planned(
             path: filed_path(standing.repo_root()),
         })?;
 
-    if !is_planned(project.status()) {
+    if !project.status().is_some_and(is_planned) {
         return Err(Error::NotPlanned {
             path: spelled,
             status: project.status().map(ToOwned::to_owned),
@@ -526,8 +532,17 @@ pub(crate) fn planned(
 // filed it under. Nothing wider than that: `Planned` is the gate, so a workspace
 // that spells its planned column something else is a refusal rather than a
 // guess.
-fn is_planned(status: Option<&str>) -> bool {
-    status.is_some_and(|status| status.trim().eq_ignore_ascii_case(PLANNED))
+//
+// A project with no status at all is the caller's `is_some_and` rather than an
+// arm here, so that a caller with the string in hand — the panel's, which puts
+// the board's own spelling on the thread — asks the same question without
+// unwrapping an answer this function has already looked at.
+//
+// `pub(crate)` for [`mod@crate::pulling`], which gates the same project read
+// back over the same wire: a second fold of `Planned` there would be a second
+// opinion about which column warlock reads from.
+pub(crate) fn is_planned(status: &str) -> bool {
+    status.trim().eq_ignore_ascii_case(PLANNED)
 }
 
 #[cfg(test)]

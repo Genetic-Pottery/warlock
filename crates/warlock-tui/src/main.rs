@@ -27,9 +27,10 @@ use ratatui::crossterm::event::{self, Event, KeyEvent, MouseEvent};
 use ratatui::layout::Size;
 use warlock_engine::{Agent, Manifest, Written, write_claude_md};
 use warlock_tui::{
-    App, Cell, Converses, Focus, Position, PushAnswered, PushConfirm, QuitConfirm, Reach,
-    RecordPrompt, Run, ScopePrompt, Wired, composer_on_screen, copied_text, draw, panel_height,
-    panel_width, paste_for, position_at, tree_height,
+    App, CarryAnswered, Cell, Composed, Converses, Focus, Position, PullAnswered, PushAnswered,
+    PushConfirm, QuitConfirm, Reach, RecordPrompt, Reviewed, Run, ScopePrompt, Wired,
+    composer_on_screen, copied_text, draw, panel_height, panel_width, paste_for, position_at,
+    tree_height,
 };
 
 mod boundary;
@@ -46,6 +47,7 @@ mod input;
 mod key;
 mod pacting;
 mod pull;
+mod pulling;
 mod push;
 mod pushing;
 mod query;
@@ -59,7 +61,7 @@ mod terminal;
 mod viewing;
 mod writing;
 
-use chatting::Chat;
+use chatting::{Chat, Wanted};
 use check::check;
 use clipboard::{Clip, Clipboard};
 use config::configure;
@@ -70,6 +72,7 @@ use input::{Action, Drag, MouseAction, Pressed, drag_after, mouse_action, press_
 use key::{key_add, key_forget, key_list, key_use};
 use pacting::{Pact, Reloaded};
 use pull::pull;
+use pulling::Pulls;
 use push::push;
 use pushing::{Opens, Pushes, Pushing};
 use query::{Listing, list};
@@ -642,6 +645,11 @@ fn run() -> Result<(), Error> {
         // asks for one. The home under which the sigils, the binding and the
         // key store sit is read here as well, once for the session.
         pushes: Pushes::new(),
+        // The same two facts, read a second time rather than shared with the
+        // value above: a pull opens its own client on its own worker, and a
+        // `Pulls` that borrowed a `Pushes`'s home would tie the two together
+        // for nothing but the four bytes it saves.
+        pulls: Pulls::new(),
         prompt: ScopePrompt::default(),
         record: RecordPrompt::default(),
         drag: None,
@@ -715,12 +723,17 @@ fn run() -> Result<(), Error> {
 
 /// Everything one interactive session holds, and the seam the tests drive.
 ///
-/// Generic over all five impure things — the screen, the model, the
-/// conversation's model, the clipboard, the Linear a push files to — so a test
-/// can press keys at a whole session with no terminal attached, no `claude`
-/// installed, no display and no socket. `warlock` itself only ever instantiates
-/// it one way, in [`run`].
-struct Session<S: Screen, P: Wired + Agent, C: Converses, B: Clip, O: Opens> {
+/// Generic over all six impure things — the screen, the model, the
+/// conversation's model, the clipboard, the Linear a push files to and the
+/// model a pull drafts a slice with — so a test can press keys at a whole
+/// session with no terminal attached, no `claude` installed, no display and no
+/// socket. `warlock` itself only ever instantiates it one way, in [`run`].
+///
+/// The two models are two parameters because they are two conversations: the
+/// panel's has heard the reader's talk and answers in prose, and a slice's has
+/// heard none of it and answers in JSON. A test drives each with the stand-in
+/// its own path needs.
+struct Session<S: Screen, P: Wired + Agent, C: Converses, B: Clip, O: Opens, A: Converses> {
     app: App,
     screen: S,
     scope: Scope,
@@ -742,6 +755,11 @@ struct Session<S: Screen, P: Wired + Agent, C: Converses, B: Clip, O: Opens> {
     /// say-no to a second. The window above is the question; this is the answer
     /// leaving the machine. See [`Pushes`].
     pushes: Pushes<O>,
+    /// The same three things for a `/pull`, and in the other order: a pull has
+    /// nothing to put a window up about until the board has answered, so the
+    /// request comes first and the reading is what it has to say. Its own
+    /// [`Option`] is its own say-no to a second pull. See [`Pulls`].
+    pulls: Pulls<O, A>,
     prompt: ScopePrompt,
     /// The second window the `s` key puts up, over a scope name no `[[scope]]`
     /// record claims. Never up at the same time as [`Session::prompt`]: one goes
@@ -770,7 +788,9 @@ struct Session<S: Screen, P: Wired + Agent, C: Converses, B: Clip, O: Opens> {
     watched: Watched,
 }
 
-impl<S: Screen, P: Wired + Agent, C: Converses, B: Clip, O: Opens> Session<S, P, C, B, O> {
+impl<S: Screen, P: Wired + Agent, C: Converses, B: Clip, O: Opens, A: Converses>
+    Session<S, P, C, B, O, A>
+{
     fn size(&self) -> io::Result<Size> {
         self.screen.size()
     }
@@ -789,6 +809,11 @@ impl<S: Screen, P: Wired + Agent, C: Converses, B: Clip, O: Opens> Session<S, P,
         // loop draws and then waits.
         let width = panel_width(size);
         self.chat.set_composer_width(width);
+        // And the other thing the field is told once a round: which slice of a
+        // pull, if any, the next submission answers for. Told here rather than
+        // at the two edges of a question, so a field cannot be left labelled for
+        // a question that is over — see [`Pulls::answering`].
+        self.chat.set_composer_answering(self.pulls.answering());
         let field = composer_on_screen(&self.app, self.chat.composer());
         let header = self.app.run_header();
         self.app.set_viewport_height(tree_height(size));
@@ -801,6 +826,12 @@ impl<S: Screen, P: Wired + Agent, C: Converses, B: Clip, O: Opens> Session<S, P,
         let record = &self.record;
         let write = self.chat.write_prompt();
         let (filing, push) = (&self.pushing.field, &self.pushing.confirm);
+        let pull = self.pulls.confirm();
+        // The two windows the run itself puts up, read off it for the same
+        // reason the dialog above is: they are states of the pull in flight, and
+        // a session holding a copy of either would be a second answer to what a
+        // slice is waiting for.
+        let (review, carry) = (self.pulls.reviewing(), self.pulls.carrying());
         self.screen.draw(|frame| {
             draw(
                 frame,
@@ -813,6 +844,9 @@ impl<S: Screen, P: Wired + Agent, C: Converses, B: Clip, O: Opens> Session<S, P,
                 write,
                 filing,
                 push,
+                pull,
+                review,
+                carry,
                 field,
             );
         })
@@ -838,6 +872,9 @@ impl<S: Screen, P: Wired + Agent, C: Converses, B: Clip, O: Opens> Session<S, P,
             &self.app,
             self.confirm,
             &self.pushing.confirm,
+            self.pulls.confirm(),
+            self.pulls.reviewing(),
+            self.pulls.carrying(),
             &self.pushing.field,
             &self.prompt,
             &self.record,
@@ -957,6 +994,9 @@ impl<S: Screen, P: Wired + Agent, C: Converses, B: Clip, O: Opens> Session<S, P,
             key,
             self.confirm,
             &self.pushing.confirm,
+            self.pulls.confirm(),
+            self.pulls.reviewing(),
+            self.pulls.carrying(),
             &self.pushing.field,
             &self.prompt,
             &self.record,
@@ -989,6 +1029,14 @@ impl<S: Screen, P: Wired + Agent, C: Converses, B: Clip, O: Opens> Session<S, P,
             Pressed::Confirm(next) => self.confirm = next,
             // The push dialog, moved or answered: see [`Session::push_answered`].
             Pressed::Push(answered) => self.push_answered(answered, now),
+            // And the question a `/pull` puts up once the board has answered:
+            // see [`Session::pull_answered`].
+            Pressed::Pull(answered) => self.pull_answered(answered, now),
+            // And the two windows the run itself puts up: what becomes of one
+            // slice's drafts, and whether a skipped slice ends the run. See
+            // [`Session::review_answered`] and [`Session::carry_answered`].
+            Pressed::Review(answered) => self.review_answered(answered, now),
+            Pressed::Carry(answered) => self.carry_answered(answered, now),
             // Esc with a run in flight. The handle does both halves at once — it
             // latches, so the descent stops at the next directory instead of
             // starting a pass for it, and it kills the `claude` running right now,
@@ -1264,39 +1312,9 @@ impl<S: Screen, P: Wired + Agent, C: Converses, B: Clip, O: Opens> Session<S, P,
             }
             // Somebody typing at the foot of the panel's column: a character more
             // or less in the draft, the keyboard handed back, or a draft offered
-            // up. What each of those comes to is [`apply_compose`], which is
-            // handed the local above rather than reaching for anything on the app
-            // — what is in the draft is not a fact about the tree.
-            //
-            // The output directory goes in for the same reason and in the same
-            // shape: it is a local of the loop, `/brief` is the one thing that
-            // settles it, and this is where `/brief` is answered — so it goes in
-            // borrowed rather than being fetched from somewhere in there.
-            //
-            // The last of the three is now a worker thread, so the agent and the
-            // turn go in with it, and the instant the key was pressed goes in as
-            // well for the pact key's reason: a turn is as old as the question
-            // that asked it, not as old as the first thing the model got round to
-            // saying.
-            //
-            // The one thing a draft hands back is a `/push`: the brief this
-            // session wrote, which the conversation knows and cannot file,
-            // because which board it files to is the manifest's, the machine's
-            // sigils' and the key store's. That question is answered here and
-            // on this thread — no socket is opened by any of it — and what
-            // comes back is the window the reader is now looking at. See
-            // [`Pushes::press`].
-            Pressed::Compose(outcome) => {
-                if let Some(written) = self.chat.compose(&mut self.app, outcome, now) {
-                    self.pushing = self.pushes.press(
-                        &mut self.app,
-                        &self.manifest,
-                        &self.scope.repo_root,
-                        &written,
-                        now,
-                    );
-                }
-            }
+            // up. Which of the two conversations that last one reaches is
+            // [`Session::composed`]'s to say.
+            Pressed::Compose(outcome) => self.composed(outcome, now),
             // Somebody typing into the window a `/push` puts up when this
             // machine can file to more than one board: a character more or
             // less in the scope name, the window abandoned, or — on Enter —
@@ -1323,6 +1341,62 @@ impl<S: Screen, P: Wired + Agent, C: Converses, B: Clip, O: Opens> Session<S, P,
         }
 
         Ok(true)
+    }
+
+    /// A keystroke at the foot of the panel's column, and the one place it is
+    /// decided which conversation a submitted draft belongs to.
+    ///
+    /// While a slice of a pull is waiting on an answer, an Enter is that answer:
+    /// the text is taken out of the field and put to the session that asked, and
+    /// no turn of the chat starts, no command in it is recognised and nothing
+    /// about the register changes. Everything else — a character more or less,
+    /// the keyboard handed back — is the conversation's as it always was, so the
+    /// draft being edited is the same value whichever of the two will get it.
+    ///
+    /// The question is asked of the pull rather than answered by a flag kept
+    /// here: a second record of "somebody is being asked something" would be one
+    /// more thing to clear on every way a question can end, and the pull already
+    /// knows (see [`Pulls::relaying`]).
+    ///
+    /// What a chat submission can hand back is a brief and what is wanted of
+    /// it: the document this session wrote or the one the command named, which
+    /// the conversation knows and can do neither thing with, because which board
+    /// it reaches is the manifest's, the machine's sigils' and the key store's.
+    /// A `/push` is answered on this thread — no socket is opened by any of it —
+    /// and what comes back is the window the reader is now looking at. A `/pull`
+    /// has nothing to put up until a project has been read back, so it goes
+    /// straight onto a worker and what comes back arrives at the bottom of a
+    /// later round. See [`Pushes::press`] and [`Pulls::press`].
+    fn composed(&mut self, outcome: Composed, now: Instant) {
+        if self.pulls.relaying() && matches!(outcome, Composed::Submit) {
+            // Taken whole and unread: what the slice asked is not warlock's
+            // question, so what is sent back is not warlock's to word.
+            let answer = self.chat.taken();
+            self.pulls.answered(&mut self.app, &answer, now);
+            return;
+        }
+
+        match self.chat.compose(&mut self.app, outcome, now) {
+            Some(Wanted::Filed(brief)) => {
+                self.pushing = self.pushes.press(
+                    &mut self.app,
+                    &self.manifest,
+                    &self.scope.repo_root,
+                    &brief,
+                    now,
+                );
+            }
+            Some(Wanted::Cut(brief)) => {
+                self.pulls.press(
+                    &mut self.app,
+                    &self.manifest,
+                    &self.scope.repo_root,
+                    &brief,
+                    now,
+                );
+            }
+            None => {}
+        }
     }
 
     /// The push dialog, moved or answered. An arrow re-lights the question that
@@ -1358,6 +1432,51 @@ impl<S: Screen, P: Wired + Agent, C: Converses, B: Clip, O: Opens> Session<S, P,
                     );
                 }
             }
+        }
+    }
+
+    /// The pull dialog, moved or answered. An arrow re-lights the question that
+    /// is up — the facts it was opened with ride along unchanged, since they are
+    /// what is being answered about — and either answer takes it down.
+    ///
+    /// A No leaves the session exactly where it was and sends nothing: the
+    /// project is still `Planned`, nothing was written and the fetch that put
+    /// this up has already had its say on the thread. A Yes takes the window
+    /// down and starts the run. Either way warlock goes on running, which is
+    /// what the dialog promised.
+    fn pull_answered(&mut self, answered: PullAnswered, now: Instant) {
+        match answered {
+            PullAnswered::Open(answer) => self.pulls.lit(answer),
+            PullAnswered::Cancel => self.pulls.cancelled(),
+            PullAnswered::Cut => self.pulls.cut(&mut self.app, now),
+        }
+    }
+
+    /// One slice's drafts, answered about. An arrow re-lights the window — the
+    /// titles it was opened with ride along, since they are what is being
+    /// answered about — and each of the three answers takes it down.
+    ///
+    /// Create is the only one that sends anything, and it sends it from a
+    /// worker; skip records nothing and asks whether to carry on; feedback
+    /// leaves the field taking whatever the reader has to say. Whichever it is,
+    /// the session goes on exactly where it was.
+    fn review_answered(&mut self, answered: Reviewed, now: Instant) {
+        match answered {
+            Reviewed::Open(choice) => self.pulls.review_lit(choice),
+            Reviewed::Create => self.pulls.create(&mut self.app, now),
+            Reviewed::Skip => self.pulls.skip(&mut self.app, now),
+            Reviewed::Feedback => self.pulls.feedback(&mut self.app, now),
+        }
+    }
+
+    /// The question a skipped slice left up: a Yes drafts the next slice and a
+    /// No ends the run with the rest of the project untouched. Neither writes
+    /// anything, here or on the board.
+    fn carry_answered(&mut self, answered: CarryAnswered, now: Instant) {
+        match answered {
+            CarryAnswered::Open(answer) => self.pulls.carry_lit(answer),
+            CarryAnswered::Carry => self.pulls.carry_on(&mut self.app, now),
+            CarryAnswered::Stop => self.pulls.stop(&mut self.app, now),
         }
     }
 
@@ -1446,6 +1565,19 @@ impl<S: Screen, P: Wired + Agent, C: Converses, B: Clip, O: Opens> Session<S, P,
         // the project's address or one line about why there is none. Drained like
         // the rest, so the frames keep coming while it is in flight.
         self.pushes.keep_up(&mut self.app, now);
+        // And a project being read back off the board, and then cut: what the
+        // fetch found, a line about why there is nothing to cut, or whatever the
+        // slice being drafted has come to. Nothing here writes, so a pull that
+        // never reports has left the board exactly as it was.
+        //
+        // The one thing it hands back is warlock's attempt at a question a slice
+        // asked, offered into the field as an ordinary draft: every editing key
+        // works on it, Enter sends whatever the field then holds, and clearing it
+        // and typing sends that instead. It is put here rather than in there
+        // because the field is the conversation's — see [`Chat::offer`].
+        if let Some(proposal) = self.pulls.keep_up(&mut self.app, now) {
+            self.chat.offer(&proposal);
+        }
     }
 }
 

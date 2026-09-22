@@ -15,18 +15,27 @@ fn standing_in(repo: &Path) -> Standing {
     Standing::at(repo.to_path_buf(), repo.to_path_buf())
 }
 
-fn said(repo: &Path, path: &str, json: bool) -> String {
+// The home is handed in for the same reason the repository is: the composition
+// reads the sigils under whatever home it is given, and one resolved in here
+// would be the developer's own.
+fn said(repo: &Path, home: &Path, path: &str, json: bool) -> String {
     let mut out = Vec::new();
-    checked_onto(&standing_in(repo), PathBuf::from(path), json, &mut out)
-        .expect("a check inside a repository answers");
+    checked_onto(
+        &standing_in(repo),
+        Some(home),
+        PathBuf::from(path),
+        json,
+        &mut out,
+    )
+    .expect("a check inside a repository answers");
     String::from_utf8(out).expect("warlock writes its own text")
 }
 
 #[test]
 fn the_composition_answers_about_a_path_the_manifest_has_never_heard_of() {
-    let repo = tempfile::tempdir().expect("a temporary directory");
+    let (repo, home) = (a_dir(), a_dir());
 
-    let line = said(repo.path(), "src", false);
+    let line = said(repo.path(), home.path(), "src", false);
 
     assert!(
         line.contains("nothing scopes `src`"),
@@ -41,14 +50,14 @@ fn the_composition_answers_about_a_path_the_manifest_has_never_heard_of() {
 
 #[test]
 fn the_composition_reads_the_scope_the_manifest_holds() {
-    let repo = tempfile::tempdir().expect("a temporary directory");
+    let (repo, home) = (a_dir(), a_dir());
     Manifest::with_entries([PactEntry::new(".", "src", "src/WARLOCK.md")
         .expect("a relative module path is inside the root")
         .with_scope("data-plane")])
     .save(repo.path())
     .expect("a manifest that saves");
 
-    let line = said(repo.path(), "src", false);
+    let line = said(repo.path(), home.path(), "src", false);
 
     assert!(
         line.contains("data-plane"),
@@ -58,11 +67,12 @@ fn the_composition_reads_the_scope_the_manifest_holds() {
 
 #[test]
 fn a_missing_manifest_answers_and_an_unparsable_one_refuses() {
-    let repo = tempfile::tempdir().expect("a temporary directory");
+    let (repo, home) = (a_dir(), a_dir());
     // Missing: an answer, not a failure.
     let mut out = Vec::new();
     checked_onto(
         &standing_in(repo.path()),
+        Some(home.path()),
         PathBuf::from("src"),
         false,
         &mut out,
@@ -77,6 +87,7 @@ fn a_missing_manifest_answers_and_an_unparsable_one_refuses() {
     let mut out = Vec::new();
     let error = checked_onto(
         &standing_in(repo.path()),
+        Some(home.path()),
         PathBuf::from("src"),
         false,
         &mut out,
@@ -93,9 +104,9 @@ fn a_missing_manifest_answers_and_an_unparsable_one_refuses() {
 
 #[test]
 fn the_json_answer_is_one_line_and_names_the_command() {
-    let repo = tempfile::tempdir().expect("a temporary directory");
+    let (repo, home) = (a_dir(), a_dir());
 
-    let line = said(repo.path(), "src", true);
+    let line = said(repo.path(), home.path(), "src", true);
 
     assert_eq!(line.lines().count(), 1, "not one line: {line:?}");
     assert!(

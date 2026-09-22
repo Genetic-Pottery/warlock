@@ -1163,8 +1163,8 @@ mod submitting {
     use warlock_tui::Converses;
 
     use super::super::{
-        ALREADY_CHATTING, BRIEF_COMMAND, BRIEF_NOTE, CHAT_COMMAND, CHAT_NOTE, Chat, NOT_BRIEFING,
-        WRITE_COMMAND, brief_asking, nothing_written,
+        ALREADY_CHATTING, About, BRIEF_COMMAND, BRIEF_NOTE, CHAT_COMMAND, CHAT_NOTE, Chat,
+        NOT_BRIEFING, PULL_COMMAND, PUSH_COMMAND, WRITE_COMMAND, Wanted, brief_asking,
     };
     use crate::error::one_line;
     use crate::writing::write_opened;
@@ -1337,56 +1337,65 @@ mod submitting {
     }
 
     #[test]
-    fn push_with_nothing_written_is_one_note_naming_write() {
-        // There is no document to file, so the refusal names the command that
-        // would make one. Unlike `/write`, `/push` is about a file rather than
-        // a register: the same line comes in either mode, and neither the mode
-        // nor a turn moves.
+    fn a_bare_command_with_nothing_written_is_one_note_naming_write() {
+        // There is no document to file or to cut, so each refusal names the
+        // command that would make one. Unlike `/write`, these two are about a
+        // file rather than a register: the same line comes in either mode, and
+        // neither the mode nor a turn moves. Both are asserted here because
+        // they are one branch, and a test of only one of them would pass over a
+        // `/pull` that had quietly stopped refusing.
         let now = Instant::now();
 
-        for draft in ["/push", "  /push  "] {
-            let (app, chat) = submit(draft, now);
+        for (command, about) in [(PUSH_COMMAND, About::Push), (PULL_COMMAND, About::Pull)] {
+            for draft in [command.to_owned(), format!("  {command}  ")] {
+                let (app, chat) = submit(&draft, now);
 
+                assert_eq!(
+                    app.panel().mode(),
+                    Mode::Chat,
+                    "{draft:?} moved the register"
+                );
+                assert_eq!(
+                    rows(&app, now),
+                    vec![note(&about.nothing_written())],
+                    "{draft:?} did not leave exactly one note"
+                );
+                assert_eq!(turns(&app), 0, "{draft:?} opened a turn");
+                assert!(!chat.answering(), "{draft:?} started something");
+                assert!(
+                    chat.written.is_none(),
+                    "{draft:?} left the session remembering a document"
+                );
+                assert!(
+                    chat.composer().draft().is_empty(),
+                    "{draft:?} was left in the field"
+                );
+            }
+
+            // The line names both words, because a reader who has just been
+            // told no needs to be told what to do instead.
+            let line = about.nothing_written();
+
+            assert!(line.contains(WRITE_COMMAND), "{line:?} did not name /write");
+            assert!(line.contains(command), "{line:?} did not name {command}");
+            assert!(!line.contains('\n'), "{line:?} is more than one line");
+
+            // And brief mode changes none of it: the register is not what is
+            // missing.
+            let mut app = App::default();
+            let mut chat = conversation();
+            submit_into(&mut app, &mut chat, "/brief", now);
+            let before = turns(&app);
+            submit_into(&mut app, &mut chat, command, now);
+
+            assert_eq!(turns(&app), before, "{command} in brief mode cost a turn");
             assert_eq!(
                 app.panel().mode(),
-                Mode::Chat,
-                "{draft:?} moved the register"
+                Mode::Brief,
+                "{command} moved the register"
             );
-            assert_eq!(
-                rows(&app, now),
-                vec![note(&nothing_written())],
-                "{draft:?} did not leave exactly one note"
-            );
-            assert_eq!(turns(&app), 0, "{draft:?} opened a turn");
-            assert!(!chat.answering(), "{draft:?} started something");
-            assert!(
-                chat.written.is_none(),
-                "{draft:?} left the session remembering a document"
-            );
-            assert!(
-                chat.composer().draft().is_empty(),
-                "{draft:?} was left in the field"
-            );
+            assert_eq!(rows(&app, now).last(), Some(&note(&line)));
         }
-
-        // The line names both words, because a reader who has just been told
-        // no needs to be told what to do instead.
-        let line = nothing_written();
-
-        assert!(line.contains(WRITE_COMMAND), "{line:?} did not name /write");
-        assert!(!line.contains('\n'), "{line:?} is more than one line");
-
-        // And brief mode changes none of it: the register is not what is
-        // missing.
-        let mut app = App::default();
-        let mut chat = conversation();
-        submit_into(&mut app, &mut chat, "/brief", now);
-        let before = turns(&app);
-        submit_into(&mut app, &mut chat, "/push", now);
-
-        assert_eq!(turns(&app), before, "/push in brief mode cost a turn");
-        assert_eq!(app.panel().mode(), Mode::Brief, "/push moved the register");
-        assert_eq!(rows(&app, now).last(), Some(&note(&line)));
     }
 
     #[test]
@@ -1407,7 +1416,7 @@ mod submitting {
         );
         let filed = chat.compose(&mut app, Composed::Submit, now);
 
-        assert_eq!(filed.as_deref(), Some("docs/a-brief.md"));
+        assert_eq!(filed, Some(Wanted::Filed("docs/a-brief.md".to_owned())));
         assert!(rows(&app, now).is_empty(), "a named brief left a line");
         assert_eq!(turns(&app), 0, "a named brief opened a turn");
         assert!(
@@ -1426,6 +1435,48 @@ mod submitting {
 
         assert_eq!(refused, None, "a path outside the repository was filed");
         assert_eq!(rows(&app, now).len(), 1, "the refusal was not one line");
+    }
+
+    #[test]
+    fn pull_hands_up_a_cut_of_the_brief_it_names_or_the_one_this_session_wrote() {
+        // The other verb over the same branch: a named path is spelled the
+        // manifest's way and handed up as a cut, and the same path refused for
+        // a `/push` is refused for a `/pull`. Nothing is read and nothing is
+        // sent — what to do with the document is the loop's.
+        let now = Instant::now();
+        let root = a_root();
+        let mut app = App::default();
+        let mut chat = conversation_in(root.path());
+
+        chat.compose(
+            &mut app,
+            Composed::Typing(Composer::new("/pull docs/a-brief.md")),
+            now,
+        );
+        let cut = chat.compose(&mut app, Composed::Submit, now);
+
+        assert_eq!(cut, Some(Wanted::Cut("docs/a-brief.md".to_owned())));
+        assert!(rows(&app, now).is_empty(), "a named brief left a line");
+        assert_eq!(turns(&app), 0, "a named brief opened a turn");
+
+        chat.compose(
+            &mut app,
+            Composed::Typing(Composer::new("/pull ../elsewhere/a-brief.md")),
+            now,
+        );
+        let refused = chat.compose(&mut app, Composed::Submit, now);
+
+        assert_eq!(refused, None, "a path outside the repository was cut");
+        assert_eq!(rows(&app, now).len(), 1, "the refusal was not one line");
+
+        // And a bare `/pull` after a `/write` is about the document that write
+        // left behind, which is the same one a bare `/push` would file.
+        let mut chat = conversation_in(root.path());
+        chat.written = Some("docs/written.md".to_owned());
+        chat.compose(&mut app, Composed::Typing(Composer::new("/pull")), now);
+        let written = chat.compose(&mut app, Composed::Submit, now);
+
+        assert_eq!(written, Some(Wanted::Cut("docs/written.md".to_owned())));
     }
 
     #[test]

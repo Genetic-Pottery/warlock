@@ -915,8 +915,9 @@ mod gate {
     use ratatui::layout::Size;
     use warlock_engine::NodeState;
     use warlock_tui::{
-        Answer, App, Composed, Composer, Edited, Focus, PushConfirm, QuitConfirm, RecordPrompt,
-        Row, ScopeField, ScopePrompt, edit_for, panel_height, push_answer_for, tree_height,
+        Answer, App, Composed, Composer, Edited, Focus, PullConfirm, PushConfirm, QuitConfirm,
+        RecordPrompt, Row, ScopeField, ScopePrompt, edit_for, panel_height, pull_answer_for,
+        push_answer_for, tree_height,
     };
 
     use super::super::{Action, Pressed, action_for, press_for as every_window};
@@ -943,6 +944,9 @@ mod gate {
             key,
             confirm,
             &PushConfirm::Closed,
+            &PullConfirm::Closed,
+            None,
+            None,
             &ScopePrompt::Closed,
             prompt,
             record,
@@ -1147,10 +1151,27 @@ mod gate {
             Pressed::Push(answered) => {
                 panic!("{answered:?} came from a push dialog that is not up")
             }
+            // And once more for the question a `/pull` puts up, which the same
+            // shim hands in closed: this module's rounds are a session with no
+            // project read back, so an answer here is a window nobody opened.
+            Pressed::Pull(answered) => {
+                panic!("{answered:?} came from a pull dialog that is not up")
+            }
             // And once more for the field that dialog can come up behind,
             // which is handed in closed by the same shim.
             Pressed::Filing(edited) => {
                 panic!("{edited:?} came from a scope field that is not up")
+            }
+            // And for the window a slice's drafts are gated in, handed in
+            // closed by the same shim: nothing here drafts anything, so an
+            // answer is a window nobody opened.
+            Pressed::Review(reviewed) => {
+                panic!("{reviewed:?} came from a review window that is not up")
+            }
+            // And for the question a skip puts up behind it, closed for the
+            // same reason and loud for the same reason.
+            Pressed::Carry(answered) => {
+                panic!("{answered:?} came from a carry-on question that is not up")
             }
             // The loop's three composer arms, and the reason the draft is a
             // local here exactly as it is there: nothing about it is ever
@@ -2251,8 +2272,8 @@ mod gate {
     // uses.
     mod pushing {
         use super::{
-            Composer, INERT, KeyCode, KeyEvent, Pressed, PushConfirm, QuitConfirm, RecordPrompt,
-            ScopePrompt, ctrl_c, every_window, press, push_answer_for,
+            Composer, INERT, KeyCode, KeyEvent, Pressed, PullConfirm, PushConfirm, QuitConfirm,
+            RecordPrompt, ScopePrompt, ctrl_c, every_window, press, push_answer_for,
         };
 
         fn open() -> PushConfirm {
@@ -2280,6 +2301,9 @@ mod gate {
                 key,
                 QuitConfirm::Closed,
                 push,
+                &PullConfirm::Closed,
+                None,
+                None,
                 &ScopePrompt::Closed,
                 &ScopePrompt::Closed,
                 &RecordPrompt::Closed,
@@ -2375,6 +2399,9 @@ mod gate {
                         key,
                         QuitConfirm::Closed,
                         &push,
+                        &PullConfirm::Closed,
+                        None,
+                        None,
                         &ScopePrompt::Closed,
                         &scope,
                         &record,
@@ -2407,6 +2434,9 @@ mod gate {
                     press(KeyCode::Enter),
                     QuitConfirm::open(),
                     &push,
+                    &PullConfirm::Closed,
+                    None,
+                    None,
                     &ScopePrompt::Closed,
                     &ScopePrompt::Closed,
                     &RecordPrompt::Closed,
@@ -2442,13 +2472,477 @@ mod gate {
         }
     }
 
+    // The seventh window: the question a `/pull` puts up once the board has
+    // answered. It stands in the sixth's place in the order — the two are the
+    // same kind of question and a session never has both up — so every round
+    // in here opens it by hand and calls the gate itself, as the push dialog's
+    // rounds do.
+    mod pulling {
+        use super::{
+            Composer, INERT, KeyCode, KeyEvent, Pressed, PullConfirm, PushConfirm, QuitConfirm,
+            RecordPrompt, ScopePrompt, ctrl_c, every_window, press, pull_answer_for,
+        };
+
+        fn open() -> PullConfirm {
+            PullConfirm::open(
+                "Cut a planned project into tickets",
+                "planned",
+                9,
+                "Warlock",
+                "work",
+            )
+        }
+
+        // The gate with this window up and every other one down, which is the
+        // only way it is ever up in a session.
+        fn asked(key: KeyEvent, pull: &PullConfirm) -> Pressed {
+            asking(key, pull, None, false)
+        }
+
+        fn asking(
+            key: KeyEvent,
+            pull: &PullConfirm,
+            composer: Option<&Composer>,
+            answered: bool,
+        ) -> Pressed {
+            every_window(
+                key,
+                QuitConfirm::Closed,
+                &PushConfirm::Closed,
+                pull,
+                None,
+                None,
+                &ScopePrompt::Closed,
+                &ScopePrompt::Closed,
+                &RecordPrompt::Closed,
+                &ScopePrompt::Closed,
+                composer,
+                false,
+                answered,
+            )
+        }
+
+        // What the dialog itself says about a key, which is what the gate has
+        // to hand back for every one of them — and it hands it back as a
+        // variant of its own, so no arm can mistake a pull's answer for a
+        // push's.
+        fn answered(key: KeyEvent, pull: &PullConfirm) -> Pressed {
+            let cutting = pull.cutting().expect("the dialog under test is up");
+            Pressed::Pull(pull_answer_for(key, cutting.answer()))
+        }
+
+        #[test]
+        fn every_tree_binding_is_the_dialogs_and_none_of_them_reaches_the_app() {
+            // The promise over the whole list, as for the push dialog: while
+            // the question is up there is no `p` that pacts, no `j` that moves
+            // a selection under it and no `r` that starts a refresh.
+            let pull = open();
+
+            for code in INERT {
+                let key = press(code);
+
+                assert_eq!(
+                    asked(key, &pull),
+                    answered(key, &pull),
+                    "{code:?} should have been answered by the dialog"
+                );
+            }
+        }
+
+        #[test]
+        fn q_is_the_dialogs_too_so_the_quit_question_cannot_come_up_underneath() {
+            let pull = open();
+            let key = press(KeyCode::Char('q'));
+
+            assert_eq!(asked(key, &pull), answered(key, &pull));
+            assert_ne!(asked(key, &pull), Pressed::Confirm(QuitConfirm::open()));
+        }
+
+        #[test]
+        fn ctrl_c_is_still_answered_before_the_dialog() {
+            // The keystroke of last resort, with this window up as with every
+            // other: it leaves with no run started, and stops the turn when one
+            // is being answered.
+            let pull = open();
+
+            assert_eq!(asked(ctrl_c(), &pull), Pressed::Leave);
+            assert_eq!(asking(ctrl_c(), &pull, None, true), Pressed::CancelTurn);
+        }
+
+        #[test]
+        fn the_composer_is_not_consulted_while_the_dialog_is_up() {
+            // Which is also why a second `/pull` cannot be typed while this is
+            // up: the field that would take the command is behind the window.
+            let pull = open();
+            let draft = Composer::new("web");
+
+            for code in [KeyCode::Char('j'), KeyCode::Tab, KeyCode::Enter] {
+                let key = press(code);
+
+                assert_eq!(
+                    asking(key, &pull, Some(&draft), false),
+                    answered(key, &pull),
+                    "{code:?} reached the draft from behind the dialog"
+                );
+            }
+        }
+
+        #[test]
+        fn the_dialog_has_the_keys_while_any_of_the_three_fields_is_up() {
+            // The precedence, written down: a `/write` turn still out opens the
+            // write prompt on no keystroke at all, and a field that came up
+            // under this dialog does not get to take the keys off it.
+            let pull = open();
+            let scope = ScopePrompt::open("crates/warlock-engine", "data-plane");
+            let record = RecordPrompt::open("crates/warlock-engine", "data-plane");
+            let write = ScopePrompt::open("Write the brief to", "docs/brief.md");
+
+            for code in INERT.into_iter().chain([KeyCode::Enter, KeyCode::Esc]) {
+                let key = press(code);
+
+                assert_eq!(
+                    every_window(
+                        key,
+                        QuitConfirm::Closed,
+                        &PushConfirm::Closed,
+                        &pull,
+                        None,
+                        None,
+                        &ScopePrompt::Closed,
+                        &scope,
+                        &record,
+                        &write,
+                        None,
+                        false,
+                        false,
+                    ),
+                    answered(key, &pull),
+                    "{code:?} was answered by the wrong window"
+                );
+            }
+        }
+
+        #[test]
+        fn the_quit_question_is_asked_before_it() {
+            // The other side of the order, and a situation no session is in.
+            // Asserted anyway, because which window answers has to be decided
+            // somewhere rather than by the order of two `if`s nobody looked at.
+            let pull = open();
+
+            assert_eq!(
+                asking(press(KeyCode::Enter), &pull, None, false),
+                answered(press(KeyCode::Enter), &pull)
+            );
+            assert_eq!(
+                every_window(
+                    press(KeyCode::Enter),
+                    QuitConfirm::open(),
+                    &PushConfirm::Closed,
+                    &pull,
+                    None,
+                    None,
+                    &ScopePrompt::Closed,
+                    &ScopePrompt::Closed,
+                    &RecordPrompt::Closed,
+                    &ScopePrompt::Closed,
+                    None,
+                    false,
+                    false,
+                ),
+                Pressed::Confirm(QuitConfirm::Closed)
+            );
+        }
+
+        #[test]
+        fn the_push_dialog_is_asked_in_the_same_place_and_first() {
+            // The one place both could be filled, which no session reaches:
+            // the push dialog is up while a brief is being filed and this one
+            // only after a project has been read back. Decided here rather
+            // than left to whichever `if` happens to come first.
+            let pull = open();
+            let push = PushConfirm::open(
+                "Push a brief to the board",
+                "warlock-team",
+                "Warlock",
+                "work",
+            );
+            let key = press(KeyCode::Enter);
+
+            assert!(matches!(
+                every_window(
+                    key,
+                    QuitConfirm::Closed,
+                    &push,
+                    &pull,
+                    None,
+                    None,
+                    &ScopePrompt::Closed,
+                    &ScopePrompt::Closed,
+                    &RecordPrompt::Closed,
+                    &ScopePrompt::Closed,
+                    None,
+                    false,
+                    false,
+                ),
+                Pressed::Push(_)
+            ));
+        }
+
+        #[test]
+        fn the_keys_mean_what_they_always_did_once_the_dialog_is_down() {
+            // The other half of the promise: with the question answered, every
+            // key it swallowed is whatever the gate with nothing up says it is.
+            for code in INERT.into_iter().chain([KeyCode::Char('q')]) {
+                let key = press(code);
+
+                assert_eq!(
+                    asked(key, &PullConfirm::Closed),
+                    super::press_for(
+                        key,
+                        QuitConfirm::Closed,
+                        &ScopePrompt::Closed,
+                        None,
+                        false,
+                        false
+                    ),
+                    "{code:?} was answered by a window that is not up"
+                );
+            }
+        }
+    }
+
+    // The two windows a confirmed pull puts up while it is running: the one a
+    // slice's drafts wait behind, and the question a skipped slice leaves. Both
+    // are states of the run rather than fields of the session, so both are
+    // handed to the gate as an `Option` and every round here hands one over.
+    mod running {
+        use warlock_tui::{Carry, Choice, Review, Reviewed, carry_answer_for, review_answer_for};
+
+        use super::{
+            Composer, INERT, KeyCode, KeyEvent, Pressed, PullConfirm, PushConfirm, QuitConfirm,
+            RecordPrompt, ScopePrompt, ctrl_c, every_window, press,
+        };
+
+        const SLICE: &str = "slice 1 `Gate the drafts`";
+
+        fn review() -> Review {
+            Review::open(SLICE, vec!["Put a window in the way".to_owned()], true)
+        }
+
+        fn carry() -> Carry {
+            Carry::open("2 slices")
+        }
+
+        // The gate with one of the two up and every other window down, which is
+        // the only way either is ever up in a session.
+        fn asking(
+            key: KeyEvent,
+            review: Option<&Review>,
+            carry: Option<&Carry>,
+            composer: Option<&Composer>,
+            answered: bool,
+        ) -> Pressed {
+            every_window(
+                key,
+                QuitConfirm::Closed,
+                &PushConfirm::Closed,
+                &PullConfirm::Closed,
+                review,
+                carry,
+                &ScopePrompt::Closed,
+                &ScopePrompt::Closed,
+                &RecordPrompt::Closed,
+                &ScopePrompt::Closed,
+                composer,
+                false,
+                answered,
+            )
+        }
+
+        #[test]
+        fn every_tree_binding_is_the_review_windows_and_none_of_them_reaches_the_app() {
+            // While drafts are waiting to be answered about there is no `p`
+            // that pacts, no `j` that moves a selection behind the window and
+            // no `q` that puts the quit question up under it.
+            let drafts = review();
+
+            for code in INERT.into_iter().chain([KeyCode::Char('q'), KeyCode::Esc]) {
+                let key = press(code);
+
+                assert_eq!(
+                    asking(key, Some(&drafts), None, None, false),
+                    Pressed::Review(review_answer_for(key, &drafts)),
+                    "{code:?} should have been answered by the review window"
+                );
+            }
+        }
+
+        #[test]
+        fn every_tree_binding_is_the_carry_on_questions_too() {
+            let asked = carry();
+
+            for code in INERT.into_iter().chain([KeyCode::Char('q'), KeyCode::Esc]) {
+                let key = press(code);
+
+                assert_eq!(
+                    asking(key, None, Some(&asked), None, false),
+                    Pressed::Carry(carry_answer_for(key, asked.answer())),
+                    "{code:?} should have been answered by the carry-on question"
+                );
+            }
+        }
+
+        #[test]
+        fn the_composer_is_not_consulted_while_either_is_up() {
+            // Which is why a slice cannot be answered into the field while its
+            // own drafts are waiting: the field is behind the window.
+            let drafts = review();
+            let asked = carry();
+            let draft = Composer::new("say something");
+
+            for code in [KeyCode::Char('j'), KeyCode::Tab, KeyCode::Enter] {
+                let key = press(code);
+
+                assert_eq!(
+                    asking(key, Some(&drafts), None, Some(&draft), false),
+                    Pressed::Review(review_answer_for(key, &drafts)),
+                    "{code:?} reached the draft from behind the review window"
+                );
+                assert_eq!(
+                    asking(key, None, Some(&asked), Some(&draft), false),
+                    Pressed::Carry(carry_answer_for(key, asked.answer())),
+                    "{code:?} reached the draft from behind the carry-on question"
+                );
+            }
+        }
+
+        #[test]
+        fn ctrl_c_is_still_answered_before_either_of_them() {
+            // The keystroke of last resort, with these windows up as with every
+            // other.
+            assert_eq!(
+                asking(ctrl_c(), Some(&review()), None, None, false),
+                Pressed::Leave
+            );
+            assert_eq!(
+                asking(ctrl_c(), None, Some(&carry()), None, true),
+                Pressed::CancelTurn
+            );
+        }
+
+        #[test]
+        fn the_quit_question_and_the_two_dialogs_are_asked_before_them() {
+            // Situations no session is in — the dialog is answered and gone
+            // before a slice is drafted — asserted anyway, so which window
+            // answers is decided here rather than by the order of two `if`s
+            // nobody looked at.
+            let drafts = review();
+            let key = press(KeyCode::Enter);
+
+            assert_eq!(
+                every_window(
+                    key,
+                    QuitConfirm::open(),
+                    &PushConfirm::Closed,
+                    &PullConfirm::Closed,
+                    Some(&drafts),
+                    None,
+                    &ScopePrompt::Closed,
+                    &ScopePrompt::Closed,
+                    &RecordPrompt::Closed,
+                    &ScopePrompt::Closed,
+                    None,
+                    false,
+                    false,
+                ),
+                Pressed::Confirm(QuitConfirm::Closed)
+            );
+            assert!(matches!(
+                every_window(
+                    key,
+                    QuitConfirm::Closed,
+                    &PushConfirm::Closed,
+                    &PullConfirm::open("A project", "planned", 9, "Warlock", "work"),
+                    Some(&drafts),
+                    None,
+                    &ScopePrompt::Closed,
+                    &ScopePrompt::Closed,
+                    &RecordPrompt::Closed,
+                    &ScopePrompt::Closed,
+                    None,
+                    false,
+                    false,
+                ),
+                Pressed::Pull(_)
+            ));
+        }
+
+        #[test]
+        fn the_review_window_is_asked_before_the_carry_on_question() {
+            // The one place both could be filled, which no run reaches: a slice
+            // is being reviewed, or asking whether to carry on, or neither.
+            let drafts = review();
+
+            assert_eq!(
+                asking(
+                    press(KeyCode::Enter),
+                    Some(&drafts),
+                    Some(&carry()),
+                    None,
+                    false
+                ),
+                Pressed::Review(Reviewed::Skip)
+            );
+        }
+
+        #[test]
+        fn a_windows_answer_cannot_be_mistaken_for_any_other_windows() {
+            // Each window hands its answer back as a variant of its own, so no
+            // arm of the loop can file a slice's drafts because a quit question
+            // was answered Yes.
+            let create = review().with_choice(Choice::Create);
+
+            assert_eq!(
+                asking(press(KeyCode::Enter), Some(&create), None, None, false),
+                Pressed::Review(Reviewed::Create)
+            );
+            assert_ne!(
+                asking(press(KeyCode::Enter), Some(&create), None, None, false),
+                Pressed::Confirm(QuitConfirm::Closed)
+            );
+        }
+
+        #[test]
+        fn the_keys_mean_what_they_always_did_once_both_are_down() {
+            // The other half of the promise: with the run past its windows,
+            // every key they swallowed is whatever the gate with nothing up
+            // says it is.
+            for code in INERT.into_iter().chain([KeyCode::Char('q')]) {
+                let key = press(code);
+
+                assert_eq!(
+                    asking(key, None, None, None, false),
+                    super::press_for(
+                        key,
+                        QuitConfirm::Closed,
+                        &ScopePrompt::Closed,
+                        None,
+                        false,
+                        false
+                    ),
+                    "{code:?} was answered by a window that is not up"
+                );
+            }
+        }
+    }
+
     // The sixth window: the field that comes up in front of that dialog when
     // this machine can file to more than one board. Nothing but a `/push`
     // opens it either, so every round in here opens it by hand.
     mod filing {
         use super::{
-            Composer, Edited, INERT, KeyCode, KeyEvent, Pressed, PushConfirm, QuitConfirm,
-            RecordPrompt, ScopePrompt, ctrl_c, edit_for, every_window, press,
+            Composer, Edited, INERT, KeyCode, KeyEvent, Pressed, PullConfirm, PushConfirm,
+            QuitConfirm, RecordPrompt, ScopePrompt, ctrl_c, edit_for, every_window, press,
         };
 
         fn open() -> ScopePrompt {
@@ -2469,6 +2963,9 @@ mod gate {
                 key,
                 QuitConfirm::Closed,
                 &PushConfirm::Closed,
+                &PullConfirm::Closed,
+                None,
+                None,
                 filing,
                 &ScopePrompt::Closed,
                 &RecordPrompt::Closed,
@@ -2550,6 +3047,9 @@ mod gate {
                         key,
                         QuitConfirm::Closed,
                         &PushConfirm::Closed,
+                        &PullConfirm::Closed,
+                        None,
+                        None,
                         &filing,
                         &scope,
                         &record,
@@ -2584,6 +3084,9 @@ mod gate {
                     key,
                     QuitConfirm::Closed,
                     &push,
+                    &PullConfirm::Closed,
+                    None,
+                    None,
                     &filing,
                     &ScopePrompt::Closed,
                     &RecordPrompt::Closed,
@@ -2599,6 +3102,9 @@ mod gate {
                     key,
                     QuitConfirm::open(),
                     &PushConfirm::Closed,
+                    &PullConfirm::Closed,
+                    None,
+                    None,
                     &filing,
                     &ScopePrompt::Closed,
                     &RecordPrompt::Closed,
@@ -3427,8 +3933,8 @@ mod pointer {
     use ratatui::layout::Size;
     use warlock_engine::NodeState;
     use warlock_tui::{
-        App, Cell, Composer, Focus, PushConfirm, QuitConfirm, Reach, RecordPrompt, Row,
-        ScopePrompt, panel_height, panel_width, tree_height,
+        App, Carry, Cell, Composer, Focus, PullConfirm, PushConfirm, QuitConfirm, Reach,
+        RecordPrompt, Review, Row, ScopePrompt, panel_height, panel_width, tree_height,
     };
 
     use super::super::{MouseAction, WHEEL_NOTCH, mouse_action};
@@ -3599,6 +4105,9 @@ mod pointer {
             app,
             confirm,
             &PushConfirm::Closed,
+            &PullConfirm::Closed,
+            None,
+            None,
             &ScopePrompt::Closed,
             prompt,
             record,
@@ -3614,6 +4123,9 @@ mod pointer {
             app,
             QuitConfirm::Closed,
             &PushConfirm::Closed,
+            &PullConfirm::Closed,
+            None,
+            None,
             &ScopePrompt::Closed,
             &ScopePrompt::Closed,
             &RecordPrompt::Closed,
@@ -4481,6 +4993,9 @@ mod pointer {
                     &app,
                     QuitConfirm::Closed,
                     &push,
+                    &PullConfirm::Closed,
+                    None,
+                    None,
                     &ScopePrompt::Closed,
                     &ScopePrompt::Closed,
                     &RecordPrompt::Closed,
@@ -4490,6 +5005,90 @@ mod pointer {
                 None,
                 "{mouse:?} should mean nothing while the push dialog is up"
             );
+        }
+    }
+
+    #[test]
+    fn the_pull_dialog_swallows_the_gesture_too() {
+        // The seventh window, for the sixth's reason and in a test of its own
+        // because `asks_under` above cannot put it up: a click that reached the
+        // tree from behind a question would select a row the reader cannot see,
+        // and a wheel notch would scroll the thread it is drawn over.
+        let app = app_talking();
+        let pull = PullConfirm::open(
+            "Cut a planned project into tickets",
+            "planned",
+            9,
+            "Warlock",
+            "work",
+        );
+        for mouse in [
+            left_click(IN_PANEL, FIRST_PANEL_LINE + 2),
+            drag(IN_PANEL + 3, FIRST_PANEL_LINE + 3),
+            release(IN_PANEL + 3, FIRST_PANEL_LINE + 3),
+            wheel_down(IN_TREE, FIRST_TREE_ROW),
+        ] {
+            assert_eq!(
+                mouse_action(
+                    mouse,
+                    SIZE,
+                    &app,
+                    QuitConfirm::Closed,
+                    &PushConfirm::Closed,
+                    &pull,
+                    None,
+                    None,
+                    &ScopePrompt::Closed,
+                    &ScopePrompt::Closed,
+                    &RecordPrompt::Closed,
+                    &ScopePrompt::Closed,
+                    None,
+                ),
+                None,
+                "{mouse:?} should mean nothing while the pull dialog is up"
+            );
+        }
+    }
+
+    #[test]
+    fn the_two_windows_a_running_pull_puts_up_swallow_the_gesture_as_well() {
+        // The eighth and ninth, for the seventh's reason: neither has anything
+        // clickable in it, and a wheel notch that reached the thread behind one
+        // would scroll the very titles being answered about out of sight.
+        let app = app_talking();
+        let review = Review::open(
+            "slice 1 `Gate the drafts`",
+            vec!["Put a window in the way".to_owned()],
+            true,
+        );
+        let carry = Carry::open("2 slices");
+        for mouse in [
+            left_click(IN_PANEL, FIRST_PANEL_LINE + 2),
+            drag(IN_PANEL + 3, FIRST_PANEL_LINE + 3),
+            release(IN_PANEL + 3, FIRST_PANEL_LINE + 3),
+            wheel_down(IN_TREE, FIRST_TREE_ROW),
+        ] {
+            for (drafts, asked) in [(Some(&review), None), (None, Some(&carry))] {
+                assert_eq!(
+                    mouse_action(
+                        mouse,
+                        SIZE,
+                        &app,
+                        QuitConfirm::Closed,
+                        &PushConfirm::Closed,
+                        &PullConfirm::Closed,
+                        drafts,
+                        asked,
+                        &ScopePrompt::Closed,
+                        &ScopePrompt::Closed,
+                        &RecordPrompt::Closed,
+                        &ScopePrompt::Closed,
+                        None,
+                    ),
+                    None,
+                    "{mouse:?} should mean nothing while a run's window is up"
+                );
+            }
         }
     }
 

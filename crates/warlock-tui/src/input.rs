@@ -16,9 +16,11 @@ use ratatui::crossterm::event::{
 };
 use ratatui::layout::Size;
 use warlock_tui::{
-    Answered, App, Cell, Composed, Composer, Edited, Focus, Hit, PushAnswered, PushConfirm,
-    QuitConfirm, Reach, RecordEdited, RecordPrompt, ScopePrompt, answer_for, compose_for, edit_for,
-    hit_test, panel_reach, push_answer_for, record_edit_for,
+    Answered, App, Carry, CarryAnswered, Cell, Composed, Composer, Edited, Focus, Hit,
+    PullAnswered, PullConfirm, PushAnswered, PushConfirm, QuitConfirm, Reach, RecordEdited,
+    RecordPrompt, Review, Reviewed, ScopePrompt, answer_for, carry_answer_for, compose_for,
+    edit_for, hit_test, panel_reach, pull_answer_for, push_answer_for, record_edit_for,
+    review_answer_for,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -123,6 +125,18 @@ pub(crate) enum Pressed {
     // coming down, and a `PushConfirm::Closed` here could not tell it from the
     // Esc that closes the same window with nothing sent.
     Push(PushAnswered),
+    // The question a `/pull` asks once the board has answered, for the reason
+    // `Push` carries an answer rather than a next state: `Cut` is a run
+    // starting and the window coming down, which a `PullConfirm::Closed` could
+    // not be told from the Esc that closes the same window having started
+    // nothing.
+    Pull(PullAnswered),
+    // One slice's drafts answered about: three answers, so its own value rather
+    // than the two-answer ones above — see `Reviewed`.
+    Review(Reviewed),
+    // And the two-answer question a skipped slice leaves behind, which is the
+    // quit dialog's shape said in the run's words.
+    Carry(CarryAnswered),
     // The field that comes up in front of that dialog when the machine can file
     // to more than one board. A fourth variant over `Edited` for `Scope` and
     // `Write`'s reason: the three are the same keystrokes and three different
@@ -201,6 +215,9 @@ pub(crate) fn press_for(
     key: KeyEvent,
     confirm: QuitConfirm,
     push: &PushConfirm,
+    pull: &PullConfirm,
+    review: Option<&Review>,
+    carry: Option<&Carry>,
     filing: &ScopePrompt,
     prompt: &ScopePrompt,
     record: &RecordPrompt,
@@ -227,6 +244,28 @@ pub(crate) fn press_for(
 
     if let Some(asked) = push.filing() {
         return Pressed::Push(push_answer_for(key, asked.answer()));
+    }
+
+    // The push dialog's place in the order rather than a place of its own: the
+    // two are the same kind of question asked at the same point in the same
+    // command's shape, and a session never has both up — a `/pull` is typed
+    // into the composer, which takes no keys while either is drawn over it.
+    if let Some(asked) = pull.cutting() {
+        return Pressed::Pull(pull_answer_for(key, asked.answer()));
+    }
+
+    // The two windows a confirmed pull puts up, in the dialog's own place and
+    // for its reason: they are the same kind of question at the same point in
+    // the same command's shape. They can never be up with it or with each other
+    // — the dialog is answered and gone before a slice is drafted, and a slice
+    // is being reviewed, or asking whether to carry on, or neither — so the
+    // order between the three of them is a statement rather than a choice.
+    if let Some(drafts) = review {
+        return Pressed::Review(review_answer_for(key, drafts));
+    }
+
+    if let Some(asked) = carry {
+        return Pressed::Carry(carry_answer_for(key, asked.answer()));
     }
 
     if let Some(field) = filing.field() {
@@ -337,7 +376,7 @@ pub(crate) struct Drag {
 // `PanelLine` for a point on the composer and scrolls a window the pointer is
 // not over.
 //
-// None of the six windows has anything clickable in it, so while any is up
+// None of the nine windows has anything clickable in it, so while any is up
 // every event is dropped, wheel and click alike: a click that reached the tree
 // behind one would select a row the reader cannot see.
 #[expect(
@@ -352,6 +391,9 @@ pub(crate) fn mouse_action(
     app: &App,
     confirm: QuitConfirm,
     push: &PushConfirm,
+    pull: &PullConfirm,
+    review: Option<&Review>,
+    carry: Option<&Carry>,
     filing: &ScopePrompt,
     prompt: &ScopePrompt,
     record: &RecordPrompt,
@@ -360,6 +402,9 @@ pub(crate) fn mouse_action(
 ) -> Option<MouseAction> {
     if confirm.is_open()
         || push.is_open()
+        || pull.is_open()
+        || review.is_some()
+        || carry.is_some()
         || filing.is_open()
         || prompt.is_open()
         || record.is_open()
