@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::{fmt, io};
 
 use warlock_engine::{claude_md, filed, filing, keys, load, manifest, pact, route, scope, sigils};
-use warlock_tui::{BriefError, LinearError};
+use warlock_tui::{BriefError, LinearError, ScopeBlockError};
 
 use crate::boundary::{blocking_scopes_message, closed_scope_message};
 use crate::cut::listed;
@@ -239,6 +239,38 @@ pub(crate) enum Error {
         path: String,
         status: Option<String>,
     },
+    // A project whose content is not a scope to cut: no `## Scope` heading, a
+    // heading with no slices under it, or slices that wait on each other. One
+    // variant for all three because `ScopeBlockError` has already worded them
+    // and this carries the sentence rather than re-writing it, the way `Filing`
+    // above carries the engine's. What it is about is the project's content on
+    // the board rather than a file here, so there is no path to name with it.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the refusal lands before the verb that raises it: `warlock \
+                      pull` is a later slice of brief 23"
+        )
+    )]
+    ScopeBlock {
+        source: ScopeBlockError,
+    },
+    // Every slice of a project already carrying a cut record, refused before
+    // the repository is read: a run with nothing to draft is not a run that
+    // succeeded quietly. Named against the brief like `NoRecord` and
+    // `NotPlanned`, because the records it read are that path's.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the refusal lands before the verb that raises it: `warlock \
+                      pull` is a later slice of brief 23"
+        )
+    )]
+    AllCut {
+        path: String,
+    },
     // The team key again, because a workflow state belongs to a team rather
     // than to the workspace: a `Backlog` on one team says nothing about
     // another, so the refusal is only useful with the team in it. Raised before
@@ -401,6 +433,17 @@ fn not_planned_message(path: &str, status: Option<&str>) -> String {
     format!(
         "the project filed for `{path}` {found} rather than `Planned`, so nothing was read: \
          warlock reads a project back once it is planned"
+    )
+}
+
+// The fact, then the file that holds it, then the rule underneath: a slice is
+// cut once, so a project every record already covers has nowhere left to go
+// here and the issues it made are where the work goes on.
+fn all_cut_message(path: &str) -> String {
+    format!(
+        "every slice of the project filed for `{path}` is already cut, so there is nothing to \
+         draft: `.warlock/filed.toml` holds a record for each of them, and warlock cuts a slice \
+         once"
     )
 }
 
@@ -637,8 +680,15 @@ impl fmt::Display for Error {
             Self::NotPlanned { path, status } => {
                 write!(f, "{}", not_planned_message(path, status.as_deref()))
             }
-            // The two cut refusals with wording of their own, said above for
+            // The parser's own sentence and nothing around it, for `Brief`'s
+            // reason: it names the heading the project is missing, or the
+            // slices that wait on each other, and ends in there being nothing
+            // to cut. Unflattened because it can only be one line — this is the
+            // one wrapped error here that wraps nothing itself.
+            Self::ScopeBlock { source } => write!(f, "{source}"),
+            // The three cut refusals with wording of their own, said above for
             // the reason the rest are.
+            Self::AllCut { path } => write!(f, "{}", all_cut_message(path)),
             Self::NoBacklog { team } => write!(f, "{}", no_backlog_message(team)),
             Self::Uncut { issues, source } => write!(f, "{}", uncut_message(issues, source)),
             Self::Problems { first, rest: 0 } => write!(f, "{first}"),
@@ -668,6 +718,7 @@ impl std::error::Error for Error {
             Self::Route { source } => Some(source),
             Self::Filing { source } => Some(source),
             Self::Brief { source } => Some(source),
+            Self::ScopeBlock { source } => Some(source),
             Self::Filed { source } => Some(source),
             Self::Unfiled { source, .. } | Self::Uncut { source, .. } => Some(source.as_ref()),
             Self::Linear { source } => Some(source),
@@ -707,8 +758,10 @@ impl std::error::Error for Error {
             | Self::UnknownProject { .. }
             | Self::NotPlanned { .. }
             // Nor here: a team whose workflow has no `Backlog` is that same
-            // disagreement, and the call that answered it worked.
+            // disagreement, and a project every cut record already covers is
+            // this machine's own file answering completely.
             | Self::NoBacklog { .. }
+            | Self::AllCut { .. }
             // Nor here, and there could not be one: a run's failures are N
             // errors rather than one, they have already been printed in full,
             // and picking a first to be "the" cause would be the summary
