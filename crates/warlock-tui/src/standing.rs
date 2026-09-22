@@ -56,6 +56,12 @@ pub(crate) const FOR_REFRESH: &str = "refresh anything under";
 // points, and the repository is what says which board it belongs to.
 pub(crate) const FOR_PUSH: &str = "push a brief from";
 
+// "from" for `FOR_PUSH`'s reason and about the same document: what a pull
+// resolves is not the brief's text but the record spelled against the root that
+// says which project it became, so the repository is what turns a path into
+// something to cut rather than where the file happens to sit.
+pub(crate) const FOR_PULL: &str = "cut a brief from";
+
 // The working directory is kept as well as the root because the two answer
 // different questions: the root is what stored paths are spelled against, and
 // the working directory is what a relative argument is joined onto. A subcommand

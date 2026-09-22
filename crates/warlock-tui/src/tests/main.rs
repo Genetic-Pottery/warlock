@@ -619,6 +619,139 @@ fn a_push_asks_for_no_object_and_takes_no_word_beside_its_two_flags() {
     }
 }
 
+// `warlock pull docs/brief.md` with whichever of the two flags a case is
+// about, so each assertion below reads as the flags and not as the positional
+// under them — the push's helper above, one verb along.
+fn pulled_brief(scope: Option<&str>, dry_run: bool) -> Command {
+    Command::Pull {
+        path: PathBuf::from("docs/brief.md"),
+        scope: scope.map(str::to_owned),
+        dry_run,
+    }
+}
+
+#[test]
+fn a_pull_takes_the_brief_whose_project_it_cuts_and_the_two_flags_that_go_with_it() {
+    // The path is required, like the push's: a pull is about the one brief
+    // whose project a push recorded, and there is no whole-repository answer
+    // for an omitted path to mean.
+    assert_eq!(
+        parse(&["pull", "docs/brief.md"]).unwrap().command,
+        Some(pulled_brief(None, false))
+    );
+    assert_eq!(
+        parse(&["pull", "docs/brief.md", "--dry-run"])
+            .unwrap()
+            .command,
+        Some(pulled_brief(None, true))
+    );
+    // `--scope` is optional to clap and needed only when this machine can file
+    // to more than one board, which clap has not read `.warlock/pacts.toml` to
+    // know — and the name reaches warlock exactly as it was typed, because the
+    // pull resolves its board through the very `resolve_filing` the push does.
+    assert_eq!(
+        parse(&["pull", "docs/brief.md", "--scope", "data-plane"])
+            .unwrap()
+            .command,
+        Some(pulled_brief(Some("data-plane"), false))
+    );
+    // Both flags, in either order and either side of the path, for the reason
+    // the push's are pinned that way: a person retyping the command from the
+    // refusal that named `--scope` will put it wherever the cursor was.
+    for args in [
+        [
+            "pull",
+            "docs/brief.md",
+            "--scope",
+            "data-plane",
+            "--dry-run",
+        ],
+        [
+            "pull",
+            "--dry-run",
+            "--scope",
+            "data-plane",
+            "docs/brief.md",
+        ],
+    ] {
+        assert_eq!(
+            parse(&args).unwrap().command,
+            Some(pulled_brief(Some("data-plane"), true)),
+            "{args:?}"
+        );
+    }
+}
+
+#[test]
+fn a_pull_asks_for_no_object_and_takes_no_word_beside_its_two_flags() {
+    // No `--json`, matching the push and the other subcommands that spend
+    // something: what a script parses afterwards is the cut record in
+    // `.warlock/filed.toml`, which is a file rather than a stream to be caught.
+    let malformed: [&[&str]; 7] = [
+        &["pull"],
+        &["pull", "--dry-run"],
+        &["pull", "a.md", "b.md"],
+        &["pull", "docs/brief.md", "--json"],
+        &["pull", "docs/brief.md", "--scope"],
+        &["pull", "docs/brief.md", "--dry-run=yes"],
+        &["pull", "docs/brief.md", "--force"],
+    ];
+
+    for args in malformed {
+        let error = parse(args).unwrap_err();
+        assert!(error.use_stderr(), "{args:?}");
+        assert_eq!(error.exit_code(), 2, "{args:?}");
+    }
+
+    // And the absence stated over the parser itself rather than over the
+    // spellings above: `--scope` and `--dry-run` are the only words a pull
+    // takes beside its path and clap's own help.
+    let command = subcommand(&["pull"]);
+    for argument in command.get_arguments().filter(|a| !a.is_positional()) {
+        let long = argument.get_long().unwrap_or_default();
+        assert!(
+            ["help", "scope", "dry-run"].contains(&long),
+            "`pull` takes `--{long}`, which is none of its two flags"
+        );
+    }
+}
+
+#[test]
+fn the_pulls_help_names_both_of_its_flags_and_the_brief_it_wants() {
+    // What `warlock pull --help` prints, read off the parser rather than by
+    // spawning the binary: the positional is spelled `PATH` as the push's is,
+    // and the two flags are named with the values they take.
+    let help = subcommand(&["pull"]).render_long_help().to_string();
+    for said in ["PATH", "--scope <NAME>", "--dry-run"] {
+        assert!(help.contains(said), "{said}: {help}");
+    }
+}
+
+#[test]
+fn the_pull_leaves_the_push_spelled_exactly_as_it_was() {
+    // The two verbs sit side by side and share a resolver, so this is the
+    // guard against the second one being wired by editing the first: the push
+    // still takes its path and its two flags, and still refuses a `--json`.
+    assert_eq!(
+        parse(&[
+            "push",
+            "docs/brief.md",
+            "--scope",
+            "data-plane",
+            "--dry-run"
+        ])
+        .unwrap()
+        .command,
+        Some(pushed_brief(Some("data-plane"), true))
+    );
+    assert_eq!(
+        parse(&["push", "docs/brief.md", "--json"])
+            .unwrap_err()
+            .exit_code(),
+        2
+    );
+}
+
 #[test]
 fn both_spellings_of_help_are_a_help_exit_that_succeeded() {
     // Not an error in the sense that matters: help was asked for, so it
@@ -656,6 +789,10 @@ fn per_subcommand_help_is_a_help_exit_too() {
         ["key", "--help"].as_slice(),
         ["key", "add", "--help"].as_slice(),
         ["key", "list", "--help"].as_slice(),
+        // The two verbs that reach a board, whose help is the one a person
+        // reads before typing a command that sends something.
+        ["push", "--help"].as_slice(),
+        ["pull", "--help"].as_slice(),
     ] {
         let error = parse(args).unwrap_err();
         assert_eq!(error.kind(), ErrorKind::DisplayHelp, "{args:?}");
@@ -683,6 +820,11 @@ fn each_subcommands_help_says_what_that_subcommand_does() {
         ("refresh", "stale"),
         ("scope", "scope"),
         ("key", "Linear"),
+        // The two that reach a board say which direction they go in, because
+        // that is the difference somebody typing one of them is choosing
+        // between: a brief filed as a project, a project cut into issues.
+        ("push", "brief"),
+        ("pull", "issues"),
     ] {
         let mut command = Cli::command();
         let help = command
@@ -759,7 +901,7 @@ fn help_prints_a_few_lines_rather_than_this_file() {
     let help = Cli::command().render_long_help().to_string();
     for subcommand in [
         "init", "config", "stale", "fresh", "check", "unpact", "pact", "refresh", "scope", "key",
-        "push",
+        "push", "pull",
     ] {
         assert!(help.contains(subcommand), "{subcommand}: {help}");
     }
@@ -767,7 +909,7 @@ fn help_prints_a_few_lines_rather_than_this_file() {
     // A row per subcommand plus the usage and options chrome: the ceiling is
     // what stops an `about` becoming a paragraph, so it moves by one when a
     // subcommand is added and never to make room for prose.
-    assert!(help.lines().count() < 22, "{help}");
+    assert!(help.lines().count() < 23, "{help}");
     // Every doc comment on `Cli` and its variants spells the command in
     // backticks, and no `about` above does, so a backtick reaching the help
     // is a doc comment that got lifted into it.

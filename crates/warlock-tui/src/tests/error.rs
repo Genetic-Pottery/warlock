@@ -1,12 +1,14 @@
 use std::path::{Path, PathBuf};
 
 use warlock_engine::{claude_md, manifest, scope, sigils};
+use warlock_tui::ScopeBlockError;
 
 use super::{Error, one_line};
+use crate::status_for;
 // The tails themselves, not copies of them: these used to be re-typed here
 // as literals, so rewording either original left this suite passing on a
 // sentence nothing said any more.
-use crate::standing::{FOR_CLAUDE_MD, FOR_SIGILS};
+use crate::standing::{FOR_CLAUDE_MD, FOR_PULL, FOR_SIGILS};
 
 const PROBLEM: &str = "`/repo/crates/engine` could not be hashed and is stale: \
                            could not read `/repo/crates/engine/src/lib.rs`, so the \
@@ -150,6 +152,14 @@ fn every_message_quoting_another_error_is_one_line_so_it_prints_as_one() {
         Error::Clipboard {
             source: arboard::Error::ClipboardOccupied,
         },
+        Error::ScopeBlock {
+            source: ScopeBlockError::NoScope,
+        },
+        Error::ScopeBlock {
+            source: ScopeBlockError::Circle {
+                slices: vec!["1. the door".to_owned(), "2. the room".to_owned()],
+            },
+        },
     ]);
 }
 
@@ -194,8 +204,90 @@ fn every_message_warlock_words_itself_is_one_line_so_it_prints_as_one() {
             failed: 1,
             total: 1,
         },
+        Error::AllCut {
+            path: "docs/brief.md".to_owned(),
+        },
         Error::Cancelled,
     ]);
+}
+
+// The three ways a project is not a scope to cut, asserted as the parser's own
+// sentences: this variant carries them rather than wording anything, so a test
+// of its own words would be a test of nothing.
+#[test]
+fn a_project_with_no_scope_to_cut_says_what_the_parser_said() {
+    assert_eq!(
+        Error::ScopeBlock {
+            source: ScopeBlockError::NoScope,
+        }
+        .to_string(),
+        "this project has no `## Scope` heading, so there is nothing to cut into slices"
+    );
+    assert_eq!(
+        Error::ScopeBlock {
+            source: ScopeBlockError::NoSlices,
+        }
+        .to_string(),
+        "this project's `## Scope` section has no `### ` slice headings, so there is \
+         nothing to cut"
+    );
+
+    // Named as the document shows them, because the parser names them that way
+    // and nothing here re-words the list.
+    let circle = ScopeBlockError::Circle {
+        slices: vec!["1. the door".to_owned(), "2. the room".to_owned()],
+    };
+    let said = circle.to_string();
+
+    assert_eq!(Error::ScopeBlock { source: circle }.to_string(), said);
+    assert_eq!(
+        said,
+        "these slices wait on each other, so there is no order to cut them in: \
+         1. the door and 2. the room"
+    );
+}
+
+#[test]
+fn a_project_with_every_slice_cut_names_the_brief_and_the_file_recording_them() {
+    let error = Error::AllCut {
+        path: "docs/brief.md".to_owned(),
+    };
+
+    assert_eq!(
+        error.to_string(),
+        "every slice of the project filed for `docs/brief.md` is already cut, so there is \
+         nothing to draft: `.warlock/filed.toml` holds a record for each of them, and \
+         warlock cuts a slice once"
+    );
+}
+
+// Both of the refusals added for a pull, held to the register every other one
+// of its refusals takes: the ordinary 1, and never the boundary's 3 — a script
+// reading one of these as "ask for a sigil" would be sent to `warlock config`
+// over a brief with no `## Scope` heading.
+#[test]
+fn neither_new_cut_refusal_spends_the_boundarys_status() {
+    for error in [
+        Error::ScopeBlock {
+            source: ScopeBlockError::NoScope,
+        },
+        Error::ScopeBlock {
+            source: ScopeBlockError::NoSlices,
+        },
+        Error::ScopeBlock {
+            source: ScopeBlockError::Circle {
+                slices: vec!["1. the door".to_owned()],
+            },
+        },
+        Error::AllCut {
+            path: "docs/brief.md".to_owned(),
+        },
+    ] {
+        let outcome = Err(error);
+
+        assert_eq!(status_for(&outcome), 1, "{outcome:?}");
+        assert_ne!(status_for(&outcome), 3, "{outcome:?}");
+    }
 }
 
 #[test]
@@ -275,6 +367,23 @@ fn config_outside_a_repository_says_the_same_thing_about_sigils() {
         error.to_string(),
         "no `.git` directory in `/elsewhere` or any of its parents, so there is \
              no repository root to hold sigils for"
+    );
+}
+
+#[test]
+fn pull_outside_a_repository_says_the_same_thing_about_cutting_a_brief() {
+    // The one `.git` fact again, with the tail a pull asks for on the end: the
+    // record that says which project a brief became is spelled against a root,
+    // so there is nothing to resolve without one.
+    let error = Error::NoRepository {
+        start: PathBuf::from("/elsewhere"),
+        wanted: FOR_PULL,
+    };
+
+    assert_eq!(
+        error.to_string(),
+        "no `.git` directory in `/elsewhere` or any of its parents, so there is \
+             no repository root to cut a brief from"
     );
 }
 

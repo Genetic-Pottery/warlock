@@ -69,6 +69,7 @@ use error::Error;
 use input::{Action, Drag, MouseAction, Pressed, drag_after, mouse_action, press_for};
 use key::{key_add, key_forget, key_list, key_use};
 use pacting::{Pact, Reloaded};
+use pull::pull;
 use push::push;
 use pushing::{Opens, Pushes, Pushing};
 use query::{Listing, list};
@@ -245,6 +246,28 @@ enum Command {
         #[arg(long, value_name = "NAME")]
         scope: Option<String>,
         /// Print what would be sent, open no socket and write no record.
+        #[arg(long)]
+        dry_run: bool,
+    },
+    #[command(
+        about = "Cut a filed project's scope block into issues on the board that holds it.",
+        long_about = None
+    )]
+    Pull {
+        // Required, like the push's and for its reason: a pull is about the one
+        // brief whose project a push recorded, and there is no whole-repository
+        // answer for an omitted path to mean.
+        /// Which brief's project to cut into issues.
+        #[arg(value_name = "PATH")]
+        path: PathBuf,
+        // Optional to clap for the push's reason and settled the push's way: the
+        // board is picked through the same `resolve_filing`, and which scopes
+        // this machine can file under is in `.warlock/pacts.toml`, which clap
+        // has not read. A `String` and not a validated type, as the push's is.
+        /// Which scope to file under, when this machine can file to several.
+        #[arg(long, value_name = "NAME")]
+        scope: Option<String>,
+        /// Print the project, its status and its slices, draft nothing and write no record.
         #[arg(long)]
         dry_run: bool,
     },
@@ -482,6 +505,19 @@ fn main() -> ExitCode {
             scope,
             dry_run,
         }) => push(&path, scope.as_deref(), dry_run),
+        // The other half of that one, dispatched beside it and gated by nothing
+        // here for the same reason: a pull picks its board by the sigil rather
+        // than by opening a directory, so not one of its refusals — an
+        // unrecorded path, a project the board does not know, a status that is
+        // not `Planned`, a scope block that will not parse, nothing left to cut
+        // — is the boundary's **3**. They are all ordinary **1**s through
+        // `status_for`'s catch-all. What it spends past the read is one drafting
+        // session per slice and the issues those file; see [`mod@pull`].
+        Some(Command::Pull {
+            path,
+            scope,
+            dry_run,
+        }) => pull(&path, scope.as_deref(), dry_run),
     };
 
     // `run` has returned, so the guard inside it has already dropped and the
