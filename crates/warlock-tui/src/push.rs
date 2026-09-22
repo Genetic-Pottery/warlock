@@ -51,7 +51,11 @@ pub(crate) fn push(path: &Path, scope: Option<&str>, dry_run: bool) -> Result<()
 // is handed and so is only ever a function of one lifetime: the seam below has
 // to take a key borrowed for however long the target lives, and this is the
 // one-line function that says so.
-fn client(key: &str) -> LinearClient {
+//
+// `pub(crate)` for [`mod@crate::pull`], which reads a project back off the same
+// board with the same key: one spelling of "the socket opens here", so the one
+// line in warlock that turns a stored key into a client cannot become two.
+pub(crate) fn client(key: &str) -> LinearClient {
     LinearClient::new(key)
 }
 
