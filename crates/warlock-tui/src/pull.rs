@@ -10,6 +10,12 @@
 //! drafting half writes — no mutation is issued, and the status is not moved in
 //! either direction.
 //!
+//! The half that spends is [`filed_each`]: one one-shot session per slice left
+//! to cut, its drafts filed through [`cut::cut`], and the project's one comment
+//! after the last of them. It is the only thing here that sends a mutation, and
+//! the status is not moved on that road either — an issue is created, an edge is
+//! written and a comment is said, and nothing else.
+//!
 //! No `--json`, matching [`mod@crate::push`] and the other verbs that spend
 //! something: the answer worth parsing is the record, which is a file rather
 //! than a stream to be caught.
@@ -24,12 +30,17 @@
 use std::io::{self, Write};
 use std::path::Path;
 
+use warlock_engine::drafting::Draft;
 use warlock_engine::{filed_path, resolve_filing};
 use warlock_tui::{
-    ChatAgent, Converses, FetchedProject, Posts, Slice, fetch_project, scope_block_in,
+    ChatAgent, Converses, Drafted, Drafting, FetchedProject, LinearIssue, Posts, Replied, Slice,
+    fetch_project, scope_block_in,
 };
 
-use crate::cut::listed;
+// The module rather than its `cut` and `Slice`, which would both be a second
+// name for something this file already has: the slices here are the document's,
+// and `cut::Slice` is one slice's drafts on their way to a board.
+use crate::cut::{self, Cut, Filing, listed};
 use crate::error::Error;
 use crate::push::{Board, client, records};
 use crate::standing::{FOR_PULL, Standing};
@@ -100,12 +111,6 @@ pub(crate) fn pull(path: &Path, scope: Option<&str>, dry_run: bool) -> Result<()
               than reads, which is the whole of what lets every refusal run \
               against a temporary repository and a temporary home"
 )]
-#[expect(
-    unused_variables,
-    reason = "the agent is the drafting half's, which is the next slice of \
-              brief 23; `expect` so that the half reaching for it has to take \
-              this off"
-)]
 fn pulled<P: Posts, O: FnOnce(&str) -> P, A: Converses, W: Write>(
     standing: &Standing,
     home: &Path,
@@ -173,26 +178,248 @@ fn pulled<P: Posts, O: FnOnce(&str) -> P, A: Converses, W: Write>(
 
     if dry_run {
         for line in would(board, &project, &cutting) {
-            drop(writeln!(out, "warlock: {line}"));
+            say(out, &line);
         }
         return Ok(());
     }
 
-    // The half that spends, and the one this slice of brief 23 does not carry:
-    // one drafting session per uncut slice, its drafts filed through
-    // [`cut::cut`], and the project's one comment after the last of them. It
-    // lands here, with the board, the project, the order and the skips all
-    // resolved above it and the seam and the agent in hand.
+    // Read off the same file the skips came from rather than threaded out of
+    // `planned`, for the reason `spelled` is spelled again above. The refusal
+    // cannot happen — `planned` has already refused a brief no record names —
+    // and it is that same sentence rather than a panic, because a `warlock
+    // pull` that aborted the process over its own impossible branch would be a
+    // worse answer than the one it would have printed.
+    let project_id = filed
+        .record(&spelled)
+        .ok_or_else(|| Error::NoRecord {
+            path: spelled.clone(),
+        })?
+        .project_id();
+    let filing = Filing {
+        brief: &spelled,
+        project: project_id,
+        team: board.team,
+        label: board.label,
+    };
+
+    let created = filed_each(
+        &linear,
+        standing.repo_root(),
+        filing,
+        block.brief(),
+        &cutting,
+        agent,
+        out,
+    )?;
+
+    // After the last slice and only when something was filed: a run that skipped
+    // every slice it could and drafted nothing usable has nothing to say on the
+    // project, and saying it anyway would be a comment per run rather than a
+    // comment per cut.
     //
-    // A panic rather than a quiet `Ok(())`: `warlock pull` is not a clap
-    // subcommand yet, so nothing can reach this line, and a run that reported
-    // success having drafted nothing is the one outcome worse than a loud stop.
+    // A comment Linear turns down is a reported line and not a failure: the
+    // issues exist and are recorded by the time it is said, and losing a run
+    // over a note on a project would be the tail wagging the cut.
+    if !created.is_empty()
+        && let Some(line) = cut::announce(&linear, project_id, &created)
+    {
+        say(out, &line);
+    }
+
+    Ok(())
+}
+
+/// Every slice in the cut order: the skips said, the rest drafted and filed, and
+/// the identifiers this run created handed back for the project's one comment.
+///
+/// Split from [`pulled`] because it is the half that spends: everything above it
+/// resolves where the work goes and what is left to do, and everything here
+/// sends. Nothing in it reads the environment — the root, the board and the seam
+/// all arrive — so the whole of it runs against a temporary repository.
+fn filed_each<P: Posts, A: Converses, W: Write>(
+    linear: &P,
+    root: &Path,
+    filing: Filing<'_>,
+    brief: &str,
+    cutting: &[Cutting<'_>],
+    agent: &A,
+    out: &mut W,
+) -> Result<Vec<String>, Error> {
+    // One entry per slice of the project, in document order, holding the issues
+    // that slice came to: what `depends_on` names is a position, so a position
+    // is what this is indexed by. A slice skipped as already cut fills its entry
+    // from its record and a slice that was filed now fills it with whole issues,
+    // which is what lets a relation be written from either.
     //
-    // [`cut::cut`]: crate::cut::cut
-    todo!(
-        "draft and file the {} slices left to cut",
-        state.uncut().len()
-    )
+    // Empty is "nothing this run can name as a blocker" — a slice that never
+    // drafted — and an empty entry is left out of `needs` rather than written as
+    // an edge to nothing.
+    let mut became: Vec<Vec<LinearIssue>> = vec![Vec::new(); cutting.len()];
+    // What was created here, for the project's one comment. The skips are not in
+    // it: the comment says what this run filed, and an earlier run's issues were
+    // named by an earlier run's comment.
+    let mut created: Vec<String> = Vec::new();
+
+    for (place, slice) in cutting.iter().enumerate() {
+        let at = slice.slice.position() - 1;
+        let heading = heading(place, cutting.len(), slice.slice);
+
+        if let Some(issues) = slice.already {
+            say(
+                out,
+                &format!(
+                    "{heading} — already cut as {}, so nothing was sent",
+                    listed(issues)
+                ),
+            );
+            became[at] = issues
+                .iter()
+                .map(|issue| LinearIssue::recorded(issue))
+                .collect();
+            continue;
+        }
+
+        say(out, &format!("{heading} — drafting"));
+        let Some(drafts) = drafted(agent, brief, slice.slice, out) else {
+            continue;
+        };
+
+        // Built here and not held across the loop: the references are into
+        // `became`, which the line after the cut writes to, and a list kept any
+        // longer than the call it is made for would be a borrow of the thing
+        // this run exists to fill in.
+        let needs: Vec<&[LinearIssue]> = slice
+            .slice
+            .depends_on()
+            .iter()
+            .filter_map(|position| became.get(position - 1))
+            .map(Vec::as_slice)
+            .filter(|issues| !issues.is_empty())
+            .collect();
+
+        // `?`, and not a reported line: what reaches here is a team with no
+        // `Backlog` state, a create Linear turned down, or a record that would
+        // not save — and carrying on to the next slice after any of the three
+        // would be warlock filing a second slice into the same wall, or
+        // recording nothing about issues that now exist.
+        match cut::cut(
+            linear,
+            root,
+            filing,
+            cut::Slice {
+                title: slice.slice.heading(),
+                drafts: &drafts,
+                needs: &needs,
+            },
+            out,
+        )? {
+            // Unreachable while the skips above are read off the same file
+            // `cut` matches against, and handled rather than asserted: the two
+            // readings agreeing is worth nothing to assert and a panic in the
+            // middle of a run that has filed issues is worth avoiding.
+            Cut::Already(issues) => {
+                became[at] = issues
+                    .iter()
+                    .map(|issue| LinearIssue::recorded(issue))
+                    .collect();
+            }
+            Cut::Filed { issues, reported } => {
+                // The edges Linear turned down, said here because `cut` hands
+                // them back rather than printing them: an issue that exists with
+                // a missing edge is a thing a person can fix on the board, and
+                // it is only fixable if they are told.
+                for line in reported {
+                    say(out, &line);
+                }
+                created.extend(issues.iter().map(|issue| issue.identifier().to_owned()));
+                became[at] = issues;
+            }
+        }
+    }
+
+    Ok(created)
+}
+
+/// One slice drafted in one session, or `None` with what went wrong already
+/// said.
+///
+/// [`Drafting::one_shot`] rather than [`Drafting::for_slice`]: there is nobody
+/// at a shell to put a question to, so the session is told up front that it
+/// cannot ask one and is held to no rounds at all. One session per slice, opened
+/// here and dropped at the end of this call, so nothing a slice said reaches the
+/// next one.
+///
+/// Every way a slice can fail to draft is a reported line and the next slice,
+/// not the end of the run: the slices left are other work, they were ordered so
+/// that nothing is filed before what it waits on, and a run that stopped would
+/// leave the operator re-running it to reach them anyway.
+fn drafted<A: Converses, W: Write>(
+    agent: &A,
+    brief: &str,
+    slice: &Slice,
+    out: &mut W,
+) -> Option<Vec<Draft>> {
+    let mut session = Drafting::one_shot(agent, brief, slice.heading(), slice.prose());
+
+    let replied = match session.open() {
+        Ok(replied) => replied,
+        // A missing binary, a timeout or a cancel, none of which is better the
+        // second time — see [`Drafting`]'s own note — so the slice is left
+        // uncut rather than asked again.
+        Err(error) => {
+            say(out, &format!("{} was not drafted: {error}", named(slice)));
+            return None;
+        }
+    };
+
+    match replied {
+        Replied::Answer(Drafted::Drafts { fill, repairs }) => {
+            // On stdout with the progress for `running.rs`'s reason: a repaired
+            // draft is a ticket that was filed, not one that was missed, and a
+            // log read tomorrow should be able to tell the two apart.
+            for repair in repairs {
+                say(out, &format!("{} — {repair}", named(slice)));
+            }
+            Some(fill.drafts)
+        }
+        // Four answers and not an object among them. Reported and left uncut
+        // rather than filed as the stand-in ticket the document road's floor
+        // would supply: a supplied ticket is warlock putting work nobody planned
+        // on somebody's board.
+        Replied::Answer(Drafted::Unusable(defect)) => {
+            say(out, &format!("{} was not drafted: {defect}", named(slice)));
+            None
+        }
+        // A session with no rounds hands a question back to nobody, so this is
+        // unreachable — and said rather than panicked on for the reason
+        // `Cut::Already` is handled above.
+        Replied::Question(_) => {
+            say(
+                out,
+                &format!(
+                    "{} was not drafted: the session asked a question and there is nobody to \
+                     answer it",
+                    named(slice)
+                ),
+            );
+            None
+        }
+    }
+}
+
+// The prefix of every line about one slice that is not its place in the run: the
+// position in the document and the heading, which is what a reader takes back to
+// the brief.
+fn named(slice: &Slice) -> String {
+    format!("slice {} `{}`", slice.position(), slice.heading())
+}
+
+// A failed write is ignored, exactly as `running.rs`'s `Progress` ignores one
+// and for its reason: `warlock pull docs/brief.md | head -1` is a closed stdout,
+// and failing a run of drafting sessions over the state of a pipe would spend
+// somebody's tokens and then throw away what they bought.
+fn say<W: Write>(out: &mut W, fact: &str) {
+    drop(writeln!(out, "warlock: {fact}"));
 }
 
 /// One slice of the project's scope with what `.warlock/filed.toml` already
@@ -239,13 +466,7 @@ fn would(board: Board<'_>, project: &FetchedProject, cutting: &[Cutting<'_>]) ->
     )];
 
     for (place, slice) in cutting.iter().enumerate() {
-        let heading = format!(
-            "[{}/{}] slice {} `{}`",
-            place + 1,
-            cutting.len(),
-            slice.slice.position(),
-            slice.slice.heading()
-        );
+        let heading = heading(place, cutting.len(), slice.slice);
         lines.push(match slice.already {
             Some(issues) => format!("{heading} — already cut as {}", listed(issues)),
             None => heading,
@@ -253,6 +474,18 @@ fn would(board: Board<'_>, project: &FetchedProject, cutting: &[Cutting<'_>]) ->
     }
 
     lines
+}
+
+// One slice's line, shared by the dry run's report and the run itself so that
+// the two read alike: a person who has read a `--dry-run` is looking for the
+// same slices in the same order when they take the flag off.
+//
+// The fraction is the place in the cut order, one-based as `running.rs`'s is,
+// and the position is where the slice sits in the document — the two differ
+// exactly when a `depends_on` line moved something, and the second is what finds
+// the slice in the brief.
+fn heading(place: usize, total: usize, slice: &Slice) -> String {
+    format!("[{}/{total}] {}", place + 1, named(slice))
 }
 
 // `1 slice`, `9 slices`, so the line above is not worded twice or read as

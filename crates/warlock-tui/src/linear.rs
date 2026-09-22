@@ -508,6 +508,29 @@ pub struct Issue {
 }
 
 impl Issue {
+    /// An issue a cut record names, which is the one an earlier run filed: the
+    /// identifier is everything such a record keeps, so it stands as the id as
+    /// well and there is no URL.
+    ///
+    /// For the one thing a resumed run does with a slice it cut last time —
+    /// name its issues as the blockers of a slice being filed now. The
+    /// alternative is a request per recorded issue to turn identifiers back
+    /// into ids, which would make a slice nothing is being sent for the reason
+    /// something was sent.
+    ///
+    /// Whether Linear resolves an identifier where a relation wants an id is
+    /// Linear's to say, and this promises nothing about it: an edge the API
+    /// turns down is one reported line and leaves every issue filed, so the
+    /// worst this can come to is the ordering a person adds on the board.
+    #[must_use]
+    pub fn recorded(identifier: &str) -> Self {
+        Self {
+            id: identifier.to_owned(),
+            identifier: identifier.to_owned(),
+            url: String::new(),
+        }
+    }
+
     #[must_use]
     pub fn id(&self) -> &str {
         &self.id

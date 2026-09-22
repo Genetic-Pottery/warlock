@@ -9,7 +9,8 @@
 //! exist and not once at the end, because an issue nothing records is exactly
 //! what the next run files a second time.
 //!
-//! Its own module rather than [`mod@crate::pull`]'s, which writes nothing.
+//! Its own module rather than [`mod@crate::pull`]'s, which sequences the slices
+//! and issues no write of its own.
 //! No key is read here and none can be: the seam arrives built, as it does for
 //! a pull.
 
@@ -57,14 +58,6 @@ pub(crate) struct Slice<'a> {
 }
 
 /// What filing one slice came to.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "what `cut` answers, and read by the caller that lands in a \
-                  later slice of brief 23"
-    )
-)]
 #[derive(Debug)]
 pub(crate) enum Cut {
     /// The record already names this slice, so nothing was sent: the
@@ -84,15 +77,6 @@ pub(crate) enum Cut {
     },
 }
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the operation lands before the door that calls it: `warlock \
-                  pull` and the panel are later slices of brief 23, and this is \
-                  what they will both call once a slice has been drafted"
-    )
-)]
 pub(crate) fn cut<W: Write>(
     linear: &impl Posts,
     root: &Path,
@@ -261,14 +245,6 @@ fn relate(linear: &impl Posts, edges: &[(&LinearIssue, &LinearIssue)]) -> Vec<St
 /// Nothing here decides *when* to say it: the brief's one comment lands after
 /// the last slice settles and only when something was filed, which is the run's
 /// question and not this operation's.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the operation lands before the run that sequences it: `warlock \
-                  pull` and the panel are later slices of brief 23"
-    )
-)]
 pub(crate) fn announce(linear: &impl Posts, project: &str, issues: &[String]) -> Option<String> {
     let body = format!(
         "Warlock cut this project into {}.\n\nThe project's status was not moved.",
