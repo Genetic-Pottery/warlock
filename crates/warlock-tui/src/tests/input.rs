@@ -945,6 +945,8 @@ mod gate {
             confirm,
             &PushConfirm::Closed,
             &PullConfirm::Closed,
+            None,
+            None,
             &ScopePrompt::Closed,
             prompt,
             record,
@@ -1159,6 +1161,17 @@ mod gate {
             // which is handed in closed by the same shim.
             Pressed::Filing(edited) => {
                 panic!("{edited:?} came from a scope field that is not up")
+            }
+            // And for the window a slice's drafts are gated in, handed in
+            // closed by the same shim: nothing here drafts anything, so an
+            // answer is a window nobody opened.
+            Pressed::Review(reviewed) => {
+                panic!("{reviewed:?} came from a review window that is not up")
+            }
+            // And for the question a skip puts up behind it, closed for the
+            // same reason and loud for the same reason.
+            Pressed::Carry(answered) => {
+                panic!("{answered:?} came from a carry-on question that is not up")
             }
             // The loop's three composer arms, and the reason the draft is a
             // local here exactly as it is there: nothing about it is ever
@@ -2289,6 +2302,8 @@ mod gate {
                 QuitConfirm::Closed,
                 push,
                 &PullConfirm::Closed,
+                None,
+                None,
                 &ScopePrompt::Closed,
                 &ScopePrompt::Closed,
                 &RecordPrompt::Closed,
@@ -2385,6 +2400,8 @@ mod gate {
                         QuitConfirm::Closed,
                         &push,
                         &PullConfirm::Closed,
+                        None,
+                        None,
                         &ScopePrompt::Closed,
                         &scope,
                         &record,
@@ -2418,6 +2435,8 @@ mod gate {
                     QuitConfirm::open(),
                     &push,
                     &PullConfirm::Closed,
+                    None,
+                    None,
                     &ScopePrompt::Closed,
                     &ScopePrompt::Closed,
                     &RecordPrompt::Closed,
@@ -2491,6 +2510,8 @@ mod gate {
                 QuitConfirm::Closed,
                 &PushConfirm::Closed,
                 pull,
+                None,
+                None,
                 &ScopePrompt::Closed,
                 &ScopePrompt::Closed,
                 &RecordPrompt::Closed,
@@ -2585,6 +2606,8 @@ mod gate {
                         QuitConfirm::Closed,
                         &PushConfirm::Closed,
                         &pull,
+                        None,
+                        None,
                         &ScopePrompt::Closed,
                         &scope,
                         &record,
@@ -2616,6 +2639,8 @@ mod gate {
                     QuitConfirm::open(),
                     &PushConfirm::Closed,
                     &pull,
+                    None,
+                    None,
                     &ScopePrompt::Closed,
                     &ScopePrompt::Closed,
                     &RecordPrompt::Closed,
@@ -2649,6 +2674,8 @@ mod gate {
                     QuitConfirm::Closed,
                     &push,
                     &pull,
+                    None,
+                    None,
                     &ScopePrompt::Closed,
                     &ScopePrompt::Closed,
                     &RecordPrompt::Closed,
@@ -2712,6 +2739,8 @@ mod gate {
                 QuitConfirm::Closed,
                 &PushConfirm::Closed,
                 &PullConfirm::Closed,
+                None,
+                None,
                 filing,
                 &ScopePrompt::Closed,
                 &RecordPrompt::Closed,
@@ -2794,6 +2823,8 @@ mod gate {
                         QuitConfirm::Closed,
                         &PushConfirm::Closed,
                         &PullConfirm::Closed,
+                        None,
+                        None,
                         &filing,
                         &scope,
                         &record,
@@ -2829,6 +2860,8 @@ mod gate {
                     QuitConfirm::Closed,
                     &push,
                     &PullConfirm::Closed,
+                    None,
+                    None,
                     &filing,
                     &ScopePrompt::Closed,
                     &RecordPrompt::Closed,
@@ -2845,6 +2878,8 @@ mod gate {
                     QuitConfirm::open(),
                     &PushConfirm::Closed,
                     &PullConfirm::Closed,
+                    None,
+                    None,
                     &filing,
                     &ScopePrompt::Closed,
                     &RecordPrompt::Closed,
@@ -3846,6 +3881,8 @@ mod pointer {
             confirm,
             &PushConfirm::Closed,
             &PullConfirm::Closed,
+            None,
+            None,
             &ScopePrompt::Closed,
             prompt,
             record,
@@ -3862,6 +3899,8 @@ mod pointer {
             QuitConfirm::Closed,
             &PushConfirm::Closed,
             &PullConfirm::Closed,
+            None,
+            None,
             &ScopePrompt::Closed,
             &ScopePrompt::Closed,
             &RecordPrompt::Closed,
@@ -4730,6 +4769,8 @@ mod pointer {
                     QuitConfirm::Closed,
                     &push,
                     &PullConfirm::Closed,
+                    None,
+                    None,
                     &ScopePrompt::Closed,
                     &ScopePrompt::Closed,
                     &RecordPrompt::Closed,
@@ -4770,6 +4811,8 @@ mod pointer {
                     QuitConfirm::Closed,
                     &PushConfirm::Closed,
                     &pull,
+                    None,
+                    None,
                     &ScopePrompt::Closed,
                     &ScopePrompt::Closed,
                     &RecordPrompt::Closed,

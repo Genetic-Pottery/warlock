@@ -13,20 +13,21 @@ use super::{
     Areas, BAR_EMPTY, BAR_FILLED, BAR_MIN_WIDTH, BORDER_THICKNESS, BRIEF_THREAD_TITLE, CANCEL_KEY,
     COLLAPSE_KEY, COMPOSER_CURSOR, COMPOSER_MIN_HEIGHT, CONFIRM_ANSWER_GAP, CONFIRM_HEIGHT,
     CONFIRM_LINES, CONFIRM_MARGIN, CONFIRM_MARGIN_ROWS, CONFIRM_NO, CONFIRM_QUESTION, CONFIRM_YES,
-    ELLIPSIS, FILES_KEY, FILING_HEADING, FILING_RULES, FOOTER_HEIGHT, GUIDE, GUIDE_BRANCH,
+    Carry, ELLIPSIS, FILES_KEY, FILING_HEADING, FILING_RULES, FOOTER_HEIGHT, GUIDE, GUIDE_BRANCH,
     GUIDE_LAST, HEADER_GAP, HEADER_HEIGHT, Hit, INDENT, KEY_DROP_ORDER, KEY_GAP, KEYS, LIVE_KEY,
     MARK, MARK_MARGIN, MARK_MARGIN_ROWS, MOVE_KEYS, NO_MARKER, NOTE_MARKER, PACTING_KEYS,
     PACTING_QUIT_KEY, PACTING_RUN, PANEL_INDENT, PATH_HEADING, PATH_RULES, PERCENT_WIDTH, PULL_KEY,
     PULL_LINES, PULL_QUESTION, PULL_SLICES, PULL_STATUS, PULL_TEAM, PUSH_KEY, PUSH_LINES,
     PUSH_QUESTION, PUSH_TEAM, QUIT_KEY, RECORD_HEADING, RECORD_HEIGHT, RECORD_LABEL_GAP,
-    RECORD_LINES, RECORD_RULES, REFRESHING_RUN, ROW_KEY, RUN_HEADER_HEIGHT, Reach, SAID_MARKER,
-    SCOPE_CURSOR, SCOPE_HEADING, SCOPE_HEIGHT, SCOPE_LINES, SCOPE_MARGIN, SCOPE_MARGIN_ROWS,
-    SCROLLBACK_ARROW, SELECTED, SELECTION_MARKER, THREAD_TITLE, TREE_MIN_WIDTH, TREE_PERCENT,
-    areas, centred, composer_height, composer_on_screen, confirm_area, confirm_size, display_width,
-    draw, footer_text_area, guide_prefixes, hit_test, keys_line, label_width, mark_area,
-    pacting_keys_line, pane_inner, panel_height, panel_reach, panel_row, panel_rows_area,
-    panel_width, pull_area, push_area, record_lines, record_size, run_header_height,
-    run_header_line, scope_size, tree_height, tree_rows_area, tree_width, truncated,
+    RECORD_LINES, RECORD_RULES, REFRESHING_RUN, ROW_KEY, RUN_HEADER_HEIGHT, Reach, Review,
+    SAID_MARKER, SCOPE_CURSOR, SCOPE_HEADING, SCOPE_HEIGHT, SCOPE_LINES, SCOPE_MARGIN,
+    SCOPE_MARGIN_ROWS, SCROLLBACK_ARROW, SELECTED, SELECTION_MARKER, THREAD_TITLE, TREE_MIN_WIDTH,
+    TREE_PERCENT, areas, centred, composer_height, composer_on_screen, confirm_area, confirm_size,
+    display_width, draw, footer_text_area, guide_prefixes, hit_test, keys_line, label_width,
+    mark_area, pacting_keys_line, pane_inner, panel_height, panel_reach, panel_row,
+    panel_rows_area, panel_width, pull_area, push_area, record_lines, record_size,
+    run_header_height, run_header_line, scope_size, tree_height, tree_rows_area, tree_width,
+    truncated,
 };
 use crate::COMPOSER_MAX_ROWS;
 use crate::account::{Line as Entry, Outcome};
@@ -403,6 +404,8 @@ fn render_push(app: &App, width: u16, height: u16, push: &PushConfirm) -> Buffer
         push,
         &PullConfirm::Closed,
         None,
+        None,
+        None,
     )
 }
 
@@ -424,6 +427,8 @@ fn render_pull(app: &App, width: u16, height: u16, pull: &PullConfirm) -> Buffer
         &PushConfirm::Closed,
         pull,
         None,
+        None,
+        None,
     )
 }
 
@@ -444,6 +449,8 @@ fn render_filing(app: &App, width: u16, height: u16, filing: &ScopePrompt) -> Bu
         filing,
         &PushConfirm::Closed,
         &PullConfirm::Closed,
+        None,
+        None,
         None,
     )
 }
@@ -501,6 +508,8 @@ fn render_all(
         &ScopePrompt::Closed,
         &PushConfirm::Closed,
         &PullConfirm::Closed,
+        None,
+        None,
         composer,
     )
 }
@@ -523,6 +532,8 @@ fn render_every(
     filing: &ScopePrompt,
     push: &PushConfirm,
     pull: &PullConfirm,
+    review: Option<&Review>,
+    carry: Option<&Carry>,
     composer: Option<&Composer>,
 ) -> Buffer {
     let mut terminal =
@@ -530,7 +541,8 @@ fn render_every(
     terminal
         .draw(|frame| {
             draw(
-                frame, app, chrome, now, confirm, scope, record, path, filing, push, pull, composer,
+                frame, app, chrome, now, confirm, scope, record, path, filing, push, pull, review,
+                carry, composer,
             );
         })
         .expect("test backend never fails");

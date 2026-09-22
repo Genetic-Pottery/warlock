@@ -417,6 +417,241 @@ pub fn pull_answer_for(key: KeyEvent, highlighted: Answer) -> PullAnswered {
     }
 }
 
+/// What one slice's drafts are answered with: file them, leave the slice alone,
+/// or say what is wrong with them.
+///
+/// Three answers and so a value of its own rather than [`Answer`] renamed a
+/// fourth time: the windows above ask one thing and take a yes or a no, and this
+/// asks which of three things to do. [`answer_for`] cannot be written over for
+/// the same reason — there is no third answer for it to hand back.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub enum Choice {
+    /// File this slice's drafts as issues.
+    Create,
+    /// The default, for [`Answer::No`]'s reason: the round that puts the window
+    /// up and an Enter straight after it file nothing at all. It is also the
+    /// answer in the middle, so the one that spends is a deliberate press
+    /// either way.
+    #[default]
+    Skip,
+    /// Redraft this slice with something typed into the composer.
+    Feedback,
+}
+
+impl Choice {
+    // One step along the row rather than a toggle, and clamped at both ends: a
+    // highlight that wrapped would put the answer that files issues under the
+    // finger of somebody pressing Right twice.
+    const fn leftwards(self) -> Self {
+        match self {
+            Self::Create | Self::Skip => Self::Create,
+            Self::Feedback => Self::Skip,
+        }
+    }
+
+    // `offered` is whether this slice still has its one redraft. A third answer
+    // that is not drawn is not one a key can land on.
+    const fn rightwards(self, offered: bool) -> Self {
+        match self {
+            Self::Create => Self::Skip,
+            Self::Skip | Self::Feedback if offered => Self::Feedback,
+            answer => answer,
+        }
+    }
+}
+
+/// One slice's drafts, waiting to be answered about: what was drafted, for which
+/// slice, and which of the answers is lit.
+///
+/// The titles are what the model settled on and the whole of what the window
+/// shows of a draft: a body is paragraphs and a window that drew them would be a
+/// document card with three answers under it. They are on the thread as well,
+/// said as they arrived, so a reader who wants more than a title scrolls.
+///
+/// There is no `Closed` variant beside this the way there is for the three
+/// dialogs above, and deliberately: those are fields of the session, which is
+/// always there, and this is a state of one slice of one run — it exists exactly
+/// as long as that slice is waiting, and a caller with no run has nothing to
+/// hold.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Review {
+    /// The slice, named in the words every line about it is named in: the window
+    /// and the thread are talking about the same slice and say so alike.
+    slice: String,
+    titles: Vec<String>,
+    /// Whether the third answer is offered at all. A slice is redrafted once —
+    /// see [`Choice::Feedback`]'s caller — so the second time round this window
+    /// goes up with two answers on it.
+    feedback: bool,
+    choice: Choice,
+}
+
+impl Review {
+    /// [`Choice::Skip`] is lit on open, for the reason [`Answer::No`] is the
+    /// default elsewhere: the round that puts this up and an Enter straight
+    /// after it cost nothing.
+    #[must_use]
+    pub fn open(slice: impl Into<String>, titles: Vec<String>, feedback: bool) -> Self {
+        Self {
+            slice: slice.into(),
+            titles,
+            feedback,
+            choice: Choice::Skip,
+        }
+    }
+
+    #[must_use]
+    pub fn slice(&self) -> &str {
+        &self.slice
+    }
+
+    #[must_use]
+    pub fn titles(&self) -> &[String] {
+        &self.titles
+    }
+
+    /// Whether the third answer is offered: see the field's own note.
+    #[must_use]
+    pub const fn feedback(&self) -> bool {
+        self.feedback
+    }
+
+    #[must_use]
+    pub const fn choice(&self) -> Choice {
+        self.choice
+    }
+
+    // The one way the highlight moves, for [`Filing::with_answer`]'s reason:
+    // answering re-lights the same window rather than building a second one from
+    // drafts that would have to be handed over again.
+    #[must_use]
+    pub fn with_choice(&self, choice: Choice) -> Self {
+        Self {
+            choice,
+            ..self.clone()
+        }
+    }
+}
+
+/// What a key did to the review window: moved the highlight, or answered.
+///
+/// Three answers and no cancel. A window that could be dismissed would leave the
+/// run holding drafts nobody had decided about, so the least committal key —
+/// Esc — is [`Reviewed::Skip`], which is the answer that files nothing and asks
+/// what to do next.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Reviewed {
+    Open(Choice),
+    Create,
+    Skip,
+    Feedback,
+}
+
+/// The review window's keys, which are [`answer_for`]'s where the two windows
+/// can mean the same thing: only presses count, Left and Right move the
+/// highlight positionally, Enter answers with whatever is lit, and a key nothing
+/// is bound to leaves the window exactly as it was.
+///
+/// The letters are the answers' own initials rather than `y`/`n`, matched by
+/// character for [`answer_for`]'s reason: terminals disagree about whether shift
+/// rides along with an upper-case letter, and a reader with caps lock on is
+/// still answering.
+///
+/// The whole window and not just the lit answer, because what a key means
+/// depends on the drafts: a slice that has spent its redraft has no third answer
+/// for `f` or a Right to reach.
+#[must_use]
+pub fn review_answer_for(key: KeyEvent, review: &Review) -> Reviewed {
+    let lit = review.choice();
+    if key.kind != KeyEventKind::Press {
+        return Reviewed::Open(lit);
+    }
+
+    match key.code {
+        KeyCode::Left => Reviewed::Open(lit.leftwards()),
+        KeyCode::Right => Reviewed::Open(lit.rightwards(review.feedback())),
+        KeyCode::Enter => match lit {
+            Choice::Create => Reviewed::Create,
+            Choice::Skip => Reviewed::Skip,
+            Choice::Feedback => Reviewed::Feedback,
+        },
+        KeyCode::Char('c' | 'C') => Reviewed::Create,
+        KeyCode::Char('s' | 'S') | KeyCode::Esc => Reviewed::Skip,
+        KeyCode::Char('f' | 'F') if review.feedback() => Reviewed::Feedback,
+        _ => Reviewed::Open(lit),
+    }
+}
+
+/// The question a skipped slice leaves behind: whether to go on to the ones
+/// after it.
+///
+/// Its own value for [`Review`]'s reason — it is a state of the run rather than
+/// a field of the session — and a two-answer question for the plainest one:
+/// what it asks has a yes and a no.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Carry {
+    /// What is left to offer, in the run's own words. A count said here would be
+    /// a second place that has to know whether one slice is `1 slice` or
+    /// `1 slices`.
+    left: String,
+    answer: Answer,
+}
+
+impl Carry {
+    /// No is lit on open, and here that is the answer that stops: a run carries
+    /// on by somebody saying so, and Esc after a skip leaves the rest of the
+    /// project alone.
+    #[must_use]
+    pub fn open(left: impl Into<String>) -> Self {
+        Self {
+            left: left.into(),
+            answer: Answer::No,
+        }
+    }
+
+    #[must_use]
+    pub fn left(&self) -> &str {
+        &self.left
+    }
+
+    #[must_use]
+    pub const fn answer(&self) -> Answer {
+        self.answer
+    }
+
+    // The one way the highlight moves, for [`Filing::with_answer`]'s reason.
+    #[must_use]
+    pub fn with_answer(&self, answer: Answer) -> Self {
+        Self {
+            answer,
+            ..self.clone()
+        }
+    }
+}
+
+/// [`Answered`] in the carry-on question's vocabulary: a confirmed question here
+/// drafts the next slice, and a refused one ends the run with the rest of the
+/// project untouched.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CarryAnswered {
+    Open(Answer),
+    Stop,
+    Carry,
+}
+
+/// The quit dialog's rules again, renamed rather than restated, so that the one
+/// two-answer question inside a pull is answered by the very keys every other
+/// one is: Esc and `n` stop, Left then Enter carries on, an immediate Enter
+/// stops, a release changes nothing.
+#[must_use]
+pub fn carry_answer_for(key: KeyEvent, highlighted: Answer) -> CarryAnswered {
+    match answer_for(key, highlighted) {
+        Answered::Open(answer) => CarryAnswered::Open(answer),
+        Answered::Close => CarryAnswered::Stop,
+        Answered::Leave => CarryAnswered::Carry,
+    }
+}
+
 #[cfg(test)]
 #[path = "tests/confirm.rs"]
 mod tests;

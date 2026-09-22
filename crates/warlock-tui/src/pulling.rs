@@ -53,20 +53,32 @@
 //! reaches the slice is whatever the field holds when somebody presses Enter, so
 //! a proposal that failed, that settled nothing, or that somebody cleared and
 //! typed over costs the question nothing at all.
+//!
+//! Nothing a slice drafts becomes an issue on its own. The drafts land on the
+//! thread as titles and then wait behind a [`Review`], which is answered
+//! create, skip or feedback: create files that slice through [`cut::cut`] on a
+//! worker of its own, skip records nothing and asks whether to carry on, and
+//! feedback takes whatever is typed into the field and redrafts that one slice
+//! exactly once more. Those are the only writes a pull can lead to, and the one
+//! mutation among them is an issue, an edge between issues and the cut record
+//! beside the brief — a project's status is never sent, on any path here.
 
+use std::io;
 use std::mem;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::thread;
 use std::time::Instant;
 
+use warlock_engine::drafting::Draft;
 use warlock_engine::{Manifest, agent, filed_path, resolve_filing};
 use warlock_tui::{
-    Answer, App, Cancel, ChatAgent, Converses, Drafted, Drafting, NOTHING_SETTLES_IT, PullConfirm,
-    Replied, Slice, fetch_project, propose_answer, scope_block_in,
+    Answer, App, Cancel, Carry, ChatAgent, Choice, Converses, Drafted, Drafting, LinearIssue,
+    NOTHING_SETTLES_IT, PullConfirm, Replied, Review, Slice, fetch_project, propose_answer,
+    scope_block_in,
 };
 
-use crate::cut::listed;
+use crate::cut::{self, Cut, listed};
 use crate::error::{Error, one_line};
 use crate::pacting::CancelGuard;
 use crate::pull::{counted, heading, is_planned, named};
@@ -131,8 +143,9 @@ pub(crate) struct Fetched {
     ready: Ready,
 }
 
-/// What a Yes would run: the brief the slices were cut out of, and the slices
-/// no cut record claims, in the order a run walks them.
+/// What a Yes would run: the brief the slices were cut out of, the slices no
+/// cut record claims in the order a run walks them, and where a created issue
+/// would go.
 ///
 /// Carried from the fetch rather than read again when the question is answered,
 /// because there is no second reading: the project's description came off the
@@ -142,6 +155,34 @@ pub(crate) struct Fetched {
 struct Ready {
     brief: String,
     slices: Vec<Slice>,
+    /// One entry per slice of the *document*, indexed by position, holding the
+    /// issues that slice already is: a `depends_on` names a position, so a
+    /// position is what this is indexed by. Filled here from the cut records,
+    /// so a slice filed by an earlier run can still be named as a blocker, and
+    /// filled again as this run's own slices are created.
+    ///
+    /// Empty is "nothing this run can name as a blocker" — a slice nobody has
+    /// filed — and an empty entry is left out of a cut's `needs` rather than
+    /// written as an edge to nothing.
+    became: Vec<Vec<LinearIssue>>,
+    board: Board,
+    /// What the fetch was made from, kept for the filing worker: the manifest,
+    /// the repository, the home the sigils and the key store sit under, and the
+    /// brief as `.warlock/filed.toml` spells it. A create resolves the board
+    /// again over there rather than carrying a key across — see [`Work`].
+    work: Work,
+}
+
+/// Where this project's issues go: the project a push made, and the two names
+/// off the `[[scope]]` record that say which team and which label.
+///
+/// The key is not among them and cannot be — it is read on the two lines in
+/// this module that build a client, and nowhere else.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Board {
+    project: String,
+    team: String,
+    label: String,
 }
 
 impl Fetched {
@@ -243,22 +284,76 @@ struct Slicing<A: Converses> {
     // cannot come apart: a count kept beside the index would be a second answer
     // to which slice this is.
     at: usize,
+    // What every slice of the document has become so far, and where a create
+    // writes what this one becomes: see [`Ready::became`].
+    became: Vec<Vec<LinearIssue>>,
+    board: Board,
+    work: Work,
+    // Whether this slice has spent its one redraft. Cleared as the run moves on,
+    // because it is a fact about the slice under way and not about the run: one
+    // feedback each, and the second review of a redrafted slice is offered with
+    // two answers rather than three.
+    redrafted: bool,
     stage: Stage<A>,
 }
 
-/// The two things a slice can be doing: talking to the model, or waiting on
-/// somebody.
+/// The things a slice can be doing: talking to the model, waiting on somebody,
+/// or being filed.
 ///
-/// One value rather than a session and a flag beside it, because the session is
-/// in exactly one of the two places — on a worker, or parked here with a
-/// question out — and a pair would have a fourth state for every caller to read
-/// and none of them to produce.
+/// One value rather than a session and flags beside it, because the slice is in
+/// exactly one of them — on a worker, parked with a question out, held behind
+/// the review window, being filed, or holding the carry-on question — and a
+/// record per state would have combinations for every caller to read and none of
+/// them to produce.
 #[derive(Debug)]
 enum Stage<A: Converses> {
     /// A turn on a worker, with the session riding along.
     Drafting(Asking<A>),
     /// A question relayed, the session parked until somebody answers it.
     Waiting(Waiting<A>),
+    /// Drafts in hand and the review window up.
+    Reviewing(Reviewing<A>),
+    /// Feedback asked for, the session parked until somebody types it: the
+    /// window is down, because what is being asked for is text rather than an
+    /// answer to a question.
+    Feedback(Drafting<A>),
+    /// The drafts on their way to the board, on a worker.
+    Filing(Filing),
+    /// A slice skipped, with the run asking whether to go on to the next.
+    Carrying(Carry),
+}
+
+/// One slice's drafts, held behind the window that decides what becomes of
+/// them.
+///
+/// The drafts are kept whole while the titles alone are on the thread and in the
+/// window: what create files is this, and a review that held titles would be a
+/// window whose Yes had to ask the model again for the bodies.
+///
+/// The session is `Some` for exactly as long as this slice still has its one
+/// redraft. It is the conversation that drafted these, so feedback given to it
+/// is feedback about something it said; once spent it goes, because a second
+/// redraft is not offered and a session nobody can reach is a `claude` held
+/// open for nothing.
+#[derive(Debug)]
+struct Reviewing<A> {
+    review: Review,
+    drafts: Vec<Draft>,
+    session: Option<Drafting<A>>,
+}
+
+// One slice being filed, from the panel's side: what the worker will say, and
+// nothing else.
+//
+// No cancel guard, unlike every other worker here, and deliberately: a create
+// that has left the machine cannot be taken back, and the cut record beside it
+// is what stops the next run filing the same drafts twice. So a pull dropped
+// mid-create leaves a worker that finishes filing and records what it filed,
+// into a channel nobody is listening to — which is the only ending that does not
+// lose issues.
+#[derive(Debug)]
+struct Filing {
+    landings: Receiver<Result<Cut, String>>,
 }
 
 /// A question put to whoever is at the panel: the session that asked it, and
@@ -468,14 +563,19 @@ impl<O: Opens, A: Converses> Pulls<O, A> {
         }
     }
 
-    // Whichever of the two things the slice under way is doing. One drain per
-    // round and never both: a session is on a worker or it is parked with a
-    // question out, and the stage is the one record of which.
+    // Whichever of the things the slice under way is doing has a worker to
+    // drain. One drain per round and never two: the stage is the one record of
+    // which, and the three stages that are waiting on a person — the review
+    // window, the field a feedback goes in, the carry-on question — have nothing
+    // in flight to ask about.
     fn drafted(&mut self, app: &mut App, now: Instant) -> Option<String> {
-        if matches!(self.slicing.as_ref()?.stage, Stage::Waiting(_)) {
-            return self.proposed(app, now);
+        match self.slicing.as_ref()?.stage {
+            Stage::Drafting(_) => self.turned(app, now),
+            Stage::Waiting(_) => return self.proposed(app, now),
+            Stage::Filing(_) => self.cutting(app, now),
+            Stage::Reviewing(_) | Stage::Feedback(_) | Stage::Carrying(_) => {}
         }
-        self.turned(app, now);
+
         None
     }
 
@@ -522,6 +622,30 @@ impl<O: Opens, A: Converses> Pulls<O, A> {
                 self.slicing = Some(slicing);
                 return;
             }
+            // Drafts, which are not an ending either: they are said as they
+            // arrived and then wait behind the window, because nothing this
+            // run drafted becomes an issue until somebody says so.
+            Ended::Drafted {
+                session,
+                drafts,
+                lines,
+            } => {
+                for line in lines {
+                    app.panel_mut().note(line, now);
+                }
+                let titles = drafts.iter().map(|draft| draft.title.clone()).collect();
+                // The redraft is offered exactly once per slice, so the second
+                // time round the window goes up with two answers and the
+                // session goes with the drafts it has already given.
+                let feedback = !slicing.redrafted;
+                slicing.stage = Stage::Reviewing(Reviewing {
+                    review: Review::open(named(&slicing.slices[slicing.at]), titles, feedback),
+                    drafts,
+                    session: feedback.then_some(session),
+                });
+                self.slicing = Some(slicing);
+                return;
+            }
             Ended::Over(lines) => {
                 for line in lines {
                     app.panel_mut().note(line, now);
@@ -529,11 +653,22 @@ impl<O: Opens, A: Converses> Pulls<O, A> {
             }
         }
 
+        self.onwards(slicing, app, now);
+    }
+
+    // The slice after this one, started on the round this one settled: a run
+    // that waited for the round after would spend a poll interval of nothing
+    // between every two sessions.
+    //
+    // The run is taken by value because the agent the next session is opened off
+    // sits beside it on this value, and it is put back only when there is a next
+    // slice: the last one leaves the run taken down, which is what makes the
+    // next `/pull` allowed on the round the last slice reported.
+    fn onwards(&mut self, mut slicing: Slicing<A>, app: &mut App, now: Instant) {
         slicing.at += 1;
+        slicing.redrafted = false;
         let at = slicing.at;
         let total = slicing.slices.len();
-        // The last slice leaves the run taken down, which is what makes the
-        // next `/pull` allowed on the round the last one reported.
         if at < total {
             slicing.stage = Stage::Drafting(started(
                 &self.agent,
@@ -546,6 +681,76 @@ impl<O: Opens, A: Converses> Pulls<O, A> {
             ));
             self.slicing = Some(slicing);
         }
+    }
+
+    // One slice's filing, when its worker has one to report: the identifiers on
+    // the thread, every edge Linear turned down beside them, and the run on to
+    // the next slice.
+    //
+    // A refusal is one line and the next slice, not the end of the run, for the
+    // reason a failed draft is: what is left was ordered so that nothing is
+    // filed before what it waits on, and a run that stopped would leave the
+    // reader typing `/pull` again to reach it.
+    fn cutting(&mut self, app: &mut App, now: Instant) {
+        let Some(mut slicing) = self.slicing.take() else {
+            return;
+        };
+        let Stage::Filing(filing) = &slicing.stage else {
+            self.slicing = Some(slicing);
+            return;
+        };
+        let landing = match filing.landings.try_recv() {
+            Ok(landing) => landing,
+            // Still filing, and nothing new to say.
+            Err(TryRecvError::Empty) => {
+                self.slicing = Some(slicing);
+                return;
+            }
+            // The worker panicked: the hook has already printed it, and what is
+            // left to say is that this slice cannot be reported on. Whatever it
+            // created is on the board with its record beside it, which is what
+            // the next `/pull` will read.
+            Err(TryRecvError::Disconnected) => Err(SLICE_LOST.to_owned()),
+        };
+
+        let slice = &slicing.slices[slicing.at];
+        let at = slice.position().saturating_sub(1);
+        match landing {
+            // Unreachable while the run is over the slices no record claims,
+            // and answered rather than asserted for [`Pulls::cut`]'s reason: a
+            // panic in a panel that is otherwise running is a worse answer than
+            // a line saying what the file already said.
+            Ok(Cut::Already(issues)) => {
+                app.panel_mut().note(already_line(slice, &issues), now);
+                if let Some(entry) = slicing.became.get_mut(at) {
+                    *entry = issues
+                        .iter()
+                        .map(|issue| LinearIssue::recorded(issue))
+                        .collect();
+                }
+            }
+            Ok(Cut::Filed { issues, reported }) => {
+                let identifiers: Vec<String> = issues
+                    .iter()
+                    .map(|issue| issue.identifier().to_owned())
+                    .collect();
+                app.panel_mut().note(filed_line(slice, &identifiers), now);
+                // One line each, and after the identifiers: an issue that
+                // exists with a missing edge is something a person can fix on
+                // the board, and it is only fixable if they are told.
+                for line in reported {
+                    app.panel_mut().note(refused_line(slice, &line), now);
+                }
+                if let Some(entry) = slicing.became.get_mut(at) {
+                    *entry = issues;
+                }
+            }
+            Err(why) => {
+                app.panel_mut().note(unfiled_line(slice, &why), now);
+            }
+        }
+
+        self.onwards(slicing, app, now);
     }
 
     // Warlock's attempt at the question that is up, when its worker has one to
@@ -588,40 +793,74 @@ impl<O: Opens, A: Converses> Pulls<O, A> {
         }
     }
 
-    /// Whether a slice is waiting on an answer, which is the whole of what the
-    /// loop asks before it routes a submitted draft here rather than into the
-    /// conversation.
+    /// Whether a slice is waiting on text from the field, which is the whole of
+    /// what the loop asks before it routes a submitted draft here rather than
+    /// into the conversation.
     ///
-    /// A state of the pull and not a mode: it is true for exactly as long as one
-    /// session has one question out, and it goes false on the round the answer
-    /// is taken.
+    /// Two stages answer it and not one: a question a slice asked, and the
+    /// feedback a review asked for. Both are the same routing — whatever is in
+    /// the field is taken whole and goes to this session — and the words on the
+    /// field say which of the two it is.
+    ///
+    /// A state of the pull and not a mode: it is true for exactly as long as
+    /// one session is waiting on somebody, and it goes false on the round the
+    /// text is taken.
     pub(crate) fn relaying(&self) -> bool {
         self.waiting().is_some()
     }
 
-    /// What the field is answering for, as a sentence to draw on it, or `None`
-    /// while nothing is waiting.
+    /// What the field is taking text for, as a sentence to draw on it, or
+    /// `None` while nothing is waiting.
     ///
     /// Named the way every other line about a slice names it, so a reader whose
     /// eye is on the border and a reader whose eye is on the thread are being
-    /// told about the same slice in the same words.
+    /// told about the same slice in the same words. The verb is the difference:
+    /// `answering` is a question the slice asked, `redrafting` is the reader's
+    /// own say about drafts they have just read.
     pub(crate) fn answering(&self) -> Option<String> {
-        self.waiting()
-            .map(|slicing| format!("answering {}", named(&slicing.slices[slicing.at])))
+        let slicing = self.waiting()?;
+        let slice = named(&slicing.slices[slicing.at]);
+        Some(match slicing.stage {
+            Stage::Feedback(_) => format!("redrafting {slice}"),
+            _ => format!("answering {slice}"),
+        })
     }
 
     fn waiting(&self) -> Option<&Slicing<A>> {
         self.slicing
             .as_ref()
-            .filter(|slicing| matches!(slicing.stage, Stage::Waiting(_)))
+            .filter(|slicing| matches!(slicing.stage, Stage::Waiting(_) | Stage::Feedback(_)))
     }
 
-    /// The answer somebody sent, put to the session that asked for it.
+    /// The window a slice's drafts are waiting behind, for the round the loop
+    /// is drawing, or `None` when nothing is waiting to be reviewed.
+    pub(crate) fn reviewing(&self) -> Option<&Review> {
+        match &self.slicing.as_ref()?.stage {
+            Stage::Reviewing(reviewing) => Some(&reviewing.review),
+            _ => None,
+        }
+    }
+
+    /// The carry-on question a skip left up, for the same round, or `None` when
+    /// nothing was skipped.
+    pub(crate) fn carrying(&self) -> Option<&Carry> {
+        match &self.slicing.as_ref()?.stage {
+            Stage::Carrying(carry) => Some(carry),
+            _ => None,
+        }
+    }
+
+    /// The text somebody sent, put to the session waiting on it.
     ///
-    /// The text goes up exactly as it was handed over: nothing here reads it,
-    /// no command in it is recognised and warlock's own attempt has no standing
+    /// It goes up exactly as it was handed over: nothing here reads it, no
+    /// command in it is recognised and warlock's own attempt has no standing
     /// over anything typed in its place — what was in the field is what was
     /// sent, and the thread says so.
+    ///
+    /// The two stages that take text take it identically, because it is one
+    /// turn of one session either way; the line on the thread is what says
+    /// whether the session was answering a question or being told to draft
+    /// again.
     ///
     /// A no-op with nothing waiting, which is how the loop's one question
     /// ([`Pulls::relaying`]) stays the only one: a submitted draft that arrived
@@ -630,17 +869,199 @@ impl<O: Opens, A: Converses> Pulls<O, A> {
         let Some(mut slicing) = self.slicing.take() else {
             return;
         };
+        let slice = slicing.slices[slicing.at].clone();
         slicing.stage = match slicing.stage {
             // Not waiting on anybody, so there is nothing this answers: the
             // stage goes back exactly as it was.
-            stage @ Stage::Drafting(_) => stage,
+            stage @ (Stage::Drafting(_)
+            | Stage::Reviewing(_)
+            | Stage::Filing(_)
+            | Stage::Carrying(_)) => stage,
             Stage::Waiting(waiting) => {
-                let slice = &slicing.slices[slicing.at];
-                app.panel_mut().note(answer_line(slice, answer), now);
+                app.panel_mut().note(answer_line(&slice, answer), now);
                 Stage::Drafting(asked(waiting.session, answer))
+            }
+            Stage::Feedback(session) => {
+                app.panel_mut().note(feedback_line(&slice, answer), now);
+                // Said here rather than where the answer was asked for, so the
+                // slice is spent by the turn that redrafts it and not by a
+                // reader who chose feedback and then thought better of it.
+                slicing.redrafted = true;
+                Stage::Drafting(asked(session, answer))
             }
         };
         self.slicing = Some(slicing);
+    }
+
+    /// The review window with another answer lit. A window that is not up stays
+    /// down, which is the rule every other dialog here keeps.
+    pub(crate) fn review_lit(&mut self, choice: Choice) {
+        if let Some(slicing) = self.slicing.as_mut()
+            && let Stage::Reviewing(reviewing) = &mut slicing.stage
+        {
+            reviewing.review = reviewing.review.with_choice(choice);
+        }
+    }
+
+    /// Create: this slice's drafts on their way to the board, on a worker.
+    ///
+    /// The window comes down on the round the answer is given, so there is no
+    /// round on which both it and its own filing are up. The session goes with
+    /// it: the drafts are in hand, and a conversation kept open past the answer
+    /// that spends it is a `claude` held for nothing.
+    ///
+    /// Nothing on this thread sends. The board is resolved and the client built
+    /// over there, which is what keeps the panel drawing while Linear is
+    /// answering — one create per draft, and the edges after them.
+    pub(crate) fn create(&mut self, app: &mut App, now: Instant) {
+        let Some(mut slicing) = self.slicing.take() else {
+            return;
+        };
+        let reviewing = match slicing.stage {
+            Stage::Reviewing(reviewing) => reviewing,
+            // A key that reached the wrong window: the stage goes back exactly
+            // as it was and nothing is sent.
+            stage => {
+                slicing.stage = stage;
+                self.slicing = Some(slicing);
+                return;
+            }
+        };
+
+        let slice = &slicing.slices[slicing.at];
+        app.panel_mut().note(filing_line(slice), now);
+        // What this slice waits on, as the issues those slices became: an empty
+        // entry is a slice nothing has filed, and it is left out rather than
+        // written as an edge to nothing.
+        let needs: Vec<Vec<LinearIssue>> = slice
+            .depends_on()
+            .iter()
+            .filter_map(|position| slicing.became.get(position.saturating_sub(1)))
+            .filter(|issues| !issues.is_empty())
+            .cloned()
+            .collect();
+        let landings = spawn_filing(
+            self.open.clone(),
+            slicing.work.clone(),
+            slicing.board.clone(),
+            slice.heading().to_owned(),
+            reviewing.drafts,
+            needs,
+        );
+
+        slicing.stage = Stage::Filing(Filing { landings });
+        self.slicing = Some(slicing);
+    }
+
+    /// Skip: nothing is recorded for this slice, and the run asks whether to go
+    /// on to the ones after it.
+    ///
+    /// No record, no request and no note of the refusal anywhere but the
+    /// thread: a skipped slice is one the next `/pull` offers again, which is
+    /// the whole difference between skipping drafts and filing them.
+    ///
+    /// The last slice has nothing to ask about, so it ends the run instead: a
+    /// question whose only answer is "there is nothing left" is one nobody
+    /// should have to press a key for.
+    pub(crate) fn skip(&mut self, app: &mut App, now: Instant) {
+        let Some(mut slicing) = self.slicing.take() else {
+            return;
+        };
+        if !matches!(slicing.stage, Stage::Reviewing(_)) {
+            self.slicing = Some(slicing);
+            return;
+        }
+
+        app.panel_mut()
+            .note(skipped_line(&slicing.slices[slicing.at]), now);
+        let left = slicing.slices.len() - slicing.at - 1;
+        if left == 0 {
+            return;
+        }
+
+        slicing.stage = Stage::Carrying(Carry::open(counted(left)));
+        self.slicing = Some(slicing);
+    }
+
+    /// Feedback: the window down and the field taking whatever the reader has
+    /// to say about these drafts.
+    ///
+    /// A slice that has spent its redraft has no session to hear it, and this
+    /// is a no-op there rather than a second conversation: the window it was
+    /// answered from does not draw the answer at all (see [`Review::feedback`]),
+    /// so a call with none left is a key that reached the wrong window.
+    pub(crate) fn feedback(&mut self, app: &mut App, now: Instant) {
+        let Some(mut slicing) = self.slicing.take() else {
+            return;
+        };
+        let reviewing = match slicing.stage {
+            Stage::Reviewing(reviewing) => reviewing,
+            stage => {
+                slicing.stage = stage;
+                self.slicing = Some(slicing);
+                return;
+            }
+        };
+        let Reviewing {
+            review,
+            drafts,
+            session,
+        } = reviewing;
+        let Some(session) = session else {
+            slicing.stage = Stage::Reviewing(Reviewing {
+                review,
+                drafts,
+                session: None,
+            });
+            self.slicing = Some(slicing);
+            return;
+        };
+
+        app.panel_mut()
+            .note(asking_feedback_line(&slicing.slices[slicing.at]), now);
+        slicing.stage = Stage::Feedback(session);
+        self.slicing = Some(slicing);
+    }
+
+    /// The carry-on question with the other answer lit, and the same rule about
+    /// a window that is not up.
+    pub(crate) fn carry_lit(&mut self, answer: Answer) {
+        if let Some(slicing) = self.slicing.as_mut()
+            && let Stage::Carrying(carry) = &slicing.stage
+        {
+            slicing.stage = Stage::Carrying(carry.with_answer(answer));
+        }
+    }
+
+    /// A Yes to the carry-on question: on to the next slice.
+    pub(crate) fn carry_on(&mut self, app: &mut App, now: Instant) {
+        let Some(slicing) = self.slicing.take() else {
+            return;
+        };
+        if !matches!(slicing.stage, Stage::Carrying(_)) {
+            self.slicing = Some(slicing);
+            return;
+        }
+
+        self.onwards(slicing, app, now);
+    }
+
+    /// A No: the run ends here, with the slices after this one never offered.
+    ///
+    /// They are left rather than refused — nothing has been drafted for them
+    /// and nothing sent about them — so the next `/pull` finds them exactly as
+    /// this one did.
+    pub(crate) fn stop(&mut self, app: &mut App, now: Instant) {
+        let Some(slicing) = self.slicing.take() else {
+            return;
+        };
+        if !matches!(slicing.stage, Stage::Carrying(_)) {
+            self.slicing = Some(slicing);
+            return;
+        }
+
+        let left = slicing.slices.len() - slicing.at - 1;
+        app.panel_mut().note(stopped_line(left), now);
     }
 
     /// The same question with the other answer lit. A closed dialog stays
@@ -686,6 +1107,10 @@ impl<O: Opens, A: Converses> Pulls<O, A> {
             brief: ready.brief,
             slices: ready.slices,
             at: 0,
+            became: ready.became,
+            board: ready.board,
+            work: ready.work,
+            redrafted: false,
             stage: Stage::Drafting(asking),
         });
     }
@@ -801,26 +1226,34 @@ fn spawn_proposal<A: Converses>(
     received
 }
 
-/// What one slice's turn came to: a question to put to somebody, or the lines
-/// that end this slice.
+/// What one slice's turn came to: a question to put to somebody, drafts to be
+/// answered about, or the lines that end this slice.
 ///
-/// The session rides out on the question and nowhere else, which is the whole
-/// distinction: an ending that is lines is an ending, and the slices left are
-/// other work — they were ordered so that nothing is drafted before what it
-/// waits on, and a run that stopped would leave the reader typing `/pull` again
-/// to reach them.
+/// The session rides out on the first two and not on the third, which is the
+/// whole distinction: a question's next turn is whatever somebody answers and
+/// drafts can be asked for again once, while an ending is an ending — the slices
+/// left are other work, they were ordered so that nothing is drafted before what
+/// it waits on, and a run that stopped would leave the reader typing `/pull`
+/// again to reach them.
 enum Ended<A> {
     Asked {
         session: Drafting<A>,
         question: String,
     },
+    Drafted {
+        session: Drafting<A>,
+        drafts: Vec<Draft>,
+        /// What to say about them as they arrive: the titles, and one line per
+        /// repair. Worded here rather than by the caller because this is where
+        /// the reply was read.
+        lines: Vec<String>,
+    },
     Over(Vec<String>),
 }
 
-// The session is dropped on every path but the question's. Nothing after the
-// asking has anything more to say to it: the drafts are in hand, or the slice is
-// uncut and asking again is a turn spent on an answer that was not better the
-// first time.
+// The session is dropped on the endings alone. Nothing after one has anything
+// more to say to it: the slice is uncut, and asking again is a turn spent on an
+// answer that was not better the first time.
 fn ended<A>(slice: &Slice, turned: Option<Turned<A>>) -> Ended<A> {
     let Some((session, replied)) = turned else {
         return Ended::Over(vec![format!(
@@ -829,7 +1262,8 @@ fn ended<A>(slice: &Slice, turned: Option<Turned<A>>) -> Ended<A> {
         )]);
     };
 
-    // Questions apart, every arm below is lines about a slice that is over.
+    // The two arms that keep the session return; every other one below is lines
+    // about a slice that is over.
     let lines = match replied {
         Ok(Replied::Answer(Drafted::Drafts { fill, repairs })) => {
             let titles: Vec<String> = fill
@@ -843,7 +1277,15 @@ fn ended<A>(slice: &Slice, turned: Option<Turned<A>>) -> Ended<A> {
             // conversation read back tomorrow should be able to tell the two
             // apart.
             lines.extend(repairs.iter().map(|repair| repair_line(slice, repair)));
-            lines
+
+            // Held rather than filed: what becomes of them is the review
+            // window's answer, and the session goes with them because feedback
+            // is a turn of this same conversation.
+            return Ended::Drafted {
+                session,
+                drafts: fill.drafts,
+                lines,
+            };
         }
         // Four answers and not an object among them, which on this road takes
         // the whole of the asking first. Reported and left uncut rather than
@@ -900,11 +1342,81 @@ fn unproposed_line(slice: &Slice, why: &str) -> String {
     format!("{} — no answer was proposed: {why}", named(slice))
 }
 
+// What the reader told the slice about its drafts, in their own words and the
+// other half of the pair [`question_line`] and [`answer_line`] make: the verb
+// says this was feedback rather than an answer to anything the slice asked.
+fn feedback_line(slice: &Slice, feedback: &str) -> String {
+    format!(
+        "{} is being redrafted: {}",
+        named(slice),
+        one_line(feedback)
+    )
+}
+
+// The window down and the field waiting, said before anything is typed so that a
+// reader who has just pressed Feedback is told where their words are to go.
+fn asking_feedback_line(slice: &Slice) -> String {
+    format!("{} — say what these drafts should be instead", named(slice))
+}
+
+// A create started, over the requests it is about to make: the board is a
+// network away and a reader who has just said Create is looking at the
+// conversation.
+fn filing_line(slice: &Slice) -> String {
+    format!("{} — filing", named(slice))
+}
+
+// What a slice became, by identifier, which is the one thing about an issue that
+// must not be lost: a cut record keeps identifiers and nothing else, and this is
+// the same list `warlock pull` prints.
+fn filed_line(slice: &Slice, issues: &[String]) -> String {
+    format!("{} — cut into {}", named(slice), listed(issues))
+}
+
+// A slice the record already claims, which the run is over the uncut slices of
+// and so cannot reach — said rather than asserted, for the reason `cutting`
+// gives.
+fn already_line(slice: &Slice, issues: &[String]) -> String {
+    format!(
+        "{} — already cut as {}, so nothing was sent",
+        named(slice),
+        listed(issues)
+    )
+}
+
+// One edge Linear turned down, in the filing path's own words: the issues exist
+// either way, and an issue with a missing edge is something a person can fix on
+// the board if they are told about it.
+fn refused_line(slice: &Slice, refused: &str) -> String {
+    format!("{} — {refused}", named(slice))
+}
+
+// A create that came to nothing: a team with nowhere to put an issue, a request
+// Linear turned down, a record that would not save. One line, and the run goes
+// on to the next slice.
+fn unfiled_line(slice: &Slice, why: &str) -> String {
+    format!("{} was not filed: {why}", named(slice))
+}
+
+// A slice left alone. `nothing was recorded` rather than `skipped` alone,
+// because what a reader wants to know tomorrow is whether the next `/pull` will
+// offer this slice again — and it will.
+fn skipped_line(slice: &Slice) -> String {
+    format!("{} was skipped; nothing was recorded for it", named(slice))
+}
+
+// The run ended by a No to the carry-on question, counting what was never
+// offered: those slices are untouched rather than refused, so the next `/pull`
+// finds them exactly as this one did.
+fn stopped_line(left: usize) -> String {
+    format!("the run stopped; {} left for another pull", counted(left))
+}
+
 // Everything the worker owns, and the whole of what crosses the thread
 // boundary beside the seam: the manifest is cloned as a pact's is, because the
 // board is resolved over there and a `Target` borrows the manifest it was found
 // in.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct Work {
     manifest: Manifest,
     root: PathBuf,
@@ -914,6 +1426,78 @@ struct Work {
     // are both spelled before they get here, so nothing below resolves a path
     // against a working directory.
     brief: String,
+}
+
+// One slice's drafts handed to a worker to be filed, with everything it owns
+// copied in: the run on this side goes on living while Linear answers, and a
+// worker borrowing from it would be one the next round could not move past.
+//
+// No cancel handle, for [`Filing`]'s reason: what this does cannot be taken
+// back, and the record it writes is what stops the next run filing the same
+// drafts again.
+//
+// The `JoinHandle` is dropped on purpose, as every other worker's is.
+fn spawn_filing<O: Opens>(
+    open: O,
+    work: Work,
+    board: Board,
+    title: String,
+    drafts: Vec<Draft>,
+    needs: Vec<Vec<LinearIssue>>,
+) -> Receiver<Result<Cut, String>> {
+    let (events, received) = mpsc::channel();
+    thread::spawn(move || {
+        let landing = filing(&open, &work, &board, &title, &drafts, &needs)
+            .map_err(|error| one_line(&error.to_string()));
+        // Ignored for the reason every other worker's send is: a receiver that
+        // has gone away is a panel nobody is looking at any more. What this
+        // worker did is on the board and in the cut record beside the brief,
+        // which is where the next `/pull` reads it from.
+        let _ = events.send(landing);
+    });
+
+    received
+}
+
+// The filing itself: the board resolved again over here, the client built on the
+// one line in this module that is not the fetch's, and [`cut::cut`] unchanged.
+//
+// `io::sink` where its progress would have gone, exactly as `pushing.rs` gives
+// `sent` nowhere to print: the panel's lines are the panel's own and worded
+// beside the slice they are about, and a writer crossing to the event loop would
+// be the same facts said twice in two registers.
+fn filing<O: Opens>(
+    open: &O,
+    work: &Work,
+    board: &Board,
+    title: &str,
+    drafts: &[Draft],
+    needs: &[Vec<LinearIssue>],
+) -> Result<Cut, Error> {
+    let target = resolve_filing(&work.manifest, &work.root, &work.home, None)
+        .map_err(|source| Error::Filing { source })?;
+    // The key is read here, on the second and last line of this module that
+    // sees one — the fetch's is the other — and what is held either side of it
+    // is a manifest, two paths, three names and this slice's drafts.
+    let linear = open.open(target.value());
+    let needs: Vec<&[LinearIssue]> = needs.iter().map(Vec::as_slice).collect();
+
+    cut::cut(
+        &linear,
+        &work.root,
+        cut::Filing {
+            brief: &work.brief,
+            project: &board.project,
+            team: &board.team,
+            label: &board.label,
+        },
+        cut::Slice {
+            title,
+            drafts,
+            needs: &needs,
+        },
+        &mut io::sink(),
+    )
 }
 
 // The `JoinHandle` is dropped on purpose, as a turn's and a push's are: joining
@@ -1007,6 +1591,27 @@ fn fetched<O: Opens>(open: &O, work: &Work, cancel: &Cancel) -> Result<Fetched, 
         .map(|slice| (*slice).clone())
         .collect();
 
+    // What each already-cut slice became, put where a `depends_on` naming it
+    // will look: an earlier run's issues are named by identifier in the record
+    // and by nothing else, which is exactly what an edge is written from.
+    let mut became: Vec<Vec<LinearIssue>> = vec![Vec::new(); slices.len()];
+    for slice in &slices {
+        let Some((_, cut)) = state
+            .cut()
+            .iter()
+            .find(|(title, _)| *title == slice.heading())
+        else {
+            continue;
+        };
+        if let Some(entry) = became.get_mut(slice.position().saturating_sub(1)) {
+            *entry = cut
+                .issues()
+                .iter()
+                .map(|issue| LinearIssue::recorded(issue))
+                .collect();
+        }
+    }
+
     Ok(Fetched {
         project: project.name().to_owned(),
         status,
@@ -1014,6 +1619,13 @@ fn fetched<O: Opens>(open: &O, work: &Work, cancel: &Cancel) -> Result<Fetched, 
         ready: Ready {
             brief: block.brief().to_owned(),
             slices: uncut,
+            became,
+            board: Board {
+                project: record.project_id().to_owned(),
+                team: target.record().team().to_owned(),
+                label: target.record().label().to_owned(),
+            },
+            work: work.clone(),
         },
         team: target.record().team().to_owned(),
         // The key by name. `Target::value` is read on one line above and

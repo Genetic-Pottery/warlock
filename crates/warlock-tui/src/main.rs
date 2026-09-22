@@ -27,9 +27,10 @@ use ratatui::crossterm::event::{self, Event, KeyEvent, MouseEvent};
 use ratatui::layout::Size;
 use warlock_engine::{Agent, Manifest, Written, write_claude_md};
 use warlock_tui::{
-    App, Cell, Composed, Converses, Focus, Position, PullAnswered, PushAnswered, PushConfirm,
-    QuitConfirm, Reach, RecordPrompt, Run, ScopePrompt, Wired, composer_on_screen, copied_text,
-    draw, panel_height, panel_width, paste_for, position_at, tree_height,
+    App, CarryAnswered, Cell, Composed, Converses, Focus, Position, PullAnswered, PushAnswered,
+    PushConfirm, QuitConfirm, Reach, RecordPrompt, Reviewed, Run, ScopePrompt, Wired,
+    composer_on_screen, copied_text, draw, panel_height, panel_width, paste_for, position_at,
+    tree_height,
 };
 
 mod boundary;
@@ -826,6 +827,11 @@ impl<S: Screen, P: Wired + Agent, C: Converses, B: Clip, O: Opens, A: Converses>
         let write = self.chat.write_prompt();
         let (filing, push) = (&self.pushing.field, &self.pushing.confirm);
         let pull = self.pulls.confirm();
+        // The two windows the run itself puts up, read off it for the same
+        // reason the dialog above is: they are states of the pull in flight, and
+        // a session holding a copy of either would be a second answer to what a
+        // slice is waiting for.
+        let (review, carry) = (self.pulls.reviewing(), self.pulls.carrying());
         self.screen.draw(|frame| {
             draw(
                 frame,
@@ -839,6 +845,8 @@ impl<S: Screen, P: Wired + Agent, C: Converses, B: Clip, O: Opens, A: Converses>
                 filing,
                 push,
                 pull,
+                review,
+                carry,
                 field,
             );
         })
@@ -865,6 +873,8 @@ impl<S: Screen, P: Wired + Agent, C: Converses, B: Clip, O: Opens, A: Converses>
             self.confirm,
             &self.pushing.confirm,
             self.pulls.confirm(),
+            self.pulls.reviewing(),
+            self.pulls.carrying(),
             &self.pushing.field,
             &self.prompt,
             &self.record,
@@ -985,6 +995,8 @@ impl<S: Screen, P: Wired + Agent, C: Converses, B: Clip, O: Opens, A: Converses>
             self.confirm,
             &self.pushing.confirm,
             self.pulls.confirm(),
+            self.pulls.reviewing(),
+            self.pulls.carrying(),
             &self.pushing.field,
             &self.prompt,
             &self.record,
@@ -1020,6 +1032,11 @@ impl<S: Screen, P: Wired + Agent, C: Converses, B: Clip, O: Opens, A: Converses>
             // And the question a `/pull` puts up once the board has answered:
             // see [`Session::pull_answered`].
             Pressed::Pull(answered) => self.pull_answered(answered, now),
+            // And the two windows the run itself puts up: what becomes of one
+            // slice's drafts, and whether a skipped slice ends the run. See
+            // [`Session::review_answered`] and [`Session::carry_answered`].
+            Pressed::Review(answered) => self.review_answered(answered, now),
+            Pressed::Carry(answered) => self.carry_answered(answered, now),
             // Esc with a run in flight. The handle does both halves at once — it
             // latches, so the descent stops at the next directory instead of
             // starting a pass for it, and it kills the `claude` running right now,
@@ -1432,6 +1449,34 @@ impl<S: Screen, P: Wired + Agent, C: Converses, B: Clip, O: Opens, A: Converses>
             PullAnswered::Open(answer) => self.pulls.lit(answer),
             PullAnswered::Cancel => self.pulls.cancelled(),
             PullAnswered::Cut => self.pulls.cut(&mut self.app, now),
+        }
+    }
+
+    /// One slice's drafts, answered about. An arrow re-lights the window — the
+    /// titles it was opened with ride along, since they are what is being
+    /// answered about — and each of the three answers takes it down.
+    ///
+    /// Create is the only one that sends anything, and it sends it from a
+    /// worker; skip records nothing and asks whether to carry on; feedback
+    /// leaves the field taking whatever the reader has to say. Whichever it is,
+    /// the session goes on exactly where it was.
+    fn review_answered(&mut self, answered: Reviewed, now: Instant) {
+        match answered {
+            Reviewed::Open(choice) => self.pulls.review_lit(choice),
+            Reviewed::Create => self.pulls.create(&mut self.app, now),
+            Reviewed::Skip => self.pulls.skip(&mut self.app, now),
+            Reviewed::Feedback => self.pulls.feedback(&mut self.app, now),
+        }
+    }
+
+    /// The question a skipped slice left up: a Yes drafts the next slice and a
+    /// No ends the run with the rest of the project untouched. Neither writes
+    /// anything, here or on the board.
+    fn carry_answered(&mut self, answered: CarryAnswered, now: Instant) {
+        match answered {
+            CarryAnswered::Open(answer) => self.pulls.carry_lit(answer),
+            CarryAnswered::Carry => self.pulls.carry_on(&mut self.app, now),
+            CarryAnswered::Stop => self.pulls.stop(&mut self.app, now),
         }
     }
 
