@@ -9,8 +9,9 @@ use super::{
     Activities, Activity, BRIEF_EFFORT, BRIEF_MODEL, CHAT_INSTRUCTION, CHAT_SYSTEM_PROMPT, Cancel,
     ChatAgent, ClaudeAgent, Converses, DRAFT_NOW_INSTRUCTION, DRAFTING_CONTRACT,
     DRAFTING_ONE_SHOT_CONTRACT, DRAFTING_ROUNDS, Drafted, Drafting, EFFORT, EFFORT_VAR,
-    INVOCATION_TIMEOUT, MODEL, MODEL_VAR, OsString, Replied, SYSTEM_PROMPT, WRITE_INSTRUCTION,
-    Wired, brief_instruction, drafting_opening, or_default, overridden, render, session_id,
+    INVOCATION_TIMEOUT, MODEL, MODEL_VAR, NOTHING_SETTLES_IT, OsString, PROPOSING_SYSTEM_PROMPT,
+    Replied, SYSTEM_PROMPT, WRITE_INSTRUCTION, Wired, brief_instruction, drafting_opening,
+    or_default, overridden, propose_answer, proposing_instruction, render, session_id,
 };
 use crate::brief::scope_block_in;
 use crate::panel::Mode;
@@ -913,9 +914,13 @@ fn a_drafting_session_may_read_the_repository_and_do_nothing_whatever_else() {
     assert_eq!(granted, "Read,Grep,Glob");
     assert_eq!(granted.split(',').count(), 3);
 
-    // Read over every word of the vector and not only over the grant,
-    // because the system prompt is a word of it too: a prompt that names a
-    // writing tool is a prompt that invites the model to ask for one.
+    names_no_writing_tool(&vector, "a drafting turn");
+}
+
+// Read over every word of the vector and not only over the grant, because the
+// system prompt is a word of it too: a prompt that names a writing tool is a
+// prompt that invites the model to ask for one.
+fn names_no_writing_tool(vector: &[String], what: &str) {
     for named in [
         "Write",
         "Edit",
@@ -927,15 +932,118 @@ fn a_drafting_session_may_read_the_repository_and_do_nothing_whatever_else() {
         "Task",
         "WebFetch",
     ] {
-        for word in &vector {
+        for word in vector {
             assert!(
                 !word
                     .split(|letter: char| !letter.is_ascii_alphanumeric())
                     .any(|token| token == named),
-                "{named:?} is named in the vector a drafting turn runs under: {word}",
+                "{named:?} is named in the vector {what} runs under: {word}",
             );
         }
     }
+}
+
+#[test]
+fn a_proposing_session_may_read_the_repository_and_do_nothing_whatever_else() {
+    // The same grant a drafting turn gets and for the same reason: this one
+    // reads a brief, a slice and a repository to propose one sentence, and
+    // nothing it is given can change any of the three.
+    let vector = turn_args(&ChatAgent::proposing());
+    let granted =
+        value_of(&vector, "--tools").expect("a proposing turn says what it may reach for");
+
+    assert_eq!(granted, "Read,Grep,Glob");
+    assert_eq!(granted.split(',').count(), 3);
+
+    names_no_writing_tool(&vector, "a proposing turn");
+    assert_eq!(ChatAgent::proposing().timeout(), INVOCATION_TIMEOUT);
+}
+
+#[test]
+fn proposing_opens_a_conversation_of_its_own_at_the_briefs_register() {
+    let vector = turn_args(&ChatAgent::proposing());
+
+    // Raised the way a drafting turn is, through the same two constants, so
+    // the attempt at an answer is made at the register the question was
+    // asked at.
+    assert_eq!(
+        value_of(&vector, "--model"),
+        overridden(MODEL_VAR, BRIEF_MODEL).to_str(),
+    );
+    assert_eq!(
+        value_of(&vector, "--effort"),
+        overridden(EFFORT_VAR, BRIEF_EFFORT).to_str(),
+    );
+
+    // Its own id: neither the panel's conversation nor the one that asked
+    // the question, which is mid-cut and whose next turn is the answer.
+    let session = value_of(&vector, "--session-id").expect("a proposing turn opens a conversation");
+    assert!(is_uuid_shaped(session), "not UUID-shaped: {session}");
+    for other in [
+        turn_args(&ChatAgent::new()),
+        turn_args(&ChatAgent::drafting()),
+        turn_args(&ChatAgent::proposing()),
+    ] {
+        assert_ne!(value_of(&other, "--session-id"), Some(session));
+    }
+
+    // And a prompt of its own, which is none of the other three.
+    let prompt = value_of(&vector, "--system-prompt").expect("a proposing turn brings its own");
+    assert_eq!(prompt, PROPOSING_SYSTEM_PROMPT);
+    assert_ne!(prompt, CHAT_SYSTEM_PROMPT);
+    assert_ne!(prompt, SYSTEM_PROMPT);
+    assert_ne!(
+        Some(prompt),
+        value_of(&turn_args(&ChatAgent::drafting()), "--system-prompt"),
+    );
+    assert!(prompt.contains("WARLOCK.md"));
+    for said in ["one question", "plain prose"] {
+        assert!(
+            prompt.contains(said),
+            "{said:?} is missing from the prompt a proposing turn runs under",
+        );
+    }
+}
+
+#[test]
+fn a_proposing_turn_carries_the_brief_one_slice_and_the_question_on_stdin() {
+    let block = scope_block_in(TWO_SLICES).expect("two slices");
+    let first = &block.slices()[0];
+    let question = "Is the whetstone the one in `tools/` or a new one?";
+    let asking = proposing_instruction(block.brief(), first.heading(), first.prose(), question);
+
+    assert!(asking.contains(question));
+    assert!(asking.contains(first.heading()));
+    assert!(asking.contains("the knife is blunt"));
+    assert!(asking.contains("whetstone"));
+
+    // One slice, like the drafting opening: the rest of the scope is not in
+    // the turn to be answered from by accident.
+    for said in ["Sweep the floor", "broom", "## Scope", "depends_on"] {
+        assert!(
+            !asking.contains(said),
+            "{said:?} reached a turn about the first slice: {asking}",
+        );
+    }
+
+    // The fixed sentence is written down once and handed to the session
+    // rather than described to it: warlock recognises the proposal by the
+    // same bytes it asked for.
+    assert!(asking.ends_with(NOTHING_SETTLES_IT));
+    assert_eq!(asking.matches(NOTHING_SETTLES_IT).count(), 1);
+    assert!(NOTHING_SETTLES_IT.ends_with('.') && !NOTHING_SETTLES_IT.contains('\n'));
+    assert!(!PROPOSING_SYSTEM_PROMPT.contains(NOTHING_SETTLES_IT));
+
+    // And none of it is an argument: the words go in on stdin as an
+    // ordinary turn, the way every other instruction does.
+    let vector = turn_args(&ChatAgent::proposing());
+    for word in &vector {
+        assert!(
+            !word.contains(question) && !word.contains(NOTHING_SETTLES_IT),
+            "a proposing instruction reached the argument vector: {word}",
+        );
+    }
+    assert!(!vector.iter().any(|word| word == &asking));
 }
 
 #[test]
@@ -1382,6 +1490,193 @@ fn a_session_is_a_value_its_caller_holds_and_can_stop() {
         agent.sent().is_empty(),
         "a session spawns nothing until it is opened"
     );
+}
+
+// A stand-in that comes back with nothing at all: it keeps what it was asked and
+// then fails the way a child that ran out of clock does.
+#[derive(Debug, Clone, Default)]
+struct Failing {
+    sent: Arc<Mutex<Vec<String>>>,
+}
+
+impl Failing {
+    fn turns(&self) -> usize {
+        self.sent.lock().expect("the count is not poisoned").len()
+    }
+}
+
+impl Wired for Failing {
+    fn wired(&self, _cancel: Cancel, _activities: Activities) -> Self {
+        self.clone()
+    }
+}
+
+impl Converses for Failing {
+    fn turn(&self, message: &str) -> Result<String, agent::Error> {
+        self.sent
+            .lock()
+            .expect("the count is not poisoned")
+            .push(message.to_owned());
+        Err(agent::Error::TimedOut {
+            after: INVOCATION_TIMEOUT,
+        })
+    }
+
+    fn raised(&self, _model: &str, _effort: &str) -> Self {
+        self.clone()
+    }
+}
+
+const A_QUESTION: &str = "Is the whetstone the one in the drawer or a new one?";
+
+// The proposing call put to a stand-in, over the same brief and first slice the
+// drafting tests use, so what is asserted is the road and not the fixture.
+fn proposal_from<C: Converses>(agent: &C) -> Result<String, agent::Error> {
+    let block = scope_block_in(TWO_SLICES).expect("two slices");
+    let first = &block.slices()[0];
+    propose_answer(
+        agent,
+        block.brief(),
+        first.heading(),
+        first.prose(),
+        A_QUESTION,
+    )
+}
+
+#[test]
+fn a_proposal_is_one_turn_carrying_the_question_and_the_slice_and_nothing_kept_after_it() {
+    const PROPOSED: &str = "The one in the drawer: the brief names it and the slice \
+                            adds no other.";
+    let agent = Scripted::answering([PROPOSED, "A second answer, to a second call."]);
+
+    assert_eq!(proposal_from(&agent).expect("a turn"), PROPOSED);
+
+    let sent = agent.sent();
+    assert_eq!(
+        sent.len(),
+        1,
+        "a proposal took more than its turn: {sent:?}"
+    );
+    // The question, this one slice and the brief above it, which is the whole
+    // of what the session is allowed to answer from.
+    assert!(sent[0].contains(A_QUESTION));
+    assert!(sent[0].contains("Sharpen the knife"));
+    assert!(sent[0].contains("the knife is blunt"));
+    // And no other slice of the same scope.
+    assert!(!sent[0].contains("Sweep the floor"));
+    // Not the drafting conversation wearing another hat: none of its terms and
+    // no object to fill.
+    assert!(!sent[0].contains(DRAFTING_CONTRACT));
+    assert!(!sent[0].contains(DRAFTING_ONE_SHOT_CONTRACT));
+
+    // A second call is a second session: it says the same thing over again
+    // rather than carrying on from the first, because nothing was kept.
+    assert_eq!(
+        proposal_from(&agent).expect("a turn"),
+        "A second answer, to a second call.",
+    );
+    let sent = agent.sent();
+    assert_eq!(sent.len(), 2);
+    assert_eq!(sent[1], sent[0], "the second call remembered the first");
+}
+
+#[test]
+fn a_reply_that_settles_nothing_comes_back_as_the_fixed_sentence_and_not_the_models_words() {
+    // Every one of these is the session saying it has nothing: the sentence it
+    // was asked for, the sentence with a guess bolted onto it, the sentence
+    // with whitespace around it, and a reply with nothing in it at all.
+    let invented = format!("{NOTHING_SETTLES_IT} I would use the one in `tools/` myself.");
+    let replies = [
+        NOTHING_SETTLES_IT.to_owned(),
+        invented.clone(),
+        format!("\n\n{NOTHING_SETTLES_IT}\n"),
+        "   \n".to_owned(),
+    ];
+
+    for reply in replies {
+        let agent = Scripted::answering([reply.clone()]);
+
+        let proposal = proposal_from(&agent).expect("a turn");
+
+        assert_eq!(
+            proposal, NOTHING_SETTLES_IT,
+            "a reply settling nothing came back as something else: {reply:?}",
+        );
+        assert_eq!(agent.sent().len(), 1);
+    }
+
+    // The guess that rode in with the sentence is gone, rather than handed on
+    // for somebody to send to the board as a decision.
+    let agent = Scripted::answering([invented]);
+    assert!(
+        !proposal_from(&agent)
+            .expect("a turn")
+            .contains("I would use"),
+        "the model's own words came back with the fixed sentence",
+    );
+
+    // And an answer that does not say it is what it says: the sentence is
+    // recognised, not every reply that mentions the brief.
+    let agent = Scripted::answering(["The brief settles it: the one in the drawer."]);
+    assert_eq!(
+        proposal_from(&agent).expect("a turn"),
+        "The brief settles it: the one in the drawer.",
+    );
+}
+
+#[test]
+fn a_turn_that_failed_is_the_callers_to_report_and_is_not_taken_again() {
+    let agent = Failing::default();
+
+    let error = proposal_from(&agent).expect_err("the stand-in fails every turn");
+
+    match error {
+        agent::Error::TimedOut { after } => assert_eq!(after, INVOCATION_TIMEOUT),
+        other => panic!("a failed turn came back as something else: {other:?}"),
+    }
+    assert_eq!(
+        agent.turns(),
+        1,
+        "a failed proposal was tried again rather than reported",
+    );
+}
+
+#[test]
+fn a_proposal_and_a_live_drafting_session_leave_each_other_alone() {
+    let drafter = Scripted::answering(["Which whetstone is meant?", ONE_DRAFT]);
+    let proposer = Scripted::answering(["The one in the drawer."]);
+    let mut session = drafting_with(&drafter);
+
+    let question = asking(session.open().expect("a turn"));
+    assert_eq!(question, "Which whetstone is meant?");
+
+    // A whole session of its own, over its own stand-in, while the slice's own
+    // conversation sits mid-question.
+    assert_eq!(
+        proposal_from(&proposer).expect("a turn"),
+        "The one in the drawer.",
+    );
+    assert_eq!(proposer.sent().len(), 1);
+
+    // Nothing the proposal did reached the drafting session: not a turn, not
+    // the cancel it runs under, and not the count of rounds it has left.
+    assert_eq!(drafter.sent().len(), 1);
+    assert!(!session.cancel().is_cancelled());
+    assert_eq!(session.questions_left(), DRAFTING_ROUNDS - 1);
+
+    // And the session still answers its next turn, which is the drafts.
+    let (fill, _) = drafts(session.answer("the one in the drawer").expect("a turn"));
+    assert_eq!(fill.drafts.len(), 1);
+    let sent = drafter.sent();
+    assert_eq!(sent.len(), 2);
+    assert_eq!(sent[1], "the one in the drawer");
+    for message in &sent {
+        assert!(
+            !message.contains(A_QUESTION) && !message.contains(NOTHING_SETTLES_IT),
+            "a proposing turn reached the drafting session: {message}",
+        );
+    }
+    assert_eq!(proposer.sent().len(), 1);
 }
 
 #[test]
