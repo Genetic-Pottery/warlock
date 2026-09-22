@@ -2,7 +2,7 @@ use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::manifest::{temp_file_name, write_and_sync};
+use crate::manifest::replace_atomically;
 
 // `CLAUDE.md` and not `AGENTS.md`, which this was, for one mechanical reason:
 // `CLAUDE.md` is loaded at the start of every session and `AGENTS.md` is not
@@ -234,20 +234,10 @@ pub fn write_claude_md(root: impl AsRef<Path>) -> Result<Written, Error> {
         .transpose()?;
     let text = splice(&existing.unwrap_or_default());
 
-    // The same idiom, through the same two helpers, as `Manifest::save` and
-    // `write_document`: written beside and renamed over. The temporary is a dot
-    // file, so the moment it exists it is invisible to every walk in this crate
-    // — no tree, no subtree hash, no request — and it is removed on both ways
-    // out.
-    let temp = root.join(temp_file_name(FILE));
-    let write = write_and_sync(&temp, text.as_bytes()).and_then(|()| fs::rename(&temp, &target));
-    if let Err(source) = write {
-        // Best effort, and nothing to report if it fails: the caller is already
-        // being told the file was not written.
-        drop(fs::remove_file(&temp));
+    // The target, not whichever path the failure landed on: the caller asked
+    // for `CLAUDE.md` and how it gets written is this function's business.
+    if let Err((_, source)) = replace_atomically(root, FILE, text.as_bytes(), None) {
         return Err(Error::Write {
-            // The target, not the temporary: the caller asked for `CLAUDE.md`
-            // and how it gets written is this function's business.
             path: target,
             source,
         });

@@ -390,8 +390,14 @@ impl<'a> Evidence<'a> {
     }
 }
 
+// Asked once per identifier of every file sent, and again over whole file
+// texts, so it runs against megabytes on a repository that never says
+// "warlock" and so never short-circuits. Lowercasing the haystack first would
+// allocate a copy of every one of them.
 fn names_tool(text: &str) -> bool {
-    text.to_ascii_lowercase().contains("warlock")
+    text.as_bytes()
+        .windows(b"warlock".len())
+        .any(|window| window.eq_ignore_ascii_case(b"warlock"))
 }
 
 fn shown(file: &File) -> Shown<'_> {
@@ -603,7 +609,7 @@ pub fn accept_synthesis(
     expected: &Expected<'_>,
     described: &Described,
 ) -> Accepted {
-    let mut parsed = match parse(answer) {
+    let mut parsed = match parse::<Fill>(answer) {
         Ok(parsed) => parsed,
         Err(defect) => return Accepted::Unparsed(defect),
     };
@@ -817,7 +823,11 @@ pub fn file_fallback(path: &str, expected: &Expected<'_>, described: &Described)
     fallback::file(path, expected, described)
 }
 
-fn parse(answer: &str) -> Result<Fill, Defect> {
+// Generic over the fill so the drafting road scrapes braces by the same rule:
+// a model that wraps its object in a sentence, or in a code fence, is answering
+// the same way on both roads, and a tolerance widened for one of them that did
+// not hold for the other would refuse an answer the other accepts.
+pub(crate) fn parse<T: serde::de::DeserializeOwned>(answer: &str) -> Result<T, Defect> {
     let object = match (answer.find('{'), answer.rfind('}')) {
         (Some(start), Some(end)) if start <= end => &answer[start..=end],
         _ => {
@@ -962,7 +972,13 @@ fn values(fill: &Fill) -> impl Iterator<Item = (String, &str)> {
         )
 }
 
-fn line(field: &str, value: &str, minimum: usize, cap: usize, defects: &mut Vec<Defect>) {
+pub(crate) fn line(
+    field: &str,
+    value: &str,
+    minimum: usize,
+    cap: usize,
+    defects: &mut Vec<Defect>,
+) {
     let trimmed = value.trim();
     if trimmed.is_empty() {
         defects.push(Defect::Empty {
@@ -1165,7 +1181,8 @@ fn human(bytes: u64) -> String {
 // and every fact goes in whole.
 mod fallback {
     use super::{
-        DECLARED_SHOWN, Described, ENTRY_CHARS, ENTRY_MINIMUM, Expected, human, names_tool,
+        DECLARED_SHOWN, Described, ENTRY_CHARS, ENTRY_MINIMUM, Expected, flattened, human,
+        names_tool,
     };
 
     // One bound for all three builders, and it is the tightest of the caps any
@@ -1283,12 +1300,12 @@ mod fallback {
         let cut: String = line.chars().take(CAP).collect();
         cut.trim_end().to_owned()
     }
+}
 
-    // Whitespace of any kind collapses to one space: a name or a symbol that
-    // carried a newline would otherwise make a one-line value into two.
-    fn flattened(text: &str) -> String {
-        text.split_whitespace().collect::<Vec<_>>().join(" ")
-    }
+// Whitespace of any kind collapses to one space: a name or a symbol that
+// carried a newline would otherwise make a one-line value into two.
+pub(crate) fn flattened(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 // Four, and the shape of the worst chain is why. A repair can make a slot

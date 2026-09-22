@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::manifest::{temp_file_name, write_and_sync};
+use crate::manifest::replace_atomically;
 use crate::scope::{Rule, validate_scope};
 
 const SIGIL_DIR: &str = ".warlock";
@@ -209,26 +209,9 @@ fn write(home: &Path, root: &Path, config: &Config) -> Result<(), Error> {
         source,
     })?;
 
-    let target = dir.join(SIGIL_FILE);
-    // The temporary must sit in the same directory as the target, so the rename
-    // below cannot cross a filesystem and stops being atomic.
-    let temp = dir.join(temp_file_name(SIGIL_FILE));
-    let written = write_and_sync(&temp, text.as_bytes())
-        .map_err(|source| Error::Io {
-            path: temp.clone(),
-            source,
-        })
-        .and_then(|()| {
-            fs::rename(&temp, &target).map_err(|source| Error::Io {
-                path: target.clone(),
-                source,
-            })
-        });
-
-    if written.is_err() {
-        drop(fs::remove_file(&temp));
-    }
-    written
+    replace_atomically(&dir, SIGIL_FILE, text.as_bytes(), None)
+        .map(drop)
+        .map_err(|(path, source)| Error::Io { path, source })
 }
 
 fn readable_name(canonical: &Path) -> String {

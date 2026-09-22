@@ -353,7 +353,7 @@ impl std::error::Error for Error {
 }
 
 fn one_line(text: &str) -> String {
-    let flattened = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let flattened = crate::document::flattened(text);
     // Cut on a character boundary rather than at byte `STDERR_EXCERPT`: a stack
     // trace full of arrows and box drawing would otherwise panic the formatter.
     match flattened.char_indices().nth(STDERR_EXCERPT) {

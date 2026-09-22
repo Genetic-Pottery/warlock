@@ -9,7 +9,7 @@ use crate::document::{self, Defect};
 use crate::fitting::{Measured, PER_FILE_BYTE_CAP, Problem, Snapshot, byte_count, one_file};
 use crate::hash::carry_hash;
 use crate::ignores;
-use crate::manifest::{ROOT_MODULE, temp_file_name, write_and_sync};
+use crate::manifest::{ROOT_MODULE, replace_atomically};
 use crate::scope::valid_scope;
 use crate::walk::{self, DOCUMENT_FILE};
 use crate::{
@@ -208,10 +208,18 @@ fn is_fresh(manifest: &Manifest, root: &Path, directory: &Path) -> bool {
     let entry = to_manifest_path(root, directory)
         .ok()
         .and_then(|module| manifest.entry(&module));
+    // The manifest is consulted before anything is hashed, the same ordering
+    // `load` is built on: an unpacted directory is `Unpacted` whatever the
+    // digest says, and `pactable_directories` applies no "already documented"
+    // filter, so hashing first would read every unpacted subtree end to end to
+    // reach an answer that never depended on it.
+    let Some(entry) = entry else {
+        return false;
+    };
     let Ok(computed) = subtree_hash(directory) else {
         return false;
     };
-    decide_state(entry, &computed) == NodeState::PactedFresh
+    decide_state(Some(entry), &computed) == NodeState::PactedFresh
 }
 
 #[derive(Debug)]
@@ -911,31 +919,22 @@ fn announce_repair(
     }
 }
 
-// Written beside and renamed over, the same idiom as `Manifest::save`. A front
-// end that quits mid-pact — killing the pass, restoring the terminal, never
-// waiting for this function to come back — must not be able to leave half a
-// document behind, and a rename is the only way to make that safe: the file is
-// the old document or the new one, never a prefix of either. The temporary is
-// named with a leading dot because hidden entries are skipped by every
-// [`ignore`] walk in this crate, so it is in no tree, no subtree hash and no
-// request for the moment it exists.
+// A front end that quits mid-pact — killing the pass, restoring the terminal,
+// never waiting for this function to come back — must not be able to leave half
+// a document behind, which is why this goes through the atomic replace rather
+// than writing the file in place: `WARLOCK.md` is the old document or the new
+// one, never a prefix of either.
 fn write_document(directory: &Path, text: &str) -> Result<PathBuf, Error> {
-    let document = directory.join(DOCUMENT_FILE);
-    let temp = directory.join(temp_file_name(DOCUMENT_FILE));
-    let write = write_and_sync(&temp, text.as_bytes()).and_then(|()| fs::rename(&temp, &document));
-    if let Err(source) = write {
-        // Best effort: the caller is already being told the document was not
-        // written, and a stray dot file is invisible to everything here.
-        drop(fs::remove_file(&temp));
-        return Err(Error::Write {
-            // The document, not the temporary: the caller asked for
-            // `WARLOCK.md`, and how it got written is not theirs to hear about.
+    replace_atomically(directory, DOCUMENT_FILE, text.as_bytes(), None).map_err(|(_, source)| {
+        Error::Write {
+            // The document, not whichever path the failure landed on: the
+            // caller asked for `WARLOCK.md`, and how it got written is not
+            // theirs to hear about.
             directory: directory.to_path_buf(),
-            path: document,
+            path: directory.join(DOCUMENT_FILE),
             source,
-        });
-    }
-    Ok(document)
+        }
+    })
 }
 
 pub(crate) fn pactable_directories(root: &Path) -> Result<Vec<PathBuf>, Error> {

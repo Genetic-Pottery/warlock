@@ -763,9 +763,15 @@ fn spend(cost: Option<f64>) -> String {
 
 /// `934 bytes`, `1.8 KB`, `403 KB`, `1.6 MB`, `12 MB`.
 ///
-/// Base 1024, spelled `KB` rather than `KiB`, which is the spelling the panel
-/// is specified in; the engine writes `KiB` for the same arithmetic and
-/// settling that is not this module's call.
+/// Base 1024, spelled `KB` rather than `KiB`.
+///
+/// Not the same formatter as the engine's `document::human`, which renders the
+/// sizes inside a `WARLOCK.md`, and the two do not agree: the engine truncates
+/// where this rounds half up and stays on one decimal at every magnitude, so
+/// 1587 bytes is `1.6 KB` here and `1.5 KB` in the document the panel just
+/// wrote. Unifying them is a real decision and not a cleanup — the engine's
+/// spelling is pinned by a doctest and sits in every document on disk, so
+/// changing it restales them — but it is a divergence, not a design.
 ///
 /// The unit is chosen by magnitude *before* the rounding happens inside it, so
 /// nothing is promoted across a boundary by being rounded: 1048575 bytes is

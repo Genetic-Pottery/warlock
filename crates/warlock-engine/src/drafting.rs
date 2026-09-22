@@ -4,7 +4,7 @@ use std::fmt::Write as _;
 
 use serde::{Deserialize, Serialize};
 
-use crate::document::{Defect, turned_down};
+use crate::document::{Defect, flattened, line, parse, turned_down};
 
 // The drafting road asks again exactly as often as the document road does, and
 // a second bound would be a number to keep in step with this one for no gain.
@@ -117,7 +117,7 @@ pub enum Accepted {
 
 #[must_use]
 pub fn accept(answer: &str) -> Accepted {
-    let fill = match parse(answer) {
+    let fill = match parse::<Fill>(answer) {
         Ok(fill) => fill,
         Err(defect) => return Accepted::Unparsed(defect),
     };
@@ -127,20 +127,6 @@ pub fn accept(answer: &str) -> Accepted {
     } else {
         Accepted::Defective { fill, defects }
     }
-}
-
-fn parse(answer: &str) -> Result<Fill, Defect> {
-    let object = match (answer.find('{'), answer.rfind('}')) {
-        (Some(start), Some(end)) if start <= end => &answer[start..=end],
-        _ => {
-            return Err(Defect::NotJson {
-                detail: "no object found in the answer".to_owned(),
-            });
-        }
-    };
-    serde_json::from_str(object).map_err(|error| Defect::NotJson {
-        detail: error.to_string(),
-    })
 }
 
 /// Every slot of a filled drafting answer, in [`Defect`]'s own vocabulary, with
@@ -190,36 +176,6 @@ pub fn check(fill: &Fill) -> Vec<Defect> {
     }
 
     defects
-}
-
-fn line(field: &str, value: &str, minimum: usize, cap: usize, defects: &mut Vec<Defect>) {
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        defects.push(Defect::Empty {
-            field: field.to_owned(),
-        });
-        return;
-    }
-    if trimmed.contains(['\n', '\r']) {
-        defects.push(Defect::Multiline {
-            field: field.to_owned(),
-        });
-    }
-    let chars = trimmed.chars().count();
-    if chars < minimum {
-        defects.push(Defect::TooShort {
-            field: field.to_owned(),
-            chars,
-            minimum,
-        });
-    }
-    if chars > cap {
-        defects.push(Defect::TooLong {
-            field: field.to_owned(),
-            chars,
-            cap,
-        });
-    }
 }
 
 // A body is the ticket's own description and runs to paragraphs, so it is held
@@ -760,10 +716,6 @@ pub fn stub_answer(slice: &str) -> String {
         ],
     }
     .to_json()
-}
-
-fn flattened(text: &str) -> String {
-    text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 #[cfg(test)]

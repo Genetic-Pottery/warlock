@@ -146,14 +146,24 @@ pub(crate) fn wrapped_at(text: &str, width: usize) -> Vec<(usize, &str)> {
     let mut rows = Vec::new();
     let mut start = 0;
     let mut rest = text;
-    while display_width(rest) > width {
+    // Counted down by what each row consumes rather than re-measured from the
+    // remainder each turn. `display_width` walks every character it is given,
+    // so asking it about the whole rest per row made wrapping one line
+    // quadratic in its length; measuring only the bytes just consumed sums to
+    // one walk of the line. It stays exact because the width of a string is the
+    // sum of the widths of its pieces.
+    let mut remaining = display_width(text);
+    while remaining > width {
         let end = break_at(rest, width);
         rows.push((start, rest[..end].trim_end()));
         // The space the break was made at goes with the row above it. A break
         // made mid-word has no space to eat, so this takes nothing off the text.
         let after = &rest[end..];
-        rest = after.trim_start();
-        start += end + (after.len() - rest.len());
+        let trimmed = after.trim_start();
+        let consumed = end + (after.len() - trimmed.len());
+        remaining -= display_width(&rest[..consumed]);
+        rest = trimmed;
+        start += consumed;
     }
 
     // Only when something is left: a line that came out even has nothing for a
@@ -181,8 +191,14 @@ pub(crate) fn folded(text: &str, width: usize) -> Vec<String> {
 
     let mut rows = Vec::new();
     let mut rest = text;
-    while display_width(rest) > width {
+    // Counted down rather than re-measured, for the reason `wrapped_at` gives:
+    // the composer folds the whole draft on every frame and on every cursor
+    // key, and re-measuring the remainder per row made that quadratic in the
+    // draft's length.
+    let mut remaining = display_width(text);
+    while remaining > width {
         let end = filled(rest, width);
+        remaining -= display_width(&rest[..end]);
         rows.push(rest[..end].to_owned());
         rest = &rest[end..];
     }

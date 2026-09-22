@@ -232,27 +232,9 @@ impl Manifest {
             source,
         })?;
 
-        // The temporary must sit in the same directory as the target, so the
-        // rename below cannot cross a filesystem and stops being atomic.
-        let temp = dir.join(temp_file_name(MANIFEST_FILE));
-        let target = dir.join(MANIFEST_FILE);
-
-        let written = write_and_sync(&temp, text.as_bytes())
-            .map_err(|source| Error::Io {
-                path: temp.clone(),
-                source,
-            })
-            .and_then(|()| {
-                fs::rename(&temp, &target).map_err(|source| Error::Io {
-                    path: target,
-                    source,
-                })
-            });
-
-        if written.is_err() {
-            drop(fs::remove_file(&temp));
-        }
-        written
+        replace_atomically(&dir, MANIFEST_FILE, text.as_bytes(), None)
+            .map(drop)
+            .map_err(|(path, source)| Error::Io { path, source })
     }
 
     /// ```
@@ -674,6 +656,49 @@ pub(crate) fn write_and_sync(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     // follows can land before the contents do, and a crash in between leaves an
     // empty file where a good manifest used to be.
     file.sync_all()
+}
+
+// Every durable file this crate writes goes through here, and the durability is
+// in the sequence rather than in any one step: the temporary is built in `dir`
+// so the rename cannot cross a filesystem and stop being atomic, and it is
+// removed on the way out of a failure so a crash cannot leave a dot file
+// standing where the next run will find it. A caller that spells the sequence
+// out again gets to forget one of those, and both are silent.
+//
+// `prepare` runs against the temporary before anything is written to it, which
+// is the only point at which a mode can be set without leaving a window where
+// the real contents sit at whatever the umask allows; `rename` then carries the
+// mode to the target. See `keys::owner_only`, the one caller that passes it.
+//
+// The error names the path the failure happened on — the temporary for a write,
+// the target for a rename — because a caller reporting a path chooses between
+// the two: the stores name whichever one failed, and `CLAUDE.md` and
+// `WARLOCK.md` name the target whatever happened, on the grounds that how a
+// document got written is not the caller's business.
+pub(crate) fn replace_atomically(
+    dir: &Path,
+    name: &str,
+    bytes: &[u8],
+    prepare: Option<fn(&Path) -> std::io::Result<()>>,
+) -> Result<PathBuf, (PathBuf, std::io::Error)> {
+    let target = dir.join(name);
+    let temp = dir.join(temp_file_name(name));
+
+    let written = prepare
+        .map_or(Ok(()), |prepare| prepare(&temp))
+        .and_then(|()| write_and_sync(&temp, bytes))
+        .map_err(|source| (temp.clone(), source))
+        .and_then(|()| fs::rename(&temp, &target).map_err(|source| (target.clone(), source)));
+
+    match written {
+        Ok(()) => Ok(target),
+        Err(failure) => {
+            // Best effort: the caller is already being told the file was not
+            // written, and a stray dot file is invisible to every walk here.
+            drop(fs::remove_file(&temp));
+            Err(failure)
+        }
+    }
 }
 
 #[derive(Debug)]

@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::manifest::{temp_file_name, write_and_sync};
+use crate::manifest::replace_atomically;
 use crate::scope::{Rule, validate_scope};
 
 const KEY_DIR: &str = ".warlock";
@@ -162,27 +162,9 @@ fn write(home: &Path, config: &Config) -> Result<(), Error> {
         source,
     })?;
 
-    let target = dir.join(KEY_FILE);
-    // The temporary must sit in the same directory as the target, so the rename
-    // below cannot cross a filesystem and stops being atomic.
-    let temp = dir.join(temp_file_name(KEY_FILE));
-    let written = owner_only(&temp)
-        .and_then(|()| write_and_sync(&temp, text.as_bytes()))
-        .map_err(|source| Error::Io {
-            path: temp.clone(),
-            source,
-        })
-        .and_then(|()| {
-            fs::rename(&temp, &target).map_err(|source| Error::Io {
-                path: target.clone(),
-                source,
-            })
-        });
-
-    if written.is_err() {
-        drop(fs::remove_file(&temp));
-    }
-    written
+    replace_atomically(&dir, KEY_FILE, text.as_bytes(), Some(owner_only))
+        .map(drop)
+        .map_err(|(path, source)| Error::Io { path, source })
 }
 
 // The mode is arranged here rather than in `write_and_sync`, which sets none:
