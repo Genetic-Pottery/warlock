@@ -10,6 +10,7 @@ use warlock_engine::{claude_md, filed, filing, keys, load, manifest, pact, route
 use warlock_tui::{BriefError, LinearError};
 
 use crate::boundary::{blocking_scopes_message, closed_scope_message};
+use crate::cut::listed;
 
 // One vocabulary for the panel and every subcommand rather than one enum
 // each: they fail in the same ways and are printed by the same line of `main`,
@@ -238,6 +239,22 @@ pub(crate) enum Error {
         path: String,
         status: Option<String>,
     },
+    // The team key again, because a workflow state belongs to a team rather
+    // than to the workspace: a `Backlog` on one team says nothing about
+    // another, so the refusal is only useful with the team in it. Raised before
+    // any issue is created, so what it cost is nothing.
+    NoBacklog {
+        team: String,
+    },
+    // `Unfiled`'s shape for the same event one layer down: the issues exist,
+    // nothing on this machine records them, and the identifiers are what
+    // nothing else now knows. They are carried rather than only printed because
+    // the caller filing the next slice has no `out` to read them back off.
+    Uncut {
+        issues: Vec<String>,
+        // Boxed for `Unfiled`'s reason.
+        source: Box<filed::Error>,
+    },
     Terminal {
         source: io::Error,
     },
@@ -384,6 +401,28 @@ fn not_planned_message(path: &str, status: Option<&str>) -> String {
     format!(
         "the project filed for `{path}` {found} rather than `Planned`, so nothing was read: \
          warlock reads a project back once it is planned"
+    )
+}
+
+// Named against the team and against Linear's own settings, like the unknown
+// team above: the state is the team's, so a workspace that files its issues
+// into a column spelled something else is a workflow to edit rather than a
+// warlock to configure.
+fn no_backlog_message(team: &str) -> String {
+    format!(
+        "the team `{team}` has no workflow state called `Backlog`, so no issue was created: a cut \
+         slice is filed into that state, and the team's workflow in Linear is where it is named"
+    )
+}
+
+// The identifiers lead for the URL's reason in `unfiled_message`: the issues
+// exist, nothing on this machine records them, and this line is the last place
+// they are named. Flattened for that function's reason as well.
+fn uncut_message(issues: &[String], source: &filed::Error) -> String {
+    format!(
+        "the issues {} were created, and warlock could not record them: {}",
+        listed(issues),
+        one_line(&source.to_string())
     )
 }
 
@@ -598,6 +637,10 @@ impl fmt::Display for Error {
             Self::NotPlanned { path, status } => {
                 write!(f, "{}", not_planned_message(path, status.as_deref()))
             }
+            // The two cut refusals with wording of their own, said above for
+            // the reason the rest are.
+            Self::NoBacklog { team } => write!(f, "{}", no_backlog_message(team)),
+            Self::Uncut { issues, source } => write!(f, "{}", uncut_message(issues, source)),
             Self::Problems { first, rest: 0 } => write!(f, "{first}"),
             Self::Problems { first, rest } => {
                 write!(f, "{first} (and {rest} more like it)")
@@ -626,7 +669,7 @@ impl std::error::Error for Error {
             Self::Filing { source } => Some(source),
             Self::Brief { source } => Some(source),
             Self::Filed { source } => Some(source),
-            Self::Unfiled { source, .. } => Some(source.as_ref()),
+            Self::Unfiled { source, .. } | Self::Uncut { source, .. } => Some(source.as_ref()),
             Self::Linear { source } => Some(source),
             Self::Signal { source } => Some(source),
             Self::Clipboard { source } => Some(source),
@@ -663,6 +706,9 @@ impl std::error::Error for Error {
             | Self::NoRecord { .. }
             | Self::UnknownProject { .. }
             | Self::NotPlanned { .. }
+            // Nor here: a team whose workflow has no `Backlog` is that same
+            // disagreement, and the call that answered it worked.
+            | Self::NoBacklog { .. }
             // Nor here, and there could not be one: a run's failures are N
             // errors rather than one, they have already been printed in full,
             // and picking a first to be "the" cause would be the summary

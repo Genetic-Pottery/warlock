@@ -37,6 +37,7 @@ mod chatting;
 mod check;
 mod clipboard;
 mod config;
+mod cut;
 mod descent;
 mod editing;
 mod edits;
