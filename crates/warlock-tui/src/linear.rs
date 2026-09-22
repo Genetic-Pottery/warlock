@@ -426,6 +426,145 @@ impl Project {
     }
 }
 
+/// Create one issue, in the team, project, label and workflow state the caller
+/// already resolved.
+///
+/// Nothing is resolved here: an issue create that had to look up its own state
+/// would be a second request per draft, and the team that has no `Backlog` has
+/// to be refused before any issue exists rather than once a slice is half filed.
+pub fn create_issue(linear: &impl Posts, issue: &NewIssue<'_>) -> Result<Issue, Error> {
+    let data = linear.post(
+        "mutation IssueCreate($input: IssueCreateInput!) {
+            issueCreate(input: $input) { issue { id identifier url } }
+        }",
+        json!({
+            "input": {
+                "title": issue.title,
+                "description": issue.body,
+                "teamId": issue.team,
+                "projectId": issue.project,
+                "labelIds": [issue.label],
+                "stateId": issue.state,
+            },
+        }),
+    )?;
+    let created = payload(&data, "issueCreate", "issue")?;
+
+    Ok(Issue {
+        id: node_id(created)?,
+        identifier: text(created, "identifier")?,
+        url: text(created, "url")?,
+    })
+}
+
+/// What [`create_issue`] is asked for, and the whole of it: every field here is
+/// an id the caller resolved, and there is deliberately no assignee, priority,
+/// estimate, cycle or milestone. A draft says what the work is, and a field
+/// warlock would have to invent a value for is a decision taken away from the
+/// person who owns the board.
+///
+/// `state` is a *team workflow state* id from [`backlog_state`] and `label` an
+/// *issue label* id from [`issue_label_id`]; neither a project status nor a
+/// project label is usable here.
+#[derive(Debug, Clone, Copy)]
+pub struct NewIssue<'a> {
+    title: &'a str,
+    body: &'a str,
+    team: &'a str,
+    project: &'a str,
+    label: &'a str,
+    state: &'a str,
+}
+
+impl<'a> NewIssue<'a> {
+    #[must_use]
+    pub const fn new(
+        title: &'a str,
+        body: &'a str,
+        team: &'a str,
+        project: &'a str,
+        label: &'a str,
+        state: &'a str,
+    ) -> Self {
+        Self {
+            title,
+            body,
+            team,
+            project,
+            label,
+            state,
+        }
+    }
+}
+
+/// An issue that now exists, in all three of the ways the rest of warlock has to
+/// name one: the id relations are written with, the identifier a cut record
+/// stores and a person types, and the URL a failure downstream must not lose.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Issue {
+    id: String,
+    identifier: String,
+    url: String,
+}
+
+impl Issue {
+    #[must_use]
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    /// `WAR-125`, which is what a cut record holds: the id is a UUID that means
+    /// nothing to a reader and changes nothing about which issue was filed.
+    #[must_use]
+    pub fn identifier(&self) -> &str {
+        &self.identifier
+    }
+
+    #[must_use]
+    pub fn url(&self) -> &str {
+        &self.url
+    }
+}
+
+/// Write the edge saying `blocker` blocks `waiting`, by issue id.
+pub fn create_relation(linear: &impl Posts, blocker: &str, waiting: &str) -> Result<String, Error> {
+    let data = linear.post(
+        "mutation IssueRelationCreate($input: IssueRelationCreateInput!) {
+            issueRelationCreate(input: $input) { issueRelation { id } }
+        }",
+        // The direction lives entirely in which id goes in which field: with
+        // type `blocks`, `issueId` is the issue that blocks and
+        // `relatedIssueId` the one held up. Swapping the two is a change that
+        // compiles, passes anything not asserting the input, and inverts every
+        // dependency in the slice.
+        json!({
+            "input": {
+                "issueId": blocker,
+                "relatedIssueId": waiting,
+                "type": "blocks",
+            },
+        }),
+    )?;
+
+    node_id(payload(&data, "issueRelationCreate", "issueRelation")?)
+}
+
+/// Comment on a project, by id.
+///
+/// Linear has one comment mutation for issues and projects both, told apart by
+/// which id the input carries — so a `projectId` here is the whole of what makes
+/// this a project comment.
+pub fn comment_on_project(linear: &impl Posts, project: &str, body: &str) -> Result<String, Error> {
+    let data = linear.post(
+        "mutation CommentCreate($input: CommentCreateInput!) {
+            commentCreate(input: $input) { comment { id } }
+        }",
+        json!({ "input": { "projectId": project, "body": body } }),
+    )?;
+
+    node_id(payload(&data, "commentCreate", "comment")?)
+}
+
 /// The key as the whole of the `Authorization` value, with no `Bearer ` prefix:
 /// Linear takes a personal API key bare there, and the prefix an OAuth token
 /// wants is a 401 for a key. This is the only place the key is read.
