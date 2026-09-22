@@ -1,7 +1,8 @@
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
 
 use super::{
-    Answer, Answered, PushAnswered, PushConfirm, QuitConfirm, answer_for, push_answer_for,
+    Answer, Answered, PullAnswered, PullConfirm, PushAnswered, PushConfirm, QuitConfirm,
+    answer_for, pull_answer_for, push_answer_for,
 };
 
 fn press(code: KeyCode) -> KeyEvent {
@@ -411,6 +412,233 @@ mod push {
             answered(&open(), KeyCode::Enter),
             PushAnswered::Cancel,
             "Enter on No cancels, so the default answer sends nothing"
+        );
+    }
+}
+
+// The pull dialog, which is those same rules answered about a project. Every
+// test in here is one of the tests above asked again, for the reason the push
+// dialog's are: "answered by the same rules" is a claim about behaviour and not
+// about which function the body happens to call.
+mod pull {
+    use super::{
+        Answer, INERT, KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers, PullAnswered,
+        PullConfirm, press, pull_answer_for,
+    };
+
+    const PROJECT: &str = "Cut a planned project into tickets";
+
+    // The board's own spelling, which is what the fetch found written on the
+    // project rather than what the gate folds it to.
+    const STATUS: &str = "planned";
+
+    const SLICES: usize = 9;
+
+    const TEAM: &str = "Warlock";
+
+    const KEY: &str = "work";
+
+    // A value no dialog holds and no rendering can therefore contain: the
+    // question carries the name a key is held under and nothing else.
+    const KEY_VALUE: &str = "not-a-real-key-value";
+
+    fn open() -> PullConfirm {
+        PullConfirm::open(PROJECT, STATUS, SLICES, TEAM, KEY)
+    }
+
+    // The dialog answering one key, as the session answers it: the lit answer
+    // comes out of the value that is up rather than from the test.
+    fn answered(pull: &PullConfirm, code: KeyCode) -> PullAnswered {
+        let cutting = pull.cutting().expect("the dialog under test is up");
+        pull_answer_for(press(code), cutting.answer())
+    }
+
+    #[test]
+    fn a_fresh_dialog_is_up_with_no_highlighted_and_carries_the_five_facts() {
+        let pull = open();
+        let cutting = pull.cutting().expect("an opened dialog is up");
+
+        assert!(pull.is_open());
+        assert_eq!(cutting.answer(), Answer::No);
+        assert_eq!(cutting.project(), PROJECT);
+        assert_eq!(cutting.status(), STATUS);
+        assert_eq!(cutting.slices(), SLICES);
+        assert_eq!(cutting.team(), TEAM);
+        // The key by name. There is nowhere in the value for its bytes, which
+        // is why nothing downstream can print them.
+        assert_eq!(cutting.key(), KEY);
+    }
+
+    #[test]
+    fn there_is_nowhere_in_the_question_for_a_key_value() {
+        // The claim as a reader would check it: the dialog is built from the
+        // name alone, so no arrangement of these five strings puts a key into
+        // a `Debug` rendering — the one place a value that held one would leak
+        // into a panic message or a failing assertion.
+        let rendered = format!("{:?}", open().lit(Answer::Yes));
+
+        assert!(rendered.contains(KEY), "{rendered:?} drops the key's name");
+        assert!(
+            !rendered.contains(KEY_VALUE),
+            "{rendered:?} holds a key value"
+        );
+    }
+
+    #[test]
+    fn a_closed_dialog_is_the_default_and_has_nothing_to_answer() {
+        assert_eq!(PullConfirm::default(), PullConfirm::Closed);
+        assert!(!PullConfirm::Closed.is_open());
+        assert!(PullConfirm::Closed.cutting().is_none());
+        // An arrow pressed at a window that is not up lights nothing, rather
+        // than conjuring a question out of facts nobody fetched.
+        assert_eq!(PullConfirm::Closed.lit(Answer::Yes), PullConfirm::Closed);
+    }
+
+    #[test]
+    fn an_immediate_enter_answers_no() {
+        // The round that put this up and the Enter straight after it both come
+        // to nothing: No is lit, so no run starts.
+        assert_eq!(answered(&open(), KeyCode::Enter), PullAnswered::Cancel);
+    }
+
+    #[test]
+    fn esc_answers_no_from_either_side() {
+        for lit in [Answer::Yes, Answer::No] {
+            assert_eq!(
+                answered(&open().lit(lit), KeyCode::Esc),
+                PullAnswered::Cancel,
+                "Esc should answer No with {lit:?} lit"
+            );
+        }
+    }
+
+    #[test]
+    fn left_then_enter_cuts_and_right_goes_back_to_no() {
+        let pull = open();
+
+        assert_eq!(
+            answered(&pull, KeyCode::Left),
+            PullAnswered::Open(Answer::Yes)
+        );
+        let armed = pull.lit(Answer::Yes);
+        assert_eq!(answered(&armed, KeyCode::Enter), PullAnswered::Cut);
+
+        assert_eq!(
+            answered(&armed, KeyCode::Right),
+            PullAnswered::Open(Answer::No)
+        );
+        assert_eq!(
+            answered(&armed.lit(Answer::No), KeyCode::Enter),
+            PullAnswered::Cancel
+        );
+    }
+
+    #[test]
+    fn y_and_n_answer_outright_whichever_is_lit() {
+        for lit in [Answer::Yes, Answer::No] {
+            let pull = open().lit(lit);
+            assert_eq!(
+                answered(&pull, KeyCode::Char('y')),
+                PullAnswered::Cut,
+                "y should cut with {lit:?} lit"
+            );
+            assert_eq!(
+                answered(&pull, KeyCode::Char('n')),
+                PullAnswered::Cancel,
+                "n should answer No with {lit:?} lit"
+            );
+        }
+    }
+
+    #[test]
+    fn moving_the_highlight_keeps_what_the_question_is_about() {
+        // The five facts ride along: the dialog re-lit is the same dialog, not
+        // a second one built from whatever a second request might answer.
+        let moved = open().lit(Answer::Yes);
+        let cutting = moved.cutting().expect("a re-lit dialog is still up");
+
+        assert_eq!(cutting.answer(), Answer::Yes);
+        assert_eq!(cutting.project(), PROJECT);
+        assert_eq!(cutting.status(), STATUS);
+        assert_eq!(cutting.slices(), SLICES);
+        assert_eq!(cutting.team(), TEAM);
+        assert_eq!(cutting.key(), KEY);
+        assert_eq!(moved.lit(Answer::No), open());
+    }
+
+    #[test]
+    fn every_other_key_leaves_the_question_exactly_as_it_was() {
+        for lit in [Answer::Yes, Answer::No] {
+            let pull = open().lit(lit);
+            for code in INERT {
+                assert_eq!(
+                    answered(&pull, code),
+                    PullAnswered::Open(lit),
+                    "{code:?} should change nothing with {lit:?} lit"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn ctrl_c_is_not_answered_here() {
+        // The loop takes it before this window, as it does before the other
+        // two: through here it is an ordinary `c` and changes nothing.
+        let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+
+        for lit in [Answer::Yes, Answer::No] {
+            assert_eq!(pull_answer_for(ctrl_c, lit), PullAnswered::Open(lit));
+        }
+    }
+
+    #[test]
+    fn releases_and_repeats_answer_nothing() {
+        for code in [
+            KeyCode::Enter,
+            KeyCode::Esc,
+            KeyCode::Char('y'),
+            KeyCode::Char('n'),
+            KeyCode::Left,
+            KeyCode::Right,
+        ] {
+            for kind in [KeyEventKind::Release, KeyEventKind::Repeat] {
+                let event = KeyEvent::new_with_kind_and_state(
+                    code,
+                    KeyModifiers::NONE,
+                    kind,
+                    KeyEventState::NONE,
+                );
+
+                assert_eq!(
+                    pull_answer_for(event, Answer::No),
+                    PullAnswered::Open(Answer::No),
+                    "{kind:?} of {code:?} should answer nothing"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn nothing_but_yes_and_enter_on_yes_ever_cuts() {
+        for lit in [Answer::Yes, Answer::No] {
+            let pull = open().lit(lit);
+            for code in INERT.into_iter().chain([
+                KeyCode::Esc,
+                KeyCode::Char('n'),
+                KeyCode::Left,
+                KeyCode::Right,
+            ]) {
+                assert_ne!(
+                    answered(&pull, code),
+                    PullAnswered::Cut,
+                    "{code:?} should not cut with {lit:?} lit"
+                );
+            }
+        }
+        assert_eq!(
+            answered(&open(), KeyCode::Enter),
+            PullAnswered::Cancel,
+            "Enter on No answers No, so the default answer starts nothing"
         );
     }
 }

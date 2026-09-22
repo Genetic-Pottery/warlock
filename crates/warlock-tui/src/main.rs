@@ -27,9 +27,9 @@ use ratatui::crossterm::event::{self, Event, KeyEvent, MouseEvent};
 use ratatui::layout::Size;
 use warlock_engine::{Agent, Manifest, Written, write_claude_md};
 use warlock_tui::{
-    App, Cell, Converses, Focus, Position, PushAnswered, PushConfirm, QuitConfirm, Reach,
-    RecordPrompt, Run, ScopePrompt, Wired, composer_on_screen, copied_text, draw, panel_height,
-    panel_width, paste_for, position_at, tree_height,
+    App, Cell, Converses, Focus, Position, PullAnswered, PushAnswered, PushConfirm, QuitConfirm,
+    Reach, RecordPrompt, Run, ScopePrompt, Wired, composer_on_screen, copied_text, draw,
+    panel_height, panel_width, paste_for, position_at, tree_height,
 };
 
 mod boundary;
@@ -813,6 +813,7 @@ impl<S: Screen, P: Wired + Agent, C: Converses, B: Clip, O: Opens> Session<S, P,
         let record = &self.record;
         let write = self.chat.write_prompt();
         let (filing, push) = (&self.pushing.field, &self.pushing.confirm);
+        let pull = self.pulls.confirm();
         self.screen.draw(|frame| {
             draw(
                 frame,
@@ -825,6 +826,7 @@ impl<S: Screen, P: Wired + Agent, C: Converses, B: Clip, O: Opens> Session<S, P,
                 write,
                 filing,
                 push,
+                pull,
                 field,
             );
         })
@@ -850,6 +852,7 @@ impl<S: Screen, P: Wired + Agent, C: Converses, B: Clip, O: Opens> Session<S, P,
             &self.app,
             self.confirm,
             &self.pushing.confirm,
+            self.pulls.confirm(),
             &self.pushing.field,
             &self.prompt,
             &self.record,
@@ -969,6 +972,7 @@ impl<S: Screen, P: Wired + Agent, C: Converses, B: Clip, O: Opens> Session<S, P,
             key,
             self.confirm,
             &self.pushing.confirm,
+            self.pulls.confirm(),
             &self.pushing.field,
             &self.prompt,
             &self.record,
@@ -1001,6 +1005,9 @@ impl<S: Screen, P: Wired + Agent, C: Converses, B: Clip, O: Opens> Session<S, P,
             Pressed::Confirm(next) => self.confirm = next,
             // The push dialog, moved or answered: see [`Session::push_answered`].
             Pressed::Push(answered) => self.push_answered(answered, now),
+            // And the question a `/pull` puts up once the board has answered:
+            // see [`Session::pull_answered`].
+            Pressed::Pull(answered) => self.pull_answered(answered, now),
             // Esc with a run in flight. The handle does both halves at once — it
             // latches, so the descent stops at the next directory instead of
             // starting a pass for it, and it kills the `claude` running right now,
@@ -1385,6 +1392,23 @@ impl<S: Screen, P: Wired + Agent, C: Converses, B: Clip, O: Opens> Session<S, P,
                     );
                 }
             }
+        }
+    }
+
+    /// The pull dialog, moved or answered. An arrow re-lights the question that
+    /// is up — the facts it was opened with ride along unchanged, since they are
+    /// what is being answered about — and either answer takes it down.
+    ///
+    /// A No leaves the session exactly where it was and sends nothing: the
+    /// project is still `Planned`, nothing was written and the fetch that put
+    /// this up has already had its say on the thread. A Yes takes the window
+    /// down and starts the run. Either way warlock goes on running, which is
+    /// what the dialog promised.
+    fn pull_answered(&mut self, answered: PullAnswered, now: Instant) {
+        match answered {
+            PullAnswered::Open(answer) => self.pulls.lit(answer),
+            PullAnswered::Cancel => self.pulls.cancelled(),
+            PullAnswered::Cut => self.pulls.cut(&mut self.app, now),
         }
     }
 

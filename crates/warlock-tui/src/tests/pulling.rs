@@ -504,3 +504,152 @@ fn dropping_the_session_ends_the_pull_without_waiting_for_it() {
     // parked: a gate nobody opens is a thread held until the binary exits.
     gate.open();
 }
+
+// The question between the fetch and the run, asked of the value the loop
+// holds: the session answers it through `Pulls` and not through the dialog, so
+// these drive the same three calls `Session::pull_answered` makes.
+mod asking {
+    use tempfile::TempDir;
+    use warlock_tui::Answer;
+
+    use super::{
+        App, BRIEF, Instant, KEY_NAME, NAME, NOT_A_KEY, Pulls, Reading, SLICED, STATUS, TEAM,
+        a_home, a_repository, filed, landing, notes, now, press, refusal,
+    };
+    use crate::error::Error;
+
+    // A fetch carried all the way to the question, which is the only way the
+    // dialog is ever up. The two directories come back with it because they are
+    // the repository and the home the value is reading: dropped here, every
+    // path under test would be gone before the answer.
+    fn asked() -> (App, Pulls<Reading>, TempDir, TempDir) {
+        let repo = a_repository();
+        let home = a_home(repo.path());
+        filed(repo.path(), &[]);
+        let mut pulls = Pulls::with_client(
+            Reading::holding(NAME, Some(STATUS), SLICED),
+            Some(home.path().to_path_buf()),
+        );
+        let mut app = App::default();
+        press(&mut app, &mut pulls, repo.path());
+        landing(&mut app, &mut pulls);
+        (app, pulls, repo, home)
+    }
+
+    #[test]
+    fn a_landed_fetch_puts_the_question_up_carrying_what_it_read() {
+        // The five facts come off the one request rather than out of a second
+        // one, which is why they are parked on the question at all.
+        let (_app, pulls, _repo, _home) = asked();
+
+        let cutting = pulls.confirm().cutting().expect("the question is not up");
+        assert_eq!(cutting.project(), NAME);
+        assert_eq!(cutting.status(), STATUS);
+        assert_eq!(cutting.slices(), 3);
+        assert_eq!(cutting.team(), TEAM);
+        // The key by name, and nowhere in the question for its bytes.
+        assert_eq!(cutting.key(), KEY_NAME);
+        assert_eq!(cutting.answer(), Answer::No);
+        assert!(
+            !format!("{cutting:?}").contains(NOT_A_KEY),
+            "the key value is on the question"
+        );
+    }
+
+    #[test]
+    fn a_refused_pull_asks_nothing() {
+        // There is nothing to confirm about a project the gate turned away, so
+        // the refusal is the whole of what the round does.
+        let repo = a_repository();
+        let home = a_home(repo.path());
+        filed(repo.path(), &[]);
+        let mut pulls = Pulls::with_client(
+            Reading::holding(NAME, Some("Backlog"), SLICED),
+            Some(home.path().to_path_buf()),
+        );
+        let mut app = App::default();
+
+        press(&mut app, &mut pulls, repo.path());
+        landing(&mut app, &mut pulls);
+
+        assert!(
+            !pulls.confirm().is_open(),
+            "a refused pull asked to be confirmed"
+        );
+        assert_eq!(
+            notes(&app).last(),
+            Some(&refusal(&Error::NotPlanned {
+                path: BRIEF.to_owned(),
+                status: Some("Backlog".to_owned()),
+            })),
+        );
+    }
+
+    #[test]
+    fn an_arrow_lights_the_other_answer_and_leaves_the_facts_where_they_were() {
+        let (_app, mut pulls, _repo, _home) = asked();
+
+        pulls.lit(Answer::Yes);
+
+        let cutting = pulls.confirm().cutting().expect("the question came down");
+        assert_eq!(cutting.answer(), Answer::Yes);
+        assert_eq!(cutting.project(), NAME);
+        assert_eq!(cutting.slices(), 3);
+    }
+
+    #[test]
+    fn a_no_takes_the_question_down_and_leaves_the_session_where_it_was() {
+        // What a No costs: the window, and nothing else. No second request, no
+        // line on the thread and nothing written.
+        let (mut app, mut pulls, repo, _home) = asked();
+        let said = notes(&app);
+
+        pulls.cancelled();
+
+        assert!(!pulls.confirm().is_open(), "the question is still up");
+        assert_eq!(notes(&app), said, "a No said something");
+        assert!(!pulls.fetching(), "a No started a pull");
+        // And the value is back where a session with no pull in it sits, so the
+        // next `/pull` is allowed.
+        press(&mut app, &mut pulls, repo.path());
+        landing(&mut app, &mut pulls);
+        assert!(pulls.confirm().is_open(), "the next pull could not ask");
+    }
+
+    #[test]
+    fn a_yes_takes_the_question_down_and_starts_the_run() {
+        let (mut app, mut pulls, _repo, _home) = asked();
+        let said = notes(&app).len();
+
+        pulls.cut(&mut app, Instant::now());
+
+        assert!(
+            !pulls.confirm().is_open(),
+            "the question is up over its own run"
+        );
+        let notes = notes(&app);
+        assert_eq!(notes.len(), said + 1, "a Yes said nothing");
+        let line = notes.last().expect("a Yes said nothing");
+        assert!(line.contains(NAME), "{line:?} does not name the project");
+    }
+
+    #[test]
+    fn an_answer_to_a_question_that_is_not_up_does_nothing_at_all() {
+        // The three calls again with the dialog closed, which is where a key
+        // that reached the wrong window would land.
+        let repo = a_repository();
+        let home = a_home(repo.path());
+        let mut pulls = Pulls::with_client(
+            Reading::holding(NAME, Some(STATUS), SLICED),
+            Some(home.path().to_path_buf()),
+        );
+        let mut app = App::default();
+
+        pulls.lit(Answer::Yes);
+        pulls.cancelled();
+        pulls.cut(&mut app, now());
+
+        assert!(!pulls.confirm().is_open());
+        assert!(notes(&app).is_empty(), "a closed question said something");
+    }
+}

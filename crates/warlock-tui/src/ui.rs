@@ -27,7 +27,7 @@ use crate::account::{Account, Line as Entry, Voice};
 use crate::app::{App, Chrome, Focus, Row, Run, RunHeader};
 use crate::colour::{CONVERSATION_COLOUR, FOCUS_COLOUR, GUIDE_COLOUR, SYSTEM_COLOUR, colour_for};
 use crate::composer::Composer;
-use crate::confirm::{Answer, Filing, PushConfirm, QuitConfirm};
+use crate::confirm::{Answer, Cutting, Filing, PullConfirm, PushConfirm, QuitConfirm};
 use crate::panel::Mode;
 use crate::prompt::{RecordField, RecordForm, RecordPrompt, ScopeField, ScopePrompt};
 // Renamed for the reason `Entry` above is: `Span` here is ratatui's piece of a
@@ -264,6 +264,29 @@ const PUSH_LINES: u16 = 7;
 
 const PUSH_HEIGHT: u16 = PUSH_LINES + 2 * CONFIRM_MARGIN_ROWS + 2 * BORDER_THICKNESS;
 
+const PULL_QUESTION: &str = "Cut this project into tickets?";
+
+/// The status the board answered with, labelled rather than left to be read as
+/// a second name: the project above it is a title and this is a column value,
+/// and the two would otherwise be two bare strings under one another.
+const PULL_STATUS: &str = "status ";
+
+const PULL_SLICES: &str = "slices ";
+
+/// The same two labels the push dialog uses, because they label the same two
+/// facts: the board a run would file to, and the name the key that signs it is
+/// held under. Two spellings for one fact would read as two facts.
+const PULL_TEAM: &str = PUSH_TEAM;
+
+const PULL_KEY: &str = PUSH_KEY;
+
+/// Question, a blank, the project, the status, the slices, the team, the key, a
+/// blank, the answers: [`pull_lines`] asserts it draws exactly this many, as
+/// [`push_lines`] does.
+const PULL_LINES: u16 = 9;
+
+const PULL_HEIGHT: u16 = PULL_LINES + 2 * CONFIRM_MARGIN_ROWS + 2 * BORDER_THICKNESS;
+
 const SCOPE_HEADING: &str = "Scope for ";
 
 const PATH_HEADING: &str = "";
@@ -317,8 +340,8 @@ const COMPOSER_MIN_HEIGHT: u16 = 1 + 2 * BORDER_THICKNESS;
 #[expect(
     clippy::too_many_arguments,
     reason = "one frame's worth of state, and the point of it is that the binary \
-              draws a frame in one call: the six windows that can be over the \
-              app are six parameters here rather than six entry points"
+              draws a frame in one call: the seven windows that can be over the \
+              app are seven parameters here rather than seven entry points"
 )]
 pub fn draw(
     frame: &mut Frame<'_>,
@@ -331,6 +354,7 @@ pub fn draw(
     path: &ScopePrompt,
     filing: &ScopePrompt,
     push: &PushConfirm,
+    pull: &PullConfirm,
     composer: Option<&Composer>,
 ) {
     let screen = frame.area();
@@ -385,6 +409,13 @@ pub fn draw(
     }
     if let Some(asked) = push.filing() {
         draw_push(frame, screen, asked);
+    }
+    // Last, with the same claim to the frame the push dialog has and for the
+    // same reason — while a question is up it is the thing being looked at.
+    // The two are never on one frame either: a `/pull` cannot be typed while
+    // the other is up, since the keys go to the dialog before the composer.
+    if let Some(asked) = pull.cutting() {
+        draw_pull(frame, screen, asked);
     }
 }
 
@@ -1316,6 +1347,71 @@ fn push_size(filing: &Filing) -> Size {
     Size::new(padded_width(widest, CONFIRM_MARGIN), PUSH_HEIGHT)
 }
 
+// The push dialog's window with two more lines in it, and deliberately the
+// same everything else, for the reason that one is the quit question's window:
+// three questions answered in the same place on the screen with the answers in
+// the same order.
+fn draw_pull(frame: &mut Frame<'_>, screen: Rect, cutting: &Cutting) {
+    draw_over(
+        frame,
+        pull_area(screen, cutting),
+        Padding::symmetric(CONFIRM_MARGIN, CONFIRM_MARGIN_ROWS),
+        pull_lines(cutting),
+    );
+}
+
+fn pull_lines(cutting: &Cutting) -> Vec<Line<'_>> {
+    let lines = vec![
+        Line::from(PULL_QUESTION).centered(),
+        Line::default(),
+        Line::from(cutting.project()).bold().centered(),
+        Line::from(status_line(cutting)).dim().centered(),
+        Line::from(slices_line(cutting)).dim().centered(),
+        Line::from(pull_team_line(cutting)).dim().centered(),
+        Line::from(pull_key_line(cutting)).dim().centered(),
+        Line::default(),
+        answers_line(cutting.answer()),
+    ];
+
+    debug_assert_eq!(
+        u16::try_from(lines.len()).unwrap_or(u16::MAX),
+        PULL_LINES,
+        "the pull dialog is no longer {PULL_LINES} lines tall"
+    );
+
+    lines
+}
+
+fn status_line(cutting: &Cutting) -> String {
+    format!("{PULL_STATUS}{}", cutting.status())
+}
+
+fn slices_line(cutting: &Cutting) -> String {
+    format!("{PULL_SLICES}{}", cutting.slices())
+}
+
+fn pull_team_line(cutting: &Cutting) -> String {
+    format!("{PULL_TEAM}{}", cutting.team())
+}
+
+fn pull_key_line(cutting: &Cutting) -> String {
+    format!("{PULL_KEY}{}", cutting.key())
+}
+
+fn pull_size(cutting: &Cutting) -> Size {
+    let answers =
+        display_width(CONFIRM_YES) + display_width(CONFIRM_ANSWER_GAP) + display_width(CONFIRM_NO);
+    let widest = display_width(PULL_QUESTION)
+        .max(answers)
+        .max(display_width(cutting.project()))
+        .max(display_width(&status_line(cutting)))
+        .max(display_width(&slices_line(cutting)))
+        .max(display_width(&pull_team_line(cutting)))
+        .max(display_width(&pull_key_line(cutting)));
+
+    Size::new(padded_width(widest, CONFIRM_MARGIN), PULL_HEIGHT)
+}
+
 fn draw_over(frame: &mut Frame<'_>, area: Rect, padding: Padding, lines: Vec<Line<'_>>) {
     let block = Block::bordered().padding(padding);
     let inner = block.inner(area);
@@ -1348,6 +1444,12 @@ fn confirm_area(screen: Rect) -> Rect {
 // same `centred`, over a window sized by what this one has to say.
 fn push_area(screen: Rect, filing: &Filing) -> Rect {
     centred(screen, push_size(filing))
+}
+
+// Where the pull dialog lands, which is where the other two land: the same
+// `centred`, over a window sized by what this one has to say.
+fn pull_area(screen: Rect, cutting: &Cutting) -> Rect {
+    centred(screen, pull_size(cutting))
 }
 
 fn centred(screen: Rect, size: Size) -> Rect {

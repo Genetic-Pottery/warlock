@@ -253,6 +253,170 @@ pub fn push_answer_for(key: KeyEvent, highlighted: Answer) -> PushAnswered {
     }
 }
 
+// The project a `/pull` is about to cut, as the five facts the reader is being
+// asked about. Every one of them was read back off the board a moment ago and
+// none can be read again without a second request, which is why they are parked
+// here rather than looked up when the answer comes in.
+//
+// The key is here *by name*, for [`Filing`]'s reason and with the same
+// consequence: there is nowhere in this value for its bytes to sit, so a dialog
+// that cannot hold a key cannot draw one, print one or grow one in a `Debug`
+// rendering. There is no scope beside the name either — a pull resolves the
+// board the machine's own way, with no field in front of it to name a second
+// one, so a Yes asks that same question again from nothing this value carries.
+//
+// The status is the board's own spelling and not `Planned`: the gate folds case
+// and trims, and what a reader is shown is what somebody sent to look would
+// find written on the project.
+//
+// The lit answer rides along inside it for [`QuitConfirm`]'s reason — it exists
+// exactly as long as the question does — which is why this is only ever built
+// through [`PullConfirm::open`].
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Cutting {
+    project: String,
+    status: String,
+    slices: usize,
+    team: String,
+    key: String,
+    answer: Answer,
+}
+
+impl Cutting {
+    #[must_use]
+    pub fn project(&self) -> &str {
+        &self.project
+    }
+
+    /// The status as the board spelled it: see the type's own note.
+    #[must_use]
+    pub fn status(&self) -> &str {
+        &self.status
+    }
+
+    /// How many slices the project's scope has, which is how much work the
+    /// answer is about.
+    #[must_use]
+    pub const fn slices(&self) -> usize {
+        self.slices
+    }
+
+    #[must_use]
+    pub fn team(&self) -> &str {
+        &self.team
+    }
+
+    /// The *name* the key is held under, never a key value: see the type's own
+    /// note.
+    #[must_use]
+    pub fn key(&self) -> &str {
+        &self.key
+    }
+
+    #[must_use]
+    pub const fn answer(&self) -> Answer {
+        self.answer
+    }
+
+    // The one way the highlight moves, for [`Filing::with_answer`]'s reason:
+    // answering re-lights the same question rather than building a second one
+    // from facts that would have to be fetched again.
+    #[must_use]
+    pub fn with_answer(&self, answer: Answer) -> Self {
+        Self {
+            answer,
+            ..self.clone()
+        }
+    }
+}
+
+/// The question a `/pull` asks between the fetch and the run, drawn over the
+/// frame the way the other two are and answered by the very same rules —
+/// [`pull_answer_for`] is [`answer_for`] with the answers renamed.
+///
+/// A separate value from [`PushConfirm`] because the two are answered about
+/// different things and say so in their types: a confirmed question there sends
+/// one brief, and a confirmed question here starts a run over every uncut slice
+/// of a project.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
+pub enum PullConfirm {
+    #[default]
+    Closed,
+    Open(Cutting),
+}
+
+impl PullConfirm {
+    /// No is lit on open, for the reason [`Answer::No`] is the default: the
+    /// round that puts this up and an Enter straight after it come to nothing
+    /// at all.
+    #[must_use]
+    pub fn open(
+        project: impl Into<String>,
+        status: impl Into<String>,
+        slices: usize,
+        team: impl Into<String>,
+        key: impl Into<String>,
+    ) -> Self {
+        Self::Open(Cutting {
+            project: project.into(),
+            status: status.into(),
+            slices,
+            team: team.into(),
+            key: key.into(),
+            answer: Answer::No,
+        })
+    }
+
+    #[must_use]
+    pub const fn is_open(&self) -> bool {
+        matches!(self, Self::Open(_))
+    }
+
+    /// The one way into [`pull_answer_for`] and into the drawing, for the
+    /// reason [`QuitConfirm::highlighted`] is: the caller cannot invent a
+    /// question that is not up.
+    #[must_use]
+    pub const fn cutting(&self) -> Option<&Cutting> {
+        match self {
+            Self::Closed => None,
+            Self::Open(cutting) => Some(cutting),
+        }
+    }
+
+    /// The same question with the other answer lit, and a closed dialog left
+    /// closed: an arrow key pressed at nothing lights nothing.
+    #[must_use]
+    pub fn lit(&self, answer: Answer) -> Self {
+        match self {
+            Self::Closed => Self::Closed,
+            Self::Open(cutting) => Self::Open(cutting.with_answer(answer)),
+        }
+    }
+}
+
+/// [`Answered`] in this dialog's vocabulary: a confirmed question here starts
+/// the run, and warlock goes on running either way.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PullAnswered {
+    Open(Answer),
+    Cancel,
+    Cut,
+}
+
+/// The quit dialog's rules, renamed rather than restated: Esc and `n` cancel,
+/// Left then Enter cuts, an immediate Enter cancels, a release changes nothing,
+/// and every other key leaves the question exactly as it was. Written over
+/// [`answer_for`] so the three cannot drift — a key that moves one moves them
+/// all.
+#[must_use]
+pub fn pull_answer_for(key: KeyEvent, highlighted: Answer) -> PullAnswered {
+    match answer_for(key, highlighted) {
+        Answered::Open(answer) => PullAnswered::Open(answer),
+        Answered::Close => PullAnswered::Cancel,
+        Answered::Leave => PullAnswered::Cut,
+    }
+}
+
 #[cfg(test)]
 #[path = "tests/confirm.rs"]
 mod tests;

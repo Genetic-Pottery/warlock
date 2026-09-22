@@ -28,13 +28,14 @@
 //! [`crate::error::Error`] already words for `warlock pull`, so a reader who
 //! has met one at a shell meets the same words in the panel.
 
+use std::mem;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::thread;
 use std::time::Instant;
 
 use warlock_engine::{Manifest, filed_path, resolve_filing};
-use warlock_tui::{App, Cancel, fetch_project, scope_block_in};
+use warlock_tui::{Answer, App, Cancel, PullConfirm, fetch_project, scope_block_in};
 
 use crate::error::{Error, one_line};
 use crate::pacting::CancelGuard;
@@ -71,6 +72,13 @@ type Landing = Result<Fetched, String>;
 /// Held as the facts rather than as the line they are said in because they are
 /// what a reader is asked to confirm next, and none of them can be read again
 /// without a second request.
+///
+/// The board is in here twice over — the team the project sits on and the
+/// *name* the key that read it is held under — because the dialog names both
+/// and the worker is the only thing that resolved them. The key value is not
+/// among them and cannot be: it lives on one line of this module (see the
+/// module's note), and there is nowhere in this value, in the channel's message
+/// or in a `Debug` rendering for its bytes to sit.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Fetched {
     project: String,
@@ -80,6 +88,8 @@ pub(crate) struct Fetched {
     status: String,
     slices: usize,
     uncut: usize,
+    team: String,
+    key: String,
 }
 
 impl Fetched {
@@ -90,6 +100,20 @@ impl Fetched {
             self.status,
             counted(self.slices),
             self.uncut
+        )
+    }
+
+    // The question these facts are asked as. The count it names is the one the
+    // line above names first — how many slices the project has — because that
+    // is what the reader is being asked about the project, and how much of it
+    // is left is the line's to say.
+    fn asking(&self) -> PullConfirm {
+        PullConfirm::open(
+            &self.project,
+            &self.status,
+            self.slices,
+            &self.team,
+            &self.key,
         )
     }
 }
@@ -107,6 +131,11 @@ pub(crate) struct Pulls<O: Opens> {
     open: O,
     home: Option<PathBuf>,
     fetching: Option<Fetching>,
+    // The question between the fetch and the run, held here rather than beside
+    // the session's other windows because it is a state of the pull and not of
+    // the app: what it is asked about came off the wire on the round it went
+    // up, and nothing else in the panel can answer it.
+    confirm: PullConfirm,
 }
 
 // The channel, and the handle that is the whole of how a pull is stopped.
@@ -144,7 +173,14 @@ impl<O: Opens> Pulls<O> {
             open,
             home,
             fetching: None,
+            confirm: PullConfirm::Closed,
         }
+    }
+
+    // Read once a round by the loop, to draw the window and to decide which
+    // window a keystroke belongs to.
+    pub(crate) const fn confirm(&self) -> &PullConfirm {
+        &self.confirm
     }
 
     // Read once a round by the loop and once per `/pull` by this value itself,
@@ -230,6 +266,38 @@ impl<O: Opens> Pulls<O> {
         // a pull is a round on which the next `/pull` is already allowed.
         self.fetching = None;
         app.panel_mut().note(line, now);
+        // The question goes up on the round the answer landed, over the line
+        // that reports it: what a reader is being asked to confirm is what they
+        // have just read. A fetch that failed put its own sentence on the
+        // thread and there is nothing to ask about, so nothing opens.
+        if let Ok(fetched) = landing {
+            self.confirm = fetched.asking();
+        }
+    }
+
+    /// The same question with the other answer lit. A closed dialog stays
+    /// closed, which is [`PullConfirm::lit`]'s rule and not a second one here.
+    pub(crate) fn lit(&mut self, answer: Answer) {
+        self.confirm = self.confirm.lit(answer);
+    }
+
+    /// The question taken down with nothing started: no request is made, no
+    /// record is read and the session is left exactly where it was, which is
+    /// the whole of what a No costs.
+    pub(crate) fn cancelled(&mut self) {
+        self.confirm = PullConfirm::Closed;
+    }
+
+    /// The confirmed question: the window down and the run begun.
+    ///
+    /// Taken rather than read and then closed, so there is no round on which
+    /// both the question and its own run are up.
+    pub(crate) fn cut(&mut self, app: &mut App, now: Instant) {
+        let confirm = mem::replace(&mut self.confirm, PullConfirm::Closed);
+        let Some(cutting) = confirm.cutting() else {
+            return;
+        };
+        app.panel_mut().note(cutting_line(cutting.project()), now);
     }
 }
 
@@ -337,7 +405,18 @@ fn fetched<O: Opens>(open: &O, work: &Work, cancel: &Cancel) -> Result<Fetched, 
         status,
         slices: slices.len(),
         uncut: state.uncut().len(),
+        team: target.record().team().to_owned(),
+        // The key by name. `Target::value` is read on one line above and
+        // nowhere else on this path.
+        key: target.key().to_owned(),
     })
+}
+
+// What a Yes has to say for itself so far. The run it starts is the next slice
+// of this work; what is true already is that the question was answered and the
+// project it named is the one being cut.
+fn cutting_line(project: &str) -> String {
+    format!("cutting `{project}` into tickets")
 }
 
 // Named by the document rather than by the project, because the project has no

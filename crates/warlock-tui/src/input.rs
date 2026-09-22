@@ -16,9 +16,10 @@ use ratatui::crossterm::event::{
 };
 use ratatui::layout::Size;
 use warlock_tui::{
-    Answered, App, Cell, Composed, Composer, Edited, Focus, Hit, PushAnswered, PushConfirm,
-    QuitConfirm, Reach, RecordEdited, RecordPrompt, ScopePrompt, answer_for, compose_for, edit_for,
-    hit_test, panel_reach, push_answer_for, record_edit_for,
+    Answered, App, Cell, Composed, Composer, Edited, Focus, Hit, PullAnswered, PullConfirm,
+    PushAnswered, PushConfirm, QuitConfirm, Reach, RecordEdited, RecordPrompt, ScopePrompt,
+    answer_for, compose_for, edit_for, hit_test, panel_reach, pull_answer_for, push_answer_for,
+    record_edit_for,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -123,6 +124,12 @@ pub(crate) enum Pressed {
     // coming down, and a `PushConfirm::Closed` here could not tell it from the
     // Esc that closes the same window with nothing sent.
     Push(PushAnswered),
+    // The question a `/pull` asks once the board has answered, for the reason
+    // `Push` carries an answer rather than a next state: `Cut` is a run
+    // starting and the window coming down, which a `PullConfirm::Closed` could
+    // not be told from the Esc that closes the same window having started
+    // nothing.
+    Pull(PullAnswered),
     // The field that comes up in front of that dialog when the machine can file
     // to more than one board. A fourth variant over `Edited` for `Scope` and
     // `Write`'s reason: the three are the same keystrokes and three different
@@ -201,6 +208,7 @@ pub(crate) fn press_for(
     key: KeyEvent,
     confirm: QuitConfirm,
     push: &PushConfirm,
+    pull: &PullConfirm,
     filing: &ScopePrompt,
     prompt: &ScopePrompt,
     record: &RecordPrompt,
@@ -227,6 +235,14 @@ pub(crate) fn press_for(
 
     if let Some(asked) = push.filing() {
         return Pressed::Push(push_answer_for(key, asked.answer()));
+    }
+
+    // The push dialog's place in the order rather than a place of its own: the
+    // two are the same kind of question asked at the same point in the same
+    // command's shape, and a session never has both up — a `/pull` is typed
+    // into the composer, which takes no keys while either is drawn over it.
+    if let Some(asked) = pull.cutting() {
+        return Pressed::Pull(pull_answer_for(key, asked.answer()));
     }
 
     if let Some(field) = filing.field() {
@@ -337,7 +353,7 @@ pub(crate) struct Drag {
 // `PanelLine` for a point on the composer and scrolls a window the pointer is
 // not over.
 //
-// None of the six windows has anything clickable in it, so while any is up
+// None of the seven windows has anything clickable in it, so while any is up
 // every event is dropped, wheel and click alike: a click that reached the tree
 // behind one would select a row the reader cannot see.
 #[expect(
@@ -352,6 +368,7 @@ pub(crate) fn mouse_action(
     app: &App,
     confirm: QuitConfirm,
     push: &PushConfirm,
+    pull: &PullConfirm,
     filing: &ScopePrompt,
     prompt: &ScopePrompt,
     record: &RecordPrompt,
@@ -360,6 +377,7 @@ pub(crate) fn mouse_action(
 ) -> Option<MouseAction> {
     if confirm.is_open()
         || push.is_open()
+        || pull.is_open()
         || filing.is_open()
         || prompt.is_open()
         || record.is_open()
