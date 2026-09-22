@@ -1937,16 +1937,6 @@ impl<C: Converses> Drafting<C> {
         }
     }
 
-    /// The same session reporting what it is seen doing.
-    ///
-    /// Re-wires rather than replaces the agent, so the cancel handle a caller may
-    /// already be holding still reaches the run.
-    #[must_use]
-    pub fn reporting(mut self, activities: Activities) -> Self {
-        self.agent = self.agent.wired(self.cancel.clone(), activities);
-        self
-    }
-
     /// The handle this session's turns run under. A clone, because the point of
     /// it is to be pressed from a thread that is not the one waiting.
     #[must_use]

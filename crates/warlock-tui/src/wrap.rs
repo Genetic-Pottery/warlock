@@ -216,6 +216,15 @@ pub(crate) fn folded(text: &str, width: usize) -> Vec<String> {
 // cut alone has to advance it. A character wider than the whole field overhangs
 // its row rather than stopping the fold.
 fn filled(text: &str, width: usize) -> usize {
+    fits_in(text, width).max(first_character(text))
+}
+
+// Where a display column lands in the bytes, which the panel's truncation, the
+// composer's fold and the footer's clipping all have to answer the same way: a
+// second idea of how many characters fit in a field is a highlight a column off
+// the text it claims to cover. Stops *before* a character that would overhang,
+// so it never reports a width larger than it was given.
+pub(crate) fn fits_in(text: &str, width: usize) -> usize {
     let mut taken = 0;
     let mut fits = 0;
     for (index, character) in text.char_indices() {
@@ -228,7 +237,7 @@ fn filled(text: &str, width: usize) -> usize {
         fits = next;
     }
 
-    fits.max(first_character(text))
+    fits
 }
 
 // A space is only a candidate once a word has been seen, so a line's own

@@ -187,19 +187,7 @@ fn clipped(text: &str, width: usize) -> String {
 }
 
 fn fitted(text: &str, columns: usize) -> &str {
-    let mut taken = 0;
-    let mut end = 0;
-    for (index, character) in text.char_indices() {
-        let next = index + character.len_utf8();
-        let width = display_width(&text[index..next]);
-        if taken + width > columns {
-            break;
-        }
-        taken += width;
-        end = next;
-    }
-
-    &text[..end]
+    &text[..crate::wrap::fits_in(text, columns)]
 }
 
 fn keys_line(width: usize) -> String {
@@ -1389,8 +1377,7 @@ fn key_line(filing: &Filing) -> String {
 }
 
 fn push_size(filing: &Filing) -> Size {
-    let answers =
-        display_width(CONFIRM_YES) + display_width(CONFIRM_ANSWER_GAP) + display_width(CONFIRM_NO);
+    let answers = answers_width();
     let widest = display_width(PUSH_QUESTION)
         .max(answers)
         .max(display_width(filing.project()))
@@ -1452,8 +1439,7 @@ fn pull_key_line(cutting: &Cutting) -> String {
 }
 
 fn pull_size(cutting: &Cutting) -> Size {
-    let answers =
-        display_width(CONFIRM_YES) + display_width(CONFIRM_ANSWER_GAP) + display_width(CONFIRM_NO);
+    let answers = answers_width();
     let widest = display_width(PULL_QUESTION)
         .max(answers)
         .max(display_width(cutting.project()))
@@ -1556,6 +1542,13 @@ fn review_size(review: &Review) -> Size {
     Size::new(padded_width(widest, CONFIRM_MARGIN), review_height(review))
 }
 
+// The width of the `Yes  No` line every two-answer dialog draws through
+// `answers_line`, measured in one place so a window cannot come out a column
+// narrower than the answers inside it.
+fn answers_width() -> usize {
+    display_width(CONFIRM_YES) + display_width(CONFIRM_ANSWER_GAP) + display_width(CONFIRM_NO)
+}
+
 fn review_answers_width(review: &Review) -> usize {
     let two = display_width(REVIEW_CREATE)
         + display_width(REVIEW_ANSWER_GAP)
@@ -1616,8 +1609,7 @@ fn carry_left_line(carry: &Carry) -> String {
 }
 
 fn carry_size(carry: &Carry) -> Size {
-    let answers =
-        display_width(CONFIRM_YES) + display_width(CONFIRM_ANSWER_GAP) + display_width(CONFIRM_NO);
+    let answers = answers_width();
     let widest = display_width(CARRY_QUESTION)
         .max(answers)
         .max(display_width(&carry_left_line(carry)));
@@ -1679,8 +1671,7 @@ fn centred(screen: Rect, size: Size) -> Rect {
 }
 
 fn confirm_size() -> Size {
-    let answers =
-        display_width(CONFIRM_YES) + display_width(CONFIRM_ANSWER_GAP) + display_width(CONFIRM_NO);
+    let answers = answers_width();
     let widest = display_width(CONFIRM_QUESTION).max(answers);
 
     Size::new(padded_width(widest, CONFIRM_MARGIN), CONFIRM_HEIGHT)
