@@ -197,6 +197,81 @@ are filed as issues on the board the brief was planned on, so a ticket is read \
 by somebody who has not seen this conversation: no first person, and nothing \
 about this request or about what you were or were not shown.";
 
+/// What a proposing session is running under: one question, one answer, and no
+/// decision it was not handed.
+///
+/// Free of any capitalised tool name for the same reason as
+/// [`DRAFTING_SYSTEM_PROMPT`] — the read-only grant is asserted by reading the
+/// whole argument vector word by word, and a sentence opening with `Write` or
+/// `Edit` would be a false positive nobody could tell from a real one.
+const PROPOSING_SYSTEM_PROMPT: &str = "You are proposing one answer to one \
+question inside warlock, a terminal program that shows one repository as a tree \
+of directories. A pacted directory has a WARLOCK.md describing it: a purpose, \
+one line per file under `## Files`, one per subdirectory under `## \
+Directories`, and where there is anything to say `## Structure`. A change to \
+the repository you are running in was planned in a brief and is being cut into \
+tickets one slice at a time. A session cutting one of those slices has asked a \
+question, and you are given the brief, that one slice and the question. Use the \
+documents to narrow, never to answer: start at the nearest WARLOCK.md above \
+what the question is about, follow its directory and file lines downward, then \
+open the file it names and check, because a document is a map and where it and \
+the code disagree the code is right. You cannot change that repository: you \
+have no tool that alters a file or runs a command, and nothing you say is put \
+on disk. Answer from the brief, the slice and what you can read there, and from \
+nothing else — never settle something those three leave open, because an answer \
+invented from nothing is read afterwards as a decision somebody made. Your \
+whole reply is the answer itself, in plain prose: no preamble, no working out, \
+no question back, no offer to look further, and no markdown around it. A person \
+reads what you say, corrects it and sends it on, so keep it to a sentence or \
+two.";
+
+/// The one sentence a proposal comes back with when the brief, the slice and the
+/// repository do not settle the question.
+///
+/// Public, and the only place the sentence is written down: it is what the
+/// session is told to say and what the caller recognises it by, so a second copy
+/// anywhere would be a proposal warlock cannot tell from an answer. A fixed
+/// sentence rather than the model's best effort, because a guess is the one kind
+/// of answer that reaches the board looking like a decision somebody made.
+pub const NOTHING_SETTLES_IT: &str =
+    "The brief, this slice and the repository do not settle this question.";
+
+/// The one turn a proposing session gets: the brief, the one slice being cut and
+/// the question that came back from cutting it.
+///
+/// `brief` is the text above the scope heading and `title`/`prose` are one
+/// slice's — `ScopeBlock::brief`, `Slice::heading` and `Slice::prose` — so the
+/// rest of the scope is never in the turn, exactly as in
+/// [`drafting_opening`]. Rules rather than code fences around each part, because
+/// a brief is markdown and may hold fences of its own.
+///
+/// ```
+/// use warlock_tui::{NOTHING_SETTLES_IT, proposing_instruction};
+///
+/// let asking = proposing_instruction(
+///     "A file is read twice.",
+///     "Read the file once",
+///     "And keep what it said.",
+///     "Which of the two reads is kept?",
+/// );
+///
+/// assert!(asking.contains("Which of the two reads is kept?"));
+/// assert!(asking.contains("Read the file once"));
+/// assert!(asking.ends_with(NOTHING_SETTLES_IT));
+/// ```
+#[must_use]
+pub fn proposing_instruction(brief: &str, title: &str, prose: &str, question: &str) -> String {
+    format!(
+        "A change to this repository was planned in the brief between the two \
+         rules below.\n\n---\n\n{brief}\n\n---\n\nThe one slice of it being cut \
+         into tickets is this, and no other:\n\n---\n\n{title}\n\n{prose}\n\n---\
+         \n\nThe question to answer is this:\n\n---\n\n{question}\n\n---\n\n\
+         Answer it from the brief, the slice and what you can read in the \
+         repository. Where those three do not settle it, do not decide it: reply \
+         with exactly this sentence and nothing else.\n\n{NOTHING_SETTLES_IT}"
+    )
+}
+
 /// The rule the interactive session is held to, and the only thing that says a
 /// reply is a question rather than the answer.
 ///
@@ -394,6 +469,10 @@ fn chat_args() -> Vec<OsString> {
 
 fn drafting_args() -> Vec<OsString> {
     args_for(CHAT_TOOLS, DRAFTING_SYSTEM_PROMPT)
+}
+
+fn proposing_args() -> Vec<OsString> {
+    args_for(CHAT_TOOLS, PROPOSING_SYSTEM_PROMPT)
 }
 
 /// The one id every turn of a [`ChatAgent`] names, and which flag names it.
@@ -965,6 +1044,38 @@ impl ChatAgent {
         let agent = Self {
             program: OsString::from(PROGRAM),
             args: drafting_args(),
+            session: Some(Session::new()),
+            timeout: INVOCATION_TIMEOUT,
+            cancel: Cancel::new(),
+            activities: Activities::none(),
+        };
+        Converses::raised(&agent, BRIEF_MODEL, BRIEF_EFFORT)
+    }
+
+    /// The session that proposes an answer to one question: its own
+    /// conversation, one turn long, at the register the brief was written in.
+    ///
+    /// Not the slice's own drafting session asked a second thing, because that
+    /// session is mid-question and its next turn is the answer; and not the
+    /// panel's chat, which has heard the reader's talk and none of the brief.
+    /// Read-only by construction — [`CHAT_TOOLS`] and nothing else — since a
+    /// session that reads a brief, a slice and a repository has no business
+    /// holding a tool that changes one.
+    ///
+    /// ```
+    /// use warlock_tui::{ChatAgent, INVOCATION_TIMEOUT};
+    ///
+    /// let agent = ChatAgent::proposing();
+    ///
+    /// assert_eq!(agent.timeout(), INVOCATION_TIMEOUT);
+    /// // A conversation of its own, and not the one being cut.
+    /// assert!(agent.args().iter().any(|arg| arg == "--session-id"));
+    /// ```
+    #[must_use]
+    pub fn proposing() -> Self {
+        let agent = Self {
+            program: OsString::from(PROGRAM),
+            args: proposing_args(),
             session: Some(Session::new()),
             timeout: INVOCATION_TIMEOUT,
             cancel: Cancel::new(),
