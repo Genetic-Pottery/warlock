@@ -254,9 +254,7 @@ pub(crate) fn one_file(
     ))
 }
 
-pub(crate) fn byte_count(bytes: usize) -> u64 {
-    u64::try_from(bytes).unwrap_or(u64::MAX)
-}
+pub(crate) use crate::hash::byte_count;
 
 #[derive(Debug)]
 pub struct Problem {

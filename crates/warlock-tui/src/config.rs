@@ -157,11 +157,7 @@ fn holding(sigils: &[String]) -> String {
         return NOTHING.to_owned();
     }
 
-    sigils
-        .iter()
-        .map(|sigil| format!("`{sigil}`"))
-        .collect::<Vec<_>>()
-        .join(", ")
+    warlock_tui::listed(sigils)
 }
 
 // Whitespace separates the words and nothing else does, which is what makes the

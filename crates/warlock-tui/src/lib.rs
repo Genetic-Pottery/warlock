@@ -18,6 +18,7 @@ mod confirm;
 #[cfg(test)]
 mod fixture;
 mod linear;
+mod naming;
 pub mod panel;
 mod prompt;
 mod selection;
@@ -121,6 +122,8 @@ pub use linear::fetch_project;
 pub use linear::issue_label_id;
 pub use linear::label_id;
 pub use linear::team_id;
+pub use naming::and_listed;
+pub use naming::listed;
 pub use panel::Mode;
 pub use panel::Panel;
 pub use prompt::Edited;

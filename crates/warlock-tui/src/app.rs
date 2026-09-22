@@ -318,14 +318,7 @@ impl Sigils {
     pub fn line(&self) -> Option<String> {
         match self {
             Self::Nothing => None,
-            Self::Held(sigils) => Some(format!(
-                "holding {}",
-                sigils
-                    .iter()
-                    .map(|sigil| format!("`{sigil}`"))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            )),
+            Self::Held(sigils) => Some(format!("holding {}", crate::naming::listed(sigils))),
             Self::Unknown => Some("holding unknown".to_owned()),
         }
     }

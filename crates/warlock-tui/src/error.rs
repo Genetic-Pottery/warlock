@@ -309,23 +309,15 @@ pub(crate) fn one_line(message: &str) -> String {
     }
 }
 
-// `` `--a`, `--b` and `--c` ``, in [`writing::missing_line`](crate::writing)'s
-// shape: a refusal that names more than one thing is read as a sentence, and a
-// comma before the last of them would be read as a fourth flag.
+// `` `--a`, `--b` and `--c` ``. The backticks are put on here and the joining
+// is `naming`'s, which `brief` and `writing` also refuse through.
 //
 // An empty slice is the empty string and no caller reaches it: both variants
 // that call this are raised with at least one flag named, since a list of
 // nothing wrong with the command is not a refusal.
 fn naming(flags: &[&str]) -> String {
     let named: Vec<String> = flags.iter().map(|flag| format!("`{flag}`")).collect();
-    let Some((last, rest)) = named.split_last() else {
-        return String::new();
-    };
-    if rest.is_empty() {
-        last.clone()
-    } else {
-        format!("{} and {last}", rest.join(", "))
-    }
+    warlock_tui::and_listed(&named)
 }
 
 // The fact first, then the whole of the fix: the flags that were not given,

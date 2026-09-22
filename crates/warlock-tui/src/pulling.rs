@@ -443,15 +443,13 @@ impl<O: Opens, A: Converses> Pulls<O, A> {
         &self.confirm
     }
 
-    // Read once a round by the loop and once per `/pull` by this value itself,
-    // off the one run it keeps: a flag beside it would be a second record of
-    // whether a project is being read back.
+    // Answered off the run it keeps rather than off a flag beside it, which
+    // would be a second record of whether a project is being read back.
     pub(crate) const fn fetching(&self) -> bool {
         self.fetching.is_some()
     }
 
-    // Read once a round by the loop and once per `/pull` by this value itself,
-    // off the one run it keeps, for the reason above.
+    // Answered off the run it keeps, for the reason above.
     pub(crate) const fn drafting(&self) -> bool {
         self.slicing.is_some()
     }

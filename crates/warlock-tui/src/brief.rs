@@ -715,7 +715,7 @@ impl fmt::Display for ScopeBlockError {
             Self::Circle { slices } => write!(
                 f,
                 "these slices wait on each other, so there is no order to cut them in: {}",
-                listing(slices)
+                crate::naming::and_listed(slices)
             ),
         }
     }
@@ -723,25 +723,14 @@ impl fmt::Display for ScopeBlockError {
 
 impl std::error::Error for ScopeBlockError {}
 
-// `## Outcome and ## Scope`, in `writing::missing_line`'s shape: a refusal
-// naming more than one section is read as a sentence, and a comma before the
-// last of them would be read as a third section.
+// `## Outcome and ## Scope`. The heading marker is put on here and the joining
+// is `naming`'s, which `writing` and `error` also refuse through.
 fn naming(missing: &[String]) -> String {
     let named: Vec<String> = missing
         .iter()
         .map(|section| format!("## {section}"))
         .collect();
-    listing(&named)
-}
-
-fn listing(named: &[String]) -> String {
-    let Some((last, rest)) = named.split_last() else {
-        return String::new();
-    };
-    if rest.is_empty() {
-        return last.clone();
-    }
-    format!("{} and {last}", rest.join(", "))
+    crate::naming::and_listed(&named)
 }
 
 /// Five ways a file is not a brief, and no sixth: nothing here is a failure to

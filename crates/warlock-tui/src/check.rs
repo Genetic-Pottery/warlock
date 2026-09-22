@@ -287,13 +287,7 @@ fn route_line(
 // that will not parse is owed the path to go and fix.
 fn holding_line(sigils: &Sigils, config: Option<&Path>) -> String {
     match sigils {
-        Sigils::Held(held) => format!(
-            "holding {}",
-            held.iter()
-                .map(|sigil| format!("`{sigil}`"))
-                .collect::<Vec<_>>()
-                .join(", ")
-        ),
+        Sigils::Held(held) => format!("holding {}", warlock_tui::listed(held)),
         Sigils::Nothing => "holding nothing".to_owned(),
         // The `None` is unreachable today and is written out rather than
         // unwrapped: `Unknown` is a file that exists and would not read, so

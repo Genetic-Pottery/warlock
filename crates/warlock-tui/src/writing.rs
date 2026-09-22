@@ -217,12 +217,7 @@ fn missing_line(missing: &[&str]) -> String {
         .iter()
         .map(|section| format!("## {section}"))
         .collect();
-    let (last, rest) = named.split_last().expect("a refusal names what is missing");
-    let sections = if rest.is_empty() {
-        last.clone()
-    } else {
-        format!("{} and {last}", rest.join(", "))
-    };
+    let sections = warlock_tui::and_listed(&named);
     format!("the document is missing {sections}, so nothing was written")
 }
 

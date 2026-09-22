@@ -256,17 +256,7 @@ pub(crate) fn announce(linear: &impl Posts, project: &str, issues: &[String]) ->
         .map(|error| format!("the project was not commented on: {error}"))
 }
 
-// Shared with `error.rs`, which names the same identifiers in the refusal that
-// says they were not recorded: one spelling for the list, so the line a person
-// reads off a cut and the line they read off its failure name the issues the
-// same way.
-pub(crate) fn listed(issues: &[String]) -> String {
-    issues
-        .iter()
-        .map(|issue| format!("`{issue}`"))
-        .collect::<Vec<_>>()
-        .join(", ")
-}
+pub(crate) use warlock_tui::listed;
 
 #[cfg(test)]
 #[path = "tests/cut.rs"]
