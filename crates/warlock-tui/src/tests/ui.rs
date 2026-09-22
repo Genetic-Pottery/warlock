@@ -11,23 +11,24 @@ use warlock_engine::{NodeState, scope};
 
 use super::{
     Areas, BAR_EMPTY, BAR_FILLED, BAR_MIN_WIDTH, BORDER_THICKNESS, BRIEF_THREAD_TITLE, CANCEL_KEY,
-    COLLAPSE_KEY, COMPOSER_CURSOR, COMPOSER_MIN_HEIGHT, CONFIRM_ANSWER_GAP, CONFIRM_HEIGHT,
-    CONFIRM_LINES, CONFIRM_MARGIN, CONFIRM_MARGIN_ROWS, CONFIRM_NO, CONFIRM_QUESTION, CONFIRM_YES,
-    Carry, ELLIPSIS, FILES_KEY, FILING_HEADING, FILING_RULES, FOOTER_HEIGHT, GUIDE, GUIDE_BRANCH,
-    GUIDE_LAST, HEADER_GAP, HEADER_HEIGHT, Hit, INDENT, KEY_DROP_ORDER, KEY_GAP, KEYS, LIVE_KEY,
-    MARK, MARK_MARGIN, MARK_MARGIN_ROWS, MOVE_KEYS, NO_MARKER, NOTE_MARKER, PACTING_KEYS,
-    PACTING_QUIT_KEY, PACTING_RUN, PANEL_INDENT, PATH_HEADING, PATH_RULES, PERCENT_WIDTH, PULL_KEY,
-    PULL_LINES, PULL_QUESTION, PULL_SLICES, PULL_STATUS, PULL_TEAM, PUSH_KEY, PUSH_LINES,
-    PUSH_QUESTION, PUSH_TEAM, QUIT_KEY, RECORD_HEADING, RECORD_HEIGHT, RECORD_LABEL_GAP,
-    RECORD_LINES, RECORD_RULES, REFRESHING_RUN, ROW_KEY, RUN_HEADER_HEIGHT, Reach, Review,
-    SAID_MARKER, SCOPE_CURSOR, SCOPE_HEADING, SCOPE_HEIGHT, SCOPE_LINES, SCOPE_MARGIN,
-    SCOPE_MARGIN_ROWS, SCROLLBACK_ARROW, SELECTED, SELECTION_MARKER, THREAD_TITLE, TREE_MIN_WIDTH,
-    TREE_PERCENT, areas, centred, composer_height, composer_on_screen, confirm_area, confirm_size,
-    display_width, draw, footer_text_area, guide_prefixes, hit_test, keys_line, label_width,
-    mark_area, pacting_keys_line, pane_inner, panel_height, panel_reach, panel_row,
-    panel_rows_area, panel_width, pull_area, push_area, record_lines, record_size,
-    run_header_height, run_header_line, scope_size, tree_height, tree_rows_area, tree_width,
-    truncated,
+    CARRY_LEFT, CARRY_LINES, CARRY_QUESTION, COLLAPSE_KEY, COMPOSER_CURSOR, COMPOSER_MIN_HEIGHT,
+    CONFIRM_ANSWER_GAP, CONFIRM_HEIGHT, CONFIRM_LINES, CONFIRM_MARGIN, CONFIRM_MARGIN_ROWS,
+    CONFIRM_NO, CONFIRM_QUESTION, CONFIRM_YES, Carry, ELLIPSIS, FILES_KEY, FILING_HEADING,
+    FILING_RULES, FOOTER_HEIGHT, GUIDE, GUIDE_BRANCH, GUIDE_LAST, HEADER_GAP, HEADER_HEIGHT, Hit,
+    INDENT, KEY_DROP_ORDER, KEY_GAP, KEYS, LIVE_KEY, MARK, MARK_MARGIN, MARK_MARGIN_ROWS,
+    MOVE_KEYS, NO_MARKER, NOTE_MARKER, PACTING_KEYS, PACTING_QUIT_KEY, PACTING_RUN, PANEL_INDENT,
+    PATH_HEADING, PATH_RULES, PERCENT_WIDTH, PULL_KEY, PULL_LINES, PULL_QUESTION, PULL_SLICES,
+    PULL_STATUS, PULL_TEAM, PUSH_KEY, PUSH_LINES, PUSH_QUESTION, PUSH_TEAM, QUIT_KEY,
+    RECORD_HEADING, RECORD_HEIGHT, RECORD_LABEL_GAP, RECORD_LINES, RECORD_RULES, REFRESHING_RUN,
+    REVIEW_ANSWER_GAP, REVIEW_CREATE, REVIEW_FEEDBACK, REVIEW_FIXED_LINES, REVIEW_QUESTION,
+    REVIEW_SKIP, ROW_KEY, RUN_HEADER_HEIGHT, Reach, Review, SAID_MARKER, SCOPE_CURSOR,
+    SCOPE_HEADING, SCOPE_HEIGHT, SCOPE_LINES, SCOPE_MARGIN, SCOPE_MARGIN_ROWS, SCROLLBACK_ARROW,
+    SELECTED, SELECTION_MARKER, THREAD_TITLE, TREE_MIN_WIDTH, TREE_PERCENT, areas, carry_area,
+    centred, composer_height, composer_on_screen, confirm_area, confirm_size, display_width, draw,
+    footer_text_area, guide_prefixes, hit_test, keys_line, label_width, mark_area,
+    pacting_keys_line, pane_inner, panel_height, panel_reach, panel_row, panel_rows_area,
+    panel_width, pull_area, push_area, record_lines, record_size, review_area, run_header_height,
+    run_header_line, scope_size, tree_height, tree_rows_area, tree_width, truncated,
 };
 use crate::COMPOSER_MAX_ROWS;
 use crate::account::{Line as Entry, Outcome};
@@ -35,7 +36,7 @@ use crate::app::{App, Chrome, Focus, Row, Run, Sigils};
 use crate::claude::Activity;
 use crate::colour::{CONVERSATION_COLOUR, FOCUS_COLOUR, GUIDE_COLOUR, SYSTEM_COLOUR, colour_for};
 use crate::composer::Composer;
-use crate::confirm::{Answer, PullConfirm, PushConfirm, QuitConfirm};
+use crate::confirm::{Answer, Choice, PullConfirm, PushConfirm, QuitConfirm};
 use crate::fixture;
 use crate::panel::Mode;
 use crate::prompt::{RecordField, RecordForm, RecordPrompt, ScopeField, ScopePrompt};
@@ -6653,6 +6654,251 @@ fn the_pull_dialog_is_centred_over_the_frame_like_the_other_two() {
             "the frame behind shows through: {rows:?}"
         );
     }
+}
+
+// The slice one window is about, named as every line about it is.
+const REVIEW_SLICE: &str = "slice 1 `Gate the drafts`";
+
+const REVIEW_TITLES: [&str; 2] = [
+    "Put a window between the drafts and the board",
+    "Report what a create became by identifier",
+];
+
+fn review_window(feedback: bool) -> Review {
+    Review::open(
+        REVIEW_SLICE,
+        REVIEW_TITLES.map(str::to_owned).to_vec(),
+        feedback,
+    )
+}
+
+// The two windows a confirmed pull puts up, each on a frame with nothing else
+// on it, for `render_pull`'s reason: they come up over a session whose every
+// other window is down, and never with each other.
+fn render_review(app: &App, width: u16, height: u16, review: &Review) -> Buffer {
+    render_every(
+        app,
+        &Chrome::default(),
+        width,
+        height,
+        Instant::now(),
+        QuitConfirm::Closed,
+        &ScopePrompt::Closed,
+        &RecordPrompt::Closed,
+        &ScopePrompt::Closed,
+        &ScopePrompt::Closed,
+        &PushConfirm::Closed,
+        &PullConfirm::Closed,
+        Some(review),
+        None,
+        None,
+    )
+}
+
+fn render_carry(app: &App, width: u16, height: u16, carry: &Carry) -> Buffer {
+    render_every(
+        app,
+        &Chrome::default(),
+        width,
+        height,
+        Instant::now(),
+        QuitConfirm::Closed,
+        &ScopePrompt::Closed,
+        &RecordPrompt::Closed,
+        &ScopePrompt::Closed,
+        &ScopePrompt::Closed,
+        &PushConfirm::Closed,
+        &PullConfirm::Closed,
+        None,
+        Some(carry),
+        None,
+    )
+}
+
+#[test]
+fn the_review_window_names_the_slice_every_title_and_the_three_answers() {
+    let base = Instant::now();
+    let app = busy_app(base, WIDTH, FIXTURE_HEIGHT);
+    let review = review_window(true);
+
+    let buffer = render_review(&app, WIDTH, FIXTURE_HEIGHT, &review);
+
+    let area = review_area(buffer.area, &review);
+    let rows = dialog_rows(&buffer, area);
+    let on = |needle: &str| {
+        rows.iter()
+            .position(|row| row.contains(needle))
+            .unwrap_or_else(|| panic!("{needle:?} is not on the window: {rows:?}"))
+    };
+    // What is being asked, which slice it is about, what was drafted for it,
+    // and the three things that can be done about that.
+    let question = on(REVIEW_QUESTION);
+    let slice = on(REVIEW_SLICE);
+    let first = on(REVIEW_TITLES[0]);
+    let second = on(REVIEW_TITLES[1]);
+    let answers = on(REVIEW_SKIP.trim());
+
+    assert!(question < slice, "{rows:?}");
+    assert!(slice < first && first < second, "{rows:?}");
+    assert!(second < answers, "{rows:?}");
+    // Three answers on that line and nothing else, in the order a reader walks
+    // them with the arrows.
+    assert_eq!(inside_the_border(&rows[answers]), review_answers_text(true));
+    assert!(
+        column_of(&rows[answers], REVIEW_CREATE.trim())
+            < column_of(&rows[answers], REVIEW_SKIP.trim()),
+        "{rows:?}"
+    );
+    assert!(
+        column_of(&rows[answers], REVIEW_SKIP.trim())
+            < column_of(&rows[answers], REVIEW_FEEDBACK.trim()),
+        "{rows:?}"
+    );
+    // One row per title on top of the fixed five, so nothing being answered
+    // about is cut off.
+    assert_eq!(u16::try_from(rows.len()).expect("a short window"), {
+        REVIEW_FIXED_LINES
+            + u16::try_from(REVIEW_TITLES.len()).expect("two titles")
+            + 2 * CONFIRM_MARGIN_ROWS
+            + 2 * BORDER_THICKNESS
+    });
+}
+
+fn review_answers_text(feedback: bool) -> String {
+    let two = format!("{REVIEW_CREATE}{REVIEW_ANSWER_GAP}{REVIEW_SKIP}");
+    if feedback {
+        format!("{two}{REVIEW_ANSWER_GAP}{REVIEW_FEEDBACK}")
+    } else {
+        two
+    }
+    .trim()
+    .to_owned()
+}
+
+#[test]
+fn the_review_window_opens_on_skip_and_moves_only_the_highlight() {
+    let base = Instant::now();
+    let app = busy_app(base, WIDTH, FIXTURE_HEIGHT);
+    let opened = review_window(true);
+    let moved = opened.with_choice(Choice::Create);
+
+    let first = render_review(&app, WIDTH, FIXTURE_HEIGHT, &opened);
+    let second = render_review(&app, WIDTH, FIXTURE_HEIGHT, &moved);
+
+    let area = review_area(first.area, &opened);
+    // The answer that files issues is never the one under the reader's finger
+    // when the drafts arrive.
+    assert_lit_in(&first, area, REVIEW_SKIP);
+    assert_unlit_in(&first, area, REVIEW_CREATE);
+    assert_unlit_in(&first, area, REVIEW_FEEDBACK);
+    assert_lit_in(&second, area, REVIEW_CREATE);
+    assert_unlit_in(&second, area, REVIEW_SKIP);
+    // And nothing else moved: the slice and its titles are drawn in the same
+    // rows whichever answer is lit.
+    assert_eq!(
+        dialog_rows(&first, area),
+        dialog_rows(&second, review_area(second.area, &moved))
+    );
+}
+
+#[test]
+fn a_slice_that_has_spent_its_redraft_is_drawn_with_two_answers() {
+    // One redraft each, and a window that still drew the third would be
+    // offering something no key can reach.
+    let base = Instant::now();
+    let app = busy_app(base, WIDTH, FIXTURE_HEIGHT);
+    let review = review_window(false);
+
+    let buffer = render_review(&app, WIDTH, FIXTURE_HEIGHT, &review);
+
+    let rows = dialog_rows(&buffer, review_area(buffer.area, &review));
+    let answers = rows
+        .iter()
+        .position(|row| row.contains(REVIEW_SKIP.trim()))
+        .expect("the answers are drawn");
+    assert_eq!(
+        inside_the_border(&rows[answers]),
+        review_answers_text(false)
+    );
+    for row in &rows {
+        assert!(
+            !row.contains(REVIEW_FEEDBACK.trim()),
+            "a spent redraft is drawn: {rows:?}"
+        );
+    }
+}
+
+#[test]
+fn the_review_window_is_centred_and_bordered_like_every_other_question() {
+    let base = Instant::now();
+    let app = busy_app(base, WIDTH, FIXTURE_HEIGHT);
+    let review = review_window(true);
+
+    let buffer = render_review(&app, WIDTH, FIXTURE_HEIGHT, &review);
+
+    let area = review_area(buffer.area, &review);
+    let left = area.x;
+    let right = WIDTH - (area.x + area.width);
+    let above = area.y;
+    let below = FIXTURE_HEIGHT - (area.y + area.height);
+    assert!(
+        left.abs_diff(right) <= 1,
+        "{left} columns left, {right} right"
+    );
+    assert!(
+        above.abs_diff(below) <= 1,
+        "{above} rows above, {below} below"
+    );
+    let rows = dialog_rows(&buffer, area);
+    assert!(
+        rows[0].starts_with('┌') && rows[0].ends_with('┐'),
+        "{rows:?}"
+    );
+    let last = rows.last().expect("the window has rows");
+    assert!(last.starts_with('└') && last.ends_with('┘'), "{rows:?}");
+    for row in &rows[1..rows.len() - 1] {
+        assert!(row.starts_with('│') && row.ends_with('│'), "{rows:?}");
+        assert!(
+            !row.contains(UNDERNEATH),
+            "the frame behind shows through: {rows:?}"
+        );
+    }
+}
+
+// What the run handed the question, already worded: the window says it and does
+// not count anything itself.
+const CARRY_REMAINING: &str = "2 slices";
+
+#[test]
+fn the_carry_on_question_says_what_is_left_and_opens_on_no() {
+    let base = Instant::now();
+    let app = busy_app(base, WIDTH, FIXTURE_HEIGHT);
+    let opened = Carry::open(CARRY_REMAINING);
+    let moved = opened.with_answer(Answer::Yes);
+
+    let buffer = render_carry(&app, WIDTH, FIXTURE_HEIGHT, &opened);
+    let lit = render_carry(&app, WIDTH, FIXTURE_HEIGHT, &moved);
+
+    let area = carry_area(buffer.area, &opened);
+    let rows = dialog_rows(&buffer, area);
+    let on = |needle: &str| {
+        rows.iter()
+            .position(|row| row.contains(needle))
+            .unwrap_or_else(|| panic!("{needle:?} is not on the window: {rows:?}"))
+    };
+    let question = on(CARRY_QUESTION);
+    let left = on(&format!("{CARRY_REMAINING}{CARRY_LEFT}"));
+    let answers = on(CONFIRM_YES.trim());
+
+    assert!(question < left && left < answers, "{rows:?}");
+    // The quit question's two answers in the quit question's order.
+    assert_eq!(inside_the_border(&rows[answers]), answers_text());
+    assert_lit_in(&buffer, area, CONFIRM_NO);
+    assert_unlit_in(&buffer, area, CONFIRM_YES);
+    assert_lit_in(&lit, carry_area(lit.area, &moved), CONFIRM_YES);
+    assert_eq!(u16::try_from(rows.len()).expect("a short window"), {
+        CARRY_LINES + 2 * CONFIRM_MARGIN_ROWS + 2 * BORDER_THICKNESS
+    });
 }
 
 const SCOPED: &str = "crates/warlock-engine";

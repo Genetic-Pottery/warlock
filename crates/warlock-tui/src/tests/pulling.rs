@@ -193,6 +193,29 @@ fn landing<O: Opens, A: Converses>(app: &mut App, pulls: &mut Pulls<O, A>) -> us
     rounds
 }
 
+// Rounds until the run is over, drained and never blocked on — the loop draws
+// and then drains, so a test that waited on a channel would be a test of
+// something the panel does not do — with the window each slice's drafts stop
+// behind answered the way somebody at the panel would answer it: Skip, which
+// sends nothing at all, and a Yes to the carry-on question behind it.
+//
+// Skip and not Create, because what a run drafts and what becomes of the drafts
+// are two questions: every test that drives this one is about the first, and the
+// second is `reviewing`'s own.
+fn through<O: Opens, A: Converses>(app: &mut App, pulls: &mut Pulls<O, A>) {
+    let waited = Instant::now();
+    while pulls.drafting() && waited.elapsed() < AT_MOST {
+        drop(pulls.keep_up(app, now()));
+        if pulls.reviewing().is_some() {
+            pulls.skip(app, now());
+        }
+        if pulls.carrying().is_some() {
+            pulls.carry_on(app, now());
+        }
+    }
+    assert!(!pulls.drafting(), "the run never finished");
+}
+
 // The engine's own sentence for a refusal, flattened as the thread takes it:
 // these tests assert the line *is* that sentence rather than restating it.
 fn refusal(error: &Error) -> String {
@@ -216,10 +239,11 @@ fn unasked() -> Scripted {
 // is ever up and so the only way a run ever starts. The two directories come
 // back with it because they are the repository and the home the value is
 // reading: dropped here, every path under test would be gone before the answer.
-fn asked_over(
-    linear: Reading,
-    agent: Scripted,
-) -> (App, Pulls<Reading, Scripted>, TempDir, TempDir) {
+//
+// Generic over the workspace for the one difference a run that files has: a
+// create sends over the same seam the fetch read over, so the tests below that
+// answer a window hand in a board that can answer both.
+fn asked_over<O: Opens>(linear: O, agent: Scripted) -> (App, Pulls<O, Scripted>, TempDir, TempDir) {
     asked_proposing(linear, agent, unasked())
 }
 
@@ -227,11 +251,11 @@ fn asked_over(
 // attempt at a question is asked in. Separate from the slice's own script
 // because they are separate sessions, so a test that scripts one and leaves the
 // other empty is a test that says which of the two was asked.
-fn asked_proposing(
-    linear: Reading,
+fn asked_proposing<O: Opens>(
+    linear: O,
     agent: Scripted,
     proposer: Scripted,
-) -> (App, Pulls<Reading, Scripted>, TempDir, TempDir) {
+) -> (App, Pulls<O, Scripted>, TempDir, TempDir) {
     let repo = a_repository();
     let home = a_home(repo.path());
     filed(repo.path(), &[]);
@@ -749,7 +773,7 @@ mod cutting {
     use super::{
         AT_MOST, Answering, App, FIRST, Gate, Instant, NAME, Pulls, Reading, SECOND, Scripted,
         THIRD, a_home, a_project, a_repository, asked_over, filed, landing, notes, now, press,
-        unasked,
+        through, unasked,
     };
 
     // The three `[n/total]` prefixes a run over this project says, in the order
@@ -761,17 +785,6 @@ mod cutting {
         "[2/3] slice 2 `Parse the scope block` — drafting",
         "[3/3] slice 3 `File the drafts` — drafting",
     ];
-
-    // Rounds until the run has finished, drained and never blocked on: the loop
-    // draws and then drains, so a test that waited on a channel would be a test
-    // of something the panel does not do.
-    fn through(app: &mut App, pulls: &mut Pulls<Reading, Scripted>) {
-        let waited = Instant::now();
-        while pulls.drafting() && waited.elapsed() < AT_MOST {
-            pulls.keep_up(app, now());
-        }
-        assert!(!pulls.drafting(), "the run never finished");
-    }
 
     // A confirmed question and the run it starts, over a scripted model.
     fn cut(linear: Reading, agent: Scripted) -> (App, Pulls<Reading, Scripted>, TempDir, TempDir) {
@@ -1079,7 +1092,7 @@ mod relaying {
 
     use super::{
         AT_MOST, Answering, App, FIRST, Gate, Instant, Pulls, Reading, SECOND, Scripted, THIRD,
-        a_project, asked_proposing, notes, now,
+        a_project, asked_proposing, notes, now, through,
     };
 
     // The question the first slice comes back with, and warlock's attempt at it:
@@ -1145,16 +1158,6 @@ mod relaying {
     // away: the tests that care about the draft ask for it through `attempted`.
     fn round(app: &mut App, pulls: &mut Pulls<Reading, Scripted>) {
         drop(pulls.keep_up(app, now()));
-    }
-
-    // Rounds until the run is over, which after an answer is the three slices
-    // drafting one after another.
-    fn through(app: &mut App, pulls: &mut Pulls<Reading, Scripted>) {
-        let waited = Instant::now();
-        while pulls.drafting() && waited.elapsed() < AT_MOST {
-            round(app, pulls);
-        }
-        assert!(!pulls.drafting(), "the run never finished");
     }
 
     fn answered(said: &[String]) -> Vec<String> {
@@ -1473,5 +1476,553 @@ mod relaying {
             !said.iter().any(|line| line.contains(PROPOSED)),
             "an attempt nobody was waiting for was said: {said:?}"
         );
+    }
+}
+
+// The window between a slice's drafts and the board: the titles offered, the
+// three answers, and what each of them costs. Driven at the value the loop
+// holds, over a workspace that answers the writes as well as the read, so what
+// a create sent and what a skip did not are both things these tests can say.
+mod reviewing {
+    use tempfile::TempDir;
+    use warlock_engine::{CutRecord, Filed};
+    use warlock_tui::{Answer, Choice};
+
+    use super::{
+        AT_MOST, Answering, App, BRIEF, FIRST, Instant, Pulls, SECOND, Scripted, THIRD, a_project,
+        asked_over, notes, now,
+    };
+    use crate::stubs::Filling;
+
+    // What somebody types about drafts they have just read, which is the one
+    // thing a redrafting session hears.
+    const FEEDBACK: &str = "Two tickets is one too many — say it in one.";
+
+    // What the redraft comes back as, named so that a window offering it cannot
+    // be mistaken for the window that was up before the feedback.
+    const REDRAFTED: &str = "Read the project back, said again";
+
+    // A confirmed run over a board that can be filed into as well as read.
+    fn cut(linear: Filling, agent: Scripted) -> (App, Pulls<Filling, Scripted>, TempDir, TempDir) {
+        let (mut app, mut pulls, repo, home) = asked_over(linear, agent);
+        pulls.cut(&mut app, now());
+        (app, pulls, repo, home)
+    }
+
+    // The whole of the project's three slices, each drafted first time: the
+    // scripts below add to this only when a slice is to be redrafted.
+    fn drafting_each() -> Scripted {
+        Scripted::saying([
+            Answering::drafts(FIRST),
+            Answering::drafts(SECOND),
+            Answering::drafts(THIRD),
+        ])
+    }
+
+    // The same three slices with a redraft of the first written into the script:
+    // it drafts, the reader says what is wrong with what it drafted, and it
+    // answers again in its own words.
+    fn redrafting() -> Scripted {
+        Scripted::saying([
+            Answering::drafts(FIRST),
+            Answering::drafts(REDRAFTED),
+            Answering::drafts(SECOND),
+            Answering::drafts(THIRD),
+        ])
+    }
+
+    // Rounds until the slice under way is waiting behind the window, drained and
+    // never blocked on, for the reason every other helper here is.
+    fn offered(app: &mut App, pulls: &mut Pulls<Filling, Scripted>) {
+        let waited = Instant::now();
+        while pulls.reviewing().is_none() && waited.elapsed() < AT_MOST {
+            drop(pulls.keep_up(app, now()));
+        }
+        assert!(
+            pulls.reviewing().is_some(),
+            "no drafts were ever offered: {:?}",
+            notes(app)
+        );
+    }
+
+    // Rounds until the answer that was given has come to whatever it comes to:
+    // the next slice's window, or a run that is over. Both are endings, and a
+    // helper per ending would be two ways of saying the same wait.
+    fn settled(app: &mut App, pulls: &mut Pulls<Filling, Scripted>) {
+        let waited = Instant::now();
+        while pulls.drafting() && pulls.reviewing().is_none() && waited.elapsed() < AT_MOST {
+            drop(pulls.keep_up(app, now()));
+        }
+        assert!(
+            !pulls.drafting() || pulls.reviewing().is_some(),
+            "the answer never came to anything: {:?}",
+            notes(app)
+        );
+    }
+
+    // The window's three answers, taken off the value that is up rather than
+    // pressed: which key means which is `confirm.rs`'s, asserted there.
+    fn titles(pulls: &Pulls<Filling, Scripted>) -> Vec<String> {
+        pulls.reviewing().expect("a window is up").titles().to_vec()
+    }
+
+    // What the record beside the brief claims, which is the one thing that stops
+    // the next run filing the same drafts again.
+    fn cuts(root: &std::path::Path) -> Vec<CutRecord> {
+        Filed::load(root)
+            .expect("a record file that loads")
+            .record(BRIEF)
+            .expect("the brief is filed")
+            .cuts()
+            .to_vec()
+    }
+
+    // Which of the run's lines is about a slice, by the prefix every line about
+    // one carries.
+    fn about(said: &[String], slice: &str) -> Vec<String> {
+        said.iter()
+            .filter(|line| line.contains(&format!("`{slice}`")))
+            .cloned()
+            .collect()
+    }
+
+    #[test]
+    fn a_slices_drafts_wait_behind_a_window_with_their_titles_on_the_thread() {
+        // Nothing a run drafts becomes an issue on its own: the titles are said
+        // as they arrive and then the slice stops, with the board still holding
+        // the one request the fetch made.
+        let linear = Filling::over(a_project());
+        let (mut app, mut pulls, _repo, _home) = cut(linear.clone(), drafting_each());
+
+        offered(&mut app, &mut pulls);
+
+        let review = pulls.reviewing().expect("a window is up");
+        assert_eq!(review.slice(), format!("slice 1 `{FIRST}`"));
+        assert_eq!(
+            review.titles(),
+            [
+                format!("Stand in for {FIRST}"),
+                format!("Follow on from {FIRST}"),
+            ]
+        );
+        // Skip is lit, so the round that put this up and an Enter straight
+        // after it file nothing at all.
+        assert_eq!(review.choice(), Choice::Skip);
+        assert!(review.feedback(), "the one redraft is not offered");
+        let said = notes(&app);
+        assert!(
+            about(&said, FIRST)
+                .iter()
+                .any(|line| line.contains("drafted `")),
+            "the titles are not on the thread: {said:?}"
+        );
+        assert_eq!(linear.requests(), 1, "the drafts were filed unasked");
+        assert!(
+            !said.iter().any(|line| line.contains(SECOND)),
+            "the run walked past a window: {said:?}"
+        );
+    }
+
+    #[test]
+    fn create_files_the_slice_and_reports_what_it_became_by_identifier() {
+        // The one thing about an issue that must not be lost, said in the words
+        // the cut record keeps it in — and the record itself is written by the
+        // filing path, which is what stops the next run filing these again.
+        let linear = Filling::over(a_project());
+        let (mut app, mut pulls, repo, _home) = cut(linear.clone(), drafting_each());
+        offered(&mut app, &mut pulls);
+
+        pulls.create(&mut app, now());
+        settled(&mut app, &mut pulls);
+
+        let said = notes(&app);
+        let filed: Vec<String> = about(&said, FIRST)
+            .into_iter()
+            .filter(|line| line.contains("cut into"))
+            .collect();
+        assert_eq!(
+            filed,
+            vec![format!("slice 1 `{FIRST}` — cut into `WAR-1`, `WAR-2`")],
+            "the identifiers are not on the thread: {said:?}"
+        );
+        let cuts = cuts(repo.path());
+        assert_eq!(cuts.len(), 1, "the cut record was not written: {cuts:?}");
+        assert_eq!(cuts[0].issues(), ["WAR-1".to_owned(), "WAR-2".to_owned()]);
+        assert_eq!(
+            linear
+                .documents()
+                .iter()
+                .filter(|document| document.contains("issueCreate("))
+                .count(),
+            2,
+            "one issue per draft, and no more"
+        );
+        // And the run goes on: the window up now is the next slice's.
+        assert_eq!(
+            pulls.reviewing().map(|review| review.slice().to_owned()),
+            Some(format!("slice 2 `{SECOND}`"))
+        );
+    }
+
+    #[test]
+    fn an_edge_linear_turned_down_is_its_own_line_beside_the_identifiers() {
+        // The issues exist either way, and an issue with a missing edge is
+        // something a person can fix on the board — if they are told.
+        let linear = Filling::refusing_relations(a_project(), "that relation already exists");
+        let (mut app, mut pulls, _repo, _home) = cut(linear, drafting_each());
+        offered(&mut app, &mut pulls);
+
+        pulls.create(&mut app, now());
+        settled(&mut app, &mut pulls);
+
+        let said = notes(&app);
+        let refused: Vec<String> = about(&said, FIRST)
+            .into_iter()
+            .filter(|line| line.contains("was not written as blocking"))
+            .collect();
+        assert_eq!(
+            refused.len(),
+            1,
+            "the edge Linear turned down is not on the thread: {said:?}"
+        );
+        assert!(
+            refused[0].contains("that relation already exists"),
+            "{:?} does not carry Linear's own words",
+            refused[0]
+        );
+        assert!(
+            about(&said, FIRST)
+                .iter()
+                .any(|line| line.contains("cut into `WAR-1`, `WAR-2`")),
+            "a refused edge took the issues down with it: {said:?}"
+        );
+    }
+
+    #[test]
+    fn a_create_that_came_to_nothing_is_one_line_and_the_run_carries_on() {
+        // A team with nowhere to put an issue is refused while the slice is
+        // still nothing on the board. One line, the session alive, the panel
+        // usable, and the next slice offered.
+        let linear = Filling::without_the_team(a_project());
+        let (mut app, mut pulls, repo, _home) = cut(linear, drafting_each());
+        offered(&mut app, &mut pulls);
+
+        pulls.create(&mut app, now());
+        settled(&mut app, &mut pulls);
+
+        let said = notes(&app);
+        let unfiled: Vec<String> = about(&said, FIRST)
+            .into_iter()
+            .filter(|line| line.contains("was not filed"))
+            .collect();
+        assert_eq!(
+            unfiled.len(),
+            1,
+            "a refusal cost more than a line: {said:?}"
+        );
+        assert!(
+            cuts(repo.path()).is_empty(),
+            "a slice nothing was filed for was recorded as cut"
+        );
+        assert!(pulls.drafting(), "a refused create took the run down");
+        assert_eq!(
+            pulls.reviewing().map(|review| review.slice().to_owned()),
+            Some(format!("slice 2 `{SECOND}`")),
+            "the run did not reach the next slice: {said:?}"
+        );
+    }
+
+    #[test]
+    fn a_skip_records_nothing_and_asks_whether_to_carry_on() {
+        // A skipped slice is one the next `/pull` offers again, which is the
+        // whole difference between skipping drafts and filing them.
+        let linear = Filling::over(a_project());
+        let (mut app, mut pulls, repo, _home) = cut(linear.clone(), drafting_each());
+        offered(&mut app, &mut pulls);
+
+        pulls.skip(&mut app, now());
+
+        let said = notes(&app);
+        assert!(
+            about(&said, FIRST)
+                .iter()
+                .any(|line| line.contains("was skipped; nothing was recorded for it")),
+            "the skip is not on the thread: {said:?}"
+        );
+        assert_eq!(linear.requests(), 1, "a skip sent something to the board");
+        assert!(cuts(repo.path()).is_empty(), "a skip wrote a cut record");
+        let carry = pulls.carrying().expect("the carry-on question is up");
+        assert_eq!(carry.left(), "2 slices");
+        // No is lit, so the answer that is under the finger is the one that
+        // leaves the rest of the project alone.
+        assert_eq!(carry.answer(), Answer::No);
+        assert!(
+            pulls.reviewing().is_none(),
+            "the window is up behind its own answer"
+        );
+    }
+
+    #[test]
+    fn a_no_to_the_carry_on_question_leaves_the_slices_after_it_unoffered() {
+        // The run ends here and the slices behind it are untouched: nothing was
+        // drafted for them, nothing was sent about them, and the next `/pull`
+        // finds them exactly as this one did.
+        let linear = Filling::over(a_project());
+        let agent = drafting_each();
+        let (mut app, mut pulls, _repo, _home) = cut(linear.clone(), agent.clone());
+        offered(&mut app, &mut pulls);
+        pulls.skip(&mut app, now());
+
+        pulls.stop(&mut app, now());
+
+        assert!(!pulls.drafting(), "a No left the run running");
+        assert_eq!(agent.turns(), 1, "a slice past the No was drafted");
+        let said = notes(&app);
+        assert!(
+            said.iter()
+                .any(|line| line == "the run stopped; 2 slices left for another pull"),
+            "the run did not say what it left: {said:?}"
+        );
+        assert!(
+            !said.iter().any(|line| line.contains(SECOND)),
+            "a slice that was never offered was named: {said:?}"
+        );
+        assert_eq!(linear.requests(), 1, "a stopped run sent something");
+    }
+
+    #[test]
+    fn a_yes_to_the_carry_on_question_moves_to_the_next_slice() {
+        // The other answer, which is a run that goes on where it left off: the
+        // slice after the skipped one is drafted and offered in its turn.
+        let linear = Filling::over(a_project());
+        let (mut app, mut pulls, _repo, _home) = cut(linear, drafting_each());
+        offered(&mut app, &mut pulls);
+        pulls.skip(&mut app, now());
+
+        pulls.carry_on(&mut app, now());
+        offered(&mut app, &mut pulls);
+
+        assert_eq!(
+            pulls.reviewing().map(|review| review.slice().to_owned()),
+            Some(format!("slice 2 `{SECOND}`"))
+        );
+        assert!(
+            pulls.carrying().is_none(),
+            "the question is up behind its own answer"
+        );
+    }
+
+    #[test]
+    fn the_last_slice_skipped_ends_the_run_without_asking() {
+        // A question whose only answer is "there is nothing left" is one nobody
+        // should have to press a key for.
+        let linear = Filling::over(a_project());
+        let (mut app, mut pulls, _repo, _home) = cut(linear, drafting_each());
+        for _ in 0..2 {
+            offered(&mut app, &mut pulls);
+            pulls.skip(&mut app, now());
+            pulls.carry_on(&mut app, now());
+        }
+        offered(&mut app, &mut pulls);
+
+        pulls.skip(&mut app, now());
+
+        assert!(pulls.carrying().is_none(), "the last slice asked anyway");
+        assert!(!pulls.drafting(), "the run outlived its last slice");
+        let said = notes(&app);
+        assert!(
+            about(&said, THIRD)
+                .iter()
+                .any(|line| line.contains("was skipped")),
+            "the last slice was not reported as skipped: {said:?}"
+        );
+    }
+
+    #[test]
+    fn feedback_redrafts_that_one_slice_and_offers_the_window_again() {
+        // The field takes whatever the reader has to say, it goes to the session
+        // that drafted these — so it is feedback about something that session
+        // said — and what comes back is offered in its turn.
+        let linear = Filling::over(a_project());
+        let agent = redrafting();
+        let (mut app, mut pulls, _repo, _home) = cut(linear, agent.clone());
+        offered(&mut app, &mut pulls);
+
+        pulls.feedback(&mut app, now());
+
+        assert!(pulls.relaying(), "the field is not taking the feedback");
+        assert_eq!(
+            pulls.answering(),
+            Some(format!("redrafting slice 1 `{FIRST}`"))
+        );
+        assert!(
+            pulls.reviewing().is_none(),
+            "the window is up while its own feedback is being typed"
+        );
+        pulls.answered(&mut app, FEEDBACK, now());
+        offered(&mut app, &mut pulls);
+
+        assert!(
+            agent.said().iter().any(|turn| turn == FEEDBACK),
+            "the feedback did not reach the session that drafted: {:?}",
+            agent.said()
+        );
+        assert_eq!(
+            titles(&pulls),
+            [
+                format!("Stand in for {REDRAFTED}"),
+                format!("Follow on from {REDRAFTED}"),
+            ],
+            "the window is not about what came back"
+        );
+        let said = notes(&app);
+        assert!(
+            about(&said, FIRST)
+                .iter()
+                .any(|line| line.contains("is being redrafted:") && line.contains(FEEDBACK)),
+            "the thread does not say what was asked for: {said:?}"
+        );
+    }
+
+    #[test]
+    fn a_second_feedback_is_not_offered_and_answers_nothing() {
+        // One redraft each: the window that comes back from one is drawn with
+        // two answers, and the key that would ask for another reaches a window
+        // that does not have it.
+        let linear = Filling::over(a_project());
+        let agent = redrafting();
+        let (mut app, mut pulls, _repo, _home) = cut(linear, agent.clone());
+        offered(&mut app, &mut pulls);
+        pulls.feedback(&mut app, now());
+        pulls.answered(&mut app, FEEDBACK, now());
+        offered(&mut app, &mut pulls);
+        let said = notes(&app).len();
+
+        assert!(
+            !pulls
+                .reviewing()
+                .expect("the window is up again")
+                .feedback(),
+            "a second redraft is offered"
+        );
+        pulls.feedback(&mut app, now());
+
+        assert!(
+            pulls.reviewing().is_some(),
+            "a second feedback took the window down"
+        );
+        assert!(!pulls.relaying(), "a second feedback asked for text");
+        assert_eq!(agent.turns(), 2, "the slice was redrafted twice");
+        assert_eq!(
+            notes(&app).len(),
+            said,
+            "a key that reached the wrong window said something"
+        );
+    }
+
+    #[test]
+    fn the_run_carries_on_past_a_redraft_with_its_own_redraft_back() {
+        // The redraft is spent by the slice that used it and not by the run: the
+        // slice after a redrafted one is offered its own.
+        let linear = Filling::over(a_project());
+        let (mut app, mut pulls, _repo, _home) = cut(linear, redrafting());
+        offered(&mut app, &mut pulls);
+        pulls.feedback(&mut app, now());
+        pulls.answered(&mut app, FEEDBACK, now());
+        offered(&mut app, &mut pulls);
+
+        pulls.skip(&mut app, now());
+        pulls.carry_on(&mut app, now());
+        offered(&mut app, &mut pulls);
+
+        assert!(
+            pulls
+                .reviewing()
+                .expect("the next slice's window is up")
+                .feedback(),
+            "the next slice has no redraft of its own"
+        );
+    }
+
+    #[test]
+    fn an_answer_to_a_window_that_is_not_up_does_nothing_at_all() {
+        // A key that arrived a round late, which the loop's one question cannot
+        // rule out: every answer here is a no-op with nothing waiting, so a
+        // stale press cannot file drafts nobody was looking at.
+        let linear = Filling::over(a_project());
+        let (mut app, mut pulls, repo, _home) = cut(linear.clone(), drafting_each());
+
+        pulls.create(&mut app, now());
+        pulls.skip(&mut app, now());
+        pulls.feedback(&mut app, now());
+        pulls.carry_on(&mut app, now());
+        pulls.stop(&mut app, now());
+        pulls.review_lit(Choice::Create);
+        pulls.carry_lit(Answer::Yes);
+
+        assert!(pulls.drafting(), "a stale answer took the run down");
+        assert_eq!(linear.requests(), 1, "a stale answer sent something");
+        assert!(
+            cuts(repo.path()).is_empty(),
+            "a stale answer wrote a record"
+        );
+    }
+
+    #[test]
+    fn an_arrow_lights_another_answer_and_leaves_the_drafts_where_they_were() {
+        // Answering re-lights the window rather than building a second one: what
+        // is being answered about rides along, because nothing would hand the
+        // drafts over again.
+        let linear = Filling::over(a_project());
+        let (mut app, mut pulls, _repo, _home) = cut(linear, drafting_each());
+        offered(&mut app, &mut pulls);
+        let offered_titles = titles(&pulls);
+
+        pulls.review_lit(Choice::Create);
+
+        let review = pulls.reviewing().expect("the window is still up");
+        assert_eq!(review.choice(), Choice::Create);
+        assert_eq!(review.titles(), offered_titles.as_slice());
+        assert_eq!(review.slice(), format!("slice 1 `{FIRST}`"));
+
+        pulls.skip(&mut app, now());
+        pulls.carry_lit(Answer::Yes);
+
+        let carry = pulls.carrying().expect("the question is still up");
+        assert_eq!(carry.answer(), Answer::Yes);
+        assert_eq!(carry.left(), "2 slices");
+    }
+
+    #[test]
+    fn nothing_a_run_sends_is_a_mutation_of_the_project() {
+        // The promise the whole command is written around: a pull reads the
+        // project, files issues out of it and edges between them, and leaves the
+        // project exactly as it found it — `Planned`, with nobody assigned to
+        // anything.
+        let linear = Filling::over(a_project());
+        let (mut app, mut pulls, _repo, _home) = cut(linear.clone(), drafting_each());
+        for _ in 0..3 {
+            offered(&mut app, &mut pulls);
+            pulls.create(&mut app, now());
+            settled(&mut app, &mut pulls);
+        }
+
+        assert!(!pulls.drafting(), "the run never finished");
+        let sent: Vec<String> = linear
+            .documents()
+            .into_iter()
+            .filter(|document| document.contains("mutation"))
+            .collect();
+        assert!(!sent.is_empty(), "nothing was filed at all");
+        for document in &sent {
+            assert!(
+                document.contains("IssueCreate") || document.contains("IssueRelationCreate"),
+                "a run sent a mutation that is not an issue or an edge: {document}"
+            );
+            assert!(
+                !document.contains("project"),
+                "a run sent a mutation naming the project: {document}"
+            );
+        }
     }
 }

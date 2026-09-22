@@ -3669,11 +3669,24 @@ mod cutting {
         );
     }
 
-    // Rounds until the run is over, so the suite leaves no worker parked.
+    // Rounds until the run is over, so the suite leaves no worker parked, with
+    // the two windows a run puts up answered by the keys that answer them:
+    // `s` files nothing for the slice, and the carry-on question behind it is a
+    // Left onto Yes and an Enter, exactly as the dialog before the run was.
+    //
+    // Skip and not Create, because what these tests are about is the relay: the
+    // drafts a slice settles on are `pulling.rs`'s own to be answered about.
     fn through(driven: &mut Cutting) {
         let waited = Instant::now();
         while driven.pulls.drafting() && waited.elapsed() < AT_MOST {
             round(driven);
+            if driven.pulls.reviewing().is_some() {
+                assert!(pressed(driven, KeyCode::Char('s')));
+            }
+            if driven.pulls.carrying().is_some() {
+                assert!(pressed(driven, KeyCode::Left));
+                assert!(pressed(driven, KeyCode::Enter));
+            }
         }
         assert!(!driven.pulls.drafting(), "the run never finished");
     }

@@ -434,6 +434,163 @@ impl Posts for Reading {
     }
 }
 
+/// The whole of a pull's conversation with a board: the one request the fetch
+/// makes, answered by the [`Reading`] this wraps, and then the requests a create
+/// sends for one slice's drafts.
+///
+/// A wrapper rather than a fourth stand-in with a project of its own, because a
+/// run reads and writes over one seam: the client the fetch was made with and
+/// the one the filing worker builds are both this value, and a second value
+/// holding the same project would be two opinions about one workspace.
+///
+/// Every document is kept whether it was answered or refused, which is how a
+/// test says what a run sent — and, more to the point, what it did not: nothing
+/// a pull may do moves a project's status, and the way to check that is to read
+/// the list.
+#[derive(Debug, Clone)]
+pub(crate) struct Filling {
+    reading: Reading,
+    asked: Arc<Mutex<Vec<String>>>,
+    // Issues are numbered as they are created, so the identifiers a test reads
+    // off the thread are this workspace's own answers in the order it gave them.
+    filed: Arc<Mutex<u32>>,
+    trouble: Option<Trouble>,
+}
+
+/// What this workspace is to go wrong about: the two failures a create has to
+/// survive, and they fail at opposite ends of it.
+///
+/// An edge turned down leaves every issue standing, so what is at stake is
+/// whether the refusal is reported beside the identifiers. A team with nowhere
+/// to put an issue is refused before anything exists at all, so what is at stake
+/// is whether the run carries on.
+#[derive(Debug, Clone)]
+enum Trouble {
+    Relations(String),
+    NoTeam,
+}
+
+impl Filling {
+    /// A workspace that answers everything a create asks for: the team, its
+    /// `Backlog` state, the label, an issue per draft and every edge between
+    /// them.
+    pub(crate) fn over(reading: Reading) -> Self {
+        Self {
+            reading,
+            asked: Arc::new(Mutex::new(Vec::new())),
+            filed: Arc::new(Mutex::new(0)),
+            trouble: None,
+        }
+    }
+
+    /// The same workspace, turning every edge down in Linear's own words while
+    /// the issues themselves are created.
+    pub(crate) fn refusing_relations(reading: Reading, message: impl Into<String>) -> Self {
+        Self {
+            trouble: Some(Trouble::Relations(message.into())),
+            ..Self::over(reading)
+        }
+    }
+
+    /// A workspace with no team by the key the scope record names, which is a
+    /// create refused while the slice is still nothing on the board.
+    pub(crate) fn without_the_team(reading: Reading) -> Self {
+        Self {
+            trouble: Some(Trouble::NoTeam),
+            ..Self::over(reading)
+        }
+    }
+
+    /// Every document this workspace was asked, in the order it was asked.
+    pub(crate) fn documents(&self) -> Vec<String> {
+        self.asked
+            .lock()
+            .expect("no test panics holding this")
+            .clone()
+    }
+
+    pub(crate) fn requests(&self) -> usize {
+        self.asked
+            .lock()
+            .expect("no test panics holding this")
+            .len()
+    }
+
+    // The next identifier, which is what a cut record keeps of an issue and so
+    // what the thread reports.
+    fn next_issue(&self) -> Value {
+        let mut filed = self.filed.lock().expect("no test panics holding this");
+        *filed += 1;
+        let number = *filed;
+
+        json!({
+            "issueCreate": {
+                "issue": {
+                    "id": format!("issue-{number}"),
+                    "identifier": format!("WAR-{number}"),
+                    "url": format!("https://linear.app/acme/issue/WAR-{number}"),
+                },
+            },
+        })
+    }
+}
+
+impl Opens for Filling {
+    type Client = Self;
+
+    fn open(&self, _key: &str) -> Self {
+        self.clone()
+    }
+}
+
+impl Posts for Filling {
+    fn post(&self, document: &str, variables: Value) -> Result<Value, LinearError> {
+        self.asked
+            .lock()
+            .expect("no test panics holding this")
+            .push(document.to_owned());
+
+        // The fetch's own request, answered by the project this was built over:
+        // one workspace, read by the same value that is then filed into.
+        if document.contains("project(id:") {
+            return self.reading.post(document, variables);
+        }
+        if document.contains("teams(") {
+            let nodes = match self.trouble {
+                Some(Trouble::NoTeam) => json!([]),
+                _ => json!([{ "id": "team-held" }]),
+            };
+            return Ok(json!({ "teams": { "nodes": nodes } }));
+        }
+        if document.contains("workflowStates(") {
+            return Ok(json!({
+                "workflowStates": { "nodes": [{ "id": "state-backlog", "name": "Backlog" }] }
+            }));
+        }
+        if document.contains("issueLabels(") {
+            return Ok(json!({ "issueLabels": { "nodes": [{ "id": "label-held" }] } }));
+        }
+        if document.contains("issueCreate(") {
+            return Ok(self.next_issue());
+        }
+        if document.contains("issueRelationCreate(") {
+            if let Some(Trouble::Relations(message)) = &self.trouble {
+                return Err(LinearError::Refused {
+                    message: message.clone(),
+                });
+            }
+            return Ok(json!({
+                "issueRelationCreate": { "issueRelation": { "id": "relation-held" } }
+            }));
+        }
+
+        // A document this does not know is a request no pull was meant to make
+        // — a project's status among them, which this workspace has no answer
+        // for precisely because nothing here may send one.
+        panic!("a pull asked for something no workspace was given: {document}");
+    }
+}
+
 /// A request held open, for the one thing about a worker a finished push cannot
 /// show: that the loop goes round — drawing, answering keys — while it is in
 /// flight. A test holds the gate shut, counts rounds, and opens it.

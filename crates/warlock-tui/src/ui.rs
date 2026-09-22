@@ -1472,10 +1472,15 @@ fn pull_size(cutting: &Cutting) -> Size {
 fn draw_review(frame: &mut Frame<'_>, screen: Rect, review: &Review) {
     draw_over(
         frame,
-        centred(screen, review_size(review)),
+        review_area(screen, review),
         Padding::symmetric(CONFIRM_MARGIN, CONFIRM_MARGIN_ROWS),
         review_lines(review),
     );
+}
+
+// Where the review window lands, which is where every other question lands.
+fn review_area(screen: Rect, review: &Review) -> Rect {
+    centred(screen, review_size(review))
 }
 
 fn review_lines(review: &Review) -> Vec<Line<'_>> {
@@ -1577,10 +1582,15 @@ fn review_height(review: &Review) -> u16 {
 fn draw_carry(frame: &mut Frame<'_>, screen: Rect, carry: &Carry) {
     draw_over(
         frame,
-        centred(screen, carry_size(carry)),
+        carry_area(screen, carry),
         Padding::symmetric(CONFIRM_MARGIN, CONFIRM_MARGIN_ROWS),
         carry_lines(carry),
     );
+}
+
+// And where the question behind a skipped slice lands, likewise.
+fn carry_area(screen: Rect, carry: &Carry) -> Rect {
+    centred(screen, carry_size(carry))
 }
 
 fn carry_lines(carry: &Carry) -> Vec<Line<'_>> {

@@ -1,8 +1,9 @@
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
 
 use super::{
-    Answer, Answered, PullAnswered, PullConfirm, PushAnswered, PushConfirm, QuitConfirm,
-    answer_for, pull_answer_for, push_answer_for,
+    Answer, Answered, Carry, CarryAnswered, Choice, PullAnswered, PullConfirm, PushAnswered,
+    PushConfirm, QuitConfirm, Review, Reviewed, answer_for, carry_answer_for, pull_answer_for,
+    push_answer_for, review_answer_for,
 };
 
 fn press(code: KeyCode) -> KeyEvent {
@@ -639,6 +640,382 @@ mod pull {
             answered(&open(), KeyCode::Enter),
             PullAnswered::Cancel,
             "Enter on No answers No, so the default answer starts nothing"
+        );
+    }
+}
+
+// The window one slice's drafts wait behind, which is the only question warlock
+// asks that has three answers. What its keys mean is asserted here rather than
+// where the run is driven: a test about a run should be able to say `create`
+// without also saying which key spells it.
+mod review {
+    use super::{
+        Choice, INERT, KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers, Review,
+        Reviewed, press, review_answer_for,
+    };
+
+    const SLICE: &str = "slice 1 `The review window`";
+
+    fn titles() -> Vec<String> {
+        vec![
+            "Gate the drafts behind a window".to_owned(),
+            "Report what the create became".to_owned(),
+        ]
+    }
+
+    // A slice with its redraft still to spend, which is how a window first goes
+    // up.
+    fn open() -> Review {
+        Review::open(SLICE, titles(), true)
+    }
+
+    // The same slice once it has been redrafted: two answers, and the third
+    // nowhere a key can reach.
+    fn spent() -> Review {
+        Review::open(SLICE, titles(), false)
+    }
+
+    // The window answering one key as the session answers it: what is lit comes
+    // off the value that is up, and the whole window goes in because a key's
+    // meaning depends on whether the redraft is still there.
+    fn answered(review: &Review, code: KeyCode) -> Reviewed {
+        review_answer_for(press(code), review)
+    }
+
+    // Every key the tree answers to that this window does not, which is INERT
+    // without `f`: asking for a redraft is the one thing this window binds a
+    // letter to that no other does.
+    fn inert() -> Vec<KeyCode> {
+        INERT
+            .into_iter()
+            .filter(|code| !matches!(code, KeyCode::Char('f' | 'F')))
+            .collect()
+    }
+
+    #[test]
+    fn a_fresh_window_is_up_on_skip_with_the_drafts_it_is_about() {
+        // Skip is lit for No's reason elsewhere: the round that puts this up
+        // and an Enter straight after it file nothing at all.
+        let review = open();
+
+        assert_eq!(review.choice(), Choice::Skip);
+        assert_eq!(review.slice(), SLICE);
+        assert_eq!(review.titles(), titles().as_slice());
+        assert!(review.feedback(), "a fresh slice has its redraft to spend");
+        assert_eq!(answered(&review, KeyCode::Enter), Reviewed::Skip);
+    }
+
+    #[test]
+    fn the_arrows_walk_the_three_answers_and_stop_at_both_ends() {
+        // A highlight that wrapped would put the answer that files issues under
+        // the finger of somebody pressing Right twice.
+        let create = open().with_choice(Choice::Create);
+        let feedback = open().with_choice(Choice::Feedback);
+
+        assert_eq!(
+            answered(&open(), KeyCode::Left),
+            Reviewed::Open(Choice::Create)
+        );
+        assert_eq!(
+            answered(&open(), KeyCode::Right),
+            Reviewed::Open(Choice::Feedback)
+        );
+        assert_eq!(
+            answered(&create, KeyCode::Left),
+            Reviewed::Open(Choice::Create),
+            "Left walked off the left end"
+        );
+        assert_eq!(
+            answered(&feedback, KeyCode::Right),
+            Reviewed::Open(Choice::Feedback),
+            "Right walked off the right end"
+        );
+        assert_eq!(
+            answered(&feedback, KeyCode::Left),
+            Reviewed::Open(Choice::Skip)
+        );
+        assert_eq!(
+            answered(&create, KeyCode::Right),
+            Reviewed::Open(Choice::Skip)
+        );
+    }
+
+    #[test]
+    fn enter_answers_with_whatever_is_lit() {
+        for (choice, answer) in [
+            (Choice::Create, Reviewed::Create),
+            (Choice::Skip, Reviewed::Skip),
+            (Choice::Feedback, Reviewed::Feedback),
+        ] {
+            assert_eq!(
+                answered(&open().with_choice(choice), KeyCode::Enter),
+                answer,
+                "Enter on {choice:?} answered something else"
+            );
+        }
+    }
+
+    #[test]
+    fn the_answers_initials_answer_outright_whichever_is_lit() {
+        // Letters rather than `y`/`n`, and matched in either case for
+        // `answer_for`'s reason: a reader with caps lock on is still answering.
+        for lit in [Choice::Create, Choice::Skip, Choice::Feedback] {
+            let review = open().with_choice(lit);
+            for (code, answer) in [
+                (KeyCode::Char('c'), Reviewed::Create),
+                (KeyCode::Char('C'), Reviewed::Create),
+                (KeyCode::Char('s'), Reviewed::Skip),
+                (KeyCode::Char('S'), Reviewed::Skip),
+                (KeyCode::Char('f'), Reviewed::Feedback),
+                (KeyCode::Char('F'), Reviewed::Feedback),
+            ] {
+                assert_eq!(
+                    answered(&review, code),
+                    answer,
+                    "{code:?} with {lit:?} lit answered something else"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn esc_skips_rather_than_dismissing_the_window() {
+        // There is no cancel: a window that could be dismissed would leave the
+        // run holding drafts nobody had decided about, so the least committal
+        // key is the answer that files nothing and asks what to do next.
+        for lit in [Choice::Create, Choice::Skip, Choice::Feedback] {
+            assert_eq!(
+                answered(&open().with_choice(lit), KeyCode::Esc),
+                Reviewed::Skip,
+                "Esc with {lit:?} lit did not skip"
+            );
+        }
+    }
+
+    #[test]
+    fn a_spent_redraft_is_neither_pressed_nor_walked_onto() {
+        // One redraft each. The third answer is not drawn on a window that has
+        // spent it, and a key that is not drawn is not one that can be pressed.
+        let spent = spent();
+
+        assert_eq!(
+            answered(&spent, KeyCode::Char('f')),
+            Reviewed::Open(Choice::Skip),
+            "`f` asked for a second redraft"
+        );
+        assert_eq!(
+            answered(&spent, KeyCode::Right),
+            Reviewed::Open(Choice::Skip),
+            "Right lit an answer that is not on the window"
+        );
+        assert_eq!(
+            answered(&spent.with_choice(Choice::Create), KeyCode::Right),
+            Reviewed::Open(Choice::Skip)
+        );
+    }
+
+    #[test]
+    fn every_other_key_leaves_the_window_exactly_as_it_was() {
+        for lit in [Choice::Create, Choice::Skip, Choice::Feedback] {
+            let review = open().with_choice(lit);
+            for code in inert() {
+                assert_eq!(
+                    answered(&review, code),
+                    Reviewed::Open(lit),
+                    "{code:?} should leave {lit:?} lit and answer nothing"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn releases_and_repeats_answer_nothing() {
+        for code in [
+            KeyCode::Enter,
+            KeyCode::Esc,
+            KeyCode::Char('c'),
+            KeyCode::Char('s'),
+            KeyCode::Char('f'),
+            KeyCode::Left,
+            KeyCode::Right,
+        ] {
+            for kind in [KeyEventKind::Release, KeyEventKind::Repeat] {
+                let event = KeyEvent::new_with_kind_and_state(
+                    code,
+                    KeyModifiers::NONE,
+                    kind,
+                    KeyEventState::NONE,
+                );
+
+                assert_eq!(
+                    review_answer_for(event, &open()),
+                    Reviewed::Open(Choice::Skip),
+                    "{kind:?} of {code:?} should answer nothing"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn nothing_but_create_and_enter_on_create_ever_files() {
+        // The half worth saying outright: of every key this window sees, only
+        // two spellings of Create put anything on the board.
+        for lit in [Choice::Create, Choice::Skip, Choice::Feedback] {
+            let review = open().with_choice(lit);
+            for code in inert().into_iter().chain([
+                KeyCode::Esc,
+                KeyCode::Char('s'),
+                KeyCode::Char('f'),
+                KeyCode::Left,
+                KeyCode::Right,
+            ]) {
+                assert_ne!(
+                    answered(&review, code),
+                    Reviewed::Create,
+                    "{code:?} should not file with {lit:?} lit"
+                );
+            }
+        }
+        assert_eq!(
+            answered(&open(), KeyCode::Enter),
+            Reviewed::Skip,
+            "Enter on Skip skips, so the default answer files nothing"
+        );
+    }
+}
+
+// The question a skipped slice leaves behind, which is the quit dialog's rules
+// asked about something else. Every test here is one of this file's own asked
+// again, because "answered by the same keys" is a claim about behaviour and not
+// about which function the body happens to call.
+mod carry {
+    use super::{
+        Answer, Carry, CarryAnswered, INERT, KeyCode, KeyEvent, KeyEventKind, KeyEventState,
+        KeyModifiers, carry_answer_for, press,
+    };
+
+    const LEFT: &str = "2 slices";
+
+    fn open() -> Carry {
+        Carry::open(LEFT)
+    }
+
+    fn answered(carry: &Carry, code: KeyCode) -> CarryAnswered {
+        carry_answer_for(press(code), carry.answer())
+    }
+
+    #[test]
+    fn a_fresh_question_is_up_on_no_and_carries_what_is_left() {
+        // No is the answer that stops: a run carries on by somebody saying so.
+        let carry = open();
+
+        assert_eq!(carry.answer(), Answer::No);
+        assert_eq!(carry.left(), LEFT);
+        assert_eq!(
+            answered(&carry, KeyCode::Enter),
+            CarryAnswered::Stop,
+            "an immediate Enter carried on"
+        );
+    }
+
+    #[test]
+    fn esc_and_n_stop_from_either_side() {
+        for lit in [Answer::Yes, Answer::No] {
+            let carry = open().with_answer(lit);
+            for code in [KeyCode::Esc, KeyCode::Char('n'), KeyCode::Char('N')] {
+                assert_eq!(
+                    answered(&carry, code),
+                    CarryAnswered::Stop,
+                    "{code:?} with {lit:?} lit did not stop the run"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn left_then_enter_carries_on_and_right_goes_back_to_no() {
+        let carry = open();
+
+        assert_eq!(
+            answered(&carry, KeyCode::Left),
+            CarryAnswered::Open(Answer::Yes)
+        );
+        let lit = open().with_answer(Answer::Yes);
+        assert_eq!(lit.left(), LEFT, "moving the highlight lost the count");
+        assert_eq!(answered(&lit, KeyCode::Enter), CarryAnswered::Carry);
+        assert_eq!(
+            answered(&lit, KeyCode::Right),
+            CarryAnswered::Open(Answer::No)
+        );
+        assert_eq!(
+            answered(&lit, KeyCode::Char('y')),
+            CarryAnswered::Carry,
+            "`y` answers outright wherever the highlight is"
+        );
+    }
+
+    #[test]
+    fn every_other_key_leaves_the_question_exactly_as_it_was() {
+        for lit in [Answer::Yes, Answer::No] {
+            let carry = open().with_answer(lit);
+            for code in INERT {
+                assert_eq!(
+                    answered(&carry, code),
+                    CarryAnswered::Open(lit),
+                    "{code:?} should leave {lit:?} lit and answer nothing"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn releases_and_repeats_answer_nothing() {
+        for code in [
+            KeyCode::Enter,
+            KeyCode::Esc,
+            KeyCode::Char('y'),
+            KeyCode::Char('n'),
+            KeyCode::Left,
+            KeyCode::Right,
+        ] {
+            for kind in [KeyEventKind::Release, KeyEventKind::Repeat] {
+                let event = KeyEvent::new_with_kind_and_state(
+                    code,
+                    KeyModifiers::NONE,
+                    kind,
+                    KeyEventState::NONE,
+                );
+
+                assert_eq!(
+                    carry_answer_for(event, Answer::No),
+                    CarryAnswered::Open(Answer::No),
+                    "{kind:?} of {code:?} should answer nothing"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn nothing_but_yes_and_enter_on_yes_ever_carries_on() {
+        for lit in [Answer::Yes, Answer::No] {
+            let carry = open().with_answer(lit);
+            for code in INERT.into_iter().chain([
+                KeyCode::Esc,
+                KeyCode::Char('n'),
+                KeyCode::Left,
+                KeyCode::Right,
+            ]) {
+                assert_ne!(
+                    answered(&carry, code),
+                    CarryAnswered::Carry,
+                    "{code:?} should not carry on with {lit:?} lit"
+                );
+            }
+        }
+        assert_eq!(
+            answered(&open(), KeyCode::Enter),
+            CarryAnswered::Stop,
+            "Enter on No stops, so the default answer leaves the project alone"
         );
     }
 }
