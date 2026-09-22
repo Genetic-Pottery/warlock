@@ -3,14 +3,16 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use serde_json::Value;
 use tempfile::TempDir;
 use warlock_engine::{
-    Manifest, PactEntry, ScopeRecord, resolve_filing, save_key, save_key_binding, save_sigils,
+    Filed, FiledRecord, Manifest, PactEntry, ScopeRecord, from_manifest_path, resolve_filing,
+    save_key, save_key_binding, save_sigils,
 };
-use warlock_tui::{App, Edited, Line, ScopeField, ScopePrompt, edit_for};
+use warlock_tui::{App, Edited, Line, LinearError, Posts, ScopeField, ScopePrompt, edit_for};
 
-use super::{FILING_HEADING, NO_SCOPE, Pushes, Pushing, filing_to};
-use crate::error::one_line;
+use super::{FILING_HEADING, NO_SCOPE, Pushes, Pushing, Work, filed, filing_to};
+use crate::error::{Error, one_line};
 use crate::stubs::Boarding;
 
 // Not a key, and named so that nothing reading this file mistakes it for one:
@@ -39,6 +41,10 @@ const LABEL: &str = "warlock";
 const WRITTEN: &str = "docs/brief.md";
 
 const TITLE: &str = "Push a brief to the board";
+
+const PROJECT_ID: &str = "b229262b-22aa-444a-a8af-0a2a3f4ef100";
+
+const URL: &str = "https://linear.app/acme/project/push-a-brief-1a2b3c";
 
 // Every section the built-in shape asks for, so a repository that has written
 // no template of its own holds this document to something it satisfies.
@@ -93,6 +99,50 @@ fn a_home(root: &Path, sigils: &[&str]) -> TempDir {
     save_key_binding(home.path(), root, KEY_NAME).expect("a binding that writes");
     save_key(home.path(), KEY_NAME, NOT_A_KEY).expect("a key store that writes");
     home
+}
+
+// The client the worker may never reach. A `/push` of a brief this repository
+// has already filed is refused in front of every request, so reaching this at
+// all is the failure the test is about — which is why it is a panic and not a
+// recorded flag, the same shape `tests/push.rs` holds the subcommand to.
+#[derive(Debug, Clone, Copy)]
+struct Unreachable;
+
+impl Posts for Unreachable {
+    fn post(&self, document: &str, _variables: Value) -> Result<Value, LinearError> {
+        panic!("a request was sent: {document}");
+    }
+}
+
+// What an answered dialog hands the worker: the root, the brief resolved
+// against it, and the board `Pushes::send` read off the target. Built the way
+// that method builds it, so the spelling under test is the one a push carries.
+fn work(root: &Path) -> Work {
+    Work {
+        root: root.to_path_buf(),
+        path: from_manifest_path(root, WRITTEN),
+        scope: SCOPE.to_owned(),
+        team: TEAM.to_owned(),
+        label: LABEL.to_owned(),
+    }
+}
+
+// The record a first `/push` of this brief would have left behind.
+fn already_filed(root: &Path) {
+    Filed::with_records([
+        FiledRecord::new(
+            root,
+            root.join(WRITTEN),
+            PROJECT_ID,
+            URL,
+            SCOPE,
+            TEAM,
+            "2026-09-20T07:32:00Z",
+        )
+        .expect("a path inside the repository"),
+    ])
+    .save(root)
+    .expect("a record file that saves");
 }
 
 fn notes(app: &App) -> Vec<String> {
@@ -414,4 +464,45 @@ fn the_brief_is_read_from_the_repository_root_rather_than_the_working_directory(
 
     assert!(still_there.exists(), "this test moved the brief");
     assert!(pushing.confirm.is_open(), "{:?}", notes(&app));
+}
+
+#[test]
+fn a_brief_this_repository_has_already_filed_is_refused_with_nothing_sent() {
+    // A brief is filed once: pushing the same one twice from the panel would
+    // be two projects on the board under one title, and nothing on this side
+    // can take one back. The client here panics when it is asked anything, so
+    // "no request left the worker" is an assertion about the order in `filed`
+    // rather than a reading of it — the same stand-in `warlock push` is held
+    // to.
+    let repo = a_repository();
+    already_filed(repo.path());
+
+    let error = filed(&Unreachable, &work(repo.path())).expect_err("a brief is filed once");
+
+    assert!(
+        matches!(&error, Error::AlreadyFiled { path, url } if path == WRITTEN && url == URL),
+        "{error:?}"
+    );
+    // The address of the project it already made is the point of this refusal,
+    // and the line the thread takes is the flattened one.
+    assert!(one_line(&error.to_string()).contains(URL), "{error}");
+}
+
+#[test]
+fn a_brief_with_no_record_is_sent_and_recorded_exactly_as_before() {
+    // The other side of the refusal above: a repository that has filed nothing
+    // pushes the same four requests it always did, and the address comes back
+    // for the line the panel words.
+    let repo = a_repository();
+    let linear = Boarding::filing(URL);
+
+    let url = filed(&linear, &work(repo.path())).expect("a push with nothing in its way");
+
+    assert_eq!(url, URL, "the address the worker hands back");
+    assert_eq!(linear.requests(), 4, "one push is four requests");
+    let filed = Filed::load(repo.path()).expect("the record the push saved");
+    assert_eq!(
+        filed.record(WRITTEN).expect("a record for the brief").url(),
+        URL,
+    );
 }
