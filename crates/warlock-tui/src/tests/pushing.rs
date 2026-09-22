@@ -129,18 +129,16 @@ fn work(root: &Path) -> Work {
 
 // The record a first `/push` of this brief would have left behind.
 fn already_filed(root: &Path) {
-    Filed::with_records([
-        FiledRecord::new(
-            root,
-            root.join(WRITTEN),
-            PROJECT_ID,
-            URL,
-            SCOPE,
-            TEAM,
-            "2026-09-20T07:32:00Z",
-        )
-        .expect("a path inside the repository"),
-    ])
+    Filed::with_records([FiledRecord::new(
+        root,
+        root.join(WRITTEN),
+        PROJECT_ID,
+        URL,
+        SCOPE,
+        TEAM,
+        "2026-09-20T07:32:00Z",
+    )
+    .expect("a path inside the repository")])
     .save(root)
     .expect("a record file that saves");
 }
