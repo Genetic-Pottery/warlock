@@ -14,13 +14,13 @@
 // Stated once, here, because it is the only place warlock says which commands
 // exist: a second copy of this sentence in the loop or in a test fixture would
 // be a second list to keep true.
-const REFUSAL: &str = "warlock has five commands — /brief, /write, /chat, /push and /pull — and only /push and /pull take a path after them, the brief to file and the brief to cut.";
+const REFUSAL: &str = "warlock has five commands — /brief, /write, /chat, /push and /draft — and only /push and /draft take a path after them, the brief to file and the brief to cut.";
 
 // Seven variants and no eighth for "empty", because an empty draft never gets
 // here — `Composer::is_submittable` declines to offer one up — and a function
 // that is total anyway is worth more than a variant every caller must match on.
 //
-// The borrows in `Push` and `Pull` are what keep the module's promise that
+// The borrows in `Push` and `Cut` are what keep the module's promise that
 // nothing here copies the draft: the path is a slice of the draft the caller
 // still owns, and `&str` is `Copy`, so the value stays as cheap to pass around
 // as it was when no variant carried anything.
@@ -31,8 +31,8 @@ pub enum Submitted<'a> {
     Chat,
     // `None` is `/push` on its own, which files what this session wrote.
     Push(Option<&'a str>),
-    // `None` is `/pull` on its own, which cuts what this session wrote.
-    Pull(Option<&'a str>),
+    // `None` is `/draft` on its own, which cuts what this session wrote.
+    Cut(Option<&'a str>),
     Message,
     // An unknown word, a bare `/`, or one of the other three command words with
     // something after it. It never reaches the model: the point of refusing
@@ -97,11 +97,11 @@ pub fn submitted_for(draft: &str) -> Submitted<'_> {
     // arrives as the path it is — but never across a line break, which is
     // somebody typing a message under a command word rather than naming a file
     // no path has a newline in.
-    if matches!(word, PUSH | PULL) && !after.contains('\n') {
+    if matches!(word, PUSH | CUT) && !after.contains('\n') {
         let named = after.trim();
         let named = (!named.is_empty()).then_some(named);
-        return if word == PULL {
-            Submitted::Pull(named)
+        return if word == CUT {
+            Submitted::Cut(named)
         } else {
             Submitted::Push(named)
         };
@@ -125,7 +125,7 @@ pub fn submitted_for(draft: &str) -> Submitted<'_> {
 // Named because they are matched on before the match below rather than inside
 // it, and a literal in two places is two places to change.
 const PUSH: &str = "/push";
-const PULL: &str = "/pull";
+const CUT: &str = "/draft";
 
 #[cfg(test)]
 #[path = "tests/submission.rs"]

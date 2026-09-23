@@ -27,7 +27,7 @@ piped — it reads a plain line and the terminal is never touched.
 | `warlock pact <path>` | Describe a directory and everything below it, a `WARLOCK.md` each | a model pass per directory |
 | `warlock refresh <path>` | The same over only the directories that are not fresh | a model pass per stale directory |
 | `warlock push <path>` | File the brief at `path` as a project on the board this machine's sigil names | one project on somebody's board and one record write |
-| `warlock pull <path>` | Cut the project filed for the brief at `path` into issues on the board that holds it | a model pass per uncut slice, the issues they become, and a record write each |
+| `warlock draft <path>` | Cut the project filed for the brief at `path` into issues on the board that holds it | a model pass per uncut slice, the issues they become, and a record write each |
 
 The two listings take the repository root when the path is left off. Every other
 path is required, and on `unpact` and `pact` that is the point rather than an
@@ -487,14 +487,14 @@ the `warlock` in the dry-run line above is the name this checkout is bound to
 and never what is stored under it, and the value is read on exactly one line —
 the one that builds the client.
 
-## Pulling
+## Drafting
 
-`warlock pull <PATH>` is the other half of that one. The project a push
+`warlock draft <PATH>` is the other half of that one. The project a push
 recorded for the brief at `path` is read back, its `## Scope` section is parsed
 into slices, the slices `.warlock/filed.toml` already holds a cut record for
 are skipped, and every other one is drafted by a session of its own and filed
 as issues on the same board. The project's status is not moved in either
-direction, here or anywhere: a pull creates issues, writes the relations
+direction, here or anywhere: a draft creates issues, writes the relations
 between them and says one comment, and nothing else.
 
 Two flags and no more, spelled as the push's are. `--scope <NAME>` picks the
@@ -526,7 +526,7 @@ sits in the document, so a reader can find it in the brief — the two differ
 exactly when a `depends_on` line moved something:
 
 ```sh
-$ warlock pull docs/warlock-brief-23-cut-a-planned-project-into-tickets.md
+$ warlock draft docs/warlock-brief-23-cut-a-planned-project-into-tickets.md
 warlock: [1/3] slice 1 `The project fetch` — already cut as `WAR-121`, `WAR-122`, so nothing was sent
 warlock: [2/3] slice 2 `The scope parser` — drafting
 warlock: cut `The scope parser` into `WAR-123`, `WAR-124`
@@ -541,7 +541,7 @@ bought, nothing is sent past the read that fetched the project and no record is
 written:
 
 ```sh
-$ warlock pull docs/warlock-brief-23-cut-a-planned-project-into-tickets.md --dry-run
+$ warlock draft docs/warlock-brief-23-cut-a-planned-project-into-tickets.md --dry-run
 warlock: would cut `Cut a planned project into tickets`, which is `Planned`, into `WAR` under the scope `warlock-team` — 3 slices, 1 already cut, and nothing was drafted
 warlock: [1/3] slice 1 `The project fetch` — already cut as `WAR-121`, `WAR-122`
 warlock: [2/3] slice 2 `The scope parser`
@@ -620,7 +620,7 @@ warlock: the issues `WAR-123`, `WAR-124` were created, and warlock could not rec
 Every one of these is an ordinary **1** — the unrecorded path, the unknown
 project id, the wrong status, all three scope-block refusals, the cycle among
 them, nothing left to cut, the team with no `Backlog`, and whatever Linear
-turned down. The boundary's **3** is never spent by a pull and could not be,
+turned down. The boundary's **3** is never spent by a draft and could not be,
 for the push's reason: a sigil here picks which board the project is on rather
 than opening a directory to be written, so there is no path being acted on for
 the boundary to refuse.
@@ -634,7 +634,7 @@ that builds the client — and only key *names* ever reach a line.
 | Status | What it means |
 | --- | --- |
 | `0` | Completed. The question was answered or the write happened, whatever the answer turned out to be — an empty listing and a scope closed to this machine included |
-| `1` | Warlock could not do it, or would not: the repository will not resolve, the manifest will not parse or will not save, the path has no repository-relative spelling, a scope name nothing records yet was given without all three record flags or with a blank one, a name that already has a record was given any of them, a push has no board or more than one, the brief is not one or is already filed, a pull's brief is not recorded in `.warlock/filed.toml`, its project is one Linear does not know or is not `Planned`, the scope block will not cut or has nothing left to cut, the team has no `Backlog` state, or Linear refused what was sent. The line on stderr is the thing to go and read |
+| `1` | Warlock could not do it, or would not: the repository will not resolve, the manifest will not parse or will not save, the path has no repository-relative spelling, a scope name nothing records yet was given without all three record flags or with a blank one, a name that already has a record was given any of them, a push has no board or more than one, the brief is not one or is already filed, a draft's brief is not recorded in `.warlock/filed.toml`, its project is one Linear does not know or is not `Planned`, the scope block will not cut or has nothing left to cut, the team has no `Backlog` state, or Linear refused what was sent. The line on stderr is the thing to go and read |
 | `2` | The command line was never a request. Clap's status and its wording, for a word warlock has no place for |
 | `3` | Refused, with nothing spent: this machine's sigils do not open the scope covering the path. No byte moved, retrying changes nothing, and the road out is `warlock config` |
 | `4` | Completed with failures: a run wrote the documents it could and saved the manifest, and the lines above the count name the directories that did not come out of it |

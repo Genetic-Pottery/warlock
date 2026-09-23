@@ -1,8 +1,8 @@
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
 
 use super::{
-    Answer, Answered, Carry, CarryAnswered, Choice, PullAnswered, PullConfirm, PushAnswered,
-    PushConfirm, QuitConfirm, Review, Reviewed, answer_for, carry_answer_for, pull_answer_for,
+    Answer, Answered, Carry, CarryAnswered, Choice, CutAnswered, CutConfirm, PushAnswered,
+    PushConfirm, QuitConfirm, Review, Reviewed, answer_for, carry_answer_for, cut_answer_for,
     push_answer_for, review_answer_for,
 };
 
@@ -420,14 +420,14 @@ mod push {
     }
 }
 
-// The pull dialog, which is those same rules answered about a project. Every
+// The cut dialog, which is those same rules answered about a project. Every
 // test in here is one of the tests above asked again, for the reason the push
 // dialog's are: "answered by the same rules" is a claim about behaviour and not
 // about which function the body happens to call.
-mod pull {
+mod cut {
     use super::{
-        Answer, INERT, KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers, PullAnswered,
-        PullConfirm, press, pull_answer_for,
+        Answer, CutAnswered, CutConfirm, INERT, KeyCode, KeyEvent, KeyEventKind, KeyEventState,
+        KeyModifiers, cut_answer_for, press,
     };
 
     const PROJECT: &str = "Cut a planned project into tickets";
@@ -446,23 +446,23 @@ mod pull {
     // question carries the name a key is held under and nothing else.
     const KEY_VALUE: &str = "not-a-real-key-value";
 
-    fn open() -> PullConfirm {
-        PullConfirm::open(PROJECT, STATUS, SLICES, TEAM, KEY)
+    fn open() -> CutConfirm {
+        CutConfirm::open(PROJECT, STATUS, SLICES, TEAM, KEY)
     }
 
     // The dialog answering one key, as the session answers it: the lit answer
     // comes out of the value that is up rather than from the test.
-    fn answered(pull: &PullConfirm, code: KeyCode) -> PullAnswered {
-        let cutting = pull.cutting().expect("the dialog under test is up");
-        pull_answer_for(press(code), cutting.answer())
+    fn answered(cut: &CutConfirm, code: KeyCode) -> CutAnswered {
+        let cutting = cut.cutting().expect("the dialog under test is up");
+        cut_answer_for(press(code), cutting.answer())
     }
 
     #[test]
     fn a_fresh_dialog_is_up_with_no_highlighted_and_carries_the_five_facts() {
-        let pull = open();
-        let cutting = pull.cutting().expect("an opened dialog is up");
+        let cut = open();
+        let cutting = cut.cutting().expect("an opened dialog is up");
 
-        assert!(pull.is_open());
+        assert!(cut.is_open());
         assert_eq!(cutting.answer(), Answer::No);
         assert_eq!(cutting.project(), PROJECT);
         assert_eq!(cutting.status(), STATUS);
@@ -490,19 +490,19 @@ mod pull {
 
     #[test]
     fn a_closed_dialog_is_the_default_and_has_nothing_to_answer() {
-        assert_eq!(PullConfirm::default(), PullConfirm::Closed);
-        assert!(!PullConfirm::Closed.is_open());
-        assert!(PullConfirm::Closed.cutting().is_none());
+        assert_eq!(CutConfirm::default(), CutConfirm::Closed);
+        assert!(!CutConfirm::Closed.is_open());
+        assert!(CutConfirm::Closed.cutting().is_none());
         // An arrow pressed at a window that is not up lights nothing, rather
         // than conjuring a question out of facts nobody fetched.
-        assert_eq!(PullConfirm::Closed.lit(Answer::Yes), PullConfirm::Closed);
+        assert_eq!(CutConfirm::Closed.lit(Answer::Yes), CutConfirm::Closed);
     }
 
     #[test]
     fn an_immediate_enter_answers_no() {
         // The round that put this up and the Enter straight after it both come
         // to nothing: No is lit, so no run starts.
-        assert_eq!(answered(&open(), KeyCode::Enter), PullAnswered::Cancel);
+        assert_eq!(answered(&open(), KeyCode::Enter), CutAnswered::Cancel);
     }
 
     #[test]
@@ -510,7 +510,7 @@ mod pull {
         for lit in [Answer::Yes, Answer::No] {
             assert_eq!(
                 answered(&open().lit(lit), KeyCode::Esc),
-                PullAnswered::Cancel,
+                CutAnswered::Cancel,
                 "Esc should answer No with {lit:?} lit"
             );
         }
@@ -518,37 +518,37 @@ mod pull {
 
     #[test]
     fn left_then_enter_cuts_and_right_goes_back_to_no() {
-        let pull = open();
+        let cut = open();
 
         assert_eq!(
-            answered(&pull, KeyCode::Left),
-            PullAnswered::Open(Answer::Yes)
+            answered(&cut, KeyCode::Left),
+            CutAnswered::Open(Answer::Yes)
         );
-        let armed = pull.lit(Answer::Yes);
-        assert_eq!(answered(&armed, KeyCode::Enter), PullAnswered::Cut);
+        let armed = cut.lit(Answer::Yes);
+        assert_eq!(answered(&armed, KeyCode::Enter), CutAnswered::Cut);
 
         assert_eq!(
             answered(&armed, KeyCode::Right),
-            PullAnswered::Open(Answer::No)
+            CutAnswered::Open(Answer::No)
         );
         assert_eq!(
             answered(&armed.lit(Answer::No), KeyCode::Enter),
-            PullAnswered::Cancel
+            CutAnswered::Cancel
         );
     }
 
     #[test]
     fn y_and_n_answer_outright_whichever_is_lit() {
         for lit in [Answer::Yes, Answer::No] {
-            let pull = open().lit(lit);
+            let cut = open().lit(lit);
             assert_eq!(
-                answered(&pull, KeyCode::Char('y')),
-                PullAnswered::Cut,
+                answered(&cut, KeyCode::Char('y')),
+                CutAnswered::Cut,
                 "y should cut with {lit:?} lit"
             );
             assert_eq!(
-                answered(&pull, KeyCode::Char('n')),
-                PullAnswered::Cancel,
+                answered(&cut, KeyCode::Char('n')),
+                CutAnswered::Cancel,
                 "n should answer No with {lit:?} lit"
             );
         }
@@ -573,11 +573,11 @@ mod pull {
     #[test]
     fn every_other_key_leaves_the_question_exactly_as_it_was() {
         for lit in [Answer::Yes, Answer::No] {
-            let pull = open().lit(lit);
+            let cut = open().lit(lit);
             for code in INERT {
                 assert_eq!(
-                    answered(&pull, code),
-                    PullAnswered::Open(lit),
+                    answered(&cut, code),
+                    CutAnswered::Open(lit),
                     "{code:?} should change nothing with {lit:?} lit"
                 );
             }
@@ -591,7 +591,7 @@ mod pull {
         let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
 
         for lit in [Answer::Yes, Answer::No] {
-            assert_eq!(pull_answer_for(ctrl_c, lit), PullAnswered::Open(lit));
+            assert_eq!(cut_answer_for(ctrl_c, lit), CutAnswered::Open(lit));
         }
     }
 
@@ -614,8 +614,8 @@ mod pull {
                 );
 
                 assert_eq!(
-                    pull_answer_for(event, Answer::No),
-                    PullAnswered::Open(Answer::No),
+                    cut_answer_for(event, Answer::No),
+                    CutAnswered::Open(Answer::No),
                     "{kind:?} of {code:?} should answer nothing"
                 );
             }
@@ -625,7 +625,7 @@ mod pull {
     #[test]
     fn nothing_but_yes_and_enter_on_yes_ever_cuts() {
         for lit in [Answer::Yes, Answer::No] {
-            let pull = open().lit(lit);
+            let cut = open().lit(lit);
             for code in INERT.into_iter().chain([
                 KeyCode::Esc,
                 KeyCode::Char('n'),
@@ -633,15 +633,15 @@ mod pull {
                 KeyCode::Right,
             ]) {
                 assert_ne!(
-                    answered(&pull, code),
-                    PullAnswered::Cut,
+                    answered(&cut, code),
+                    CutAnswered::Cut,
                     "{code:?} should not cut with {lit:?} lit"
                 );
             }
         }
         assert_eq!(
             answered(&open(), KeyCode::Enter),
-            PullAnswered::Cancel,
+            CutAnswered::Cancel,
             "Enter on No answers No, so the default answer starts nothing"
         );
     }

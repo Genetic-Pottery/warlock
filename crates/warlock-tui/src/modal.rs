@@ -1,5 +1,5 @@
 use crate::confirm::{
-    Answer, Carry, Cutting, Filing, PullConfirm, PushConfirm, QuitConfirm, Review,
+    Answer, Carry, CutConfirm, Cutting, Filing, PushConfirm, QuitConfirm, Review,
 };
 use crate::prompt::{RecordForm, RecordPrompt, ScopeField, ScopePrompt};
 
@@ -11,7 +11,7 @@ use crate::prompt::{RecordForm, RecordPrompt, ScopeField, ScopePrompt};
 pub enum Modal<'a> {
     Quit(Answer),
     Push(&'a Filing),
-    Pull(&'a Cutting),
+    Cut(&'a Cutting),
     Review(&'a Review),
     Carry(&'a Carry),
     Filing(&'a ScopeField),
@@ -22,7 +22,7 @@ pub enum Modal<'a> {
 
 // Named fields rather than positional arguments: four of these are prompts of
 // one type, and handed in by position they could be swapped with nothing to
-// catch it. Each window's state stays with the flow that owns it — the pull
+// catch it. Each window's state stays with the flow that owns it — the cut
 // owns its three, the push its two, the chat its write prompt — and more than
 // one can be up at once, since a `/write` turn or a board's answer opens its
 // window with no keystroke. So this does not make two open impossible; it makes
@@ -31,7 +31,7 @@ pub enum Modal<'a> {
 pub struct Modals<'a> {
     pub quit: QuitConfirm,
     pub push: &'a PushConfirm,
-    pub pull: &'a PullConfirm,
+    pub cut: &'a CutConfirm,
     pub review: Option<&'a Review>,
     pub carry: Option<&'a Carry>,
     pub filing: &'a ScopePrompt,
@@ -45,7 +45,7 @@ impl Default for Modals<'_> {
         Self {
             quit: QuitConfirm::Closed,
             push: &PushConfirm::Closed,
-            pull: &PullConfirm::Closed,
+            cut: &CutConfirm::Closed,
             review: None,
             carry: None,
             filing: &ScopePrompt::Closed,
@@ -63,14 +63,14 @@ impl<'a> Modals<'a> {
     // it. Only this one is drawn, so the order below is the whole precedence.
     //
     // Quit first: it is the gate on the way out, and a window can come up under
-    // it with nobody pressing anything — a board answering a `/pull`, a slice's
+    // it with nobody pressing anything — a board answering a `/draft`, a slice's
     // drafts arriving, a `/write` turn answering into its prompt.
     //
-    // The push, pull, review and carry questions before the three fields, for
+    // The push, cut, review and carry questions before the three fields, for
     // the same reason one step down: a field can come up under one of them on no
     // keystroke, and the question is the window somebody is looking at. Among
     // those four and the filing field the order is a statement rather than a
-    // choice: a `/push` or `/pull` is typed into the composer, which takes no
+    // choice: a `/push` or `/draft` is typed into the composer, which takes no
     // keys while any of them is up; the filing field's submit is what puts the
     // push dialog up; and a slice is being reviewed, or asking whether to carry
     // on, or neither.
@@ -86,7 +86,7 @@ impl<'a> Modals<'a> {
             .highlighted()
             .map(Modal::Quit)
             .or_else(|| self.push.filing().map(Modal::Push))
-            .or_else(|| self.pull.cutting().map(Modal::Pull))
+            .or_else(|| self.cut.cutting().map(Modal::Cut))
             .or_else(|| self.review.map(Modal::Review))
             .or_else(|| self.carry.map(Modal::Carry))
             .or_else(|| self.filing.field().map(Modal::Filing))

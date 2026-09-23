@@ -9,7 +9,7 @@ use crate::status_for;
 // The tails themselves, not copies of them: these used to be re-typed here
 // as literals, so rewording either original left this suite passing on a
 // sentence nothing said any more.
-use crate::standing::{FOR_CLAUDE_MD, FOR_PULL, FOR_SIGILS};
+use crate::standing::{FOR_CLAUDE_MD, FOR_CUT, FOR_SIGILS};
 
 const PROBLEM: &str = "`/repo/crates/engine` could not be hashed and is stale: \
                            could not read `/repo/crates/engine/src/lib.rs`, so the \
@@ -266,7 +266,7 @@ fn a_project_with_every_slice_cut_names_the_brief_and_the_file_recording_them() 
     );
 }
 
-// Both of the refusals added for a pull, held to the register every other one
+// Both of the refusals added for a cut, held to the register every other one
 // of its refusals takes: the ordinary 1, and never the boundary's 3 — a script
 // reading one of these as "ask for a sigil" would be sent to `warlock config`
 // over a brief with no `## Scope` heading.
@@ -376,13 +376,13 @@ fn config_outside_a_repository_says_the_same_thing_about_sigils() {
 }
 
 #[test]
-fn pull_outside_a_repository_says_the_same_thing_about_cutting_a_brief() {
-    // The one `.git` fact again, with the tail a pull asks for on the end: the
+fn cut_outside_a_repository_says_the_same_thing_about_cutting_a_brief() {
+    // The one `.git` fact again, with the tail a cut asks for on the end: the
     // record that says which project a brief became is spelled against a root,
     // so there is nothing to resolve without one.
     let error = Error::NoRepository {
         start: PathBuf::from("/elsewhere"),
-        wanted: FOR_PULL,
+        wanted: FOR_CUT,
     };
 
     assert_eq!(

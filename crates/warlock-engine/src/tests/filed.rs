@@ -135,7 +135,7 @@ fn a_version_2_file_with_cut_records_round_trips() {
         "2026-09-21T09:00:00Z",
     ));
     brief.push_cut(CutRecord::new(
-        "`warlock pull`",
+        "`warlock draft`",
         ["WAR-127"],
         "2026-09-21T09:05:00Z",
     ));
@@ -176,7 +176,7 @@ fn a_version_2_file_with_cut_records_round_trips() {
     assert_eq!(cuts[0].key(), "the cut record");
     assert_eq!(cuts[0].issues(), ["WAR-125", "WAR-126"]);
     assert_eq!(cuts[0].cut_at(), "2026-09-21T09:00:00Z");
-    assert_eq!(cuts[1].title(), "`warlock pull`");
+    assert_eq!(cuts[1].title(), "`warlock draft`");
     assert_eq!(cuts[1].issues(), ["WAR-127"]);
     assert!(
         loaded
@@ -239,7 +239,7 @@ fn a_brief_with_two_slices_cut() -> Filed {
         "2026-09-21T09:00:00Z",
     ));
     brief.push_cut(CutRecord::new(
-        "`warlock pull`",
+        "`warlock draft`",
         ["WAR-127", "WAR-128"],
         "2026-09-21T09:05:00Z",
     ));
@@ -259,7 +259,7 @@ fn a_supplied_title_is_matched_to_its_record_by_the_folded_key() {
         [
             "  THE   Cut\tRecord ",
             "Relations and the comment",
-            "`warlock pull`",
+            "`warlock draft`",
         ],
     );
 
@@ -272,7 +272,7 @@ fn a_supplied_title_is_matched_to_its_record_by_the_folded_key() {
         [
             ("  THE   Cut\tRecord ", &["WAR-125".to_owned()][..]),
             (
-                "`warlock pull`",
+                "`warlock draft`",
                 &["WAR-127".to_owned(), "WAR-128".to_owned()][..]
             ),
         ],
@@ -290,11 +290,21 @@ fn reordering_the_supplied_titles_changes_neither_answer() {
     let filed = a_brief_with_two_slices_cut();
     let forwards = filed.cut_state(
         "docs/warlock-brief-22.md",
-        ["The cut record", "Relations", "`warlock pull`", "The draft"],
+        [
+            "The cut record",
+            "Relations",
+            "`warlock draft`",
+            "The draft",
+        ],
     );
     let backwards = filed.cut_state(
         "docs/warlock-brief-22.md",
-        ["The draft", "`warlock pull`", "Relations", "The cut record"],
+        [
+            "The draft",
+            "`warlock draft`",
+            "Relations",
+            "The cut record",
+        ],
     );
 
     let sorted = |mut titles: Vec<String>| {
@@ -341,7 +351,7 @@ fn a_retitled_slice_is_uncut_and_leaves_its_old_record_gone() {
 
     let state = filed.cut_state(
         "docs/warlock-brief-22.md",
-        ["The cut record, revisited", "`warlock pull`"],
+        ["The cut record, revisited", "`warlock draft`"],
     );
 
     assert_eq!(
@@ -367,12 +377,12 @@ fn a_brief_with_no_cut_record_has_everything_uncut_and_nothing_gone() {
     let filed = Filed::with_records([filed_brief()]);
 
     for path in ["docs/warlock-brief-22.md", "docs/never-filed.md"] {
-        let state = filed.cut_state(path, ["The cut record", "`warlock pull`"]);
+        let state = filed.cut_state(path, ["The cut record", "`warlock draft`"]);
 
         assert!(state.cut().is_empty(), "{path}");
         assert_eq!(
             state.uncut(),
-            ["The cut record", "`warlock pull`"],
+            ["The cut record", "`warlock draft`"],
             "{path}"
         );
         assert!(state.gone().is_empty(), "{path}");

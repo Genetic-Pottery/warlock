@@ -13,22 +13,23 @@ use super::{
     Areas, BAR_EMPTY, BAR_FILLED, BAR_MIN_WIDTH, BORDER_THICKNESS, BRIEF_THREAD_TITLE, CANCEL_KEY,
     CARRY_LEFT, CARRY_LINES, CARRY_QUESTION, COLLAPSE_KEY, COMPOSER_CURSOR, COMPOSER_MIN_HEIGHT,
     CONFIRM_ANSWER_GAP, CONFIRM_HEIGHT, CONFIRM_LINES, CONFIRM_MARGIN, CONFIRM_MARGIN_ROWS,
-    CONFIRM_NO, CONFIRM_QUESTION, CONFIRM_YES, Carry, ELLIPSIS, FILES_KEY, FILING_HEADING,
-    FILING_RULES, FOOTER_HEIGHT, GUIDE, GUIDE_BRANCH, GUIDE_LAST, HEADER_GAP, HEADER_HEIGHT, Hit,
-    INDENT, KEY_DROP_ORDER, KEY_GAP, KEYS, LIVE_KEY, MARK, MARK_MARGIN, MARK_MARGIN_ROWS,
-    MOVE_KEYS, NO_MARKER, NOTE_MARKER, PACTING_KEYS, PACTING_QUIT_KEY, PACTING_RUN, PANEL_INDENT,
-    PATH_HEADING, PATH_RULES, PERCENT_WIDTH, PULL_KEY, PULL_LINES, PULL_QUESTION, PULL_SLICES,
-    PULL_STATUS, PULL_TEAM, PUSH_KEY, PUSH_LINES, PUSH_QUESTION, PUSH_TEAM, QUIT_KEY,
+    CONFIRM_NO, CONFIRM_QUESTION, CONFIRM_YES, CUT_KEY, CUT_LINES, CUT_QUESTION, CUT_SLICES,
+    CUT_STATUS, CUT_TEAM, Carry, ELLIPSIS, FILES_KEY, FILING_HEADING, FILING_RULES, FOOTER_HEIGHT,
+    GUIDE, GUIDE_BRANCH, GUIDE_LAST, HEADER_GAP, HEADER_HEIGHT, Hit, INDENT, KEY_DROP_ORDER,
+    KEY_GAP, KEYS, LIVE_KEY, MARK, MARK_MARGIN, MARK_MARGIN_ROWS, MOVE_KEYS, NO_MARKER,
+    NOTE_MARKER, PACTING_KEYS, PACTING_QUIT_KEY, PACTING_RUN, PANEL_INDENT, PATH_HEADING,
+    PATH_RULES, PERCENT_WIDTH, PUSH_KEY, PUSH_LINES, PUSH_QUESTION, PUSH_TEAM, QUIT_KEY,
     RECORD_HEADING, RECORD_HEIGHT, RECORD_LABEL_GAP, RECORD_LINES, RECORD_RULES, REFRESHING_RUN,
     REVIEW_ANSWER_GAP, REVIEW_CREATE, REVIEW_FEEDBACK, REVIEW_FIXED_LINES, REVIEW_QUESTION,
     REVIEW_SKIP, ROW_KEY, RUN_HEADER_HEIGHT, Reach, Review, SAID_MARKER, SCOPE_CURSOR,
     SCOPE_HEADING, SCOPE_HEIGHT, SCOPE_LINES, SCOPE_MARGIN, SCOPE_MARGIN_ROWS, SCROLLBACK_ARROW,
     SELECTED, SELECTION_MARKER, THREAD_TITLE, TREE_MIN_WIDTH, TREE_PERCENT, areas, carry_area,
-    centred, composer_height, composer_on_screen, confirm_area, confirm_size, display_width, draw,
-    footer_text_area, guide_prefixes, hit_test, keys_line, label_width, mark_area,
-    pacting_keys_line, pane_inner, panel_height, panel_reach, panel_row, panel_rows_area,
-    panel_width, pull_area, push_area, record_lines, record_size, review_area, run_header_height,
-    run_header_line, scope_size, tree_height, tree_rows_area, tree_width, truncated,
+    centred, composer_height, composer_on_screen, confirm_area, confirm_size, cut_area,
+    display_width, draw, footer_text_area, guide_prefixes, hit_test, keys_line, label_width,
+    mark_area, pacting_keys_line, pane_inner, panel_height, panel_reach, panel_row,
+    panel_rows_area, panel_width, push_area, record_lines, record_size, review_area,
+    run_header_height, run_header_line, scope_size, tree_height, tree_rows_area, tree_width,
+    truncated,
 };
 use crate::COMPOSER_MAX_ROWS;
 use crate::account::{Line as Entry, Outcome};
@@ -36,7 +37,7 @@ use crate::app::{App, Chrome, Focus, Row, Run, Sigils};
 use crate::claude::Activity;
 use crate::colour::{CONVERSATION_COLOUR, FOCUS_COLOUR, GUIDE_COLOUR, SYSTEM_COLOUR, colour_for};
 use crate::composer::Composer;
-use crate::confirm::{Answer, Choice, PullConfirm, PushConfirm, QuitConfirm};
+use crate::confirm::{Answer, Choice, CutConfirm, PushConfirm, QuitConfirm};
 use crate::fixture;
 use crate::modal::Modals;
 use crate::panel::Mode;
@@ -379,9 +380,9 @@ fn render_push(app: &App, width: u16, height: u16, push: &PushConfirm) -> Buffer
     )
 }
 
-fn render_pull(app: &App, width: u16, height: u16, pull: &PullConfirm) -> Buffer {
+fn render_cut(app: &App, width: u16, height: u16, cut: &CutConfirm) -> Buffer {
     let modals = Modals {
-        pull,
+        cut,
         ..Modals::default()
     };
     render_every(
@@ -6397,41 +6398,41 @@ fn the_quit_question_is_drawn_over_a_window_that_came_up_under_it() {
     assert!(!text.contains(PUSH_QUESTION), "{text}");
 }
 
-const PULL_PROJECT: &str = "Cut a planned project into tickets";
+const CUT_PROJECT: &str = "Cut a planned project into tickets";
 
 // The board's own spelling, which is what a reader sent to look would find
 // written on the project rather than what the gate folds it to.
-const PULL_STATUS_NAME: &str = "planned";
+const CUT_STATUS_NAME: &str = "planned";
 
-const PULL_SLICE_COUNT: usize = 9;
+const CUT_SLICE_COUNT: usize = 9;
 
 // A key value no window holds and no frame can therefore draw: the dialog is
 // built from the name alone, so this string is here only to be looked for.
-const PULL_KEY_VALUE: &str = "lin_api_not_a_real_key_value";
+const CUT_KEY_VALUE: &str = "lin_api_not_a_real_key_value";
 
-fn pull_dialog() -> PullConfirm {
-    PullConfirm::open(
-        PULL_PROJECT,
-        PULL_STATUS_NAME,
-        PULL_SLICE_COUNT,
+fn cut_dialog() -> CutConfirm {
+    CutConfirm::open(
+        CUT_PROJECT,
+        CUT_STATUS_NAME,
+        CUT_SLICE_COUNT,
         PUSH_TEAM_NAME,
         PUSH_KEY_NAME,
     )
 }
 
-fn pull_rect(buffer: &Buffer, pull: &PullConfirm) -> Rect {
-    pull_area(buffer.area, pull.cutting().expect("the dialog is up"))
+fn cut_rect(buffer: &Buffer, cut: &CutConfirm) -> Rect {
+    cut_area(buffer.area, cut.cutting().expect("the dialog is up"))
 }
 
 #[test]
-fn the_pull_dialog_names_the_project_the_status_the_slices_the_team_and_the_key_by_name() {
+fn the_cut_dialog_names_the_project_the_status_the_slices_the_team_and_the_key_by_name() {
     let base = Instant::now();
     let app = busy_app(base, WIDTH, FIXTURE_HEIGHT);
-    let pull = pull_dialog();
+    let cut = cut_dialog();
 
-    let buffer = render_pull(&app, WIDTH, FIXTURE_HEIGHT, &pull);
+    let buffer = render_cut(&app, WIDTH, FIXTURE_HEIGHT, &cut);
 
-    let rows = dialog_rows(&buffer, pull_rect(&buffer, &pull));
+    let rows = dialog_rows(&buffer, cut_rect(&buffer, &cut));
     let on = |needle: &str| {
         rows.iter()
             .position(|row| row.contains(needle))
@@ -6440,12 +6441,12 @@ fn the_pull_dialog_names_the_project_the_status_the_slices_the_team_and_the_key_
     // The five facts somebody is being asked about, in the order they are read
     // in: which project, what the board says it is, how much of it there is,
     // where the tickets land and whose key signs them.
-    let question = on(PULL_QUESTION);
-    let project = on(PULL_PROJECT);
-    let status = on(&format!("{PULL_STATUS}{PULL_STATUS_NAME}"));
-    let slices = on(&format!("{PULL_SLICES}{PULL_SLICE_COUNT}"));
-    let team = on(&format!("{PULL_TEAM}{PUSH_TEAM_NAME}"));
-    let key = on(&format!("{PULL_KEY}{PUSH_KEY_NAME}"));
+    let question = on(CUT_QUESTION);
+    let project = on(CUT_PROJECT);
+    let status = on(&format!("{CUT_STATUS}{CUT_STATUS_NAME}"));
+    let slices = on(&format!("{CUT_SLICES}{CUT_SLICE_COUNT}"));
+    let team = on(&format!("{CUT_TEAM}{PUSH_TEAM_NAME}"));
+    let key = on(&format!("{CUT_KEY}{PUSH_KEY_NAME}"));
     let answers = on(CONFIRM_YES.trim());
 
     assert!(question < project, "{rows:?}");
@@ -6462,26 +6463,26 @@ fn the_pull_dialog_names_the_project_the_status_the_slices_the_team_and_the_key_
     );
     // The window is as tall as it says it is, border and margins included.
     assert_eq!(u16::try_from(rows.len()).expect("a short window"), {
-        PULL_LINES + 2 * CONFIRM_MARGIN_ROWS + 2 * BORDER_THICKNESS
+        CUT_LINES + 2 * CONFIRM_MARGIN_ROWS + 2 * BORDER_THICKNESS
     });
 }
 
 #[test]
-fn no_key_value_is_drawn_anywhere_on_a_frame_with_the_pull_dialog_up() {
+fn no_key_value_is_drawn_anywhere_on_a_frame_with_the_cut_dialog_up() {
     // The claim as a reader would check it, over the whole frame rather than
     // the window: the dialog is handed a name and there is nowhere in it for a
     // value, so the one thing a key could leak onto is a screenshot.
     let base = Instant::now();
     let app = busy_app(base, WIDTH, FIXTURE_HEIGHT);
-    let pull = PullConfirm::open(
-        PULL_PROJECT,
-        PULL_STATUS_NAME,
-        PULL_SLICE_COUNT,
+    let cut = CutConfirm::open(
+        CUT_PROJECT,
+        CUT_STATUS_NAME,
+        CUT_SLICE_COUNT,
         PUSH_TEAM_NAME,
         PUSH_KEY_NAME,
     );
 
-    let buffer = render_pull(&app, WIDTH, FIXTURE_HEIGHT, &pull);
+    let buffer = render_cut(&app, WIDTH, FIXTURE_HEIGHT, &cut);
 
     let screen: Vec<String> = (0..FIXTURE_HEIGHT).map(|y| row_text(&buffer, y)).collect();
     assert!(
@@ -6490,23 +6491,23 @@ fn no_key_value_is_drawn_anywhere_on_a_frame_with_the_pull_dialog_up() {
     );
     for row in &screen {
         assert!(
-            !row.contains(PULL_KEY_VALUE),
+            !row.contains(CUT_KEY_VALUE),
             "a key value is drawn: {row:?}"
         );
     }
 }
 
 #[test]
-fn the_pull_dialog_opens_with_no_lit_and_moves_only_the_highlight() {
+fn the_cut_dialog_opens_with_no_lit_and_moves_only_the_highlight() {
     let base = Instant::now();
     let app = busy_app(base, WIDTH, FIXTURE_HEIGHT);
-    let opened = pull_dialog();
+    let opened = cut_dialog();
     let moved = opened.lit(Answer::Yes);
 
-    let first = render_pull(&app, WIDTH, FIXTURE_HEIGHT, &opened);
-    let second = render_pull(&app, WIDTH, FIXTURE_HEIGHT, &moved);
+    let first = render_cut(&app, WIDTH, FIXTURE_HEIGHT, &opened);
+    let second = render_cut(&app, WIDTH, FIXTURE_HEIGHT, &moved);
 
-    let area = pull_rect(&first, &opened);
+    let area = cut_rect(&first, &opened);
     // The answer that starts a run is never the one under the reader's finger
     // when the question arrives.
     assert_lit_in(&first, area, CONFIRM_NO);
@@ -6517,19 +6518,19 @@ fn the_pull_dialog_opens_with_no_lit_and_moves_only_the_highlight() {
     // the same columns whichever answer is lit.
     assert_eq!(
         dialog_rows(&first, area),
-        dialog_rows(&second, pull_rect(&second, &moved))
+        dialog_rows(&second, cut_rect(&second, &moved))
     );
 }
 
 #[test]
-fn the_pull_dialog_is_centred_over_the_frame_like_the_other_two() {
+fn the_cut_dialog_is_centred_over_the_frame_like_the_other_two() {
     let base = Instant::now();
     let app = busy_app(base, WIDTH, FIXTURE_HEIGHT);
-    let pull = pull_dialog();
+    let cut = cut_dialog();
 
-    let buffer = render_pull(&app, WIDTH, FIXTURE_HEIGHT, &pull);
+    let buffer = render_cut(&app, WIDTH, FIXTURE_HEIGHT, &cut);
 
-    let area = pull_rect(&buffer, &pull);
+    let area = cut_rect(&buffer, &cut);
     let left = area.x;
     let right = WIDTH - (area.x + area.width);
     let above = area.y;
@@ -6576,8 +6577,8 @@ fn review_window(feedback: bool) -> Review {
     )
 }
 
-// The two windows a confirmed pull puts up, each on a frame with nothing else
-// on it, for `render_pull`'s reason: they come up over a session whose every
+// The two windows a confirmed cut puts up, each on a frame with nothing else
+// on it, for `render_cut`'s reason: they come up over a session whose every
 // other window is down, and never with each other.
 fn render_review(app: &App, width: u16, height: u16, review: &Review) -> Buffer {
     let modals = Modals {

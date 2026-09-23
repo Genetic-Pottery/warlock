@@ -657,7 +657,7 @@ const PUSHED: &str = "# Cut a planned project into tickets\n\n\
                       Nothing reads a project's content back, and a brief about\n\
                       the format quotes ## Scope mid-sentence where a substring\n\
                       search would cut the document in half.\n\n\
-                      ## Outcome\n\n`warlock pull` files a ticket per slice.\n\n\
+                      ## Outcome\n\n`warlock draft` files a ticket per slice.\n\n\
                       ## Success criteria\n\n**The reader**\n\n- sees a ticket per slice\n\n\
                       ## Constraints\n\nNo new dependency.\n\n\
                       ## Out of scope\n\nAny Linear call.\n\n\

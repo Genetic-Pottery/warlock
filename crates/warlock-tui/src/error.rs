@@ -190,7 +190,7 @@ pub(crate) enum Error {
         // failure only one command can reach.
         source: Box<filed::Error>,
     },
-    // The three refusals a pull has before it reads anything: a brief nothing
+    // The three refusals a cut has before it reads anything: a brief nothing
     // filed, an id the workspace does not have, and a project that is not
     // planned. Each names what it read and where that came from, because all
     // three are a file on this machine and the board disagreeing rather than a
@@ -566,7 +566,7 @@ impl fmt::Display for Error {
             // stack said.
             Self::Linear { source } => write!(f, "{}", one_line(&source.to_string())),
             Self::Unfiled { url, source } => write!(f, "{}", unfiled_message(url, source)),
-            // The three pull refusals with wording of their own, said below for
+            // The three cut refusals with wording of their own, said below for
             // the push refusals' reason.
             Self::NoRecord { path } => write!(f, "{}", no_record_message(path)),
             Self::UnknownProject { id, path } => {

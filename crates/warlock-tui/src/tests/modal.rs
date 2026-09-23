@@ -1,7 +1,7 @@
 use warlock_engine::Destination;
 
 use super::{Modal, Modals};
-use crate::confirm::{Carry, PullConfirm, PushConfirm, QuitConfirm, Review};
+use crate::confirm::{Carry, CutConfirm, PushConfirm, QuitConfirm, Review};
 use crate::prompt::{RecordPrompt, ScopePrompt};
 
 #[test]
@@ -15,7 +15,7 @@ fn the_precedence_is_quit_the_four_questions_then_the_four_fields() {
         "Push a brief to the board",
         Destination::new("warlock-team", "Warlock", "warlock", "work"),
     );
-    let pull = PullConfirm::open("A project", "planned", 9, "Warlock", "work");
+    let cut = CutConfirm::open("A project", "planned", 9, "Warlock", "work");
     let review = Review::open("slice 1", vec!["A draft".to_owned()], true);
     let carry = Carry::open("2 slices");
     let filing = ScopePrompt::open("Which board", "work");
@@ -28,7 +28,7 @@ fn the_precedence_is_quit_the_four_questions_then_the_four_fields() {
     let mut modals = Modals {
         quit: QuitConfirm::open(),
         push: &push,
-        pull: &pull,
+        cut: &cut,
         review: Some(&review),
         carry: Some(&carry),
         filing: &filing,
@@ -42,7 +42,7 @@ fn the_precedence_is_quit_the_four_questions_then_the_four_fields() {
         match modal {
             Modal::Quit(_) => modals.quit = QuitConfirm::Closed,
             Modal::Push(_) => modals.push = &PushConfirm::Closed,
-            Modal::Pull(_) => modals.pull = &PullConfirm::Closed,
+            Modal::Cut(_) => modals.cut = &CutConfirm::Closed,
             Modal::Review(_) => modals.review = None,
             Modal::Carry(_) => modals.carry = None,
             Modal::Filing(_) => modals.filing = &ScopePrompt::Closed,
@@ -57,7 +57,7 @@ fn the_precedence_is_quit_the_four_questions_then_the_four_fields() {
         [
             Modal::Quit(QuitConfirm::open().highlighted().expect("open")),
             Modal::Push(push.filing().expect("open")),
-            Modal::Pull(pull.cutting().expect("open")),
+            Modal::Cut(cut.cutting().expect("open")),
             Modal::Review(&review),
             Modal::Carry(&carry),
             Modal::Filing(filing.field().expect("open")),
