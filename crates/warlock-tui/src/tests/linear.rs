@@ -6,9 +6,9 @@ use std::sync::Mutex;
 use serde_json::{Value, json};
 
 use super::{
-    BACKLOG, Client, ENDPOINT, Error, NewIssue, NewProject, Posts, REQUEST_TIMEOUT, answer,
-    authorization, backlog_state, backlog_status, comment_on_project, create_issue, create_project,
-    create_relation, fetch_project, issue_label_id, label_id, team_id,
+    BACKLOG, Board, Client, ENDPOINT, Error, Linear, NewIssue, NewProject, Posts, REQUEST_TIMEOUT,
+    answer, authorization, backlog_state, backlog_status, comment_on_project, create_issue,
+    create_project, create_relation, fetch_project, issue_label_id, label_id, team_id,
 };
 
 const KEY: &str = "lin_api_a_key_nobody_holds_8f3a1c";
@@ -955,6 +955,23 @@ fn a_relation_is_one_blocking_edge_written_in_one_request() {
         linear.documents()[0].contains("issueRelationCreate("),
         "{:?}",
         linear.documents()
+    );
+}
+
+#[test]
+fn the_board_hands_the_blocker_to_the_wire_first() {
+    // The two ids are both `&str`, so a swap between the trait and the
+    // operation under it compiles and inverts every dependency a cut writes.
+    let board = Linear::new(Posting::answering([Ok(relation_created())]));
+
+    board
+        .create_relation("issue-first", "issue-second")
+        .expect("the stand-in answered");
+
+    assert_eq!(last_input(&board.posts)["issueId"], json!("issue-first"));
+    assert_eq!(
+        last_input(&board.posts)["relatedIssueId"],
+        json!("issue-second")
     );
 }
 

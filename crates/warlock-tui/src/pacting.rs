@@ -29,7 +29,7 @@ use warlock_tui::{
     Sigils, Wired,
 };
 
-use crate::boundary::{Reach, Verdict, verdict};
+use crate::boundary::Operation;
 use crate::descent::{Descent, RunEvent, descend};
 use crate::error::one_line;
 use crate::session::{Scope, closed_scope, reload};
@@ -319,6 +319,7 @@ fn cancelled(toggled: Toggled) -> Toggled {
 // anything that paints rather than asks.
 fn turned_down(
     app: &mut App,
+    operation: Operation,
     manifest: &Manifest,
     repo_root: &Path,
     sigils: &Sigils,
@@ -328,7 +329,7 @@ fn turned_down(
         app.set_pact_refused();
         return true;
     }
-    closed_scope(app, manifest, repo_root, sigils).is_some()
+    closed_scope(app, operation, manifest, repo_root, sigils)
 }
 
 fn pact_press(
@@ -339,19 +340,18 @@ fn pact_press(
     in_flight: bool,
     at: Instant,
 ) -> Option<PactToggle> {
-    if turned_down(app, manifest, repo_root, sigils, in_flight) {
+    // Which way the press goes decides what the boundary is asked about: an
+    // un-pact drops every pact below the row, so it is asked about them too.
+    let operation = match app.pact_reach() {
+        Some(reach) if !reach.pacted => Operation::Unpact,
+        _ => Operation::Pact,
+    };
+    if turned_down(app, operation, manifest, repo_root, sigils, in_flight) {
         return None;
     }
-    // The downward question, asked before the toggle for the reason the two
-    // above it are. Last of the three, because "may this operator act here at
-    // all" is settled before "what would this press reach".
-    if blocked_unpact(app, manifest, repo_root, sigils) {
-        return None;
-    }
-    // Both boundary questions are past, so what is left is the app's own
-    // rules about the row. Asked and then carried out, rather than in one
-    // painting call, so the press acted on is provably the press the two
-    // questions above were asked about.
+    // The boundary is past, so what is left is the app's own rules about the
+    // row. Asked and then carried out, rather than in one painting call, so
+    // the press acted on is provably the press the boundary was asked about.
     let toggle = match app.pact_intent() {
         PactIntent::Toggles(toggle) => toggle,
         PactIntent::Refused(message) => {
@@ -365,39 +365,6 @@ fn pact_press(
         app.start_account(at);
     }
     Some(toggle)
-}
-
-fn blocked_unpact(app: &mut App, manifest: &Manifest, repo_root: &Path, sigils: &Sigils) -> bool {
-    // Which directory the press reaches and which way it goes, both off one
-    // answer: a press that would pact rather than un-pact loses no boundary.
-    let Some(reach) = app.pact_reach() else {
-        return false;
-    };
-    if reach.pacted {
-        return false;
-    }
-
-    // The decision is [`verdict`]'s, asked at the reach an un-pact needs; this
-    // is the panel's half of what to do about it. `closed_scope` has already
-    // asked the narrower question by the time this runs — see [`pact_press`] —
-    // so what is left to say here is only ever about what is underneath.
-    let path = reach.path;
-    let answer = verdict(
-        &path,
-        repo_root,
-        manifest,
-        sigils.as_slice(),
-        Reach::HereAndBelow,
-    );
-    if !matches!(answer, Verdict::ClosedBelow { .. }) {
-        return false;
-    }
-
-    let label = app.label_for(&path);
-    if let Some(line) = answer.message(&label) {
-        app.set_message(line);
-    }
-    true
 }
 
 // `edits.rs` drives the real `p` rather than a copy of its rules; the two
@@ -421,11 +388,16 @@ fn refresh_press(
     in_flight: bool,
     at: Instant,
 ) -> Option<PathBuf> {
-    if turned_down(app, manifest, repo_root, sigils, in_flight) {
+    if turned_down(
+        app,
+        Operation::Refresh,
+        manifest,
+        repo_root,
+        sigils,
+        in_flight,
+    ) {
         return None;
     }
-    // No downward question here, unlike `pact_press`: a refresh never drops a
-    // pact, so there is no boundary below the row for it to lose.
     let directory = app.refresh()?;
     app.start_account(at);
     Some(directory)

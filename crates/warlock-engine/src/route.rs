@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use crate::keys::{self, keys_path, load_key_names};
 use crate::manifest::{self, Manifest, ScopeRecord, manifest_path};
 use crate::scope::{scope_covering, scope_opens_to};
-use crate::sigils::{self, load_key_binding, load_sigils, sigils_path};
+use crate::sigils::{self, held_sigils, load_key_binding, sigils_path};
 
 /// ```
 /// use warlock_engine::{
@@ -73,20 +73,11 @@ pub fn resolve_route(
         });
     };
 
-    // A missing config reads as an empty held set *here only*, against
-    // `load_sigils`'s own insistence that absent and holds-nothing stay
-    // different answers: this is the caller that knows which it is acting on,
-    // and a machine that has never recorded a sigil opens no scope either way.
-    // Unreadable and unparseable stay errors, because those are not an answer.
-    //
-    // This call is also what keeps a config that will not parse a `Sigils`
-    // refusal here even though `route_facts` reads the same file forgivingly:
-    // it runs before the two key refusals below, so the broken file is reported
-    // as broken rather than as a checkout bound to nothing.
-    let held = match load_sigils(home, root) {
-        Err(sigils::Error::NotFound { .. }) => Vec::new(),
-        other => other.map_err(|source| Error::Sigils { source })?,
-    };
+    // Before the two key refusals below, which is what keeps a config that
+    // will not parse a `Sigils` refusal here even though `route_facts` reads
+    // the same file forgivingly: the broken file is reported as broken rather
+    // than as a checkout bound to nothing.
+    let held = held_sigils(home, root).map_err(|source| Error::Sigils { source })?;
 
     let key = bound_key(home, root)?;
 
@@ -169,7 +160,7 @@ pub(crate) fn bound_key(home: &Path, root: &Path) -> Result<String, Error> {
 // been paid for by every other caller: a `Route` in hand is a route that can
 // actually be filed, which is the whole guarantee `resolve_route` sells.
 //
-// No sigil is read here, deliberately. `load_sigils`, `scope_opens_to` and
+// No sigil is read here, deliberately. `held_sigils`, `scope_opens_to` and
 // `opens` stay in the wrapper because a config that will not parse is
 // `Sigils::Unknown` to `check` — an answer, printed, with exit 0 — and reading
 // the held set here would turn it into a failure.

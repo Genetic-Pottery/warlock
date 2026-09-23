@@ -27,11 +27,10 @@ use crate::account::{Account, Line as Entry, Voice};
 use crate::app::{App, Chrome, Focus, Row, Run, RunHeader};
 use crate::colour::{CONVERSATION_COLOUR, FOCUS_COLOUR, GUIDE_COLOUR, SYSTEM_COLOUR, colour_for};
 use crate::composer::Composer;
-use crate::confirm::{
-    Answer, Carry, Choice, Cutting, Filing, PullConfirm, PushConfirm, QuitConfirm, Review,
-};
+use crate::confirm::{Answer, Carry, Choice, Cutting, Filing, Review};
+use crate::modal::Modal;
 use crate::panel::Mode;
-use crate::prompt::{RecordField, RecordForm, RecordPrompt, ScopeField, ScopePrompt};
+use crate::prompt::{RecordField, RecordForm, ScopeField};
 // Renamed for the reason `Entry` above is: `Span` here is ratatui's piece of a
 // drawn line, and the selection's is the cells of one row the highlight covers;
 // its `Window` is the panel's view of the card, which is neither of the
@@ -369,26 +368,12 @@ const COMPOSER_CURSOR: &str = SCOPE_CURSOR;
 
 const COMPOSER_MIN_HEIGHT: u16 = 1 + 2 * BORDER_THICKNESS;
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "one frame's worth of state, and the point of it is that the binary \
-              draws a frame in one call: the seven windows that can be over the \
-              app are seven parameters here rather than seven entry points"
-)]
 pub fn draw(
     frame: &mut Frame<'_>,
     app: &App,
     chrome: &Chrome,
     now: Instant,
-    confirm: QuitConfirm,
-    scope: &ScopePrompt,
-    record: &RecordPrompt,
-    path: &ScopePrompt,
-    filing: &ScopePrompt,
-    push: &PushConfirm,
-    pull: &PullConfirm,
-    review: Option<&Review>,
-    carry: Option<&Carry>,
+    modal: Option<Modal<'_>>,
     composer: Option<&Composer>,
 ) {
     let screen = frame.area();
@@ -418,48 +403,24 @@ pub fn draw(
     draw_tree_pane(frame, tree, app, chrome, now);
     draw_footer(frame, footer, app);
 
-    // Over the finished frame rather than instead of it, each clearing the cells
-    // behind it, so what a prompt is answered against is still on screen around
-    // it. Nothing below is skipped when one of these is up.
-    if let Some(highlighted) = confirm.highlighted() {
-        draw_confirm(frame, screen, highlighted);
-    }
-    if let Some(field) = path.field() {
-        draw_scope(frame, screen, field, PATH_HEADING, PATH_RULES);
-    }
-    if let Some(field) = scope.field() {
-        draw_scope(frame, screen, field, SCOPE_HEADING, scope::RULES);
-    }
-    if let Some(form) = record.form() {
-        draw_record(frame, screen, form);
-    }
-    // The last two are the two halves of one `/push`, drawn after the three
-    // above for the reason the keys go to them first: they are the windows
-    // somebody is looking at while any of those can be up underneath. They are
-    // never both on a frame — the submit that takes the field down is the one
-    // that puts the dialog up.
-    if let Some(field) = filing.field() {
-        draw_scope(frame, screen, field, FILING_HEADING, FILING_RULES);
-    }
-    if let Some(asked) = push.filing() {
-        draw_push(frame, screen, asked);
-    }
-    // Last, with the same claim to the frame the push dialog has and for the
-    // same reason — while a question is up it is the thing being looked at.
-    // The two are never on one frame either: a `/pull` cannot be typed while
-    // the other is up, since the keys go to the dialog before the composer.
-    if let Some(asked) = pull.cutting() {
-        draw_pull(frame, screen, asked);
-    }
-    // The two windows a run puts up once it is going, which is after the dialog
-    // above has been answered and taken down: they are never on a frame with it
-    // or with each other, since a slice is being reviewed, or asking whether to
-    // carry on, or neither.
-    if let Some(drafts) = review {
-        draw_review(frame, screen, drafts);
-    }
-    if let Some(asked) = carry {
-        draw_carry(frame, screen, asked);
+    // Over the finished frame rather than instead of it, clearing only the cells
+    // behind it, so what a window is answered against is still on screen around
+    // it.
+    match modal {
+        None => {}
+        Some(Modal::Quit(highlighted)) => draw_confirm(frame, screen, highlighted),
+        Some(Modal::Push(asked)) => draw_push(frame, screen, asked),
+        Some(Modal::Pull(asked)) => draw_pull(frame, screen, asked),
+        Some(Modal::Review(drafts)) => draw_review(frame, screen, drafts),
+        Some(Modal::Carry(asked)) => draw_carry(frame, screen, asked),
+        Some(Modal::Filing(field)) => {
+            draw_scope(frame, screen, field, FILING_HEADING, FILING_RULES);
+        }
+        Some(Modal::Scope(field)) => {
+            draw_scope(frame, screen, field, SCOPE_HEADING, scope::RULES);
+        }
+        Some(Modal::Record(form)) => draw_record(frame, screen, form),
+        Some(Modal::Write(field)) => draw_scope(frame, screen, field, PATH_HEADING, PATH_RULES),
     }
 }
 
@@ -1381,11 +1342,11 @@ fn push_lines(filing: &Filing) -> Vec<Line<'_>> {
 }
 
 fn team_line(filing: &Filing) -> String {
-    format!("{PUSH_TEAM}{}", filing.team())
+    format!("{PUSH_TEAM}{}", filing.destination().team())
 }
 
 fn key_line(filing: &Filing) -> String {
-    format!("{PUSH_KEY}{}", filing.key())
+    format!("{PUSH_KEY}{}", filing.destination().key())
 }
 
 fn push_size(filing: &Filing) -> Size {

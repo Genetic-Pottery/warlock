@@ -191,7 +191,7 @@ fn over_the_cap(request: &agent::Request) -> String {
 /// The sentence the engine makes of one mended line.
 ///
 /// A file's line is never cut the way a directory's slot was: the attempts
-/// run out and `describe_file` writes the line itself, from the name, the
+/// run out and `Snapshot::line` writes the line itself, from the name, the
 /// size and what the file declares. So every per-file mend reads the same
 /// whatever was wrong with the answer.
 fn mended(file: &str) -> String {

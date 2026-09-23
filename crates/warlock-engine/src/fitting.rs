@@ -3,8 +3,9 @@ use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::document::{self, Described};
-use crate::{agent, hash, languages, walk};
+use crate::document::{self, Defect, Described};
+use crate::pact::{Error, Observer, Refusal};
+use crate::{Agent, agent, hash, languages, walk};
 
 pub const PER_FILE_BYTE_CAP: u64 = 1024 * 1024;
 
@@ -122,44 +123,187 @@ impl Snapshot {
         self.request.directory()
     }
 
-    pub(crate) fn files(&self) -> &BTreeMap<String, Measured> {
-        &self.files
-    }
-
     fn expected(&self) -> document::Expected<'_> {
         document::Expected::of(&self.request)
-    }
-
-    pub(crate) fn synthesis_request(
-        &self,
-        lines: &BTreeMap<String, String>,
-        rejected: &[document::Defect],
-    ) -> agent::Request {
-        let instructions =
-            document::synthesis_instructions(&self.name, lines, &self.expected(), rejected);
-        self.request.clone().with_prompt(instructions)
-    }
-
-    pub(crate) fn accept_synthesis(
-        &self,
-        answer: &str,
-        lines: &BTreeMap<String, String>,
-    ) -> document::Accepted {
-        document::accept_synthesis(answer, lines, &self.expected(), &self.described)
-    }
-
-    pub(crate) fn mend(&self, fill: &document::Fill) -> (document::Fill, Vec<document::Mend>) {
-        document::mend(fill, &self.expected(), &self.described)
     }
 
     pub(crate) fn render(&self, fill: &document::Fill) -> String {
         document::render(&self.name, fill, &self.expected(), &self.described)
     }
 
+    /// Every line a directory's document needs, asking only about what moved.
+    ///
+    /// The document is the store: a file whose bytes hash to what the manifest
+    /// recorded keeps the line already on the page, and every other file costs one
+    /// pass. Both halves have to agree before a line is reused — a hash with no
+    /// line on the page is a document somebody edited, and a line with no hash is a
+    /// file nobody has measured — and either way the answer is to ask again, which
+    /// costs a pass and never a wrong line.
+    pub(crate) fn assemble(
+        &self,
+        carried: Option<(&str, &BTreeMap<String, String>)>,
+        agent: &dyn Agent,
+        observer: &mut dyn Observer,
+    ) -> Result<Assembled, Error> {
+        let directory = self.directory();
+        let (page, recorded) = match carried {
+            Some((page, recorded)) => (document::lines_of(page), recorded.clone()),
+            None => (BTreeMap::new(), BTreeMap::new()),
+        };
+
+        // Every file is settled against the page before the first pass runs, so
+        // that `Observer::describing` can be handed a denominator: what a front end
+        // needs is the count of files this directory will *pay* for.
+        //
+        // A line is kept only where the recorded digest matches the file as it
+        // stands *and* the line as it sits on the page — `hash::line_hash` binds
+        // the two. A document is warlock's to write, so a line somebody edited by
+        // hand simply fails to match and is described again, silently and at the
+        // cost of that one file. Testing the file's hash alone was what let an
+        // edited line be carried forward and then granted as though a pass had
+        // written it.
+        let planned: Vec<(&String, &Measured, Option<String>)> = self
+            .files
+            .iter()
+            .map(|(name, measured)| {
+                let kept = measured
+                    .hash
+                    .as_ref()
+                    .zip(page.get(name))
+                    .filter(|(hash, line)| recorded.get(name) == Some(&hash::line_hash(hash, line)))
+                    .map(|(_, line)| line.clone());
+                (name, measured, kept)
+            })
+            .collect();
+
+        let paying = planned.iter().filter(|(.., kept)| kept.is_none()).count();
+
+        let mut assembled = Assembled::default();
+        let mut position = 0;
+        for (name, measured, kept) in planned {
+            if let Some(line) = kept {
+                assembled.lines.insert(name.clone(), line);
+                assembled.kept.push(name.clone());
+            } else {
+                position += 1;
+                observer.describing(directory, name, measured.size, position, paying);
+                let described = self.line(name, agent, observer)?;
+                if described.mended {
+                    assembled.mended.push(name.clone());
+                }
+                assembled.problems.extend(described.problem);
+                assembled.lines.insert(name.clone(), described.line);
+                assembled.asked.push(name.clone());
+            }
+
+            // Recorded from the line that actually went into the document, kept or
+            // freshly described, so the next run compares against what is on the
+            // page rather than against what this one meant to put there.
+            if let Some((hash, line)) = measured.hash.as_ref().zip(assembled.lines.get(name)) {
+                assembled
+                    .hashes
+                    .insert(name.clone(), hash::line_hash(hash, line));
+            }
+        }
+        Ok(assembled)
+    }
+
+    // Ends with a line warlock wrote itself rather than a refusal, because one
+    // unusable answer about one file is no reason to lose the directory it sits
+    // in. What it cannot do is invent a file: a name that is not there is an
+    // error, since the caller walked the directory to get it.
+    pub(crate) fn line(
+        &self,
+        name: &str,
+        agent: &dyn Agent,
+        observer: &mut dyn Observer,
+    ) -> Result<DescribedFile, Error> {
+        let directory = self.directory();
+        let (request, described, problem) = one_file(document::FILE_PROMPT, directory, name)
+            .map_err(|source| Error::from_walk(directory, source))?;
+        let expected = document::Expected::of(&request);
+
+        let answered = ask(
+            directory,
+            agent,
+            observer,
+            |rejected| {
+                request
+                    .clone()
+                    .with_prompt(document::file_instructions(name, rejected))
+            },
+            |answer| document::accept_file(answer, name, &expected, &described),
+        )?;
+
+        Ok(match answered {
+            Some(line) => DescribedFile {
+                line,
+                mended: false,
+                problem,
+            },
+            None => DescribedFile {
+                line: document::file_fallback(name, &expected, &described),
+                mended: true,
+                problem,
+            },
+        })
+    }
+
+    // Shown the lines and never the source. Ends in a fill either way: the mend is
+    // the floor under an exhausted loop, so a directory is never lost because its
+    // synthesis could not be got right.
+    pub(crate) fn fill(
+        &self,
+        lines: &BTreeMap<String, String>,
+        agent: &dyn Agent,
+        observer: &mut dyn Observer,
+    ) -> Result<Synthesised, Error> {
+        // Announced before the first attempt waits on a model, so a front end's
+        // clock counts what is being waited on rather than going quiet after the
+        // last file.
+        observer.requesting(lines.len(), self.carried_bytes(lines));
+
+        let expected = self.expected();
+        let mut best = None;
+        let answered = ask(
+            self.directory(),
+            agent,
+            observer,
+            |rejected| {
+                self.request
+                    .clone()
+                    .with_prompt(document::synthesis_instructions(
+                        &self.name, lines, &expected, rejected,
+                    ))
+            },
+            |answer| match document::accept_synthesis(answer, lines, &expected, &self.described) {
+                document::Accepted::Filled(fill) => Ok(fill),
+                document::Accepted::Defective { fill, defects } => {
+                    best = Some(fill);
+                    Err(defects)
+                }
+                document::Accepted::Unparsed(defect) => Err(vec![defect]),
+            },
+        )?;
+        if let Some(fill) = answered {
+            return Ok(Synthesised {
+                fill,
+                mends: Vec::new(),
+            });
+        }
+
+        let unusable = best.unwrap_or_else(|| document::Fill {
+            files: lines.clone(),
+            ..document::Fill::default()
+        });
+        let (fill, mends) = document::mend(&unusable, &expected, &self.described);
+        Ok(Synthesised { fill, mends })
+    }
+
     // What the synthesis request carries: the lines, and the documents of the
     // directories below. The files are in it by name and size only, so counting
     // them would report a payload that was never sent.
-    pub(crate) fn carried_bytes(&self, lines: &BTreeMap<String, String>) -> u64 {
+    fn carried_bytes(&self, lines: &BTreeMap<String, String>) -> u64 {
         lines
             .values()
             .map(|line| byte_count(line.len()))
@@ -171,6 +315,64 @@ impl Snapshot {
                 .map(|child| byte_count(child.text().len()))
                 .sum::<u64>()
     }
+}
+
+// A transport failure ends it at once: a pass that produced no answer is not a
+// pass that produced a wrong one, and retrying a missing `claude` finds it
+// still missing.
+fn ask<T>(
+    directory: &Path,
+    agent: &dyn Agent,
+    observer: &mut dyn Observer,
+    request: impl Fn(&[Defect]) -> agent::Request,
+    mut accept: impl FnMut(&str) -> Result<T, Vec<Defect>>,
+) -> Result<Option<T>, Error> {
+    let mut rejected = Vec::new();
+    for attempt in 1..=document::ATTEMPTS {
+        let answer = agent
+            .run(&request(&rejected))
+            .map_err(|source| Error::Refused {
+                directory: directory.to_path_buf(),
+                cause: Refusal::Agent { source },
+            })?;
+        match accept(answer.text()) {
+            Ok(taken) => return Ok(Some(taken)),
+            Err(defects) => {
+                observer.rejected(directory, &defects, attempt, document::ATTEMPTS);
+                rejected = defects;
+            }
+        }
+    }
+    Ok(None)
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct Assembled {
+    pub(crate) lines: BTreeMap<String, String>,
+    // What each file hashed to as its line was settled, for the manifest to
+    // record. A file that could not be hashed is absent and will be asked about
+    // again.
+    pub(crate) hashes: BTreeMap<String, String>,
+    pub(crate) asked: Vec<String>,
+    pub(crate) kept: Vec<String>,
+    // Files whose every attempt was spent, so warlock wrote the line.
+    pub(crate) mended: Vec<String>,
+    pub(crate) problems: Vec<Problem>,
+}
+
+#[derive(Debug)]
+pub(crate) struct DescribedFile {
+    pub(crate) line: String,
+    pub(crate) mended: bool,
+    // Why the pass was shown a name and a size instead of the file, where it
+    // was: too large for the per-file cap, or unreadable.
+    pub(crate) problem: Option<Problem>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Synthesised {
+    pub(crate) fill: document::Fill,
+    pub(crate) mends: Vec<document::Mend>,
 }
 
 fn describe(described: &mut Described, path: &Path, name: &str, text: &str) {

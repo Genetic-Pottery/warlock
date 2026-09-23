@@ -2,10 +2,10 @@
 //! it is filed, what this machine holds, and whether the two meet — printed,
 //! and nothing written anywhere.
 //!
-//! The boundary halves of the answer are the engine's [`scope_covering`] and
-//! [`scope_opens_to`], called once each and neither re-implemented here, and
-//! the route is one [`route_facts`] call in its reporting form. That is the
-//! point of the subcommand: the alternative for a script is walking
+//! The covering scope and the route are one [`route_facts`] call in its
+//! reporting form, and whether this machine opens that scope is one
+//! [`scope_opens_to`] call; neither is re-implemented here. That is the point
+//! of the subcommand: the alternative for a script is walking
 //! `.warlock/pacts.toml` upwards by hand, which is the boundary rule and the
 //! `[[scope]]` lookup written a second time somewhere they will drift from the
 //! first. Only the *name* a key is stored under is ever read, so there is no
@@ -26,7 +26,7 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
-use warlock_engine::{Manifest, route_facts, scope_covering, scope_opens_to, sigils_path};
+use warlock_engine::{Manifest, route_facts, scope_opens_to, sigils_path};
 use warlock_tui::Sigils;
 
 use crate::error::Error;
@@ -150,11 +150,11 @@ fn checked_onto<W: Write>(
 // sigil config, under the home handed in. That is what keeps the tests off the
 // developer's real home.
 //
-// The path is spelled *before* coverage is asked for, and both refusals are the
-// same one: `spelled` and `scope_covering` agree by construction, since the
-// second is the first followed by a walk. Asking here means a refused path is a
-// refusal before anything is printed rather than an answer with an unprintable
-// path in it.
+// The path is spelled *before* the route is asked for, and both refusals are
+// the same one: `spelled` and `route_facts` agree by construction, since the
+// second is the first followed by a walk. Asking here means a refused path is
+// this command's `Unspellable` refusal before anything is printed rather than a
+// `Route` error with the same cause.
 fn checked(
     repo_root: &Path,
     home: Option<&Path>,
@@ -162,31 +162,22 @@ fn checked(
     target: &Path,
 ) -> Result<Checked, Error> {
     let path = spelled(repo_root, target)?;
-    let scope = scope_covering(target, repo_root, manifest)
-        .map_err(|source| Error::Unspellable { source })?
-        .map(str::to_owned);
-    let sigils = home.map_or(Sigils::Nothing, |home| sigils_under(home, repo_root));
-    // The scope and the sigils meet in the engine and nowhere else: `Nothing`
-    // and `Unknown` are both the empty slice on the way in (`Sigils::as_slice`),
-    // which is what makes `opens` false for both over a scoped path and true for
-    // both over an unscoped one.
-    let opens = scope_opens_to(scope.as_deref(), sigils.as_slice());
     // One engine call for the whole route, and the reporting form of it: every
     // absence `resolve_route` refuses on — an unscoped path, a scope with no
     // record, nothing bound, a name the store has never heard of — arrives here
     // as a value, which is what keeps a check's exit status 0 whatever it finds.
     // The alternative was reading `manifest.scopes()` and the sigil config for
     // the binding here, which is the `[[scope]]` lookup written a second time
-    // somewhere it can disagree with the first.
-    //
-    // `scope` and `opens` are still the two calls above rather than
-    // `facts.scope()`: the boundary rule is one rule, and a reader checking
-    // that warlock asked it has to find `scope_covering` and `scope_opens_to`
-    // in this function. The two agree by construction — `route_facts` is that
-    // same call followed by a record lookup — and only `opens` needs the held
-    // sigils, which the reporting form deliberately never reads.
+    // somewhere it can disagree with the first. Its scope is `scope_covering`'s
+    // answer, so there is no second coverage walk here either.
     let facts =
         route_facts(target, repo_root, manifest, home).map_err(|source| Error::Route { source })?;
+    let scope = facts.scope().map(str::to_owned);
+    let sigils = home.map_or(Sigils::Nothing, |home| sigils_under(home, repo_root));
+    // `Nothing` and `Unknown` are both the empty slice on the way in
+    // (`Sigils::as_slice`), which is what makes `opens` false for both over a
+    // scoped path and true for both over an unscoped one.
+    let opens = scope_opens_to(facts.scope(), sigils.as_slice());
     let record = facts.record();
 
     Ok(Checked {

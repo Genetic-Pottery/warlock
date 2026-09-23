@@ -7,7 +7,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::{Position, Rect, Size};
 use ratatui::style::{Color, Modifier};
 use ratatui::widgets::{Paragraph, Widget};
-use warlock_engine::{NodeState, scope};
+use warlock_engine::{Destination, NodeState, scope};
 
 use super::{
     Areas, BAR_EMPTY, BAR_FILLED, BAR_MIN_WIDTH, BORDER_THICKNESS, BRIEF_THREAD_TITLE, CANCEL_KEY,
@@ -38,6 +38,7 @@ use crate::colour::{CONVERSATION_COLOUR, FOCUS_COLOUR, GUIDE_COLOUR, SYSTEM_COLO
 use crate::composer::Composer;
 use crate::confirm::{Answer, Choice, PullConfirm, PushConfirm, QuitConfirm};
 use crate::fixture;
+use crate::modal::Modals;
 use crate::panel::Mode;
 use crate::prompt::{RecordField, RecordForm, RecordPrompt, ScopeField, ScopePrompt};
 // Renamed because `Position` in here is ratatui's point on the screen, and a
@@ -301,27 +302,19 @@ fn render_confirm(
     now: Instant,
     confirm: QuitConfirm,
 ) -> Buffer {
-    render_windows(
-        app,
-        &Chrome::default(),
-        width,
-        height,
-        now,
-        confirm,
-        &ScopePrompt::Closed,
-    )
+    let modals = Modals {
+        quit: confirm,
+        ..Modals::default()
+    };
+    render_every(app, &Chrome::default(), width, height, now, modals, None)
 }
 
 fn render_scope(app: &App, width: u16, height: u16, now: Instant, scope: &ScopePrompt) -> Buffer {
-    render_windows(
-        app,
-        &Chrome::default(),
-        width,
-        height,
-        now,
-        QuitConfirm::Closed,
+    let modals = Modals {
         scope,
-    )
+        ..Modals::default()
+    };
+    render_every(app, &Chrome::default(), width, height, now, modals, None)
 }
 
 fn render_record(
@@ -331,220 +324,109 @@ fn render_record(
     now: Instant,
     record: &RecordPrompt,
 ) -> Buffer {
-    render_all(
-        app,
-        &Chrome::default(),
-        width,
-        height,
-        now,
-        QuitConfirm::Closed,
-        &ScopePrompt::Closed,
+    let modals = Modals {
         record,
-        &ScopePrompt::Closed,
-        None,
-    )
+        ..Modals::default()
+    };
+    render_every(app, &Chrome::default(), width, height, now, modals, None)
 }
 
 fn render_path(app: &App, width: u16, height: u16, now: Instant, path: &ScopePrompt) -> Buffer {
-    render_all(
-        app,
-        &Chrome::default(),
-        width,
-        height,
-        now,
-        QuitConfirm::Closed,
-        &ScopePrompt::Closed,
-        &RecordPrompt::Closed,
-        path,
-        None,
-    )
+    let modals = Modals {
+        write: path,
+        ..Modals::default()
+    };
+    render_every(app, &Chrome::default(), width, height, now, modals, None)
 }
 
 fn render_chrome(app: &App, chrome: &Chrome, width: u16, height: u16) -> Buffer {
-    render_windows(
+    render_every(
         app,
         chrome,
         width,
         height,
         Instant::now(),
-        QuitConfirm::Closed,
-        &ScopePrompt::Closed,
+        Modals::default(),
+        None,
     )
 }
 
 fn render_composer(app: &App, composer: &Composer, width: u16, height: u16) -> Buffer {
-    render_all(
+    render_every(
         app,
         &Chrome::default(),
         width,
         height,
         Instant::now(),
-        QuitConfirm::Closed,
-        &ScopePrompt::Closed,
-        &RecordPrompt::Closed,
-        &ScopePrompt::Closed,
+        Modals::default(),
         Some(composer),
     )
 }
 
-// The push dialog over a frame with nothing else up, which is how it comes up
-// in a session: the three fields and the quit question are never on the screen
-// underneath it.
 fn render_push(app: &App, width: u16, height: u16, push: &PushConfirm) -> Buffer {
-    render_every(
-        app,
-        &Chrome::default(),
-        width,
-        height,
-        Instant::now(),
-        QuitConfirm::Closed,
-        &ScopePrompt::Closed,
-        &RecordPrompt::Closed,
-        &ScopePrompt::Closed,
-        &ScopePrompt::Closed,
+    let modals = Modals {
         push,
-        &PullConfirm::Closed,
-        None,
-        None,
+        ..Modals::default()
+    };
+    render_every(
+        app,
+        &Chrome::default(),
+        width,
+        height,
+        Instant::now(),
+        modals,
         None,
     )
 }
 
-// The pull dialog on a frame with nothing else up, for `render_push`'s reason:
-// it comes up over a session with every other window down, since the keys
-// reach the composer that typed `/pull` only while none of them is.
 fn render_pull(app: &App, width: u16, height: u16, pull: &PullConfirm) -> Buffer {
-    render_every(
-        app,
-        &Chrome::default(),
-        width,
-        height,
-        Instant::now(),
-        QuitConfirm::Closed,
-        &ScopePrompt::Closed,
-        &RecordPrompt::Closed,
-        &ScopePrompt::Closed,
-        &ScopePrompt::Closed,
-        &PushConfirm::Closed,
+    let modals = Modals {
         pull,
-        None,
-        None,
-        None,
-    )
-}
-
-// And the field that comes up in front of it, on a frame with nothing else up
-// for the same reason: the submit that takes this one down is the one that
-// puts the dialog up, so the two are never both drawn.
-fn render_filing(app: &App, width: u16, height: u16, filing: &ScopePrompt) -> Buffer {
+        ..Modals::default()
+    };
     render_every(
         app,
         &Chrome::default(),
         width,
         height,
         Instant::now(),
-        QuitConfirm::Closed,
-        &ScopePrompt::Closed,
-        &RecordPrompt::Closed,
-        &ScopePrompt::Closed,
+        modals,
+        None,
+    )
+}
+
+fn render_filing(app: &App, width: u16, height: u16, filing: &ScopePrompt) -> Buffer {
+    let modals = Modals {
         filing,
-        &PushConfirm::Closed,
-        &PullConfirm::Closed,
-        None,
-        None,
-        None,
-    )
-}
-
-fn render_windows(
-    app: &App,
-    chrome: &Chrome,
-    width: u16,
-    height: u16,
-    now: Instant,
-    confirm: QuitConfirm,
-    scope: &ScopePrompt,
-) -> Buffer {
-    render_all(
-        app,
-        chrome,
-        width,
-        height,
-        now,
-        confirm,
-        scope,
-        &RecordPrompt::Closed,
-        &ScopePrompt::Closed,
-        None,
-    )
-}
-
-#[expect(
-    clippy::too_many_arguments,
-    reason = "one frame's worth of state, and the point of it is that no \
-                  test builds a frame any other way"
-)]
-fn render_all(
-    app: &App,
-    chrome: &Chrome,
-    width: u16,
-    height: u16,
-    now: Instant,
-    confirm: QuitConfirm,
-    scope: &ScopePrompt,
-    record: &RecordPrompt,
-    path: &ScopePrompt,
-    composer: Option<&Composer>,
-) -> Buffer {
+        ..Modals::default()
+    };
     render_every(
         app,
-        chrome,
+        &Chrome::default(),
         width,
         height,
-        now,
-        confirm,
-        scope,
-        record,
-        path,
-        &ScopePrompt::Closed,
-        &PushConfirm::Closed,
-        &PullConfirm::Closed,
+        Instant::now(),
+        modals,
         None,
-        None,
-        composer,
     )
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "one frame's worth of state, and the point of it is that no \
-                  test builds a frame any other way"
-)]
+// Every window the frame could be asked about, and the one `current` picks is
+// the one drawn — the same road the binary's frame takes.
 fn render_every(
     app: &App,
     chrome: &Chrome,
     width: u16,
     height: u16,
     now: Instant,
-    confirm: QuitConfirm,
-    scope: &ScopePrompt,
-    record: &RecordPrompt,
-    path: &ScopePrompt,
-    filing: &ScopePrompt,
-    push: &PushConfirm,
-    pull: &PullConfirm,
-    review: Option<&Review>,
-    carry: Option<&Carry>,
+    modals: Modals<'_>,
     composer: Option<&Composer>,
 ) -> Buffer {
     let mut terminal =
         Terminal::new(TestBackend::new(width, height)).expect("test backend never fails");
     terminal
         .draw(|frame| {
-            draw(
-                frame, app, chrome, now, confirm, scope, record, path, filing, push, pull, review,
-                carry, composer,
-            );
+            draw(frame, app, chrome, now, modals.current(), composer);
         })
         .expect("test backend never fails");
     terminal.backend().buffer().clone()
@@ -5664,16 +5546,13 @@ fn a_field_under_a_conversation_is_drawn_the_same_whatever_a_run_is_doing() {
     // both panes — so what the run changed and what it left alone are read
     // off the one frame.
     let drawn = |composer: &Composer| {
-        let buffer = render_all(
+        let buffer = render_every(
             &app,
             &Chrome::default(),
             WIDTH,
             FIXTURE_HEIGHT,
             now,
-            QuitConfirm::Closed,
-            &ScopePrompt::Closed,
-            &RecordPrompt::Closed,
-            &ScopePrompt::Closed,
+            Modals::default(),
             Some(composer),
         );
         let field = areas(buffer.area, Some(composer))
@@ -5767,28 +5646,22 @@ fn a_document_read_during_a_run_hides_the_muted_field_and_gives_the_rows_back() 
         "the panel should have the rows the muted field was taking"
     );
     assert_eq!(
-        render_all(
+        render_every(
             &app,
             &Chrome::default(),
             WIDTH,
             FIXTURE_HEIGHT,
             now,
-            QuitConfirm::Closed,
-            &ScopePrompt::Closed,
-            &RecordPrompt::Closed,
-            &ScopePrompt::Closed,
+            Modals::default(),
             Some(&muted),
         ),
-        render_all(
+        render_every(
             &app,
             &Chrome::default(),
             WIDTH,
             FIXTURE_HEIGHT,
             now,
-            QuitConfirm::Closed,
-            &ScopePrompt::Closed,
-            &RecordPrompt::Closed,
-            &ScopePrompt::Closed,
+            Modals::default(),
             None,
         ),
         "a muted draft reached a frame the document card has"
@@ -6383,7 +6256,10 @@ const PUSH_TEAM_NAME: &str = "Warlock";
 const PUSH_KEY_NAME: &str = "work";
 
 fn push_dialog() -> PushConfirm {
-    PushConfirm::open(PUSH_PROJECT, PUSH_SCOPE, PUSH_TEAM_NAME, PUSH_KEY_NAME)
+    PushConfirm::open(
+        PUSH_PROJECT,
+        Destination::new(PUSH_SCOPE, PUSH_TEAM_NAME, "warlock", PUSH_KEY_NAME),
+    )
 }
 
 fn push_rect(buffer: &Buffer, push: &PushConfirm) -> Rect {
@@ -6491,6 +6367,34 @@ fn the_push_dialog_is_centred_over_the_frame_like_the_quit_question() {
             "the frame behind shows through: {rows:?}"
         );
     }
+}
+
+#[test]
+fn the_quit_question_is_drawn_over_a_window_that_came_up_under_it() {
+    // A board's answer can put a window up with nobody pressing anything, so
+    // the quit question can be up with one under it. The keys go to the quit
+    // question, so it is the one on the frame.
+    let app = busy_app(Instant::now(), WIDTH, FIXTURE_HEIGHT);
+    let push = push_dialog();
+    let modals = Modals {
+        quit: QuitConfirm::open(),
+        push: &push,
+        ..Modals::default()
+    };
+
+    let buffer = render_every(
+        &app,
+        &Chrome::default(),
+        WIDTH,
+        FIXTURE_HEIGHT,
+        Instant::now(),
+        modals,
+        None,
+    );
+
+    let text = rows_text(&buffer).join("\n");
+    assert!(text.contains(CONFIRM_QUESTION), "{text}");
+    assert!(!text.contains(PUSH_QUESTION), "{text}");
 }
 
 const PULL_PROJECT: &str = "Cut a planned project into tickets";
@@ -6676,41 +6580,33 @@ fn review_window(feedback: bool) -> Review {
 // on it, for `render_pull`'s reason: they come up over a session whose every
 // other window is down, and never with each other.
 fn render_review(app: &App, width: u16, height: u16, review: &Review) -> Buffer {
+    let modals = Modals {
+        review: Some(review),
+        ..Modals::default()
+    };
     render_every(
         app,
         &Chrome::default(),
         width,
         height,
         Instant::now(),
-        QuitConfirm::Closed,
-        &ScopePrompt::Closed,
-        &RecordPrompt::Closed,
-        &ScopePrompt::Closed,
-        &ScopePrompt::Closed,
-        &PushConfirm::Closed,
-        &PullConfirm::Closed,
-        Some(review),
-        None,
+        modals,
         None,
     )
 }
 
 fn render_carry(app: &App, width: u16, height: u16, carry: &Carry) -> Buffer {
+    let modals = Modals {
+        carry: Some(carry),
+        ..Modals::default()
+    };
     render_every(
         app,
         &Chrome::default(),
         width,
         height,
         Instant::now(),
-        QuitConfirm::Closed,
-        &ScopePrompt::Closed,
-        &RecordPrompt::Closed,
-        &ScopePrompt::Closed,
-        &ScopePrompt::Closed,
-        &PushConfirm::Closed,
-        &PullConfirm::Closed,
-        None,
-        Some(carry),
+        modals,
         None,
     )
 }

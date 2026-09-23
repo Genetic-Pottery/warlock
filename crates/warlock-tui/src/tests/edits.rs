@@ -7,8 +7,9 @@ use warlock_engine::{
 };
 use warlock_tui::App;
 
-use super::{Flags, Opened, scoped_line, unpacted_line, unscoped_line};
+use super::{Opened, scoped_line, unpacted_line, unscoped_line};
 use crate::error::Error;
+use crate::rescope::{RecordFields, ScopeRefusal};
 // The other door onto the un-pact rule, pressed here so that the two are
 // held to one answer in one place. See `pressed_p`.
 use crate::pacting::pressed_p;
@@ -16,7 +17,7 @@ use crate::pacting::pressed_p;
 // retyped: the footer and the shell refuse the same boundary in the same
 // words, and a test holding a copy of those words is a test that would go on
 // passing while the two doors drifted apart.
-use crate::boundary::closed_scope_message;
+use crate::boundary::{Operation, closed_scope_message};
 use crate::session::{load_manifest, sigils_under};
 use crate::status_for;
 
@@ -83,18 +84,19 @@ fn manifest_bytes(repo_root: &Path) -> Option<Vec<u8>> {
 // handed in instead. The three writes below reach their edit through this
 // and only through this, so there is no way to the second half without the
 // first.
-fn open(repo_root: &Path, home: &Path, path: &str) -> Result<Opened, Error> {
+fn open(repo_root: &Path, home: &Path, path: &str, operation: Operation) -> Result<Opened, Error> {
     let manifest = load_manifest(repo_root).expect("a manifest that reads");
     Opened::new(
         repo_root.to_path_buf(),
         Some(home),
         manifest,
         repo_root.join(path),
+        operation,
     )
 }
 
 fn unpact(repo_root: &Path, home: &Path, path: &str) -> Result<String, Error> {
-    open(repo_root, home, path)?.unpacted()
+    open(repo_root, home, path, Operation::Unpact)?.unpacted()
 }
 
 fn scope_add(
@@ -102,15 +104,15 @@ fn scope_add(
     home: &Path,
     path: &str,
     scope: &str,
-    flags: Flags<'_>,
+    flags: RecordFields<'_>,
 ) -> Result<String, Error> {
-    open(repo_root, home, path)?.scoped(scope, flags)
+    open(repo_root, home, path, Operation::Scope)?.scoped(scope, flags)
 }
 
 // The three flags a name nothing records has to be given, as one value, so a
 // test about something else says what it is about rather than filling a form.
-fn a_record() -> Flags<'static> {
-    Flags {
+fn a_record() -> RecordFields<'static> {
+    RecordFields {
         team: Some("Billing"),
         review_state: Some("In Review"),
         label: Some("area/billing"),
@@ -118,7 +120,7 @@ fn a_record() -> Flags<'static> {
 }
 
 fn scope_remove(repo_root: &Path, home: &Path, path: &str) -> Result<String, Error> {
-    open(repo_root, home, path)?.unscoped()
+    open(repo_root, home, path, Operation::Scope)?.unscoped()
 }
 
 fn stored(repo_root: &Path, module: &str) -> PactEntry {
@@ -127,14 +129,6 @@ fn stored(repo_root: &Path, module: &str) -> PactEntry {
         .entry(module)
         .expect("the manifest holds this module")
         .clone()
-}
-
-// Asked of the one judge rather than retyped here, so a test cannot go on
-// agreeing with a wording warlock no longer uses.
-fn refusal(text: &str) -> String {
-    validate_scope(text)
-        .expect_err("this text is not a scope")
-        .to_string()
 }
 
 #[test]
@@ -343,6 +337,7 @@ fn a_path_with_no_manifest_form_is_refused_with_nothing_written() {
             Some(home.path()),
             manifest,
             outside.clone(),
+            Operation::Unpact,
         )
         .and_then(|opened| opened.unpacted());
 
@@ -566,7 +561,7 @@ fn both_scope_writes_leave_the_records_where_they_found_them() {
         home.path(),
         "docs",
         "data-plane",
-        Flags::default(),
+        RecordFields::default(),
     )
     .expect("nothing scopes `docs`");
     assert_eq!(
@@ -613,162 +608,54 @@ fn an_unpact_keeps_the_records_including_the_one_it_orphaned() {
 const TEAM: &str = " Billing Team ";
 
 #[test]
-fn a_name_nothing_records_names_every_flag_that_was_not_given() {
+fn every_scope_refusal_is_one_line_a_1_and_nothing_written() {
+    // The rules are `rescope`'s and tested there; what the shell adds is that
+    // each refusal reaches `main` as one line, the ordinary 1 rather than
+    // clap's 2 or the boundary's 3, with the file left as it was.
     let repo = a_repository_of_records();
     let home = a_dir();
     let before = manifest_bytes(repo.path()).expect("a manifest on disk");
 
-    for (flags, missing) in [
-        (
-            Flags::default(),
-            vec!["--team", "--review-state", "--label"],
+    for refused in [
+        scope_add(
+            repo.path(),
+            home.path(),
+            "docs",
+            "Control Plane",
+            a_record(),
         ),
-        (
-            Flags {
-                review_state: None,
-                label: None,
-                ..a_record()
-            },
-            vec!["--review-state", "--label"],
+        scope_add(repo.path(), home.path(), "docs", "", a_record()),
+        scope_add(repo.path(), home.path(), "docs/adr", "billing", a_record()),
+        scope_remove(repo.path(), home.path(), "docs/adr"),
+        scope_add(
+            repo.path(),
+            home.path(),
+            "docs",
+            "billing",
+            RecordFields::default(),
         ),
-        (
-            Flags {
-                team: None,
-                ..a_record()
-            },
-            vec!["--team"],
-        ),
-    ] {
-        let error = scope_add(repo.path(), home.path(), "docs", "billing", flags)
-            .expect_err("nothing records `billing`");
-
-        let Error::UnrecordedScope {
-            scope,
-            missing: named,
-        } = &error
-        else {
-            panic!("a name with no record was refused as something else: {error:?}");
-        };
-        assert_eq!(scope, "billing");
-        // All of them and in the window's field order, because the point of
-        // the refusal is that the command is retyped once rather than three
-        // times.
-        assert_eq!(named, &missing, "{flags:?}");
-        let said = error.to_string();
-        for flag in &missing {
-            assert!(said.contains(&format!("`{flag}`")), "{said}");
-        }
-        assert!(!said.contains('\n'), "`main` prints one line");
-        // Not clap's 2 — the command line parsed — and not the boundary's 3,
-        // which is the one refusal re-running can never fix.
-        assert_eq!(status_for(&Err(error)), 1, "{flags:?}");
-    }
-
-    assert_eq!(manifest_bytes(repo.path()).as_deref(), Some(&before[..]));
-}
-
-#[test]
-fn a_blank_value_is_refused_rather_than_trimmed_into_acceptability() {
-    let repo = a_repository_of_records();
-    let home = a_dir();
-    let before = manifest_bytes(repo.path()).expect("a manifest on disk");
-
-    for (flags, blank) in [
-        (
-            Flags {
-                team: Some(""),
-                ..a_record()
-            },
-            vec!["--team"],
-        ),
-        (
-            Flags {
-                review_state: Some("   "),
-                ..a_record()
-            },
-            vec!["--review-state"],
-        ),
-        (
-            Flags {
-                label: Some("\t"),
-                ..a_record()
-            },
-            vec!["--label"],
-        ),
-        (
-            Flags {
+        scope_add(
+            repo.path(),
+            home.path(),
+            "docs",
+            "billing",
+            RecordFields {
                 team: Some(" "),
-                review_state: Some(""),
-                label: Some("\t "),
+                ..a_record()
             },
-            vec!["--team", "--review-state", "--label"],
         ),
+        scope_add(repo.path(), home.path(), "docs", "data-plane", a_record()),
     ] {
-        let error = scope_add(repo.path(), home.path(), "docs", "billing", flags)
-            .expect_err("a blank value is not a record");
-
-        let Error::BlankRecord { flags: named } = &error else {
-            // Apart from the missing-flag refusal on purpose: a flag nobody
-            // passed and a flag passed an empty string are different
-            // mistakes, and the second one is not a shell problem.
-            panic!("a blank value was refused as something else: {error:?}");
+        let error = refused.expect_err("each of these is refused");
+        let Error::Scope { refusal } = &error else {
+            panic!("a scope rule was refused as something else: {error:?}");
         };
-        assert_eq!(named, &blank, "{flags:?}");
-        let said = error.to_string();
-        for flag in &blank {
-            assert!(said.contains(&format!("`{flag}`")), "{said}");
-        }
-        assert!(!said.contains('\n'), "`main` prints one line");
-        assert_eq!(status_for(&Err(error)), 1, "{flags:?}");
-    }
-
-    assert_eq!(manifest_bytes(repo.path()).as_deref(), Some(&before[..]));
-}
-
-#[test]
-fn a_flag_at_a_name_something_already_records_is_refused_rather_than_dropped() {
-    // The rule the `s` key follows, at the shell: a record in the file is
-    // never rewritten, merged or deleted from here, so a value handed to one
-    // is a value that would be dropped on the floor — and a run that believes
-    // it wrote something it did not is the outcome this refusal exists for.
-    let repo = a_repository_of_records();
-    let home = a_dir();
-    let before = manifest_bytes(repo.path()).expect("a manifest on disk");
-
-    for flags in [
-        a_record(),
-        Flags {
-            team: Some("Someone Else"),
-            ..Flags::default()
-        },
-        Flags {
-            review_state: Some("Done"),
-            ..Flags::default()
-        },
-        Flags {
-            label: Some("area/other"),
-            ..Flags::default()
-        },
-        // Blank and unwanted at once, which is this refusal rather than the
-        // one above: what the file already records is asked first, so the
-        // answer names the record instead of the spelling of a value that was
-        // never going to be stored.
-        Flags {
-            team: Some(""),
-            ..Flags::default()
-        },
-    ] {
-        let error = scope_add(repo.path(), home.path(), "docs", "data-plane", flags)
-            .expect_err("`data-plane` already has a record");
-
         assert!(
-            matches!(error, Error::RecordedScope { .. }),
-            "{flags:?}: {error:?}"
+            error.to_string().starts_with(&refusal.to_string()),
+            "{error}"
         );
-        let said = error.to_string();
-        assert!(said.contains("`data-plane`"), "{said}");
-        assert!(!said.contains('\n'), "`main` prints one line");
-        assert_eq!(status_for(&Err(error)), 1, "{flags:?}");
+        assert!(!error.to_string().contains('\n'), "`main` prints one line");
+        assert_eq!(status_for(&Err(error)), 1);
     }
 
     assert_eq!(manifest_bytes(repo.path()).as_deref(), Some(&before[..]));
@@ -785,7 +672,7 @@ fn a_name_nothing_records_gets_its_scope_and_its_record_from_one_write() {
         home.path(),
         "docs",
         "billing",
-        Flags {
+        RecordFields {
             team: Some(TEAM),
             review_state: Some("In Review"),
             label: Some("area/billing"),
@@ -859,7 +746,7 @@ fn a_name_something_records_is_written_flagless_and_gains_no_second_record() {
         home.path(),
         "docs",
         "data-plane",
-        Flags::default(),
+        RecordFields::default(),
     )
     .expect("`data-plane` already has a record");
 
@@ -886,7 +773,7 @@ fn a_name_something_records_is_written_flagless_and_gains_no_second_record() {
             home.path(),
             "docs",
             "Data-Plane",
-            Flags::default(),
+            RecordFields::default(),
         )
         .expect("`data-plane` is the same name folded"),
         "docs is scoped `data-plane`"
@@ -908,11 +795,11 @@ fn a_closed_boundary_answers_before_a_single_flag_is_looked_at() {
     let before = manifest_bytes(repo.path()).expect("a manifest on disk");
 
     for (scope, flags) in [
-        ("billing", Flags::default()),
+        ("billing", RecordFields::default()),
         ("billing", a_record()),
         (
             "billing",
-            Flags {
+            RecordFields {
                 team: Some("  "),
                 ..a_record()
             },
@@ -1040,7 +927,15 @@ fn the_boundary_is_asked_before_the_path_is_checked_for_an_entry() {
         a_record(),
     )
     .expect_err("there is no entry to write a scope on");
-    assert!(matches!(error, Error::NoPact { .. }), "{error:?}");
+    assert!(
+        matches!(
+            error,
+            Error::Scope {
+                refusal: ScopeRefusal::NoPact { .. }
+            }
+        ),
+        "{error:?}"
+    );
 }
 
 #[test]
@@ -1082,73 +977,20 @@ fn a_closed_boundary_answers_a_clear_and_an_unpact_before_either_reads_the_manif
     holding(home.path(), repo.path(), &["platform"]);
     let error = scope_remove(repo.path(), home.path(), "crates/tui")
         .expect_err("there is no entry to clear a scope on");
-    assert!(matches!(error, Error::NoPact { .. }), "{error:?}");
+    assert!(
+        matches!(
+            error,
+            Error::Scope {
+                refusal: ScopeRefusal::NoPact { .. }
+            }
+        ),
+        "{error:?}"
+    );
     assert_eq!(
         unpact(repo.path(), home.path(), "crates/tui")
             .expect("nothing is pacted at or below `crates/tui`"),
         "unpacted crates/tui — 0 entries dropped"
     );
-    assert_eq!(manifest_bytes(repo.path()).as_deref(), Some(&before[..]));
-}
-
-#[test]
-fn a_scope_the_engine_refuses_prints_its_rule_and_writes_nothing() {
-    let repo = a_repository();
-    let home = a_dir();
-    let before = manifest_bytes(repo.path()).expect("a manifest on disk");
-
-    // The list, the capital-with-a-space, and the empty argument — which is
-    // the `Empty` rule rather than a clear, because clearing is `scope
-    // remove`. Each is judged after the fold, so the text held against the
-    // judge here is the lower-cased one.
-    for (given, folded) in [
-        ("control-plane, data-plane", "control-plane, data-plane"),
-        ("Control Plane", "control plane"),
-        ("", ""),
-        ("data-plane-", "data-plane-"),
-    ] {
-        let error = scope_add(repo.path(), home.path(), "docs", given, a_record())
-            .expect_err("this is not a scope");
-
-        assert!(matches!(error, Error::Scope { .. }), "{given:?}: {error:?}");
-        // The engine's own sentence about the one rule that was broken,
-        // asked of the judge rather than retyped — and asked about the
-        // folded text, because folding is the one thing done to what was
-        // given.
-        assert_eq!(error.to_string(), refusal(folded), "{given:?}");
-        assert!(!error.to_string().contains('\n'), "{given:?}");
-        assert_eq!(status_for(&Err(error)), 1, "{given:?}");
-    }
-
-    assert_eq!(manifest_bytes(repo.path()).as_deref(), Some(&before[..]));
-}
-
-#[test]
-fn a_directory_with_no_entry_is_refused_past_an_open_boundary_and_writes_nothing() {
-    // Nothing scopes `docs/adr` and nothing above it does, so the boundary
-    // waves it through and the manifest gets the next word: there is no pact
-    // here to carry a scope.
-    let repo = a_repository();
-    let home = a_dir();
-    let before = manifest_bytes(repo.path()).expect("a manifest on disk");
-
-    let refusals = [
-        scope_add(repo.path(), home.path(), "docs/adr", "billing", a_record())
-            .expect_err("`docs/adr` has no entry"),
-        scope_remove(repo.path(), home.path(), "docs/adr")
-            .expect_err("and has none to clear either"),
-    ];
-
-    for error in refusals {
-        assert!(matches!(error, Error::NoPact { .. }), "{error:?}");
-        let said = error.to_string();
-        // `no_pact_message`'s shape: it names the directory and points at
-        // pacting it.
-        assert!(said.contains("docs/adr"), "{said}");
-        assert!(said.contains("`p`"), "{said}");
-        assert!(!said.contains('\n'), "`main` prints one line");
-        assert_eq!(status_for(&Err(error)), 1);
-    }
     assert_eq!(manifest_bytes(repo.path()).as_deref(), Some(&before[..]));
 }
 
@@ -1166,6 +1008,7 @@ fn a_path_with_no_manifest_form_is_refused_by_both_scope_writes() {
                 Some(home.path()),
                 manifest.clone(),
                 outside.clone(),
+                Operation::Scope,
             )
         };
 

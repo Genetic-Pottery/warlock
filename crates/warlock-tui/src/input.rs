@@ -1,26 +1,21 @@
-//! Events turned into intentions, with nothing attached to stdout:
-//! [`action_for`] for a key, [`press_for`] for a key once the windows have had
-//! their say, and [`mouse_action`] for a pointer event.
-//!
 //! Everything about the situation arrives as a parameter rather than being
-//! looked up, which is what keeps each of the three a pure function and every
-//! rule below one assertion. Two of those parameters are read in exactly one
-//! arm each: `in_flight` re-reads Esc in [`action_for`] and `q` in
-//! [`press_for`], and `answered` re-reads Ctrl-C — which [`press_for`] takes at
-//! the top, before [`action_for`] is ever asked. Nothing here decides what a
-//! window *is*; [`press_for`] only decides which of them is asked, and the
-//! order it asks in is the precedence.
+//! looked up, which is what keeps [`action_for`], [`press_for`] and
+//! [`mouse_action`] pure functions and every rule below one assertion. Two of
+//! those parameters are read in exactly one arm each: `in_flight` re-reads Esc
+//! in [`action_for`] and `q` in [`press_for`], and `answered` re-reads Ctrl-C —
+//! which [`press_for`] takes at the top, before [`action_for`] is ever asked.
+//! Which window is up is not decided here: it arrives as the one
+//! [`Modal`] that `Modals::current` picked, the same one the frame draws.
 
 use ratatui::crossterm::event::{
     KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 use ratatui::layout::Size;
 use warlock_tui::{
-    Answered, App, Carry, CarryAnswered, Cell, Composed, Composer, Edited, Focus, Hit,
-    PullAnswered, PullConfirm, PushAnswered, PushConfirm, QuitConfirm, Reach, RecordEdited,
-    RecordPrompt, Review, Reviewed, ScopePrompt, answer_for, carry_answer_for, compose_for,
-    edit_for, hit_test, panel_reach, pull_answer_for, push_answer_for, record_edit_for,
-    review_answer_for,
+    Answered, App, CarryAnswered, Cell, Composed, Composer, Edited, Focus, Hit, Modal,
+    PullAnswered, PushAnswered, QuitConfirm, Reach, RecordEdited, Reviewed, answer_for,
+    carry_answer_for, compose_for, edit_for, hit_test, panel_reach, pull_answer_for,
+    push_answer_for, record_edit_for, review_answer_for,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -168,60 +163,25 @@ fn is_tab(key: KeyEvent) -> bool {
     key.code == KeyCode::Tab
 }
 
-// The order of the tests below is the precedence, and it is the whole of what
-// this function decides.
+// Ctrl-C before the window: raw mode is exactly the mode in which the terminal
+// stops turning it into `SIGINT`, so if nothing here answers it nothing does,
+// and routed through the window it would arrive at `answer_for` as an ordinary
+// `c` with a modifier riding along — the last resort of a reader who wants out,
+// swallowed by the dialog. `answered` is the one thing that changes what it
+// means: with a turn out it stops that turn, with none it leaves. Esc is
+// deliberately not this key, because a turn and a run are two things and the
+// key that stops one must not stop the other.
 //
-// Ctrl-C first, before the windows: raw mode is exactly the mode in which the
-// terminal stops turning it into `SIGINT`, so if nothing here answers it
-// nothing does, and routed through the question it would arrive at `answer_for`
-// as an ordinary `c` with a modifier riding along — the last resort of a reader
-// who wants out, swallowed by the dialog. `answered` is the one thing that
-// changes what it means: with a turn out it stops that turn, with none it
-// leaves. Esc is deliberately not this key, because a turn and a run are two
-// things and the key that stops one must not stop the other.
+// Then the window, and on that road `action_for` is not called at all, which
+// is the plain statement of "nothing leaks through to the tree underneath".
 //
-// Then each window, and on those roads `action_for` is not called at all, which
-// is the plain statement of "nothing leaks through to the tree underneath". The
-// two windows the `s` key puts up are asked before the write prompt because
-// either can be up at once with it — `s` opens one from the tree while a
-// `/write` turn is still out, and the answer to that turn opens the other with
-// no keystroke — and the `s` window is the one somebody is typing in now.
-// Between those two themselves there is no precedence to have: the record
-// window opens exactly as the scope window closes, so they are never both up.
-//
-// The push dialog is asked before those three and after the quit one. Before,
-// because the three fields can come up underneath it with nobody asking — a
-// `/write` turn still out answers into the write prompt on no keystroke at all
-// — and the dialog is the window somebody is looking at and the one drawn on
-// top; after, because the quit dialog is the gate on the way out and the two
-// are never up together anyway (`q` reaches nothing while this is up).
-//
-// The scope field a `/push` puts up when the machine can file to more than one
-// board is asked in the dialog's own place, for the dialog's own reason: it is
-// the other half of the same question and the two are never up together — the
-// submit that takes this one down is what puts that one up.
-//
-// The composer is asked after all of them, because a window is drawn over it: a
-// key cannot be both typed into a field on the frame and answered by the dialog
+// The composer after it, because a window is drawn over the composer: a key
+// cannot be both typed into a field on the frame and answered by the dialog
 // covering it. `composer` is `Some` only when the focus is on the field, which
 // is the caller's line, not a lookup here.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "the whole of what a keystroke can mean, and the point of it is that \
-              there is one place that decides: each window that can be over the app \
-              is a parameter here rather than a gate of its own somewhere else"
-)]
 pub(crate) fn press_for(
     key: KeyEvent,
-    confirm: QuitConfirm,
-    push: &PushConfirm,
-    pull: &PullConfirm,
-    review: Option<&Review>,
-    carry: Option<&Carry>,
-    filing: &ScopePrompt,
-    prompt: &ScopePrompt,
-    record: &RecordPrompt,
-    write: &ScopePrompt,
+    modal: Option<Modal<'_>>,
     composer: Option<&Composer>,
     in_flight: bool,
     answered: bool,
@@ -234,54 +194,22 @@ pub(crate) fn press_for(
         };
     }
 
-    if let Some(highlighted) = confirm.highlighted() {
-        return match answer_for(key, highlighted) {
-            Answered::Open(answer) => Pressed::Confirm(QuitConfirm::Open(answer)),
-            Answered::Close => Pressed::Confirm(QuitConfirm::Closed),
-            Answered::Leave => Pressed::Leave,
+    if let Some(modal) = modal {
+        return match modal {
+            Modal::Quit(highlighted) => match answer_for(key, highlighted) {
+                Answered::Open(answer) => Pressed::Confirm(QuitConfirm::Open(answer)),
+                Answered::Close => Pressed::Confirm(QuitConfirm::Closed),
+                Answered::Leave => Pressed::Leave,
+            },
+            Modal::Push(asked) => Pressed::Push(push_answer_for(key, asked.answer())),
+            Modal::Pull(asked) => Pressed::Pull(pull_answer_for(key, asked.answer())),
+            Modal::Review(drafts) => Pressed::Review(review_answer_for(key, drafts)),
+            Modal::Carry(asked) => Pressed::Carry(carry_answer_for(key, asked.answer())),
+            Modal::Filing(field) => Pressed::Filing(edit_for(key, field)),
+            Modal::Scope(field) => Pressed::Scope(edit_for(key, field)),
+            Modal::Record(form) => Pressed::Record(record_edit_for(key, form)),
+            Modal::Write(field) => Pressed::Write(edit_for(key, field)),
         };
-    }
-
-    if let Some(asked) = push.filing() {
-        return Pressed::Push(push_answer_for(key, asked.answer()));
-    }
-
-    // The push dialog's place in the order rather than a place of its own: the
-    // two are the same kind of question asked at the same point in the same
-    // command's shape, and a session never has both up — a `/pull` is typed
-    // into the composer, which takes no keys while either is drawn over it.
-    if let Some(asked) = pull.cutting() {
-        return Pressed::Pull(pull_answer_for(key, asked.answer()));
-    }
-
-    // The two windows a confirmed pull puts up, in the dialog's own place and
-    // for its reason: they are the same kind of question at the same point in
-    // the same command's shape. They can never be up with it or with each other
-    // — the dialog is answered and gone before a slice is drafted, and a slice
-    // is being reviewed, or asking whether to carry on, or neither — so the
-    // order between the three of them is a statement rather than a choice.
-    if let Some(drafts) = review {
-        return Pressed::Review(review_answer_for(key, drafts));
-    }
-
-    if let Some(asked) = carry {
-        return Pressed::Carry(carry_answer_for(key, asked.answer()));
-    }
-
-    if let Some(field) = filing.field() {
-        return Pressed::Filing(edit_for(key, field));
-    }
-
-    if let Some(field) = prompt.field() {
-        return Pressed::Scope(edit_for(key, field));
-    }
-
-    if let Some(form) = record.form() {
-        return Pressed::Record(record_edit_for(key, form));
-    }
-
-    if let Some(field) = write.field() {
-        return Pressed::Write(edit_for(key, field));
     }
 
     // Tab goes past the field rather than into it: it is not text on any
@@ -376,40 +304,17 @@ pub(crate) struct Drag {
 // `PanelLine` for a point on the composer and scrolls a window the pointer is
 // not over.
 //
-// None of the nine windows has anything clickable in it, so while any is up
-// every event is dropped, wheel and click alike: a click that reached the tree
-// behind one would select a row the reader cannot see.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "`press_for`'s reason, for the pointer: the frame the gesture landed \
-              on is what decides what it meant, and every window that could be \
-              over it has to be asked here"
-)]
+// No window has anything clickable in it, so while one is up every event is
+// dropped, wheel and click alike: a click that reached the tree behind one
+// would select a row the reader cannot see.
 pub(crate) fn mouse_action(
     mouse: MouseEvent,
     size: Size,
     app: &App,
-    confirm: QuitConfirm,
-    push: &PushConfirm,
-    pull: &PullConfirm,
-    review: Option<&Review>,
-    carry: Option<&Carry>,
-    filing: &ScopePrompt,
-    prompt: &ScopePrompt,
-    record: &RecordPrompt,
-    write: &ScopePrompt,
+    modal: Option<Modal<'_>>,
     composer: Option<&Composer>,
 ) -> Option<MouseAction> {
-    if confirm.is_open()
-        || push.is_open()
-        || pull.is_open()
-        || review.is_some()
-        || carry.is_some()
-        || filing.is_open()
-        || prompt.is_open()
-        || record.is_open()
-        || write.is_open()
-    {
+    if modal.is_some() {
         return None;
     }
 

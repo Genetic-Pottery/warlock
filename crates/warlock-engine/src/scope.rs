@@ -212,6 +212,68 @@ fn is_separator(character: char) -> bool {
     character == '-' || character == '_'
 }
 
+// String work on the manifest's own stored paths, never a question for the
+// filesystem, so an entry whose directory is gone still answers.
+pub(crate) fn at_or_below(module: &str, selected: &str) -> bool {
+    // The repository root is above everything, itself included.
+    selected == ROOT_MODULE
+        || module == selected
+        // The `/` is what makes this segment-wise. A plain `starts_with` would
+        // have `crates/engine` swallow `crates/engine-tools`.
+        || module
+            .strip_prefix(selected)
+            .is_some_and(|below| below.starts_with('/'))
+}
+
+// The downward question — what does an un-pact reach — and not
+// `scope_covering`/`scope_opens_to`, which walk up. Not interchangeable here:
+// coverage reads an unscoped `crates` as the absence of a statement, which
+// would let somebody standing above a boundary destroy it by aiming at its
+// parent.
+/// ```
+/// use warlock_engine::{Manifest, PactEntry, closed_scopes_at_or_below};
+///
+/// let entry = |module: &str| PactEntry::new(".", module, format!("{module}/WARLOCK.md"));
+/// let manifest = Manifest::with_entries([
+///     entry("crates")?,
+///     entry("crates/engine")?.with_scope("data-plane"),
+///     entry("crates/engine-tools")?.with_scope("tooling"),
+/// ]);
+/// let held = ["tooling".to_owned()];
+///
+/// // `crates` is unscoped, so its own boundary opens — but the un-pact reaches
+/// // one this machine is outside of.
+/// let blocking = closed_scopes_at_or_below("crates", ".", &manifest, &held)?;
+/// assert_eq!(blocking, ["data-plane"]);
+///
+/// // A sibling that merely shares a prefix is not below, and its own scope is
+/// // held.
+/// let blocking = closed_scopes_at_or_below("crates/engine-tools", ".", &manifest, &held)?;
+/// assert!(blocking.is_empty());
+/// # Ok::<(), warlock_engine::manifest::Error>(())
+/// ```
+pub fn closed_scopes_at_or_below<'manifest>(
+    directory: impl AsRef<Path>,
+    root: impl AsRef<Path>,
+    manifest: &'manifest Manifest,
+    held: &[String],
+) -> Result<Vec<&'manifest str>, manifest::Error> {
+    let selected = to_manifest_path(root, directory)?;
+
+    let mut blocking: Vec<&str> = Vec::new();
+    let below = manifest
+        .entries()
+        .iter()
+        .filter(|entry| at_or_below(entry.module(), &selected))
+        .filter_map(valid_scope);
+    for scope in below {
+        if !scope_opens_to(Some(scope), held) && !blocking.contains(&scope) {
+            blocking.push(scope);
+        }
+    }
+    Ok(blocking)
+}
+
 #[cfg(test)]
 #[path = "tests/scope.rs"]
 mod tests;

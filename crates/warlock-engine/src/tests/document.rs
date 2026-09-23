@@ -860,7 +860,7 @@ fn a_mend_keeps_the_lines_the_run_paid_for() {
     .collect();
 
     // An answer bad enough to reach the mend: the purpose is too short, so
-    // the attempts run out and `synthesise` falls through to here.
+    // the attempts run out and `Snapshot::fill` falls through to here.
     let unusable = Fill {
         purpose: "Too short.".to_owned(),
         files: lines.clone(),

@@ -915,67 +915,12 @@ mod gate {
     use ratatui::layout::Size;
     use warlock_engine::NodeState;
     use warlock_tui::{
-        Answer, App, Composed, Composer, Edited, Focus, PullConfirm, PushConfirm, QuitConfirm,
-        RecordPrompt, Row, ScopeField, ScopePrompt, edit_for, panel_height, pull_answer_for,
-        push_answer_for, tree_height,
+        Answer, App, Composed, Composer, Edited, Focus, Modals, PullConfirm, PushConfirm,
+        QuitConfirm, RecordPrompt, Row, ScopeField, ScopePrompt, edit_for, panel_height,
+        pull_answer_for, push_answer_for, tree_height,
     };
 
-    use super::super::{Action, Pressed, action_for, press_for as every_window};
-
-    // The gate with both of `/push`'s windows down, which is every round in
-    // this module bar their own tests: those call `press_for` itself, with one
-    // of them up.
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "the gate's own signature, minus the two windows these tests \
-                  never have up"
-    )]
-    fn gate_for(
-        key: KeyEvent,
-        confirm: QuitConfirm,
-        prompt: &ScopePrompt,
-        record: &RecordPrompt,
-        write: &ScopePrompt,
-        composer: Option<&Composer>,
-        in_flight: bool,
-        answered: bool,
-    ) -> Pressed {
-        every_window(
-            key,
-            confirm,
-            &PushConfirm::Closed,
-            &PullConfirm::Closed,
-            None,
-            None,
-            &ScopePrompt::Closed,
-            prompt,
-            record,
-            write,
-            composer,
-            in_flight,
-            answered,
-        )
-    }
-
-    fn press_for(
-        key: KeyEvent,
-        confirm: QuitConfirm,
-        prompt: &ScopePrompt,
-        composer: Option<&Composer>,
-        in_flight: bool,
-        answered: bool,
-    ) -> Pressed {
-        gate_for(
-            key,
-            confirm,
-            prompt,
-            &RecordPrompt::Closed,
-            &ScopePrompt::Closed,
-            composer,
-            in_flight,
-            answered,
-        )
-    }
+    use super::super::{Action, Pressed, action_for, press_for};
 
     const SIZE: Size = Size {
         width: 80,
@@ -1105,8 +1050,12 @@ mod gate {
     ) -> Round {
         match press_for(
             key,
-            *confirm,
-            prompt,
+            Modals {
+                quit: *confirm,
+                scope: prompt,
+                ..Modals::default()
+            }
+            .current(),
             offered(app, composer),
             in_flight,
             false,
@@ -1129,47 +1078,30 @@ mod gate {
             Pressed::Scope(Edited::Submit) => {
                 assert!(prompt.is_open(), "a submit came from a prompt that is up");
             }
-            // Unreachable through [`press_for`] above, which hands the gate
-            // a closed write prompt: the rounds here are about a session
-            // with no document waiting to be written. A key that arrived
-            // from that window anyway would be the gate answering a question
-            // nobody asked, so it is loud rather than quiet — the write
-            // prompt's own tests call the gate directly and assert on what
+            // The rest are unreachable: this round hands the gate the quit
+            // question and the scope prompt and every other window closed, so
+            // an answer from any of them would be the gate answering a question
+            // nobody asked. Loud rather than quiet for that reason; each
+            // window's own tests call `press_for` with it up and assert on what
             // comes back.
             Pressed::Write(edited) => {
                 panic!("{edited:?} came from a write prompt that is not up")
             }
-            // Unreachable for the same reason and loud for the same reason:
-            // the gate above is handed a closed record window too, and the
-            // record window's own tests call the gate directly.
             Pressed::Record(edited) => {
                 panic!("{edited:?} came from a record window that is not up")
             }
-            // And once more for the push dialog, which `gate_for` above also
-            // hands in closed: its own tests call `press_for` itself with it
-            // up, so an answer arriving here is a question nobody asked.
             Pressed::Push(answered) => {
                 panic!("{answered:?} came from a push dialog that is not up")
             }
-            // And once more for the question a `/pull` puts up, which the same
-            // shim hands in closed: this module's rounds are a session with no
-            // project read back, so an answer here is a window nobody opened.
             Pressed::Pull(answered) => {
                 panic!("{answered:?} came from a pull dialog that is not up")
             }
-            // And once more for the field that dialog can come up behind,
-            // which is handed in closed by the same shim.
             Pressed::Filing(edited) => {
                 panic!("{edited:?} came from a scope field that is not up")
             }
-            // And for the window a slice's drafts are gated in, handed in
-            // closed by the same shim: nothing here drafts anything, so an
-            // answer is a window nobody opened.
             Pressed::Review(reviewed) => {
                 panic!("{reviewed:?} came from a review window that is not up")
             }
-            // And for the question a skip puts up behind it, closed for the
-            // same reason and loud for the same reason.
             Pressed::Carry(answered) => {
                 panic!("{answered:?} came from a carry-on question that is not up")
             }
@@ -1294,8 +1226,11 @@ mod gate {
                 assert_eq!(
                     press_for(
                         press(code),
-                        QuitConfirm::Open(lit),
-                        &ScopePrompt::Closed,
+                        Modals {
+                            quit: QuitConfirm::Open(lit),
+                            ..Modals::default()
+                        }
+                        .current(),
                         None,
                         false,
                         false
@@ -1326,12 +1261,42 @@ mod gate {
             let mut confirm = QuitConfirm::Open(Answer::Yes);
 
             assert_eq!(
-                press_for(key, confirm, &ScopePrompt::Closed, None, false, false),
+                press_for(
+                    key,
+                    Modals {
+                        quit: confirm,
+                        ..Modals::default()
+                    }
+                    .current(),
+                    None,
+                    false,
+                    false
+                ),
                 Pressed::Leave
             );
             assert_eq!(
-                press_for(key, confirm, &ScopePrompt::Closed, None, false, false),
-                press_for(ctrl_c(), confirm, &ScopePrompt::Closed, None, false, false)
+                press_for(
+                    key,
+                    Modals {
+                        quit: confirm,
+                        ..Modals::default()
+                    }
+                    .current(),
+                    None,
+                    false,
+                    false
+                ),
+                press_for(
+                    ctrl_c(),
+                    Modals {
+                        quit: confirm,
+                        ..Modals::default()
+                    }
+                    .current(),
+                    None,
+                    false,
+                    false
+                )
             );
             assert_eq!(round(&mut app, &mut confirm, key), Round::Left);
         }
@@ -1413,8 +1378,11 @@ mod gate {
                     assert_eq!(
                         press_for(
                             ctrl_c(),
-                            confirm,
-                            &ScopePrompt::Closed,
+                            Modals {
+                                quit: confirm,
+                                ..Modals::default()
+                            }
+                            .current(),
                             composer,
                             in_flight,
                             false
@@ -1458,8 +1426,11 @@ mod gate {
                     assert_eq!(
                         press_for(
                             ctrl_c(),
-                            confirm,
-                            &ScopePrompt::Closed,
+                            Modals {
+                                quit: confirm,
+                                ..Modals::default()
+                            }
+                            .current(),
                             composer,
                             in_flight,
                             true
@@ -1476,8 +1447,11 @@ mod gate {
         assert_eq!(
             press_for(
                 ctrl_c(),
-                QuitConfirm::Closed,
-                &ScopePrompt::Open(ScopeField::new(DIRECTORY, "web")),
+                Modals {
+                    scope: &ScopePrompt::Open(ScopeField::new(DIRECTORY, "web")),
+                    ..Modals::default()
+                }
+                .current(),
                 None,
                 false,
                 true
@@ -1489,14 +1463,7 @@ mod gate {
         // answered: one key, one meaning — stop what I asked for — and the
         // reader who presses it twice gets the cancel and then the way out.
         assert_eq!(
-            press_for(
-                ctrl_c(),
-                QuitConfirm::Closed,
-                &ScopePrompt::Closed,
-                None,
-                false,
-                false
-            ),
+            press_for(ctrl_c(), None, None, false, false),
             Pressed::Leave
         );
     }
@@ -1511,44 +1478,16 @@ mod gate {
         for in_flight in [false, true] {
             for code in INERT {
                 assert_eq!(
-                    press_for(
-                        press(code),
-                        QuitConfirm::Closed,
-                        &ScopePrompt::Closed,
-                        None,
-                        in_flight,
-                        true
-                    ),
-                    press_for(
-                        press(code),
-                        QuitConfirm::Closed,
-                        &ScopePrompt::Closed,
-                        None,
-                        in_flight,
-                        false
-                    ),
+                    press_for(press(code), None, None, in_flight, true),
+                    press_for(press(code), None, None, in_flight, false),
                     "{code:?} read differently with a turn being answered"
                 );
             }
 
             for code in [KeyCode::Char('q'), KeyCode::Esc] {
                 assert_eq!(
-                    press_for(
-                        press(code),
-                        QuitConfirm::Closed,
-                        &ScopePrompt::Closed,
-                        None,
-                        in_flight,
-                        true
-                    ),
-                    press_for(
-                        press(code),
-                        QuitConfirm::Closed,
-                        &ScopePrompt::Closed,
-                        None,
-                        in_flight,
-                        false
-                    ),
+                    press_for(press(code), None, None, in_flight, true),
+                    press_for(press(code), None, None, in_flight, false),
                     "{code:?} read differently with a turn being answered"
                 );
             }
@@ -1558,25 +1497,11 @@ mod gate {
         // `q` with a turn out and nothing running still asks first, and `q`
         // with a run in flight still leaves outright.
         assert_eq!(
-            press_for(
-                press(KeyCode::Char('q')),
-                QuitConfirm::Closed,
-                &ScopePrompt::Closed,
-                None,
-                false,
-                true
-            ),
+            press_for(press(KeyCode::Char('q')), None, None, false, true),
             Pressed::Confirm(QuitConfirm::open())
         );
         assert_eq!(
-            press_for(
-                press(KeyCode::Char('q')),
-                QuitConfirm::Closed,
-                &ScopePrompt::Closed,
-                None,
-                true,
-                true
-            ),
+            press_for(press(KeyCode::Char('q')), None, None, true, true),
             Pressed::Leave
         );
     }
@@ -1587,50 +1512,22 @@ mod gate {
         // settings of the flag: the gate is for the twitch that follows a
         // cancel, and during a run Esc already means cancel.
         assert_eq!(
-            press_for(
-                press(KeyCode::Esc),
-                QuitConfirm::Closed,
-                &ScopePrompt::Closed,
-                None,
-                true,
-                false
-            ),
+            press_for(press(KeyCode::Esc), None, None, true, false),
             Pressed::Act(Action::CancelPact),
         );
         assert_eq!(
-            press_for(
-                press(KeyCode::Char('q')),
-                QuitConfirm::Closed,
-                &ScopePrompt::Closed,
-                None,
-                true,
-                false
-            ),
+            press_for(press(KeyCode::Char('q')), None, None, true, false),
             Pressed::Leave,
         );
 
         // And the same two keys with nothing running, which is the only
         // difference the flag makes here.
         assert_eq!(
-            press_for(
-                press(KeyCode::Esc),
-                QuitConfirm::Closed,
-                &ScopePrompt::Closed,
-                None,
-                false,
-                false
-            ),
+            press_for(press(KeyCode::Esc), None, None, false, false),
             Pressed::Confirm(QuitConfirm::open()),
         );
         assert_eq!(
-            press_for(
-                press(KeyCode::Char('q')),
-                QuitConfirm::Closed,
-                &ScopePrompt::Closed,
-                None,
-                false,
-                false
-            ),
+            press_for(press(KeyCode::Char('q')), None, None, false, false),
             Pressed::Confirm(QuitConfirm::open()),
         );
     }
@@ -1643,14 +1540,7 @@ mod gate {
         for in_flight in [false, true] {
             for code in INERT {
                 assert_eq!(
-                    press_for(
-                        press(code),
-                        QuitConfirm::Closed,
-                        &ScopePrompt::Closed,
-                        None,
-                        in_flight,
-                        false
-                    ),
+                    press_for(press(code), None, None, in_flight, false),
                     action_for(press(code), in_flight).map_or(Pressed::Nothing, Pressed::Act),
                     "{code:?} should read as it always has, in flight = {in_flight}"
                 );
@@ -1674,22 +1564,18 @@ mod gate {
                 );
 
                 assert_eq!(
-                    press_for(
-                        key,
-                        QuitConfirm::Closed,
-                        &ScopePrompt::Closed,
-                        None,
-                        false,
-                        false
-                    ),
+                    press_for(key, None, None, false, false),
                     Pressed::Nothing,
                     "{kind:?} of {code:?} should open nothing"
                 );
                 assert_eq!(
                     press_for(
                         key,
-                        QuitConfirm::open(),
-                        &ScopePrompt::Closed,
+                        Modals {
+                            quit: QuitConfirm::open(),
+                            ..Modals::default()
+                        }
+                        .current(),
                         None,
                         false,
                         false
@@ -1723,7 +1609,17 @@ mod gate {
 
             for code in INERT {
                 let key = press(code);
-                let pressed = press_for(key, QuitConfirm::Closed, &prompt, None, false, false);
+                let pressed = press_for(
+                    key,
+                    Modals {
+                        scope: &prompt,
+                        ..Modals::default()
+                    }
+                    .current(),
+                    None,
+                    false,
+                    false,
+                );
 
                 assert_eq!(
                     pressed,
@@ -1759,8 +1655,11 @@ mod gate {
         assert_eq!(
             press_for(
                 press(KeyCode::Char('q')),
-                QuitConfirm::Closed,
-                &prompt,
+                Modals {
+                    scope: &prompt,
+                    ..Modals::default()
+                }
+                .current(),
                 None,
                 false,
                 false
@@ -1771,8 +1670,11 @@ mod gate {
         assert_eq!(
             press_for(
                 press(KeyCode::Esc),
-                QuitConfirm::Closed,
-                &prompt,
+                Modals {
+                    scope: &prompt,
+                    ..Modals::default()
+                }
+                .current(),
                 None,
                 false,
                 false
@@ -1813,8 +1715,11 @@ mod gate {
                 assert_eq!(
                     press_for(
                         ctrl_c(),
-                        QuitConfirm::Closed,
-                        &prompt,
+                        Modals {
+                            scope: &prompt,
+                            ..Modals::default()
+                        }
+                        .current(),
                         None,
                         in_flight,
                         false
@@ -1849,22 +1754,47 @@ mod gate {
         // Ctrl-C, over all three at once. It is a key event and not a
         // signal, so if the gate does not answer it here nothing does.
         assert_eq!(
-            press_for(ctrl_c(), question, &prompt, Some(&draft), false, false),
+            press_for(
+                ctrl_c(),
+                Modals {
+                    quit: question,
+                    scope: &prompt,
+                    ..Modals::default()
+                }
+                .current(),
+                Some(&draft),
+                false,
+                false
+            ),
             Pressed::Leave
         );
         // Then the question, which is drawn over everything else on the
         // frame: a key cannot be both typed into a field and answered by the
         // dialog covering it.
         assert_eq!(
-            press_for(key, question, &prompt, Some(&draft), false, false),
+            press_for(
+                key,
+                Modals {
+                    quit: question,
+                    scope: &prompt,
+                    ..Modals::default()
+                }
+                .current(),
+                Some(&draft),
+                false,
+                false
+            ),
             Pressed::Confirm(question)
         );
         // Then the prompt, over the composer, for the same reason again.
         assert_eq!(
             press_for(
                 key,
-                QuitConfirm::Closed,
-                &prompt,
+                Modals {
+                    scope: &prompt,
+                    ..Modals::default()
+                }
+                .current(),
                 Some(&draft),
                 false,
                 false
@@ -1874,34 +1804,20 @@ mod gate {
         // Then the composer, over the keys: this is where `j` stops being a
         // movement and becomes the letter j.
         assert_eq!(
-            press_for(
-                key,
-                QuitConfirm::Closed,
-                &ScopePrompt::Closed,
-                Some(&draft),
-                false,
-                false
-            ),
+            press_for(key, None, Some(&draft), false, false),
             Pressed::Compose(Composed::Typing(Composer::new("webj")))
         );
         // And then the keys, as they have always been read.
         assert_eq!(
-            press_for(
-                key,
-                QuitConfirm::Closed,
-                &ScopePrompt::Closed,
-                None,
-                false,
-                false
-            ),
+            press_for(key, None, None, false, false),
             Pressed::Act(Action::SelectNext)
         );
     }
 
     mod writing {
         use super::{
-            Action, Composer, Edited, INERT, KeyCode, KeyEvent, Pressed, QuitConfirm, RecordPrompt,
-            ScopeField, ScopePrompt, action_for, ctrl_c, edit_for, gate_for, press,
+            Action, Composer, Edited, INERT, KeyCode, KeyEvent, Modals, Pressed, QuitConfirm,
+            ScopeField, ScopePrompt, action_for, ctrl_c, edit_for, press, press_for,
         };
 
         const PROPOSED: &str = "docs/warlock-brief-13-scopes-and-sigils.md";
@@ -1917,12 +1833,13 @@ mod gate {
         }
 
         fn asked(key: KeyEvent, write: &ScopePrompt) -> Pressed {
-            gate_for(
+            press_for(
                 key,
-                QuitConfirm::Closed,
-                &ScopePrompt::Closed,
-                &RecordPrompt::Closed,
-                write,
+                Modals {
+                    write,
+                    ..Modals::default()
+                }
+                .current(),
                 None,
                 false,
                 false,
@@ -1980,15 +1897,16 @@ mod gate {
 
             assert_eq!(asked(ctrl_c(), &write), Pressed::Leave);
             assert_eq!(
-                gate_for(
+                press_for(
                     ctrl_c(),
-                    QuitConfirm::Closed,
-                    &ScopePrompt::Closed,
-                    &RecordPrompt::Closed,
-                    &write,
+                    Modals {
+                        write: &write,
+                        ..Modals::default()
+                    }
+                    .current(),
                     None,
                     false,
-                    true,
+                    true
                 ),
                 Pressed::CancelTurn
             );
@@ -2008,15 +1926,16 @@ mod gate {
                 let key = press(code);
 
                 assert_eq!(
-                    gate_for(
+                    press_for(
                         key,
-                        QuitConfirm::Closed,
-                        &ScopePrompt::Closed,
-                        &RecordPrompt::Closed,
-                        &write,
+                        Modals {
+                            write: &write,
+                            ..Modals::default()
+                        }
+                        .current(),
                         Some(&draft),
                         false,
-                        false,
+                        false
                     ),
                     Pressed::Write(edit_for(key, &field())),
                     "{code:?} reached the draft from behind the window"
@@ -2041,15 +1960,17 @@ mod gate {
                 let key = press(code);
 
                 assert_eq!(
-                    gate_for(
+                    press_for(
                         key,
-                        QuitConfirm::Closed,
-                        &scope,
-                        &RecordPrompt::Closed,
-                        &write,
+                        Modals {
+                            scope: &scope,
+                            write: &write,
+                            ..Modals::default()
+                        }
+                        .current(),
                         None,
                         false,
-                        false,
+                        false
                     ),
                     Pressed::Scope(edit_for(key, &scope_field)),
                     "{code:?} was answered by the wrong window"
@@ -2089,8 +2010,8 @@ mod gate {
         use warlock_tui::{RecordEdited, RecordForm, RecordPrompt, record_edit_for};
 
         use super::{
-            Composer, INERT, KeyCode, KeyEvent, Pressed, QuitConfirm, ScopePrompt, ctrl_c,
-            gate_for, press,
+            Composer, INERT, KeyCode, KeyEvent, Modals, Pressed, QuitConfirm, ctrl_c, press,
+            press_for,
         };
 
         const DIRECTORY: &str = "crates/warlock-engine";
@@ -2114,16 +2035,17 @@ mod gate {
             record: &RecordPrompt,
             composer: Option<&Composer>,
         ) -> Pressed {
-            gate_for(
+            // No scope window beside it, and no test of the two up together,
+            // because they cannot be: the record window opens exactly as the
+            // scope window closes, out of the one value `scope_submit` hands
+            // back.
+            press_for(
                 key,
-                QuitConfirm::Closed,
-                // Closed, and there is no test here of the two being up
-                // together, because they cannot be: the record window opens
-                // exactly as the scope window closes, out of the one value
-                // `scope_submit` hands back.
-                &ScopePrompt::Closed,
-                record,
-                &ScopePrompt::Closed,
+                Modals {
+                    record,
+                    ..Modals::default()
+                }
+                .current(),
                 composer,
                 false,
                 false,
@@ -2186,15 +2108,16 @@ mod gate {
 
             assert_eq!(asked(ctrl_c(), &record), Pressed::Leave);
             assert_eq!(
-                gate_for(
+                press_for(
                     ctrl_c(),
-                    QuitConfirm::Closed,
-                    &ScopePrompt::Closed,
-                    &record,
-                    &ScopePrompt::Closed,
+                    Modals {
+                        record: &record,
+                        ..Modals::default()
+                    }
+                    .current(),
                     None,
                     false,
-                    true,
+                    true
                 ),
                 Pressed::CancelTurn
             );
@@ -2209,15 +2132,17 @@ mod gate {
             let record = open();
 
             assert_eq!(
-                gate_for(
+                press_for(
                     press(KeyCode::Char('y')),
-                    QuitConfirm::open(),
-                    &ScopePrompt::Closed,
-                    &record,
-                    &ScopePrompt::Closed,
+                    Modals {
+                        quit: QuitConfirm::open(),
+                        record: &record,
+                        ..Modals::default()
+                    }
+                    .current(),
                     None,
                     false,
-                    false,
+                    false
                 ),
                 Pressed::Leave
             );
@@ -2252,36 +2177,23 @@ mod gate {
 
                 assert_eq!(
                     asked(key, &RecordPrompt::Closed),
-                    super::press_for(
-                        key,
-                        QuitConfirm::Closed,
-                        &ScopePrompt::Closed,
-                        None,
-                        false,
-                        false
-                    ),
+                    press_for(key, None, None, false, false),
                     "{code:?} was answered by a window that is not up"
                 );
             }
         }
     }
 
-    // The fifth window: the question a `/push` asks before anything leaves the
-    // machine. Nothing opens it yet, so every round in here opens it by hand
-    // and calls the gate itself rather than the shim the rest of this module
-    // uses.
     mod pushing {
         use super::{
-            Composer, INERT, KeyCode, KeyEvent, Pressed, PullConfirm, PushConfirm, QuitConfirm,
-            RecordPrompt, ScopePrompt, ctrl_c, every_window, press, push_answer_for,
+            Composer, INERT, KeyCode, KeyEvent, Modals, Pressed, PushConfirm, QuitConfirm,
+            RecordPrompt, ScopePrompt, ctrl_c, press, press_for, push_answer_for,
         };
 
         fn open() -> PushConfirm {
             PushConfirm::open(
                 "Push a brief to the board",
-                "warlock-team",
-                "Warlock",
-                "work",
+                warlock_engine::Destination::new("warlock-team", "Warlock", "warlock", "work"),
             )
         }
 
@@ -2297,17 +2209,13 @@ mod gate {
             composer: Option<&Composer>,
             answered: bool,
         ) -> Pressed {
-            every_window(
+            press_for(
                 key,
-                QuitConfirm::Closed,
-                push,
-                &PullConfirm::Closed,
-                None,
-                None,
-                &ScopePrompt::Closed,
-                &ScopePrompt::Closed,
-                &RecordPrompt::Closed,
-                &ScopePrompt::Closed,
+                Modals {
+                    push,
+                    ..Modals::default()
+                }
+                .current(),
                 composer,
                 false,
                 answered,
@@ -2395,20 +2303,19 @@ mod gate {
                 let key = press(code);
 
                 assert_eq!(
-                    every_window(
+                    press_for(
                         key,
-                        QuitConfirm::Closed,
-                        &push,
-                        &PullConfirm::Closed,
-                        None,
-                        None,
-                        &ScopePrompt::Closed,
-                        &scope,
-                        &record,
-                        &write,
+                        Modals {
+                            push: &push,
+                            scope: &scope,
+                            record: &record,
+                            write: &write,
+                            ..Modals::default()
+                        }
+                        .current(),
                         None,
                         false,
-                        false,
+                        false
                     ),
                     answered(key, &push),
                     "{code:?} was answered by the wrong window"
@@ -2430,20 +2337,17 @@ mod gate {
                 answered(press(KeyCode::Enter), &push)
             );
             assert_eq!(
-                every_window(
+                press_for(
                     press(KeyCode::Enter),
-                    QuitConfirm::open(),
-                    &push,
-                    &PullConfirm::Closed,
-                    None,
-                    None,
-                    &ScopePrompt::Closed,
-                    &ScopePrompt::Closed,
-                    &RecordPrompt::Closed,
-                    &ScopePrompt::Closed,
+                    Modals {
+                        quit: QuitConfirm::open(),
+                        push: &push,
+                        ..Modals::default()
+                    }
+                    .current(),
                     None,
                     false,
-                    false,
+                    false
                 ),
                 Pressed::Confirm(QuitConfirm::Closed)
             );
@@ -2458,29 +2362,17 @@ mod gate {
 
                 assert_eq!(
                     asked(key, &PushConfirm::Closed),
-                    super::press_for(
-                        key,
-                        QuitConfirm::Closed,
-                        &ScopePrompt::Closed,
-                        None,
-                        false,
-                        false
-                    ),
+                    press_for(key, None, None, false, false),
                     "{code:?} was answered by a window that is not up"
                 );
             }
         }
     }
 
-    // The seventh window: the question a `/pull` puts up once the board has
-    // answered. It stands in the sixth's place in the order — the two are the
-    // same kind of question and a session never has both up — so every round
-    // in here opens it by hand and calls the gate itself, as the push dialog's
-    // rounds do.
     mod pulling {
         use super::{
-            Composer, INERT, KeyCode, KeyEvent, Pressed, PullConfirm, PushConfirm, QuitConfirm,
-            RecordPrompt, ScopePrompt, ctrl_c, every_window, press, pull_answer_for,
+            Composer, INERT, KeyCode, KeyEvent, Modals, Pressed, PullConfirm, PushConfirm,
+            QuitConfirm, RecordPrompt, ScopePrompt, ctrl_c, press, press_for, pull_answer_for,
         };
 
         fn open() -> PullConfirm {
@@ -2505,17 +2397,13 @@ mod gate {
             composer: Option<&Composer>,
             answered: bool,
         ) -> Pressed {
-            every_window(
+            press_for(
                 key,
-                QuitConfirm::Closed,
-                &PushConfirm::Closed,
-                pull,
-                None,
-                None,
-                &ScopePrompt::Closed,
-                &ScopePrompt::Closed,
-                &RecordPrompt::Closed,
-                &ScopePrompt::Closed,
+                Modals {
+                    pull,
+                    ..Modals::default()
+                }
+                .current(),
                 composer,
                 false,
                 answered,
@@ -2601,20 +2489,19 @@ mod gate {
                 let key = press(code);
 
                 assert_eq!(
-                    every_window(
+                    press_for(
                         key,
-                        QuitConfirm::Closed,
-                        &PushConfirm::Closed,
-                        &pull,
-                        None,
-                        None,
-                        &ScopePrompt::Closed,
-                        &scope,
-                        &record,
-                        &write,
+                        Modals {
+                            pull: &pull,
+                            scope: &scope,
+                            record: &record,
+                            write: &write,
+                            ..Modals::default()
+                        }
+                        .current(),
                         None,
                         false,
-                        false,
+                        false
                     ),
                     answered(key, &pull),
                     "{code:?} was answered by the wrong window"
@@ -2634,20 +2521,17 @@ mod gate {
                 answered(press(KeyCode::Enter), &pull)
             );
             assert_eq!(
-                every_window(
+                press_for(
                     press(KeyCode::Enter),
-                    QuitConfirm::open(),
-                    &PushConfirm::Closed,
-                    &pull,
-                    None,
-                    None,
-                    &ScopePrompt::Closed,
-                    &ScopePrompt::Closed,
-                    &RecordPrompt::Closed,
-                    &ScopePrompt::Closed,
+                    Modals {
+                        quit: QuitConfirm::open(),
+                        pull: &pull,
+                        ..Modals::default()
+                    }
+                    .current(),
                     None,
                     false,
-                    false,
+                    false
                 ),
                 Pressed::Confirm(QuitConfirm::Closed)
             );
@@ -2662,27 +2546,22 @@ mod gate {
             let pull = open();
             let push = PushConfirm::open(
                 "Push a brief to the board",
-                "warlock-team",
-                "Warlock",
-                "work",
+                warlock_engine::Destination::new("warlock-team", "Warlock", "warlock", "work"),
             );
             let key = press(KeyCode::Enter);
 
             assert!(matches!(
-                every_window(
+                press_for(
                     key,
-                    QuitConfirm::Closed,
-                    &push,
-                    &pull,
-                    None,
-                    None,
-                    &ScopePrompt::Closed,
-                    &ScopePrompt::Closed,
-                    &RecordPrompt::Closed,
-                    &ScopePrompt::Closed,
+                    Modals {
+                        push: &push,
+                        pull: &pull,
+                        ..Modals::default()
+                    }
+                    .current(),
                     None,
                     false,
-                    false,
+                    false
                 ),
                 Pressed::Push(_)
             ));
@@ -2697,14 +2576,7 @@ mod gate {
 
                 assert_eq!(
                     asked(key, &PullConfirm::Closed),
-                    super::press_for(
-                        key,
-                        QuitConfirm::Closed,
-                        &ScopePrompt::Closed,
-                        None,
-                        false,
-                        false
-                    ),
+                    press_for(key, None, None, false, false),
                     "{code:?} was answered by a window that is not up"
                 );
             }
@@ -2719,8 +2591,8 @@ mod gate {
         use warlock_tui::{Carry, Choice, Review, Reviewed, carry_answer_for, review_answer_for};
 
         use super::{
-            Composer, INERT, KeyCode, KeyEvent, Pressed, PullConfirm, PushConfirm, QuitConfirm,
-            RecordPrompt, ScopePrompt, ctrl_c, every_window, press,
+            Composer, INERT, KeyCode, KeyEvent, Modals, Pressed, PullConfirm, QuitConfirm, ctrl_c,
+            press, press_for,
         };
 
         const SLICE: &str = "slice 1 `Gate the drafts`";
@@ -2742,17 +2614,14 @@ mod gate {
             composer: Option<&Composer>,
             answered: bool,
         ) -> Pressed {
-            every_window(
+            press_for(
                 key,
-                QuitConfirm::Closed,
-                &PushConfirm::Closed,
-                &PullConfirm::Closed,
-                review,
-                carry,
-                &ScopePrompt::Closed,
-                &ScopePrompt::Closed,
-                &RecordPrompt::Closed,
-                &ScopePrompt::Closed,
+                Modals {
+                    review,
+                    carry,
+                    ..Modals::default()
+                }
+                .current(),
                 composer,
                 false,
                 answered,
@@ -2840,38 +2709,32 @@ mod gate {
             let key = press(KeyCode::Enter);
 
             assert_eq!(
-                every_window(
+                press_for(
                     key,
-                    QuitConfirm::open(),
-                    &PushConfirm::Closed,
-                    &PullConfirm::Closed,
-                    Some(&drafts),
-                    None,
-                    &ScopePrompt::Closed,
-                    &ScopePrompt::Closed,
-                    &RecordPrompt::Closed,
-                    &ScopePrompt::Closed,
+                    Modals {
+                        quit: QuitConfirm::open(),
+                        review: Some(&drafts),
+                        ..Modals::default()
+                    }
+                    .current(),
                     None,
                     false,
-                    false,
+                    false
                 ),
                 Pressed::Confirm(QuitConfirm::Closed)
             );
             assert!(matches!(
-                every_window(
+                press_for(
                     key,
-                    QuitConfirm::Closed,
-                    &PushConfirm::Closed,
-                    &PullConfirm::open("A project", "planned", 9, "Warlock", "work"),
-                    Some(&drafts),
-                    None,
-                    &ScopePrompt::Closed,
-                    &ScopePrompt::Closed,
-                    &RecordPrompt::Closed,
-                    &ScopePrompt::Closed,
+                    Modals {
+                        pull: &PullConfirm::open("A project", "planned", 9, "Warlock", "work"),
+                        review: Some(&drafts),
+                        ..Modals::default()
+                    }
+                    .current(),
                     None,
                     false,
-                    false,
+                    false
                 ),
                 Pressed::Pull(_)
             ));
@@ -2922,27 +2785,19 @@ mod gate {
 
                 assert_eq!(
                     asking(key, None, None, None, false),
-                    super::press_for(
-                        key,
-                        QuitConfirm::Closed,
-                        &ScopePrompt::Closed,
-                        None,
-                        false,
-                        false
-                    ),
+                    press_for(key, None, None, false, false),
                     "{code:?} was answered by a window that is not up"
                 );
             }
         }
     }
 
-    // The sixth window: the field that comes up in front of that dialog when
-    // this machine can file to more than one board. Nothing but a `/push`
-    // opens it either, so every round in here opens it by hand.
+    // The field that comes up in front of the push dialog when this machine can
+    // file to more than one board.
     mod filing {
         use super::{
-            Composer, Edited, INERT, KeyCode, KeyEvent, Pressed, PullConfirm, PushConfirm,
-            QuitConfirm, RecordPrompt, ScopePrompt, ctrl_c, edit_for, every_window, press,
+            Composer, Edited, INERT, KeyCode, KeyEvent, Modals, Pressed, PushConfirm, QuitConfirm,
+            RecordPrompt, ScopePrompt, ctrl_c, edit_for, press, press_for,
         };
 
         fn open() -> ScopePrompt {
@@ -2959,17 +2814,13 @@ mod gate {
             composer: Option<&Composer>,
             answered: bool,
         ) -> Pressed {
-            every_window(
+            press_for(
                 key,
-                QuitConfirm::Closed,
-                &PushConfirm::Closed,
-                &PullConfirm::Closed,
-                None,
-                None,
-                filing,
-                &ScopePrompt::Closed,
-                &RecordPrompt::Closed,
-                &ScopePrompt::Closed,
+                Modals {
+                    filing,
+                    ..Modals::default()
+                }
+                .current(),
                 composer,
                 false,
                 answered,
@@ -3043,20 +2894,19 @@ mod gate {
                 let key = press(code);
 
                 assert_eq!(
-                    every_window(
+                    press_for(
                         key,
-                        QuitConfirm::Closed,
-                        &PushConfirm::Closed,
-                        &PullConfirm::Closed,
-                        None,
-                        None,
-                        &filing,
-                        &scope,
-                        &record,
-                        &write,
+                        Modals {
+                            filing: &filing,
+                            scope: &scope,
+                            record: &record,
+                            write: &write,
+                            ..Modals::default()
+                        }
+                        .current(),
                         None,
                         false,
-                        false,
+                        false
                     ),
                     typed(key, &filing),
                     "{code:?} was answered by the wrong window"
@@ -3073,45 +2923,37 @@ mod gate {
             let filing = open();
             let push = PushConfirm::open(
                 "Push a brief to the board",
-                "warlock-team",
-                "Warlock",
-                "work",
+                warlock_engine::Destination::new("warlock-team", "Warlock", "warlock", "work"),
             );
             let key = press(KeyCode::Enter);
 
             assert!(matches!(
-                every_window(
+                press_for(
                     key,
-                    QuitConfirm::Closed,
-                    &push,
-                    &PullConfirm::Closed,
-                    None,
-                    None,
-                    &filing,
-                    &ScopePrompt::Closed,
-                    &RecordPrompt::Closed,
-                    &ScopePrompt::Closed,
+                    Modals {
+                        push: &push,
+                        filing: &filing,
+                        ..Modals::default()
+                    }
+                    .current(),
                     None,
                     false,
-                    false,
+                    false
                 ),
                 Pressed::Push(_)
             ));
             assert_eq!(
-                every_window(
+                press_for(
                     key,
-                    QuitConfirm::open(),
-                    &PushConfirm::Closed,
-                    &PullConfirm::Closed,
-                    None,
-                    None,
-                    &filing,
-                    &ScopePrompt::Closed,
-                    &RecordPrompt::Closed,
-                    &ScopePrompt::Closed,
+                    Modals {
+                        quit: QuitConfirm::open(),
+                        filing: &filing,
+                        ..Modals::default()
+                    }
+                    .current(),
                     None,
                     false,
-                    false,
+                    false
                 ),
                 Pressed::Confirm(QuitConfirm::Closed)
             );
@@ -3141,14 +2983,7 @@ mod gate {
 
                 assert_eq!(
                     asked(key, &ScopePrompt::Closed),
-                    super::press_for(
-                        key,
-                        QuitConfirm::Closed,
-                        &ScopePrompt::Closed,
-                        None,
-                        false,
-                        false
-                    ),
+                    press_for(key, None, None, false, false),
                     "{code:?} was answered by a window that is not up"
                 );
             }
@@ -3189,14 +3024,7 @@ mod gate {
             let typed = Composer::new(format!("{TYPED}{code}"));
 
             assert_eq!(
-                press_for(
-                    key,
-                    QuitConfirm::Closed,
-                    &ScopePrompt::Closed,
-                    Some(&before),
-                    false,
-                    false
-                ),
+                press_for(key, None, Some(&before), false, false),
                 Pressed::Compose(Composed::Typing(typed.clone())),
                 "{code} should be a letter while the composer has the keyboard"
             );
@@ -3227,14 +3055,7 @@ mod gate {
                 app.set_focus(focus);
 
                 assert_eq!(
-                    press_for(
-                        key,
-                        QuitConfirm::Closed,
-                        &ScopePrompt::Closed,
-                        offered(&app, &composer),
-                        false,
-                        false
-                    ),
+                    press_for(key, None, offered(&app, &composer), false, false),
                     Pressed::Act(action),
                     "{code} should mean {action:?} again with the keys at {focus:?}"
                 );
@@ -3371,14 +3192,7 @@ mod gate {
             let mut prompt = ScopePrompt::Closed;
 
             for code in INERT.into_iter().filter(|code| *code != KeyCode::Tab) {
-                let pressed = press_for(
-                    press(code),
-                    QuitConfirm::Closed,
-                    &ScopePrompt::Closed,
-                    Some(&composer),
-                    false,
-                    false,
-                );
+                let pressed = press_for(press(code), None, Some(&composer), false, false);
 
                 assert!(
                     matches!(pressed, Pressed::Compose(_)),
@@ -3432,14 +3246,7 @@ mod gate {
                 let mut composer = muted.clone();
 
                 assert_eq!(
-                    press_for(
-                        press(code),
-                        QuitConfirm::Closed,
-                        &ScopePrompt::Closed,
-                        Some(&composer),
-                        false,
-                        true
-                    ),
+                    press_for(press(code), None, Some(&composer), false, true),
                     Pressed::Nothing,
                     "{code:?} did something at a muted field"
                 );
@@ -3478,25 +3285,11 @@ mod gate {
             muted.set_muted(true);
 
             assert_eq!(
-                press_for(
-                    press(KeyCode::Tab),
-                    QuitConfirm::Closed,
-                    &ScopePrompt::Closed,
-                    Some(&muted),
-                    false,
-                    true
-                ),
+                press_for(press(KeyCode::Tab), None, Some(&muted), false, true),
                 Pressed::Act(Action::ToggleFocus),
             );
             assert_eq!(
-                press_for(
-                    ctrl_c(),
-                    QuitConfirm::Closed,
-                    &ScopePrompt::Closed,
-                    Some(&muted),
-                    false,
-                    true
-                ),
+                press_for(ctrl_c(), None, Some(&muted), false, true),
                 Pressed::CancelTurn,
             );
         }
@@ -3527,14 +3320,7 @@ mod gate {
                 let typed = Composer::new(format!("{TYPED}{code}"));
 
                 assert_eq!(
-                    press_for(
-                        key,
-                        QuitConfirm::Closed,
-                        &ScopePrompt::Closed,
-                        Some(&live),
-                        true,
-                        false
-                    ),
+                    press_for(key, None, Some(&live), true, false),
                     Pressed::Compose(Composed::Typing(typed)),
                     "{code} did not reach a field with a run in flight"
                 );
@@ -3553,8 +3339,7 @@ mod gate {
             assert_eq!(
                 press_for(
                     press(KeyCode::Char('p')),
-                    QuitConfirm::Closed,
-                    &ScopePrompt::Closed,
+                    None,
                     Some(&composer),
                     true,
                     false
@@ -3567,8 +3352,7 @@ mod gate {
             assert_eq!(
                 press_for(
                     press(KeyCode::Char('p')),
-                    QuitConfirm::Closed,
-                    &ScopePrompt::Closed,
+                    None,
                     Some(&composer),
                     false,
                     false
@@ -3590,8 +3374,7 @@ mod gate {
             assert_eq!(
                 press_for(
                     press(KeyCode::Char('p')),
-                    QuitConfirm::Closed,
-                    &ScopePrompt::Closed,
+                    None,
                     Some(&composer),
                     false,
                     true
@@ -3604,8 +3387,7 @@ mod gate {
             assert_eq!(
                 press_for(
                     press(KeyCode::Char('p')),
-                    QuitConfirm::Closed,
-                    &ScopePrompt::Closed,
+                    None,
                     Some(&composer),
                     false,
                     false
@@ -3622,14 +3404,7 @@ mod gate {
             let composer = Composer::new(TYPED);
 
             assert_eq!(
-                press_for(
-                    press(KeyCode::Tab),
-                    QuitConfirm::Closed,
-                    &ScopePrompt::Closed,
-                    Some(&composer),
-                    false,
-                    false
-                ),
+                press_for(press(KeyCode::Tab), None, Some(&composer), false, false),
                 Pressed::Act(Action::ToggleFocus)
             );
 
@@ -3657,14 +3432,7 @@ mod gate {
             let composer = Composer::new(TYPED);
 
             assert_eq!(
-                press_for(
-                    press(KeyCode::Esc),
-                    QuitConfirm::Closed,
-                    &ScopePrompt::Closed,
-                    Some(&composer),
-                    false,
-                    false
-                ),
+                press_for(press(KeyCode::Esc), None, Some(&composer), false, false),
                 Pressed::Compose(Composed::Leave),
                 "Esc belongs to the field rather than to the gate on the way out"
             );
@@ -3701,25 +3469,11 @@ mod gate {
             let composer = Composer::new(TYPED);
 
             assert_eq!(
-                press_for(
-                    press(KeyCode::Esc),
-                    QuitConfirm::Closed,
-                    &ScopePrompt::Closed,
-                    Some(&composer),
-                    true,
-                    false
-                ),
+                press_for(press(KeyCode::Esc), None, Some(&composer), true, false),
                 Pressed::Compose(Composed::Leave)
             );
             assert_eq!(
-                press_for(
-                    press(KeyCode::Esc),
-                    QuitConfirm::Closed,
-                    &ScopePrompt::Closed,
-                    None,
-                    true,
-                    false
-                ),
+                press_for(press(KeyCode::Esc), None, None, true, false),
                 Pressed::Act(Action::CancelPact)
             );
         }
@@ -3734,14 +3488,7 @@ mod gate {
             let composer = Composer::new("why nine passes");
 
             assert_eq!(
-                press_for(
-                    press(KeyCode::Enter),
-                    QuitConfirm::Closed,
-                    &ScopePrompt::Closed,
-                    Some(&composer),
-                    false,
-                    false
-                ),
+                press_for(press(KeyCode::Enter), None, Some(&composer), false, false),
                 Pressed::Compose(Composed::Submit)
             );
 
@@ -3818,14 +3565,7 @@ mod gate {
 
                 for in_flight in [false, true] {
                     assert_eq!(
-                        press_for(
-                            ctrl_c(),
-                            QuitConfirm::Closed,
-                            &ScopePrompt::Closed,
-                            Some(&composer),
-                            in_flight,
-                            false
-                        ),
+                        press_for(ctrl_c(), None, Some(&composer), in_flight, false),
                         Pressed::Leave,
                         "Ctrl-C should leave from {draft:?} with a run in flight = {in_flight}"
                     );
@@ -3933,8 +3673,8 @@ mod pointer {
     use ratatui::layout::Size;
     use warlock_engine::NodeState;
     use warlock_tui::{
-        App, Carry, Cell, Composer, Focus, PullConfirm, PushConfirm, QuitConfirm, Reach,
-        RecordPrompt, Review, Row, ScopePrompt, panel_height, panel_width, tree_height,
+        App, Carry, Cell, Composer, Focus, Modal, Modals, PullConfirm, PushConfirm, QuitConfirm,
+        Reach, RecordPrompt, Review, Row, ScopePrompt, panel_height, panel_width, tree_height,
     };
 
     use super::super::{MouseAction, WHEEL_NOTCH, mouse_action};
@@ -4081,79 +3821,31 @@ mod pointer {
     }
 
     fn asks(mouse: MouseEvent, app: &App) -> Option<MouseAction> {
-        asks_under(
-            mouse,
-            app,
-            QuitConfirm::Closed,
-            &ScopePrompt::Closed,
-            &RecordPrompt::Closed,
-            &ScopePrompt::Closed,
-        )
+        asks_under(mouse, app, None)
     }
 
-    fn asks_under(
-        mouse: MouseEvent,
-        app: &App,
-        confirm: QuitConfirm,
-        prompt: &ScopePrompt,
-        record: &RecordPrompt,
-        write: &ScopePrompt,
-    ) -> Option<MouseAction> {
-        mouse_action(
-            mouse,
-            SIZE,
-            app,
-            confirm,
-            &PushConfirm::Closed,
-            &PullConfirm::Closed,
-            None,
-            None,
-            &ScopePrompt::Closed,
-            prompt,
-            record,
-            write,
-            None,
-        )
+    fn asks_under(mouse: MouseEvent, app: &App, modal: Option<Modal<'_>>) -> Option<MouseAction> {
+        mouse_action(mouse, SIZE, app, modal, None)
     }
 
     fn asks_composing(mouse: MouseEvent, app: &App, composer: &Composer) -> Option<MouseAction> {
-        mouse_action(
-            mouse,
-            SIZE,
-            app,
-            QuitConfirm::Closed,
-            &PushConfirm::Closed,
-            &PullConfirm::Closed,
-            None,
-            None,
-            &ScopePrompt::Closed,
-            &ScopePrompt::Closed,
-            &RecordPrompt::Closed,
-            &ScopePrompt::Closed,
-            Some(composer),
-        )
+        mouse_action(mouse, SIZE, app, None, Some(composer))
     }
 
     fn round(app: &mut App, confirm: QuitConfirm, mouse: MouseEvent) {
         round_under(
             app,
-            confirm,
-            &ScopePrompt::Closed,
-            &RecordPrompt::Closed,
-            &ScopePrompt::Closed,
+            Modals {
+                quit: confirm,
+                ..Modals::default()
+            }
+            .current(),
             mouse,
         );
     }
 
-    fn round_under(
-        app: &mut App,
-        confirm: QuitConfirm,
-        prompt: &ScopePrompt,
-        record: &RecordPrompt,
-        write: &ScopePrompt,
-        mouse: MouseEvent,
-    ) {
-        match asks_under(mouse, app, confirm, prompt, record, write) {
+    fn round_under(app: &mut App, modal: Option<Modal<'_>>, mouse: MouseEvent) {
+        match asks_under(mouse, app, modal) {
             Some(MouseAction::SelectNextBy(rows)) => app.select_next_by(rows),
             Some(MouseAction::SelectPreviousBy(rows)) => app.select_previous_by(rows),
             Some(MouseAction::ScrollPanelDown(lines)) => app.scroll_panel_down(lines),
@@ -4965,20 +4657,27 @@ mod pointer {
                 release(IN_PANEL + 3, FIRST_PANEL_LINE + 3),
             ] {
                 assert_eq!(
-                    asks_under(mouse, &app, confirm, scope, record, write),
+                    asks_under(
+                        mouse,
+                        &app,
+                        Modals {
+                            quit: confirm,
+                            scope,
+                            record,
+                            write,
+                            ..Modals::default()
+                        }
+                        .current()
+                    ),
                     None,
                     "{mouse:?} should mean nothing while a window is up"
                 );
             }
         }
 
-        // And the fifth window, which `asks_under` above cannot put up because
-        // every other test in here has it down.
         let push = PushConfirm::open(
             "Push a brief to the board",
-            "warlock-team",
-            "Warlock",
-            "work",
+            warlock_engine::Destination::new("warlock-team", "Warlock", "warlock", "work"),
         );
         for mouse in [
             left_click(IN_PANEL, FIRST_PANEL_LINE + 2),
@@ -4991,16 +4690,12 @@ mod pointer {
                     mouse,
                     SIZE,
                     &app,
-                    QuitConfirm::Closed,
-                    &push,
-                    &PullConfirm::Closed,
-                    None,
-                    None,
-                    &ScopePrompt::Closed,
-                    &ScopePrompt::Closed,
-                    &RecordPrompt::Closed,
-                    &ScopePrompt::Closed,
-                    None,
+                    Modals {
+                        push: &push,
+                        ..Modals::default()
+                    }
+                    .current(),
+                    None
                 ),
                 None,
                 "{mouse:?} should mean nothing while the push dialog is up"
@@ -5010,10 +4705,9 @@ mod pointer {
 
     #[test]
     fn the_pull_dialog_swallows_the_gesture_too() {
-        // The seventh window, for the sixth's reason and in a test of its own
-        // because `asks_under` above cannot put it up: a click that reached the
-        // tree from behind a question would select a row the reader cannot see,
-        // and a wheel notch would scroll the thread it is drawn over.
+        // A click that reached the tree from behind a question would select a
+        // row the reader cannot see, and a wheel notch would scroll the thread
+        // it is drawn over.
         let app = app_talking();
         let pull = PullConfirm::open(
             "Cut a planned project into tickets",
@@ -5033,16 +4727,12 @@ mod pointer {
                     mouse,
                     SIZE,
                     &app,
-                    QuitConfirm::Closed,
-                    &PushConfirm::Closed,
-                    &pull,
-                    None,
-                    None,
-                    &ScopePrompt::Closed,
-                    &ScopePrompt::Closed,
-                    &RecordPrompt::Closed,
-                    &ScopePrompt::Closed,
-                    None,
+                    Modals {
+                        pull: &pull,
+                        ..Modals::default()
+                    }
+                    .current(),
+                    None
                 ),
                 None,
                 "{mouse:?} should mean nothing while the pull dialog is up"
@@ -5052,7 +4742,7 @@ mod pointer {
 
     #[test]
     fn the_two_windows_a_running_pull_puts_up_swallow_the_gesture_as_well() {
-        // The eighth and ninth, for the seventh's reason: neither has anything
+        // For the pull dialog's reason: neither has anything
         // clickable in it, and a wheel notch that reached the thread behind one
         // would scroll the very titles being answered about out of sight.
         let app = app_talking();
@@ -5074,16 +4764,13 @@ mod pointer {
                         mouse,
                         SIZE,
                         &app,
-                        QuitConfirm::Closed,
-                        &PushConfirm::Closed,
-                        &PullConfirm::Closed,
-                        drafts,
-                        asked,
-                        &ScopePrompt::Closed,
-                        &ScopePrompt::Closed,
-                        &RecordPrompt::Closed,
-                        &ScopePrompt::Closed,
-                        None,
+                        Modals {
+                            review: drafts,
+                            carry: asked,
+                            ..Modals::default()
+                        }
+                        .current(),
+                        None
                     ),
                     None,
                     "{mouse:?} should mean nothing while a run's window is up"
@@ -5225,10 +4912,11 @@ mod pointer {
                 asks_under(
                     mouse,
                     &app,
-                    QuitConfirm::open(),
-                    &ScopePrompt::Closed,
-                    &RecordPrompt::Closed,
-                    &ScopePrompt::Closed
+                    Modals {
+                        quit: QuitConfirm::open(),
+                        ..Modals::default()
+                    }
+                    .current()
                 ),
                 None,
                 "{mouse:?} should mean nothing while the question is up"
@@ -5272,20 +4960,22 @@ mod pointer {
                     asks_under(
                         mouse,
                         &app,
-                        QuitConfirm::Closed,
-                        &prompt,
-                        &RecordPrompt::Closed,
-                        &ScopePrompt::Closed
+                        Modals {
+                            scope: &prompt,
+                            ..Modals::default()
+                        }
+                        .current()
                     ),
                     None,
                     "{mouse:?} should mean nothing while the prompt is up"
                 );
                 round_under(
                     &mut app,
-                    QuitConfirm::Closed,
-                    &prompt,
-                    &RecordPrompt::Closed,
-                    &ScopePrompt::Closed,
+                    Modals {
+                        scope: &prompt,
+                        ..Modals::default()
+                    }
+                    .current(),
                     mouse,
                 );
             }
@@ -5309,20 +4999,22 @@ mod pointer {
                 asks_under(
                     mouse,
                     &app,
-                    QuitConfirm::Closed,
-                    &ScopePrompt::Closed,
-                    &RecordPrompt::Closed,
-                    &write
+                    Modals {
+                        write: &write,
+                        ..Modals::default()
+                    }
+                    .current()
                 ),
                 None,
                 "{mouse:?} should mean nothing while the path prompt is up"
             );
             round_under(
                 &mut app,
-                QuitConfirm::Closed,
-                &ScopePrompt::Closed,
-                &RecordPrompt::Closed,
-                &write,
+                Modals {
+                    write: &write,
+                    ..Modals::default()
+                }
+                .current(),
                 mouse,
             );
         }
@@ -5348,20 +5040,22 @@ mod pointer {
                 asks_under(
                     mouse,
                     &app,
-                    QuitConfirm::Closed,
-                    &ScopePrompt::Closed,
-                    &record,
-                    &ScopePrompt::Closed
+                    Modals {
+                        record: &record,
+                        ..Modals::default()
+                    }
+                    .current()
                 ),
                 None,
                 "{mouse:?} should mean nothing while the record window is up"
             );
             round_under(
                 &mut app,
-                QuitConfirm::Closed,
-                &ScopePrompt::Closed,
-                &record,
-                &ScopePrompt::Closed,
+                Modals {
+                    record: &record,
+                    ..Modals::default()
+                }
+                .current(),
                 mouse,
             );
         }

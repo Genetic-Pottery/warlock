@@ -234,7 +234,10 @@ mod push {
     const KEY: &str = "work";
 
     fn open() -> PushConfirm {
-        PushConfirm::open(PROJECT, SCOPE, TEAM, KEY)
+        PushConfirm::open(
+            PROJECT,
+            warlock_engine::Destination::new(SCOPE, TEAM, "warlock", KEY),
+        )
     }
 
     // The dialog answering one key, as the session answers it: the lit answer
@@ -252,10 +255,10 @@ mod push {
         assert!(push.is_open());
         assert_eq!(filing.answer(), Answer::No);
         assert_eq!(filing.project(), PROJECT);
-        assert_eq!(filing.team(), TEAM);
+        assert_eq!(filing.destination().team(), TEAM);
         // The key by name. There is nowhere in the value for its bytes, which
         // is why nothing downstream can print them.
-        assert_eq!(filing.key(), KEY);
+        assert_eq!(filing.destination().key(), KEY);
     }
 
     #[test]
@@ -333,8 +336,8 @@ mod push {
 
         assert_eq!(filing.answer(), Answer::Yes);
         assert_eq!(filing.project(), PROJECT);
-        assert_eq!(filing.team(), TEAM);
-        assert_eq!(filing.key(), KEY);
+        assert_eq!(filing.destination().team(), TEAM);
+        assert_eq!(filing.destination().key(), KEY);
         assert_eq!(moved.lit(Answer::No), open());
     }
 

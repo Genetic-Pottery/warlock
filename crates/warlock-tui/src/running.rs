@@ -271,7 +271,7 @@ fn ending<W: Write>(cancelled: bool, report: Option<&Report>, err: &mut W) -> Re
 // neither, because a run whose record never reached the disk is warlock unable
 // to do the thing rather than a run that completed imperfectly.
 fn started(descent: Descent, path: &Path) -> Result<(), Error> {
-    let opened = opened(descent.wanted(), path)?;
+    let opened = opened(descent.wanted(), descent.into(), path)?;
     let cancel = listening()?;
     let agent = ClaudeAgent::new().with_cancel(cancel.clone());
 

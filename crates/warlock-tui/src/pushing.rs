@@ -2,51 +2,35 @@
 //! project on the board.
 //!
 //! Everything up to that answer happens on the event loop's own thread between
-//! two frames and opens no socket at all: which board a brief files to is a
-//! manifest, a sigil file and a key store, all of them local. The answer is the
-//! one thing that leaves the machine, and it leaves on a worker thread — see
-//! [`Pushes`], which is [`crate::pacting::Pact`]'s shape for a request instead
-//! of a pass: a channel per run, drained at the bottom of the loop, and the
-//! `Option` holding it is itself the say-no to a second one.
+//! two frames and opens no socket at all: [`prepare`] is a manifest, a sigil
+//! file, a key store, the filed records and the brief, all of them local. The
+//! answer is the one thing that leaves the machine, and it leaves on a worker
+//! thread — see [`Pushes`], which is [`crate::pacting::Pact`]'s shape for a
+//! request instead of a pass: a channel per run, drained at the bottom of the
+//! loop, and the `Option` holding it is itself the say-no to a second one.
 //!
-//! [`resolve_filing`] is asked once per press and the boundary rule is nowhere
-//! in this file — a sigil compared against a `[[scope]]` record here would be a
-//! second copy of `scope_opens_to`, and it is the copy that would forget the
-//! wildcard. Every refusal but the ambiguous one is the engine's own sentence,
-//! put on the thread verbatim, so the key refusals stay worded in `route.rs`
-//! where `warlock check` meets them first.
+//! What this file adds to [`mod@crate::push`] is the asking: a field when the
+//! machine can file to several boards, the dialog over what [`prepare`]
+//! resolved, and the lines on the thread. The boundary rule is nowhere in this
+//! file, and every refusal is `push.rs`'s own sentence put on the thread, bar the
+//! two the field answers instead.
 //!
-//! No `Target` outlives a call below. It borrows the manifest and carries the
-//! Linear key's value, so what the window keeps is the scope name that found
-//! it, and a confirmed question resolves it again.
-//!
-//! The key is read on exactly one line in this file — the one that builds the
-//! client — and what crosses onto the worker is that client and five owned
-//! strings. There is nowhere in [`Work`], in the channel's message, in a line or
-//! in a `Debug` rendering for a key value to be, which is the same arrangement
-//! `push.rs` makes for the subcommand.
-//!
-//! What the worker then does is the subcommand's own [`sent`]: the document, the
-//! four requests in their order, the wording of every failure and the record
-//! appended to `.warlock/filed.toml`. Nothing about a push is composed twice —
-//! including the last refusal, which the worker asks in front of that call:
-//! a brief `.warlock/filed.toml` already records is answered with the address of
-//! the project it already made, in `push.rs`'s words, with nothing sent.
+//! A confirmed dialog files the [`Prepared`] it was drawn from, with nothing
+//! resolved again: what the reader said yes to is what is sent.
 
+use std::mem;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::Instant;
 use std::{io, thread};
 
-use warlock_engine::{
-    Manifest, Target, filing, from_manifest_path, resolve_filing, to_manifest_path,
-};
+use warlock_engine::{Manifest, filing, from_manifest_path};
 use warlock_tui::{
-    App, Edited, Filing, LinearClient, Posts, PushConfirm, ScopeField, ScopePrompt, brief_at,
+    App, Edited, LinearOpener, Opens, PushAnswered, PushConfirm, ScopeField, ScopePrompt,
 };
 
 use crate::error::{Error, one_line};
-use crate::push::{Board, records, sent};
+use crate::push::{Prepared, file, prepare};
 use crate::standing::Standing;
 
 pub(crate) const FILING_HEADING: &str = "Scope to file the brief to";
@@ -78,11 +62,15 @@ const PUSH_LOST: &str =
 // `Chat::written` at the end of the question would answer about a different
 // file — or, in a session that has written none, about no file at all, which
 // was a dialog that took a Yes and silently did nothing.
+//
+// `ready` is what the dialog was drawn from and is `Some` exactly while it is
+// up, so a Yes files the push the reader was shown.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct Pushing {
     pub(crate) confirm: PushConfirm,
     pub(crate) field: ScopePrompt,
     pub(crate) brief: Option<String>,
+    ready: Option<Prepared>,
 }
 
 impl Pushing {
@@ -91,55 +79,25 @@ impl Pushing {
             confirm: PushConfirm::Closed,
             field: ScopePrompt::Closed,
             brief: None,
+            ready: None,
         }
     }
 
     fn asking(brief: &str, field: ScopeField) -> Self {
         Self {
-            confirm: PushConfirm::Closed,
             field: ScopePrompt::Open(field),
             brief: Some(brief.to_owned()),
+            ..Self::closed()
         }
     }
 
-    fn confirming(brief: &str, confirm: PushConfirm) -> Self {
+    fn confirming(brief: &str, ready: Prepared) -> Self {
         Self {
-            confirm,
+            confirm: PushConfirm::open(ready.brief().name(), ready.destination().clone()),
             field: ScopePrompt::Closed,
             brief: Some(brief.to_owned()),
+            ready: Some(ready),
         }
-    }
-}
-
-/// Where the client comes from, as a parameter rather than a call: the seam
-/// `push.rs::pushed` takes as `open: FnOnce(&str) -> P`, written as a trait so
-/// that [`Pushes`] — and so [`crate::Session`] — gains one type parameter for it
-/// rather than two.
-///
-/// The bounds are what the two workers need. A client is built from a key
-/// borrowed for as long as the target lives and is then owned by a thread that
-/// outlives the press, which is the associated type's side; and the seam itself
-/// crosses onto a thread, because [`crate::pulling::Pulls`] resolves its board
-/// over there and so opens its client there too. Both implementations are
-/// empty or a handle — there is nothing in either to make cloning one cost
-/// anything.
-pub(crate) trait Opens: Clone + Send + 'static {
-    type Client: Posts + Send + 'static;
-
-    fn open(&self, key: &str) -> Self::Client;
-}
-
-/// The one [`Opens`] that opens a socket, and the only value in warlock that
-/// does. Holds nothing: a client is built per push, from a key read on one line
-/// and dropped with the worker that used it.
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct Linear;
-
-impl Opens for Linear {
-    type Client = LinearClient;
-
-    fn open(&self, key: &str) -> LinearClient {
-        LinearClient::new(key)
     }
 }
 
@@ -151,8 +109,13 @@ impl Opens for Linear {
 /// what the thread takes.
 type Landing = Result<String, String>;
 
-/// The push a session is doing, if it is doing one, and where its client comes
-/// from.
+/// The push a session is doing, if it is doing one, the window asking about the
+/// next one, and where its client comes from.
+///
+/// The window is held here rather than beside the session's other windows for
+/// [`crate::pulling::Pulls`]'s reason: it is a state of the push, and every
+/// answer to it — a field typed into, a dialog answered — is this value's to
+/// act on.
 ///
 /// [`crate::pacting::Pact`]'s shape: the seam is held for the life of the
 /// process, the run is an [`Option`] that is its own one-at-a-time guard, and
@@ -168,6 +131,7 @@ type Landing = Result<String, String>;
 pub(crate) struct Pushes<O: Opens> {
     open: O,
     home: Option<PathBuf>,
+    window: Pushing,
     sending: Option<Sending>,
 }
 
@@ -180,13 +144,13 @@ struct Sending {
     team: String,
 }
 
-impl Pushes<Linear> {
+impl Pushes<LinearOpener> {
     // The seam and the home, both settled here: building the seam costs nothing
     // — it is a unit value, and no socket exists until an answered dialog asks
     // for one — and a home that will not resolve is a `None` that every `/push`
     // is refused with in `Standing::home`'s own words.
     pub(crate) fn new() -> Self {
-        Self::with_client(Linear, Standing::home().ok())
+        Self::with_client(LinearOpener, Standing::home().ok())
     }
 }
 
@@ -198,6 +162,7 @@ impl<O: Opens> Pushes<O> {
         Self {
             open,
             home,
+            window: Pushing::closed(),
             sending: None,
         }
     }
@@ -209,11 +174,26 @@ impl<O: Opens> Pushes<O> {
         self.sending.is_some()
     }
 
+    pub(crate) const fn window(&self) -> &Pushing {
+        &self.window
+    }
+
     // `/push` typed into the composer. The two refusals are asked in the order
     // they have to be: a push already in flight is answered before anything is
     // read, because resolving a board for a request that cannot be sent would
     // read three files to no purpose.
     pub(crate) fn press(
+        &mut self,
+        app: &mut App,
+        manifest: &Manifest,
+        repo_root: &Path,
+        written: &str,
+        now: Instant,
+    ) {
+        self.window = self.pressed(app, manifest, repo_root, written, now);
+    }
+
+    fn pressed(
         &self,
         app: &mut App,
         manifest: &Manifest,
@@ -238,31 +218,35 @@ impl<O: Opens> Pushes<O> {
     // Typing and abandoning move nothing but the field: nothing has been
     // resolved and nothing has been sent, so an Esc has nothing to put back.
     //
-    // `brief` is the one this `/push` named, carried on the window since the
+    // The brief is the one this `/push` named, carried on the window since the
     // press that opened it. It is not asked of the session: `/push
     // docs/a-brief.md` files a document this session did not write, so a second
     // reading of `Chat::written` would resolve a board for one file and file
     // another — or, with nothing written, resolve for none.
     //
-    // `None` is a field with no push behind it, which the keys cannot reach,
+    // No brief is a field with no push behind it, which the keys cannot reach,
     // and it reads as nothing to file rather than as a refusal to word.
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "a submit of this field is a board resolution, so it takes what \
-                  one takes: the repository, the document, the typing being \
-                  judged and the keystroke judging it"
-    )]
     pub(crate) fn edit(
+        &mut self,
+        app: &mut App,
+        manifest: &Manifest,
+        repo_root: &Path,
+        edited: Edited,
+        now: Instant,
+    ) {
+        self.window = self.edited(app, manifest, repo_root, edited, now);
+    }
+
+    fn edited(
         &self,
         app: &mut App,
         manifest: &Manifest,
         repo_root: &Path,
-        brief: Option<&str>,
-        prompt: &ScopePrompt,
         edited: Edited,
         now: Instant,
     ) -> Pushing {
-        let Some(brief) = brief else {
+        let window = &self.window;
+        let Some(brief) = window.brief.as_deref() else {
             return Pushing::closed();
         };
 
@@ -273,7 +257,7 @@ impl<O: Opens> Pushes<O> {
             // home is so much as looked at: the engine would answer about a
             // scope named nothing, and what is true is that the reader has not
             // typed yet.
-            Edited::Submit => match prompt.field() {
+            Edited::Submit => match window.field.field() {
                 Some(field) if field.text().trim().is_empty() => {
                     Pushing::asking(brief, field.clone().refused(NO_SCOPE))
                 }
@@ -288,69 +272,39 @@ impl<O: Opens> Pushes<O> {
         }
     }
 
-    /// The confirmed question: the board resolved a second time, the client
-    /// built, and the worker started.
+    /// The dialog, moved or answered. An arrow re-lights the question that is
+    /// up and either answer takes it down; a Yes also starts the worker.
     ///
-    /// Everything that can refuse is asked here, on this thread, and says so on
-    /// the thread — a refusal costs a line and leaves the session exactly where
-    /// it was. The socket is opened on the line marked below and on no earlier
-    /// one.
-    pub(crate) fn send(
-        &mut self,
-        app: &mut App,
-        manifest: &Manifest,
-        repo_root: &Path,
-        brief: Option<&str>,
-        filing: &Filing,
-        now: Instant,
-    ) {
+    /// The window is taken rather than read and then closed, so what the
+    /// question was asked about is what the request is made from and there is
+    /// no round on which both a dialog and its own push are up.
+    pub(crate) fn answer(&mut self, app: &mut App, answered: PushAnswered, now: Instant) {
+        let window = &mut self.window;
+        match answered {
+            PushAnswered::Open(answer) => window.confirm = window.confirm.lit(answer),
+            PushAnswered::Cancel => window.confirm = PushConfirm::Closed,
+            PushAnswered::Send => {
+                if let Some(ready) = mem::take(window).ready {
+                    self.send(app, ready, now);
+                }
+            }
+        }
+    }
+
+    fn send(&mut self, app: &mut App, ready: Prepared, now: Instant) {
         if self.sending() {
             saying(app, ALREADY_FILING, now);
             return;
         }
-        // The brief is the one the question was asked about, carried on the
-        // window since the press. Both are `None` only in a state the keys
-        // cannot reach — this dialog is up because a home resolved and because a
-        // press named a brief — and that reads as nothing to file rather than as
-        // a refusal to word.
-        let (Some(home), Some(written)) = (self.home.as_deref(), brief) else {
-            return;
-        };
 
-        // The scope name the dialog was opened with, asked of the engine again:
-        // the target that answered the first time borrows the manifest and
-        // carries the key, so it could not be parked on the window. See the
-        // module's note.
-        let target = match resolve_filing(manifest, repo_root, home, Some(filing.scope())) {
-            Ok(target) => target,
-            Err(error) => {
-                refused(app, &error, now);
-                return;
-            }
-        };
-        let record = target.record();
-        let work = Work {
-            root: repo_root.to_path_buf(),
-            // The manifest-relative spelling the press handed over, resolved
-            // against the root rather than the working directory, exactly as the
-            // read that opened the dialog resolved it.
-            path: from_manifest_path(repo_root, written),
-            scope: target.scope().to_owned(),
-            team: record.team().to_owned(),
-            label: record.label().to_owned(),
-        };
-
-        // The key is read here and on no other line in this module, on the last
-        // line before anything can leave the machine — `push.rs` reads it in the
-        // same one place for the same reason.
-        let client = self.open.open(target.value());
+        let team = ready.destination().team().to_owned();
         // Before the worker starts, so the thread says which board is being
         // filed to from the instant it is: the answer may be seconds away and a
         // reader who has just said yes is looking at the conversation.
-        app.panel_mut().note(filing_line(&work.team), now);
+        app.panel_mut().note(filing_line(&team), now);
         self.sending = Some(Sending {
-            team: work.team.clone(),
-            events: spawn_push(client, work),
+            team,
+            events: spawn_push(self.open.clone(), ready),
         });
     }
 
@@ -375,7 +329,8 @@ impl<O: Opens> Pushes<O> {
             Ok(url) => filed_line(&sending.team, url),
             // The worker's own sentence, which is `push.rs`'s wording of
             // whatever went wrong: a transport failure, Linear's refusal, a
-            // document that is no longer a brief, a record that would not save.
+            // record written since the dialog opened, a record that would not
+            // save.
             Err(line) => line.clone(),
         };
         // Taken before the line is put on the thread, so the round that reports
@@ -393,82 +348,26 @@ impl<O: Opens> Pushes<O> {
     }
 }
 
-// Everything the worker owns, and the whole of what crosses the thread
-// boundary beside the client: five owned values, nothing borrowing the manifest,
-// the app or the target the board was read out of.
-#[derive(Debug, Clone)]
-struct Work {
-    root: PathBuf,
-    path: PathBuf,
-    scope: String,
-    team: String,
-    label: String,
-}
-
 // The `JoinHandle` is dropped on purpose, as a turn's and a pass's are: joining
 // is waiting, and this thread exists precisely so nobody waits for it. There is
 // no cancel handle either — one request per operation, no retry and no backoff
 // (see `linear.rs`), and a mutation that may already have run is not something a
 // keystroke can take back.
-fn spawn_push<P: Posts + Send + 'static>(client: P, work: Work) -> Receiver<Landing> {
+//
+// `io::sink` is where the line `file` prints would have gone. The panel words its
+// own — a conversation is not a terminal — and the address it needs comes back
+// from the call rather than out of the bytes.
+fn spawn_push<O: Opens>(open: O, ready: Prepared) -> Receiver<Landing> {
     let (events, received) = mpsc::channel();
     thread::spawn(move || {
-        let landing = filed(&client, &work).map_err(|error| one_line(&error.to_string()));
+        let landing =
+            file(&ready, &open, &mut io::sink()).map_err(|error| one_line(&error.to_string()));
         // Ignored for the reason every other worker's send is: a receiver that
         // has gone away is an application that is quitting.
         let _ = events.send(landing);
     });
 
     received
-}
-
-// The document, the four requests and the record, every one of them the
-// subcommand's: [`sent`] sequences them, words their failures and decides where
-// the label is resolved, and this is the same call `warlock push` makes.
-//
-// `io::sink` is where the line `sent` prints would have gone. The panel words its
-// own — a conversation is not a terminal — and the address it needs comes back
-// from the call rather than out of the bytes.
-//
-// The brief is read here rather than on the event loop's thread, so a document
-// edited or deleted between the dialog and the answer is reported by the same
-// worker as everything else: one line, from one place, however the push went.
-//
-// The records are asked first, and about the same question `push.rs` asks them
-// before it builds its client: a brief is filed once, so a second `/push` of one
-// this repository has already filed is the address of the project it already
-// made and not a second project on the board under one title. Nothing on this
-// side can take a project back, which is why the refusal is here — in front of
-// [`sent`] and so in front of every request — rather than reported after one.
-fn filed(client: &impl Posts, work: &Work) -> Result<String, Error> {
-    // The spelling `Standing::spelled` gives the subcommand, out of the path the
-    // press resolved against the root: it is what a record is keyed by, so it is
-    // what the records are asked about.
-    let spelled =
-        to_manifest_path(&work.root, &work.path).map_err(|source| Error::Unspellable { source })?;
-    let records = records(&work.root)?;
-    if let Some(already) = records.record(&spelled) {
-        return Err(Error::AlreadyFiled {
-            path: spelled,
-            url: already.url().to_owned(),
-        });
-    }
-
-    let brief = brief_at(&work.root, &work.path).map_err(|source| Error::Brief { source })?;
-
-    sent(
-        client,
-        &work.root,
-        Board {
-            scope: &work.scope,
-            team: &work.team,
-            label: &work.label,
-        },
-        &brief,
-        &work.path,
-        records,
-        &mut io::sink(),
-    )
 }
 
 fn filing_line(team: &str) -> String {
@@ -496,61 +395,34 @@ fn filing_to(
     now: Instant,
 ) -> Pushing {
     let name = asked.map(|field| field.text().trim());
-    match resolve_filing(manifest, repo_root, home, name) {
-        Ok(target) => confirming(app, repo_root, written, &target, now),
-        // Every window built below carries the brief it is about, so the answer
-        // is filed against the document the question was asked about.
+    let path = from_manifest_path(repo_root, written);
+    match prepare(manifest, repo_root, home, &path, name) {
+        Ok(ready) => Pushing::confirming(written, ready),
         // The one sentence of the engine's this does not repeat: its own names
         // `--scope`, which is a flag on the subcommand and nothing a panel has,
         // and here the field that is about to open is the instruction.
-        Err(filing::Error::Several { candidates }) => Pushing::asking(
+        Err(Error::Filing {
+            source: filing::Error::Several { candidates },
+        }) => Pushing::asking(
             written,
             ScopeField::new(FILING_HEADING, "").refused(pick_one(&candidates)),
         ),
         // Back to the field with the candidates under it and the typing where
-        // it was, one character from being right. The other arm cannot happen —
-        // there is no unknown name without a name — and answers it the way
-        // every other refusal is answered rather than by inventing a window.
-        Err(error @ filing::Error::Unknown { .. }) => match asked {
+        // it was, one character from being right. There is no unknown name
+        // without a field, and that arm is answered the way every other refusal
+        // is rather than by inventing a window.
+        Err(
+            error @ Error::Filing {
+                source: filing::Error::Unknown { .. },
+            },
+        ) => match asked {
             Some(field) => {
                 Pushing::asking(written, field.clone().refused(one_line(&error.to_string())))
             }
-            None => refused(app, &error, now),
+            None => saying(app, one_line(&error.to_string()), now),
         },
-        Err(error) => refused(app, &error, now),
-    }
-}
-
-// The name is read off the brief here rather than from the path, because it is
-// the name the project would be filed under: the file the reader is looking at
-// is the document, and a title guessed from its filename would be a second
-// opinion about what it is called.
-fn confirming(
-    app: &mut App,
-    repo_root: &Path,
-    written: &str,
-    target: &Target<'_>,
-    now: Instant,
-) -> Pushing {
-    let path = from_manifest_path(repo_root, written);
-    match brief_at(repo_root, &path) {
-        Ok(brief) => Pushing::confirming(
-            written,
-            PushConfirm::open(
-                brief.name(),
-                target.scope(),
-                target.record().team(),
-                // The key by name. `Target::value` is not read on this path at
-                // all.
-                target.key(),
-            ),
-        ),
         Err(error) => saying(app, one_line(&error.to_string()), now),
     }
-}
-
-fn refused(app: &mut App, error: &filing::Error, now: Instant) -> Pushing {
-    saying(app, one_line(&error.to_string()), now)
 }
 
 // On the thread and not the footer, where `/push`'s other refusal already

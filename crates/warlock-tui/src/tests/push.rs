@@ -1,21 +1,18 @@
-use std::cell::RefCell;
-use std::collections::VecDeque;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::rc::Rc;
 
-use serde_json::{Value, json};
 use tempfile::TempDir;
 use warlock_engine::{
-    Filed, FiledRecord, Manifest, PactEntry, ScopeRecord, filed_path, keys_path, manifest_path,
-    route, save_key, save_key_binding, save_sigils, sigils_path,
+    Destination, Filed, FiledRecord, Manifest, PactEntry, ScopeRecord, filed_path, keys_path,
+    manifest_path, route, save_key, save_key_binding, save_sigils, sigils_path,
 };
-use warlock_tui::{Brief, LinearError, Posts, brief_at};
+use warlock_tui::{Brief, Opens, brief_at};
 
-use super::{Board, pushed, sent};
+use super::{Prepared, file, prepare, pushed, sent};
 use crate::error::Error;
 use crate::standing::Standing;
 use crate::status_for;
+use crate::stubs::{Boarding, Op, ProjectAsked};
 
 // Not a key, and named so that nothing reading this file mistakes it for one.
 // It is stored only so that a bound name resolves and a push can reach the
@@ -49,90 +46,6 @@ const BRIEF: &str = "# Push a brief to the board\n\n\
                      ## Scope\n\n### 1. Read the file\n\ndepends_on: []\n";
 
 const TITLE: &str = "Push a brief to the board";
-
-// A Linear that answers from memory, held by handle: the closure `pushed` opens
-// its client through has to hand one *over*, and the test keeps a copy to read
-// afterwards. `RefCell` rather than the `Mutex` the client's own stand-in uses,
-// because nothing here crosses a thread.
-//
-// It also looks at `.warlock/filed.toml` on every call, which is what makes
-// "the record is appended after the create" an assertion rather than a reading:
-// a record already on disk at the fourth request would be one written before
-// the project it names existed.
-#[derive(Debug, Clone)]
-struct Posting {
-    answers: Rc<RefCell<VecDeque<Result<Value, LinearError>>>>,
-    asked: Rc<RefCell<Vec<(String, Value)>>>,
-    recorded: Rc<RefCell<Vec<bool>>>,
-    filed: PathBuf,
-}
-
-impl Posting {
-    fn answering(
-        root: &Path,
-        answers: impl IntoIterator<Item = Result<Value, LinearError>>,
-    ) -> Self {
-        Self {
-            answers: Rc::new(RefCell::new(answers.into_iter().collect())),
-            asked: Rc::new(RefCell::new(Vec::new())),
-            recorded: Rc::new(RefCell::new(Vec::new())),
-            filed: filed_path(root),
-        }
-    }
-
-    fn documents(&self) -> Vec<String> {
-        self.asked
-            .borrow()
-            .iter()
-            .map(|(document, _)| document.clone())
-            .collect()
-    }
-
-    // The `input` of the last thing the stand-in was asked, which is the project
-    // create in every test that gets that far.
-    fn last_input(&self) -> Value {
-        self.asked
-            .borrow()
-            .last()
-            .expect("the stand-in was asked at least once")
-            .1["input"]
-            .clone()
-    }
-
-    fn recorded_when_asked(&self) -> Vec<bool> {
-        self.recorded.borrow().clone()
-    }
-}
-
-impl Posts for Posting {
-    fn post(&self, document: &str, variables: Value) -> Result<Value, LinearError> {
-        self.asked
-            .borrow_mut()
-            .push((document.to_owned(), variables));
-        self.recorded.borrow_mut().push(self.filed.exists());
-
-        self.answers
-            .borrow_mut()
-            .pop_front()
-            .unwrap_or_else(|| panic!("the stand-in was asked more times than it was answered"))
-    }
-}
-
-// The client a refusal may never build. Every refusal a push has happens before
-// the socket is opened, so reaching this at all is the failure the test is
-// about — which is why it is a panic and not a recorded flag.
-#[derive(Debug, Clone, Copy)]
-struct Unreachable;
-
-impl Posts for Unreachable {
-    fn post(&self, document: &str, _variables: Value) -> Result<Value, LinearError> {
-        panic!("a request was sent: {document}");
-    }
-}
-
-fn no_socket(_key: &str) -> Unreachable {
-    panic!("the key was read and a client was built");
-}
 
 fn a_dir() -> TempDir {
     tempfile::tempdir().expect("a temporary directory")
@@ -194,13 +107,13 @@ fn keeping(home: &Path, name: &str) {
 
 // The whole subcommand, less the environment: the repository root and the home
 // are this test's temporary directories, and the socket is whatever `open` is.
-fn push_to<P: Posts, O: FnOnce(&str) -> P>(
+fn push_to<O: Opens>(
     repo: &Path,
     home: &Path,
     path: &str,
     scope: Option<&str>,
     dry_run: bool,
-    open: O,
+    open: &O,
 ) -> (Result<(), Error>, String) {
     let mut out = Vec::new();
     let outcome = pushed(
@@ -224,7 +137,7 @@ fn push_to<P: Posts, O: FnOnce(&str) -> P>(
 // one of them promises have been checked: nothing was sent, nothing was
 // printed, nothing was recorded, and the status is the ordinary 1.
 fn refusal(repo: &Path, home: &Path, path: &str, scope: Option<&str>) -> Error {
-    let (outcome, printed) = push_to(repo, home, path, scope, false, no_socket);
+    let (outcome, printed) = push_to(repo, home, path, scope, false, &Boarding::unopened());
 
     assert!(printed.is_empty(), "a refusal printed something: {printed}");
     assert!(
@@ -247,57 +160,54 @@ fn said(error: &Error) -> String {
     message
 }
 
-fn team_found() -> Value {
-    json!({ "teams": { "nodes": [{ "id": "team-1" }] } })
-}
-
-fn no_team() -> Value {
-    json!({ "teams": { "nodes": [] } })
-}
-
-fn backlog() -> Value {
-    json!({
-        "projectStatuses": {
-            "nodes": [
-                { "id": "status-planned", "name": "Planned" },
-                { "id": "status-backlog", "name": "Backlog" },
-            ],
-        },
-    })
-}
-
-fn label_found() -> Value {
-    json!({ "projectLabels": { "nodes": [{ "id": "label-held" }] } })
-}
-
-fn project_created() -> Value {
-    json!({ "projectCreate": { "project": { "id": PROJECT_ID, "url": URL } } })
-}
-
-// The four answers a push that files something gets, in the order it asks for
-// them.
-fn a_whole_push(root: &Path) -> Posting {
-    Posting::answering(
-        root,
-        [
-            Ok(team_found()),
-            Ok(backlog()),
-            Ok(label_found()),
-            Ok(project_created()),
-        ],
-    )
+// A workspace that has the team, the status and the label, and creates the
+// project at the address these tests expect, noting at every call whether the
+// record file is on disk yet.
+fn a_whole_push(root: &Path) -> Boarding {
+    Boarding::filing(URL)
+        .creating_project(PROJECT_ID, URL)
+        .watching(filed_path(root))
 }
 
 fn brief_here(root: &Path) -> Brief {
     brief_at(root, root.join(BRIEF_PATH)).expect("a document that is a brief")
 }
 
-fn board() -> Board<'static> {
-    Board {
-        scope: SCOPE,
-        team: TEAM,
-        label: LABEL,
-    }
+fn destination() -> Destination {
+    Destination::new(SCOPE, TEAM, LABEL, KEY_NAME)
+}
+
+// The half both doors call first, over the manifest this repository saved and
+// the brief joined onto its root, the way the panel joins its spelling.
+fn preparing(repo: &Path, home: &Path, scope: Option<&str>) -> Result<Prepared, Error> {
+    let manifest = Standing::at(repo.to_path_buf(), repo.to_path_buf())
+        .manifest()
+        .expect("a manifest that loads");
+    prepare(&manifest, repo, home, &repo.join(BRIEF_PATH), scope)
+}
+
+fn prepared(repo: &Path, home: &Path) -> Prepared {
+    preparing(repo, home, None).expect("a repository, a board and a brief are a push")
+}
+
+fn refused(repo: &Path, home: &Path, scope: Option<&str>) -> Error {
+    preparing(repo, home, scope).expect_err("a refusal")
+}
+
+// The record a first push of this brief would have left behind.
+fn already_filed(root: &Path) {
+    Filed::with_records([FiledRecord::new(
+        root,
+        root.join(BRIEF_PATH),
+        PROJECT_ID,
+        URL,
+        SCOPE,
+        TEAM,
+        "2026-09-20T07:32:00Z",
+    )
+    .expect("a path inside the repository")])
+    .save(root)
+    .expect("a record file that saves");
 }
 
 fn records_in(root: &Path) -> Filed {
@@ -309,27 +219,24 @@ fn a_push_that_files_asks_for_the_team_the_status_and_the_label_before_it_create
     let repo = a_repository();
     let home = a_home(repo.path());
     let linear = a_whole_push(repo.path());
-    let handed = linear.clone();
 
-    let (outcome, printed) = push_to(repo.path(), home.path(), BRIEF_PATH, None, false, |key| {
-        // The value out of the key store reached the constructor, which is the
-        // one line in the module that reads it.
-        assert_eq!(key, NOT_A_KEY);
-        handed
-    });
+    let (outcome, printed) = push_to(repo.path(), home.path(), BRIEF_PATH, None, false, &linear);
 
     outcome.expect("a repository, a board and a brief are a push");
-    let asked = linear.documents();
-    assert_eq!(asked.len(), 4, "one request per operation: {asked:?}");
-    assert!(asked[0].contains("teams("), "{asked:?}");
-    assert!(asked[1].contains("projectStatuses"), "{asked:?}");
-    assert!(asked[2].contains("projectLabels"), "{asked:?}");
-    assert!(asked[3].contains("projectCreate("), "{asked:?}");
-    // And the record is the step after all four, rather than a file written
+    // The value out of the key store reached the one line that reads it.
+    assert_eq!(linear.opened_with(), [NOT_A_KEY]);
+    // The label is `create_project`'s own first request, so it is not asked for
+    // here: see `linear.rs`, whose tests hold the label ahead of the create.
+    assert_eq!(
+        linear.ops(),
+        [Op::Team, Op::BacklogStatus, Op::CreateProject],
+        "one call per operation"
+    );
+    // And the record is the step after all of them, rather than a file written
     // beside a project that might never have existed.
     assert_eq!(
         linear.recorded_when_asked(),
-        [false, false, false, false],
+        [false, false, false],
         "a record was on disk before the project that it names"
     );
     assert!(filed_path(repo.path()).exists());
@@ -341,34 +248,31 @@ fn the_create_carries_the_brief_the_team_and_the_status_that_were_resolved_for_i
     let repo = a_repository();
     let home = a_home(repo.path());
     let linear = a_whole_push(repo.path());
-    let handed = linear.clone();
 
-    push_to(repo.path(), home.path(), BRIEF_PATH, None, false, |_| {
-        handed
-    })
-    .0
-    .expect("a push");
+    push_to(repo.path(), home.path(), BRIEF_PATH, None, false, &linear)
+        .0
+        .expect("a push");
 
-    let input = linear.last_input();
-    assert_eq!(input["name"], json!(TITLE), "{input}");
     assert_eq!(
-        input["content"],
-        json!(brief_here(repo.path()).content()),
-        "the body is the file's own bytes: {input}"
+        linear.projects_created(),
+        [ProjectAsked {
+            name: TITLE.to_owned(),
+            // The body is the file's own bytes.
+            content: brief_here(repo.path()).content().to_owned(),
+            team: "team-1".to_owned(),
+            status: Some("status-backlog".to_owned()),
+            label: LABEL.to_owned(),
+        }]
     );
-    assert_eq!(input["teamIds"], json!(["team-1"]), "{input}");
-    assert_eq!(input["statusId"], json!("status-backlog"), "{input}");
 }
 
 #[test]
 fn a_push_that_files_says_the_team_the_label_the_name_and_the_url_and_records_them() {
     let repo = a_repository();
     let home = a_home(repo.path());
-    let handed = a_whole_push(repo.path());
+    let linear = a_whole_push(repo.path());
 
-    let (outcome, printed) = push_to(repo.path(), home.path(), BRIEF_PATH, None, false, |_| {
-        handed
-    });
+    let (outcome, printed) = push_to(repo.path(), home.path(), BRIEF_PATH, None, false, &linear);
 
     outcome.expect("a push");
     for said in [TEAM, LABEL, TITLE, URL] {
@@ -392,7 +296,14 @@ fn a_dry_run_opens_no_socket_writes_no_record_and_says_what_would_go() {
     let repo = a_repository();
     let home = a_home(repo.path());
 
-    let (outcome, printed) = push_to(repo.path(), home.path(), BRIEF_PATH, None, true, no_socket);
+    let (outcome, printed) = push_to(
+        repo.path(),
+        home.path(),
+        BRIEF_PATH,
+        None,
+        true,
+        &Boarding::unopened(),
+    );
 
     outcome.expect("a dry run answers");
     assert!(
@@ -417,24 +328,10 @@ fn a_dry_run_opens_no_socket_writes_no_record_and_says_what_would_go() {
 fn a_brief_this_repository_has_already_filed_is_refused_with_the_url_it_got() {
     let repo = a_repository();
     let home = a_home(repo.path());
-    Filed::with_records([FiledRecord::new(
-        repo.path(),
-        repo.path().join(BRIEF_PATH),
-        PROJECT_ID,
-        URL,
-        SCOPE,
-        TEAM,
-        "2026-09-20T07:32:00Z",
-    )
-    .expect("a path inside the repository")])
-    .save(repo.path())
-    .expect("a record file that saves");
+    already_filed(repo.path());
 
-    let (outcome, printed) = push_to(repo.path(), home.path(), BRIEF_PATH, None, false, no_socket);
+    let error = refused(repo.path(), home.path(), None);
 
-    assert!(printed.is_empty(), "{printed}");
-    assert_eq!(status_for(&outcome), 1);
-    let error = outcome.expect_err("a brief is filed once");
     assert!(
         matches!(&error, Error::AlreadyFiled { path, url } if path == BRIEF_PATH && url == URL),
         "{error:?}"
@@ -444,7 +341,139 @@ fn a_brief_this_repository_has_already_filed_is_refused_with_the_url_it_got() {
 }
 
 #[test]
-fn a_machine_with_no_board_to_file_to_is_refused_before_anything_is_read() {
+fn every_refusal_prepare_raises_is_the_ordinary_status_with_nothing_printed_or_sent() {
+    // What the subcommand adds to `prepare`'s refusals, whose sentences are
+    // asserted above: the board is never opened, nothing is printed or
+    // recorded, and the status is 1 rather than the boundary's 3. One of each
+    // kind — no board, several, a name that is no candidate, an unbound
+    // checkout, a document that is not a brief.
+    let no_board = a_repository();
+    let nothing = a_dir();
+
+    let several = a_repository();
+    saving(
+        several.path(),
+        &a_manifest([a_record(SCOPE, TEAM), a_record("web", "WEB")]),
+    );
+    let both = a_dir();
+    holding(both.path(), several.path(), &[SCOPE, "web"]);
+    bound(both.path(), several.path(), KEY_NAME);
+    keeping(both.path(), KEY_NAME);
+
+    let unbound_repo = a_repository();
+    let unbound = a_dir();
+    holding(unbound.path(), unbound_repo.path(), &[SCOPE]);
+    keeping(unbound.path(), KEY_NAME);
+
+    let not_a_brief = a_repository();
+    write_brief(
+        not_a_brief.path(),
+        "# Push a brief to the board\n\nNo sections.\n",
+    );
+    let not_a_brief_home = a_home(not_a_brief.path());
+
+    for (repo, home, scope) in [
+        (&no_board, &nothing, None),
+        (&several, &both, None),
+        (&several, &both, Some("billing")),
+        (&unbound_repo, &unbound, None),
+        (&not_a_brief, &not_a_brief_home, None),
+    ] {
+        refusal(repo.path(), home.path(), BRIEF_PATH, scope);
+    }
+
+    // Already filed has a record on disk by definition, so it is checked
+    // unchanged rather than absent.
+    let filed = a_repository();
+    let filed_home = a_home(filed.path());
+    already_filed(filed.path());
+    let before = fs::read_to_string(filed_path(filed.path())).expect("a record file");
+
+    let (outcome, printed) = push_to(
+        filed.path(),
+        filed_home.path(),
+        BRIEF_PATH,
+        None,
+        false,
+        &Boarding::unopened(),
+    );
+
+    assert!(printed.is_empty(), "{printed}");
+    assert_eq!(status_for(&outcome), 1);
+    assert_eq!(
+        fs::read_to_string(filed_path(filed.path())).expect("a record file"),
+        before
+    );
+}
+
+#[test]
+fn a_record_written_after_the_push_was_prepared_is_refused_before_the_key_is_read() {
+    // The panel's dialog can sit open while another push of the same brief
+    // lands. Nothing on this side can take a project back, so `file` asks the
+    // records again, and the board here panics if it is so much as opened.
+    let repo = a_repository();
+    let home = a_home(repo.path());
+    let ready = prepared(repo.path(), home.path());
+    already_filed(repo.path());
+
+    let mut out = Vec::new();
+    let error = file(&ready, &Boarding::unopened(), &mut out).expect_err("a brief is filed once");
+
+    assert!(
+        matches!(&error, Error::AlreadyFiled { path, url } if path == BRIEF_PATH && url == URL),
+        "{error:?}"
+    );
+    assert!(out.is_empty(), "{}", String::from_utf8_lossy(&out));
+    assert_eq!(records_in(repo.path()).records().len(), 1);
+}
+
+#[test]
+fn a_prepared_push_names_the_brief_and_the_board_and_prints_no_key_value() {
+    let repo = a_repository();
+    let home = a_home(repo.path());
+
+    let ready = prepared(repo.path(), home.path());
+
+    assert_eq!(
+        ready.brief().name(),
+        TITLE,
+        "the name is the brief's title line"
+    );
+    assert_eq!(ready.destination(), &destination());
+    // It carries the value for `file` to open the board with, and a `Debug`
+    // rendering — which is what a failing assertion prints — must not show it.
+    assert!(
+        !format!("{ready:?}").contains(NOT_A_KEY),
+        "the key value is in the prepared push"
+    );
+}
+
+#[test]
+fn filing_a_prepared_push_hands_back_the_address_it_recorded() {
+    let repo = a_repository();
+    let home = a_home(repo.path());
+    let linear = a_whole_push(repo.path());
+
+    let url = file(
+        &prepared(repo.path(), home.path()),
+        &linear,
+        &mut Vec::new(),
+    )
+    .expect("a push with nothing in its way");
+
+    assert_eq!(url, URL, "the address the panel's line is worded from");
+    assert_eq!(linear.opened_with(), [NOT_A_KEY]);
+    assert_eq!(
+        records_in(repo.path())
+            .record(BRIEF_PATH)
+            .expect("a record for the brief")
+            .url(),
+        URL,
+    );
+}
+
+#[test]
+fn a_machine_with_no_board_to_file_to_is_refused() {
     // The three ways there is no candidate, which are fixed in three different
     // places: the machine holds nothing, it holds a sigil this repository has
     // never recorded, and it holds one a pact carries with no `[[scope]]`
@@ -467,7 +496,7 @@ fn a_machine_with_no_board_to_file_to_is_refused_before_anything_is_read() {
         (&unmatched, &elsewhere, "billing"),
         (&unrecorded, &no_record, "[[scope]]"),
     ] {
-        let error = refusal(repo.path(), home.path(), BRIEF_PATH, None);
+        let error = refused(repo.path(), home.path(), None);
 
         assert!(matches!(error, Error::Filing { .. }), "{error:?}");
         assert!(said(&error).contains(expected), "{}", said(&error));
@@ -486,7 +515,7 @@ fn a_machine_that_can_file_to_several_boards_names_them_all_and_asks_for_one() {
     bound(home.path(), repo.path(), KEY_NAME);
     keeping(home.path(), KEY_NAME);
 
-    let error = refusal(repo.path(), home.path(), BRIEF_PATH, None);
+    let error = refused(repo.path(), home.path(), None);
 
     let message = said(&error);
     assert!(matches!(error, Error::Filing { .. }), "{error:?}");
@@ -507,22 +536,14 @@ fn a_scope_that_is_a_candidate_is_honoured_and_one_that_is_not_names_the_candida
     bound(home.path(), repo.path(), KEY_NAME);
     keeping(home.path(), KEY_NAME);
 
-    // Honoured: the named candidate's team is the board the dry run reports,
-    // and the other one is nowhere in it.
-    let (outcome, printed) = push_to(
-        repo.path(),
-        home.path(),
-        BRIEF_PATH,
-        Some("web"),
-        true,
-        no_socket,
-    );
-    outcome.expect("a named candidate is a board");
-    assert!(printed.contains("WEB"), "{printed}");
-    assert!(!printed.contains(TEAM), "{printed}");
+    // Honoured: the named candidate's team is the board, and the other one is
+    // nowhere in it.
+    let ready = preparing(repo.path(), home.path(), Some("web")).expect("a named candidate");
+    assert_eq!(ready.destination().team(), "WEB");
+    assert_eq!(ready.destination().scope(), "web");
 
     // And a name that is not one of them is refused with both of them named.
-    let error = refusal(repo.path(), home.path(), BRIEF_PATH, Some("billing"));
+    let error = refused(repo.path(), home.path(), Some("billing"));
 
     let message = said(&error);
     assert!(matches!(error, Error::Filing { .. }), "{error:?}");
@@ -545,7 +566,7 @@ fn an_unbound_checkout_and_a_dangling_name_are_route_s_two_sentences_reached_thr
     holding(unbound.path(), repo.path(), &[SCOPE]);
     keeping(unbound.path(), KEY_NAME);
 
-    let error = refusal(repo.path(), unbound.path(), BRIEF_PATH, None);
+    let error = refused(repo.path(), unbound.path(), None);
     assert_eq!(
         said(&error),
         route::Error::Unbound {
@@ -559,7 +580,7 @@ fn an_unbound_checkout_and_a_dangling_name_are_route_s_two_sentences_reached_thr
     bound(dangling.path(), repo.path(), KEY_NAME);
     keeping(dangling.path(), "personal");
 
-    let error = refusal(repo.path(), dangling.path(), BRIEF_PATH, None);
+    let error = refused(repo.path(), dangling.path(), None);
     assert_eq!(
         said(&error),
         route::Error::Dangling {
@@ -571,7 +592,7 @@ fn an_unbound_checkout_and_a_dangling_name_are_route_s_two_sentences_reached_thr
 }
 
 #[test]
-fn a_file_that_is_not_a_brief_is_refused_before_the_socket_is_opened() {
+fn a_file_that_is_not_a_brief_is_refused() {
     // Absent, untitled, and missing a section of the repository's shape: three
     // documents, one refusal each, and no board told about any of them.
     let absent = a_repository();
@@ -592,7 +613,7 @@ fn a_file_that_is_not_a_brief_is_refused_before_the_socket_is_opened() {
         (&sectionless, "## Outcome"),
     ] {
         let home = a_home(repo.path());
-        let error = refusal(repo.path(), home.path(), BRIEF_PATH, None);
+        let error = refused(repo.path(), home.path(), None);
 
         assert!(matches!(error, Error::Brief { .. }), "{error:?}");
         assert!(said(&error).contains(expected), "{}", said(&error));
@@ -603,12 +624,9 @@ fn a_file_that_is_not_a_brief_is_refused_before_the_socket_is_opened() {
 fn a_team_key_linear_does_not_know_names_the_value_and_the_file_it_is_written_in() {
     let repo = a_repository();
     let home = a_home(repo.path());
-    let linear = Posting::answering(repo.path(), [Ok(no_team())]);
-    let handed = linear.clone();
+    let linear = a_whole_push(repo.path()).without_team();
 
-    let (outcome, printed) = push_to(repo.path(), home.path(), BRIEF_PATH, None, false, |_| {
-        handed
-    });
+    let (outcome, printed) = push_to(repo.path(), home.path(), BRIEF_PATH, None, false, &linear);
 
     assert_eq!(status_for(&outcome), 1);
     let error = outcome.expect_err("a team the workspace does not have is a refusal");
@@ -624,7 +642,7 @@ fn a_team_key_linear_does_not_know_names_the_value_and_the_file_it_is_written_in
     );
     // Nothing was created and nothing was printed, because the refusal is the
     // answer to the first request.
-    assert_eq!(linear.documents().len(), 1);
+    assert_eq!(linear.ops(), [Op::Team]);
     assert!(printed.is_empty(), "{printed}");
     assert!(!filed_path(repo.path()).exists());
 }
@@ -632,27 +650,16 @@ fn a_team_key_linear_does_not_know_names_the_value_and_the_file_it_is_written_in
 #[test]
 fn a_label_that_will_not_resolve_stops_before_the_project_rather_than_after_it() {
     // The ticket's label bullet turned the other way up, and deliberately: the
-    // label is `create_project`'s own first request (see `linear.rs`), so there
-    // is no create that landed for a failing label to be missing from. What the
-    // push can honestly report is that nothing was created, nothing was
+    // label is `create_project`'s own first request (see `linear.rs`, whose
+    // tests hold that order), so there is no create that landed for a failing
+    // label to be missing from. What the push can honestly report of a
+    // `create_project` that failed is that nothing was created, nothing was
     // recorded and there is no URL — which is what this asserts.
     let repo = a_repository();
     let home = a_home(repo.path());
-    let linear = Posting::answering(
-        repo.path(),
-        [
-            Ok(team_found()),
-            Ok(backlog()),
-            Err(LinearError::Refused {
-                message: "Entity not found".to_owned(),
-            }),
-        ],
-    );
-    let handed = linear.clone();
+    let linear = a_whole_push(repo.path()).refuse(Op::CreateProject, "Entity not found");
 
-    let (outcome, printed) = push_to(repo.path(), home.path(), BRIEF_PATH, None, false, |_| {
-        handed
-    });
+    let (outcome, printed) = push_to(repo.path(), home.path(), BRIEF_PATH, None, false, &linear);
 
     assert_eq!(
         status_for(&outcome),
@@ -662,9 +669,11 @@ fn a_label_that_will_not_resolve_stops_before_the_project_rather_than_after_it()
     let error = outcome.expect_err("a label that will not resolve is a refusal");
     assert!(matches!(error, Error::Linear { .. }), "{error:?}");
 
-    let asked = linear.documents();
-    assert_eq!(asked.len(), 3, "a project was created anyway: {asked:?}");
-    assert!(asked[2].contains("projectLabels"), "{asked:?}");
+    assert_eq!(
+        linear.ops(),
+        [Op::Team, Op::BacklogStatus, Op::CreateProject],
+        "the push carried on past the failed create"
+    );
     assert!(
         printed.is_empty(),
         "a URL was printed for a project that does not exist: {printed}"
@@ -685,15 +694,7 @@ fn a_create_that_landed_with_a_record_that_will_not_save_still_prints_the_url() 
     let wall = repo.path().join("docs").join("brief.md");
     let root = wall.join("inside");
     let brief = brief_here(repo.path());
-    let linear = Posting::answering(
-        &root,
-        [
-            Ok(team_found()),
-            Ok(backlog()),
-            Ok(label_found()),
-            Ok(project_created()),
-        ],
-    );
+    let linear = a_whole_push(&root);
 
     let mut out = Vec::new();
     // The address is dropped here for `status_for`'s sake, which is the question
@@ -702,7 +703,7 @@ fn a_create_that_landed_with_a_record_that_will_not_save_still_prints_the_url() 
     let outcome = sent(
         &linear,
         &root,
-        board(),
+        &destination(),
         &brief,
         &root.join(BRIEF_PATH),
         Filed::new(),
@@ -736,11 +737,9 @@ fn no_line_and_no_error_on_this_path_carries_a_key_value() {
     // already read. The name is printed and the value it stands for never is.
     let repo = a_repository();
     let home = a_home(repo.path());
-    let handed = a_whole_push(repo.path());
+    let linear = a_whole_push(repo.path());
 
-    let (filed, printed) = push_to(repo.path(), home.path(), BRIEF_PATH, None, false, |_| {
-        handed
-    });
+    let (filed, printed) = push_to(repo.path(), home.path(), BRIEF_PATH, None, false, &linear);
     filed.expect("a push");
 
     let dry = a_repository();
@@ -751,20 +750,28 @@ fn no_line_and_no_error_on_this_path_carries_a_key_value() {
         BRIEF_PATH,
         None,
         true,
-        no_socket,
+        &Boarding::unopened(),
     );
     outcome.expect("a dry run");
 
     // The same push again, which is the already-filed refusal, and a `--scope`
     // nothing answers to: both are raised with a target in hand.
-    let again = push_to(repo.path(), home.path(), BRIEF_PATH, None, false, no_socket).0;
+    let again = push_to(
+        repo.path(),
+        home.path(),
+        BRIEF_PATH,
+        None,
+        false,
+        &Boarding::unopened(),
+    )
+    .0;
     let unknown = push_to(
         repo.path(),
         home.path(),
         BRIEF_PATH,
         Some("billing"),
         false,
-        no_socket,
+        &Boarding::unopened(),
     )
     .0;
 
@@ -798,7 +805,14 @@ fn a_record_file_that_will_not_read_is_a_failure_rather_than_an_empty_one() {
     let home = a_home(repo.path());
     fs::write(filed_path(repo.path()), "version = 1\nnot toml {{{").expect("a broken record file");
 
-    let (outcome, printed) = push_to(repo.path(), home.path(), BRIEF_PATH, None, false, no_socket);
+    let (outcome, printed) = push_to(
+        repo.path(),
+        home.path(),
+        BRIEF_PATH,
+        None,
+        false,
+        &Boarding::unopened(),
+    );
 
     assert_eq!(status_for(&outcome), 1);
     let error = outcome.expect_err("a record file that will not parse is a failure");

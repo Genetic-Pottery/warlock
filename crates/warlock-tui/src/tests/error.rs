@@ -4,6 +4,7 @@ use warlock_engine::{claude_md, manifest, scope, sigils};
 use warlock_tui::ScopeBlockError;
 
 use super::{Error, one_line};
+use crate::rescope::ScopeRefusal;
 use crate::status_for;
 // The tails themselves, not copies of them: these used to be re-typed here
 // as literals, so rewording either original left this suite passing on a
@@ -144,7 +145,9 @@ fn every_message_quoting_another_error_is_one_line_so_it_prints_as_one() {
                 .expect_err("a name that is not a scope name is refused"),
         },
         Error::Scope {
-            rule: scope::Rule::Empty,
+            refusal: ScopeRefusal::Rule {
+                rule: scope::Rule::Empty,
+            },
         },
         Error::Signal {
             source: ctrlc::Error::MultipleHandlers,
@@ -193,8 +196,10 @@ fn every_message_warlock_words_itself_is_one_line_so_it_prints_as_one() {
             path: "crates/engine".to_owned(),
             scope: "data-plane".to_owned(),
         },
-        Error::NoPact {
-            module: "crates/engine".to_owned(),
+        Error::Scope {
+            refusal: ScopeRefusal::NoPact {
+                module: "crates/engine".to_owned(),
+            },
         },
         Error::Failures {
             failed: 3,
@@ -402,36 +407,17 @@ fn a_string_that_is_not_a_sigil_names_itself_and_the_rule_it_broke() {
 }
 
 #[test]
-fn a_scope_that_is_not_one_is_the_engines_rule_and_nothing_wrapped_round_it() {
-    // What `warlock scope add crates 'Control Plane'` prints, after the
-    // fold: the rule's own sentence, so the shell and the scope field say
-    // one thing about one rule. Asked of the judge rather than retyped.
-    let rule = warlock_engine::validate_scope("control plane")
-        .expect_err("a space is not a scope character");
-
-    assert_eq!(
-        Error::Scope { rule: rule.clone() }.to_string(),
-        rule.to_string()
-    );
-    assert_eq!(
-        Error::Scope {
-            rule: scope::Rule::Empty
-        }
-        .to_string(),
-        "a scope cannot be empty"
-    );
-}
-
-#[test]
-fn a_directory_nobody_pacted_is_named_and_pointed_at_the_key_that_pacts_it() {
-    let error = Error::NoPact {
+fn a_scope_refusal_is_the_refusals_own_sentence_and_nothing_wrapped_round_it() {
+    let refusal = ScopeRefusal::NoPact {
         module: "crates/engine".to_owned(),
     };
 
     assert_eq!(
-        error.to_string(),
-        "`crates/engine` is not in the manifest, so there is no pact to carry a \
-             scope; pact it in warlock first, with `p`"
+        Error::Scope {
+            refusal: refusal.clone()
+        }
+        .to_string(),
+        refusal.to_string()
     );
 }
 

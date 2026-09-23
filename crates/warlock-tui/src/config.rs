@@ -15,7 +15,7 @@ use std::fmt;
 use std::io::{self, Write};
 use std::path::Path;
 
-use warlock_engine::{load_sigils, save_sigils, sigils, sigils_path, validate_sigil};
+use warlock_engine::{held_sigils, save_sigils, sigils_path, validate_sigil};
 
 use crate::error::{Error, one_line};
 use crate::standing::{FOR_SIGILS, Standing};
@@ -108,9 +108,8 @@ enum Held {
 // here is to *set* the sigils, and a config that cannot be read is the
 // situation a reader most needs to be able to type over.
 fn held_for(home: &Path, root: &Path) -> Held {
-    match load_sigils(home, root) {
+    match held_sigils(home, root) {
         Ok(sigils) => Held::Sigils(sigils),
-        Err(sigils::Error::NotFound { .. }) => Held::Sigils(Vec::new()),
         Err(error) => Held::Unreadable(one_line(&error.to_string())),
     }
 }

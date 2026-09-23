@@ -277,6 +277,7 @@ fn driven(
         Some(home),
         manifest,
         repo_root.join(path),
+        descent.into(),
     )?;
     // The production composition, not a second one assembled here: whatever
     // order `descended` puts these in is the order under test.

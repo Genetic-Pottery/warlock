@@ -3,9 +3,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use super::{
-    DOCUMENT_FILE, Failure, Observer, PactedSubtree, Pacting, Refusal, Unviewable, Unwatched,
-    Viewed, assemble_lines, closed_scopes_at_or_below, describe_file, pact_directory, pact_subtree,
-    pactable_directories, refresh_subtree, synthesise, unpact_ignored, unpact_subtree, view_file,
+    DOCUMENT_FILE, Failure, Observer, PactedSubtree, Pacting, Refusal, Unwatched, pact_directory,
+    pact_subtree, pactable_directories, refresh_subtree, unpact_ignored, unpact_subtree,
 };
 use crate::document::{self, STAMP};
 use crate::fitting::{Omission, Snapshot};
@@ -340,7 +339,9 @@ fn a_line_is_reused_only_where_the_file_has_not_moved() {
     };
 
     // Nothing recorded: every file is asked about.
-    let first = assemble_lines(&taken(dir.path()), None, &agent, &mut Unwatched).expect("lines");
+    let first = taken(dir.path())
+        .assemble(None, &agent, &mut Unwatched)
+        .expect("lines");
     assert_eq!(agent.passes.get(), 2);
     assert_eq!(first.asked, ["reading.rs", "writing.rs"]);
 
@@ -354,13 +355,9 @@ fn a_line_is_reused_only_where_the_file_has_not_moved() {
             .collect::<Vec<_>>(),
     );
 
-    let again = assemble_lines(
-        &taken(dir.path()),
-        Some((&page, &first.hashes)),
-        &agent,
-        &mut Unwatched,
-    )
-    .expect("lines");
+    let again = taken(dir.path())
+        .assemble(Some((&page, &first.hashes)), &agent, &mut Unwatched)
+        .expect("lines");
     assert_eq!(agent.passes.get(), 3, "one changed file, one pass");
     assert_eq!(again.asked, ["writing.rs"]);
     assert_eq!(again.lines["reading.rs"], first.lines["reading.rs"]);
@@ -391,8 +388,9 @@ fn one_file_is_one_pass_and_one_line() {
     let dir = tempfile::tempdir().expect("a temporary directory");
     fs::write(dir.path().join("reading.rs"), "pub fn read_one() {}\n").expect("writes");
 
-    let described =
-        describe_file(dir.path(), "reading.rs", &Lined, &mut Unwatched).expect("a line");
+    let described = taken(dir.path())
+        .line("reading.rs", &Lined, &mut Unwatched)
+        .expect("a line");
     assert_eq!(
         described.line,
         "The reading half: one entry point and the type it hands back."
@@ -440,8 +438,9 @@ fn synthesis_is_shown_the_lines_and_checked_against_the_directory() {
     .into_iter()
     .collect();
 
-    let synthesised =
-        synthesise(&taken(dir.path()), &lines, &agent, &mut Unwatched).expect("a fill either way");
+    let synthesised = taken(dir.path())
+        .fill(&lines, &agent, &mut Unwatched)
+        .expect("a fill either way");
 
     assert_eq!(agent.passes.get(), 1, "a clean answer is taken at once");
     assert!(synthesised.mends.is_empty(), "{:?}", synthesised.mends);
@@ -467,8 +466,9 @@ fn synthesis_that_cannot_be_got_right_is_mended_rather_than_lost() {
     .into_iter()
     .collect();
 
-    let synthesised =
-        synthesise(&taken(dir.path()), &lines, &agent, &mut Unwatched).expect("a fill either way");
+    let synthesised = taken(dir.path())
+        .fill(&lines, &agent, &mut Unwatched)
+        .expect("a fill either way");
 
     assert_eq!(agent.passes.get(), document::ATTEMPTS);
     assert_eq!(
@@ -494,13 +494,9 @@ fn a_hash_with_no_line_on_the_page_is_asked_about_again() {
     let hash = crate::hash::file_hash(dir.path().join("reading.rs")).expect("hashes");
     let recorded = [("reading.rs".to_owned(), hash)].into_iter().collect();
 
-    let assembled = assemble_lines(
-        &taken(dir.path()),
-        Some(("", &recorded)),
-        &agent,
-        &mut Unwatched,
-    )
-    .expect("lines");
+    let assembled = taken(dir.path())
+        .assemble(Some(("", &recorded)), &agent, &mut Unwatched)
+        .expect("lines");
 
     assert_eq!(assembled.asked, ["reading.rs"]);
     assert!(assembled.kept.is_empty());
@@ -516,13 +512,9 @@ fn a_line_with_no_hash_behind_it_is_asked_about_again() {
     let agent = Lining::saying(r#"{"line": "A line about one file alone."}"#);
     let page = page_of(&[("reading.rs", "The line already on the page.")]);
 
-    let assembled = assemble_lines(
-        &taken(dir.path()),
-        Some((&page, &BTreeMap::new())),
-        &agent,
-        &mut Unwatched,
-    )
-    .expect("lines");
+    let assembled = taken(dir.path())
+        .assemble(Some((&page, &BTreeMap::new())), &agent, &mut Unwatched)
+        .expect("lines");
 
     assert_eq!(assembled.asked, ["reading.rs"]);
     assert_eq!(agent.passes.get(), 1);
@@ -544,13 +536,9 @@ fn a_file_the_page_and_the_hashes_agree_on_costs_nothing() {
         .collect();
     let page = page_of(&[("reading.rs", LINE)]);
 
-    let assembled = assemble_lines(
-        &taken(dir.path()),
-        Some((&page, &recorded)),
-        &agent,
-        &mut Unwatched,
-    )
-    .expect("lines");
+    let assembled = taken(dir.path())
+        .assemble(Some((&page, &recorded)), &agent, &mut Unwatched)
+        .expect("lines");
 
     assert_eq!(agent.passes.get(), 0, "the run paid for nothing");
     assert_eq!(assembled.kept, ["reading.rs"]);
@@ -580,13 +568,9 @@ fn a_line_edited_on_the_page_is_described_again_however_still_its_file_is() {
     .collect();
     let page = page_of(&[("reading.rs", "maintained by a unicorn, actually")]);
 
-    let assembled = assemble_lines(
-        &taken(dir.path()),
-        Some((&page, &recorded)),
-        &agent,
-        &mut Unwatched,
-    )
-    .expect("lines");
+    let assembled = taken(dir.path())
+        .assemble(Some((&page, &recorded)), &agent, &mut Unwatched)
+        .expect("lines");
 
     assert_eq!(agent.passes.get(), 1, "the edited line costs one pass");
     assert_eq!(assembled.asked, ["reading.rs"]);
@@ -595,7 +579,7 @@ fn a_line_edited_on_the_page_is_described_again_however_still_its_file_is() {
 }
 
 // The end-to-end half of `a_line_edited_on_the_page_is_described_again`:
-// that one settles `assemble_lines`, this one settles that a real refresh
+// that one settles `Snapshot::assemble`, this one settles that a real refresh
 // reaches it. A refresh is the path that reuses lines at all — a pact runs
 // under `AboveFailure::Describe` and re-describes everything regardless —
 // so a refresh that kept the edit is the way this could regress without a
@@ -711,13 +695,9 @@ fn a_line_for_a_file_that_is_gone_is_left_off_the_page() {
         (gone, "A line about a file that has since been deleted."),
     ]);
 
-    let assembled = assemble_lines(
-        &taken(dir.path()),
-        Some((&page, &recorded)),
-        &agent,
-        &mut Unwatched,
-    )
-    .expect("lines");
+    let assembled = taken(dir.path())
+        .assemble(Some((&page, &recorded)), &agent, &mut Unwatched)
+        .expect("lines");
 
     assert_eq!(agent.passes.get(), 0, "the file that is left was reused");
     assert_eq!(assembled.kept, ["reading.rs"]);
@@ -738,8 +718,9 @@ fn a_file_warlock_had_to_write_itself_is_named_as_such() {
     let dir = one_file_directory();
     let agent = Lining::saying("prose where an object was asked for");
 
-    let assembled =
-        assemble_lines(&taken(dir.path()), None, &agent, &mut Unwatched).expect("lines");
+    let assembled = taken(dir.path())
+        .assemble(None, &agent, &mut Unwatched)
+        .expect("lines");
 
     assert_eq!(assembled.asked, ["reading.rs"]);
     assert_eq!(assembled.mended, ["reading.rs"]);
@@ -752,8 +733,9 @@ fn a_file_whose_line_is_never_usable_is_written_by_warlock_rather_than_refused()
     let over = "x".repeat(document::ENTRY_CHARS + 40);
     let agent = Lining::saying(format!("{{\"line\": \"{over}\"}}"));
 
-    let described =
-        describe_file(dir.path(), "reading.rs", &agent, &mut Unwatched).expect("a line either way");
+    let described = taken(dir.path())
+        .line("reading.rs", &agent, &mut Unwatched)
+        .expect("a line either way");
 
     assert_eq!(
         agent.passes.get(),
@@ -783,8 +765,9 @@ fn a_file_answered_with_prose_is_mended_where_a_directory_would_be_refused() {
     let dir = one_file_directory();
     let agent = Lining::saying("Here is some prose instead of the object you asked for.");
 
-    let described =
-        describe_file(dir.path(), "reading.rs", &agent, &mut Unwatched).expect("a line either way");
+    let described = taken(dir.path())
+        .line("reading.rs", &agent, &mut Unwatched)
+        .expect("a line either way");
 
     assert!(described.mended);
     assert!(
@@ -799,7 +782,8 @@ fn a_file_that_is_not_there_is_an_error_and_not_a_line_about_nothing() {
     let dir = one_file_directory();
     let agent = Lining::saying(r#"{"line": "a line about a file that does not exist"}"#);
 
-    let error = describe_file(dir.path(), "writing.rs", &agent, &mut Unwatched)
+    let error = taken(dir.path())
+        .line("writing.rs", &agent, &mut Unwatched)
         .expect_err("the caller walked the directory to get this name");
 
     assert!(matches!(error, super::Error::Walk { .. }), "{error:?}");
@@ -1868,7 +1852,9 @@ fn every_file_a_directory_pays_for_is_announced_once_and_counted_to_the_same_tot
     let agent = Lining::saying(r#"{"line": "A line about one file alone."}"#);
     let mut watched = Weighing::default();
 
-    assemble_lines(&taken(dir.path()), None, &agent, &mut watched).expect("lines");
+    taken(dir.path())
+        .assemble(None, &agent, &mut watched)
+        .expect("lines");
 
     assert_eq!(
         watched.described,
@@ -1898,13 +1884,9 @@ fn a_file_taken_off_the_page_is_never_announced_and_never_counted() {
     let page = page_of(&[("reading.rs", LINE)]);
     let mut watched = Weighing::default();
 
-    assemble_lines(
-        &taken(dir.path()),
-        Some((&page, &recorded)),
-        &agent,
-        &mut watched,
-    )
-    .expect("lines");
+    taken(dir.path())
+        .assemble(Some((&page, &recorded)), &agent, &mut watched)
+        .expect("lines");
 
     assert_eq!(watched.described, [("writing.rs".to_owned(), 18, 1, 1)]);
 }
@@ -1917,7 +1899,9 @@ fn a_file_asked_about_twice_is_announced_once() {
     let agent = Lining::saying("prose where an object was asked for");
     let mut watched = Weighing::default();
 
-    let assembled = assemble_lines(&taken(dir.path()), None, &agent, &mut watched).expect("lines");
+    let assembled = taken(dir.path())
+        .assemble(None, &agent, &mut watched)
+        .expect("lines");
 
     assert_eq!(assembled.mended, ["reading.rs"], "every attempt was spent");
     assert!(agent.passes.get() > 1, "the retries this is about happened");
@@ -1935,7 +1919,9 @@ fn the_handover_counts_the_lines_and_the_documents_below_and_not_the_files() {
     let agent = Lining::saying("prose where an object was asked for");
     let mut watched = Weighing::default();
 
-    synthesise(&taken(dir.path()), &BTreeMap::new(), &agent, &mut watched).expect("a fill");
+    taken(dir.path())
+        .fill(&BTreeMap::new(), &agent, &mut watched)
+        .expect("a fill");
 
     assert_eq!(
         watched.requested,
@@ -2280,172 +2266,6 @@ fn a_run_that_rewrites_the_entries_leaves_the_records_alone() {
         record_bytes(&before),
         "a pass writes documents and grants, and no record is its to move",
     );
-}
-
-fn scoped(modules: &[(&str, Option<&str>)]) -> Manifest {
-    Manifest::with_entries(modules.iter().map(|(module, scope)| {
-        let entry = PactEntry::new(".", module, format!("{module}/WARLOCK.md"))
-            .expect("a relative path inside the root is storable");
-        match scope {
-            Some(scope) => entry.with_scope(*scope),
-            None => entry,
-        }
-    }))
-}
-
-fn held(sigils: &[&str]) -> Vec<String> {
-    sigils.iter().map(|sigil| (*sigil).to_owned()).collect()
-}
-
-#[test]
-fn a_scoped_descendant_this_machine_does_not_open_blocks() {
-    // The case the whole question is about: the target says nothing, so
-    // coverage on the target alone answers "open", and the boundary is one
-    // directory down.
-    let manifest = scoped(&[
-        ("crates", None),
-        ("crates/engine", Some("data-plane")),
-        ("crates/tui", None),
-    ]);
-
-    assert_eq!(
-        closed_scopes_at_or_below("crates", ".", &manifest, &held(&["web"]))
-            .expect("a path inside the root"),
-        ["data-plane"],
-    );
-    // And the entry carrying it is exactly one an un-pact would drop.
-    assert!(
-        !modules(&unpact_subtree("crates", ".", &manifest).expect("un-pacts"))
-            .contains(&"crates/engine"),
-    );
-}
-
-#[test]
-fn a_scoped_descendant_this_machine_opens_does_not_block() {
-    let manifest = scoped(&[("crates", None), ("crates/engine", Some("data-plane"))]);
-
-    for sigils in [
-        held(&["data-plane"]),
-        held(&["web", "data-plane"]),
-        held(&["*"]),
-    ] {
-        assert!(
-            closed_scopes_at_or_below("crates", ".", &manifest, &sigils)
-                .expect("a path inside the root")
-                .is_empty(),
-            "{sigils:?} opens it",
-        );
-    }
-}
-
-#[test]
-fn the_target_s_own_scope_is_asked_about_too_and_does_not_license_what_is_below() {
-    let manifest = scoped(&[
-        ("crates", Some("platform")),
-        ("crates/engine", Some("data-plane")),
-    ]);
-
-    // Holding the target's own scope is not permission over the boundary
-    // inside it: these are two questions, not one.
-    assert_eq!(
-        closed_scopes_at_or_below("crates", ".", &manifest, &held(&["platform"]))
-            .expect("a path inside the root"),
-        ["data-plane"],
-    );
-    // "At or below" is at, too: the target's own closed scope is blocking.
-    assert_eq!(
-        closed_scopes_at_or_below("crates", ".", &manifest, &held(&["data-plane"]))
-            .expect("a path inside the root"),
-        ["platform"],
-    );
-}
-
-#[test]
-fn an_unscoped_root_buys_nothing_over_the_scopes_below_it() {
-    // `unpact .` drops every entry there is, so it is asked about every
-    // entry there is — the root's silence is the absence of a statement,
-    // not permission over the statements under it.
-    let manifest = scoped(&[
-        (".", None),
-        ("crates/engine", Some("data-plane")),
-        ("docs", None),
-    ]);
-
-    for directory in [".", "/repo"] {
-        assert_eq!(
-            closed_scopes_at_or_below(directory, "/repo", &manifest, &held(&["web"]))
-                .expect("a path inside the root"),
-            ["data-plane"],
-            "{directory}",
-        );
-    }
-    // Nothing scoped below, or all of it held, and the root un-pact is the
-    // ordinary one it has always been.
-    assert!(
-        closed_scopes_at_or_below(".", "/repo", &manifest, &held(&["data-plane"]))
-            .expect("a path inside the root")
-            .is_empty(),
-    );
-    assert!(
-        closed_scopes_at_or_below(".", "/repo", &pacted(&[".", "crates"]), &[])
-            .expect("a path inside the root")
-            .is_empty(),
-    );
-}
-
-#[test]
-fn a_sibling_that_shares_a_prefix_carries_no_blocking_scope() {
-    // The same segment-wise match `unpact_subtree` uses: what is not
-    // dropped cannot block.
-    let manifest = scoped(&[
-        ("crates/engine", None),
-        ("crates/engine-tools", Some("tooling")),
-        ("crates/engineering", Some("estimates")),
-    ]);
-
-    assert!(
-        closed_scopes_at_or_below("crates/engine", ".", &manifest, &[])
-            .expect("a path inside the root")
-            .is_empty(),
-    );
-    assert_eq!(
-        closed_scopes_at_or_below("crates/engine-tools", ".", &manifest, &[])
-            .expect("a path inside the root"),
-        ["tooling"],
-    );
-}
-
-#[test]
-fn a_descendant_scope_that_is_not_a_scope_does_not_block() {
-    // Read as no scope, exactly as `scope_covering` reads it: one rule for
-    // what a boundary is, not two. A valid one beside it still blocks, and
-    // the string that is not a scope is not named in the answer.
-    let manifest = scoped(&[
-        ("crates", None),
-        ("crates/engine", Some("Data Plane!")),
-        ("crates/tui", Some("")),
-        ("crates/store", Some("data-plane")),
-    ]);
-
-    assert_eq!(
-        closed_scopes_at_or_below("crates", ".", &manifest, &[]).expect("a path inside the root"),
-        ["data-plane"],
-    );
-    assert!(
-        closed_scopes_at_or_below("crates/engine", ".", &manifest, &[])
-            .expect("a path inside the root")
-            .is_empty(),
-    );
-}
-
-#[test]
-fn a_path_with_no_manifest_relative_form_is_the_same_error_an_un_pact_gives() {
-    let manifest = scoped(&[("crates/engine", Some("data-plane"))]);
-
-    assert!(matches!(
-        closed_scopes_at_or_below("/elsewhere/crates", "/repo", &manifest, &[]),
-        Err(manifest::Error::PathOutsideRoot { .. })
-    ));
 }
 
 #[test]
@@ -3541,118 +3361,5 @@ fn a_partly_completed_pact_keeps_the_scope_of_every_entry_it_keeps() {
              the two ungranted directories keep their boundaries. The one that \
              earned nothing loses its entry, and a scope has no home outside an \
              entry — a pact is the direction that can take a boundary away",
-    );
-}
-
-fn untouched(path: &Path, contents: &[u8]) {
-    assert_eq!(
-        fs::read(path).expect("the file is still there"),
-        contents,
-        "`{}` was changed by being looked at",
-        path.display(),
-    );
-}
-
-#[test]
-fn a_view_of_an_ordinary_file_is_the_whole_of_it() {
-    let dir = tempfile::tempdir().expect("a temporary directory");
-    let contents = "# engine\n\nThe core.\n";
-    let path = write(dir.path(), "WARLOCK.md", contents);
-
-    let Viewed { text, cut } = view_file(&path).expect("an ordinary file reads");
-
-    assert_eq!(text, contents);
-    assert!(!cut, "a file under the cap is not cut");
-    untouched(&path, contents.as_bytes());
-}
-
-#[test]
-fn an_empty_file_is_an_empty_view_rather_than_a_failure() {
-    let dir = tempfile::tempdir().expect("a temporary directory");
-    let path = write(dir.path(), "empty.rs", "");
-
-    let Viewed { text, cut } = view_file(&path).expect("an empty file reads");
-
-    assert!(text.is_empty(), "{text:?}");
-    assert!(!cut, "there is nothing past nothing");
-    untouched(&path, b"");
-}
-
-#[test]
-fn a_file_that_is_not_there_is_a_read_failure_naming_it() {
-    let dir = tempfile::tempdir().expect("a temporary directory");
-    let path = dir.path().join("gone.rs");
-
-    let error = view_file(&path).expect_err("nothing to read");
-
-    assert!(matches!(error, Unviewable::Unreadable { .. }), "{error:?}");
-    assert_eq!(error.path(), path);
-    assert!(
-        error.to_string().contains(&path.display().to_string()),
-        "{error}",
-    );
-}
-
-#[cfg(unix)]
-#[test]
-fn a_file_that_may_not_be_read_is_a_read_failure_naming_it() {
-    use std::os::unix::fs::PermissionsExt as _;
-
-    let dir = tempfile::tempdir().expect("a temporary directory");
-    let contents = "# engine\n\nThe core.\n";
-    let path = write(dir.path(), "WARLOCK.md", contents);
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o000)).expect("chmods");
-    if fs::read(&path).is_ok() {
-        // Running as root: no file is unreadable, so there is nothing here
-        // to assert against.
-        return;
-    }
-
-    let error = view_file(&path).expect_err("the permissions say no");
-
-    assert!(matches!(error, Unviewable::Unreadable { .. }), "{error:?}");
-    assert_eq!(error.path(), path);
-    assert!(
-        error.to_string().contains(&path.display().to_string()),
-        "{error}",
-    );
-
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).expect("chmods back");
-    untouched(&path, contents.as_bytes());
-}
-
-#[test]
-fn a_directory_is_a_read_failure_naming_it() {
-    let dir = tempfile::tempdir().expect("a temporary directory");
-    write(dir.path(), "src/lib.rs", "//! Core engine.\n");
-    let path = dir.path().join("src");
-
-    let error = view_file(&path).expect_err("a directory has no text");
-
-    assert!(
-        matches!(error, Unviewable::Unreadable { .. }),
-        "a directory is the filesystem saying no, not a file that is not text: {error:?}",
-    );
-    assert_eq!(error.path(), path);
-    assert!(
-        error.to_string().contains(&path.display().to_string()),
-        "{error}",
-    );
-    untouched(&path.join("lib.rs"), b"//! Core engine.\n");
-}
-
-#[test]
-fn a_second_view_reads_the_file_as_it_is_now() {
-    let dir = tempfile::tempdir().expect("a temporary directory");
-    let path = write(dir.path(), "WARLOCK.md", "# engine\n");
-
-    let first = view_file(&path).expect("reads").text;
-    fs::write(&path, "# engine\n\nRewritten.\n").expect("rewrites the file");
-    let second = view_file(&path).expect("reads again").text;
-
-    assert_eq!(first, "# engine\n");
-    assert_eq!(
-        second, "# engine\n\nRewritten.\n",
-        "every view is a read from disk, so nothing is cached to go stale",
     );
 }
