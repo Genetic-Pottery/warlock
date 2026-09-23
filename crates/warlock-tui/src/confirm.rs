@@ -224,7 +224,7 @@ pub fn push_answer_for(key: KeyEvent, highlighted: Answer) -> PushAnswered {
     }
 }
 
-// The project a `/pull` is about to cut, as the five facts the reader is being
+// The project a `/draft` is about to cut, as the five facts the reader is being
 // asked about. Every one of them was read back off the board a moment ago and
 // none can be read again without a second request, which is why they are parked
 // here rather than looked up when the answer comes in.
@@ -232,7 +232,7 @@ pub fn push_answer_for(key: KeyEvent, highlighted: Answer) -> PushAnswered {
 // The key is here *by name*, for [`Filing`]'s reason and with the same
 // consequence: there is nowhere in this value for its bytes to sit, so a dialog
 // that cannot hold a key cannot draw one, print one or grow one in a `Debug`
-// rendering. There is no scope beside the name either — a pull resolves the
+// rendering. There is no scope beside the name either — a cut resolves the
 // board the machine's own way, with no field in front of it to name a second
 // one, so a Yes asks that same question again from nothing this value carries.
 //
@@ -242,7 +242,7 @@ pub fn push_answer_for(key: KeyEvent, highlighted: Answer) -> PushAnswered {
 //
 // The lit answer rides along inside it for [`QuitConfirm`]'s reason — it exists
 // exactly as long as the question does — which is why this is only ever built
-// through [`PullConfirm::open`].
+// through [`CutConfirm::open`].
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Cutting {
     project: String,
@@ -301,22 +301,22 @@ impl Cutting {
     }
 }
 
-/// The question a `/pull` asks between the fetch and the run, drawn over the
+/// The question a `/draft` asks between the fetch and the run, drawn over the
 /// frame the way the other two are and answered by the very same rules —
-/// [`pull_answer_for`] is [`answer_for`] with the answers renamed.
+/// [`cut_answer_for`] is [`answer_for`] with the answers renamed.
 ///
 /// A separate value from [`PushConfirm`] because the two are answered about
 /// different things and say so in their types: a confirmed question there sends
 /// one brief, and a confirmed question here starts a run over every uncut slice
 /// of a project.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
-pub enum PullConfirm {
+pub enum CutConfirm {
     #[default]
     Closed,
     Open(Cutting),
 }
 
-impl PullConfirm {
+impl CutConfirm {
     /// No is lit on open, for the reason [`Answer::No`] is the default: the
     /// round that puts this up and an Enter straight after it come to nothing
     /// at all.
@@ -343,7 +343,7 @@ impl PullConfirm {
         matches!(self, Self::Open(_))
     }
 
-    /// The one way into [`pull_answer_for`] and into the drawing, for the
+    /// The one way into [`cut_answer_for`] and into the drawing, for the
     /// reason [`QuitConfirm::highlighted`] is: the caller cannot invent a
     /// question that is not up.
     #[must_use]
@@ -368,7 +368,7 @@ impl PullConfirm {
 /// [`Answered`] in this dialog's vocabulary: a confirmed question here starts
 /// the run, and warlock goes on running either way.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum PullAnswered {
+pub enum CutAnswered {
     Open(Answer),
     Cancel,
     Cut,
@@ -380,11 +380,11 @@ pub enum PullAnswered {
 /// [`answer_for`] so the three cannot drift — a key that moves one moves them
 /// all.
 #[must_use]
-pub fn pull_answer_for(key: KeyEvent, highlighted: Answer) -> PullAnswered {
+pub fn cut_answer_for(key: KeyEvent, highlighted: Answer) -> CutAnswered {
     match answer_for(key, highlighted) {
-        Answered::Open(answer) => PullAnswered::Open(answer),
-        Answered::Close => PullAnswered::Cancel,
-        Answered::Leave => PullAnswered::Cut,
+        Answered::Open(answer) => CutAnswered::Open(answer),
+        Answered::Close => CutAnswered::Cancel,
+        Answered::Leave => CutAnswered::Cut,
     }
 }
 
@@ -611,7 +611,7 @@ pub enum CarryAnswered {
 }
 
 /// The quit dialog's rules again, renamed rather than restated, so that the one
-/// two-answer question inside a pull is answered by the very keys every other
+/// two-answer question inside a cut is answered by the very keys every other
 /// one is: Esc and `n` stop, Left then Enter carries on, an immediate Enter
 /// stops, a release changes nothing.
 #[must_use]

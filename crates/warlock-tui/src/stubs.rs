@@ -248,11 +248,11 @@ impl Converses for Scripted {
 /// through: a `Boarding` is its own [`Opens::Board`], so a test keeps a handle on
 /// the very board a flow opened and reads afterwards what was asked of it.
 ///
-/// One stand-in for every flow rather than one per test file: a push, a pull's
+/// One stand-in for every flow rather than one per test file: a push, a cut's
 /// fetch and a cut are one conversation with one workspace, and the panel's
 /// session opens all three through a single type parameter.
 ///
-/// `Arc<Mutex<_>>` rather than `Rc<RefCell<_>>`: the panel's push and pull run
+/// `Arc<Mutex<_>>` rather than `Rc<RefCell<_>>`: the panel's push and cut run
 /// on worker threads, so a board that could not cross one would not stand in
 /// for the thing being tested.
 ///
@@ -380,7 +380,7 @@ impl Boarding {
     }
 
     /// A workspace holding one project, under that name, in that status, with
-    /// that description — which is where the scope block a pull parses lives.
+    /// that description — which is where the scope block a cut parses lives.
     pub(crate) fn holding(
         name: impl Into<String>,
         status: Option<&str>,
@@ -389,7 +389,7 @@ impl Boarding {
         Self::filing("").reading(FetchedProject::new(
             name,
             content,
-            "https://linear.app/acme/project/pulled-1a2b3c",
+            "https://linear.app/acme/project/drafted-1a2b3c",
             status,
         ))
     }

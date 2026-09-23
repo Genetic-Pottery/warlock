@@ -37,6 +37,7 @@ mod check;
 mod clipboard;
 mod config;
 mod cut;
+mod cutting;
 mod descent;
 mod editing;
 mod edits;
@@ -44,8 +45,7 @@ mod error;
 mod input;
 mod key;
 mod pacting;
-mod pull;
-mod pulling;
+mod planned;
 mod push;
 mod pushing;
 mod query;
@@ -70,8 +70,8 @@ use error::Error;
 use input::{Action, Drag, MouseAction, Pressed, drag_after, mouse_action, press_for};
 use key::{key_add, key_forget, key_list, key_use};
 use pacting::{Pact, Reloaded};
-use pull::pull;
-use pulling::Pulls;
+
+use cutting::Cutter;
 use push::push;
 use pushing::Pushes;
 use query::{Listing, list};
@@ -253,11 +253,12 @@ enum Command {
         dry_run: bool,
     },
     #[command(
-        about = "Cut a filed project's scope block into issues on the board that holds it.",
+        name = "draft",
+        about = "Draft tickets from a filed project's scope block onto the board that holds it.",
         long_about = None
     )]
-    Pull {
-        // Required, like the push's and for its reason: a pull is about the one
+    Cut {
+        // Required, like the push's and for its reason: a cut is about the one
         // brief whose project a push recorded, and there is no whole-repository
         // answer for an omitted path to mean.
         /// Which brief's project to cut into issues.
@@ -509,18 +510,18 @@ fn main() -> ExitCode {
             dry_run,
         }) => push(&path, scope.as_deref(), dry_run),
         // The other half of that one, dispatched beside it and gated by nothing
-        // here for the same reason: a pull picks its board by the sigil rather
+        // here for the same reason: a cut picks its board by the sigil rather
         // than by opening a directory, so not one of its refusals — an
         // unrecorded path, a project the board does not know, a status that is
         // not `Planned`, a scope block that will not parse, nothing left to cut
         // — is the boundary's **3**. They are all ordinary **1**s through
         // `status_for`'s catch-all. What it spends past the read is one drafting
-        // session per slice and the issues those file; see [`mod@pull`].
-        Some(Command::Pull {
+        // session per slice and the issues those file; see [`mod@planned`].
+        Some(Command::Cut {
             path,
             scope,
             dry_run,
-        }) => pull(&path, scope.as_deref(), dry_run),
+        }) => planned::cut(&path, scope.as_deref(), dry_run),
     };
 
     // `run` has returned, so the guard inside it has already dropped and the
@@ -641,10 +642,10 @@ fn run() -> Result<(), Error> {
         // key store sit is read here as well, once for the session.
         pushes: Pushes::new(),
         // The same two facts, read a second time rather than shared with the
-        // value above: a pull opens its own client on its own worker, and a
-        // `Pulls` that borrowed a `Pushes`'s home would tie the two together
+        // value above: a cut opens its own client on its own worker, and a
+        // `Cutter` that borrowed a `Pushes`'s home would tie the two together
         // for nothing but the four bytes it saves.
-        pulls: Pulls::new(),
+        cutter: Cutter::new(),
     };
     let mut session = Session::new(app, scope, manifest, watched, parts);
 
@@ -717,19 +718,19 @@ fn modals<'a, C: Converses, O: Opens, A: Converses>(
     scope: &'a ScopePrompt,
     record: &'a RecordPrompt,
     pushes: &'a Pushes<O>,
-    pulls: &'a Pulls<O, A>,
+    cutter: &'a Cutter<O, A>,
     chat: &'a Chat<C>,
 ) -> Modals<'a> {
     let pushing = pushes.window();
     Modals {
         quit,
         push: &pushing.confirm,
-        pull: pulls.confirm(),
+        cut: cutter.confirm(),
         // The two windows the run itself puts up, read off it rather than
-        // copied: they are states of the pull in flight, and a session holding a
+        // copied: they are states of the cut in flight, and a session holding a
         // copy of either would be a second answer to what a slice is waiting for.
-        review: pulls.reviewing(),
-        carry: pulls.carrying(),
+        review: cutter.reviewing(),
+        carry: cutter.carrying(),
         filing: &pushing.field,
         scope,
         record,
@@ -739,7 +740,7 @@ fn modals<'a, C: Converses, O: Opens, A: Converses>(
 
 /// The six impure things a session is built over — the screen, the model, the
 /// conversation's model, the clipboard, the Linear a push files to and the model
-/// a pull drafts a slice with — named once, so a test can press keys at a whole
+/// a cut drafts a slice with — named once, so a test can press keys at a whole
 /// session with no terminal attached, no `claude` installed, no display and no
 /// socket. `warlock` itself only ever uses [`Live`].
 ///
@@ -780,7 +781,7 @@ struct Parts<K: Seams> {
     pact: Pact<K::Pass>,
     chat: Chat<K::Talk>,
     pushes: Pushes<K::Board>,
-    pulls: Pulls<K::Board, K::Draft>,
+    cutter: Cutter<K::Board, K::Draft>,
 }
 
 /// Everything one interactive session holds, and the seam the tests drive.
@@ -799,11 +800,11 @@ struct Session<K: Seams> {
     /// under, the window asking about it and the one request it may have in
     /// flight — which is its own say-no to a second. See [`Pushes`].
     pushes: Pushes<K::Board>,
-    /// The same for a `/pull`, and in the other order: a pull has nothing to
+    /// The same for a `/draft`, and in the other order: a cut has nothing to
     /// put a window up about until the board has answered, so the request comes
     /// first and the reading is what it has to say. Its own [`Option`] is its
-    /// own say-no to a second pull. See [`Pulls`].
-    pulls: Pulls<K::Board, K::Draft>,
+    /// own say-no to a second cut. See [`Cutter`].
+    cutter: Cutter<K::Board, K::Draft>,
     prompt: ScopePrompt,
     /// The second window the `s` key puts up, over a scope name no `[[scope]]`
     /// record claims. Never up at the same time as [`Session::prompt`]: one goes
@@ -840,7 +841,7 @@ impl<K: Seams> Session<K> {
             pact,
             chat,
             pushes,
-            pulls,
+            cutter,
         } = parts;
         Self {
             app,
@@ -852,7 +853,7 @@ impl<K: Seams> Session<K> {
             clipboard,
             confirm: QuitConfirm::default(),
             pushes,
-            pulls,
+            cutter,
             prompt: ScopePrompt::default(),
             record: RecordPrompt::default(),
             drag: None,
@@ -875,7 +876,7 @@ impl<K: Seams> Session<K> {
             &self.prompt,
             &self.record,
             &self.pushes,
-            &self.pulls,
+            &self.cutter,
             &self.chat,
         )
         .current()
@@ -896,10 +897,10 @@ impl<K: Seams> Session<K> {
         let width = panel_width(size);
         self.chat.set_composer_width(width);
         // And the other thing the field is told once a round: which slice of a
-        // pull, if any, the next submission answers for. Told here rather than
+        // cut, if any, the next submission answers for. Told here rather than
         // at the two edges of a question, so a field cannot be left labelled for
-        // a question that is over — see [`Pulls::answering`].
-        self.chat.set_composer_answering(self.pulls.answering());
+        // a question that is over — see [`Cutter::answering`].
+        self.chat.set_composer_answering(self.cutter.answering());
         let field = composer_on_screen(&self.app, self.chat.composer());
         let header = self.app.run_header();
         self.app.set_viewport_height(tree_height(size));
@@ -912,7 +913,7 @@ impl<K: Seams> Session<K> {
             &self.prompt,
             &self.record,
             &self.pushes,
-            &self.pulls,
+            &self.cutter,
             &self.chat,
         )
         .current();
@@ -1071,13 +1072,13 @@ impl<K: Seams> Session<K> {
             Pressed::Confirm(next) => self.confirm = next,
             // The push dialog, moved or answered: see [`Pushes::answer`].
             Pressed::Push(answered) => self.pushes.answer(&mut self.app, answered, now),
-            // And the question a `/pull` puts up once the board has answered,
+            // And the question a `/draft` puts up once the board has answered,
             // and the two windows the run itself puts up: what becomes of one
             // slice's drafts, and whether a skipped slice ends the run. See
-            // [`Pulls::confirmed`], [`Pulls::reviewed`] and [`Pulls::carried`].
-            Pressed::Pull(answered) => self.pulls.confirmed(&mut self.app, answered, now),
-            Pressed::Review(answered) => self.pulls.reviewed(&mut self.app, answered, now),
-            Pressed::Carry(answered) => self.pulls.carried(&mut self.app, answered, now),
+            // [`Cutter::confirmed`], [`Cutter::reviewed`] and [`Cutter::carried`].
+            Pressed::Cut(answered) => self.cutter.confirmed(&mut self.app, answered, now),
+            Pressed::Review(answered) => self.cutter.reviewed(&mut self.app, answered, now),
+            Pressed::Carry(answered) => self.cutter.carried(&mut self.app, answered, now),
             // Esc with a run in flight. The handle does both halves at once — it
             // latches, so the descent stops at the next directory instead of
             // starting a pass for it, and it kills the `claude` running right now,
@@ -1385,33 +1386,33 @@ impl<K: Seams> Session<K> {
     /// A keystroke at the foot of the panel's column, and the one place it is
     /// decided which conversation a submitted draft belongs to.
     ///
-    /// While a slice of a pull is waiting on an answer, an Enter is that answer:
+    /// While a slice of a cut is waiting on an answer, an Enter is that answer:
     /// the text is taken out of the field and put to the session that asked, and
     /// no turn of the chat starts, no command in it is recognised and nothing
     /// about the register changes. Everything else — a character more or less,
     /// the keyboard handed back — is the conversation's as it always was, so the
     /// draft being edited is the same value whichever of the two will get it.
     ///
-    /// The question is asked of the pull rather than answered by a flag kept
+    /// The question is asked of the cut rather than answered by a flag kept
     /// here: a second record of "somebody is being asked something" would be one
-    /// more thing to clear on every way a question can end, and the pull already
-    /// knows (see [`Pulls::relaying`]).
+    /// more thing to clear on every way a question can end, and the cut already
+    /// knows (see [`Cutter::relaying`]).
     ///
     /// What a chat submission can hand back is a brief and what is wanted of
     /// it: the document this session wrote or the one the command named, which
     /// the conversation knows and can do neither thing with, because which board
     /// it reaches is the manifest's, the machine's sigils' and the key store's.
     /// A `/push` is answered on this thread — no socket is opened by any of it —
-    /// and what comes back is the window the reader is now looking at. A `/pull`
+    /// and what comes back is the window the reader is now looking at. A `/draft`
     /// has nothing to put up until a project has been read back, so it goes
     /// straight onto a worker and what comes back arrives at the bottom of a
-    /// later round. See [`Pushes::press`] and [`Pulls::press`].
+    /// later round. See [`Pushes::press`] and [`Cutter::press`].
     fn composed(&mut self, outcome: Composed, now: Instant) {
-        if self.pulls.relaying() && matches!(outcome, Composed::Submit) {
+        if self.cutter.relaying() && matches!(outcome, Composed::Submit) {
             // Taken whole and unread: what the slice asked is not warlock's
             // question, so what is sent back is not warlock's to word.
             let answer = self.chat.taken();
-            self.pulls.answered(&mut self.app, &answer, now);
+            self.cutter.answered(&mut self.app, &answer, now);
             return;
         }
 
@@ -1426,7 +1427,7 @@ impl<K: Seams> Session<K> {
                 );
             }
             Some(Wanted::Cut(brief)) => {
-                self.pulls.press(
+                self.cutter.press(
                     &mut self.app,
                     &self.manifest,
                     &self.scope.repo_root,
@@ -1525,7 +1526,7 @@ impl<K: Seams> Session<K> {
         self.pushes.keep_up(&mut self.app, now);
         // And a project being read back off the board, and then cut: what the
         // fetch found, a line about why there is nothing to cut, or whatever the
-        // slice being drafted has come to. Nothing here writes, so a pull that
+        // slice being drafted has come to. Nothing here writes, so a cut that
         // never reports has left the board exactly as it was.
         //
         // The one thing it hands back is warlock's attempt at a question a slice
@@ -1533,7 +1534,7 @@ impl<K: Seams> Session<K> {
         // works on it, Enter sends whatever the field then holds, and clearing it
         // and typing sends that instead. It is put here rather than in there
         // because the field is the conversation's — see [`Chat::offer`].
-        if let Some(proposal) = self.pulls.keep_up(&mut self.app, now) {
+        if let Some(proposal) = self.cutter.keep_up(&mut self.app, now) {
             self.chat.offer(&proposal);
         }
     }

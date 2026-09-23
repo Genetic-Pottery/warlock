@@ -6,7 +6,7 @@ fn each_command_word_is_its_own_command() {
     assert_eq!(submitted_for("/write"), Submitted::Write);
     assert_eq!(submitted_for("/chat"), Submitted::Chat);
     assert_eq!(submitted_for("/push"), Submitted::Push(None));
-    assert_eq!(submitted_for("/pull"), Submitted::Pull(None));
+    assert_eq!(submitted_for("/draft"), Submitted::Cut(None));
 }
 
 #[test]
@@ -34,33 +34,33 @@ fn push_takes_the_brief_to_file_after_it() {
 }
 
 #[test]
-fn pull_takes_the_brief_to_cut_after_it() {
+fn cut_takes_the_brief_to_cut_after_it() {
     // The same argument, read the same way, because the two commands name the
     // same kind of thing: a brief somebody committed.
     assert_eq!(
-        submitted_for("/pull docs/warlock-brief-23-cut.md"),
-        Submitted::Pull(Some("docs/warlock-brief-23-cut.md"))
+        submitted_for("/draft docs/warlock-brief-23-cut.md"),
+        Submitted::Cut(Some("docs/warlock-brief-23-cut.md"))
     );
     assert_eq!(
-        submitted_for("  /pull   docs/a.md  "),
-        Submitted::Pull(Some("docs/a.md"))
+        submitted_for("  /draft   docs/a.md  "),
+        Submitted::Cut(Some("docs/a.md"))
     );
     assert_eq!(
-        submitted_for("/pull docs/a brief.md"),
-        Submitted::Pull(Some("docs/a brief.md"))
+        submitted_for("/draft docs/a brief.md"),
+        Submitted::Cut(Some("docs/a brief.md"))
     );
-    assert_eq!(submitted_for("/pull "), Submitted::Pull(None));
+    assert_eq!(submitted_for("/draft "), Submitted::Cut(None));
 }
 
 #[test]
-fn a_push_or_a_pull_with_a_second_line_is_refused() {
+fn a_push_or_a_cut_with_a_second_line_is_refused() {
     // No path has a newline in it, so this is somebody typing a message under
     // a command word and expecting it to be read.
     for draft in [
         "/push\nsome text",
         "/push docs/a.md\nand a thought",
-        "/pull\nsome text",
-        "/pull docs/a.md\nand a thought",
+        "/draft\nsome text",
+        "/draft docs/a.md\nand a thought",
     ] {
         assert_eq!(
             submitted_for(draft),
@@ -116,7 +116,7 @@ fn a_second_slash_makes_it_a_path_and_so_a_message() {
         "/home/cole/notes is stale",
         "/brief/notes",
         "/push/x",
-        "/pull/x",
+        "/draft/x",
         "//",
     ] {
         assert_eq!(
@@ -140,10 +140,10 @@ fn a_word_that_is_not_a_command_is_refused() {
         "/Brief",
         "/PUSH",
         "/Push",
-        "/PULL",
-        "/Pull",
-        "/PULL docs/a.md",
-        "/Pull docs/a.md",
+        "/CUT",
+        "/Draft",
+        "/CUT docs/a.md",
+        "/Draft docs/a.md",
         "/",
     ] {
         assert_eq!(
@@ -156,7 +156,7 @@ fn a_word_that_is_not_a_command_is_refused() {
 
 #[test]
 fn a_command_word_with_anything_after_it_is_refused() {
-    // `/push` and `/pull` are the exceptions and have their own tests. For the
+    // `/push` and `/draft` are the exceptions and have their own tests. For the
     // other three a second line is an argument by another route: a `/brief`
     // with a paragraph under it is somebody expecting the paragraph to be read.
     for draft in [
@@ -189,8 +189,8 @@ fn every_refusal_is_the_same_one_line() {
         "/brief\nx",
         "/PUSH",
         "/push docs/a.md\nand a thought",
-        "/PULL",
-        "/pull docs/a.md\nand a thought",
+        "/CUT",
+        "/draft docs/a.md\nand a thought",
     ];
 
     for draft in refusals {
@@ -199,14 +199,14 @@ fn every_refusal_is_the_same_one_line() {
             .expect("a refused draft has a line");
 
         assert!(!line.contains('\n'), "{draft:?} gave more than one line");
-        for command in ["/brief", "/write", "/chat", "/push", "/pull"] {
+        for command in ["/brief", "/write", "/chat", "/push", "/draft"] {
             assert!(
                 line.contains(command),
                 "{draft:?} did not name {command}, one of warlock's five commands"
             );
         }
         assert!(
-            line.contains("/push and /pull take a path after them"),
+            line.contains("/push and /draft take a path after them"),
             "{draft:?} did not say which commands take a path after them"
         );
     }
@@ -221,8 +221,8 @@ fn nothing_but_a_refusal_has_a_line_to_say() {
         "/write",
         "/chat",
         "/push",
-        "/pull",
-        "/pull docs/a.md",
+        "/draft",
+        "/draft docs/a.md",
         "why nine passes?",
         "",
     ] {

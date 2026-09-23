@@ -9,10 +9,10 @@
 //! exist and not once at the end, because an issue nothing records is exactly
 //! what the next run files a second time.
 //!
-//! Its own module rather than [`mod@crate::pull`]'s, which sequences the slices
+//! Its own module rather than [`mod@crate::planned`]'s, which sequences the slices
 //! and issues no write of its own.
 //! No key is read here and none can be: the seam arrives built, as it does for
-//! a pull.
+//! a cut.
 
 use std::collections::HashSet;
 use std::io::Write;

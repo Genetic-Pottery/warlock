@@ -20,8 +20,8 @@ use warlock_tui::{
 
 use super::{Cli, Command, Error, FOR_CLAUDE_MD, Parts, ScopeCommand, Seams, Session, status_for};
 use crate::chatting::Chat;
+use crate::cutting::Cutter;
 use crate::pacting::Pact;
-use crate::pulling::Pulls;
 use crate::pushing::Pushes;
 use crate::query::spelled;
 use crate::rescope::ScopeRefusal;
@@ -622,11 +622,11 @@ fn a_push_asks_for_no_object_and_takes_no_word_beside_its_two_flags() {
     }
 }
 
-// `warlock pull docs/brief.md` with whichever of the two flags a case is
+// `warlock draft docs/brief.md` with whichever of the two flags a case is
 // about, so each assertion below reads as the flags and not as the positional
 // under them — the push's helper above, one verb along.
-fn pulled_brief(scope: Option<&str>, dry_run: bool) -> Command {
-    Command::Pull {
+fn cut_brief(scope: Option<&str>, dry_run: bool) -> Command {
+    Command::Cut {
         path: PathBuf::from("docs/brief.md"),
         scope: scope.map(str::to_owned),
         dry_run,
@@ -634,43 +634,43 @@ fn pulled_brief(scope: Option<&str>, dry_run: bool) -> Command {
 }
 
 #[test]
-fn a_pull_takes_the_brief_whose_project_it_cuts_and_the_two_flags_that_go_with_it() {
-    // The path is required, like the push's: a pull is about the one brief
+fn a_cut_takes_the_brief_whose_project_it_cuts_and_the_two_flags_that_go_with_it() {
+    // The path is required, like the push's: a cut is about the one brief
     // whose project a push recorded, and there is no whole-repository answer
     // for an omitted path to mean.
     assert_eq!(
-        parse(&["pull", "docs/brief.md"]).unwrap().command,
-        Some(pulled_brief(None, false))
+        parse(&["draft", "docs/brief.md"]).unwrap().command,
+        Some(cut_brief(None, false))
     );
     assert_eq!(
-        parse(&["pull", "docs/brief.md", "--dry-run"])
+        parse(&["draft", "docs/brief.md", "--dry-run"])
             .unwrap()
             .command,
-        Some(pulled_brief(None, true))
+        Some(cut_brief(None, true))
     );
     // `--scope` is optional to clap and needed only when this machine can file
     // to more than one board, which clap has not read `.warlock/pacts.toml` to
     // know — and the name reaches warlock exactly as it was typed, because the
-    // pull resolves its board through the very `resolve_filing` the push does.
+    // cut resolves its board through the very `resolve_filing` the push does.
     assert_eq!(
-        parse(&["pull", "docs/brief.md", "--scope", "data-plane"])
+        parse(&["draft", "docs/brief.md", "--scope", "data-plane"])
             .unwrap()
             .command,
-        Some(pulled_brief(Some("data-plane"), false))
+        Some(cut_brief(Some("data-plane"), false))
     );
     // Both flags, in either order and either side of the path, for the reason
     // the push's are pinned that way: a person retyping the command from the
     // refusal that named `--scope` will put it wherever the cursor was.
     for args in [
         [
-            "pull",
+            "draft",
             "docs/brief.md",
             "--scope",
             "data-plane",
             "--dry-run",
         ],
         [
-            "pull",
+            "draft",
             "--dry-run",
             "--scope",
             "data-plane",
@@ -679,25 +679,25 @@ fn a_pull_takes_the_brief_whose_project_it_cuts_and_the_two_flags_that_go_with_i
     ] {
         assert_eq!(
             parse(&args).unwrap().command,
-            Some(pulled_brief(Some("data-plane"), true)),
+            Some(cut_brief(Some("data-plane"), true)),
             "{args:?}"
         );
     }
 }
 
 #[test]
-fn a_pull_asks_for_no_object_and_takes_no_word_beside_its_two_flags() {
+fn a_cut_asks_for_no_object_and_takes_no_word_beside_its_two_flags() {
     // No `--json`, matching the push and the other subcommands that spend
     // something: what a script parses afterwards is the cut record in
     // `.warlock/filed.toml`, which is a file rather than a stream to be caught.
     let malformed: [&[&str]; 7] = [
-        &["pull"],
-        &["pull", "--dry-run"],
-        &["pull", "a.md", "b.md"],
-        &["pull", "docs/brief.md", "--json"],
-        &["pull", "docs/brief.md", "--scope"],
-        &["pull", "docs/brief.md", "--dry-run=yes"],
-        &["pull", "docs/brief.md", "--force"],
+        &["draft"],
+        &["draft", "--dry-run"],
+        &["draft", "a.md", "b.md"],
+        &["draft", "docs/brief.md", "--json"],
+        &["draft", "docs/brief.md", "--scope"],
+        &["draft", "docs/brief.md", "--dry-run=yes"],
+        &["draft", "docs/brief.md", "--force"],
     ];
 
     for args in malformed {
@@ -707,31 +707,31 @@ fn a_pull_asks_for_no_object_and_takes_no_word_beside_its_two_flags() {
     }
 
     // And the absence stated over the parser itself rather than over the
-    // spellings above: `--scope` and `--dry-run` are the only words a pull
+    // spellings above: `--scope` and `--dry-run` are the only words a cut
     // takes beside its path and clap's own help.
-    let command = subcommand(&["pull"]);
+    let command = subcommand(&["draft"]);
     for argument in command.get_arguments().filter(|a| !a.is_positional()) {
         let long = argument.get_long().unwrap_or_default();
         assert!(
             ["help", "scope", "dry-run"].contains(&long),
-            "`pull` takes `--{long}`, which is none of its two flags"
+            "`draft` takes `--{long}`, which is none of its two flags"
         );
     }
 }
 
 #[test]
-fn the_pulls_help_names_both_of_its_flags_and_the_brief_it_wants() {
-    // What `warlock pull --help` prints, read off the parser rather than by
+fn the_cut_help_names_both_of_its_flags_and_the_brief_it_wants() {
+    // What `warlock draft --help` prints, read off the parser rather than by
     // spawning the binary: the positional is spelled `PATH` as the push's is,
     // and the two flags are named with the values they take.
-    let help = subcommand(&["pull"]).render_long_help().to_string();
+    let help = subcommand(&["draft"]).render_long_help().to_string();
     for said in ["PATH", "--scope <NAME>", "--dry-run"] {
         assert!(help.contains(said), "{said}: {help}");
     }
 }
 
 #[test]
-fn the_pull_leaves_the_push_spelled_exactly_as_it_was() {
+fn the_cut_leaves_the_push_spelled_exactly_as_it_was() {
     // The two verbs sit side by side and share a resolver, so this is the
     // guard against the second one being wired by editing the first: the push
     // still takes its path and its two flags, and still refuses a `--json`.
@@ -795,7 +795,7 @@ fn per_subcommand_help_is_a_help_exit_too() {
         // The two verbs that reach a board, whose help is the one a person
         // reads before typing a command that sends something.
         ["push", "--help"].as_slice(),
-        ["pull", "--help"].as_slice(),
+        ["draft", "--help"].as_slice(),
     ] {
         let error = parse(args).unwrap_err();
         assert_eq!(error.kind(), ErrorKind::DisplayHelp, "{args:?}");
@@ -827,7 +827,7 @@ fn each_subcommands_help_says_what_that_subcommand_does() {
         // that is the difference somebody typing one of them is choosing
         // between: a brief filed as a project, a project cut into issues.
         ("push", "brief"),
-        ("pull", "issues"),
+        ("draft", "issues"),
     ] {
         let mut command = Cli::command();
         let help = command
@@ -904,7 +904,7 @@ fn help_prints_a_few_lines_rather_than_this_file() {
     let help = Cli::command().render_long_help().to_string();
     for subcommand in [
         "init", "config", "stale", "fresh", "check", "unpact", "pact", "refresh", "scope", "key",
-        "push", "pull",
+        "push", "draft",
     ] {
         assert!(help.contains(subcommand), "{subcommand}: {help}");
     }
@@ -1307,7 +1307,7 @@ impl<O: Opens, A: Converses> Seams for Stubbed<O, A> {
 }
 
 // The drafting model is a script with nothing in it: no test driven through
-// this confirms a pull, so a turn being asked for at all is a session opened
+// this confirms a cut, so a turn being asked for at all is a session opened
 // where none was meant to be.
 type Driven = Session<Stubbed<Boarding, Scripted>>;
 
@@ -1321,10 +1321,10 @@ fn driving(app: App, scope: Scope, tree: &Tree) -> Driven {
         // the sigils of the machine it runs on. The tests that do push replace
         // this whole value with one over a temporary home.
         Pushes::with_client(Boarding::filing(""), None),
-        // And the same for a `/pull`, for the same reason: with no home there
+        // And the same for a `/draft`, for the same reason: with no home there
         // is nothing for one to resolve a board under, so no test in this file
         // can read the machine's own sigils by typing the command.
-        Pulls::with_client(
+        Cutter::with_client(
             Boarding::filing(""),
             None,
             Scripted::saying([]),
@@ -1341,7 +1341,7 @@ fn driving_over<O: Opens, A: Converses>(
     scope: Scope,
     tree: &Tree,
     pushes: Pushes<O>,
-    pulls: Pulls<O, A>,
+    cutter: Cutter<O, A>,
 ) -> Session<Stubbed<O, A>> {
     let watched = Watched::start(&scope, tree);
     let root = scope.repo_root.clone();
@@ -1351,7 +1351,7 @@ fn driving_over<O: Opens, A: Converses>(
         pact: Pact::with_agent(Passing::filling()),
         chat: Chat::with_agent(root, Saying::answering(ANSWER)),
         pushes,
-        pulls,
+        cutter,
     };
     Session::new(app, scope, Manifest::new(), watched, parts)
 }
@@ -1414,10 +1414,10 @@ fn session_over(root: &Path) -> Driven {
 fn session_reading<O: Opens, A: Converses>(
     root: &Path,
     pushes: Pushes<O>,
-    pulls: Pulls<O, A>,
+    cutter: Cutter<O, A>,
 ) -> Session<Stubbed<O, A>> {
     let (app, scope, tree) = loading(root);
-    driving_over(app, scope, &tree, pushes, pulls)
+    driving_over(app, scope, &tree, pushes, cutter)
 }
 
 fn loading(root: &Path) -> (App, Scope, Tree) {
@@ -2921,7 +2921,7 @@ mod filing {
 
     use super::{AT_MOST, Driven, key, pressed, session_over};
     use crate::chatting::Chat;
-    use crate::pulling::Pulls;
+    use crate::cutting::Cutter;
     use crate::pushing::{ALREADY_FILING, Pushes};
     use crate::stubs::{Boarding, Gate, Saying, Scripted};
 
@@ -2998,11 +2998,11 @@ mod filing {
         driven.manifest = a_manifest();
         driven.chat = Chat::with_agent(repo, Saying::answering(BRIEF));
         driven.pushes = Pushes::with_client(linear.clone(), Some(home.to_path_buf()));
-        // The same home for a `/pull`, so the command reaches the board through
+        // The same home for a `/draft`, so the command reaches the board through
         // this test's sigils rather than being refused for want of one. The
         // client is the same stand-in because the session opens both through
-        // one seam; the pull below is refused before it is built.
-        driven.pulls = Pulls::with_client(
+        // one seam; the cut below is refused before it is built.
+        driven.cutter = Cutter::with_client(
             linear.clone(),
             Some(home.to_path_buf()),
             Scripted::saying([]),
@@ -3101,41 +3101,41 @@ mod filing {
     }
 
     #[test]
-    fn a_pull_typed_into_the_composer_reaches_the_board_and_reports_on_the_thread() {
-        // The routing rather than the fetch: a `/pull` naming a path is a
+    fn a_cut_typed_into_the_composer_reaches_the_board_and_reports_on_the_thread() {
+        // The routing rather than the fetch: a `/draft` naming a path is a
         // different thing from a `/push` naming one, and the loop has to answer
-        // it somewhere else. This repository has filed nothing, so the pull is
+        // it somewhere else. This repository has filed nothing, so the cut is
         // refused on the far side of a worker thread — which is the half being
         // asserted, because the line only reaches the thread if the loop drains
-        // the pull every round. No dialog comes up and nothing is sent.
+        // the cut every round. No dialog comes up and nothing is sent.
         let repo = a_repository();
         let home = a_home(repo.path());
         let linear = Boarding::filing(URL);
         let mut driven = filing_session(repo.path(), home.path(), &linear);
 
-        typing(&mut driven, "/pull docs/brief.md");
+        typing(&mut driven, "/draft docs/brief.md");
         let waited = Instant::now();
-        while driven.pulls.fetching() && waited.elapsed() < AT_MOST {
+        while driven.cutter.fetching() && waited.elapsed() < AT_MOST {
             round(&mut driven);
         }
 
-        assert!(!driven.pulls.fetching(), "the pull never reported");
+        assert!(!driven.cutter.fetching(), "the draft never reported");
         assert!(
             said(&driven, "docs/brief.md"),
-            "the thread does not name the document the pull read for: {:?}",
+            "the thread does not name the document the draft read for: {:?}",
             notes(&driven)
         );
-        assert_eq!(linear.requests(), 0, "a pull of an unfiled brief was sent");
+        assert_eq!(linear.requests(), 0, "a draft of an unfiled brief was sent");
         assert!(
             !driven.pushes.window().confirm.is_open(),
-            "a pull put the push dialog up"
+            "a draft put the push dialog up"
         );
     }
 
     #[test]
-    fn a_bare_pull_in_a_session_that_wrote_nothing_is_one_line_and_reads_nothing() {
+    fn a_bare_cut_in_a_session_that_wrote_nothing_is_one_line_and_reads_nothing() {
         // The refusal as the loop reaches it rather than as `chatting.rs` words
-        // it: a `/pull` with no document behind it and none named never gets as
+        // it: a `/draft` with no document behind it and none named never gets as
         // far as a home, a key or a request. The sentence itself is asserted
         // where it is built, so what is pinned here is that the loop stops —
         // one line, no fetch and a board nobody opened.
@@ -3144,25 +3144,25 @@ mod filing {
         let linear = Boarding::filing(URL);
         let mut driven = filing_session(repo.path(), home.path(), &linear);
 
-        typing(&mut driven, "/pull");
+        typing(&mut driven, "/draft");
         round(&mut driven);
 
         let said = notes(&driven);
         assert_eq!(
             said.len(),
             1,
-            "a bare pull said more than one line: {said:?}"
+            "a bare draft said more than one line: {said:?}"
         );
         assert!(
-            said[0].contains("/write") && said[0].contains("/pull"),
+            said[0].contains("/write") && said[0].contains("/draft"),
             "the line does not name the command that would make a brief: {said:?}"
         );
-        assert!(!driven.pulls.fetching(), "a bare pull started a fetch");
+        assert!(!driven.cutter.fetching(), "a bare draft started a fetch");
         assert!(
-            !driven.pulls.confirm().is_open(),
-            "a bare pull put the dialog up"
+            !driven.cutter.confirm().is_open(),
+            "a bare draft put the dialog up"
         );
-        assert_eq!(linear.requests(), 0, "a bare pull was sent");
+        assert_eq!(linear.requests(), 0, "a bare draft was sent");
     }
 
     #[test]
@@ -3482,13 +3482,13 @@ mod filing {
     }
 }
 
-// A `/pull` driven the whole way through a session — the command, the dialog's
+// A `/draft` driven the whole way through a session — the command, the dialog's
 // Yes, a slice that asks something, and the keys that edit and send the answer —
 // over a Linear that answers one project out of memory and a home this module
 // made. Nothing here opens a socket, reads a real credential or looks at the
 // machine's own sigils, binding or key store.
 //
-// What is asserted is the routing, which is the half `tests/pulling.rs` cannot
+// What is asserted is the routing, which is the half `tests/cutting.rs` cannot
 // see: that the field is the composer's own value, that an Enter in it while a
 // slice is waiting reaches that slice instead of starting a turn of the
 // conversation, and that every editing key works on what warlock put there.
@@ -3506,7 +3506,7 @@ mod cutting {
     use warlock_tui::{Focus, Line};
 
     use super::{AT_MOST, Driven, key, session_reading};
-    use crate::pulling::Pulls;
+    use crate::cutting::Cutter;
     use crate::pushing::Pushes;
     use crate::stubs::{Answering, Boarding, Scripted};
 
@@ -3527,7 +3527,7 @@ mod cutting {
 
     const PROJECT_ID: &str = "b229262b-22aa-444a-a8af-0a2a3f4ef100";
 
-    const URL: &str = "https://linear.app/acme/project/pull-a-brief-1a2b3c";
+    const URL: &str = "https://linear.app/acme/project/draft-a-brief-1a2b3c";
 
     const NAME: &str = "Cut a planned project into tickets";
 
@@ -3558,7 +3558,7 @@ mod cutting {
     }
 
     // A repository the session loads, with the brief on disk and the record a
-    // `/push` of it would have left behind: what a pull reads is the project,
+    // `/push` of it would have left behind: what a cut reads is the project,
     // and the file is what the record is keyed by.
     fn a_repository() -> TempDir {
         let repo = tempfile::tempdir().expect("a temporary directory");
@@ -3607,7 +3607,7 @@ mod cutting {
         let mut driven = session_reading(
             repo,
             Pushes::with_client(linear.clone(), Some(home.to_path_buf())),
-            Pulls::with_client(linear, Some(home.to_path_buf()), agent, proposer),
+            Cutter::with_client(linear, Some(home.to_path_buf()), agent, proposer),
         );
         driven.manifest = a_manifest();
         driven
@@ -3666,16 +3666,16 @@ mod cutting {
         );
     }
 
-    // `/pull` and the rounds the fetch takes, up to the dialog it puts on the
+    // `/draft` and the rounds the fetch takes, up to the dialog it puts on the
     // screen and no further: which key is pressed at it is the caller's.
     fn fetched(driven: &mut Driven) {
-        typing(driven, &format!("/pull {BRIEF}"));
+        typing(driven, &format!("/draft {BRIEF}"));
         let waited = Instant::now();
-        while driven.pulls.fetching() && waited.elapsed() < AT_MOST {
+        while driven.cutter.fetching() && waited.elapsed() < AT_MOST {
             round(driven);
         }
         assert!(
-            driven.pulls.confirm().is_open(),
+            driven.cutter.confirm().is_open(),
             "the dialog did not come up: {:?}",
             notes(driven)
         );
@@ -3709,29 +3709,29 @@ mod cutting {
     // Left onto Yes and an Enter, exactly as the dialog before the run was.
     //
     // Skip and not Create, because what these tests are about is the relay: the
-    // drafts a slice settles on are `pulling.rs`'s own to be answered about.
+    // drafts a slice settles on are `cutting.rs`'s own to be answered about.
     fn through(driven: &mut Driven) {
         let waited = Instant::now();
-        while driven.pulls.drafting() && waited.elapsed() < AT_MOST {
+        while driven.cutter.drafting() && waited.elapsed() < AT_MOST {
             round(driven);
-            if driven.pulls.reviewing().is_some() {
+            if driven.cutter.reviewing().is_some() {
                 assert!(pressed(driven, KeyCode::Char('s')));
             }
-            if driven.pulls.carrying().is_some() {
+            if driven.cutter.carrying().is_some() {
                 assert!(pressed(driven, KeyCode::Left));
                 assert!(pressed(driven, KeyCode::Enter));
             }
         }
-        assert!(!driven.pulls.drafting(), "the run never finished");
+        assert!(!driven.cutter.drafting(), "the run never finished");
     }
 
     #[test]
-    fn a_no_at_the_dialog_ends_the_pull_and_opens_no_session_at_all() {
+    fn a_no_at_the_dialog_ends_the_cut_and_opens_no_session_at_all() {
         // The dialog's two No paths as a reader reaches them through the loop:
         // Esc, and the reflex Enter on the round it came up. Both are the same
         // answer, and what it costs is the window — nothing is drafted, neither
         // conversation is opened, and the session is where it was, so the next
-        // `/pull` asks the same question again.
+        // `/draft` asks the same question again.
         for code in [KeyCode::Esc, KeyCode::Enter] {
             let repo = a_repository();
             let home = a_home(repo.path());
@@ -3745,15 +3745,15 @@ mod cutting {
             assert!(pressed(&mut driven, code), "{code:?} ended the session");
 
             assert!(
-                !driven.pulls.confirm().is_open(),
+                !driven.cutter.confirm().is_open(),
                 "{code:?} left the dialog up"
             );
-            assert!(!driven.pulls.drafting(), "{code:?} started a run");
+            assert!(!driven.cutter.drafting(), "{code:?} started a run");
             // A round after it, because a run that started would start on the
             // loop's next pass rather than on the key.
             round(&mut driven);
             assert!(
-                !driven.pulls.drafting(),
+                !driven.cutter.drafting(),
                 "{code:?} started a run a beat later"
             );
             assert_eq!(agent.turns(), 0, "{code:?} opened a drafting session");
@@ -3763,7 +3763,7 @@ mod cutting {
                 "{code:?} opened the other conversation"
             );
             assert_eq!(notes(&driven).len(), said, "{code:?} said something");
-            // And the value is back where a session with no pull in it sits.
+            // And the value is back where a session with no cut in it sits.
             fetched(&mut driven);
         }
     }
@@ -3813,7 +3813,7 @@ mod cutting {
     #[test]
     fn an_enter_while_a_slice_waits_answers_it_rather_than_starting_a_turn() {
         // The whole of the routing: the field is the conversation's, and what
-        // decides where a submission goes is the pull in flight and nothing on
+        // decides where a submission goes is the cut in flight and nothing on
         // the chat at all.
         let repo = a_repository();
         let home = a_home(repo.path());
@@ -3896,7 +3896,7 @@ mod cutting {
 
     #[test]
     fn the_field_says_which_slice_it_is_answering_for_and_stops_when_it_is_over() {
-        // Told once a round by the draw, off the pull, so a field cannot be left
+        // Told once a round by the draw, off the cut, so a field cannot be left
         // labelled for a question that is over.
         let repo = a_repository();
         let home = a_home(repo.path());
@@ -3995,7 +3995,7 @@ mod cutting {
     #[test]
     fn no_key_value_reaches_the_thread_or_anything_the_session_holds() {
         // `filing`'s claim, made again for the other command and for the one
-        // place only a pull has: the field. Warlock's attempt is put there by
+        // place only a cut has: the field. Warlock's attempt is put there by
         // the run, so the composer is on this path as much as the thread is,
         // and the value out of this home's key store is to be in neither — nor
         // in the `Debug` rendering a failing assertion elsewhere would print.
@@ -4012,14 +4012,14 @@ mod cutting {
         offered(&mut driven);
         // Read with a slice still waiting, so what is asserted is the run in
         // flight as well as the run that is over.
-        let in_flight = format!("{:?}", driven.pulls);
+        let in_flight = format!("{:?}", driven.cutter);
         assert!(pressed(&mut driven, KeyCode::Enter));
         through(&mut driven);
 
         assert!(!in_flight.contains(NOT_A_KEY), "the run carries the key");
         assert!(
-            !format!("{:?}", driven.pulls).contains(NOT_A_KEY),
-            "the session's pull state carries the key"
+            !format!("{:?}", driven.cutter).contains(NOT_A_KEY),
+            "the session's draft state carries the key"
         );
         assert!(
             !driven.chat.composer().draft().contains(NOT_A_KEY),

@@ -1,19 +1,19 @@
-//! `/pull`, from the command word to the project cut into issues, driving
-//! [`mod@crate::pull`] with somebody at the panel to ask.
+//! `/draft`, from the command word to the project cut into issues, driving
+//! [`mod@crate::planned`] with somebody at the panel to ask.
 //!
 //! What this file adds to that module is the asking and the workers. The
 //! project is read back on a worker — [`prepare`] makes a request, and
 //! everything a reader is asked to confirm is on the wire — and the answer is a
 //! line on the thread and the question over it. Every refusal is the sentence
-//! [`crate::error::Error`] words for `warlock pull`, so a reader who has met one
+//! [`crate::error::Error`] words for `warlock draft`, so a reader who has met one
 //! at a shell meets the same words here.
 //!
-//! [`Pulls`] is [`crate::pushing::Pushes`]'s shape — the [`Opens`] seam held for
+//! [`Cutter`] is [`crate::pushing::Pushes`]'s shape — the [`Opens`] seam held for
 //! the life of the process, the home resolved once, an [`Option`] that is its
 //! own say-no to a second run, a channel drained at the bottom of the loop —
 //! with one difference: the board is resolved on the worker rather than on the
 //! event loop's thread. A push resolves it first because a dialog is about to
-//! name the team it found; a pull has nothing to put up until the board has
+//! name the team it found; a cut has nothing to put up until the board has
 //! answered, so the sequence from the sigils to the slice count is one thing
 //! that fails in one place.
 //!
@@ -21,7 +21,7 @@
 //! order and one at a time, and every turn of it happens on a worker: a
 //! [`Drafting`] is stateful across turns and each turn blocks on a subprocess,
 //! so the session is *moved* onto the thread and handed back through the
-//! channel with its reply. A turn driven from [`Pulls::keep_up`] instead would
+//! channel with its reply. A turn driven from [`Cutter::keep_up`] instead would
 //! freeze the frame for as long as `claude` took to think.
 //!
 //! A slice that asks something is a *state of that run* — [`Stage::Waiting`] —
@@ -30,9 +30,9 @@
 //! prompt with a question of its own out. So the relay is held here, beside the
 //! session that asked, and the loop routes the field to it for exactly as long
 //! as it lives. Nothing in this module knows what a composer is: it says what is
-//! being answered ([`Pulls::answering`]), it takes an answer
-//! ([`Pulls::answered`]) and it hands back warlock's attempt for the field
-//! ([`Pulls::keep_up`]), and which value holds the draft is the loop's business.
+//! being answered ([`Cutter::answering`]), it takes an answer
+//! ([`Cutter::answered`]) and it hands back warlock's attempt for the field
+//! ([`Cutter::keep_up`]), and which value holds the draft is the loop's business.
 //!
 //! That attempt runs on a worker of its own, off a second conversation at the
 //! register the brief was written in — one turn, read-only, and nothing of the
@@ -59,32 +59,33 @@ use std::time::Instant;
 use warlock_engine::drafting::Draft;
 use warlock_engine::{Manifest, agent, from_manifest_path};
 use warlock_tui::{
-    Answer, App, Cancel, Carry, CarryAnswered, ChatAgent, Choice, Converses, Drafting,
-    LinearOpener, NOTHING_SETTLES_IT, Opens, PullAnswered, PullConfirm, Replied, Review, Reviewed,
+    Answer, App, Cancel, Carry, CarryAnswered, ChatAgent, Choice, Converses, CutAnswered,
+    CutConfirm, Drafting, LinearOpener, NOTHING_SETTLES_IT, Opens, Replied, Review, Reviewed,
     Slice, propose_answer,
 };
 
 use crate::cut::{Cut, listed};
 use crate::error::{Error, one_line};
 use crate::pacting::CancelGuard;
-use crate::pull::{
-    self, Announcement, Next, Pull, Reply, Settled, counted, named, not_drafted, prepare, replied,
+use crate::planned::{
+    self, Announcement, Next, Planned, Reply, Settled, counted, named, not_drafted, prepare,
+    replied,
 };
 use crate::standing::Standing;
 
-// Said to a `/pull` typed with one already running, and it is the whole of that
+// Said to a `/draft` typed with one already running, and it is the whole of that
 // refusal: no board is resolved, no record is read and no request is made. Two
-// pulls at once would be two sets of drafting sessions spending on one
+// cuts at once would be two sets of drafting sessions spending on one
 // conversation's behalf, which is why the one-at-a-time rule is worth a line of
 // its own rather than a queue.
-pub(crate) const ALREADY_PULLING: &str = "a pull is already running; this one read nothing";
+pub(crate) const ALREADY_CUTTING: &str = "a draft is already running; this one read nothing";
 
 // The worker sends on every path it takes, so a channel that closes with
 // nothing on it is a panic. The hook has already printed it; what is left to
 // say is that nothing was read — which is the honest answer for a sequence that
 // only reads, and the reason this sentence promises more than a lost push's
 // does.
-const PULL_LOST: &str = "the pull stopped without saying how it went; nothing was read or changed";
+const CUT_LOST: &str = "the draft stopped without saying how it went; nothing was read or changed";
 
 // The same for a slice's worker, which also sends on every path it takes. One
 // slice is one session and one thread, so a channel that closed with nothing on
@@ -101,53 +102,53 @@ const SLICE_LOST: &str = "it stopped without saying how it went";
 const ANNOUNCE_LOST: &str =
     "the project's comment stopped without saying how it went; look at the project to see";
 
-/// What a pull has to say for itself once the board has answered: the project
+/// What a cut has to say for itself once the board has answered: the project
 /// read back and gated, or the line that says why not.
 ///
 /// A `String` for the failure, because the failure is worded on the worker
 /// where it happens — out of `error.rs`, flattened — and a line is what the
 /// thread takes.
-type Landing = Result<Pull, String>;
+type Landing = Result<Planned, String>;
 
 // The count it names first is how many slices the project has, because that is
 // what the reader is being asked about; how much of it is left is the line's
 // second half.
-fn fetched_line(pull: &Pull) -> String {
+fn fetched_line(planned: &Planned) -> String {
     format!(
         "`{}` is `{}` — {}, {} still to cut",
-        pull.name(),
-        pull.status(),
-        counted(pull.total()),
-        pull.left()
+        planned.name(),
+        planned.status(),
+        counted(planned.total()),
+        planned.left()
     )
 }
 
-fn asking(pull: &Pull) -> PullConfirm {
-    PullConfirm::open(
-        pull.name(),
-        pull.status(),
-        pull.total(),
-        pull.destination().team(),
-        pull.destination().key(),
+fn asking(planned: &Planned) -> CutConfirm {
+    CutConfirm::open(
+        planned.name(),
+        planned.status(),
+        planned.total(),
+        planned.destination().team(),
+        planned.destination().key(),
     )
 }
 
-/// The pull a session is doing, if it is doing one, and where its client comes
+/// The cut a session is doing, if it is doing one, and where its client comes
 /// from.
 ///
 /// The home is here for [`crate::pushing::Pushes`]'s reason: it cannot move
 /// under a running warlock, and a second reading per keystroke would be a second
 /// answer. It is also what keeps every test in this crate off the developer's
-/// own — a `Pulls` is built with the home it is to use, so nothing below this
+/// own — a `Cutter` is built with the home it is to use, so nothing below this
 /// line asks the environment.
 #[derive(Debug)]
-pub(crate) struct Pulls<O: Opens, A: Converses> {
+pub(crate) struct Cutter<O: Opens, A: Converses> {
     open: O,
     home: Option<PathBuf>,
     // The conversation every slice's session is opened off, built once for the
     // session and cheap to build: an agent is a command line and a timeout, so
     // no `claude` exists until a confirmed question asks a slice for drafts.
-    // `warlock pull` builds its one the same way and for the same reason.
+    // `warlock draft` builds its one the same way and for the same reason.
     agent: A,
     // And the conversation warlock's attempt at a question is asked in, which is
     // a different one: not the slice's own session, whose next turn is the
@@ -156,17 +157,17 @@ pub(crate) struct Pulls<O: Opens, A: Converses> {
     proposer: A,
     fetching: Option<Fetching>,
     // The question between the fetch and the run, held here rather than beside
-    // the session's other windows because it is a state of the pull and not of
+    // the session's other windows because it is a state of the cut and not of
     // the app: what it is asked about came off the wire on the round it went
     // up, and nothing else in the panel can answer it.
-    confirm: PullConfirm,
-    // The pull the question above is asked about, parked beside it: the dialog
+    confirm: CutConfirm,
+    // The cut the question above is asked about, parked beside it: the dialog
     // names counts and a board, and a Yes walks the slices themselves. Taken by
     // the Yes and dropped by the No, so it lives exactly as long as the question
     // does. Never fetched again at the Yes: a second reading would be a second
     // project to disagree with the one the reader confirmed.
-    ready: Option<Pull>,
-    // The run, which is its own say-no to a second `/pull` for as long as it
+    ready: Option<Planned>,
+    // The run, which is its own say-no to a second `/draft` for as long as it
     // lasts: a slice in flight is a session spending on this conversation's
     // behalf, and two sets of them would be two runs cutting one project.
     slicing: Option<Slicing<A>>,
@@ -176,10 +177,10 @@ pub(crate) struct Pulls<O: Opens, A: Converses> {
     announcing: Option<Receiver<Option<String>>>,
 }
 
-// The channel, and the handle that is the whole of how a pull is stopped.
+// The channel, and the handle that is the whole of how a cut is stopped.
 //
 // Dropping the session drops this, which cancels: no exit path has to remember
-// to stop a pull, exactly as none has to remember to stop a pact. What a cancel
+// to stop a cut, exactly as none has to remember to stop a pact. What a cancel
 // can reach is either side of the request rather than the request itself —
 // there is one request, one timeout and no retry (see `linear.rs`), and nothing
 // on this side can interrupt a socket that is already waiting.
@@ -196,15 +197,15 @@ struct Fetching {
     cancel: CancelGuard,
 }
 
-/// The run a Yes started: the pull being walked, the slice under way, and
+/// The run a Yes started: the cut being walked, the slice under way, and
 /// where that slice's session has got to.
 ///
 /// There is always exactly one slice under way while this lives — the reply
-/// that ends one slice starts the next, or ends the run — so "a pull is
+/// that ends one slice starts the next, or ends the run — so "a cut is
 /// drafting" needs no flag beside it.
 #[derive(Debug)]
 struct Slicing<A: Converses> {
-    pull: Pull,
+    planned: Planned,
     next: Next,
     // Whether this slice has spent its one redraft. Cleared as the run moves on,
     // because it is a fact about the slice under way and not about the run: one
@@ -264,7 +265,7 @@ struct Reviewing<A> {
 //
 // No cancel guard, unlike every other worker here, and deliberately: a create
 // that has left the machine cannot be taken back, and the cut record beside it
-// is what stops the next run filing the same drafts twice. So a pull dropped
+// is what stops the next run filing the same drafts twice. So a cut dropped
 // mid-create leaves a worker that finishes filing and records what it filed,
 // into a channel nobody is listening to — which is the only ending that does not
 // lose issues.
@@ -317,12 +318,12 @@ struct Asking<A> {
 /// on a subprocess, and it has to come back for the next one.
 type Turned<A> = (Drafting<A>, Result<Replied, agent::Error>);
 
-impl Pulls<LinearOpener, ChatAgent> {
+impl Cutter<LinearOpener, ChatAgent> {
     pub(crate) fn new() -> Self {
         // Two conversations of its own at the register the brief was written in,
         // neither of them the panel's: a drafting session has heard none of the
         // reader's talk and answers in JSON, and a proposing one is read-only
-        // and one turn long. `warlock pull` opens its sessions off the same
+        // and one turn long. `warlock draft` opens its sessions off the same
         // value for the same reason.
         Self::with_client(
             LinearOpener,
@@ -333,7 +334,7 @@ impl Pulls<LinearOpener, ChatAgent> {
     }
 }
 
-impl<O: Opens, A: Converses> Pulls<O, A> {
+impl<O: Opens, A: Converses> Cutter<O, A> {
     // The seam a test drives the real value over a stand-in client and two
     // stand-in models through, rather than assembling the pieces underneath and
     // proving something about an arrangement the event loop never has.
@@ -348,7 +349,7 @@ impl<O: Opens, A: Converses> Pulls<O, A> {
             agent,
             proposer,
             fetching: None,
-            confirm: PullConfirm::Closed,
+            confirm: CutConfirm::Closed,
             ready: None,
             slicing: None,
             announcing: None,
@@ -357,34 +358,34 @@ impl<O: Opens, A: Converses> Pulls<O, A> {
 
     // Read once a round by the loop, to draw the window and to decide which
     // window a keystroke belongs to.
-    pub(crate) const fn confirm(&self) -> &PullConfirm {
+    pub(crate) const fn confirm(&self) -> &CutConfirm {
         &self.confirm
     }
 
-    // Read once a round by the loop and once per `/pull` by this value itself,
+    // Read once a round by the loop and once per `/draft` by this value itself,
     // off the one run it keeps: a flag beside it would be a second record of
     // whether a project is being read back.
     pub(crate) const fn fetching(&self) -> bool {
         self.fetching.is_some()
     }
 
-    // Read once a round by the loop and once per `/pull` by this value itself,
+    // Read once a round by the loop and once per `/draft` by this value itself,
     // off the one run it keeps, for the reason above.
     pub(crate) const fn drafting(&self) -> bool {
         self.slicing.is_some()
     }
 
-    // What a second `/pull` is refused against: a project being read back, a
+    // What a second `/draft` is refused against: a project being read back, a
     // project being cut and the comment on a project just cut are all this
-    // session's one pull.
+    // session's one cut.
     const fn running(&self) -> bool {
         self.fetching() || self.drafting() || self.announcing.is_some()
     }
 
-    /// `/pull` typed into the composer, with the brief it is about already
+    /// `/draft` typed into the composer, with the brief it is about already
     /// spelled the manifest's way.
     ///
-    /// The two refusals are asked in the order they have to be: a pull already
+    /// The two refusals are asked in the order they have to be: a cut already
     /// running is answered before anything is read, because a machine with no
     /// home is a fact about a request that is not going to be made anyway.
     /// Everything past them is the worker's, so this returns having read
@@ -398,7 +399,7 @@ impl<O: Opens, A: Converses> Pulls<O, A> {
         now: Instant,
     ) {
         if self.running() {
-            app.panel_mut().note(ALREADY_PULLING, now);
+            app.panel_mut().note(ALREADY_CUTTING, now);
             return;
         }
         // `Standing::home`'s own sentence, asked of the error that words it
@@ -427,7 +428,7 @@ impl<O: Opens, A: Converses> Pulls<O, A> {
         });
     }
 
-    /// What the pull has said since the last round: what the board answered, or
+    /// What the cut has said since the last round: what the board answered, or
     /// what the slice being drafted came to.
     ///
     /// Drained rather than received, for [`crate::pacting`]'s reason: nothing
@@ -457,10 +458,10 @@ impl<O: Opens, A: Converses> Pulls<O, A> {
             Ok(landing) => landing,
             // Still in flight, and nothing new to say.
             Err(TryRecvError::Empty) => return,
-            Err(TryRecvError::Disconnected) => Err(PULL_LOST.to_owned()),
+            Err(TryRecvError::Disconnected) => Err(CUT_LOST.to_owned()),
         };
         let line = match &landing {
-            Ok(pull) => fetched_line(pull),
+            Ok(planned) => fetched_line(planned),
             // The worker's own sentence, which is `error.rs`'s wording of
             // whatever stopped it: a machine that cannot say which board it
             // stands at, a brief nothing filed, a project Linear no longer has,
@@ -469,16 +470,16 @@ impl<O: Opens, A: Converses> Pulls<O, A> {
             Err(line) => line.clone(),
         };
         // Taken before the line is put on the thread, so the round that reports
-        // a pull is a round on which the next `/pull` is already allowed.
+        // a cut is a round on which the next `/draft` is already allowed.
         self.fetching = None;
         app.panel_mut().note(line, now);
         // The question goes up on the round the answer landed, over the line
         // that reports it: what a reader is being asked to confirm is what they
         // have just read. A fetch that failed put its own sentence on the
         // thread and there is nothing to ask about, so nothing opens.
-        if let Ok(pull) = landing {
-            self.confirm = asking(&pull);
-            self.ready = Some(pull);
+        if let Ok(planned) = landing {
+            self.confirm = asking(&planned);
+            self.ready = Some(planned);
         }
     }
 
@@ -552,7 +553,7 @@ impl<O: Opens, A: Converses> Pulls<O, A> {
                 let slice = slicing.next.slice();
                 app.panel_mut().note(question_line(slice, &question), now);
                 let proposing =
-                    spawn_proposal(&self.proposer, slicing.pull.brief(), slice, &question);
+                    spawn_proposal(&self.proposer, slicing.planned.brief(), slice, &question);
                 slicing.stage = Stage::Waiting(Waiting {
                     session,
                     proposing: Some(proposing),
@@ -601,24 +602,29 @@ impl<O: Opens, A: Converses> Pulls<O, A> {
     // The run is taken by value because the agent the next session is opened off
     // sits beside it on this value, and it is put back only when there is a next
     // slice: the last one leaves the run taken down, which is what makes the
-    // next `/pull` allowed once the project's comment has been said.
+    // next `/draft` allowed once the project's comment has been said.
     fn onwards(&mut self, mut slicing: Slicing<A>, app: &mut App, now: Instant) {
-        let Some(next) = slicing.pull.next_uncut() else {
-            self.finished(&slicing.pull);
+        let Some(next) = slicing.planned.next_uncut() else {
+            self.finished(&slicing.planned);
             return;
         };
         slicing.redrafted = false;
-        slicing.stage =
-            Stage::Drafting(started(&self.agent, app, slicing.pull.brief(), &next, now));
+        slicing.stage = Stage::Drafting(started(
+            &self.agent,
+            app,
+            slicing.planned.brief(),
+            &next,
+            now,
+        ));
         slicing.next = next;
         self.slicing = Some(slicing);
     }
 
     // Every road out of a run comes through here — the last slice settled, the
     // last slice skipped, a No to carrying on — so the comment is asked for once
-    // and the pull decides whether one is owed.
-    fn finished(&mut self, pull: &Pull) {
-        if let Some(announcement) = pull.finish() {
+    // and the cut decides whether one is owed.
+    fn finished(&mut self, planned: &Planned) {
+        if let Some(announcement) = planned.finish() {
             self.announcing = Some(spawn_announcement(self.open.clone(), announcement));
         }
     }
@@ -630,7 +636,7 @@ impl<O: Opens, A: Converses> Pulls<O, A> {
     // A refusal is one line and the next slice, not the end of the run, for the
     // reason a failed draft is: what is left was ordered so that nothing is
     // filed before what it waits on, and a run that stopped would leave the
-    // reader typing `/pull` again to reach it.
+    // reader typing `/draft` again to reach it.
     fn cutting(&mut self, app: &mut App, now: Instant) {
         let Some(mut slicing) = self.slicing.take() else {
             return;
@@ -649,11 +655,11 @@ impl<O: Opens, A: Converses> Pulls<O, A> {
             // The worker panicked: the hook has already printed it, and what is
             // left to say is that this slice cannot be reported on. Whatever it
             // created is on the board with its record beside it, which is what
-            // the next `/pull` will read.
+            // the next `/draft` will read.
             Err(TryRecvError::Disconnected) => Err(SLICE_LOST.to_owned()),
         };
 
-        let settled = landing.map(|cut| slicing.pull.settle(&slicing.next, cut));
+        let settled = landing.map(|cut| slicing.planned.settle(&slicing.next, cut));
         let slice = slicing.next.slice();
         match settled {
             Ok(Settled::Already(issues)) => {
@@ -725,7 +731,7 @@ impl<O: Opens, A: Converses> Pulls<O, A> {
     /// the field is taken whole and goes to this session — and the words on the
     /// field say which of the two it is.
     ///
-    /// A state of the pull and not a mode: it is true for exactly as long as
+    /// A state of the cut and not a mode: it is true for exactly as long as
     /// one session is waiting on somebody, and it goes false on the round the
     /// text is taken.
     pub(crate) fn relaying(&self) -> bool {
@@ -786,7 +792,7 @@ impl<O: Opens, A: Converses> Pulls<O, A> {
     /// again.
     ///
     /// A no-op with nothing waiting, which is how the loop's one question
-    /// ([`Pulls::relaying`]) stays the only one: a submitted draft that arrived
+    /// ([`Cutter::relaying`]) stays the only one: a submitted draft that arrived
     /// a round late cannot start a turn of a session that has moved on.
     pub(crate) fn answered(&mut self, app: &mut App, answer: &str, now: Instant) {
         let Some(mut slicing) = self.slicing.take() else {
@@ -816,7 +822,7 @@ impl<O: Opens, A: Converses> Pulls<O, A> {
         self.slicing = Some(slicing);
     }
 
-    /// The pull dialog, moved or answered. An arrow re-lights the question that
+    /// The cut dialog, moved or answered. An arrow re-lights the question that
     /// is up — the facts it was opened with ride along unchanged, since they are
     /// what is being answered about — and either answer takes it down.
     ///
@@ -825,11 +831,11 @@ impl<O: Opens, A: Converses> Pulls<O, A> {
     /// this up has already had its say on the thread. A Yes takes the window
     /// down and starts the run. Either way warlock goes on running, which is
     /// what the dialog promised.
-    pub(crate) fn confirmed(&mut self, app: &mut App, answered: PullAnswered, now: Instant) {
+    pub(crate) fn confirmed(&mut self, app: &mut App, answered: CutAnswered, now: Instant) {
         match answered {
-            PullAnswered::Open(answer) => self.lit(answer),
-            PullAnswered::Cancel => self.cancelled(),
-            PullAnswered::Cut => self.cut(app, now),
+            CutAnswered::Open(answer) => self.lit(answer),
+            CutAnswered::Cancel => self.cancelled(),
+            CutAnswered::Cut => self.cut(app, now),
         }
     }
 
@@ -899,7 +905,7 @@ impl<O: Opens, A: Converses> Pulls<O, A> {
         app.panel_mut().note(filing_line(slicing.next.slice()), now);
         let landings = spawn_filing(
             self.open.clone(),
-            slicing.pull.filing(&slicing.next, reviewing.drafts),
+            slicing.planned.filing(&slicing.next, reviewing.drafts),
         );
 
         slicing.stage = Stage::Filing(Filing { landings });
@@ -910,7 +916,7 @@ impl<O: Opens, A: Converses> Pulls<O, A> {
     /// on to the ones after it.
     ///
     /// No record, no request and no note of the refusal anywhere but the
-    /// thread: a skipped slice is one the next `/pull` offers again, which is
+    /// thread: a skipped slice is one the next `/draft` offers again, which is
     /// the whole difference between skipping drafts and filing them.
     ///
     /// The last slice has nothing to ask about, so it ends the run instead: a
@@ -929,7 +935,7 @@ impl<O: Opens, A: Converses> Pulls<O, A> {
             .note(skipped_line(slicing.next.slice()), now);
         let left = slicing.next.left();
         if left == 0 {
-            self.finished(&slicing.pull);
+            self.finished(&slicing.planned);
             return;
         }
 
@@ -1003,7 +1009,7 @@ impl<O: Opens, A: Converses> Pulls<O, A> {
     /// A No: the run ends here, with the slices after this one never offered.
     ///
     /// They are left rather than refused — nothing has been drafted for them
-    /// and nothing sent about them — so the next `/pull` finds them exactly as
+    /// and nothing sent about them — so the next `/draft` finds them exactly as
     /// this one did.
     fn stop(&mut self, app: &mut App, now: Instant) {
         let Some(slicing) = self.slicing.take() else {
@@ -1015,11 +1021,11 @@ impl<O: Opens, A: Converses> Pulls<O, A> {
         }
 
         app.panel_mut().note(stopped_line(slicing.next.left()), now);
-        self.finished(&slicing.pull);
+        self.finished(&slicing.planned);
     }
 
     /// The same question with the other answer lit. A closed dialog stays
-    /// closed, which is [`PullConfirm::lit`]'s rule and not a second one here.
+    /// closed, which is [`CutConfirm::lit`]'s rule and not a second one here.
     fn lit(&mut self, answer: Answer) {
         self.confirm = self.confirm.lit(answer);
     }
@@ -1029,9 +1035,9 @@ impl<O: Opens, A: Converses> Pulls<O, A> {
     /// the whole of what a No costs.
     ///
     /// The slices go down with it. They were the answer to one reading of one
-    /// project, and the next `/pull` reads it again.
+    /// project, and the next `/draft` reads it again.
     fn cancelled(&mut self) {
-        self.confirm = PullConfirm::Closed;
+        self.confirm = CutConfirm::Closed;
         self.ready = None;
     }
 
@@ -1046,18 +1052,18 @@ impl<O: Opens, A: Converses> Pulls<O, A> {
     /// rather than by an `expect`, because a panic in a panel that is otherwise
     /// running is a worse answer than a Yes that did nothing.
     fn cut(&mut self, app: &mut App, now: Instant) {
-        let confirm = mem::replace(&mut self.confirm, PullConfirm::Closed);
-        let (Some(cutting), Some(mut pull)) = (confirm.cutting(), self.ready.take()) else {
+        let confirm = mem::replace(&mut self.confirm, CutConfirm::Closed);
+        let (Some(cutting), Some(mut planned)) = (confirm.cutting(), self.ready.take()) else {
             return;
         };
         app.panel_mut().note(cutting_line(cutting.project()), now);
 
-        let Some(next) = pull.next_uncut() else {
+        let Some(next) = planned.next_uncut() else {
             return;
         };
-        let asking = started(&self.agent, app, pull.brief(), &next, now);
+        let asking = started(&self.agent, app, planned.brief(), &next, now);
         self.slicing = Some(Slicing {
-            pull,
+            planned,
             next,
             redrafted: false,
             stage: Stage::Drafting(asking),
@@ -1177,7 +1183,7 @@ fn spawn_proposal<A: Converses>(
 /// whole distinction: a question's next turn is whatever somebody answers and
 /// drafts can be asked for again once, while an ending is an ending — the slices
 /// left are other work, they were ordered so that nothing is drafted before what
-/// it waits on, and a run that stopped would leave the reader typing `/pull`
+/// it waits on, and a run that stopped would leave the reader typing `/draft`
 /// again to reach them.
 enum Ended<A> {
     Asked {
@@ -1281,7 +1287,7 @@ fn filing_line(slice: &Slice) -> String {
 
 // What a slice became, by identifier, which is the one thing about an issue that
 // must not be lost: a cut record keeps identifiers and nothing else, and this is
-// the same list `warlock pull` prints.
+// the same list `warlock draft` prints.
 fn filed_line(slice: &Slice, issues: &[String]) -> String {
     format!("{} — cut into {}", named(slice), listed(issues))
 }
@@ -1313,17 +1319,17 @@ fn unfiled_line(slice: &Slice, why: &str) -> String {
 }
 
 // A slice left alone. `nothing was recorded` rather than `skipped` alone,
-// because what a reader wants to know tomorrow is whether the next `/pull` will
+// because what a reader wants to know tomorrow is whether the next `/draft` will
 // offer this slice again — and it will.
 fn skipped_line(slice: &Slice) -> String {
     format!("{} was skipped; nothing was recorded for it", named(slice))
 }
 
 // The run ended by a No to the carry-on question, counting what was never
-// offered: those slices are untouched rather than refused, so the next `/pull`
+// offered: those slices are untouched rather than refused, so the next `/draft`
 // finds them exactly as this one did.
 fn stopped_line(left: usize) -> String {
-    format!("the run stopped; {} left for another pull", counted(left))
+    format!("the run stopped; {} left for another draft", counted(left))
 }
 
 // Everything the fetch's worker owns, and the whole of what crosses the thread
@@ -1335,7 +1341,7 @@ struct Work {
     root: PathBuf,
     home: PathBuf,
     // The manifest's own spelling, which is what a filed record is keyed by:
-    // the composer's `/pull docs/a-brief.md` and the path `/write` remembered
+    // the composer's `/draft docs/a-brief.md` and the path `/write` remembered
     // are both spelled before they get here, so nothing below resolves a path
     // against a working directory.
     brief: String,
@@ -1350,7 +1356,7 @@ struct Work {
 // are the panel's own and worded beside the slice they are about.
 //
 // The `JoinHandle` is dropped on purpose, as every other worker's is.
-fn spawn_filing<O: Opens>(open: O, filing: pull::Filing) -> Receiver<Result<Cut, String>> {
+fn spawn_filing<O: Opens>(open: O, filing: planned::Filing) -> Receiver<Result<Cut, String>> {
     let (events, received) = mpsc::channel();
     thread::spawn(move || {
         let landing = filing
@@ -1359,7 +1365,7 @@ fn spawn_filing<O: Opens>(open: O, filing: pull::Filing) -> Receiver<Result<Cut,
         // Ignored for the reason every other worker's send is: a receiver that
         // has gone away is a panel nobody is looking at any more. What this
         // worker did is on the board and in the cut record beside the brief,
-        // which is where the next `/pull` reads it from.
+        // which is where the next `/draft` reads it from.
         let _ = events.send(landing);
     });
 
@@ -1386,7 +1392,7 @@ fn spawn_fetch<O: Opens>(open: O, work: Work, cancel: Cancel) -> Receiver<Landin
         let landing = fetched(&open, &work, &cancel).map_err(|error| one_line(&error.to_string()));
         // Ignored for the reason every other worker's send is: a receiver that
         // has gone away is an application that is quitting, which is also the
-        // one thing that cancels a pull.
+        // one thing that cancels a cut.
         let _ = events.send(landing);
     });
 
@@ -1397,12 +1403,12 @@ fn spawn_fetch<O: Opens>(open: O, work: Work, cancel: Cancel) -> Receiver<Landin
 // already waiting cannot be interrupted, so what the guard buys is a worker that
 // neither opens one after the session has gone nor hands back an answer nobody
 // will hear.
-fn fetched<O: Opens>(open: &O, work: &Work, cancel: &Cancel) -> Result<Pull, Error> {
+fn fetched<O: Opens>(open: &O, work: &Work, cancel: &Cancel) -> Result<Planned, Error> {
     if cancel.is_cancelled() {
         return Err(Error::Cancelled);
     }
 
-    let pull = prepare(
+    let planned = prepare(
         &work.manifest,
         &work.root,
         &work.home,
@@ -1415,7 +1421,7 @@ fn fetched<O: Opens>(open: &O, work: &Work, cancel: &Cancel) -> Result<Pull, Err
         return Err(Error::Cancelled);
     }
 
-    Ok(pull)
+    Ok(planned)
 }
 
 // The line the run opens with, over the first slice's own: the project named
@@ -1437,5 +1443,5 @@ fn reading_line(brief: &str) -> String {
 // half of this module that takes both as parameters: nothing in the suite can
 // read the sigils, the binding or the key store of the machine it runs on.
 #[cfg(test)]
-#[path = "tests/pulling.rs"]
+#[path = "tests/cutting.rs"]
 mod tests;

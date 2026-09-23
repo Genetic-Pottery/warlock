@@ -147,13 +147,13 @@ impl Filed {
     /// record.push_cut(CutRecord::new("An older name", ["WAR-99"], "2026-09-20T09:00:00Z"));
     /// let filed = Filed::with_records([record]);
     ///
-    /// let state = filed.cut_state("docs/brief.md", ["  THE   cut record ", "`warlock pull`"]);
+    /// let state = filed.cut_state("docs/brief.md", ["  THE   cut record ", "`warlock draft`"]);
     ///
     /// assert_eq!(
     ///     state.cut().iter().map(|(title, cut)| (*title, cut.issues())).collect::<Vec<_>>(),
     ///     [("  THE   cut record ", &["WAR-125".to_owned()][..])],
     /// );
-    /// assert_eq!(state.uncut(), ["`warlock pull`"]);
+    /// assert_eq!(state.uncut(), ["`warlock draft`"]);
     /// assert_eq!(
     ///     state.gone().iter().map(|cut| cut.title()).collect::<Vec<_>>(),
     ///     ["An older name"],

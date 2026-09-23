@@ -113,7 +113,7 @@ type Landing = Result<String, String>;
 /// next one, and where its client comes from.
 ///
 /// The window is held here rather than beside the session's other windows for
-/// [`crate::pulling::Pulls`]'s reason: it is a state of the push, and every
+/// [`crate::cutting::Cutter`]'s reason: it is a state of the push, and every
 /// answer to it — a field typed into, a dialog answered — is this value's to
 /// act on.
 ///

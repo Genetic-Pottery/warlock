@@ -1,7 +1,7 @@
 //! A planned project is cut into issues, one scope slice at a time: `warlock
-//! pull <PATH>` here, and the panel's `/pull` in [`mod@crate::pulling`], both
-//! through [`prepare`], a walk over the [`Pull`] it answers with, [`Filing`] for
-//! each slice drafted, and [`Pull::finish`] once the last slice has settled.
+//! draft <PATH>` here, and the panel's `/draft` in [`mod@crate::cutting`], both
+//! through [`prepare`], a walk over the [`Planned`] it answers with, [`Filing`] for
+//! each slice drafted, and [`Planned::finish`] once the last slice has settled.
 //!
 //! The split is the promise rather than an arrangement: everything that can
 //! refuse — no board, a brief no record names, a project the board has lost or
@@ -9,18 +9,18 @@
 //! nothing left to cut — is asked by [`prepare`], which sends one read and no
 //! mutation, so a refusal costs nothing. Drafting is the door's own business:
 //! nothing here opens a session, and a door that drafts hands the drafts back to
-//! [`Pull::filing`]. The status is not moved on any road — an issue is created,
+//! [`Planned::filing`]. The status is not moved on any road — an issue is created,
 //! an edge is written and a comment is said, and nothing else.
 //!
-//! What every slice became lives on the [`Pull`] and is written only by
-//! [`Pull::settle`], so the edges a later slice asks for are worked out in one
+//! What every slice became lives on the [`Planned`] and is written only by
+//! [`Planned::settle`], so the edges a later slice asks for are worked out in one
 //! place whichever door is driving.
 //!
 //! No `--json`, matching [`mod@crate::push`] and the other verbs that spend
 //! something: the answer worth parsing is the record, which is a file rather
 //! than a stream to be caught.
 //!
-//! No key value is printed here and none can be. [`Pull`], [`Filing`] and
+//! No key value is printed here and none can be. [`Planned`], [`Filing`] and
 //! [`Announcement`] each carry one with a redacting `Debug`, it is read only on
 //! the lines that open a board, and everything that prints takes a
 //! [`Destination`], which names the key and never holds it.
@@ -42,22 +42,22 @@ use warlock_tui::{
 use crate::cut::{self, Cut, listed};
 use crate::error::Error;
 use crate::push::records;
-use crate::standing::{FOR_PULL, Standing};
+use crate::standing::{FOR_CUT, Standing};
 
 // The one status a project is read back from, and the only spelling accepted:
 // the comparison below trims and folds case, so `planned` and ` Planned ` are
 // this and `Backlog` is not.
 const PLANNED: &str = "Planned";
 
-pub(crate) fn pull(path: &Path, scope: Option<&str>, dry_run: bool) -> Result<(), Error> {
-    let standing = Standing::here(FOR_PULL)?;
+pub(crate) fn cut(path: &Path, scope: Option<&str>, dry_run: bool) -> Result<(), Error> {
+    let standing = Standing::here(FOR_CUT)?;
     // The error rather than `check`'s `.ok()`, for [`mod@crate::push`]'s reason:
     // the sigils under the home pick the board and the key store beside them is
-    // what reads it back, so a machine with no home has nothing to pull with
+    // what reads it back, so a machine with no home has nothing to cut with
     // rather than an answer of "nothing held".
     let home = Standing::home()?;
 
-    pulled(
+    cut_with(
         &standing,
         &home,
         path,
@@ -76,7 +76,7 @@ pub(crate) fn pull(path: &Path, scope: Option<&str>, dry_run: bool) -> Result<()
     )
 }
 
-// Split from `pull` the way `pushed` is split from `push`: the environment — the
+// Split from `cut` the way `pushed` is split from `push`: the environment — the
 // working directory, the repository root, the home the sigils and the key store
 // sit under — is three parameters rather than three reads, so every refusal can
 // be run against a temporary repository and a temporary home, and no test in
@@ -92,7 +92,7 @@ pub(crate) fn pull(path: &Path, scope: Option<&str>, dry_run: bool) -> Result<()
               than reads, which is the whole of what lets every refusal run \
               against a temporary repository and a temporary home"
 )]
-fn pulled<O: Opens, A: Converses, W: Write>(
+fn cut_with<O: Opens, A: Converses, W: Write>(
     standing: &Standing,
     home: &Path,
     path: &Path,
@@ -103,7 +103,7 @@ fn pulled<O: Opens, A: Converses, W: Write>(
     out: &mut W,
 ) -> Result<(), Error> {
     let manifest = standing.manifest()?;
-    let mut pull = prepare(
+    let mut planned = prepare(
         &manifest,
         standing.repo_root(),
         home,
@@ -113,7 +113,7 @@ fn pulled<O: Opens, A: Converses, W: Write>(
     )?;
 
     if dry_run {
-        for line in would(pull) {
+        for line in would(planned) {
             say(out, &line);
         }
         return Ok(());
@@ -122,7 +122,7 @@ fn pulled<O: Opens, A: Converses, W: Write>(
     // Every slice in the cut order, the skips said as well as the work: a
     // reader following along wants to see the whole project go past, and the
     // fraction on each line is its place among all of them.
-    while let Some(next) = pull.next() {
+    while let Some(next) = planned.next() {
         if let Some(issues) = next.already() {
             say(
                 out,
@@ -136,7 +136,7 @@ fn pulled<O: Opens, A: Converses, W: Write>(
         }
 
         say(out, &format!("{} — drafting", next.heading()));
-        let Some(drafts) = drafted(agent, pull.brief(), next.slice(), out) else {
+        let Some(drafts) = drafted(agent, planned.brief(), next.slice(), out) else {
             continue;
         };
 
@@ -145,18 +145,18 @@ fn pulled<O: Opens, A: Converses, W: Write>(
         // not save — and carrying on to the next slice after any of the three
         // would be warlock filing a second slice into the same wall, or
         // recording nothing about issues that now exist.
-        let cut = pull.filing(&next, drafts).file(open, out)?;
+        let cut = planned.filing(&next, drafts).file(open, out)?;
         // The edges Linear turned down: an issue that exists with a missing
         // edge is a thing a person can fix on the board, and it is only
         // fixable if they are told.
-        if let Settled::Filed { reported, .. } = pull.settle(&next, cut) {
+        if let Settled::Filed { reported, .. } = planned.settle(&next, cut) {
             for line in reported {
                 say(out, &line);
             }
         }
     }
 
-    if let Some(announcement) = pull.finish()
+    if let Some(announcement) = planned.finish()
         && let Some(line) = announcement.post(open)
     {
         say(out, &line);
@@ -209,7 +209,7 @@ fn drafted<A: Converses, W: Write>(
 }
 
 // A failed write is ignored, exactly as `running.rs`'s `Progress` ignores one
-// and for its reason: `warlock pull docs/brief.md | head -1` is a closed stdout,
+// and for its reason: `warlock draft docs/brief.md | head -1` is a closed stdout,
 // and failing a run of drafting sessions over the state of a pipe would spend
 // somebody's tokens and then throw away what they bought.
 fn say<W: Write>(out: &mut W, fact: &str) {
@@ -217,22 +217,22 @@ fn say<W: Write>(out: &mut W, fact: &str) {
 }
 
 // One line for the run and one per slice, rather than push's single sentence:
-// what a pull is about to do is an order, and an order is not a thing one line
+// what a cut is about to do is an order, and an order is not a thing one line
 // can say.
-fn would(mut pull: Pull) -> Vec<String> {
-    let destination = pull.destination();
+fn would(mut planned: Planned) -> Vec<String> {
+    let destination = planned.destination();
     let mut lines = vec![format!(
         "would cut `{}`, which is `{}`, into `{}` under the scope `{}` — {}, {} already cut, and \
          nothing was drafted",
-        pull.name(),
-        pull.status(),
+        planned.name(),
+        planned.status(),
         destination.team(),
         destination.scope(),
-        counted(pull.total()),
-        pull.total() - pull.left()
+        counted(planned.total()),
+        planned.total() - planned.left()
     )];
 
-    while let Some(next) = pull.next() {
+    while let Some(next) = planned.next() {
         lines.push(match next.already() {
             Some(issues) => format!("{} — already cut as {}", next.heading(), listed(issues)),
             None => next.heading(),
@@ -244,7 +244,7 @@ fn would(mut pull: Pull) -> Vec<String> {
 
 /// A project read back and gated, with every slice's standing: what is left to
 /// cut, what earlier runs cut it into, and what this run has created so far.
-pub(crate) struct Pull {
+pub(crate) struct Planned {
     root: PathBuf,
     // The brief as `.warlock/filed.toml` spells it, which is what a cut record
     // is appended under.
@@ -282,9 +282,9 @@ pub(crate) struct Pull {
 // Hand-written for `Target`'s reason: this holds the key value, and the panel
 // keeps one across rounds, which a failing assertion anywhere in the suite may
 // print.
-impl fmt::Debug for Pull {
+impl fmt::Debug for Planned {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Pull")
+        f.debug_struct("Planned")
             .field("root", &self.root)
             .field("spelled", &self.spelled)
             .field("project", &self.project)
@@ -318,13 +318,13 @@ pub(crate) fn prepare<O: Opens>(
     path: &Path,
     scope: Option<&str>,
     open: &O,
-) -> Result<Pull, Error> {
+) -> Result<Planned, Error> {
     let target =
         resolve_filing(manifest, root, home, scope).map_err(|source| Error::Filing { source })?;
 
     let spelled = to_manifest_path(root, path).map_err(|source| Error::Unspellable { source })?;
     // `records` rather than a second `Filed::load`: the file a push appends to
-    // and the file a pull resolves against are one file, and a second loader
+    // and the file a cut resolves against are one file, and a second loader
     // here would be a second reading of what a missing one means.
     let filed = records(root)?;
     let Some(record) = filed.record(&spelled) else {
@@ -375,7 +375,7 @@ pub(crate) fn prepare<O: Opens>(
         }
     }
 
-    Ok(Pull {
+    Ok(Planned {
         root: root.to_path_buf(),
         spelled,
         project: record.project_id().to_owned(),
@@ -392,7 +392,7 @@ pub(crate) fn prepare<O: Opens>(
     })
 }
 
-impl Pull {
+impl Planned {
     pub(crate) fn name(&self) -> &str {
         &self.name
     }
@@ -736,5 +736,5 @@ fn is_planned(status: &str) -> bool {
 // [`Board`] seam, so none of them opens a socket or reads a key store that is
 // not its own.
 #[cfg(test)]
-#[path = "tests/pull.rs"]
+#[path = "tests/planned.rs"]
 mod tests;

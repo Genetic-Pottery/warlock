@@ -265,28 +265,28 @@ const PUSH_LINES: u16 = 7;
 
 const PUSH_HEIGHT: u16 = PUSH_LINES + 2 * CONFIRM_MARGIN_ROWS + 2 * BORDER_THICKNESS;
 
-const PULL_QUESTION: &str = "Cut this project into tickets?";
+const CUT_QUESTION: &str = "Draft tickets for this project?";
 
 /// The status the board answered with, labelled rather than left to be read as
 /// a second name: the project above it is a title and this is a column value,
 /// and the two would otherwise be two bare strings under one another.
-const PULL_STATUS: &str = "status ";
+const CUT_STATUS: &str = "status ";
 
-const PULL_SLICES: &str = "slices ";
+const CUT_SLICES: &str = "slices ";
 
 /// The same two labels the push dialog uses, because they label the same two
 /// facts: the board a run would file to, and the name the key that signs it is
 /// held under. Two spellings for one fact would read as two facts.
-const PULL_TEAM: &str = PUSH_TEAM;
+const CUT_TEAM: &str = PUSH_TEAM;
 
-const PULL_KEY: &str = PUSH_KEY;
+const CUT_KEY: &str = PUSH_KEY;
 
 /// Question, a blank, the project, the status, the slices, the team, the key, a
-/// blank, the answers: [`pull_lines`] asserts it draws exactly this many, as
+/// blank, the answers: [`cut_lines`] asserts it draws exactly this many, as
 /// [`push_lines`] does.
-const PULL_LINES: u16 = 9;
+const CUT_LINES: u16 = 9;
 
-const PULL_HEIGHT: u16 = PULL_LINES + 2 * CONFIRM_MARGIN_ROWS + 2 * BORDER_THICKNESS;
+const CUT_HEIGHT: u16 = CUT_LINES + 2 * CONFIRM_MARGIN_ROWS + 2 * BORDER_THICKNESS;
 
 const REVIEW_QUESTION: &str = "File these drafts as issues?";
 
@@ -410,7 +410,7 @@ pub fn draw(
         None => {}
         Some(Modal::Quit(highlighted)) => draw_confirm(frame, screen, highlighted),
         Some(Modal::Push(asked)) => draw_push(frame, screen, asked),
-        Some(Modal::Pull(asked)) => draw_pull(frame, screen, asked),
+        Some(Modal::Cut(asked)) => draw_cut(frame, screen, asked),
         Some(Modal::Review(drafts)) => draw_review(frame, screen, drafts),
         Some(Modal::Carry(asked)) => draw_carry(frame, screen, asked),
         Some(Modal::Filing(field)) => {
@@ -1365,68 +1365,68 @@ fn push_size(filing: &Filing) -> Size {
 // same everything else, for the reason that one is the quit question's window:
 // three questions answered in the same place on the screen with the answers in
 // the same order.
-fn draw_pull(frame: &mut Frame<'_>, screen: Rect, cutting: &Cutting) {
+fn draw_cut(frame: &mut Frame<'_>, screen: Rect, cutting: &Cutting) {
     draw_over(
         frame,
-        pull_area(screen, cutting),
+        cut_area(screen, cutting),
         Padding::symmetric(CONFIRM_MARGIN, CONFIRM_MARGIN_ROWS),
-        pull_lines(cutting),
+        cut_lines(cutting),
     );
 }
 
-fn pull_lines(cutting: &Cutting) -> Vec<Line<'_>> {
+fn cut_lines(cutting: &Cutting) -> Vec<Line<'_>> {
     let lines = vec![
-        Line::from(PULL_QUESTION).centered(),
+        Line::from(CUT_QUESTION).centered(),
         Line::default(),
         Line::from(cutting.project()).bold().centered(),
         Line::from(status_line(cutting)).dim().centered(),
         Line::from(slices_line(cutting)).dim().centered(),
-        Line::from(pull_team_line(cutting)).dim().centered(),
-        Line::from(pull_key_line(cutting)).dim().centered(),
+        Line::from(cut_team_line(cutting)).dim().centered(),
+        Line::from(cut_key_line(cutting)).dim().centered(),
         Line::default(),
         answers_line(cutting.answer()),
     ];
 
     debug_assert_eq!(
         u16::try_from(lines.len()).unwrap_or(u16::MAX),
-        PULL_LINES,
-        "the pull dialog is no longer {PULL_LINES} lines tall"
+        CUT_LINES,
+        "the draft dialog is no longer {CUT_LINES} lines tall"
     );
 
     lines
 }
 
 fn status_line(cutting: &Cutting) -> String {
-    format!("{PULL_STATUS}{}", cutting.status())
+    format!("{CUT_STATUS}{}", cutting.status())
 }
 
 fn slices_line(cutting: &Cutting) -> String {
-    format!("{PULL_SLICES}{}", cutting.slices())
+    format!("{CUT_SLICES}{}", cutting.slices())
 }
 
-fn pull_team_line(cutting: &Cutting) -> String {
-    format!("{PULL_TEAM}{}", cutting.team())
+fn cut_team_line(cutting: &Cutting) -> String {
+    format!("{CUT_TEAM}{}", cutting.team())
 }
 
-fn pull_key_line(cutting: &Cutting) -> String {
-    format!("{PULL_KEY}{}", cutting.key())
+fn cut_key_line(cutting: &Cutting) -> String {
+    format!("{CUT_KEY}{}", cutting.key())
 }
 
-fn pull_size(cutting: &Cutting) -> Size {
+fn cut_size(cutting: &Cutting) -> Size {
     let answers =
         display_width(CONFIRM_YES) + display_width(CONFIRM_ANSWER_GAP) + display_width(CONFIRM_NO);
-    let widest = display_width(PULL_QUESTION)
+    let widest = display_width(CUT_QUESTION)
         .max(answers)
         .max(display_width(cutting.project()))
         .max(display_width(&status_line(cutting)))
         .max(display_width(&slices_line(cutting)))
-        .max(display_width(&pull_team_line(cutting)))
-        .max(display_width(&pull_key_line(cutting)));
+        .max(display_width(&cut_team_line(cutting)))
+        .max(display_width(&cut_key_line(cutting)));
 
-    Size::new(padded_width(widest, CONFIRM_MARGIN), PULL_HEIGHT)
+    Size::new(padded_width(widest, CONFIRM_MARGIN), CUT_HEIGHT)
 }
 
-// The pull dialog's window with the drafts in it instead of the board, and
+// The cut dialog's window with the drafts in it instead of the board, and
 // deliberately the same everything else, for the reason that one is the quit
 // question's window: every question warlock asks is answered in the same place
 // on the screen.
@@ -1620,10 +1620,10 @@ fn push_area(screen: Rect, filing: &Filing) -> Rect {
     centred(screen, push_size(filing))
 }
 
-// Where the pull dialog lands, which is where the other two land: the same
+// Where the cut dialog lands, which is where the other two land: the same
 // `centred`, over a window sized by what this one has to say.
-fn pull_area(screen: Rect, cutting: &Cutting) -> Rect {
-    centred(screen, pull_size(cutting))
+fn cut_area(screen: Rect, cutting: &Cutting) -> Rect {
+    centred(screen, cut_size(cutting))
 }
 
 fn centred(screen: Rect, size: Size) -> Rect {

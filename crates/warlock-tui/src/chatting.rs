@@ -43,7 +43,7 @@ const BRIEF_COMMAND: &str = "/brief";
 const CHAT_COMMAND: &str = "/chat";
 const WRITE_COMMAND: &str = "/write";
 const PUSH_COMMAND: &str = "/push";
-const PULL_COMMAND: &str = "/pull";
+const CUT_COMMAND: &str = "/draft";
 
 // Said on a *change* of register only, so a `/brief` typed in brief mode costs a
 // turn and no line. Each names the way out, because that is the one thing a
@@ -67,12 +67,12 @@ const NOT_BRIEFING: &str = "/write is only in brief mode — /brief enters it";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum About {
     Push,
-    Pull,
+    Cut,
 }
 
 impl About {
     // The third refusal, and the same kind of line as the two above it: a bare
-    // `/push` or `/pull` is about the document this session wrote, so a session
+    // `/push` or `/draft` is about the document this session wrote, so a session
     // that has written none has nothing to act on — and is told the other road,
     // because a brief committed yesterday is the ordinary thing to be filing or
     // cutting and nothing on the screen says it can be named.
@@ -84,7 +84,7 @@ impl About {
     fn nothing_written(self) -> String {
         let (command, does) = match self {
             Self::Push => (PUSH_COMMAND, "files"),
-            Self::Pull => (PULL_COMMAND, "cuts"),
+            Self::Cut => (CUT_COMMAND, "cuts"),
         };
         format!(
             "{command} on its own {does} the brief {WRITE_COMMAND} wrote, and this session has \
@@ -311,7 +311,7 @@ impl<C: Converses> Chat<C> {
     }
 
     // The one thing a draft can hand back to the loop: the brief a `/push`
-    // asks to file or a `/pull` asks to cut. Which board either of them reaches
+    // asks to file or a `/draft` asks to cut. Which board either of them reaches
     // is a manifest, a home and a key store away, and none of the three is this
     // value's — so the commands are recognised here and answered there.
     pub(crate) fn compose(
@@ -385,10 +385,8 @@ impl<C: Converses> Chat<C> {
                     .brief_for(app, named, About::Push, now)
                     .map(Wanted::Filed);
             }
-            Submitted::Pull(named) => {
-                return self
-                    .brief_for(app, named, About::Pull, now)
-                    .map(Wanted::Cut);
+            Submitted::Cut(named) => {
+                return self.brief_for(app, named, About::Cut, now).map(Wanted::Cut);
             }
             // The line is asked of the value rather than restated here, so the
             // list of commands that exist is written down in one place.
@@ -412,8 +410,8 @@ impl<C: Converses> Chat<C> {
     // engine's own sentence is what refuses one that climbs out of it.
     //
     // One call for both commands, with `about` deciding nothing but the words
-    // of the refusal: a `/pull` that resolved its path a second way would be a
-    // pull of a document a `/push` would have filed somewhere else.
+    // of the refusal: a `/draft` that resolved its path a second way would be a
+    // cut of a document a `/push` would have filed somewhere else.
     fn brief_for(
         &self,
         app: &mut App,

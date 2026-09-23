@@ -194,7 +194,7 @@ impl<P: Posts> Board for Linear<P> {
 /// The bounds are what the panel's workers need. A board is built from a key
 /// borrowed for as long as the target lives and is then owned by a thread that
 /// outlives the press, which is the associated type's side; and the opener
-/// itself crosses onto a thread, because the panel's pull resolves its board
+/// itself crosses onto a thread, because the panel's cut resolves its board
 /// over there and so opens it there too.
 pub trait Opens: Clone + Send + 'static {
     type Board: Board + Send + 'static;
@@ -453,7 +453,7 @@ fn issue_label_id(linear: &impl Posts, name: &str, team: &str) -> Result<String,
 /// The order is the point and not an implementation detail: the label is the
 /// only mark on a project saying warlock filed it, nothing here can take a
 /// project back, and a create that landed before a label that then failed is a
-/// project no pull will ever read. Resolving first means a project that exists
+/// project no cut will ever read. Resolving first means a project that exists
 /// is a project that carries the label.
 fn create_project(linear: &impl Posts, project: &NewProject<'_>) -> Result<Project, Error> {
     let label = label_id(linear, project.label)?;

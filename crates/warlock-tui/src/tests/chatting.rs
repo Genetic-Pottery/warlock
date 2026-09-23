@@ -1163,8 +1163,8 @@ mod submitting {
     use warlock_tui::Converses;
 
     use super::super::{
-        ALREADY_CHATTING, About, BRIEF_COMMAND, BRIEF_NOTE, CHAT_COMMAND, CHAT_NOTE, Chat,
-        NOT_BRIEFING, PULL_COMMAND, PUSH_COMMAND, WRITE_COMMAND, Wanted, brief_asking,
+        ALREADY_CHATTING, About, BRIEF_COMMAND, BRIEF_NOTE, CHAT_COMMAND, CHAT_NOTE, CUT_COMMAND,
+        Chat, NOT_BRIEFING, PUSH_COMMAND, WRITE_COMMAND, Wanted, brief_asking,
     };
     use crate::error::one_line;
     use crate::writing::write_opened;
@@ -1343,10 +1343,10 @@ mod submitting {
         // file rather than a register: the same line comes in either mode, and
         // neither the mode nor a turn moves. Both are asserted here because
         // they are one branch, and a test of only one of them would pass over a
-        // `/pull` that had quietly stopped refusing.
+        // `/draft` that had quietly stopped refusing.
         let now = Instant::now();
 
-        for (command, about) in [(PUSH_COMMAND, About::Push), (PULL_COMMAND, About::Pull)] {
+        for (command, about) in [(PUSH_COMMAND, About::Push), (CUT_COMMAND, About::Cut)] {
             for draft in [command.to_owned(), format!("  {command}  ")] {
                 let (app, chat) = submit(&draft, now);
 
@@ -1438,10 +1438,10 @@ mod submitting {
     }
 
     #[test]
-    fn pull_hands_up_a_cut_of_the_brief_it_names_or_the_one_this_session_wrote() {
+    fn cut_hands_up_a_cut_of_the_brief_it_names_or_the_one_this_session_wrote() {
         // The other verb over the same branch: a named path is spelled the
         // manifest's way and handed up as a cut, and the same path refused for
-        // a `/push` is refused for a `/pull`. Nothing is read and nothing is
+        // a `/push` is refused for a `/draft`. Nothing is read and nothing is
         // sent — what to do with the document is the loop's.
         let now = Instant::now();
         let root = a_root();
@@ -1450,7 +1450,7 @@ mod submitting {
 
         chat.compose(
             &mut app,
-            Composed::Typing(Composer::new("/pull docs/a-brief.md")),
+            Composed::Typing(Composer::new("/draft docs/a-brief.md")),
             now,
         );
         let cut = chat.compose(&mut app, Composed::Submit, now);
@@ -1461,7 +1461,7 @@ mod submitting {
 
         chat.compose(
             &mut app,
-            Composed::Typing(Composer::new("/pull ../elsewhere/a-brief.md")),
+            Composed::Typing(Composer::new("/draft ../elsewhere/a-brief.md")),
             now,
         );
         let refused = chat.compose(&mut app, Composed::Submit, now);
@@ -1469,11 +1469,11 @@ mod submitting {
         assert_eq!(refused, None, "a path outside the repository was cut");
         assert_eq!(rows(&app, now).len(), 1, "the refusal was not one line");
 
-        // And a bare `/pull` after a `/write` is about the document that write
+        // And a bare `/draft` after a `/write` is about the document that write
         // left behind, which is the same one a bare `/push` would file.
         let mut chat = conversation_in(root.path());
         chat.written = Some("docs/written.md".to_owned());
-        chat.compose(&mut app, Composed::Typing(Composer::new("/pull")), now);
+        chat.compose(&mut app, Composed::Typing(Composer::new("/draft")), now);
         let written = chat.compose(&mut app, Composed::Submit, now);
 
         assert_eq!(written, Some(Wanted::Cut("docs/written.md".to_owned())));

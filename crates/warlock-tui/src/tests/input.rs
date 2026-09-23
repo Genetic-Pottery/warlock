@@ -915,9 +915,9 @@ mod gate {
     use ratatui::layout::Size;
     use warlock_engine::NodeState;
     use warlock_tui::{
-        Answer, App, Composed, Composer, Edited, Focus, Modals, PullConfirm, PushConfirm,
-        QuitConfirm, RecordPrompt, Row, ScopeField, ScopePrompt, edit_for, panel_height,
-        pull_answer_for, push_answer_for, tree_height,
+        Answer, App, Composed, Composer, CutConfirm, Edited, Focus, Modals, PushConfirm,
+        QuitConfirm, RecordPrompt, Row, ScopeField, ScopePrompt, cut_answer_for, edit_for,
+        panel_height, push_answer_for, tree_height,
     };
 
     use super::super::{Action, Pressed, action_for, press_for};
@@ -1093,8 +1093,8 @@ mod gate {
             Pressed::Push(answered) => {
                 panic!("{answered:?} came from a push dialog that is not up")
             }
-            Pressed::Pull(answered) => {
-                panic!("{answered:?} came from a pull dialog that is not up")
+            Pressed::Cut(answered) => {
+                panic!("{answered:?} came from a draft dialog that is not up")
             }
             Pressed::Filing(edited) => {
                 panic!("{edited:?} came from a scope field that is not up")
@@ -2369,14 +2369,14 @@ mod gate {
         }
     }
 
-    mod pulling {
+    mod cutting {
         use super::{
-            Composer, INERT, KeyCode, KeyEvent, Modals, Pressed, PullConfirm, PushConfirm,
-            QuitConfirm, RecordPrompt, ScopePrompt, ctrl_c, press, press_for, pull_answer_for,
+            Composer, CutConfirm, INERT, KeyCode, KeyEvent, Modals, Pressed, PushConfirm,
+            QuitConfirm, RecordPrompt, ScopePrompt, ctrl_c, cut_answer_for, press, press_for,
         };
 
-        fn open() -> PullConfirm {
-            PullConfirm::open(
+        fn open() -> CutConfirm {
+            CutConfirm::open(
                 "Cut a planned project into tickets",
                 "planned",
                 9,
@@ -2387,20 +2387,20 @@ mod gate {
 
         // The gate with this window up and every other one down, which is the
         // only way it is ever up in a session.
-        fn asked(key: KeyEvent, pull: &PullConfirm) -> Pressed {
-            asking(key, pull, None, false)
+        fn asked(key: KeyEvent, cut: &CutConfirm) -> Pressed {
+            asking(key, cut, None, false)
         }
 
         fn asking(
             key: KeyEvent,
-            pull: &PullConfirm,
+            cut: &CutConfirm,
             composer: Option<&Composer>,
             answered: bool,
         ) -> Pressed {
             press_for(
                 key,
                 Modals {
-                    pull,
+                    cut,
                     ..Modals::default()
                 }
                 .current(),
@@ -2412,11 +2412,11 @@ mod gate {
 
         // What the dialog itself says about a key, which is what the gate has
         // to hand back for every one of them — and it hands it back as a
-        // variant of its own, so no arm can mistake a pull's answer for a
+        // variant of its own, so no arm can mistake a cut's answer for a
         // push's.
-        fn answered(key: KeyEvent, pull: &PullConfirm) -> Pressed {
-            let cutting = pull.cutting().expect("the dialog under test is up");
-            Pressed::Pull(pull_answer_for(key, cutting.answer()))
+        fn answered(key: KeyEvent, cut: &CutConfirm) -> Pressed {
+            let cutting = cut.cutting().expect("the dialog under test is up");
+            Pressed::Cut(cut_answer_for(key, cutting.answer()))
         }
 
         #[test]
@@ -2424,14 +2424,14 @@ mod gate {
             // The promise over the whole list, as for the push dialog: while
             // the question is up there is no `p` that pacts, no `j` that moves
             // a selection under it and no `r` that starts a refresh.
-            let pull = open();
+            let cut = open();
 
             for code in INERT {
                 let key = press(code);
 
                 assert_eq!(
-                    asked(key, &pull),
-                    answered(key, &pull),
+                    asked(key, &cut),
+                    answered(key, &cut),
                     "{code:?} should have been answered by the dialog"
                 );
             }
@@ -2439,11 +2439,11 @@ mod gate {
 
         #[test]
         fn q_is_the_dialogs_too_so_the_quit_question_cannot_come_up_underneath() {
-            let pull = open();
+            let cut = open();
             let key = press(KeyCode::Char('q'));
 
-            assert_eq!(asked(key, &pull), answered(key, &pull));
-            assert_ne!(asked(key, &pull), Pressed::Confirm(QuitConfirm::open()));
+            assert_eq!(asked(key, &cut), answered(key, &cut));
+            assert_ne!(asked(key, &cut), Pressed::Confirm(QuitConfirm::open()));
         }
 
         #[test]
@@ -2451,25 +2451,25 @@ mod gate {
             // The keystroke of last resort, with this window up as with every
             // other: it leaves with no run started, and stops the turn when one
             // is being answered.
-            let pull = open();
+            let cut = open();
 
-            assert_eq!(asked(ctrl_c(), &pull), Pressed::Leave);
-            assert_eq!(asking(ctrl_c(), &pull, None, true), Pressed::CancelTurn);
+            assert_eq!(asked(ctrl_c(), &cut), Pressed::Leave);
+            assert_eq!(asking(ctrl_c(), &cut, None, true), Pressed::CancelTurn);
         }
 
         #[test]
         fn the_composer_is_not_consulted_while_the_dialog_is_up() {
-            // Which is also why a second `/pull` cannot be typed while this is
+            // Which is also why a second `/draft` cannot be typed while this is
             // up: the field that would take the command is behind the window.
-            let pull = open();
+            let cut = open();
             let draft = Composer::new("web");
 
             for code in [KeyCode::Char('j'), KeyCode::Tab, KeyCode::Enter] {
                 let key = press(code);
 
                 assert_eq!(
-                    asking(key, &pull, Some(&draft), false),
-                    answered(key, &pull),
+                    asking(key, &cut, Some(&draft), false),
+                    answered(key, &cut),
                     "{code:?} reached the draft from behind the dialog"
                 );
             }
@@ -2480,7 +2480,7 @@ mod gate {
             // The precedence, written down: a `/write` turn still out opens the
             // write prompt on no keystroke at all, and a field that came up
             // under this dialog does not get to take the keys off it.
-            let pull = open();
+            let cut = open();
             let scope = ScopePrompt::open("crates/warlock-engine", "data-plane");
             let record = RecordPrompt::open("crates/warlock-engine", "data-plane");
             let write = ScopePrompt::open("Write the brief to", "docs/brief.md");
@@ -2492,7 +2492,7 @@ mod gate {
                     press_for(
                         key,
                         Modals {
-                            pull: &pull,
+                            cut: &cut,
                             scope: &scope,
                             record: &record,
                             write: &write,
@@ -2503,7 +2503,7 @@ mod gate {
                         false,
                         false
                     ),
-                    answered(key, &pull),
+                    answered(key, &cut),
                     "{code:?} was answered by the wrong window"
                 );
             }
@@ -2514,18 +2514,18 @@ mod gate {
             // The other side of the order, and a situation no session is in.
             // Asserted anyway, because which window answers has to be decided
             // somewhere rather than by the order of two `if`s nobody looked at.
-            let pull = open();
+            let cut = open();
 
             assert_eq!(
-                asking(press(KeyCode::Enter), &pull, None, false),
-                answered(press(KeyCode::Enter), &pull)
+                asking(press(KeyCode::Enter), &cut, None, false),
+                answered(press(KeyCode::Enter), &cut)
             );
             assert_eq!(
                 press_for(
                     press(KeyCode::Enter),
                     Modals {
                         quit: QuitConfirm::open(),
-                        pull: &pull,
+                        cut: &cut,
                         ..Modals::default()
                     }
                     .current(),
@@ -2543,7 +2543,7 @@ mod gate {
             // the push dialog is up while a brief is being filed and this one
             // only after a project has been read back. Decided here rather
             // than left to whichever `if` happens to come first.
-            let pull = open();
+            let cut = open();
             let push = PushConfirm::open(
                 "Push a brief to the board",
                 warlock_engine::Destination::new("warlock-team", "Warlock", "warlock", "work"),
@@ -2555,7 +2555,7 @@ mod gate {
                     key,
                     Modals {
                         push: &push,
-                        pull: &pull,
+                        cut: &cut,
                         ..Modals::default()
                     }
                     .current(),
@@ -2575,7 +2575,7 @@ mod gate {
                 let key = press(code);
 
                 assert_eq!(
-                    asked(key, &PullConfirm::Closed),
+                    asked(key, &CutConfirm::Closed),
                     press_for(key, None, None, false, false),
                     "{code:?} was answered by a window that is not up"
                 );
@@ -2583,7 +2583,7 @@ mod gate {
         }
     }
 
-    // The two windows a confirmed pull puts up while it is running: the one a
+    // The two windows a confirmed cut puts up while it is running: the one a
     // slice's drafts wait behind, and the question a skipped slice leaves. Both
     // are states of the run rather than fields of the session, so both are
     // handed to the gate as an `Option` and every round here hands one over.
@@ -2591,7 +2591,7 @@ mod gate {
         use warlock_tui::{Carry, Choice, Review, Reviewed, carry_answer_for, review_answer_for};
 
         use super::{
-            Composer, INERT, KeyCode, KeyEvent, Modals, Pressed, PullConfirm, QuitConfirm, ctrl_c,
+            Composer, CutConfirm, INERT, KeyCode, KeyEvent, Modals, Pressed, QuitConfirm, ctrl_c,
             press, press_for,
         };
 
@@ -2727,7 +2727,7 @@ mod gate {
                 press_for(
                     key,
                     Modals {
-                        pull: &PullConfirm::open("A project", "planned", 9, "Warlock", "work"),
+                        cut: &CutConfirm::open("A project", "planned", 9, "Warlock", "work"),
                         review: Some(&drafts),
                         ..Modals::default()
                     }
@@ -2736,7 +2736,7 @@ mod gate {
                     false,
                     false
                 ),
-                Pressed::Pull(_)
+                Pressed::Cut(_)
             ));
         }
 
@@ -3673,7 +3673,7 @@ mod pointer {
     use ratatui::layout::Size;
     use warlock_engine::NodeState;
     use warlock_tui::{
-        App, Carry, Cell, Composer, Focus, Modal, Modals, PullConfirm, PushConfirm, QuitConfirm,
+        App, Carry, Cell, Composer, CutConfirm, Focus, Modal, Modals, PushConfirm, QuitConfirm,
         Reach, RecordPrompt, Review, Row, ScopePrompt, panel_height, panel_width, tree_height,
     };
 
@@ -4704,12 +4704,12 @@ mod pointer {
     }
 
     #[test]
-    fn the_pull_dialog_swallows_the_gesture_too() {
+    fn the_cut_dialog_swallows_the_gesture_too() {
         // A click that reached the tree from behind a question would select a
         // row the reader cannot see, and a wheel notch would scroll the thread
         // it is drawn over.
         let app = app_talking();
-        let pull = PullConfirm::open(
+        let cut = CutConfirm::open(
             "Cut a planned project into tickets",
             "planned",
             9,
@@ -4728,21 +4728,21 @@ mod pointer {
                     SIZE,
                     &app,
                     Modals {
-                        pull: &pull,
+                        cut: &cut,
                         ..Modals::default()
                     }
                     .current(),
                     None
                 ),
                 None,
-                "{mouse:?} should mean nothing while the pull dialog is up"
+                "{mouse:?} should mean nothing while the draft dialog is up"
             );
         }
     }
 
     #[test]
-    fn the_two_windows_a_running_pull_puts_up_swallow_the_gesture_as_well() {
-        // For the pull dialog's reason: neither has anything
+    fn the_two_windows_a_running_cut_puts_up_swallow_the_gesture_as_well() {
+        // For the cut dialog's reason: neither has anything
         // clickable in it, and a wheel notch that reached the thread behind one
         // would scroll the very titles being answered about out of sight.
         let app = app_talking();
