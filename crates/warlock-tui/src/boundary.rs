@@ -1,28 +1,41 @@
 //! One function over values, because the panel's keys and the headless
 //! subcommands have to refuse the same things for the same reasons and both
 //! used to work it out for themselves. Nothing in here reads the disk, sets a
-//! message, returns an error or knows which door asked.
+//! message, returns an error or knows which door asked. A caller names the
+//! operation it is about to perform and never how far the question reaches,
+//! because a caller choosing its own reach is how an un-pact comes to be asked
+//! only the narrow question.
 //!
 //! The two questions are genuinely different rather than one asked twice.
 //! Whether an operator may act *at* a directory looks up, at the scopes at and
-//! above it; whether an un-pact may proceed looks down, because it drops every
-//! pact in the subtree and a directory that is itself open may sit above
+//! above it; whether an un-pact may proceed looks down as well, because it drops
+//! every pact in the subtree and a directory that is itself open may sit above
 //! boundaries this operator was never entitled to move. Neither answer implies
-//! the other; what *was* duplicated is the order they are asked in. The wording
-//! lives here for the same reason, since the footer calls these functions and
-//! `Error`'s `Display` calls them too.
+//! the other. The wording lives here too, since the footer calls these
+//! functions and `Error`'s `Display` calls them as well.
 
 use std::path::Path;
 
 use warlock_engine::{Manifest, closed_scopes_at_or_below, scope_covering, scope_opens_to};
 
+use crate::descent::Descent;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Reach {
-    // What `p` (pacting), `r`, `s` and the shell's cheap writes ask: none of
-    // them touches a pact anywhere but the one directory named.
-    Here,
-    // What an un-pact asks, in both doors.
-    HereAndBelow,
+pub(crate) enum Operation {
+    Pact,
+    Refresh,
+    Scope,
+    Unpact,
+}
+
+impl From<Descent> for Operation {
+    fn from(descent: Descent) -> Self {
+        match descent {
+            Descent::Pact => Self::Pact,
+            Descent::Refresh => Self::Refresh,
+            Descent::Unpact => Self::Unpact,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -31,8 +44,7 @@ pub(crate) enum Verdict {
     // operator: a pacted directory with no scope above it is open to anyone.
     Open,
     Closed { scope: String },
-    // Only ever answered for `Reach::HereAndBelow`, and only ever to an
-    // un-pact.
+    // Only ever answered to `Operation::Unpact`.
     ClosedBelow { scopes: Vec<String> },
 }
 
@@ -63,12 +75,20 @@ impl Verdict {
 // refusing: it is not a boundary question, it takes a tree rooted outside its
 // own repository to reach, and every caller has a better sentence for it than
 // this one would invent. The engine's own calls refuse it again a moment later.
-pub(crate) fn verdict(
+//
+// The upward question is answered first for every operation, so an operator
+// who may not act here at all is told that rather than handed a list of what is
+// underneath. Only an un-pact goes on to look down: a pact, a refresh and a
+// scope write leave every pact below the directory where they found it, and
+// gating a root refresh on holding every sigil in a monorepo would refuse the
+// ordinary gesture. See
+// `docs/warlock-decision-un-pacting-across-a-descendant-scope.md`.
+pub(crate) fn permits(
+    operation: Operation,
     directory: &Path,
     repo_root: &Path,
     manifest: &Manifest,
     held: &[String],
-    reach: Reach,
 ) -> Verdict {
     let covering = scope_covering(directory, repo_root, manifest)
         .ok()
@@ -85,18 +105,20 @@ pub(crate) fn verdict(
         };
     }
 
-    if reach == Reach::Here {
-        return Verdict::Open;
-    }
-
-    let Ok(blocking) = closed_scopes_at_or_below(directory, repo_root, manifest, held) else {
-        return Verdict::Open;
-    };
-    if blocking.is_empty() {
-        return Verdict::Open;
-    }
-    Verdict::ClosedBelow {
-        scopes: blocking.into_iter().map(str::to_owned).collect(),
+    match operation {
+        Operation::Pact | Operation::Refresh | Operation::Scope => Verdict::Open,
+        Operation::Unpact => {
+            let Ok(blocking) = closed_scopes_at_or_below(directory, repo_root, manifest, held)
+            else {
+                return Verdict::Open;
+            };
+            if blocking.is_empty() {
+                return Verdict::Open;
+            }
+            Verdict::ClosedBelow {
+                scopes: blocking.into_iter().map(str::to_owned).collect(),
+            }
+        }
     }
 }
 

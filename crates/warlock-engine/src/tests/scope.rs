@@ -1,8 +1,8 @@
 use super::{
-    MAXIMUM_CHARACTERS, RULES, Rule, at_or_above, is_scope_character, scope_covering,
-    scope_opens_to, validate_scope, validate_sigil,
+    MAXIMUM_CHARACTERS, RULES, Rule, at_or_above, closed_scopes_at_or_below, is_scope_character,
+    scope_covering, scope_opens_to, validate_scope, validate_sigil,
 };
-use crate::{Manifest, PactEntry};
+use crate::{Manifest, PactEntry, manifest, unpact_subtree};
 
 fn entry(module: &str) -> PactEntry {
     PactEntry::new(".", module, format!("{module}/WARLOCK.md"))
@@ -478,4 +478,168 @@ fn coverage_and_opening_compose_into_the_whole_question() {
         scope_opens_to(covering("docs"), &sigils),
         "nothing at or above `docs` carries a scope"
     );
+}
+
+fn scoped(modules: &[(&str, Option<&str>)]) -> Manifest {
+    Manifest::with_entries(modules.iter().map(|(module, scope)| {
+        let entry = PactEntry::new(".", module, format!("{module}/WARLOCK.md"))
+            .expect("a relative path inside the root is storable");
+        match scope {
+            Some(scope) => entry.with_scope(*scope),
+            None => entry,
+        }
+    }))
+}
+
+#[test]
+fn a_scoped_descendant_this_machine_does_not_open_blocks() {
+    // The case the whole question is about: the target says nothing, so
+    // coverage on the target alone answers "open", and the boundary is one
+    // directory down.
+    let manifest = scoped(&[
+        ("crates", None),
+        ("crates/engine", Some("data-plane")),
+        ("crates/tui", None),
+    ]);
+
+    assert_eq!(
+        closed_scopes_at_or_below("crates", ".", &manifest, &held(&["web"]))
+            .expect("a path inside the root"),
+        ["data-plane"],
+    );
+    // And the entry carrying it is exactly one an un-pact would drop.
+    assert!(
+        unpact_subtree("crates", ".", &manifest)
+            .expect("un-pacts")
+            .entry("crates/engine")
+            .is_none(),
+    );
+}
+
+#[test]
+fn a_scoped_descendant_this_machine_opens_does_not_block() {
+    let manifest = scoped(&[("crates", None), ("crates/engine", Some("data-plane"))]);
+
+    for sigils in [
+        held(&["data-plane"]),
+        held(&["web", "data-plane"]),
+        held(&["*"]),
+    ] {
+        assert!(
+            closed_scopes_at_or_below("crates", ".", &manifest, &sigils)
+                .expect("a path inside the root")
+                .is_empty(),
+            "{sigils:?} opens it",
+        );
+    }
+}
+
+#[test]
+fn the_target_s_own_scope_is_asked_about_too_and_does_not_license_what_is_below() {
+    let manifest = scoped(&[
+        ("crates", Some("platform")),
+        ("crates/engine", Some("data-plane")),
+    ]);
+
+    // Holding the target's own scope is not permission over the boundary
+    // inside it: these are two questions, not one.
+    assert_eq!(
+        closed_scopes_at_or_below("crates", ".", &manifest, &held(&["platform"]))
+            .expect("a path inside the root"),
+        ["data-plane"],
+    );
+    // "At or below" is at, too: the target's own closed scope is blocking.
+    assert_eq!(
+        closed_scopes_at_or_below("crates", ".", &manifest, &held(&["data-plane"]))
+            .expect("a path inside the root"),
+        ["platform"],
+    );
+}
+
+#[test]
+fn an_unscoped_root_buys_nothing_over_the_scopes_below_it() {
+    // `unpact .` drops every entry there is, so it is asked about every
+    // entry there is — the root's silence is the absence of a statement,
+    // not permission over the statements under it.
+    let manifest = scoped(&[
+        (".", None),
+        ("crates/engine", Some("data-plane")),
+        ("docs", None),
+    ]);
+
+    for directory in [".", "/repo"] {
+        assert_eq!(
+            closed_scopes_at_or_below(directory, "/repo", &manifest, &held(&["web"]))
+                .expect("a path inside the root"),
+            ["data-plane"],
+            "{directory}",
+        );
+    }
+    // Nothing scoped below, or all of it held, and the root un-pact is the
+    // ordinary one it has always been.
+    assert!(
+        closed_scopes_at_or_below(".", "/repo", &manifest, &held(&["data-plane"]))
+            .expect("a path inside the root")
+            .is_empty(),
+    );
+    assert!(
+        closed_scopes_at_or_below(".", "/repo", &scoped(&[(".", None), ("crates", None)]), &[])
+            .expect("a path inside the root")
+            .is_empty(),
+    );
+}
+
+#[test]
+fn a_sibling_that_shares_a_prefix_carries_no_blocking_scope() {
+    // The same segment-wise match `unpact_subtree` uses: what is not
+    // dropped cannot block.
+    let manifest = scoped(&[
+        ("crates/engine", None),
+        ("crates/engine-tools", Some("tooling")),
+        ("crates/engineering", Some("estimates")),
+    ]);
+
+    assert!(
+        closed_scopes_at_or_below("crates/engine", ".", &manifest, &[])
+            .expect("a path inside the root")
+            .is_empty(),
+    );
+    assert_eq!(
+        closed_scopes_at_or_below("crates/engine-tools", ".", &manifest, &[])
+            .expect("a path inside the root"),
+        ["tooling"],
+    );
+}
+
+#[test]
+fn a_descendant_scope_that_is_not_a_scope_does_not_block() {
+    // Read as no scope, exactly as `scope_covering` reads it: one rule for
+    // what a boundary is, not two. A valid one beside it still blocks, and
+    // the string that is not a scope is not named in the answer.
+    let manifest = scoped(&[
+        ("crates", None),
+        ("crates/engine", Some("Data Plane!")),
+        ("crates/tui", Some("")),
+        ("crates/store", Some("data-plane")),
+    ]);
+
+    assert_eq!(
+        closed_scopes_at_or_below("crates", ".", &manifest, &[]).expect("a path inside the root"),
+        ["data-plane"],
+    );
+    assert!(
+        closed_scopes_at_or_below("crates/engine", ".", &manifest, &[])
+            .expect("a path inside the root")
+            .is_empty(),
+    );
+}
+
+#[test]
+fn a_path_with_no_manifest_relative_form_is_the_same_error_an_un_pact_gives() {
+    let manifest = scoped(&[("crates/engine", Some("data-plane"))]);
+
+    assert!(matches!(
+        closed_scopes_at_or_below("/elsewhere/crates", "/repo", &manifest, &[]),
+        Err(manifest::Error::PathOutsideRoot { .. })
+    ));
 }

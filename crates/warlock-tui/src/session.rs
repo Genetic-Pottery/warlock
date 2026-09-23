@@ -9,21 +9,20 @@
 //! config that will not parse is a state on the header rather than a reason not
 //! to draw a tree.
 //!
-//! [`closed_scope`] is the one place the boundary question is asked, by all
-//! three keys that can be refused over it, so a pact, a refresh and a scope
-//! write are turned down on the same grounds in the same words.
+//! [`closed_scope`] is where every key that can be refused over a boundary
+//! asks it, so a pact, an un-pact, a refresh and a scope write are turned down
+//! on the same grounds in the same words.
 
 use std::env;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use warlock_engine::{
-    Loaded, Manifest, Tree, load_sigils, load_tree, manifest_path, repository_root, sigils,
-    unpact_ignored,
+    Loaded, Manifest, Tree, held_sigils, load_tree, manifest_path, repository_root, unpact_ignored,
 };
 use warlock_tui::{App, Chrome, Sigils, Watch, WatchPolicy, Watching, reseat_on};
 
-use crate::boundary::{Reach, Verdict, closed_scope_message, verdict};
+use crate::boundary::{Operation, permits};
 use crate::error::{Error, one_line};
 use crate::standing::Standing;
 
@@ -275,19 +274,9 @@ pub(crate) fn start_watching(app: &mut App, scope: &Scope, tree: &Tree) -> Watch
     watched
 }
 
-// The one place the boundary question is asked, so `p`, `r` and `s` are refused
-// on the same grounds in the same words. `Some` means refused, and the sentence
-// is already on the app's message line by the time it returns.
-//
-// `scope_covering` walks *up*, so what this answers is whether the operator may
-// act at the selected row — never what the act would reach below it. Un-pacting
-// reaches the whole subtree and takes the scopes on it, so it is refused by a
-// second, downward question, asked in `pacting.rs` and by `warlock unpact` in
-// `edits.rs`. This function is deliberately not widened to cover that: it is
-// `r`'s and `s`'s too, a pact and a refresh provably leave every scope where they
-// found it, and gating a root refresh on holding every sigil in a monorepo would
-// refuse the ordinary gesture. See
-// `docs/warlock-decision-un-pacting-across-a-descendant-scope.md`.
+// `true` means refused, and the sentence is already on the app's message line
+// by the time it returns. The decision is [`permits`]'s; this is the panel's
+// half of what to do about it.
 //
 // A file row passes through as open even though coverage would happily answer for
 // one: `p`, `r` and `s` all refuse a file on better grounds, and those refusals
@@ -295,29 +284,26 @@ pub(crate) fn start_watching(app: &mut App, scope: &Scope, tree: &Tree) -> Watch
 // boundary nobody could have drawn is not a boundary somebody is crossing.
 pub(crate) fn closed_scope(
     app: &mut App,
+    operation: Operation,
     manifest: &Manifest,
     repo_root: &Path,
     sigils: &Sigils,
-) -> Option<String> {
-    let row = app.selected_row()?;
+) -> bool {
+    let Some(row) = app.selected_row() else {
+        return false;
+    };
     if row.is_file() {
-        return None;
+        return false;
     }
 
-    // The whole of the decision is [`verdict`]'s, and this is the panel's half
-    // of what to do about it: put the sentence on the footer and hand the scope
-    // back to the key that asked. The shell renders the same verdict as an
-    // `Error` and neither of them works the answer out for itself.
     let path = row.path.clone();
-    let Verdict::Closed { scope } =
-        verdict(&path, repo_root, manifest, sigils.as_slice(), Reach::Here)
-    else {
-        return None;
-    };
-
+    let verdict = permits(operation, &path, repo_root, manifest, sigils.as_slice());
     let label = app.label_for(&path);
-    app.set_message(closed_scope_message(&label, &scope));
-    Some(scope)
+    let Some(line) = verdict.message(&label) else {
+        return false;
+    };
+    app.set_message(line);
+    true
 }
 
 // Read once, from `load_app`, before the loop starts. A sigil is written by
@@ -342,18 +328,16 @@ fn sigils_held(home: Option<&Path>, repo_root: &Path) -> Sigils {
 // a machine holds is a line on a header, and warlock is a way of reading a tree.
 // A config that will not parse becomes `Sigils::Unknown` — said out loud, so that
 // broken is never drawn as absent — and nothing here can return upwards to end
-// the event loop.
+// the event loop. Filing and routing read the same file through the same
+// `held_sigils` and refuse instead; the difference is theirs to keep.
 //
-// Shared with `warlock check`, which asks the same question with nothing on
-// screen: a second reading of these three cases elsewhere would be a second
-// answer waiting to disagree with the header. It takes `home` rather than looking
-// one up, which is what keeps every test off the developer's own.
+// Shared with `warlock check` and the headless writes, which ask the same
+// question with nothing on screen: a second reading of these cases elsewhere
+// would be a second answer waiting to disagree with the header. It takes `home`
+// rather than looking one up, which is what keeps every test off the
+// developer's own.
 pub(crate) fn sigils_under(home: &Path, repo_root: &Path) -> Sigils {
-    match load_sigils(home, repo_root) {
-        Ok(sigils) => Sigils::held(sigils),
-        Err(sigils::Error::NotFound { .. }) => Sigils::Nothing,
-        Err(_) => Sigils::Unknown,
-    }
+    held_sigils(home, repo_root).map_or(Sigils::Unknown, Sigils::held)
 }
 
 // The loop holds two paths rather than a `Standing`, so this is the one line

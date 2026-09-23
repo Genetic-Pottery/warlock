@@ -11,14 +11,17 @@
 //! flight was told to stop.
 
 use std::collections::VecDeque;
-use std::sync::{Arc, Condvar, Mutex};
+use std::fmt;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 
-use serde_json::{Value, json};
 use warlock_engine::{Agent, agent, drafting, stub_answer};
-use warlock_tui::{Activities, Cancel, Converses, LinearError, Posts, Wired};
+use warlock_tui::{
+    Activities, Board, Cancel, Converses, FetchedProject, LinearError, LinearIssue, LinearProject,
+    NewIssue, NewProject, Opens, Wired,
+};
 
 use crate::clipboard::Clip;
-use crate::pushing::Opens;
 
 // A clipboard nothing on the machine has to provide. The refusal is kept as the
 // description rather than as an `arboard::Error`, because that type is not
@@ -147,10 +150,8 @@ impl Answering {
 /// and wires its agent to it, so a test that wants to know whether quitting
 /// reached the turn in flight has nowhere else to look.
 ///
-/// `Arc<Mutex<_>>` rather than the `Rc<RefCell<_>>` a subcommand's stand-in
-/// uses, for the difference this path has: a slice's turn runs on a worker
-/// thread, so a model that could not cross one would not stand in for the thing
-/// being tested.
+/// `Arc<Mutex<_>>` because a slice's turn runs on a worker thread, so a model
+/// that could not cross one would not stand in for the thing being tested.
 #[derive(Debug, Clone)]
 pub(crate) struct Scripted {
     answers: Arc<Mutex<VecDeque<Answering>>>,
@@ -243,37 +244,245 @@ impl Converses for Scripted {
     }
 }
 
-/// A Linear that answers the four requests a push makes out of memory, and the
-/// seam it arrives through: a `Boarding` is its own [`Opens::Client`], so a test
-/// keeps a handle on the very client the session opened and can read afterwards
-/// what was asked of it.
+/// A board that answers every operation out of memory, and the seam it arrives
+/// through: a `Boarding` is its own [`Opens::Board`], so a test keeps a handle on
+/// the very board a flow opened and reads afterwards what was asked of it.
 ///
-/// `Arc<Mutex<_>>` and not the `Rc<RefCell<_>>` of `tests/push.rs`'s stand-in,
-/// for the difference this path has: the panel's push runs on a worker thread,
-/// so a client that could not cross one would not be a stand-in for the thing
-/// being tested.
+/// One stand-in for every flow rather than one per test file: a push, a pull's
+/// fetch and a cut are one conversation with one workspace, and the panel's
+/// session opens all three through a single type parameter.
 ///
-/// The key it is opened with is taken and dropped, never stored. A stand-in
-/// holding it would put it back into a `Debug` rendering, which is the one thing
-/// every test on this path asserts is nowhere.
-#[derive(Debug, Clone)]
+/// `Arc<Mutex<_>>` rather than `Rc<RefCell<_>>`: the panel's push and pull run
+/// on worker threads, so a board that could not cross one would not stand in
+/// for the thing being tested.
+///
+/// `Debug` is written by hand because the keys it was opened with are kept, and
+/// a derived rendering would put them back into the `Debug` output every test on
+/// this path asserts carries no key.
+#[derive(Clone)]
 pub(crate) struct Boarding {
-    asked: Arc<Mutex<Vec<String>>>,
-    url: String,
-    refusing: Option<String>,
+    log: Arc<Mutex<Log>>,
+    team: Option<String>,
+    status: Option<String>,
+    state: Option<String>,
+    label: String,
+    project: Option<FetchedProject>,
+    created: LinearProject,
+    first_issue: u32,
+    refusals: Vec<Refusal>,
+    refusing_everything: Option<String>,
+    watching: Option<PathBuf>,
+    unopened: bool,
+    unreachable: bool,
     held: Option<Arc<Gate>>,
 }
 
+#[derive(Debug, Default)]
+struct Log {
+    calls: Vec<Call>,
+    recorded: Vec<bool>,
+    keys: Vec<String>,
+    issued: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Call {
+    Team(String),
+    BacklogStatus,
+    BacklogState(String),
+    IssueLabel { name: String, team: String },
+    FetchProject(String),
+    CreateProject(ProjectAsked),
+    CreateIssue(IssueAsked),
+    Relation { blocker: String, waiting: String },
+    Comment { project: String, body: String },
+}
+
+impl Call {
+    pub(crate) const fn op(&self) -> Op {
+        match self {
+            Self::Team(_) => Op::Team,
+            Self::BacklogStatus => Op::BacklogStatus,
+            Self::BacklogState(_) => Op::BacklogState,
+            Self::IssueLabel { .. } => Op::IssueLabel,
+            Self::FetchProject(_) => Op::FetchProject,
+            Self::CreateProject(_) => Op::CreateProject,
+            Self::CreateIssue(_) => Op::CreateIssue,
+            Self::Relation { .. } => Op::Relation,
+            Self::Comment { .. } => Op::Comment,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Op {
+    Team,
+    BacklogStatus,
+    BacklogState,
+    IssueLabel,
+    FetchProject,
+    CreateProject,
+    CreateIssue,
+    Relation,
+    Comment,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ProjectAsked {
+    pub(crate) name: String,
+    pub(crate) content: String,
+    pub(crate) team: String,
+    pub(crate) status: Option<String>,
+    pub(crate) label: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct IssueAsked {
+    pub(crate) title: String,
+    pub(crate) body: String,
+    pub(crate) team: String,
+    pub(crate) project: String,
+    pub(crate) label: String,
+    pub(crate) state: String,
+}
+
+// Which calls of one operation are turned down, counted from the first call of
+// that operation: `until` of `None` is every call from `from` on.
+#[derive(Debug, Clone)]
+struct Refusal {
+    op: Op,
+    from: usize,
+    until: Option<usize>,
+    message: String,
+}
+
 impl Boarding {
-    /// A workspace that has the team, the backlog status and the label already,
-    /// and creates the project at `url`.
+    /// A workspace that has the team, both `Backlog`s and the label already,
+    /// creates the project at `url`, numbers issues from 1, and holds no project
+    /// to read back.
     pub(crate) fn filing(url: impl Into<String>) -> Self {
         Self {
-            asked: Arc::new(Mutex::new(Vec::new())),
-            url: url.into(),
-            refusing: None,
+            log: Arc::new(Mutex::new(Log::default())),
+            team: Some("team-1".to_owned()),
+            status: Some("status-backlog".to_owned()),
+            state: Some("state-backlog".to_owned()),
+            label: "label-held".to_owned(),
+            project: None,
+            created: LinearProject::new("project-filed", url),
+            first_issue: 1,
+            refusals: Vec::new(),
+            refusing_everything: None,
+            watching: None,
+            unopened: false,
+            unreachable: false,
             held: None,
         }
+    }
+
+    /// A workspace holding one project, under that name, in that status, with
+    /// that description — which is where the scope block a pull parses lives.
+    pub(crate) fn holding(
+        name: impl Into<String>,
+        status: Option<&str>,
+        content: impl Into<String>,
+    ) -> Self {
+        Self::filing("").reading(FetchedProject::new(
+            name,
+            content,
+            "https://linear.app/acme/project/pulled-1a2b3c",
+            status,
+        ))
+    }
+
+    /// Linear's own words for a request it understood and would not do, on
+    /// whichever operation comes first: the failure the panel has to survive.
+    pub(crate) fn refusing(message: impl Into<String>) -> Self {
+        Self {
+            refusing_everything: Some(message.into()),
+            ..Self::filing("")
+        }
+    }
+
+    /// A board no call may reach: being asked anything at all is the failure a
+    /// test holding one is about, so it panics rather than recording a flag.
+    pub(crate) fn unreachable() -> Self {
+        Self {
+            unreachable: true,
+            ..Self::filing("")
+        }
+    }
+
+    /// The same, one step earlier: the key being read and a board being opened
+    /// at all is the failure.
+    pub(crate) fn unopened() -> Self {
+        Self {
+            unopened: true,
+            ..Self::unreachable()
+        }
+    }
+
+    pub(crate) fn reading(mut self, project: FetchedProject) -> Self {
+        self.project = Some(project);
+        self
+    }
+
+    pub(crate) fn creating_project(mut self, id: &str, url: &str) -> Self {
+        self.created = LinearProject::new(id, url);
+        self
+    }
+
+    pub(crate) fn without_team(mut self) -> Self {
+        self.team = None;
+        self
+    }
+
+    pub(crate) fn without_backlog_state(mut self) -> Self {
+        self.state = None;
+        self
+    }
+
+    pub(crate) fn labelled(mut self, id: &str) -> Self {
+        id.clone_into(&mut self.label);
+        self
+    }
+
+    /// Issues are numbered as they are created — `issue-N`, `WAR-N` — so the
+    /// identifiers a test reads back are this workspace's own answers in the
+    /// order it gave them.
+    pub(crate) const fn numbering_from(mut self, first: u32) -> Self {
+        self.first_issue = first;
+        self
+    }
+
+    pub(crate) fn refuse(self, op: Op, message: &str) -> Self {
+        self.refusal(op, 0, None, message)
+    }
+
+    /// Every call of `op` from the `from`th on (counting from nothing) turned
+    /// down: what a run that dies partway is built out of.
+    pub(crate) fn refuse_from(self, op: Op, from: usize, message: &str) -> Self {
+        self.refusal(op, from, None, message)
+    }
+
+    pub(crate) fn refuse_at(self, op: Op, at: usize, message: &str) -> Self {
+        self.refusal(op, at, Some(at + 1), message)
+    }
+
+    fn refusal(mut self, op: Op, from: usize, until: Option<usize>, message: &str) -> Self {
+        self.refusals.push(Refusal {
+            op,
+            from,
+            until,
+            message: message.to_owned(),
+        });
+        self
+    }
+
+    /// Whether `path` exists is noted at every call, which is how a test says
+    /// that a record was written after the requests rather than before one.
+    pub(crate) fn watching(mut self, path: PathBuf) -> Self {
+        self.watching = Some(path);
+        self
     }
 
     /// The same workspace, answering nothing until the gate is opened: what a
@@ -283,311 +492,225 @@ impl Boarding {
         self
     }
 
-    /// Linear's own words for a request it understood and would not do, on
-    /// whichever request comes first: the failure the panel has to survive.
-    pub(crate) fn refusing(message: impl Into<String>) -> Self {
-        Self {
-            refusing: Some(message.into()),
-            ..Self::filing("")
-        }
+    pub(crate) fn calls(&self) -> Vec<Call> {
+        self.log().calls.clone()
     }
 
-    /// How many requests reached the workspace, which is how a test says that a
-    /// second `/push` sent nothing: one push is four.
+    pub(crate) fn ops(&self) -> Vec<Op> {
+        self.log().calls.iter().map(Call::op).collect()
+    }
+
+    /// How many calls reached the workspace, which is how a test says that a
+    /// refusal or a second press sent nothing.
     pub(crate) fn requests(&self) -> usize {
-        self.asked
-            .lock()
-            .expect("no test panics holding this")
-            .len()
+        self.log().calls.len()
+    }
+
+    /// Where in the whole conversation each call of `op` was asked, so an
+    /// ordering promise is an assertion about positions.
+    pub(crate) fn positions_of(&self, op: Op) -> Vec<usize> {
+        self.log()
+            .calls
+            .iter()
+            .enumerate()
+            .filter(|(_, call)| call.op() == op)
+            .map(|(at, _)| at)
+            .collect()
+    }
+
+    pub(crate) fn projects_created(&self) -> Vec<ProjectAsked> {
+        self.log()
+            .calls
+            .iter()
+            .filter_map(|call| match call {
+                Call::CreateProject(asked) => Some(asked.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    pub(crate) fn issues_created(&self) -> Vec<IssueAsked> {
+        self.log()
+            .calls
+            .iter()
+            .filter_map(|call| match call {
+                Call::CreateIssue(asked) => Some(asked.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Every edge asked for, blocker first.
+    pub(crate) fn relations(&self) -> Vec<(String, String)> {
+        self.log()
+            .calls
+            .iter()
+            .filter_map(|call| match call {
+                Call::Relation { blocker, waiting } => Some((blocker.clone(), waiting.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Every project comment asked for, as the project id and the body.
+    pub(crate) fn comments(&self) -> Vec<(String, String)> {
+        self.log()
+            .calls
+            .iter()
+            .filter_map(|call| match call {
+                Call::Comment { project, body } => Some((project.clone(), body.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Whether the watched path existed at each call, in the order of the calls.
+    pub(crate) fn recorded_when_asked(&self) -> Vec<bool> {
+        self.log().recorded.clone()
+    }
+
+    /// Every key this board was opened with, which is how a test says the value
+    /// out of the key store reached the one line that reads it.
+    pub(crate) fn opened_with(&self) -> Vec<String> {
+        self.log().keys.clone()
+    }
+
+    fn log(&self) -> MutexGuard<'_, Log> {
+        self.log.lock().expect("no test panics holding this")
+    }
+
+    fn ask(&self, call: Call) -> Result<(), LinearError> {
+        assert!(!self.unreachable, "a request was sent: {call:?}");
+        let op = call.op();
+        let index = {
+            let mut log = self.log();
+            let index = log.calls.iter().filter(|asked| asked.op() == op).count();
+            let recorded = self.watching.as_deref().is_some_and(Path::exists);
+            log.recorded.push(recorded);
+            log.calls.push(call);
+            index
+        };
+        if let Some(gate) = &self.held {
+            gate.wait();
+        }
+
+        let refused = self.refusing_everything.as_ref().or_else(|| {
+            self.refusals
+                .iter()
+                .find(|refusal| {
+                    refusal.op == op
+                        && index >= refusal.from
+                        && refusal.until.is_none_or(|until| index < until)
+                })
+                .map(|refusal| &refusal.message)
+        });
+        match refused {
+            Some(message) => Err(LinearError::Refused {
+                message: message.clone(),
+            }),
+            None => Ok(()),
+        }
+    }
+}
+
+impl fmt::Debug for Boarding {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Boarding")
+            .field("requests", &self.requests())
+            .finish_non_exhaustive()
     }
 }
 
 impl Opens for Boarding {
-    type Client = Self;
+    type Board = Self;
 
-    fn open(&self, _key: &str) -> Self {
+    fn open(&self, key: &str) -> Self {
+        assert!(!self.unopened, "the key was read and a board was opened");
+        self.log().keys.push(key.to_owned());
         self.clone()
     }
 }
 
-impl Posts for Boarding {
-    fn post(&self, document: &str, _variables: Value) -> Result<Value, LinearError> {
-        self.asked
-            .lock()
-            .expect("no test panics holding this")
-            .push(document.to_owned());
-        if let Some(gate) = &self.held {
-            gate.wait();
-        }
-
-        if let Some(message) = &self.refusing {
-            return Err(LinearError::Refused {
-                message: message.clone(),
-            });
-        }
-        Ok(answered(document, &self.url))
-    }
-}
-
-// The `data` object of each answer, by the operation that asked for it: the
-// client unwraps `data` before its callers see it, so this is the shape they
-// read. A document this does not know is a fifth request nobody meant to send.
-fn answered(document: &str, url: &str) -> Value {
-    if document.contains("teams(") {
-        json!({ "teams": { "nodes": [{ "id": "team-held" }] } })
-    } else if document.contains("projectStatuses") {
-        json!({ "projectStatuses": { "nodes": [{ "id": "status-backlog", "name": "Backlog" }] } })
-    } else if document.contains("projectLabels(") {
-        json!({ "projectLabels": { "nodes": [{ "id": "label-held" }] } })
-    } else if document.contains("projectCreate(") {
-        json!({ "projectCreate": { "project": { "id": "project-filed", "url": url } } })
-    } else {
-        panic!("a push asked for something no workspace was given: {document}");
-    }
-}
-
-/// The other direction over the same seam: a Linear that answers the one
-/// request a `/pull` makes — `project(id:)` — out of memory, and is its own
-/// [`Opens::Client`] for [`Boarding`]'s reason.
-///
-/// A sibling rather than a fifth arm on `answered` above, because the two are
-/// stand-ins for two different conversations: a push's workspace has a team, a
-/// status and a label and creates something, a pull's has one project and is
-/// only read. Folding them into one value would make every test set fields the
-/// path it drives never looks at.
-#[derive(Debug, Clone)]
-pub(crate) struct Reading {
-    asked: Arc<Mutex<Vec<String>>>,
-    name: String,
-    // `None` is a project sitting in no status at all, which is a workspace
-    // whose board has none rather than a broken answer — so the gate has to be
-    // able to say it, and a test has to be able to make it.
-    status: Option<String>,
-    content: String,
-    held: Option<Arc<Gate>>,
-}
-
-impl Reading {
-    /// A workspace holding one project, under that name, in that status, with
-    /// that description — which is where the scope block a pull parses lives.
-    pub(crate) fn holding(
-        name: impl Into<String>,
-        status: Option<&str>,
-        content: impl Into<String>,
-    ) -> Self {
-        Self {
-            asked: Arc::new(Mutex::new(Vec::new())),
-            name: name.into(),
-            status: status.map(ToOwned::to_owned),
-            content: content.into(),
-            held: None,
-        }
+impl Board for Boarding {
+    fn team_id(&self, key: &str) -> Result<Option<String>, LinearError> {
+        self.ask(Call::Team(key.to_owned()))?;
+        Ok(self.team.clone())
     }
 
-    /// The same workspace, answering nothing until the gate is opened: a slow
-    /// request, without a clock.
-    pub(crate) fn held_at(mut self, gate: &Arc<Gate>) -> Self {
-        self.held = Some(Arc::clone(gate));
-        self
+    fn backlog_status(&self) -> Result<Option<String>, LinearError> {
+        self.ask(Call::BacklogStatus)?;
+        Ok(self.status.clone())
     }
 
-    /// How many requests reached the workspace, which is how a test says that a
-    /// refusal read nothing: one pull is one request.
-    pub(crate) fn requests(&self) -> usize {
-        self.asked
-            .lock()
-            .expect("no test panics holding this")
-            .len()
-    }
-}
-
-impl Opens for Reading {
-    type Client = Self;
-
-    fn open(&self, _key: &str) -> Self {
-        self.clone()
-    }
-}
-
-impl Posts for Reading {
-    fn post(&self, document: &str, _variables: Value) -> Result<Value, LinearError> {
-        self.asked
-            .lock()
-            .expect("no test panics holding this")
-            .push(document.to_owned());
-        if let Some(gate) = &self.held {
-            gate.wait();
-        }
-
-        assert!(
-            document.contains("project(id:"),
-            "a pull asked for something no workspace was given: {document}"
-        );
-        Ok(json!({
-            "project": {
-                "name": self.name,
-                "content": self.content,
-                "url": "https://linear.app/acme/project/pulled-1a2b3c",
-                "status": self.status.as_ref().map(|status| json!({ "name": status })),
-            }
-        }))
-    }
-}
-
-/// The whole of a pull's conversation with a board: the one request the fetch
-/// makes, answered by the [`Reading`] this wraps, and then the requests a create
-/// sends for one slice's drafts.
-///
-/// A wrapper rather than a fourth stand-in with a project of its own, because a
-/// run reads and writes over one seam: the client the fetch was made with and
-/// the one the filing worker builds are both this value, and a second value
-/// holding the same project would be two opinions about one workspace.
-///
-/// Every document is kept whether it was answered or refused, which is how a
-/// test says what a run sent — and, more to the point, what it did not: nothing
-/// a pull may do moves a project's status, and the way to check that is to read
-/// the list.
-#[derive(Debug, Clone)]
-pub(crate) struct Filling {
-    reading: Reading,
-    asked: Arc<Mutex<Vec<String>>>,
-    // Issues are numbered as they are created, so the identifiers a test reads
-    // off the thread are this workspace's own answers in the order it gave them.
-    filed: Arc<Mutex<u32>>,
-    trouble: Option<Trouble>,
-}
-
-/// What this workspace is to go wrong about: the two failures a create has to
-/// survive, and they fail at opposite ends of it.
-///
-/// An edge turned down leaves every issue standing, so what is at stake is
-/// whether the refusal is reported beside the identifiers. A team with nowhere
-/// to put an issue is refused before anything exists at all, so what is at stake
-/// is whether the run carries on.
-#[derive(Debug, Clone)]
-enum Trouble {
-    Relations(String),
-    NoTeam,
-}
-
-impl Filling {
-    /// A workspace that answers everything a create asks for: the team, its
-    /// `Backlog` state, the label, an issue per draft and every edge between
-    /// them.
-    pub(crate) fn over(reading: Reading) -> Self {
-        Self {
-            reading,
-            asked: Arc::new(Mutex::new(Vec::new())),
-            filed: Arc::new(Mutex::new(0)),
-            trouble: None,
-        }
+    fn backlog_state(&self, team: &str) -> Result<Option<String>, LinearError> {
+        self.ask(Call::BacklogState(team.to_owned()))?;
+        Ok(self.state.clone())
     }
 
-    /// The same workspace, turning every edge down in Linear's own words while
-    /// the issues themselves are created.
-    pub(crate) fn refusing_relations(reading: Reading, message: impl Into<String>) -> Self {
-        Self {
-            trouble: Some(Trouble::Relations(message.into())),
-            ..Self::over(reading)
-        }
+    fn issue_label_id(&self, name: &str, team: &str) -> Result<String, LinearError> {
+        self.ask(Call::IssueLabel {
+            name: name.to_owned(),
+            team: team.to_owned(),
+        })?;
+        Ok(self.label.clone())
     }
 
-    /// A workspace with no team by the key the scope record names, which is a
-    /// create refused while the slice is still nothing on the board.
-    pub(crate) fn without_the_team(reading: Reading) -> Self {
-        Self {
-            trouble: Some(Trouble::NoTeam),
-            ..Self::over(reading)
-        }
+    fn fetch_project(&self, id: &str) -> Result<Option<FetchedProject>, LinearError> {
+        self.ask(Call::FetchProject(id.to_owned()))?;
+        Ok(self.project.clone())
     }
 
-    /// Every document this workspace was asked, in the order it was asked.
-    pub(crate) fn documents(&self) -> Vec<String> {
-        self.asked
-            .lock()
-            .expect("no test panics holding this")
-            .clone()
+    fn create_project(&self, project: &NewProject<'_>) -> Result<LinearProject, LinearError> {
+        self.ask(Call::CreateProject(ProjectAsked {
+            name: project.name().to_owned(),
+            content: project.content().to_owned(),
+            team: project.team().to_owned(),
+            status: project.status().map(ToOwned::to_owned),
+            label: project.label().to_owned(),
+        }))?;
+        Ok(self.created.clone())
     }
 
-    pub(crate) fn requests(&self) -> usize {
-        self.asked
-            .lock()
-            .expect("no test panics holding this")
-            .len()
+    fn create_issue(&self, issue: &NewIssue<'_>) -> Result<LinearIssue, LinearError> {
+        self.ask(Call::CreateIssue(IssueAsked {
+            title: issue.title().to_owned(),
+            body: issue.body().to_owned(),
+            team: issue.team().to_owned(),
+            project: issue.project().to_owned(),
+            label: issue.label().to_owned(),
+            state: issue.state().to_owned(),
+        }))?;
+        let number = {
+            let mut log = self.log();
+            let number = self.first_issue + log.issued;
+            log.issued += 1;
+            number
+        };
+        Ok(LinearIssue::new(
+            format!("issue-{number}"),
+            format!("WAR-{number}"),
+            format!("https://linear.app/acme/issue/WAR-{number}"),
+        ))
     }
 
-    // The next identifier, which is what a cut record keeps of an issue and so
-    // what the thread reports.
-    fn next_issue(&self) -> Value {
-        let mut filed = self.filed.lock().expect("no test panics holding this");
-        *filed += 1;
-        let number = *filed;
-
-        json!({
-            "issueCreate": {
-                "issue": {
-                    "id": format!("issue-{number}"),
-                    "identifier": format!("WAR-{number}"),
-                    "url": format!("https://linear.app/acme/issue/WAR-{number}"),
-                },
-            },
-        })
+    fn create_relation(&self, blocker: &str, waiting: &str) -> Result<String, LinearError> {
+        self.ask(Call::Relation {
+            blocker: blocker.to_owned(),
+            waiting: waiting.to_owned(),
+        })?;
+        Ok(format!(
+            "relation-{}",
+            self.positions_of(Op::Relation).len()
+        ))
     }
-}
 
-impl Opens for Filling {
-    type Client = Self;
-
-    fn open(&self, _key: &str) -> Self {
-        self.clone()
-    }
-}
-
-impl Posts for Filling {
-    fn post(&self, document: &str, variables: Value) -> Result<Value, LinearError> {
-        self.asked
-            .lock()
-            .expect("no test panics holding this")
-            .push(document.to_owned());
-
-        // The fetch's own request, answered by the project this was built over:
-        // one workspace, read by the same value that is then filed into.
-        if document.contains("project(id:") {
-            return self.reading.post(document, variables);
-        }
-        if document.contains("teams(") {
-            let nodes = match self.trouble {
-                Some(Trouble::NoTeam) => json!([]),
-                _ => json!([{ "id": "team-held" }]),
-            };
-            return Ok(json!({ "teams": { "nodes": nodes } }));
-        }
-        if document.contains("workflowStates(") {
-            return Ok(json!({
-                "workflowStates": { "nodes": [{ "id": "state-backlog", "name": "Backlog" }] }
-            }));
-        }
-        if document.contains("issueLabels(") {
-            return Ok(json!({ "issueLabels": { "nodes": [{ "id": "label-held" }] } }));
-        }
-        if document.contains("issueCreate(") {
-            return Ok(self.next_issue());
-        }
-        if document.contains("issueRelationCreate(") {
-            if let Some(Trouble::Relations(message)) = &self.trouble {
-                return Err(LinearError::Refused {
-                    message: message.clone(),
-                });
-            }
-            return Ok(json!({
-                "issueRelationCreate": { "issueRelation": { "id": "relation-held" } }
-            }));
-        }
-
-        // A document this does not know is a request no pull was meant to make
-        // — a project's status among them, which this workspace has no answer
-        // for precisely because nothing here may send one.
-        panic!("a pull asked for something no workspace was given: {document}");
+    fn comment_on_project(&self, project: &str, body: &str) -> Result<String, LinearError> {
+        self.ask(Call::Comment {
+            project: project.to_owned(),
+            body: body.to_owned(),
+        })?;
+        Ok("comment-1".to_owned())
     }
 }
 

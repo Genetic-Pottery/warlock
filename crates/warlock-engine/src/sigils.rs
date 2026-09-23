@@ -99,6 +99,18 @@ pub fn load_sigils(home: impl AsRef<Path>, root: impl AsRef<Path>) -> Result<Vec
     read(home.as_ref(), root.as_ref()).map(|config| config.sigils)
 }
 
+// Every door that acts on what is held reads it through this, so they agree
+// that a checkout nobody configured holds nothing. What a config that is there
+// and will not read means stays each door's call — the panel and `warlock
+// check` print it as unknown and carry on, filing and routing refuse — which is
+// why it comes back as an error rather than being folded here too.
+pub fn held_sigils(home: impl AsRef<Path>, root: impl AsRef<Path>) -> Result<Vec<String>, Error> {
+    match load_sigils(home, root) {
+        Err(Error::NotFound { .. }) => Ok(Vec::new()),
+        other => other,
+    }
+}
+
 /// ```
 /// use warlock_engine::{sigils, load_key_binding, save_key_binding};
 ///

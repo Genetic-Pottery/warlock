@@ -1,7 +1,7 @@
 use std::mem::discriminant;
 use std::path::Path;
 
-use super::{Error, resolve_filing};
+use super::{Destination, Error, resolve_filing};
 use crate::keys::save_key;
 use crate::manifest::{Manifest, PactEntry, ScopeRecord, manifest_path};
 use crate::route::{self, resolve_route};
@@ -76,6 +76,27 @@ fn one_candidate_is_the_board_and_carries_the_key() {
     assert!(
         !format!("{target:?}").contains(KEY),
         "the one type in this crate that holds a key must not print it: {target:?}"
+    );
+}
+
+#[test]
+fn a_destination_is_the_target_by_name_with_no_key_value_in_it() {
+    let (home, root) = (a_dir(), a_dir());
+    bound(home.path(), root.path());
+    holds(home.path(), root.path(), &["data-plane"]);
+
+    let manifest = a_manifest(&["data-plane", "web"]);
+    let destination = resolve_filing(&manifest, root.path(), home.path(), None)
+        .expect("one board")
+        .destination();
+
+    assert_eq!(
+        destination,
+        Destination::new("data-plane", "Team data-plane", "warlock", "work")
+    );
+    assert!(
+        !format!("{destination:?}").contains(KEY),
+        "a destination printed the key value: {destination:?}"
     );
 }
 

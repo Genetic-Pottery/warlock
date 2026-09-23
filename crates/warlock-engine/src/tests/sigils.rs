@@ -2,8 +2,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use super::{
-    DIGEST_CHARACTERS, Error, MAXIMUM_NAME_CHARACTERS, SIGIL_FILE, load_key_binding, load_sigils,
-    project_directory, save_key_binding, save_sigils, sigils_path,
+    DIGEST_CHARACTERS, Error, MAXIMUM_NAME_CHARACTERS, SIGIL_FILE, held_sigils, load_key_binding,
+    load_sigils, project_directory, save_key_binding, save_sigils, sigils_path,
 };
 
 fn a_dir() -> tempfile::TempDir {
@@ -539,4 +539,27 @@ fn a_save_that_fails_leaves_no_temporary_and_no_half_written_file() {
         ["data-plane"],
         "and the set that was held is the set that is still held"
     );
+}
+
+#[test]
+fn held_sigils_reads_a_missing_config_as_nothing_held_and_a_broken_one_as_broken() {
+    let (home, elsewhere) = (a_dir(), a_dir());
+    let root = named(elsewhere.path(), "warlock");
+
+    assert_eq!(
+        held_sigils(home.path(), &root).expect("absent is an answer"),
+        Vec::<String>::new()
+    );
+
+    save_sigils(home.path(), &root, &["data-plane".to_owned()]).expect("saves");
+    assert_eq!(
+        held_sigils(home.path(), &root).expect("loads"),
+        ["data-plane"]
+    );
+
+    hand_write(home.path(), &root, "this is not toml\n");
+    assert!(matches!(
+        held_sigils(home.path(), &root),
+        Err(Error::Syntax { .. })
+    ));
 }

@@ -1,20 +1,18 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs;
-use std::io::Read as _;
 use std::path::{Path, PathBuf};
-use std::str::Utf8Error;
 
 use crate::document::{self, Defect};
-use crate::fitting::{Measured, PER_FILE_BYTE_CAP, Problem, Snapshot, byte_count, one_file};
+use crate::fitting::{Assembled, Problem, Snapshot, Synthesised};
 use crate::hash::carry_hash;
 use crate::ignores;
 use crate::manifest::{ROOT_MODULE, temp_file_name, write_and_sync};
-use crate::scope::valid_scope;
+use crate::scope::at_or_below;
 use crate::walk::{self, DOCUMENT_FILE};
 use crate::{
     Agent, Manifest, NodeState, PactEntry, agent, decide_state, from_manifest_path, hash, manifest,
-    now_rfc3339, scope_opens_to, subtree_hash, to_manifest_path,
+    now_rfc3339, subtree_hash, to_manifest_path,
 };
 
 /// ```
@@ -736,74 +734,12 @@ fn ancestry<'module>(module: &'module str, loaded: &str) -> Vec<&'module str> {
     candidates
 }
 
-// String work on the manifest's own stored paths, never a question for the
-// filesystem, so an entry whose directory is gone still answers.
-fn at_or_below(module: &str, selected: &str) -> bool {
-    // The repository root is above everything, itself included.
-    selected == ROOT_MODULE
-        || module == selected
-        // The `/` is what makes this segment-wise. A plain `starts_with` would
-        // have `crates/engine` swallow `crates/engine-tools`.
-        || module
-            .strip_prefix(selected)
-            .is_some_and(|below| below.starts_with('/'))
-}
-
-// The downward question — what does an un-pact reach — and not
-// `scope_covering`/`scope_opens_to`, which walk up. Not interchangeable here:
-// coverage reads an unscoped `crates` as the absence of a statement, which
-// would let somebody standing above a boundary destroy it by aiming at its
-// parent.
-/// ```
-/// use warlock_engine::{Manifest, PactEntry, closed_scopes_at_or_below};
-///
-/// let entry = |module: &str| PactEntry::new(".", module, format!("{module}/WARLOCK.md"));
-/// let manifest = Manifest::with_entries([
-///     entry("crates")?,
-///     entry("crates/engine")?.with_scope("data-plane"),
-///     entry("crates/engine-tools")?.with_scope("tooling"),
-/// ]);
-/// let held = ["tooling".to_owned()];
-///
-/// // `crates` is unscoped, so its own boundary opens — but the un-pact reaches
-/// // one this machine is outside of.
-/// let blocking = closed_scopes_at_or_below("crates", ".", &manifest, &held)?;
-/// assert_eq!(blocking, ["data-plane"]);
-///
-/// // A sibling that merely shares a prefix is not below, and its own scope is
-/// // held.
-/// let blocking = closed_scopes_at_or_below("crates/engine-tools", ".", &manifest, &held)?;
-/// assert!(blocking.is_empty());
-/// # Ok::<(), warlock_engine::manifest::Error>(())
-/// ```
-pub fn closed_scopes_at_or_below<'manifest>(
-    directory: impl AsRef<Path>,
-    root: impl AsRef<Path>,
-    manifest: &'manifest Manifest,
-    held: &[String],
-) -> Result<Vec<&'manifest str>, manifest::Error> {
-    let selected = to_manifest_path(root, directory)?;
-
-    let mut blocking: Vec<&str> = Vec::new();
-    let below = manifest
-        .entries()
-        .iter()
-        .filter(|entry| at_or_below(entry.module(), &selected))
-        .filter_map(valid_scope);
-    for scope in below {
-        if !scope_opens_to(Some(scope), held) && !blocking.contains(&scope) {
-            blocking.push(scope);
-        }
-    }
-    Ok(blocking)
-}
-
 // This entry point is never shown the directory's previous document — it hands
 // `None` down as `carried` — so every file is described from source and the
 // document is written over without being read first.
 //
 // A refresh does read it: `describe_and_grant` passes the page down under
-// `AboveFailure::Skip`, and `assemble_lines` keeps a line from it wherever the
+// `AboveFailure::Skip`, and `Snapshot::assemble` keeps a line from it wherever the
 // recorded digest still matches. That digest covers the file *and* the line
 // (`hash::line_hash`), so what is reused is only ever a line warlock wrote
 // about a file that has not moved. A document is warlock's to write: an edit
@@ -869,7 +805,7 @@ fn pact_directory_watched(
         mended,
         problems,
         ..
-    } = assemble_lines(&snapshot, carried, agent, observer)?;
+    } = snapshot.assemble(carried, agent, observer)?;
 
     let mut repairs: Vec<Repaired> = mended
         .iter()
@@ -882,7 +818,7 @@ fn pact_directory_watched(
         })
         .collect();
 
-    let Synthesised { fill, mends } = synthesise(&snapshot, &lines, agent, observer)?;
+    let Synthesised { fill, mends } = snapshot.fill(&lines, agent, observer)?;
     repairs.extend(
         mends
             .into_iter()
@@ -940,268 +876,6 @@ fn write_document(directory: &Path, text: &str) -> Result<PathBuf, Error> {
 
 pub(crate) fn pactable_directories(root: &Path) -> Result<Vec<PathBuf>, Error> {
     walk::pactable_directories(root).map_err(|source| Error::from_walk(root, source))
-}
-
-// Shown the lines and never the source. Ends in a fill either way: the mend is
-// the floor under an exhausted loop, so a directory is never lost because its
-// synthesis could not be got right.
-fn synthesise(
-    snapshot: &Snapshot,
-    lines: &BTreeMap<String, String>,
-    agent: &dyn Agent,
-    observer: &mut dyn Observer,
-) -> Result<Synthesised, Error> {
-    let directory = snapshot.directory();
-
-    // Announced before the first attempt waits on a model, so a front end's
-    // clock counts what is being waited on rather than going quiet after the
-    // last file.
-    observer.requesting(lines.len(), snapshot.carried_bytes(lines));
-
-    let mut rejected = Vec::new();
-    let mut best = None;
-    for attempt in 1..=document::ATTEMPTS {
-        let asked = snapshot.synthesis_request(lines, &rejected);
-        let answer = agent.run(&asked).map_err(|source| Error::Refused {
-            directory: directory.to_path_buf(),
-            cause: Refusal::Agent { source },
-        })?;
-        match snapshot.accept_synthesis(answer.text(), lines) {
-            document::Accepted::Filled(fill) => {
-                return Ok(Synthesised {
-                    fill,
-                    mends: Vec::new(),
-                });
-            }
-            document::Accepted::Defective { fill, defects } => {
-                observer.rejected(directory, &defects, attempt, document::ATTEMPTS);
-                best = Some(fill);
-                rejected = defects;
-            }
-            document::Accepted::Unparsed(defect) => {
-                let defects = vec![defect];
-                observer.rejected(directory, &defects, attempt, document::ATTEMPTS);
-                rejected = defects;
-            }
-        }
-    }
-
-    let unusable = best.unwrap_or_else(|| document::Fill {
-        files: lines.clone(),
-        ..document::Fill::default()
-    });
-    let (fill, mends) = snapshot.mend(&unusable);
-    Ok(Synthesised { fill, mends })
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct Synthesised {
-    fill: document::Fill,
-    mends: Vec<document::Mend>,
-}
-
-/// Every line a directory's document needs, asking only about what moved.
-///
-/// The document is the store: a file whose bytes hash to what the manifest
-/// recorded keeps the line already on the page, and every other file costs one
-/// pass. Both halves have to agree before a line is reused — a hash with no
-/// line on the page is a document somebody edited, and a line with no hash is a
-/// file nobody has measured — and either way the answer is to ask again, which
-/// costs a pass and never a wrong line.
-fn assemble_lines(
-    snapshot: &Snapshot,
-    carried: Option<(&str, &BTreeMap<String, String>)>,
-    agent: &dyn Agent,
-    observer: &mut dyn Observer,
-) -> Result<Assembled, Error> {
-    let directory = snapshot.directory();
-    let (page, recorded) = match carried {
-        Some((page, recorded)) => (document::lines_of(page), recorded.clone()),
-        None => (BTreeMap::new(), BTreeMap::new()),
-    };
-
-    // Every file is settled against the page before the first pass runs, so
-    // that `Observer::describing` can be handed a denominator: what a front end
-    // needs is the count of files this directory will *pay* for.
-    //
-    // A line is kept only where the recorded digest matches the file as it
-    // stands *and* the line as it sits on the page — `hash::line_hash` binds
-    // the two. A document is warlock's to write, so a line somebody edited by
-    // hand simply fails to match and is described again, silently and at the
-    // cost of that one file. Testing the file's hash alone was what let an
-    // edited line be carried forward and then granted as though a pass had
-    // written it.
-    let planned: Vec<(&String, &Measured, Option<String>)> = snapshot
-        .files()
-        .iter()
-        .map(|(name, measured)| {
-            let kept = measured
-                .hash
-                .as_ref()
-                .zip(page.get(name))
-                .filter(|(hash, line)| recorded.get(name) == Some(&hash::line_hash(hash, line)))
-                .map(|(_, line)| line.clone());
-            (name, measured, kept)
-        })
-        .collect();
-
-    let paying = planned.iter().filter(|(.., kept)| kept.is_none()).count();
-
-    let mut assembled = Assembled::default();
-    let mut position = 0;
-    for (name, measured, kept) in planned {
-        if let Some(line) = kept {
-            assembled.lines.insert(name.clone(), line);
-            assembled.kept.push(name.clone());
-        } else {
-            position += 1;
-            observer.describing(directory, name, measured.size, position, paying);
-            let described = describe_file(directory, name, agent, observer)?;
-            if described.mended {
-                assembled.mended.push(name.clone());
-            }
-            assembled.problems.extend(described.problem);
-            assembled.lines.insert(name.clone(), described.line);
-            assembled.asked.push(name.clone());
-        }
-
-        // Recorded from the line that actually went into the document, kept or
-        // freshly described, so the next run compares against what is on the
-        // page rather than against what this one meant to put there.
-        if let Some((hash, line)) = measured.hash.as_ref().zip(assembled.lines.get(name)) {
-            assembled
-                .hashes
-                .insert(name.clone(), hash::line_hash(hash, line));
-        }
-    }
-    Ok(assembled)
-}
-
-#[derive(Debug, Default)]
-struct Assembled {
-    lines: BTreeMap<String, String>,
-    // What each file hashed to as its line was settled, for the manifest to
-    // record. A file that could not be hashed is absent and will be asked about
-    // again.
-    hashes: BTreeMap<String, String>,
-    asked: Vec<String>,
-    kept: Vec<String>,
-    // Files whose every attempt was spent, so warlock wrote the line.
-    mended: Vec<String>,
-    problems: Vec<Problem>,
-}
-
-// Ends with a line warlock wrote itself rather than a refusal, because one
-// unusable answer about one file is no reason to lose the directory it sits in.
-// What it cannot do is invent a file: a name that is not there is an error,
-// since the caller walked the directory to get it.
-fn describe_file(
-    directory: &Path,
-    name: &str,
-    agent: &dyn Agent,
-    observer: &mut dyn Observer,
-) -> Result<DescribedFile, Error> {
-    let (request, described, problem) = one_file(document::FILE_PROMPT, directory, name)
-        .map_err(|source| Error::from_walk(directory, source))?;
-    let expected = document::Expected::of(&request);
-
-    let mut rejected = Vec::new();
-    for attempt in 1..=document::ATTEMPTS {
-        let asked = request
-            .clone()
-            .with_prompt(document::file_instructions(name, &rejected));
-        // A transport failure ends it at once: a pass that produced no answer
-        // is not a pass that produced a wrong one, and retrying a missing
-        // `claude` finds it still missing.
-        let answer = agent.run(&asked).map_err(|source| Error::Refused {
-            directory: directory.to_path_buf(),
-            cause: Refusal::Agent { source },
-        })?;
-        match document::accept_file(answer.text(), name, &expected, &described) {
-            Ok(line) => {
-                return Ok(DescribedFile {
-                    line,
-                    mended: false,
-                    problem,
-                });
-            }
-            Err(defects) => {
-                observer.rejected(directory, &defects, attempt, document::ATTEMPTS);
-                rejected = defects;
-            }
-        }
-    }
-
-    Ok(DescribedFile {
-        line: document::file_fallback(name, &expected, &described),
-        mended: true,
-        problem,
-    })
-}
-
-#[derive(Debug)]
-struct DescribedFile {
-    line: String,
-    mended: bool,
-    // Why the pass was shown a name and a size instead of the file, where it
-    // was: too large for the per-file cap, or unreadable.
-    problem: Option<Problem>,
-}
-
-/// ```
-/// use std::fs;
-/// use warlock_engine::{Viewed, view_file};
-///
-/// let dir = tempfile::tempdir()?;
-/// let path = dir.path().join("WARLOCK.md");
-/// fs::write(&path, "# engine\n\nThe core.\n")?;
-///
-/// let Viewed { text, cut } = view_file(&path)?;
-/// assert_eq!(text, "# engine\n\nThe core.\n");
-/// assert!(!cut);
-/// # Ok::<(), Box<dyn std::error::Error>>(())
-/// ```
-pub fn view_file(path: impl AsRef<Path>) -> Result<Viewed, Unviewable> {
-    let path = path.as_ref();
-    let mut bytes = read_capped(path).map_err(|source| Unviewable::Unreadable {
-        path: path.to_path_buf(),
-        source,
-    })?;
-
-    // The read stops one byte past the cap, so one byte over is the whole of
-    // "there is more to this file", and dropping it needs no cast from the
-    // cap's `u64` to an index.
-    let cut = byte_count(bytes.len()) > PER_FILE_BYTE_CAP;
-    if cut {
-        bytes.truncate(bytes.len() - 1);
-    }
-
-    let text = match str::from_utf8(&bytes) {
-        Ok(text) => text,
-        // A cut inside a character is the cap's doing, not the file's, so it
-        // costs that one character and nothing else. Everything before
-        // `valid_up_to` was just checked, so the floor is unreachable.
-        Err(source) if cut && source.error_len().is_none() => {
-            str::from_utf8(&bytes[..source.valid_up_to()]).unwrap_or_default()
-        }
-        Err(source) => {
-            return Err(Unviewable::NotText {
-                path: path.to_path_buf(),
-                source,
-            });
-        }
-    }
-    .to_owned();
-
-    Ok(Viewed { text, cut })
-}
-
-fn read_capped(path: &Path) -> std::io::Result<Vec<u8>> {
-    let mut bytes = Vec::new();
-    fs::File::open(path)?
-        .take(PER_FILE_BYTE_CAP + 1)
-        .read_to_end(&mut bytes)?;
-    Ok(bytes)
 }
 
 /// ```
@@ -1329,58 +1003,6 @@ pub struct Repaired {
 impl fmt::Display for Repaired {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}: {}", self.directory.display(), self.mend)
-    }
-}
-
-#[derive(Debug)]
-pub struct Viewed {
-    pub text: String,
-    pub cut: bool,
-}
-
-#[derive(Debug)]
-#[non_exhaustive]
-pub enum Unviewable {
-    Unreadable {
-        path: PathBuf,
-        source: std::io::Error,
-    },
-    NotText {
-        path: PathBuf,
-        source: Utf8Error,
-    },
-}
-
-impl Unviewable {
-    #[must_use]
-    pub fn path(&self) -> &Path {
-        match self {
-            Self::Unreadable { path, .. } | Self::NotText { path, .. } => path,
-        }
-    }
-}
-
-impl fmt::Display for Unviewable {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Unreadable { path, source } => {
-                write!(f, "could not read `{}`: {source}", path.display())
-            }
-            Self::NotText { path, source } => write!(
-                f,
-                "`{}` is not text ({source}), so there is nothing to show",
-                path.display()
-            ),
-        }
-    }
-}
-
-impl std::error::Error for Unviewable {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::Unreadable { source, .. } => Some(source),
-            Self::NotText { source, .. } => Some(source),
-        }
     }
 }
 

@@ -1,3 +1,4 @@
+use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use std::{fs, io};
@@ -13,18 +14,19 @@ use warlock_engine::{
     resolve_filing,
 };
 use warlock_tui::{
-    App, Chrome, Converses, Focus, LinearError, QuitConfirm, RecordPrompt, Row, ScopePrompt,
+    App, Chrome, Converses, Focus, LinearError, Opens, QuitConfirm, RecordPrompt, Row, ScopePrompt,
     brief_at, tree_height,
 };
 
-use super::{Cli, Command, Error, FOR_CLAUDE_MD, Pushing, ScopeCommand, Session, status_for};
+use super::{Cli, Command, Error, FOR_CLAUDE_MD, Parts, ScopeCommand, Seams, Session, status_for};
 use crate::chatting::Chat;
 use crate::pacting::Pact;
 use crate::pulling::Pulls;
-use crate::pushing::{Opens, Pushes};
+use crate::pushing::Pushes;
 use crate::query::spelled;
+use crate::rescope::ScopeRefusal;
 use crate::session::{Scope, Watched};
-use crate::stubs::{Boarding, Copying, Passing, Reading, Saying, Scripted};
+use crate::stubs::{Boarding, Copying, Passing, Saying, Scripted};
 use crate::terminal::Screen;
 
 // `try_parse_from` wants argv as the process gets it, program name and all,
@@ -1070,8 +1072,10 @@ fn the_statuses_the_older_subcommands_leave_are_where_they_were() {
         ),
         (Err(Error::NoHome), 1),
         (
-            Err(Error::NoPact {
-                module: "crates/engine".to_owned(),
+            Err(Error::Scope {
+                refusal: ScopeRefusal::NoPact {
+                    module: "crates/engine".to_owned(),
+                },
             }),
             1,
         ),
@@ -1289,19 +1293,23 @@ impl Screen for FakeScreen {
     }
 }
 
-// The last of the six is the model a slice's drafting session would be opened
-// off. It is a script with nothing in it: no test in this file confirms a pull,
-// so a turn being asked for at all is a session opened where none was meant to
-// be.
-type Driven = Session<FakeScreen, Passing, Saying, Copying, Boarding, Scripted>;
+// The board and the drafting model are left open, because they are the whole
+// difference between a session that files and one that cuts.
+struct Stubbed<O, A>(PhantomData<(O, A)>);
 
-/// The same session over the other stand-in board: a Linear that answers the
-/// one request a `/pull` makes rather than the four a `/push` makes.
-///
-/// A second alias and not a second `Session`: the board is one type parameter of
-/// the value the loop holds, so a test that drives a pull the whole way through
-/// drives the very same session under a different seam.
-type Cutting = Session<FakeScreen, Passing, Saying, Copying, Reading, Scripted>;
+impl<O: Opens, A: Converses> Seams for Stubbed<O, A> {
+    type Screen = FakeScreen;
+    type Pass = Passing;
+    type Talk = Saying;
+    type Clip = Copying;
+    type Board = O;
+    type Draft = A;
+}
+
+// The drafting model is a script with nothing in it: no test driven through
+// this confirms a pull, so a turn being asked for at all is a session opened
+// where none was meant to be.
+type Driven = Session<Stubbed<Boarding, Scripted>>;
 
 fn driving(app: App, scope: Scope, tree: &Tree) -> Driven {
     driving_over(
@@ -1334,29 +1342,18 @@ fn driving_over<O: Opens, A: Converses>(
     tree: &Tree,
     pushes: Pushes<O>,
     pulls: Pulls<O, A>,
-) -> Session<FakeScreen, Passing, Saying, Copying, O, A> {
+) -> Session<Stubbed<O, A>> {
     let watched = Watched::start(&scope, tree);
     let root = scope.repo_root.clone();
-    Session {
-        app,
+    let parts = Parts {
         screen: FakeScreen::of(80, 24),
-        scope,
-        manifest: Manifest::new(),
+        clipboard: Copying::taking(),
         pact: Pact::with_agent(Passing::filling()),
         chat: Chat::with_agent(root, Saying::answering(ANSWER)),
-        clipboard: Copying::taking(),
-        confirm: QuitConfirm::default(),
-        pushing: Pushing::closed(),
         pushes,
         pulls,
-        prompt: ScopePrompt::default(),
-        record: RecordPrompt::default(),
-        drag: None,
-        said: None,
-        document: None,
-        mouse_captured: true,
-        watched,
-    }
+    };
+    Session::new(app, scope, Manifest::new(), watched, parts)
 }
 
 fn session(rows: Vec<Row>) -> Driven {
@@ -1418,7 +1415,7 @@ fn session_reading<O: Opens, A: Converses>(
     root: &Path,
     pushes: Pushes<O>,
     pulls: Pulls<O, A>,
-) -> Session<FakeScreen, Passing, Saying, Copying, O, A> {
+) -> Session<Stubbed<O, A>> {
     let (app, scope, tree) = loading(root);
     driving_over(app, scope, &tree, pushes, pulls)
 }
@@ -3091,7 +3088,7 @@ mod filing {
     fn confirmed(driven: &mut Driven) {
         typing(driven, "/push");
         assert!(
-            driven.pushing.confirm.is_open(),
+            driven.pushes.window().confirm.is_open(),
             "the dialog did not come up: {:?}",
             notes(driven)
         );
@@ -3130,7 +3127,7 @@ mod filing {
         );
         assert_eq!(linear.requests(), 0, "a pull of an unfiled brief was sent");
         assert!(
-            !driven.pushing.confirm.is_open(),
+            !driven.pushes.window().confirm.is_open(),
             "a pull put the push dialog up"
         );
     }
@@ -3193,7 +3190,7 @@ mod filing {
             "the thread does not carry the project's address: {:?}",
             notes(&driven)
         );
-        assert_eq!(linear.requests(), 4, "one push is four requests");
+        assert_eq!(linear.requests(), 3, "one push is three calls");
         let filed = Filed::load(repo.path()).expect("a record that saves and reads back");
         let record = filed
             .records()
@@ -3230,7 +3227,7 @@ mod filing {
 
         typing(&mut driven, &format!("/push {named}"));
         assert!(
-            driven.pushing.confirm.is_open(),
+            driven.pushes.window().confirm.is_open(),
             "the dialog did not come up: {:?}",
             notes(&driven)
         );
@@ -3243,7 +3240,7 @@ mod filing {
             "the thread does not carry the project's address: {:?}",
             notes(&driven)
         );
-        assert_eq!(linear.requests(), 4, "one push is four requests");
+        assert_eq!(linear.requests(), 3, "one push is three calls");
         let filed = Filed::load(repo.path()).expect("a record that saves and reads back");
         let record = filed
             .records()
@@ -3330,7 +3327,7 @@ mod filing {
         );
         // The session is where it was: the dialog is down, no push is in flight,
         // and the keyboard still works.
-        assert!(!driven.pushing.confirm.is_open());
+        assert!(!driven.pushes.window().confirm.is_open());
         assert!(!driven.pushes.sending());
         assert!(
             pressed(&mut driven, key(KeyCode::Esc)),
@@ -3358,13 +3355,13 @@ mod filing {
             notes(&driven)
         );
         assert!(
-            !driven.pushing.confirm.is_open(),
+            !driven.pushes.window().confirm.is_open(),
             "the second `/push` put a dialog up"
         );
         landing(&mut driven);
         assert_eq!(
             linear.requests(),
-            4,
+            3,
             "the second `/push` sent something after all"
         );
         assert_eq!(
@@ -3399,18 +3396,16 @@ mod filing {
             .path()
             .to_owned();
 
-        confirmed(&mut driven);
-        // Counted here rather than before the dialog was answered, the way the
-        // refusal above counts: the check is the worker's, so the "filing to"
-        // line is already said when the work is handed off, and what is being
-        // asserted is that the answer coming back is one line and not a second
-        // project.
         let before = notes(&driven).len();
-        landing(&mut driven);
+        typing(&mut driven, "/push");
 
+        assert!(
+            !driven.pushes.window().confirm.is_open(),
+            "a push of a filed brief put the dialog up"
+        );
         let notes = notes(&driven);
-        // The line the dialog's Yes is answered with, and the only one: a
-        // refusal off the worker is one note however it was worded.
+        // The line the `/push` is answered with, and the only one: nothing was
+        // started, so there is no "filing to" line in front of it.
         assert_eq!(
             notes.len(),
             before + 1,
@@ -3425,15 +3420,15 @@ mod filing {
         assert_eq!(line.lines().count(), 1, "{line} is more than one line");
 
         // Nothing left this machine the second time: the stand-in counts every
-        // request it was asked for, and these are the first push's four.
+        // call it was asked, and these are the first push's three.
         assert_eq!(
             linear.requests(),
-            4,
+            3,
             "the second `/push` sent something after all"
         );
         // And the session is where it was: no push in flight, one record, and
         // the keyboard still answering.
-        assert!(!driven.pushing.confirm.is_open());
+        assert!(!driven.pushes.window().confirm.is_open());
         assert!(!driven.pushes.sending());
         let filed = Filed::load(repo.path()).expect("a record that saves and reads back");
         assert_eq!(filed.records().len(), 1, "{:?}", filed.records());
@@ -3472,7 +3467,7 @@ mod filing {
             "the session's push state carries the key"
         );
         assert!(
-            !format!("{:?}", driven.pushing).contains(NOT_A_KEY),
+            !format!("{:?}", driven.pushes.window()).contains(NOT_A_KEY),
             "the window carries the key"
         );
         for note in notes(&driven) {
@@ -3510,10 +3505,10 @@ mod cutting {
     };
     use warlock_tui::{Focus, Line};
 
-    use super::{AT_MOST, Cutting, key, session_reading};
+    use super::{AT_MOST, Driven, key, session_reading};
     use crate::pulling::Pulls;
     use crate::pushing::Pushes;
-    use crate::stubs::{Answering, Reading, Scripted};
+    use crate::stubs::{Answering, Boarding, Scripted};
 
     // Not a key, and named so that nothing reading this file mistakes it for
     // one: it is stored so that a bound name resolves and the client is built
@@ -3607,8 +3602,8 @@ mod cutting {
     // The session `run` builds, with its impure things replaced: the manifest
     // that would have been loaded, a board that answers one project out of
     // memory, and the two conversations a cut opens.
-    fn cutting_session(repo: &Path, home: &Path, agent: Scripted, proposer: Scripted) -> Cutting {
-        let linear = Reading::holding(NAME, Some("Planned"), SLICED);
+    fn cutting_session(repo: &Path, home: &Path, agent: Scripted, proposer: Scripted) -> Driven {
+        let linear = Boarding::holding(NAME, Some("Planned"), SLICED);
         let mut driven = session_reading(
             repo,
             Pushes::with_client(linear.clone(), Some(home.to_path_buf())),
@@ -3628,7 +3623,7 @@ mod cutting {
         ])
     }
 
-    fn notes(driven: &Cutting) -> Vec<String> {
+    fn notes(driven: &Driven) -> Vec<String> {
         driven
             .app
             .panel()
@@ -3643,7 +3638,7 @@ mod cutting {
             .collect()
     }
 
-    fn pressed(driven: &mut Cutting, code: KeyCode) -> bool {
+    fn pressed(driven: &mut Driven, code: KeyCode) -> bool {
         driven
             .press(key(code), Instant::now())
             .expect("no key pressed here writes to a terminal")
@@ -3653,7 +3648,7 @@ mod cutting {
     // happened off this thread. The draw is what tells the field its width and
     // what it is answering for, so a test that only drained would be a test of
     // half a round.
-    fn round(driven: &mut Cutting) {
+    fn round(driven: &mut Driven) {
         let size = driven.size().expect("the fake screen has a size");
         driven.draw(size).expect("the fake screen draws");
         driven.keep_up();
@@ -3662,7 +3657,7 @@ mod cutting {
     // The command typed the way a reader types one: the block arrives whole, as
     // a terminal with bracketed paste hands it over, and the Enter after it is
     // the submit.
-    fn typing(driven: &mut Cutting, command: &str) {
+    fn typing(driven: &mut Driven, command: &str) {
         driven.app.set_focus(Focus::Composer);
         driven.paste(command);
         assert!(
@@ -3673,7 +3668,7 @@ mod cutting {
 
     // `/pull` and the rounds the fetch takes, up to the dialog it puts on the
     // screen and no further: which key is pressed at it is the caller's.
-    fn fetched(driven: &mut Cutting) {
+    fn fetched(driven: &mut Driven) {
         typing(driven, &format!("/pull {BRIEF}"));
         let waited = Instant::now();
         while driven.pulls.fetching() && waited.elapsed() < AT_MOST {
@@ -3688,7 +3683,7 @@ mod cutting {
 
     // The same, with the two keys that answer the dialog Yes: No is lit when it
     // opens, so Left is what moves onto Yes.
-    fn confirmed(driven: &mut Cutting) {
+    fn confirmed(driven: &mut Driven) {
         fetched(driven);
         assert!(pressed(driven, KeyCode::Left));
         assert!(pressed(driven, KeyCode::Enter));
@@ -3696,7 +3691,7 @@ mod cutting {
 
     // Rounds until warlock's attempt at the question is in the field, which is
     // two things arriving on two rounds: the question, and then the attempt.
-    fn offered(driven: &mut Cutting) {
+    fn offered(driven: &mut Driven) {
         let waited = Instant::now();
         while driven.chat.composer().draft().is_empty() && waited.elapsed() < AT_MOST {
             round(driven);
@@ -3715,7 +3710,7 @@ mod cutting {
     //
     // Skip and not Create, because what these tests are about is the relay: the
     // drafts a slice settles on are `pulling.rs`'s own to be answered about.
-    fn through(driven: &mut Cutting) {
+    fn through(driven: &mut Driven) {
         let waited = Instant::now();
         while driven.pulls.drafting() && waited.elapsed() < AT_MOST {
             round(driven);

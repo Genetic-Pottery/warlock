@@ -15,7 +15,7 @@ fn write(dir: &Path, name: &str, contents: impl AsRef<[u8]>) -> PathBuf {
 
 fn own_files(dir: &Path) -> Result<BTreeMap<String, u64>, crate::walk::Error> {
     Ok(super::Snapshot::take(dir)?
-        .files()
+        .files
         .iter()
         .map(|(name, measured)| (name.clone(), measured.size))
         .collect())

@@ -19,27 +19,22 @@ use std::io::Write;
 use std::path::Path;
 
 use warlock_engine::drafting::Draft;
-use warlock_engine::{CutRecord, fold_title, manifest_path, now_rfc3339};
-use warlock_tui::{
-    LinearIssue, NewIssue, Posts, backlog_state, comment_on_project, create_issue, create_relation,
-    issue_label_id, team_id,
-};
+use warlock_engine::{CutRecord, Destination, fold_title, manifest_path, now_rfc3339};
+use warlock_tui::{Board, LinearIssue, NewIssue};
 
 use crate::error::Error;
 use crate::push::records;
 
 /// Where one slice's issues go, which is what [`resolve_filing`] and the
-/// brief's own record between them answered: the two names off the
-/// `[[scope]]` record, the project a push made, and the brief as
-/// `.warlock/filed.toml` spells it.
+/// brief's own record between them answered: the board, the project a push
+/// made, and the brief as `.warlock/filed.toml` spells it.
 ///
 /// [`resolve_filing`]: warlock_engine::resolve_filing
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Filing<'a> {
     pub(crate) brief: &'a str,
     pub(crate) project: &'a str,
-    pub(crate) team: &'a str,
-    pub(crate) label: &'a str,
+    pub(crate) destination: &'a Destination,
 }
 
 /// One slice of the project's scope, with the drafts a session settled for it
@@ -78,7 +73,7 @@ pub(crate) enum Cut {
 }
 
 pub(crate) fn cut<W: Write>(
-    linear: &impl Posts,
+    linear: &impl Board,
     root: &Path,
     filing: Filing<'_>,
     slice: Slice<'_>,
@@ -111,40 +106,41 @@ pub(crate) fn cut<W: Write>(
         return Ok(Cut::Already(issues));
     }
 
-    let team = team_id(linear, filing.team)
+    let team = linear
+        .team_id(filing.destination.team())
         .map_err(|source| Error::Linear { source })?
         .ok_or_else(|| Error::UnknownTeam {
-            team: filing.team.to_owned(),
+            team: filing.destination.team().to_owned(),
             path: manifest_path(root),
         })?;
     // Before the label and before every create: a team with nowhere to put an
     // issue is a refusal that costs nothing, and the same question asked after
     // the first create would leave a slice half filed on the board.
-    let state = backlog_state(linear, &team)
+    let state = linear
+        .backlog_state(&team)
         .map_err(|source| Error::Linear { source })?
         .ok_or_else(|| Error::NoBacklog {
-            team: filing.team.to_owned(),
+            team: filing.destination.team().to_owned(),
         })?;
-    let label =
-        issue_label_id(linear, filing.label, &team).map_err(|source| Error::Linear { source })?;
+    let label = linear
+        .issue_label_id(filing.destination.label(), &team)
+        .map_err(|source| Error::Linear { source })?;
 
     let mut issues = Vec::with_capacity(slice.drafts.len());
     for draft in slice.drafts {
         // A create that fails partway is a refusal and not a short cut record:
         // a record says the slice is filed, so writing one for the drafts that
         // landed would be warlock promising never to file the rest.
-        let issue = create_issue(
-            linear,
-            &NewIssue::new(
+        let issue = linear
+            .create_issue(&NewIssue::new(
                 &draft.title,
                 &draft.body,
                 &team,
                 filing.project,
                 &label,
                 &state,
-            ),
-        )
-        .map_err(|source| Error::Linear { source })?;
+            ))
+            .map_err(|source| Error::Linear { source })?;
         issues.push(issue);
     }
 
@@ -222,11 +218,12 @@ fn edges<'a>(
     edges
 }
 
-fn relate(linear: &impl Posts, edges: &[(&LinearIssue, &LinearIssue)]) -> Vec<String> {
+fn relate(linear: &impl Board, edges: &[(&LinearIssue, &LinearIssue)]) -> Vec<String> {
     edges
         .iter()
         .filter_map(|(blocker, waiting)| {
-            create_relation(linear, blocker.id(), waiting.id())
+            linear
+                .create_relation(blocker.id(), waiting.id())
                 .err()
                 .map(|error| {
                     format!(
@@ -245,13 +242,14 @@ fn relate(linear: &impl Posts, edges: &[(&LinearIssue, &LinearIssue)]) -> Vec<St
 /// Nothing here decides *when* to say it: the brief's one comment lands after
 /// the last slice settles and only when something was filed, which is the run's
 /// question and not this operation's.
-pub(crate) fn announce(linear: &impl Posts, project: &str, issues: &[String]) -> Option<String> {
+pub(crate) fn announce(linear: &impl Board, project: &str, issues: &[String]) -> Option<String> {
     let body = format!(
         "Warlock cut this project into {}.\n\nThe project's status was not moved.",
         listed(issues)
     );
 
-    comment_on_project(linear, project, &body)
+    linear
+        .comment_on_project(project, &body)
         .err()
         .map(|error| format!("the project was not commented on: {error}"))
 }

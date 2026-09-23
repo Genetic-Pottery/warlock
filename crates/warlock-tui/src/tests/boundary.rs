@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use warlock_engine::{Manifest, PactEntry};
 
-use super::{Reach, Verdict, verdict};
+use super::{Operation, Verdict, permits};
 use crate::error::Error;
 
 // Never read: nothing in this module touches a disk.
@@ -25,9 +25,15 @@ fn at(module: &str) -> PathBuf {
     PathBuf::from(ROOT).join(module)
 }
 
-fn asked(manifest: &Manifest, module: &str, sigils: &[&str], reach: Reach) -> Verdict {
+fn asked(manifest: &Manifest, module: &str, sigils: &[&str], operation: Operation) -> Verdict {
     let held: Vec<String> = sigils.iter().map(|sigil| (*sigil).to_owned()).collect();
-    verdict(&at(module), &PathBuf::from(ROOT), manifest, &held, reach)
+    permits(
+        operation,
+        &at(module),
+        &PathBuf::from(ROOT),
+        manifest,
+        &held,
+    )
 }
 
 #[test]
@@ -35,7 +41,7 @@ fn a_directory_nothing_covers_is_open_to_anyone() {
     let manifest = pacts(&[("crates", None)]);
 
     assert_eq!(
-        asked(&manifest, "crates", &[], Reach::Here),
+        asked(&manifest, "crates", &[], Operation::Pact),
         Verdict::Open,
         "the permissive default sits on the directory, not on the operator"
     );
@@ -46,21 +52,21 @@ fn a_scope_no_held_sigil_opens_closes_the_directory() {
     let manifest = pacts(&[("crates", Some("platform"))]);
 
     assert_eq!(
-        asked(&manifest, "crates", &["web"], Reach::Here),
+        asked(&manifest, "crates", &["web"], Operation::Pact),
         Verdict::Closed {
             scope: "platform".to_owned()
         },
         "holding the wrong sigil is refused"
     );
     assert_eq!(
-        asked(&manifest, "crates", &[], Reach::Here),
+        asked(&manifest, "crates", &[], Operation::Pact),
         Verdict::Closed {
             scope: "platform".to_owned()
         },
         "and so is holding none at all"
     );
     assert_eq!(
-        asked(&manifest, "crates", &["platform"], Reach::Here),
+        asked(&manifest, "crates", &["platform"], Operation::Pact),
         Verdict::Open,
         "the sigil that names the scope opens it"
     );
@@ -71,7 +77,7 @@ fn a_scope_covers_everything_beneath_it() {
     let manifest = pacts(&[("crates", Some("platform")), ("crates/engine", None)]);
 
     assert_eq!(
-        asked(&manifest, "crates/engine", &[], Reach::Here),
+        asked(&manifest, "crates/engine", &[], Operation::Pact),
         Verdict::Closed {
             scope: "platform".to_owned()
         },
@@ -84,13 +90,15 @@ fn asking_about_here_says_nothing_about_what_is_underneath() {
     // The directory itself is open; the pact under it is not.
     let manifest = pacts(&[("crates", None), ("crates/engine", Some("platform"))]);
 
+    for operation in [Operation::Pact, Operation::Refresh, Operation::Scope] {
+        assert_eq!(
+            asked(&manifest, "crates", &[], operation),
+            Verdict::Open,
+            "{operation:?} touches one directory and asks about one directory"
+        );
+    }
     assert_eq!(
-        asked(&manifest, "crates", &[], Reach::Here),
-        Verdict::Open,
-        "`p`, `r` and `s` touch one directory and ask about one directory"
-    );
-    assert_eq!(
-        asked(&manifest, "crates", &[], Reach::HereAndBelow),
+        asked(&manifest, "crates", &[], Operation::Unpact),
         Verdict::ClosedBelow {
             scopes: vec!["platform".to_owned()]
         },
@@ -103,7 +111,7 @@ fn a_boundary_underneath_that_is_held_is_no_obstacle() {
     let manifest = pacts(&[("crates", None), ("crates/engine", Some("platform"))]);
 
     assert_eq!(
-        asked(&manifest, "crates", &["platform"], Reach::HereAndBelow),
+        asked(&manifest, "crates", &["platform"], Operation::Unpact),
         Verdict::Open,
         "the rule refuses over scopes not held, not over having any"
     );
@@ -119,12 +127,12 @@ fn the_scope_above_is_answered_before_the_scopes_below() {
     ]);
 
     assert_eq!(
-        asked(&manifest, "crates", &[], Reach::HereAndBelow),
+        asked(&manifest, "crates", &[], Operation::Unpact),
         Verdict::Closed {
             scope: "platform".to_owned()
         },
         "an operator who may not act here at all does not need a list of \
-             what is underneath — and this ordering used to live in two callers"
+             what is underneath"
     );
 }
 

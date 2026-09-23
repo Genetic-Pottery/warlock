@@ -7,8 +7,8 @@
 //! A question stands here and nothing more, because none of `stale`, `fresh`,
 //! `check`, `config` or `init` writes a pact. A write stands and is let
 //! through: `edits::Opened` is built on top of this one and cannot be
-//! constructed without `boundary::verdict` having said the covering scope is
-//! open to this machine, so the gate is not a step a write can forget.
+//! constructed without `boundary::permits` having said the operation it names
+//! is open to this machine, so the gate is not a step a write can forget.
 
 use std::env;
 use std::path::{Path, PathBuf};

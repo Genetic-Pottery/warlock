@@ -34,11 +34,12 @@ const ENDPOINT: &str = "https://api.linear.app/graphql";
 /// One GraphQL round trip: a document, its variables, and the answer's `data`
 /// object.
 ///
-/// The seam every operation is written against, which is what lets them be
-/// driven by an in-memory stand-in and keeps every test in this crate off the
-/// network. Unwrapping the envelope belongs here rather than to each caller: a
-/// stand-in hands back the `data` a real answer would have carried, and says a
-/// refusal by returning [`Error::Refused`].
+/// The transport under [`Linear`], and the seam this module's own tests drive
+/// with an in-memory stand-in to check how each operation is spelled. Nothing
+/// outside this module is written against it: the flows take a [`Board`].
+/// Unwrapping the envelope belongs here rather than to each caller: a stand-in
+/// hands back the `data` a real answer would have carried, and says a refusal
+/// by returning [`Error::Refused`].
 ///
 /// ```no_run
 /// use serde_json::json;
@@ -118,6 +119,103 @@ impl Posts for Client {
     }
 }
 
+/// The operations warlock asks of a board, in the words of the board rather
+/// than of GraphQL.
+///
+/// The flows are written against this and not against [`Posts`], so a flow's
+/// test fake answers operations instead of recognising query text: Linear's
+/// spelling is [`Linear`]'s business, checked in this module's own tests.
+pub trait Board {
+    fn team_id(&self, key: &str) -> Result<Option<String>, Error>;
+    fn backlog_status(&self) -> Result<Option<String>, Error>;
+    fn backlog_state(&self, team: &str) -> Result<Option<String>, Error>;
+    fn issue_label_id(&self, name: &str, team: &str) -> Result<String, Error>;
+    fn fetch_project(&self, id: &str) -> Result<Option<FetchedProject>, Error>;
+    fn create_project(&self, project: &NewProject<'_>) -> Result<Project, Error>;
+    fn create_issue(&self, issue: &NewIssue<'_>) -> Result<Issue, Error>;
+    fn create_relation(&self, blocker: &str, waiting: &str) -> Result<String, Error>;
+    fn comment_on_project(&self, project: &str, body: &str) -> Result<String, Error>;
+}
+
+/// The one [`Board`] that speaks GraphQL, over whatever [`Posts`] it holds.
+#[derive(Debug)]
+pub struct Linear<P = Client> {
+    posts: P,
+}
+
+impl<P: Posts> Linear<P> {
+    #[must_use]
+    pub const fn new(posts: P) -> Self {
+        Self { posts }
+    }
+}
+
+impl<P: Posts> Board for Linear<P> {
+    fn team_id(&self, key: &str) -> Result<Option<String>, Error> {
+        team_id(&self.posts, key)
+    }
+
+    fn backlog_status(&self) -> Result<Option<String>, Error> {
+        backlog_status(&self.posts)
+    }
+
+    fn backlog_state(&self, team: &str) -> Result<Option<String>, Error> {
+        backlog_state(&self.posts, team)
+    }
+
+    fn issue_label_id(&self, name: &str, team: &str) -> Result<String, Error> {
+        issue_label_id(&self.posts, name, team)
+    }
+
+    fn fetch_project(&self, id: &str) -> Result<Option<FetchedProject>, Error> {
+        fetch_project(&self.posts, id)
+    }
+
+    fn create_project(&self, project: &NewProject<'_>) -> Result<Project, Error> {
+        create_project(&self.posts, project)
+    }
+
+    fn create_issue(&self, issue: &NewIssue<'_>) -> Result<Issue, Error> {
+        create_issue(&self.posts, issue)
+    }
+
+    fn create_relation(&self, blocker: &str, waiting: &str) -> Result<String, Error> {
+        create_relation(&self.posts, blocker, waiting)
+    }
+
+    fn comment_on_project(&self, project: &str, body: &str) -> Result<String, Error> {
+        comment_on_project(&self.posts, project, body)
+    }
+}
+
+/// Where a board comes from: a key in, a [`Board`] out, and the one seam both
+/// the headless verbs and the panel open theirs through.
+///
+/// The bounds are what the panel's workers need. A board is built from a key
+/// borrowed for as long as the target lives and is then owned by a thread that
+/// outlives the press, which is the associated type's side; and the opener
+/// itself crosses onto a thread, because the panel's pull resolves its board
+/// over there and so opens it there too.
+pub trait Opens: Clone + Send + 'static {
+    type Board: Board + Send + 'static;
+
+    fn open(&self, key: &str) -> Self::Board;
+}
+
+/// The one [`Opens`] that opens a socket, and the only value in warlock that
+/// does. Holds nothing: a board is built per request run, from a key read on
+/// one line and dropped with whatever used it.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Opener;
+
+impl Opens for Opener {
+    type Board = Linear<Client>;
+
+    fn open(&self, key: &str) -> Linear<Client> {
+        Linear::new(Client::new(key))
+    }
+}
+
 /// The name a brief and its issues are filed under: a project status for a
 /// project, a team's workflow state for an issue. Two unrelated types in
 /// Linear's schema that a workspace spells the same way. A workspace or team
@@ -128,7 +226,7 @@ const BACKLOG: &str = "Backlog";
 /// A team key — `WAR` — as Linear's own team id, or `None` when the workspace
 /// has no team by that key. Not an error: the caller holds the words about
 /// `.warlock/pacts.toml` and this module does not.
-pub fn team_id(linear: &impl Posts, key: &str) -> Result<Option<String>, Error> {
+fn team_id(linear: &impl Posts, key: &str) -> Result<Option<String>, Error> {
     let data = linear.post(
         "query Team($key: String!) {
             teams(filter: { key: { eq: $key } }, first: 1) { nodes { id } }
@@ -141,7 +239,7 @@ pub fn team_id(linear: &impl Posts, key: &str) -> Result<Option<String>, Error> 
 
 /// The id of the [`BACKLOG`] status, or `None` when the workspace has no status
 /// by that name.
-pub fn backlog_status(linear: &impl Posts) -> Result<Option<String>, Error> {
+fn backlog_status(linear: &impl Posts) -> Result<Option<String>, Error> {
     // `projectStatuses` takes no filter, so the one request this operation is
     // allowed asks for Linear's largest page and the match happens here. A
     // workspace with more than 250 project statuses would need a second page;
@@ -167,7 +265,7 @@ pub fn backlog_status(linear: &impl Posts) -> Result<Option<String>, Error> {
 /// Workflow states belong to a team and not to the workspace, so this takes the
 /// id [`team_id`] answered rather than the team key. One request, asking for
 /// Linear's largest page and matching here, as [`backlog_status`] does.
-pub fn backlog_state(linear: &impl Posts, team: &str) -> Result<Option<String>, Error> {
+fn backlog_state(linear: &impl Posts, team: &str) -> Result<Option<String>, Error> {
     let data = linear.post(
         "query WorkflowStates($team: ID!) {
             workflowStates(filter: { team: { id: { eq: $team } } }, first: 250) {
@@ -190,7 +288,7 @@ pub fn backlog_state(linear: &impl Posts, team: &str) -> Result<Option<String>, 
 /// `None` rather than an error for [`team_id`]'s reason: an id the board no
 /// longer knows is worth words about the file that recorded it, and this module
 /// does not hold them.
-pub fn fetch_project(linear: &impl Posts, id: &str) -> Result<Option<FetchedProject>, Error> {
+fn fetch_project(linear: &impl Posts, id: &str) -> Result<Option<FetchedProject>, Error> {
     let data = match linear.post(
         "query Project($id: String!) {
             project(id: $id) { name content url status { name } }
@@ -225,10 +323,10 @@ pub fn fetch_project(linear: &impl Posts, id: &str) -> Result<Option<FetchedProj
     }))
 }
 
-/// A project as [`fetch_project`] reads it back, which is not the [`Project`] a
-/// create answers with: what matters about a project that already exists is what
-/// is written on it, and what matters about one that has just been made is where
-/// to find it.
+/// A project as [`Board::fetch_project`] reads it back, which is not the
+/// [`Project`] a create answers with: what matters about a project that already
+/// exists is what is written on it, and what matters about one that has just
+/// been made is where to find it.
 ///
 /// Two of the four are allowed to be empty and neither is a broken answer. A
 /// project filed into a workspace with no `Backlog` has no status at all, so a
@@ -244,6 +342,21 @@ pub struct FetchedProject {
 }
 
 impl FetchedProject {
+    #[must_use]
+    pub fn new(
+        name: impl Into<String>,
+        content: impl Into<String>,
+        url: impl Into<String>,
+        status: Option<&str>,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            content: content.into(),
+            url: url.into(),
+            status: status.map(ToOwned::to_owned),
+        }
+    }
+
     #[must_use]
     pub fn name(&self) -> &str {
         &self.name
@@ -274,7 +387,7 @@ impl FetchedProject {
 /// A project label is its own type in Linear: `issueLabels` and
 /// `issueLabelCreate` are a different set of labels, and an id from there is not
 /// one a project can carry.
-pub fn label_id(linear: &impl Posts, name: &str) -> Result<String, Error> {
+fn label_id(linear: &impl Posts, name: &str) -> Result<String, Error> {
     let data = linear.post(
         "query ProjectLabel($name: String!) {
             projectLabels(filter: { name: { eq: $name } }, first: 1) { nodes { id } }
@@ -310,7 +423,7 @@ pub fn label_id(linear: &impl Posts, name: &str) -> Result<String, Error> {
 /// Two requests at most, one per thing asked, and the create only ever runs
 /// against an empty answer — so a second cut finds the label the first one made
 /// rather than adding another of the same name.
-pub fn issue_label_id(linear: &impl Posts, name: &str, team: &str) -> Result<String, Error> {
+fn issue_label_id(linear: &impl Posts, name: &str, team: &str) -> Result<String, Error> {
     let data = linear.post(
         "query IssueLabel($name: String!, $team: ID!) {
             issueLabels(
@@ -342,7 +455,7 @@ pub fn issue_label_id(linear: &impl Posts, name: &str, team: &str) -> Result<Str
 /// project back, and a create that landed before a label that then failed is a
 /// project no pull will ever read. Resolving first means a project that exists
 /// is a project that carries the label.
-pub fn create_project(linear: &impl Posts, project: &NewProject<'_>) -> Result<Project, Error> {
+fn create_project(linear: &impl Posts, project: &NewProject<'_>) -> Result<Project, Error> {
     let label = label_id(linear, project.label)?;
 
     let mut input = json!({
@@ -375,8 +488,9 @@ pub fn create_project(linear: &impl Posts, project: &NewProject<'_>) -> Result<P
     })
 }
 
-/// What [`create_project`] is asked for: the label is the name it goes by in the
-/// workspace rather than an id, because the create path is what resolves it.
+/// What [`Board::create_project`] is asked for: the label is the name it goes by
+/// in the workspace rather than an id, because the create path is what resolves
+/// it.
 #[derive(Debug, Clone, Copy)]
 pub struct NewProject<'a> {
     name: &'a str,
@@ -403,6 +517,31 @@ impl<'a> NewProject<'a> {
         self.status = status;
         self
     }
+
+    #[must_use]
+    pub const fn name(&self) -> &'a str {
+        self.name
+    }
+
+    #[must_use]
+    pub const fn content(&self) -> &'a str {
+        self.content
+    }
+
+    #[must_use]
+    pub const fn team(&self) -> &'a str {
+        self.team
+    }
+
+    #[must_use]
+    pub const fn status(&self) -> Option<&'a str> {
+        self.status
+    }
+
+    #[must_use]
+    pub const fn label(&self) -> &'a str {
+        self.label
+    }
 }
 
 /// A project that now exists. The URL is the one thing a failure downstream must
@@ -415,6 +554,14 @@ pub struct Project {
 }
 
 impl Project {
+    #[must_use]
+    pub fn new(id: impl Into<String>, url: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            url: url.into(),
+        }
+    }
+
     #[must_use]
     pub fn id(&self) -> &str {
         &self.id
@@ -432,7 +579,7 @@ impl Project {
 /// Nothing is resolved here: an issue create that had to look up its own state
 /// would be a second request per draft, and the team that has no `Backlog` has
 /// to be refused before any issue exists rather than once a slice is half filed.
-pub fn create_issue(linear: &impl Posts, issue: &NewIssue<'_>) -> Result<Issue, Error> {
+fn create_issue(linear: &impl Posts, issue: &NewIssue<'_>) -> Result<Issue, Error> {
     let data = linear.post(
         "mutation IssueCreate($input: IssueCreateInput!) {
             issueCreate(input: $input) { issue { id identifier url } }
@@ -457,15 +604,15 @@ pub fn create_issue(linear: &impl Posts, issue: &NewIssue<'_>) -> Result<Issue, 
     })
 }
 
-/// What [`create_issue`] is asked for, and the whole of it: every field here is
-/// an id the caller resolved, and there is deliberately no assignee, priority,
-/// estimate, cycle or milestone. A draft says what the work is, and a field
+/// What [`Board::create_issue`] is asked for, and the whole of it: every field
+/// here is an id the caller resolved, and there is deliberately no assignee,
+/// priority, estimate, cycle or milestone. A draft says what the work is, and a field
 /// warlock would have to invent a value for is a decision taken away from the
 /// person who owns the board.
 ///
-/// `state` is a *team workflow state* id from [`backlog_state`] and `label` an
-/// *issue label* id from [`issue_label_id`]; neither a project status nor a
-/// project label is usable here.
+/// `state` is a *team workflow state* id from [`Board::backlog_state`] and
+/// `label` an *issue label* id from [`Board::issue_label_id`]; neither a project
+/// status nor a project label is usable here.
 #[derive(Debug, Clone, Copy)]
 pub struct NewIssue<'a> {
     title: &'a str,
@@ -495,6 +642,36 @@ impl<'a> NewIssue<'a> {
             state,
         }
     }
+
+    #[must_use]
+    pub const fn title(&self) -> &'a str {
+        self.title
+    }
+
+    #[must_use]
+    pub const fn body(&self) -> &'a str {
+        self.body
+    }
+
+    #[must_use]
+    pub const fn team(&self) -> &'a str {
+        self.team
+    }
+
+    #[must_use]
+    pub const fn project(&self) -> &'a str {
+        self.project
+    }
+
+    #[must_use]
+    pub const fn label(&self) -> &'a str {
+        self.label
+    }
+
+    #[must_use]
+    pub const fn state(&self) -> &'a str {
+        self.state
+    }
 }
 
 /// An issue that now exists, in all three of the ways the rest of warlock has to
@@ -508,6 +685,19 @@ pub struct Issue {
 }
 
 impl Issue {
+    #[must_use]
+    pub fn new(
+        id: impl Into<String>,
+        identifier: impl Into<String>,
+        url: impl Into<String>,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            identifier: identifier.into(),
+            url: url.into(),
+        }
+    }
+
     /// An issue a cut record names, which is the one an earlier run filed: the
     /// identifier is everything such a record keeps, so it stands as the id as
     /// well and there is no URL.
@@ -550,7 +740,7 @@ impl Issue {
 }
 
 /// Write the edge saying `blocker` blocks `waiting`, by issue id.
-pub fn create_relation(linear: &impl Posts, blocker: &str, waiting: &str) -> Result<String, Error> {
+fn create_relation(linear: &impl Posts, blocker: &str, waiting: &str) -> Result<String, Error> {
     let data = linear.post(
         "mutation IssueRelationCreate($input: IssueRelationCreateInput!) {
             issueRelationCreate(input: $input) { issueRelation { id } }
@@ -577,7 +767,7 @@ pub fn create_relation(linear: &impl Posts, blocker: &str, waiting: &str) -> Res
 /// Linear has one comment mutation for issues and projects both, told apart by
 /// which id the input carries — so a `projectId` here is the whole of what makes
 /// this a project comment.
-pub fn comment_on_project(linear: &impl Posts, project: &str, body: &str) -> Result<String, Error> {
+fn comment_on_project(linear: &impl Posts, project: &str, body: &str) -> Result<String, Error> {
     let data = linear.post(
         "mutation CommentCreate($input: CommentCreateInput!) {
             commentCreate(input: $input) { comment { id } }

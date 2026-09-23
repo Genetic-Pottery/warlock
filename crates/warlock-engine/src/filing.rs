@@ -12,7 +12,7 @@ use crate::keys::{keys_path, load_key};
 use crate::manifest::{Manifest, ScopeRecord, manifest_path};
 use crate::route::{self, bound_key};
 use crate::scope::{scope_opens_to, valid_scope};
-use crate::sigils::{self, load_sigils};
+use crate::sigils::{self, held_sigils};
 
 /// ```
 /// use warlock_engine::{
@@ -77,17 +77,9 @@ pub fn resolve_filing<'m>(
 ) -> Result<Target<'m>, Error> {
     let (root, home) = (root.as_ref(), home.as_ref());
 
-    // A missing config reads as an empty held set *here only*, as it does in
-    // `resolve_route` and against `load_sigils`'s own insistence that absent and
-    // holds-nothing stay different answers: a machine that has never recorded a
-    // sigil files to no board either way. Unreadable and unparseable stay
-    // errors, because those are not an answer — and reading them before the key
-    // half below is what keeps a broken config reported as broken rather than as
-    // a checkout that holds nothing.
-    let held = match load_sigils(home, root) {
-        Err(sigils::Error::NotFound { .. }) => Vec::new(),
-        other => other.map_err(|source| Error::Sigils { source })?,
-    };
+    // Before the key half below, so a broken config is reported as broken
+    // rather than as a checkout that holds nothing.
+    let held = held_sigils(home, root).map_err(|source| Error::Sigils { source })?;
 
     let candidates: Vec<&ScopeRecord> = manifest
         .scopes()
@@ -229,6 +221,69 @@ impl<'m> Target<'m> {
     #[must_use]
     pub fn value(&self) -> &str {
         &self.value
+    }
+
+    #[must_use]
+    pub fn destination(&self) -> Destination {
+        Destination {
+            scope: self.scope.to_owned(),
+            team: self.record.team().to_owned(),
+            label: self.record.label().to_owned(),
+            key: self.key.clone(),
+        }
+    }
+}
+
+// What a `Target` says about where work goes, owned and without the key value,
+// so it can sit in a window or cross onto a worker thread where a `Target`,
+// which borrows the manifest and carries the key, cannot. The key is here by
+// name only: nothing that holds a `Destination` can print a key value.
+//
+// The board's project is not here. It comes from a brief's filed record rather
+// than from the `[[scope]]` record, and the push that is about to make one has
+// none to carry.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Destination {
+    scope: String,
+    team: String,
+    label: String,
+    key: String,
+}
+
+impl Destination {
+    #[must_use]
+    pub fn new(
+        scope: impl Into<String>,
+        team: impl Into<String>,
+        label: impl Into<String>,
+        key: impl Into<String>,
+    ) -> Self {
+        Self {
+            scope: scope.into(),
+            team: team.into(),
+            label: label.into(),
+            key: key.into(),
+        }
+    }
+
+    #[must_use]
+    pub fn scope(&self) -> &str {
+        &self.scope
+    }
+
+    #[must_use]
+    pub fn team(&self) -> &str {
+        &self.team
+    }
+
+    #[must_use]
+    pub fn label(&self) -> &str {
+        &self.label
+    }
+
+    #[must_use]
+    pub fn key(&self) -> &str {
+        &self.key
     }
 }
 
