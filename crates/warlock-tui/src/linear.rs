@@ -140,6 +140,7 @@ pub trait Board {
     fn create_issue(&self, issue: &NewIssue<'_>) -> Result<Issue, Error>;
     fn create_relation(&self, blocker: &str, waiting: &str) -> Result<String, Error>;
     fn comment_on_project(&self, project: &str, body: &str) -> Result<String, Error>;
+    fn comment_on_issue(&self, issue: &str, body: &str) -> Result<String, Error>;
 }
 
 /// The one [`Board`] that speaks GraphQL, over whatever [`Posts`] it holds.
@@ -210,6 +211,10 @@ impl<P: Posts> Board for Linear<P> {
 
     fn comment_on_project(&self, project: &str, body: &str) -> Result<String, Error> {
         comment_on_project(&self.posts, project, body)
+    }
+
+    fn comment_on_issue(&self, issue: &str, body: &str) -> Result<String, Error> {
+        comment_on_issue(&self.posts, issue, body)
     }
 }
 
@@ -1452,6 +1457,27 @@ fn comment_on_project(linear: &impl Posts, project: &str, body: &str) -> Result<
             commentCreate(input: $input) { comment { id } }
         }",
         json!({ "input": { "projectId": project, "body": body } }),
+    )?;
+
+    node_id(payload(&data, "commentCreate", "comment")?)
+}
+
+/// Comment on an issue, by id.
+///
+/// The same mutation [`comment_on_project`] sends, and `issueId` in place of
+/// `projectId` is the entire difference: the two functions exist so that which
+/// object gets commented on is decided by the name a caller types rather than by
+/// the key it spells in a JSON literal.
+///
+/// One request and no retry, per this module's rule, and here that rule has teeth:
+/// a create is not idempotent, so a retried comment is how a halt gets explained
+/// twice on the same ticket. A comment that did not land is a line to print.
+fn comment_on_issue(linear: &impl Posts, issue: &str, body: &str) -> Result<String, Error> {
+    let data = linear.post(
+        "mutation CommentCreate($input: CommentCreateInput!) {
+            commentCreate(input: $input) { comment { id } }
+        }",
+        json!({ "input": { "issueId": issue, "body": body } }),
     )?;
 
     node_id(payload(&data, "commentCreate", "comment")?)

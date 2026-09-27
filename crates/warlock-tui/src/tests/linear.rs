@@ -8,9 +8,10 @@ use serde_json::{Value, json};
 use super::{
     Assignee, BACKLOG, BLOCKERS_PAGE, Blocker, Board, Client, ENDPOINT, Error, LABELS_PAGE, Linear,
     NamedIssue, NewIssue, NewProject, Posts, Priority, QUEUE_PAGE, QueuedIssue, REQUEST_TIMEOUT,
-    StateType, answer, authorization, backlog_state, backlog_status, comment_on_project,
-    create_issue, create_project, create_relation, fetch_project, issue_label_id, label_id,
-    move_issue, named_issue, scope_queue, team_id, viewer, workflow_state,
+    StateType, answer, authorization, backlog_state, backlog_status, comment_on_issue,
+    comment_on_project, create_issue, create_project, create_relation, fetch_project,
+    issue_label_id, label_id, move_issue, named_issue, scope_queue, team_id, viewer,
+    workflow_state,
 };
 
 use crate::IN_PROGRESS;
@@ -1915,4 +1916,74 @@ fn a_comment_that_answers_nothing_usable_is_malformed() {
         );
         assert_eq!(linear.documents().len(), 1, "no retry and no backoff");
     }
+}
+
+#[test]
+fn a_comment_is_written_on_the_issue_by_id_in_one_request() {
+    let linear = Posting::answering([Ok(comment_created())]);
+
+    let comment = comment_on_issue(&linear, "issue-1", "Halted: the tree was dirty.")
+        .expect("the stand-in answered");
+
+    assert_eq!(comment, "comment-1");
+    assert_eq!(
+        last_input(&linear),
+        json!({
+            "issueId": "issue-1",
+            "body": "Halted: the tree was dirty.",
+        })
+    );
+    assert_eq!(linear.documents().len(), 1, "one request per operation");
+}
+
+#[test]
+fn an_issue_comment_names_no_project_and_moves_no_state() {
+    let linear = Posting::answering([Ok(comment_created())]);
+
+    comment_on_issue(&linear, "issue-1", "Halted.").expect("the stand-in answered");
+
+    let asked = linear.documents().pop().expect("one request was made");
+    let input = last_input(&linear);
+
+    // One comment mutation serves issues and projects both, told apart by the id
+    // in the input: a `projectId` here would comment on the wrong object in a
+    // request that succeeds.
+    assert!(asked.contains("commentCreate("), "{asked}");
+    assert!(input.get("projectId").is_none(), "{input}");
+    assert!(input.get("stateId").is_none(), "{input}");
+    assert!(!asked.contains("issueUpdate"), "{asked}");
+}
+
+#[test]
+fn an_issue_comment_that_answers_nothing_usable_is_malformed() {
+    for answer in [
+        json!({ "commentCreate": { "comment": null } }),
+        json!({ "commentCreate": { "success": true } }),
+        json!({ "commentCreate": {} }),
+        json!({ "commentCreate": { "comment": { "body": "Halted." } } }),
+    ] {
+        let linear = Posting::answering([Ok(answer.clone())]);
+
+        let error = comment_on_issue(&linear, "issue-1", "Halted.").expect_err("no comment");
+
+        assert!(
+            matches!(error, Error::Malformed { .. }),
+            "{answer}: {error:?}"
+        );
+        assert_eq!(linear.documents().len(), 1, "no retry and no backoff");
+    }
+}
+
+#[test]
+fn an_issue_comment_the_api_refuses_comes_back_once_in_linears_words() {
+    let linear = Posting::answering([Err(Error::Refused {
+        message: "Entity not found".to_owned(),
+    })]);
+
+    // A create is not idempotent: a retry here is how one halt gets explained
+    // twice on the same ticket.
+    let error = comment_on_issue(&linear, "issue-1", "Halted.").expect_err("the stand-in refused");
+
+    assert!(matches!(error, Error::Refused { .. }), "{error:?}");
+    assert_eq!(linear.documents().len(), 1, "no retry and no backoff");
 }

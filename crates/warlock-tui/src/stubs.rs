@@ -302,6 +302,7 @@ pub(crate) enum Call {
     CreateIssue(IssueAsked),
     Relation { blocker: String, waiting: String },
     Comment { project: String, body: String },
+    IssueComment { issue: String, body: String },
 }
 
 impl Call {
@@ -321,6 +322,7 @@ impl Call {
             Self::CreateIssue(_) => Op::CreateIssue,
             Self::Relation { .. } => Op::Relation,
             Self::Comment { .. } => Op::Comment,
+            Self::IssueComment { .. } => Op::IssueComment,
         }
     }
 }
@@ -341,6 +343,7 @@ pub(crate) enum Op {
     CreateIssue,
     Relation,
     Comment,
+    IssueComment,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -791,6 +794,17 @@ impl Board for Boarding {
     fn comment_on_project(&self, project: &str, body: &str) -> Result<String, LinearError> {
         self.ask(Call::Comment {
             project: project.to_owned(),
+            body: body.to_owned(),
+        })?;
+        Ok("comment-1".to_owned())
+    }
+
+    /// Recorded as its own call, not as a [`Call::Comment`] with an issue id in
+    /// it: a flow that meant to explain a halt on the ticket and commented on the
+    /// project instead is a bug a shared variant would hide.
+    fn comment_on_issue(&self, issue: &str, body: &str) -> Result<String, LinearError> {
+        self.ask(Call::IssueComment {
+            issue: issue.to_owned(),
             body: body.to_owned(),
         })?;
         Ok("comment-1".to_owned())
