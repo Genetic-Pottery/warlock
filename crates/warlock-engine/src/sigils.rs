@@ -74,7 +74,11 @@ pub fn sigils_path(home: impl AsRef<Path>, root: impl AsRef<Path>) -> PathBuf {
     project_dir(home.as_ref(), root.as_ref()).join(SIGIL_FILE)
 }
 
-fn project_dir(home: &Path, root: &Path) -> PathBuf {
+// `pub(crate)` so `pulls.rs` derives its run directory from this one join rather
+// than repeating `.warlock/<project>` itself: the two would then be free to
+// disagree, and the day they did every run record on the machine would appear to
+// vanish while the sigils beside them still read.
+pub(crate) fn project_dir(home: &Path, root: &Path) -> PathBuf {
     home.join(SIGIL_DIR).join(project_directory(root))
 }
 
