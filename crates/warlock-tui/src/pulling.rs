@@ -54,8 +54,9 @@ use warlock_engine::{
     Manifest, PullRun, PullSubtask, RunStatus, ScopeRecord, SubtaskStatus, now_rfc3339, pulls,
 };
 use warlock_tui::{
-    Activity, Board, Crossing, Dirty, Forge, GitError, IN_PROGRESS, LinearError, Repository,
-    Sibling, Split, Worked, branch_name, commit_message, crossings_after, working_opening,
+    Activity, Board, Crossing, Dirty, Finished, Forge, GitError, IN_PROGRESS, LeftStale,
+    LinearError, PullRequest, Repository, Sibling, Split, Touched, Worked, branch_name,
+    commit_message, crossings_after, pull_request_body, pull_request_title, working_opening,
 };
 
 /// Everything one pull is allowed to touch, built by whichever door is pulling.
@@ -98,6 +99,21 @@ pub(crate) struct Pulling<'a, B: Board, R: Repository, F: Forge, S: Splits, W: W
 impl<B: Board, R: Repository, F: Forge, S: Splits, W: Works> Pulling<'_, B, R, F, S, W> {
     pub(crate) fn report(&mut self, event: PullEvent) {
         (self.progress)(event);
+    }
+
+    /// The whole of one pull: the work, and then — only if every sub-task
+    /// finished — the pull request.
+    ///
+    /// What a door calls. The two halves are separately callable because they
+    /// fail differently and are worth driving apart in a test, but nothing
+    /// outside this module has a use for a [`Reached`]: a run that stopped is
+    /// already recorded and commented, and the only thing left to do with it is
+    /// spend its [`status`](Pulled::status).
+    pub(crate) fn pull(&mut self, ticket: &Ticket<'_>) -> Result<Pulled, Error> {
+        match self.work(ticket)? {
+            Reached::Worked { run, touched } => self.finish(ticket, run, &touched),
+            Reached::Stopped(ending) => Ok(ending),
+        }
     }
 
     /// One pull, from the ticket to the last sub-task: the run record loaded or
@@ -326,6 +342,110 @@ impl<B: Board, R: Repository, F: Forge, S: Splits, W: Works> Pulling<'_, B, R, F
         self.halt(ticket, &mut run, &comment, Pulled::halted(ticket))
     }
 
+    /// Everything after the last sub-task's commit: the refresh, the push, the
+    /// pull request, the URL on the ticket and in the record, and the ticket
+    /// moved to the scope's review state.
+    ///
+    /// The order is the promise, and every step of it is one a later step reads:
+    /// the refresh writes onto the branch, the push publishes what the refresh
+    /// left, the pull request is opened from what was pushed, and the record is
+    /// written before the ticket is told anything. The board comes last for the
+    /// reason [`halt`](Self::halt) puts it last — a ticket carrying a URL that
+    /// `state.json` does not hold is a pull request the next invocation would
+    /// open a second time.
+    ///
+    /// No `gh` on the machine is a finish all the same. The body is commented on
+    /// the ticket instead, the record keeps a `pr_url` of `null`, and the ticket
+    /// still moves: the work is done and pushed, and what is missing is a
+    /// program, not a step of the run.
+    pub(crate) fn finish(
+        &mut self,
+        ticket: &Ticket<'_>,
+        mut run: PullRun,
+        touched: &[TouchedScope],
+    ) -> Result<Pulled, Error> {
+        let stale = self.refresh_stale();
+
+        self.report(PullEvent::Heading(Heading::PullRequest {
+            branch: run.branch().to_owned(),
+        }));
+
+        // Detected again rather than carried from `start`: a resumed run never
+        // called it, and the branch a pull request merges into is not a thing to
+        // guess at from a record written on another day.
+        let base = self.repo.default_branch().map_err(Error::git)?;
+        self.repo.publish(run.branch()).map_err(Error::git)?;
+
+        let title = pull_request_title(ticket.identifier, ticket.title);
+        let body = pull_request_body(
+            ticket.description,
+            &finished_in(&run),
+            &scopes_in(touched),
+            &stale_in(&stale),
+        );
+        let opened = self
+            .forge
+            .open_pull_request(PullRequest {
+                base: &base,
+                head: run.branch(),
+                title: &title,
+                body: &body,
+            })
+            .map_err(Error::git)?;
+
+        run.set_status(RunStatus::InReview);
+        if let Some(url) = opened.url() {
+            run.set_pr_url(url);
+        }
+        self.save(&run)?;
+
+        let comment = match opened.url() {
+            Some(url) => format!(
+                "`{}` is pushed and its pull request is open: {url}",
+                run.branch()
+            ),
+            None => without_gh(run.branch(), &body),
+        };
+        self.board
+            .comment_on_issue(ticket.id, &comment)
+            .map_err(Error::board)?;
+
+        let review = self.scope.review_state().to_owned();
+        if !self.move_ticket(ticket.id, &review)? {
+            self.report(PullEvent::NoReviewState {
+                team: self.scope.team().to_owned(),
+                state: review,
+            });
+        }
+
+        Ok(Pulled::Opened {
+            ticket: ticket.identifier.to_owned(),
+            url: opened.url().map(ToOwned::to_owned),
+        })
+    }
+
+    /// Where the refresh of stale documents goes, and nothing behind it yet.
+    ///
+    /// Slice 9 of brief 24 — "Freshness before the pull request" — fills this
+    /// in: every pacted directory the branch made stale and this machine may
+    /// refresh, passed children before parents, committed as one
+    /// `<TICKET>: refresh WARLOCK.md` of its own, with whatever was left stale
+    /// answered back so the body can name it. Until then it runs no pass, spends
+    /// no session and issues no `git` command, and the empty answer renders as no
+    /// "Directories left stale" heading at all.
+    ///
+    /// A named call rather than a comment because the position is the part that
+    /// is hard to put back later: after the last sub-task's commit, so the refresh
+    /// reads a tree that holds the whole change, and before the push, so what it
+    /// writes is on the branch the pull request is opened from.
+    #[expect(
+        clippy::unused_self,
+        reason = "the pass this stands in for reads the manifest, the sigils and the tree"
+    )]
+    fn refresh_stale(&mut self) -> Vec<StaleDirectory> {
+        Vec::new()
+    }
+
     /// A run this checkout already holds, picked up where it was left: its own
     /// branch checked out, and the tree it left required to be clean.
     ///
@@ -451,7 +571,7 @@ pub(crate) enum Reached {
 /// One scope a session wrote under and this machine holds, with the paths written
 /// under it.
 ///
-/// The owned twin of [`Touched`](warlock_tui::Touched), which borrows the `git
+/// The owned twin of [`Touched`], which borrows the `git
 /// status` entries it was read from. Those entries are gone by the next
 /// sub-task — the commit that ends this one empties the tree — so a run that
 /// wants to name these scopes in a pull request body at the end has to have kept
@@ -460,6 +580,21 @@ pub(crate) enum Reached {
 pub(crate) struct TouchedScope {
     pub(crate) scope: String,
     pub(crate) paths: Vec<String>,
+}
+
+/// One pacted directory the branch made stale that the refresh did not put back,
+/// and why it did not.
+///
+/// The owned twin of [`LeftStale`], as [`TouchedScope`]
+/// is of [`Touched`]. The reason it is owned is
+/// [`refresh_stale`](Pulling::refresh_stale)'s: the pass that fills that seam
+/// builds both of these — a path relative to the root, and a sentence about a
+/// boundary or a failure — and neither is borrowed from anything that outlives
+/// the pass.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct StaleDirectory {
+    pub(crate) directory: String,
+    pub(crate) reason: String,
 }
 
 /// The ticket one pull works, in what a run needs of it and nothing else.
@@ -582,7 +717,7 @@ pub(crate) trait Splits {
 ///
 /// A factory and not a session: a run opens one session per sub-task and drops it
 /// at the end of the sub-task, so nothing one sub-task said reaches the next —
-/// which is what [`working_opening`](warlock_tui::working_opening) is written on
+/// which is what [`working_opening`] is written on
 /// the assumption of.
 ///
 /// The retries are the implementation's, not the caller's:
@@ -671,7 +806,7 @@ pub(crate) enum PullEvent {
         note: String,
     },
     /// The team has no workflow state named
-    /// [`IN_PROGRESS`](warlock_tui::IN_PROGRESS). No state is carried because
+    /// [`IN_PROGRESS`]. No state is carried because
     /// there is only one spelling this looks for; the review state's is the
     /// scope record's, so that one is said.
     NoStartState {
@@ -853,6 +988,60 @@ fn remember(kept: &mut Vec<TouchedScope>, crossings: &warlock_tui::Crossings<'_>
     }
 }
 
+/// Every finished sub-task as the pull request body names it, in the record's
+/// order.
+///
+/// A sub-task that finished and logged nothing is still named: a run's shape is
+/// its sub-tasks, and a reviewer reading a body with one of them missing would
+/// go looking for the commit it does not explain. The empty summary is what
+/// [`pull_request_body`] already leaves out.
+fn finished_in(run: &PullRun) -> Vec<Finished<'_>> {
+    run.subtasks()
+        .iter()
+        .filter(|subtask| *subtask.status() == SubtaskStatus::Done)
+        .map(|subtask| Finished {
+            id: subtask.id(),
+            goal: subtask.goal(),
+            summary: subtask.log().unwrap_or_default(),
+        })
+        .collect()
+}
+
+fn scopes_in(touched: &[TouchedScope]) -> Vec<Touched<'_>> {
+    touched
+        .iter()
+        .map(|held| Touched {
+            scope: &held.scope,
+            paths: held.paths.iter().map(String::as_str).collect(),
+        })
+        .collect()
+}
+
+fn stale_in(stale: &[StaleDirectory]) -> Vec<LeftStale<'_>> {
+    stale
+        .iter()
+        .map(|left| LeftStale {
+            directory: &left.directory,
+            reason: &left.reason,
+        })
+        .collect()
+}
+
+/// What goes on the ticket when the machine that worked it has no `gh`: the body
+/// the pull request would have carried, under a sentence saying why it is here
+/// and naming the branch to open one from.
+///
+/// The whole body and not a summary of it. This is the only place that account
+/// of the run exists — there is no pull request to hold it — and a reviewer
+/// opening the request by hand is the person it was written for.
+fn without_gh(branch: &str, body: &str) -> String {
+    format!(
+        "There is no `gh` on the machine that worked this ticket, so no pull request was opened. \
+         `{branch}` is pushed and holds one commit per sub-task, and what the pull request would \
+         have said is below.\n\n{body}"
+    )
+}
+
 /// The one comment a halted run leaves on its ticket: what finished, what
 /// stopped and why, what never started, and the two commands that carry the run
 /// on.
@@ -864,7 +1053,7 @@ fn remember(kept: &mut Vec<TouchedScope>, crossings: &warlock_tui::Crossings<'_>
 /// waiting for a queue pass that will not choose it ahead of anything.
 ///
 /// A section with nothing in it is absent rather than an empty heading, as
-/// [`pull_request_body`](warlock_tui::pull_request_body) leaves one out: a run
+/// [`pull_request_body`] leaves one out: a run
 /// that halted on its first sub-task has nothing finished, and a heading saying
 /// so is the bulk of the comment.
 pub(crate) fn halt_comment(run: &PullRun) -> String {

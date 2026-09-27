@@ -5,7 +5,10 @@ use warlock_engine::splitting::{Caught, Cycle, Numbered};
 use warlock_engine::{
     Manifest, PactEntry, PullRun, PullSubtask, RunStatus, ScopeRecord, SubtaskStatus, state_path,
 };
-use warlock_tui::{Dirty, Split, Stopped, Unsplit, Worked, commit_message};
+use warlock_tui::{
+    Dirty, Finished, HUMAN_GATE, Split, Stopped, Touched, Unsplit, Worked, commit_message,
+    pull_request_body, pull_request_title,
+};
 
 use super::{
     Error, Heading, PullEvent, Pulled, Pulling, Reached, Ticket, halt_comment, next_runnable,
@@ -420,6 +423,36 @@ fn work(
         "the sub-task loop asked for a pull request"
     );
     (reached, events)
+}
+
+/// One whole pull, the finish included, over the same seams: what a door spends.
+fn pull(
+    ground: &Ground,
+    board: &Boarding,
+    repo: &Checkout,
+    forge: &Forging,
+    split: &Slicing,
+    sessions: &Sessions,
+) -> (Result<Pulled, Error>, Vec<PullEvent>) {
+    let mut events = Vec::new();
+    let pulled = {
+        let mut sink = |event: PullEvent| events.push(event);
+        Pulling {
+            board,
+            repo,
+            forge,
+            split,
+            sessions,
+            scope: &ground.scope,
+            manifest: &ground.manifest,
+            held: &ground.held,
+            root: ground.root.path(),
+            home: ground.home.path(),
+            progress: &mut sink,
+        }
+        .pull(&ticket())
+    };
+    (pulled, events)
 }
 
 /// Every comment this run left on its ticket, which a halt promises is exactly
@@ -975,5 +1008,290 @@ fn the_record_says_a_sub_task_is_in_progress_while_its_session_runs() {
     assert_eq!(
         status_of(&ground.saved(), "WAR-140.01"),
         SubtaskStatus::Done
+    );
+}
+
+// The finish: everything after the last sub-task's commit. Driven through
+// `pull`, which is what a door calls, so the order asserted below is the order a
+// real run does these in.
+
+const URL: &str = "https://github.com/team/repo/pull/12";
+
+const REVIEW: &str = "In Review";
+
+/// The run every finish test below works: two sub-tasks, the second of which
+/// also writes under a held scope the ticket was not pulled under.
+fn two_sub_tasks() -> (Checkout, Slicing, Sessions) {
+    let repo = Checkout::clean(DEFAULT).trees([
+        wrote("crates/engine/src/read.rs"),
+        vec![
+            Dirty {
+                code: " M".to_owned(),
+                path: "crates/engine/src/route.rs".to_owned(),
+                from: None,
+            },
+            Dirty {
+                code: "??".to_owned(),
+                path: "docs/route.md".to_owned(),
+                from: None,
+            },
+        ],
+    ]);
+    let split = Slicing::into_chain(TICKET, &["Add the reader", "Use the reader"]);
+    let sessions = Sessions::answering([
+        said("done", "Added the reader.", None),
+        said("done", "Used the reader.", None),
+    ]);
+    (repo, split, sessions)
+}
+
+/// The body that run's pull request carries, built the same way the finish
+/// builds it — which is how the stale list being empty is asserted rather than
+/// described.
+fn expected_body() -> String {
+    pull_request_body(
+        DESCRIPTION,
+        &[
+            Finished {
+                id: "WAR-140.01",
+                goal: "Add the reader",
+                summary: "Added the reader.",
+            },
+            Finished {
+                id: "WAR-140.02",
+                goal: "Use the reader",
+                summary: "Used the reader.",
+            },
+        ],
+        &[Touched {
+            scope: OTHER,
+            paths: vec!["docs/route.md"],
+        }],
+        &[],
+    )
+}
+
+#[test]
+fn a_finished_run_pushes_opens_the_pull_request_comments_and_moves_the_ticket() {
+    let ground = Ground::new();
+    let board = Boarding::filing("");
+    let forge = Forging::opening(URL);
+    let (repo, split, sessions) = two_sub_tasks();
+
+    let (pulled, events) = pull(&ground, &board, &repo, &forge, &split, &sessions);
+
+    let Ok(opened) = pulled else {
+        panic!("every sub-task finished, so the run opened a pull request: {pulled:?}");
+    };
+    assert_eq!(
+        opened,
+        Pulled::Opened {
+            ticket: TICKET.to_owned(),
+            url: Some(URL.to_owned()),
+        }
+    );
+    assert_eq!(opened.status(), 0);
+
+    // The request: opened against the detected default branch, from the run's own
+    // branch, with the title and the body the pull request modules render.
+    let asked = forge.asked();
+    assert_eq!(asked.len(), 1);
+    assert_eq!(asked[0].base, DEFAULT);
+    assert_eq!(asked[0].head, branch());
+    assert_eq!(asked[0].title, pull_request_title(TICKET, TITLE));
+    assert_eq!(asked[0].body, expected_body());
+    assert!(asked[0].body.contains(HUMAN_GATE));
+    assert!(asked[0].body.contains(OTHER));
+
+    // The last sub-task's commit, then the push, and nothing between them but the
+    // reading of the branch to open against.
+    let calls = repo.calls();
+    let last = calls
+        .iter()
+        .rposition(|call| matches!(call, GitCall::CommitAll(_)))
+        .expect("the run committed its sub-tasks");
+    assert_eq!(
+        calls[last..],
+        [
+            GitCall::CommitAll(commit_message(TICKET, "WAR-140.02", "Use the reader")),
+            GitCall::DefaultBranch,
+            GitCall::Publish(branch()),
+        ]
+    );
+
+    // The board, in order: the ticket moved to `In Progress` before the split, the
+    // URL commented, and then the move to the scope record's review state.
+    assert_eq!(
+        board.calls(),
+        [
+            Call::WorkflowState {
+                team: TEAM.to_owned(),
+                name: "In Progress".to_owned(),
+            },
+            Call::MoveIssue {
+                issue: ISSUE.to_owned(),
+                state: "state-backlog".to_owned(),
+            },
+            Call::IssueComment {
+                issue: ISSUE.to_owned(),
+                body: format!(
+                    "`{}` is pushed and its pull request is open: {URL}",
+                    branch()
+                ),
+            },
+            Call::WorkflowState {
+                team: TEAM.to_owned(),
+                name: REVIEW.to_owned(),
+            },
+            Call::MoveIssue {
+                issue: ISSUE.to_owned(),
+                state: "state-backlog".to_owned(),
+            },
+        ]
+    );
+
+    // What the next invocation reads back: the URL, and a run in review.
+    let saved = ground.saved();
+    assert_eq!(saved.status(), RunStatus::InReview);
+    assert_eq!(saved.pr_url(), Some(URL));
+
+    // The pull request is a section of its own, and the last one.
+    let mut expected = headings(&[
+        ("WAR-140.01", "Add the reader"),
+        ("WAR-140.02", "Use the reader"),
+    ]);
+    expected.push(PullEvent::Heading(Heading::PullRequest {
+        branch: branch(),
+    }));
+    assert_eq!(events, expected);
+}
+
+// The refresh is a seam and not a behaviour yet: slice 9 of the brief fills it.
+// What is asserted is that it costs nothing — no `git`, no session, no second
+// split — so the day it does something, this test is what says so.
+#[test]
+fn the_refresh_call_site_runs_no_git_command_and_no_pass() {
+    let ground = Ground::new();
+    let board = Boarding::filing("");
+    let forge = Forging::opening(URL);
+    let (repo, split, sessions) = two_sub_tasks();
+
+    let (pulled, _) = pull(&ground, &board, &repo, &forge, &split, &sessions);
+
+    assert!(pulled.is_ok(), "{pulled:?}");
+    // One split, one session per sub-task, and no third of either.
+    assert_eq!(split.asked().len(), 1);
+    assert_eq!(sessions.openings().len(), 2);
+    // One commit per sub-task: no `<TICKET>: refresh WARLOCK.md` beside them.
+    assert_eq!(
+        repo.commits(),
+        [
+            commit_message(TICKET, "WAR-140.01", "Add the reader"),
+            commit_message(TICKET, "WAR-140.02", "Use the reader"),
+        ]
+    );
+    // And nothing was left stale, so the body has no heading for it.
+    assert!(!forge.asked()[0].body.contains("Directories left stale"));
+}
+
+#[test]
+fn a_team_with_no_review_state_gets_a_line_and_the_run_still_finishes() {
+    let ground = Ground::new();
+    let board = Boarding::filing("").without_backlog_state();
+    let forge = Forging::opening(URL);
+    let (repo, split, sessions) = two_sub_tasks();
+
+    let (pulled, events) = pull(&ground, &board, &repo, &forge, &split, &sessions);
+
+    let Ok(opened) = pulled else {
+        panic!("a board with no such state is a line, not a failure: {pulled:?}");
+    };
+    assert_eq!(opened.status(), 0);
+    assert!(events.contains(&PullEvent::NoReviewState {
+        team: TEAM.to_owned(),
+        state: REVIEW.to_owned(),
+    }));
+
+    // The state was asked for by the scope record's name and no move followed.
+    assert!(board.positions_of(Op::MoveIssue).is_empty());
+    assert_eq!(
+        board.calls().last(),
+        Some(&Call::WorkflowState {
+            team: TEAM.to_owned(),
+            name: REVIEW.to_owned(),
+        })
+    );
+    // The pull request was opened and the URL is on the ticket all the same.
+    assert_eq!(forge.asked().len(), 1);
+    assert_eq!(comments(&board).len(), 1);
+    assert_eq!(ground.saved().pr_url(), Some(URL));
+}
+
+#[test]
+fn no_gh_comments_the_body_on_the_ticket_and_the_run_still_counts_as_finished() {
+    let ground = Ground::new();
+    let board = Boarding::filing("");
+    let forge = Forging::without_gh();
+    let (repo, split, sessions) = two_sub_tasks();
+
+    let (pulled, _) = pull(&ground, &board, &repo, &forge, &split, &sessions);
+
+    let Ok(opened) = pulled else {
+        panic!("no `gh` is still a run that did the work: {pulled:?}");
+    };
+    assert_eq!(
+        opened,
+        Pulled::Opened {
+            ticket: TICKET.to_owned(),
+            url: None,
+        }
+    );
+    assert_eq!(opened.status(), 0);
+
+    // The branch was pushed and the request was asked for: what came back is that
+    // there is no `gh` to ask.
+    assert!(repo.calls().contains(&GitCall::Publish(branch())));
+    assert_eq!(forge.asked().len(), 1);
+
+    // The body is on the ticket instead, under a sentence naming the branch.
+    let posted = comments(&board);
+    assert_eq!(posted.len(), 1);
+    assert!(posted[0].contains("no `gh`"), "{}", posted[0]);
+    assert!(posted[0].contains(&branch()), "{}", posted[0]);
+    assert!(posted[0].ends_with(&expected_body()), "{}", posted[0]);
+
+    // In review, with no URL to record, and the ticket moved anyway.
+    let saved = ground.saved();
+    assert_eq!(saved.status(), RunStatus::InReview);
+    assert_eq!(saved.pr_url(), None);
+    assert_eq!(board.positions_of(Op::MoveIssue).len(), 2);
+}
+
+#[test]
+fn a_run_that_halted_never_reaches_the_forge() {
+    let ground = Ground::new();
+    let board = Boarding::filing("");
+    let forge = Forging::opening(URL);
+    let repo = Checkout::clean(DEFAULT).trees([wrote("crates/engine/src/read.rs")]);
+    let split = Slicing::into_chain(TICKET, &["Settle the wire format", "Write the format out"]);
+    let sessions = Sessions::answering([said(
+        "blocked",
+        "The format is a decision.",
+        Some("only a person can settle the wire format"),
+    )]);
+
+    let (pulled, events) = pull(&ground, &board, &repo, &forge, &split, &sessions);
+
+    let Ok(Pulled::Halted { ticket }) = pulled else {
+        panic!("nothing was runnable: {pulled:?}");
+    };
+    assert_eq!(ticket, TICKET);
+    assert!(forge.asked().is_empty());
+    assert!(!repo.calls().contains(&GitCall::Publish(branch())));
+    assert_eq!(ground.saved().status(), RunStatus::Halted);
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, PullEvent::Heading(Heading::PullRequest { .. })))
     );
 }

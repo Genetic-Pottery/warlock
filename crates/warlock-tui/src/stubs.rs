@@ -1024,6 +1024,16 @@ impl Forging {
         }
     }
 
+    /// A machine with no `gh` on it, which answers the request rather than
+    /// refusing it: the request is still recorded, because what a caller has to
+    /// do about [`Opened::NoGh`] is decided from the body it built.
+    pub(crate) fn without_gh() -> Self {
+        Self {
+            log: Arc::new(Mutex::new(Vec::new())),
+            opened: Opened::NoGh,
+        }
+    }
+
     pub(crate) fn asked(&self) -> Vec<PullRequestAsked> {
         self.log
             .lock()
