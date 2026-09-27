@@ -1,8 +1,8 @@
 use std::path::Path;
 
 use super::{
-    Error, PullRun, PullSubtask, ReasonMissing, RunStatus, SubtaskStatus, brief_path, pulls_dir,
-    run_dir, run_manifest_path, state_path,
+    Error, PullRun, PullSubtask, ReasonMissing, RunStatus, SubtaskStatus, brief_path,
+    halted_and_resumed_runs, pulls_dir, run_dir, run_manifest_path, state_path,
 };
 
 const WAR_124: &str = r#"{
@@ -810,5 +810,338 @@ fn a_loaded_record_is_unaffected_by_whatever_the_manifest_says() {
     assert_eq!(
         manifest_of(home.path(), root.path()),
         run.to_manifest_string()
+    );
+}
+
+// One saved run per line of a fixture, so a test can say what a home holds in a
+// sentence instead of five statements per record.
+fn saved(home: &Path, root: &Path, ticket: &str, scope: &str, status: RunStatus) {
+    let mut run = PullRun::new(
+        ticket,
+        "A ticket",
+        scope,
+        format!("{}/a-ticket", ticket.to_lowercase()),
+        "2026-09-27T06:21:55+00:00",
+    );
+    run.set_status(status);
+    run.save(home, root).expect("a run saves");
+}
+
+fn tickets(runs: &[PullRun]) -> Vec<&str> {
+    runs.iter().map(PullRun::ticket).collect()
+}
+
+#[test]
+fn a_checkout_that_has_never_pulled_holds_no_run_and_no_open_ones() {
+    let (home, root) = (
+        tempfile::tempdir().expect("a temporary home"),
+        tempfile::tempdir().expect("a temporary root"),
+    );
+
+    // There is no `pulls` directory to read, and neither lookup treats that as a
+    // failure.
+    assert!(!pulls_dir(home.path(), root.path()).exists());
+    assert_eq!(
+        PullRun::find(home.path(), root.path(), "WAR-140").expect("a missing run is not an error"),
+        None
+    );
+
+    let found = halted_and_resumed_runs(home.path(), root.path(), "warlock-team")
+        .expect("a missing pulls directory is not an error");
+    assert!(found.is_empty());
+    assert!(found.runs().is_empty());
+    assert!(found.unreadable().is_empty());
+}
+
+#[test]
+fn a_ticket_this_machine_is_not_working_has_no_run_beside_the_ones_it_is() {
+    let (home, root) = (
+        tempfile::tempdir().expect("a temporary home"),
+        tempfile::tempdir().expect("a temporary root"),
+    );
+    saved(
+        home.path(),
+        root.path(),
+        "WAR-140",
+        "warlock-team",
+        RunStatus::InProgress,
+    );
+
+    assert_eq!(
+        PullRun::find(home.path(), root.path(), "WAR-141").expect("a missing run is not an error"),
+        None
+    );
+
+    let held = PullRun::find(home.path(), root.path(), "WAR-140")
+        .expect("the run reads")
+        .expect("this machine holds it");
+    assert_eq!(held.ticket(), "WAR-140");
+    assert_eq!(held.status(), RunStatus::InProgress);
+}
+
+// The fixture the two lookups are worth having for: two scopes, every run status,
+// and one record for a ticket in neither of the statuses being asked about.
+fn two_scopes(home: &Path, root: &Path) {
+    saved(home, root, "WAR-140", "warlock-team", RunStatus::Pulled);
+    saved(home, root, "WAR-141", "warlock-team", RunStatus::InProgress);
+    saved(home, root, "WAR-142", "warlock-team", RunStatus::Halted);
+    saved(home, root, "WAR-143", "warlock-team", RunStatus::Resumed);
+    saved(home, root, "WAR-144", "warlock-team", RunStatus::InReview);
+    saved(home, root, "WAR-9", "warlock-docs", RunStatus::Halted);
+    saved(home, root, "WAR-10", "warlock-docs", RunStatus::Resumed);
+    saved(home, root, "WAR-11", "warlock-docs", RunStatus::InProgress);
+}
+
+#[test]
+fn the_scope_lookup_returns_the_halted_and_resumed_runs_of_that_scope_only() {
+    let (home, root) = (
+        tempfile::tempdir().expect("a temporary home"),
+        tempfile::tempdir().expect("a temporary root"),
+    );
+    two_scopes(home.path(), root.path());
+
+    let team = halted_and_resumed_runs(home.path(), root.path(), "warlock-team")
+        .expect("the scan reads the home");
+
+    // `pulled`, `in_progress` and `in_review` are somebody else's problem: the
+    // first two are a pull's to carry, and the third is waiting on a reviewer.
+    assert_eq!(tickets(team.runs()), ["WAR-142", "WAR-143"]);
+    assert_eq!(team.runs()[0].status(), RunStatus::Halted);
+    assert_eq!(team.runs()[1].status(), RunStatus::Resumed);
+    assert!(team.unreadable().is_empty());
+
+    // The other scope's runs are in the same directory and stay out of the
+    // answer, including its own halted and resumed ones.
+    let docs = halted_and_resumed_runs(home.path(), root.path(), "warlock-docs")
+        .expect("the scan reads the home");
+    assert_eq!(tickets(docs.runs()), ["WAR-10", "WAR-9"]);
+
+    // A scope nothing was ever pulled for reads empty rather than everything.
+    assert!(
+        halted_and_resumed_runs(home.path(), root.path(), "warlock-control")
+            .expect("the scan reads the home")
+            .is_empty()
+    );
+}
+
+// Two calls over one home have to agree, whatever order the filesystem hands the
+// directory over in, because a caller prints this list.
+#[test]
+fn the_scope_lookup_is_ordered_by_ticket_identifier() {
+    let (home, root) = (
+        tempfile::tempdir().expect("a temporary home"),
+        tempfile::tempdir().expect("a temporary root"),
+    );
+    for ticket in ["WAR-9", "WAR-140", "WAR-10", "WAR-2"] {
+        saved(
+            home.path(),
+            root.path(),
+            ticket,
+            "warlock-team",
+            RunStatus::Halted,
+        );
+    }
+
+    let first = halted_and_resumed_runs(home.path(), root.path(), "warlock-team")
+        .expect("the scan reads the home");
+    let again = halted_and_resumed_runs(home.path(), root.path(), "warlock-team")
+        .expect("the scan reads the home");
+
+    // Sorted by identifier as text, so `WAR-10` precedes `WAR-9`. Ordering by the
+    // number in the identifier is selection's job, not this lookup's.
+    assert_eq!(
+        tickets(first.runs()),
+        ["WAR-10", "WAR-140", "WAR-2", "WAR-9"]
+    );
+    assert_eq!(tickets(first.runs()), tickets(again.runs()));
+}
+
+#[test]
+fn every_run_this_machine_holds_is_found_by_its_ticket() {
+    let (home, root) = (
+        tempfile::tempdir().expect("a temporary home"),
+        tempfile::tempdir().expect("a temporary root"),
+    );
+    two_scopes(home.path(), root.path());
+
+    for ticket in [
+        "WAR-140", "WAR-141", "WAR-142", "WAR-143", "WAR-144", "WAR-9", "WAR-10", "WAR-11",
+    ] {
+        let held = PullRun::find(home.path(), root.path(), ticket)
+            .expect("the run reads")
+            .expect("this machine holds it");
+        assert_eq!(held.ticket(), ticket);
+    }
+}
+
+// A record broken by a hand edit must never read as a ticket nobody pulled: the
+// run behind it may be halted with uncommitted work on its branch.
+#[test]
+fn a_malformed_record_is_an_error_from_the_ticket_lookup() {
+    let (home, root) = (
+        tempfile::tempdir().expect("a temporary home"),
+        tempfile::tempdir().expect("a temporary root"),
+    );
+    saved(
+        home.path(),
+        root.path(),
+        "WAR-140",
+        "warlock-team",
+        RunStatus::Halted,
+    );
+    std::fs::write(
+        state_path(home.path(), root.path(), "WAR-140"),
+        "{ not json at all",
+    )
+    .expect("the record is mangled");
+
+    assert!(matches!(
+        PullRun::find(home.path(), root.path(), "WAR-140"),
+        Err(Error::Parse { .. }),
+    ));
+}
+
+#[test]
+fn a_malformed_record_is_named_by_the_scope_lookup_rather_than_skipped() {
+    let (home, root) = (
+        tempfile::tempdir().expect("a temporary home"),
+        tempfile::tempdir().expect("a temporary root"),
+    );
+    two_scopes(home.path(), root.path());
+    let mangled = state_path(home.path(), root.path(), "WAR-142");
+    std::fs::write(&mangled, "{ not json at all").expect("the record is mangled");
+
+    let found = halted_and_resumed_runs(home.path(), root.path(), "warlock-team")
+        .expect("one broken record does not fail the scan");
+
+    // The rest of the scope still comes back, so one bad record cannot stop a
+    // resumed run being taken.
+    assert_eq!(tickets(found.runs()), ["WAR-143"]);
+    assert!(!found.is_empty());
+
+    // And the broken one is named, with the path to fix.
+    assert_eq!(found.unreadable().len(), 1);
+    let Error::Parse { path, .. } = &found.unreadable()[0] else {
+        panic!(
+            "a malformed record is a parse error: {:?}",
+            found.unreadable()
+        );
+    };
+    assert_eq!(path, &mangled);
+
+    // Its scope is the field that will not parse, so it is named for whichever
+    // scope asked.
+    let docs = halted_and_resumed_runs(home.path(), root.path(), "warlock-docs")
+        .expect("one broken record does not fail the scan");
+    assert_eq!(docs.unreadable().len(), 1);
+}
+
+// A `blocked` sub-task with no reason is the same class of broken as invalid
+// JSON, and `serde_json` reports it the same way.
+#[test]
+fn a_sub_task_missing_its_reason_is_named_by_the_scope_lookup() {
+    let (home, root) = (
+        tempfile::tempdir().expect("a temporary home"),
+        tempfile::tempdir().expect("a temporary root"),
+    );
+    saved(
+        home.path(),
+        root.path(),
+        "WAR-124",
+        "warlock-team",
+        RunStatus::Halted,
+    );
+    std::fs::write(
+        state_path(home.path(), root.path(), "WAR-124"),
+        WAR_124
+            .replace("\"in_review\"", "\"halted\"")
+            .replace("\"`crates/control` is scoped control-plane\"", "null"),
+    )
+    .expect("the record is written");
+
+    let found = halted_and_resumed_runs(home.path(), root.path(), "warlock-team")
+        .expect("one broken record does not fail the scan");
+
+    assert!(found.runs().is_empty());
+    assert_eq!(found.unreadable().len(), 1);
+    assert!(
+        found.unreadable()[0]
+            .to_string()
+            .contains("no `blocked_reason`"),
+        "{}",
+        found.unreadable()[0],
+    );
+}
+
+// Nothing under `pulls/` is trusted to be a run: a stray file, a directory
+// holding no record, and a name that is not a ticket all have to leave the scan
+// standing.
+#[test]
+fn a_name_under_pulls_that_is_not_a_run_is_passed_over() {
+    let (home, root) = (
+        tempfile::tempdir().expect("a temporary home"),
+        tempfile::tempdir().expect("a temporary root"),
+    );
+    saved(
+        home.path(),
+        root.path(),
+        "WAR-142",
+        "warlock-team",
+        RunStatus::Halted,
+    );
+    let pulls = pulls_dir(home.path(), root.path());
+    std::fs::write(pulls.join("README"), "a note somebody left").expect("a stray file is written");
+    std::fs::write(pulls.join(".DS_Store"), "junk").expect("a stray dotfile is written");
+    std::fs::create_dir(pulls.join("WAR-999")).expect("an empty directory is created");
+    std::fs::write(pulls.join("WAR-999").join("manifest.md"), "# WAR-999\n")
+        .expect("a directory with no record is left");
+
+    let found = halted_and_resumed_runs(home.path(), root.path(), "warlock-team")
+        .expect("the scan reads the home");
+
+    // Passed over in silence: none of them is a record that broke, so none is
+    // worth telling the operator about.
+    assert_eq!(tickets(found.runs()), ["WAR-142"]);
+    assert!(found.unreadable().is_empty());
+
+    // And a directory with no `state.json` is not a run this machine holds.
+    assert_eq!(
+        PullRun::find(home.path(), root.path(), "WAR-999")
+            .expect("a missing record is not an error"),
+        None
+    );
+}
+
+// The per-checkout separation `sigils.rs` gives every path here applies to the
+// lookups too: two checkouts of one repository do not see each other's runs.
+#[test]
+fn the_lookups_only_see_this_checkouts_runs() {
+    let home = tempfile::tempdir().expect("a temporary home");
+    let (here, elsewhere) = (
+        tempfile::tempdir().expect("a temporary root"),
+        tempfile::tempdir().expect("another temporary root"),
+    );
+    saved(
+        home.path(),
+        here.path(),
+        "WAR-142",
+        "warlock-team",
+        RunStatus::Halted,
+    );
+    saved(
+        home.path(),
+        elsewhere.path(),
+        "WAR-143",
+        "warlock-team",
+        RunStatus::Resumed,
+    );
+
+    let found = halted_and_resumed_runs(home.path(), here.path(), "warlock-team")
+        .expect("the scan reads the home");
+
+    assert_eq!(tickets(found.runs()), ["WAR-142"]);
+    assert_eq!(
+        PullRun::find(home.path(), here.path(), "WAR-143").expect("a missing run is not an error"),
+        None
     );
 }

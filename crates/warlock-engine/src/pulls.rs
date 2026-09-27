@@ -476,6 +476,198 @@ impl PullRun {
             Err(source) => Err(Error::Io { path, source }),
         }
     }
+
+    /// Whether this checkout holds a run for `ticket`, and the run when it does.
+    ///
+    /// This is the question selection asks: an issue Linear says is in progress
+    /// is only ours to carry on if this machine holds its run, and an issue with
+    /// no run here is somebody else's in progress or nobody's yet.
+    ///
+    /// ```
+    /// use warlock_engine::PullRun;
+    ///
+    /// let (home, root) = (tempfile::tempdir()?, tempfile::tempdir()?);
+    /// let run = PullRun::new("WAR-140", "A ticket", "warlock-team", "war-140/a-ticket", "now");
+    ///
+    /// assert_eq!(PullRun::find(home.path(), root.path(), "WAR-140")?, None);
+    ///
+    /// run.save(home.path(), root.path())?;
+    ///
+    /// assert_eq!(PullRun::find(home.path(), root.path(), "WAR-140")?, Some(run));
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    // Only "no run here" becomes `None`. An unreadable or malformed `state.json`
+    // is still an error, for the reason `load` opens with: a record broken by a
+    // hand edit must not answer this question the same way a ticket nobody
+    // pulled does, because a caller told "no run here" walks past a branch with
+    // uncommitted work on it and starts the ticket again.
+    pub fn find(
+        home: impl AsRef<Path>,
+        root: impl AsRef<Path>,
+        ticket: &str,
+    ) -> Result<Option<Self>, Error> {
+        match Self::load(home, root, ticket) {
+            Ok(run) => Ok(Some(run)),
+            Err(Error::NotFound { .. }) => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+}
+
+/// Every `halted` and `resumed` run this checkout holds for one scope, and every
+/// record under `pulls/` it could not read.
+///
+/// The two lists are separate because they are answered differently and both
+/// have to be said: the runs are what selection acts on, and an unreadable
+/// record is something only the operator can fix. See
+/// [`halted_and_resumed_runs`].
+#[derive(Debug, Default)]
+pub struct ScopeRuns {
+    runs: Vec<PullRun>,
+    unreadable: Vec<Error>,
+}
+
+impl ScopeRuns {
+    /// The matching runs, ordered by ticket identifier.
+    #[must_use]
+    pub fn runs(&self) -> &[PullRun] {
+        &self.runs
+    }
+
+    /// One error per record the scan found and could not read, ordered by
+    /// ticket identifier. Each carries the path it failed on, so a caller can
+    /// name it without rebuilding it.
+    #[must_use]
+    pub fn unreadable(&self) -> &[Error] {
+        &self.unreadable
+    }
+
+    /// Nothing to act on and nothing to report.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.runs.is_empty() && self.unreadable.is_empty()
+    }
+}
+
+/// The runs in `scope` that are waiting on the operator or on a pull to pick
+/// them up again: a `resumed` run is taken before any fresh issue, and a
+/// `halted` one is skipped and named with the `warlock resume` that releases it.
+///
+/// Both lists come back ordered by ticket identifier as text, so two calls over
+/// one home agree.
+///
+/// ```
+/// use warlock_engine::{PullRun, RunStatus, halted_and_resumed_runs};
+///
+/// let (home, root) = (tempfile::tempdir()?, tempfile::tempdir()?);
+///
+/// // No `pulls` directory at all is an empty answer, not a failure.
+/// assert!(halted_and_resumed_runs(home.path(), root.path(), "warlock-team")?.is_empty());
+///
+/// let mut run = PullRun::new("WAR-140", "A ticket", "warlock-team", "war-140/a-ticket", "now");
+/// run.set_status(RunStatus::Halted);
+/// run.save(home.path(), root.path())?;
+///
+/// let found = halted_and_resumed_runs(home.path(), root.path(), "warlock-team")?;
+///
+/// assert_eq!(found.runs().len(), 1);
+/// assert_eq!(found.runs()[0].ticket(), "WAR-140");
+/// // A run belongs to the scope that pulled it, and to no other.
+/// assert!(halted_and_resumed_runs(home.path(), root.path(), "warlock-docs")?.is_empty());
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
+///
+/// # Errors
+///
+/// Only when `pulls/` itself cannot be listed. One record that cannot be read
+/// does not fail the scan — it is returned by [`ScopeRuns::unreadable`].
+pub fn halted_and_resumed_runs(
+    home: impl AsRef<Path>,
+    root: impl AsRef<Path>,
+    scope: &str,
+) -> Result<ScopeRuns, Error> {
+    let dir = pulls_dir(home, root);
+
+    let entries = match fs::read_dir(&dir) {
+        Ok(entries) => entries,
+        // A checkout that has never pulled anything has no `pulls/` directory,
+        // and that is the ordinary case rather than a broken one: the directory
+        // is created by the first save. Answering empty is what lets selection
+        // call this before any run exists without special-casing a first run.
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(ScopeRuns::default());
+        }
+        Err(source) => return Err(Error::Io { path: dir, source }),
+    };
+
+    // Every name first, sorted, and only then read. `read_dir` yields in
+    // whatever order the filesystem holds, which is neither sorted nor stable
+    // across machines, so two calls over one home would otherwise disagree about
+    // the order of the very list a caller prints.
+    //
+    // Sorted by ticket identifier, which is the directory name, so `WAR-10`
+    // comes before `WAR-9`. That is deliberately not the queue order: ordering
+    // by Linear priority, then by how much each ticket blocks, then by the
+    // number in the identifier as a number belongs to selection, which has the
+    // queue in front of it and this list does not.
+    let mut names = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|source| Error::Io {
+            path: dir.clone(),
+            source,
+        })?;
+        names.push(entry.file_name());
+    }
+    names.sort();
+
+    let mut found = ScopeRuns::default();
+
+    for name in names {
+        let run_directory = dir.join(&name);
+        // A stray file under `pulls/`, or a directory holding no `state.json`,
+        // is not a run at all and is passed over in silence. `save` writes
+        // `state.json` before anything else, so there is no moment at which a
+        // real run is a directory without one, and naming every unrelated name
+        // somebody dropped in here would bury the records that are genuinely
+        // broken.
+        if !run_directory.is_dir() {
+            continue;
+        }
+        let path = run_directory.join(STATE_FILE);
+        let text = match fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => continue,
+            // Anything else — a permission, a directory where the file should be
+            // — is a record that exists and cannot be read. Named, not skipped:
+            // the run behind it may be `halted` with uncommitted work on its
+            // branch, and a scan that silently drops it tells selection this
+            // scope is clear.
+            Err(source) => {
+                found.unreadable.push(Error::Io { path, source });
+                continue;
+            }
+        };
+        match serde_json::from_str::<PullRun>(&text) {
+            // The scope is read from the record rather than from the directory
+            // name, because the directory name is the ticket and a ticket says
+            // nothing about which scope pulled it.
+            Ok(run) => {
+                if run.scope == scope
+                    && matches!(run.status, RunStatus::Halted | RunStatus::Resumed)
+                {
+                    found.runs.push(run);
+                }
+            }
+            // A record too malformed to parse has no readable scope, so it is
+            // named whatever scope was asked for. One broken record turning up
+            // in every scope's answer is the lesser fault: the alternative is a
+            // halted run in *this* scope going unmentioned because the field
+            // that says so is the field that will not parse.
+            Err(source) => found.unreadable.push(Error::Parse { path, source }),
+        }
+    }
+
+    Ok(found)
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
