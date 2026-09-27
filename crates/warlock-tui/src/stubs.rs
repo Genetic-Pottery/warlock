@@ -262,6 +262,7 @@ impl Converses for Scripted {
 #[derive(Clone)]
 pub(crate) struct Boarding {
     log: Arc<Mutex<Log>>,
+    viewer: String,
     team: Option<String>,
     status: Option<String>,
     state: Option<String>,
@@ -287,6 +288,7 @@ struct Log {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Call {
+    Viewer,
     Team(String),
     BacklogStatus,
     BacklogState(String),
@@ -301,6 +303,7 @@ pub(crate) enum Call {
 impl Call {
     pub(crate) const fn op(&self) -> Op {
         match self {
+            Self::Viewer => Op::Viewer,
             Self::Team(_) => Op::Team,
             Self::BacklogStatus => Op::BacklogStatus,
             Self::BacklogState(_) => Op::BacklogState,
@@ -316,6 +319,7 @@ impl Call {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Op {
+    Viewer,
     Team,
     BacklogStatus,
     BacklogState,
@@ -356,6 +360,10 @@ struct Refusal {
     message: String,
 }
 
+/// The user every [`Boarding`] answers [`Board::viewer`] with, so a test
+/// asserting where the id went can name it rather than repeat a literal.
+pub(crate) const VIEWER: &str = "user-viewer";
+
 impl Boarding {
     /// A workspace that has the team, both `Backlog`s and the label already,
     /// creates the project at `url`, numbers issues from 1, and holds no project
@@ -363,6 +371,7 @@ impl Boarding {
     pub(crate) fn filing(url: impl Into<String>) -> Self {
         Self {
             log: Arc::new(Mutex::new(Log::default())),
+            viewer: VIEWER.to_owned(),
             team: Some("team-1".to_owned()),
             status: Some("status-backlog".to_owned()),
             state: Some("state-backlog".to_owned()),
@@ -633,6 +642,11 @@ impl Opens for Boarding {
 }
 
 impl Board for Boarding {
+    fn viewer(&self) -> Result<String, LinearError> {
+        self.ask(Call::Viewer)?;
+        Ok(self.viewer.clone())
+    }
+
     fn team_id(&self, key: &str) -> Result<Option<String>, LinearError> {
         self.ask(Call::Team(key.to_owned()))?;
         Ok(self.team.clone())

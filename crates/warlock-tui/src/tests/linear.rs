@@ -8,7 +8,7 @@ use serde_json::{Value, json};
 use super::{
     BACKLOG, Board, Client, ENDPOINT, Error, Linear, NewIssue, NewProject, Posts, REQUEST_TIMEOUT,
     answer, authorization, backlog_state, backlog_status, comment_on_project, create_issue,
-    create_project, create_relation, fetch_project, issue_label_id, label_id, team_id,
+    create_project, create_relation, fetch_project, issue_label_id, label_id, team_id, viewer,
 };
 
 const KEY: &str = "lin_api_a_key_nobody_holds_8f3a1c";
@@ -520,6 +520,39 @@ fn last_input(linear: &Posting) -> Value {
         .pop()
         .expect("the stand-in was asked at least once")["input"]
         .clone()
+}
+
+#[test]
+fn the_viewer_is_the_key_holders_id_in_one_request() {
+    let linear = Posting::answering([Ok(json!({ "viewer": { "id": "user-1" } }))]);
+
+    let user = viewer(&linear).expect("the stand-in answered");
+
+    assert_eq!(user, "user-1");
+    assert_eq!(linear.variables(), [json!({})]);
+
+    let asked = linear.documents();
+
+    assert_eq!(asked.len(), 1, "one request per operation");
+    assert!(asked[0].contains("viewer { id }"), "{asked:?}");
+}
+
+#[test]
+fn a_viewer_answer_that_is_not_the_one_asked_for_is_malformed() {
+    for answer in [
+        json!({}),
+        json!({ "viewer": null }),
+        json!({ "viewer": { "name": "Ada" } }),
+    ] {
+        let linear = Posting::answering([Ok(answer.clone())]);
+
+        let error = viewer(&linear).expect_err("that is not the answer asked for");
+
+        assert!(
+            matches!(error, Error::Malformed { .. }),
+            "{answer}: {error:?}"
+        );
+    }
 }
 
 #[test]

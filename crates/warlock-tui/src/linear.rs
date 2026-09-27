@@ -126,6 +126,7 @@ impl Posts for Client {
 /// test fake answers operations instead of recognising query text: Linear's
 /// spelling is [`Linear`]'s business, checked in this module's own tests.
 pub trait Board {
+    fn viewer(&self) -> Result<String, Error>;
     fn team_id(&self, key: &str) -> Result<Option<String>, Error>;
     fn backlog_status(&self) -> Result<Option<String>, Error>;
     fn backlog_state(&self, team: &str) -> Result<Option<String>, Error>;
@@ -151,6 +152,10 @@ impl<P: Posts> Linear<P> {
 }
 
 impl<P: Posts> Board for Linear<P> {
+    fn viewer(&self) -> Result<String, Error> {
+        viewer(&self.posts)
+    }
+
     fn team_id(&self, key: &str) -> Result<Option<String>, Error> {
         team_id(&self.posts, key)
     }
@@ -222,6 +227,18 @@ impl Opens for Opener {
 /// with nothing by this name takes the thing with no status at all, rather than
 /// whichever one happens to sort first.
 const BACKLOG: &str = "Backlog";
+
+/// The user the key belongs to, as Linear's own user id.
+///
+/// No `Option`, unlike [`team_id`] and [`backlog_state`]: a workspace can be
+/// missing a team or a state, but a request Linear answered at all was
+/// authenticated as somebody, so an answer carrying no viewer is a malformed one
+/// and not an absence for a caller to have words about.
+fn viewer(linear: &impl Posts) -> Result<String, Error> {
+    let data = linear.post("query Viewer { viewer { id } }", json!({}))?;
+
+    node_id(data.get("viewer").ok_or_else(|| missing("viewer"))?)
+}
 
 /// A team key — `WAR` — as Linear's own team id, or `None` when the workspace
 /// has no team by that key. Not an error: the caller holds the words about
