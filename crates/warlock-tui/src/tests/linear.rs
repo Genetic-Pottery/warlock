@@ -6,9 +6,10 @@ use std::sync::Mutex;
 use serde_json::{Value, json};
 
 use super::{
-    BACKLOG, Board, Client, ENDPOINT, Error, Linear, NewIssue, NewProject, Posts, REQUEST_TIMEOUT,
-    answer, authorization, backlog_state, backlog_status, comment_on_project, create_issue,
-    create_project, create_relation, fetch_project, issue_label_id, label_id, team_id, viewer,
+    BACKLOG, BLOCKERS_PAGE, Blocker, Board, Client, ENDPOINT, Error, Linear, NewIssue, NewProject,
+    Posts, Priority, QUEUE_PAGE, QueuedIssue, REQUEST_TIMEOUT, StateType, answer, authorization,
+    backlog_state, backlog_status, comment_on_project, create_issue, create_project,
+    create_relation, fetch_project, issue_label_id, label_id, scope_queue, team_id, viewer,
 };
 
 const KEY: &str = "lin_api_a_key_nobody_holds_8f3a1c";
@@ -376,6 +377,450 @@ fn a_status_with_no_name_and_an_answer_with_no_project_are_malformed() {
             "{answer}: {error:?}"
         );
     }
+}
+
+// The three ids a scope's record and this machine's key resolve to, which is
+// the whole of what the queue is asked in terms of.
+const TEAM: &str = "team-1";
+const LABEL: &str = "warlock";
+const ME: &str = "user-viewer";
+
+fn a_queue_of(issues: &[Value], more: bool) -> Value {
+    json!({ "issues": { "pageInfo": { "hasNextPage": more }, "nodes": issues } })
+}
+
+fn an_issue() -> Value {
+    json!({
+        "id": "1b9a5d2e-6c47-4f0a-9d31-0e7b2c4a8f55",
+        "identifier": "WAR-133",
+        "title": "Read a scope's ticket queue from Linear",
+        "priority": 2,
+        "state": { "name": "Todo", "type": "unstarted" },
+        "inverseRelations": { "nodes": [blocking("WAR-129", Some("Ada"), "started")] },
+    })
+}
+
+// One `blocks` edge as it arrives on an issue's `inverseRelations`, where the
+// far side is the issue doing the blocking.
+fn blocking(identifier: &str, assignee: Option<&str>, state: &str) -> Value {
+    json!({
+        "type": "blocks",
+        "issue": {
+            "identifier": identifier,
+            "state": { "type": state },
+            "assignee": assignee.map(|name| json!({ "name": name })),
+        },
+    })
+}
+
+fn only_issue(queue: &Value) -> QueuedIssue {
+    let linear = Posting::answering([Ok(queue.clone())]);
+
+    scope_queue(&linear, TEAM, LABEL, ME)
+        .expect("the stand-in answered")
+        .issues()
+        .first()
+        .expect("the stand-in answered with one issue")
+        .clone()
+}
+
+// The field at that JSON pointer taken out of the object holding it.
+fn without(pointer: &str) -> Value {
+    let mut answer = a_queue_of(&[an_issue()], false);
+    let (parent, field) = pointer
+        .rsplit_once('/')
+        .expect("a pointer to a field under an object");
+
+    answer
+        .pointer_mut(parent)
+        .and_then(Value::as_object_mut)
+        .unwrap_or_else(|| panic!("the fixture has no `{parent}`"))
+        .remove(field)
+        .unwrap_or_else(|| panic!("the fixture has no `{pointer}`"));
+
+    answer
+}
+
+#[test]
+fn a_scopes_whole_queue_is_read_in_one_request() {
+    let linear = Posting::answering([Ok(a_queue_of(&[an_issue()], false))]);
+
+    let queue = scope_queue(&linear, TEAM, LABEL, ME).expect("the stand-in answered");
+
+    let issue = &queue.issues()[0];
+
+    assert_eq!(issue.id(), "1b9a5d2e-6c47-4f0a-9d31-0e7b2c4a8f55");
+    assert_eq!(issue.identifier(), "WAR-133");
+    assert_eq!(issue.title(), "Read a scope's ticket queue from Linear");
+    // The team's own name for the state, and Linear's type for it: a record
+    // names states the first way and readiness is decided the second.
+    assert_eq!(issue.state(), "Todo");
+    assert_eq!(issue.state_type(), &StateType::new("unstarted"));
+    assert_eq!(issue.priority(), Priority::High);
+    assert_eq!(
+        issue.blockers(),
+        [Blocker::new(
+            "WAR-129",
+            Some("Ada"),
+            StateType::new("started")
+        )]
+    );
+    assert!(!queue.capped());
+    assert_eq!(linear.documents().len(), 1, "one request per operation");
+}
+
+#[test]
+fn the_queue_is_the_teams_labelled_work_assigned_to_the_key_holder_and_not_finished() {
+    let linear = Posting::answering([Ok(a_queue_of(&[an_issue()], false))]);
+
+    scope_queue(&linear, TEAM, LABEL, ME).expect("the stand-in answered");
+
+    let asked = linear.documents().pop().expect("one request was made");
+
+    assert!(asked.contains("issues("), "{asked}");
+    assert!(asked.contains("team: { id: { eq: $team } }"), "{asked}");
+    assert!(
+        asked.contains("labels: { name: { eq: $label } }"),
+        "{asked}"
+    );
+    assert!(
+        asked.contains("assignee: { id: { eq: $assignee } }"),
+        "{asked}"
+    );
+    // On the state's *type* and never its name: a team calls its finished state
+    // whatever it likes, and a queue that filtered by name would work tickets
+    // that shipped last week.
+    assert!(
+        asked.contains(r#"state: { type: { nin: ["completed", "canceled"] } }"#),
+        "{asked}"
+    );
+    assert_eq!(
+        linear.variables(),
+        [json!({
+            "team": TEAM,
+            "label": LABEL,
+            "assignee": ME,
+            "first": QUEUE_PAGE,
+            "blockers": BLOCKERS_PAGE,
+        })]
+    );
+}
+
+#[test]
+fn the_page_asked_for_is_the_cap_the_constant_holds() {
+    let linear = Posting::answering([Ok(a_queue_of(&[an_issue()], false))]);
+
+    scope_queue(&linear, TEAM, LABEL, ME).expect("the stand-in answered");
+
+    let asked = linear.documents().pop().expect("one request was made");
+
+    assert!(asked.contains("first: $first"), "{asked}");
+    assert_eq!(linear.variables()[0]["first"], json!(QUEUE_PAGE));
+    // And the nested connection has its own cap rather than whatever default
+    // Linear applies to a relation list nobody bounded.
+    assert!(
+        asked.contains("inverseRelations(first: $blockers)"),
+        "{asked}"
+    );
+    assert_eq!(linear.variables()[0]["blockers"], json!(BLOCKERS_PAGE));
+}
+
+#[test]
+fn a_blocker_is_an_issue_blocking_this_one_and_never_one_it_blocks() {
+    // The direction is the whole risk: reading `relations` instead of
+    // `inverseRelations` compiles, answers the same shape, and inverts every
+    // dependency in the queue. `WAR-140` waits on this issue and must not read
+    // as holding it up.
+    let mut waiting = an_issue();
+    waiting["relations"] = json!({
+        "nodes": [blocking("WAR-140", Some("Ada"), "unstarted")],
+    });
+
+    let issue = only_issue(&a_queue_of(&[waiting], false));
+
+    assert_eq!(
+        issue
+            .blockers()
+            .iter()
+            .map(Blocker::identifier)
+            .collect::<Vec<_>>(),
+        ["WAR-129"]
+    );
+}
+
+#[test]
+fn the_only_relations_read_are_the_inverse_ones() {
+    let linear = Posting::answering([Ok(a_queue_of(&[an_issue()], false))]);
+
+    scope_queue(&linear, TEAM, LABEL, ME).expect("the stand-in answered");
+
+    let asked = linear.documents().pop().expect("one request was made");
+
+    assert!(asked.contains("inverseRelations"), "{asked}");
+    // With the one field taken out of the text, no other `relations` may be
+    // left in it: asking for both and reading the wrong one is the inversion
+    // above.
+    assert!(!asked.replace("inverseRelations", "").contains("relations"));
+}
+
+#[test]
+fn a_relation_that_blocks_nothing_is_read_and_dropped() {
+    let mut issue = an_issue();
+    issue["inverseRelations"]["nodes"] = json!([
+        { "type": "related", "issue": { "identifier": "WAR-1", "state": { "type": "started" }, "assignee": null } },
+        blocking("WAR-129", Some("Ada"), "started"),
+        { "type": "duplicate", "issue": { "identifier": "WAR-2", "state": { "type": "started" }, "assignee": null } },
+    ]);
+
+    let issue = only_issue(&a_queue_of(&[issue], false));
+
+    assert_eq!(issue.blockers().len(), 1, "only `blocks` holds work up");
+    assert_eq!(issue.blockers()[0].identifier(), "WAR-129");
+}
+
+#[test]
+fn a_blocker_is_carried_whoever_owns_it_and_whatever_state_it_is_in() {
+    let mut issue = an_issue();
+    issue["inverseRelations"]["nodes"] = json!([
+        blocking("WAR-9", Some("Someone Else"), "started"),
+        blocking("WAR-10", None, "backlog"),
+        blocking("WAR-11", Some("Ada"), "completed"),
+    ]);
+
+    let issue = only_issue(&a_queue_of(&[issue], false));
+
+    // The queue's own filters are not the blockers': an issue is held up by
+    // whatever blocks it, on anybody's plate and under any label, and an
+    // unassigned one still holds it up.
+    assert_eq!(
+        issue.blockers(),
+        [
+            Blocker::new("WAR-9", Some("Someone Else"), StateType::new("started")),
+            Blocker::new("WAR-10", None, StateType::new("backlog")),
+            Blocker::new("WAR-11", Some("Ada"), StateType::new("completed")),
+        ]
+    );
+    assert!(!issue.blockers()[0].state_type().settled());
+    assert!(!issue.blockers()[1].state_type().settled());
+    assert!(issue.blockers()[2].state_type().settled(), "out of the way");
+}
+
+#[test]
+fn the_blockers_asked_for_carry_no_filter_of_their_own() {
+    let linear = Posting::answering([Ok(a_queue_of(&[an_issue()], false))]);
+
+    scope_queue(&linear, TEAM, LABEL, ME).expect("the stand-in answered");
+
+    let asked = linear.documents().pop().expect("one request was made");
+    let (_, relations) = asked
+        .split_once("inverseRelations")
+        .expect("the document reads the inverse relations");
+
+    // A blocker filtered by assignee or label is a blocker that disappears, and
+    // an issue held up by somebody else's ticket that reads as ready.
+    assert!(!relations.contains("filter"), "{relations}");
+    assert!(!relations.contains("assignee: {"), "{relations}");
+    assert!(!relations.contains("labels"), "{relations}");
+}
+
+#[test]
+fn only_completed_and_canceled_are_out_of_the_way() {
+    for settled in ["completed", "canceled"] {
+        assert!(StateType::new(settled).settled(), "{settled}");
+    }
+    for open in ["triage", "backlog", "unstarted", "started", "invented"] {
+        assert!(!StateType::new(open).settled(), "{open}");
+    }
+}
+
+#[test]
+fn linears_priority_numbers_are_read_as_the_order_work_is_taken() {
+    let ranks = [
+        (1, Priority::Urgent),
+        (2, Priority::High),
+        (3, Priority::Medium),
+        (4, Priority::Low),
+        (0, Priority::None),
+    ];
+
+    for (number, rank) in ranks {
+        let mut issue = an_issue();
+        issue["priority"] = json!(number);
+
+        assert_eq!(
+            only_issue(&a_queue_of(&[issue], false)).priority(),
+            rank,
+            "priority {number}"
+        );
+    }
+
+    // The reason the number does not leave the module: `0` is Linear's "no
+    // priority" and would sort ahead of urgent, so the order has to be the
+    // type's and not the integer's.
+    let mut ordered = ranks.map(|(_, rank)| rank);
+    ordered.sort_unstable();
+    assert_eq!(
+        ordered,
+        [
+            Priority::Urgent,
+            Priority::High,
+            Priority::Medium,
+            Priority::Low,
+            Priority::None,
+        ]
+    );
+}
+
+#[test]
+fn a_priority_number_no_version_of_linear_sends_is_no_priority() {
+    for number in [json!(5), json!(-1), json!(2.0)] {
+        let mut issue = an_issue();
+        issue["priority"] = number.clone();
+
+        let read = only_issue(&a_queue_of(&[issue], false)).priority();
+
+        // `2.0` is the `Float!` the schema promises spelled the other way, and
+        // still high; the two outside the five are not a reason to work
+        // something first.
+        let expected = if number == json!(2.0) {
+            Priority::High
+        } else {
+            Priority::None
+        };
+
+        assert_eq!(read, expected, "{number}");
+    }
+}
+
+#[test]
+fn a_page_that_came_back_full_says_so_and_a_short_one_does_not() {
+    let short = Posting::answering([Ok(a_queue_of(&[an_issue()], false))]);
+    let more = Posting::answering([Ok(a_queue_of(&[an_issue()], true))]);
+
+    assert!(
+        !scope_queue(&short, TEAM, LABEL, ME)
+            .expect("the stand-in answered")
+            .capped()
+    );
+    // `hasNextPage`, which is Linear saying there is another page, is the plain
+    // case.
+    assert!(
+        scope_queue(&more, TEAM, LABEL, ME)
+            .expect("the stand-in answered")
+            .capped()
+    );
+
+    // And a page filled exactly to the cap, which an API that answers
+    // `hasNextPage: false` on the boundary would otherwise hide.
+    let full = Posting::answering([Ok(a_queue_of(&vec![an_issue(); QUEUE_PAGE], false))]);
+
+    let queue = scope_queue(&full, TEAM, LABEL, ME).expect("the stand-in answered");
+
+    assert_eq!(queue.issues().len(), QUEUE_PAGE);
+    assert!(queue.capped());
+}
+
+#[test]
+fn an_issue_whose_relations_filled_their_page_caps_the_queue_too() {
+    let mut issue = an_issue();
+    issue["inverseRelations"]["nodes"] =
+        Value::Array(vec![blocking("WAR-9", None, "started"); BLOCKERS_PAGE]);
+
+    let linear = Posting::answering([Ok(a_queue_of(&[issue], false))]);
+
+    let queue = scope_queue(&linear, TEAM, LABEL, ME).expect("the stand-in answered");
+
+    // A blocker list cut off would make a held-up issue read as ready, so the
+    // flag covers it: what it says is that there is more of this queue on the
+    // board than came back.
+    assert!(queue.capped());
+}
+
+#[test]
+fn a_queue_with_nothing_on_it_is_an_ordinary_answer() {
+    let linear = Posting::answering([Ok(a_queue_of(&[], false))]);
+
+    let queue = scope_queue(&linear, TEAM, LABEL, ME).expect("an empty queue is an answer");
+
+    assert_eq!(queue.issues(), []);
+    assert!(!queue.capped());
+}
+
+#[test]
+fn a_queue_answer_that_is_not_the_one_asked_for_is_malformed() {
+    let mut answers = vec![
+        json!({ "issues": {} }),
+        json!({ "projects": { "nodes": [] } }),
+        // Asked for and not answered, so the page is not one this side can say
+        // anything about.
+        json!({ "issues": { "nodes": [] } }),
+        a_queue_of(&[json!({})], false),
+    ];
+
+    for pointer in [
+        "/issues/pageInfo/hasNextPage",
+        "/issues/nodes/0/id",
+        "/issues/nodes/0/identifier",
+        "/issues/nodes/0/title",
+        "/issues/nodes/0/priority",
+        "/issues/nodes/0/state",
+        "/issues/nodes/0/state/name",
+        "/issues/nodes/0/state/type",
+        "/issues/nodes/0/inverseRelations",
+        "/issues/nodes/0/inverseRelations/nodes/0/type",
+        "/issues/nodes/0/inverseRelations/nodes/0/issue",
+        "/issues/nodes/0/inverseRelations/nodes/0/issue/identifier",
+        "/issues/nodes/0/inverseRelations/nodes/0/issue/state",
+        "/issues/nodes/0/inverseRelations/nodes/0/issue/state/type",
+        "/issues/nodes/0/inverseRelations/nodes/0/issue/assignee",
+    ] {
+        answers.push(without(pointer));
+    }
+
+    for answer in answers {
+        let linear = Posting::answering([Ok(answer.clone())]);
+
+        let error =
+            scope_queue(&linear, TEAM, LABEL, ME).expect_err("that is not the answer asked for");
+
+        assert!(
+            matches!(error, Error::Malformed { .. }),
+            "{answer}: {error:?}"
+        );
+        assert_eq!(linear.documents().len(), 1, "no retry and no second page");
+    }
+}
+
+#[test]
+fn an_unassigned_issue_can_still_be_holding_one_up() {
+    let mut issue = an_issue();
+    issue["inverseRelations"]["nodes"] = json!([blocking("WAR-9", None, "started")]);
+
+    let issue = only_issue(&a_queue_of(&[issue], false));
+
+    assert_eq!(issue.blockers()[0].assignee(), None);
+}
+
+#[test]
+fn the_board_hands_the_team_label_and_assignee_to_the_wire_in_that_order() {
+    // Three `&str` in a row: a swap between the trait and the operation under it
+    // compiles, and asks the board for somebody else's work.
+    let board = Linear::new(Posting::answering([Ok(a_queue_of(&[], false))]));
+
+    board
+        .scope_queue(TEAM, LABEL, ME)
+        .expect("the stand-in answered");
+
+    assert_eq!(
+        board.posts.variables().pop().expect("one request was made"),
+        json!({
+            "team": TEAM,
+            "label": LABEL,
+            "assignee": ME,
+            "first": QUEUE_PAGE,
+            "blockers": BLOCKERS_PAGE,
+        })
+    );
 }
 
 fn issue_label_found() -> Value {

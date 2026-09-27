@@ -18,7 +18,7 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use warlock_engine::{Agent, agent, drafting, stub_answer};
 use warlock_tui::{
     Activities, Board, Cancel, Converses, FetchedProject, LinearError, LinearIssue, LinearProject,
-    NewIssue, NewProject, Opens, Wired,
+    NewIssue, NewProject, Opens, Queue, Wired,
 };
 
 use crate::clipboard::Clip;
@@ -294,6 +294,7 @@ pub(crate) enum Call {
     BacklogState(String),
     IssueLabel { name: String, team: String },
     FetchProject(String),
+    ScopeQueue(QueueAsked),
     CreateProject(ProjectAsked),
     CreateIssue(IssueAsked),
     Relation { blocker: String, waiting: String },
@@ -309,6 +310,7 @@ impl Call {
             Self::BacklogState(_) => Op::BacklogState,
             Self::IssueLabel { .. } => Op::IssueLabel,
             Self::FetchProject(_) => Op::FetchProject,
+            Self::ScopeQueue(_) => Op::ScopeQueue,
             Self::CreateProject(_) => Op::CreateProject,
             Self::CreateIssue(_) => Op::CreateIssue,
             Self::Relation { .. } => Op::Relation,
@@ -325,10 +327,18 @@ pub(crate) enum Op {
     BacklogState,
     IssueLabel,
     FetchProject,
+    ScopeQueue,
     CreateProject,
     CreateIssue,
     Relation,
     Comment,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct QueueAsked {
+    pub(crate) team: String,
+    pub(crate) label: String,
+    pub(crate) assignee: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -674,6 +684,18 @@ impl Board for Boarding {
     fn fetch_project(&self, id: &str) -> Result<Option<FetchedProject>, LinearError> {
         self.ask(Call::FetchProject(id.to_owned()))?;
         Ok(self.project.clone())
+    }
+
+    /// An empty queue, and the call recorded: this stand-in serves the flows
+    /// that file and cut, none of which reads a queue. The flow that works one
+    /// gives this something to answer when it arrives.
+    fn scope_queue(&self, team: &str, label: &str, assignee: &str) -> Result<Queue, LinearError> {
+        self.ask(Call::ScopeQueue(QueueAsked {
+            team: team.to_owned(),
+            label: label.to_owned(),
+            assignee: assignee.to_owned(),
+        }))?;
+        Ok(Queue::new(Vec::new(), false))
     }
 
     fn create_project(&self, project: &NewProject<'_>) -> Result<LinearProject, LinearError> {
