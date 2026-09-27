@@ -25,6 +25,7 @@ pub mod pulls;
 pub mod route;
 pub mod scope;
 pub mod sigils;
+pub mod splitting;
 pub mod state;
 pub mod tree;
 pub mod view;
