@@ -1,6 +1,7 @@
 use std::borrow::Cow;
 use std::ffi::{OsStr, OsString};
 use std::fmt;
+use std::fmt::Write as _;
 use std::io;
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -297,6 +298,146 @@ fn collected(handle: JoinHandle<io::Result<Vec<u8>>>) -> Result<Vec<u8>, Error> 
             source: io::Error::other("the thread reading the command's output panicked"),
         }),
     }
+}
+
+/// The last line of every body, and the only claim in it warlock makes about
+/// itself.
+///
+/// One line and not a wrapped paragraph: with no `gh` on the machine this body
+/// is commented on the ticket instead, and Linear's editor reads a single
+/// newline inside a paragraph as a line break — the reason
+/// `brief::for_the_board` exists — so a sentence hard wrapped at this file's
+/// column width arrives ragged on a page with a width of its own.
+pub const HUMAN_GATE: &str = "The pull request and the ticket's review state are the human gate: warlock merges nothing, closes nothing and moves nothing past review.";
+
+// Named under the heading rather than left to the reader, because a list of
+// scopes with no sentence over it reads as a confession: these are directories
+// this machine was entitled to edit, and the section exists so a reviewer sees
+// the work reached past the one scope it was pulled under.
+const TOUCHED_NOTE: &str = "Held on this machine, and not the scope this ticket was pulled under.";
+
+/// A sub-task the run finished, as the body names it.
+///
+/// Borrowed and flat on purpose. The run record is another ticket's to own, and a
+/// body that took its types would make rendering wait on them; mapping a record
+/// into these three strings is a line at the call site.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Finished<'a> {
+    pub id: &'a str,
+    pub goal: &'a str,
+    pub summary: &'a str,
+}
+
+/// A scope the run edited under while holding it, other than the one the ticket
+/// was pulled under, and the paths it touched there.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Touched<'a> {
+    pub scope: &'a str,
+    pub paths: Vec<&'a str>,
+}
+
+/// A pacted directory the branch made stale that the refresh did not put back,
+/// and why it did not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LeftStale<'a> {
+    pub directory: &'a str,
+    pub reason: &'a str,
+}
+
+/// ```
+/// use warlock_tui::pull_request_title;
+///
+/// assert_eq!(
+///     pull_request_title("WAR-131", "The Linear queue query"),
+///     "WAR-131: The Linear queue query"
+/// );
+/// ```
+#[must_use]
+pub fn pull_request_title(ticket: &str, title: &str) -> String {
+    // Trimmed because a ticket title arrives from the board, and a newline or a
+    // trailing space in it survives all the way into `gh pr create`'s `--title`,
+    // where it is a pull request nobody can search for by name.
+    format!("{}: {}", ticket.trim(), title.trim())
+}
+
+/// What the pull request says, and what gets commented on the ticket when there
+/// is no `gh` to open one — so it stands alone, with no pull request around it.
+///
+/// A section with nothing in it is absent rather than an empty heading: a run
+/// that crossed nothing and left nothing stale is the ordinary run, and three
+/// bare headings saying so would be the bulk of its body.
+///
+/// ```
+/// use warlock_tui::{HUMAN_GATE, pull_request_body};
+///
+/// // The emptiest run there is: no description, no sub-task, nothing crossed
+/// // and nothing stale.
+/// let body = pull_request_body("", &[], &[], &[]);
+///
+/// assert_eq!(body, format!("{HUMAN_GATE}\n"));
+/// ```
+#[must_use]
+pub fn pull_request_body(
+    description: &str,
+    finished: &[Finished<'_>],
+    touched: &[Touched<'_>],
+    stale: &[LeftStale<'_>],
+) -> String {
+    let mut blocks: Vec<String> = Vec::new();
+
+    let description = description.trim();
+    if !description.is_empty() {
+        blocks.push(description.to_owned());
+    }
+
+    if !finished.is_empty() {
+        let mut block = String::from("## Sub-tasks");
+        for task in finished {
+            let _ = write!(block, "\n\n### {} {}", task.id.trim(), task.goal.trim());
+            let summary = task.summary.trim();
+            if !summary.is_empty() {
+                let _ = write!(block, "\n\n{summary}");
+            }
+        }
+        blocks.push(block);
+    }
+
+    if !touched.is_empty() {
+        let mut block = format!("## Scopes touched\n\n{TOUCHED_NOTE}");
+        for scope in touched {
+            let _ = write!(block, "\n\n### {}", scope.scope.trim());
+            if !scope.paths.is_empty() {
+                // The blank line that opens the list, written once here so every
+                // item below writes the same thing. Under the guard because a
+                // scope with no path under it would otherwise end the block on a
+                // blank line, and the join would make three.
+                block.push('\n');
+                for path in &scope.paths {
+                    let _ = write!(block, "\n- `{}`", path.trim());
+                }
+            }
+        }
+        blocks.push(block);
+    }
+
+    if !stale.is_empty() {
+        let mut block = String::from("## Directories left stale\n");
+        for directory in stale {
+            let _ = write!(
+                block,
+                "\n- `{}` — {}",
+                directory.directory.trim(),
+                directory.reason.trim()
+            );
+        }
+        blocks.push(block);
+    }
+
+    blocks.push(HUMAN_GATE.to_owned());
+
+    let mut body = blocks.join("\n\n");
+    body.push('\n');
+    body
 }
 
 #[cfg(test)]
