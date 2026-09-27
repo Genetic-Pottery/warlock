@@ -14,6 +14,7 @@
 // real home.
 
 use std::fmt;
+use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -25,6 +26,27 @@ use crate::sigils::project_dir;
 const PULLS_DIR: &str = "pulls";
 
 const STATE_FILE: &str = "state.json";
+
+const MANIFEST_FILE: &str = "manifest.md";
+
+const BRIEF_SUFFIX: &str = ".md";
+
+// The line is true and has to stay true: `manifest.md` is rendered from the
+// record on every save and nothing reads a byte of it back, which is what lets a
+// save rewrite it whole. Code that started reading it would be reading a copy,
+// and a hand edit to it is gone at the next sub-task.
+const DO_NOT_EDIT: &str = "<!-- Rendered from state.json on every write. Do not edit by hand. -->";
+
+// The one thing in a brief that is not rendered. A sub-task's own session
+// appends its account of the work under this heading while the run is going, so
+// a re-rendered brief carries the existing heading and everything below it
+// across verbatim rather than writing these two lines back over it — see
+// `brief_text`. Changing either string orphans the logs already written under
+// the old one: a brief holding an old heading would gain a second, and the
+// account under the first would stop being found.
+const LOG_HEADING: &str = "## Execution log";
+
+const LOG_MARKER: &str = "<!-- spawn appends below this line; never edits above it -->";
 
 /// Where every run this checkout has pulled lives.
 ///
@@ -81,6 +103,44 @@ pub fn run_dir(home: impl AsRef<Path>, root: impl AsRef<Path>, ticket: &str) -> 
 #[must_use]
 pub fn state_path(home: impl AsRef<Path>, root: impl AsRef<Path>, ticket: &str) -> PathBuf {
     run_dir(home, root, ticket).join(STATE_FILE)
+}
+
+/// The run's rendered manifest — not [`crate::manifest::manifest_path`], which is
+/// the repository's `pacts.toml`.
+///
+/// ```
+/// use warlock_engine::{run_dir, run_manifest_path};
+///
+/// let (home, root) = (tempfile::tempdir()?, tempfile::tempdir()?);
+/// assert_eq!(
+///     run_manifest_path(home.path(), root.path(), "WAR-140"),
+///     run_dir(home.path(), root.path(), "WAR-140").join("manifest.md"),
+/// );
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
+#[must_use]
+pub fn run_manifest_path(home: impl AsRef<Path>, root: impl AsRef<Path>, ticket: &str) -> PathBuf {
+    run_dir(home, root, ticket).join(MANIFEST_FILE)
+}
+
+/// ```
+/// use warlock_engine::{brief_path, run_dir};
+///
+/// let (home, root) = (tempfile::tempdir()?, tempfile::tempdir()?);
+/// assert_eq!(
+///     brief_path(home.path(), root.path(), "WAR-140", "WAR-140.01"),
+///     run_dir(home.path(), root.path(), "WAR-140").join("WAR-140.01.md"),
+/// );
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
+#[must_use]
+pub fn brief_path(
+    home: impl AsRef<Path>,
+    root: impl AsRef<Path>,
+    ticket: &str,
+    subtask: &str,
+) -> PathBuf {
+    run_dir(home, root, ticket).join(format!("{subtask}{BRIEF_SUFFIX}"))
 }
 
 /// ```
@@ -238,6 +298,91 @@ impl PullRun {
         Ok(text)
     }
 
+    /// The whole run in the shape of `.forman/<TICKET>/manifest.md`: the ticket
+    /// and its title, the run's state, then one checkbox line per sub-task.
+    ///
+    /// ```
+    /// use warlock_engine::{PullRun, PullSubtask};
+    ///
+    /// let run = PullRun::new(
+    ///     "WAR-140",
+    ///     "The Linear queue query",
+    ///     "warlock-team",
+    ///     "war-140/the-linear-queue-query",
+    ///     "2026-09-27T06:21:55+00:00",
+    /// )
+    /// .with_subtasks([PullSubtask::new("WAR-140.01", "Add the issues query", [] as [&str; 0])]);
+    ///
+    /// let manifest = run.to_manifest_string();
+    ///
+    /// assert!(manifest.starts_with("# WAR-140: The Linear queue query\n"));
+    /// assert!(manifest.contains("- status: `pulled`\n"));
+    /// assert!(manifest.contains("- pull request: none\n"));
+    /// assert!(manifest.contains("- [ ] `WAR-140.01` Add the issues query\n"));
+    /// ```
+    #[must_use]
+    pub fn to_manifest_string(&self) -> String {
+        let mut text = String::new();
+        let _ = writeln!(text, "# {}: {}", self.ticket, self.title);
+        let _ = writeln!(text);
+        let _ = writeln!(text, "- status: `{}`", self.status);
+        let _ = writeln!(text, "- branch: `{}`", self.branch);
+        let _ = writeln!(text, "- pulled at: {}", self.pulled_at);
+        // Named as absent rather than left out, for the reason `pr_url` is
+        // written as `null` rather than skipped: the manifest is rewritten
+        // before and after every sub-task, so a line that comes and goes makes
+        // every diff of it unreadable.
+        match &self.pr_url {
+            Some(url) => {
+                let _ = writeln!(text, "- pull request: {url}");
+            }
+            None => {
+                let _ = writeln!(text, "- pull request: none");
+            }
+        }
+        let _ = writeln!(text);
+        let _ = writeln!(text, "{DO_NOT_EDIT}");
+        let _ = writeln!(text);
+        let _ = writeln!(text, "## Sub-tasks");
+        let _ = writeln!(text);
+
+        for subtask in &self.subtasks {
+            let ticked = if matches!(subtask.status, SubtaskStatus::Done) {
+                'x'
+            } else {
+                ' '
+            };
+            let _ = write!(text, "- [{ticked}] `{}` {}", subtask.id, subtask.goal);
+            // A tick answers `done` and nothing else, so the three
+            // reason-carrying statuses say so on the line and bring their reason
+            // with them: an unticked `blocked` that reads exactly like a
+            // `pending` one is the manifest failing at the one job it has, which
+            // is telling a person what a halted run stopped on.
+            if subtask.status.reason().is_some() {
+                let _ = write!(text, " — {}", subtask.status);
+            }
+            if let Some(cost) = subtask.cost_usd {
+                let _ = write!(text, "  ${cost:.4}");
+            }
+            let _ = writeln!(text);
+        }
+
+        // A run nothing has been spent on has no total rather than a total of
+        // zero: `$0.0000` under a fresh pull reads as a measurement, and nothing
+        // has been measured yet.
+        let spent = self
+            .subtasks
+            .iter()
+            .filter_map(PullSubtask::cost_usd)
+            .reduce(|spent, cost| spent + cost);
+        if let Some(spent) = spent {
+            let _ = writeln!(text);
+            let _ = writeln!(text, "**Total: ${spent:.4}**");
+        }
+
+        text
+    }
+
     /// ```
     /// use warlock_engine::{PullRun, state_path};
     ///
@@ -264,29 +409,34 @@ impl PullRun {
             source,
         })?;
 
-        // The temporary must sit in the same directory as the target, so the
-        // rename below cannot cross a filesystem and stops being atomic. It is
-        // what makes a save safe to do before and after every sub-task: a run
-        // killed mid-write reloads the last whole record, never half of one.
-        let temp = dir.join(temp_file_name(STATE_FILE));
-        let target = dir.join(STATE_FILE);
+        // The record goes down before anything rendered from it, and the `?` is
+        // the whole of that rule: a `manifest.md` written beside a `state.json`
+        // that failed to land is the file a person reads by hand describing a run
+        // warlock will reload as something else.
+        write_file(&dir, STATE_FILE, &text)?;
 
-        let written = write_and_sync(&temp, text.as_bytes())
-            .map_err(|source| Error::Io {
-                path: temp.clone(),
-                source,
-            })
-            .and_then(|()| {
-                fs::rename(&temp, &target).map_err(|source| Error::Io {
-                    path: target,
-                    source,
-                })
-            });
+        write_file(&dir, MANIFEST_FILE, &self.to_manifest_string())?;
 
-        if written.is_err() {
-            drop(fs::remove_file(&temp));
+        for subtask in &self.subtasks {
+            let name = format!("{}{BRIEF_SUFFIX}", subtask.id);
+            let path = dir.join(&name);
+            // Read before writing, because a sub-task's session appends its
+            // account to its own brief while the run is going and a save happens
+            // before and after every sub-task. Rendering the brief whole from the
+            // record would delete that account; `brief_text` carries it across.
+            let existing = match fs::read_to_string(&path) {
+                Ok(text) => Some(text),
+                Err(source) if source.kind() == std::io::ErrorKind::NotFound => None,
+                Err(source) => return Err(Error::Io { path, source }),
+            };
+            write_file(
+                &dir,
+                &name,
+                &subtask.brief_text(&self.ticket, existing.as_deref()),
+            )?;
         }
-        written
+
+        Ok(())
     }
 
     /// ```
@@ -434,6 +584,111 @@ impl PullSubtask {
     pub const fn set_cost_usd(&mut self, cost: f64) {
         self.cost_usd = Some(cost);
     }
+
+    /// The sub-task in the shape of `.forman/<TICKET>/<TICKET>.NN.md`: front
+    /// matter, the goal, then an empty execution log for the session working it
+    /// to append under.
+    ///
+    /// Only what the record holds is rendered, so the definition of done, the
+    /// touchpoints, the test plan and the notes a hand-written brief carries are
+    /// not here: nothing in a run record holds them, and a heading over nothing
+    /// reads as a sub-task with no test plan rather than as a record that never
+    /// had one.
+    ///
+    /// ```
+    /// use warlock_engine::PullSubtask;
+    ///
+    /// let brief = PullSubtask::new("WAR-140.01", "Add the issues query", ["WAR-140.02"])
+    ///     .to_brief_string("WAR-140");
+    ///
+    /// assert!(brief.starts_with("---\nsubtask_id: WAR-140.01\nparent: WAR-140\n"));
+    /// assert!(brief.contains("status: pending\ndepends_on: [WAR-140.02]\n"));
+    /// assert!(brief.contains("## Goal\nAdd the issues query\n"));
+    /// assert!(brief.contains("## Execution log\n"));
+    /// ```
+    #[must_use]
+    pub fn to_brief_string(&self, parent: &str) -> String {
+        self.brief_text(parent, None)
+    }
+
+    fn brief_text(&self, parent: &str, existing: Option<&str>) -> String {
+        let mut text = String::new();
+        let _ = writeln!(text, "---");
+        let _ = writeln!(text, "subtask_id: {}", self.id);
+        let _ = writeln!(text, "parent: {parent}");
+        let _ = writeln!(text, "status: {}", self.status.as_str());
+        if let Some(reason) = self.status.reason() {
+            let _ = writeln!(text, "blocked_reason: {}", yaml_string(reason));
+        }
+        let _ = writeln!(text, "depends_on: [{}]", self.depends_on.join(", "));
+        let _ = writeln!(text, "---");
+        let _ = writeln!(text);
+        let _ = writeln!(text, "## Goal");
+        let _ = writeln!(text, "{}", self.goal);
+        let _ = writeln!(text);
+        let _ = writeln!(text, "---");
+
+        // An existing log is carried across exactly as it was found, heading and
+        // marker included, rather than re-rendered with the appended part put
+        // back underneath: whatever is down there was written by something
+        // outside this module, and the only way to be sure a save cannot damage
+        // it is never to rewrite any of it. `self.log` — the sub-task's own
+        // summary of its outcome — is not written under the heading for the same
+        // reason: this side of the line renders the head of the brief from the
+        // record and nothing below it, so the two writers can never race over
+        // the same bytes. The summary is in `state.json`, and whatever appends
+        // the account is what puts it in the file.
+        if let Some(log) = existing.and_then(log_section) {
+            text.push_str(log);
+        } else {
+            let _ = writeln!(text, "{LOG_HEADING}");
+            let _ = writeln!(text, "{LOG_MARKER}");
+        }
+
+        text
+    }
+}
+
+fn log_section(brief: &str) -> Option<&str> {
+    if brief.starts_with(LOG_HEADING) {
+        return Some(brief);
+    }
+    let at = brief.find(&format!("\n{LOG_HEADING}"))?;
+    Some(&brief[at + 1..])
+}
+
+// A reason is prose — it carries colons, backticks and quotes, each of which
+// derails a bare YAML scalar. A JSON string is a valid YAML double-quoted
+// scalar, escapes and all, so the reason crosses through `serde_json` rather than
+// through a quoter written here.
+fn yaml_string(text: &str) -> String {
+    serde_json::Value::String(text.to_owned()).to_string()
+}
+
+// The temporary must sit in the same directory as the target, so the rename
+// cannot cross a filesystem and stop being atomic. It is what makes a save safe
+// to do before and after every sub-task: a run killed mid-write leaves the last
+// whole file, never half of one.
+fn write_file(dir: &Path, name: &str, text: &str) -> Result<(), Error> {
+    let temp = dir.join(temp_file_name(name));
+    let target = dir.join(name);
+
+    let written = write_and_sync(&temp, text.as_bytes())
+        .map_err(|source| Error::Io {
+            path: temp.clone(),
+            source,
+        })
+        .and_then(|()| {
+            fs::rename(&temp, &target).map_err(|source| Error::Io {
+                path: target,
+                source,
+            })
+        });
+
+    if written.is_err() {
+        drop(fs::remove_file(&temp));
+    }
+    written
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

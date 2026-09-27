@@ -1,8 +1,8 @@
 use std::path::Path;
 
 use super::{
-    Error, PullRun, PullSubtask, ReasonMissing, RunStatus, SubtaskStatus, pulls_dir, run_dir,
-    state_path,
+    Error, PullRun, PullSubtask, ReasonMissing, RunStatus, SubtaskStatus, brief_path, pulls_dir,
+    run_dir, run_manifest_path, state_path,
 };
 
 const WAR_124: &str = r#"{
@@ -403,7 +403,7 @@ fn a_run_round_trips_through_a_save_and_a_load() {
 }
 
 #[test]
-fn a_save_writes_the_state_file_under_the_derived_run_directory_and_nothing_else() {
+fn a_save_writes_the_record_the_manifest_and_a_brief_each_and_nothing_else() {
     let (home, root) = (
         tempfile::tempdir().expect("a temporary home"),
         tempfile::tempdir().expect("a temporary root"),
@@ -413,10 +413,15 @@ fn a_save_writes_the_state_file_under_the_derived_run_directory_and_nothing_else
         .save(home.path(), root.path())
         .expect("a run saves");
 
-    // Exactly one file, at the derived path, and no temporary left beside it.
+    // Four files, each at its derived path, and no temporary left beside them.
     assert_eq!(
         entries(home.path()),
-        [state_path(home.path(), root.path(), "WAR-140")],
+        [
+            brief_path(home.path(), root.path(), "WAR-140", "WAR-140.01"),
+            brief_path(home.path(), root.path(), "WAR-140", "WAR-140.02"),
+            run_manifest_path(home.path(), root.path(), "WAR-140"),
+            state_path(home.path(), root.path(), "WAR-140"),
+        ],
     );
     assert_eq!(
         state_path(home.path(), root.path(), "WAR-140").parent(),
@@ -581,6 +586,229 @@ fn a_second_save_replaces_the_record_rather_than_appending_to_it() {
     assert_eq!(read.status(), RunStatus::InProgress);
     assert_eq!(
         entries(home.path()),
-        [state_path(home.path(), root.path(), "WAR-140")],
+        [
+            brief_path(home.path(), root.path(), "WAR-140", "WAR-140.01"),
+            run_manifest_path(home.path(), root.path(), "WAR-140"),
+            state_path(home.path(), root.path(), "WAR-140"),
+        ],
+    );
+}
+
+fn manifest_of(home: &Path, root: &Path) -> String {
+    std::fs::read_to_string(run_manifest_path(home, root, "WAR-140")).expect("the manifest reads")
+}
+
+fn brief_of(home: &Path, root: &Path, subtask: &str) -> String {
+    std::fs::read_to_string(brief_path(home, root, "WAR-140", subtask)).expect("the brief reads")
+}
+
+#[test]
+fn a_save_renders_the_manifest_from_the_record() {
+    let (home, root) = (
+        tempfile::tempdir().expect("a temporary home"),
+        tempfile::tempdir().expect("a temporary root"),
+    );
+    let run = a_worked_run();
+
+    run.save(home.path(), root.path()).expect("a run saves");
+    let manifest = manifest_of(home.path(), root.path());
+
+    assert_eq!(manifest, run.to_manifest_string());
+    assert!(
+        manifest.starts_with("# WAR-140: The Linear queue query\n\n"),
+        "{manifest}",
+    );
+    for line in [
+        "- status: `halted`\n",
+        "- branch: `war-140/the-linear-queue-query`\n",
+        "- pulled at: 2026-09-27T06:21:55+00:00\n",
+        "- pull request: https://github.com/Genetic-Pottery/warlock/pull/140\n",
+        "<!-- Rendered from state.json on every write. Do not edit by hand. -->\n",
+        "## Sub-tasks\n",
+        "- [x] `WAR-140.01` A first goal  $2.3842\n",
+        "- [ ] `WAR-140.02` A second goal — blocked: control-plane is closed  $0.5309\n",
+        "**Total: $2.9152**\n",
+    ] {
+        assert!(manifest.contains(line), "{manifest} is missing {line:?}");
+    }
+}
+
+// The run's own state, not the sub-tasks': a pulled run with nothing worked yet
+// has no pull request and nothing spent, and the manifest still has to read.
+#[test]
+fn a_manifest_of_an_unworked_run_names_the_missing_pull_request_and_totals_nothing() {
+    let manifest = a_run()
+        .with_subtasks([a_subtask("WAR-140.01")])
+        .to_manifest_string();
+
+    assert!(manifest.contains("- status: `pulled`\n"), "{manifest}");
+    assert!(manifest.contains("- pull request: none\n"), "{manifest}");
+    assert!(
+        manifest.contains("- [ ] `WAR-140.01` A goal\n"),
+        "{manifest}"
+    );
+    assert!(!manifest.contains("Total"), "{manifest}");
+    assert!(!manifest.contains('$'), "{manifest}");
+}
+
+#[test]
+fn a_save_writes_one_brief_per_sub_task_with_an_execution_log_to_append_under() {
+    let (home, root) = (
+        tempfile::tempdir().expect("a temporary home"),
+        tempfile::tempdir().expect("a temporary root"),
+    );
+
+    a_worked_run()
+        .save(home.path(), root.path())
+        .expect("a run saves");
+
+    let first = brief_of(home.path(), root.path(), "WAR-140.01");
+    assert!(
+        first.starts_with(
+            "---\nsubtask_id: WAR-140.01\nparent: WAR-140\nstatus: done\ndepends_on: []\n---\n"
+        ),
+        "{first}",
+    );
+    assert!(first.contains("\n## Goal\nA first goal\n"), "{first}");
+    assert!(
+        first.ends_with(
+            "\n---\n## Execution log\n<!-- spawn appends below this line; never edits above it -->\n"
+        ),
+        "{first}",
+    );
+
+    // A reason cannot be omitted from the record, so it cannot be omitted from
+    // the brief either — and it is quoted, because a reason is prose.
+    let second = brief_of(home.path(), root.path(), "WAR-140.02");
+    assert!(second.contains("\nstatus: blocked\n"), "{second}");
+    assert!(
+        second.contains("\nblocked_reason: \"control-plane is closed\"\n"),
+        "{second}",
+    );
+    assert!(second.contains("\ndepends_on: [WAR-140.01]\n"), "{second}");
+}
+
+#[test]
+fn a_reason_carrying_a_colon_or_a_quote_stays_a_readable_front_matter_line() {
+    let mut subtask = a_subtask("WAR-140.01");
+    subtask.set_status(SubtaskStatus::Crossed(
+        "wrote \"crates/control\": scope control-plane".to_owned(),
+    ));
+
+    let brief = subtask.to_brief_string("WAR-140");
+
+    assert!(
+        brief.contains("\nblocked_reason: \"wrote \\\"crates/control\\\": scope control-plane\"\n"),
+        "{brief}",
+    );
+}
+
+#[test]
+fn a_second_save_rewrites_the_manifest_from_the_changed_record() {
+    let (home, root) = (
+        tempfile::tempdir().expect("a temporary home"),
+        tempfile::tempdir().expect("a temporary root"),
+    );
+    let mut run = a_run().with_subtasks([a_subtask("WAR-140.01")]);
+
+    run.save(home.path(), root.path()).expect("a run saves");
+    let before = manifest_of(home.path(), root.path());
+    assert!(before.contains("- status: `pulled`\n"), "{before}");
+    assert!(before.contains("- [ ] `WAR-140.01` A goal\n"), "{before}");
+
+    run.set_status(RunStatus::InReview);
+    run.set_pr_url("https://github.com/Genetic-Pottery/warlock/pull/140");
+    let subtask = run
+        .subtask_mut("WAR-140.01")
+        .expect("the sub-task is there");
+    subtask.set_status(SubtaskStatus::Done);
+    subtask.set_cost_usd(1.25);
+    run.save(home.path(), root.path())
+        .expect("a run saves again");
+
+    let after = manifest_of(home.path(), root.path());
+    assert!(after.contains("- status: `in_review`\n"), "{after}");
+    assert!(
+        after.contains("- pull request: https://github.com/Genetic-Pottery/warlock/pull/140\n"),
+        "{after}",
+    );
+    assert!(
+        after.contains("- [x] `WAR-140.01` A goal  $1.2500\n"),
+        "{after}",
+    );
+    assert!(after.contains("**Total: $1.2500**\n"), "{after}");
+    assert!(!after.contains("`pulled`"), "{after}");
+
+    // The brief tracks the record too, so its front matter cannot go on saying
+    // `pending` about a sub-task that finished.
+    let brief = brief_of(home.path(), root.path(), "WAR-140.01");
+    assert!(brief.contains("\nstatus: done\n"), "{brief}");
+    assert!(!brief.contains("pending"), "{brief}");
+}
+
+// The trap this module is built around: a sub-task's session appends its account
+// to its own brief, and a save happens before and after every sub-task, so a
+// brief re-rendered whole would delete the account of the work that just
+// finished.
+#[test]
+fn a_log_appended_to_a_brief_survives_every_later_save() {
+    let (home, root) = (
+        tempfile::tempdir().expect("a temporary home"),
+        tempfile::tempdir().expect("a temporary root"),
+    );
+    let mut run = a_run().with_subtasks([a_subtask("WAR-140.01")]);
+    run.save(home.path(), root.path()).expect("a run saves");
+
+    let path = brief_path(home.path(), root.path(), "WAR-140", "WAR-140.01");
+    let appended = format!(
+        "{}\n### 2026-09-27 — done\n\n- What the session did.\n",
+        std::fs::read_to_string(&path).expect("the brief reads"),
+    );
+    std::fs::write(&path, &appended).expect("a log is appended");
+
+    let subtask = run
+        .subtask_mut("WAR-140.01")
+        .expect("the sub-task is there");
+    subtask.set_status(SubtaskStatus::Done);
+    run.save(home.path(), root.path())
+        .expect("a run saves again");
+
+    let brief = brief_of(home.path(), root.path(), "WAR-140.01");
+    assert!(brief.contains("### 2026-09-27 — done\n"), "{brief}");
+    assert!(brief.contains("- What the session did.\n"), "{brief}");
+    // Carried across once, with the head re-rendered from the record above it.
+    assert_eq!(brief.matches("## Execution log").count(), 1, "{brief}");
+    assert_eq!(brief.matches("What the session did.").count(), 1, "{brief}");
+    assert!(brief.contains("\nstatus: done\n"), "{brief}");
+}
+
+// `manifest.md` is a rendering and never an input: nothing reads it back, so
+// whatever it says about the run cannot reach the record.
+#[test]
+fn a_loaded_record_is_unaffected_by_whatever_the_manifest_says() {
+    let (home, root) = (
+        tempfile::tempdir().expect("a temporary home"),
+        tempfile::tempdir().expect("a temporary root"),
+    );
+    let run = a_worked_run();
+    run.save(home.path(), root.path()).expect("a run saves");
+
+    std::fs::write(
+        run_manifest_path(home.path(), root.path(), "WAR-140"),
+        "# WAR-999: Something else entirely\n\n- status: `in_review`\n",
+    )
+    .expect("the manifest is overwritten");
+
+    let read = PullRun::load(home.path(), root.path(), "WAR-140").expect("the run loads");
+    assert_eq!(read, run);
+    assert_eq!(read.status(), RunStatus::Halted);
+
+    // And the next save renders it back over the edit rather than keeping any of
+    // it.
+    read.save(home.path(), root.path())
+        .expect("a run saves again");
+    assert_eq!(
+        manifest_of(home.path(), root.path()),
+        run.to_manifest_string()
     );
 }
