@@ -10,15 +10,16 @@ use super::{
     Cancel, ChatAgent, ClaudeAgent, Converses, DRAFT_NOW_INSTRUCTION, DRAFTING_CONTRACT,
     DRAFTING_ONE_SHOT_CONTRACT, DRAFTING_ROUNDS, Drafted, Drafting, EFFORT, EFFORT_VAR,
     INVOCATION_TIMEOUT, MODEL, MODEL_VAR, NOTHING_SETTLES_IT, OsString, PROPOSING_SYSTEM_PROMPT,
-    Replied, SYSTEM_PROMPT, Stopped, WORKING_ATTEMPTS, WORKING_TIMEOUT, WORKING_TURNS,
-    WRITE_INSTRUCTION, Wired, Worked, Working, brief_instruction, drafting_opening, or_default,
-    overridden, propose_answer, proposing_instruction, render, session_id, working_opening,
-    working_retry, working_system_prompt,
+    Replied, SYSTEM_PROMPT, Split, Splitting, Stopped, Unsplit, WORKING_ATTEMPTS, WORKING_TIMEOUT,
+    WORKING_TURNS, WRITE_INSTRUCTION, Wired, Worked, Working, brief_instruction, drafting_opening,
+    or_default, overridden, propose_answer, proposing_instruction, render, session_id,
+    working_opening, working_retry, working_system_prompt,
 };
 use crate::brief::scope_block_in;
 use crate::panel::Mode;
 use crate::template::DEFAULT_TEMPLATE;
-use warlock_engine::{Agent, agent, drafting, working};
+use warlock_engine::document::Defect;
+use warlock_engine::{Agent, agent, drafting, splitting, working};
 
 // A name no directory on `PATH` can hold, so the lookup fails the way it does on
 // a machine with no `claude` installed.
@@ -961,6 +962,70 @@ fn a_proposing_session_may_read_the_repository_and_do_nothing_whatever_else() {
     assert_eq!(ChatAgent::proposing().timeout(), INVOCATION_TIMEOUT);
 }
 
+#[test]
+fn a_splitting_session_may_read_the_repository_and_do_nothing_whatever_else() {
+    // The same three a drafting and a proposing turn get. A split is a plan,
+    // not a change: it reads one ticket and the repository it is about, and
+    // what it hands back is JSON for warlock to check — so nothing it holds
+    // can touch the tree the sub-tasks are later worked in.
+    let vector = turn_args(&ChatAgent::splitting());
+    let granted =
+        value_of(&vector, "--tools").expect("a splitting turn says what it may reach for");
+
+    assert_eq!(granted, "Read,Grep,Glob");
+    assert_eq!(
+        granted.split(',').collect::<Vec<_>>(),
+        ["Read", "Grep", "Glob"]
+    );
+
+    names_no_writing_tool(&vector, "a splitting turn");
+
+    // And none of the fencing the one writing session carries, because there is
+    // nothing here to fence: a grant that never goes unprompted, a hook
+    // refusing writes that cannot happen, a turn limit on a session that
+    // answers in one.
+    for absent in [
+        "--allowedTools",
+        "--settings",
+        "--max-turns",
+        "--permission-mode",
+    ] {
+        assert!(
+            !vector.iter().any(|word| word == absent),
+            "{absent} is in the vector a splitting turn runs under",
+        );
+    }
+
+    // Its own conversation, at the register the brief was written in, and not
+    // the drafting session under another name.
+    let session = value_of(&vector, "--session-id").expect("a splitting turn opens a conversation");
+    assert!(is_uuid_shaped(session), "not UUID-shaped: {session}");
+    assert_ne!(
+        value_of(&turn_args(&ChatAgent::drafting()), "--session-id"),
+        Some(session),
+    );
+    assert_eq!(
+        value_of(&vector, "--model"),
+        overridden(MODEL_VAR, BRIEF_MODEL).to_str(),
+    );
+    assert_eq!(
+        value_of(&vector, "--effort"),
+        overridden(EFFORT_VAR, BRIEF_EFFORT).to_str(),
+    );
+
+    let prompt = value_of(&vector, "--system-prompt").expect("a splitting turn brings its own");
+    assert_ne!(prompt, CHAT_SYSTEM_PROMPT);
+    assert_ne!(prompt, PROPOSING_SYSTEM_PROMPT);
+    // Nor the drafting prompt reworded: one session cuts a brief into tickets a
+    // person reads, this one cuts a ticket into sub-tasks warlock hands on.
+    assert_ne!(
+        value_of(&turn_args(&ChatAgent::drafting()), "--system-prompt"),
+        Some(prompt),
+    );
+    assert!(prompt.contains("sub-tasks") && prompt.contains("WARLOCK.md"));
+    assert_eq!(ChatAgent::splitting().timeout(), INVOCATION_TIMEOUT);
+}
+
 // Stands in for the prompt sub-task 4 writes: this file is about the fence, and
 // none of the assertions below read a word of what the session is told. Plain on
 // purpose — no capitalised tool name in it — so that a vector found to name
@@ -1140,12 +1205,12 @@ fn the_sub_task_session_is_its_own_conversation_at_the_briefs_register() {
 
 #[test]
 fn the_sub_task_session_is_the_only_one_given_a_writing_tool() {
-    // Every session kind that existed before the sub-task one, each read word
-    // by word: the grant, the system prompt and every other argument. The
-    // sub-task session is the single exception, and it is exempt rather than
-    // fixed for the obvious reason — writing is what it is for, and its fence
-    // is the hook and the six-tool grant asserted above, not the absence of a
-    // tool name from its vector.
+    // Every session kind but the sub-task one, each read word by word: the
+    // grant, the system prompt and every other argument. The sub-task session is
+    // the single exception, and it is exempt rather than fixed for the obvious
+    // reason — writing is what it is for, and its fence is the hook and the
+    // six-tool grant asserted above, not the absence of a tool name from its
+    // vector.
     names_no_writing_tool(&args(&ClaudeAgent::new()), "a pass");
     names_no_writing_tool(&turn_args(&ChatAgent::new()), "a panel turn");
     names_no_writing_tool(
@@ -1158,6 +1223,7 @@ fn the_sub_task_session_is_the_only_one_given_a_writing_tool() {
     );
     names_no_writing_tool(&turn_args(&ChatAgent::drafting()), "a drafting turn");
     names_no_writing_tool(&turn_args(&ChatAgent::proposing()), "a proposing turn");
+    names_no_writing_tool(&turn_args(&ChatAgent::splitting()), "a splitting turn");
 
     // And the exception is a real one rather than a spare sentence: the helper
     // above would refuse the sub-task session's own vector.
@@ -3300,6 +3366,263 @@ fn a_cancelled_attempt_is_not_taken_again_and_is_not_blamed_on_the_session() {
 fn the_handle_a_sub_task_session_hands_out_reaches_the_agent_it_runs() {
     let agent = Attempting::taking([Attempt::Says(working::stub_answer("nothing to do"))]);
     let session = a_session(&agent);
+
+    session.cancel().cancel();
+
+    assert!(
+        agent.cancelled(),
+        "the session's handle reached some other copy of the agent",
+    );
+}
+
+// The one ticket every splitting test below is run over: a key, a title and a
+// description, which is the whole of what the session is handed.
+const SPLIT_TICKET: &str = "WAR-138";
+const SPLIT_TITLE: &str = "Split a pulled ticket into numbered sub-tasks";
+const SPLIT_DESCRIPTION: &str = "Nothing splits a ticket today, and a run needs \
+                                 an ordered set of small sub-tasks.";
+
+fn splitting_with<C: Converses>(agent: &C) -> Splitting<C> {
+    Splitting::for_ticket(agent, SPLIT_TICKET, SPLIT_TITLE, SPLIT_DESCRIPTION)
+}
+
+// The sub-tasks and what warlock had to repair to get them, or a panic saying
+// which other ending arrived.
+fn subtasks(split: Split) -> (Vec<splitting::Numbered>, Vec<String>) {
+    match split {
+        Split::Subtasks { subtasks, repairs } => (subtasks, repairs),
+        Split::Halted(unsplit) => panic!("nothing was split: {unsplit}"),
+    }
+}
+
+fn unsplit(split: Split) -> Unsplit {
+    match split {
+        Split::Halted(unsplit) => unsplit,
+        Split::Subtasks { subtasks, .. } => panic!("a halt came back as sub-tasks: {subtasks:?}"),
+    }
+}
+
+// Two sub-tasks, every field inside its caps and the second waiting on the
+// first: an answer the contract accepts as it stands, so a test that uses it is
+// asserting about the road it took and not about the repair.
+fn a_clean_split() -> String {
+    splitting::stub_answer(SPLIT_TITLE)
+}
+
+#[test]
+fn a_split_that_fits_its_caps_comes_back_numbered_with_nothing_repaired() {
+    let agent = Scripted::answering([a_clean_split()]);
+    let mut session = splitting_with(&agent);
+
+    let (subtasks, repairs) = subtasks(session.run());
+
+    assert_eq!(session.attempts(), 1);
+    assert_eq!(subtasks.len(), 2);
+    assert_eq!(subtasks[0].id, "WAR-138.01");
+    assert_eq!(subtasks[1].id, "WAR-138.02");
+    // The positions the pass answered in are gone: what a sub-task waits on is
+    // spelt as the identifier the manifest names it by.
+    assert!(subtasks[0].depends_on.is_empty());
+    assert_eq!(subtasks[1].depends_on, ["WAR-138.01"]);
+    assert!(repairs.is_empty(), "{repairs:?}");
+}
+
+#[test]
+fn the_opening_turn_is_the_ticket_and_the_shape_and_nothing_about_the_board() {
+    let agent = Scripted::answering([a_clean_split()]);
+    let mut session = splitting_with(&agent);
+
+    let _ = session.run();
+
+    let sent = agent.sent();
+    assert_eq!(sent.len(), 1);
+    let opening = &sent[0];
+    assert!(opening.starts_with(splitting::SPLIT_PROMPT));
+    assert!(opening.contains(SPLIT_TITLE));
+    assert!(opening.contains(SPLIT_DESCRIPTION));
+    // The first attempt has nothing to be told not to repeat.
+    assert!(!opening.contains("turned down"), "{opening}");
+    // The key is warlock's, for spelling the identifiers with. A pass told
+    // which board this ticket is on would write about the board.
+    assert!(
+        !opening.contains(SPLIT_TICKET),
+        "the ticket's key reached the turn: {opening}",
+    );
+}
+
+#[test]
+fn a_split_that_filled_itself_badly_is_repaired_rather_than_refused() {
+    // Over the cap on both counts: a goal past `GOAL_CHARS` and a second
+    // sub-task waiting on a position the array does not hold. Neither is worth
+    // a turn of a raised-register session — the first is a cut warlock can make
+    // itself and the second is a reference to drop.
+    let long = "s".repeat(splitting::GOAL_CHARS + 40);
+    let answer = format!(
+        "Here you go:\n\n{{\"subtasks\":[\
+         {{\"goal\":\"{long}\"}},\
+         {{\"goal\":\"Number the sub-tasks and write their briefs\",\"depends_on\":[1,9]}}]}}",
+    );
+    let agent = Scripted::answering([answer]);
+    let mut session = splitting_with(&agent);
+
+    let (subtasks, repairs) = subtasks(session.run());
+
+    // One turn: a fill that parsed is never asked again.
+    assert_eq!(session.attempts(), 1);
+    assert_eq!(subtasks.len(), 2);
+    assert_eq!(subtasks[0].goal.chars().count(), splitting::GOAL_CHARS);
+    assert_eq!(subtasks[1].depends_on, ["WAR-138.01"]);
+    // And what was done is said rather than done quietly.
+    assert_eq!(repairs.len(), 2);
+    assert!(
+        repairs
+            .iter()
+            .any(|repair| repair.contains("subtasks[0].goal")),
+        "{repairs:?}",
+    );
+    // The drop is named on the sub-task that carried it, in the engine's own
+    // words — a count rather than the position, because the positions have been
+    // rewritten into identifiers by the time anybody reads this and `9` would
+    // point at nothing in the manifest.
+    assert!(
+        repairs
+            .iter()
+            .any(|repair| repair.contains("subtasks[1].depends_on") && repair.contains("lost")),
+        "the dropped reference is not named: {repairs:?}",
+    );
+    // The repaired fill is clean: nothing is handed on still carrying a defect.
+    assert!(subtasks.iter().all(|subtask| !subtask.goal.is_empty()));
+}
+
+#[test]
+fn a_split_that_is_not_the_object_is_asked_again_with_what_was_wrong_with_it() {
+    let agent = Scripted::answering([
+        "I had a look and I do not think this ticket needs splitting.".to_owned(),
+        a_clean_split(),
+    ]);
+    let mut session = splitting_with(&agent);
+
+    let (subtasks, _) = subtasks(session.run());
+
+    assert_eq!(session.attempts(), 2);
+    assert_eq!(subtasks.len(), 2);
+
+    // The second turn is the instructions afresh — the ticket is in it again,
+    // because a session with no memory of the first turn has to be told — with
+    // the last attempt's defect listed as something not to repeat.
+    let sent = agent.sent();
+    assert_eq!(sent.len(), 2);
+    let again = &sent[1];
+    assert!(again.starts_with(splitting::SPLIT_PROMPT));
+    assert!(again.contains(SPLIT_TITLE));
+    assert!(again.contains("turned down"), "{again}");
+    assert!(again.contains("not a JSON object"), "{again}");
+}
+
+#[test]
+fn a_ticket_that_never_parses_is_reported_rather_than_split_by_warlock() {
+    let prose = [
+        "Which of the two?",
+        "Still asking.",
+        "And again.",
+        "Once more.",
+    ];
+    assert!(prose.len() >= splitting::ATTEMPTS);
+    let agent = Scripted::answering(prose);
+    let mut session = splitting_with(&agent);
+
+    let halted = unsplit(session.run());
+
+    // Every attempt spent and no fifth taken.
+    assert_eq!(session.attempts(), splitting::ATTEMPTS);
+    assert_eq!(agent.sent().len(), splitting::ATTEMPTS);
+    assert!(
+        matches!(halted, Unsplit::Unusable(Defect::NotJson { .. })),
+        "{halted:?}",
+    );
+
+    // Not a stand-in sub-task built out of the ticket, though the repair would
+    // build one: a supplied sub-task is warlock sending a session into a tree
+    // with work nobody planned.
+    let said = halted.to_string();
+    assert!(said.contains("was not split into sub-tasks"), "{said}");
+    assert!(said.contains(&splitting::ATTEMPTS.to_string()), "{said}");
+    assert!(said.contains("Nothing was branched"), "{said}");
+}
+
+#[test]
+fn sub_tasks_that_wait_on_one_another_halt_the_split_with_the_circle_named() {
+    // Two sub-tasks each waiting on the other. Nothing in the repair breaks
+    // this: every way out would be a guess at which dependency the pass did not
+    // mean, and a dropped edge is invisible in the manifest afterwards.
+    let answer = "{\"subtasks\":[\
+                  {\"goal\":\"Number the sub-tasks once the briefs exist\",\"depends_on\":[2]},\
+                  {\"goal\":\"Write the briefs once the numbering exists\",\"depends_on\":[1]}]}";
+    let agent = Scripted::answering([answer]);
+    let mut session = splitting_with(&agent);
+
+    let halted = unsplit(session.run());
+
+    assert_eq!(session.attempts(), 1);
+    let Unsplit::Circle(cycle) = &halted else {
+        panic!("a circle was read as something else: {halted:?}");
+    };
+    assert_eq!(cycle.ticket, SPLIT_TICKET);
+    assert_eq!(cycle.caught.len(), 2);
+
+    // The halt's own words, which are the comment that goes on the ticket: the
+    // engine already names the ticket and every sub-task in the circle, so
+    // warlock says it once.
+    let said = halted.to_string();
+    assert_eq!(said, cycle.to_string());
+    assert!(said.contains("WAR-138"), "{said}");
+    assert!(said.contains("wait on one another"), "{said}");
+    assert!(
+        said.contains("Number the sub-tasks once the briefs exist"),
+        "{said}"
+    );
+}
+
+#[test]
+fn a_session_that_never_answers_halts_the_split_rather_than_failing_the_caller() {
+    let agent = Failing::default();
+    let mut session = splitting_with(&agent);
+
+    let halted = unsplit(session.run());
+
+    // One turn and no retry: the failures that reach here are a missing binary,
+    // a cancel and a clock, and none of the three is better the second time.
+    assert_eq!(session.attempts(), 1);
+    assert_eq!(agent.turns(), 1);
+    assert_eq!(halted, Unsplit::Stopped(Stopped::TimedOut));
+
+    let said = halted.to_string();
+    assert!(said.contains("was not split into sub-tasks"), "{said}");
+    assert!(said.contains("past its timeout"), "{said}");
+    assert!(said.contains("Nothing was branched"), "{said}");
+}
+
+#[test]
+fn nothing_is_asked_until_a_splitting_session_is_run() {
+    let agent = Scripted::answering([a_clean_split()]);
+    let session = splitting_with(&agent);
+
+    assert_eq!(session.attempts(), 0);
+    assert!(agent.sent().is_empty());
+
+    // And the handle it hands out is pressable before anything has started.
+    session.cancel().cancel();
+    assert!(session.cancel().is_cancelled());
+}
+
+#[test]
+fn the_handle_a_splitting_session_hands_out_reaches_the_agent_it_runs() {
+    // Wired to report as well, because that is the one thing that re-wires the
+    // agent after the handle was minted: a `reporting` that replaced the agent
+    // instead of re-wiring it would leave a caller holding a handle that reaches
+    // a copy nothing is running.
+    let agent = Attempting::taking([Attempt::Says(a_clean_split())]);
+    let session = splitting_with(&agent).reporting(Activities::none());
 
     session.cancel().cancel();
 

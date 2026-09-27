@@ -55,7 +55,7 @@ use std::time::Duration;
 // vocabulary for a slot that was filled wrong, whether the slot is a line of a
 // document or the title of a draft.
 use warlock_engine::document::Defect;
-use warlock_engine::{Agent, agent, drafting, working};
+use warlock_engine::{Agent, agent, drafting, splitting, working};
 
 /// The clock one invocation runs under. A child that outlives it is killed *and*
 /// reaped rather than abandoned.
@@ -250,6 +250,36 @@ whole reply is the answer itself, in plain prose: no preamble, no working out, \
 no question back, no offer to look further, and no markdown around it. A person \
 reads what you say, corrects it and sends it on, so keep it to a sentence or \
 two.";
+
+/// What a splitting session is running under: one pulled ticket, cut into the
+/// sub-tasks a run works through.
+///
+/// Not [`DRAFTING_SYSTEM_PROMPT`] reworded. A drafting session reads a brief and
+/// hands back tickets for a board somebody reads; this one reads one ticket that
+/// is already on that board and hands back the sub-tasks warlock itself hands to
+/// later sessions. What each one has to be told about its reader is different,
+/// and one prompt serving both would be a sentence that is true of neither.
+///
+/// Free of any capitalised tool name for the same reason as the two above — the
+/// read-only grant is asserted by reading the whole argument vector word by
+/// word, and a sentence opening with `Write` or `Edit` would be a false positive
+/// nobody could tell from a real one.
+const SPLITTING_SYSTEM_PROMPT: &str = "You are cutting one ticket into \
+sub-tasks inside warlock, a terminal program that shows one repository as a \
+tree of directories. A pacted directory has a WARLOCK.md describing it: a \
+purpose, one line per file under `## Files`, one per subdirectory under `## \
+Directories`, and where there is anything to say `## Structure`. The ticket is \
+one change to the repository you are running in, and you are given its title \
+and its description and nothing else. Use the documents to narrow, never to \
+answer: start at the nearest WARLOCK.md above what the ticket is about, follow \
+its directory and file lines downward, then open the file it names and check, \
+because a document is a map and where it and the code disagree the code is \
+right. You cannot change that repository: you have no tool that alters a file \
+or runs a command, and nothing you say is put on disk. Each sub-task you hand \
+back is picked up later by a session that has read none of the others, holds no \
+memory of this one and has nobody to ask, so write every sub-task for a reader \
+who has not seen this conversation: no first person, and nothing about this \
+request or about what you were or were not shown.";
 
 /// The one sentence a proposal comes back with when the brief, the slice and the
 /// repository do not settle the question.
@@ -792,6 +822,15 @@ fn drafting_args() -> Vec<OsString> {
 
 fn proposing_args() -> Vec<OsString> {
     args_for(CHAT_TOOLS, PROPOSING_SYSTEM_PROMPT)
+}
+
+/// The same read-only vector the two above get, and deliberately nothing the
+/// sub-task session gets: no `--allowedTools`, no `--settings` hook to gate
+/// writes that cannot happen, no `--max-turns`. A split reads a ticket and
+/// answers with JSON, and every one of those flags would be fencing a session
+/// that holds nothing to fence.
+fn splitting_args() -> Vec<OsString> {
+    args_for(CHAT_TOOLS, SPLITTING_SYSTEM_PROMPT)
 }
 
 /// The one session warlock raises that may change the tree, and the whole of
@@ -1534,6 +1573,38 @@ impl ChatAgent {
         let agent = Self {
             program: OsString::from(PROGRAM),
             args: proposing_args(),
+            session: Some(Session::new()),
+            timeout: INVOCATION_TIMEOUT,
+            cancel: Cancel::new(),
+            activities: Activities::none(),
+        };
+        Converses::raised(&agent, BRIEF_MODEL, BRIEF_EFFORT)
+    }
+
+    /// One pulled ticket's splitting session: its own conversation, at the
+    /// register the ticket's brief was written in.
+    ///
+    /// Read-only by construction — [`CHAT_TOOLS`] and nothing else — because a
+    /// split is a plan and not a change: the session reads one ticket and the
+    /// repository it is about, and everything it says comes back as JSON for
+    /// warlock to check. Raised through [`Converses::raised`] rather than by
+    /// naming the two flags here, so a split and a draft cannot drift apart in
+    /// which model they reach for.
+    ///
+    /// ```
+    /// use warlock_tui::{ChatAgent, INVOCATION_TIMEOUT};
+    ///
+    /// let agent = ChatAgent::splitting();
+    ///
+    /// assert_eq!(agent.timeout(), INVOCATION_TIMEOUT);
+    /// // A conversation of its own, and not the one on the panel.
+    /// assert!(agent.args().iter().any(|arg| arg == "--session-id"));
+    /// ```
+    #[must_use]
+    pub fn splitting() -> Self {
+        let agent = Self {
+            program: OsString::from(PROGRAM),
+            args: splitting_args(),
             session: Some(Session::new()),
             timeout: INVOCATION_TIMEOUT,
             cancel: Cancel::new(),
@@ -2589,6 +2660,242 @@ impl<C: Converses> Drafting<C> {
     }
 }
 
+/// What one pulled ticket's splitting session ended with.
+///
+/// Two endings and no third, and neither of them is an error a caller has to
+/// unwrap: a split either produced the numbered sub-tasks a run works through,
+/// or it produced a sentence to put on the ticket. Nothing here branches,
+/// commits or reaches Linear, so there is no half-done state for a third
+/// variant to describe.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Split {
+    /// The sub-tasks, mended, ordered and named `<TICKET>.01` upward, with one
+    /// line per repair warlock made to get them.
+    ///
+    /// The repairs are lines rather than
+    /// [`Mend`](warlock_engine::splitting::Mend) values for the reason
+    /// [`Drafted::Drafts`]'s are: a caller's whole use for them is to say them,
+    /// and `Mend` already writes itself.
+    Subtasks {
+        subtasks: Vec<splitting::Numbered>,
+        repairs: Vec<String>,
+    },
+    /// No sub-tasks, and why — in the words that go on the ticket.
+    Halted(Unsplit),
+}
+
+/// Why a ticket was not split, said the way a comment on that ticket says it.
+///
+/// Three endings, and the reason they are one type is that a caller does one
+/// thing with all three: no branch was cut, no worktree was made and nothing
+/// was committed on any of these roads, so what is left to do is tell whoever
+/// pulled the ticket what happened. [`fmt::Display`] is that telling, and the
+/// variants are kept apart underneath it so a caller that wants to act
+/// differently on a cancel than on a circle still can.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Unsplit {
+    /// Every attempt came back as something that was not the object, carrying
+    /// the last one's defect.
+    ///
+    /// Not mended into a stand-in sub-task, though the document road's floor
+    /// would do exactly that and [`mend`](warlock_engine::splitting::mend)
+    /// itself will build one out of the ticket: a supplied line in a
+    /// `WARLOCK.md` is warlock describing a directory it could not get
+    /// described, and a supplied *sub-task* is warlock sending a session with
+    /// writing tools into a tree with work nobody planned. A ticket that never
+    /// parsed is reported and left unsplit.
+    Unusable(Defect),
+    /// The sub-tasks wait on one another, so no order puts every dependency
+    /// before its dependant. The one split defect with no repair.
+    Circle(splitting::Cycle),
+    /// The session itself never answered: a missing binary, a cancel, the
+    /// clock, or the account.
+    Stopped(Stopped),
+}
+
+impl fmt::Display for Unsplit {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Unusable(defect) => write!(
+                f,
+                "This ticket was not split into sub-tasks: the session was asked {} times and not \
+                 one of its answers was the object it was asked for. The last one was refused \
+                 because {defect}. Nothing was branched and no work was started.",
+                splitting::ATTEMPTS,
+            ),
+            // The engine wrote the whole sentence, names the ticket in it and
+            // lists every sub-task in the circle. A preamble here would be
+            // warlock saying the same thing twice in one comment.
+            Self::Circle(cycle) => write!(f, "{cycle}"),
+            Self::Stopped(stopped) => write!(
+                f,
+                "This ticket was not split into sub-tasks: {stopped}. Nothing was branched and no \
+                 work was started.",
+            ),
+        }
+    }
+}
+
+/// One pulled ticket's splitting session: one read-only conversation, run until
+/// it answers with the object or runs out of attempts.
+///
+/// Not a [`Drafting`] with the brief left off. That session has somebody in
+/// front of it and relays up to [`DRAFTING_ROUNDS`] questions; this one is
+/// raised inside a run with nobody watching, so prose is never a question here —
+/// it is an attempt that failed, from the first turn.
+///
+/// What it does *not* do is the point of the type being this small: no branch,
+/// no worktree, no commit, no request to Linear, and no writing tool anywhere in
+/// the session it raises. It reads one ticket, asks for the object, repairs what
+/// came back and numbers it. Whoever calls this decides what a [`Split`] means.
+///
+/// Generic over [`Converses`] for the reason [`Drafting`] is: the seam is one
+/// message in and one answer out, so every road below — accepted, repaired,
+/// asked again, exhausted, a circle, a session that never answered — is driven
+/// by a stand-in with no `claude` on the machine.
+///
+/// ```
+/// use warlock_tui::{ChatAgent, Splitting};
+///
+/// let session = Splitting::for_ticket(
+///     &ChatAgent::splitting(),
+///     "WAR-138",
+///     "Split a pulled ticket into numbered sub-tasks",
+///     "One read-only session fills the object, warlock checks and repairs it.",
+/// );
+///
+/// assert_eq!(session.attempts(), 0);
+/// // Whoever holds the session can stop the turn it is in, from any thread.
+/// session.cancel().cancel();
+/// ```
+#[derive(Debug)]
+pub struct Splitting<C> {
+    agent: C,
+    cancel: Cancel,
+    /// What the numbering spells each sub-task's identifier from, and the only
+    /// thing here the engine's instructions never see: a pass told which board
+    /// this ticket is on would write about the board.
+    ticket: String,
+    /// The ticket, kept whole: an attempt that has to be asked again is asked
+    /// with [`warlock_engine::splitting::split_instructions`] built afresh, and
+    /// the same two strings are what
+    /// [`mend`](warlock_engine::splitting::mend) falls back on for a goal
+    /// nobody answered.
+    title: String,
+    description: String,
+    attempts: usize,
+}
+
+impl<C: Converses> Splitting<C> {
+    /// A session aimed at one pulled ticket.
+    ///
+    /// The agent is wired to a cancel handle minted here, so cancelling reaches
+    /// the child this session is actually running rather than some other copy of
+    /// the same agent. Nothing is spawned until [`run`](Splitting::run).
+    #[must_use]
+    pub fn for_ticket(agent: &C, ticket: &str, title: &str, description: &str) -> Self {
+        let cancel = Cancel::new();
+        Self {
+            agent: agent.wired(cancel.clone(), Activities::none()),
+            cancel,
+            ticket: ticket.to_owned(),
+            title: title.to_owned(),
+            description: description.to_owned(),
+            attempts: 0,
+        }
+    }
+
+    /// The same session reporting what it is seen doing.
+    ///
+    /// Re-wires rather than replaces the agent, so the cancel handle a caller
+    /// may already be holding still reaches the run.
+    #[must_use]
+    pub fn reporting(mut self, activities: Activities) -> Self {
+        self.agent = self.agent.wired(self.cancel.clone(), activities);
+        self
+    }
+
+    /// The handle this session's turns run under. A clone, because the point of
+    /// it is to be pressed from a thread that is not the one waiting.
+    #[must_use]
+    pub fn cancel(&self) -> Cancel {
+        self.cancel.clone()
+    }
+
+    /// How many turns have been spent. Zero until [`run`](Splitting::run), and
+    /// never more than [`warlock_engine::splitting::ATTEMPTS`].
+    #[must_use]
+    pub const fn attempts(&self) -> usize {
+        self.attempts
+    }
+
+    /// Run the split: the ticket and the shape to fill, asked again for as long
+    /// as the answer was not the object.
+    ///
+    /// No `Result`. A turn that failed is one of the three endings a
+    /// [`Split`] already has room for, and a caller handed an
+    /// [`Err`](Result::Err) beside an [`Unsplit`] would have two ways to say
+    /// the same thing and a reason to treat one of them as nothing having
+    /// happened — which is exactly what a split that never ran is.
+    ///
+    /// Only an answer that did not parse is asked again, and it is asked with
+    /// the instructions built afresh carrying the last attempt's defect listed
+    /// back, which is how the document road asks again. A fill that parsed is
+    /// kept and repaired however badly it filled itself: the mend is the floor
+    /// brief 16 put under this, [`check`](warlock_engine::splitting::check)
+    /// over a mended fill is empty, and spending two more turns of a
+    /// raised-register session on a goal four characters too long buys a goal
+    /// warlock could have cut itself.
+    pub fn run(&mut self) -> Split {
+        let mut rejected: Vec<Defect> = Vec::new();
+        // Every road out is a `return` carrying what actually happened, which is
+        // why this is a `loop` and not a bounded one: a `while` over the count
+        // would fall out the bottom with nothing in hand and need a sentence
+        // about an ending that cannot arrive.
+        loop {
+            self.attempts += 1;
+            let asked = splitting::split_instructions(&self.title, &self.description, &rejected);
+            let reply = match self.agent.turn(&asked) {
+                Ok(reply) => reply,
+                Err(error) => return Split::Halted(Unsplit::Stopped(stopped_by(&error))),
+            };
+            match splitting::accept(&reply) {
+                splitting::Accepted::Filled(fill) | splitting::Accepted::Defective { fill, .. } => {
+                    return self.numbered(&fill);
+                }
+                // The one answer worth another turn — until there are no turns
+                // left, and then it is the last word on why nothing was split.
+                splitting::Accepted::Unparsed(defect) => {
+                    if self.attempts >= splitting::ATTEMPTS {
+                        return Split::Halted(Unsplit::Unusable(defect));
+                    }
+                    // The only thing the next turn is told about this one.
+                    rejected = vec![defect];
+                }
+            }
+        }
+    }
+
+    /// A fill that parsed, put through the engine's repair, ordered and named.
+    ///
+    /// The repair runs over a clean fill too, not only a defective one:
+    /// `prune` drops a `depends_on` position that points past the end or back
+    /// at the sub-task carrying it, and `check` reports neither, so a fill that
+    /// came back `Filled` can still have a repair to name. It is also what
+    /// makes a circle reaching [`number`](warlock_engine::splitting::number) a
+    /// real one rather than a sub-task waiting on itself.
+    fn numbered(&self, fill: &splitting::Fill) -> Split {
+        let (fill, mends) = splitting::mend(fill, &self.title, &self.description);
+        match splitting::number(&fill, &self.ticket) {
+            Ok(subtasks) => Split::Subtasks {
+                subtasks,
+                repairs: mends.iter().map(ToString::to_string).collect(),
+            },
+            Err(cycle) => Split::Halted(Unsplit::Circle(cycle)),
+        }
+    }
+}
+
 /// How many attempts one sub-task gets: the first, and at most two retries.
 ///
 /// Three because a failure that survives one retry is rarely a failure a third
@@ -2599,7 +2906,13 @@ impl<C: Converses> Drafting<C> {
 /// half-changed is a property of warlock, not a knob.
 pub const WORKING_ATTEMPTS: usize = 3;
 
-/// Why a sub-task session's run ended with no answer to read.
+/// Why a session warlock raised ended with no answer to read.
+///
+/// Written for the sub-task session and shared with [`Splitting`], which fails
+/// the same handful of ways for the same reasons; a second vocabulary for "the
+/// account is out of credit" would be two sentences warlock could write for one
+/// refusal. Only [`TurnLimit`](Stopped::TurnLimit) is a sub-task's alone — a
+/// read-only session is given no `--max-turns` to spend.
 ///
 /// The four the brief names are told apart because warlock does something
 /// different with each: a turn limit is the one worth taking again with more
