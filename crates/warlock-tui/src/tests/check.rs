@@ -507,7 +507,8 @@ fn the_prose_for_a_scoped_recorded_and_bound_checkout_says_the_route_and_the_key
     assert_eq!(
         prose(&answered),
         "`crates/engine/src` is scoped `data-plane`\n\
-         work here is filed to `Data Plane`, as `In Review`, labelled `area/data-plane`\n\
+         work here is filed to `Data Plane`, labelled `area/data-plane`, and a finished pull \
+         moves the ticket to `In Review`\n\
          holding `data-plane`\n\
          `data-plane` is open to this machine\n\
          filing to `Data Plane` would use the key `work`, which this machine stores"
@@ -534,7 +535,8 @@ fn a_closed_scope_keeps_its_whole_route_in_the_prose_beside_the_closed_line() {
     assert_eq!(
         prose(&answer(home.path(), "crates/engine")),
         "`crates/engine` is scoped `data-plane`\n\
-         work here is filed to `Data Plane`, as `In Review`, labelled `area/data-plane`\n\
+         work here is filed to `Data Plane`, labelled `area/data-plane`, and a finished pull \
+         moves the ticket to `In Review`\n\
          holding `platform`\n\
          `data-plane` is closed to this machine — hold that sigil to work here, \
          with `warlock config`\n\
@@ -591,7 +593,8 @@ fn an_unbound_checkout_is_sent_to_key_use_and_key_add_and_a_dangling_name_to_key
     assert_eq!(
         prose(&answer(unbound.path(), "crates/engine")),
         "`crates/engine` is scoped `data-plane`\n\
-         work here is filed to `Data Plane`, as `In Review`, labelled `area/data-plane`\n\
+         work here is filed to `Data Plane`, labelled `area/data-plane`, and a finished pull \
+         moves the ticket to `In Review`\n\
          holding `data-plane`\n\
          `data-plane` is open to this machine\n\
          no key is bound to this checkout: `warlock key use <name>` binds a name this \
@@ -606,7 +609,8 @@ fn an_unbound_checkout_is_sent_to_key_use_and_key_add_and_a_dangling_name_to_key
     assert_eq!(
         prose(&answer(dangling.path(), "crates/engine")),
         "`crates/engine` is scoped `data-plane`\n\
-         work here is filed to `Data Plane`, as `In Review`, labelled `area/data-plane`\n\
+         work here is filed to `Data Plane`, labelled `area/data-plane`, and a finished pull \
+         moves the ticket to `In Review`\n\
          holding `data-plane`\n\
          `data-plane` is open to this machine\n\
          the key `work` is bound here and this machine has not stored it: \

@@ -260,7 +260,10 @@ fn route_line(
 ) -> String {
     match (scope, team, review_state, label) {
         (_, Some(team), Some(review_state), Some(label)) => {
-            format!("work here is filed to `{team}`, as `{review_state}`, labelled `{label}`")
+            format!(
+                "work here is filed to `{team}`, labelled `{label}`, and a finished pull moves \
+                 the ticket to `{review_state}`"
+            )
         }
         (Some(scope), ..) => format!(
             "`{scope}` has no `[[scope]]` record, so there is nothing to route to: a record \
