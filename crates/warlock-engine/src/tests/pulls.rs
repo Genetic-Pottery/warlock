@@ -1,4 +1,9 @@
-use super::{PullRun, PullSubtask, ReasonMissing, RunStatus, SubtaskStatus};
+use std::path::Path;
+
+use super::{
+    Error, PullRun, PullSubtask, ReasonMissing, RunStatus, SubtaskStatus, pulls_dir, run_dir,
+    state_path,
+};
 
 const WAR_124: &str = r#"{
   "ticket": "WAR-124",
@@ -339,4 +344,243 @@ fn an_unknown_key_is_refused_rather_than_ignored() {
     let text = WAR_124.replace("\"scope\"", "\"scopes\"");
 
     assert!(serde_json::from_str::<PullRun>(&text).is_err());
+}
+
+// A record with something in every field, so a round trip proves the whole shape
+// survives the file and not just the four keys a new run happens to fill.
+fn a_worked_run() -> PullRun {
+    let mut done = PullSubtask::new("WAR-140.01", "A first goal", [] as [&str; 0]);
+    done.set_status(SubtaskStatus::Done);
+    done.set_log("What the session did.");
+    done.set_started_at("2026-09-27T06:22:00+00:00");
+    done.set_finished_at("2026-09-27T06:29:00+00:00");
+    done.set_session_id("5b80b301-8d38-451e-9f55-0034e0877152");
+    done.set_cost_usd(2.384_245);
+
+    let mut blocked = PullSubtask::new("WAR-140.02", "A second goal", ["WAR-140.01"]);
+    blocked.set_status(SubtaskStatus::Blocked("control-plane is closed".to_owned()));
+    blocked.set_started_at("2026-09-27T06:29:00+00:00");
+    blocked.set_session_id("6b2fbcbf-0b42-4a15-8df6-d0bf88018009");
+    blocked.set_cost_usd(0.530_913_5);
+
+    let mut run = a_run().with_subtasks([done, blocked]);
+    run.set_status(RunStatus::Halted);
+    run.set_pr_url("https://github.com/Genetic-Pottery/warlock/pull/140");
+    run
+}
+
+// Every path written anywhere under a directory, so a test can say what a save
+// touched rather than only checking the file it expected is there.
+fn entries(dir: &Path) -> Vec<std::path::PathBuf> {
+    let mut found = Vec::new();
+    let Ok(read) = std::fs::read_dir(dir) else {
+        return found;
+    };
+    for entry in read.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            found.extend(entries(&path));
+        } else {
+            found.push(path);
+        }
+    }
+    found.sort();
+    found
+}
+
+#[test]
+fn a_run_round_trips_through_a_save_and_a_load() {
+    let (home, root) = (
+        tempfile::tempdir().expect("a temporary home"),
+        tempfile::tempdir().expect("a temporary root"),
+    );
+    let run = a_worked_run();
+
+    run.save(home.path(), root.path()).expect("a run saves");
+    let read = PullRun::load(home.path(), root.path(), "WAR-140").expect("the run it wrote loads");
+
+    assert_eq!(read, run);
+}
+
+#[test]
+fn a_save_writes_the_state_file_under_the_derived_run_directory_and_nothing_else() {
+    let (home, root) = (
+        tempfile::tempdir().expect("a temporary home"),
+        tempfile::tempdir().expect("a temporary root"),
+    );
+
+    a_worked_run()
+        .save(home.path(), root.path())
+        .expect("a run saves");
+
+    // Exactly one file, at the derived path, and no temporary left beside it.
+    assert_eq!(
+        entries(home.path()),
+        [state_path(home.path(), root.path(), "WAR-140")],
+    );
+    assert_eq!(
+        state_path(home.path(), root.path(), "WAR-140").parent(),
+        Some(run_dir(home.path(), root.path(), "WAR-140").as_path()),
+    );
+    assert!(
+        run_dir(home.path(), root.path(), "WAR-140")
+            .starts_with(pulls_dir(home.path(), root.path()))
+    );
+}
+
+// The run record is machine-local, so a save must leave the checkout it is about
+// untouched: a `state.json` inside the repository would turn up in the diff of
+// the commit the run is making.
+#[test]
+fn a_save_writes_nothing_inside_the_repository_root() {
+    let (home, root) = (
+        tempfile::tempdir().expect("a temporary home"),
+        tempfile::tempdir().expect("a temporary root"),
+    );
+    std::fs::write(root.path().join("Cargo.toml"), "[package]\n").expect("a file in the checkout");
+
+    a_worked_run()
+        .save(home.path(), root.path())
+        .expect("a run saves");
+
+    assert_eq!(entries(root.path()), [root.path().join("Cargo.toml")]);
+    assert!(
+        state_path(home.path(), root.path(), "WAR-140").starts_with(home.path()),
+        "the state file must sit under the home it was handed",
+    );
+}
+
+#[test]
+fn a_ticket_this_machine_holds_no_run_for_is_not_found_rather_than_an_empty_run() {
+    let (home, root) = (
+        tempfile::tempdir().expect("a temporary home"),
+        tempfile::tempdir().expect("a temporary root"),
+    );
+
+    let error = PullRun::load(home.path(), root.path(), "WAR-140")
+        .expect_err("a run nobody pulled is not there");
+
+    assert!(matches!(error, Error::NotFound { .. }));
+    let message = error.to_string();
+    assert!(
+        message.contains("WAR-140") && message.contains("state.json"),
+        "{message} does not name the run it looked for",
+    );
+    assert!(std::error::Error::source(&error).is_none());
+}
+
+// The run belongs to the checkout, not to the machine: two clones of one
+// repository can both be working the same ticket, and neither may read the
+// other's record.
+#[test]
+fn two_checkouts_hold_their_own_run_for_the_same_ticket() {
+    let (home, here, there) = (
+        tempfile::tempdir().expect("a temporary home"),
+        tempfile::tempdir().expect("one checkout"),
+        tempfile::tempdir().expect("another checkout"),
+    );
+
+    a_worked_run()
+        .save(home.path(), here.path())
+        .expect("a run saves");
+
+    assert!(matches!(
+        PullRun::load(home.path(), there.path(), "WAR-140"),
+        Err(Error::NotFound { .. }),
+    ));
+    assert_ne!(
+        state_path(home.path(), here.path(), "WAR-140"),
+        state_path(home.path(), there.path(), "WAR-140"),
+    );
+}
+
+#[test]
+fn a_record_broken_by_hand_is_a_parse_error_naming_the_file() {
+    let (home, root) = (
+        tempfile::tempdir().expect("a temporary home"),
+        tempfile::tempdir().expect("a temporary root"),
+    );
+    let path = state_path(home.path(), root.path(), "WAR-140");
+    std::fs::create_dir_all(path.parent().expect("the run directory"))
+        .expect("the run directory is made");
+    std::fs::write(&path, "{ not json").expect("a broken record");
+
+    let error =
+        PullRun::load(home.path(), root.path(), "WAR-140").expect_err("broken bytes are refused");
+
+    assert!(matches!(error, Error::Parse { .. }));
+    assert!(
+        error.to_string().contains("state.json"),
+        "{error} does not name the file at fault",
+    );
+    assert!(std::error::Error::source(&error).is_some());
+}
+
+// The reason a `blocked` sub-task cannot be read without its reason reaches the
+// caller through the same variant, because `serde_json` reports it as a
+// deserialisation failure.
+#[test]
+fn a_reason_missing_from_a_saved_record_is_reported_as_a_parse_error() {
+    let (home, root) = (
+        tempfile::tempdir().expect("a temporary home"),
+        tempfile::tempdir().expect("a temporary root"),
+    );
+    a_worked_run()
+        .save(home.path(), root.path())
+        .expect("a run saves");
+
+    let path = state_path(home.path(), root.path(), "WAR-140");
+    let text = std::fs::read_to_string(&path)
+        .expect("the record reads")
+        .replace("\"control-plane is closed\"", "null");
+    std::fs::write(&path, text).expect("the edited record is written");
+
+    let error = PullRun::load(home.path(), root.path(), "WAR-140")
+        .expect_err("a blocked sub-task with no reason is refused");
+
+    assert!(matches!(error, Error::Parse { .. }));
+    assert!(
+        error.to_string().contains("WAR-140.02"),
+        "{error} does not name the sub-task",
+    );
+}
+
+#[test]
+fn a_saved_record_is_pretty_printed_with_a_trailing_newline() {
+    let (home, root) = (
+        tempfile::tempdir().expect("a temporary home"),
+        tempfile::tempdir().expect("a temporary root"),
+    );
+    let run = a_worked_run();
+
+    run.save(home.path(), root.path()).expect("a run saves");
+    let text = std::fs::read_to_string(state_path(home.path(), root.path(), "WAR-140"))
+        .expect("the record reads");
+
+    assert_eq!(text, run.to_json_string().expect("a record serialises"));
+    assert!(text.starts_with("{\n  \"ticket\": \"WAR-140\","), "{text}");
+    assert!(text.ends_with("}\n"), "{text}");
+}
+
+#[test]
+fn a_second_save_replaces_the_record_rather_than_appending_to_it() {
+    let (home, root) = (
+        tempfile::tempdir().expect("a temporary home"),
+        tempfile::tempdir().expect("a temporary root"),
+    );
+    let mut run = a_run();
+
+    run.save(home.path(), root.path()).expect("a run saves");
+    run.set_status(RunStatus::InProgress);
+    run.push_subtask(a_subtask("WAR-140.01"));
+    run.save(home.path(), root.path())
+        .expect("a run saves again");
+
+    let read = PullRun::load(home.path(), root.path(), "WAR-140").expect("the run loads");
+    assert_eq!(read, run);
+    assert_eq!(read.status(), RunStatus::InProgress);
+    assert_eq!(
+        entries(home.path()),
+        [state_path(home.path(), root.path(), "WAR-140")],
+    );
 }

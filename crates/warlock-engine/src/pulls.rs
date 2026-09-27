@@ -6,9 +6,82 @@
 // a refactor: it strands every run in progress on every machine, and the run it
 // strands is one holding uncommitted work in somebody's tree.
 
+// A run record lives under the home directory and never inside the repository:
+// the work in progress is a branch and a tree, and a file recording how far a
+// pull got would otherwise turn up in the diff of the very commit it is
+// describing. The home is a parameter for the reason `sigils.rs` opens with —
+// resolving `HOME` here would let a test in this crate write the developer's
+// real home.
+
 use std::fmt;
+use std::fs;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+
+use crate::manifest::{temp_file_name, write_and_sync};
+use crate::sigils::project_dir;
+
+const PULLS_DIR: &str = "pulls";
+
+const STATE_FILE: &str = "state.json";
+
+/// Where every run this checkout has pulled lives.
+///
+/// ```
+/// use warlock_engine::{project_directory, pulls_dir};
+///
+/// let (home, root) = (tempfile::tempdir()?, tempfile::tempdir()?);
+/// assert_eq!(
+///     pulls_dir(home.path(), root.path()),
+///     home.path()
+///         .join(".warlock")
+///         .join(project_directory(root.path()))
+///         .join("pulls"),
+/// );
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
+#[must_use]
+pub fn pulls_dir(home: impl AsRef<Path>, root: impl AsRef<Path>) -> PathBuf {
+    project_dir(home.as_ref(), root.as_ref()).join(PULLS_DIR)
+}
+
+/// A run's own directory: its state, and the manifest and briefs rendered beside
+/// it.
+///
+/// The ticket identifier is the directory name, so one checkout holds at most
+/// one run per ticket and a second pull of the same ticket reloads the first
+/// rather than starting a run beside it.
+///
+/// ```
+/// use warlock_engine::{pulls_dir, run_dir};
+///
+/// let (home, root) = (tempfile::tempdir()?, tempfile::tempdir()?);
+/// assert_eq!(
+///     run_dir(home.path(), root.path(), "WAR-140"),
+///     pulls_dir(home.path(), root.path()).join("WAR-140"),
+/// );
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
+#[must_use]
+pub fn run_dir(home: impl AsRef<Path>, root: impl AsRef<Path>, ticket: &str) -> PathBuf {
+    pulls_dir(home, root).join(ticket)
+}
+
+/// ```
+/// use warlock_engine::{run_dir, state_path};
+///
+/// let (home, root) = (tempfile::tempdir()?, tempfile::tempdir()?);
+/// assert_eq!(
+///     state_path(home.path(), root.path(), "WAR-140"),
+///     run_dir(home.path(), root.path(), "WAR-140").join("state.json"),
+/// );
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
+#[must_use]
+pub fn state_path(home: impl AsRef<Path>, root: impl AsRef<Path>, ticket: &str) -> PathBuf {
+    run_dir(home, root, ticket).join(STATE_FILE)
+}
 
 /// ```
 /// use warlock_engine::{PullRun, PullSubtask, RunStatus, SubtaskStatus};
@@ -153,6 +226,105 @@ impl PullRun {
 
     pub fn subtasks_mut(&mut self) -> &mut [PullSubtask] {
         &mut self.subtasks
+    }
+
+    /// Pretty-printed with a trailing newline, because this file is read by a
+    /// person as often as by warlock: a halted run is looked at by hand, beside
+    /// `.forman/<TICKET>/state.json`, which is spelled the same way.
+    pub fn to_json_string(&self) -> Result<String, Error> {
+        let mut text =
+            serde_json::to_string_pretty(self).map_err(|source| Error::Serialize { source })?;
+        text.push('\n');
+        Ok(text)
+    }
+
+    /// ```
+    /// use warlock_engine::{PullRun, state_path};
+    ///
+    /// let (home, root) = (tempfile::tempdir()?, tempfile::tempdir()?);
+    /// let run = PullRun::new("WAR-140", "A ticket", "warlock-team", "war-140/a-ticket", "now");
+    ///
+    /// run.save(home.path(), root.path())?;
+    ///
+    /// assert!(state_path(home.path(), root.path(), "WAR-140").is_file());
+    /// assert_eq!(PullRun::load(home.path(), root.path(), "WAR-140")?, run);
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    // Saved under its own ticket rather than under one the caller names, so the
+    // record and the directory holding it can never disagree about which ticket
+    // this is.
+    pub fn save(&self, home: impl AsRef<Path>, root: impl AsRef<Path>) -> Result<(), Error> {
+        // Serialise before touching the filesystem: a record that cannot be
+        // written as JSON should not leave a new directory behind.
+        let text = self.to_json_string()?;
+
+        let dir = run_dir(home, root, &self.ticket);
+        fs::create_dir_all(&dir).map_err(|source| Error::Io {
+            path: dir.clone(),
+            source,
+        })?;
+
+        // The temporary must sit in the same directory as the target, so the
+        // rename below cannot cross a filesystem and stops being atomic. It is
+        // what makes a save safe to do before and after every sub-task: a run
+        // killed mid-write reloads the last whole record, never half of one.
+        let temp = dir.join(temp_file_name(STATE_FILE));
+        let target = dir.join(STATE_FILE);
+
+        let written = write_and_sync(&temp, text.as_bytes())
+            .map_err(|source| Error::Io {
+                path: temp.clone(),
+                source,
+            })
+            .and_then(|()| {
+                fs::rename(&temp, &target).map_err(|source| Error::Io {
+                    path: target,
+                    source,
+                })
+            });
+
+        if written.is_err() {
+            drop(fs::remove_file(&temp));
+        }
+        written
+    }
+
+    /// ```
+    /// use warlock_engine::{PullRun, pulls};
+    ///
+    /// let (home, root) = (tempfile::tempdir()?, tempfile::tempdir()?);
+    ///
+    /// // A ticket this machine is not working has no run, and that is not an
+    /// // empty one.
+    /// assert!(matches!(
+    ///     PullRun::load(home.path(), root.path(), "WAR-140"),
+    ///     Err(pulls::Error::NotFound { .. }),
+    /// ));
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    // Absent is `NotFound`, following `Manifest::load`, `load_sigils` and
+    // `Filed::load`. An empty record was rejected outright here, and more firmly
+    // than in those three: a default `PullRun` would have to invent a ticket, a
+    // scope, a branch and a start time, and a caller that took it for a run
+    // would resume a pull onto a branch nobody created. "This machine holds no
+    // run for this ticket" is the answer, and only the caller — selection, or a
+    // resume — knows what to do with it. Unreadable and unparseable stay named
+    // for the same reason: a record broken by a hand edit must never be
+    // indistinguishable from one that was never pulled, because the run it
+    // describes is holding uncommitted work in somebody's tree.
+    pub fn load(
+        home: impl AsRef<Path>,
+        root: impl AsRef<Path>,
+        ticket: &str,
+    ) -> Result<Self, Error> {
+        let path = state_path(home, root, ticket);
+        match fs::read_to_string(&path) {
+            Ok(text) => serde_json::from_str(&text).map_err(|source| Error::Parse { path, source }),
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
+                Err(Error::NotFound { path })
+            }
+            Err(source) => Err(Error::Io { path, source }),
+        }
     }
 }
 
@@ -508,6 +680,57 @@ impl TryFrom<WireSubtask> for PullSubtask {
             session_id,
             cost_usd,
         })
+    }
+}
+
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum Error {
+    NotFound {
+        path: PathBuf,
+    },
+    Io {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+    // One variant for both malformed JSON and a `blocked` sub-task with no
+    // reason, because `serde_json` reports the second through the first:
+    // `ReasonMissing` is raised inside `TryFrom<WireSubtask>` and reaches here as
+    // a deserialisation error carrying its message. Splitting them would mean
+    // parsing that message back apart to tell which it was.
+    Parse {
+        path: PathBuf,
+        source: serde_json::Error,
+    },
+    Serialize {
+        source: serde_json::Error,
+    },
+}
+
+impl fmt::Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NotFound { path } => write!(f, "no pull run at `{}`", path.display()),
+            Self::Io { path, source } => {
+                write!(f, "could not read or write `{}`: {source}", path.display())
+            }
+            Self::Parse { path, source } => {
+                write!(f, "malformed pull run at `{}`: {source}", path.display())
+            }
+            Self::Serialize { source } => {
+                write!(f, "could not write the pull run as JSON: {source}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for Error {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Io { source, .. } => Some(source),
+            Self::Parse { source, .. } | Self::Serialize { source } => Some(source),
+            Self::NotFound { .. } => None,
+        }
     }
 }
 
