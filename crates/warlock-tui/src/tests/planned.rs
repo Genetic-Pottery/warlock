@@ -18,7 +18,7 @@ use super::{Planned, Settled, cut_with, prepare};
 use crate::error::Error;
 use crate::standing::Standing;
 use crate::status_for;
-use crate::stubs::{Boarding, Call, Op};
+use crate::stubs::{Boarding, Call, Op, VIEWER};
 
 // Not a key, and named so that nothing reading this file mistakes it for one.
 // It is stored only so that a bound name resolves and a cut can reach the
@@ -1599,5 +1599,80 @@ mod headless {
                 "a run asked for {op:?}"
             );
         }
+    }
+
+    #[test]
+    fn the_whole_run_asks_once_who_it_files_for_and_asks_before_the_first_issue() {
+        let repo = a_scoped_repository();
+        let home = a_home(repo.path());
+        let linear = a_sliced_project(SLICED);
+
+        cut_filing(repo.path(), home.path(), &linear, &Sketching::drafting());
+
+        // Three slices with two drafts in each: six issues, and one answer about
+        // who they are all for. A request per slice — or per draft — would be
+        // bought again for an answer that cannot have changed.
+        assert_eq!(linear.issues_created().len(), 6);
+        let asked = linear.positions_of(Op::Viewer);
+        assert_eq!(asked.len(), 1, "{:?}", linear.ops());
+        // And before anything exists to assign: the id is resolved while the run
+        // is still nothing, not found out once issues are on the board.
+        let first = linear.positions_of(Op::CreateIssue)[0];
+        assert!(
+            asked[0] < first,
+            "the viewer was asked at {} and the first issue created at {first}",
+            asked[0]
+        );
+    }
+
+    #[test]
+    fn every_issue_the_run_files_is_assigned_to_the_user_the_viewer_answered() {
+        let repo = a_scoped_repository();
+        let home = a_home(repo.path());
+        let linear = a_sliced_project(SLICED);
+
+        cut_filing(repo.path(), home.path(), &linear, &Sketching::drafting());
+
+        // One id for the run, the one the board said the key belongs to: the
+        // slices are cut one at a time and the assignee is not a thing a later
+        // slice can drift on.
+        let issues = linear.issues_created();
+        assert_eq!(issues.len(), 6, "{issues:?}");
+        for issue in &issues {
+            assert_eq!(issue.assignee, VIEWER, "{issue:?}");
+        }
+    }
+
+    #[test]
+    fn a_viewer_request_the_api_turns_down_refuses_the_run_before_anything_exists() {
+        // A board that will not say who the key belongs to has nothing to file
+        // for. A timeout is the same failure by the same road — one `LinearError`
+        // through the one line that maps it — so the refusal stands for both.
+        let repo = a_scoped_repository();
+        let home = a_home(repo.path());
+        let linear = a_sliced_project(SLICED).refuse(Op::Viewer, "the workspace would not");
+        let before = fs::read_to_string(filed_path(repo.path())).expect("a record file");
+
+        let (outcome, printed) = cut_to(repo.path(), home.path(), BRIEF_PATH, None, false, &linear);
+
+        let error = refusal(outcome);
+        assert!(matches!(error, Error::Linear { .. }), "{error:?}");
+        assert!(
+            said(&error).contains("the workspace would not"),
+            "{}",
+            said(&error)
+        );
+        // The one request and nothing after it: the project was never even
+        // fetched, no session was opened — the model panics if one is — and
+        // nothing was created.
+        assert_eq!(linear.calls(), [Call::Viewer], "{:?}", linear.calls());
+        assert!(printed.is_empty(), "a refusal printed something: {printed}");
+        // And the record file is the one that was there: a run that filed
+        // nothing writes no cut.
+        assert!(recorded(repo.path()).is_empty(), "a refusal recorded a cut");
+        assert_eq!(
+            fs::read_to_string(filed_path(repo.path())).expect("a record file"),
+            before
+        );
     }
 }
