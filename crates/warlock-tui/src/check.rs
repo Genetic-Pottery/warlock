@@ -21,14 +21,30 @@
 //! and not warlock's. So is a config that will not read — `sigils` is
 //! three-valued for that reason, because printing `[]` would tell an operator
 //! they hold nothing when the truth is warlock could not read what they hold.
+//!
+//! `--gate` is the one exception and the reason the rest of it is the rule: it
+//! asks the same question and spends the status on the verdict itself, because a
+//! shell or a `PreToolUse` hook stopping a write cannot read five lines of prose
+//! and has nothing but the status to stop on. It prints nothing, it invents no
+//! status — a closed scope is `Error::ClosedScope` and the **3** the headless
+//! writes already refuse with — and it is the same [`checked`] answer underneath,
+//! so a gate that refuses and a check that says "closed" can never disagree.
+//!
+//! With no path at all, `--gate` is the same question asked by a Claude Code
+//! `PreToolUse` hook, which hands the path over on stdin and reads an object back
+//! rather than a status: [`hook`]. That form is the one thing here that prints
+//! something a person never reads, and it is still [`gated`]'s verdict — the two
+//! forms differ in where the path comes from and in what a refusal is written as,
+//! and in nothing else.
 
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
-use serde_json::Value;
+use serde_json::{Value, json};
 use warlock_engine::{Manifest, route_facts, scope_opens_to, sigils_path};
 use warlock_tui::Sigils;
 
+use crate::boundary::closed_scope_message;
 use crate::error::Error;
 use crate::query::{envelope, spelled, write_object};
 use crate::session::sigils_under;
@@ -57,6 +73,28 @@ const LABEL: &str = "label";
 const KEY: &str = "key";
 
 const KEY_FOUND: &str = "key_found";
+
+// Claude Code's `PreToolUse` vocabulary, spelled its way and not warlock's: the
+// two fields read off the payload are `snake_case` and the four written back are
+// `camelCase`, because this is somebody else's schema at both ends and a field
+// renamed to match the rest of this file is a hook that silently permits
+// everything. Named as constants so the read and the write are the only places
+// they appear and a test can be wrong about them out loud.
+const TOOL_INPUT: &str = "tool_input";
+
+const FILE_PATH: &str = "file_path";
+
+const HOOK_OUTPUT: &str = "hookSpecificOutput";
+
+const HOOK_EVENT_NAME: &str = "hookEventName";
+
+const PRE_TOOL_USE: &str = "PreToolUse";
+
+const PERMISSION_DECISION: &str = "permissionDecision";
+
+const DENY: &str = "deny";
+
+const PERMISSION_REASON: &str = "permissionDecisionReason";
 
 // A value rather than four things printed as they are worked out, so the prose
 // and the object are two renderings of one answer and cannot disagree about it.
@@ -194,6 +232,204 @@ fn checked(
     })
 }
 
+// `warlock check --gate <PATH>`: the same answer with the verdict spent on the
+// exit status instead of printed. A shell and a `PreToolUse` hook can both stop
+// a write before it lands, which neither can do with five lines of prose and a
+// 0, and nothing here is printed at all — the closed case is `main`'s one line
+// on stderr, and the open case says nothing because there is nothing to say
+// about a write that may proceed.
+//
+// The refusal travels through `Error::ClosedScope`, which is the register the
+// headless writes already refuse in: one line, exit **3**, and re-running will
+// never work. No new status and no `--force`.
+pub(crate) fn gate(path: PathBuf) -> Result<(), Error> {
+    gated_onto(
+        &Standing::here(FOR_CHECK)?,
+        Standing::home().ok().as_deref(),
+        path,
+    )
+}
+
+// Split from `gate` for `checked_onto`'s reason and to the same shape: the home,
+// the root, the manifest and the joined path become parameters in exactly one
+// place, so a test gates against a temporary repository and a temporary home
+// rather than against the machine it runs on.
+fn gated_onto(standing: &Standing, home: Option<&Path>, path: PathBuf) -> Result<(), Error> {
+    let manifest = standing.manifest()?;
+
+    gated(&checked(
+        standing.repo_root(),
+        home,
+        &manifest,
+        &standing.target(path),
+    )?)
+}
+
+// The gate is `check`'s own verdict read as a decision, and deliberately not a
+// second reading of the boundary: `opens` is one `scope_opens_to` call over one
+// `scope_covering` walk, both inside [`checked`], so the status here and the
+// line `warlock check` prints cannot come to disagree about a path. What a gate
+// costs over the narrowest possible question is the key binding and the key
+// store `route_facts` also reads — two small files, against a rule written once.
+//
+// `path` is already the repository-relative spelling `query::spelled` gave
+// [`checked`], which is what the refusal wants: an absolute machine path in a
+// line a hook shows somebody names their home directory back at them.
+//
+// Matched on the scope rather than on `opens` alone, for `boundary::permits`'s
+// reason: an unscoped path is open (`scope_opens_to(None, ..)` is `true`), so a
+// refusal is always in some named scope's name and this arm can never invent
+// one to refuse in.
+fn gated(checked: &Checked) -> Result<(), Error> {
+    match (checked.scope.as_deref(), checked.opens) {
+        (Some(scope), false) => Err(Error::ClosedScope {
+            path: checked.path.clone(),
+            scope: scope.to_owned(),
+        }),
+        _ => Ok(()),
+    }
+}
+
+// `warlock check --gate` with no path: the same gate asked by a Claude Code
+// `PreToolUse` hook, which sends the write it is about to make as a JSON payload
+// on stdin and reads an object back off stdout.
+//
+// It is the same flag as the path form and not a second one, and the exit status
+// is where that asymmetry lives: **2** is the only status Claude Code honours
+// from a hook, and it means "block this tool call" for every event rather than
+// "the scope is closed", so a gate that refused here with the boundary's **3**
+// would be a write Claude Code waved through. The refusal therefore travels in
+// the JSON and the status stays 0 either way — which leaves one flag serving a
+// shell that reads statuses and a hook that reads objects off one verdict,
+// rather than two flags that can come to disagree about a path.
+//
+// Stdin is read here and nowhere below, so everything under this takes the
+// payload as bytes and a test runs the code a hook runs. It is read to the end
+// rather than a line at a time, unlike `key`'s: the payload is one object and the
+// hook closes the stream behind it.
+pub(crate) fn hook() -> Result<(), Error> {
+    let mut payload = Vec::new();
+    // The first two of the four quiet exits, and all four are the same reading:
+    // a hook cannot refuse a write it cannot name, so a stdin that will not read
+    // and a working directory in no repository permit rather than deny. Refusing
+    // on either would stop every write in a session over something that is not a
+    // boundary at all, and there is nowhere for a word about it to go — stdout
+    // here is a schema and stderr is a hook's log nobody is reading.
+    if io::stdin().read_to_end(&mut payload).is_err() {
+        return Ok(());
+    }
+    let Ok(standing) = Standing::here(FOR_CHECK) else {
+        return Ok(());
+    };
+
+    hooked_onto(
+        &standing,
+        Standing::home().ok().as_deref(),
+        &payload,
+        &mut io::stdout(),
+    )
+}
+
+// Split from `hook` for `gated_onto`'s reason and to the same shape, with the
+// payload and the writer added: a test feeds bytes in and reads the object back
+// out, against a temporary repository and a temporary home.
+//
+// The other two quiet exits are here. A payload that will not parse or carries no
+// `tool_input.file_path` is a tool call this gate has nothing to say about — a
+// `Bash` or a `WebFetch` reaches a `PreToolUse` hook too — and a path that will
+// not spell against this repository, or a manifest that will not parse, is
+// likewise a write warlock cannot name a scope for. All four permit.
+fn hooked_onto<W: Write>(
+    standing: &Standing,
+    home: Option<&Path>,
+    payload: &[u8],
+    out: &mut W,
+) -> Result<(), Error> {
+    let Some(path) = wanted(payload) else {
+        return Ok(());
+    };
+    // Joined and spelled by exactly the road the path form takes, so an absolute
+    // `file_path` from the hook and a relative one typed at a shell reach the
+    // same scope.
+    let Ok(checked) = standing.manifest().and_then(|manifest| {
+        checked(
+            standing.repo_root(),
+            home,
+            &manifest,
+            &standing.target(path),
+        )
+    }) else {
+        return Ok(());
+    };
+
+    match gated(&checked) {
+        // An open scope, or a path no scope covers: nothing is written at all.
+        // Silence is how a `PreToolUse` hook permits, and an empty stdout is
+        // also what a shell wrapping this wants — there is no envelope for it
+        // to have to parse before it learns nothing was refused.
+        Ok(()) => Ok(()),
+        Err(Error::ClosedScope { path, scope }) => {
+            write_object(out, &denial(&path, &scope));
+            Ok(())
+        }
+        // Unreachable: `gated` refuses with `ClosedScope` and with nothing else.
+        // Written out rather than folded into the quiet arm above so that a
+        // second refusal added there is a **1** somebody sees, and not a write
+        // this hook silently permits.
+        Err(error) => Err(error),
+    }
+}
+
+// Defensive field access through `Value`, for the reason the stream reader takes
+// the same shape: this is a schema warlock does not own and the vendor may extend
+// at any time, so every step down it is an `Option` and the absence of any of
+// them is `None` rather than a refusal.
+//
+// An empty `file_path` is one of those absences rather than a path: joined onto
+// the working directory it would be the directory itself, which in a repository
+// whose root carries a scope is a deny object about a write nobody can find.
+fn wanted(payload: &[u8]) -> Option<PathBuf> {
+    let payload: Value = serde_json::from_slice(payload).ok()?;
+    let path = payload.get(TOOL_INPUT)?.get(FILE_PATH)?.as_str()?;
+
+    (!path.is_empty()).then(|| PathBuf::from(path))
+}
+
+// Not `query::envelope`: this object is Claude Code's, nested and with no
+// `command` field, so it is built here rather than bent out of warlock's own
+// shape. It goes out through `write_object` all the same, which is the
+// exactly-one-compact-object-on-one-line promise the `--json` answers make, and
+// the one a hook's stdout parser wants even more. Field order is insertion order
+// — see `preserve_order` in the workspace manifest.
+fn denial(path: &str, scope: &str) -> Value {
+    json!({
+        HOOK_OUTPUT: {
+            HOOK_EVENT_NAME: PRE_TOOL_USE,
+            PERMISSION_DECISION: DENY,
+            PERMISSION_REASON: reason(path, scope),
+        }
+    })
+}
+
+// The boundary's own sentence, and deliberately not a wording of its own: the
+// same fact refused at a keystroke, at a shell prompt and at a hook says the same
+// thing, names the same scope and points at the same `warlock config`. A sigil
+// and the scope it opens share a name, so naming the scope is naming the sigil
+// this write wants — which is why "hold that sigil" needs nothing added to it.
+//
+// The `warlock: ` prefix is `main`'s, carried into the JSON because the status
+// line a hook shows says only that permission was denied: without it the reason
+// arrives as a sentence from nowhere, and warlock is the program to go and argue
+// with. The path is backticked here rather than in the message, which is the
+// caller's job for `Verdict::message`'s reason — a panel spells a directory the
+// way the tree does.
+fn reason(path: &str, scope: &str) -> String {
+    format!(
+        "warlock: {}",
+        closed_scope_message(&format!("`{path}`"), scope)
+    )
+}
+
 // One line per fact rather than a paragraph, because a reader looking for one
 // of them should find it on a line of its own, and all five are printed every
 // time: an answer whose shape changes with what is missing is one a reader has
@@ -260,7 +496,10 @@ fn route_line(
 ) -> String {
     match (scope, team, review_state, label) {
         (_, Some(team), Some(review_state), Some(label)) => {
-            format!("work here is filed to `{team}`, as `{review_state}`, labelled `{label}`")
+            format!(
+                "work here is filed to `{team}`, labelled `{label}`, and a finished pull moves \
+                 the ticket to `{review_state}`"
+            )
         }
         (Some(scope), ..) => format!(
             "`{scope}` has no `[[scope]]` record, so there is nothing to route to: a record \

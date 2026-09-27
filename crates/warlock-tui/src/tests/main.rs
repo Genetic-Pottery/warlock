@@ -148,8 +148,9 @@ fn a_check_takes_the_path_it_is_a_check_of_and_a_json_flag_in_either_order() {
     assert_eq!(
         parse(&["check", "crates/engine"]).unwrap().command,
         Some(Command::Check {
-            path: PathBuf::from("crates/engine"),
-            json: false
+            path: Some(PathBuf::from("crates/engine")),
+            json: false,
+            gate: false
         })
     );
     for args in [
@@ -159,8 +160,9 @@ fn a_check_takes_the_path_it_is_a_check_of_and_a_json_flag_in_either_order() {
         assert_eq!(
             parse(&args).unwrap().command,
             Some(Command::Check {
-                path: PathBuf::from("crates/engine"),
-                json: true
+                path: Some(PathBuf::from("crates/engine")),
+                json: true,
+                gate: false
             }),
             "{args:?}"
         );
@@ -168,11 +170,46 @@ fn a_check_takes_the_path_it_is_a_check_of_and_a_json_flag_in_either_order() {
 }
 
 #[test]
+fn a_gate_takes_the_path_in_either_order_and_takes_no_json() {
+    for args in [
+        ["check", "--gate", "crates/engine"],
+        ["check", "crates/engine", "--gate"],
+    ] {
+        assert_eq!(
+            parse(&args).unwrap().command,
+            Some(Command::Check {
+                path: Some(PathBuf::from("crates/engine")),
+                json: false,
+                gate: true
+            }),
+            "{args:?}"
+        );
+    }
+    // A gate prints no envelope, so `--json` beside it is refused at the command
+    // line rather than ignored: the silence would look like an empty answer to
+    // whatever was about to read it.
+    let error = parse(&["check", "--gate", "--json", "crates/engine"]).unwrap_err();
+    assert!(error.use_stderr());
+    assert_eq!(error.exit_code(), 2);
+    // And the pathless gate parses, because its path arrives on stdin.
+    assert_eq!(
+        parse(&["check", "--gate"]).unwrap().command,
+        Some(Command::Check {
+            path: None,
+            json: false,
+            gate: true
+        })
+    );
+}
+
+#[test]
 fn a_check_with_no_path_is_a_malformed_invocation_rather_than_a_whole_repository_answer() {
     // Unlike the two listings, whose omitted path means the repository
     // root: a check is a walk up from one place, so there is no
     // whole-repository answer for an absence to mean. Clap's refusal, so it
-    // is a 2 and not warlock answering about something nobody named.
+    // is a 2 and not warlock answering about something nobody named. The path
+    // being an `Option` to clap is `--gate`'s doing and changes none of this:
+    // `required_unless_present` is what keeps these three a 2.
     for args in [
         ["check"].as_slice(),
         ["check", "--json"].as_slice(),
