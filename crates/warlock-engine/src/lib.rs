@@ -29,6 +29,7 @@ pub mod state;
 pub mod tree;
 pub mod view;
 mod walk;
+pub mod working;
 
 pub use agent::Agent;
 pub use briefs::DEFAULT_BRIEF_DIRECTORY;
