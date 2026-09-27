@@ -885,6 +885,273 @@ fn target<'f>(fill: &'f mut Fill, field: &str) -> Option<&'f mut String> {
     }
 }
 
+/// One sub-task of a split after it has been ordered and named: the same
+/// answer, with an identifier of its own and with `depends_on` spelt in those
+/// identifiers rather than in positions.
+///
+/// The positions are gone on purpose. They meant places in the array the pass
+/// wrote, the sort moves those places, and a record carrying both would be two
+/// spellings of one ordering that drift apart the first time anything is
+/// reordered.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Numbered {
+    pub id: String,
+    pub goal: String,
+    pub depends_on: Vec<String>,
+    pub definition_of_done: Vec<String>,
+    pub likely_files: Vec<String>,
+    pub test_plan: String,
+    pub notes: String,
+}
+
+/// One sub-task caught in a circle, named the way the pass named it: its
+/// 1-based place in the array it answered with, and its goal. There is no
+/// identifier here because nothing was numbered — the numbering is what the
+/// circle stopped.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Caught {
+    pub position: usize,
+    pub goal: String,
+}
+
+/// The one split defect with no repair: sub-tasks that wait on one another, so
+/// no order puts every dependency before its dependant.
+///
+/// It is not repairable because every repair would be a guess at which
+/// dependency the pass did not mean, and a dropped edge is invisible in the
+/// manifest afterwards — the run would go on in an order nobody chose. So this
+/// is a halt, and [`fmt::Display`] writes the sentence that says why.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Cycle {
+    pub ticket: String,
+    pub caught: Vec<Caught>,
+}
+
+impl fmt::Display for Cycle {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let ticket = self.ticket.trim();
+        let ticket = if ticket.is_empty() {
+            "this ticket".to_owned()
+        } else {
+            format!("`{ticket}`")
+        };
+        let places: Vec<String> = self
+            .caught
+            .iter()
+            .map(|caught| caught.position.to_string())
+            .collect();
+        // One sub-task on its own is a sub-task waiting on itself, which `mend`
+        // drops and only an unmended fill can still carry. It is a circle all
+        // the same, and saying "wait on one another" of one sub-task would read
+        // as a sentence warlock got wrong rather than a split that is.
+        let circle = if let [only] = places.as_slice() {
+            format!("sub-task {only} waits on itself")
+        } else {
+            format!(
+                "sub-tasks {} wait on one another, directly or by way of another sub-task",
+                named(&places),
+            )
+        };
+        write!(
+            f,
+            "The split of {ticket} could not be ordered: {circle}, so nothing in the split can \
+             start. No dependency was dropped to break the circle.",
+        )?;
+        for caught in &self.caught {
+            write!(f, " Sub-task {} is `{}`.", caught.position, caught.goal)?;
+        }
+        Ok(())
+    }
+}
+
+// `2`, `2 and 3`, `2, 3 and 4`. Plain prose, because the sentence goes on a
+// ticket for a person to read.
+fn named(items: &[String]) -> String {
+    match items {
+        [] => "none".to_owned(),
+        [only] => only.clone(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+    }
+}
+
+/// Order a mended split so every sub-task comes after everything it waits on,
+/// then name each one `<TICKET>.01`, `<TICKET>.02` and so on, rewriting
+/// `depends_on` into those names. A manifest read top to bottom is then a legal
+/// order to work in.
+///
+/// Sub-tasks nothing separates keep the order the pass gave them: of the
+/// sub-tasks whose dependencies are all placed, the earliest in the answer goes
+/// next, so a split that arrived in a workable order is numbered in exactly
+/// that order and two calls over one answer agree.
+///
+/// ```
+/// use warlock_engine::splitting::{Fill, Subtask, number};
+///
+/// let fill = Fill {
+///     subtasks: vec![
+///         Subtask { goal: "Write the briefs".to_owned(), depends_on: vec![2], ..Subtask::default() },
+///         Subtask { goal: "Split the ticket".to_owned(), ..Subtask::default() },
+///     ],
+/// };
+///
+/// let numbered = number(&fill, "WAR-138").expect("nothing here waits on itself");
+///
+/// assert_eq!(numbered[0].id, "WAR-138.01");
+/// assert_eq!(numbered[0].goal, "Split the ticket");
+/// assert_eq!(numbered[1].id, "WAR-138.02");
+/// assert_eq!(numbered[1].depends_on, ["WAR-138.01"]);
+/// ```
+///
+/// # Errors
+///
+/// [`Cycle`] when sub-tasks wait on one another, naming every sub-task in the
+/// circle. That is the one split defect [`mend`] does not answer.
+pub fn number(fill: &Fill, ticket: &str) -> Result<Vec<Numbered>, Cycle> {
+    let subtasks = &fill.subtasks;
+    let order = match ordered(subtasks) {
+        Ok(order) => order,
+        Err(tangled) => {
+            return Err(Cycle {
+                ticket: ticket.trim().to_owned(),
+                caught: tangled
+                    .into_iter()
+                    .map(|index| Caught {
+                        position: index + 1,
+                        goal: subtasks[index].goal.clone(),
+                    })
+                    .collect(),
+            });
+        }
+    };
+
+    // Where each sub-task of the answer ended up, so a position can be read
+    // straight through to the name of the sub-task it points at.
+    let mut placed_at = vec![0; order.len()];
+    for (at, index) in order.iter().enumerate() {
+        placed_at[*index] = at;
+    }
+    let name = |at: usize| format!("{}.{:02}", ticket.trim(), at + 1);
+
+    Ok(order
+        .iter()
+        .enumerate()
+        .map(|(at, index)| {
+            let subtask = &subtasks[*index];
+            let mut depends_on: Vec<String> = Vec::new();
+            for position in &subtask.depends_on {
+                let Some(dependency) = resolved(*position, &placed_at) else {
+                    continue;
+                };
+                let spelt = name(dependency);
+                // A position the pass repeated is one dependency, and a name
+                // written twice in a manifest reads as two.
+                if !depends_on.contains(&spelt) {
+                    depends_on.push(spelt);
+                }
+            }
+            Numbered {
+                id: name(at),
+                goal: subtask.goal.clone(),
+                depends_on,
+                definition_of_done: subtask.definition_of_done.clone(),
+                likely_files: subtask.likely_files.clone(),
+                test_plan: subtask.test_plan.clone(),
+                notes: subtask.notes.clone(),
+            }
+        })
+        .collect())
+}
+
+// The sub-task a 1-based position names, as a place in the ordered answer.
+// `mend`'s `prune` has already dropped every position that does not resolve —
+// zero, past the end, and the sub-task carrying it — so this never misses on a
+// mended fill, and the assertion says so. On an unmended one it ignores the
+// position rather than panicking or re-implementing the drop: dropping a
+// dependency is a repair, repairs are named in the output, and this function
+// has nowhere to name one.
+fn resolved(position: usize, placed_at: &[usize]) -> Option<usize> {
+    let at = position
+        .checked_sub(1)
+        .and_then(|index| placed_at.get(index))
+        .copied();
+    debug_assert!(
+        at.is_some(),
+        "position {position} does not name a sub-task of this ticket: `mend` drops those, so \
+         `number` was handed a fill that was never mended"
+    );
+    at
+}
+
+// The answer's sub-tasks in an order where every dependency comes first, as
+// places in the answer, or the sub-tasks that could not be ordered.
+fn ordered(subtasks: &[Subtask]) -> Result<Vec<usize>, Vec<usize>> {
+    let held = subtasks.len();
+    let mut placed = vec![false; held];
+    let mut order = Vec::with_capacity(held);
+    // The lowest-numbered sub-task that could go next, every turn: that is what
+    // keeps the sort stable, since a sub-task is only overtaken by one it waits
+    // on. Held to `held` turns because each turn places one.
+    for _ in 0..held {
+        let Some(next) =
+            (0..held).find(|index| !placed[*index] && ready(&subtasks[*index], &placed))
+        else {
+            break;
+        };
+        placed[next] = true;
+        order.push(next);
+    }
+    if order.len() == held {
+        Ok(order)
+    } else {
+        Err(tangled(subtasks, &placed))
+    }
+}
+
+fn ready(subtask: &Subtask, placed: &[bool]) -> bool {
+    subtask
+        .depends_on
+        .iter()
+        .all(|position| placed_yet(*position, placed))
+}
+
+// A position that resolves is ready when the sub-task it names is placed; one
+// that does not resolve cannot hold anything up, for the reason `resolved`
+// gives.
+fn placed_yet(position: usize, placed: &[bool]) -> bool {
+    position
+        .checked_sub(1)
+        .and_then(|index| placed.get(index))
+        .copied()
+        .unwrap_or(true)
+}
+
+// Which of the sub-tasks left over from the sort to name in the halt. The
+// leftovers are the circle plus whatever waits on it, and a sub-task that
+// merely waits on a circle is not in one — so anything nothing else in the
+// leftovers waits on is dropped, over and over until the set stops shrinking.
+// What is left is the sub-tasks that both wait and are waited on, which is the
+// circle itself and any run of sub-tasks between two circles.
+fn tangled(subtasks: &[Subtask], placed: &[bool]) -> Vec<usize> {
+    let over: Vec<usize> = (0..subtasks.len())
+        .filter(|index| !placed[*index])
+        .collect();
+    let mut caught = over.clone();
+    loop {
+        let held = caught.clone();
+        caught.retain(|index| {
+            held.iter()
+                .any(|other| subtasks[*other].depends_on.contains(&(index + 1)))
+        });
+        if caught.len() == held.len() {
+            break;
+        }
+    }
+    // Every leftover waits on another leftover, so a leftover set always holds
+    // a circle and this cannot empty. If it ever did, naming every leftover
+    // would still be true and a halt that names nothing would not be.
+    if caught.is_empty() { over } else { caught }
+}
+
 // The caps are written into the prose rather than asked about, and the numbers
 // themselves are arbitrary: what is permanent is that there is a ceiling at all.
 // A pass told the number answers inside it; a pass asked to be brief answers at

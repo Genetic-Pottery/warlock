@@ -3,10 +3,10 @@ use std::collections::BTreeSet;
 use crate::document::Defect;
 
 use super::{
-    Accepted, DEPENDS_ON_PER_SUBTASK, DONE_CHARS, DONE_PER_SUBTASK, FILE_CHARS, FILES_PER_SUBTASK,
-    Fill, GOAL_CHARS, GOAL_MINIMUM, MEND_PASSES, Mend, Mended, NOTES_CHARS, SPLIT_PROMPT,
-    SUBTASKS_PER_TICKET, Subtask, TEST_PLAN_CHARS, accept, check, mend, mended, split_instructions,
-    stub_answer,
+    Accepted, Caught, DEPENDS_ON_PER_SUBTASK, DONE_CHARS, DONE_PER_SUBTASK, FILE_CHARS,
+    FILES_PER_SUBTASK, Fill, GOAL_CHARS, GOAL_MINIMUM, MEND_PASSES, Mend, Mended, NOTES_CHARS,
+    Numbered, SPLIT_PROMPT, SUBTASKS_PER_TICKET, Subtask, TEST_PLAN_CHARS, accept, check, mend,
+    mended, number, split_instructions, stub_answer,
 };
 
 const DONE: &str = "The module exists and its tests pass.";
@@ -1010,6 +1010,290 @@ fn a_mended_fill_is_never_defective_whatever_was_wrong_with_it() {
          handed a fill, not an answer — and `UnknownTarget` and `ToolNamed` belong to the \
          document road, which has an evidence witness this one has not"
     );
+}
+
+// A sub-task of `TICKET` that waits on the 1-based positions given.
+fn waiting(which: usize, on: &[usize]) -> Subtask {
+    Subtask {
+        depends_on: on.to_vec(),
+        ..sound(which)
+    }
+}
+
+fn numbers(numbered: &[Numbered]) -> Vec<&str> {
+    numbered.iter().map(|subtask| subtask.id.as_str()).collect()
+}
+
+fn goals(numbered: &[Numbered]) -> Vec<&str> {
+    numbered
+        .iter()
+        .map(|subtask| subtask.goal.as_str())
+        .collect()
+}
+
+// The property the numbering exists for: read top to bottom, every dependency
+// is already finished.
+fn legal(numbered: &[Numbered]) {
+    let mut behind: Vec<&str> = Vec::new();
+    for subtask in numbered {
+        for dependency in &subtask.depends_on {
+            assert!(
+                behind.contains(&dependency.as_str()),
+                "{} waits on {dependency}, which does not come before it in {:?}",
+                subtask.id,
+                numbers(numbered),
+            );
+        }
+        behind.push(&subtask.id);
+    }
+}
+
+#[test]
+fn a_split_already_in_order_is_numbered_in_that_order_from_01() {
+    let fill = split(vec![
+        waiting(0, &[]),
+        waiting(1, &[1]),
+        waiting(2, &[2]),
+        waiting(3, &[1, 3]),
+    ]);
+
+    let numbered = number(&fill, "WAR-138").expect("a chain in order holds no circle");
+
+    assert_eq!(
+        numbers(&numbered),
+        ["WAR-138.01", "WAR-138.02", "WAR-138.03", "WAR-138.04"],
+        "the numbering counts from 01, padded to two places"
+    );
+    assert_eq!(
+        goals(&numbered),
+        [
+            sound(0).goal.as_str(),
+            sound(1).goal.as_str(),
+            sound(2).goal.as_str(),
+            sound(3).goal.as_str(),
+        ],
+        "a split that arrived workable is left in the order the pass wrote it"
+    );
+    assert_eq!(numbered[3].depends_on, ["WAR-138.01", "WAR-138.03"]);
+    legal(&numbered);
+}
+
+#[test]
+fn a_chain_written_backwards_is_sorted_and_its_positions_become_names() {
+    // Last first: 3 waits on 2, 2 waits on 1, 1 waits on nothing.
+    let fill = split(vec![waiting(0, &[2]), waiting(1, &[3]), waiting(2, &[])]);
+
+    let numbered = number(&fill, "WAR-138").expect("a chain holds no circle whichever way it runs");
+
+    assert_eq!(
+        goals(&numbered),
+        [
+            sound(2).goal.as_str(),
+            sound(1).goal.as_str(),
+            sound(0).goal.as_str(),
+        ],
+        "the order is turned around so every dependency is finished first"
+    );
+    assert_eq!(
+        numbers(&numbered),
+        ["WAR-138.01", "WAR-138.02", "WAR-138.03"]
+    );
+    assert_eq!(numbered[1].depends_on, ["WAR-138.01"]);
+    assert_eq!(numbered[2].depends_on, ["WAR-138.02"]);
+    legal(&numbered);
+}
+
+#[test]
+fn a_diamond_puts_both_middles_after_the_first_and_before_the_last() {
+    // 1 -> 2 and 1 -> 3, then 4 waits on both.
+    let fill = split(vec![
+        waiting(0, &[]),
+        waiting(1, &[1]),
+        waiting(2, &[1]),
+        waiting(3, &[2, 3]),
+    ]);
+
+    let numbered = number(&fill, "WAR-138").expect("a diamond holds no circle");
+
+    legal(&numbered);
+    assert_eq!(numbered[0].goal, sound(0).goal);
+    assert_eq!(numbered[3].goal, sound(3).goal);
+    assert_eq!(numbered[3].depends_on, ["WAR-138.02", "WAR-138.03"]);
+}
+
+#[test]
+fn sub_tasks_nothing_separates_keep_the_order_the_pass_gave_them() {
+    // Nothing orders 1, 2 and 4 against each other, and 3 waits on 4. Only 3
+    // moves, and it moves the least it can: everything else stays where the
+    // pass put it.
+    let fill = split(vec![
+        waiting(0, &[]),
+        waiting(1, &[]),
+        waiting(2, &[4]),
+        waiting(3, &[]),
+    ]);
+
+    let numbered = number(&fill, "WAR-138").expect("one dependency and no circle");
+
+    assert_eq!(
+        goals(&numbered),
+        [
+            sound(0).goal.as_str(),
+            sound(1).goal.as_str(),
+            sound(3).goal.as_str(),
+            sound(2).goal.as_str(),
+        ],
+    );
+    legal(&numbered);
+    assert_eq!(
+        number(&fill, "WAR-138").unwrap(),
+        numbered,
+        "two calls over one answer agree"
+    );
+}
+
+#[test]
+fn a_repeated_position_is_one_name_and_the_ticket_is_taken_as_written() {
+    let fill = split(vec![waiting(0, &[]), waiting(1, &[1, 1])]);
+
+    let numbered = number(&fill, "  WAR-138\n").expect("a repeat is not a circle");
+
+    assert_eq!(numbers(&numbered), ["WAR-138.01", "WAR-138.02"]);
+    assert_eq!(
+        numbered[1].depends_on,
+        ["WAR-138.01"],
+        "one dependency written twice is one dependency"
+    );
+}
+
+#[test]
+fn a_mended_split_is_numbered_whole_and_carries_every_field_over() {
+    let (mended, _) = mend(&good(), TICKET, DESCRIPTION);
+
+    let numbered = number(&mended, "WAR-138").expect("the stub split holds no circle");
+
+    assert_eq!(numbered.len(), mended.subtasks.len());
+    legal(&numbered);
+    let last = numbered.last().expect("four sub-tasks");
+    assert_eq!(
+        last.definition_of_done,
+        mended.subtasks[3].definition_of_done
+    );
+    assert_eq!(last.likely_files, mended.subtasks[3].likely_files);
+    assert_eq!(last.test_plan, mended.subtasks[3].test_plan);
+    assert_eq!(last.notes, mended.subtasks[3].notes);
+}
+
+#[test]
+fn two_sub_tasks_waiting_on_each_other_halt_the_split() {
+    let fill = split(vec![waiting(0, &[2]), waiting(1, &[1])]);
+
+    let cycle = number(&fill, "WAR-138").expect_err("neither sub-task can go first");
+
+    assert_eq!(
+        cycle.caught,
+        vec![
+            Caught {
+                position: 1,
+                goal: sound(0).goal,
+            },
+            Caught {
+                position: 2,
+                goal: sound(1).goal,
+            },
+        ],
+    );
+    let said = cycle.to_string();
+    assert!(
+        said.contains(
+            "The split of `WAR-138` could not be ordered: sub-tasks 1 and 2 wait on one \
+                       another"
+        ),
+        "{said}"
+    );
+    assert!(
+        said.contains("No dependency was dropped to break the circle."),
+        "{said}"
+    );
+    assert!(
+        said.contains(&format!("Sub-task 1 is `{}`.", sound(0).goal)),
+        "{said}"
+    );
+    assert!(
+        said.contains(&format!("Sub-task 2 is `{}`.", sound(1).goal)),
+        "{said}"
+    );
+}
+
+#[test]
+fn a_longer_circle_names_every_sub_task_in_it_and_nothing_else() {
+    // 1 is orderable, 2 -> 4 -> 3 -> 2 is the circle, and 5 only waits on it.
+    let fill = split(vec![
+        waiting(0, &[]),
+        waiting(1, &[4]),
+        waiting(2, &[2]),
+        waiting(3, &[3]),
+        waiting(4, &[2]),
+    ]);
+
+    let cycle = number(&fill, "WAR-138").expect_err("three sub-tasks wait on each other");
+
+    assert_eq!(
+        cycle
+            .caught
+            .iter()
+            .map(|caught| caught.position)
+            .collect::<Vec<_>>(),
+        [2, 3, 4],
+        "the circle itself, not the sub-task that merely waits on it"
+    );
+    let said = cycle.to_string();
+    assert!(
+        said.contains("sub-tasks 2, 3 and 4 wait on one another"),
+        "{said}"
+    );
+    assert!(
+        !said.contains(&format!("Sub-task 5 is `{}`", sound(4).goal)),
+        "a sub-task waiting on the circle is not in it: {said}"
+    );
+}
+
+#[test]
+fn an_unnamed_ticket_still_says_which_sub_tasks_are_in_the_circle() {
+    let fill = split(vec![waiting(0, &[2]), waiting(1, &[1])]);
+
+    let said = number(&fill, "   ").expect_err("a circle whatever the ticket is called");
+
+    assert!(
+        said.to_string().starts_with("The split of this ticket"),
+        "{said}"
+    );
+}
+
+// The repair drops a sub-task that waits on itself, so this only reaches
+// `number` from a fill nobody mended. It is still a circle, and it still halts.
+#[test]
+fn a_sub_task_waiting_on_itself_is_a_circle_of_one() {
+    let fill = split(vec![sound(0), waiting(1, &[2])]);
+
+    let cycle = number(&fill, "WAR-138").expect_err("a sub-task cannot go after itself");
+
+    assert_eq!(
+        cycle.caught,
+        vec![Caught {
+            position: 2,
+            goal: sound(1).goal,
+        }],
+    );
+    assert!(
+        cycle.to_string().contains("sub-task 2 waits on itself"),
+        "{cycle}"
+    );
+}
+
+#[test]
+fn nothing_to_split_is_nothing_to_number() {
+    assert_eq!(number(&Fill::default(), "WAR-138"), Ok(Vec::new()));
 }
 
 #[test]
