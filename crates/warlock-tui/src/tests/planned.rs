@@ -315,8 +315,11 @@ fn a_project(status: Option<&str>) -> Boarding {
     a_project_of(SLICED, status)
 }
 
-fn fetched_by_the_record() -> [Call; 1] {
-    [Call::FetchProject(PROJECT_ID.to_owned())]
+// Everything `prepare` sends, in order: the user the key belongs to, resolved
+// once for the run so every issue it files can be assigned, then the project the
+// record names. Two reads and no write.
+fn read_by_prepare() -> [Call; 2] {
+    [Call::Viewer, Call::FetchProject(PROJECT_ID.to_owned())]
 }
 
 // The module's first step, less the environment: the repository root and the
@@ -531,9 +534,9 @@ mod preparing {
         assert_eq!(planned.left(), 3);
         assert_eq!(planned.destination().team(), TEAM);
         // The id out of `.warlock/filed.toml` and no other selector, in one
-        // request.
-        assert_eq!(linear.calls(), fetched_by_the_record());
-        assert_eq!(linear.requests(), 1, "one call per operation");
+        // request, alongside the one that resolved who the run files for.
+        assert_eq!(linear.calls(), read_by_prepare());
+        assert_eq!(linear.requests(), 2, "one call per operation");
         assert_eq!(linear.opened_with(), [NOT_A_KEY.to_owned()]);
         assert!(
             !format!("{planned:?}").contains(NOT_A_KEY),
@@ -553,7 +556,7 @@ mod preparing {
         preparing(repo.path(), home.path(), "./docs/brief.md", None, &linear)
             .expect("the same brief, spelled twice");
 
-        assert_eq!(linear.calls(), fetched_by_the_record());
+        assert_eq!(linear.calls(), read_by_prepare());
     }
 
     #[test]
@@ -645,7 +648,7 @@ mod preparing {
         // Nothing is read or sent after the status: the scope block in the
         // content that came back is never parsed, and no second request is
         // made.
-        assert_eq!(linear.calls(), fetched_by_the_record());
+        assert_eq!(linear.calls(), read_by_prepare());
     }
 
     #[test]
@@ -716,7 +719,7 @@ mod preparing {
 
         assert_eq!(
             linear.calls(),
-            fetched_by_the_record(),
+            read_by_prepare(),
             "something other than the read was asked"
         );
         assert_eq!(
@@ -774,7 +777,7 @@ mod preparing {
         assert!(message.contains(".warlock/filed.toml"), "{message}");
         // Refused where the answer that said so arrived: the fetch and nothing
         // after it, and the record file as it was.
-        assert_eq!(linear.calls(), fetched_by_the_record());
+        assert_eq!(linear.calls(), read_by_prepare());
         assert_eq!(
             fs::read_to_string(filed_path(repo.path())).expect("a record file"),
             before
@@ -1201,7 +1204,7 @@ mod headless {
         // reads what it reports and spends nothing else.
         assert_eq!(
             linear.calls(),
-            fetched_by_the_record(),
+            read_by_prepare(),
             "a dry run sent more than the fetch"
         );
         assert_eq!(
@@ -1576,14 +1579,16 @@ mod headless {
         cut_filing(repo.path(), home.path(), &linear, &Sketching::drafting());
 
         // A board has no operation that moves a status, and an issue create has
-        // no field beyond the six a draft and its slice resolve: what the latter
-        // puts on the wire is held by `linear.rs`'s own tests. What a run can
-        // still get wrong is asking for something a cut has no business asking.
+        // no field beyond the seven a draft, its slice and the run's own viewer
+        // resolve: what the latter puts on the wire is held by `linear.rs`'s own
+        // tests. What a run can still get wrong is asking for something a cut has
+        // no business asking.
         for op in linear.ops() {
             assert!(
                 matches!(
                     op,
-                    Op::FetchProject
+                    Op::Viewer
+                        | Op::FetchProject
                         | Op::Team
                         | Op::BacklogState
                         | Op::IssueLabel

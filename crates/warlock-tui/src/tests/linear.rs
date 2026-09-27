@@ -868,6 +868,7 @@ fn draft<'a>() -> NewIssue<'a> {
         "project-1",
         "issue-label-held",
         "state-backlog",
+        "user-viewer",
     )
 }
 
@@ -889,7 +890,8 @@ fn a_created_issue_comes_back_with_its_id_identifier_and_url() {
 }
 
 #[test]
-fn the_issue_create_carries_the_title_body_team_project_label_and_state_and_nothing_else() {
+fn the_issue_create_carries_the_title_body_team_project_label_state_and_assignee_and_nothing_else()
+{
     let linear = Posting::answering([Ok(issue_created())]);
 
     create_issue(&linear, &draft()).expect("the stand-in answered");
@@ -903,13 +905,26 @@ fn the_issue_create_carries_the_title_body_team_project_label_and_state_and_noth
             "projectId": "project-1",
             "labelIds": ["issue-label-held"],
             "stateId": "state-backlog",
+            "assigneeId": "user-viewer",
         }),
         "no field warlock would have to invent"
     );
 }
 
 #[test]
-fn no_issue_create_invents_a_status_assignee_priority_estimate_cycle_or_milestone() {
+fn an_issue_is_created_assigned_to_the_user_the_caller_resolved() {
+    let linear = Posting::answering([Ok(issue_created())]);
+
+    create_issue(&linear, &draft()).expect("the stand-in answered");
+
+    // The claim `warlock pull` reads: an issue filed with no assignee is one it
+    // can never select, so the id the caller resolved has to reach the wire
+    // under the name Linear knows it by.
+    assert_eq!(last_input(&linear)["assigneeId"], json!("user-viewer"));
+}
+
+#[test]
+fn no_issue_create_invents_a_status_priority_estimate_cycle_or_milestone() {
     let linear = Posting::answering([Ok(issue_created())]);
 
     create_issue(&linear, &draft()).expect("the stand-in answered");
@@ -918,7 +933,6 @@ fn no_issue_create_invents_a_status_assignee_priority_estimate_cycle_or_mileston
 
     for invented in [
         "statusId",
-        "assigneeId",
         "priority",
         "priorityLabel",
         "estimate",

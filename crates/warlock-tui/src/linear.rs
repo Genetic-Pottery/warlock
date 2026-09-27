@@ -609,6 +609,7 @@ fn create_issue(linear: &impl Posts, issue: &NewIssue<'_>) -> Result<Issue, Erro
                 "projectId": issue.project,
                 "labelIds": [issue.label],
                 "stateId": issue.state,
+                "assigneeId": issue.assignee,
             },
         }),
     )?;
@@ -622,10 +623,17 @@ fn create_issue(linear: &impl Posts, issue: &NewIssue<'_>) -> Result<Issue, Erro
 }
 
 /// What [`Board::create_issue`] is asked for, and the whole of it: every field
-/// here is an id the caller resolved, and there is deliberately no assignee,
-/// priority, estimate, cycle or milestone. A draft says what the work is, and a field
-/// warlock would have to invent a value for is a decision taken away from the
-/// person who owns the board.
+/// here is an id the caller resolved, and priority, estimate, cycle and
+/// milestone stay unwritten. A draft says what the work is, and a field warlock
+/// would have to invent a value for is a decision taken away from the person who
+/// owns the board.
+///
+/// `assignee` is the exception, and it is not an invented value: the person
+/// running `draft` is the person who owns the board, and the assignee is the
+/// claim `warlock pull` reads — it only ever works tickets assigned to the
+/// operator, so a backlog nothing is assigned in is a queue it can never select
+/// from. Handing work to a teammate stays a reassignment a human makes in
+/// Linear, which is why there is no way to name anybody else here.
 ///
 /// `state` is a *team workflow state* id from [`Board::backlog_state`] and
 /// `label` an *issue label* id from [`Board::issue_label_id`]; neither a project
@@ -638,6 +646,7 @@ pub struct NewIssue<'a> {
     project: &'a str,
     label: &'a str,
     state: &'a str,
+    assignee: &'a str,
 }
 
 impl<'a> NewIssue<'a> {
@@ -649,6 +658,7 @@ impl<'a> NewIssue<'a> {
         project: &'a str,
         label: &'a str,
         state: &'a str,
+        assignee: &'a str,
     ) -> Self {
         Self {
             title,
@@ -657,6 +667,7 @@ impl<'a> NewIssue<'a> {
             project,
             label,
             state,
+            assignee,
         }
     }
 
@@ -688,6 +699,11 @@ impl<'a> NewIssue<'a> {
     #[must_use]
     pub const fn state(&self) -> &'a str {
         self.state
+    }
+
+    #[must_use]
+    pub const fn assignee(&self) -> &'a str {
+        self.assignee
     }
 }
 

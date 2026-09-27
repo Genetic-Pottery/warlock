@@ -29,12 +29,18 @@ use crate::push::records;
 /// brief's own record between them answered: the board, the project a push
 /// made, and the brief as `.warlock/filed.toml` spells it.
 ///
+/// `assignee` is the user the key belongs to, resolved once for the run by
+/// [`prepare`] rather than here: this is one slice of several, and the answer is
+/// the same for all of them.
+///
 /// [`resolve_filing`]: warlock_engine::resolve_filing
+/// [`prepare`]: crate::planned::prepare
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Filing<'a> {
     pub(crate) brief: &'a str,
     pub(crate) project: &'a str,
     pub(crate) destination: &'a Destination,
+    pub(crate) assignee: &'a str,
 }
 
 /// One slice of the project's scope, with the drafts a session settled for it
@@ -139,6 +145,7 @@ pub(crate) fn cut<W: Write>(
                 filing.project,
                 &label,
                 &state,
+                filing.assignee,
             ))
             .map_err(|source| Error::Linear { source })?;
         issues.push(issue);

@@ -258,6 +258,9 @@ pub(crate) struct Planned {
     brief: String,
     destination: Destination,
     value: String,
+    // The user the key belongs to, resolved once by `prepare`: every issue this
+    // run files is assigned to them, and nothing here can name anybody else.
+    assignee: String,
     // `ordered` and not `slices`: the order is the order tickets are filed and
     // blocked in, so a slice is only reached once everything it waits on has
     // been.
@@ -292,6 +295,7 @@ impl fmt::Debug for Planned {
             .field("status", &self.status)
             .field("destination", &self.destination)
             .field("value", &"<redacted>")
+            .field("assignee", &self.assignee)
             .field("slices", &self.slices)
             .field("already", &self.already)
             .field("became", &self.became)
@@ -331,8 +335,17 @@ pub(crate) fn prepare<O: Opens>(
         return Err(Error::NoRecord { path: spelled });
     };
 
-    let project = open
-        .open(target.value())
+    let board = open.open(target.value());
+    // Once for the run, here rather than in `cut::cut`, which is called per
+    // slice: the id is the same for every issue the run files, and asking per
+    // slice — or per draft — would be a request bought again for an answer that
+    // cannot have changed. Before the project read for the reason every other
+    // refusal is asked here: a board that will not say who the key belongs to
+    // has nothing to file for, and that is not a thing to find out once issues
+    // exist.
+    let assignee = board.viewer().map_err(|source| Error::Linear { source })?;
+
+    let project = board
         .fetch_project(record.project_id())
         .map_err(|source| Error::Linear { source })?
         .ok_or_else(|| Error::UnknownProject {
@@ -384,6 +397,7 @@ pub(crate) fn prepare<O: Opens>(
         brief: block.brief().to_owned(),
         destination: target.destination(),
         value: target.value().to_owned(),
+        assignee,
         slices: ordered.into_iter().cloned().collect(),
         already,
         became,
@@ -476,6 +490,7 @@ impl Planned {
             project: self.project.clone(),
             destination: self.destination.clone(),
             value: self.value.clone(),
+            assignee: self.assignee.clone(),
             title: next.slice.heading().to_owned(),
             drafts,
             needs,
@@ -578,6 +593,7 @@ pub(crate) struct Filing {
     project: String,
     destination: Destination,
     value: String,
+    assignee: String,
     title: String,
     drafts: Vec<Draft>,
     needs: Vec<Vec<LinearIssue>>,
@@ -591,6 +607,7 @@ impl fmt::Debug for Filing {
             .field("project", &self.project)
             .field("destination", &self.destination)
             .field("value", &"<redacted>")
+            .field("assignee", &self.assignee)
             .field("title", &self.title)
             .field("drafts", &self.drafts)
             .field("needs", &self.needs)
@@ -612,6 +629,7 @@ impl Filing {
                 brief: &self.brief,
                 project: &self.project,
                 destination: &self.destination,
+                assignee: &self.assignee,
             },
             cut::Slice {
                 title: &self.title,

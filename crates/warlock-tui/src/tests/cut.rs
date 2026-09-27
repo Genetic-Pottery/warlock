@@ -9,7 +9,7 @@ use warlock_tui::{Board, LinearIssue};
 use super::{Cut, Filing, Slice, announce, cut};
 use crate::error::Error;
 use crate::status_for;
-use crate::stubs::{Boarding, Call, IssueAsked, Op};
+use crate::stubs::{Boarding, Call, IssueAsked, Op, VIEWER};
 
 const SCOPE: &str = "warlock-team";
 
@@ -85,6 +85,9 @@ fn filing(destination: &Destination) -> Filing<'_> {
         brief: BRIEF_PATH,
         project: PROJECT_ID,
         destination,
+        // What `prepare` resolved for the run: `cut` is handed the id rather
+        // than asking for it, so nothing here makes a viewer request.
+        assignee: VIEWER,
     }
 }
 
@@ -276,6 +279,7 @@ fn each_issue_carries_the_scope_records_team_the_project_and_the_backlog_state()
         project: PROJECT_ID.to_owned(),
         label: "label-held".to_owned(),
         state: "state-backlog".to_owned(),
+        assignee: VIEWER.to_owned(),
     };
     assert_eq!(
         linear.issues_created(),

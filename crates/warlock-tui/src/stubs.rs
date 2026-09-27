@@ -348,6 +348,7 @@ pub(crate) struct IssueAsked {
     pub(crate) project: String,
     pub(crate) label: String,
     pub(crate) state: String,
+    pub(crate) assignee: String,
 }
 
 // Which calls of one operation are turned down, counted from the first call of
@@ -694,6 +695,7 @@ impl Board for Boarding {
             project: issue.project().to_owned(),
             label: issue.label().to_owned(),
             state: issue.state().to_owned(),
+            assignee: issue.assignee().to_owned(),
         }))?;
         let number = {
             let mut log = self.log();
