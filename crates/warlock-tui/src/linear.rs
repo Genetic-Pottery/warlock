@@ -132,6 +132,8 @@ pub trait Board {
     fn backlog_state(&self, team: &str) -> Result<Option<String>, Error>;
     fn issue_label_id(&self, name: &str, team: &str) -> Result<String, Error>;
     fn fetch_project(&self, id: &str) -> Result<Option<FetchedProject>, Error>;
+    fn scope_queue(&self, team: &str, label: &str, assignee: &str) -> Result<Queue, Error>;
+    fn named_issue(&self, team: &str, number: u64) -> Result<Option<NamedIssue>, Error>;
     fn create_project(&self, project: &NewProject<'_>) -> Result<Project, Error>;
     fn create_issue(&self, issue: &NewIssue<'_>) -> Result<Issue, Error>;
     fn create_relation(&self, blocker: &str, waiting: &str) -> Result<String, Error>;
@@ -174,6 +176,14 @@ impl<P: Posts> Board for Linear<P> {
 
     fn fetch_project(&self, id: &str) -> Result<Option<FetchedProject>, Error> {
         fetch_project(&self.posts, id)
+    }
+
+    fn scope_queue(&self, team: &str, label: &str, assignee: &str) -> Result<Queue, Error> {
+        scope_queue(&self.posts, team, label, assignee)
+    }
+
+    fn named_issue(&self, team: &str, number: u64) -> Result<Option<NamedIssue>, Error> {
+        named_issue(&self.posts, team, number)
     }
 
     fn create_project(&self, project: &NewProject<'_>) -> Result<Project, Error> {
@@ -392,6 +402,577 @@ impl FetchedProject {
     #[must_use]
     pub fn status(&self) -> Option<&str> {
         self.status.as_deref()
+    }
+}
+
+/// Issues read in the one request a queue is allowed, which is a hundred rather
+/// than the 250 the other queries in this module ask for: every issue carries a
+/// page of relations under it, the two multiply into the size of one answer, and
+/// a scope with a hundred unfinished tickets on one person is past the point
+/// where reading further would change what to work on next.
+const QUEUE_PAGE: usize = 100;
+
+/// Blocking relations read per issue, and its own cap for the reason above. Not
+/// left off: a nested connection with no `first` takes whatever default Linear
+/// has today, which is a number this side would neither have chosen nor notice
+/// changing.
+const BLOCKERS_PAGE: usize = 25;
+
+/// Every issue a scope's queue holds, in one request.
+///
+/// The three filters are the whole of what makes an issue this scope's work: the
+/// record's team, the record's label, and the user the key belongs to. The
+/// assignee is a filter rather than a check afterwards because `pull` only ever
+/// works tickets assigned to the operator — an issue somebody else holds is not
+/// a ticket this queue has an opinion about.
+///
+/// The fourth filter is on the state's *type* and not its name: a team names its
+/// workflow states what it likes, `Done` on one board is `Shipped` on the next,
+/// and only the type says which of those names means finished. Filtering on the
+/// wire rather than here is the difference between a page of live work and a page
+/// that may be all history.
+///
+/// Blockers are read unfiltered, and that asymmetry is the point: an issue is
+/// held up by whatever blocks it, whoever owns that and whatever label it
+/// carries, so the relations must not inherit the queue's own filters.
+///
+/// One page and one request, per this module's rule. A queue with more on it than
+/// came back answers [`Queue::capped`] with `true`, which is the caller's to
+/// print — nothing here loops.
+fn scope_queue(
+    linear: &impl Posts,
+    team: &str,
+    label: &str,
+    assignee: &str,
+) -> Result<Queue, Error> {
+    let data = linear.post(
+        r#"query ScopeQueue(
+            $team: ID!
+            $label: String!
+            $assignee: ID!
+            $first: Int!
+            $blockers: Int!
+        ) {
+            issues(
+                filter: {
+                    team: { id: { eq: $team } }
+                    labels: { name: { eq: $label } }
+                    assignee: { id: { eq: $assignee } }
+                    state: { type: { nin: ["completed", "canceled"] } }
+                }
+                first: $first
+            ) {
+                pageInfo { hasNextPage }
+                nodes {
+                    id
+                    identifier
+                    title
+                    priority
+                    state { name type }
+                    inverseRelations(first: $blockers) {
+                        nodes {
+                            type
+                            issue { identifier state { type } assignee { name } }
+                        }
+                    }
+                }
+            }
+        }"#,
+        json!({
+            "team": team,
+            "label": label,
+            "assignee": assignee,
+            "first": QUEUE_PAGE,
+            "blockers": BLOCKERS_PAGE,
+        }),
+    )?;
+
+    let found = nodes(&data, "issues")?;
+    let mut issues = Vec::with_capacity(found.len());
+    // A blocker list cut off mid-way would make a held-up issue look ready, so a
+    // full relation page counts as a capped queue too: the flag answers "there is
+    // more of this on the board than came back", not "there are more issues".
+    let mut crowded = false;
+
+    for node in found {
+        let (issue, relations) = queued_issue(node)?;
+
+        crowded |= relations >= BLOCKERS_PAGE;
+        issues.push(issue);
+    }
+
+    Ok(Queue {
+        issues,
+        capped: has_next_page(&data, "issues")? || found.len() >= QUEUE_PAGE || crowded,
+    })
+}
+
+/// One issue and how many relations it answered with, blocking or not — which is
+/// the queue's business rather than the issue's, so it is returned beside it
+/// rather than kept on it.
+fn queued_issue(node: &Value) -> Result<(QueuedIssue, usize), Error> {
+    let state = node.get("state").ok_or_else(|| missing("state"))?;
+    let relations = nodes(node, "inverseRelations")?;
+
+    let mut blockers = Vec::new();
+
+    for relation in relations {
+        // A relation carrying no type at all is an unreadable answer rather than
+        // one more relation to drop: skipping it quietly is how a held-up issue
+        // comes to look ready.
+        if text(relation, "type")? == BLOCKS {
+            blockers.push(blocker(relation)?);
+        }
+    }
+
+    let issue = QueuedIssue {
+        id: node_id(node)?,
+        identifier: text(node, "identifier")?,
+        title: text(node, "title")?,
+        state: text(state, "name")?,
+        state_type: StateType(text(state, "type")?),
+        priority: priority(node)?,
+        blockers,
+    };
+
+    Ok((issue, relations.len()))
+}
+
+/// The far side of one `blocks` relation on an issue's `inverseRelations`, which
+/// is the issue doing the blocking.
+///
+/// The direction is the whole of what this reads, and it lives in which field is
+/// taken from which connection: in `relations` an issue is the `issue` of the
+/// edge and the far side is `relatedIssue`, so those are the issues it blocks;
+/// in `inverseRelations` it is the `relatedIssue` and the far side is `issue`, so
+/// those are the issues blocking it. Reading the wrong one of the two compiles,
+/// answers the same shape, and inverts every dependency in the queue.
+fn blocker(relation: &Value) -> Result<Blocker, Error> {
+    let blocker = relation.get("issue").ok_or_else(|| missing("issue"))?;
+    let state = blocker.get("state").ok_or_else(|| missing("state"))?;
+
+    Ok(Blocker {
+        identifier: text(blocker, "identifier")?,
+        assignee: assignee_name(blocker)?,
+        state_type: StateType(text(state, "type")?),
+    })
+}
+
+/// Linear's word for the one relation type that holds work up, and the one
+/// [`create_relation`] writes. The others — `related`, `duplicate`, `similar` —
+/// block nothing and are read and dropped.
+const BLOCKS: &str = "blocks";
+
+/// Linear's `priority`, read into the order a queue is worked.
+///
+/// The number on the wire is not that order: `0` is *no* priority and `1` is
+/// urgent, so an integer sorted as an integer puts the issue nobody has ranked
+/// ahead of the one that is on fire. Nothing outside this function sees the
+/// number.
+fn priority(node: &Value) -> Result<Priority, Error> {
+    let number = node
+        .get("priority")
+        .and_then(Value::as_f64)
+        .ok_or_else(|| missing("priority"))?;
+
+    // `priority` is a `Float!` in Linear's schema carrying one of five whole
+    // numbers, so each rank is the interval around its number rather than an
+    // equality on a float.
+    Ok(if (0.5..1.5).contains(&number) {
+        Priority::Urgent
+    } else if (1.5..2.5).contains(&number) {
+        Priority::High
+    } else if (2.5..3.5).contains(&number) {
+        Priority::Medium
+    } else if (3.5..4.5).contains(&number) {
+        Priority::Low
+    } else {
+        // `0` is Linear's own "no priority", and so is anything outside the
+        // five: a rank this side cannot read is not a reason to work something
+        // first.
+        Priority::None
+    })
+}
+
+/// A scope's queue as it came back, and whether that was all of it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Queue {
+    issues: Vec<QueuedIssue>,
+    capped: bool,
+}
+
+impl Queue {
+    #[must_use]
+    pub fn new(issues: Vec<QueuedIssue>, capped: bool) -> Self {
+        Self { issues, capped }
+    }
+
+    /// In Linear's own order, which is not the order the queue is worked:
+    /// choosing is somebody else's function, and it wants the queue as the board
+    /// gave it.
+    #[must_use]
+    pub fn issues(&self) -> &[QueuedIssue] {
+        &self.issues
+    }
+
+    /// There is more of this queue on the board than came back: either a full
+    /// page of issues, or an issue with more relations than one page of them.
+    ///
+    /// Worth a line in the output rather than a second request, because it means
+    /// the choice was made over part of the queue and the person is the only one
+    /// who can say whether that matters.
+    #[must_use]
+    pub const fn capped(&self) -> bool {
+        self.capped
+    }
+}
+
+/// One issue in a scope's queue, carrying everything choosing needs and nothing
+/// else.
+///
+/// Both names Linear has for an issue, because both are needed: the id writes a
+/// state move and the identifier is what a person types and a run record holds.
+/// The state arrives twice for the same reason — the name is what the record's
+/// `review_state` and `In Progress` are matched against and what a skip prints,
+/// the type is what says whether a blocker is out of the way.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueuedIssue {
+    id: String,
+    identifier: String,
+    title: String,
+    state: String,
+    state_type: StateType,
+    priority: Priority,
+    blockers: Vec<Blocker>,
+}
+
+impl QueuedIssue {
+    #[must_use]
+    pub fn new(
+        id: impl Into<String>,
+        identifier: impl Into<String>,
+        title: impl Into<String>,
+        state: impl Into<String>,
+        state_type: StateType,
+        priority: Priority,
+        blockers: Vec<Blocker>,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            identifier: identifier.into(),
+            title: title.into(),
+            state: state.into(),
+            state_type,
+            priority,
+            blockers,
+        }
+    }
+
+    #[must_use]
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    #[must_use]
+    pub fn identifier(&self) -> &str {
+        &self.identifier
+    }
+
+    #[must_use]
+    pub fn title(&self) -> &str {
+        &self.title
+    }
+
+    /// The team's own name for the state — `In Review`, `Doing` — which is what
+    /// a record names and a skipped issue prints.
+    #[must_use]
+    pub fn state(&self) -> &str {
+        &self.state
+    }
+
+    #[must_use]
+    pub const fn state_type(&self) -> &StateType {
+        &self.state_type
+    }
+
+    #[must_use]
+    pub const fn priority(&self) -> Priority {
+        self.priority
+    }
+
+    /// The issues blocking this one, whoever owns them.
+    #[must_use]
+    pub fn blockers(&self) -> &[Blocker] {
+        &self.blockers
+    }
+}
+
+/// An issue holding up one in the queue, in the three facts a refusal needs: the
+/// identifier to name it, the assignee to say whose it is, and the state type to
+/// say whether it is still in the way.
+///
+/// No id and no title: nothing is done to a blocker, it is only reported.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Blocker {
+    identifier: String,
+    assignee: Option<String>,
+    state_type: StateType,
+}
+
+impl Blocker {
+    #[must_use]
+    pub fn new(
+        identifier: impl Into<String>,
+        assignee: Option<&str>,
+        state_type: StateType,
+    ) -> Self {
+        Self {
+            identifier: identifier.into(),
+            assignee: assignee.map(ToOwned::to_owned),
+            state_type,
+        }
+    }
+
+    #[must_use]
+    pub fn identifier(&self) -> &str {
+        &self.identifier
+    }
+
+    /// The person's name and not their id: a blocker is never matched against
+    /// anybody, only printed. `None` is an unassigned blocker, which a queue
+    /// filtered by assignee can still be held up by.
+    #[must_use]
+    pub fn assignee(&self) -> Option<&str> {
+        self.assignee.as_deref()
+    }
+
+    #[must_use]
+    pub const fn state_type(&self) -> &StateType {
+        &self.state_type
+    }
+}
+
+/// A workflow state's type, which is the part of a state that is Linear's rather
+/// than the team's: `triage`, `backlog`, `unstarted`, `started`, `completed`,
+/// `canceled`.
+///
+/// Kept as the string it arrived as instead of an enum over those six, because
+/// the only question anything asks of it is [`StateType::settled`] and a seventh
+/// type invented in Linear next year should not make a queue unreadable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StateType(String);
+
+impl StateType {
+    #[must_use]
+    pub fn new(name: impl Into<String>) -> Self {
+        Self(name.into())
+    }
+
+    /// Out of the way: the one judgement this type exists to make. An issue is
+    /// ready when every issue blocking it is settled, and these two types are
+    /// what Linear calls settled — a state named `Done`, `Shipped` or `Won't do`
+    /// is one of them whatever the team called it.
+    #[must_use]
+    pub fn settled(&self) -> bool {
+        self.0 == "completed" || self.0 == "canceled"
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// Linear's `priority`, in the order work is taken rather than the order the
+/// numbers come in.
+///
+/// The derived ordering is the whole point: ascending is urgent first and no
+/// priority last, so sorting a queue by this sorts it the way the board reads.
+/// Linear's own numbers — `0` for none, `1` for urgent — sort the other way
+/// round, which is why nothing outside [`priority`] holds one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Priority {
+    Urgent,
+    High,
+    Medium,
+    Low,
+    None,
+}
+
+/// Labels read on a named ticket, and its own cap for [`QUEUE_PAGE`]'s reason.
+/// The only question asked of them is whether the record's label is among them,
+/// so the cap is generous rather than tight: fifty labels on one issue is past
+/// the point where a workspace is labelling anything.
+const LABELS_PAGE: usize = 50;
+
+/// One ticket a person named, by the two facts an identifier is made of.
+///
+/// Not by the identifier itself, because Linear's `IssueFilter` has no
+/// `identifier`: the identifier is a display name made of the team's key and the
+/// issue's number, and those two are what can be filtered on. Splitting it is the
+/// caller's, which is also where a string that is no identifier at all gets its
+/// own words rather than a request.
+///
+/// The node selection is [`scope_queue`]'s — the ticket comes back as the same
+/// [`QueuedIssue`], parsed by the same function, so a named ticket and a chosen
+/// one are the same value and the rules cannot drift — plus the three facts the
+/// queue's filters stood for. Which is the whole point of reading it this way:
+/// the filters are what make a queue, and an issue *missing* from a filtered
+/// queue cannot say which filter dropped it. Here the three arrive as facts, and
+/// the caller's check on them can name the one that failed.
+///
+/// The state filter is left off for the same reason, and one more: a ticket that
+/// shipped last week is absent from the queue too, and a refusal calling that
+/// "not on your team" would be a lie about the board.
+///
+/// `None` when the workspace has no such issue — a team key nobody uses, or a
+/// number that team has not reached. Not an error, for [`team_id`]'s reason.
+fn named_issue(linear: &impl Posts, team: &str, number: u64) -> Result<Option<NamedIssue>, Error> {
+    let data = linear.post(
+        r"query NamedIssue($team: String!, $number: Float!, $labels: Int!, $blockers: Int!) {
+            issues(
+                filter: { team: { key: { eq: $team } }, number: { eq: $number } }
+                first: 1
+            ) {
+                nodes {
+                    id
+                    identifier
+                    title
+                    priority
+                    state { name type }
+                    team { key }
+                    labels(first: $labels) { nodes { name } }
+                    assignee { id name }
+                    inverseRelations(first: $blockers) {
+                        nodes {
+                            type
+                            issue { identifier state { type } assignee { name } }
+                        }
+                    }
+                }
+            }
+        }",
+        json!({
+            // Upper cased because Linear's team keys are, and `WAR-133` is
+            // something a person types: `war-133` names the same ticket to
+            // everyone except an `eq` on the key.
+            "team": team.trim().to_uppercase(),
+            "number": number,
+            "labels": LABELS_PAGE,
+            "blockers": BLOCKERS_PAGE,
+        }),
+    )?;
+
+    let Some(node) = nodes(&data, "issues")?.first() else {
+        return Ok(None);
+    };
+    let team = node.get("team").ok_or_else(|| missing("team"))?;
+    // The relation count the queue reads to know it was capped is dropped here:
+    // one named ticket has no page to be at the end of, and `BLOCKERS_PAGE`
+    // relations on a single issue is past anything this reports on.
+    let (issue, _) = queued_issue(node)?;
+
+    Ok(Some(NamedIssue {
+        issue,
+        team: text(team, "key")?,
+        labels: label_names(node)?,
+        assignee: assigned(node)?,
+    }))
+}
+
+/// A named ticket, and the three facts that say whether it is this scope's work
+/// at all.
+///
+/// An issue in a [`Queue`] answers those three by construction: the query
+/// filtered on them, so it is on the team, carries the label and belongs to the
+/// key's user. A named ticket is read with none of them applied, so they arrive
+/// as facts here — which is what lets a refusal name which one failed instead of
+/// saying only that the ticket is not in the queue.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NamedIssue {
+    issue: QueuedIssue,
+    team: String,
+    labels: Vec<String>,
+    assignee: Option<Assignee>,
+}
+
+impl NamedIssue {
+    #[must_use]
+    pub fn new(
+        issue: QueuedIssue,
+        team: impl Into<String>,
+        labels: Vec<String>,
+        assignee: Option<Assignee>,
+    ) -> Self {
+        Self {
+            issue,
+            team: team.into(),
+            labels,
+            assignee,
+        }
+    }
+
+    #[must_use]
+    pub const fn issue(&self) -> &QueuedIssue {
+        &self.issue
+    }
+
+    /// The ticket itself, once the checks on the rest are through: what is worked
+    /// is an issue and not a membership.
+    #[must_use]
+    pub fn into_issue(self) -> QueuedIssue {
+        self.issue
+    }
+
+    /// The team's key — `WAR` — which is how a scope record names a team, so the
+    /// two are comparable without resolving either to an id.
+    #[must_use]
+    pub fn team(&self) -> &str {
+        &self.team
+    }
+
+    /// Every label on the ticket, because a refusal says what it carries as well
+    /// as what it is missing.
+    #[must_use]
+    pub fn labels(&self) -> &[String] {
+        &self.labels
+    }
+
+    #[must_use]
+    pub const fn assignee(&self) -> Option<&Assignee> {
+        self.assignee.as_ref()
+    }
+}
+
+/// Who holds a ticket: the id it is matched by and the name it is named by.
+///
+/// Both, because one of each is needed and neither does the other's work. Ids are
+/// what [`Board::viewer`] answers and the only honest way to ask whether a ticket
+/// is yours — two people in a workspace can share a display name. The name is the
+/// half a person reads in a refusal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Assignee {
+    id: String,
+    name: String,
+}
+
+impl Assignee {
+    #[must_use]
+    pub fn new(id: impl Into<String>, name: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            name: name.into(),
+        }
+    }
+
+    #[must_use]
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
     }
 }
 
@@ -895,6 +1476,48 @@ fn optional(node: &Value, field: &str) -> Result<Option<String>, Error> {
         Some(_) => text(node, field).map(Some),
         None => Err(missing(field)),
     }
+}
+
+fn assignee_name(issue: &Value) -> Result<Option<String>, Error> {
+    match issue.get("assignee") {
+        Some(Value::Null) => Ok(None),
+        Some(assignee) => text(assignee, "name").map(Some),
+        None => Err(missing("assignee")),
+    }
+}
+
+/// Who a named ticket is assigned to, as both of the things a gate needs: an
+/// unassigned issue is `None` rather than a broken answer, and an `assignee` the
+/// answer left out altogether is malformed for [`optional`]'s reason.
+fn assigned(issue: &Value) -> Result<Option<Assignee>, Error> {
+    match issue.get("assignee") {
+        Some(Value::Null) => Ok(None),
+        Some(assignee) => Ok(Some(Assignee {
+            id: node_id(assignee)?,
+            name: text(assignee, "name")?,
+        })),
+        None => Err(missing("assignee")),
+    }
+}
+
+/// Every label on an issue, by name. An issue with none is an empty list and not
+/// an absence: no labels is a perfectly ordinary issue, and it is a refusal for
+/// the caller rather than a malformed answer.
+fn label_names(issue: &Value) -> Result<Vec<String>, Error> {
+    nodes(issue, "labels")?
+        .iter()
+        .map(|label| text(label, "name"))
+        .collect()
+}
+
+/// Linear saying there is another page behind the one asked for, which is the
+/// half of a capped queue this side cannot work out for itself.
+fn has_next_page(data: &Value, connection: &str) -> Result<bool, Error> {
+    data.get(connection)
+        .and_then(|connection| connection.get("pageInfo"))
+        .and_then(|info| info.get("hasNextPage"))
+        .and_then(Value::as_bool)
+        .ok_or_else(|| missing("hasNextPage"))
 }
 
 fn status_name(project: &Value) -> Result<Option<String>, Error> {
