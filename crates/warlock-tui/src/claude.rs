@@ -21,6 +21,24 @@
 //! there would be a copy of this one that nothing keeps in step. The stdin
 //! deadlock is the one part `git.rs` does not share — it closes stdin instead of
 //! writing to it, so it needs no writer thread.
+//!
+//! One thing about the CLI its documentation does not settle, and the answer is
+//! load-bearing for any session given a writing tool: a `PreToolUse` hook handed
+//! in on the invocation with `--settings` *does* still load when
+//! `--setting-sources ""` is passed beside it. `--setting-sources` governs which
+//! *sources* settings are read from — user, project, local — and a hook given on
+//! the command line is not one of them, so the two flags can be carried
+//! together: a session can refuse to inherit this machine's settings and still be
+//! fenced by a hook of warlock's own. Established against the real binary by
+//! `a_pre_tool_use_hook_given_with_settings_loads_under_no_setting_sources` in
+//! `tests/claude.rs`, which is `#[ignore]`d because it spends a model call; the
+//! hook it passes records the payload it is handed and denies the call, so what
+//! the probe reads is two files rather than anything the model said, and a
+//! control run with the hook left off makes the edit the hook refused. Should a
+//! CLI release ever change this, the session keeps the hook and gives up
+//! `--setting-sources`, never the reverse: the hook is the boundary a write is
+//! refused at, and inherited settings are a session that was told the wrong
+//! things, not a session that can write where it must not.
 
 use std::env;
 use std::ffi::{OsStr, OsString};

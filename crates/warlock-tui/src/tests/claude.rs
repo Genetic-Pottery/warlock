@@ -3356,3 +3356,189 @@ fn a_failure_arrives_quickly_rather_than_after_the_timeout() {
 
     assert!(started.elapsed() < Duration::from_secs(5));
 }
+
+/// The one test in the crate that spawns the real `claude` and spends a model
+/// call, which is why it is `#[ignore]`d and run by hand with
+/// `cargo test -p warlock-tui -- --ignored --nocapture`. Everything else here
+/// stands `claude` in with `/bin/sh`.
+///
+/// It exists because one thing about the CLI could not be read off its
+/// documentation: whether a `PreToolUse` hook handed in on the invocation with
+/// `--settings` still loads when `--setting-sources ""` says to load no settings
+/// from anywhere. The finding is written up in
+/// [the module doc](mod@crate::claude); this is what establishes it, and what
+/// would catch the CLI changing its mind.
+mod against_the_real_cli {
+    use std::fs;
+    use std::io::Read;
+    use std::process::{Command, Stdio};
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    use super::super::{kill_and_reap, watch};
+
+    /// Generous, because this is a real model call deciding to use a real tool,
+    /// and it is a backstop rather than an expectation: the probe takes well
+    /// under a minute when it works.
+    const PROBE_TIMEOUT: Duration = Duration::from_mins(3);
+
+    /// What the hook answers with, and what makes the refusal this probe's own
+    /// rather than any other gate on the machine.
+    const REASON: &str = "warlock hook probe";
+
+    /// Three ways the probe can come out, only one of which is an answer.
+    #[derive(Debug)]
+    enum Observed {
+        /// The hook ran: it was handed the tool call, and it refused it.
+        HookFired { payload: String, scratch: String },
+        /// The hook did not run: the edit went through untouched.
+        EditWentThrough,
+        /// The session never reached for `Edit`, so nothing was asked of the
+        /// hook and the run says nothing either way.
+        NoEditAttempted { reply: String },
+    }
+
+    #[test]
+    #[ignore = "spawns the real `claude` and spends a model call"]
+    fn a_pre_tool_use_hook_given_with_settings_loads_under_no_setting_sources() {
+        let observed = probe();
+
+        match observed {
+            Observed::HookFired { payload, scratch } => {
+                assert!(
+                    payload.contains("\"tool_name\":\"Edit\""),
+                    "the hook fired, but on something other than `Edit`: {payload}"
+                );
+                assert_eq!(
+                    scratch, BEFORE,
+                    "the hook refused the edit and the edit happened anyway"
+                );
+            }
+            Observed::EditWentThrough => panic!(
+                "the `--settings` hook did not load under `--setting-sources \"\"`. \
+                 The recorded decision holds: the sub-task session keeps the hook and \
+                 gives up `--setting-sources`, never the reverse. Drop \
+                 `--setting-sources` from the session's arguments and say so in the \
+                 module doc."
+            ),
+            Observed::NoEditAttempted { reply } => panic!(
+                "the session never called `Edit`, so the probe establishes nothing. \
+                 Run it again; if it keeps happening the prompt or the tool grant has \
+                 gone stale. The reply was:\n{reply}"
+            ),
+        }
+    }
+
+    const BEFORE: &str = "before\n";
+
+    /// Run the probe: a session with `Edit`, a hook on `Edit` that records what
+    /// it was handed and refuses it, and `--setting-sources ""` alongside.
+    ///
+    /// Nothing here depends on what the model *says*. The two observables are
+    /// files: the payload the hook writes, and whether the scratch file moved.
+    fn probe() -> Observed {
+        let directory = tempfile::tempdir().expect("a temporary directory");
+        let work = directory.path().join("work");
+        fs::create_dir(&work).expect("a working directory for the session");
+        let scratch = work.join("scratch.txt");
+        fs::write(&scratch, BEFORE).expect("the file the session is asked to edit");
+        let payload = directory.path().join("payload.json");
+
+        // The hook is a shell line rather than a script on disk: it needs no
+        // execute bit, and a command the CLI runs through a shell can both
+        // record its stdin and answer on its stdout.
+        let denial = serde_json::json!({
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "deny",
+                "permissionDecisionReason": REASON,
+            }
+        })
+        .to_string();
+        let command = format!(
+            "cat > '{payload}'; printf '%s' '{denial}'",
+            payload = payload.display()
+        );
+        // Built with `serde_json` so the escaping of the line above is the
+        // library's problem and not a quoting puzzle written out by hand.
+        let settings = serde_json::json!({
+            "hooks": {
+                "PreToolUse": [{
+                    "matcher": "Edit",
+                    "hooks": [{ "type": "command", "command": command }],
+                }]
+            }
+        })
+        .to_string();
+
+        let reply = run(
+            &work,
+            &[
+                "--print",
+                "--tools",
+                "Read,Edit",
+                "--allowedTools",
+                "Read",
+                "Edit",
+                "--setting-sources",
+                "",
+                "--settings",
+                &settings,
+                "Use the Edit tool to change the word before to after in \
+                 scratch.txt. Do not use Bash.",
+            ],
+        );
+
+        let after = fs::read_to_string(&scratch).expect("the scratch file is still there");
+        match fs::read_to_string(&payload) {
+            Ok(payload) => Observed::HookFired {
+                payload,
+                scratch: after,
+            },
+            Err(_) if after == BEFORE => Observed::NoEditAttempted { reply },
+            Err(_) => Observed::EditWentThrough,
+        }
+    }
+
+    /// Spawn `claude` and come back with what it printed, killed and reaped if
+    /// it outstays [`PROBE_TIMEOUT`].
+    ///
+    /// The same shape as [`crate::claude`]'s own runs and for the same reasons:
+    /// reader threads so a full pipe cannot deadlock the wait, and a polling
+    /// waiter over a shared handle so the handle is still there to kill with.
+    fn run(work: &std::path::Path, args: &[&str]) -> String {
+        let mut child = Command::new("claude")
+            .args(args)
+            .current_dir(work)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("`claude` is on PATH: this test is opted into on a machine that has it");
+
+        let stdout = child.stdout.take().expect("stdout was asked for");
+        let stderr = child.stderr.take().expect("stderr was asked for");
+        let readers = [reading(stdout), reading(stderr)];
+
+        let child = Arc::new(Mutex::new(child));
+        let (waiter, exits) = watch(&child);
+        if exits.recv_timeout(PROBE_TIMEOUT).is_err() {
+            kill_and_reap(&child);
+        }
+        let _ = waiter.join();
+
+        let mut reply = String::new();
+        for reader in readers {
+            reply.push_str(&reader.join().expect("the reader thread ran"));
+        }
+        reply
+    }
+
+    fn reading<R: Read + Send + 'static>(mut source: R) -> std::thread::JoinHandle<String> {
+        std::thread::spawn(move || {
+            let mut text = String::new();
+            let _ = source.read_to_string(&mut text);
+            text
+        })
+    }
+}
