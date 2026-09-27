@@ -133,6 +133,7 @@ pub trait Board {
     fn issue_label_id(&self, name: &str, team: &str) -> Result<String, Error>;
     fn fetch_project(&self, id: &str) -> Result<Option<FetchedProject>, Error>;
     fn scope_queue(&self, team: &str, label: &str, assignee: &str) -> Result<Queue, Error>;
+    fn named_issue(&self, team: &str, number: u64) -> Result<Option<NamedIssue>, Error>;
     fn create_project(&self, project: &NewProject<'_>) -> Result<Project, Error>;
     fn create_issue(&self, issue: &NewIssue<'_>) -> Result<Issue, Error>;
     fn create_relation(&self, blocker: &str, waiting: &str) -> Result<String, Error>;
@@ -179,6 +180,10 @@ impl<P: Posts> Board for Linear<P> {
 
     fn scope_queue(&self, team: &str, label: &str, assignee: &str) -> Result<Queue, Error> {
         scope_queue(&self.posts, team, label, assignee)
+    }
+
+    fn named_issue(&self, team: &str, number: u64) -> Result<Option<NamedIssue>, Error> {
+        named_issue(&self.posts, team, number)
     }
 
     fn create_project(&self, project: &NewProject<'_>) -> Result<Project, Error> {
@@ -794,6 +799,183 @@ pub enum Priority {
     None,
 }
 
+/// Labels read on a named ticket, and its own cap for [`QUEUE_PAGE`]'s reason.
+/// The only question asked of them is whether the record's label is among them,
+/// so the cap is generous rather than tight: fifty labels on one issue is past
+/// the point where a workspace is labelling anything.
+const LABELS_PAGE: usize = 50;
+
+/// One ticket a person named, by the two facts an identifier is made of.
+///
+/// Not by the identifier itself, because Linear's `IssueFilter` has no
+/// `identifier`: the identifier is a display name made of the team's key and the
+/// issue's number, and those two are what can be filtered on. Splitting it is the
+/// caller's, which is also where a string that is no identifier at all gets its
+/// own words rather than a request.
+///
+/// The node selection is [`scope_queue`]'s — the ticket comes back as the same
+/// [`QueuedIssue`], parsed by the same function, so a named ticket and a chosen
+/// one are the same value and the rules cannot drift — plus the three facts the
+/// queue's filters stood for. Which is the whole point of reading it this way:
+/// the filters are what make a queue, and an issue *missing* from a filtered
+/// queue cannot say which filter dropped it. Here the three arrive as facts, and
+/// the caller's check on them can name the one that failed.
+///
+/// The state filter is left off for the same reason, and one more: a ticket that
+/// shipped last week is absent from the queue too, and a refusal calling that
+/// "not on your team" would be a lie about the board.
+///
+/// `None` when the workspace has no such issue — a team key nobody uses, or a
+/// number that team has not reached. Not an error, for [`team_id`]'s reason.
+fn named_issue(linear: &impl Posts, team: &str, number: u64) -> Result<Option<NamedIssue>, Error> {
+    let data = linear.post(
+        r"query NamedIssue($team: String!, $number: Float!, $labels: Int!, $blockers: Int!) {
+            issues(
+                filter: { team: { key: { eq: $team } }, number: { eq: $number } }
+                first: 1
+            ) {
+                nodes {
+                    id
+                    identifier
+                    title
+                    priority
+                    state { name type }
+                    team { key }
+                    labels(first: $labels) { nodes { name } }
+                    assignee { id name }
+                    inverseRelations(first: $blockers) {
+                        nodes {
+                            type
+                            issue { identifier state { type } assignee { name } }
+                        }
+                    }
+                }
+            }
+        }",
+        json!({
+            // Upper cased because Linear's team keys are, and `WAR-133` is
+            // something a person types: `war-133` names the same ticket to
+            // everyone except an `eq` on the key.
+            "team": team.trim().to_uppercase(),
+            "number": number,
+            "labels": LABELS_PAGE,
+            "blockers": BLOCKERS_PAGE,
+        }),
+    )?;
+
+    let Some(node) = nodes(&data, "issues")?.first() else {
+        return Ok(None);
+    };
+    let team = node.get("team").ok_or_else(|| missing("team"))?;
+    // The relation count the queue reads to know it was capped is dropped here:
+    // one named ticket has no page to be at the end of, and `BLOCKERS_PAGE`
+    // relations on a single issue is past anything this reports on.
+    let (issue, _) = queued_issue(node)?;
+
+    Ok(Some(NamedIssue {
+        issue,
+        team: text(team, "key")?,
+        labels: label_names(node)?,
+        assignee: assigned(node)?,
+    }))
+}
+
+/// A named ticket, and the three facts that say whether it is this scope's work
+/// at all.
+///
+/// An issue in a [`Queue`] answers those three by construction: the query
+/// filtered on them, so it is on the team, carries the label and belongs to the
+/// key's user. A named ticket is read with none of them applied, so they arrive
+/// as facts here — which is what lets a refusal name which one failed instead of
+/// saying only that the ticket is not in the queue.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NamedIssue {
+    issue: QueuedIssue,
+    team: String,
+    labels: Vec<String>,
+    assignee: Option<Assignee>,
+}
+
+impl NamedIssue {
+    #[must_use]
+    pub fn new(
+        issue: QueuedIssue,
+        team: impl Into<String>,
+        labels: Vec<String>,
+        assignee: Option<Assignee>,
+    ) -> Self {
+        Self {
+            issue,
+            team: team.into(),
+            labels,
+            assignee,
+        }
+    }
+
+    #[must_use]
+    pub const fn issue(&self) -> &QueuedIssue {
+        &self.issue
+    }
+
+    /// The ticket itself, once the checks on the rest are through: what is worked
+    /// is an issue and not a membership.
+    #[must_use]
+    pub fn into_issue(self) -> QueuedIssue {
+        self.issue
+    }
+
+    /// The team's key — `WAR` — which is how a scope record names a team, so the
+    /// two are comparable without resolving either to an id.
+    #[must_use]
+    pub fn team(&self) -> &str {
+        &self.team
+    }
+
+    /// Every label on the ticket, because a refusal says what it carries as well
+    /// as what it is missing.
+    #[must_use]
+    pub fn labels(&self) -> &[String] {
+        &self.labels
+    }
+
+    #[must_use]
+    pub const fn assignee(&self) -> Option<&Assignee> {
+        self.assignee.as_ref()
+    }
+}
+
+/// Who holds a ticket: the id it is matched by and the name it is named by.
+///
+/// Both, because one of each is needed and neither does the other's work. Ids are
+/// what [`Board::viewer`] answers and the only honest way to ask whether a ticket
+/// is yours — two people in a workspace can share a display name. The name is the
+/// half a person reads in a refusal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Assignee {
+    id: String,
+    name: String,
+}
+
+impl Assignee {
+    #[must_use]
+    pub fn new(id: impl Into<String>, name: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            name: name.into(),
+        }
+    }
+
+    #[must_use]
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+}
+
 /// The id of the label by that name, creating it when the workspace has none.
 ///
 /// Two requests at most, one per thing asked, and the create only ever runs
@@ -1302,6 +1484,30 @@ fn assignee_name(issue: &Value) -> Result<Option<String>, Error> {
         Some(assignee) => text(assignee, "name").map(Some),
         None => Err(missing("assignee")),
     }
+}
+
+/// Who a named ticket is assigned to, as both of the things a gate needs: an
+/// unassigned issue is `None` rather than a broken answer, and an `assignee` the
+/// answer left out altogether is malformed for [`optional`]'s reason.
+fn assigned(issue: &Value) -> Result<Option<Assignee>, Error> {
+    match issue.get("assignee") {
+        Some(Value::Null) => Ok(None),
+        Some(assignee) => Ok(Some(Assignee {
+            id: node_id(assignee)?,
+            name: text(assignee, "name")?,
+        })),
+        None => Err(missing("assignee")),
+    }
+}
+
+/// Every label on an issue, by name. An issue with none is an empty list and not
+/// an absence: no labels is a perfectly ordinary issue, and it is a refusal for
+/// the caller rather than a malformed answer.
+fn label_names(issue: &Value) -> Result<Vec<String>, Error> {
+    nodes(issue, "labels")?
+        .iter()
+        .map(|label| text(label, "name"))
+        .collect()
 }
 
 /// Linear saying there is another page behind the one asked for, which is the

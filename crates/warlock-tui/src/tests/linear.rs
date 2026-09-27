@@ -6,10 +6,11 @@ use std::sync::Mutex;
 use serde_json::{Value, json};
 
 use super::{
-    BACKLOG, BLOCKERS_PAGE, Blocker, Board, Client, ENDPOINT, Error, Linear, NewIssue, NewProject,
-    Posts, Priority, QUEUE_PAGE, QueuedIssue, REQUEST_TIMEOUT, StateType, answer, authorization,
-    backlog_state, backlog_status, comment_on_project, create_issue, create_project,
-    create_relation, fetch_project, issue_label_id, label_id, scope_queue, team_id, viewer,
+    Assignee, BACKLOG, BLOCKERS_PAGE, Blocker, Board, Client, ENDPOINT, Error, LABELS_PAGE, Linear,
+    NamedIssue, NewIssue, NewProject, Posts, Priority, QUEUE_PAGE, QueuedIssue, REQUEST_TIMEOUT,
+    StateType, answer, authorization, backlog_state, backlog_status, comment_on_project,
+    create_issue, create_project, create_relation, fetch_project, issue_label_id, label_id,
+    named_issue, scope_queue, team_id, viewer,
 };
 
 const KEY: &str = "lin_api_a_key_nobody_holds_8f3a1c";
@@ -426,7 +427,11 @@ fn only_issue(queue: &Value) -> QueuedIssue {
 
 // The field at that JSON pointer taken out of the object holding it.
 fn without(pointer: &str) -> Value {
-    let mut answer = a_queue_of(&[an_issue()], false);
+    dropping(a_queue_of(&[an_issue()], false), pointer)
+}
+
+// The same, out of whichever answer is handed in.
+fn dropping(mut answer: Value, pointer: &str) -> Value {
     let (parent, field) = pointer
         .rsplit_once('/')
         .expect("a pointer to a field under an object");
@@ -820,6 +825,214 @@ fn the_board_hands_the_team_label_and_assignee_to_the_wire_in_that_order() {
             "first": QUEUE_PAGE,
             "blockers": BLOCKERS_PAGE,
         })
+    );
+}
+
+// One named ticket as the board answers it: the queue's own node, plus the three
+// facts the queue answered with a filter instead.
+fn a_named_ticket(node: &Value) -> Value {
+    json!({ "issues": { "nodes": [node] } })
+}
+
+fn named_node() -> Value {
+    let mut node = an_issue();
+
+    node["team"] = json!({ "key": "WAR" });
+    node["labels"] = json!({ "nodes": [{ "name": "warlock" }, { "name": "area/tui" }] });
+    node["assignee"] = json!({ "id": ME, "name": "Cole" });
+    node
+}
+
+fn a_ticket(node: &Value) -> NamedIssue {
+    let linear = Posting::answering([Ok(a_named_ticket(node))]);
+
+    named_issue(&linear, "WAR", 133)
+        .expect("the stand-in answered")
+        .expect("the stand-in answered with the ticket")
+}
+
+#[test]
+fn a_named_ticket_is_read_by_the_two_facts_its_identifier_is_made_of() {
+    let linear = Posting::answering([Ok(a_named_ticket(&named_node()))]);
+
+    let found = named_issue(&linear, "WAR", 133)
+        .expect("the stand-in answered")
+        .expect("the stand-in answered with the ticket");
+
+    // The identifier itself is not a filter Linear has: it is a display name made
+    // of the team's key and the number, and those two are what can be asked.
+    let asked = linear.documents().pop().expect("one request was made");
+
+    assert!(
+        asked.contains("filter: { team: { key: { eq: $team } }, number: { eq: $number } }"),
+        "{asked}"
+    );
+    assert_eq!(found.issue().identifier(), "WAR-133");
+    assert_eq!(linear.documents().len(), 1, "one request per question");
+}
+
+#[test]
+fn the_named_read_carries_none_of_the_queues_filters() {
+    let linear = Posting::answering([Ok(a_named_ticket(&named_node()))]);
+
+    named_issue(&linear, "WAR", 133).expect("the stand-in answered");
+
+    let asked = linear.documents().pop().expect("one request was made");
+    let (filter, _) = asked
+        .split_once('\n')
+        .and_then(|(_, rest)| rest.split_once("first: 1"))
+        .expect("the document filters one page of one");
+
+    // Label, assignee and state are read as fields and never filtered on, which
+    // is the whole point of this read: a ticket dropped by a filter cannot say
+    // which filter dropped it, so the three arrive as facts to be checked.
+    assert!(!filter.contains("labels: {"), "{filter}");
+    assert!(!filter.contains("assignee: {"), "{filter}");
+    assert!(!filter.contains("state: {"), "{filter}");
+    // And the selection asks for all three.
+    assert!(asked.contains("team { key }"), "{asked}");
+    assert!(
+        asked.contains("labels(first: $labels) { nodes { name } }"),
+        "{asked}"
+    );
+    assert!(asked.contains("assignee { id name }"), "{asked}");
+}
+
+#[test]
+fn the_named_read_asks_for_the_caps_the_constants_hold() {
+    let linear = Posting::answering([Ok(a_named_ticket(&named_node()))]);
+
+    named_issue(&linear, "war", 133).expect("the stand-in answered");
+
+    assert_eq!(
+        linear.variables(),
+        [json!({
+            // Upper cased on the way out, because Linear's team keys are and
+            // `war-133` is a thing a person types.
+            "team": "WAR",
+            "number": 133,
+            "labels": LABELS_PAGE,
+            "blockers": BLOCKERS_PAGE,
+        })]
+    );
+}
+
+#[test]
+fn a_named_ticket_is_the_same_value_a_queue_would_have_given() {
+    // Parsed by the queue's own function, so a named ticket and a chosen one are
+    // one type and the rules over them cannot drift.
+    let found = a_ticket(&named_node());
+
+    assert_eq!(
+        found.issue(),
+        &only_issue(&a_queue_of(&[an_issue()], false))
+    );
+}
+
+#[test]
+fn a_named_ticket_carries_the_team_labels_and_assignee_the_queue_filtered_on() {
+    let found = a_ticket(&named_node());
+
+    // The key and not the id: a scope record names a team `WAR`, so the two are
+    // comparable without resolving either.
+    assert_eq!(found.team(), "WAR");
+    assert_eq!(found.labels(), ["warlock", "area/tui"]);
+    assert_eq!(found.assignee(), Some(&Assignee::new(ME, "Cole")));
+    // The id is what says whether a ticket is yours, and the name is what a
+    // refusal prints: two people in a workspace can share a display name.
+    assert_eq!(found.assignee().map(Assignee::id), Some(ME));
+    assert_eq!(found.assignee().map(Assignee::name), Some("Cole"));
+}
+
+#[test]
+fn a_ticket_with_no_labels_and_nobody_on_it_is_an_ordinary_answer() {
+    let mut node = named_node();
+    node["labels"] = json!({ "nodes": [] });
+    node["assignee"] = Value::Null;
+
+    let found = a_ticket(&node);
+
+    // Neither is malformed: both are refusals the caller words, not answers this
+    // module cannot read.
+    assert_eq!(found.labels(), [] as [String; 0]);
+    assert_eq!(found.assignee(), None);
+}
+
+#[test]
+fn a_ticket_that_shipped_is_still_answered() {
+    let mut node = named_node();
+    node["state"] = json!({ "name": "Done", "type": "completed" });
+
+    let found = a_ticket(&node);
+
+    // The state filter is left off this read on purpose: a finished ticket is
+    // absent from the queue too, and a refusal calling that "not on your team"
+    // would be a lie about the board.
+    assert_eq!(found.issue().state(), "Done");
+    assert!(found.issue().state_type().settled());
+}
+
+#[test]
+fn a_number_no_ticket_has_is_an_absence_rather_than_an_error() {
+    let linear = Posting::answering([Ok(json!({ "issues": { "nodes": [] } }))]);
+
+    let found = named_issue(&linear, "WAR", 9_999).expect("an empty answer is an answer");
+
+    assert_eq!(found, None);
+}
+
+#[test]
+fn a_named_answer_that_is_not_the_one_asked_for_is_malformed() {
+    let mut answers = vec![
+        json!({ "issues": {} }),
+        json!({ "projects": { "nodes": [] } }),
+        a_named_ticket(&json!({})),
+    ];
+
+    for pointer in [
+        // The three the queue answered with a filter: a missing one is an answer
+        // no gate can be decided from, so it is never read as an absence.
+        "/issues/nodes/0/team",
+        "/issues/nodes/0/team/key",
+        "/issues/nodes/0/labels",
+        "/issues/nodes/0/labels/nodes/0/name",
+        "/issues/nodes/0/assignee",
+        "/issues/nodes/0/assignee/id",
+        "/issues/nodes/0/assignee/name",
+        // And the queue's own fields, since the ticket is parsed by its function.
+        "/issues/nodes/0/identifier",
+        "/issues/nodes/0/state/type",
+        "/issues/nodes/0/inverseRelations",
+    ] {
+        answers.push(dropping(a_named_ticket(&named_node()), pointer));
+    }
+
+    for answer in answers {
+        let linear = Posting::answering([Ok(answer.clone())]);
+
+        let error = named_issue(&linear, "WAR", 133).expect_err("that is not the answer asked for");
+
+        assert!(
+            matches!(error, Error::Malformed { .. }),
+            "{answer}: {error:?}"
+        );
+        assert_eq!(linear.documents().len(), 1, "no retry and no second page");
+    }
+}
+
+#[test]
+fn the_board_hands_the_team_key_and_the_number_to_the_wire_in_that_order() {
+    let board = Linear::new(Posting::answering([Ok(a_named_ticket(&named_node()))]));
+
+    let found = board
+        .named_issue("WAR", 133)
+        .expect("the stand-in answered")
+        .expect("the stand-in answered with the ticket");
+
+    assert_eq!(found.issue().identifier(), "WAR-133");
+    assert_eq!(
+        board.posts.variables().pop().expect("one request was made")["number"],
+        json!(133)
     );
 }
 

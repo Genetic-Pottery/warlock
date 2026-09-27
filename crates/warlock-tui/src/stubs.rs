@@ -18,7 +18,7 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use warlock_engine::{Agent, agent, drafting, stub_answer};
 use warlock_tui::{
     Activities, Board, Cancel, Converses, FetchedProject, LinearError, LinearIssue, LinearProject,
-    NewIssue, NewProject, Opens, Queue, Wired,
+    NamedIssue, NewIssue, NewProject, Opens, Queue, Wired,
 };
 
 use crate::clipboard::Clip;
@@ -295,6 +295,7 @@ pub(crate) enum Call {
     IssueLabel { name: String, team: String },
     FetchProject(String),
     ScopeQueue(QueueAsked),
+    NamedIssue { team: String, number: u64 },
     CreateProject(ProjectAsked),
     CreateIssue(IssueAsked),
     Relation { blocker: String, waiting: String },
@@ -311,6 +312,7 @@ impl Call {
             Self::IssueLabel { .. } => Op::IssueLabel,
             Self::FetchProject(_) => Op::FetchProject,
             Self::ScopeQueue(_) => Op::ScopeQueue,
+            Self::NamedIssue { .. } => Op::NamedIssue,
             Self::CreateProject(_) => Op::CreateProject,
             Self::CreateIssue(_) => Op::CreateIssue,
             Self::Relation { .. } => Op::Relation,
@@ -328,6 +330,7 @@ pub(crate) enum Op {
     IssueLabel,
     FetchProject,
     ScopeQueue,
+    NamedIssue,
     CreateProject,
     CreateIssue,
     Relation,
@@ -696,6 +699,17 @@ impl Board for Boarding {
             assignee: assignee.to_owned(),
         }))?;
         Ok(Queue::new(Vec::new(), false))
+    }
+
+    /// No such ticket, and the call recorded: the flows this stand-in serves name
+    /// no ticket. The one that does is tested against a stand-in `Posts`, where
+    /// the answer is the point rather than the call.
+    fn named_issue(&self, team: &str, number: u64) -> Result<Option<NamedIssue>, LinearError> {
+        self.ask(Call::NamedIssue {
+            team: team.to_owned(),
+            number,
+        })?;
+        Ok(None)
     }
 
     fn create_project(&self, project: &NewProject<'_>) -> Result<LinearProject, LinearError> {

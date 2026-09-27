@@ -459,3 +459,414 @@ fn every_skip_in_a_queue_with_nothing_ready_is_reported_in_the_queues_order() {
         Reason::Blocked { blockers } if blockers.len() == 1
     ));
 }
+
+// The other door: a ticket somebody named rather than one the queue gave up.
+//
+// Driven over a stand-in `Posts` rather than a stand-in board, because what this
+// path promises is about the wire as well as the rules — the identifier a person
+// typed has to reach Linear split into the two facts it can be asked for, and the
+// three checks have to be made against fields of the board's own answer rather
+// than against a filter nobody can see the effect of.
+mod named {
+    use std::sync::{Arc, Mutex};
+
+    use serde_json::{Value, json};
+    use warlock_engine::ScopeRecord;
+
+    use super::{PullRun, Reason, RunStatus, run};
+    use crate::linear::{Error as LinearError, Linear, Posts};
+    use crate::queue::{Named, Refusal, take_named};
+
+    // The user the key belongs to, which is the only person whose work `pull`
+    // takes.
+    const ME: &str = "user-viewer";
+
+    // The scope record in `.warlock/pacts.toml`: the team it routes to, the state
+    // it reserves for review, and the label that says a ticket is its work.
+    fn record() -> ScopeRecord {
+        ScopeRecord::new("warlock-team", "WAR", "In Review", "warlock")
+    }
+
+    // A board that answers one named-ticket read from memory, and keeps what it
+    // was asked. Cloneable over one shared answer because `Linear` owns what it
+    // posts through, and a test still has to say what reached the wire.
+    #[derive(Clone)]
+    struct Posting(Arc<Asked>);
+
+    #[derive(Debug)]
+    struct Asked {
+        answer: Mutex<Option<Result<Value, LinearError>>>,
+        variables: Mutex<Vec<Value>>,
+    }
+
+    impl Posting {
+        fn answering(answer: Result<Value, LinearError>) -> Self {
+            Self(Arc::new(Asked {
+                answer: Mutex::new(Some(answer)),
+                variables: Mutex::new(Vec::new()),
+            }))
+        }
+
+        fn board(&self) -> Linear<Self> {
+            Linear::new(self.clone())
+        }
+
+        fn variables(&self) -> Vec<Value> {
+            self.0
+                .variables
+                .lock()
+                .expect("the stand-in was not used across a panic")
+                .clone()
+        }
+    }
+
+    impl Posts for Posting {
+        fn post(&self, _document: &str, variables: Value) -> Result<Value, LinearError> {
+            self.0
+                .variables
+                .lock()
+                .expect("the stand-in was not used across a panic")
+                .push(variables);
+
+            self.0
+                .answer
+                .lock()
+                .expect("the stand-in was not used across a panic")
+                .take()
+                .expect("one request per question, with no retry")
+        }
+    }
+
+    // A board holding that one ticket, and one holding nothing.
+    fn holding(node: &Value) -> Posting {
+        Posting::answering(Ok(json!({ "issues": { "nodes": [node] } })))
+    }
+
+    fn holding_nothing() -> Posting {
+        Posting::answering(Ok(json!({ "issues": { "nodes": [] } })))
+    }
+
+    // `WAR-133` as the board answers it when everything about it is in order: on
+    // the record's team, carrying its label, on the key holder, in `Todo`, with
+    // nothing in its way.
+    fn ticket() -> Value {
+        json!({
+            "id": "id-WAR-133",
+            "identifier": "WAR-133",
+            "title": "The work of WAR-133",
+            "priority": 2,
+            "state": { "name": "Todo", "type": "unstarted" },
+            "team": { "key": "WAR" },
+            "labels": { "nodes": [{ "name": "warlock" }] },
+            "assignee": { "id": ME, "name": "Cole" },
+            "inverseRelations": { "nodes": [] },
+        })
+    }
+
+    fn blocking(identifier: &str, assignee: Option<&str>, state: &str) -> Value {
+        json!({
+            "type": "blocks",
+            "issue": {
+                "identifier": identifier,
+                "state": { "type": state },
+                "assignee": assignee.map(|name| json!({ "name": name })),
+            },
+        })
+    }
+
+    fn asked_for(posting: &Posting, ticket: &str, runs: &[PullRun]) -> Named {
+        take_named(&posting.board(), &record(), ME, ticket, runs).expect("the stand-in answered")
+    }
+
+    // The ticket that was taken, or `None` when it was refused.
+    fn taken(posting: &Posting, runs: &[PullRun]) -> Option<String> {
+        match asked_for(posting, "WAR-133", runs) {
+            Named::Taken(issue) => Some(issue.identifier().to_owned()),
+            Named::Refused(_) => None,
+        }
+    }
+
+    // The printable reason `WAR-133` was turned down, which is what every
+    // refusal below is asserted as.
+    fn refused(node: &Value, runs: &[PullRun]) -> String {
+        reason(&asked_for(&holding(node), "WAR-133", runs))
+    }
+
+    fn reason(named: &Named) -> String {
+        match named {
+            Named::Refused(refusal) => refusal.to_string(),
+            Named::Taken(issue) => panic!("{} was taken", issue.identifier()),
+        }
+    }
+
+    #[test]
+    fn a_ticket_on_the_team_carrying_the_label_and_assigned_to_you_is_taken() {
+        let posting = holding(&ticket());
+
+        let named = asked_for(&posting, "WAR-133", &[]);
+
+        // The whole issue and not just its identifier: what a run needs is the id
+        // to move it and the title to name the work.
+        assert!(
+            matches!(&named, Named::Taken(issue)
+                if issue.id() == "id-WAR-133"
+                    && issue.identifier() == "WAR-133"
+                    && issue.title() == "The work of WAR-133"),
+            "{named:?}"
+        );
+        assert_eq!(posting.variables().len(), 1, "one request per question");
+    }
+
+    #[test]
+    fn the_identifier_reaches_the_wire_as_the_two_facts_linear_can_be_asked_for() {
+        let posting = holding(&ticket());
+
+        // Typed in lower case, because a person types it.
+        asked_for(&posting, "war-133", &[]);
+
+        let asked = posting.variables().pop().expect("one request was made");
+
+        assert_eq!(asked["team"], json!("WAR"));
+        assert_eq!(asked["number"], json!(133));
+    }
+
+    #[test]
+    fn a_string_that_is_no_ticket_is_refused_without_asking_the_board() {
+        for typed in ["banana", "WAR-", "WAR-x", "-9", "WAR 133", ""] {
+            let posting = holding_nothing();
+
+            let named = asked_for(&posting, typed, &[]);
+
+            assert_eq!(
+                reason(&named),
+                format!("`{typed}` is not a ticket identifier, which reads like `WAR-9`")
+            );
+            // A typo is not worth a round trip, and the board's answer about it
+            // would be vaguer than this one.
+            assert!(posting.variables().is_empty(), "{typed} reached the board");
+        }
+    }
+
+    #[test]
+    fn a_ticket_the_board_does_not_have_is_refused_by_the_name_that_was_typed() {
+        let named = asked_for(&holding_nothing(), "WAR-404", &[]);
+
+        assert!(
+            matches!(&named, Named::Refused(Refusal::Unknown { ticket }) if ticket == "WAR-404"),
+            "{named:?}"
+        );
+        assert_eq!(reason(&named), "the board has no `WAR-404`");
+    }
+
+    #[test]
+    fn a_ticket_on_another_team_is_refused_naming_both_teams() {
+        let mut node = ticket();
+        node["team"] = json!({ "key": "ENG" });
+
+        assert_eq!(
+            refused(&node, &[]),
+            "on team `ENG`, and this scope routes to `WAR`"
+        );
+    }
+
+    #[test]
+    fn a_ticket_without_the_records_label_is_refused_naming_the_label_it_wants() {
+        let mut node = ticket();
+        node["labels"] = json!({ "nodes": [{ "name": "area/tui" }, { "name": "chore" }] });
+
+        // What it carries as well as what it is missing: the usual cause is a
+        // near miss rather than an unlabelled ticket.
+        assert_eq!(
+            refused(&node, &[]),
+            "not labelled `warlock` — it carries area/tui, chore"
+        );
+
+        let mut bare = ticket();
+        bare["labels"] = json!({ "nodes": [] });
+
+        assert_eq!(
+            refused(&bare, &[]),
+            "not labelled `warlock` — it carries no labels at all"
+        );
+    }
+
+    #[test]
+    fn a_ticket_somebody_else_holds_is_refused_naming_them() {
+        let mut theirs = ticket();
+        theirs["assignee"] = json!({ "id": "user-ada", "name": "Ada" });
+
+        assert_eq!(refused(&theirs, &[]), "assigned to Ada and not to you");
+
+        let mut nobodys = ticket();
+        nobodys["assignee"] = Value::Null;
+
+        assert_eq!(
+            refused(&nobodys, &[]),
+            "assigned to nobody, and `pull` works your own tickets"
+        );
+    }
+
+    #[test]
+    fn the_holder_is_matched_by_id_and_never_by_name() {
+        // Two people in a workspace can share a display name, and the id is what
+        // the key itself answered.
+        let mut twin = ticket();
+        twin["assignee"] = json!({ "id": "user-other", "name": "Cole" });
+
+        assert_eq!(refused(&twin, &[]), "assigned to Cole and not to you");
+
+        let mut renamed = ticket();
+        renamed["assignee"] = json!({ "id": ME, "name": "Cole Michaels" });
+
+        assert_eq!(taken(&holding(&renamed), &[]).as_deref(), Some("WAR-133"));
+    }
+
+    #[test]
+    fn the_team_key_and_the_label_are_matched_trimmed_and_case_insensitively() {
+        let mut node = ticket();
+        node["team"] = json!({ "key": " war " });
+        node["labels"] = json!({ "nodes": [{ "name": "WARLOCK" }] });
+
+        assert_eq!(taken(&holding(&node), &[]).as_deref(), Some("WAR-133"));
+    }
+
+    #[test]
+    fn the_wrong_team_is_named_before_the_missing_label() {
+        let mut node = ticket();
+        node["team"] = json!({ "key": "ENG" });
+        node["labels"] = json!({ "nodes": [] });
+        node["assignee"] = Value::Null;
+
+        // An issue label belongs to a team in Linear, so a ticket on another team
+        // cannot be carrying this team's label either: naming the label would
+        // send somebody to fix the wrong thing.
+        assert_eq!(
+            refused(&node, &[]),
+            "on team `ENG`, and this scope routes to `WAR`"
+        );
+    }
+
+    #[test]
+    fn a_ticket_that_is_already_finished_is_refused_as_finished() {
+        for (state, kind) in [("Done", "completed"), ("Won't do", "canceled")] {
+            let mut node = ticket();
+            node["state"] = json!({ "name": state, "type": kind });
+
+            // It is missing from the queue rather than skipped in it, and every
+            // one of the three checks above passes on it — so "not on your team"
+            // would be a lie and this is its own reason.
+            assert_eq!(
+                refused(&node, &[]),
+                format!("in `{state}`, which is finished")
+            );
+        }
+    }
+
+    #[test]
+    fn a_ticket_in_the_records_review_state_is_refused_naming_the_state() {
+        let mut node = ticket();
+        // The board's own spelling of it, which is what a person will go looking
+        // for.
+        node["state"] = json!({ "name": "in review", "type": "started" });
+
+        assert_eq!(
+            refused(&node, &[]),
+            "in `in review`, which is waiting on a human"
+        );
+    }
+
+    #[test]
+    fn a_ticket_whose_run_here_is_halted_is_refused_with_the_command_that_releases_it() {
+        let runs = [run("WAR-133", RunStatus::Halted)];
+
+        assert_eq!(
+            refused(&ticket(), &runs),
+            "halted — `warlock resume WAR-133` releases it"
+        );
+    }
+
+    #[test]
+    fn a_blocked_ticket_is_refused_naming_each_open_blocker_and_whose_it_is() {
+        let mut node = ticket();
+        node["inverseRelations"] = json!({
+            "nodes": [
+                blocking("WAR-1", Some("Ada"), "completed"),
+                blocking("WAR-2", Some("Someone Else"), "started"),
+                blocking("WAR-3", None, "backlog"),
+            ],
+        });
+
+        // The settled one is out of the way and not part of the reason; the
+        // unassigned one is still in it.
+        assert_eq!(
+            refused(&node, &[]),
+            "blocked by WAR-2 (Someone Else), WAR-3 (unassigned)"
+        );
+    }
+
+    #[test]
+    fn a_ticket_blocked_only_by_settled_issues_is_taken() {
+        let mut node = ticket();
+        node["inverseRelations"] = json!({
+            "nodes": [
+                blocking("WAR-1", Some("Ada"), "completed"),
+                blocking("WAR-2", None, "canceled"),
+            ],
+        });
+
+        assert_eq!(taken(&holding(&node), &[]).as_deref(), Some("WAR-133"));
+    }
+
+    #[test]
+    fn a_ticket_in_progress_is_taken_only_when_this_machine_holds_its_run() {
+        let mut node = ticket();
+        node["state"] = json!({ "name": "In Progress", "type": "started" });
+
+        assert_eq!(
+            refused(&node, &[]),
+            "in progress elsewhere — this machine holds no run record for it"
+        );
+
+        let runs = [run("WAR-133", RunStatus::InProgress)];
+
+        assert_eq!(taken(&holding(&node), &runs).as_deref(), Some("WAR-133"));
+    }
+
+    #[test]
+    fn a_named_ticket_is_only_ever_refused_for_a_reason_the_chooser_skips_by() {
+        // The four queue rules are one function, read from both doors, so a
+        // refusal for one of them prints the skip's own words.
+        for reason in [
+            Reason::Halted {
+                ticket: "WAR-133".to_owned(),
+            },
+            Reason::InReview {
+                state: "In Review".to_owned(),
+            },
+            Reason::InProgressElsewhere,
+            Reason::Blocked {
+                blockers: Vec::new(),
+            },
+        ] {
+            assert_eq!(
+                Refusal::NotReady(reason.clone()).to_string(),
+                reason.to_string()
+            );
+        }
+    }
+
+    #[test]
+    fn a_board_that_could_not_be_reached_is_a_failure_and_not_a_refusal() {
+        let posting = Posting::answering(Err(LinearError::Status { code: 500 }));
+
+        let error = take_named(&posting.board(), &record(), ME, "WAR-133", &[])
+            .expect_err("the stand-in refused");
+
+        // Nothing is said about the ticket: warlock does not know anything about
+        // it yet, and a refusal would be an invented fact.
+        assert!(
+            matches!(error, LinearError::Status { code: 500 }),
+            "{error:?}"
+        );
+    }
+}
