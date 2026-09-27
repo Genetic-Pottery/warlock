@@ -6,17 +6,19 @@ use std::time::{Duration, Instant};
 
 use super::stream;
 use super::{
-    Activities, Activity, BRIEF_EFFORT, BRIEF_MODEL, CHAT_INSTRUCTION, CHAT_SYSTEM_PROMPT, Cancel,
-    ChatAgent, ClaudeAgent, Converses, DRAFT_NOW_INSTRUCTION, DRAFTING_CONTRACT,
+    Activities, Activity, BRIEF_EFFORT, BRIEF_MODEL, Bounded, CHAT_INSTRUCTION, CHAT_SYSTEM_PROMPT,
+    Cancel, ChatAgent, ClaudeAgent, Converses, DRAFT_NOW_INSTRUCTION, DRAFTING_CONTRACT,
     DRAFTING_ONE_SHOT_CONTRACT, DRAFTING_ROUNDS, Drafted, Drafting, EFFORT, EFFORT_VAR,
     INVOCATION_TIMEOUT, MODEL, MODEL_VAR, NOTHING_SETTLES_IT, OsString, PROPOSING_SYSTEM_PROMPT,
-    Replied, SYSTEM_PROMPT, WRITE_INSTRUCTION, Wired, brief_instruction, drafting_opening,
-    or_default, overridden, propose_answer, proposing_instruction, render, session_id,
+    Replied, SYSTEM_PROMPT, Stopped, WORKING_ATTEMPTS, WORKING_TIMEOUT, WORKING_TURNS,
+    WRITE_INSTRUCTION, Wired, Worked, Working, brief_instruction, drafting_opening, or_default,
+    overridden, propose_answer, proposing_instruction, render, session_id, working_opening,
+    working_retry, working_system_prompt,
 };
 use crate::brief::scope_block_in;
 use crate::panel::Mode;
 use crate::template::DEFAULT_TEMPLATE;
-use warlock_engine::{Agent, agent, drafting};
+use warlock_engine::{Agent, agent, drafting, working};
 
 // A name no directory on `PATH` can hold, so the lookup fails the way it does on
 // a machine with no `claude` installed.
@@ -957,6 +959,473 @@ fn a_proposing_session_may_read_the_repository_and_do_nothing_whatever_else() {
 
     names_no_writing_tool(&vector, "a proposing turn");
     assert_eq!(ChatAgent::proposing().timeout(), INVOCATION_TIMEOUT);
+}
+
+// Stands in for the prompt sub-task 4 writes: this file is about the fence, and
+// none of the assertions below read a word of what the session is told. Plain on
+// purpose — no capitalised tool name in it — so that a vector found to name
+// `Edit` is the grant naming it and not this string.
+const WORKING_PROMPT: &str = "You are working one sub-task of one ticket.";
+
+#[test]
+fn the_sub_task_session_is_granted_exactly_six_tools_in_both_flags() {
+    let vector = turn_args(&ChatAgent::working(WORKING_PROMPT));
+    let granted = value_of(&vector, "--tools").expect("the sub-task session says what it holds");
+
+    // Exactly these, in this order, and the same list in both flags:
+    // `--tools` is what the session has at all and `--allowedTools` is what it
+    // may use without stopping to ask a person who is not there.
+    assert_eq!(granted, "Read,Grep,Glob,Edit,Write,Bash");
+    assert_eq!(
+        granted.split(',').collect::<Vec<_>>(),
+        ["Read", "Grep", "Glob", "Edit", "Write", "Bash"],
+    );
+    assert_eq!(value_of(&vector, "--allowedTools"), Some(granted));
+
+    // One of each flag, so neither grant is a first word some later pair
+    // quietly widens.
+    for flag in ["--tools", "--allowedTools"] {
+        assert_eq!(
+            vector.iter().filter(|word| *word == flag).count(),
+            1,
+            "{flag} is named twice in the sub-task session's vector",
+        );
+    }
+
+    // And nothing else that hands a tool over or waves a permission through:
+    // the grant above is the whole of what this session may do.
+    for refused in [
+        "--permission-mode",
+        "--dangerously-skip-permissions",
+        "--allow-dangerously-skip-permissions",
+        "--add-dir",
+        "--agents",
+        "--mcp-config",
+    ] {
+        assert!(
+            !vector.iter().any(|word| word == refused),
+            "{refused} reached the sub-task session's vector",
+        );
+    }
+}
+
+#[test]
+fn the_sub_task_session_reaches_no_machine_settings_and_no_mcp_server() {
+    let vector = turn_args(&ChatAgent::working(WORKING_PROMPT));
+
+    // This machine's user, project and local settings are refused, so the
+    // session is told what warlock told it and not what somebody's global
+    // hooks or a repository's own instructions would say.
+    assert_eq!(value_of(&vector, "--setting-sources"), Some(""));
+    // And no MCP server at all: `--strict-mcp-config` with nothing beside it
+    // is the only way the session cannot reach Linear — settings sources are
+    // not where MCP servers come from. So warlock is the only route out.
+    assert!(vector.iter().any(|word| word == "--strict-mcp-config"));
+    assert!(!vector.iter().any(|word| word == "--mcp-config"));
+
+    // Both flags together, which is sub-task 2's finding and not an
+    // assumption: a `PreToolUse` hook given with `--settings` still loads
+    // under `--setting-sources ""`, established against the real CLI by
+    // `a_pre_tool_use_hook_given_with_settings_loads_under_no_setting_sources`
+    // below. Were that ever to change, the hook stays and this flag goes.
+    assert!(vector.iter().any(|word| word == "--settings"));
+}
+
+#[test]
+fn the_sub_task_session_carries_the_gate_hook_inline_with_no_file_on_disk() {
+    let vector = turn_args(&ChatAgent::working(WORKING_PROMPT));
+    let settings = value_of(&vector, "--settings").expect("the sub-task session brings its fence");
+
+    // Inline JSON and not a path: `--settings` takes either, and a file would
+    // be settings on disk outliving a session that may have been killed, plus
+    // a path for somebody to clean up. Asserted both ways round — it parses as
+    // an object, and there is no such file to have been written.
+    assert!(settings.starts_with('{'), "not inline JSON: {settings}");
+    assert!(
+        !std::path::Path::new(settings).exists(),
+        "the fence was written to a file: {settings}",
+    );
+    let settings: serde_json::Value =
+        serde_json::from_str(settings).expect("the fence is a JSON object");
+
+    let hooks = settings["hooks"]["PreToolUse"]
+        .as_array()
+        .expect("a PreToolUse hook");
+    assert_eq!(hooks.len(), 1);
+    let matcher = hooks[0]["matcher"].as_str().expect("a matcher");
+    for gated in ["Edit", "Write", "MultiEdit", "NotebookEdit"] {
+        assert!(
+            matcher.split('|').any(|named| named == gated),
+            "{gated} is not gated: {matcher}",
+        );
+    }
+    // `Bash` is not in the matcher and cannot be: a hook is handed a command
+    // string rather than a path, and a shell line writes wherever the operator
+    // can. A fact about the fence, asserted so it stays a stated one.
+    assert!(!matcher.split('|').any(|named| named == "Bash"));
+
+    let ran = hooks[0]["hooks"].as_array().expect("one command to run");
+    assert_eq!(ran.len(), 1);
+    assert_eq!(ran[0]["type"], "command");
+    let command = ran[0]["command"].as_str().expect("a command line");
+    assert!(command.ends_with("check --gate"), "not the gate: {command}");
+    // Warlock's own binary, named absolutely, because the hook runs in a child
+    // of `claude` whose working directory is the repository being worked.
+    let program = std::env::current_exe().expect("the test binary knows its own path");
+    assert!(
+        command.contains(&program.display().to_string()),
+        "the hook names some other warlock: {command}",
+    );
+}
+
+#[test]
+fn the_sub_task_session_runs_under_its_own_clock_and_its_own_turn_limit() {
+    let agent = ChatAgent::working(WORKING_PROMPT);
+
+    // Not the five minutes a pass gets: that clock is sized for one document,
+    // and this session edits files and runs a test suite that is minutes on
+    // its own.
+    assert_eq!(agent.timeout(), WORKING_TIMEOUT);
+    assert_ne!(agent.timeout(), INVOCATION_TIMEOUT);
+    assert_ne!(
+        WORKING_TIMEOUT.as_secs(),
+        300,
+        "the sub-task session is running on a pass's five minutes",
+    );
+    assert!(WORKING_TIMEOUT > INVOCATION_TIMEOUT);
+
+    // The second bound, and a different kind: a session can spin cheaply
+    // inside one tool loop for half an hour, and it can also spend its turns
+    // in a minute.
+    let vector = turn_args(&agent);
+    assert_eq!(
+        value_of(&vector, "--max-turns"),
+        Some(WORKING_TURNS.to_string().as_str()),
+    );
+    // A bound rather than a formality, and one a retry can still double.
+    assert_ne!(WORKING_TURNS, 0);
+    assert_ne!(WORKING_TURNS.checked_mul(2), None);
+}
+
+#[test]
+fn the_sub_task_session_is_its_own_conversation_at_the_briefs_register() {
+    let vector = turn_args(&ChatAgent::working(WORKING_PROMPT));
+
+    // Raised the way a drafting turn is and through the same two constants: a
+    // session that writes code has less business being cheap than one
+    // answering a question.
+    assert_eq!(
+        value_of(&vector, "--model"),
+        overridden(MODEL_VAR, BRIEF_MODEL).to_str(),
+    );
+    assert_eq!(
+        value_of(&vector, "--effort"),
+        overridden(EFFORT_VAR, BRIEF_EFFORT).to_str(),
+    );
+
+    // Its own id, and the prompt it was handed rather than one of warlock's:
+    // what this session is told is the caller's to say, because it names the
+    // scope the ticket was pulled under and the sigils this machine holds.
+    let session = value_of(&vector, "--session-id").expect("a sub-task opens a conversation");
+    assert!(is_uuid_shaped(session), "not UUID-shaped: {session}");
+    for other in [
+        turn_args(&ChatAgent::new()),
+        turn_args(&ChatAgent::drafting()),
+        turn_args(&ChatAgent::working(WORKING_PROMPT)),
+    ] {
+        assert_ne!(value_of(&other, "--session-id"), Some(session));
+    }
+    assert_eq!(value_of(&vector, "--system-prompt"), Some(WORKING_PROMPT));
+}
+
+#[test]
+fn the_sub_task_session_is_the_only_one_given_a_writing_tool() {
+    // Every session kind that existed before the sub-task one, each read word
+    // by word: the grant, the system prompt and every other argument. The
+    // sub-task session is the single exception, and it is exempt rather than
+    // fixed for the obvious reason — writing is what it is for, and its fence
+    // is the hook and the six-tool grant asserted above, not the absence of a
+    // tool name from its vector.
+    names_no_writing_tool(&args(&ClaudeAgent::new()), "a pass");
+    names_no_writing_tool(&turn_args(&ChatAgent::new()), "a panel turn");
+    names_no_writing_tool(
+        &turn_args(
+            &ChatAgent::new()
+                .at_model(BRIEF_MODEL)
+                .at_effort(BRIEF_EFFORT),
+        ),
+        "a brief turn",
+    );
+    names_no_writing_tool(&turn_args(&ChatAgent::drafting()), "a drafting turn");
+    names_no_writing_tool(&turn_args(&ChatAgent::proposing()), "a proposing turn");
+
+    // And the exception is a real one rather than a spare sentence: the helper
+    // above would refuse the sub-task session's own vector.
+    let vector = turn_args(&ChatAgent::working(WORKING_PROMPT));
+    for named in ["Edit", "Write", "Bash"] {
+        assert!(
+            vector.iter().any(|word| word
+                .split(|letter: char| !letter.is_ascii_alphanumeric())
+                .any(|token| token == named)),
+            "{named} is missing from the one session that is meant to have it",
+        );
+    }
+}
+
+// The three things a sub-task session is handed, each spelt so a test can find
+// it again in what warlock writes around it. A real sub-task's shape — front
+// matter, a goal, a definition of done — because the builders trim and frame
+// markdown rather than prose.
+const A_SUB_TASK_BRIEF: &str = "---\nsubtask_id: WAR-140.02\nparent: WAR-140\n---\n\n\
+                                ## Goal\nRead the queue's own ordering in the panel.\n\n\
+                                ## Definition of done\n- [ ] A queue with nothing behind it \
+                                draws no header.";
+
+const A_TICKET_TITLE: &str = "Read a scope's ticket queue from Linear";
+
+const A_TICKET_DESCRIPTION: &str = "## Problem\nThe panel offers a scope with no queue behind \
+                                    it.\n\n## Out of scope\nThe filing, which is another \
+                                    ticket's.";
+
+#[test]
+fn the_sub_task_system_prompt_names_the_scope_and_the_sigils_this_machine_holds() {
+    let held = ["data-plane".to_owned(), "web".to_owned()];
+    let prompt = working_system_prompt("data-plane", &held);
+
+    // The scope the ticket was pulled under, and every sigil this machine
+    // holds: the two halves of where this session's boundary is.
+    assert!(prompt.contains("scope `data-plane`"), "{prompt}");
+    assert!(
+        prompt.contains("the sigils `data-plane`, `web`"),
+        "{prompt}"
+    );
+
+    // One sigil is not a list, and none is a sentence rather than an empty one:
+    // a session shown "holds the sigils " with nothing after it reads it as a
+    // prompt that was built wrong, and guesses which way.
+    assert!(working_system_prompt("web", &held[1..]).contains("the sigil `web`"));
+    assert!(working_system_prompt("web", &[]).contains("no sigils at all"));
+
+    // And the sigils are listed rather than judged: which scopes they open is
+    // the gate's answer at every write, so this prompt states what is held and
+    // that the gate decides — never a second copy of the rule.
+    assert!(prompt.contains("warlock gates every edit and every new file"));
+}
+
+#[test]
+fn the_sub_task_system_prompt_makes_a_refused_write_the_end_of_the_sub_task() {
+    let prompt = working_system_prompt("data-plane", &["web".to_owned()]);
+
+    for said in [
+        // A write the hook refuses is reported, with the refusal's own words:
+        // that sentence is warlock's, names the path and the scope, and is the
+        // one thing the operator needs to read.
+        "report `blocked`",
+        "refusal's own words as the reason",
+        // And going around it is refused in advance, by each route there is.
+        "Routing around it is not an option",
+        "not with a shell command",
+        "not by writing somewhere else",
+        "not by editing a scope, a sigil or warlock's own configuration",
+    ] {
+        assert!(prompt.contains(said), "{said:?} is not said: {prompt}");
+    }
+}
+
+#[test]
+fn the_sub_task_system_prompt_leaves_the_history_alone() {
+    let prompt = working_system_prompt("data-plane", &["data-plane".to_owned()]);
+
+    // The four in the ticket's own words, so a rewording that drops one fails
+    // here rather than in a run that force-pushed a branch.
+    assert!(prompt.contains("Do not commit, do not push"), "{prompt}");
+    assert!(
+        prompt.contains("do not switch, create or delete a branch"),
+        "{prompt}",
+    );
+    assert!(prompt.contains("do not rewrite history"), "{prompt}");
+
+    // Named as the commands a session would actually reach for, because
+    // "history" is an abstraction and `git reset --hard` is not.
+    for refused in [
+        "git commit",
+        "git push",
+        "git switch",
+        "git checkout",
+        "git rebase",
+        "git reset",
+        "git stash",
+    ] {
+        assert!(
+            prompt.contains(refused),
+            "`{refused}` is not refused by name: {prompt}",
+        );
+    }
+
+    // And the shell is not taken away with them: the tests are what say the
+    // change holds, and a session told to leave `git` alone has to be told the
+    // difference.
+    assert!(prompt.contains("run the tests the sub-task asks for"));
+}
+
+#[test]
+fn the_sub_task_session_runs_under_the_prompt_that_names_its_boundary() {
+    let prompt = working_system_prompt("data-plane", &["data-plane".to_owned()]);
+    let vector = turn_args(&ChatAgent::working(&prompt));
+
+    // Built at the moment the session is raised and passed through untouched,
+    // which is why the constant beside the others is a builder here.
+    assert_eq!(value_of(&vector, "--system-prompt"), Some(prompt.as_str()));
+
+    // The exemption above shown to be a real one: this is the single prompt in
+    // the file that names a writing tool, because a session holding six tools
+    // and told about none of them spends turns asking for what it has.
+    for named in ["Edit", "Write", "Bash"] {
+        assert!(prompt.contains(named), "{named} is not named: {prompt}");
+    }
+}
+
+#[test]
+fn the_sub_task_opening_carries_the_brief_and_the_ticket_as_context() {
+    let opening = working_opening(A_SUB_TASK_BRIEF, A_TICKET_TITLE, A_TICKET_DESCRIPTION, &[]);
+
+    // The sub-task's own brief, whole, and said to be the whole of the work.
+    assert!(opening.contains("Read the queue's own ordering in the panel."));
+    assert!(opening.contains("draws no header."));
+    assert!(opening.contains("the whole of what you are to do"));
+
+    // The ticket, framed rather than merely included: a title and a
+    // description that arrive unframed are read as more work to do, and the
+    // half of them another sub-task owns gets done twice.
+    assert!(opening.contains(A_TICKET_TITLE));
+    assert!(opening.contains("The panel offers a scope with no queue behind it."));
+    assert!(opening.contains("they are not a to-do list"), "{opening}");
+    assert!(opening.contains("belongs to another sub-task or to nobody"));
+
+    // The brief comes first and the ticket after it, so what to do is read
+    // before the context it was cut out of.
+    assert!(opening.find("## Goal") < opening.find(A_TICKET_TITLE));
+}
+
+#[test]
+fn the_sub_task_opening_appends_the_engines_contract_rather_than_restating_it() {
+    let opening = working_opening(A_SUB_TASK_BRIEF, A_TICKET_TITLE, A_TICKET_DESCRIPTION, &[]);
+
+    // Last words said, and exactly once.
+    assert!(opening.ends_with(working::RESULT_PROMPT));
+    assert_eq!(opening.matches(working::RESULT_PROMPT).count(), 1);
+
+    // And written down once: with the engine's own text taken away, nothing
+    // left in the prompt says what the object looks like. Two copies of a
+    // shape is one copy that will disagree with the reader enforcing it.
+    let ours = opening.replace(working::RESULT_PROMPT, "");
+    for key in ["\"status\"", "\"summary\"", "blocked_reason"] {
+        assert!(
+            !ours.contains(key),
+            "{key} is restated outside the engine's contract: {ours}",
+        );
+    }
+}
+
+#[test]
+fn the_sub_task_opening_carries_what_the_finished_siblings_said() {
+    let finished = [
+        ("WAR-140.01", "Added the issues query and its two fakes."),
+        (
+            "WAR-140.03",
+            "Took a named ticket over the queue's own rules.",
+        ),
+    ];
+    let opening = working_opening(
+        A_SUB_TASK_BRIEF,
+        A_TICKET_TITLE,
+        A_TICKET_DESCRIPTION,
+        &finished,
+    );
+
+    for (id, summary) in finished {
+        assert!(opening.contains(id), "{id} is missing: {opening}");
+        assert!(opening.contains(summary), "{summary:?} is missing");
+    }
+
+    // In the order they were handed over, each id above its own summary, so a
+    // reader can tell which finished sibling said what.
+    assert!(opening.find("WAR-140.01") < opening.find("WAR-140.03"));
+    assert!(opening.find("WAR-140.01") < opening.find("Added the issues query"));
+
+    // Said to be finished, because a summary of work already in the tree reads
+    // as work to do otherwise.
+    assert!(opening.contains("already finished"));
+    assert!(opening.contains("neither redo nor revise them"));
+
+    // The orchestrator's history is not in it and cannot be: the whole of what
+    // this builder is handed is the brief, the ticket and these summaries, so
+    // the prompt is those three plus warlock's own framing and nothing else.
+    let ours = [A_SUB_TASK_BRIEF, A_TICKET_TITLE, A_TICKET_DESCRIPTION]
+        .into_iter()
+        .chain(finished.into_iter().flat_map(|(id, summary)| [id, summary]))
+        .fold(opening.clone(), |text, part| text.replace(part, ""));
+    assert!(!ours.contains("WAR-140"));
+}
+
+#[test]
+fn a_sub_task_opening_with_no_finished_siblings_has_no_section_for_them() {
+    let alone = working_opening(A_SUB_TASK_BRIEF, A_TICKET_TITLE, A_TICKET_DESCRIPTION, &[]);
+    let with = working_opening(
+        A_SUB_TASK_BRIEF,
+        A_TICKET_TITLE,
+        A_TICKET_DESCRIPTION,
+        &[("WAR-140.01", "Added the issues query.")],
+    );
+
+    // Not a heading over nothing: a session shown "sub-tasks that have already
+    // finished" followed by silence reads it as siblings that finished and said
+    // nothing about what they did.
+    assert!(!alone.contains("already finished"));
+    assert!(!alone.contains("neither redo nor revise"));
+
+    // And no dangling rule either, which is the part a `contains` would miss:
+    // between the ticket's closing rule and the contract there is nothing but
+    // the blank line separating them.
+    let tail = alone.rsplit_once("---").expect("the ticket block closes").1;
+    assert_eq!(tail, format!("\n\n{}", working::RESULT_PROMPT));
+
+    // The two rules the section brings are the only rules it adds.
+    assert_eq!(
+        alone.matches("---").count() + 2,
+        with.matches("---").count()
+    );
+}
+
+#[test]
+fn a_sub_task_retry_runs_in_the_tree_the_failed_attempt_left() {
+    let opening = working_opening(A_SUB_TASK_BRIEF, A_TICKET_TITLE, A_TICKET_DESCRIPTION, &[]);
+    let again = working_retry(&opening, "  the tests would not build  ");
+
+    // What went wrong last time, trimmed and in the failed attempt's own words.
+    assert!(again.contains("the tests would not build"));
+    assert!(!again.contains("  the tests"));
+
+    // The one fact a second attempt cannot see for itself: warlock undoes
+    // nothing, so this session starts in a tree that may be half changed.
+    for said in [
+        "working tree",
+        "that attempt left",
+        "Nothing it wrote has been undone",
+        "nothing it wrote has been committed",
+        "rather than from the beginning",
+    ] {
+        assert!(again.contains(said), "{said:?} is not said: {again}");
+    }
+
+    // Composed in that order and no other: the notice first, then the opening
+    // carried verbatim, so the sub-task and the shape of the object are still
+    // the last words said and there is no second paraphrase of either to keep
+    // in step.
+    assert!(again.starts_with("This sub-task was attempted before"));
+    assert!(again.ends_with(&opening));
+    assert!(again.ends_with(working::RESULT_PROMPT));
+    assert_eq!(again.matches(working::RESULT_PROMPT).count(), 1);
 }
 
 #[test]
@@ -2314,6 +2783,35 @@ fn a_result_line_missing_a_half_still_gives_up_the_other_one() {
 }
 
 #[test]
+fn a_result_line_that_carries_no_answer_says_why_the_run_failed_instead() {
+    // The line a run stopped at `--max-turns` ends on: no `result` at all, and
+    // the only account of the stopping anywhere — stderr is empty. Without this
+    // the turn limit worth retrying and a crashed CLI are the same silence.
+    let stopped = stream::read_line(
+        r#"{"type":"result","subtype":"error_max_turns","is_error":true,"errors":["Reached maximum number of turns (60)"]}"#,
+    );
+    assert_eq!(
+        stopped.text.as_deref(),
+        Some("error_max_turns Reached maximum number of turns (60)")
+    );
+
+    // Only when the run says it failed, and only when it left no answer: a line
+    // that carries a document carries the document.
+    let answered = stream::read_line(
+        r#"{"type":"result","subtype":"success","result":"a document","is_error":false}"#,
+    );
+    assert_eq!(answered.text.as_deref(), Some("a document"));
+
+    let silent = stream::read_line(r#"{"type":"result","subtype":"error_during_execution"}"#);
+    assert_eq!(silent.text, None);
+
+    // An error with nothing to say about itself is still nothing to say: an
+    // empty string here would be an answer the run never gave.
+    let wordless = stream::read_line(r#"{"type":"result","is_error":true}"#);
+    assert_eq!(wordless.text, None);
+}
+
+#[test]
 fn one_line_of_several_blocks_is_several_activities_in_order() {
     // What a real assistant message looks like when the model thinks, says
     // something, then calls two tools.
@@ -2358,6 +2856,459 @@ fn cancelling_with_no_pass_running_is_a_no_op_that_still_latches() {
 // The stand-ins below are shell scripts, so the whole module is Unix-only. What
 // is under test — the pipes, the timeout, the kill — is not, but a portable
 // stand-in would have to be a second binary to build.
+// A sub-task session written down before it runs: one entry per attempt, taken
+// in the order the attempts come. Its own double rather than [`Scripted`],
+// because what this session does with an attempt that *failed* is the whole of
+// what is under test and a stand-in that can only succeed says nothing about
+// it. Shared through `Arc` for `Scripted`'s reason: the session wires the agent
+// it was given before it sends anything, and a copy that recorded into itself
+// would record nothing a test could read.
+#[derive(Debug)]
+enum Attempt {
+    /// The session's last message.
+    Says(String),
+    /// The run exited non-zero with this on its stderr — the text the
+    /// classification reads, and in these tests the CLI's own words.
+    Failed(String),
+    /// The clock ran out and the child was stopped.
+    RanLong,
+    /// Somebody pressed stop while the attempt was in flight: the handle the
+    /// session wired is latched, and the turn ends as `cancelled` makes it end.
+    Interrupted,
+}
+
+#[derive(Debug, Clone, Default)]
+struct Attempting {
+    attempts: Arc<Mutex<Vec<Attempt>>>,
+    sent: Arc<Mutex<Vec<String>>>,
+    bounds: Arc<Mutex<Vec<u32>>>,
+    cancels: Arc<Mutex<Vec<Cancel>>>,
+}
+
+impl Attempting {
+    fn taking(attempts: impl IntoIterator<Item = Attempt>) -> Self {
+        Self {
+            attempts: Arc::new(Mutex::new(attempts.into_iter().collect())),
+            ..Self::default()
+        }
+    }
+
+    fn sent(&self) -> Vec<String> {
+        self.sent
+            .lock()
+            .expect("the script is not poisoned")
+            .clone()
+    }
+
+    fn turns(&self) -> usize {
+        self.sent.lock().expect("the script is not poisoned").len()
+    }
+
+    /// Every turn bound this stand-in was re-let with, in order: what a
+    /// turn-limit retry is asked to have done.
+    fn bounds(&self) -> Vec<u32> {
+        self.bounds
+            .lock()
+            .expect("the script is not poisoned")
+            .clone()
+    }
+
+    fn cancelled(&self) -> bool {
+        self.cancels
+            .lock()
+            .expect("the script is not poisoned")
+            .iter()
+            .any(Cancel::is_cancelled)
+    }
+}
+
+impl Wired for Attempting {
+    fn wired(&self, cancel: Cancel, _activities: Activities) -> Self {
+        self.cancels
+            .lock()
+            .expect("the script is not poisoned")
+            .push(cancel);
+        self.clone()
+    }
+}
+
+impl Converses for Attempting {
+    fn turn(&self, message: &str) -> Result<String, agent::Error> {
+        self.sent
+            .lock()
+            .expect("the script is not poisoned")
+            .push(message.to_owned());
+        let mut attempts = self.attempts.lock().expect("the script is not poisoned");
+        assert!(
+            !attempts.is_empty(),
+            "an attempt was made the script has no answer for",
+        );
+        match attempts.remove(0) {
+            Attempt::Says(text) => Ok(text),
+            Attempt::Failed(said) => Err(agent::Error::Failed {
+                code: Some(1),
+                stderr: said,
+            }),
+            Attempt::RanLong => Err(agent::Error::TimedOut {
+                after: WORKING_TIMEOUT,
+            }),
+            Attempt::Interrupted => {
+                // Where a real cancel comes from: a handle somebody else
+                // pressed, which is the one this session minted and wired.
+                for cancel in self
+                    .cancels
+                    .lock()
+                    .expect("the script is not poisoned")
+                    .iter()
+                {
+                    cancel.cancel();
+                }
+                Err(agent::Error::Io {
+                    source: io::Error::new(io::ErrorKind::Interrupted, "the run was cancelled"),
+                })
+            }
+        }
+    }
+
+    fn raised(&self, _model: &str, _effort: &str) -> Self {
+        self.clone()
+    }
+}
+
+impl Bounded for Attempting {
+    fn at_turns(&self, turns: u32) -> Self {
+        self.bounds
+            .lock()
+            .expect("the script is not poisoned")
+            .push(turns);
+        self.clone()
+    }
+}
+
+const A_SUB_TASK: &str = "## Goal\nSharpen the knife.";
+const ITS_TICKET: &str = "The knife is blunt";
+const ITS_DESCRIPTION: &str = "Two people have cut themselves sawing with it.";
+
+fn an_opening() -> String {
+    working_opening(A_SUB_TASK, ITS_TICKET, ITS_DESCRIPTION, &[])
+}
+
+fn a_session(agent: &Attempting) -> Working<Attempting> {
+    Working::on(agent, &an_opening())
+}
+
+// Named apart from `answered` above, which reads a drafting session's reply:
+// two sessions, two vocabularies, and one helper serving both would be a name
+// that means something different depending on where it is read.
+fn told(worked: &Worked) -> &working::Accepted {
+    match worked {
+        Worked::Answered(accepted) => accepted,
+        Worked::Halted(stopped) => panic!("the session halted rather than answering: {stopped}"),
+    }
+}
+
+fn stopping(worked: &Worked) -> &Stopped {
+    match worked {
+        Worked::Halted(stopped) => stopped,
+        Worked::Answered(accepted) => panic!("the session answered: {accepted:?}"),
+    }
+}
+
+// What `claude` actually writes when a run stops for each of the reasons worth
+// telling apart — the result line's own subtype for a turn limit, which reaches
+// the failure through `judge` because stderr is empty, and the API's error text
+// for the rest. Written down here so a test says what the CLI says rather than
+// what the classification happens to look for.
+const AT_THE_TURN_LIMIT: &str = "error_max_turns Reached maximum number of turns (60)";
+const AT_THE_USAGE_LIMIT: &str = "Claude AI usage limit reached|1750000000";
+const AT_THE_RATE_LIMIT: &str = r#"API Error: 429 {"type":"error","error":{"type":"rate_limit_error","message":"Number of \
+       requests has exceeded your rate limit"}}"#;
+const WITH_A_BAD_CREDENTIAL: &str = r#"API Error: 401 {"type":"error","error":{"type":"authentication_error","message":"invalid \
+       x-api-key"}}"#;
+
+#[test]
+fn a_sub_task_that_finishes_is_one_attempt_and_the_summary_the_session_gave() {
+    let agent = Attempting::taking([Attempt::Says(working::stub_answer(
+        "Sharpened it on the whetstone and left the drawer as it was.",
+    ))]);
+    let mut session = a_session(&agent);
+
+    let worked = session.run();
+
+    let accepted = told(&worked);
+    assert_eq!(accepted.reported(), &working::Reported::Done);
+    assert_eq!(
+        accepted.summary(),
+        "Sharpened it on the whetstone and left the drawer as it was."
+    );
+    assert_eq!(session.attempts(), 1);
+    assert_eq!(
+        agent.sent(),
+        vec![an_opening()],
+        "the first attempt is the opening, verbatim and alone",
+    );
+}
+
+#[test]
+fn a_sub_task_reported_blocked_is_the_end_of_it_rather_than_something_to_retry() {
+    let refusal = "`warlock check --gate` refused the write to `docs/brief.md`";
+    let agent = Attempting::taking([
+        Attempt::Says(working::stub_reply(
+            "blocked",
+            "Everything but the document; the gate refused that file.",
+            Some(refusal),
+        )),
+        // Never reached: a block is an answer, and warlock arguing with the
+        // one party that was in the tree is not a retry.
+        Attempt::Says(working::stub_answer("did it anyway")),
+    ]);
+    let mut session = a_session(&agent);
+
+    let worked = session.run();
+
+    assert_eq!(
+        told(&worked).reported(),
+        &working::Reported::Blocked(refusal.to_owned())
+    );
+    assert_eq!(session.attempts(), 1);
+    assert_eq!(agent.turns(), 1);
+}
+
+#[test]
+fn a_failed_attempt_is_taken_again_with_the_retry_prompt_and_can_finish() {
+    let reason = "the test suite would not build";
+    let agent = Attempting::taking([
+        Attempt::Says(working::stub_reply(
+            "failed",
+            "Got half of it in.",
+            Some(reason),
+        )),
+        Attempt::Says(working::stub_answer("Fixed the build and finished it.")),
+    ]);
+    let mut session = a_session(&agent);
+
+    let worked = session.run();
+
+    assert_eq!(told(&worked).reported(), &working::Reported::Done);
+    assert_eq!(session.attempts(), 2);
+
+    let sent = agent.sent();
+    assert_eq!(sent[0], an_opening());
+    assert_eq!(
+        sent[1],
+        working_retry(&an_opening(), reason),
+        "the second attempt is the retry prompt over the same opening",
+    );
+    assert!(sent[1].contains(reason), "{}", sent[1]);
+}
+
+#[test]
+fn a_sub_task_that_keeps_failing_is_given_up_after_the_attempts_it_is_allowed() {
+    let failing = || {
+        Attempt::Says(working::stub_reply(
+            "failed",
+            "Could not get the tests to pass.",
+            Some("the same three tests fail"),
+        ))
+    };
+    let agent = Attempting::taking([
+        failing(),
+        failing(),
+        failing(),
+        // The attempt that must not happen: three is the whole allowance.
+        Attempt::Says(working::stub_answer("a fourth attempt nobody allowed")),
+    ]);
+    let mut session = a_session(&agent);
+
+    let worked = session.run();
+
+    assert_eq!(
+        told(&worked).reported(),
+        &working::Reported::Failed("the same three tests fail".to_owned())
+    );
+    assert_eq!(session.attempts(), WORKING_ATTEMPTS);
+    assert_eq!(agent.turns(), WORKING_ATTEMPTS);
+}
+
+#[test]
+fn an_answer_that_is_not_the_object_is_a_failure_that_keeps_what_was_said() {
+    let prose = "I sharpened the knife. It took a while but it is sharp now.";
+    let agent = Attempting::taking([
+        Attempt::Says(prose.to_owned()),
+        Attempt::Says(prose.to_owned()),
+        Attempt::Says(prose.to_owned()),
+    ]);
+    let mut session = a_session(&agent);
+
+    let worked = session.run();
+
+    let accepted = told(&worked);
+    assert!(
+        matches!(accepted.reported(), working::Reported::Failed(_)),
+        "{accepted:?}"
+    );
+    assert_eq!(accepted.unreadable(), Some(&working::Unreadable::NoObject));
+    assert_eq!(
+        accepted.reply(),
+        prose,
+        "the session's own last message is the only account of the attempt there is",
+    );
+    // Unreadable is a failure, so it is retried like one — and gives up where
+    // one does.
+    assert_eq!(session.attempts(), WORKING_ATTEMPTS);
+}
+
+#[test]
+fn an_object_that_will_not_parse_is_the_same_failure_and_is_kept_too() {
+    let malformed = r#"{"status": "done", "summary": "Sharpened it",}"#;
+    let agent = Attempting::taking([
+        Attempt::Says(malformed.to_owned()),
+        Attempt::Says(working::stub_answer("Sharpened it, and said so properly.")),
+    ]);
+    let mut session = a_session(&agent);
+
+    let worked = session.run();
+
+    assert_eq!(told(&worked).reported(), &working::Reported::Done);
+    assert_eq!(session.attempts(), 2);
+    assert!(
+        agent.sent()[1].contains("could not be read"),
+        "the retry is told what was wrong with the answer: {}",
+        agent.sent()[1],
+    );
+}
+
+#[test]
+fn a_turn_limit_is_taken_again_on_twice_the_turns() {
+    let agent = Attempting::taking([
+        Attempt::Failed(AT_THE_TURN_LIMIT.to_owned()),
+        Attempt::Says(working::stub_answer("Finished it with the room to do it.")),
+    ]);
+    let mut session = a_session(&agent);
+
+    let worked = session.run();
+
+    assert_eq!(told(&worked).reported(), &working::Reported::Done);
+    assert_eq!(session.attempts(), 2);
+    assert_eq!(
+        agent.bounds(),
+        vec![WORKING_TURNS * 2],
+        "the retry after a turn limit is the one that runs on different terms",
+    );
+    assert!(
+        agent.sent()[1].contains("turn limit"),
+        "the retry is told why the last attempt stopped: {}",
+        agent.sent()[1],
+    );
+}
+
+#[test]
+fn a_second_turn_limit_doubles_again_and_the_third_is_the_end_of_it() {
+    let agent = Attempting::taking([
+        Attempt::Failed(AT_THE_TURN_LIMIT.to_owned()),
+        Attempt::Failed(AT_THE_TURN_LIMIT.to_owned()),
+        Attempt::Failed(AT_THE_TURN_LIMIT.to_owned()),
+    ]);
+    let mut session = a_session(&agent);
+
+    let worked = session.run();
+
+    assert_eq!(stopping(&worked), &Stopped::TurnLimit);
+    assert_eq!(session.attempts(), WORKING_ATTEMPTS);
+    assert_eq!(agent.bounds(), vec![WORKING_TURNS * 2, WORKING_TURNS * 4]);
+}
+
+#[test]
+fn what_the_account_or_the_credential_refuses_is_named_and_not_taken_again() {
+    let refusals = [
+        (AT_THE_USAGE_LIMIT, Stopped::UsageLimit),
+        (AT_THE_RATE_LIMIT, Stopped::RateLimit),
+        (WITH_A_BAD_CREDENTIAL, Stopped::BadCredential),
+    ];
+
+    for (said, expected) in refusals {
+        let agent = Attempting::taking([
+            Attempt::Failed(said.to_owned()),
+            // A second attempt would be a second refusal, and this is what
+            // says warlock does not spend one finding that out.
+            Attempt::Says(working::stub_answer("an attempt nobody allowed")),
+        ]);
+        let mut session = a_session(&agent);
+
+        let worked = session.run();
+
+        assert_eq!(stopping(&worked), &expected, "misread: {said}");
+        assert_eq!(
+            session.attempts(),
+            1,
+            "retried what cannot be retried: {said}"
+        );
+        assert_eq!(agent.turns(), 1);
+        assert!(agent.bounds().is_empty());
+    }
+}
+
+#[test]
+fn a_failure_the_list_does_not_name_keeps_what_the_run_said_and_is_not_retried() {
+    let agent = Attempting::taking([
+        Attempt::Failed("Segmentation fault".to_owned()),
+        Attempt::Says(working::stub_answer("an attempt nobody allowed")),
+    ]);
+    let mut session = a_session(&agent);
+
+    let worked = session.run();
+
+    let Stopped::Broke(said) = stopping(&worked) else {
+        panic!("a crash was read as something warlock has a plan for: {worked:?}");
+    };
+    assert!(said.contains("Segmentation fault"), "{said}");
+    assert_eq!(agent.turns(), 1);
+}
+
+#[test]
+fn an_attempt_that_runs_out_of_clock_is_the_end_of_the_sub_task() {
+    let agent = Attempting::taking([
+        Attempt::RanLong,
+        Attempt::Says(working::stub_answer("an attempt nobody allowed")),
+    ]);
+    let mut session = a_session(&agent);
+
+    let worked = session.run();
+
+    // Not retried: the clock is warlock's own bound, and half an hour that ran
+    // out is not half an hour that would have been enough twice.
+    assert_eq!(stopping(&worked), &Stopped::TimedOut);
+    assert_eq!(agent.turns(), 1);
+}
+
+#[test]
+fn a_cancelled_attempt_is_not_taken_again_and_is_not_blamed_on_the_session() {
+    let agent = Attempting::taking([
+        Attempt::Interrupted,
+        Attempt::Says(working::stub_answer("an attempt nobody asked for")),
+    ]);
+    let mut session = a_session(&agent);
+
+    let worked = session.run();
+
+    assert_eq!(stopping(&worked), &Stopped::Cancelled);
+    assert_eq!(agent.turns(), 1);
+    assert!(agent.cancelled());
+}
+
+#[test]
+fn the_handle_a_sub_task_session_hands_out_reaches_the_agent_it_runs() {
+    let agent = Attempting::taking([Attempt::Says(working::stub_answer("nothing to do"))]);
+    let session = a_session(&agent);
+
+    session.cancel().cancel();
+
+    assert!(
+        agent.cancelled(),
+        "the session's handle reached some other copy of the agent",
+    );
+}
+
 #[cfg(unix)]
 mod unix {
     use std::io::ErrorKind;
@@ -3342,6 +4293,237 @@ mod unix {
             }
         }
     }
+
+    // The one session that may change the tree, run through the plumbing at the
+    // top of the module rather than against a stand-in in memory: a small
+    // program in `claude`'s place that keeps its argv, its environment and its
+    // stdin, and answers with a result line the way the real one does.
+    //
+    // A child module for `turns`'s reason — the helpers above are reusable and
+    // a second copy of them would drift.
+    mod sub_task {
+        use std::collections::HashMap;
+        use std::io::Write as _;
+        use std::process::{Command, Stdio};
+        use std::{env, fs};
+
+        use warlock_engine::working;
+
+        use super::super::{value_of, words};
+        use super::{clean_up, scratch};
+        use crate::{
+            ChatAgent, Stopped, WORKING_ATTEMPTS, WORKING_TURNS, Worked, Working, working_opening,
+            working_system_prompt,
+        };
+
+        // Set by the shell that runs the stand-in, and so present in the
+        // child's environment without anybody having put them there.
+        const THE_SHELLS_OWN: [&str; 4] = ["_", "PWD", "OLDPWD", "SHLVL"];
+
+        // Nothing a secret is ever spelt with should be anywhere in the vector.
+        // Deliberately not the bare word `key`, which a path or a prompt can
+        // hold innocently: these are the shapes a credential arrives in.
+        const A_SECRET_LOOKS_LIKE: [&str; 9] = [
+            "api_key", "api-key", "apikey", "x-api", "token", "secret", "bearer", "password",
+            "sk-ant",
+        ];
+
+        #[test]
+        fn nothing_of_a_key_reaches_the_child_that_works_a_sub_task() {
+            let directory = scratch("sub-task-child");
+            let (argv, environment, stdin) = (
+                directory.join("argv"),
+                directory.join("environment"),
+                directory.join("stdin"),
+            );
+            let answered = working::stub_answer("Recorded what it was handed.");
+            let result = serde_json::json!({
+                "type": "result",
+                "subtype": "success",
+                "result": answered,
+            })
+            .to_string();
+            // NUL-separated on both sides, so an argument or a value holding a
+            // newline — the system prompt holds several — is still read back as
+            // the one word it was.
+            let stand_in = directory.join("recorder");
+            written(
+                &stand_in,
+                &format!(
+                    "#!/bin/sh\n\
+                     for arg in \"$@\"; do printf '%s\\0' \"$arg\"; done > '{argv}'\n\
+                     env -0 > '{environment}'\n\
+                     cat > '{stdin}'\n\
+                     printf '%s\\n' '{result}'\n",
+                    argv = argv.display(),
+                    environment = environment.display(),
+                    stdin = stdin.display(),
+                ),
+            );
+
+            let agent = ChatAgent::working(&working_system_prompt(
+                "crates/warlock-tui/**",
+                &["warlock-tui".to_owned()],
+            ))
+            .with_program(&stand_in);
+            // Read before the run: the first child to spawn claims the session,
+            // and the flag naming it flips from `--session-id` to `--resume`.
+            let built = words(&agent.args());
+            let opening = working_opening(
+                "## Goal\nSharpen the knife.",
+                "The knife is blunt",
+                "Two people have cut themselves sawing with it.",
+                &[],
+            );
+
+            let worked = Working::on(&agent, &opening).run();
+
+            // The plumbing worked end to end: the prompt went down stdin on the
+            // writer thread, the stream came back through the readers, and the
+            // result was read as the contract's object.
+            let Worked::Answered(accepted) = &worked else {
+                panic!("the stand-in's result line did not come back as an answer: {worked:?}");
+            };
+            assert_eq!(accepted.reported(), &working::Reported::Done);
+            assert_eq!(
+                fs::read_to_string(&stdin).expect("the stand-in kept its stdin"),
+                opening,
+                "something other than the opening reached the child",
+            );
+
+            // The whole vector, word for word: what the child was given is what
+            // warlock built and nothing else was appended on the way.
+            let handed = nul_separated(&argv);
+            assert_eq!(handed, built);
+            for word in &handed {
+                let word = word.to_lowercase();
+                for shape in A_SECRET_LOOKS_LIKE {
+                    assert!(
+                        !word.contains(shape),
+                        "`{shape}` in an argument of the sub-task session: {word}",
+                    );
+                }
+            }
+
+            // And the whole environment. Every variable the child has is one
+            // this process already had, with the same value: warlock sets
+            // nothing on the child, so there is nowhere for a key it holds to
+            // travel. What the operator's own shell exports is the operator's
+            // business and travels into every child they run.
+            let mine: HashMap<String, String> = env::vars().collect();
+            let held = nul_separated(&environment);
+            for (name, value) in held.iter().map(String::as_str).filter_map(split) {
+                if THE_SHELLS_OWN.contains(&name.as_str()) {
+                    continue;
+                }
+                assert_eq!(
+                    mine.get(&name),
+                    Some(&value),
+                    "`{name}` was put in the child's environment by warlock",
+                );
+            }
+
+            clean_up(&directory);
+        }
+
+        #[test]
+        fn a_real_turn_limit_is_read_off_the_stream_and_retried_on_twice_the_turns() {
+            // The whole road from what `claude` actually does at `--max-turns`
+            // to the flag the retry is spawned with: the CLI exits non-zero,
+            // says nothing at all on stderr, and puts the stopping on the
+            // result line — so this is what says the fallback in `judge`, the
+            // reading in `stream::failure` and the classification are one
+            // working path and not three plausible ones.
+            let directory = scratch("sub-task-turn-limit");
+            let argv = directory.join("argv");
+            let at_the_limit = serde_json::json!({
+                "type": "result",
+                "subtype": "error_max_turns",
+                "is_error": true,
+                "errors": ["Reached maximum number of turns (60)"],
+            })
+            .to_string();
+            let stand_in = directory.join("out-of-turns");
+            written(
+                &stand_in,
+                &format!(
+                    "#!/bin/sh\n\
+                     for arg in \"$@\"; do printf '%s\\0' \"$arg\"; done > '{argv}'\n\
+                     cat > /dev/null\n\
+                     printf '%s\\n' '{at_the_limit}'\n\
+                     exit 1\n",
+                    argv = argv.display(),
+                ),
+            );
+
+            let agent = ChatAgent::working("sharpen the knife").with_program(&stand_in);
+            let opening = working_opening("## Goal\nSharpen it.", "Blunt", "It is blunt.", &[]);
+
+            let mut session = Working::on(&agent, &opening);
+            let worked = session.run();
+
+            assert_eq!(worked, Worked::Halted(Stopped::TurnLimit));
+            assert_eq!(session.attempts(), WORKING_ATTEMPTS);
+            // The last attempt's own vector: the doubling is a flag the child
+            // was spawned with, not a number warlock kept to itself.
+            let last = nul_separated(&argv);
+            assert_eq!(
+                value_of(&last, "--max-turns"),
+                Some((WORKING_TURNS * 4).to_string().as_str()),
+            );
+
+            clean_up(&directory);
+        }
+
+        /// Write the stand-in through a child of our own rather than with
+        /// [`fs::write`], and make it runnable there too.
+        ///
+        /// Not fussiness: a whole test suite is running on other threads of
+        /// this process, and on Linux a program cannot be `exec`ed while any
+        /// process holds a writable handle on it. A file this process writes
+        /// itself is inherited by whatever child another thread happens to
+        /// spawn in that instant, and the run comes back `ETXTBSY` — "Text file
+        /// busy" — on that thread's timing and nobody else's. The handle here
+        /// belongs to a child that has already exited by the time the stand-in
+        /// is spawned, so there is no window to lose.
+        fn written(path: &std::path::Path, body: &str) {
+            let mut child = Command::new("/bin/sh")
+                .arg("-c")
+                .arg(format!(
+                    "cat > '{path}' && chmod 755 '{path}'",
+                    path = path.display()
+                ))
+                .stdin(Stdio::piped())
+                .spawn()
+                .expect("a shell to write the stand-in with");
+            child
+                .stdin
+                .take()
+                .expect("stdin was piped")
+                .write_all(body.as_bytes())
+                .expect("the stand-in is written");
+            let status = child.wait().expect("the writing shell is reaped");
+            assert!(status.success(), "the stand-in was not written: {status}");
+        }
+
+        // Everything but the empty tail a trailing separator leaves. Empties in
+        // the middle are kept: `--setting-sources ""` is an argument warlock
+        // passes deliberately, and a reader that dropped it would be reading a
+        // vector the child never got.
+        fn nul_separated(path: &std::path::Path) -> Vec<String> {
+            let text = fs::read_to_string(path).expect("the stand-in recorded what it was given");
+            let mut parts: Vec<String> = text.split('\0').map(str::to_owned).collect();
+            if parts.last().is_some_and(String::is_empty) {
+                parts.pop();
+            }
+            parts
+        }
+
+        fn split(entry: &str) -> Option<(String, String)> {
+            let (name, value) = entry.split_once('=')?;
+            Some((name.to_owned(), value.to_owned()))
+        }
+    }
 }
 
 #[test]
@@ -3355,4 +4537,190 @@ fn a_failure_arrives_quickly_rather_than_after_the_timeout() {
     let _ = agent.run(&agent::Request::new("anything", "."));
 
     assert!(started.elapsed() < Duration::from_secs(5));
+}
+
+/// The one test in the crate that spawns the real `claude` and spends a model
+/// call, which is why it is `#[ignore]`d and run by hand with
+/// `cargo test -p warlock-tui -- --ignored --nocapture`. Everything else here
+/// stands `claude` in with `/bin/sh`.
+///
+/// It exists because one thing about the CLI could not be read off its
+/// documentation: whether a `PreToolUse` hook handed in on the invocation with
+/// `--settings` still loads when `--setting-sources ""` says to load no settings
+/// from anywhere. The finding is written up in
+/// [the module doc](mod@crate::claude); this is what establishes it, and what
+/// would catch the CLI changing its mind.
+mod against_the_real_cli {
+    use std::fs;
+    use std::io::Read;
+    use std::process::{Command, Stdio};
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    use super::super::{kill_and_reap, watch};
+
+    /// Generous, because this is a real model call deciding to use a real tool,
+    /// and it is a backstop rather than an expectation: the probe takes well
+    /// under a minute when it works.
+    const PROBE_TIMEOUT: Duration = Duration::from_mins(3);
+
+    /// What the hook answers with, and what makes the refusal this probe's own
+    /// rather than any other gate on the machine.
+    const REASON: &str = "warlock hook probe";
+
+    /// Three ways the probe can come out, only one of which is an answer.
+    #[derive(Debug)]
+    enum Observed {
+        /// The hook ran: it was handed the tool call, and it refused it.
+        HookFired { payload: String, scratch: String },
+        /// The hook did not run: the edit went through untouched.
+        EditWentThrough,
+        /// The session never reached for `Edit`, so nothing was asked of the
+        /// hook and the run says nothing either way.
+        NoEditAttempted { reply: String },
+    }
+
+    #[test]
+    #[ignore = "spawns the real `claude` and spends a model call"]
+    fn a_pre_tool_use_hook_given_with_settings_loads_under_no_setting_sources() {
+        let observed = probe();
+
+        match observed {
+            Observed::HookFired { payload, scratch } => {
+                assert!(
+                    payload.contains("\"tool_name\":\"Edit\""),
+                    "the hook fired, but on something other than `Edit`: {payload}"
+                );
+                assert_eq!(
+                    scratch, BEFORE,
+                    "the hook refused the edit and the edit happened anyway"
+                );
+            }
+            Observed::EditWentThrough => panic!(
+                "the `--settings` hook did not load under `--setting-sources \"\"`. \
+                 The recorded decision holds: the sub-task session keeps the hook and \
+                 gives up `--setting-sources`, never the reverse. Drop \
+                 `--setting-sources` from the session's arguments and say so in the \
+                 module doc."
+            ),
+            Observed::NoEditAttempted { reply } => panic!(
+                "the session never called `Edit`, so the probe establishes nothing. \
+                 Run it again; if it keeps happening the prompt or the tool grant has \
+                 gone stale. The reply was:\n{reply}"
+            ),
+        }
+    }
+
+    const BEFORE: &str = "before\n";
+
+    /// Run the probe: a session with `Edit`, a hook on `Edit` that records what
+    /// it was handed and refuses it, and `--setting-sources ""` alongside.
+    ///
+    /// Nothing here depends on what the model *says*. The two observables are
+    /// files: the payload the hook writes, and whether the scratch file moved.
+    fn probe() -> Observed {
+        let directory = tempfile::tempdir().expect("a temporary directory");
+        let work = directory.path().join("work");
+        fs::create_dir(&work).expect("a working directory for the session");
+        let scratch = work.join("scratch.txt");
+        fs::write(&scratch, BEFORE).expect("the file the session is asked to edit");
+        let payload = directory.path().join("payload.json");
+
+        // The hook is a shell line rather than a script on disk: it needs no
+        // execute bit, and a command the CLI runs through a shell can both
+        // record its stdin and answer on its stdout.
+        let denial = serde_json::json!({
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "deny",
+                "permissionDecisionReason": REASON,
+            }
+        })
+        .to_string();
+        let command = format!(
+            "cat > '{payload}'; printf '%s' '{denial}'",
+            payload = payload.display()
+        );
+        // Built with `serde_json` so the escaping of the line above is the
+        // library's problem and not a quoting puzzle written out by hand.
+        let settings = serde_json::json!({
+            "hooks": {
+                "PreToolUse": [{
+                    "matcher": "Edit",
+                    "hooks": [{ "type": "command", "command": command }],
+                }]
+            }
+        })
+        .to_string();
+
+        let reply = run(
+            &work,
+            &[
+                "--print",
+                "--tools",
+                "Read,Edit",
+                "--allowedTools",
+                "Read",
+                "Edit",
+                "--setting-sources",
+                "",
+                "--settings",
+                &settings,
+                "Use the Edit tool to change the word before to after in \
+                 scratch.txt. Do not use Bash.",
+            ],
+        );
+
+        let after = fs::read_to_string(&scratch).expect("the scratch file is still there");
+        match fs::read_to_string(&payload) {
+            Ok(payload) => Observed::HookFired {
+                payload,
+                scratch: after,
+            },
+            Err(_) if after == BEFORE => Observed::NoEditAttempted { reply },
+            Err(_) => Observed::EditWentThrough,
+        }
+    }
+
+    /// Spawn `claude` and come back with what it printed, killed and reaped if
+    /// it outstays [`PROBE_TIMEOUT`].
+    ///
+    /// The same shape as [`crate::claude`]'s own runs and for the same reasons:
+    /// reader threads so a full pipe cannot deadlock the wait, and a polling
+    /// waiter over a shared handle so the handle is still there to kill with.
+    fn run(work: &std::path::Path, args: &[&str]) -> String {
+        let mut child = Command::new("claude")
+            .args(args)
+            .current_dir(work)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("`claude` is on PATH: this test is opted into on a machine that has it");
+
+        let stdout = child.stdout.take().expect("stdout was asked for");
+        let stderr = child.stderr.take().expect("stderr was asked for");
+        let readers = [reading(stdout), reading(stderr)];
+
+        let child = Arc::new(Mutex::new(child));
+        let (waiter, exits) = watch(&child);
+        if exits.recv_timeout(PROBE_TIMEOUT).is_err() {
+            kill_and_reap(&child);
+        }
+        let _ = waiter.join();
+
+        let mut reply = String::new();
+        for reader in readers {
+            reply.push_str(&reader.join().expect("the reader thread ran"));
+        }
+        reply
+    }
+
+    fn reading<R: Read + Send + 'static>(mut source: R) -> std::thread::JoinHandle<String> {
+        std::thread::spawn(move || {
+            let mut text = String::new();
+            let _ = source.read_to_string(&mut text);
+            text
+        })
+    }
 }
