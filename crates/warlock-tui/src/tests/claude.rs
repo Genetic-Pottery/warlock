@@ -10,8 +10,9 @@ use super::{
     ChatAgent, ClaudeAgent, Converses, DRAFT_NOW_INSTRUCTION, DRAFTING_CONTRACT,
     DRAFTING_ONE_SHOT_CONTRACT, DRAFTING_ROUNDS, Drafted, Drafting, EFFORT, EFFORT_VAR,
     INVOCATION_TIMEOUT, MODEL, MODEL_VAR, NOTHING_SETTLES_IT, OsString, PROPOSING_SYSTEM_PROMPT,
-    Replied, SYSTEM_PROMPT, WRITE_INSTRUCTION, Wired, brief_instruction, drafting_opening,
-    or_default, overridden, propose_answer, proposing_instruction, render, session_id,
+    Replied, SYSTEM_PROMPT, WORKING_TIMEOUT, WORKING_TURNS, WRITE_INSTRUCTION, Wired,
+    brief_instruction, drafting_opening, or_default, overridden, propose_answer,
+    proposing_instruction, render, session_id,
 };
 use crate::brief::scope_block_in;
 use crate::panel::Mode;
@@ -957,6 +958,217 @@ fn a_proposing_session_may_read_the_repository_and_do_nothing_whatever_else() {
 
     names_no_writing_tool(&vector, "a proposing turn");
     assert_eq!(ChatAgent::proposing().timeout(), INVOCATION_TIMEOUT);
+}
+
+// Stands in for the prompt sub-task 4 writes: this file is about the fence, and
+// none of the assertions below read a word of what the session is told. Plain on
+// purpose — no capitalised tool name in it — so that a vector found to name
+// `Edit` is the grant naming it and not this string.
+const WORKING_PROMPT: &str = "You are working one sub-task of one ticket.";
+
+#[test]
+fn the_sub_task_session_is_granted_exactly_six_tools_in_both_flags() {
+    let vector = turn_args(&ChatAgent::working(WORKING_PROMPT));
+    let granted = value_of(&vector, "--tools").expect("the sub-task session says what it holds");
+
+    // Exactly these, in this order, and the same list in both flags:
+    // `--tools` is what the session has at all and `--allowedTools` is what it
+    // may use without stopping to ask a person who is not there.
+    assert_eq!(granted, "Read,Grep,Glob,Edit,Write,Bash");
+    assert_eq!(
+        granted.split(',').collect::<Vec<_>>(),
+        ["Read", "Grep", "Glob", "Edit", "Write", "Bash"],
+    );
+    assert_eq!(value_of(&vector, "--allowedTools"), Some(granted));
+
+    // One of each flag, so neither grant is a first word some later pair
+    // quietly widens.
+    for flag in ["--tools", "--allowedTools"] {
+        assert_eq!(
+            vector.iter().filter(|word| *word == flag).count(),
+            1,
+            "{flag} is named twice in the sub-task session's vector",
+        );
+    }
+
+    // And nothing else that hands a tool over or waves a permission through:
+    // the grant above is the whole of what this session may do.
+    for refused in [
+        "--permission-mode",
+        "--dangerously-skip-permissions",
+        "--allow-dangerously-skip-permissions",
+        "--add-dir",
+        "--agents",
+        "--mcp-config",
+    ] {
+        assert!(
+            !vector.iter().any(|word| word == refused),
+            "{refused} reached the sub-task session's vector",
+        );
+    }
+}
+
+#[test]
+fn the_sub_task_session_reaches_no_machine_settings_and_no_mcp_server() {
+    let vector = turn_args(&ChatAgent::working(WORKING_PROMPT));
+
+    // This machine's user, project and local settings are refused, so the
+    // session is told what warlock told it and not what somebody's global
+    // hooks or a repository's own instructions would say.
+    assert_eq!(value_of(&vector, "--setting-sources"), Some(""));
+    // And no MCP server at all: `--strict-mcp-config` with nothing beside it
+    // is the only way the session cannot reach Linear — settings sources are
+    // not where MCP servers come from. So warlock is the only route out.
+    assert!(vector.iter().any(|word| word == "--strict-mcp-config"));
+    assert!(!vector.iter().any(|word| word == "--mcp-config"));
+
+    // Both flags together, which is sub-task 2's finding and not an
+    // assumption: a `PreToolUse` hook given with `--settings` still loads
+    // under `--setting-sources ""`, established against the real CLI by
+    // `a_pre_tool_use_hook_given_with_settings_loads_under_no_setting_sources`
+    // below. Were that ever to change, the hook stays and this flag goes.
+    assert!(vector.iter().any(|word| word == "--settings"));
+}
+
+#[test]
+fn the_sub_task_session_carries_the_gate_hook_inline_with_no_file_on_disk() {
+    let vector = turn_args(&ChatAgent::working(WORKING_PROMPT));
+    let settings = value_of(&vector, "--settings").expect("the sub-task session brings its fence");
+
+    // Inline JSON and not a path: `--settings` takes either, and a file would
+    // be settings on disk outliving a session that may have been killed, plus
+    // a path for somebody to clean up. Asserted both ways round — it parses as
+    // an object, and there is no such file to have been written.
+    assert!(settings.starts_with('{'), "not inline JSON: {settings}");
+    assert!(
+        !std::path::Path::new(settings).exists(),
+        "the fence was written to a file: {settings}",
+    );
+    let settings: serde_json::Value =
+        serde_json::from_str(settings).expect("the fence is a JSON object");
+
+    let hooks = settings["hooks"]["PreToolUse"]
+        .as_array()
+        .expect("a PreToolUse hook");
+    assert_eq!(hooks.len(), 1);
+    let matcher = hooks[0]["matcher"].as_str().expect("a matcher");
+    for gated in ["Edit", "Write", "MultiEdit", "NotebookEdit"] {
+        assert!(
+            matcher.split('|').any(|named| named == gated),
+            "{gated} is not gated: {matcher}",
+        );
+    }
+    // `Bash` is not in the matcher and cannot be: a hook is handed a command
+    // string rather than a path, and a shell line writes wherever the operator
+    // can. A fact about the fence, asserted so it stays a stated one.
+    assert!(!matcher.split('|').any(|named| named == "Bash"));
+
+    let ran = hooks[0]["hooks"].as_array().expect("one command to run");
+    assert_eq!(ran.len(), 1);
+    assert_eq!(ran[0]["type"], "command");
+    let command = ran[0]["command"].as_str().expect("a command line");
+    assert!(command.ends_with("check --gate"), "not the gate: {command}");
+    // Warlock's own binary, named absolutely, because the hook runs in a child
+    // of `claude` whose working directory is the repository being worked.
+    let program = std::env::current_exe().expect("the test binary knows its own path");
+    assert!(
+        command.contains(&program.display().to_string()),
+        "the hook names some other warlock: {command}",
+    );
+}
+
+#[test]
+fn the_sub_task_session_runs_under_its_own_clock_and_its_own_turn_limit() {
+    let agent = ChatAgent::working(WORKING_PROMPT);
+
+    // Not the five minutes a pass gets: that clock is sized for one document,
+    // and this session edits files and runs a test suite that is minutes on
+    // its own.
+    assert_eq!(agent.timeout(), WORKING_TIMEOUT);
+    assert_ne!(agent.timeout(), INVOCATION_TIMEOUT);
+    assert_ne!(
+        WORKING_TIMEOUT.as_secs(),
+        300,
+        "the sub-task session is running on a pass's five minutes",
+    );
+    assert!(WORKING_TIMEOUT > INVOCATION_TIMEOUT);
+
+    // The second bound, and a different kind: a session can spin cheaply
+    // inside one tool loop for half an hour, and it can also spend its turns
+    // in a minute.
+    let vector = turn_args(&agent);
+    assert_eq!(
+        value_of(&vector, "--max-turns"),
+        Some(WORKING_TURNS.to_string().as_str()),
+    );
+    // A bound rather than a formality, and one a retry can still double.
+    assert_ne!(WORKING_TURNS, 0);
+    assert_ne!(WORKING_TURNS.checked_mul(2), None);
+}
+
+#[test]
+fn the_sub_task_session_is_its_own_conversation_at_the_briefs_register() {
+    let vector = turn_args(&ChatAgent::working(WORKING_PROMPT));
+
+    // Raised the way a drafting turn is and through the same two constants: a
+    // session that writes code has less business being cheap than one
+    // answering a question.
+    assert_eq!(
+        value_of(&vector, "--model"),
+        overridden(MODEL_VAR, BRIEF_MODEL).to_str(),
+    );
+    assert_eq!(
+        value_of(&vector, "--effort"),
+        overridden(EFFORT_VAR, BRIEF_EFFORT).to_str(),
+    );
+
+    // Its own id, and the prompt it was handed rather than one of warlock's:
+    // what this session is told is the caller's to say, because it names the
+    // scope the ticket was pulled under and the sigils this machine holds.
+    let session = value_of(&vector, "--session-id").expect("a sub-task opens a conversation");
+    assert!(is_uuid_shaped(session), "not UUID-shaped: {session}");
+    for other in [
+        turn_args(&ChatAgent::new()),
+        turn_args(&ChatAgent::drafting()),
+        turn_args(&ChatAgent::working(WORKING_PROMPT)),
+    ] {
+        assert_ne!(value_of(&other, "--session-id"), Some(session));
+    }
+    assert_eq!(value_of(&vector, "--system-prompt"), Some(WORKING_PROMPT));
+}
+
+#[test]
+fn the_sub_task_session_is_the_only_one_given_a_writing_tool() {
+    // Every session kind that existed before the sub-task one, each read word
+    // by word: the grant, the system prompt and every other argument. The
+    // sub-task session is the single exception, and it is exempt rather than
+    // fixed for the obvious reason — writing is what it is for, and its fence
+    // is the hook and the six-tool grant asserted above, not the absence of a
+    // tool name from its vector.
+    names_no_writing_tool(&args(&ClaudeAgent::new()), "a pass");
+    names_no_writing_tool(&turn_args(&ChatAgent::new()), "a panel turn");
+    names_no_writing_tool(
+        &turn_args(
+            &ChatAgent::new()
+                .at_model(BRIEF_MODEL)
+                .at_effort(BRIEF_EFFORT),
+        ),
+        "a brief turn",
+    );
+    names_no_writing_tool(&turn_args(&ChatAgent::drafting()), "a drafting turn");
+    names_no_writing_tool(&turn_args(&ChatAgent::proposing()), "a proposing turn");
+
+    // And the exception is a real one rather than a spare sentence: the helper
+    // above would refuse the sub-task session's own vector.
+    let vector = turn_args(&ChatAgent::working(WORKING_PROMPT));
+    for named in ["Edit", "Write", "Bash"] {
+        assert!(
+            vector.iter().any(|word| word
+                .split(|letter: char| !letter.is_ascii_alphanumeric())
+                .any(|token| token == named)),
+            "{named} is missing from the one session that is meant to have it",
+        );
+    }
 }
 
 #[test]

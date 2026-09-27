@@ -565,6 +565,128 @@ fn proposing_args() -> Vec<OsString> {
     args_for(CHAT_TOOLS, PROPOSING_SYSTEM_PROMPT)
 }
 
+/// The one session warlock raises that may change the tree, and the whole of
+/// what it may reach for: the three a read-only session gets, plus one that
+/// edits a file, one that writes a new one and one that runs the tests saying
+/// whether the change holds.
+///
+/// Six names written down once and passed twice — to `--tools`, which is the
+/// set the session has at all, and to `--allowedTools`, which is the set it may
+/// use without stopping to ask. Both, because either alone is the wrong
+/// session: `--tools` on its own is a session that asks a person who is not
+/// there and waits out its timeout, and `--allowedTools` on its own leaves the
+/// grant to whatever the CLI defaults to. Nothing wider is named: no
+/// `WebFetch`, no `Task`, no `WebSearch` — a sub-task works from what it was
+/// handed and what it can read in the repository, and `Bash` is already as much
+/// of the machine as this fence can honestly claim to hold.
+const WORKING_TOOLS: &str = "Read,Grep,Glob,Edit,Write,Bash";
+
+/// The clock a sub-task session runs under, and deliberately not
+/// [`INVOCATION_TIMEOUT`]: five minutes is sized for one pass writing one
+/// document, and a sub-task reads a brief, edits files and runs a test suite
+/// that is minutes on its own. A backstop rather than a budget — a session that
+/// reaches this was stuck, not thorough — and the reason it is a number at all
+/// is that nobody is watching the panel to notice.
+pub const WORKING_TIMEOUT: Duration = Duration::from_mins(30);
+
+/// How many turns a sub-task session gets before the CLI stops it, passed as
+/// `--max-turns`.
+///
+/// A second bound beside [`WORKING_TIMEOUT`] and not a duplicate of it: a
+/// session can spin cheaply for half an hour inside one tool loop, and it can
+/// also spend its turns in a minute. Sized so that a turn limit reached is
+/// news — enough turns to read, change and check a sub-task's worth of files —
+/// and low enough that doubling it on a retry is still a bound.
+pub const WORKING_TURNS: u32 = 60;
+
+/// The tool calls the gate hook is asked about: every built-in that puts bytes
+/// in a file. Matched by the CLI as a regular expression against the tool's
+/// name, so the four are alternatives rather than a list.
+///
+/// `Bash` is not among them and cannot be: a shell line writes wherever the
+/// operator can, and a `PreToolUse` hook has a command string to look at rather
+/// than a path. That is a fact about the fence and not an omission — the gate
+/// refuses a write it can name, and the boundary was never security.
+const GATED_TOOLS: &str = "Edit|Write|MultiEdit|NotebookEdit";
+
+/// `warlock check --gate`, as the shell line a `PreToolUse` hook runs.
+///
+/// Named by [`current_exe`](std::env::current_exe) rather than by `argv[0]` or
+/// the bare word `warlock`: the hook is run by a child of `claude` whose working
+/// directory is the repository being worked, so a relative `argv[0]` — which is
+/// what a `./target/debug/warlock` launch gives — would resolve against the
+/// wrong directory, and the bare word would gate a development build's session
+/// with whatever older binary happens to be on `PATH`. `current_exe` is the
+/// binary that is running, absolutely, which is the one whose rules the operator
+/// is looking at.
+///
+/// The bare word is still the fallback, because a platform that cannot answer
+/// `current_exe` is better off with a hook that may resolve than with no hook at
+/// all, and a hook whose command does not exist is a permit rather than a
+/// refusal either way.
+fn gate_command() -> String {
+    let program = env::current_exe().map_or_else(
+        |_| String::from("warlock"),
+        |path| path.display().to_string(),
+    );
+    // Single-quoted, because the path is the reader's and may hold a space; an
+    // embedded quote is closed, escaped and reopened the way a shell wants it.
+    format!("'{}' check --gate", program.replace('\'', r"'\''"))
+}
+
+/// The hook the sub-task session is fenced by, as the JSON `--settings` takes.
+///
+/// Handed over on the invocation and never written anywhere: a file would be a
+/// path to clean up after a session that may have been killed, and — worse —
+/// settings on disk that outlive the run. `--settings` takes a JSON string as
+/// well as a path, so the fence travels with the session that needs it and dies
+/// with it.
+///
+/// Built with `serde_json` rather than written out as a literal, so the shell
+/// line's escaping is the library's problem.
+fn gate_settings() -> String {
+    serde_json::json!({
+        "hooks": {
+            "PreToolUse": [{
+                "matcher": GATED_TOOLS,
+                "hooks": [{ "type": "command", "command": gate_command() }],
+            }]
+        }
+    })
+    .to_string()
+}
+
+/// The vector the one writing session runs under.
+///
+/// The system prompt is a parameter and not a constant beside the others,
+/// because what this session must be told is not knowable here: it names the
+/// scope the ticket was pulled under and the sigils this machine holds, and both
+/// are read at the moment the session is raised.
+///
+/// Three things are kept out on purpose. `--setting-sources ""` refuses this
+/// machine's user, project and local settings, so the session is not told what
+/// some repository's `CLAUDE.md` or somebody's global hooks would tell it;
+/// `--strict-mcp-config` with no `--mcp-config` beside it leaves the session no
+/// MCP server at all, so it cannot reach Linear or anything else except through
+/// warlock; and no permission mode is passed, because `--allowedTools` is how
+/// this session goes unprompted and `bypassPermissions` would be the fence
+/// turned off rather than opened.
+fn working_args(system_prompt: &str) -> Vec<OsString> {
+    let mut args = args_for(WORKING_TOOLS, system_prompt);
+    args.extend([
+        OsString::from("--allowedTools"),
+        OsString::from(WORKING_TOOLS),
+        OsString::from("--setting-sources"),
+        OsString::from(NO_SETTINGS),
+        OsString::from("--strict-mcp-config"),
+        OsString::from("--settings"),
+        OsString::from(gate_settings()),
+        OsString::from("--max-turns"),
+        OsString::from(WORKING_TURNS.to_string()),
+    ]);
+    args
+}
+
 /// The one id every turn of a [`ChatAgent`] names, and which flag names it.
 ///
 /// `--session-id` opens a conversation and `--resume` continues one, so
@@ -1168,6 +1290,46 @@ impl ChatAgent {
             args: proposing_args(),
             session: Some(Session::new()),
             timeout: INVOCATION_TIMEOUT,
+            cancel: Cancel::new(),
+            activities: Activities::none(),
+        };
+        Converses::raised(&agent, BRIEF_MODEL, BRIEF_EFFORT)
+    }
+
+    /// One sub-task's session: the only session warlock raises that may change
+    /// the repository, fenced by the vector [`working_args`] builds.
+    ///
+    /// Everything about it that is not the prompt is settled here, and each part
+    /// is deliberate. Exactly [`WORKING_TOOLS`], in `--tools` and in
+    /// `--allowedTools`, so the grant is named rather than defaulted and nothing
+    /// stops to ask a person who is not there. A `PreToolUse` hook running
+    /// `warlock check --gate`, so a write outside the scopes this machine holds
+    /// is refused where it is attempted rather than found afterwards. No
+    /// settings sources and no MCP server, so the session is told what warlock
+    /// told it and can reach nothing except through warlock. Its own
+    /// [`WORKING_TIMEOUT`] and its own [`WORKING_TURNS`], because the five
+    /// minutes of [`INVOCATION_TIMEOUT`] are one document's worth of thinking
+    /// and this one runs a test suite. And the register the brief and the
+    /// tickets were written at, since a session that writes code has less
+    /// business being cheap than one that answers a question.
+    ///
+    /// ```
+    /// use warlock_tui::{ChatAgent, INVOCATION_TIMEOUT, WORKING_TIMEOUT};
+    ///
+    /// let agent = ChatAgent::working("You are working one sub-task.");
+    ///
+    /// assert_eq!(agent.timeout(), WORKING_TIMEOUT);
+    /// assert_ne!(agent.timeout(), INVOCATION_TIMEOUT);
+    /// // A conversation of its own, opened by the first turn to run.
+    /// assert!(agent.args().iter().any(|arg| arg == "--session-id"));
+    /// ```
+    #[must_use]
+    pub fn working(system_prompt: &str) -> Self {
+        let agent = Self {
+            program: OsString::from(PROGRAM),
+            args: working_args(system_prompt),
+            session: Some(Session::new()),
+            timeout: WORKING_TIMEOUT,
             cancel: Cancel::new(),
             activities: Activities::none(),
         };

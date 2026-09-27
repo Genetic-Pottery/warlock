@@ -73,6 +73,8 @@ pub use claude::Drafting;
 pub use claude::INVOCATION_TIMEOUT;
 pub use claude::NOTHING_SETTLES_IT;
 pub use claude::Replied;
+pub use claude::WORKING_TIMEOUT;
+pub use claude::WORKING_TURNS;
 pub use claude::WRITE_INSTRUCTION;
 pub use claude::Wired;
 pub use claude::brief_instruction;
