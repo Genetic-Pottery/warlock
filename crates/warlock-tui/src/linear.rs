@@ -130,6 +130,8 @@ pub trait Board {
     fn team_id(&self, key: &str) -> Result<Option<String>, Error>;
     fn backlog_status(&self) -> Result<Option<String>, Error>;
     fn backlog_state(&self, team: &str) -> Result<Option<String>, Error>;
+    fn workflow_state(&self, team: &str, name: &str) -> Result<Option<String>, Error>;
+    fn move_issue(&self, issue: &str, state: &str) -> Result<String, Error>;
     fn issue_label_id(&self, name: &str, team: &str) -> Result<String, Error>;
     fn fetch_project(&self, id: &str) -> Result<Option<FetchedProject>, Error>;
     fn scope_queue(&self, team: &str, label: &str, assignee: &str) -> Result<Queue, Error>;
@@ -138,6 +140,7 @@ pub trait Board {
     fn create_issue(&self, issue: &NewIssue<'_>) -> Result<Issue, Error>;
     fn create_relation(&self, blocker: &str, waiting: &str) -> Result<String, Error>;
     fn comment_on_project(&self, project: &str, body: &str) -> Result<String, Error>;
+    fn comment_on_issue(&self, issue: &str, body: &str) -> Result<String, Error>;
 }
 
 /// The one [`Board`] that speaks GraphQL, over whatever [`Posts`] it holds.
@@ -170,6 +173,14 @@ impl<P: Posts> Board for Linear<P> {
         backlog_state(&self.posts, team)
     }
 
+    fn workflow_state(&self, team: &str, name: &str) -> Result<Option<String>, Error> {
+        workflow_state(&self.posts, team, name)
+    }
+
+    fn move_issue(&self, issue: &str, state: &str) -> Result<String, Error> {
+        move_issue(&self.posts, issue, state)
+    }
+
     fn issue_label_id(&self, name: &str, team: &str) -> Result<String, Error> {
         issue_label_id(&self.posts, name, team)
     }
@@ -200,6 +211,10 @@ impl<P: Posts> Board for Linear<P> {
 
     fn comment_on_project(&self, project: &str, body: &str) -> Result<String, Error> {
         comment_on_project(&self.posts, project, body)
+    }
+
+    fn comment_on_issue(&self, issue: &str, body: &str) -> Result<String, Error> {
+        comment_on_issue(&self.posts, issue, body)
     }
 }
 
@@ -289,10 +304,35 @@ fn backlog_status(linear: &impl Posts) -> Result<Option<String>, Error> {
 /// that cannot take an issue is worth words about the team, and this module does
 /// not hold them.
 ///
+/// [`workflow_state`] under a fixed name, which loosens what this used to do: the
+/// match was on `Backlog` exactly and is now trimmed and case-insensitive, so a
+/// team whose column reads `backlog` files into it instead of filing with no
+/// state at all. Deliberate — the two resolvers reading the same list by
+/// different rules is the kind of difference nobody discovers until a board is
+/// spelled unusually.
+fn backlog_state(linear: &impl Posts, team: &str) -> Result<Option<String>, Error> {
+    workflow_state(linear, team, BACKLOG)
+}
+
+/// The id of the team's workflow state by name, or `None` when that team has no
+/// state by it.
+///
+/// `None` rather than an error, and here it is load-bearing rather than tidy: the
+/// caller moving an issue prints a missing column as one line and works the
+/// ticket anyway. A workflow column is a courtesy to people who are not watching
+/// the terminal, and nothing about the work depends on it.
+///
+/// Matched trimmed and case-insensitively, because `In progress` and
+/// `In Progress` are the same column to everyone except a string comparison.
+/// That rule is spelled out again in `queue.rs`'s own `named`, rather than
+/// shared: this module is below that one — `queue.rs` reads the types parsed
+/// here — and a helper pulled up from there would point the dependency
+/// backwards for four words of code.
+///
 /// Workflow states belong to a team and not to the workspace, so this takes the
 /// id [`team_id`] answered rather than the team key. One request, asking for
 /// Linear's largest page and matching here, as [`backlog_status`] does.
-fn backlog_state(linear: &impl Posts, team: &str) -> Result<Option<String>, Error> {
+fn workflow_state(linear: &impl Posts, team: &str, name: &str) -> Result<Option<String>, Error> {
     let data = linear.post(
         "query WorkflowStates($team: ID!) {
             workflowStates(filter: { team: { id: { eq: $team } } }, first: 250) {
@@ -304,7 +344,12 @@ fn backlog_state(linear: &impl Posts, team: &str) -> Result<Option<String>, Erro
 
     nodes(&data, "workflowStates")?
         .iter()
-        .find(|state| state.get("name").and_then(Value::as_str) == Some(BACKLOG))
+        .find(|state| {
+            state
+                .get("name")
+                .and_then(Value::as_str)
+                .is_some_and(|found| found.trim().eq_ignore_ascii_case(name.trim()))
+        })
         .map(node_id)
         .transpose()
 }
@@ -1376,6 +1421,31 @@ fn create_relation(linear: &impl Posts, blocker: &str, waiting: &str) -> Result<
     node_id(payload(&data, "issueRelationCreate", "issueRelation")?)
 }
 
+/// Move one issue into a workflow state, by the two ids the caller already
+/// resolved.
+///
+/// The input carries `stateId` and nothing else, which is the whole of what this
+/// is allowed to write: an assignee is a human's decision about whose work a
+/// ticket is, and a project's status is a different type on a different object
+/// that no issue move has any business touching. A state named `completed` or
+/// `canceled` is not refused here — a team names its columns what it likes and
+/// this module cannot tell which id is which without a second request — it is
+/// refused by the caller, which knows the name it asked [`workflow_state`] for.
+///
+/// One request and no retry, per this module's rule. A move that failed leaves a
+/// ticket in the column it was in, which is a line to print rather than a run to
+/// abandon: the board is a courtesy and the work is the point.
+fn move_issue(linear: &impl Posts, issue: &str, state: &str) -> Result<String, Error> {
+    let data = linear.post(
+        "mutation IssueUpdate($id: String!, $input: IssueUpdateInput!) {
+            issueUpdate(id: $id, input: $input) { issue { id } }
+        }",
+        json!({ "id": issue, "input": { "stateId": state } }),
+    )?;
+
+    node_id(payload(&data, "issueUpdate", "issue")?)
+}
+
 /// Comment on a project, by id.
 ///
 /// Linear has one comment mutation for issues and projects both, told apart by
@@ -1387,6 +1457,27 @@ fn comment_on_project(linear: &impl Posts, project: &str, body: &str) -> Result<
             commentCreate(input: $input) { comment { id } }
         }",
         json!({ "input": { "projectId": project, "body": body } }),
+    )?;
+
+    node_id(payload(&data, "commentCreate", "comment")?)
+}
+
+/// Comment on an issue, by id.
+///
+/// The same mutation [`comment_on_project`] sends, and `issueId` in place of
+/// `projectId` is the entire difference: the two functions exist so that which
+/// object gets commented on is decided by the name a caller types rather than by
+/// the key it spells in a JSON literal.
+///
+/// One request and no retry, per this module's rule, and here that rule has teeth:
+/// a create is not idempotent, so a retried comment is how a halt gets explained
+/// twice on the same ticket. A comment that did not land is a line to print.
+fn comment_on_issue(linear: &impl Posts, issue: &str, body: &str) -> Result<String, Error> {
+    let data = linear.post(
+        "mutation CommentCreate($input: CommentCreateInput!) {
+            commentCreate(input: $input) { comment { id } }
+        }",
+        json!({ "input": { "issueId": issue, "body": body } }),
     )?;
 
     node_id(payload(&data, "commentCreate", "comment")?)

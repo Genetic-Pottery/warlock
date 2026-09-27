@@ -292,6 +292,8 @@ pub(crate) enum Call {
     Team(String),
     BacklogStatus,
     BacklogState(String),
+    WorkflowState { team: String, name: String },
+    MoveIssue { issue: String, state: String },
     IssueLabel { name: String, team: String },
     FetchProject(String),
     ScopeQueue(QueueAsked),
@@ -300,6 +302,7 @@ pub(crate) enum Call {
     CreateIssue(IssueAsked),
     Relation { blocker: String, waiting: String },
     Comment { project: String, body: String },
+    IssueComment { issue: String, body: String },
 }
 
 impl Call {
@@ -309,6 +312,8 @@ impl Call {
             Self::Team(_) => Op::Team,
             Self::BacklogStatus => Op::BacklogStatus,
             Self::BacklogState(_) => Op::BacklogState,
+            Self::WorkflowState { .. } => Op::WorkflowState,
+            Self::MoveIssue { .. } => Op::MoveIssue,
             Self::IssueLabel { .. } => Op::IssueLabel,
             Self::FetchProject(_) => Op::FetchProject,
             Self::ScopeQueue(_) => Op::ScopeQueue,
@@ -317,6 +322,7 @@ impl Call {
             Self::CreateIssue(_) => Op::CreateIssue,
             Self::Relation { .. } => Op::Relation,
             Self::Comment { .. } => Op::Comment,
+            Self::IssueComment { .. } => Op::IssueComment,
         }
     }
 }
@@ -327,6 +333,8 @@ pub(crate) enum Op {
     Team,
     BacklogStatus,
     BacklogState,
+    WorkflowState,
+    MoveIssue,
     IssueLabel,
     FetchProject,
     ScopeQueue,
@@ -335,6 +343,7 @@ pub(crate) enum Op {
     CreateIssue,
     Relation,
     Comment,
+    IssueComment,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -676,6 +685,31 @@ impl Board for Boarding {
         Ok(self.state.clone())
     }
 
+    /// The one workflow state this workspace holds an id for, whatever name is
+    /// asked: which name that was is in the recorded call, so a test asserting
+    /// that a flow asked for `In Progress` reads it there rather than from the
+    /// answer. A board built [`without_backlog_state`] has no states at all, so
+    /// a move's resolve comes back empty too.
+    ///
+    /// [`without_backlog_state`]: Boarding::without_backlog_state
+    fn workflow_state(&self, team: &str, name: &str) -> Result<Option<String>, LinearError> {
+        self.ask(Call::WorkflowState {
+            team: team.to_owned(),
+            name: name.to_owned(),
+        })?;
+        Ok(self.state.clone())
+    }
+
+    /// The move recorded and the issue handed back, as the real board answers
+    /// with the issue it updated.
+    fn move_issue(&self, issue: &str, state: &str) -> Result<String, LinearError> {
+        self.ask(Call::MoveIssue {
+            issue: issue.to_owned(),
+            state: state.to_owned(),
+        })?;
+        Ok(issue.to_owned())
+    }
+
     fn issue_label_id(&self, name: &str, team: &str) -> Result<String, LinearError> {
         self.ask(Call::IssueLabel {
             name: name.to_owned(),
@@ -760,6 +794,17 @@ impl Board for Boarding {
     fn comment_on_project(&self, project: &str, body: &str) -> Result<String, LinearError> {
         self.ask(Call::Comment {
             project: project.to_owned(),
+            body: body.to_owned(),
+        })?;
+        Ok("comment-1".to_owned())
+    }
+
+    /// Recorded as its own call, not as a [`Call::Comment`] with an issue id in
+    /// it: a flow that meant to explain a halt on the ticket and commented on the
+    /// project instead is a bug a shared variant would hide.
+    fn comment_on_issue(&self, issue: &str, body: &str) -> Result<String, LinearError> {
+        self.ask(Call::IssueComment {
+            issue: issue.to_owned(),
             body: body.to_owned(),
         })?;
         Ok("comment-1".to_owned())
