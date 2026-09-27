@@ -1,5 +1,7 @@
 use std::path::Path;
 
+use crate::splitting;
+
 use super::{
     Error, PullRun, PullSubtask, ReasonMissing, RunStatus, SubtaskStatus, brief_path,
     halted_and_resumed_runs, pulls_dir, run_dir, run_manifest_path, state_path,
@@ -55,6 +57,45 @@ fn a_run() -> PullRun {
 
 fn a_subtask(id: &str) -> PullSubtask {
     PullSubtask::new(id, "A goal", [] as [&str; 0])
+}
+
+// A split of `WAR-140` as a pass would have answered it — two sub-tasks, the
+// second waiting on the first, every brief slot filled — ordered, numbered and
+// turned into the record's own sub-tasks. Built through `splitting::number`
+// rather than by hand, so a test of the record is a test of what the split
+// actually hands it.
+fn a_split() -> Vec<PullSubtask> {
+    subtasks(&splitting::Fill {
+        subtasks: vec![
+            splitting::Subtask {
+                goal: "Add the issues query".to_owned(),
+                definition_of_done: vec![
+                    "`warlock pull` lists the queue".to_owned(),
+                    "The query is paged".to_owned(),
+                ],
+                likely_files: vec!["crates/warlock-linear/src/queue.rs".to_owned()],
+                test_plan: "cargo test -p warlock-linear".to_owned(),
+                notes: "Read `issues.rs` first.".to_owned(),
+                ..splitting::Subtask::default()
+            },
+            splitting::Subtask {
+                goal: "Drive the query from the pull".to_owned(),
+                depends_on: vec![1],
+                definition_of_done: vec!["A pull names the issue it took".to_owned()],
+                likely_files: vec!["crates/warlock-tui/src/pull.rs".to_owned()],
+                test_plan: "cargo test -p warlock-tui".to_owned(),
+                notes: "The queue order is settled; do not re-sort it.".to_owned(),
+            },
+        ],
+    })
+}
+
+fn subtasks(fill: &splitting::Fill) -> Vec<PullSubtask> {
+    splitting::number(fill, "WAR-140")
+        .expect("nothing in the fill waits on itself")
+        .into_iter()
+        .map(PullSubtask::from)
+        .collect()
 }
 
 fn subtask_json(status: &str, reason: &str) -> String {
@@ -176,6 +217,9 @@ fn the_wire_keys_are_the_ones_a_forman_state_file_spells() {
         .keys()
         .map(String::as_str)
         .collect();
+    // The brief's four keys come last, after every key a record written before
+    // they existed holds — `WAR_124` above is one, and it read — so the diff
+    // between the two is four added lines and nothing moved.
     assert_eq!(
         subtask_keys,
         [
@@ -189,8 +233,42 @@ fn the_wire_keys_are_the_ones_a_forman_state_file_spells() {
             "finished_at",
             "session_id",
             "cost_usd",
+            "definition_of_done",
+            "likely_files",
+            "test_plan",
+            "notes",
         ],
     );
+}
+
+// The record `WAR_124` holds was written before a sub-task carried a brief, and
+// it is read back by this build every day of a run in progress. It has to read as
+// a split that answered nothing rather than fail.
+#[test]
+fn a_record_written_before_the_brief_keys_existed_reads_as_a_split_that_answered_none_of_them() {
+    let run: PullRun = serde_json::from_str(WAR_124).expect("the older shape still reads");
+
+    let subtask = run.subtask("WAR-124.01").expect("the first sub-task");
+    assert!(subtask.definition_of_done().is_empty());
+    assert!(subtask.likely_files().is_empty());
+    assert_eq!(subtask.test_plan(), None);
+    assert_eq!(subtask.notes(), None);
+
+    // And the brief rendered from it is the brief that build rendered: a goal,
+    // and no heading over anything nobody answered.
+    let brief = subtask.to_brief_string("WAR-124");
+    assert!(
+        brief.contains("\n## Goal\nAdd the drafting session's spawn surface\n"),
+        "{brief}",
+    );
+    for heading in [
+        "## Definition of done",
+        "## Likely files",
+        "## Test plan",
+        "## Notes",
+    ] {
+        assert!(!brief.contains(heading), "{brief} names {heading:?}");
+    }
 }
 
 #[test]
@@ -780,6 +858,219 @@ fn a_log_appended_to_a_brief_survives_every_later_save() {
     assert_eq!(brief.matches("## Execution log").count(), 1, "{brief}");
     assert_eq!(brief.matches("What the session did.").count(), 1, "{brief}");
     assert!(brief.contains("\nstatus: done\n"), "{brief}");
+}
+
+// The whole of this sub-task's job, end to end: what a split answered becomes a
+// run record, and the briefs written beside it are what a fresh session is handed.
+#[test]
+fn a_numbered_split_is_saved_as_a_record_and_a_brief_per_sub_task() {
+    let (home, root) = (
+        tempfile::tempdir().expect("a temporary home"),
+        tempfile::tempdir().expect("a temporary root"),
+    );
+    let run = a_run().with_subtasks(a_split());
+
+    run.save(home.path(), root.path()).expect("a run saves");
+
+    assert!(state_path(home.path(), root.path(), "WAR-140").is_file());
+    assert!(run_manifest_path(home.path(), root.path(), "WAR-140").is_file());
+    // Numbered from one, one brief each, and nothing else in the directory but
+    // the record and the manifest.
+    for subtask in ["WAR-140.01", "WAR-140.02"] {
+        assert!(
+            brief_path(home.path(), root.path(), "WAR-140", subtask).is_file(),
+            "no brief for {subtask}",
+        );
+    }
+    let held = std::fs::read_dir(run_dir(home.path(), root.path(), "WAR-140"))
+        .expect("the run directory reads")
+        .count();
+    assert_eq!(held, 4);
+
+    // Read back, the record still holds every slot the split filled, so the next
+    // save renders the same briefs.
+    let read = PullRun::load(home.path(), root.path(), "WAR-140").expect("the run loads");
+    assert_eq!(read, run);
+    let first = read.subtask("WAR-140.01").expect("the first sub-task");
+    assert_eq!(first.goal(), "Add the issues query");
+    assert_eq!(first.depends_on(), [] as [String; 0]);
+    assert_eq!(
+        first.definition_of_done(),
+        ["`warlock pull` lists the queue", "The query is paged"],
+    );
+    assert_eq!(first.likely_files(), ["crates/warlock-linear/src/queue.rs"]);
+    assert_eq!(first.test_plan(), Some("cargo test -p warlock-linear"));
+    assert_eq!(first.notes(), Some("Read `issues.rs` first."));
+    assert_eq!(
+        read.subtask("WAR-140.02")
+            .expect("the second sub-task")
+            .depends_on(),
+        ["WAR-140.01"],
+    );
+
+    let brief = brief_of(home.path(), root.path(), "WAR-140.01");
+    assert!(
+        brief.starts_with(
+            "---\nsubtask_id: WAR-140.01\nparent: WAR-140\nstatus: pending\ndepends_on: []\n---\n"
+        ),
+        "{brief}",
+    );
+    for section in [
+        "\n## Goal\nAdd the issues query\n",
+        "\n## Definition of done\n- `warlock pull` lists the queue\n- The query is paged\n",
+        "\n## Likely files / touchpoints\n- crates/warlock-linear/src/queue.rs\n",
+        "\n## Test plan\ncargo test -p warlock-linear\n",
+        "\n## Notes for executor\nRead `issues.rs` first.\n",
+    ] {
+        assert!(brief.contains(section), "{brief} is missing {section:?}");
+    }
+    // The log heading is last, and the brief ends there with nothing under it:
+    // the account of the work is the session's to append.
+    assert!(
+        brief.ends_with(
+            "\n---\n## Execution log\n<!-- spawn appends below this line; never edits above it -->\n"
+        ),
+        "{brief}",
+    );
+
+    // And the sub-task that waits says so where a session would look for it.
+    let second = brief_of(home.path(), root.path(), "WAR-140.02");
+    assert!(second.contains("\ndepends_on: [WAR-140.01]\n"), "{second}");
+}
+
+// Only the goal is required of a split, so most of a brief can be absent — and
+// absent has to read as nothing said rather than as nothing to do.
+#[test]
+fn a_slot_the_split_left_empty_is_no_heading_rather_than_an_empty_one() {
+    let fill = splitting::Fill {
+        subtasks: vec![splitting::Subtask {
+            goal: "Add the issues query".to_owned(),
+            // A blank entry, a whitespace-only test plan and an unanswered notes
+            // block: three ways of saying nothing, and the brief says none of
+            // them.
+            likely_files: vec![String::new()],
+            test_plan: "   \n ".to_owned(),
+            ..splitting::Subtask::default()
+        }],
+    };
+    let subtask = subtasks(&fill).pop().expect("one sub-task");
+
+    // The record keeps the list it was handed — `splitting::mend` is what drops a
+    // blank entry, and an unmended split is allowed here — and the brief is where
+    // a blank is passed over.
+    assert_eq!(subtask.likely_files(), [""]);
+    assert_eq!(subtask.test_plan(), None);
+    assert_eq!(subtask.notes(), None);
+
+    let brief = subtask.to_brief_string("WAR-140");
+
+    assert!(
+        brief.contains("\n## Goal\nAdd the issues query\n"),
+        "{brief}"
+    );
+    for heading in [
+        "## Definition of done",
+        "## Likely files",
+        "## Test plan",
+        "## Notes",
+    ] {
+        assert!(!brief.contains(heading), "{brief} names {heading:?}");
+    }
+    // Which leaves the goal running straight into the log, with no run of blank
+    // lines where the headings would have been.
+    assert!(
+        brief.ends_with(
+            "\n## Goal\nAdd the issues query\n\n---\n## Execution log\n<!-- spawn appends below \
+             this line; never edits above it -->\n"
+        ),
+        "{brief}",
+    );
+}
+
+// The brief holds two writers' work now — warlock's rendering above the line and
+// the session's account below it — so the trap `a_log_appended_to_a_brief_...`
+// guards has to hold with the sections there as well.
+#[test]
+fn a_re_save_keeps_the_appended_log_and_re_renders_the_sections_above_it() {
+    let (home, root) = (
+        tempfile::tempdir().expect("a temporary home"),
+        tempfile::tempdir().expect("a temporary root"),
+    );
+    let mut run = a_run().with_subtasks(a_split());
+    run.save(home.path(), root.path()).expect("a run saves");
+
+    let path = brief_path(home.path(), root.path(), "WAR-140", "WAR-140.01");
+    let appended = format!(
+        "{}\n### 2026-09-27 — done\n\n- Added the query, and the test plan ran.\n",
+        std::fs::read_to_string(&path).expect("the brief reads"),
+    );
+    std::fs::write(&path, &appended).expect("a log is appended");
+
+    let subtask = run
+        .subtask_mut("WAR-140.01")
+        .expect("the sub-task is there");
+    subtask.set_status(SubtaskStatus::Done);
+    run.save(home.path(), root.path())
+        .expect("a run saves again");
+
+    let brief = brief_of(home.path(), root.path(), "WAR-140.01");
+    // The log crossed once, heading and marker verbatim.
+    assert_eq!(brief.matches("## Execution log").count(), 1, "{brief}");
+    assert_eq!(
+        brief
+            .matches("<!-- spawn appends below this line; never edits above it -->")
+            .count(),
+        1,
+        "{brief}",
+    );
+    assert_eq!(
+        brief
+            .matches("Added the query, and the test plan ran.")
+            .count(),
+        1,
+        "{brief}",
+    );
+    // The sections above it are rendered again from the record, once each, and
+    // the status the save changed came with them.
+    assert!(brief.contains("\nstatus: done\n"), "{brief}");
+    for heading in [
+        "## Goal",
+        "## Definition of done",
+        "## Likely files / touchpoints",
+        "## Test plan",
+        "## Notes for executor",
+    ] {
+        assert_eq!(brief.matches(heading).count(), 1, "{brief} — {heading:?}");
+    }
+}
+
+// The four keys are read as leniently as they are written: a record hand-edited
+// to a blank test plan is a record whose split said nothing about testing, and
+// one this build wrote comes back byte for byte.
+#[test]
+fn the_brief_keys_round_trip_and_a_blank_one_reads_as_unanswered() {
+    let run = a_run().with_subtasks(a_split());
+
+    let text = serde_json::to_string_pretty(&run).expect("a record serialises");
+    let read: PullRun = serde_json::from_str(&text).expect("a record it wrote reads back");
+
+    assert_eq!(read, run);
+    assert_eq!(
+        serde_json::to_string_pretty(&read).expect("a record serialises"),
+        text,
+    );
+
+    let edited = text.replace(
+        "\"test_plan\": \"cargo test -p warlock-linear\"",
+        "\"test_plan\": \"  \"",
+    );
+    let read: PullRun = serde_json::from_str(&edited).expect("a hand edit does not strand the run");
+    assert_eq!(
+        read.subtask("WAR-140.01")
+            .expect("the first sub-task")
+            .test_plan(),
+        None,
+    );
 }
 
 // `manifest.md` is a rendering and never an input: nothing reads it back, so

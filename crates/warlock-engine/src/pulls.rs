@@ -22,6 +22,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::manifest::{temp_file_name, write_and_sync};
 use crate::sigils::project_dir;
+use crate::splitting::Numbered;
 
 const PULLS_DIR: &str = "pulls";
 
@@ -47,6 +48,20 @@ const DO_NOT_EDIT: &str = "<!-- Rendered from state.json on every write. Do not 
 const LOG_HEADING: &str = "## Execution log";
 
 const LOG_MARKER: &str = "<!-- spawn appends below this line; never edits above it -->";
+
+// The brief's headings, in the spelling `.forman/<TICKET>/<TICKET>.NN.md` uses,
+// because a person reads the two side by side and a session that has worked from
+// one is handed the other. A heading appears only where the split answered the
+// slot behind it — see `brief_text`.
+const GOAL_HEADING: &str = "## Goal";
+
+const DONE_HEADING: &str = "## Definition of done";
+
+const FILES_HEADING: &str = "## Likely files / touchpoints";
+
+const TEST_PLAN_HEADING: &str = "## Test plan";
+
+const NOTES_HEADING: &str = "## Notes for executor";
 
 /// Where every run this checkout has pulled lives.
 ///
@@ -677,6 +692,21 @@ pub struct PullSubtask {
     goal: String,
     status: SubtaskStatus,
     depends_on: Vec<String>,
+    // What the split answered about the work, and the whole of what a fresh
+    // session has to go on besides the ticket. Held in the record rather than
+    // rendered out of the split each time, because the split is one read-only
+    // session at the start of the run and `save` re-renders every brief before
+    // and after every sub-task: a record that did not hold these would write the
+    // definition of done into the brief once and then delete it at the next
+    // save, out from under the session working from it.
+    definition_of_done: Vec<String>,
+    likely_files: Vec<String>,
+    // A slot the split left empty is `None` and not `Some("")`: the brief leaves
+    // an unanswered slot out altogether, so "not answered" and "answered blank"
+    // render the same and holding them apart in the type would be a distinction
+    // nothing can act on. `said` is where the two are made one.
+    test_plan: Option<String>,
+    notes: Option<String>,
     log: Option<String>,
     started_at: Option<String>,
     finished_at: Option<String>,
@@ -700,12 +730,66 @@ impl PullSubtask {
             goal: goal.into(),
             status: SubtaskStatus::Pending,
             depends_on: depends_on.into_iter().map(Into::into).collect(),
+            definition_of_done: Vec::new(),
+            likely_files: Vec::new(),
+            test_plan: None,
+            notes: None,
             log: None,
             started_at: None,
             finished_at: None,
             session_id: None,
             cost_usd: None,
         }
+    }
+
+    /// What would show this sub-task finished, the paths the work is expected to
+    /// touch, the commands that would show it works, and what the session needs
+    /// that the ticket does not say.
+    ///
+    /// Builders rather than setters, and there is no setter beside them: these
+    /// four are the split's answer, they are written once when the run is
+    /// recorded, and nothing later in the run has anything to say about them.
+    /// The outcome of the work is `set_log`, `set_status` and the rest.
+    ///
+    /// ```
+    /// use warlock_engine::PullSubtask;
+    ///
+    /// let subtask = PullSubtask::new("WAR-140.01", "Add the issues query", [] as [&str; 0])
+    ///     .with_definition_of_done(["`warlock pull` lists the queue"])
+    ///     .with_likely_files(["crates/warlock-linear/src/queue.rs"])
+    ///     .with_test_plan("cargo test -p warlock-linear")
+    ///     .with_notes("The query is paged; read `issues.rs` first.");
+    ///
+    /// assert_eq!(subtask.definition_of_done(), ["`warlock pull` lists the queue"]);
+    /// assert_eq!(subtask.test_plan(), Some("cargo test -p warlock-linear"));
+    /// // Blank is not an answer: it is the slot left unanswered.
+    /// assert_eq!(subtask.clone().with_notes("   ").notes(), None);
+    /// ```
+    #[must_use]
+    pub fn with_definition_of_done(
+        mut self,
+        done: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        self.definition_of_done = done.into_iter().map(Into::into).collect();
+        self
+    }
+
+    #[must_use]
+    pub fn with_likely_files(mut self, files: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.likely_files = files.into_iter().map(Into::into).collect();
+        self
+    }
+
+    #[must_use]
+    pub fn with_test_plan(mut self, plan: impl Into<String>) -> Self {
+        self.test_plan = said(plan.into());
+        self
+    }
+
+    #[must_use]
+    pub fn with_notes(mut self, notes: impl Into<String>) -> Self {
+        self.notes = said(notes.into());
+        self
     }
 
     #[must_use]
@@ -726,6 +810,26 @@ impl PullSubtask {
     #[must_use]
     pub fn depends_on(&self) -> &[String] {
         &self.depends_on
+    }
+
+    #[must_use]
+    pub fn definition_of_done(&self) -> &[String] {
+        &self.definition_of_done
+    }
+
+    #[must_use]
+    pub fn likely_files(&self) -> &[String] {
+        &self.likely_files
+    }
+
+    #[must_use]
+    pub fn test_plan(&self) -> Option<&str> {
+        self.test_plan.as_deref()
+    }
+
+    #[must_use]
+    pub fn notes(&self) -> Option<&str> {
+        self.notes.as_deref()
     }
 
     #[must_use]
@@ -778,24 +882,31 @@ impl PullSubtask {
     }
 
     /// The sub-task in the shape of `.forman/<TICKET>/<TICKET>.NN.md`: front
-    /// matter, the goal, then an empty execution log for the session working it
-    /// to append under.
+    /// matter, the goal, then whatever else the split answered — the definition
+    /// of done, the likely files, the test plan and the notes — and last an empty
+    /// execution log for the session working it to append under.
     ///
-    /// Only what the record holds is rendered, so the definition of done, the
-    /// touchpoints, the test plan and the notes a hand-written brief carries are
-    /// not here: nothing in a run record holds them, and a heading over nothing
-    /// reads as a sub-task with no test plan rather than as a record that never
-    /// had one.
+    /// Only what the record holds is rendered, and a slot the split left empty
+    /// is left out of the brief altogether rather than written as a heading with
+    /// nothing under it: `## Test plan` followed by silence reads as a sub-task
+    /// there is no way to check, where no heading says only that nothing was
+    /// said about checking it.
     ///
     /// ```
     /// use warlock_engine::PullSubtask;
     ///
     /// let brief = PullSubtask::new("WAR-140.01", "Add the issues query", ["WAR-140.02"])
+    ///     .with_definition_of_done(["`warlock pull` lists the queue"])
+    ///     .with_test_plan("cargo test -p warlock-linear")
     ///     .to_brief_string("WAR-140");
     ///
     /// assert!(brief.starts_with("---\nsubtask_id: WAR-140.01\nparent: WAR-140\n"));
     /// assert!(brief.contains("status: pending\ndepends_on: [WAR-140.02]\n"));
     /// assert!(brief.contains("## Goal\nAdd the issues query\n"));
+    /// assert!(brief.contains("## Definition of done\n- `warlock pull` lists the queue\n"));
+    /// assert!(brief.contains("## Test plan\ncargo test -p warlock-linear\n"));
+    /// // Nothing was said about the files, so the brief says nothing about them.
+    /// assert!(!brief.contains("## Likely files"));
     /// assert!(brief.contains("## Execution log\n"));
     /// ```
     #[must_use]
@@ -815,8 +926,16 @@ impl PullSubtask {
         let _ = writeln!(text, "depends_on: [{}]", self.depends_on.join(", "));
         let _ = writeln!(text, "---");
         let _ = writeln!(text);
-        let _ = writeln!(text, "## Goal");
+        let _ = writeln!(text, "{GOAL_HEADING}");
         let _ = writeln!(text, "{}", self.goal);
+        // Bullets and not `- [ ]` checkboxes, for all that a hand-written brief
+        // ticks its own: everything above the log line is rendered from the
+        // record on every save, so a box ticked in the file is gone at the next
+        // one. A list that cannot be kept ticked must not ask to be.
+        listed(&mut text, DONE_HEADING, &self.definition_of_done);
+        listed(&mut text, FILES_HEADING, &self.likely_files);
+        written(&mut text, TEST_PLAN_HEADING, self.test_plan.as_deref());
+        written(&mut text, NOTES_HEADING, self.notes.as_deref());
         let _ = writeln!(text);
         let _ = writeln!(text, "---");
 
@@ -838,6 +957,83 @@ impl PullSubtask {
         }
 
         text
+    }
+}
+
+// A section of the brief, heading and all, or nothing where the slot was never
+// answered. A blank entry is passed over on the way — it says nothing a session
+// could work from, and a list of nothing but blanks is a list nobody filled in —
+// so `likely_files: [""]` is as absent as `likely_files: []`.
+fn listed(text: &mut String, heading: &str, entries: &[String]) {
+    let said: Vec<&str> = entries
+        .iter()
+        .map(|entry| entry.trim())
+        .filter(|entry| !entry.is_empty())
+        .collect();
+    if said.is_empty() {
+        return;
+    }
+    let _ = writeln!(text);
+    let _ = writeln!(text, "{heading}");
+    for entry in said {
+        let _ = writeln!(text, "- {entry}");
+    }
+}
+
+fn written(text: &mut String, heading: &str, value: Option<&str>) {
+    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return;
+    };
+    let _ = writeln!(text);
+    let _ = writeln!(text, "{heading}");
+    let _ = writeln!(text, "{value}");
+}
+
+// Blank is not an answer. Trimmed on the way in so the record holds what the
+// brief would render and the two can never disagree about whether there is
+// anything there.
+fn said(value: String) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else if trimmed.len() == value.len() {
+        Some(value)
+    } else {
+        Some(trimmed.to_owned())
+    }
+}
+
+/// A numbered sub-task of a split, as the run records it: the identifier and the
+/// dependencies [`crate::splitting::number`] settled, the brief the split filled
+/// in, and `pending` — nothing has been worked yet.
+///
+/// ```
+/// use warlock_engine::splitting::{Fill, Subtask, number};
+/// use warlock_engine::{PullRun, PullSubtask, SubtaskStatus};
+///
+/// let fill = Fill {
+///     subtasks: vec![Subtask {
+///         goal: "Add the issues query".to_owned(),
+///         test_plan: "cargo test -p warlock-linear".to_owned(),
+///         ..Subtask::default()
+///     }],
+/// };
+/// let numbered = number(&fill, "WAR-140").expect("nothing here waits on itself");
+///
+/// let run = PullRun::new("WAR-140", "A ticket", "warlock-team", "war-140/a-ticket", "now")
+///     .with_subtasks(numbered.into_iter().map(PullSubtask::from));
+///
+/// let subtask = run.subtask("WAR-140.01").expect("the split's first sub-task");
+/// assert_eq!(subtask.status(), &SubtaskStatus::Pending);
+/// assert_eq!(subtask.test_plan(), Some("cargo test -p warlock-linear"));
+/// ```
+impl From<Numbered> for PullSubtask {
+    fn from(numbered: Numbered) -> Self {
+        Self::new(numbered.id, numbered.goal, numbered.depends_on)
+            .with_definition_of_done(numbered.definition_of_done)
+            .with_likely_files(numbered.likely_files)
+            .with_test_plan(numbered.test_plan)
+            .with_notes(numbered.notes)
     }
 }
 
@@ -1013,6 +1209,26 @@ impl std::error::Error for ReasonMissing {}
 // session's own last message answers with, and what `.forman/<TICKET>/state.json`
 // spells, so one key keeps the record and the answer it came from readable
 // against each other.
+//
+// The brief's four keys are spelled the way the split's own JSON object spells
+// them — `definition_of_done`, `likely_files`, `test_plan`, `notes` — so the
+// answer a model filled in, the record holding it and the headings of the brief
+// rendered from it are one vocabulary end to end.
+//
+// They are keys on this object rather than something rendered out of the split
+// each time, and that is a decision against `deny_unknown_fields` above: a
+// record written by this build and read by an older one is refused outright. It
+// is the lesser fault. The split is one read-only session at the start of a run,
+// its answer is gone by the second sub-task, and `save` re-renders every brief
+// before and after each one — so the alternative loses the definition of done,
+// the touchpoints and the test plan from the file a fresh session works from, on
+// every save after the first. Reading the other way round, which is the way that
+// happens, is safe: all four are `#[serde(default)]`, so a record written before
+// they existed reads as a sub-task whose split answered none of them, which is
+// exactly what it is. New keys are appended here rather than slotted in beside
+// `goal` for the same reason the run's own keys never move: the diff between a
+// record written by the old build and one written by the new is then four added
+// lines and nothing else.
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct WireSubtask {
@@ -1027,6 +1243,14 @@ struct WireSubtask {
     finished_at: Option<String>,
     session_id: Option<String>,
     cost_usd: Option<f64>,
+    #[serde(default)]
+    definition_of_done: Vec<String>,
+    #[serde(default)]
+    likely_files: Vec<String>,
+    #[serde(default)]
+    test_plan: Option<String>,
+    #[serde(default)]
+    notes: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -1074,6 +1298,10 @@ impl From<PullSubtask> for WireSubtask {
             finished_at: subtask.finished_at,
             session_id: subtask.session_id,
             cost_usd: subtask.cost_usd,
+            definition_of_done: subtask.definition_of_done,
+            likely_files: subtask.likely_files,
+            test_plan: subtask.test_plan,
+            notes: subtask.notes,
         }
     }
 }
@@ -1093,6 +1321,10 @@ impl TryFrom<WireSubtask> for PullSubtask {
             finished_at,
             session_id,
             cost_usd,
+            definition_of_done,
+            likely_files,
+            test_plan,
+            notes,
         } = wire;
 
         let status = match (status, blocked_reason) {
@@ -1121,6 +1353,15 @@ impl TryFrom<WireSubtask> for PullSubtask {
             goal,
             status,
             depends_on,
+            definition_of_done,
+            likely_files,
+            // Through `said` on the way in as well as on the way out, so a
+            // record hand-edited to `"test_plan": " "` reads as the slot nobody
+            // answered rather than as one answered with a space — and a record
+            // this build wrote round-trips unchanged, since `said` already ran
+            // over everything it holds.
+            test_plan: test_plan.and_then(said),
+            notes: notes.and_then(said),
             log,
             started_at,
             finished_at,
