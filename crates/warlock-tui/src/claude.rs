@@ -1,6 +1,7 @@
-//! Running `claude` as a child process: the only module in this library that
-//! spawns anything. Nothing about a prompt is decided here — a pass's text is
-//! the engine's and a turn's is the reader's, and both go through untouched.
+//! Running `claude` as a child process, and the process plumbing
+//! [`git`](mod@crate::git) spawns `git` and `gh` through. Nothing about a prompt
+//! is decided here — a pass's text is the engine's and a turn's is the reader's,
+//! and both go through untouched.
 //!
 //! Three ways the obvious "wait, then read" deadlocks, and the shape each one
 //! forces. A pipe holds something like 64KiB, so waiting for exit before
@@ -13,6 +14,13 @@
 //! [`Mutex<Child>`](std::sync::Mutex) and reports over a channel — which is
 //! what lets [`Cancel`] reach into a run in flight, and why stdout is asked for
 //! as `stream-json` and read a line at a time. No async runtime.
+//!
+//! [`watch`], [`kill_and_reap`] and [`drain`] are `pub(crate)` for that reason
+//! and no other: the pipe and the `&mut self` are not facts about `claude`, a
+//! `git` child meets both the same way, and a second polling waiter written over
+//! there would be a copy of this one that nothing keeps in step. The stdin
+//! deadlock is the one part `git.rs` does not share — it closes stdin instead of
+//! writing to it, so it needs no writer thread.
 
 use std::env;
 use std::ffi::{OsStr, OsString};
@@ -1667,10 +1675,13 @@ fn read<R: Read + Send + 'static>(
     })
 }
 
-/// Stderr, whole. Nothing looks at it until the run has been judged, so there is
-/// nothing to report as it arrives — but it still has to be read concurrently, or
-/// a child that fills the pipe blocks forever.
-fn drain<R: Read + Send + 'static>(mut source: R) -> JoinHandle<io::Result<Vec<u8>>> {
+/// A stream read whole on a thread of its own: `claude`'s stderr, and both of a
+/// `git` child's.
+///
+/// Nothing looks at it until the child has been judged, so there is nothing to
+/// report as it arrives — but it still has to be read concurrently, or a child
+/// that fills the pipe blocks forever.
+pub(crate) fn drain<R: Read + Send + 'static>(mut source: R) -> JoinHandle<io::Result<Vec<u8>>> {
     thread::spawn(move || {
         let mut buffer = Vec::new();
         source.read_to_end(&mut buffer)?;
@@ -1694,7 +1705,9 @@ fn collect<T>(handle: JoinHandle<io::Result<T>>) -> Result<T, agent::Error> {
 /// of the `Arc` and releases the lock between polls, where a thread blocked in
 /// [`Child::wait`](std::process::Child::wait) would own the only handle there
 /// is.
-fn watch(child: &Arc<Mutex<Child>>) -> (JoinHandle<()>, mpsc::Receiver<io::Result<ExitStatus>>) {
+pub(crate) fn watch(
+    child: &Arc<Mutex<Child>>,
+) -> (JoinHandle<()>, mpsc::Receiver<io::Result<ExitStatus>>) {
     let (sender, receiver) = mpsc::channel();
     let child = Arc::clone(child);
     let waiter = thread::spawn(move || {
@@ -1719,9 +1732,10 @@ fn watch(child: &Arc<Mutex<Child>>) -> (JoinHandle<()>, mpsc::Receiver<io::Resul
 }
 
 /// Both, always. A child that is killed and not waited on is a zombie in the
-/// process table; one abandoned without the kill is an orphan holding a
-/// subscription's worth of tokens.
-fn kill_and_reap(child: &Arc<Mutex<Child>>) {
+/// process table; one abandoned without the kill keeps going — a model pass
+/// spending a subscription's worth of tokens, or a `git push` against a branch
+/// whoever asked for it has given up on.
+pub(crate) fn kill_and_reap(child: &Arc<Mutex<Child>>) {
     let mut child = lock(child);
     let _ = child.kill();
     let _ = child.wait();

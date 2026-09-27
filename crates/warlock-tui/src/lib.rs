@@ -1,12 +1,13 @@
 //! The front end minus the terminal. Nothing in this crate opens a terminal,
 //! reads a key or owns an event loop: `src/main.rs` does all of that and hands
 //! values in, which is what keeps the draw path assertable against an in-memory
-//! buffer and everything else against plain values. Three modules reach past
+//! buffer and everything else against plain values. Four modules reach past
 //! that rule on purpose — `claude` runs the CLI as a child process because the
-//! engine's port spawns nothing, `linear` opens a socket because the board is
-//! somewhere else, and `watch` holds a filesystem watcher — and all three are
-//! built so the decisions made about what they hear are values a test can drive
-//! without any of them.
+//! engine's port spawns nothing, `git` runs `git` and `gh` through `claude`'s own
+//! process plumbing because a pull request is made of subprocesses, `linear`
+//! opens a socket because the board is somewhere else, and `watch` holds a
+//! filesystem watcher — and all four are built so the decisions made about what
+//! they hear are values a test can drive without any of them.
 
 mod account;
 mod app;
@@ -17,6 +18,7 @@ mod composer;
 mod confirm;
 #[cfg(test)]
 mod fixture;
+mod git;
 mod linear;
 mod modal;
 pub mod panel;
@@ -103,6 +105,28 @@ pub use confirm::carry_answer_for;
 pub use confirm::cut_answer_for;
 pub use confirm::push_answer_for;
 pub use confirm::review_answer_for;
+pub use git::COMMAND_TIMEOUT;
+pub use git::Commit;
+pub use git::Dirty;
+pub use git::Error as GitError;
+pub use git::Finished;
+pub use git::Forge;
+pub use git::Gh;
+pub use git::Git;
+pub use git::HUMAN_GATE;
+pub use git::Head;
+pub use git::LeftStale;
+pub use git::Opened;
+pub use git::PullRequest;
+pub use git::Ran;
+pub use git::Repository;
+pub use git::Runs;
+pub use git::Spawner;
+pub use git::Touched;
+pub use git::branch_name;
+pub use git::commit_message;
+pub use git::pull_request_body;
+pub use git::pull_request_title;
 pub use linear::Board;
 pub use linear::Client as LinearClient;
 pub use linear::Error as LinearError;
