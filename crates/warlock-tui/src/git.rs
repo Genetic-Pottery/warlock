@@ -3,7 +3,7 @@ use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::fmt::Write as _;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::mpsc::RecvTimeoutError;
 use std::sync::{Arc, Mutex};
@@ -119,6 +119,22 @@ pub enum Error {
     TimedOut {
         after: Duration,
     },
+    /// The command ran and said no. Carries the command as it was run, so a
+    /// reader can run it themselves, and what `git` said about it.
+    Refused {
+        command: String,
+        code: Option<i32>,
+        message: String,
+    },
+    /// The command worked and the answer warlock needed was not in what it
+    /// printed. Its own variant because the answer to this is never to carry on
+    /// with a default: the one thing it is raised for is a default branch
+    /// nothing names, and `main` is a guess that cuts a branch from the wrong
+    /// place on the repositories where it is wrong.
+    Unreadable {
+        what: String,
+        saw: String,
+    },
 }
 
 impl fmt::Display for Error {
@@ -129,6 +145,15 @@ impl fmt::Display for Error {
             Self::TimedOut { after } => {
                 write!(f, "the command did not finish within {after:?}")
             }
+            Self::Refused {
+                command,
+                code,
+                message,
+            } => {
+                let code = code.map_or_else(|| "a signal".to_owned(), |code| format!("{code}"));
+                write!(f, "`{command}` exited with {code}: {message}")
+            }
+            Self::Unreadable { what, saw } => write!(f, "{what} could not be read: {saw}"),
         }
     }
 }
@@ -137,7 +162,10 @@ impl std::error::Error for Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Io { source } => Some(source),
-            Self::NotFound { .. } | Self::TimedOut { .. } => None,
+            Self::NotFound { .. }
+            | Self::TimedOut { .. }
+            | Self::Refused { .. }
+            | Self::Unreadable { .. } => None,
         }
     }
 }
@@ -298,6 +326,546 @@ fn collected(handle: JoinHandle<io::Result<Vec<u8>>>) -> Result<Vec<u8>, Error> 
             source: io::Error::other("the thread reading the command's output panicked"),
         }),
     }
+}
+
+/// The program every operation below runs, and the only one they run.
+const GIT: &str = "git";
+
+/// The remote a pull is against.
+///
+/// `git` has no notion of *the* remote — `origin` is only the name `clone`
+/// gives the place a checkout came from — but a branch has to be pushed
+/// somewhere and a pull request opened against something. One name in one
+/// place, so a repository that calls its remote something else is a setting
+/// somebody can add here rather than a string to go hunting for.
+const REMOTE: &str = "origin";
+
+/// One path `git status` named, under the two-letter code it named it with.
+///
+/// The code is kept as the two characters `git` printed rather than parsed into
+/// "modified", "added", "untracked" and the rest: the reader is about to run
+/// `git status` themselves, and a halt that renamed the codes would make them
+/// translate back before they could look.
+///
+/// [`from`](Dirty::from) is the other side of a rename or a copy, which `git`
+/// reports as a second field — the pull halts on a dirty tree and the halt has
+/// to name both, because "`R` `src/route.rs`" alone does not say which file has
+/// gone.
+///
+/// Paths are text, not bytes, and this is the one place in the module that
+/// converts lossily: a path is not required to be UTF-8, but nothing here ever
+/// opens one of these — they are read by a person deciding what to do with
+/// their own working tree.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Dirty {
+    pub code: String,
+    pub path: String,
+    pub from: Option<String>,
+}
+
+impl fmt::Display for Dirty {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} {}", self.code, self.path)?;
+        if let Some(from) = &self.from {
+            write!(f, " (was {from})")?;
+        }
+        Ok(())
+    }
+}
+
+/// One commit, by the identifier `git` gave it.
+///
+/// ```
+/// use warlock_tui::Commit;
+///
+/// let commit = Commit::new("4e724822589a889678ef4d920a03a69e67d977e8");
+///
+/// assert_eq!(commit.short(), "4e724822");
+/// assert_eq!(commit.to_string(), "4e724822589a889678ef4d920a03a69e67d977e8");
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Commit(String);
+
+impl Commit {
+    #[must_use]
+    pub fn new(id: impl Into<String>) -> Self {
+        Self(id.into())
+    }
+
+    #[must_use]
+    pub fn id(&self) -> &str {
+        &self.0
+    }
+
+    /// Enough of the identifier to paste into a `git show`, for a halt message
+    /// that has to fit on a line. Eight characters because that is what `git`
+    /// abbreviates to on a repository of this size; ambiguity is the reader's
+    /// to resolve, and [`id`](Commit::id) is still whole.
+    #[must_use]
+    pub fn short(&self) -> &str {
+        let end = self
+            .0
+            .char_indices()
+            .nth(8)
+            .map_or(self.0.len(), |(index, _)| index);
+        &self.0[..end]
+    }
+}
+
+impl fmt::Display for Commit {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// Whether `HEAD` is where the caller left it.
+///
+/// A value rather than an error, and rather than a panic: warlock owns every
+/// commit on a pull's branch, so a `HEAD` that moved while a session was
+/// running means the session committed something. That is a thing the caller
+/// halts and reports — with the commit, so the reader can go and look at it —
+/// not a thing this module decides.
+///
+/// ```
+/// use warlock_tui::{Commit, Head};
+///
+/// let before = Commit::new("aaaa1111");
+/// let after = Commit::new("bbbb2222");
+///
+/// assert_eq!(Head::between(&before, &before), Head::Unmoved);
+/// assert_eq!(
+///     Head::between(&before, &after),
+///     Head::Moved {
+///         from: before,
+///         to: after
+///     }
+/// );
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Head {
+    Unmoved,
+    Moved { from: Commit, to: Commit },
+}
+
+impl Head {
+    #[must_use]
+    pub fn between(before: &Commit, after: &Commit) -> Self {
+        if before == after {
+            Self::Unmoved
+        } else {
+            Self::Moved {
+                from: before.clone(),
+                to: after.clone(),
+            }
+        }
+    }
+}
+
+/// Everything a pull asks of the checkout it runs in, said in the pull's words
+/// rather than in `git`'s.
+///
+/// [`Runs`] is the seam that starts a process; this is the seam the pull is
+/// written against, the way `Board` sits above `Posts` in `linear.rs`. A caller
+/// is driven in a test by a stand-in that records the argument vectors and
+/// scripts the answers, with no repository, no network and no `git` on the
+/// machine.
+///
+/// What is missing is the point of it. There is no stash, no reset, no clean,
+/// no merge, no rebase, no amend, no force and no delete — not as an option a
+/// caller may pass, and not spelled some other way further down. A tree with
+/// work in it is [reported](Repository::dirty) and the run stops, because that
+/// work is somebody's and warlock did not put it there.
+pub trait Repository {
+    /// What is dirty in the working tree; empty is a clean tree.
+    fn dirty(&self) -> Result<Vec<Dirty>, Error>;
+
+    /// The branch the remote points its `HEAD` at — detected, and reported
+    /// rather than guessed when nothing names one.
+    fn default_branch(&self) -> Result<String, Error>;
+
+    /// Move onto a branch that is already there. What a resumed run does with
+    /// the branch its record names, instead of cutting it a second time.
+    fn switch_to(&self, branch: &str) -> Result<(), Error>;
+
+    /// Bring the checked-out `branch` up to the remote, refusing anything that
+    /// is not a fast-forward.
+    fn catch_up(&self, branch: &str) -> Result<(), Error>;
+
+    /// Cut `branch` from `from` and move onto it.
+    fn cut_branch(&self, branch: &str, from: &str) -> Result<(), Error>;
+
+    /// The commit `HEAD` is on.
+    fn head(&self) -> Result<Commit, Error>;
+
+    /// Stage everything the working tree has and make one commit carrying
+    /// exactly `message`.
+    fn commit_all(&self, message: &str) -> Result<(), Error>;
+
+    /// Push `branch` to the remote and set it as the upstream.
+    fn publish(&self, branch: &str) -> Result<(), Error>;
+}
+
+/// The one [`Repository`] that speaks `git`, over whatever [`Runs`] it holds
+/// and in whatever directory it was given.
+///
+/// ```no_run
+/// use warlock_tui::{Git, Repository};
+///
+/// // Runs a real `git`, so this example is not executed by the test suite.
+/// let checkout = Git::at(".");
+///
+/// for dirty in checkout.dirty()? {
+///     println!("{dirty}");
+/// }
+/// # Ok::<(), warlock_tui::GitError>(())
+/// ```
+#[derive(Debug, Clone)]
+pub struct Git<R = Spawner> {
+    runs: R,
+    directory: PathBuf,
+}
+
+impl Git<Spawner> {
+    /// A checkout run by a real `git` under the module's clock.
+    #[must_use]
+    pub fn at(directory: impl Into<PathBuf>) -> Self {
+        Self::new(Spawner::new(), directory)
+    }
+}
+
+impl<R: Runs> Git<R> {
+    #[must_use]
+    pub fn new(runs: R, directory: impl Into<PathBuf>) -> Self {
+        Self {
+            runs,
+            directory: directory.into(),
+        }
+    }
+
+    #[must_use]
+    pub fn directory(&self) -> &Path {
+        &self.directory
+    }
+
+    /// One `git`, whatever it exited with: for the calls that ask a question
+    /// and read the answer off a refusal as readily as off a success.
+    fn ran(&self, args: &[&str]) -> Result<Ran, Error> {
+        let vector: Vec<OsString> = args.iter().map(OsString::from).collect();
+        self.runs.run(GIT.as_ref(), &vector, &self.directory)
+    }
+
+    /// One `git` that has to have worked, so every caller below is spared the
+    /// same four lines and no operation can forget to look at the status.
+    fn done(&self, args: &[&str]) -> Result<Ran, Error> {
+        let ran = self.ran(args)?;
+        if ran.success() {
+            Ok(ran)
+        } else {
+            Err(Error::Refused {
+                command: format!("{GIT} {}", args.join(" ")),
+                code: ran.code(),
+                message: complaint(&ran),
+            })
+        }
+    }
+}
+
+impl<R: Runs> Repository for Git<R> {
+    fn dirty(&self) -> Result<Vec<Dirty>, Error> {
+        // `--porcelain=v1` pins the format against a `git` that one day makes
+        // v2 the default, `-z` is what makes a path with a newline or a quote
+        // in it readable at all, and `--untracked-files=all` names the files
+        // inside a new directory rather than the directory: a halt says which
+        // files are in the way, and "`?? src/`" is not that.
+        let ran = self.done(&["status", "--porcelain=v1", "-z", "--untracked-files=all"])?;
+        Ok(dirty_in(ran.stdout()))
+    }
+
+    fn default_branch(&self) -> Result<String, Error> {
+        // The local answer first, because it is a file read and the other one
+        // is a round trip to the forge.
+        let local = self.ran(&["symbolic-ref", "--quiet", "--short", &origin_head()])?;
+        if local.success()
+            && let Some(branch) = branch_named(&local.stdout_text())
+        {
+            return Ok(branch);
+        }
+
+        // `origin/HEAD` is unset in a checkout cloned before `git` set it, and
+        // in one where somebody deleted it; the remote still knows.
+        let remote = self.ran(&["remote", "show", REMOTE])?;
+        if remote.success()
+            && let Some(branch) = head_branch_in(&remote.stdout_text())
+        {
+            return Ok(branch);
+        }
+
+        // No guess. `main` would be right nearly every time, and the times it
+        // was wrong a branch would be cut from `master` or `develop` behind
+        // somebody's back and a pull request opened against a branch nobody
+        // merges into.
+        Err(Error::Unreadable {
+            what: format!("the default branch of `{REMOTE}`"),
+            saw: undetected(&local, &remote),
+        })
+    }
+
+    fn switch_to(&self, branch: &str) -> Result<(), Error> {
+        self.done(&["switch", branch])?;
+        Ok(())
+    }
+
+    fn catch_up(&self, branch: &str) -> Result<(), Error> {
+        // `--ff-only` and not a plain pull: a default branch that has diverged
+        // from the remote is a checkout somebody is in the middle of something
+        // in, and the answer to that is to stop, not to make a merge commit on
+        // it. The remote and the branch are named rather than left to the
+        // upstream configuration, so what this pulls does not depend on how the
+        // checkout was set up.
+        self.done(&["pull", "--ff-only", REMOTE, branch])?;
+        Ok(())
+    }
+
+    fn cut_branch(&self, branch: &str, from: &str) -> Result<(), Error> {
+        // The start point is named rather than taken from whatever is checked
+        // out: this is the one call that decides where a ticket's work begins,
+        // and it should not depend on a switch somewhere above it having
+        // happened.
+        self.done(&["switch", "--create", branch, from])?;
+        Ok(())
+    }
+
+    fn head(&self) -> Result<Commit, Error> {
+        let ran = self.done(&["rev-parse", "HEAD"])?;
+        let id = ran.stdout_text().trim().to_owned();
+        if id.is_empty() {
+            return Err(Error::Unreadable {
+                what: "the commit `HEAD` is on".to_owned(),
+                saw: "`git rev-parse HEAD` printed nothing".to_owned(),
+            });
+        }
+        Ok(Commit::new(id))
+    }
+
+    /// `git add -A` and then one commit. Everything, because a sub-task's work
+    /// is whatever it left in the tree and a warlock that picked paths would
+    /// commit half of it.
+    ///
+    /// A `git` that refuses because there is nothing to commit is an
+    /// [`Error::Refused`] like any other, carrying what `git` said: whether a
+    /// sub-task that changed nothing is a failure is the caller's to decide.
+    fn commit_all(&self, message: &str) -> Result<(), Error> {
+        self.done(&["add", "-A"])?;
+        // The message as its own argument, never interpolated into one: a goal
+        // with a quote, a newline or a `$` in it is a commit message, not a
+        // shell word, and nothing here goes through a shell anyway.
+        self.done(&["commit", "-m", message])?;
+        Ok(())
+    }
+
+    fn publish(&self, branch: &str) -> Result<(), Error> {
+        // `--set-upstream` every time rather than only the first: a resumed run
+        // pushes a branch that already has one, and setting it again to the
+        // same place costs nothing and spares the caller having to know which
+        // kind of run it is in.
+        self.done(&["push", "--set-upstream", REMOTE, branch])?;
+        Ok(())
+    }
+}
+
+/// The branch a pull's work goes on: the ticket, lowercased, then the title.
+///
+/// The team key is a parameter because it belongs to the scope record in
+/// `.warlock/pacts.toml`, and nothing in this module reads a file.
+///
+/// ```
+/// use warlock_tui::branch_name;
+///
+/// assert_eq!(
+///     branch_name("WAR", 137, "Run git and gh behind a seam: branch, commits, push"),
+///     "war-137/run-git-and-gh-behind-a-seam-branch-commits-push"
+/// );
+/// ```
+#[must_use]
+pub fn branch_name(team_key: &str, number: u32, title: &str) -> String {
+    format!(
+        "{}-{number}/{}",
+        team_key.trim().to_lowercase(),
+        branch_slug(title)
+    )
+}
+
+/// The message on every commit warlock makes: `<TICKET> <TICKET>.NN: <goal>`.
+///
+/// The ticket twice, because the two halves are read by different things. The
+/// first word is what a `git log --oneline | grep WAR-137` matches, so a whole
+/// ticket's history comes back whichever sub-task each commit belongs to; the
+/// second is the sub-task itself, which is what a halted run resumes from.
+///
+/// ```
+/// use warlock_tui::commit_message;
+///
+/// assert_eq!(
+///     commit_message("WAR-137", "WAR-137.02", "Render the pull request title and body"),
+///     "WAR-137 WAR-137.02: Render the pull request title and body"
+/// );
+/// ```
+#[must_use]
+pub fn commit_message(ticket: &str, sub_task: &str, goal: &str) -> String {
+    // Trimmed on every side: a goal arrives from a brief, where it is a line of
+    // markdown that may well end in a newline, and a commit message with a
+    // blank second line is a body as far as `git log` is concerned.
+    format!(
+        "{} {}: {}",
+        ticket.trim(),
+        sub_task.trim(),
+        goal.trim().replace('\n', " ")
+    )
+}
+
+/// About this many characters of title in a branch name.
+///
+/// A branch name is read in `git branch`, in a shell prompt and in the URL of a
+/// pull request, all beside the ticket half and whatever else is on the line.
+const BRANCH_SLUG_MAX: usize = 50;
+
+/// What a title with nothing sluggable in it becomes, so there is always a
+/// second half: `war-137/` is not a branch name.
+const UNNAMED: &str = "untitled";
+
+// A second copy of the rule in `writing.rs`'s `slugged`, on purpose, and the
+// only two places it is written.
+//
+// It cannot be shared as the code stands: `writing.rs` is a `main.rs` module and
+// `pub(crate)` to the binary, so the library cannot call it, and lifting it here
+// would leave the document writer taking its filename rule from the module that
+// runs `git`.
+//
+// It should not be shared even then, because the two answer to different things.
+// A filename is a `docs/` name a person reads and renames at will; a branch name
+// is a ref that a run record, a pushed branch and an open pull request all have
+// to agree on, so tuning the filename rule must not quietly move every branch
+// and leave a halted run resuming onto a name that no longer exists. They
+// already differ twice over: the cap is this one's own, and a title that slugs
+// to nothing is `untitled.md` there — a name a reader fixes — and
+// `<ticket>/untitled` here, a name nobody ever types.
+fn branch_slug(title: &str) -> String {
+    let mut slug = String::new();
+    for character in title.chars() {
+        if character.is_alphanumeric() {
+            slug.extend(character.to_lowercase());
+        } else if !slug.ends_with('-') {
+            // Every run of punctuation and whitespace, however long, is one
+            // hyphen: `git` takes a double hyphen in a ref, but a reader asked
+            // to type one is reading a typo.
+            slug.push('-');
+        }
+    }
+    let slug = capped(slug.trim_matches('-'));
+    if slug.is_empty() {
+        return UNNAMED.to_owned();
+    }
+    slug.to_owned()
+}
+
+// Three cases, and the third is why the cap is "about". A slug that fits comes
+// back whole; one that does not is cut back to the last hyphen inside the cap;
+// and one whose first word is itself longer than the cap is cut after that word,
+// however long it is, because there is nowhere to break it and half a word in a
+// branch name is a name nobody can guess the rest of.
+fn capped(slug: &str) -> &str {
+    let Some((cut, _)) = slug.char_indices().nth(BRANCH_SLUG_MAX) else {
+        return slug;
+    };
+    if slug[cut..].starts_with('-') {
+        return &slug[..cut];
+    }
+    if let Some(hyphen) = slug[..cut].rfind('-') {
+        return &slug[..hyphen];
+    }
+    match slug[cut..].find('-') {
+        Some(end) => &slug[..cut + end],
+        None => slug,
+    }
+}
+
+// `XY PATH\0`, and for a rename or a copy `XY PATH\0ORIG_PATH\0` — the new name
+// first and the old one as a field of its own, which is the whole reason the
+// entries are walked with an iterator rather than mapped over.
+fn dirty_in(payload: &[u8]) -> Vec<Dirty> {
+    // The payload ends in a NUL, so the split leaves an empty tail; a field in
+    // the middle is never empty, because every one of them starts with a status
+    // or is a path.
+    let mut fields = payload
+        .split(|&byte| byte == 0)
+        .filter(|field| !field.is_empty());
+    let mut dirty = Vec::new();
+
+    while let Some(field) = fields.next() {
+        // `XY` and the space after it: three bytes, all of them ASCII, before
+        // the first byte of the path.
+        if field.len() < 4 {
+            continue;
+        }
+        let code = String::from_utf8_lossy(&field[..2]).into_owned();
+        let path = String::from_utf8_lossy(&field[3..]).into_owned();
+        let renamed = code.contains('R') || code.contains('C');
+        let from = renamed
+            .then(|| fields.next())
+            .flatten()
+            .map(|field| String::from_utf8_lossy(field).into_owned());
+        dirty.push(Dirty { code, path, from });
+    }
+
+    dirty
+}
+
+fn origin_head() -> String {
+    format!("refs/remotes/{REMOTE}/HEAD")
+}
+
+// `--short` answers `origin/main`; the unabbreviated ref is stripped as well, so
+// a `git` that ever stops shortening is read rather than taken for a branch
+// called `refs`.
+fn branch_named(text: &str) -> Option<String> {
+    let name = text.trim();
+    let name = name.strip_prefix("refs/remotes/").unwrap_or(name);
+    let name = name.strip_prefix(&format!("{REMOTE}/")).unwrap_or(name);
+    (!name.is_empty()).then(|| name.to_owned())
+}
+
+// What to say when neither probe named a branch: whatever `git` complained,
+// and the one command that sets `origin/HEAD` for good. A halt with something
+// to do in it, rather than one that only refuses.
+fn undetected(local: &Ran, remote: &Ran) -> String {
+    let said = [complaint(remote), complaint(local)]
+        .into_iter()
+        .find(|said| !said.is_empty())
+        .unwrap_or_else(|| format!("`{REMOTE}/HEAD` names no branch"));
+    format!("{said}; run `git remote set-head {REMOTE} --auto`")
+}
+
+// The one line of `git remote show origin` that matters. `(unknown)` is what it
+// prints when the remote has no HEAD at all, and that is not a branch name.
+fn head_branch_in(text: &str) -> Option<String> {
+    text.lines()
+        .find_map(|line| line.trim().strip_prefix("HEAD branch:"))
+        .map(str::trim)
+        .filter(|branch| !branch.is_empty() && *branch != "(unknown)")
+        .map(ToOwned::to_owned)
+}
+
+// What `git` said about a refusal. Its stderr, which is where it complains, and
+// its stdout when it did not: `git commit` says "nothing to commit" on stdout
+// and exits non-zero, and an error carrying an empty string would be a halt
+// nobody can act on.
+fn complaint(ran: &Ran) -> String {
+    let stderr = ran.stderr_text();
+    let stderr = stderr.trim();
+    if !stderr.is_empty() {
+        return stderr.to_owned();
+    }
+    ran.stdout_text().trim().to_owned()
 }
 
 /// The last line of every body, and the only claim in it warlock makes about

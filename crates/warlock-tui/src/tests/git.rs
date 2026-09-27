@@ -475,3 +475,576 @@ mod rendering {
         );
     }
 }
+
+// Every operation, driven through a runner that records the argument vector and
+// scripts the answer: no repository, no network, and no `git` on the machine.
+mod operations {
+    use std::collections::VecDeque;
+    use std::ffi::{OsStr, OsString};
+    use std::path::{Path, PathBuf};
+    use std::sync::{Arc, Mutex};
+
+    use super::super::{
+        Commit, Dirty, Error, Git, Head, Ran, Repository, Runs, branch_name, commit_message,
+    };
+
+    // The directory every call below has to have run in, and one no machine
+    // has: a test that reached a real checkout would fail here first.
+    const CHECKOUT: &str = "/warlock/no/such/checkout";
+
+    #[derive(Debug, PartialEq, Eq)]
+    struct Call {
+        program: String,
+        args: Vec<String>,
+        directory: PathBuf,
+    }
+
+    #[derive(Default)]
+    struct Shared {
+        calls: Mutex<Vec<Call>>,
+        answers: Mutex<VecDeque<Result<Ran, Error>>>,
+    }
+
+    // Cloned into the `Git` and kept by the test, so the vectors can be read
+    // after the operation has taken its runner by value.
+    #[derive(Clone, Default)]
+    struct Fake {
+        shared: Arc<Shared>,
+    }
+
+    impl Fake {
+        fn new() -> Self {
+            Self::default()
+        }
+
+        // An unscripted call answers with a clean success, so a test only says
+        // what it is about.
+        fn says(self, stdout: impl Into<Vec<u8>>) -> Self {
+            self.answers(Ok(Ran::new(Some(0), stdout, "")))
+        }
+
+        fn refuses(self, code: i32, stderr: &str) -> Self {
+            self.answers(Ok(Ran::new(Some(code), "", stderr)))
+        }
+
+        fn answers(self, answer: Result<Ran, Error>) -> Self {
+            self.shared
+                .answers
+                .lock()
+                .expect("answers")
+                .push_back(answer);
+            self
+        }
+
+        fn checkout(&self) -> Git<Self> {
+            Git::new(self.clone(), CHECKOUT)
+        }
+
+        fn vectors(&self) -> Vec<Vec<String>> {
+            self.shared
+                .calls
+                .lock()
+                .expect("calls")
+                .iter()
+                .map(|call| call.args.clone())
+                .collect()
+        }
+
+        fn only(&self) -> Vec<String> {
+            let mut vectors = self.vectors();
+            assert_eq!(vectors.len(), 1, "expected exactly one call: {vectors:?}");
+            vectors.remove(0)
+        }
+    }
+
+    impl Runs for Fake {
+        fn run(&self, program: &OsStr, args: &[OsString], directory: &Path) -> Result<Ran, Error> {
+            self.shared.calls.lock().expect("calls").push(Call {
+                program: program.to_string_lossy().into_owned(),
+                args: args
+                    .iter()
+                    .map(|arg| arg.to_string_lossy().into_owned())
+                    .collect(),
+                directory: directory.to_path_buf(),
+            });
+            self.shared
+                .answers
+                .lock()
+                .expect("answers")
+                .pop_front()
+                .unwrap_or_else(|| Ok(Ran::new(Some(0), "", "")))
+        }
+    }
+
+    fn words(vector: &[String]) -> Vec<&str> {
+        vector.iter().map(String::as_str).collect()
+    }
+
+    #[test]
+    fn every_operation_runs_git_in_the_directory_it_was_given() {
+        let fake = Fake::new().says("deadbeef\n");
+
+        let _ = fake.checkout().head().expect("the scripted commit");
+
+        let calls = fake.shared.calls.lock().expect("calls");
+        assert_eq!(calls[0].program, "git");
+        assert_eq!(calls[0].directory, Path::new(CHECKOUT));
+    }
+
+    #[test]
+    fn a_clean_tree_is_an_empty_answer_to_one_status_call() {
+        let fake = Fake::new().says("");
+
+        let dirty = fake.checkout().dirty().expect("a scripted clean status");
+
+        assert!(dirty.is_empty(), "{dirty:?}");
+        assert_eq!(
+            words(&fake.only()),
+            ["status", "--porcelain=v1", "-z", "--untracked-files=all"]
+        );
+    }
+
+    #[test]
+    fn a_dirty_tree_comes_back_as_the_paths_that_are_dirty() {
+        // The bytes a real `git status --porcelain=v1 -z --untracked-files=all`
+        // printed: a rename, a modification, and two untracked files, one of
+        // them inside a directory that is itself new.
+        let fake = Fake::new().says(
+            &b"R  renamed.txt\0old.txt\0 M sub/new.txt\0?? fresh/deep.txt\0?? untracked.txt\0"[..],
+        );
+
+        let dirty = fake.checkout().dirty().expect("the scripted status");
+
+        assert_eq!(
+            dirty,
+            vec![
+                Dirty {
+                    code: "R ".to_owned(),
+                    path: "renamed.txt".to_owned(),
+                    from: Some("old.txt".to_owned()),
+                },
+                Dirty {
+                    code: " M".to_owned(),
+                    path: "sub/new.txt".to_owned(),
+                    from: None,
+                },
+                Dirty {
+                    code: "??".to_owned(),
+                    path: "fresh/deep.txt".to_owned(),
+                    from: None,
+                },
+                Dirty {
+                    code: "??".to_owned(),
+                    path: "untracked.txt".to_owned(),
+                    from: None,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_rename_names_both_sides_and_does_not_swallow_the_entry_after_it() {
+        // The old path is a field of its own rather than part of the record, so
+        // a reader that took every field for an entry would report `old.txt` as
+        // dirty in its own right and lose the modification after it.
+        let fake =
+            Fake::new().says(&b"R  after.rs\0before.rs\0C  copy.rs\0source.rs\0 M last.rs\0"[..]);
+
+        let dirty = fake.checkout().dirty().expect("the scripted status");
+
+        assert_eq!(dirty.len(), 3);
+        assert_eq!(dirty[0].path, "after.rs");
+        assert_eq!(dirty[0].from.as_deref(), Some("before.rs"));
+        assert_eq!(dirty[1].from.as_deref(), Some("source.rs"));
+        assert_eq!(dirty[2].path, "last.rs");
+        assert_eq!(dirty[2].from, None);
+        assert_eq!(dirty[0].to_string(), "R  after.rs (was before.rs)");
+    }
+
+    #[test]
+    fn a_status_that_cannot_be_run_is_the_refusal_git_gave() {
+        let fake = Fake::new().refuses(128, "fatal: not a git repository\n");
+
+        let error = fake
+            .checkout()
+            .dirty()
+            .expect_err("a scripted refusal is not a clean tree");
+
+        match error {
+            Error::Refused {
+                command,
+                code,
+                message,
+            } => {
+                assert_eq!(
+                    command,
+                    "git status --porcelain=v1 -z --untracked-files=all"
+                );
+                assert_eq!(code, Some(128));
+                assert_eq!(message, "fatal: not a git repository");
+            }
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_default_branch_is_read_off_the_local_head_ref() {
+        let fake = Fake::new().says("origin/main\n");
+
+        let branch = fake
+            .checkout()
+            .default_branch()
+            .expect("the scripted default branch");
+
+        assert_eq!(branch, "main");
+        assert_eq!(
+            words(&fake.only()),
+            [
+                "symbolic-ref",
+                "--quiet",
+                "--short",
+                "refs/remotes/origin/HEAD"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_default_branch_that_is_not_main_is_read_as_what_it_is() {
+        // The test that matters: nothing here knows the word `main`.
+        for named in ["origin/master", "origin/trunk", "origin/develop"] {
+            let fake = Fake::new().says(format!("{named}\n"));
+
+            let branch = fake.checkout().default_branch().expect("the scripted ref");
+
+            assert_eq!(branch, named.trim_start_matches("origin/"));
+        }
+    }
+
+    #[test]
+    fn an_unset_head_ref_falls_through_to_the_remote_rather_than_to_a_guess() {
+        let fake = Fake::new().refuses(1, "").says(
+            "* remote origin\n  Fetch URL: git@example.com:team/repo.git\n  HEAD branch: trunk\n",
+        );
+
+        let branch = fake
+            .checkout()
+            .default_branch()
+            .expect("the remote names one");
+
+        assert_eq!(branch, "trunk");
+        let vectors = fake.vectors();
+        assert_eq!(vectors.len(), 2);
+        assert_eq!(words(&vectors[1]), ["remote", "show", "origin"]);
+    }
+
+    #[test]
+    fn a_default_branch_nothing_names_is_reported_rather_than_guessed_past() {
+        let fake = Fake::new()
+            .refuses(1, "")
+            .says("* remote origin\n  HEAD branch: (unknown)\n");
+
+        let error = fake
+            .checkout()
+            .default_branch()
+            .expect_err("nothing named a default branch");
+
+        let said = error.to_string();
+        assert!(
+            !said.contains("main"),
+            "the halt offered a guess instead of an answer: {said}"
+        );
+        assert!(
+            said.contains("git remote set-head origin --auto"),
+            "the halt says nothing the reader can do: {said}"
+        );
+        match error {
+            Error::Unreadable { what, .. } => {
+                assert_eq!(what, "the default branch of `origin`");
+            }
+            other => panic!("expected an unreadable default branch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_missing_git_stays_a_missing_program_rather_than_becoming_a_refusal() {
+        let fake = Fake::new().answers(Err(Error::NotFound {
+            program: "git".to_owned(),
+        }));
+
+        let error = fake.checkout().head().expect_err("there is no git here");
+
+        assert!(matches!(error, Error::NotFound { .. }), "{error:?}");
+    }
+
+    #[test]
+    fn head_is_read_as_the_commit_it_is_on() {
+        let fake = Fake::new().says("4e724822589a889678ef4d920a03a69e67d977e8\n");
+
+        let head = fake.checkout().head().expect("the scripted commit");
+
+        assert_eq!(
+            head,
+            Commit::new("4e724822589a889678ef4d920a03a69e67d977e8")
+        );
+        assert_eq!(head.short(), "4e724822");
+        assert_eq!(words(&fake.only()), ["rev-parse", "HEAD"]);
+    }
+
+    #[test]
+    fn a_head_that_moved_is_reported_with_the_commit_it_moved_to() {
+        let before = Fake::new().says("1111111111111111111111111111111111111111\n");
+        let after = Fake::new().says("2222222222222222222222222222222222222222\n");
+
+        let before = before.checkout().head().expect("the commit before");
+        let after = after.checkout().head().expect("the commit after");
+
+        assert_eq!(
+            Head::between(&before, &after),
+            Head::Moved {
+                from: before.clone(),
+                to: after.clone(),
+            }
+        );
+        match Head::between(&before, &after) {
+            Head::Moved { to, .. } => assert_eq!(to.short(), "22222222"),
+            Head::Unmoved => panic!("the session committed and nobody noticed"),
+        }
+        assert_eq!(Head::between(&after, &after), Head::Unmoved);
+    }
+
+    #[test]
+    fn a_recorded_branch_is_switched_to_and_a_new_one_is_cut_by_a_separate_call() {
+        let resumed = Fake::new();
+        resumed
+            .checkout()
+            .switch_to("war-137/a-halted-run")
+            .expect("the branch is there");
+        assert_eq!(words(&resumed.only()), ["switch", "war-137/a-halted-run"]);
+
+        let fresh = Fake::new();
+        fresh
+            .checkout()
+            .cut_branch("war-137/a-new-run", "main")
+            .expect("the branch is cut");
+        assert_eq!(
+            words(&fresh.only()),
+            ["switch", "--create", "war-137/a-new-run", "main"]
+        );
+    }
+
+    #[test]
+    fn the_default_branch_is_brought_up_to_date_by_fast_forward_only() {
+        let fake = Fake::new();
+
+        fake.checkout().catch_up("trunk").expect("a fast-forward");
+
+        assert_eq!(
+            words(&fake.only()),
+            ["pull", "--ff-only", "origin", "trunk"]
+        );
+    }
+
+    #[test]
+    fn a_commit_stages_everything_and_then_commits_the_message_given_whole() {
+        let fake = Fake::new();
+        let message = commit_message(
+            "WAR-137",
+            "WAR-137.02",
+            "Render the pull request title and body from structured inputs",
+        );
+
+        fake.checkout()
+            .commit_all(&message)
+            .expect("both calls succeed");
+
+        let vectors = fake.vectors();
+        assert_eq!(words(&vectors[0]), ["add", "-A"]);
+        assert_eq!(
+            vectors[1],
+            vec![
+                "commit".to_owned(),
+                "-m".to_owned(),
+                "WAR-137 WAR-137.02: Render the pull request title and body from structured inputs"
+                    .to_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_commit_message_is_the_ticket_the_sub_task_and_the_goal() {
+        assert_eq!(
+            commit_message("WAR-137", "WAR-137.02", "Render the pull request"),
+            "WAR-137 WAR-137.02: Render the pull request"
+        );
+        // A goal read off a brief arrives with the line it was on.
+        assert_eq!(
+            commit_message(" WAR-137 ", "WAR-137.02\n", "Render the pull request\n"),
+            "WAR-137 WAR-137.02: Render the pull request"
+        );
+        // A goal that wrapped is one line in a commit message: a blank second
+        // line would make the rest of it a body.
+        assert_eq!(
+            commit_message(
+                "WAR-137",
+                "WAR-137.03",
+                "Put every git operation\nbehind a seam"
+            ),
+            "WAR-137 WAR-137.03: Put every git operation behind a seam"
+        );
+    }
+
+    #[test]
+    fn a_commit_with_nothing_to_commit_is_the_refusal_and_what_git_said_on_stdout() {
+        // `git commit` complains on stdout and exits non-zero, so an error that
+        // only read stderr would be empty.
+        let fake = Fake::new().says("").answers(Ok(Ran::new(
+            Some(1),
+            "nothing to commit, working tree clean\n",
+            "",
+        )));
+
+        let error = fake
+            .checkout()
+            .commit_all("WAR-137 WAR-137.03: A sub-task that changed nothing")
+            .expect_err("git refused");
+
+        match error {
+            Error::Refused { message, .. } => {
+                assert_eq!(message, "nothing to commit, working tree clean");
+            }
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_push_sets_the_upstream_and_carries_no_force() {
+        let fake = Fake::new();
+
+        fake.checkout()
+            .publish("war-137/run-git-and-gh-behind-a-seam")
+            .expect("the push succeeds");
+
+        assert_eq!(
+            words(&fake.only()),
+            [
+                "push",
+                "--set-upstream",
+                "origin",
+                "war-137/run-git-and-gh-behind-a-seam"
+            ]
+        );
+    }
+
+    #[test]
+    fn nothing_the_module_runs_stashes_resets_cleans_merges_forces_or_deletes() {
+        // Every operation there is, driven once, and then every argument of
+        // every one of them read: the rule is about the whole module, not about
+        // the push it is easiest to break it in.
+        let fake = Fake::new()
+            .says("")
+            .says("origin/main\n")
+            .says("1111111111111111111111111111111111111111\n");
+        let checkout = fake.checkout();
+
+        let _ = checkout.dirty().expect("a clean tree");
+        let _ = checkout.default_branch().expect("a default branch");
+        let _ = checkout.head().expect("a commit");
+        checkout.switch_to("main").expect("a switch");
+        checkout.catch_up("main").expect("a fast-forward");
+        checkout.cut_branch("war-137/work", "main").expect("a cut");
+        checkout
+            .commit_all("WAR-137 WAR-137.03: A goal")
+            .expect("a commit");
+        checkout.publish("war-137/work").expect("a push");
+
+        let vectors = fake.vectors();
+        assert_eq!(
+            vectors.len(),
+            9,
+            "an operation was added or lost: {vectors:?}"
+        );
+        for vector in &vectors {
+            for argument in vector {
+                assert!(
+                    !matches!(
+                        argument.as_str(),
+                        "stash"
+                            | "reset"
+                            | "clean"
+                            | "merge"
+                            | "rebase"
+                            | "revert"
+                            | "checkout"
+                            | "-f"
+                            | "-d"
+                            | "-D"
+                            | "-u"
+                    ),
+                    "`git {}` is not warlock's to run",
+                    vector.join(" ")
+                );
+                assert!(
+                    !argument.starts_with("--force")
+                        && argument != "--delete"
+                        && argument != "--amend"
+                        && argument != "--hard",
+                    "`git {}` carries a flag this module never passes",
+                    vector.join(" ")
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_branch_name_is_the_ticket_lowercased_then_the_title_slugged() {
+        assert_eq!(
+            branch_name("WAR", 137, "Run git and gh behind a seam"),
+            "war-137/run-git-and-gh-behind-a-seam"
+        );
+    }
+
+    #[test]
+    fn a_title_with_punctuation_mixed_case_and_runs_of_spaces_slugs_to_single_hyphens() {
+        assert_eq!(
+            branch_name("WAR", 42, "  Cut   the  Branch: commits, push & THE PR!  "),
+            "war-42/cut-the-branch-commits-push-the-pr"
+        );
+        assert_eq!(
+            branch_name("war", 7, "A/B — testing (v2.0)"),
+            "war-7/a-b-testing-v2-0"
+        );
+    }
+
+    #[test]
+    fn a_long_title_is_cut_at_a_word_rather_than_mid_word() {
+        let name = branch_name(
+            "WAR",
+            137,
+            "Run git and gh behind a seam: branch, commits, push, pull request",
+        );
+
+        assert_eq!(
+            name,
+            "war-137/run-git-and-gh-behind-a-seam-branch-commits-push"
+        );
+        assert!(!name.ends_with('-'));
+    }
+
+    #[test]
+    fn a_first_word_longer_than_the_cap_is_kept_whole_because_half_of_it_is_not_a_name() {
+        let long = "Supercalifragilisticexpialidociousandthensomemoreforgoodmeasureindeed yes";
+
+        assert_eq!(
+            branch_name("WAR", 1, long),
+            "war-1/supercalifragilisticexpialidociousandthensomemoreforgoodmeasureindeed"
+        );
+    }
+
+    #[test]
+    fn a_title_that_slugs_to_nothing_still_makes_a_branch_a_human_can_type() {
+        // `war-137/` is not a ref, and a ticket titled in a script this rule
+        // drops entirely is still a ticket somebody pulled.
+        assert_eq!(branch_name("WAR", 137, "  —  !!  "), "war-137/untitled");
+        assert_eq!(branch_name("WAR", 137, ""), "war-137/untitled");
+    }
+}
