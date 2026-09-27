@@ -20,7 +20,7 @@ piped — it reads a plain line and the terminal is never touched.
 | `warlock key forget <name>` | Remove a stored key from this machine by name | one key-store write |
 | `warlock stale [path]` | List the pacted directories at or below `path` that are stale | nothing |
 | `warlock fresh [path]` | The same for the fresh ones | nothing |
-| `warlock check <path>` | Say which scope covers `path`, where work under it is filed, what this machine holds, and whether the two meet | nothing |
+| `warlock check <path>` | Say which scope covers `path`, where work under it is filed, what this machine holds, and whether the two meet — or, with `--gate`, refuse a closed scope instead of describing it | nothing |
 | `warlock unpact <path>` | Drop the pact on a directory and every pact below it | one manifest write |
 | `warlock scope add <path> <scope>` | Write a scope onto a pacted directory, and — `--team`, `--review-state`, `--label` — the `[[scope]]` record routing it, when nothing records the name yet | one manifest write |
 | `warlock scope remove <path>` | Clear the scope on a pacted directory | one manifest write |
@@ -169,7 +169,7 @@ scope and the sigils meet, and which stored key name this checkout is bound to:
 ```sh
 $ warlock check crates/engine
 `crates/engine` is scoped `data-plane`
-work here is filed to `Data Plane`, as `In Review`, labelled `area/data-plane`
+work here is filed to `Data Plane`, labelled `area/data-plane`, and a finished pull moves the ticket to `In Review`
 holding `data-plane`
 `data-plane` is open to this machine
 filing to `Data Plane` would use the key `work`, which this machine stores
@@ -219,14 +219,75 @@ fix, while `key: "work", key_found: false` is a name this machine has never
 stored and `warlock key add work` is.
 
 The verdict is a field and never a status. A closed scope is the answer to the
-question rather than a failure to reach one, so `check` exits 0 either way, and
-so do an unbound checkout, a bound name the store has never heard of and a path
-no scope covers. That is what leaves the exit status free:
+question rather than a failure to reach one, so `check` without `--gate` exits 0
+either way, and so do an unbound checkout, a bound name the store has never
+heard of and a path no scope covers. That is what leaves the exit status free:
 `warlock check <path> --json | jq -e '.opens'` spends `jq`'s status on the
 verdict, and `warlock check <path> --json | jq -e '.opens and .key_found'`
 spends it on "this machine may work here and can file the ticket" — warlock
 spends none of its own on saying no either way. The same goes for an empty
 listing — nothing stale is an answer, and it is a 0.
+
+`warlock check --gate` is the one exception, and the paragraph above is the rule
+it is the exception to. A shell about to write a file, and a `PreToolUse` hook
+about to let Claude Code write one, cannot read five lines of prose and cannot
+be stopped by a field, so `--gate` asks exactly the same question and answers it
+by refusing. It prints no envelope and takes no `--json` — `--gate --json` is
+refused at the command line rather than quietly ignored, because an empty stdout
+piped into `jq` costs a debugging session. `check` without `--gate` is unchanged
+in every respect: the same five lines, the same fields in the same order, the
+same 0.
+
+Given a path, a gate is one line on stderr and **exit 3** when the scope
+covering that path does not open to this machine's sigils, and nothing at all
+and **exit 0** when it does:
+
+```sh
+$ warlock check --gate crates/engine/src/lib.rs
+warlock: crates/engine/src/lib.rs is scoped `data-plane` — hold that sigil to work here, with `warlock config`
+$ echo $?
+3
+
+# the same path, holding `data-plane`: nothing to say and nothing in the way
+$ warlock check --gate crates/engine/src/lib.rs && echo may write
+may write
+```
+
+The 3 and the line are the boundary's own, the ones `unpact` and `scope add`
+refuse with, so nothing was invented for the gate. A path no scope covers exits
+0, and so does a path in a directory nothing has pacted: an unscoped path is
+open to anyone, exactly as the verdict line above says it is.
+
+With no path at all, `--gate` is the hook form. It reads a Claude Code
+`PreToolUse` payload on stdin and takes the path from `tool_input.file_path`,
+and it answers on stdout rather than in a status — a closed scope is exactly one
+deny object on one line, in Claude Code's vocabulary rather than warlock's
+envelope:
+
+```sh
+$ warlock check --gate < payload.json
+{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"warlock: `crates/engine/src/lib.rs` is scoped `data-plane` — hold that sigil to work here, with `warlock config`"}}
+$ echo $?
+0
+```
+
+The reason is the boundary's one sentence with `warlock: ` in front of it, so it
+names the path, the covering scope and — a sigil and the scope it opens share a
+name — the sigil the write wants. The prefix is there because the line Claude
+Code shows says only that permission was denied, and warlock is the program to
+go and argue with.
+
+An open scope, a path no scope covers, a payload that will not parse and a
+payload with no `tool_input.file_path` in it all write nothing at all: a hook
+cannot refuse a write it cannot name. Every one of them exits **0**, and so does
+the refusal. That asymmetry with the path form is the point rather than an
+oversight: **2** is the only status Claude Code honours from a hook, and it
+means "block this tool call" for every event rather than "the scope is closed",
+so a hook refusing with the boundary's 3 would be a write waved through. The
+refusal travels in the JSON and the status stays 0 either way, which is what
+leaves one flag serving both a shell that reads statuses and a hook that reads
+objects, off one verdict, rather than two flags that can come to disagree about
+a path.
 
 ## Writing
 
