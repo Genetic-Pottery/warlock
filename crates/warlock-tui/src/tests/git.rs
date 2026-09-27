@@ -54,13 +54,14 @@ fn output_that_is_not_utf_8_comes_back_as_the_bytes_it_was() {
 // portable stand-in would have to be a second binary to build.
 #[cfg(unix)]
 mod unix {
-    use std::ffi::OsString;
+    use std::collections::HashMap;
+    use std::ffi::{OsStr, OsString};
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::{Duration, Instant};
     use std::{env, fs, process, thread};
 
-    use super::super::{Error, Runs, Spawner};
+    use super::super::{Error, Forge, Gh, Opened, PullRequest, Ran, Runs, Spawner};
     use super::NOT_A_PROGRAM;
 
     fn args(words: &[&str]) -> Vec<OsString> {
@@ -258,6 +259,100 @@ mod unix {
             .expect_err("nothing can run in a directory that is not there");
 
         assert!(matches!(error, Error::Io { .. }), "{error:?}");
+    }
+
+    #[test]
+    fn nothing_is_added_to_a_child_s_environment() {
+        // The other half of the no-key rule, and the half that is about the
+        // environment rather than the argument vector — `operations` has the
+        // arguments. Warlock holds a Linear key; no `git` or `gh` child may be
+        // handed one, and the way that is kept true is that nothing is written
+        // into a child's environment at all. Inherited whole and untouched:
+        // `gh` reads its own credentials from out there, so the fix for a key
+        // leaking is never an `env_clear`.
+        let mine: HashMap<String, String> = env::vars().collect();
+
+        let ran = Spawner::new()
+            .run("env".as_ref(), &[], Path::new("."))
+            .expect("`env` prints the environment it was given");
+
+        assert!(ran.success());
+        let printed = ran.stdout_text();
+        let mut seen = 0;
+        for line in printed.lines() {
+            let Some((name, value)) = line.split_once('=') else {
+                continue;
+            };
+            // A value with a newline in it prints over several lines, and only
+            // the first of them is a name. Skipping the rest costs nothing:
+            // something *added* would be a whole entry of its own.
+            if name.is_empty()
+                || !name
+                    .chars()
+                    .all(|letter| letter.is_ascii_alphanumeric() || letter == '_')
+            {
+                continue;
+            }
+            seen += 1;
+            let Some(ours) = mine.get(name) else {
+                panic!("the child was given `{name}`, which this process does not have");
+            };
+            if !ours.contains('\n') {
+                assert_eq!(ours, value, "the child's `{name}` is not this process's");
+            }
+        }
+        assert!(seen > 1, "`env` printed nothing worth checking: {printed}");
+    }
+
+    // A real [`Spawner`] pointed at a program of the test's choosing. The
+    // missing-`gh` path is worth reaching through an actual failed lookup
+    // rather than a scripted one: whether the operating system's answer is the
+    // one the module turns into an outcome is exactly what a fake cannot say.
+    struct Instead(&'static str);
+
+    impl Runs for Instead {
+        fn run(&self, _program: &OsStr, args: &[OsString], directory: &Path) -> Result<Ran, Error> {
+            Spawner::new().run(self.0.as_ref(), args, directory)
+        }
+    }
+
+    fn pull_request() -> PullRequest<'static> {
+        PullRequest {
+            base: "main",
+            head: "war-137/run-git-and-gh-behind-a-seam",
+            title: "WAR-137: Run git and gh behind a seam",
+            body: "The pull request and the ticket's review state are the human gate.\n",
+        }
+    }
+
+    #[test]
+    fn a_gh_that_no_path_holds_is_an_outcome_rather_than_an_error() {
+        let opened = Gh::new(Instead(NOT_A_PROGRAM), ".")
+            .open_pull_request(pull_request())
+            .expect("a machine with no `gh` on it has still done the work");
+
+        assert_eq!(opened, Opened::NoGh);
+        assert_eq!(opened.url(), None);
+    }
+
+    #[test]
+    fn a_gh_that_is_there_and_fails_is_a_failure_and_not_the_missing_one() {
+        // `/bin/sh pr create …` is a program that exists, runs, and says no —
+        // the case the outcome above must not swallow.
+        let error = Gh::new(Instead("/bin/sh"), ".")
+            .open_pull_request(pull_request())
+            .expect_err("a `gh` that ran and refused is a failure");
+
+        match error {
+            Error::Refused { command, code, .. } => {
+                assert_eq!(
+                    command,
+                    "gh pr create --base main --head war-137/run-git-and-gh-behind-a-seam"
+                );
+                assert_ne!(code, Some(0));
+            }
+            other => panic!("expected a refusal, got {other:?}"),
+        }
     }
 
     #[test]
@@ -485,7 +580,8 @@ mod operations {
     use std::sync::{Arc, Mutex};
 
     use super::super::{
-        Commit, Dirty, Error, Git, Head, Ran, Repository, Runs, branch_name, commit_message,
+        Commit, Dirty, Error, Forge, Gh, Git, Head, Opened, PullRequest, Ran, Repository, Runs,
+        branch_name, commit_message,
     };
 
     // The directory every call below has to have run in, and one no machine
@@ -538,6 +634,10 @@ mod operations {
 
         fn checkout(&self) -> Git<Self> {
             Git::new(self.clone(), CHECKOUT)
+        }
+
+        fn forge(&self) -> Gh<Self> {
+            Gh::new(self.clone(), CHECKOUT)
         }
 
         fn vectors(&self) -> Vec<Vec<String>> {
@@ -936,35 +1036,182 @@ mod operations {
     }
 
     #[test]
-    fn nothing_the_module_runs_stashes_resets_cleans_merges_forces_or_deletes() {
-        // Every operation there is, driven once, and then every argument of
-        // every one of them read: the rule is about the whole module, not about
-        // the push it is easiest to break it in.
-        let fake = Fake::new()
+    fn a_pull_request_is_opened_against_the_default_branch_with_the_branch_as_head() {
+        let fake = Fake::new().says("https://github.com/team/repo/pull/12\n");
+
+        let opened = fake
+            .forge()
+            .open_pull_request(PullRequest {
+                base: "trunk",
+                head: BRANCH,
+                title: TITLE,
+                body: BODY,
+            })
+            .expect("the scripted pull request");
+
+        assert_eq!(
+            opened,
+            Opened::At {
+                url: "https://github.com/team/repo/pull/12".to_owned()
+            }
+        );
+        assert_eq!(opened.url(), Some("https://github.com/team/repo/pull/12"));
+
+        let calls = fake.shared.calls.lock().expect("calls");
+        assert_eq!(calls[0].program, "gh");
+        assert_eq!(calls[0].directory, Path::new(CHECKOUT));
+        assert_eq!(
+            calls[0].args,
+            vec![
+                "pr".to_owned(),
+                "create".to_owned(),
+                "--base".to_owned(),
+                // The detected default branch, not `gh`'s own idea of one, and
+                // never `main`.
+                "trunk".to_owned(),
+                "--head".to_owned(),
+                BRANCH.to_owned(),
+                "--title".to_owned(),
+                TITLE.to_owned(),
+                "--body".to_owned(),
+                // Whole, with its blank lines and its markdown: a body is one
+                // argument and never a shell word.
+                BODY.to_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_url_is_the_last_one_gh_printed_and_not_the_first_thing_that_looked_like_one() {
+        let fake = Fake::new().says(
+            "Creating pull request for war-137/work into main in team/repo\n\
+             see https://docs.github.com/pull-requests\n\
+             \n\
+             https://github.com/team/repo/pull/12\n",
+        );
+
+        let opened = fake
+            .forge()
+            .open_pull_request(request())
+            .expect("the scripted pull request");
+
+        assert_eq!(opened.url(), Some("https://github.com/team/repo/pull/12"));
+    }
+
+    #[test]
+    fn a_gh_no_path_holds_is_an_outcome_and_a_gh_that_refuses_is_a_failure() {
+        // The distinction the whole variant exists for. Absent: the work is
+        // done, the branch is pushed, and the caller comments the body on the
+        // ticket instead. Present and saying no: something went wrong and the
+        // run has to be told.
+        let absent = Fake::new().answers(Err(Error::NotFound {
+            program: "gh".to_owned(),
+        }));
+        let refusing = Fake::new().refuses(1, "pull request already exists for this branch\n");
+
+        let opened = absent
+            .forge()
+            .open_pull_request(request())
+            .expect("a missing `gh` is not a failed run");
+        let error = refusing
+            .forge()
+            .open_pull_request(request())
+            .expect_err("a `gh` that ran and said no is a failed run");
+
+        assert_eq!(opened, Opened::NoGh);
+        match error {
+            Error::Refused {
+                command,
+                code,
+                message,
+            } => {
+                // The two branches and not the body: a halt that quoted the
+                // rendered document back would bury what `gh` said under it.
+                assert_eq!(command, format!("gh pr create --base main --head {BRANCH}"));
+                assert_eq!(code, Some(1));
+                assert_eq!(message, "pull request already exists for this branch");
+            }
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_gh_that_opened_something_and_said_where_is_not_a_success_without_the_url() {
+        let fake = Fake::new().says("Creating pull request for war-137/work into main\n");
+
+        let error = fake
+            .forge()
+            .open_pull_request(request())
+            .expect_err("there is no pull request to report");
+
+        match error {
+            Error::Unreadable { what, saw } => {
+                assert_eq!(what, "the pull request's URL");
+                assert_eq!(saw, "Creating pull request for war-137/work into main");
+            }
+            other => panic!("expected an unreadable URL, got {other:?}"),
+        }
+    }
+
+    const BASE: &str = "main";
+    const BRANCH: &str = "war-137/run-git-and-gh-behind-a-seam";
+    const MESSAGE: &str = "WAR-137 WAR-137.04: Open the pull request behind the same seam";
+    const TITLE: &str = "WAR-137: Run git and gh behind a seam";
+    const BODY: &str = "## Sub-tasks\n\n### WAR-137.04 Open the pull request\n";
+
+    fn request() -> PullRequest<'static> {
+        PullRequest {
+            base: BASE,
+            head: BRANCH,
+            title: TITLE,
+            body: BODY,
+        }
+    }
+
+    // Every operation the module has, `git` and `gh` alike, driven once, and
+    // every argument vector the lot of them produced. Both audits below read
+    // it: the rules they check are about the whole module, and a rule proved
+    // against the one operation it is easiest to break in is a rule a tenth
+    // operation walks straight past.
+    fn every_vector() -> Vec<Vec<String>> {
+        let mut fake = Fake::new()
             .says("")
             .says("origin/main\n")
             .says("1111111111111111111111111111111111111111\n");
-        let checkout = fake.checkout();
+        // The six plain successes between the three answers above and the URL
+        // below: `switch`, `pull`, `switch --create`, `add`, `commit`, `push`.
+        for _ in 0..6 {
+            fake = fake.says("");
+        }
+        let fake = fake.says("https://github.com/team/repo/pull/12\n");
 
+        let checkout = fake.checkout();
         let _ = checkout.dirty().expect("a clean tree");
         let _ = checkout.default_branch().expect("a default branch");
         let _ = checkout.head().expect("a commit");
-        checkout.switch_to("main").expect("a switch");
-        checkout.catch_up("main").expect("a fast-forward");
-        checkout.cut_branch("war-137/work", "main").expect("a cut");
-        checkout
-            .commit_all("WAR-137 WAR-137.03: A goal")
-            .expect("a commit");
-        checkout.publish("war-137/work").expect("a push");
+        checkout.switch_to(BRANCH).expect("a switch");
+        checkout.catch_up(BASE).expect("a fast-forward");
+        checkout.cut_branch(BRANCH, BASE).expect("a cut");
+        checkout.commit_all(MESSAGE).expect("a commit");
+        checkout.publish(BRANCH).expect("a push");
+        let _ = fake
+            .forge()
+            .open_pull_request(request())
+            .expect("a pull request");
 
         let vectors = fake.vectors();
         assert_eq!(
             vectors.len(),
-            9,
+            10,
             "an operation was added or lost: {vectors:?}"
         );
-        for vector in &vectors {
-            for argument in vector {
+        vectors
+    }
+
+    #[test]
+    fn nothing_the_module_runs_stashes_resets_cleans_merges_forces_or_deletes() {
+        for vector in every_vector() {
+            for argument in &vector {
                 assert!(
                     !matches!(
                         argument.as_str(),
@@ -980,7 +1227,7 @@ mod operations {
                             | "-D"
                             | "-u"
                     ),
-                    "`git {}` is not warlock's to run",
+                    "`{}` is not warlock's to run",
                     vector.join(" ")
                 );
                 assert!(
@@ -988,7 +1235,61 @@ mod operations {
                         && argument != "--delete"
                         && argument != "--amend"
                         && argument != "--hard",
-                    "`git {}` carries a flag this module never passes",
+                    "`{}` carries a flag this module never passes",
+                    vector.join(" ")
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn no_child_is_given_a_word_neither_the_module_nor_its_caller_supplied() {
+        // The arguments half of the no-key rule; the environment half is in
+        // `unix`. Nothing in this module is ever handed a key — there is
+        // nowhere in it for one to arrive — and this is what keeps it so. An
+        // operation that grew a `-c http.extraheader=…`, read a token out of
+        // the environment behind its caller's back, or spliced one into a
+        // remote URL would put a word in one of these vectors that is neither
+        // `git`'s, `gh`'s, nor one of the five the test passed in.
+        const OWN_WORDS: [&str; 29] = [
+            "status",
+            "--porcelain=v1",
+            "-z",
+            "--untracked-files=all",
+            "symbolic-ref",
+            "--quiet",
+            "--short",
+            "refs/remotes/origin/HEAD",
+            "remote",
+            "show",
+            "origin",
+            "switch",
+            "--create",
+            "pull",
+            "--ff-only",
+            "rev-parse",
+            "HEAD",
+            "add",
+            "-A",
+            "commit",
+            "-m",
+            "push",
+            "--set-upstream",
+            "pr",
+            "create",
+            "--base",
+            "--head",
+            "--title",
+            "--body",
+        ];
+        let passed_in = [BASE, BRANCH, MESSAGE, TITLE, BODY];
+
+        for vector in every_vector() {
+            for argument in &vector {
+                assert!(
+                    OWN_WORDS.contains(&argument.as_str())
+                        || passed_in.contains(&argument.as_str()),
+                    "`{}` carries `{argument}`, which came from neither the caller nor the module",
                     vector.join(" ")
                 );
             }

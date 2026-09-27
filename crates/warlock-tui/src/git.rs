@@ -1008,6 +1008,208 @@ pub fn pull_request_body(
     body
 }
 
+/// The program the pull request goes through, and the only one this half runs.
+const GH: &str = "gh";
+
+/// The pull request to open, once everything about it has been decided.
+///
+/// Four strings of the same type, so they are named rather than positional: the
+/// two branches are the pair that a call swapping them would still compile and
+/// still run, and the pull request would be the default branch merged into the
+/// work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PullRequest<'a> {
+    /// The branch it merges into — the detected default branch, never a guess.
+    pub base: &'a str,
+    /// The branch it merges: the one this run's commits are on.
+    pub head: &'a str,
+    /// [`pull_request_title`]'s answer.
+    pub title: &'a str,
+    /// [`pull_request_body`]'s answer.
+    pub body: &'a str,
+}
+
+/// What came of asking for a pull request.
+///
+/// [`NoGh`](Opened::NoGh) is a variant of the success and not an
+/// [`Error`], and that is a decision rather than an oversight. A machine with
+/// no `gh` on it has still done the work: the branch is cut, the commits are
+/// made and the push has happened, and the caller's answer to this variant is
+/// to comment [the same body](pull_request_body) on the ticket, name the
+/// branch, and count the run finished. Folding it into an error would halt a
+/// run that succeeded, and turn "install `gh`" into "the pull failed".
+///
+/// A `gh` that is there and says no is an [`Error::Refused`], which is the
+/// distinction the variant exists for.
+///
+/// ```
+/// use warlock_tui::Opened;
+///
+/// let opened = Opened::At {
+///     url: "https://github.com/team/repo/pull/12".to_owned(),
+/// };
+///
+/// assert_eq!(opened.url(), Some("https://github.com/team/repo/pull/12"));
+/// assert_eq!(Opened::NoGh.url(), None);
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Opened {
+    At { url: String },
+    NoGh,
+}
+
+impl Opened {
+    #[must_use]
+    pub fn url(&self) -> Option<&str> {
+        match self {
+            Self::At { url } => Some(url),
+            Self::NoGh => None,
+        }
+    }
+}
+
+/// The one thing a pull asks of the forge, and — like [`Repository`] — as much
+/// for what it does not have as for what it does.
+///
+/// Opening a pull request is the whole of it. There is no merge, no approval,
+/// no close and no auto-merge, because the pull request is where warlock stops:
+/// a `gh pr merge` added here would take a run past the human gate its own body
+/// promises is there.
+///
+/// Its own trait beside [`Repository`] rather than a method on it, because the
+/// two are answered by different programs and only one of them may be missing:
+/// a caller holding a [`Repository`] holds something that has to work, and a
+/// caller holding a `Forge` holds something that may come back
+/// [`Opened::NoGh`].
+pub trait Forge {
+    fn open_pull_request(&self, request: PullRequest<'_>) -> Result<Opened, Error>;
+}
+
+/// The one [`Forge`] that speaks `gh`, over whatever [`Runs`] it holds and in
+/// whatever directory it was given.
+///
+/// ```no_run
+/// use warlock_tui::{Forge, Gh, PullRequest};
+///
+/// // Runs a real `gh`, so this example is not executed by the test suite.
+/// let opened = Gh::at(".").open_pull_request(PullRequest {
+///     base: "main",
+///     head: "war-137/run-git-and-gh-behind-a-seam",
+///     title: "WAR-137: Run git and gh behind a seam",
+///     body: "The pull request and the ticket's review state are the human gate.\n",
+/// })?;
+///
+/// match opened.url() {
+///     Some(url) => println!("{url}"),
+///     None => println!("no `gh` on this machine; comment the body on the ticket"),
+/// }
+/// # Ok::<(), warlock_tui::GitError>(())
+/// ```
+#[derive(Debug, Clone)]
+pub struct Gh<R = Spawner> {
+    runs: R,
+    directory: PathBuf,
+}
+
+impl Gh<Spawner> {
+    /// A forge reached by a real `gh` under the module's clock.
+    #[must_use]
+    pub fn at(directory: impl Into<PathBuf>) -> Self {
+        Self::new(Spawner::new(), directory)
+    }
+}
+
+impl<R: Runs> Gh<R> {
+    #[must_use]
+    pub fn new(runs: R, directory: impl Into<PathBuf>) -> Self {
+        Self {
+            runs,
+            directory: directory.into(),
+        }
+    }
+
+    #[must_use]
+    pub fn directory(&self) -> &Path {
+        &self.directory
+    }
+}
+
+impl<R: Runs> Forge for Gh<R> {
+    fn open_pull_request(&self, request: PullRequest<'_>) -> Result<Opened, Error> {
+        // The base named rather than left to `gh`'s own default: `gh` would ask
+        // the forge for the repository's default branch, which is the question
+        // `Repository::default_branch` already answered against this checkout's
+        // remote.
+        //
+        // Every value its own argument. A body is markdown with blank lines,
+        // backticks and whatever a summary contained in it, and nothing here
+        // goes through a shell.
+        let args = [
+            "pr",
+            "create",
+            "--base",
+            request.base,
+            "--head",
+            request.head,
+            "--title",
+            request.title,
+            "--body",
+            request.body,
+        ];
+        let vector: Vec<OsString> = args.iter().map(OsString::from).collect();
+
+        let ran = match self.runs.run(GH.as_ref(), &vector, &self.directory) {
+            Ok(ran) => ran,
+            // The whole reason `NotFound` is a variant of its own. Anything
+            // else — a broken pipe, a timeout, a `gh` that exited non-zero —
+            // stays what it is.
+            Err(Error::NotFound { .. }) => return Ok(Opened::NoGh),
+            Err(other) => return Err(other),
+        };
+
+        if !ran.success() {
+            return Err(Error::Refused {
+                // The two branches and not the whole vector: the title and the
+                // body are the rendered document, and a halt that quoted them
+                // back would bury what `gh` actually said under it.
+                command: format!(
+                    "{GH} pr create --base {} --head {}",
+                    request.base, request.head
+                ),
+                code: ran.code(),
+                message: complaint(&ran),
+            });
+        }
+
+        match url_in(&ran.stdout_text()) {
+            Some(url) => Ok(Opened::At { url }),
+            None => Err(Error::Unreadable {
+                what: "the pull request's URL".to_owned(),
+                saw: said_or_silent(&ran),
+            }),
+        }
+    }
+}
+
+// The last URL rather than the first: `gh pr create` prints the one it made on
+// its own last line, and whatever it says above that — the branch it is opening
+// from, a notice about the remote — may itself carry a link.
+fn url_in(text: &str) -> Option<String> {
+    text.lines()
+        .map(str::trim)
+        .rfind(|line| line.starts_with("https://") || line.starts_with("http://"))
+        .map(ToOwned::to_owned)
+}
+
+fn said_or_silent(ran: &Ran) -> String {
+    let said = complaint(ran);
+    if said.is_empty() {
+        format!("`{GH} pr create` printed nothing")
+    } else {
+        said
+    }
+}
+
 #[cfg(test)]
 #[path = "tests/git.rs"]
 mod tests;
