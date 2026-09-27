@@ -1397,7 +1397,7 @@ mod reviewing {
         AT_MOST, Answering, App, BRIEF, Cutter, FIRST, Instant, NOT_A_KEY, PREPARED, PROJECT_ID,
         SECOND, Scripted, THIRD, a_project, asked_over, fs, notes, now,
     };
-    use crate::stubs::{Boarding, Op};
+    use crate::stubs::{Boarding, Op, VIEWER};
 
     // What somebody types about drafts they have just read, which is the one
     // thing a redrafting session hears.
@@ -1583,6 +1583,36 @@ mod reviewing {
         assert_eq!(
             cutter.reviewing().map(|review| review.slice().to_owned()),
             Some(format!("slice 2 `{SECOND}`"))
+        );
+    }
+
+    #[test]
+    fn what_the_panel_files_is_assigned_to_the_user_the_bound_key_belongs_to() {
+        // The panel takes the same `prepare`/`Filing::file` route the shell verb
+        // does, so the id the run resolved once rides every draft a window
+        // creates. Nothing here is the panel's own doing — this asserts that,
+        // which is why a `/draft` needs no assigning of its own.
+        let linear = a_project();
+        let (mut app, mut cutter, _repo, _home) = cut(linear.clone(), drafting_each());
+        offered(&mut app, &mut cutter);
+
+        cutter.create(&mut app, now());
+        settled(&mut app, &mut cutter);
+
+        let issues = linear.issues_created();
+        assert_eq!(issues.len(), 2, "{issues:?}");
+        for issue in &issues {
+            assert_eq!(issue.assignee, VIEWER, "{issue:?}");
+        }
+        // Once for the run, before the window was ever up: the fetch that put
+        // the question there is where the id came from, not the create.
+        let asked = linear.positions_of(Op::Viewer);
+        assert_eq!(asked.len(), 1, "{:?}", linear.ops());
+        let first = linear.positions_of(Op::CreateIssue)[0];
+        assert!(
+            asked[0] < first,
+            "the assignee was found out after an issue existed: {:?}",
+            linear.ops()
         );
     }
 
