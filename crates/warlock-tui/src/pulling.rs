@@ -36,20 +36,27 @@
 //! [`crossings_in`]: warlock_tui::crossings_in
 //! [`pull_request_body`]: warlock_tui::pull_request_body
 
-// The loop that spends these is not here yet, and a seam nothing calls is dead
-// code to the bin target however thoroughly the tests here drive it. An `expect`
-// rather than an `allow` so that the day everything below has a caller, this
-// line is the compile error that asks to be deleted.
+// The door that spends the loop is not here yet, and a value nothing outside the
+// tests builds is dead code to the bin target however thoroughly the tests here
+// drive it. An `expect` rather than an `allow` so that the day everything below
+// has a caller, this line is the compile error that asks to be deleted.
 #![expect(
     dead_code,
-    reason = "the seams and the decisions land before the loop that spends them"
+    reason = "the loop lands before the subcommand that spends it"
 )]
 
+use std::fmt;
 use std::fmt::Write as _;
 use std::path::Path;
 
-use warlock_engine::{Manifest, PullRun, PullSubtask, ScopeRecord, SubtaskStatus};
-use warlock_tui::{Activity, Board, Forge, Repository, Split, Worked};
+use warlock_engine::working::Reported;
+use warlock_engine::{
+    Manifest, PullRun, PullSubtask, RunStatus, ScopeRecord, SubtaskStatus, now_rfc3339, pulls,
+};
+use warlock_tui::{
+    Activity, Board, Crossing, Dirty, Forge, GitError, IN_PROGRESS, LinearError, Repository,
+    Sibling, Split, Worked, branch_name, commit_message, crossings_after, working_opening,
+};
 
 /// Everything one pull is allowed to touch, built by whichever door is pulling.
 ///
@@ -92,7 +99,474 @@ impl<B: Board, R: Repository, F: Forge, S: Splits, W: Works> Pulling<'_, B, R, F
     pub(crate) fn report(&mut self, event: PullEvent) {
         (self.progress)(event);
     }
+
+    /// One pull, from the ticket to the last sub-task: the run record loaded or
+    /// made, the branch checked out or cut, the ticket moved, the ticket split,
+    /// and then every sub-task the split ordered, one session at a time.
+    ///
+    /// It stops where the work stops. What is left afterwards — the push, the
+    /// pull request, the review state — needs every sub-task finished and is
+    /// [`Reached::Worked`]'s to do; every other ending is a halt this function
+    /// has already recorded and commented, which is why the two come back as one
+    /// value rather than as an `Ok` and an `Err`. A halt is not a failure: the
+    /// branch holds the commits the run did make.
+    ///
+    /// The clock is read here and is not a seam. Nothing in a run branches on the
+    /// time — the three instants are recorded for a person reading `state.json`
+    /// afterwards — so a stand-in clock would buy an assertion nobody makes and a
+    /// field on every call site.
+    pub(crate) fn work(&mut self, ticket: &Ticket<'_>) -> Result<Reached, Error> {
+        let mut run =
+            match PullRun::find(self.home, self.root, ticket.identifier).map_err(Error::record)? {
+                Some(held) => {
+                    self.take_up(&held)?;
+                    held
+                }
+                None => self.start(ticket)?,
+            };
+        // Whichever road it came in on. `resumed` is the status of a run waiting
+        // to be picked up, and this is the picking up: the brief's rule is that
+        // only `resume` moves a run to `resumed` and only a pull moves it on.
+        run.set_status(RunStatus::InProgress);
+
+        // Before the split, so the board is honest while the model works — and
+        // before the record is first saved, because a team with no such state is
+        // a line in the output rather than a thing the record has to remember.
+        let team = self.scope.team().to_owned();
+        if !self.move_ticket(ticket.id, IN_PROGRESS)? {
+            self.report(PullEvent::NoStartState { team });
+        }
+
+        // A resumed run already holds its split, and splitting it again would
+        // spend a session and append a second `.01` beside the first. A held run
+        // with no sub-tasks is one whose split halted, and is owed the split.
+        if run.subtasks().is_empty()
+            && let Some(reached) = self.split_into(ticket, &mut run)
+        {
+            return reached;
+        }
+
+        self.save(&run)?;
+        self.through_subtasks(ticket, run)
+    }
+
+    /// The split, with its sub-tasks pushed onto the run, or the halt it ended
+    /// in.
+    fn split_into(
+        &mut self,
+        ticket: &Ticket<'_>,
+        run: &mut PullRun,
+    ) -> Option<Result<Reached, Error>> {
+        self.report(PullEvent::Heading(Heading::Split {
+            ticket: ticket.identifier.to_owned(),
+            title: ticket.title.to_owned(),
+        }));
+        match self
+            .split
+            .split(ticket.identifier, ticket.title, ticket.description)
+        {
+            Split::Subtasks { subtasks, repairs } => {
+                for note in repairs {
+                    self.report(PullEvent::Repair { note });
+                }
+                for subtask in subtasks {
+                    run.push_subtask(PullSubtask::from(subtask));
+                }
+                None
+            }
+            // The record is saved all the same, holding a branch and no
+            // sub-tasks. Nothing was committed and nothing is lost, but the
+            // branch was cut and the ticket was moved, and a halt with no record
+            // behind it would leave the next pass calling this ticket "in
+            // progress elsewhere" — which is a lie about a run on this very
+            // machine. `Unsplit` already writes the sentence that goes on the
+            // ticket, so the sub-task account a halt usually posts would have
+            // nothing to list.
+            Split::Halted(unsplit) => {
+                let comment = unsplit.to_string();
+                Some(self.halt(ticket, run, &comment, Pulled::halted(ticket)))
+            }
+        }
+    }
+
+    /// Every sub-task the split ordered, serially, in the order
+    /// [`next_runnable`] answers.
+    ///
+    /// The record is saved on both sides of every session, which is what makes a
+    /// run killed anywhere resumable: the save before says a sub-task is in
+    /// progress, and the save after says what came of it.
+    fn through_subtasks(
+        &mut self,
+        ticket: &Ticket<'_>,
+        mut run: PullRun,
+    ) -> Result<Reached, Error> {
+        let total = run.subtasks().len();
+        let mut touched: Vec<TouchedScope> = Vec::new();
+
+        while let Some((id, goal, position)) = next_up(&run) {
+            self.report(PullEvent::Heading(Heading::Subtask {
+                id: id.clone(),
+                goal: goal.clone(),
+                position,
+                total,
+            }));
+
+            let subtask = run.subtask_mut(&id).expect(IN_THE_RUN);
+            subtask.set_status(SubtaskStatus::InProgress);
+            subtask.set_started_at(now_rfc3339());
+            self.save(&run)?;
+
+            let opening = opening_for(&run, ticket, &id);
+            let before = self.repo.head().map_err(Error::git)?;
+            let worked = self.sessions.work(&opening);
+            let after = self.repo.head().map_err(Error::git)?;
+            let (log, stopped) = read(worked);
+
+            let subtask = run.subtask_mut(&id).expect(IN_THE_RUN);
+            subtask.set_finished_at(now_rfc3339());
+            if let Some(log) = log {
+                subtask.set_log(log);
+            }
+
+            // `HEAD` before the tree, because a session that committed has moved
+            // its own work out of the tree: whatever `git status` says next is no
+            // longer an account of what that session wrote, so the crossing check
+            // would be reading a clean tree and answering "nothing crossed".
+            if after != before {
+                let moved = format!(
+                    "the session committed. `HEAD` moved from {} to {}, so what this sub-task \
+                     wrote is in a commit warlock did not make and cannot check. Nothing further \
+                     was committed.",
+                    before.short(),
+                    after.short(),
+                );
+                run.subtask_mut(&id)
+                    .expect(IN_THE_RUN)
+                    .set_status(SubtaskStatus::Failed(moved));
+                let comment = halt_comment(&run);
+                return self.halt(ticket, &mut run, &comment, Pulled::halted(ticket));
+            }
+
+            // Whatever the session reported, and before any commit: the gate hook
+            // never sees a `sed` inside a `Bash`, so this is the only check that
+            // covers every way a byte reaches the tree.
+            let mut changed = Vec::new();
+            let crossings = crossings_after(
+                self.repo,
+                &mut changed,
+                self.root,
+                self.manifest,
+                self.held,
+                Some(self.scope.name()),
+            )
+            .map_err(Error::git)?;
+
+            if !crossings.crossed.is_empty() {
+                let crossed = crossed_reason(&crossings.crossed);
+                run.subtask_mut(&id)
+                    .expect(IN_THE_RUN)
+                    .set_status(SubtaskStatus::Crossed(crossed));
+                let comment = halt_comment(&run);
+                // The tree is left exactly as the session left it: no commit, no
+                // reset, no stash. The work is under a boundary this machine does
+                // not hold, and what happens to it is a person's to decide.
+                return self.halt(
+                    ticket,
+                    &mut run,
+                    &comment,
+                    Pulled::Crossed {
+                        ticket: ticket.identifier.to_owned(),
+                        subtask: id,
+                    },
+                );
+            }
+
+            // Kept across the sessions rather than read again at the end: every
+            // commit below empties the tree these paths were read from, so by the
+            // time the pull request body wants them there is nothing left to ask.
+            remember(&mut touched, &crossings);
+            let wrote = !changed.is_empty();
+
+            match stopped {
+                // A session that reported itself done and left nothing in the
+                // tree is still done — a sub-task can finish by finding that the
+                // work is already there — and `git commit` with nothing staged
+                // refuses, so a commit here would end a run over an empty diff.
+                None => {
+                    if wrote {
+                        let message = commit_message(ticket.identifier, &id, &goal);
+                        self.repo.commit_all(&message).map_err(Error::git)?;
+                    }
+                    run.subtask_mut(&id)
+                        .expect(IN_THE_RUN)
+                        .set_status(SubtaskStatus::Done);
+                }
+                // Nothing is committed and nothing is undone. The next sibling
+                // runs in the tree this one left, which is what
+                // [`working_retry`](warlock_tui::working_retry) tells a session
+                // about.
+                Some(status) => {
+                    run.subtask_mut(&id).expect(IN_THE_RUN).set_status(status);
+                }
+            }
+            self.save(&run)?;
+        }
+
+        // Nothing runnable is two endings: every sub-task finished, or something
+        // stopped and everything left waits on it.
+        if run
+            .subtasks()
+            .iter()
+            .all(|subtask| *subtask.status() == SubtaskStatus::Done)
+        {
+            return Ok(Reached::Worked { run, touched });
+        }
+
+        let comment = halt_comment(&run);
+        self.halt(ticket, &mut run, &comment, Pulled::halted(ticket))
+    }
+
+    /// A run this checkout already holds, picked up where it was left: its own
+    /// branch checked out, and the tree it left required to be clean.
+    ///
+    /// The clean tree is the whole point of the refusal. A halted sub-task's
+    /// uncommitted work is still in that tree, and a run that carried on over it
+    /// would fold somebody else's half-finished edit into the next sub-task's
+    /// commit under that sub-task's message. Refusing is what gets a human to
+    /// look, and it commits nothing on the way out.
+    fn take_up(&mut self, run: &PullRun) -> Result<(), Error> {
+        self.repo.switch_to(run.branch()).map_err(Error::git)?;
+        let dirty = self.repo.dirty().map_err(Error::git)?;
+        if dirty.is_empty() {
+            Ok(())
+        } else {
+            Err(Error::Dirty {
+                branch: run.branch().to_owned(),
+                dirty,
+            })
+        }
+    }
+
+    /// A ticket with no run on this machine: the branch cut from the detected
+    /// default branch, and the record that will hold everything after it.
+    ///
+    /// The default branch is switched to before it is caught up, and that order
+    /// is not incidental: [`Repository::catch_up`] runs a `git pull --ff-only`,
+    /// which merges into whatever is checked out, so pulling the default branch
+    /// from somewhere else would fast-forward the wrong ref.
+    fn start(&mut self, ticket: &Ticket<'_>) -> Result<PullRun, Error> {
+        let default = self.repo.default_branch().map_err(Error::git)?;
+        self.repo.switch_to(&default).map_err(Error::git)?;
+        self.repo.catch_up(&default).map_err(Error::git)?;
+
+        let branch = branch_name(self.scope.team(), ticket.number, ticket.title);
+        self.repo
+            .cut_branch(&branch, &default)
+            .map_err(Error::git)?;
+
+        Ok(PullRun::new(
+            ticket.identifier,
+            ticket.title,
+            self.scope.name(),
+            branch,
+            now_rfc3339(),
+        ))
+    }
+
+    /// The ticket moved to the team's state of that name, or `false` when the
+    /// team has no such state.
+    ///
+    /// `false` and not an error, for both callers: a board whose workflow nobody
+    /// has given an `In Progress` or a review state is a board warlock reports on
+    /// and works past, and a run that stopped over it would be the board wagging
+    /// the pull.
+    fn move_ticket(&self, issue: &str, state: &str) -> Result<bool, Error> {
+        let found = self
+            .board
+            .workflow_state(self.scope.team(), state)
+            .map_err(Error::board)?;
+        let Some(state) = found else {
+            return Ok(false);
+        };
+        self.board.move_issue(issue, &state).map_err(Error::board)?;
+        Ok(true)
+    }
+
+    /// Every halt goes through here, and the order of the three things it does is
+    /// the promise: the record is written first, then the ticket is commented,
+    /// and the ticket is not moved at all.
+    ///
+    /// The record first because it is the source of truth — a comment naming
+    /// sub-tasks a `state.json` that failed to write does not agree with is a
+    /// comment about a run nobody can resume. The ticket is left where it is
+    /// because a halt is warlock stopping, not the work going backwards, and one
+    /// comment because the comment is the account of the whole run.
+    fn halt(
+        &mut self,
+        ticket: &Ticket<'_>,
+        run: &mut PullRun,
+        comment: &str,
+        ending: Pulled,
+    ) -> Result<Reached, Error> {
+        run.set_status(RunStatus::Halted);
+        self.save(run)?;
+        self.board
+            .comment_on_issue(ticket.id, comment)
+            .map_err(Error::board)?;
+        Ok(Reached::Stopped(ending))
+    }
+
+    /// The record, and everything rendered beside it, under the home this pull
+    /// was built with — never under the repository.
+    fn save(&self, run: &PullRun) -> Result<(), Error> {
+        run.save(self.home, self.root).map_err(Error::record)
+    }
 }
+
+/// What [`Pulling::work`] leaves behind, in the two shapes the rest of a pull
+/// cares about.
+///
+/// Not a `Result`, because neither of these is a failure: a halt is a run that
+/// did as much as it could, wrote its record and said so on the ticket. The
+/// [`Error`] beside it is for the failures — a `git` that refused, a board that
+/// would not answer, a record that would not write.
+#[derive(Debug)]
+pub(crate) enum Reached {
+    /// Every sub-task finished and committed. The record is `in_progress`, the
+    /// branch holds one commit per sub-task, and what is left is the push and the
+    /// pull request.
+    Worked {
+        run: PullRun,
+        /// The scopes this machine holds that the sessions wrote under, other
+        /// than the one the ticket was pulled under — which the pull request body
+        /// names. Owned and accumulated as the run went, because each commit
+        /// empties the tree the paths were read from.
+        touched: Vec<TouchedScope>,
+    },
+    /// The run stopped. The record is `halted`, the ticket carries one comment
+    /// saying what finished and what did not, and the ticket has not moved.
+    Stopped(Pulled),
+}
+
+/// One scope a session wrote under and this machine holds, with the paths written
+/// under it.
+///
+/// The owned twin of [`Touched`](warlock_tui::Touched), which borrows the `git
+/// status` entries it was read from. Those entries are gone by the next
+/// sub-task — the commit that ends this one empties the tree — so a run that
+/// wants to name these scopes in a pull request body at the end has to have kept
+/// them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TouchedScope {
+    pub(crate) scope: String,
+    pub(crate) paths: Vec<String>,
+}
+
+/// The ticket one pull works, in what a run needs of it and nothing else.
+///
+/// Values rather than a [`QueuedIssue`](warlock_tui::QueuedIssue), because two of
+/// these five are not on one: the number as a number, which
+/// [`branch_name`] takes, and the description, which the queue's query does not
+/// read. Whoever chose the ticket supplies them, and this module asks the board
+/// for nothing about the ticket it was handed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Ticket<'a> {
+    /// The board's own identifier for the issue, which is what a move and a
+    /// comment are addressed to. Never the `WAR-140` sort.
+    pub(crate) id: &'a str,
+    /// `WAR-140`: the run record's directory, the first word of every commit and
+    /// the stem every sub-task is numbered from.
+    pub(crate) identifier: &'a str,
+    /// The number in the identifier, which is the branch name's middle.
+    pub(crate) number: u32,
+    pub(crate) title: &'a str,
+    /// What the ticket says, as the context the split and every sub-task session
+    /// are given. Empty is a ticket whose description nobody read, and it reads
+    /// as a ticket with nothing more to say than its title.
+    pub(crate) description: &'a str,
+}
+
+/// What stopped a pull short of an ending of its own.
+///
+/// Three of the four are somebody else's failure carried whole, so the sentence a
+/// door prints is the one the module that failed wrote. The fourth is the one
+/// refusal this module makes itself, and it is a refusal rather than a halt
+/// because nothing has happened yet: no session has run, so there is nothing to
+/// record and nothing to say on the ticket that the tree does not already say.
+#[derive(Debug)]
+pub(crate) enum Error {
+    Git {
+        source: GitError,
+    },
+    Board {
+        source: LinearError,
+    },
+    Record {
+        source: pulls::Error,
+    },
+    /// A run was picked up, its branch checked out, and the tree is not clean.
+    Dirty {
+        branch: String,
+        dirty: Vec<Dirty>,
+    },
+}
+
+impl Error {
+    // Named constructors so every call site is `.map_err(Error::git)` rather
+    // than a closure spelling the struct field out again.
+    fn git(source: GitError) -> Self {
+        Self::Git { source }
+    }
+
+    fn board(source: LinearError) -> Self {
+        Self::Board { source }
+    }
+
+    fn record(source: pulls::Error) -> Self {
+        Self::Record { source }
+    }
+}
+
+impl fmt::Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            // No preamble on the three carried failures: `git.rs`, `linear.rs`
+            // and `pulls.rs` each name what they were doing, and a sentence here
+            // would say "the pull failed" over the top of the reason.
+            Self::Git { source } => write!(f, "{source}"),
+            Self::Board { source } => write!(f, "{source}"),
+            Self::Record { source } => write!(f, "{source}"),
+            Self::Dirty { branch, dirty } => {
+                write!(
+                    f,
+                    "`{branch}` is checked out for this run and its working tree is not clean, so \
+                     nothing was committed and no session was raised. What a halted sub-task left \
+                     is yours to keep or to drop:",
+                )?;
+                for entry in dirty {
+                    write!(f, "\n  {entry}")?;
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
+impl std::error::Error for Error {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Git { source } => Some(source),
+            Self::Board { source } => Some(source),
+            Self::Record { source } => Some(source),
+            Self::Dirty { .. } => None,
+        }
+    }
+}
+
+// The one panic message in the loop, and it says why it cannot happen: every
+// identifier reached for is one `next_runnable` just answered with, out of the
+// very record being written to.
+const IN_THE_RUN: &str = "the sub-task the run just offered is in the run";
 
 /// The splitting session, behind a seam.
 ///
@@ -155,6 +629,14 @@ impl Pulled {
         }
     }
 
+    /// The ordinary halt, named from the ticket being worked: every halt but the
+    /// crossing, which carries the sub-task that crossed as well.
+    fn halted(ticket: &Ticket<'_>) -> Self {
+        Self::Halted {
+            ticket: ticket.identifier.to_owned(),
+        }
+    }
+
     pub(crate) fn ticket(&self) -> &str {
         match self {
             Self::Opened { ticket, .. }
@@ -181,6 +663,13 @@ pub(crate) enum PullEvent {
     /// [`Section`](warlock_tui::Section) on the panel's account card — and a
     /// line rendered in here would be the shell's wording sent to both.
     Activity(Activity),
+    /// One repair warlock made to what the split answered, in the engine's own
+    /// words. Said rather than swallowed: the sub-tasks a run works are not quite
+    /// the ones the session wrote, and a manifest nobody was told had been mended
+    /// reads as a manifest the model produced.
+    Repair {
+        note: String,
+    },
     /// The team has no workflow state named
     /// [`IN_PROGRESS`](warlock_tui::IN_PROGRESS). No state is carried because
     /// there is only one spelling this looks for; the review state's is the
@@ -241,6 +730,127 @@ pub(crate) fn next_runnable(run: &PullRun) -> Option<&PullSubtask> {
                     .is_some_and(|needed| *needed.status() == SubtaskStatus::Done)
             })
     })
+}
+
+/// The sub-task to work next with what the header above its session says: its
+/// identifier, its goal and its one-based place in the record.
+///
+/// Owned, and that is what it is for: the loop is about to write to the very
+/// record [`next_runnable`] borrowed from, and the three facts it needs afterwards
+/// are these. The position is the sub-task's place in the record rather than a
+/// count of sessions, so a run that passed over a blocked sub-task and came back
+/// to a later sibling still numbers each one where the manifest has it.
+fn next_up(run: &PullRun) -> Option<(String, String, usize)> {
+    let next = next_runnable(run)?;
+    let at = run
+        .subtasks()
+        .iter()
+        .position(|subtask| subtask.id() == next.id())
+        // Found by walking this same list, so it is there. One rather than a
+        // panic if it somehow is not: the numerator of a progress header is not
+        // worth ending a run over.
+        .map_or(1, |at| at + 1);
+    Some((next.id().to_owned(), next.goal().to_owned(), at))
+}
+
+/// The opening turn of one sub-task's session: its own brief, the ticket as
+/// context, and what its finished siblings reported.
+///
+/// Rendered from the record rather than read from the brief on disk, though the
+/// two are the same text at this point: the file also carries whatever the last
+/// session appended under its execution log heading, and a session shown its own
+/// half-written log would be reading yesterday's notes as today's instructions.
+fn opening_for(run: &PullRun, ticket: &Ticket<'_>, id: &str) -> String {
+    let brief = run
+        .subtask(id)
+        .expect(IN_THE_RUN)
+        .to_brief_string(ticket.identifier);
+    // A sub-task that finished and logged nothing is left out rather than carried
+    // as an empty summary: a session shown an id with silence under it reads it as
+    // a sibling that finished and had nothing to say.
+    let finished: Vec<Sibling<'_>> = run
+        .subtasks()
+        .iter()
+        .filter(|sibling| *sibling.status() == SubtaskStatus::Done)
+        .filter_map(|sibling| Some((sibling.id(), sibling.log()?)))
+        .collect();
+    working_opening(&brief, ticket.title, ticket.description, &finished)
+}
+
+/// One session's outcome as the record takes it: what to log, and the status to
+/// set — where `None` is a session that reported itself done.
+///
+/// `None` is not "no status": it is the one claim the session does not get to
+/// settle. What the working tree holds decides a `done`, so the status for it is
+/// set after the check rather than here.
+///
+/// A session that never answered is `failed` carrying what stopped it. Nothing is
+/// retried here — [`Works`] has spent every attempt by the time this is read, and
+/// a second policy on top of that one would be warlock asking twice as patiently
+/// as it decided to.
+fn read(worked: Worked) -> (Option<String>, Option<SubtaskStatus>) {
+    match worked {
+        Worked::Answered(accepted) => {
+            let stopped = match accepted.reported() {
+                Reported::Done => None,
+                Reported::Blocked(reason) => Some(SubtaskStatus::Blocked(reason.to_owned())),
+                Reported::Failed(reason) => Some(SubtaskStatus::Failed(reason.to_owned())),
+            };
+            (Some(accepted.summary().to_owned()), stopped)
+        }
+        Worked::Halted(why) => (None, Some(SubtaskStatus::Failed(why.to_string()))),
+    }
+}
+
+/// What a `crossed` sub-task's reason says: every path the session wrote that
+/// this machine's sigils do not open, each with the scope that covers it.
+///
+/// Every path and not the first, because the operator's next move is to look at
+/// all of them, and the scope on each because two crossed paths are commonly under
+/// two different scopes.
+fn crossed_reason(crossed: &[Crossing<'_>]) -> String {
+    let mut reason =
+        String::from("wrote under a scope this machine does not hold, so nothing was committed:");
+    for crossing in crossed {
+        let _ = write!(
+            reason,
+            " `{}` is scoped `{}`;",
+            crossing.path, crossing.scope
+        );
+    }
+    // The last separator is a full stop, so the reason reads as a sentence
+    // wherever it is quoted — a halt comment, a manifest line, a `state.json`
+    // somebody is reading by hand.
+    if reason.ends_with(';') {
+        reason.pop();
+        reason.push('.');
+    }
+    reason
+}
+
+/// Fold one session's held-but-foreign scopes into what the run has seen, with no
+/// scope and no path said twice.
+///
+/// Two sessions touching one scope is one entry in the pull request body and not
+/// two, and the order is the order the paths were first seen, following
+/// [`crossings_in`](warlock_tui::crossings_in)'s own promise about order.
+fn remember(kept: &mut Vec<TouchedScope>, crossings: &warlock_tui::Crossings<'_>) {
+    for foreign in &crossings.touched {
+        let at = if let Some(at) = kept.iter().position(|held| held.scope == foreign.scope) {
+            at
+        } else {
+            kept.push(TouchedScope {
+                scope: foreign.scope.to_owned(),
+                paths: Vec::new(),
+            });
+            kept.len() - 1
+        };
+        for path in &foreign.paths {
+            if !kept[at].paths.iter().any(|held| held == path) {
+                kept[at].paths.push((*path).to_owned());
+            }
+        }
+    }
 }
 
 /// The one comment a halted run leaves on its ticket: what finished, what

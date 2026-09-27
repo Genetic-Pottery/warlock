@@ -1,6 +1,16 @@
-use warlock_engine::{PullRun, PullSubtask, SubtaskStatus};
+use std::path::Path;
 
-use super::{Pulled, halt_comment, next_runnable};
+use tempfile::TempDir;
+use warlock_engine::splitting::{Caught, Cycle, Numbered};
+use warlock_engine::{
+    Manifest, PactEntry, PullRun, PullSubtask, RunStatus, ScopeRecord, SubtaskStatus, state_path,
+};
+use warlock_tui::{Dirty, Split, Stopped, Unsplit, Worked, commit_message};
+
+use super::{
+    Error, Heading, PullEvent, Pulled, Pulling, Reached, Ticket, halt_comment, next_runnable,
+};
+use crate::stubs::{Boarding, Call, Checkout, Forging, GitCall, Op, Sessions, Slicing, said};
 
 const TICKET: &str = "WAR-140";
 
@@ -263,4 +273,707 @@ fn the_three_endings_spend_what_the_shell_spells_them_with() {
         3
     );
     assert_eq!(opened.ticket(), TICKET);
+}
+
+// Everything below drives the whole of `Pulling::work` against fakes: no socket,
+// no repository, no `claude`, and no clock read that anything asserts. What is
+// real is a temporary home, because the run record is a file and the promise about
+// it is that the next invocation reads back what this one wrote.
+
+const TEAM: &str = "WAR";
+
+const NUMBER: u32 = 140;
+
+const ISSUE: &str = "issue-140";
+
+const TITLE: &str = "Add `warlock pull <SCOPE>`";
+
+const DESCRIPTION: &str =
+    "The pieces do not add up to a command until something orchestrates them.";
+
+// Detected, never guessed: `main` here is what this checkout's `origin/HEAD`
+// answered, and every assertion about the branch reads it back rather than
+// assuming it.
+const DEFAULT: &str = "main";
+
+// A scope in the manifest that this machine's sigils do not open.
+const CLOSED: &str = "control-plane";
+
+// A scope this machine holds that is not the one the ticket was pulled under: a
+// path under it is not a crossing, and the pull request names it.
+const OTHER: &str = "docs-team";
+
+/// The ground a pull stands on that is not a fake: the two directories, and the
+/// scope, manifest and sigils the door resolved before any of this ran.
+struct Ground {
+    home: TempDir,
+    root: TempDir,
+    scope: ScopeRecord,
+    manifest: Manifest,
+    held: Vec<String>,
+}
+
+impl Ground {
+    fn new() -> Self {
+        let root = tempfile::tempdir().expect("a temporary repository");
+        let manifest = Manifest::with_entries([
+            pacted(root.path(), "crates/engine", SCOPE),
+            pacted(root.path(), "crates/control", CLOSED),
+            pacted(root.path(), "docs", OTHER),
+        ]);
+        Self {
+            home: tempfile::tempdir().expect("a temporary home"),
+            root,
+            scope: ScopeRecord::new(SCOPE, TEAM, "In Review", "warlock"),
+            manifest,
+            held: vec![SCOPE.to_owned(), OTHER.to_owned()],
+        }
+    }
+
+    /// The record as it is on disk, which is the only copy the next invocation of
+    /// `warlock pull` will ever see.
+    fn saved(&self) -> PullRun {
+        PullRun::load(self.home.path(), self.root.path(), TICKET).expect("the run wrote its record")
+    }
+}
+
+fn pacted(root: &Path, directory: &str, scope: &str) -> PactEntry {
+    let at = root.join(directory);
+    PactEntry::new(root, &at, at.join("WARLOCK.md"))
+        .expect("the directory is under the root")
+        .with_scope(scope)
+}
+
+fn ticket() -> Ticket<'static> {
+    Ticket {
+        id: ISSUE,
+        identifier: TICKET,
+        number: NUMBER,
+        title: TITLE,
+        description: DESCRIPTION,
+    }
+}
+
+fn branch() -> String {
+    warlock_tui::branch_name(TEAM, NUMBER, TITLE)
+}
+
+/// One modified path, which is a tree with something in it to commit.
+fn wrote(path: &str) -> Vec<Dirty> {
+    vec![Dirty {
+        code: " M".to_owned(),
+        path: path.to_owned(),
+        from: None,
+    }]
+}
+
+fn numbered(id: &str, goal: &str, depends_on: &[&str]) -> Numbered {
+    Numbered {
+        id: id.to_owned(),
+        goal: goal.to_owned(),
+        depends_on: depends_on.iter().map(|id| (*id).to_owned()).collect(),
+        definition_of_done: vec![format!("{goal}, and the tests say so")],
+        likely_files: vec!["crates/warlock-tui/src/pulling.rs".to_owned()],
+        test_plan: String::new(),
+        notes: String::new(),
+    }
+}
+
+fn sliced(subtasks: Vec<Numbered>, repairs: Vec<String>) -> Slicing {
+    Slicing::answering(Split::Subtasks { subtasks, repairs })
+}
+
+/// One whole pull, over the seams, with the progress it printed.
+///
+/// The forge is built here and asserted untouched on every road: opening the pull
+/// request is the finish's, and a run that stopped short of it must not have asked
+/// for one.
+fn work(
+    ground: &Ground,
+    board: &Boarding,
+    repo: &Checkout,
+    split: &Slicing,
+    sessions: &Sessions,
+) -> (Result<Reached, Error>, Vec<PullEvent>) {
+    let forge = Forging::opening("https://github.com/team/repo/pull/12");
+    let mut events = Vec::new();
+    let reached = {
+        let mut sink = |event: PullEvent| events.push(event);
+        Pulling {
+            board,
+            repo,
+            forge: &forge,
+            split,
+            sessions,
+            scope: &ground.scope,
+            manifest: &ground.manifest,
+            held: &ground.held,
+            root: ground.root.path(),
+            home: ground.home.path(),
+            progress: &mut sink,
+        }
+        .work(&ticket())
+    };
+
+    assert!(
+        forge.asked().is_empty(),
+        "the sub-task loop asked for a pull request"
+    );
+    (reached, events)
+}
+
+/// Every comment this run left on its ticket, which a halt promises is exactly
+/// one.
+fn comments(board: &Boarding) -> Vec<String> {
+    board
+        .calls()
+        .into_iter()
+        .filter_map(|call| match call {
+            Call::IssueComment { issue, body } => {
+                assert_eq!(issue, ISSUE, "a comment went to another issue");
+                Some(body)
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+fn status_of(run: &PullRun, id: &str) -> SubtaskStatus {
+    run.subtask(id)
+        .expect("the sub-task is in the run")
+        .status()
+        .clone()
+}
+
+/// The headings a run prints when every sub-task is worked in order: the split,
+/// and then one per sub-task with its one-based place in the record.
+fn headings(worked: &[(&str, &str)]) -> Vec<PullEvent> {
+    let mut events = vec![PullEvent::Heading(Heading::Split {
+        ticket: TICKET.to_owned(),
+        title: TITLE.to_owned(),
+    })];
+    for (at, (id, goal)) in worked.iter().enumerate() {
+        events.push(PullEvent::Heading(Heading::Subtask {
+            id: (*id).to_owned(),
+            goal: (*goal).to_owned(),
+            position: at + 1,
+            total: worked.len(),
+        }));
+    }
+    events
+}
+
+#[test]
+fn a_run_cuts_the_branch_moves_the_ticket_splits_it_and_commits_every_sub_task() {
+    let ground = Ground::new();
+    let board = Boarding::filing("");
+    let repo = Checkout::clean(DEFAULT).trees([
+        wrote("crates/engine/src/read.rs"),
+        vec![
+            Dirty {
+                code: " M".to_owned(),
+                path: "crates/engine/src/route.rs".to_owned(),
+                from: None,
+            },
+            Dirty {
+                code: "??".to_owned(),
+                path: "docs/route.md".to_owned(),
+                from: None,
+            },
+        ],
+    ]);
+    let split = Slicing::into_chain(TICKET, &["Add the reader", "Use the reader"]);
+    let sessions = Sessions::answering([
+        said("done", "Added the reader.", None),
+        said("done", "Used the reader.", None),
+    ]);
+
+    let (reached, events) = work(&ground, &board, &repo, &split, &sessions);
+
+    let Ok(Reached::Worked { run, touched }) = reached else {
+        panic!("every sub-task finished: {reached:?}");
+    };
+    assert_eq!(run.status(), RunStatus::InProgress);
+    assert_eq!(run.branch(), branch());
+    assert_eq!(status_of(&run, "WAR-140.01"), SubtaskStatus::Done);
+    assert_eq!(status_of(&run, "WAR-140.02"), SubtaskStatus::Done);
+    assert_eq!(
+        run.subtask("WAR-140.01").and_then(PullSubtask::log),
+        Some("Added the reader.")
+    );
+    // The held scope the ticket was not pulled under, kept across the sessions:
+    // the commit that ended the second one emptied the tree it was read from.
+    assert_eq!(touched.len(), 1);
+    assert_eq!(touched[0].scope, OTHER);
+    assert_eq!(touched[0].paths, ["docs/route.md"]);
+
+    assert_eq!(
+        repo.commits(),
+        [
+            commit_message(TICKET, "WAR-140.01", "Add the reader"),
+            commit_message(TICKET, "WAR-140.02", "Use the reader"),
+        ]
+    );
+    // The branch is cut from the detected default branch, after a
+    // fast-forward-only pull of it, and the switch comes first because that pull
+    // merges into whatever is checked out.
+    assert_eq!(
+        repo.calls()[..4],
+        [
+            GitCall::DefaultBranch,
+            GitCall::SwitchTo(DEFAULT.to_owned()),
+            GitCall::CatchUp(DEFAULT.to_owned()),
+            GitCall::CutBranch {
+                branch: branch(),
+                from: DEFAULT.to_owned(),
+            },
+        ]
+    );
+    assert!(!repo.calls().contains(&GitCall::Publish(branch())));
+
+    // The ticket moved, and it moved before the split was asked for.
+    assert_eq!(
+        board.calls(),
+        [
+            Call::WorkflowState {
+                team: TEAM.to_owned(),
+                name: "In Progress".to_owned(),
+            },
+            Call::MoveIssue {
+                issue: ISSUE.to_owned(),
+                state: "state-backlog".to_owned(),
+            },
+        ]
+    );
+    assert_eq!(split.asked().len(), 1);
+    assert_eq!(split.asked()[0].description, DESCRIPTION);
+    // A finished run leaves no comment: the pull request URL is the finish's to
+    // say.
+    assert!(comments(&board).is_empty());
+
+    // What the next invocation would read back.
+    assert_eq!(ground.saved(), run);
+
+    assert_eq!(
+        events,
+        headings(&[
+            ("WAR-140.01", "Add the reader"),
+            ("WAR-140.02", "Use the reader"),
+        ])
+    );
+
+    // Each session got its own brief and the ticket as context, and the second
+    // was told what the first reported.
+    let openings = sessions.openings();
+    assert_eq!(openings.len(), 2);
+    assert!(openings[0].contains("Add the reader"));
+    assert!(openings[0].contains(DESCRIPTION));
+    assert!(!openings[0].contains("already finished"));
+    assert!(openings[1].contains("Added the reader."));
+}
+
+#[test]
+fn a_crossing_halts_at_once_commits_nothing_and_leaves_the_tree_alone() {
+    let ground = Ground::new();
+    let board = Boarding::filing("");
+    let repo = Checkout::clean(DEFAULT).trees([
+        wrote("crates/engine/src/read.rs"),
+        wrote("crates/control/src/lib.rs"),
+    ]);
+    let split = Slicing::into_chain(TICKET, &["Add the reader", "Use the reader"]);
+    let sessions = Sessions::answering([
+        said("done", "Added the reader.", None),
+        said("done", "Used the reader, and a little more.", None),
+    ]);
+
+    let (reached, _) = work(&ground, &board, &repo, &split, &sessions);
+
+    let Ok(Reached::Stopped(Pulled::Crossed { ticket, subtask })) = reached else {
+        panic!("the second session crossed a boundary: {reached:?}");
+    };
+    assert_eq!(ticket, TICKET);
+    assert_eq!(subtask, "WAR-140.02");
+    assert_eq!(
+        Pulled::Crossed {
+            ticket,
+            subtask: subtask.clone()
+        }
+        .status(),
+        3
+    );
+
+    // The first sub-task's commit and nothing after it.
+    assert_eq!(
+        repo.commits(),
+        [commit_message(TICKET, "WAR-140.01", "Add the reader")]
+    );
+    // The tree is left as the session left it: the last thing asked of the
+    // checkout is the status that found the crossing.
+    assert_eq!(repo.calls().last(), Some(&GitCall::Dirty));
+
+    let saved = ground.saved();
+    assert_eq!(saved.status(), RunStatus::Halted);
+    assert_eq!(status_of(&saved, "WAR-140.01"), SubtaskStatus::Done);
+    let crossed = status_of(&saved, &subtask);
+    assert_eq!(crossed.as_str(), "crossed");
+    let reason = crossed.reason().expect("a crossing says what it wrote");
+    assert!(reason.contains("crates/control/src/lib.rs"), "{reason}");
+    assert!(reason.contains(CLOSED), "{reason}");
+
+    // One comment, and it is the halt's account of the run.
+    let posted = comments(&board);
+    assert_eq!(posted.len(), 1);
+    assert_eq!(posted[0], halt_comment(&saved));
+    assert!(posted[0].contains("## Finished"));
+    assert!(posted[0].contains("`crossed`"));
+    // The ticket stays where it is: the only move is the one to `In Progress`.
+    assert_eq!(board.positions_of(Op::MoveIssue).len(), 1);
+}
+
+#[test]
+fn a_moved_head_halts_the_run_as_failed_and_names_the_commit() {
+    let ground = Ground::new();
+    let board = Boarding::filing("");
+    let repo = Checkout::clean(DEFAULT)
+        .heads(["4e724822589a", "9f1c3a7b0d21"])
+        .trees([wrote("crates/engine/src/read.rs")]);
+    let split = Slicing::into_chain(TICKET, &["Add the reader"]);
+    let sessions = Sessions::answering([said("done", "Added the reader, and committed it.", None)]);
+
+    let (reached, _) = work(&ground, &board, &repo, &split, &sessions);
+
+    let Ok(Reached::Stopped(Pulled::Halted { ticket })) = reached else {
+        panic!("the session committed, so the run halted: {reached:?}");
+    };
+    assert_eq!(ticket, TICKET);
+
+    assert!(repo.commits().is_empty());
+    // The tree is not even read: what the session wrote is in a commit, so the
+    // status would answer about a tree that no longer holds it.
+    assert!(!repo.calls().contains(&GitCall::Dirty));
+
+    let saved = ground.saved();
+    assert_eq!(saved.status(), RunStatus::Halted);
+    let failed = status_of(&saved, "WAR-140.01");
+    assert_eq!(failed.as_str(), "failed");
+    let reason = failed.reason().expect("a failure says why");
+    assert!(reason.contains("4e724822"), "{reason}");
+    assert!(reason.contains("9f1c3a7b"), "{reason}");
+    assert_eq!(comments(&board).len(), 1);
+}
+
+#[test]
+fn a_blocked_sub_task_lets_a_sibling_that_does_not_wait_on_it_run() {
+    let ground = Ground::new();
+    let board = Boarding::filing("");
+    let repo = Checkout::clean(DEFAULT).trees([wrote("crates/engine/src/read.rs")]);
+    let split = sliced(
+        vec![
+            numbered("WAR-140.01", "Settle the wire format", &[]),
+            numbered("WAR-140.02", "Write the format out", &["WAR-140.01"]),
+            numbered("WAR-140.03", "Add the reader", &[]),
+        ],
+        vec!["dropped `depends_on` reference 4, which nothing answers to".to_owned()],
+    );
+    let sessions = Sessions::answering([
+        said(
+            "blocked",
+            "The format is a decision.",
+            Some("only a person can settle the wire format"),
+        ),
+        said("done", "Added the reader.", None),
+    ]);
+
+    let (reached, events) = work(&ground, &board, &repo, &split, &sessions);
+
+    let Ok(Reached::Stopped(Pulled::Halted { .. })) = reached else {
+        panic!("the run ran out of runnable sub-tasks: {reached:?}");
+    };
+    // Two sessions: the blocked one, then the sibling that does not wait on it.
+    assert_eq!(sessions.openings().len(), 2);
+    assert_eq!(
+        repo.commits(),
+        [commit_message(TICKET, "WAR-140.03", "Add the reader")]
+    );
+
+    let saved = ground.saved();
+    assert_eq!(status_of(&saved, "WAR-140.01").as_str(), "blocked");
+    // The one waiting on the blocked sub-task was never started.
+    assert_eq!(status_of(&saved, "WAR-140.02"), SubtaskStatus::Pending);
+    assert_eq!(status_of(&saved, "WAR-140.03"), SubtaskStatus::Done);
+
+    let posted = comments(&board);
+    assert_eq!(posted.len(), 1);
+    assert!(posted[0].contains("## Finished"));
+    assert!(posted[0].contains("only a person can settle the wire format"));
+    assert!(posted[0].contains("## Not started"));
+
+    // The repair the split needed is said rather than swallowed.
+    assert!(events.contains(&PullEvent::Repair {
+        note: "dropped `depends_on` reference 4, which nothing answers to".to_owned(),
+    }));
+    // The header's fraction is the sub-task's place in the record, not a count of
+    // sessions.
+    assert!(events.contains(&PullEvent::Heading(Heading::Subtask {
+        id: "WAR-140.03".to_owned(),
+        goal: "Add the reader".to_owned(),
+        position: 3,
+        total: 3,
+    })));
+}
+
+#[test]
+fn a_blocked_sub_task_with_nothing_else_runnable_halts_the_run() {
+    let ground = Ground::new();
+    let board = Boarding::filing("");
+    let repo = Checkout::clean(DEFAULT).trees([wrote("crates/engine/src/read.rs")]);
+    let split = Slicing::into_chain(TICKET, &["Settle the wire format", "Write the format out"]);
+    let sessions = Sessions::answering([said(
+        "blocked",
+        "The format is a decision.",
+        Some("only a person can settle the wire format"),
+    )]);
+
+    let (reached, _) = work(&ground, &board, &repo, &split, &sessions);
+
+    let Ok(Reached::Stopped(Pulled::Halted { .. })) = reached else {
+        panic!("nothing was runnable: {reached:?}");
+    };
+    // One session, and nothing committed: the tree still holds what it wrote.
+    assert_eq!(sessions.openings().len(), 1);
+    assert!(repo.commits().is_empty());
+
+    let posted = comments(&board);
+    assert_eq!(posted.len(), 1);
+    assert!(!posted[0].contains("## Finished"));
+    assert!(posted[0].contains("## Stopped"));
+}
+
+#[test]
+fn a_session_that_never_answered_is_failed_with_what_stopped_it() {
+    let ground = Ground::new();
+    let board = Boarding::filing("");
+    let repo = Checkout::clean(DEFAULT).trees([wrote("crates/engine/src/read.rs")]);
+    let split = Slicing::into_chain(TICKET, &["Add the reader"]);
+    let sessions = Sessions::answering([Worked::Halted(Stopped::TimedOut)]);
+
+    let (reached, _) = work(&ground, &board, &repo, &split, &sessions);
+
+    assert!(matches!(
+        reached,
+        Ok(Reached::Stopped(Pulled::Halted { .. }))
+    ));
+    assert!(repo.commits().is_empty());
+
+    let saved = ground.saved();
+    let failed = status_of(&saved, "WAR-140.01");
+    assert_eq!(failed.as_str(), "failed");
+    assert_eq!(
+        failed.reason(),
+        Some(Stopped::TimedOut.to_string().as_str())
+    );
+    // No message to read, so nothing is logged in the session's name.
+    assert_eq!(saved.subtask("WAR-140.01").and_then(PullSubtask::log), None);
+}
+
+#[test]
+fn a_dirty_tree_on_a_resumed_run_refuses_and_commits_nothing() {
+    let ground = Ground::new();
+    let mut resumed =
+        PullRun::new(TICKET, TITLE, SCOPE, branch(), "2026-09-28T09:00:00Z").with_subtasks([
+            PullSubtask::new("WAR-140.01", "Add the reader", [] as [&str; 0]),
+        ]);
+    resumed.set_status(RunStatus::Resumed);
+    resumed
+        .save(ground.home.path(), ground.root.path())
+        .expect("the record is written");
+
+    let repo = Checkout::clean(DEFAULT).trees([wrote("crates/engine/src/half-done.rs")]);
+    let split = Slicing::into_chain(TICKET, &["Add the reader"]);
+    // A board no call may reach and a session list nothing may draw from: the
+    // refusal is asserted by the absence of everything it would have done.
+    let sessions = Sessions::answering([]);
+    let (reached, events) = work(&ground, &Boarding::unreachable(), &repo, &split, &sessions);
+
+    let Err(Error::Dirty { branch: on, dirty }) = reached else {
+        panic!("a dirty tree on a resumed run is a refusal: {reached:?}");
+    };
+    assert_eq!(on, branch());
+    assert_eq!(dirty.len(), 1);
+    let said = Error::Dirty { branch: on, dirty }.to_string();
+    assert!(said.contains(&branch()), "{said}");
+    assert!(said.contains("crates/engine/src/half-done.rs"), "{said}");
+
+    // The run's own branch was checked out, the tree was read, and nothing else
+    // happened.
+    assert_eq!(repo.calls(), [GitCall::SwitchTo(branch()), GitCall::Dirty]);
+    assert!(split.asked().is_empty());
+    assert!(sessions.openings().is_empty());
+    assert!(events.is_empty());
+    // The record is untouched, so the run is still there to be picked up.
+    assert_eq!(ground.saved(), resumed);
+}
+
+#[test]
+fn a_clean_resumed_run_is_not_split_again_and_works_only_what_is_left() {
+    let ground = Ground::new();
+    let mut done = PullSubtask::new("WAR-140.01", "Add the reader", [] as [&str; 0]);
+    done.set_status(SubtaskStatus::Done);
+    done.set_log("Added the reader.");
+    let mut resumed = PullRun::new(TICKET, TITLE, SCOPE, branch(), "2026-09-28T09:00:00Z")
+        .with_subtasks([
+            done,
+            PullSubtask::new("WAR-140.02", "Use the reader", ["WAR-140.01"]),
+        ]);
+    resumed.set_status(RunStatus::Resumed);
+    resumed
+        .save(ground.home.path(), ground.root.path())
+        .expect("the record is written");
+
+    let board = Boarding::filing("");
+    let repo = Checkout::clean(DEFAULT).trees([Vec::new(), wrote("crates/engine/src/route.rs")]);
+    let split = Slicing::into_chain(TICKET, &["Something else entirely"]);
+    let sessions = Sessions::answering([said("done", "Used the reader.", None)]);
+
+    let (reached, events) = work(&ground, &board, &repo, &split, &sessions);
+
+    let Ok(Reached::Worked { run, .. }) = reached else {
+        panic!("the one sub-task left finished: {reached:?}");
+    };
+    assert!(split.asked().is_empty(), "a resumed run was split again");
+    assert_eq!(run.subtasks().len(), 2);
+    assert_eq!(status_of(&run, "WAR-140.02"), SubtaskStatus::Done);
+    assert_eq!(
+        repo.commits(),
+        [commit_message(TICKET, "WAR-140.02", "Use the reader")]
+    );
+    assert_eq!(
+        events,
+        [PullEvent::Heading(Heading::Subtask {
+            id: "WAR-140.02".to_owned(),
+            goal: "Use the reader".to_owned(),
+            position: 2,
+            total: 2,
+        })]
+    );
+    let openings = sessions.openings();
+    assert_eq!(openings.len(), 1);
+    assert!(openings[0].contains("Added the reader."));
+}
+
+#[test]
+fn a_split_that_halts_halts_the_run_with_its_own_comment() {
+    let ground = Ground::new();
+    let board = Boarding::filing("");
+    let repo = Checkout::clean(DEFAULT);
+    let unsplit = Unsplit::Circle(Cycle {
+        ticket: TICKET.to_owned(),
+        caught: vec![
+            Caught {
+                position: 1,
+                goal: "Add the reader".to_owned(),
+            },
+            Caught {
+                position: 2,
+                goal: "Use the reader".to_owned(),
+            },
+        ],
+    });
+    let split = Slicing::answering(Split::Halted(unsplit.clone()));
+    let sessions = Sessions::answering([]);
+
+    let (reached, events) = work(&ground, &board, &repo, &split, &sessions);
+
+    let Ok(Reached::Stopped(Pulled::Halted { ticket })) = reached else {
+        panic!("an unsplit ticket halts the run: {reached:?}");
+    };
+    assert_eq!(ticket, TICKET);
+
+    // No session was raised and nothing was committed, so no branch work is lost.
+    assert!(sessions.openings().is_empty());
+    assert!(repo.commits().is_empty());
+    // The branch was cut all the same, which is why the record is written: it is
+    // the only thing that says this machine holds the run.
+    assert!(repo.calls().contains(&GitCall::CutBranch {
+        branch: branch(),
+        from: DEFAULT.to_owned(),
+    }));
+
+    let saved = ground.saved();
+    assert_eq!(saved.status(), RunStatus::Halted);
+    assert!(saved.subtasks().is_empty());
+
+    // The engine wrote the sentence; the run says it and nothing over the top.
+    assert_eq!(comments(&board), [unsplit.to_string()]);
+    assert_eq!(
+        events,
+        [PullEvent::Heading(Heading::Split {
+            ticket: TICKET.to_owned(),
+            title: TITLE.to_owned(),
+        })]
+    );
+}
+
+#[test]
+fn a_team_with_no_in_progress_state_gets_a_line_and_the_run_carries_on() {
+    let ground = Ground::new();
+    let board = Boarding::filing("").without_backlog_state();
+    let repo = Checkout::clean(DEFAULT).trees([wrote("crates/engine/src/read.rs")]);
+    let split = Slicing::into_chain(TICKET, &["Add the reader"]);
+    let sessions = Sessions::answering([said("done", "Added the reader.", None)]);
+
+    let (reached, events) = work(&ground, &board, &repo, &split, &sessions);
+
+    assert!(matches!(reached, Ok(Reached::Worked { .. })));
+    assert_eq!(
+        events[0],
+        PullEvent::NoStartState {
+            team: TEAM.to_owned(),
+        }
+    );
+    // The state was asked for and no move was attempted.
+    assert_eq!(
+        board.calls(),
+        [Call::WorkflowState {
+            team: TEAM.to_owned(),
+            name: "In Progress".to_owned(),
+        }]
+    );
+    assert_eq!(
+        repo.commits(),
+        [commit_message(TICKET, "WAR-140.01", "Add the reader")]
+    );
+}
+
+// The record is saved on both sides of every session, and only the save before one
+// is invisible from outside: what the file holds afterwards would look the same
+// either way. A run killed mid-session resumes from this.
+#[test]
+fn the_record_says_a_sub_task_is_in_progress_while_its_session_runs() {
+    let ground = Ground::new();
+    let board = Boarding::filing("");
+    let repo = Checkout::clean(DEFAULT).trees([wrote("crates/engine/src/read.rs")]);
+    let split = Slicing::into_chain(TICKET, &["Add the reader"]);
+    let sessions = Sessions::answering([said("done", "Added the reader.", None)])
+        .watching(state_path(ground.home.path(), ground.root.path(), TICKET));
+
+    let (reached, _) = work(&ground, &board, &repo, &split, &sessions);
+
+    assert!(matches!(reached, Ok(Reached::Worked { .. })));
+    let seen = sessions.seen();
+    assert_eq!(seen.len(), 1);
+    let mid: PullRun =
+        serde_json::from_str(&seen[0]).expect("the record was on disk before the session");
+    assert_eq!(mid.status(), RunStatus::InProgress);
+    assert_eq!(status_of(&mid, "WAR-140.01"), SubtaskStatus::InProgress);
+    assert!(
+        mid.subtask("WAR-140.01")
+            .and_then(PullSubtask::started_at)
+            .is_some()
+    );
+    // And the save after it is what the next invocation reads.
+    assert_eq!(
+        status_of(&ground.saved(), "WAR-140.01"),
+        SubtaskStatus::Done
+    );
 }
