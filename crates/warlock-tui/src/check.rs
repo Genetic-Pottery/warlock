@@ -21,6 +21,14 @@
 //! and not warlock's. So is a config that will not read — `sigils` is
 //! three-valued for that reason, because printing `[]` would tell an operator
 //! they hold nothing when the truth is warlock could not read what they hold.
+//!
+//! `--gate` is the one exception and the reason the rest of it is the rule: it
+//! asks the same question and spends the status on the verdict itself, because a
+//! shell or a `PreToolUse` hook stopping a write cannot read five lines of prose
+//! and has nothing but the status to stop on. It prints nothing, it invents no
+//! status — a closed scope is `Error::ClosedScope` and the **3** the headless
+//! writes already refuse with — and it is the same [`checked`] answer underneath,
+//! so a gate that refuses and a check that says "closed" can never disagree.
 
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -192,6 +200,64 @@ fn checked(
         key: facts.key().map(str::to_owned),
         key_found: facts.stored(),
     })
+}
+
+// `warlock check --gate <PATH>`: the same answer with the verdict spent on the
+// exit status instead of printed. A shell and a `PreToolUse` hook can both stop
+// a write before it lands, which neither can do with five lines of prose and a
+// 0, and nothing here is printed at all — the closed case is `main`'s one line
+// on stderr, and the open case says nothing because there is nothing to say
+// about a write that may proceed.
+//
+// The refusal travels through `Error::ClosedScope`, which is the register the
+// headless writes already refuse in: one line, exit **3**, and re-running will
+// never work. No new status and no `--force`.
+pub(crate) fn gate(path: PathBuf) -> Result<(), Error> {
+    gated_onto(
+        &Standing::here(FOR_CHECK)?,
+        Standing::home().ok().as_deref(),
+        path,
+    )
+}
+
+// Split from `gate` for `checked_onto`'s reason and to the same shape: the home,
+// the root, the manifest and the joined path become parameters in exactly one
+// place, so a test gates against a temporary repository and a temporary home
+// rather than against the machine it runs on.
+fn gated_onto(standing: &Standing, home: Option<&Path>, path: PathBuf) -> Result<(), Error> {
+    let manifest = standing.manifest()?;
+
+    gated(&checked(
+        standing.repo_root(),
+        home,
+        &manifest,
+        &standing.target(path),
+    )?)
+}
+
+// The gate is `check`'s own verdict read as a decision, and deliberately not a
+// second reading of the boundary: `opens` is one `scope_opens_to` call over one
+// `scope_covering` walk, both inside [`checked`], so the status here and the
+// line `warlock check` prints cannot come to disagree about a path. What a gate
+// costs over the narrowest possible question is the key binding and the key
+// store `route_facts` also reads — two small files, against a rule written once.
+//
+// `path` is already the repository-relative spelling `query::spelled` gave
+// [`checked`], which is what the refusal wants: an absolute machine path in a
+// line a hook shows somebody names their home directory back at them.
+//
+// Matched on the scope rather than on `opens` alone, for `boundary::permits`'s
+// reason: an unscoped path is open (`scope_opens_to(None, ..)` is `true`), so a
+// refusal is always in some named scope's name and this arm can never invent
+// one to refuse in.
+fn gated(checked: &Checked) -> Result<(), Error> {
+    match (checked.scope.as_deref(), checked.opens) {
+        (Some(scope), false) => Err(Error::ClosedScope {
+            path: checked.path.clone(),
+            scope: scope.to_owned(),
+        }),
+        _ => Ok(()),
+    }
 }
 
 // One line per fact rather than a paragraph, because a reader looking for one

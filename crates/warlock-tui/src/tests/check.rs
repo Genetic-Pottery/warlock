@@ -6,7 +6,7 @@ use warlock_engine::{
 };
 use warlock_tui::Sigils;
 
-use super::{Checked, checked, checked_onto, object, prose};
+use super::{Checked, checked, checked_onto, gated_onto, object, prose};
 use crate::error::Error;
 use crate::standing::Standing;
 use crate::status_for;
@@ -165,8 +165,15 @@ fn answer(home: &Path, path: &str) -> Checked {
 }
 
 fn holding(home: &Path, sigils: &[&str]) {
+    holding_in(home, Path::new(REPO), sigils);
+}
+
+// The repository is a parameter as well as the home, because the config is keyed
+// by root: the gate tests below stand in a temporary repository on disk, and
+// sigils written against `REPO` would not be the ones they read.
+fn holding_in(home: &Path, repo: &Path, sigils: &[&str]) {
     let sigils: Vec<String> = sigils.iter().map(|sigil| (*sigil).to_owned()).collect();
-    save_sigils(home, Path::new(REPO), &sigils).expect("a config that writes");
+    save_sigils(home, repo, &sigils).expect("a config that writes");
 }
 
 fn bound(home: &Path, name: &str) {
@@ -616,6 +623,83 @@ fn an_unbound_checkout_is_sent_to_key_use_and_key_add_and_a_dangling_name_to_key
          the key `work` is bound here and this machine has not stored it: \
          `warlock key add work` stores it, `warlock key use <name>` binds another"
     );
+}
+
+// The gate stands in a temporary repository on disk rather than at `REPO`,
+// because it loads the manifest itself: that is the composition under test —
+// root, home, manifest and joined path becoming parameters in one place — and a
+// gate that read the developer's own home would be answering about their sigils.
+// No socket is opened and no model is run; the manifest and one sigil config are
+// the whole of what is read.
+fn gating(repo: &Path, home: &Path, path: &str) -> Result<(), Error> {
+    a_manifest().save(repo).expect("a manifest that saves");
+    gated_onto(&standing_in(repo), Some(home), PathBuf::from(path))
+}
+
+#[test]
+fn a_gate_over_a_closed_scope_is_the_boundarys_three_and_names_the_scope() {
+    // A sigil that opens the outer scope and not the nearer one: the ordinary
+    // way to be closed while holding something.
+    let (repo, home) = (a_dir(), a_dir());
+    holding_in(home.path(), repo.path(), &["platform"]);
+
+    let refused = gating(repo.path(), home.path(), "crates/engine/src/lib.rs");
+
+    // The register the headless writes already refuse in, and no new status:
+    // one line and a **3**, which re-running will never turn into a 0.
+    assert_eq!(status_for(&refused), 3);
+    let error = refused.expect_err("a scope this machine holds no sigil for is closed");
+    assert!(
+        matches!(
+            &error,
+            Error::ClosedScope { path, scope }
+                if path == "crates/engine/src/lib.rs" && scope == "data-plane"
+        ),
+        "{error:?}"
+    );
+    assert!(!error.to_string().contains('\n'), "`main` prints one line");
+    // Repository-relative and never the absolute path handed in: a hook shows
+    // this line to somebody, and an absolute one names their home back at them.
+    assert!(
+        !error
+            .to_string()
+            .contains(&repo.path().display().to_string()),
+        "{error}"
+    );
+
+    // And a machine that holds nothing at all, which is every machine nobody
+    // has run `warlock config` on.
+    let nothing = a_dir();
+    assert_eq!(
+        status_for(&gating(repo.path(), nothing.path(), "crates/engine")),
+        3
+    );
+}
+
+#[test]
+fn a_gate_over_an_open_scope_an_unscoped_path_or_an_unpacted_one_is_a_zero() {
+    // The three open readings, and the same 0 for all of them: an unscoped path
+    // is open by the boundary's own permissive default (`scope_opens_to(None,
+    // ..)`), and so is one in a directory nobody has pacted, so a gate refuses
+    // only where a named scope says to. Nothing is printed for any of them —
+    // there is no writer to print through — so a hook's stdout stays empty and a
+    // shell gets no envelope it would have to parse.
+    let (repo, home) = (a_dir(), a_dir());
+    holding_in(home.path(), repo.path(), &["data-plane"]);
+
+    for path in [
+        // Open: the held sigil matches the covering scope.
+        "crates/engine",
+        "crates/engine/src/lib.rs",
+        // Pacted and unscoped, under a scope this machine does not hold.
+        "docs/adr",
+        // A directory the manifest has never heard of, which nothing covers.
+        "vendor/thing/file.rs",
+    ] {
+        let gated = gating(repo.path(), home.path(), path);
+        assert_eq!(status_for(&gated), 0, "{path}");
+        gated.unwrap_or_else(|error| panic!("{path} is open: {error}"));
+    }
 }
 
 #[test]

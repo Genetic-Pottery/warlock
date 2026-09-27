@@ -167,17 +167,29 @@ enum Command {
         long_about = None
     )]
     Check {
-        // Required, unlike the two listings' optional path, and the doc comment
-        // below is one line for the reason every other one here is: clap lifts
-        // it into `--help`. A check is a walk up from one place, so there is no
-        // whole-repository answer for an omitted path to mean — leaving it off
-        // is a malformed invocation and clap's own exit status of 2.
+        // Optional to clap and required in practice, which is `--gate`'s doing
+        // rather than a softening: `required_unless_present` keeps a plain check
+        // with no path the malformed invocation it has always been — a check is a
+        // walk up from one place, so there is no whole-repository answer for an
+        // omitted path to mean, and leaving it off is clap's wording and clap's
+        // own exit status of 2 — while leaving `--gate` free to be asked with no
+        // path at all, which is the hook form reading one on stdin. The doc
+        // comments here are one line each for the reason every other one in this
+        // file is: clap lifts them into `--help`.
         /// Which path to answer about.
-        #[arg(value_name = "PATH")]
-        path: PathBuf,
+        #[arg(value_name = "PATH", required_unless_present = "gate")]
+        path: Option<PathBuf>,
         /// Answer as one JSON object instead of three lines of prose.
         #[arg(long)]
         json: bool,
+        // A clap conflict with `--json` rather than a flag quietly ignored
+        // beside it: a gate prints no envelope at all, so `--gate --json` is
+        // somebody about to pipe an empty stdout into `jq`, and being told so at
+        // the command line costs them one read where the silence would cost them
+        // a debugging session.
+        /// Refuse instead of answering: exit 3 when PATH's scope is closed here.
+        #[arg(long, conflicts_with = "json")]
+        gate: bool,
     },
     #[command(
         about = "Drop the pact on a directory and every pact below it.",
@@ -441,7 +453,22 @@ fn main() -> ExitCode {
         // open — and it still exits 0 for it: a closed boundary is the answer,
         // not a failure to reach one, which is what leaves `jq -e '.opens'` to
         // spend the non-zero status on the verdict. See [`check`].
-        Some(Command::Check { path, json }) => check(path, json),
+        //
+        // `--gate` is that same question with the verdict spent on the exit
+        // status instead of printed: nothing on stdout, and a closed scope is the
+        // boundary's **3** through `Error::ClosedScope`, which is the register
+        // the writes already refuse in. It is the one caller that wants the
+        // non-zero status, so it takes the one `jq` would otherwise have spent.
+        //
+        // The pathless `None` is `--gate` with nothing to gate, which clap only
+        // lets through for `--gate`'s sake: it is the `PreToolUse` hook form,
+        // whose path arrives on stdin. It refuses nothing until that read is
+        // here, because a hook cannot refuse a write it cannot name.
+        Some(Command::Check { path, json, gate }) => match (path, gate) {
+            (Some(path), false) => check(path, json),
+            (Some(path), true) => check::gate(path),
+            (None, _) => Ok(()),
+        },
         // The first subcommand that writes, dispatched here for every reason
         // the questions are — it prints one line on the ordinary screen and
         // takes no terminal — and with none of a run's machinery: no worker
