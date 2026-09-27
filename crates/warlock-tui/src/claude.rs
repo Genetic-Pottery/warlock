@@ -1204,6 +1204,23 @@ pub trait Converses: Wired {
     fn raised(&self, model: &str, effort: &str) -> Self;
 }
 
+/// A conversation that can be re-let with a different turn bound.
+///
+/// Beside [`Converses`] rather than inside it, because conversing is one message
+/// in and one answer out and a turn bound is neither: the panel's chat and the
+/// two read-only sessions carry no `--max-turns` at all, and a method every
+/// stand-in had to answer would be asking six of them about a flag only one
+/// session has. [`Working`] is what needs it, on the one path where an attempt
+/// was cut off at its limit and the retry is worth taking with more room —
+/// which is a bound warlock moves, deliberately, and not a term of the
+/// conversation.
+pub trait Bounded: Converses {
+    /// The same session held to `turns` instead. A session with no bound to
+    /// move is entitled to hand itself back unchanged.
+    #[must_use]
+    fn at_turns(&self, turns: u32) -> Self;
+}
+
 /// A pass: the request the engine built, handed to `claude` on stdin, and
 /// whatever came back translated into the engine's vocabulary. No `std::process`
 /// type crosses the seam in either direction.
@@ -1595,6 +1612,24 @@ impl ChatAgent {
         self.replacing("--model", overridden(MODEL_VAR, model))
     }
 
+    /// The same session held to a different `--max-turns`, which is how a
+    /// [`Working`] retry after a turn limit gets twice the turns.
+    ///
+    /// No environment variable overrides this one, unlike the model and the
+    /// effort: the turn limit is a bound warlock puts on a session it is about
+    /// to leave alone with the tree, and a bound the run being bounded could
+    /// raise is not one.
+    ///
+    /// A session that has no `--max-turns` to begin with is left alone, which
+    /// [`replacing`](ChatAgent::replacing) already decides: the panel's chat and
+    /// the two read-only sessions are bounded by their clock and by the person
+    /// in front of them, and inventing a flag for them here would be this method
+    /// changing what those sessions are.
+    #[must_use]
+    pub fn at_turns(&self, turns: u32) -> Self {
+        self.replacing("--max-turns", OsString::from(turns.to_string()))
+    }
+
     /// A flag that is not there is not added. An agent built with
     /// [`with_args`](ChatAgent::with_args) named its own vector and is left holding
     /// it.
@@ -1848,9 +1883,24 @@ fn judge(
     stderr: &[u8],
 ) -> Result<agent::Response, agent::Error> {
     if !status.success() {
+        let said = String::from_utf8_lossy(stderr);
         return Err(agent::Error::Failed {
             code: status.code(),
-            stderr: String::from_utf8_lossy(stderr).into_owned(),
+            // Stderr when there is any, and otherwise whatever the stream
+            // itself said about failing. `claude` says why it stopped on
+            // *stdout*, in the result line, and leaves stderr empty: a run cut
+            // off at `--max-turns` exits 1 with `error_max_turns` there and
+            // nothing anywhere else, which is the whole of the evidence
+            // [`stopped_by`] has to tell a turn limit from a usage limit from a
+            // crash. Which pipe the CLI chose is its own business; this field
+            // is what the run said about failing, so a silent stderr is
+            // answered with the line that was not silent — see
+            // [`stream::failure`], which is what puts it in `document`.
+            stderr: if said.trim().is_empty() {
+                document
+            } else {
+                said.into_owned()
+            },
         });
     }
     if document.trim().is_empty() {
@@ -2033,9 +2083,51 @@ mod stream {
             text: value
                 .get("result")
                 .and_then(Value::as_str)
-                .map(str::to_owned),
+                .map(str::to_owned)
+                .or_else(|| failure(value)),
             ..Reading::default()
         }
+    }
+
+    /// Why a run that failed says it failed, for the result lines that carry no
+    /// answer at all.
+    ///
+    /// A session stopped at `--max-turns` is the case this exists for. The CLI
+    /// exits non-zero, writes nothing whatever to stderr, and leaves out
+    /// `result` entirely: what it sends instead is `"subtype":
+    /// "error_max_turns"` with `"errors": ["Reached maximum number of turns
+    /// (60)"]`, on this line and nowhere else. Without it a turn limit and a
+    /// crashed CLI are the same exit-1-and-silence, and the one retry that is
+    /// worth taking differently could never be told apart.
+    ///
+    /// Read only when `is_error` is set *and* there is no answer, so nothing
+    /// here can ever stand in for a document: a run that produced one is
+    /// carrying it in `result`, and [`judge`] keeps this text for the failure
+    /// branch alone.
+    fn failure(value: &Value) -> Option<String> {
+        if value.get("is_error").and_then(Value::as_bool) != Some(true) {
+            return None;
+        }
+        let subtype = value
+            .get("subtype")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let said = value
+            .get("errors")
+            .and_then(Value::as_array)
+            .map(|errors| {
+                errors
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            })
+            .unwrap_or_default();
+        // The subtype first, because it is the CLI's own name for what
+        // happened and the sentence beside it is prose that may be reworded.
+        let told = format!("{subtype} {said}");
+        let told = told.trim();
+        (!told.is_empty()).then(|| told.to_owned())
     }
 }
 
@@ -2175,6 +2267,12 @@ impl Converses for ChatAgent {
 
     fn raised(&self, model: &str, effort: &str) -> Self {
         self.at_effort(effort).at_model(model)
+    }
+}
+
+impl Bounded for ChatAgent {
+    fn at_turns(&self, turns: u32) -> Self {
+        Self::at_turns(self, turns)
     }
 }
 
@@ -2487,6 +2585,315 @@ impl<C: Converses> Drafting<C> {
         Drafted::Drafts {
             fill,
             repairs: mends.iter().map(ToString::to_string).collect(),
+        }
+    }
+}
+
+/// How many attempts one sub-task gets: the first, and at most two retries.
+///
+/// Three because a failure that survives one retry is rarely a failure a third
+/// attempt reads differently — and because each attempt is half an hour of a
+/// session with writing tools working in an uncommitted tree, so the cost of
+/// being generous here is paid in edits nobody asked for. A caller cannot pass
+/// its own number: how many times warlock will re-enter a tree it has already
+/// half-changed is a property of warlock, not a knob.
+pub const WORKING_ATTEMPTS: usize = 3;
+
+/// Why a sub-task session's run ended with no answer to read.
+///
+/// The four the brief names are told apart because warlock does something
+/// different with each: a turn limit is the one worth taking again with more
+/// room, and a usage limit, a rate limit and a refused credential are all the
+/// same news — the run did not fail, the account or the machine did, and
+/// spending two more attempts on it buys two more of the same refusal. The
+/// clock and the cancel are here for the same reason: neither is a sub-task
+/// that failed.
+///
+/// [`Broke`](Stopped::Broke) keeps what the run said rather than naming it,
+/// because the list above is the failures worth telling apart and not the
+/// failures there are: a CLI that is not installed, a crash, a stream that
+/// carried nothing. Read as the sentence a person sees, which is what it is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Stopped {
+    /// `--max-turns` spent before the session reported anything.
+    TurnLimit,
+    /// The account's usage limit is reached; nothing on this machine changes
+    /// that before it resets.
+    UsageLimit,
+    /// The API refused the run for asking too often.
+    RateLimit,
+    /// The credential the CLI is logged in with was refused.
+    BadCredential,
+    /// [`WORKING_TIMEOUT`] spent, and the child stopped.
+    TimedOut,
+    /// Somebody pressed stop.
+    Cancelled,
+    /// Anything else the run failed with, in the run's own words.
+    Broke(String),
+}
+
+impl Stopped {
+    /// Whether a second attempt is worth the half hour.
+    ///
+    /// Only the turn limit, and only because the retry is run on different
+    /// terms — twice the turns. Every other stopping either answers the same
+    /// way again (a usage limit, a rate limit, a credential), was warlock's own
+    /// bound being reached (the clock), was asked for (a cancel) or is the
+    /// plumbing rather than the work (a missing binary, a crash), and none of
+    /// those is a sub-task that could go better on the second read.
+    #[must_use]
+    pub const fn retryable(&self) -> bool {
+        matches!(self, Self::TurnLimit)
+    }
+}
+
+impl fmt::Display for Stopped {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::TurnLimit => {
+                f.write_str("the attempt was stopped at its turn limit before it reported anything")
+            }
+            Self::UsageLimit => f.write_str("the account's usage limit was reached"),
+            Self::RateLimit => f.write_str("the API refused the run for asking too often"),
+            Self::BadCredential => {
+                f.write_str("the credential the CLI is logged in with was refused")
+            }
+            Self::TimedOut => f.write_str("the attempt ran past its timeout and was stopped"),
+            Self::Cancelled => f.write_str("the attempt was cancelled"),
+            Self::Broke(said) => write!(f, "the attempt's run failed: {said}"),
+        }
+    }
+}
+
+/// What the CLI says when it stops for each reason worth telling apart, looked
+/// for in this order in whatever the failed run had to say.
+///
+/// Several spellings each, and lower case throughout, because the text is not a
+/// contract: `claude` writes an API error through more or less verbatim, puts
+/// its own stopping on the result line as a `subtype`, and is free to reword
+/// either. A needle list that misses is a [`Stopped::Broke`] carrying the
+/// sentence, which is a worse outcome than a match and a much better one than a
+/// wrong match — so nothing here is a substring that could belong to a
+/// sub-task's own failure, and the whole of what is read is the run's failure
+/// text and never the session's answer.
+const STOPPINGS: &[(&str, Stopped)] = &[
+    ("error_max_turns", Stopped::TurnLimit),
+    ("maximum number of turns", Stopped::TurnLimit),
+    ("max_turns", Stopped::TurnLimit),
+    ("max turns", Stopped::TurnLimit),
+    ("invalid api key", Stopped::BadCredential),
+    ("invalid_api_key", Stopped::BadCredential),
+    ("authentication_error", Stopped::BadCredential),
+    ("please run /login", Stopped::BadCredential),
+    ("oauth token", Stopped::BadCredential),
+    ("api error: 401", Stopped::BadCredential),
+    ("unauthorized", Stopped::BadCredential),
+    ("usage limit", Stopped::UsageLimit),
+    ("usage_limit", Stopped::UsageLimit),
+    ("rate limit", Stopped::RateLimit),
+    ("rate_limit", Stopped::RateLimit),
+    ("too many requests", Stopped::RateLimit),
+    ("api error: 429", Stopped::RateLimit),
+];
+
+/// Read a failed run as one of the stoppings above.
+///
+/// The exit status is what decides there is anything to read at all: a run that
+/// exited cleanly came back as an answer and never reaches here, and of the ones
+/// that did not, the four the brief names all arrive as
+/// [`agent::Error::Failed`] — a non-zero status with something to say. The text
+/// is what tells them apart, because the status itself is `1` for every one of
+/// them.
+///
+/// The text read for a [`agent::Error::Failed`] is the `stderr` field, which
+/// [`judge`] has already filled with the result line for the runs that say why
+/// they stopped on stdout and leave stderr empty — a turn limit is exactly one
+/// of those, so without that fallback this function would see silence and call
+/// every one of them a crash.
+///
+/// A cancel arrives as interrupted I/O because that is what [`cancelled`] makes
+/// it: the module refuses to blame the model for a run somebody else ended, and
+/// this is the other end of that decision.
+fn stopped_by(error: &agent::Error) -> Stopped {
+    match error {
+        agent::Error::TimedOut { .. } => Stopped::TimedOut,
+        agent::Error::Io { source } if source.kind() == io::ErrorKind::Interrupted => {
+            Stopped::Cancelled
+        }
+        agent::Error::Failed { stderr, .. } => {
+            let said = stderr.to_lowercase();
+            STOPPINGS
+                .iter()
+                .find(|(needle, _)| said.contains(needle))
+                .map_or_else(|| Stopped::Broke(error.to_string()), |(_, why)| why.clone())
+        }
+        other => Stopped::Broke(other.to_string()),
+    }
+}
+
+/// What one sub-task session came to, once its attempts are spent.
+///
+/// Two endings and no third: either a session answered and the answer was read
+/// through the engine's contract — including an answer warlock could not read,
+/// which [`warlock_engine::working::accept`] returns as a failure carrying the
+/// message verbatim — or no session answered at all and what stopped the last
+/// attempt is named. A caller that has to act on this can ask
+/// [`Accepted::reported`](warlock_engine::working::Accepted::reported) on the
+/// first and read the second as it stands.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Worked {
+    /// The session's last message, read.
+    Answered(working::Accepted),
+    /// No message to read: what stopped the run.
+    Halted(Stopped),
+}
+
+/// One sub-task's session: the prompt, the attempts it is allowed, and the
+/// outcome.
+///
+/// Generic over the [`Converses`] seam the drafting session uses, with
+/// [`Bounded`] beside it for the one thing a retry after a turn limit changes,
+/// so every branch below is driven against in-memory stand-ins with no `claude`
+/// on the machine. Against a real [`ChatAgent::working`] it runs through the
+/// plumbing at the top of this module — the writer thread, the two reader
+/// threads, the polling waiter and the [`Cancel`] — under
+/// [`WORKING_TIMEOUT`] and [`WORKING_TURNS`], because that plumbing *is*
+/// [`ChatAgent::turn`] and this drives nothing else.
+///
+/// It stops at the outcome. The commit, the check of what the tree actually
+/// holds afterwards and the loop that decides what happens to the sub-task are
+/// somebody else's: this one raises a session, reads what it said and says
+/// whether it was worth asking again.
+///
+/// A retry is the next turn of the same agent rather than a session minted
+/// afresh — that is the whole of what the seam offers, and
+/// [`working_retry`] is written for it either way: it restates the opening, so
+/// a session with no memory of the first attempt has everything it needs, and a
+/// conversation that does have one is being told what changed. What no attempt
+/// after the first is told is that it is the *third*: the tree it starts in is
+/// the fact that matters, and a count of how patient warlock is being would
+/// only invite the session to spend it.
+///
+/// ```
+/// use warlock_tui::{ChatAgent, Working, working_opening, working_system_prompt};
+///
+/// let held = ["src".to_owned()];
+/// let agent = ChatAgent::working(&working_system_prompt("src/**", &held));
+/// let opening = working_opening("## Goal\nRead it once.", "Read it once", "Because.", &[]);
+/// let session = Working::on(&agent, &opening);
+///
+/// // Nothing is spawned until it is run, and whoever holds the session can
+/// // stop the attempt it is in from any thread.
+/// assert_eq!(session.attempts(), 0);
+/// session.cancel().cancel();
+/// ```
+#[derive(Debug)]
+pub struct Working<C> {
+    agent: C,
+    cancel: Cancel,
+    /// The first attempt's prompt, kept whole: every retry is
+    /// [`working_retry`] over this same text, so the brief, the ticket and the
+    /// finished siblings cannot drift between one attempt and the next.
+    opening: String,
+    /// What the session is currently held to, doubled by a turn-limit retry.
+    /// Starts at [`WORKING_TURNS`] because that is what [`working_args`] built
+    /// the vector with; an agent someone bounded differently is told the number
+    /// this session believes, which is the same number the CLI was given.
+    turns: u32,
+    attempts: usize,
+}
+
+impl<C: Bounded> Working<C> {
+    /// A session for one sub-task, opened with the prompt
+    /// [`working_opening`] built.
+    ///
+    /// The agent is wired to a cancel minted here, as a drafting session's is,
+    /// so stopping this session reaches the child it is actually running rather
+    /// than some other copy of the same agent. Nothing is spawned until
+    /// [`run`](Working::run).
+    #[must_use]
+    pub fn on(agent: &C, opening: &str) -> Self {
+        let cancel = Cancel::new();
+        Self {
+            agent: agent.wired(cancel.clone(), Activities::none()),
+            cancel,
+            opening: opening.to_owned(),
+            turns: WORKING_TURNS,
+            attempts: 0,
+        }
+    }
+
+    /// The same session reporting what it is seen doing. Re-wires rather than
+    /// replaces, so a cancel handle already handed out still reaches the run.
+    #[must_use]
+    pub fn reporting(mut self, activities: Activities) -> Self {
+        self.agent = self.agent.wired(self.cancel.clone(), activities);
+        self
+    }
+
+    /// The handle this session's attempts run under. A clone, because the point
+    /// of it is to be pressed from a thread that is not the one waiting.
+    #[must_use]
+    pub fn cancel(&self) -> Cancel {
+        self.cancel.clone()
+    }
+
+    /// How many attempts have been spent. Zero until [`run`](Working::run), and
+    /// never more than [`WORKING_ATTEMPTS`].
+    #[must_use]
+    pub const fn attempts(&self) -> usize {
+        self.attempts
+    }
+
+    /// Run the sub-task: the opening, then a retry for as long as the last
+    /// attempt earned one.
+    ///
+    /// No `Result`. By the time anything here has gone wrong a session with
+    /// writing tools has already been in the tree, so there is no error to hand
+    /// back that a caller could treat as nothing having happened: every ending
+    /// is a [`Worked`] to record.
+    pub fn run(&mut self) -> Worked {
+        let mut message = self.opening.clone();
+        loop {
+            self.attempts += 1;
+            let worked = match self.agent.turn(&message) {
+                Ok(reply) => Worked::Answered(working::accept(&reply)),
+                Err(error) => Worked::Halted(stopped_by(&error)),
+            };
+            let Some(failure) = self.again(&worked) else {
+                return worked;
+            };
+            message = working_retry(&self.opening, &failure);
+        }
+    }
+
+    /// What the next attempt is told went wrong, or `None` when there is not
+    /// going to be one — and, for the turn limit, the re-letting of the agent
+    /// on twice the turns, since the whole reason that stopping is retried is
+    /// that the retry runs on different terms.
+    ///
+    /// Doubling the running count rather than [`WORKING_TURNS`] twice over: a
+    /// second turn limit is a sub-task that is bigger than warlock guessed, and
+    /// the third attempt gets four times the room rather than the same two.
+    fn again(&mut self, worked: &Worked) -> Option<String> {
+        if self.attempts >= WORKING_ATTEMPTS {
+            return None;
+        }
+        match worked {
+            // Only `failed` — and an unreadable answer, which the engine's
+            // contract has already made one. A `done` warlock disbelieves and a
+            // `blocked` it argues with would both be warlock overruling the one
+            // party that was actually in the tree.
+            Worked::Answered(accepted) => match accepted.reported() {
+                working::Reported::Failed(reason) => Some(reason.clone()),
+                working::Reported::Done | working::Reported::Blocked(_) => None,
+            },
+            Worked::Halted(stopped) if stopped.retryable() => {
+                self.turns = self.turns.saturating_mul(2);
+                self.agent = self.agent.at_turns(self.turns);
+                Some(stopped.to_string())
+            }
+            Worked::Halted(_) => None,
         }
     }
 }

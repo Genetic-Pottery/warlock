@@ -6,14 +6,14 @@ use std::time::{Duration, Instant};
 
 use super::stream;
 use super::{
-    Activities, Activity, BRIEF_EFFORT, BRIEF_MODEL, CHAT_INSTRUCTION, CHAT_SYSTEM_PROMPT, Cancel,
-    ChatAgent, ClaudeAgent, Converses, DRAFT_NOW_INSTRUCTION, DRAFTING_CONTRACT,
+    Activities, Activity, BRIEF_EFFORT, BRIEF_MODEL, Bounded, CHAT_INSTRUCTION, CHAT_SYSTEM_PROMPT,
+    Cancel, ChatAgent, ClaudeAgent, Converses, DRAFT_NOW_INSTRUCTION, DRAFTING_CONTRACT,
     DRAFTING_ONE_SHOT_CONTRACT, DRAFTING_ROUNDS, Drafted, Drafting, EFFORT, EFFORT_VAR,
     INVOCATION_TIMEOUT, MODEL, MODEL_VAR, NOTHING_SETTLES_IT, OsString, PROPOSING_SYSTEM_PROMPT,
-    Replied, SYSTEM_PROMPT, WORKING_TIMEOUT, WORKING_TURNS, WRITE_INSTRUCTION, Wired,
-    brief_instruction, drafting_opening, or_default, overridden, propose_answer,
-    proposing_instruction, render, session_id, working_opening, working_retry,
-    working_system_prompt,
+    Replied, SYSTEM_PROMPT, Stopped, WORKING_ATTEMPTS, WORKING_TIMEOUT, WORKING_TURNS,
+    WRITE_INSTRUCTION, Wired, Worked, Working, brief_instruction, drafting_opening, or_default,
+    overridden, propose_answer, proposing_instruction, render, session_id, working_opening,
+    working_retry, working_system_prompt,
 };
 use crate::brief::scope_block_in;
 use crate::panel::Mode;
@@ -2783,6 +2783,35 @@ fn a_result_line_missing_a_half_still_gives_up_the_other_one() {
 }
 
 #[test]
+fn a_result_line_that_carries_no_answer_says_why_the_run_failed_instead() {
+    // The line a run stopped at `--max-turns` ends on: no `result` at all, and
+    // the only account of the stopping anywhere — stderr is empty. Without this
+    // the turn limit worth retrying and a crashed CLI are the same silence.
+    let stopped = stream::read_line(
+        r#"{"type":"result","subtype":"error_max_turns","is_error":true,"errors":["Reached maximum number of turns (60)"]}"#,
+    );
+    assert_eq!(
+        stopped.text.as_deref(),
+        Some("error_max_turns Reached maximum number of turns (60)")
+    );
+
+    // Only when the run says it failed, and only when it left no answer: a line
+    // that carries a document carries the document.
+    let answered = stream::read_line(
+        r#"{"type":"result","subtype":"success","result":"a document","is_error":false}"#,
+    );
+    assert_eq!(answered.text.as_deref(), Some("a document"));
+
+    let silent = stream::read_line(r#"{"type":"result","subtype":"error_during_execution"}"#);
+    assert_eq!(silent.text, None);
+
+    // An error with nothing to say about itself is still nothing to say: an
+    // empty string here would be an answer the run never gave.
+    let wordless = stream::read_line(r#"{"type":"result","is_error":true}"#);
+    assert_eq!(wordless.text, None);
+}
+
+#[test]
 fn one_line_of_several_blocks_is_several_activities_in_order() {
     // What a real assistant message looks like when the model thinks, says
     // something, then calls two tools.
@@ -2827,6 +2856,459 @@ fn cancelling_with_no_pass_running_is_a_no_op_that_still_latches() {
 // The stand-ins below are shell scripts, so the whole module is Unix-only. What
 // is under test — the pipes, the timeout, the kill — is not, but a portable
 // stand-in would have to be a second binary to build.
+// A sub-task session written down before it runs: one entry per attempt, taken
+// in the order the attempts come. Its own double rather than [`Scripted`],
+// because what this session does with an attempt that *failed* is the whole of
+// what is under test and a stand-in that can only succeed says nothing about
+// it. Shared through `Arc` for `Scripted`'s reason: the session wires the agent
+// it was given before it sends anything, and a copy that recorded into itself
+// would record nothing a test could read.
+#[derive(Debug)]
+enum Attempt {
+    /// The session's last message.
+    Says(String),
+    /// The run exited non-zero with this on its stderr — the text the
+    /// classification reads, and in these tests the CLI's own words.
+    Failed(String),
+    /// The clock ran out and the child was stopped.
+    RanLong,
+    /// Somebody pressed stop while the attempt was in flight: the handle the
+    /// session wired is latched, and the turn ends as `cancelled` makes it end.
+    Interrupted,
+}
+
+#[derive(Debug, Clone, Default)]
+struct Attempting {
+    attempts: Arc<Mutex<Vec<Attempt>>>,
+    sent: Arc<Mutex<Vec<String>>>,
+    bounds: Arc<Mutex<Vec<u32>>>,
+    cancels: Arc<Mutex<Vec<Cancel>>>,
+}
+
+impl Attempting {
+    fn taking(attempts: impl IntoIterator<Item = Attempt>) -> Self {
+        Self {
+            attempts: Arc::new(Mutex::new(attempts.into_iter().collect())),
+            ..Self::default()
+        }
+    }
+
+    fn sent(&self) -> Vec<String> {
+        self.sent
+            .lock()
+            .expect("the script is not poisoned")
+            .clone()
+    }
+
+    fn turns(&self) -> usize {
+        self.sent.lock().expect("the script is not poisoned").len()
+    }
+
+    /// Every turn bound this stand-in was re-let with, in order: what a
+    /// turn-limit retry is asked to have done.
+    fn bounds(&self) -> Vec<u32> {
+        self.bounds
+            .lock()
+            .expect("the script is not poisoned")
+            .clone()
+    }
+
+    fn cancelled(&self) -> bool {
+        self.cancels
+            .lock()
+            .expect("the script is not poisoned")
+            .iter()
+            .any(Cancel::is_cancelled)
+    }
+}
+
+impl Wired for Attempting {
+    fn wired(&self, cancel: Cancel, _activities: Activities) -> Self {
+        self.cancels
+            .lock()
+            .expect("the script is not poisoned")
+            .push(cancel);
+        self.clone()
+    }
+}
+
+impl Converses for Attempting {
+    fn turn(&self, message: &str) -> Result<String, agent::Error> {
+        self.sent
+            .lock()
+            .expect("the script is not poisoned")
+            .push(message.to_owned());
+        let mut attempts = self.attempts.lock().expect("the script is not poisoned");
+        assert!(
+            !attempts.is_empty(),
+            "an attempt was made the script has no answer for",
+        );
+        match attempts.remove(0) {
+            Attempt::Says(text) => Ok(text),
+            Attempt::Failed(said) => Err(agent::Error::Failed {
+                code: Some(1),
+                stderr: said,
+            }),
+            Attempt::RanLong => Err(agent::Error::TimedOut {
+                after: WORKING_TIMEOUT,
+            }),
+            Attempt::Interrupted => {
+                // Where a real cancel comes from: a handle somebody else
+                // pressed, which is the one this session minted and wired.
+                for cancel in self
+                    .cancels
+                    .lock()
+                    .expect("the script is not poisoned")
+                    .iter()
+                {
+                    cancel.cancel();
+                }
+                Err(agent::Error::Io {
+                    source: io::Error::new(io::ErrorKind::Interrupted, "the run was cancelled"),
+                })
+            }
+        }
+    }
+
+    fn raised(&self, _model: &str, _effort: &str) -> Self {
+        self.clone()
+    }
+}
+
+impl Bounded for Attempting {
+    fn at_turns(&self, turns: u32) -> Self {
+        self.bounds
+            .lock()
+            .expect("the script is not poisoned")
+            .push(turns);
+        self.clone()
+    }
+}
+
+const A_SUB_TASK: &str = "## Goal\nSharpen the knife.";
+const ITS_TICKET: &str = "The knife is blunt";
+const ITS_DESCRIPTION: &str = "Two people have cut themselves sawing with it.";
+
+fn an_opening() -> String {
+    working_opening(A_SUB_TASK, ITS_TICKET, ITS_DESCRIPTION, &[])
+}
+
+fn a_session(agent: &Attempting) -> Working<Attempting> {
+    Working::on(agent, &an_opening())
+}
+
+// Named apart from `answered` above, which reads a drafting session's reply:
+// two sessions, two vocabularies, and one helper serving both would be a name
+// that means something different depending on where it is read.
+fn told(worked: &Worked) -> &working::Accepted {
+    match worked {
+        Worked::Answered(accepted) => accepted,
+        Worked::Halted(stopped) => panic!("the session halted rather than answering: {stopped}"),
+    }
+}
+
+fn stopping(worked: &Worked) -> &Stopped {
+    match worked {
+        Worked::Halted(stopped) => stopped,
+        Worked::Answered(accepted) => panic!("the session answered: {accepted:?}"),
+    }
+}
+
+// What `claude` actually writes when a run stops for each of the reasons worth
+// telling apart — the result line's own subtype for a turn limit, which reaches
+// the failure through `judge` because stderr is empty, and the API's error text
+// for the rest. Written down here so a test says what the CLI says rather than
+// what the classification happens to look for.
+const AT_THE_TURN_LIMIT: &str = "error_max_turns Reached maximum number of turns (60)";
+const AT_THE_USAGE_LIMIT: &str = "Claude AI usage limit reached|1750000000";
+const AT_THE_RATE_LIMIT: &str = r#"API Error: 429 {"type":"error","error":{"type":"rate_limit_error","message":"Number of \
+       requests has exceeded your rate limit"}}"#;
+const WITH_A_BAD_CREDENTIAL: &str = r#"API Error: 401 {"type":"error","error":{"type":"authentication_error","message":"invalid \
+       x-api-key"}}"#;
+
+#[test]
+fn a_sub_task_that_finishes_is_one_attempt_and_the_summary_the_session_gave() {
+    let agent = Attempting::taking([Attempt::Says(working::stub_answer(
+        "Sharpened it on the whetstone and left the drawer as it was.",
+    ))]);
+    let mut session = a_session(&agent);
+
+    let worked = session.run();
+
+    let accepted = told(&worked);
+    assert_eq!(accepted.reported(), &working::Reported::Done);
+    assert_eq!(
+        accepted.summary(),
+        "Sharpened it on the whetstone and left the drawer as it was."
+    );
+    assert_eq!(session.attempts(), 1);
+    assert_eq!(
+        agent.sent(),
+        vec![an_opening()],
+        "the first attempt is the opening, verbatim and alone",
+    );
+}
+
+#[test]
+fn a_sub_task_reported_blocked_is_the_end_of_it_rather_than_something_to_retry() {
+    let refusal = "`warlock check --gate` refused the write to `docs/brief.md`";
+    let agent = Attempting::taking([
+        Attempt::Says(working::stub_reply(
+            "blocked",
+            "Everything but the document; the gate refused that file.",
+            Some(refusal),
+        )),
+        // Never reached: a block is an answer, and warlock arguing with the
+        // one party that was in the tree is not a retry.
+        Attempt::Says(working::stub_answer("did it anyway")),
+    ]);
+    let mut session = a_session(&agent);
+
+    let worked = session.run();
+
+    assert_eq!(
+        told(&worked).reported(),
+        &working::Reported::Blocked(refusal.to_owned())
+    );
+    assert_eq!(session.attempts(), 1);
+    assert_eq!(agent.turns(), 1);
+}
+
+#[test]
+fn a_failed_attempt_is_taken_again_with_the_retry_prompt_and_can_finish() {
+    let reason = "the test suite would not build";
+    let agent = Attempting::taking([
+        Attempt::Says(working::stub_reply(
+            "failed",
+            "Got half of it in.",
+            Some(reason),
+        )),
+        Attempt::Says(working::stub_answer("Fixed the build and finished it.")),
+    ]);
+    let mut session = a_session(&agent);
+
+    let worked = session.run();
+
+    assert_eq!(told(&worked).reported(), &working::Reported::Done);
+    assert_eq!(session.attempts(), 2);
+
+    let sent = agent.sent();
+    assert_eq!(sent[0], an_opening());
+    assert_eq!(
+        sent[1],
+        working_retry(&an_opening(), reason),
+        "the second attempt is the retry prompt over the same opening",
+    );
+    assert!(sent[1].contains(reason), "{}", sent[1]);
+}
+
+#[test]
+fn a_sub_task_that_keeps_failing_is_given_up_after_the_attempts_it_is_allowed() {
+    let failing = || {
+        Attempt::Says(working::stub_reply(
+            "failed",
+            "Could not get the tests to pass.",
+            Some("the same three tests fail"),
+        ))
+    };
+    let agent = Attempting::taking([
+        failing(),
+        failing(),
+        failing(),
+        // The attempt that must not happen: three is the whole allowance.
+        Attempt::Says(working::stub_answer("a fourth attempt nobody allowed")),
+    ]);
+    let mut session = a_session(&agent);
+
+    let worked = session.run();
+
+    assert_eq!(
+        told(&worked).reported(),
+        &working::Reported::Failed("the same three tests fail".to_owned())
+    );
+    assert_eq!(session.attempts(), WORKING_ATTEMPTS);
+    assert_eq!(agent.turns(), WORKING_ATTEMPTS);
+}
+
+#[test]
+fn an_answer_that_is_not_the_object_is_a_failure_that_keeps_what_was_said() {
+    let prose = "I sharpened the knife. It took a while but it is sharp now.";
+    let agent = Attempting::taking([
+        Attempt::Says(prose.to_owned()),
+        Attempt::Says(prose.to_owned()),
+        Attempt::Says(prose.to_owned()),
+    ]);
+    let mut session = a_session(&agent);
+
+    let worked = session.run();
+
+    let accepted = told(&worked);
+    assert!(
+        matches!(accepted.reported(), working::Reported::Failed(_)),
+        "{accepted:?}"
+    );
+    assert_eq!(accepted.unreadable(), Some(&working::Unreadable::NoObject));
+    assert_eq!(
+        accepted.reply(),
+        prose,
+        "the session's own last message is the only account of the attempt there is",
+    );
+    // Unreadable is a failure, so it is retried like one — and gives up where
+    // one does.
+    assert_eq!(session.attempts(), WORKING_ATTEMPTS);
+}
+
+#[test]
+fn an_object_that_will_not_parse_is_the_same_failure_and_is_kept_too() {
+    let malformed = r#"{"status": "done", "summary": "Sharpened it",}"#;
+    let agent = Attempting::taking([
+        Attempt::Says(malformed.to_owned()),
+        Attempt::Says(working::stub_answer("Sharpened it, and said so properly.")),
+    ]);
+    let mut session = a_session(&agent);
+
+    let worked = session.run();
+
+    assert_eq!(told(&worked).reported(), &working::Reported::Done);
+    assert_eq!(session.attempts(), 2);
+    assert!(
+        agent.sent()[1].contains("could not be read"),
+        "the retry is told what was wrong with the answer: {}",
+        agent.sent()[1],
+    );
+}
+
+#[test]
+fn a_turn_limit_is_taken_again_on_twice_the_turns() {
+    let agent = Attempting::taking([
+        Attempt::Failed(AT_THE_TURN_LIMIT.to_owned()),
+        Attempt::Says(working::stub_answer("Finished it with the room to do it.")),
+    ]);
+    let mut session = a_session(&agent);
+
+    let worked = session.run();
+
+    assert_eq!(told(&worked).reported(), &working::Reported::Done);
+    assert_eq!(session.attempts(), 2);
+    assert_eq!(
+        agent.bounds(),
+        vec![WORKING_TURNS * 2],
+        "the retry after a turn limit is the one that runs on different terms",
+    );
+    assert!(
+        agent.sent()[1].contains("turn limit"),
+        "the retry is told why the last attempt stopped: {}",
+        agent.sent()[1],
+    );
+}
+
+#[test]
+fn a_second_turn_limit_doubles_again_and_the_third_is_the_end_of_it() {
+    let agent = Attempting::taking([
+        Attempt::Failed(AT_THE_TURN_LIMIT.to_owned()),
+        Attempt::Failed(AT_THE_TURN_LIMIT.to_owned()),
+        Attempt::Failed(AT_THE_TURN_LIMIT.to_owned()),
+    ]);
+    let mut session = a_session(&agent);
+
+    let worked = session.run();
+
+    assert_eq!(stopping(&worked), &Stopped::TurnLimit);
+    assert_eq!(session.attempts(), WORKING_ATTEMPTS);
+    assert_eq!(agent.bounds(), vec![WORKING_TURNS * 2, WORKING_TURNS * 4]);
+}
+
+#[test]
+fn what_the_account_or_the_credential_refuses_is_named_and_not_taken_again() {
+    let refusals = [
+        (AT_THE_USAGE_LIMIT, Stopped::UsageLimit),
+        (AT_THE_RATE_LIMIT, Stopped::RateLimit),
+        (WITH_A_BAD_CREDENTIAL, Stopped::BadCredential),
+    ];
+
+    for (said, expected) in refusals {
+        let agent = Attempting::taking([
+            Attempt::Failed(said.to_owned()),
+            // A second attempt would be a second refusal, and this is what
+            // says warlock does not spend one finding that out.
+            Attempt::Says(working::stub_answer("an attempt nobody allowed")),
+        ]);
+        let mut session = a_session(&agent);
+
+        let worked = session.run();
+
+        assert_eq!(stopping(&worked), &expected, "misread: {said}");
+        assert_eq!(
+            session.attempts(),
+            1,
+            "retried what cannot be retried: {said}"
+        );
+        assert_eq!(agent.turns(), 1);
+        assert!(agent.bounds().is_empty());
+    }
+}
+
+#[test]
+fn a_failure_the_list_does_not_name_keeps_what_the_run_said_and_is_not_retried() {
+    let agent = Attempting::taking([
+        Attempt::Failed("Segmentation fault".to_owned()),
+        Attempt::Says(working::stub_answer("an attempt nobody allowed")),
+    ]);
+    let mut session = a_session(&agent);
+
+    let worked = session.run();
+
+    let Stopped::Broke(said) = stopping(&worked) else {
+        panic!("a crash was read as something warlock has a plan for: {worked:?}");
+    };
+    assert!(said.contains("Segmentation fault"), "{said}");
+    assert_eq!(agent.turns(), 1);
+}
+
+#[test]
+fn an_attempt_that_runs_out_of_clock_is_the_end_of_the_sub_task() {
+    let agent = Attempting::taking([
+        Attempt::RanLong,
+        Attempt::Says(working::stub_answer("an attempt nobody allowed")),
+    ]);
+    let mut session = a_session(&agent);
+
+    let worked = session.run();
+
+    // Not retried: the clock is warlock's own bound, and half an hour that ran
+    // out is not half an hour that would have been enough twice.
+    assert_eq!(stopping(&worked), &Stopped::TimedOut);
+    assert_eq!(agent.turns(), 1);
+}
+
+#[test]
+fn a_cancelled_attempt_is_not_taken_again_and_is_not_blamed_on_the_session() {
+    let agent = Attempting::taking([
+        Attempt::Interrupted,
+        Attempt::Says(working::stub_answer("an attempt nobody asked for")),
+    ]);
+    let mut session = a_session(&agent);
+
+    let worked = session.run();
+
+    assert_eq!(stopping(&worked), &Stopped::Cancelled);
+    assert_eq!(agent.turns(), 1);
+    assert!(agent.cancelled());
+}
+
+#[test]
+fn the_handle_a_sub_task_session_hands_out_reaches_the_agent_it_runs() {
+    let agent = Attempting::taking([Attempt::Says(working::stub_answer("nothing to do"))]);
+    let session = a_session(&agent);
+
+    session.cancel().cancel();
+
+    assert!(
+        agent.cancelled(),
+        "the session's handle reached some other copy of the agent",
+    );
+}
+
 #[cfg(unix)]
 mod unix {
     use std::io::ErrorKind;
@@ -3809,6 +4291,237 @@ mod unix {
                     assert_eq!(drained(&received), reported());
                 }
             }
+        }
+    }
+
+    // The one session that may change the tree, run through the plumbing at the
+    // top of the module rather than against a stand-in in memory: a small
+    // program in `claude`'s place that keeps its argv, its environment and its
+    // stdin, and answers with a result line the way the real one does.
+    //
+    // A child module for `turns`'s reason — the helpers above are reusable and
+    // a second copy of them would drift.
+    mod sub_task {
+        use std::collections::HashMap;
+        use std::io::Write as _;
+        use std::process::{Command, Stdio};
+        use std::{env, fs};
+
+        use warlock_engine::working;
+
+        use super::super::{value_of, words};
+        use super::{clean_up, scratch};
+        use crate::{
+            ChatAgent, Stopped, WORKING_ATTEMPTS, WORKING_TURNS, Worked, Working, working_opening,
+            working_system_prompt,
+        };
+
+        // Set by the shell that runs the stand-in, and so present in the
+        // child's environment without anybody having put them there.
+        const THE_SHELLS_OWN: [&str; 4] = ["_", "PWD", "OLDPWD", "SHLVL"];
+
+        // Nothing a secret is ever spelt with should be anywhere in the vector.
+        // Deliberately not the bare word `key`, which a path or a prompt can
+        // hold innocently: these are the shapes a credential arrives in.
+        const A_SECRET_LOOKS_LIKE: [&str; 9] = [
+            "api_key", "api-key", "apikey", "x-api", "token", "secret", "bearer", "password",
+            "sk-ant",
+        ];
+
+        #[test]
+        fn nothing_of_a_key_reaches_the_child_that_works_a_sub_task() {
+            let directory = scratch("sub-task-child");
+            let (argv, environment, stdin) = (
+                directory.join("argv"),
+                directory.join("environment"),
+                directory.join("stdin"),
+            );
+            let answered = working::stub_answer("Recorded what it was handed.");
+            let result = serde_json::json!({
+                "type": "result",
+                "subtype": "success",
+                "result": answered,
+            })
+            .to_string();
+            // NUL-separated on both sides, so an argument or a value holding a
+            // newline — the system prompt holds several — is still read back as
+            // the one word it was.
+            let stand_in = directory.join("recorder");
+            written(
+                &stand_in,
+                &format!(
+                    "#!/bin/sh\n\
+                     for arg in \"$@\"; do printf '%s\\0' \"$arg\"; done > '{argv}'\n\
+                     env -0 > '{environment}'\n\
+                     cat > '{stdin}'\n\
+                     printf '%s\\n' '{result}'\n",
+                    argv = argv.display(),
+                    environment = environment.display(),
+                    stdin = stdin.display(),
+                ),
+            );
+
+            let agent = ChatAgent::working(&working_system_prompt(
+                "crates/warlock-tui/**",
+                &["warlock-tui".to_owned()],
+            ))
+            .with_program(&stand_in);
+            // Read before the run: the first child to spawn claims the session,
+            // and the flag naming it flips from `--session-id` to `--resume`.
+            let built = words(&agent.args());
+            let opening = working_opening(
+                "## Goal\nSharpen the knife.",
+                "The knife is blunt",
+                "Two people have cut themselves sawing with it.",
+                &[],
+            );
+
+            let worked = Working::on(&agent, &opening).run();
+
+            // The plumbing worked end to end: the prompt went down stdin on the
+            // writer thread, the stream came back through the readers, and the
+            // result was read as the contract's object.
+            let Worked::Answered(accepted) = &worked else {
+                panic!("the stand-in's result line did not come back as an answer: {worked:?}");
+            };
+            assert_eq!(accepted.reported(), &working::Reported::Done);
+            assert_eq!(
+                fs::read_to_string(&stdin).expect("the stand-in kept its stdin"),
+                opening,
+                "something other than the opening reached the child",
+            );
+
+            // The whole vector, word for word: what the child was given is what
+            // warlock built and nothing else was appended on the way.
+            let handed = nul_separated(&argv);
+            assert_eq!(handed, built);
+            for word in &handed {
+                let word = word.to_lowercase();
+                for shape in A_SECRET_LOOKS_LIKE {
+                    assert!(
+                        !word.contains(shape),
+                        "`{shape}` in an argument of the sub-task session: {word}",
+                    );
+                }
+            }
+
+            // And the whole environment. Every variable the child has is one
+            // this process already had, with the same value: warlock sets
+            // nothing on the child, so there is nowhere for a key it holds to
+            // travel. What the operator's own shell exports is the operator's
+            // business and travels into every child they run.
+            let mine: HashMap<String, String> = env::vars().collect();
+            let held = nul_separated(&environment);
+            for (name, value) in held.iter().map(String::as_str).filter_map(split) {
+                if THE_SHELLS_OWN.contains(&name.as_str()) {
+                    continue;
+                }
+                assert_eq!(
+                    mine.get(&name),
+                    Some(&value),
+                    "`{name}` was put in the child's environment by warlock",
+                );
+            }
+
+            clean_up(&directory);
+        }
+
+        #[test]
+        fn a_real_turn_limit_is_read_off_the_stream_and_retried_on_twice_the_turns() {
+            // The whole road from what `claude` actually does at `--max-turns`
+            // to the flag the retry is spawned with: the CLI exits non-zero,
+            // says nothing at all on stderr, and puts the stopping on the
+            // result line — so this is what says the fallback in `judge`, the
+            // reading in `stream::failure` and the classification are one
+            // working path and not three plausible ones.
+            let directory = scratch("sub-task-turn-limit");
+            let argv = directory.join("argv");
+            let at_the_limit = serde_json::json!({
+                "type": "result",
+                "subtype": "error_max_turns",
+                "is_error": true,
+                "errors": ["Reached maximum number of turns (60)"],
+            })
+            .to_string();
+            let stand_in = directory.join("out-of-turns");
+            written(
+                &stand_in,
+                &format!(
+                    "#!/bin/sh\n\
+                     for arg in \"$@\"; do printf '%s\\0' \"$arg\"; done > '{argv}'\n\
+                     cat > /dev/null\n\
+                     printf '%s\\n' '{at_the_limit}'\n\
+                     exit 1\n",
+                    argv = argv.display(),
+                ),
+            );
+
+            let agent = ChatAgent::working("sharpen the knife").with_program(&stand_in);
+            let opening = working_opening("## Goal\nSharpen it.", "Blunt", "It is blunt.", &[]);
+
+            let mut session = Working::on(&agent, &opening);
+            let worked = session.run();
+
+            assert_eq!(worked, Worked::Halted(Stopped::TurnLimit));
+            assert_eq!(session.attempts(), WORKING_ATTEMPTS);
+            // The last attempt's own vector: the doubling is a flag the child
+            // was spawned with, not a number warlock kept to itself.
+            let last = nul_separated(&argv);
+            assert_eq!(
+                value_of(&last, "--max-turns"),
+                Some((WORKING_TURNS * 4).to_string().as_str()),
+            );
+
+            clean_up(&directory);
+        }
+
+        /// Write the stand-in through a child of our own rather than with
+        /// [`fs::write`], and make it runnable there too.
+        ///
+        /// Not fussiness: a whole test suite is running on other threads of
+        /// this process, and on Linux a program cannot be `exec`ed while any
+        /// process holds a writable handle on it. A file this process writes
+        /// itself is inherited by whatever child another thread happens to
+        /// spawn in that instant, and the run comes back `ETXTBSY` — "Text file
+        /// busy" — on that thread's timing and nobody else's. The handle here
+        /// belongs to a child that has already exited by the time the stand-in
+        /// is spawned, so there is no window to lose.
+        fn written(path: &std::path::Path, body: &str) {
+            let mut child = Command::new("/bin/sh")
+                .arg("-c")
+                .arg(format!(
+                    "cat > '{path}' && chmod 755 '{path}'",
+                    path = path.display()
+                ))
+                .stdin(Stdio::piped())
+                .spawn()
+                .expect("a shell to write the stand-in with");
+            child
+                .stdin
+                .take()
+                .expect("stdin was piped")
+                .write_all(body.as_bytes())
+                .expect("the stand-in is written");
+            let status = child.wait().expect("the writing shell is reaped");
+            assert!(status.success(), "the stand-in was not written: {status}");
+        }
+
+        // Everything but the empty tail a trailing separator leaves. Empties in
+        // the middle are kept: `--setting-sources ""` is an argument warlock
+        // passes deliberately, and a reader that dropped it would be reading a
+        // vector the child never got.
+        fn nul_separated(path: &std::path::Path) -> Vec<String> {
+            let text = fs::read_to_string(path).expect("the stand-in recorded what it was given");
+            let mut parts: Vec<String> = text.split('\0').map(str::to_owned).collect();
+            if parts.last().is_some_and(String::is_empty) {
+                parts.pop();
+            }
+            parts
+        }
+
+        fn split(entry: &str) -> Option<(String, String)> {
+            let (name, value) = entry.split_once('=')?;
+            Some((name.to_owned(), value.to_owned()))
         }
     }
 }
