@@ -792,7 +792,7 @@ fn capped(slug: &str) -> &str {
 // `XY PATH\0`, and for a rename or a copy `XY PATH\0ORIG_PATH\0` — the new name
 // first and the old one as a field of its own, which is the whole reason the
 // entries are walked with an iterator rather than mapped over.
-fn dirty_in(payload: &[u8]) -> Vec<Dirty> {
+pub(crate) fn dirty_in(payload: &[u8]) -> Vec<Dirty> {
     // The payload ends in a NUL, so the split leaves an empty tail; a field in
     // the middle is never empty, because every one of them starts with a status
     // or is a path.
