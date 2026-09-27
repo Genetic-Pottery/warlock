@@ -1,12 +1,20 @@
+use std::collections::BTreeSet;
+
 use crate::document::Defect;
 
 use super::{
     Accepted, DEPENDS_ON_PER_SUBTASK, DONE_CHARS, DONE_PER_SUBTASK, FILE_CHARS, FILES_PER_SUBTASK,
-    Fill, GOAL_CHARS, GOAL_MINIMUM, NOTES_CHARS, SPLIT_PROMPT, SUBTASKS_PER_TICKET, Subtask,
-    TEST_PLAN_CHARS, accept, check, split_instructions, stub_answer,
+    Fill, GOAL_CHARS, GOAL_MINIMUM, MEND_PASSES, Mend, Mended, NOTES_CHARS, SPLIT_PROMPT,
+    SUBTASKS_PER_TICKET, Subtask, TEST_PLAN_CHARS, accept, check, mend, mended, split_instructions,
+    stub_answer,
 };
 
 const DONE: &str = "The module exists and its tests pass.";
+
+const TICKET: &str = "Split a pulled ticket into numbered sub-tasks";
+
+const DESCRIPTION: &str = "A pulled ticket is one description, and the run needs an ordered set \
+                           of small sub-tasks.";
 
 fn split(subtasks: Vec<Subtask>) -> Fill {
     Fill { subtasks }
@@ -442,6 +450,566 @@ fn a_rejected_defect_is_listed_back_as_one_not_to_repeat() {
     for defect in &rejected {
         assert!(text.contains(&format!("\n- {defect}")), "{text}");
     }
+}
+
+#[test]
+fn a_position_outside_the_ticket_is_dropped_by_the_repair() {
+    let mut subtask = sound(2);
+    subtask.depends_on = vec![0, 1, 9];
+
+    let (repaired, mends) = mend(&third(subtask), TICKET, DESCRIPTION);
+
+    assert_eq!(
+        repaired.subtasks[2].depends_on,
+        vec![1],
+        "zero and a position the ticket does not hold are gone, and the one it holds stays"
+    );
+    assert_eq!(
+        mends,
+        vec![Mend {
+            field: "subtasks[2].depends_on".to_owned(),
+            done: Mended::Dropped { count: 2 },
+        }]
+    );
+    assert_eq!(
+        mends[0].to_string(),
+        "subtasks[2].depends_on named 2 position(s) outside this ticket's sub-tasks and lost them"
+    );
+    assert_eq!(check(&repaired), []);
+}
+
+#[test]
+fn a_subtask_that_waits_on_itself_loses_the_position() {
+    let mut subtask = sound(2);
+    // Third of three, so 1-based this sub-task is position 3.
+    subtask.depends_on = vec![3, 1];
+
+    let (repaired, mends) = mend(&third(subtask), TICKET, DESCRIPTION);
+
+    assert_eq!(repaired.subtasks[2].depends_on, vec![1]);
+    assert_eq!(
+        mends,
+        vec![Mend {
+            field: "subtasks[2].depends_on".to_owned(),
+            done: Mended::Dropped { count: 1 },
+        }]
+    );
+}
+
+#[test]
+fn a_sound_fill_is_left_alone() {
+    let (repaired, mends) = mend(&good(), TICKET, DESCRIPTION);
+    assert_eq!(repaired, good());
+    assert_eq!(mends, []);
+}
+
+#[test]
+fn subtasks_past_the_cap_go_from_the_end_and_the_positions_into_them_go_too() {
+    let mut fill = split((0..SUBTASKS_PER_TICKET + 2).map(sound).collect());
+    fill.subtasks[0].depends_on = vec![2, SUBTASKS_PER_TICKET + 2];
+
+    let (repaired, mends) = mend(&fill, TICKET, DESCRIPTION);
+
+    assert_eq!(repaired.subtasks.len(), SUBTASKS_PER_TICKET);
+    assert_eq!(repaired.subtasks[7].goal, sound(7).goal, "the tail went");
+    assert_eq!(
+        repaired.subtasks[0].depends_on,
+        vec![2],
+        "the array is cut from the end and never thinned from the middle, so a surviving \
+         position still names the sub-task it always named"
+    );
+    assert_eq!(
+        mends,
+        vec![
+            Mend {
+                field: "subtasks".to_owned(),
+                done: Mended::Shortened {
+                    from: SUBTASKS_PER_TICKET + 2,
+                    to: SUBTASKS_PER_TICKET,
+                },
+            },
+            Mend {
+                field: "subtasks[0].depends_on".to_owned(),
+                done: Mended::Dropped { count: 1 },
+            },
+        ]
+    );
+    assert_eq!(check(&repaired), []);
+}
+
+#[test]
+fn a_list_over_its_cap_keeps_its_first_entries() {
+    let mut subtask = sound(2);
+    subtask.depends_on = vec![1; DEPENDS_ON_PER_SUBTASK + 1];
+    subtask.definition_of_done = (0..=DONE_PER_SUBTASK)
+        .map(|which| format!("{DONE} ({which})"))
+        .collect();
+    subtask.likely_files = (0..=FILES_PER_SUBTASK)
+        .map(|which| format!("src/file{which}.rs"))
+        .collect();
+
+    let (repaired, mends) = mend(&third(subtask), TICKET, DESCRIPTION);
+
+    let kept = &repaired.subtasks[2];
+    assert_eq!(kept.depends_on.len(), DEPENDS_ON_PER_SUBTASK);
+    assert_eq!(kept.definition_of_done.len(), DONE_PER_SUBTASK);
+    assert_eq!(kept.definition_of_done[0], format!("{DONE} (0)"));
+    assert_eq!(kept.likely_files.len(), FILES_PER_SUBTASK);
+    assert_eq!(kept.likely_files[0], "src/file0.rs");
+    assert_eq!(
+        mends,
+        vec![
+            Mend {
+                field: "subtasks[2].depends_on".to_owned(),
+                done: Mended::Shortened {
+                    from: DEPENDS_ON_PER_SUBTASK + 1,
+                    to: DEPENDS_ON_PER_SUBTASK,
+                },
+            },
+            Mend {
+                field: "subtasks[2].definition_of_done".to_owned(),
+                done: Mended::Shortened {
+                    from: DONE_PER_SUBTASK + 1,
+                    to: DONE_PER_SUBTASK,
+                },
+            },
+            Mend {
+                field: "subtasks[2].likely_files".to_owned(),
+                done: Mended::Shortened {
+                    from: FILES_PER_SUBTASK + 1,
+                    to: FILES_PER_SUBTASK,
+                },
+            },
+        ]
+    );
+    assert_eq!(
+        mends[1].to_string(),
+        format!(
+            "subtasks[2].definition_of_done had {} entries and was cut to the first {}",
+            DONE_PER_SUBTASK + 1,
+            DONE_PER_SUBTASK,
+        )
+    );
+    assert_eq!(check(&repaired), []);
+}
+
+#[test]
+fn a_blank_list_entry_is_dropped_and_the_drop_is_named() {
+    let mut subtask = sound(2);
+    subtask.definition_of_done = vec![DONE.to_owned(), "  ".to_owned(), "\n".to_owned()];
+    subtask.likely_files = vec!["   ".to_owned(), "src/lib.rs".to_owned()];
+
+    let (repaired, mends) = mend(&third(subtask), TICKET, DESCRIPTION);
+
+    assert_eq!(
+        repaired.subtasks[2].definition_of_done,
+        vec![DONE.to_owned()],
+        "the blanks are gone and the written entry stays"
+    );
+    assert_eq!(repaired.subtasks[2].likely_files, vec!["src/lib.rs"]);
+    assert_eq!(
+        mends,
+        vec![
+            Mend {
+                field: "subtasks[2].definition_of_done[1]".to_owned(),
+                done: Mended::Blank,
+            },
+            Mend {
+                field: "subtasks[2].definition_of_done[2]".to_owned(),
+                done: Mended::Blank,
+            },
+            Mend {
+                field: "subtasks[2].likely_files[0]".to_owned(),
+                done: Mended::Blank,
+            },
+        ],
+        "each blank is named at the position it was read at, before the list shortened"
+    );
+    assert_eq!(
+        mends[0].to_string(),
+        "subtasks[2].definition_of_done[1] was left blank and was dropped from its list"
+    );
+    assert_eq!(check(&repaired), []);
+}
+
+#[test]
+fn a_multiline_goal_keeps_its_first_line_and_over_cap_prose_is_cut() {
+    let mut subtask = sound(2);
+    subtask.goal = "Repair a defective split\nrather than refusing it".to_owned();
+    subtask.test_plan = "t".repeat(TEST_PLAN_CHARS + 5);
+    subtask.notes = "n".repeat(NOTES_CHARS + 5);
+    subtask.definition_of_done = vec![
+        "One fact.\nAnd a second.".to_owned(),
+        "d".repeat(DONE_CHARS + 1),
+    ];
+    subtask.likely_files = vec!["f".repeat(FILE_CHARS + 1)];
+
+    let (repaired, mends) = mend(&third(subtask), TICKET, DESCRIPTION);
+
+    let repaired_subtask = &repaired.subtasks[2];
+    assert_eq!(repaired_subtask.goal, "Repair a defective split");
+    assert_eq!(repaired_subtask.test_plan.chars().count(), TEST_PLAN_CHARS);
+    assert_eq!(repaired_subtask.notes.chars().count(), NOTES_CHARS);
+    assert_eq!(repaired_subtask.definition_of_done[0], "One fact.");
+    assert_eq!(
+        repaired_subtask.definition_of_done[1].chars().count(),
+        DONE_CHARS
+    );
+    assert_eq!(repaired_subtask.likely_files[0].chars().count(), FILE_CHARS);
+    assert_eq!(
+        mends,
+        vec![
+            Mend {
+                field: "subtasks[2].goal".to_owned(),
+                done: Mended::FirstLine,
+            },
+            Mend {
+                field: "subtasks[2].definition_of_done[0]".to_owned(),
+                done: Mended::FirstLine,
+            },
+            Mend {
+                field: "subtasks[2].definition_of_done[1]".to_owned(),
+                done: Mended::Cut {
+                    from: DONE_CHARS + 1,
+                    to: DONE_CHARS,
+                },
+            },
+            Mend {
+                field: "subtasks[2].likely_files[0]".to_owned(),
+                done: Mended::Cut {
+                    from: FILE_CHARS + 1,
+                    to: FILE_CHARS,
+                },
+            },
+            Mend {
+                field: "subtasks[2].test_plan".to_owned(),
+                done: Mended::Cut {
+                    from: TEST_PLAN_CHARS + 5,
+                    to: TEST_PLAN_CHARS,
+                },
+            },
+            Mend {
+                field: "subtasks[2].notes".to_owned(),
+                done: Mended::Cut {
+                    from: NOTES_CHARS + 5,
+                    to: NOTES_CHARS,
+                },
+            },
+        ]
+    );
+    assert_eq!(
+        mends[0].to_string(),
+        "subtasks[2].goal ran to more than one line and keeps its first"
+    );
+    assert_eq!(
+        mends[4].to_string(),
+        format!(
+            "subtasks[2].test_plan was {} characters and was cut to {TEST_PLAN_CHARS}",
+            TEST_PLAN_CHARS + 5,
+        )
+    );
+    assert_eq!(check(&repaired), []);
+}
+
+#[test]
+fn an_over_cap_goal_is_cut_on_a_character_boundary() {
+    let (repaired, mends) = mend(
+        &third(goal("é".repeat(GOAL_CHARS + 9))),
+        TICKET,
+        DESCRIPTION,
+    );
+
+    assert_eq!(repaired.subtasks[2].goal.chars().count(), GOAL_CHARS);
+    assert_eq!(
+        mends[0].done,
+        Mended::Cut {
+            from: GOAL_CHARS + 9,
+            to: GOAL_CHARS,
+        },
+        "characters, not bytes"
+    );
+    assert_eq!(check(&repaired), []);
+}
+
+#[test]
+fn a_goal_nobody_wrote_is_filled_from_the_ticket_itself() {
+    let (repaired, mends) = mend(&third(goal("  ")), TICKET, DESCRIPTION);
+
+    let filled = &repaired.subtasks[2].goal;
+    assert!(filled.contains(TICKET), "{filled}");
+    assert!(
+        filled.starts_with("Unwritten sub-task 3"),
+        "warlock's own line says it is warlock's: {filled}"
+    );
+    assert_eq!(
+        mends,
+        vec![Mend {
+            field: "subtasks[2].goal".to_owned(),
+            done: Mended::Supplied,
+        }]
+    );
+    assert_eq!(
+        mends[0].to_string(),
+        "subtasks[2].goal was not answered and was filled in from the ticket's own text"
+    );
+    assert_eq!(check(&repaired), []);
+}
+
+#[test]
+fn a_ticket_nobody_split_becomes_one_sub_task_built_from_the_ticket() {
+    for empty in [split(Vec::new()), serde_json::from_str("{}").unwrap()] {
+        let (repaired, mends) = mend(&empty, TICKET, DESCRIPTION);
+
+        assert!(
+            (1..=SUBTASKS_PER_TICKET).contains(&repaired.subtasks.len()),
+            "a split always yields between 1 and {SUBTASKS_PER_TICKET}"
+        );
+        assert!(repaired.subtasks[0].goal.contains(TICKET));
+        assert!(
+            repaired.subtasks[0]
+                .notes
+                .starts_with("No sub-task was split"),
+            "{}",
+            repaired.subtasks[0].notes
+        );
+        assert!(
+            repaired.subtasks[0].notes.contains(DESCRIPTION),
+            "the ticket's own description is what warlock has to write from"
+        );
+        assert!(repaired.subtasks[0].depends_on.is_empty());
+        assert_eq!(
+            mends,
+            vec![Mend {
+                field: "subtasks".to_owned(),
+                done: Mended::Supplied,
+            }]
+        );
+        assert_eq!(check(&repaired), []);
+    }
+}
+
+#[test]
+fn a_goal_cut_back_to_one_line_that_is_then_too_short_falls_to_the_ticket() {
+    let subtask = goal("tiny\nbut the second line of it runs on and on");
+
+    let (repaired, mends, passes) = mended(&third(subtask), TICKET, DESCRIPTION);
+
+    assert_eq!(passes, 2, "the repair of a repair is a second pass");
+    assert!(repaired.subtasks[2].goal.contains(TICKET));
+    assert_eq!(
+        mends,
+        vec![
+            Mend {
+                field: "subtasks[2].goal".to_owned(),
+                done: Mended::FirstLine,
+            },
+            Mend {
+                field: "subtasks[2].goal".to_owned(),
+                done: Mended::Supplied,
+            },
+        ],
+        "one record per repair, including the one the first repair made necessary"
+    );
+    assert_eq!(check(&repaired), []);
+}
+
+#[test]
+fn an_unnamed_ticket_still_fills_a_slot_inside_every_cap() {
+    let (repaired, _) = mend(&split(Vec::new()), "  ", "");
+
+    assert_eq!(check(&repaired), []);
+    assert!(repaired.subtasks[0].goal.contains("an unnamed ticket"));
+    assert!(
+        repaired.subtasks[0]
+            .notes
+            .contains("The ticket says nothing further.")
+    );
+}
+
+fn variant(defect: &Defect) -> &'static str {
+    match defect {
+        Defect::NotJson { .. } => "NotJson",
+        Defect::Missing { .. } => "Missing",
+        Defect::Empty { .. } => "Empty",
+        Defect::Multiline { .. } => "Multiline",
+        Defect::TooShort { .. } => "TooShort",
+        Defect::TooLong { .. } => "TooLong",
+        Defect::TooMany { .. } => "TooMany",
+        Defect::UnknownTarget { .. } => "UnknownTarget",
+        Defect::ToolNamed { .. } => "ToolNamed",
+    }
+}
+
+fn good() -> Fill {
+    let mut fill = split((0..4).map(sound).collect());
+    fill.subtasks[1].depends_on = vec![1];
+    fill.subtasks[1].definition_of_done = vec![DONE.to_owned()];
+    fill.subtasks[2].likely_files = vec!["crates/warlock-engine/src/splitting.rs".to_owned()];
+    fill.subtasks[3].depends_on = vec![1, 2];
+    fill.subtasks[3].test_plan = "cargo test -p warlock-engine".to_owned();
+    fill.subtasks[3].notes = "Read drafting.rs first.".to_owned();
+    fill
+}
+
+type Mutation = (&'static str, fn(&mut Fill));
+
+// One per repairable defect at every slot that can carry it, plus the two
+// position slips no defect reports, and a few that collide on purpose: two
+// mutations over the same slot are how a repair comes to answer a slot another
+// repair already moved. Every one of them tolerates an array another mutation
+// emptied or replaced.
+fn mutations() -> [Mutation; 15] {
+    [
+        ("Empty", |fill| {
+            if let Some(subtask) = fill.subtasks.first_mut() {
+                subtask.goal = "  ".to_owned();
+            }
+        }),
+        ("Multiline", |fill| {
+            if let Some(subtask) = fill.subtasks.get_mut(1) {
+                subtask.goal = "tiny\nbut the second line of it runs on and on".to_owned();
+            }
+        }),
+        ("TooShort", |fill| {
+            if let Some(subtask) = fill.subtasks.get_mut(1) {
+                subtask.goal = "short".to_owned();
+            }
+        }),
+        ("TooLong", |fill| {
+            if let Some(subtask) = fill.subtasks.last_mut() {
+                subtask.goal = "é".repeat(GOAL_CHARS + 7);
+            }
+        }),
+        ("TooMany", |fill| {
+            fill.subtasks = (0..SUBTASKS_PER_TICKET + 3).map(sound).collect();
+            fill.subtasks[0].depends_on = vec![2, SUBTASKS_PER_TICKET + 3];
+        }),
+        ("TooMany", |fill| {
+            if let Some(subtask) = fill.subtasks.first_mut() {
+                subtask.depends_on = (1..=DEPENDS_ON_PER_SUBTASK + 1).collect();
+            }
+        }),
+        ("TooMany", |fill| {
+            if let Some(subtask) = fill.subtasks.get_mut(2) {
+                subtask.definition_of_done = (0..DONE_PER_SUBTASK + 2)
+                    .map(|which| format!("{DONE} ({which})"))
+                    .collect();
+                subtask.definition_of_done[DONE_PER_SUBTASK + 1] = "  ".to_owned();
+            }
+        }),
+        ("Empty", |fill| {
+            if let Some(subtask) = fill.subtasks.get_mut(2) {
+                subtask.definition_of_done.insert(0, " \n ".to_owned());
+            }
+        }),
+        ("TooLong", |fill| {
+            if let Some(subtask) = fill.subtasks.get_mut(2) {
+                subtask.definition_of_done.push("d".repeat(DONE_CHARS + 40));
+            }
+        }),
+        ("Multiline", |fill| {
+            if let Some(subtask) = fill.subtasks.get_mut(2) {
+                subtask
+                    .definition_of_done
+                    .push("One fact.\nAnd a second.".to_owned());
+            }
+        }),
+        ("TooMany", |fill| {
+            if let Some(subtask) = fill.subtasks.get_mut(2) {
+                subtask.likely_files = (0..FILES_PER_SUBTASK + 2)
+                    .map(|which| format!("src/file{which}.rs"))
+                    .collect();
+                subtask.likely_files.push("  ".to_owned());
+            }
+        }),
+        ("TooLong", |fill| {
+            if let Some(subtask) = fill.subtasks.last_mut() {
+                subtask.likely_files.push("f".repeat(FILE_CHARS + 3));
+                subtask.test_plan = "t".repeat(TEST_PLAN_CHARS + 30);
+                subtask.notes = "n".repeat(NOTES_CHARS + 30);
+            }
+        }),
+        ("Missing", |fill| fill.subtasks.clear()),
+        ("out of ticket", |fill| {
+            if let Some(subtask) = fill.subtasks.get_mut(1) {
+                subtask.depends_on = vec![99, 0, 1];
+            }
+        }),
+        ("at itself", |fill| {
+            let last = fill.subtasks.len();
+            if let Some(subtask) = fill.subtasks.last_mut() {
+                subtask.depends_on = vec![last];
+            }
+        }),
+    ]
+}
+
+#[test]
+fn a_mended_fill_is_never_defective_whatever_was_wrong_with_it() {
+    let mutations = mutations();
+    let mut covered: BTreeSet<&'static str> = BTreeSet::new();
+    // A fixed seed and a plain congruential generator: this crate takes no
+    // dependency for a coin toss, and a property test that cannot be reproduced
+    // from its own source is not much of one.
+    let mut state: u64 = 0x5eed_1234_5678_9abc;
+    for _ in 0..512 {
+        let mut fill = good();
+        let mut applied: Vec<&str> = Vec::new();
+        for (name, mutate) in &mutations {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            if (state >> 60) & 1 == 1 {
+                mutate(&mut fill);
+                applied.push(name);
+            }
+        }
+        let defects = check(&fill);
+        for defect in &defects {
+            covered.insert(variant(defect));
+        }
+
+        let (repaired, mends, passes) = mended(&fill, TICKET, DESCRIPTION);
+
+        assert_eq!(
+            check(&repaired),
+            [],
+            "{applied:?} left {mends:?} and still a defect"
+        );
+        assert!(passes <= MEND_PASSES, "{applied:?} took {passes} passes");
+        assert!(
+            defects.is_empty() || !mends.is_empty(),
+            "{applied:?}: a defect is answered by a mend"
+        );
+        let held = repaired.subtasks.len();
+        assert!(
+            (1..=SUBTASKS_PER_TICKET).contains(&held),
+            "{applied:?} left {held} sub-tasks"
+        );
+        for (index, subtask) in repaired.subtasks.iter().enumerate() {
+            assert!(
+                subtask
+                    .depends_on
+                    .iter()
+                    .all(|position| (1..=held).contains(position) && *position != index + 1),
+                "{applied:?} left a position outside the ticket: {subtask:?}"
+            );
+        }
+    }
+    assert_eq!(
+        covered,
+        BTreeSet::from([
+            "Missing",
+            "Empty",
+            "Multiline",
+            "TooShort",
+            "TooLong",
+            "TooMany"
+        ]),
+        "every defect this contract reports was generated. `NotJson` cannot be — the mend is \
+         handed a fill, not an answer — and `UnknownTarget` and `ToolNamed` belong to the \
+         document road, which has an evidence witness this one has not"
+    );
 }
 
 #[test]

@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+use std::fmt;
 use std::fmt::Write as _;
 
 use serde::{Deserialize, Serialize};
@@ -361,6 +363,528 @@ fn depends_on(field: &str, given: &[usize], defects: &mut Vec<Defect>) {
     }
 }
 
+// The text warlock writes into a slot the pass left unanswered, built out of
+// the only two things this contract holds: the ticket's own title and its
+// description. Nothing here says what a sub-task should do, because that is
+// exactly what a pass which did not answer never said, and nothing here is
+// phrased as if a model wrote it — a filled-in sub-task that reads like a split
+// one is worse than an obviously empty one, because a fresh session picks it up
+// and works from it. So every line opens by saying it was not split out. Do not
+// dress these up.
+mod fallback {
+    use super::{NOTES_CHARS, cut, fit, flattened};
+
+    pub(super) fn goal(title: &str, index: usize) -> String {
+        fit(
+            &format!("Unwritten sub-task {} of {}", index + 1, named(title)),
+            "(no goal was split out)",
+        )
+    }
+
+    pub(super) fn notes(title: &str, description: &str, index: usize) -> String {
+        let description = description.trim();
+        let mut text = format!(
+            "No sub-task was split out of this ticket. This is sub-task {} of {}, and warlock \
+             filled it in rather than leave the split empty.",
+            index + 1,
+            named(title),
+        );
+        if description.is_empty() {
+            text.push_str(" The ticket says nothing further.");
+        } else {
+            text.push_str(" The ticket says:\n\n");
+            text.push_str(description);
+        }
+        cut(&text, NOTES_CHARS)
+    }
+
+    fn named(title: &str) -> String {
+        let title = flattened(title);
+        if title.is_empty() {
+            "an unnamed ticket".to_owned()
+        } else {
+            format!("the ticket `{title}`")
+        }
+    }
+}
+
+// The splitting road repairs a repair exactly as often as the drafting road
+// does, and the worst chain here is the same two links: a goal cut back to its
+// first line can land under `GOAL_MINIMUM` and then fall to warlock's own text,
+// and a list entry cut to its cap can come back blank and then be dropped. A
+// second bound would be a number to keep in step with that one for no gain.
+pub use crate::drafting::MEND_PASSES;
+
+// `field` is the slot in [`Defect`]'s own spelling — `subtasks`,
+// `subtasks[2].goal`, `subtasks[2].definition_of_done[1]` — so a caller can line
+// a mend up against the defect it answers without parsing prose.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Mend {
+    pub field: String,
+    pub done: Mended,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mended {
+    // The value spanned lines and keeps its first.
+    FirstLine,
+    // The value ran over its cap and was cut to it, counting characters.
+    Cut { from: usize, to: usize },
+    // The list ran over its cap and keeps its first entries.
+    Shortened { from: usize, to: usize },
+    // The entry was left blank, and a blank line in a list is nothing a session
+    // could work from, so it is gone from the list.
+    Blank,
+    // Positions pointing outside this ticket's own sub-tasks, or at the
+    // sub-task carrying them, and so gone.
+    Dropped { count: usize },
+    // The slot was never answered and fell to warlock's own line about the
+    // ticket. See [`fallback`].
+    Supplied,
+}
+
+impl fmt::Display for Mend {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let field = &self.field;
+        match self.done {
+            Mended::FirstLine => {
+                write!(f, "{field} ran to more than one line and keeps its first")
+            }
+            Mended::Cut { from, to } => {
+                write!(f, "{field} was {from} characters and was cut to {to}")
+            }
+            Mended::Shortened { from, to } => {
+                write!(
+                    f,
+                    "{field} had {from} entries and was cut to the first {to}"
+                )
+            }
+            Mended::Blank => write!(f, "{field} was left blank and was dropped from its list"),
+            Mended::Dropped { count } => write!(
+                f,
+                "{field} named {count} position(s) outside this ticket's sub-tasks and lost them"
+            ),
+            Mended::Supplied => write!(
+                f,
+                "{field} was not answered and was filled in from the ticket's own text"
+            ),
+        }
+    }
+}
+
+/// The mechanical mend: the floor under an exhausted attempt loop. Every
+/// [`Defect`] but `NotJson` has a repair here, and none of them reaches a model
+/// — the evidence is the answer's own text and the ticket's title and
+/// description. A fill that comes back from here is not defective: [`check`]
+/// over it is empty, it holds between 1 and [`SUBTASKS_PER_TICKET`] sub-tasks,
+/// and every position it still carries names another sub-task of this ticket.
+#[must_use]
+pub fn mend(fill: &Fill, title: &str, description: &str) -> (Fill, Vec<Mend>) {
+    let (fill, mends, _) = mended(fill, title, description);
+    (fill, mends)
+}
+
+// The same operation, saying how many passes it took. Private because the count
+// is a fact about this function and not about the split; the test for the bound
+// is the only caller that has any use for it.
+fn mended(fill: &Fill, title: &str, description: &str) -> (Fill, Vec<Mend>, usize) {
+    let mut fill = fill.clone();
+    let mut mends = Vec::new();
+    let mut passes = 0;
+    for _ in 0..MEND_PASSES {
+        let defects = check(&fill);
+        if defects.is_empty() {
+            break;
+        }
+        passes += 1;
+        sweep(&mut fill, &defects, title, description, &mut mends);
+    }
+    prune(&mut fill, &mut mends);
+
+    (fill, mends, passes)
+}
+
+// The one repair no defect asks for: `check` reports nothing about where a
+// position points, so this runs whether or not the fill was defective, and it
+// runs after the loop because the loop is what settles how long the array is.
+// Zero, a position past the end of the array and a position naming the sub-task
+// that carries it are all dropped rather than resolved: this ticket's sub-tasks
+// are the only work this contract knows about, so there is nowhere else such a
+// position could be looking, and a sub-task that waits on itself is an order no
+// run could carry out.
+fn prune(fill: &mut Fill, mends: &mut Vec<Mend>) {
+    let held = fill.subtasks.len();
+    for (index, subtask) in fill.subtasks.iter_mut().enumerate() {
+        let before = subtask.depends_on.len();
+        // Positions count from 1, so the sub-task carrying the list is at
+        // `index + 1` and the last sub-task of the ticket is at `held`.
+        subtask
+            .depends_on
+            .retain(|position| (1..=held).contains(position) && *position != index + 1);
+        let dropped = before - subtask.depends_on.len();
+        if dropped > 0 {
+            mends.push(Mend {
+                field: format!("subtasks[{index}].depends_on"),
+                done: Mended::Dropped { count: dropped },
+            });
+        }
+    }
+}
+
+// One pass of the fixpoint. The order inside it is what keeps the indices
+// meaning what the defects say they mean: what the array cuts off is decided
+// first, then what to fill and what to drop, then the values that survive are
+// rewritten in place, and only then do the arrays themselves move — so a defect
+// naming `subtasks[3]` is never applied to whatever slid into position 3.
+fn sweep(
+    fill: &mut Fill,
+    defects: &[Defect],
+    title: &str,
+    description: &str,
+    mends: &mut Vec<Mend>,
+) {
+    let mut plan = Plan::default();
+    for defect in defects {
+        plan.note_array(defect, mends);
+    }
+    for defect in defects {
+        plan.note_cut(defect, mends);
+    }
+    for defect in defects {
+        plan.note_fill(defect, mends);
+    }
+    for defect in defects {
+        let (field, done) = match defect {
+            Defect::Multiline { field } => (field, Mended::FirstLine),
+            Defect::TooLong { field, chars, cap } => (
+                field,
+                Mended::Cut {
+                    from: *chars,
+                    to: *cap,
+                },
+            ),
+            _ => continue,
+        };
+        // A slot already being filled in whole, or hanging off the end of an
+        // array this pass cuts back, is not worth rewriting first: the record
+        // would name work the same pass undoes.
+        if plan.covers(field) {
+            continue;
+        }
+        let Some(value) = target(fill, field) else {
+            continue;
+        };
+        match done {
+            // The first line of the value as the check reads it: `line`
+            // measures the trimmed value, so a goal that opens with a blank
+            // line keeps the first line of what was actually written.
+            Mended::FirstLine => {
+                *value = value.trim().lines().next().unwrap_or_default().to_owned();
+            }
+            // Characters, not bytes, and so on a character boundary. No trim:
+            // the cut lands where it lands.
+            Mended::Cut { to, .. } => *value = value.chars().take(to).collect(),
+            _ => {}
+        }
+        mends.push(Mend {
+            field: field.clone(),
+            done,
+        });
+    }
+    plan.carry_out(fill, title, description);
+}
+
+#[derive(Debug, Default)]
+struct Plan {
+    subtasks: bool,
+    cut_subtasks: bool,
+    filled_goals: BTreeSet<usize>,
+    cut_depends_on: BTreeSet<usize>,
+    cut_done: BTreeSet<usize>,
+    cut_files: BTreeSet<usize>,
+    blank_done: BTreeSet<(usize, usize)>,
+    blank_files: BTreeSet<(usize, usize)>,
+}
+
+impl Plan {
+    // The array itself: cut back to the cap, or filled with one sub-task where
+    // the pass split none out. Taken first and on its own, because what the cut
+    // takes off the end decides which of the slots below are worth repairing at
+    // all, and nothing here may depend on the order `check` reported them in.
+    fn note_array(&mut self, defect: &Defect, mends: &mut Vec<Mend>) {
+        let done = match defect {
+            Defect::Missing { field } if slot(field) == Slot::Subtasks => {
+                if std::mem::replace(&mut self.subtasks, true) {
+                    return;
+                }
+                Mended::Supplied
+            }
+            Defect::TooMany { field, count, cap } if slot(field) == Slot::Subtasks => {
+                if std::mem::replace(&mut self.cut_subtasks, true) {
+                    return;
+                }
+                Mended::Shortened {
+                    from: *count,
+                    to: *cap,
+                }
+            }
+            _ => return,
+        };
+        mends.push(Mend {
+            field: "subtasks".to_owned(),
+            done,
+        });
+    }
+
+    fn note_cut(&mut self, defect: &Defect, mends: &mut Vec<Mend>) {
+        let Defect::TooMany { field, count, cap } = defect else {
+            return;
+        };
+        let recorded = match slot(field) {
+            Slot::DependsOn(index) => !self.cut_off(index) && self.cut_depends_on.insert(index),
+            Slot::Done(index, None) => !self.cut_off(index) && self.cut_done.insert(index),
+            Slot::Files(index, None) => !self.cut_off(index) && self.cut_files.insert(index),
+            Slot::Subtasks
+            | Slot::Goal(_)
+            | Slot::Done(_, Some(_))
+            | Slot::Files(_, Some(_))
+            | Slot::TestPlan(_)
+            | Slot::Notes(_)
+            | Slot::Unknown => false,
+        };
+        if recorded {
+            mends.push(Mend {
+                field: field.clone(),
+                done: Mended::Shortened {
+                    from: *count,
+                    to: *cap,
+                },
+            });
+        }
+    }
+
+    // What was never answered: a goal left empty or too short to say anything,
+    // and an entry of a list left blank. Warlock says what the ticket says for
+    // the first and drops the second — a blank line in a list is not a fact
+    // anything could be built out of, and only the goal is required.
+    fn note_fill(&mut self, defect: &Defect, mends: &mut Vec<Mend>) {
+        let (Defect::Empty { field } | Defect::TooShort { field, .. }) = defect else {
+            return;
+        };
+        let (done, recorded) = match slot(field) {
+            Slot::Goal(index) => (
+                Mended::Supplied,
+                !self.cut_off(index) && self.filled_goals.insert(index),
+            ),
+            Slot::Done(index, Some(entry)) => (
+                Mended::Blank,
+                !self.dropped_done(index, entry) && self.blank_done.insert((index, entry)),
+            ),
+            Slot::Files(index, Some(entry)) => (
+                Mended::Blank,
+                !self.dropped_file(index, entry) && self.blank_files.insert((index, entry)),
+            ),
+            Slot::Subtasks
+            | Slot::DependsOn(_)
+            | Slot::Done(_, None)
+            | Slot::Files(_, None)
+            | Slot::TestPlan(_)
+            | Slot::Notes(_)
+            | Slot::Unknown => (Mended::Supplied, false),
+        };
+        if recorded {
+            mends.push(Mend {
+                field: field.clone(),
+                done,
+            });
+        }
+    }
+
+    fn covers(&self, field: &str) -> bool {
+        match slot(field) {
+            Slot::Subtasks => self.subtasks,
+            Slot::Goal(index) => self.cut_off(index) || self.filled_goals.contains(&index),
+            Slot::Done(index, Some(entry)) => {
+                self.dropped_done(index, entry) || self.blank_done.contains(&(index, entry))
+            }
+            Slot::Files(index, Some(entry)) => {
+                self.dropped_file(index, entry) || self.blank_files.contains(&(index, entry))
+            }
+            Slot::DependsOn(index)
+            | Slot::Done(index, None)
+            | Slot::Files(index, None)
+            | Slot::TestPlan(index)
+            | Slot::Notes(index) => self.cut_off(index),
+            Slot::Unknown => false,
+        }
+    }
+
+    // Whether a sub-task is past the cap of an array this pass cuts back, and
+    // so about to go anyway.
+    fn cut_off(&self, index: usize) -> bool {
+        self.cut_subtasks && index >= SUBTASKS_PER_TICKET
+    }
+
+    // The same question for one entry of a list this pass cuts back.
+    fn dropped_done(&self, index: usize, entry: usize) -> bool {
+        self.cut_off(index) || (self.cut_done.contains(&index) && entry >= DONE_PER_SUBTASK)
+    }
+
+    fn dropped_file(&self, index: usize, entry: usize) -> bool {
+        self.cut_off(index) || (self.cut_files.contains(&index) && entry >= FILES_PER_SUBTASK)
+    }
+
+    fn carry_out(self, fill: &mut Fill, title: &str, description: &str) {
+        if self.subtasks {
+            let index = fill.subtasks.len();
+            fill.subtasks.push(Subtask {
+                goal: fallback::goal(title, index),
+                notes: fallback::notes(title, description, index),
+                ..Subtask::default()
+            });
+        }
+        for index in &self.filled_goals {
+            if let Some(subtask) = fill.subtasks.get_mut(*index) {
+                subtask.goal = fallback::goal(title, *index);
+            }
+        }
+        for index in &self.cut_depends_on {
+            if let Some(subtask) = fill.subtasks.get_mut(*index) {
+                subtask.depends_on.truncate(DEPENDS_ON_PER_SUBTASK);
+            }
+        }
+        for index in &self.cut_done {
+            if let Some(subtask) = fill.subtasks.get_mut(*index) {
+                subtask.definition_of_done.truncate(DONE_PER_SUBTASK);
+            }
+        }
+        for index in &self.cut_files {
+            if let Some(subtask) = fill.subtasks.get_mut(*index) {
+                subtask.likely_files.truncate(FILES_PER_SUBTASK);
+            }
+        }
+
+        // The blank entries next, highest position first, so each position
+        // still names the entry it was read against as the list shortens
+        // underneath it. A blank past a cap this pass cut was never recorded,
+        // and the length check is the belt on that brace.
+        for (index, entry) in self.blank_done.iter().rev() {
+            let Some(subtask) = fill.subtasks.get_mut(*index) else {
+                continue;
+            };
+            if *entry < subtask.definition_of_done.len() {
+                subtask.definition_of_done.remove(*entry);
+            }
+        }
+        for (index, entry) in self.blank_files.iter().rev() {
+            let Some(subtask) = fill.subtasks.get_mut(*index) else {
+                continue;
+            };
+            if *entry < subtask.likely_files.len() {
+                subtask.likely_files.remove(*entry);
+            }
+        }
+
+        // Last, and off the end. Every index above was read against the
+        // pre-pass array, and the array is cut rather than thinned from the
+        // middle: nothing slides, so a surviving position still names the
+        // sub-task it always named, and a position into the part that went is
+        // out of range and `prune` drops it.
+        if self.cut_subtasks {
+            fill.subtasks.truncate(SUBTASKS_PER_TICKET);
+        }
+    }
+}
+
+// The slot a defect's `field` names, read back out of the spelling `check`
+// wrote it in. The two lists are named either whole or one entry at a time —
+// `subtasks[2].likely_files` and `subtasks[2].likely_files[1]` — and the entry
+// is what the second member carries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Slot {
+    Subtasks,
+    Goal(usize),
+    DependsOn(usize),
+    Done(usize, Option<usize>),
+    Files(usize, Option<usize>),
+    TestPlan(usize),
+    Notes(usize),
+    Unknown,
+}
+
+fn slot(field: &str) -> Slot {
+    if field == "subtasks" {
+        return Slot::Subtasks;
+    }
+    let Some(rest) = field.strip_prefix("subtasks[") else {
+        return Slot::Unknown;
+    };
+    let Some((inside, tail)) = rest.split_once(']') else {
+        return Slot::Unknown;
+    };
+    let Ok(index) = inside.parse::<usize>() else {
+        return Slot::Unknown;
+    };
+    match tail {
+        ".goal" => Slot::Goal(index),
+        ".depends_on" => Slot::DependsOn(index),
+        ".test_plan" => Slot::TestPlan(index),
+        ".notes" => Slot::Notes(index),
+        _ => listed(index, tail),
+    }
+}
+
+fn listed(index: usize, tail: &str) -> Slot {
+    let (name, entry) = match tail.split_once('[') {
+        None => (tail, None),
+        Some((name, rest)) => {
+            let Some(inside) = rest.strip_suffix(']') else {
+                return Slot::Unknown;
+            };
+            let Ok(entry) = inside.parse::<usize>() else {
+                return Slot::Unknown;
+            };
+            (name, Some(entry))
+        }
+    };
+    match name {
+        ".definition_of_done" => Slot::Done(index, entry),
+        ".likely_files" => Slot::Files(index, entry),
+        _ => Slot::Unknown,
+    }
+}
+
+// The value a rewrite writes over.
+fn target<'f>(fill: &'f mut Fill, field: &str) -> Option<&'f mut String> {
+    match slot(field) {
+        Slot::Goal(index) => fill
+            .subtasks
+            .get_mut(index)
+            .map(|subtask| &mut subtask.goal),
+        Slot::Done(index, Some(entry)) => fill
+            .subtasks
+            .get_mut(index)
+            .and_then(|subtask| subtask.definition_of_done.get_mut(entry)),
+        Slot::Files(index, Some(entry)) => fill
+            .subtasks
+            .get_mut(index)
+            .and_then(|subtask| subtask.likely_files.get_mut(entry)),
+        Slot::TestPlan(index) => fill
+            .subtasks
+            .get_mut(index)
+            .map(|subtask| &mut subtask.test_plan),
+        Slot::Notes(index) => fill
+            .subtasks
+            .get_mut(index)
+            .map(|subtask| &mut subtask.notes),
+        Slot::Subtasks
+        | Slot::DependsOn(_)
+        | Slot::Done(_, None)
+        | Slot::Files(_, None)
+        | Slot::Unknown => None,
+    }
+}
+
 // The caps are written into the prose rather than asked about, and the numbers
 // themselves are arbitrary: what is permanent is that there is a ceiling at all.
 // A pass told the number answers inside it; a pass asked to be brief answers at
@@ -511,7 +1035,11 @@ fn fit(line: &str, pad: &str) -> String {
         }
         line.push_str(pad);
     }
-    let cut: String = line.chars().take(GOAL_CHARS).collect();
+    cut(&line, GOAL_CHARS)
+}
+
+fn cut(text: &str, cap: usize) -> String {
+    let cut: String = text.chars().take(cap).collect();
     cut.trim_end().to_owned()
 }
 
