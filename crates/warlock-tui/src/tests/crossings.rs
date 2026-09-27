@@ -299,3 +299,192 @@ fn a_path_reaching_outside_the_root_is_not_a_boundary_answer() {
         "a caller that passed the wrong root has a mistake to report, not a crossing: {crossings:?}"
     );
 }
+
+// The reading half. A stand-in `Runs` under a real `Git`, rather than a stand-in
+// `Repository`: the argument vector is half of what is under test, and only the
+// real `Git` builds one.
+mod after {
+    use std::ffi::{OsStr, OsString};
+    use std::path::Path;
+    use std::sync::{Arc, Mutex};
+
+    use super::super::crossings_after;
+    use super::{Crossing, ROOT, held, pacts, root};
+    use crate::git::{Dirty, Error, Git, Ran, Runs, Touched};
+
+    struct Shared {
+        vectors: Mutex<Vec<Vec<String>>>,
+        // One answer and not a queue: a reading that ran `git` twice is a bug
+        // this stand-in should fail on rather than script for.
+        answer: Mutex<Option<Ran>>,
+    }
+
+    // Cloned into the `Git` and kept by the test, the way `tests/git.rs` does it,
+    // so the vectors can be read after the checkout has taken its runner by
+    // value.
+    #[derive(Clone)]
+    struct Scripted {
+        shared: Arc<Shared>,
+    }
+
+    impl Scripted {
+        fn says(stdout: impl Into<Vec<u8>>) -> Self {
+            Self::answering(Ran::new(Some(0), stdout, ""))
+        }
+
+        fn answering(answer: Ran) -> Self {
+            Self {
+                shared: Arc::new(Shared {
+                    vectors: Mutex::new(Vec::new()),
+                    answer: Mutex::new(Some(answer)),
+                }),
+            }
+        }
+
+        fn checkout(&self) -> Git<Self> {
+            Git::new(self.clone(), ROOT)
+        }
+
+        fn only(&self) -> Vec<String> {
+            let vectors = self.shared.vectors.lock().expect("vectors");
+            assert_eq!(vectors.len(), 1, "expected one call: {vectors:?}");
+            vectors[0].clone()
+        }
+    }
+
+    impl Runs for Scripted {
+        fn run(&self, program: &OsStr, args: &[OsString], _: &Path) -> Result<Ran, Error> {
+            assert_eq!(program, OsStr::new("git"));
+            self.shared.vectors.lock().expect("vectors").push(
+                args.iter()
+                    .map(|arg| arg.to_string_lossy().into_owned())
+                    .collect(),
+            );
+            Ok(self
+                .shared
+                .answer
+                .lock()
+                .expect("answer")
+                .take()
+                .expect("one status call and no more"))
+        }
+    }
+
+    #[test]
+    fn the_tree_is_read_with_one_status_call_and_judged_on_what_it_said() {
+        // The bytes a real `git status --porcelain=v1 -z --untracked-files=all`
+        // prints: a file moved out of a scope this machine does not hold, an
+        // untracked file under one it holds but did not pull under, and an edit
+        // under the pulled scope itself.
+        let scripted = Scripted::says(
+            &b"R  crates/web/src/route.rs\0crates/engine/src/route.rs\0\
+?? crates/cli/src/new.rs\0 M crates/web/src/page.rs\0"[..],
+        );
+        let checkout = scripted.checkout();
+        let manifest = pacts(&[
+            ("crates/engine", Some("data-plane")),
+            ("crates/web", Some("web")),
+            ("crates/cli", Some("cli")),
+        ]);
+        let mut changed = Vec::new();
+
+        let crossings = crossings_after(
+            &checkout,
+            &mut changed,
+            &root(),
+            &manifest,
+            &held(["web", "cli"].as_slice()),
+            Some("web"),
+        )
+        .expect("the scripted status");
+
+        assert_eq!(
+            scripted.only(),
+            ["status", "--porcelain=v1", "-z", "--untracked-files=all"],
+            "one vector, and the one the ticket names: no diff and no second status"
+        );
+        assert_eq!(
+            crossings.crossed,
+            [Crossing {
+                path: "crates/engine/src/route.rs",
+                scope: "data-plane",
+            }]
+        );
+        assert_eq!(
+            crossings.touched,
+            [Touched {
+                scope: "cli",
+                paths: vec!["crates/cli/src/new.rs"],
+            }]
+        );
+    }
+
+    #[test]
+    fn what_git_said_is_left_in_the_entries_the_caller_lent() {
+        // The crossings name their paths by borrowing out of these, which is why
+        // the entries are the caller's; whatever was in them before is gone.
+        let scripted = Scripted::says(&b" M docs/adr/0002.md\0"[..]);
+        let manifest = pacts(&[("docs", None)]);
+        let mut changed = vec![Dirty {
+            code: "??".to_owned(),
+            path: "a-reading-from-before.rs".to_owned(),
+            from: None,
+        }];
+
+        let crossings = crossings_after(
+            &scripted.checkout(),
+            &mut changed,
+            &root(),
+            &manifest,
+            &held(&[]),
+            None,
+        )
+        .expect("the scripted status");
+
+        assert!(crossings.is_empty(), "{crossings:?}");
+        assert_eq!(
+            changed,
+            [Dirty {
+                code: " M".to_owned(),
+                path: "docs/adr/0002.md".to_owned(),
+                from: None,
+            }]
+        );
+    }
+
+    #[test]
+    fn a_git_that_refuses_the_status_is_the_error_and_not_a_clean_tree() {
+        // The failure this check exists for, inverted: a status nobody could
+        // read, taken for a session that crossed nothing, and the run committing
+        // over the top of it.
+        let scripted =
+            Scripted::answering(Ran::new(Some(128), "", "fatal: not a git repository\n"));
+        let manifest = pacts(&[("crates/engine", Some("data-plane"))]);
+        let mut changed = Vec::new();
+
+        let error = crossings_after(
+            &scripted.checkout(),
+            &mut changed,
+            &root(),
+            &manifest,
+            &held(&[]),
+            None,
+        )
+        .expect_err("a refused status is not an answer about the tree");
+
+        assert!(
+            matches!(
+                error,
+                Error::Refused {
+                    code: Some(128),
+                    ..
+                }
+            ),
+            "{error:?}"
+        );
+        assert!(
+            error.to_string().contains("not a git repository"),
+            "{error}"
+        );
+    }
+}

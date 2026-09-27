@@ -14,6 +14,11 @@
 //! pair `r` and the gate ask — so there is one nearest-scope walk and one
 //! membership test in the workspace.
 //!
+//! [`crossings_after`] is the one place the two meet: it reads the tree through
+//! the [`Repository`] seam and hands what it read to `crossings_in`. Split in two
+//! so every question about which path is a crossing is answered by fabricated
+//! bytes in a test, and the only thing the reading function adds is the call.
+//!
 //! This is not the binary's `boundary::permits`: that answers whether an
 //! operator may perform an operation *at* a directory, before it happens. This
 //! reads what already happened, over paths rather than directories, and refuses
@@ -23,7 +28,7 @@ use std::path::Path;
 
 use warlock_engine::{Manifest, scope_covering, scope_opens_to};
 
-use crate::git::{Dirty, Touched};
+use crate::git::{Dirty, Error, Repository, Touched};
 
 /// One changed path together with the scope covering it that this machine does
 /// not hold.
@@ -150,6 +155,72 @@ pub fn crossings_in<'a>(
     }
 
     Crossings { crossed, touched }
+}
+
+/// What the working tree shows after a session, judged against what this machine
+/// holds.
+///
+/// The one call is [`Repository::dirty`], which already runs
+/// `git status --porcelain=v1 -z --untracked-files=all` and parses it; there is no
+/// second status here and no new method on the seam for one. A `git` that refuses
+/// is returned as the error it was and never flattened into an empty tree: "the
+/// status failed" and "nothing crossed" are the opposite answers, and a run that
+/// read the first as the second would commit the crossing it could not see.
+///
+/// ```
+/// use warlock_tui::{Crossing, Git, GitError, Ran, Runs, crossings_after};
+/// use warlock_engine::{Manifest, PactEntry};
+/// # use std::ffi::{OsStr, OsString};
+/// # use std::path::Path;
+/// # struct Scripted;
+/// # impl Runs for Scripted {
+/// #     fn run(&self, _: &OsStr, _: &[OsString], _: &Path) -> Result<Ran, GitError> {
+/// #         Ok(Ran::new(Some(0), &b"?? crates/engine/src/new.rs\0"[..], ""))
+/// #     }
+/// # }
+///
+/// // A stand-in `Runs` answering with the bytes a real `git status` printed.
+/// let checkout = Git::new(Scripted, ".");
+/// let manifest = Manifest::with_entries([
+///     PactEntry::new(".", "crates/engine", "crates/engine/WARLOCK.md")?
+///         .with_scope("data-plane"),
+/// ]);
+/// let mut changed = Vec::new();
+///
+/// let crossings =
+///     crossings_after(&checkout, &mut changed, ".".as_ref(), &manifest, &[], None)?;
+///
+/// assert_eq!(
+///     crossings.crossed,
+///     [Crossing { path: "crates/engine/src/new.rs", scope: "data-plane" }]
+/// );
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
+///
+/// `changed` is the caller's rather than this function's: the crossings name the
+/// paths by borrowing them out of the status entries, so the entries have to
+/// outlive the answer and a function owning both could not hand either back. What
+/// it holds on the way in does not matter — it is overwritten by what `git` said.
+///
+/// `&dyn` and not a type parameter because nothing here does anything with the
+/// repository's type: one call, one answer, and a loop that holds a boxed
+/// [`Repository`] can ask as easily as one holding a [`Git`](crate::Git).
+pub fn crossings_after<'a>(
+    repo: &dyn Repository,
+    changed: &'a mut Vec<Dirty>,
+    repo_root: &Path,
+    manifest: &'a Manifest,
+    held: &[String],
+    pulled_under: Option<&str>,
+) -> Result<Crossings<'a>, Error> {
+    *changed = repo.dirty()?;
+    Ok(crossings_in(
+        changed,
+        repo_root,
+        manifest,
+        held,
+        pulled_under,
+    ))
 }
 
 #[cfg(test)]

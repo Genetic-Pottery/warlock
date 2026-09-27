@@ -123,6 +123,7 @@ pub use confirm::push_answer_for;
 pub use confirm::review_answer_for;
 pub use crossings::Crossing;
 pub use crossings::Crossings;
+pub use crossings::crossings_after;
 pub use crossings::crossings_in;
 pub use git::COMMAND_TIMEOUT;
 pub use git::Commit;
