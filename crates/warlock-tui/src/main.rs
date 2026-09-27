@@ -460,14 +460,16 @@ fn main() -> ExitCode {
         // the writes already refuse in. It is the one caller that wants the
         // non-zero status, so it takes the one `jq` would otherwise have spent.
         //
-        // The pathless `None` is `--gate` with nothing to gate, which clap only
-        // lets through for `--gate`'s sake: it is the `PreToolUse` hook form,
-        // whose path arrives on stdin. It refuses nothing until that read is
-        // here, because a hook cannot refuse a write it cannot name.
+        // The pathless `None` is the `PreToolUse` hook form, which clap only lets
+        // through for `--gate`'s sake: the path arrives in a payload on stdin
+        // instead of in argv, and the refusal is a deny object on stdout instead
+        // of a status, because **2** is the only status Claude Code honours from
+        // a hook and it does not mean the boundary. Exit 0 either way; see
+        // [`check::hook`].
         Some(Command::Check { path, json, gate }) => match (path, gate) {
             (Some(path), false) => check(path, json),
             (Some(path), true) => check::gate(path),
-            (None, _) => Ok(()),
+            (None, _) => check::hook(),
         },
         // The first subcommand that writes, dispatched here for every reason
         // the questions are — it prints one line on the ordinary screen and

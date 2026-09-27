@@ -1,12 +1,13 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use serde_json::json;
 use warlock_engine::{
     Manifest, PactEntry, ScopeRecord, save_key, save_key_binding, save_sigils, sigils_path,
 };
 use warlock_tui::Sigils;
 
-use super::{Checked, checked, checked_onto, gated_onto, object, prose};
+use super::{Checked, checked, checked_onto, gated_onto, hooked_onto, object, prose};
 use crate::error::Error;
 use crate::standing::Standing;
 use crate::status_for;
@@ -735,4 +736,203 @@ fn every_half_finished_route_is_still_a_zero() {
             home.path().display()
         );
     }
+}
+
+// The hook form stands where the gate form stands and for the same reasons:
+// `hooked_onto` is what `check::hook` calls once it has read stdin, so a canned
+// payload here runs the code a `PreToolUse` hook runs. What is read is the
+// manifest in the temporary repository and one sigil config under the temporary
+// home; no socket is opened, no model is run and no real home is touched.
+fn hooking(repo: &Path, home: &Path, payload: &str) -> (String, Result<(), Error>) {
+    a_manifest().save(repo).expect("a manifest that saves");
+
+    let mut out = Vec::new();
+    let outcome = hooked_onto(&standing_in(repo), Some(home), payload.as_bytes(), &mut out);
+    (
+        String::from_utf8(out).expect("warlock writes its own text"),
+        outcome,
+    )
+}
+
+// The payload Claude Code sends, with the fields the gate does not read left in
+// rather than trimmed to the two it does: that is what makes the read a walk down
+// somebody else's schema instead of a deserialisation of a type warlock owns.
+// `file_path` arrives absolute, as a hook sends it.
+fn a_payload(repo: &Path, path: &str) -> String {
+    json!({
+        "session_id": "0f6b",
+        "cwd": repo,
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Edit",
+        "tool_input": {
+            "file_path": repo.join(path),
+            "old_string": "before",
+            "new_string": "after",
+        },
+    })
+    .to_string()
+}
+
+#[test]
+fn a_hook_over_a_closed_scope_writes_the_deny_object_and_still_exits_zero() {
+    // The gate form's closed case, asked the hook's way: a sigil that opens the
+    // outer scope and not the nearer one.
+    let (repo, home) = (a_dir(), a_dir());
+    holding_in(home.path(), repo.path(), &["platform"]);
+
+    let (written, outcome) = hooking(
+        repo.path(),
+        home.path(),
+        &a_payload(repo.path(), "crates/engine/src/lib.rs"),
+    );
+
+    // To the byte, because all four of these field names are Claude Code's: an
+    // object one letter out is not a weaker refusal, it is a hook that permits
+    // every write silently. One line, nested under `hookSpecificOutput`, with no
+    // `command` field — this is not warlock's envelope — and in insertion order.
+    assert_eq!(
+        written,
+        "{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\
+         \"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"warlock: \
+         `crates/engine/src/lib.rs` is scoped `data-plane` — hold that sigil to work here, \
+         with `warlock config`\"}}\n"
+    );
+    // The reason names the path the repository's way and not the machine's: it
+    // is shown to somebody, and the absolute one names their home back at them.
+    assert!(
+        !written.contains(&repo.path().display().to_string()),
+        "{written}"
+    );
+    // A 0 and not the path form's **3**: 2 is the only status Claude Code honours
+    // from a hook, so the refusal travels in the object and the status says
+    // nothing about the boundary.
+    assert_eq!(status_for(&outcome), 0);
+    outcome.expect("a hook denies by writing, not by failing");
+}
+
+#[test]
+fn a_hook_over_an_open_scope_an_unscoped_path_or_an_unpacted_one_writes_nothing() {
+    // The gate form's three open readings, and the same silence for all of them:
+    // saying nothing is how a `PreToolUse` hook permits, and a stdout with an
+    // object of any kind on it is a write stopped.
+    let (repo, home) = (a_dir(), a_dir());
+    holding_in(home.path(), repo.path(), &["data-plane"]);
+
+    for path in [
+        "crates/engine",
+        "crates/engine/src/lib.rs",
+        "docs/adr",
+        "vendor/thing/file.rs",
+    ] {
+        let (written, outcome) = hooking(repo.path(), home.path(), &a_payload(repo.path(), path));
+
+        assert!(written.is_empty(), "{path} was refused: {written}");
+        assert_eq!(status_for(&outcome), 0, "{path}");
+        outcome.unwrap_or_else(|error| panic!("{path} is open: {error}"));
+    }
+}
+
+#[test]
+fn a_payload_with_no_path_in_it_writes_nothing_and_exits_zero() {
+    // Holding nothing, so every path in this manifest is closed: a payload the
+    // read *did* understand would deny, which is what leaves the read itself as
+    // the only thing under test.
+    let (repo, home) = (a_dir(), a_dir());
+
+    for payload in [
+        // Not JSON at all, which is a hook wired to the wrong stream.
+        "not json {{{".to_owned(),
+        // JSON and not an object.
+        "[]".to_owned(),
+        // An object with no `tool_input`: a tool that writes nothing, near
+        // enough, and one every `PreToolUse` hook is handed.
+        json!({ "hook_event_name": "PreToolUse", "tool_name": "WebFetch" }).to_string(),
+        // An input with no path in it. `Bash` is the one that can write past
+        // this gate anyway, which is accepted.
+        json!({ "tool_input": { "command": "rm -rf crates/engine" } }).to_string(),
+        // A `file_path` that is not a string, which no schema promises it will
+        // never become.
+        json!({ "tool_input": { "file_path": 7 } }).to_string(),
+    ] {
+        let (written, outcome) = hooking(repo.path(), home.path(), &payload);
+
+        assert!(written.is_empty(), "{payload} was refused: {written}");
+        assert_eq!(status_for(&outcome), 0, "{payload}");
+        outcome.unwrap_or_else(|error| panic!("{payload}: {error}"));
+    }
+}
+
+#[test]
+fn an_empty_file_path_is_not_a_write_to_the_repository_root() {
+    // The one absence with a consequence of its own, so it gets a repository of
+    // its own: the payload's path is joined onto the working directory, so an
+    // empty one would be the directory itself, and here that directory carries a
+    // scope this machine does not hold. A read that let the empty string through
+    // would deny a write nobody can find.
+    let (repo, home) = (a_dir(), a_dir());
+    Manifest::with_entries([entry(".").with_scope("warlock-team")])
+        .save(repo.path())
+        .expect("a manifest that saves");
+
+    let empty = json!({ "tool_input": { "file_path": "" } }).to_string();
+    let mut out = Vec::new();
+    hooked_onto(
+        &standing_in(repo.path()),
+        Some(home.path()),
+        empty.as_bytes(),
+        &mut out,
+    )
+    .expect("a payload with no path in it permits");
+
+    assert!(out.is_empty(), "the root was refused: {out:?}");
+
+    // And the same repository denies a path it can name, so the silence above is
+    // the empty string's doing rather than a root nothing scopes.
+    let named =
+        json!({ "tool_input": { "file_path": repo.path().join("src/lib.rs") } }).to_string();
+    let mut out = Vec::new();
+    hooked_onto(
+        &standing_in(repo.path()),
+        Some(home.path()),
+        named.as_bytes(),
+        &mut out,
+    )
+    .expect("a hook denies by writing, not by failing");
+
+    assert!(
+        String::from_utf8(out)
+            .expect("warlock writes its own text")
+            .contains("\"permissionDecision\":\"deny\""),
+        "a scope this machine does not hold should have refused"
+    );
+}
+
+#[test]
+fn a_write_warlock_cannot_name_a_scope_for_writes_nothing() {
+    // The two absences that are not the payload's: a path outside the repository
+    // the hook is standing in, which has no repository-relative spelling at all,
+    // and a manifest that will not parse, which is a repository whose pacts are
+    // unknown. `warlock check` refuses the second with a **1**; a hook has no
+    // status to refuse with and nowhere to put a sentence, and a gate that cannot
+    // name the scope covering a write cannot refuse it either.
+    let (repo, home) = (a_dir(), a_dir());
+
+    let outside = json!({ "tool_input": { "file_path": "/elsewhere/file.rs" } }).to_string();
+    let (written, outcome) = hooking(repo.path(), home.path(), &outside);
+    assert!(written.is_empty(), "{written}");
+    outcome.expect("a path outside the repository permits");
+
+    let warlock = repo.path().join(".warlock");
+    fs::write(warlock.join("pacts.toml"), "not toml {{{").expect("a broken manifest");
+
+    let mut out = Vec::new();
+    hooked_onto(
+        &standing_in(repo.path()),
+        Some(home.path()),
+        a_payload(repo.path(), "crates/engine/src/lib.rs").as_bytes(),
+        &mut out,
+    )
+    .expect("a manifest that will not parse permits");
+
+    assert!(out.is_empty(), "a broken manifest refused: {out:?}");
 }
