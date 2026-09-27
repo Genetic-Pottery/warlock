@@ -8,7 +8,7 @@ use serde_json::{Value, json};
 use super::{
     BACKLOG, Board, Client, ENDPOINT, Error, Linear, NewIssue, NewProject, Posts, REQUEST_TIMEOUT,
     answer, authorization, backlog_state, backlog_status, comment_on_project, create_issue,
-    create_project, create_relation, fetch_project, issue_label_id, label_id, team_id,
+    create_project, create_relation, fetch_project, issue_label_id, label_id, team_id, viewer,
 };
 
 const KEY: &str = "lin_api_a_key_nobody_holds_8f3a1c";
@@ -523,6 +523,39 @@ fn last_input(linear: &Posting) -> Value {
 }
 
 #[test]
+fn the_viewer_is_the_key_holders_id_in_one_request() {
+    let linear = Posting::answering([Ok(json!({ "viewer": { "id": "user-1" } }))]);
+
+    let user = viewer(&linear).expect("the stand-in answered");
+
+    assert_eq!(user, "user-1");
+    assert_eq!(linear.variables(), [json!({})]);
+
+    let asked = linear.documents();
+
+    assert_eq!(asked.len(), 1, "one request per operation");
+    assert!(asked[0].contains("viewer { id }"), "{asked:?}");
+}
+
+#[test]
+fn a_viewer_answer_that_is_not_the_one_asked_for_is_malformed() {
+    for answer in [
+        json!({}),
+        json!({ "viewer": null }),
+        json!({ "viewer": { "name": "Ada" } }),
+    ] {
+        let linear = Posting::answering([Ok(answer.clone())]);
+
+        let error = viewer(&linear).expect_err("that is not the answer asked for");
+
+        assert!(
+            matches!(error, Error::Malformed { .. }),
+            "{answer}: {error:?}"
+        );
+    }
+}
+
+#[test]
 fn a_team_key_resolves_to_its_id_in_one_request() {
     let linear = Posting::answering([Ok(json!({ "teams": { "nodes": [{ "id": "team-1" }] } }))]);
 
@@ -835,6 +868,7 @@ fn draft<'a>() -> NewIssue<'a> {
         "project-1",
         "issue-label-held",
         "state-backlog",
+        "user-viewer",
     )
 }
 
@@ -856,7 +890,8 @@ fn a_created_issue_comes_back_with_its_id_identifier_and_url() {
 }
 
 #[test]
-fn the_issue_create_carries_the_title_body_team_project_label_and_state_and_nothing_else() {
+fn the_issue_create_carries_the_title_body_team_project_label_state_and_assignee_and_nothing_else()
+{
     let linear = Posting::answering([Ok(issue_created())]);
 
     create_issue(&linear, &draft()).expect("the stand-in answered");
@@ -870,13 +905,26 @@ fn the_issue_create_carries_the_title_body_team_project_label_and_state_and_noth
             "projectId": "project-1",
             "labelIds": ["issue-label-held"],
             "stateId": "state-backlog",
+            "assigneeId": "user-viewer",
         }),
         "no field warlock would have to invent"
     );
 }
 
 #[test]
-fn no_issue_create_invents_a_status_assignee_priority_estimate_cycle_or_milestone() {
+fn an_issue_is_created_assigned_to_the_user_the_caller_resolved() {
+    let linear = Posting::answering([Ok(issue_created())]);
+
+    create_issue(&linear, &draft()).expect("the stand-in answered");
+
+    // The claim `warlock pull` reads: an issue filed with no assignee is one it
+    // can never select, so the id the caller resolved has to reach the wire
+    // under the name Linear knows it by.
+    assert_eq!(last_input(&linear)["assigneeId"], json!("user-viewer"));
+}
+
+#[test]
+fn no_issue_create_invents_a_status_priority_estimate_cycle_or_milestone() {
     let linear = Posting::answering([Ok(issue_created())]);
 
     create_issue(&linear, &draft()).expect("the stand-in answered");
@@ -885,7 +933,6 @@ fn no_issue_create_invents_a_status_assignee_priority_estimate_cycle_or_mileston
 
     for invented in [
         "statusId",
-        "assigneeId",
         "priority",
         "priorityLabel",
         "estimate",

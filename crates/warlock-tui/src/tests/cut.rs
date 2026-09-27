@@ -9,7 +9,7 @@ use warlock_tui::{Board, LinearIssue};
 use super::{Cut, Filing, Slice, announce, cut};
 use crate::error::Error;
 use crate::status_for;
-use crate::stubs::{Boarding, Call, IssueAsked, Op};
+use crate::stubs::{Boarding, Call, IssueAsked, Op, VIEWER};
 
 const SCOPE: &str = "warlock-team";
 
@@ -85,6 +85,9 @@ fn filing(destination: &Destination) -> Filing<'_> {
         brief: BRIEF_PATH,
         project: PROJECT_ID,
         destination,
+        // What `prepare` resolved for the run: `cut` is handed the id rather
+        // than asking for it, so nothing here makes a viewer request.
+        assignee: VIEWER,
     }
 }
 
@@ -151,6 +154,29 @@ fn cut_after(
     (
         outcome,
         String::from_utf8(out).expect("warlock writes its own text"),
+    )
+}
+
+// The same cut for a run whose viewer answered somebody else, which is the one
+// way to tell an assignee that came through `Filing` from one this module could
+// have gone and asked for itself.
+fn cut_assigning(repo: &Path, linear: &impl Board, assignee: &str) -> Result<Cut, Error> {
+    let destination = destination();
+    let mut out = Vec::new();
+
+    cut(
+        linear,
+        repo,
+        Filing {
+            assignee,
+            ..filing(&destination)
+        },
+        Slice {
+            title: TITLE,
+            drafts: &two_drafts(),
+            needs: &[],
+        },
+        &mut out,
     )
 }
 
@@ -276,6 +302,7 @@ fn each_issue_carries_the_scope_records_team_the_project_and_the_backlog_state()
         project: PROJECT_ID.to_owned(),
         label: "label-held".to_owned(),
         state: "state-backlog".to_owned(),
+        assignee: VIEWER.to_owned(),
     };
     assert_eq!(
         linear.issues_created(),
@@ -283,6 +310,30 @@ fn each_issue_carries_the_scope_records_team_the_project_and_the_backlog_state()
             issue("Read the file off disk", "The bytes, whole."),
             issue("Fold its title", "Lowercased, collapsed."),
         ],
+    );
+}
+
+#[test]
+fn the_assignee_the_filing_carries_reaches_every_create_and_is_not_asked_for_here() {
+    // The id `prepare` resolved for the whole run arrives built, so an issue is
+    // assigned to whoever `Filing` names and nothing else: a cut that went and
+    // asked the board itself would be a request per slice for an answer that
+    // cannot have changed, and would still be right by accident while the
+    // stand-in answers the same user.
+    let repo = a_repository();
+    let linear = a_whole_cut();
+
+    cut_assigning(repo.path(), &linear, "user-somebody-else").expect("a slice that files");
+
+    let issues = linear.issues_created();
+    assert_eq!(issues.len(), 2, "{issues:?}");
+    for issue in &issues {
+        assert_eq!(issue.assignee, "user-somebody-else", "{issue:?}");
+    }
+    assert!(
+        !linear.ops().contains(&Op::Viewer),
+        "a cut asked the board who its issues are for: {:?}",
+        linear.ops()
     );
 }
 

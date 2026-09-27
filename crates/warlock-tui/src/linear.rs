@@ -126,6 +126,7 @@ impl Posts for Client {
 /// test fake answers operations instead of recognising query text: Linear's
 /// spelling is [`Linear`]'s business, checked in this module's own tests.
 pub trait Board {
+    fn viewer(&self) -> Result<String, Error>;
     fn team_id(&self, key: &str) -> Result<Option<String>, Error>;
     fn backlog_status(&self) -> Result<Option<String>, Error>;
     fn backlog_state(&self, team: &str) -> Result<Option<String>, Error>;
@@ -151,6 +152,10 @@ impl<P: Posts> Linear<P> {
 }
 
 impl<P: Posts> Board for Linear<P> {
+    fn viewer(&self) -> Result<String, Error> {
+        viewer(&self.posts)
+    }
+
     fn team_id(&self, key: &str) -> Result<Option<String>, Error> {
         team_id(&self.posts, key)
     }
@@ -222,6 +227,18 @@ impl Opens for Opener {
 /// with nothing by this name takes the thing with no status at all, rather than
 /// whichever one happens to sort first.
 const BACKLOG: &str = "Backlog";
+
+/// The user the key belongs to, as Linear's own user id.
+///
+/// No `Option`, unlike [`team_id`] and [`backlog_state`]: a workspace can be
+/// missing a team or a state, but a request Linear answered at all was
+/// authenticated as somebody, so an answer carrying no viewer is a malformed one
+/// and not an absence for a caller to have words about.
+fn viewer(linear: &impl Posts) -> Result<String, Error> {
+    let data = linear.post("query Viewer { viewer { id } }", json!({}))?;
+
+    node_id(data.get("viewer").ok_or_else(|| missing("viewer"))?)
+}
 
 /// A team key — `WAR` — as Linear's own team id, or `None` when the workspace
 /// has no team by that key. Not an error: the caller holds the words about
@@ -592,6 +609,7 @@ fn create_issue(linear: &impl Posts, issue: &NewIssue<'_>) -> Result<Issue, Erro
                 "projectId": issue.project,
                 "labelIds": [issue.label],
                 "stateId": issue.state,
+                "assigneeId": issue.assignee,
             },
         }),
     )?;
@@ -605,10 +623,17 @@ fn create_issue(linear: &impl Posts, issue: &NewIssue<'_>) -> Result<Issue, Erro
 }
 
 /// What [`Board::create_issue`] is asked for, and the whole of it: every field
-/// here is an id the caller resolved, and there is deliberately no assignee,
-/// priority, estimate, cycle or milestone. A draft says what the work is, and a field
-/// warlock would have to invent a value for is a decision taken away from the
-/// person who owns the board.
+/// here is an id the caller resolved, and priority, estimate, cycle and
+/// milestone stay unwritten. A draft says what the work is, and a field warlock
+/// would have to invent a value for is a decision taken away from the person who
+/// owns the board.
+///
+/// `assignee` is the exception, and it is not an invented value: the person
+/// running `draft` is the person who owns the board, and the assignee is the
+/// claim `warlock pull` reads — it only ever works tickets assigned to the
+/// operator, so a backlog nothing is assigned in is a queue it can never select
+/// from. Handing work to a teammate stays a reassignment a human makes in
+/// Linear, which is why there is no way to name anybody else here.
 ///
 /// `state` is a *team workflow state* id from [`Board::backlog_state`] and
 /// `label` an *issue label* id from [`Board::issue_label_id`]; neither a project
@@ -621,6 +646,7 @@ pub struct NewIssue<'a> {
     project: &'a str,
     label: &'a str,
     state: &'a str,
+    assignee: &'a str,
 }
 
 impl<'a> NewIssue<'a> {
@@ -632,6 +658,7 @@ impl<'a> NewIssue<'a> {
         project: &'a str,
         label: &'a str,
         state: &'a str,
+        assignee: &'a str,
     ) -> Self {
         Self {
             title,
@@ -640,6 +667,7 @@ impl<'a> NewIssue<'a> {
             project,
             label,
             state,
+            assignee,
         }
     }
 
@@ -671,6 +699,11 @@ impl<'a> NewIssue<'a> {
     #[must_use]
     pub const fn state(&self) -> &'a str {
         self.state
+    }
+
+    #[must_use]
+    pub const fn assignee(&self) -> &'a str {
+        self.assignee
     }
 }
 

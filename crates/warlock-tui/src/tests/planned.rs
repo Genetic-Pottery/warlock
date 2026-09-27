@@ -18,7 +18,7 @@ use super::{Planned, Settled, cut_with, prepare};
 use crate::error::Error;
 use crate::standing::Standing;
 use crate::status_for;
-use crate::stubs::{Boarding, Call, Op};
+use crate::stubs::{Boarding, Call, Op, VIEWER};
 
 // Not a key, and named so that nothing reading this file mistakes it for one.
 // It is stored only so that a bound name resolves and a cut can reach the
@@ -315,8 +315,11 @@ fn a_project(status: Option<&str>) -> Boarding {
     a_project_of(SLICED, status)
 }
 
-fn fetched_by_the_record() -> [Call; 1] {
-    [Call::FetchProject(PROJECT_ID.to_owned())]
+// Everything `prepare` sends, in order: the user the key belongs to, resolved
+// once for the run so every issue it files can be assigned, then the project the
+// record names. Two reads and no write.
+fn read_by_prepare() -> [Call; 2] {
+    [Call::Viewer, Call::FetchProject(PROJECT_ID.to_owned())]
 }
 
 // The module's first step, less the environment: the repository root and the
@@ -531,9 +534,9 @@ mod preparing {
         assert_eq!(planned.left(), 3);
         assert_eq!(planned.destination().team(), TEAM);
         // The id out of `.warlock/filed.toml` and no other selector, in one
-        // request.
-        assert_eq!(linear.calls(), fetched_by_the_record());
-        assert_eq!(linear.requests(), 1, "one call per operation");
+        // request, alongside the one that resolved who the run files for.
+        assert_eq!(linear.calls(), read_by_prepare());
+        assert_eq!(linear.requests(), 2, "one call per operation");
         assert_eq!(linear.opened_with(), [NOT_A_KEY.to_owned()]);
         assert!(
             !format!("{planned:?}").contains(NOT_A_KEY),
@@ -553,7 +556,7 @@ mod preparing {
         preparing(repo.path(), home.path(), "./docs/brief.md", None, &linear)
             .expect("the same brief, spelled twice");
 
-        assert_eq!(linear.calls(), fetched_by_the_record());
+        assert_eq!(linear.calls(), read_by_prepare());
     }
 
     #[test]
@@ -645,7 +648,7 @@ mod preparing {
         // Nothing is read or sent after the status: the scope block in the
         // content that came back is never parsed, and no second request is
         // made.
-        assert_eq!(linear.calls(), fetched_by_the_record());
+        assert_eq!(linear.calls(), read_by_prepare());
     }
 
     #[test]
@@ -716,7 +719,7 @@ mod preparing {
 
         assert_eq!(
             linear.calls(),
-            fetched_by_the_record(),
+            read_by_prepare(),
             "something other than the read was asked"
         );
         assert_eq!(
@@ -774,7 +777,7 @@ mod preparing {
         assert!(message.contains(".warlock/filed.toml"), "{message}");
         // Refused where the answer that said so arrived: the fetch and nothing
         // after it, and the record file as it was.
-        assert_eq!(linear.calls(), fetched_by_the_record());
+        assert_eq!(linear.calls(), read_by_prepare());
         assert_eq!(
             fs::read_to_string(filed_path(repo.path())).expect("a record file"),
             before
@@ -1201,7 +1204,7 @@ mod headless {
         // reads what it reports and spends nothing else.
         assert_eq!(
             linear.calls(),
-            fetched_by_the_record(),
+            read_by_prepare(),
             "a dry run sent more than the fetch"
         );
         assert_eq!(
@@ -1576,14 +1579,16 @@ mod headless {
         cut_filing(repo.path(), home.path(), &linear, &Sketching::drafting());
 
         // A board has no operation that moves a status, and an issue create has
-        // no field beyond the six a draft and its slice resolve: what the latter
-        // puts on the wire is held by `linear.rs`'s own tests. What a run can
-        // still get wrong is asking for something a cut has no business asking.
+        // no field beyond the seven a draft, its slice and the run's own viewer
+        // resolve: what the latter puts on the wire is held by `linear.rs`'s own
+        // tests. What a run can still get wrong is asking for something a cut has
+        // no business asking.
         for op in linear.ops() {
             assert!(
                 matches!(
                     op,
-                    Op::FetchProject
+                    Op::Viewer
+                        | Op::FetchProject
                         | Op::Team
                         | Op::BacklogState
                         | Op::IssueLabel
@@ -1594,5 +1599,80 @@ mod headless {
                 "a run asked for {op:?}"
             );
         }
+    }
+
+    #[test]
+    fn the_whole_run_asks_once_who_it_files_for_and_asks_before_the_first_issue() {
+        let repo = a_scoped_repository();
+        let home = a_home(repo.path());
+        let linear = a_sliced_project(SLICED);
+
+        cut_filing(repo.path(), home.path(), &linear, &Sketching::drafting());
+
+        // Three slices with two drafts in each: six issues, and one answer about
+        // who they are all for. A request per slice — or per draft — would be
+        // bought again for an answer that cannot have changed.
+        assert_eq!(linear.issues_created().len(), 6);
+        let asked = linear.positions_of(Op::Viewer);
+        assert_eq!(asked.len(), 1, "{:?}", linear.ops());
+        // And before anything exists to assign: the id is resolved while the run
+        // is still nothing, not found out once issues are on the board.
+        let first = linear.positions_of(Op::CreateIssue)[0];
+        assert!(
+            asked[0] < first,
+            "the viewer was asked at {} and the first issue created at {first}",
+            asked[0]
+        );
+    }
+
+    #[test]
+    fn every_issue_the_run_files_is_assigned_to_the_user_the_viewer_answered() {
+        let repo = a_scoped_repository();
+        let home = a_home(repo.path());
+        let linear = a_sliced_project(SLICED);
+
+        cut_filing(repo.path(), home.path(), &linear, &Sketching::drafting());
+
+        // One id for the run, the one the board said the key belongs to: the
+        // slices are cut one at a time and the assignee is not a thing a later
+        // slice can drift on.
+        let issues = linear.issues_created();
+        assert_eq!(issues.len(), 6, "{issues:?}");
+        for issue in &issues {
+            assert_eq!(issue.assignee, VIEWER, "{issue:?}");
+        }
+    }
+
+    #[test]
+    fn a_viewer_request_the_api_turns_down_refuses_the_run_before_anything_exists() {
+        // A board that will not say who the key belongs to has nothing to file
+        // for. A timeout is the same failure by the same road — one `LinearError`
+        // through the one line that maps it — so the refusal stands for both.
+        let repo = a_scoped_repository();
+        let home = a_home(repo.path());
+        let linear = a_sliced_project(SLICED).refuse(Op::Viewer, "the workspace would not");
+        let before = fs::read_to_string(filed_path(repo.path())).expect("a record file");
+
+        let (outcome, printed) = cut_to(repo.path(), home.path(), BRIEF_PATH, None, false, &linear);
+
+        let error = refusal(outcome);
+        assert!(matches!(error, Error::Linear { .. }), "{error:?}");
+        assert!(
+            said(&error).contains("the workspace would not"),
+            "{}",
+            said(&error)
+        );
+        // The one request and nothing after it: the project was never even
+        // fetched, no session was opened — the model panics if one is — and
+        // nothing was created.
+        assert_eq!(linear.calls(), [Call::Viewer], "{:?}", linear.calls());
+        assert!(printed.is_empty(), "a refusal printed something: {printed}");
+        // And the record file is the one that was there: a run that filed
+        // nothing writes no cut.
+        assert!(recorded(repo.path()).is_empty(), "a refusal recorded a cut");
+        assert_eq!(
+            fs::read_to_string(filed_path(repo.path())).expect("a record file"),
+            before
+        );
     }
 }

@@ -68,6 +68,11 @@ const THIRD: &str = "File the drafts";
 // hanging the suite, and short enough that it is a failure rather than a wait.
 const AT_MOST: Duration = Duration::from_secs(10);
 
+// What a `/draft` reads before it offers anything: the user the key belongs to,
+// once for the run, and the project the filed record names. Every assertion
+// below that a run sent nothing to the board is this number and not zero.
+const PREPARED: usize = 2;
+
 fn now() -> Instant {
     Instant::now()
 }
@@ -272,7 +277,11 @@ fn a_cut_reports_the_project_its_status_and_how_many_slices_are_left() {
         "{said:?} does not say the board's own spelling of the status"
     );
     assert!(said.contains("3 slices"), "{said:?} does not count slices");
-    assert_eq!(linear.requests(), 1, "one draft is one request");
+    assert_eq!(
+        linear.requests(),
+        PREPARED,
+        "one draft read more than it reports"
+    );
     assert!(
         !format!("{cutter:?}").contains(NOT_A_KEY),
         "the key value is in the value the session holds"
@@ -337,7 +346,11 @@ fn a_project_that_is_not_planned_is_one_line_with_nothing_torn_down() {
         })),
         "the line is not the engine's own sentence",
     );
-    assert_eq!(linear.requests(), 1, "the gate sent a second request");
+    assert_eq!(
+        linear.requests(),
+        PREPARED,
+        "the gate sent a request of its own"
+    );
     assert!(!cutter.fetching(), "a refusal left a draft running");
 }
 
@@ -385,7 +398,11 @@ fn a_second_cut_with_one_in_flight_is_one_line_and_reads_nothing() {
     );
     gate.open();
     landing(&mut app, &mut cutter);
-    assert_eq!(linear.requests(), 1, "the second draft sent something");
+    assert_eq!(
+        linear.requests(),
+        PREPARED,
+        "the second draft sent something"
+    );
 }
 
 #[test]
@@ -645,9 +662,9 @@ mod cutting {
     use warlock_engine::drafting::stub_answer;
 
     use super::{
-        AT_MOST, Answering, App, Boarding, Cutter, FIRST, Gate, Instant, NAME, SECOND, Scripted,
-        THIRD, a_home, a_project, a_repository, asked_over, filed, landing, notes, now, press,
-        through, unasked,
+        AT_MOST, Answering, App, Boarding, Cutter, FIRST, Gate, Instant, NAME, PREPARED, SECOND,
+        Scripted, THIRD, a_home, a_project, a_repository, asked_over, filed, landing, notes, now,
+        press, through, unasked,
     };
 
     // The three `[n/total]` prefixes a run over this project says, in the order
@@ -712,7 +729,11 @@ mod cutting {
             .collect();
         assert_eq!(running, RUNNING.iter().collect::<Vec<_>>());
         assert_eq!(agent.turns(), 3, "a slice was drafted twice or not at all");
-        assert_eq!(linear.requests(), 1, "the run sent something to the board");
+        assert_eq!(
+            linear.requests(),
+            PREPARED,
+            "the run sent something to the board"
+        );
     }
 
     #[test]
@@ -898,7 +919,11 @@ mod cutting {
             Some(&super::ALREADY_CUTTING.to_owned()),
             "the second draft did not say no"
         );
-        assert_eq!(linear.requests(), 1, "the second draft read the board");
+        assert_eq!(
+            linear.requests(),
+            PREPARED,
+            "the second draft read the board"
+        );
         gate.open();
     }
 
@@ -1369,10 +1394,10 @@ mod reviewing {
     use warlock_tui::{Answer, Choice};
 
     use super::{
-        AT_MOST, Answering, App, BRIEF, Cutter, FIRST, Instant, NOT_A_KEY, PROJECT_ID, SECOND,
-        Scripted, THIRD, a_project, asked_over, fs, notes, now,
+        AT_MOST, Answering, App, BRIEF, Cutter, FIRST, Instant, NOT_A_KEY, PREPARED, PROJECT_ID,
+        SECOND, Scripted, THIRD, a_project, asked_over, fs, notes, now,
     };
-    use crate::stubs::{Boarding, Op};
+    use crate::stubs::{Boarding, Op, VIEWER};
 
     // What somebody types about drafts they have just read, which is the one
     // thing a redrafting session hears.
@@ -1517,7 +1542,7 @@ mod reviewing {
                 .any(|line| line.contains("drafted `")),
             "the titles are not on the thread: {said:?}"
         );
-        assert_eq!(linear.requests(), 1, "the drafts were filed unasked");
+        assert_eq!(linear.requests(), PREPARED, "the drafts were filed unasked");
         assert!(
             !said.iter().any(|line| line.contains(SECOND)),
             "the run walked past a window: {said:?}"
@@ -1558,6 +1583,36 @@ mod reviewing {
         assert_eq!(
             cutter.reviewing().map(|review| review.slice().to_owned()),
             Some(format!("slice 2 `{SECOND}`"))
+        );
+    }
+
+    #[test]
+    fn what_the_panel_files_is_assigned_to_the_user_the_bound_key_belongs_to() {
+        // The panel takes the same `prepare`/`Filing::file` route the shell verb
+        // does, so the id the run resolved once rides every draft a window
+        // creates. Nothing here is the panel's own doing — this asserts that,
+        // which is why a `/draft` needs no assigning of its own.
+        let linear = a_project();
+        let (mut app, mut cutter, _repo, _home) = cut(linear.clone(), drafting_each());
+        offered(&mut app, &mut cutter);
+
+        cutter.create(&mut app, now());
+        settled(&mut app, &mut cutter);
+
+        let issues = linear.issues_created();
+        assert_eq!(issues.len(), 2, "{issues:?}");
+        for issue in &issues {
+            assert_eq!(issue.assignee, VIEWER, "{issue:?}");
+        }
+        // Once for the run, before the window was ever up: the fetch that put
+        // the question there is where the id came from, not the create.
+        let asked = linear.positions_of(Op::Viewer);
+        assert_eq!(asked.len(), 1, "{:?}", linear.ops());
+        let first = linear.positions_of(Op::CreateIssue)[0];
+        assert!(
+            asked[0] < first,
+            "the assignee was found out after an issue existed: {:?}",
+            linear.ops()
         );
     }
 
@@ -1646,7 +1701,11 @@ mod reviewing {
                 .any(|line| line.contains("was skipped; nothing was recorded for it")),
             "the skip is not on the thread: {said:?}"
         );
-        assert_eq!(linear.requests(), 1, "a skip sent something to the board");
+        assert_eq!(
+            linear.requests(),
+            PREPARED,
+            "a skip sent something to the board"
+        );
         assert!(cuts(repo.path()).is_empty(), "a skip wrote a cut record");
         let carry = cutter.carrying().expect("the carry-on question is up");
         assert_eq!(carry.left(), "2 slices");
@@ -1684,7 +1743,7 @@ mod reviewing {
             !said.iter().any(|line| line.contains(SECOND)),
             "a slice that was never offered was named: {said:?}"
         );
-        assert_eq!(linear.requests(), 1, "a stopped run sent something");
+        assert_eq!(linear.requests(), PREPARED, "a stopped run sent something");
     }
 
     #[test]
@@ -1858,7 +1917,7 @@ mod reviewing {
         cutter.carry_lit(Answer::Yes);
 
         assert!(cutter.drafting(), "a stale answer took the run down");
-        assert_eq!(linear.requests(), 1, "a stale answer sent something");
+        assert_eq!(linear.requests(), PREPARED, "a stale answer sent something");
         assert!(
             cuts(repo.path()).is_empty(),
             "a stale answer wrote a record"
@@ -2003,7 +2062,7 @@ mod reviewing {
         assert!(linear.comments().is_empty(), "{:?}", linear.comments());
         assert_eq!(
             linear.requests(),
-            1,
+            PREPARED,
             "a run that created nothing sent something"
         );
     }
