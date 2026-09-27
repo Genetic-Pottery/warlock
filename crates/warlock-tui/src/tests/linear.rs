@@ -10,8 +10,10 @@ use super::{
     NamedIssue, NewIssue, NewProject, Posts, Priority, QUEUE_PAGE, QueuedIssue, REQUEST_TIMEOUT,
     StateType, answer, authorization, backlog_state, backlog_status, comment_on_project,
     create_issue, create_project, create_relation, fetch_project, issue_label_id, label_id,
-    named_issue, scope_queue, team_id, viewer,
+    move_issue, named_issue, scope_queue, team_id, viewer, workflow_state,
 };
+
+use crate::IN_PROGRESS;
 
 const KEY: &str = "lin_api_a_key_nobody_holds_8f3a1c";
 
@@ -1346,6 +1348,73 @@ fn a_workflow_state_answer_that_is_not_the_one_asked_for_is_malformed() {
 }
 
 #[test]
+fn a_workflow_state_is_resolved_by_name_among_the_teams_others() {
+    let linear = Posting::answering([Ok(workflow_states())]);
+
+    let state = workflow_state(&linear, "team-1", IN_PROGRESS).expect("the stand-in answered");
+
+    assert_eq!(state.as_deref(), Some("state-doing"));
+    assert_eq!(linear.variables(), [json!({ "team": "team-1" })]);
+    assert_eq!(linear.documents().len(), 1, "one request per operation");
+}
+
+#[test]
+fn a_state_name_spelled_differently_is_still_the_same_column() {
+    // A team that renamed the case, and a record or a constant with a stray
+    // space in it: the same column to everyone except a string comparison.
+    for name in ["in progress", "  In Progress ", "IN PROGRESS"] {
+        let linear = Posting::answering([Ok(workflow_states())]);
+
+        let state = workflow_state(&linear, "team-1", name).expect("the stand-in answered");
+
+        assert_eq!(state.as_deref(), Some("state-doing"), "{name}");
+        assert_eq!(linear.documents().len(), 1, "one request per operation");
+    }
+}
+
+#[test]
+fn a_team_with_no_state_by_that_name_is_a_none_rather_than_an_error() {
+    let linear = Posting::answering([Ok(workflow_states())]);
+
+    // The caller prints this as a line and works the ticket anyway: a column
+    // the team does not have is not a reason to stop.
+    let state = workflow_state(&linear, "team-1", "Doing").expect("no such column is an answer");
+
+    assert_eq!(state, None);
+}
+
+#[test]
+fn a_named_state_answer_that_is_not_the_one_asked_for_is_malformed() {
+    for answer in [
+        json!({ "workflowStates": {} }),
+        json!({ "workflowStates": { "nodes": [{ "name": IN_PROGRESS }] } }),
+    ] {
+        let linear = Posting::answering([Ok(answer.clone())]);
+
+        let error = workflow_state(&linear, "team-1", IN_PROGRESS)
+            .expect_err("that is not the answer asked for");
+
+        assert!(
+            matches!(error, Error::Malformed { .. }),
+            "{answer}: {error:?}"
+        );
+        assert_eq!(linear.documents().len(), 1, "no retry and no backoff");
+    }
+}
+
+#[test]
+fn a_state_lookup_the_api_refuses_comes_back_once_in_linears_words() {
+    let linear = Posting::answering([Err(Error::Refused {
+        message: "Entity not found".to_owned(),
+    })]);
+
+    let error = workflow_state(&linear, "team-1", IN_PROGRESS).expect_err("the stand-in refused");
+
+    assert!(matches!(error, Error::Refused { .. }), "{error:?}");
+    assert_eq!(linear.documents().len(), 1, "no retry and no backoff");
+}
+
+#[test]
 fn a_label_the_workspace_already_has_is_reused_by_id() {
     let linear = Posting::answering([Ok(label_found())]);
 
@@ -1713,6 +1782,80 @@ fn a_relation_the_api_refuses_comes_back_in_linears_words() {
     // The caller turns this into one reported line rather than a failed slice,
     // which it can only do if the refusal arrives as Linear worded it.
     assert!(matches!(error, Error::Refused { .. }), "{error:?}");
+}
+
+fn issue_updated() -> Value {
+    json!({ "issueUpdate": { "issue": { "id": "issue-1" } } })
+}
+
+#[test]
+fn an_issue_is_moved_into_a_state_by_id_in_one_request() {
+    let linear = Posting::answering([Ok(issue_updated())]);
+
+    let moved = move_issue(&linear, "issue-1", "state-doing").expect("the stand-in answered");
+
+    assert_eq!(moved, "issue-1");
+    assert_eq!(
+        linear.variables(),
+        [json!({ "id": "issue-1", "input": { "stateId": "state-doing" } })]
+    );
+    assert_eq!(linear.documents().len(), 1, "one request per operation");
+}
+
+#[test]
+fn a_move_writes_the_state_and_nothing_else_about_the_issue() {
+    let linear = Posting::answering([Ok(issue_updated())]);
+
+    move_issue(&linear, "issue-1", "state-doing").expect("the stand-in answered");
+
+    let asked = linear.documents().pop().expect("one request was made");
+    let input = last_input(&linear);
+
+    assert!(asked.contains("issueUpdate("), "{asked}");
+    // Whose ticket it is stays a human's decision, and a project's status is a
+    // different type on a different object that no issue move may touch.
+    assert!(input.get("assigneeId").is_none(), "{input}");
+    assert!(input.get("statusId").is_none(), "{input}");
+    assert_eq!(
+        input.as_object().map(serde_json::Map::len),
+        Some(1),
+        "the state is the whole of what a move writes: {input}"
+    );
+    assert!(!asked.contains("projectUpdate"), "{asked}");
+}
+
+#[test]
+fn a_move_that_answers_nothing_usable_is_malformed() {
+    for answer in [
+        json!({ "issueUpdate": { "issue": null } }),
+        json!({ "issueUpdate": { "success": true } }),
+        json!({ "issueUpdate": {} }),
+        json!({ "issueUpdate": { "issue": { "identifier": "WAR-134" } } }),
+    ] {
+        let linear = Posting::answering([Ok(answer.clone())]);
+
+        let error = move_issue(&linear, "issue-1", "state-doing").expect_err("no issue");
+
+        assert!(
+            matches!(error, Error::Malformed { .. }),
+            "{answer}: {error:?}"
+        );
+        assert_eq!(linear.documents().len(), 1, "no retry and no backoff");
+    }
+}
+
+#[test]
+fn a_move_the_api_refuses_comes_back_once_in_linears_words() {
+    let linear = Posting::answering([Err(Error::Refused {
+        message: "Entity not found".to_owned(),
+    })]);
+
+    // A retried move is how a board ends up disagreeing with itself, and a
+    // column nobody could set is one reported line rather than a failed run.
+    let error = move_issue(&linear, "issue-1", "state-doing").expect_err("the stand-in refused");
+
+    assert!(matches!(error, Error::Refused { .. }), "{error:?}");
+    assert_eq!(linear.documents().len(), 1, "no retry and no backoff");
 }
 
 fn comment_created() -> Value {
