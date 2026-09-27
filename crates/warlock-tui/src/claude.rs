@@ -55,7 +55,7 @@ use std::time::Duration;
 // vocabulary for a slot that was filled wrong, whether the slot is a line of a
 // document or the title of a draft.
 use warlock_engine::document::Defect;
-use warlock_engine::{Agent, agent, drafting};
+use warlock_engine::{Agent, agent, drafting, working};
 
 /// The clock one invocation runs under. A child that outlives it is killed *and*
 /// reaped rather than abandoned.
@@ -434,6 +434,235 @@ pub fn drafting_opening(brief: &str, title: &str, prose: &str, contract: &str) -
     format!(
         "{contract}\n\n{}",
         drafting::drafting_instructions(brief, title, prose, &[])
+    )
+}
+
+/// Where a sub-task session's boundary is and what happens when it meets one:
+/// the scope the ticket was pulled under, the sigils this machine holds, and the
+/// single thing to do about a write the gate refuses.
+///
+/// The sigils are listed and not judged. Which scopes they open is
+/// [`scope_opens_to`](warlock_engine::scope_opens_to)'s answer and the gate hook
+/// asks it at every write, so a second copy of that rule written into prose here
+/// is a rule that can come to disagree with the one enforcing it — the prompt
+/// says what this machine holds and that the gate decides, which is true however
+/// the rule changes.
+fn working_boundary(scope: &str, sigils: &[String]) -> String {
+    let holding = if sigils.is_empty() {
+        "this machine holds no sigils at all".to_owned()
+    } else {
+        let named: Vec<String> = sigils.iter().map(|sigil| format!("`{sigil}`")).collect();
+        format!(
+            "this machine holds the sigil{} {}",
+            if sigils.len() == 1 { "" } else { "s" },
+            named.join(", "),
+        )
+    };
+    format!(
+        "This ticket was pulled under the scope `{scope}`, and {holding}. A \
+         directory covered by a scope none of those sigils opens is closed to \
+         you: warlock gates every edit and every new file before it happens, \
+         and a refusal names the path and the scope covering it. A refused \
+         write is the end of the sub-task rather than an obstacle inside it — \
+         stop there and report `blocked`, with the refusal's own words as the \
+         reason. Routing around it is not an option: not with a shell command, \
+         not by writing somewhere else that would do instead, and not by \
+         editing a scope, a sigil or warlock's own configuration. A sub-task \
+         left unfinished at a boundary is the outcome warlock wants; one \
+         finished by going around a boundary is worse than one that failed."
+    )
+}
+
+/// What a sub-task session is running under, and the half of its terms that is
+/// not in the opening turn.
+///
+/// Built rather than written down as a constant beside
+/// [`DRAFTING_SYSTEM_PROMPT`], because two of the facts it has to state are not
+/// knowable here: the scope is the manifest's and the sigils are this machine's,
+/// both read at the moment the session is raised. That is also why
+/// [`working_args`] takes the prompt as a parameter rather than reaching for a
+/// constant.
+///
+/// The one prompt in this file that names a writing tool outright, and the one
+/// that must: a session holding six tools and told about none of them spends
+/// turns asking for what it already has. `tests/claude.rs`'s
+/// `names_no_writing_tool` runs over every other session kind and exempts this
+/// one — see [`working_args`].
+///
+/// What is *not* here: anything about the work. The sub-task, its ticket and its
+/// siblings are [`working_opening`]'s, and the shape of the answer is the
+/// engine's.
+///
+/// ```
+/// use warlock_tui::working_system_prompt;
+///
+/// let prompt = working_system_prompt("data-plane", &["data-plane".to_owned()]);
+///
+/// assert!(prompt.contains("scope `data-plane`"));
+/// assert!(prompt.contains("the sigil `data-plane`"));
+/// assert!(prompt.contains("report `blocked`"));
+///
+/// // Holding nothing is said in words rather than left as an empty list.
+/// let none = working_system_prompt("data-plane", &[]);
+/// assert!(none.contains("no sigils at all"));
+/// ```
+#[must_use]
+pub fn working_system_prompt(scope: &str, sigils: &[String]) -> String {
+    format!(
+        "You are working one sub-task of one ticket inside warlock, a terminal \
+         program that shows one repository as a tree of directories. A pacted \
+         directory has a WARLOCK.md describing it: a purpose, one line per file \
+         under `## Files`, one per subdirectory under `## Directories`, and \
+         where there is anything to say `## Structure`. Use the documents to \
+         narrow, never to answer: start at the nearest WARLOCK.md above what \
+         the sub-task is about, follow its directory and file lines downward, \
+         then open the file it names and check, because a document is a map and \
+         where it and the code disagree the code is right.\n\nYou are the one \
+         warlock session that may change this repository. You hold `Read`, \
+         `Grep`, `Glob`, `Edit`, `Write` and `Bash`, and the working tree you \
+         leave is the work — nothing else you say is put on disk. Do what your \
+         sub-task's brief asks and nothing further.\n\n{}\n\nNobody is reading \
+         while you work, and there is no one to ask: a question reaches no one \
+         and an offer to check something further is thrown away. Where the \
+         brief leaves open something only a person can settle, report \
+         `blocked` and say what is open rather than settling it yourself.\n\n\
+         The repository's history is not yours to move. Do not commit, do not \
+         push, do not switch, create or delete a branch, and do not rewrite \
+         history by any route — no `git commit`, `git push`, `git switch`, \
+         `git checkout`, `git rebase`, `git reset`, `git stash` and no plumbing \
+         that has the same effect. Warlock commits what you leave, on the \
+         branch you were handed, after it has looked at the tree. Everything \
+         else a shell is for is yours: read, search, build, and run the tests \
+         the sub-task asks for.",
+        working_boundary(scope, sigils),
+    )
+}
+
+/// The finished sibling sub-tasks of the same ticket, as the opening turn names
+/// them: each one's id and the summary its own session reported.
+///
+/// Borrowed pairs rather than `PullSubtask`s, because which siblings count as
+/// finished and where a summary is read from are the caller's questions — the
+/// record holds six statuses and a log that may be absent — and this file's job
+/// is the prose around whatever it is handed.
+pub type Sibling<'summary> = (&'summary str, &'summary str);
+
+/// The opening turn of one sub-task session: the sub-task's own brief, the
+/// ticket it was cut out of as context, what its finished siblings did, and then
+/// the engine's contract for the object it answers with.
+///
+/// The contract is appended rather than restated, exactly as
+/// [`drafting_opening`] appends the engine's drafting instructions: two copies
+/// of the shape is one shape that will disagree with the reader
+/// ([`working::accept`](warlock_engine::working::accept)) enforcing it.
+///
+/// What is never in it: the orchestrator's own history. A sub-task session is
+/// opened for one sub-task, and what warlock did with the results of the others
+/// — which it retried, what it commented, what it committed — is not context for
+/// the work, it is an invitation to reason about the run instead of doing the
+/// sub-task.
+///
+/// `finished` may be empty, and an empty list is no section at all rather than a
+/// heading over nothing: a session shown "finished sub-tasks:" followed by
+/// silence reads it as siblings that finished and said nothing.
+///
+/// ```
+/// use warlock_tui::working_opening;
+///
+/// let opening = working_opening(
+///     "## Goal\nRead the file once.",
+///     "Read the file once, not twice",
+///     "Two callers read it, and they disagree.",
+///     &[("WAR-1.01", "Added the reader.")],
+/// );
+///
+/// assert!(opening.contains("Read the file once."));
+/// assert!(opening.contains("Two callers read it"));
+/// assert!(opening.contains("WAR-1.01"));
+/// assert!(opening.ends_with(warlock_engine::working::RESULT_PROMPT));
+///
+/// // No siblings, no section.
+/// let alone = working_opening("## Goal\nRead it once.", "Read it once", "Because.", &[]);
+/// assert!(!alone.contains("already finished"));
+/// ```
+#[must_use]
+pub fn working_opening(
+    brief: &str,
+    title: &str,
+    description: &str,
+    finished: &[Sibling<'_>],
+) -> String {
+    use std::fmt::Write as _;
+
+    // Rules rather than code fences around each part, for the reason
+    // `proposing_instruction` uses them: a brief is markdown and carries fences
+    // of its own.
+    let mut text = format!(
+        "The sub-task to work is the brief between the two rules below, and it \
+         is the whole of what you are to do.\n\n---\n\n{}\n\n---\n\nIt is one \
+         sub-task of a larger ticket. That ticket's title and description \
+         follow as the context the sub-task was cut out of, and as nothing \
+         more: they are not a to-do list. Whatever is in them that your brief \
+         does not ask for belongs to another sub-task or to nobody, and is not \
+         yours to do here.\n\n---\n\n{}\n\n{}\n\n---",
+        brief.trim(),
+        title.trim(),
+        description.trim(),
+    );
+
+    if !finished.is_empty() {
+        text.push_str(
+            "\n\nSub-tasks of the same ticket that have already finished, each \
+             one's id and then the summary its own session reported. Read them \
+             for what is already in the tree and the shape it took. They are \
+             finished: neither redo nor revise them.\n\n---",
+        );
+        for (id, summary) in finished {
+            let _ = write!(text, "\n\n{}\n\n{}", id.trim(), summary.trim());
+        }
+        text.push_str("\n\n---");
+    }
+
+    let _ = write!(text, "\n\n{}", working::RESULT_PROMPT);
+    text
+}
+
+/// The opening turn again, for the attempt after a failed one.
+///
+/// Said because it is the fact a second attempt most needs and the one it cannot
+/// see: warlock does not undo what a failed attempt wrote, so the tree this
+/// session starts in is the tree that attempt left — part-done edits, a
+/// half-applied rename, a test file with no test in it. An attempt that assumes
+/// a clean tree does the finished half of the work twice.
+///
+/// The notice goes above the opening rather than inside it, so the sub-task and
+/// the shape of the answer are still the last words said, and the opening is
+/// carried verbatim: the brief, the ticket and the siblings do not change
+/// between attempts, and a retry given its own paraphrase of them is a second
+/// prompt to keep in step with the first.
+///
+/// ```
+/// use warlock_tui::{working_opening, working_retry};
+///
+/// let opening = working_opening("## Goal\nRead it once.", "Read it once", "Because.", &[]);
+/// let again = working_retry(&opening, "the tests would not build");
+///
+/// assert!(again.contains("the tests would not build"));
+/// assert!(again.contains("working tree"));
+/// assert!(again.ends_with(&opening));
+/// ```
+#[must_use]
+pub fn working_retry(opening: &str, failure: &str) -> String {
+    format!(
+        "This sub-task was attempted before and the attempt failed. What it \
+         reported:\n\n---\n\n{}\n\n---\n\nYou are running in the working tree \
+         that attempt left. Nothing it wrote has been undone and nothing it \
+         wrote has been committed, so the work may be part done and the tree \
+         may be inconsistent. Read what is there before you change it, and \
+         carry the sub-task on from where it actually stands rather than from \
+         the beginning — a change made twice is its own failure. Everything \
+         below is what that attempt was given, unchanged.\n\n{opening}",
+        failure.trim(),
     )
 }
 

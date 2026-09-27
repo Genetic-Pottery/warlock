@@ -12,12 +12,13 @@ use super::{
     INVOCATION_TIMEOUT, MODEL, MODEL_VAR, NOTHING_SETTLES_IT, OsString, PROPOSING_SYSTEM_PROMPT,
     Replied, SYSTEM_PROMPT, WORKING_TIMEOUT, WORKING_TURNS, WRITE_INSTRUCTION, Wired,
     brief_instruction, drafting_opening, or_default, overridden, propose_answer,
-    proposing_instruction, render, session_id,
+    proposing_instruction, render, session_id, working_opening, working_retry,
+    working_system_prompt,
 };
 use crate::brief::scope_block_in;
 use crate::panel::Mode;
 use crate::template::DEFAULT_TEMPLATE;
-use warlock_engine::{Agent, agent, drafting};
+use warlock_engine::{Agent, agent, drafting, working};
 
 // A name no directory on `PATH` can hold, so the lookup fails the way it does on
 // a machine with no `claude` installed.
@@ -1169,6 +1170,262 @@ fn the_sub_task_session_is_the_only_one_given_a_writing_tool() {
             "{named} is missing from the one session that is meant to have it",
         );
     }
+}
+
+// The three things a sub-task session is handed, each spelt so a test can find
+// it again in what warlock writes around it. A real sub-task's shape — front
+// matter, a goal, a definition of done — because the builders trim and frame
+// markdown rather than prose.
+const A_SUB_TASK_BRIEF: &str = "---\nsubtask_id: WAR-140.02\nparent: WAR-140\n---\n\n\
+                                ## Goal\nRead the queue's own ordering in the panel.\n\n\
+                                ## Definition of done\n- [ ] A queue with nothing behind it \
+                                draws no header.";
+
+const A_TICKET_TITLE: &str = "Read a scope's ticket queue from Linear";
+
+const A_TICKET_DESCRIPTION: &str = "## Problem\nThe panel offers a scope with no queue behind \
+                                    it.\n\n## Out of scope\nThe filing, which is another \
+                                    ticket's.";
+
+#[test]
+fn the_sub_task_system_prompt_names_the_scope_and_the_sigils_this_machine_holds() {
+    let held = ["data-plane".to_owned(), "web".to_owned()];
+    let prompt = working_system_prompt("data-plane", &held);
+
+    // The scope the ticket was pulled under, and every sigil this machine
+    // holds: the two halves of where this session's boundary is.
+    assert!(prompt.contains("scope `data-plane`"), "{prompt}");
+    assert!(
+        prompt.contains("the sigils `data-plane`, `web`"),
+        "{prompt}"
+    );
+
+    // One sigil is not a list, and none is a sentence rather than an empty one:
+    // a session shown "holds the sigils " with nothing after it reads it as a
+    // prompt that was built wrong, and guesses which way.
+    assert!(working_system_prompt("web", &held[1..]).contains("the sigil `web`"));
+    assert!(working_system_prompt("web", &[]).contains("no sigils at all"));
+
+    // And the sigils are listed rather than judged: which scopes they open is
+    // the gate's answer at every write, so this prompt states what is held and
+    // that the gate decides — never a second copy of the rule.
+    assert!(prompt.contains("warlock gates every edit and every new file"));
+}
+
+#[test]
+fn the_sub_task_system_prompt_makes_a_refused_write_the_end_of_the_sub_task() {
+    let prompt = working_system_prompt("data-plane", &["web".to_owned()]);
+
+    for said in [
+        // A write the hook refuses is reported, with the refusal's own words:
+        // that sentence is warlock's, names the path and the scope, and is the
+        // one thing the operator needs to read.
+        "report `blocked`",
+        "refusal's own words as the reason",
+        // And going around it is refused in advance, by each route there is.
+        "Routing around it is not an option",
+        "not with a shell command",
+        "not by writing somewhere else",
+        "not by editing a scope, a sigil or warlock's own configuration",
+    ] {
+        assert!(prompt.contains(said), "{said:?} is not said: {prompt}");
+    }
+}
+
+#[test]
+fn the_sub_task_system_prompt_leaves_the_history_alone() {
+    let prompt = working_system_prompt("data-plane", &["data-plane".to_owned()]);
+
+    // The four in the ticket's own words, so a rewording that drops one fails
+    // here rather than in a run that force-pushed a branch.
+    assert!(prompt.contains("Do not commit, do not push"), "{prompt}");
+    assert!(
+        prompt.contains("do not switch, create or delete a branch"),
+        "{prompt}",
+    );
+    assert!(prompt.contains("do not rewrite history"), "{prompt}");
+
+    // Named as the commands a session would actually reach for, because
+    // "history" is an abstraction and `git reset --hard` is not.
+    for refused in [
+        "git commit",
+        "git push",
+        "git switch",
+        "git checkout",
+        "git rebase",
+        "git reset",
+        "git stash",
+    ] {
+        assert!(
+            prompt.contains(refused),
+            "`{refused}` is not refused by name: {prompt}",
+        );
+    }
+
+    // And the shell is not taken away with them: the tests are what say the
+    // change holds, and a session told to leave `git` alone has to be told the
+    // difference.
+    assert!(prompt.contains("run the tests the sub-task asks for"));
+}
+
+#[test]
+fn the_sub_task_session_runs_under_the_prompt_that_names_its_boundary() {
+    let prompt = working_system_prompt("data-plane", &["data-plane".to_owned()]);
+    let vector = turn_args(&ChatAgent::working(&prompt));
+
+    // Built at the moment the session is raised and passed through untouched,
+    // which is why the constant beside the others is a builder here.
+    assert_eq!(value_of(&vector, "--system-prompt"), Some(prompt.as_str()));
+
+    // The exemption above shown to be a real one: this is the single prompt in
+    // the file that names a writing tool, because a session holding six tools
+    // and told about none of them spends turns asking for what it has.
+    for named in ["Edit", "Write", "Bash"] {
+        assert!(prompt.contains(named), "{named} is not named: {prompt}");
+    }
+}
+
+#[test]
+fn the_sub_task_opening_carries_the_brief_and_the_ticket_as_context() {
+    let opening = working_opening(A_SUB_TASK_BRIEF, A_TICKET_TITLE, A_TICKET_DESCRIPTION, &[]);
+
+    // The sub-task's own brief, whole, and said to be the whole of the work.
+    assert!(opening.contains("Read the queue's own ordering in the panel."));
+    assert!(opening.contains("draws no header."));
+    assert!(opening.contains("the whole of what you are to do"));
+
+    // The ticket, framed rather than merely included: a title and a
+    // description that arrive unframed are read as more work to do, and the
+    // half of them another sub-task owns gets done twice.
+    assert!(opening.contains(A_TICKET_TITLE));
+    assert!(opening.contains("The panel offers a scope with no queue behind it."));
+    assert!(opening.contains("they are not a to-do list"), "{opening}");
+    assert!(opening.contains("belongs to another sub-task or to nobody"));
+
+    // The brief comes first and the ticket after it, so what to do is read
+    // before the context it was cut out of.
+    assert!(opening.find("## Goal") < opening.find(A_TICKET_TITLE));
+}
+
+#[test]
+fn the_sub_task_opening_appends_the_engines_contract_rather_than_restating_it() {
+    let opening = working_opening(A_SUB_TASK_BRIEF, A_TICKET_TITLE, A_TICKET_DESCRIPTION, &[]);
+
+    // Last words said, and exactly once.
+    assert!(opening.ends_with(working::RESULT_PROMPT));
+    assert_eq!(opening.matches(working::RESULT_PROMPT).count(), 1);
+
+    // And written down once: with the engine's own text taken away, nothing
+    // left in the prompt says what the object looks like. Two copies of a
+    // shape is one copy that will disagree with the reader enforcing it.
+    let ours = opening.replace(working::RESULT_PROMPT, "");
+    for key in ["\"status\"", "\"summary\"", "blocked_reason"] {
+        assert!(
+            !ours.contains(key),
+            "{key} is restated outside the engine's contract: {ours}",
+        );
+    }
+}
+
+#[test]
+fn the_sub_task_opening_carries_what_the_finished_siblings_said() {
+    let finished = [
+        ("WAR-140.01", "Added the issues query and its two fakes."),
+        (
+            "WAR-140.03",
+            "Took a named ticket over the queue's own rules.",
+        ),
+    ];
+    let opening = working_opening(
+        A_SUB_TASK_BRIEF,
+        A_TICKET_TITLE,
+        A_TICKET_DESCRIPTION,
+        &finished,
+    );
+
+    for (id, summary) in finished {
+        assert!(opening.contains(id), "{id} is missing: {opening}");
+        assert!(opening.contains(summary), "{summary:?} is missing");
+    }
+
+    // In the order they were handed over, each id above its own summary, so a
+    // reader can tell which finished sibling said what.
+    assert!(opening.find("WAR-140.01") < opening.find("WAR-140.03"));
+    assert!(opening.find("WAR-140.01") < opening.find("Added the issues query"));
+
+    // Said to be finished, because a summary of work already in the tree reads
+    // as work to do otherwise.
+    assert!(opening.contains("already finished"));
+    assert!(opening.contains("neither redo nor revise them"));
+
+    // The orchestrator's history is not in it and cannot be: the whole of what
+    // this builder is handed is the brief, the ticket and these summaries, so
+    // the prompt is those three plus warlock's own framing and nothing else.
+    let ours = [A_SUB_TASK_BRIEF, A_TICKET_TITLE, A_TICKET_DESCRIPTION]
+        .into_iter()
+        .chain(finished.into_iter().flat_map(|(id, summary)| [id, summary]))
+        .fold(opening.clone(), |text, part| text.replace(part, ""));
+    assert!(!ours.contains("WAR-140"));
+}
+
+#[test]
+fn a_sub_task_opening_with_no_finished_siblings_has_no_section_for_them() {
+    let alone = working_opening(A_SUB_TASK_BRIEF, A_TICKET_TITLE, A_TICKET_DESCRIPTION, &[]);
+    let with = working_opening(
+        A_SUB_TASK_BRIEF,
+        A_TICKET_TITLE,
+        A_TICKET_DESCRIPTION,
+        &[("WAR-140.01", "Added the issues query.")],
+    );
+
+    // Not a heading over nothing: a session shown "sub-tasks that have already
+    // finished" followed by silence reads it as siblings that finished and said
+    // nothing about what they did.
+    assert!(!alone.contains("already finished"));
+    assert!(!alone.contains("neither redo nor revise"));
+
+    // And no dangling rule either, which is the part a `contains` would miss:
+    // between the ticket's closing rule and the contract there is nothing but
+    // the blank line separating them.
+    let tail = alone.rsplit_once("---").expect("the ticket block closes").1;
+    assert_eq!(tail, format!("\n\n{}", working::RESULT_PROMPT));
+
+    // The two rules the section brings are the only rules it adds.
+    assert_eq!(
+        alone.matches("---").count() + 2,
+        with.matches("---").count()
+    );
+}
+
+#[test]
+fn a_sub_task_retry_runs_in_the_tree_the_failed_attempt_left() {
+    let opening = working_opening(A_SUB_TASK_BRIEF, A_TICKET_TITLE, A_TICKET_DESCRIPTION, &[]);
+    let again = working_retry(&opening, "  the tests would not build  ");
+
+    // What went wrong last time, trimmed and in the failed attempt's own words.
+    assert!(again.contains("the tests would not build"));
+    assert!(!again.contains("  the tests"));
+
+    // The one fact a second attempt cannot see for itself: warlock undoes
+    // nothing, so this session starts in a tree that may be half changed.
+    for said in [
+        "working tree",
+        "that attempt left",
+        "Nothing it wrote has been undone",
+        "nothing it wrote has been committed",
+        "rather than from the beginning",
+    ] {
+        assert!(again.contains(said), "{said:?} is not said: {again}");
+    }
+
+    // Composed in that order and no other: the notice first, then the opening
+    // carried verbatim, so the sub-task and the shape of the object are still
+    // the last words said and there is no second paraphrase of either to keep
+    // in step.
+    assert!(again.starts_with("This sub-task was attempted before"));
+    assert!(again.ends_with(&opening));
+    assert!(again.ends_with(working::RESULT_PROMPT));
+    assert_eq!(again.matches(working::RESULT_PROMPT).count(), 1);
 }
 
 #[test]
