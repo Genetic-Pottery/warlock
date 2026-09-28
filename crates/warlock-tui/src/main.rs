@@ -46,6 +46,8 @@ mod input;
 mod key;
 mod pacting;
 mod planned;
+mod pull;
+mod pulling;
 mod push;
 mod pushing;
 mod query;
@@ -70,6 +72,7 @@ use error::Error;
 use input::{Action, Drag, MouseAction, Pressed, drag_after, mouse_action, press_for};
 use key::{key_add, key_forget, key_list, key_use};
 use pacting::{Pact, Reloaded};
+use pull::pull;
 
 use cutting::Cutter;
 use push::push;
@@ -284,6 +287,30 @@ enum Command {
         #[arg(long, value_name = "NAME")]
         scope: Option<String>,
         /// Print the project, its status and its slices, draft nothing and write no record.
+        #[arg(long)]
+        dry_run: bool,
+    },
+    #[command(
+        about = "Work the next ready ticket in a scope's queue to an open pull request.",
+        long_about = None
+    )]
+    Pull {
+        // Required, like the push's path and for its reason: a pull is about one
+        // scope's queue, and there is no whole-repository answer for an omitted
+        // scope to mean — a machine holding two sigils would have to guess which
+        // board's work to start. A `String` and not a validated type, as a scope
+        // is everywhere else: what a scope may be is the engine's to say.
+        /// Which scope's queue to take a ticket from.
+        #[arg(value_name = "SCOPE")]
+        scope: String,
+        // Optional to clap and the only way to say which ticket: what it picks
+        // among is the operator's own queue, held to the same rules the chooser
+        // holds it to. There is no `--any` — taking somebody else's ticket is a
+        // reassignment a human makes on the board.
+        /// Work this ticket instead of choosing, if the queue's rules allow it.
+        #[arg(long, value_name = "TICKET")]
+        ticket: Option<String>,
+        /// Print the ticket that would be taken and every one passed over; write nothing.
         #[arg(long)]
         dry_run: bool,
     },
@@ -551,6 +578,19 @@ fn main() -> ExitCode {
             scope,
             dry_run,
         }) => planned::cut(&path, scope.as_deref(), dry_run),
+        // The third step of the workflow and the one that spends the most:
+        // a splitting pass, one session per sub-task, a commit each, a push and a
+        // pull request. Dispatched here with the rest and for the same reasons —
+        // its progress is lines on the ordinary screen that a script reads through
+        // a pipe, so no alternate screen, no raw mode and no panic hook — and
+        // gated by the sigil rather than by opening a directory. Two of its
+        // refusals are the boundary's **3** all the same: a scope this machine
+        // does not hold, and a session that wrote past one. See [`mod@pull`].
+        Some(Command::Pull {
+            scope,
+            ticket,
+            dry_run,
+        }) => pull(&scope, ticket.as_deref(), dry_run),
     };
 
     // `run` has returned, so the guard inside it has already dropped and the
@@ -581,7 +621,14 @@ const fn status_for(outcome: &Result<(), Error>) -> u8 {
     match outcome {
         Ok(()) => 0,
         // The boundary, and only the upward one: see the decision above.
-        Err(Error::ClosedScope { .. }) => 3,
+        //
+        // A pull's two boundary refusals spend the same register and nothing else
+        // does: a scope this machine's sigils do not open, refused before a request
+        // with nothing spent, and a session that wrote under one, which is a run
+        // that stopped with nothing committed and the tree left as it was. The
+        // numbers here and `Pulled::status`'s are one decision, asserted against
+        // each other in the tests.
+        Err(Error::ClosedScope { .. } | Error::UnheldScope { .. } | Error::Crossed { .. }) => 3,
         // A run that finished with some of its directories failed. Above the
         // catch-all rather than folded into it, because it is the one non-zero
         // status that comes with the work having been done: the documents that

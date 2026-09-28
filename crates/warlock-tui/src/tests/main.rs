@@ -792,6 +792,139 @@ fn the_cut_leaves_the_push_spelled_exactly_as_it_was() {
     );
 }
 
+// `warlock pull warlock-team` with whichever of the two flags a case is about,
+// so each assertion below reads as the flags rather than as the positional under
+// them — the push's and the draft's helper, one verb along.
+fn pulled_scope(ticket: Option<&str>, dry_run: bool) -> Command {
+    Command::Pull {
+        scope: "warlock-team".to_owned(),
+        ticket: ticket.map(str::to_owned),
+        dry_run,
+    }
+}
+
+#[test]
+fn a_pull_takes_the_scope_whose_queue_it_reads_and_the_two_flags_that_go_with_it() {
+    assert_eq!(
+        parse(&["pull", "warlock-team"]).unwrap().command,
+        Some(pulled_scope(None, false))
+    );
+    assert_eq!(
+        parse(&["pull", "warlock-team", "--dry-run"])
+            .unwrap()
+            .command,
+        Some(pulled_scope(None, true))
+    );
+    // `--ticket` takes an identifier and reaches warlock exactly as it was typed:
+    // what a ticket may be called is the board's, and the queue's rules are what
+    // judge it.
+    assert_eq!(
+        parse(&["pull", "warlock-team", "--ticket", "WAR-140"])
+            .unwrap()
+            .command,
+        Some(pulled_scope(Some("WAR-140"), false))
+    );
+    // Both flags, in either order and either side of the scope, for the reason the
+    // push's are pinned that way: a person retyping the command from a refusal
+    // will put them wherever the cursor was.
+    for args in [
+        ["pull", "warlock-team", "--ticket", "WAR-140", "--dry-run"],
+        ["pull", "--dry-run", "--ticket", "WAR-140", "warlock-team"],
+    ] {
+        assert_eq!(
+            parse(&args).unwrap().command,
+            Some(pulled_scope(Some("WAR-140"), true)),
+            "{args:?}"
+        );
+    }
+}
+
+#[test]
+fn a_pull_with_no_scope_or_with_two_is_a_malformed_invocation() {
+    // Clap's 2, for the push's reason: a pull is about one scope's queue, and an
+    // omitted scope is a command line that was never a request rather than
+    // warlock guessing which board's work to start.
+    let malformed: [&[&str]; 4] = [
+        &["pull"],
+        &["pull", "--dry-run"],
+        &["pull", "warlock-team", "warlock-docs"],
+        &["pull", "--ticket", "WAR-140"],
+    ];
+
+    for args in malformed {
+        let error = parse(args).unwrap_err();
+        assert!(error.use_stderr(), "{args:?}");
+        assert_eq!(error.exit_code(), 2, "{args:?}");
+    }
+}
+
+#[test]
+fn a_pull_asks_for_no_object_takes_no_any_and_no_word_beside_its_two_flags() {
+    // No `--json`, matching the push and the draft: what a script reads afterwards
+    // is the run record under the home directory, which is a file rather than a
+    // stream to be caught. No `--any` either — taking somebody else's ticket is a
+    // reassignment a human makes on the board.
+    let malformed: [&[&str]; 6] = [
+        &["pull", "warlock-team", "--json"],
+        &["pull", "--json", "warlock-team"],
+        &["pull", "warlock-team", "--any"],
+        &["pull", "warlock-team", "--ticket"],
+        &["pull", "warlock-team", "--dry-run=yes"],
+        &["pull", "warlock-team", "--scope", "warlock-docs"],
+    ];
+
+    for args in malformed {
+        let error = parse(args).unwrap_err();
+        assert!(error.use_stderr(), "{args:?}");
+        assert_eq!(error.exit_code(), 2, "{args:?}");
+    }
+
+    // And the absence stated over the parser itself rather than over the spellings
+    // above: `--ticket` and `--dry-run` are the only words a pull takes beside its
+    // scope and clap's own help.
+    let command = subcommand(&["pull"]);
+    for argument in command.get_arguments().filter(|a| !a.is_positional()) {
+        let long = argument.get_long().unwrap_or_default();
+        assert!(
+            ["help", "ticket", "dry-run"].contains(&long),
+            "`pull` takes `--{long}`, which is none of its two flags"
+        );
+    }
+}
+
+#[test]
+fn the_pull_help_names_both_of_its_flags_and_the_scope_it_wants() {
+    let help = subcommand(&["pull"]).render_long_help().to_string();
+    for said in ["SCOPE", "--ticket <TICKET>", "--dry-run"] {
+        assert!(help.contains(said), "{said}: {help}");
+    }
+}
+
+#[test]
+fn the_pull_leaves_the_push_and_the_draft_spelled_exactly_as_they_were() {
+    // The third verb sits beside the first two and shares their resolver, so this
+    // is the guard against it being wired by editing them: both still take their
+    // path and their two flags, and both still refuse a `--json`.
+    assert_eq!(
+        parse(&["push", "docs/brief.md", "--scope", "data-plane"])
+            .unwrap()
+            .command,
+        Some(pushed_brief(Some("data-plane"), false))
+    );
+    assert_eq!(
+        parse(&["draft", "docs/brief.md", "--dry-run"])
+            .unwrap()
+            .command,
+        Some(cut_brief(None, true))
+    );
+    for args in [
+        ["push", "docs/brief.md", "--json"],
+        ["draft", "docs/brief.md", "--json"],
+    ] {
+        assert_eq!(parse(&args).unwrap_err().exit_code(), 2, "{args:?}");
+    }
+}
+
 #[test]
 fn both_spellings_of_help_are_a_help_exit_that_succeeded() {
     // Not an error in the sense that matters: help was asked for, so it
@@ -941,7 +1074,7 @@ fn help_prints_a_few_lines_rather_than_this_file() {
     let help = Cli::command().render_long_help().to_string();
     for subcommand in [
         "init", "config", "stale", "fresh", "check", "unpact", "pact", "refresh", "scope", "key",
-        "push", "draft",
+        "push", "draft", "pull",
     ] {
         assert!(help.contains(subcommand), "{subcommand}: {help}");
     }
@@ -949,7 +1082,7 @@ fn help_prints_a_few_lines_rather_than_this_file() {
     // A row per subcommand plus the usage and options chrome: the ceiling is
     // what stops an `about` becoming a paragraph, so it moves by one when a
     // subcommand is added and never to make room for prose.
-    assert!(help.lines().count() < 23, "{help}");
+    assert!(help.lines().count() < 24, "{help}");
     // Every doc comment on `Cli` and its variants spells the command in
     // backticks, and no `about` above does, so a backtick reaching the help
     // is a doc comment that got lifted into it.

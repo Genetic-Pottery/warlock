@@ -56,6 +56,11 @@ pub(crate) const FOR_REFRESH: &str = "refresh anything under";
 // points, and the repository is what says which board it belongs to.
 pub(crate) const FOR_PUSH: &str = "push a brief from";
 
+// "in" rather than "from", because a pull is about this checkout: the branch is
+// cut here, the sub-tasks are worked here and the tree that is checked afterwards
+// is this one.
+pub(crate) const FOR_PULL: &str = "pull a ticket into";
+
 // "from" for `FOR_PUSH`'s reason and about the same document: what a cut
 // resolves is not the brief's text but the record spelled against the root that
 // says which project it became, so the repository is what turns a path into

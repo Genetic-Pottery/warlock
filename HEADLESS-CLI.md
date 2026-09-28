@@ -28,6 +28,7 @@ piped — it reads a plain line and the terminal is never touched.
 | `warlock refresh <path>` | The same over only the directories that are not fresh | a model pass per stale directory |
 | `warlock push <path>` | File the brief at `path` as a project on the board this machine's sigil names | one project on somebody's board and one record write |
 | `warlock draft <path>` | Cut the project filed for the brief at `path` into issues on the board that holds it | a model pass per uncut slice, the issues they become, and a record write each |
+| `warlock pull <SCOPE>` | Work the next ready ticket in that scope's queue to an open pull request | a splitting pass, a model pass per sub-task, a commit each, a pushed branch, a pull request, and two moves on somebody's board |
 
 The two listings take the repository root when the path is left off. Every other
 path is required, and on `unpact` and `pact` that is the point rather than an
@@ -690,20 +691,267 @@ No key value is printed by any of this either, not in the progress, not in a
 refusal and not in the dry run. The value is read on exactly one line — the one
 that builds the client — and only key *names* ever reach a line.
 
+## Pulling
+
+`warlock pull <SCOPE>` is the third step of the workflow and the only subcommand
+that commits, branches or pushes. It takes the next ready ticket off that
+scope's queue and leaves a pull request open behind it: the ticket moves to
+`In Progress`, a session splits it into sub-tasks, a session of its own works
+each sub-task, every one that finishes inside this machine's scopes is a commit,
+and then the branch is pushed, opened as a pull request and its URL commented on
+the ticket, which moves to the `review_state` the `[[scope]]` record names. The
+scope is required for the push's reason: a pull is about one queue, and a
+machine holding two sigils would have to guess which board's work to start.
+
+Two flags and no more, as push and draft have two. `--ticket <TICKET>` works
+that ticket instead of choosing one, and `--dry-run` says which ticket would be
+taken without touching anything. There is no `--json`, for push's reason one
+step on: what a script reads after a pull is the run record, and that is a file
+under the home directory rather than a stream to catch. There is no `--any`
+either — the queue is read by assignee, and taking a teammate's ticket is a
+reassignment a human makes on the board.
+
+The run record is one directory per ticket, under the same home the sigils and
+the key binding for this checkout sit under:
+
+```
+~/.warlock/repo-f447b89a747182e2/pulls/WAR-140/
+├── state.json      the record: the status, the branch, `pr_url`, a sub-task each
+├── manifest.md     rendered from it on every write, for a person to read
+└── WAR-140.01.md   one brief per sub-task, and what its session did
+```
+
+It is under the home and never in the repository, because a file recording how
+far a pull got would otherwise turn up in the diff of the very commit it is
+describing. The ticket identifier is the directory name, so one checkout holds
+at most one run per ticket and a second pull of the same one picks the first up
+rather than starting a run beside it. `state.json` is the record and the other
+two are rendered from it on every save, so a hand edit to either is gone at the
+next sub-task. Each brief's `## Execution log` is the one exception: the run
+appends the session's lines under it as they happen and re-renders around it, so
+the account of a sub-task is in its brief as well as on stdout.
+
+The order of the work is the promise rather than an arrangement. The `[[scope]]`
+record, the sigils, the key and the working tree are all settled before a socket
+is opened, so every refusal in that stretch costs nothing — no request, no
+branch, no session. A scope name nothing records is the first of them, and the
+recorded names lead because one of them is almost certainly what was meant:
+
+```sh
+$ warlock pull warlock-tem
+warlock: nothing in `.warlock/pacts.toml` records the scope `warlock-tem`, so there is no queue to read: this repository records `warlock-team`, `control-plane`
+```
+
+A recorded scope this machine's sigils do not open is the boundary's refusal and
+keeps the boundary's **3**. It is asked here, in its own words, rather than left
+to the machinery that resolves the key: that answers "not a scope this machine
+can file to", which would send somebody to fix a record that is right.
+
+```sh
+$ warlock pull control-plane
+warlock: the scope `control-plane` is not one this machine's sigils open, so nothing was pulled: this machine holds `warlock-team` — hold that sigil with `warlock config`
+$ echo $?
+3
+```
+
+The key half is the two refusals push prints, carried word for word rather than
+reworded here: an unbound checkout is sent to `warlock key use` and a bound name
+the store has never heard of to `warlock key add`. A dirty tree is the last of
+the four, and it names every entry in `git status`'s own two-letter codes,
+because that is the command the reader runs next:
+
+```sh
+$ warlock pull warlock-team
+warlock: the working tree is not clean, so no ticket was pulled: ` M crates/engine/src/lib.rs`, `?? notes.md` — warlock commits what a session writes, and what is already there is yours
+```
+
+Nothing is stashed, reset or cleaned by a pull, here or later in a run.
+
+Past those four the queue is read — every ticket on the record's team carrying
+the record's label and assigned to the user the key belongs to — and every
+ticket the pass walked past is a line with the reason on it. A halted run this
+machine holds is passed over and names `warlock resume <TICKET>`, which is the
+command that frees it; nothing a pull does releases a run by itself. A run this
+machine holds as `resumed` is taken before any ticket with no record at all,
+because somebody has already looked at it and there is a branch waiting on it.
+Nothing ready is an answer rather than a failure, and it is a **0**:
+
+```sh
+$ warlock pull warlock-team
+warlock: passed over `WAR-141` — halted — `warlock resume WAR-141` releases it
+warlock: passed over `WAR-142` — in `In Review`, which is waiting on a human
+warlock: passed over `WAR-143` — in progress elsewhere — this machine holds no run record for it
+warlock: passed over `WAR-144` — blocked by WAR-12 (Cole)
+warlock: nothing in the queue for `warlock-team` is ready to work
+$ echo $?
+0
+```
+
+`--ticket` reads that one ticket instead of the queue, and the three filters the
+queue applies on Linear's side are checked here instead, so a refusal can say
+which of them the ticket failed rather than only that it is not in the queue. It
+picks among your own work and there is no flag past that. Each of these is an
+ordinary **1**, and the reasons the chooser skips by are the same sentences the
+pass-over lines carry:
+
+```sh
+warlock: `WAR-9` was not pulled: on team `DAT`, and this scope routes to `WAR`
+warlock: `WAR-9` was not pulled: not labelled `warlock` — it carries area/docs
+warlock: `WAR-9` was not pulled: assigned to Cole and not to you
+warlock: `WAR-9` was not pulled: halted — `warlock resume WAR-9` releases it
+```
+
+Three more are about a ticket that was never in the queue to be skipped. A word
+that is not an identifier is turned down before a request is made, because
+asking the board about `banana` would turn a typo into a round trip and a vaguer
+answer; an identifier the board has no issue for is named as that; and a ticket
+that is finished says the state it finished in rather than a rule it also
+happens to fail. A ticket nobody has taken is refused for the assignee's reason
+with a sentence of its own, since there is nobody in it to name:
+
+```sh
+warlock: `banana` was not pulled: `banana` is not a ticket identifier, which reads like `WAR-9`
+warlock: `WAR-9000` was not pulled: the board has no `WAR-9000`
+warlock: `WAR-9` was not pulled: in `Done`, which is finished
+warlock: `WAR-9` was not pulled: assigned to nobody, and `pull` works your own tickets
+```
+
+`--dry-run` stops at the queue. It prints the ticket it would take and every
+ticket it passed over with the reason, writes nothing, raises no session, makes
+no `git` call at all — the tree read included — and exits 0:
+
+```sh
+$ warlock pull warlock-team --dry-run
+warlock: would pull `WAR-140` — Add `warlock pull <SCOPE>`, and nothing was written, no `git` ran and no session was raised
+warlock: passed over `WAR-141` — halted — `warlock resume WAR-141` releases it
+```
+
+The missing `git status` is the point rather than an omission: what a dry run
+answers is which ticket would be taken, and the dirty-tree refusal above would
+be a command it promised not to run. With `--ticket` it says whether that ticket
+would be taken and why not, and refusing to take one is still a 0 — nothing was
+refused, it was described:
+
+```sh
+$ warlock pull warlock-team --ticket WAR-141 --dry-run
+warlock: would not pull `WAR-141`: halted — `warlock resume WAR-141` releases it
+$ echo $?
+0
+```
+
+A run that goes ahead prints in `running.rs`'s shape: a header per section — the
+split, each sub-task, the pull request — with the session's own lines under the
+header they happened under.
+
+```sh
+$ warlock pull warlock-team
+warlock: splitting `WAR-140` — Add `warlock pull <SCOPE>`
+warlock: [1/2] `WAR-140.01` Add the pull loop's module, seams and pure decisions
+warlock: Read crates/warlock-tui/src/pulling.rs
+warlock: writing · 12 KB
+warlock: [2/2] `WAR-140.02` Work the run
+warlock: thinking
+warlock: `war-140/add-warlock-pull-scope-work-a-ticket` is pushed, opening a pull request
+warlock: `WAR-140` is in review: https://github.com/acme/warlock/pull/149
+```
+
+A cost report is the one thing a session reports that is not a line, following
+the panel's account card: it is a fact about the pass rather than something the
+session did, and a column of money down the middle of the work is not what the
+run is being read for.
+
+A run that stops short of a pull request halts, and a halt is not the loop
+failing: the branch holds one commit per finished sub-task, `state.json` holds
+the rest, and the ticket keeps one comment listing what finished, then each
+sub-task that stopped with its status and reason, then the ones never started.
+The ticket is left where it is. One `blocked` or `failed` sub-task is not on its
+own the end — the run carries on to any sibling that does not wait on it, and
+halts when nothing is runnable.
+
+```sh
+$ warlock pull warlock-team
+warlock: the run for `WAR-140` halted, so the ticket has not moved: its comment lists what finished and what did not, and `warlock resume WAR-140` releases it
+$ echo $?
+1
+```
+
+A session that commits by itself halts the run the same way, with that sub-task
+recorded as `failed` and both short commit ids in the reason: `HEAD` moving
+means what the session wrote is in a commit warlock did not make and cannot
+check, so nothing further is committed.
+
+A crossing is the one halt that is a boundary, and the second of the two **3**s.
+A session that wrote under a scope this machine does not hold stops the run
+where it stands — nothing is committed, the tree is left exactly as that session
+left it, and what happens to the work is a person's to decide:
+
+```sh
+$ warlock pull warlock-team
+warlock: `WAR-140.01` wrote under a scope this machine does not hold, so the run for `WAR-140` stopped with nothing committed: the working tree is exactly as that session left it, and the ticket's comment names the paths
+$ echo $?
+3
+```
+
+A resumed run is picked up on its own branch, and a clean tree is required there
+too. That refusal is the loop's own and names the branch it just checked out,
+the entries in it and that what a halted sub-task left is yours to keep or to
+drop: warlock will not fold somebody's half-finished edit into the next
+sub-task's commit under that sub-task's message.
+
+Three things a run reports and works past. A team whose workflow has no
+`In Progress` state, and one with no state matching the record's `review_state`,
+are each a line and a run that carries on, because a board nobody has finished
+setting up is warlock's to report rather than to stop over:
+
+```sh
+warlock: the team `WAR` has no `In Progress` state, so the ticket was not moved
+warlock: the team `WAR` has no `In Review` state, so the ticket was not moved into review
+```
+
+No `gh` on this machine is the third, and it is still a finish said as what
+happened: the branch is pushed, the body of the pull request goes on the ticket
+as a comment for whoever opens the request by hand, `pr_url` stays `null`, the
+ticket still moves and the run still exits 0.
+
+```sh
+warlock: `WAR-140` is in review, and there is no `gh` on this machine — the branch is pushed and the pull request's body is a comment on the ticket
+```
+
+A run record under `pulls/` that will not read is named the same way and the
+pass carries on without it; only a `pulls/` directory that cannot be listed at
+all stops a pull, because then nothing can say which runs this machine is
+holding.
+
+Exit status is **0** when a pull request was opened and when nothing was ready —
+an empty queue is an answer, exactly as an empty listing is. It is **3** twice,
+and both are the boundary's: a scope this machine's sigils do not open, refused
+at the start with nothing spent, and a sub-task that wrote past one, which is a
+run stopped with nothing committed. Everything else is an ordinary **1** — the
+unrecorded scope, the two key refusals, a dirty tree either side of a resume, a
+named ticket the queue's rules turn down, a halt, and whatever `git`, Linear or
+the run record said when it would not answer. A missing scope is clap's **2**,
+as a missing path is everywhere else.
+
+No key value is printed by any of this. The loop is handed a board that is
+already open rather than a key, so nothing inside a run has one to print, and
+the value is read on the one line that builds the client.
+
 ## Exit statuses
 
 | Status | What it means |
 | --- | --- |
-| `0` | Completed. The question was answered or the write happened, whatever the answer turned out to be — an empty listing and a scope closed to this machine included |
-| `1` | Warlock could not do it, or would not: the repository will not resolve, the manifest will not parse or will not save, the path has no repository-relative spelling, a scope name nothing records yet was given without all three record flags or with a blank one, a name that already has a record was given any of them, a push has no board or more than one, the brief is not one or is already filed, a draft's brief is not recorded in `.warlock/filed.toml`, its project is one Linear does not know or is not `Planned`, the scope block will not cut or has nothing left to cut, the team has no `Backlog` state, or Linear refused what was sent. The line on stderr is the thing to go and read |
+| `0` | Completed. The question was answered or the write happened, whatever the answer turned out to be — an empty listing, a queue with nothing ready to pull, and a scope closed to this machine included |
+| `1` | Warlock could not do it, or would not: the repository will not resolve, the manifest will not parse or will not save, the path has no repository-relative spelling, a scope name nothing records yet was given without all three record flags or with a blank one, a name that already has a record was given any of them, a push has no board or more than one, the brief is not one or is already filed, a draft's brief is not recorded in `.warlock/filed.toml`, its project is one Linear does not know or is not `Planned`, the scope block will not cut or has nothing left to cut, the team has no `Backlog` state, a pull's scope is one nothing records, the working tree is dirty, a named ticket is one the queue's rules turn down, a run halted, or Linear refused what was sent. The line on stderr is the thing to go and read |
 | `2` | The command line was never a request. Clap's status and its wording, for a word warlock has no place for |
-| `3` | Refused, with nothing spent: this machine's sigils do not open the scope covering the path. No byte moved, retrying changes nothing, and the road out is `warlock config` |
+| `3` | The sigil boundary, in the three places it is reached: this machine's sigils do not open the scope covering the path, they do not open the scope a pull was asked for — both refused at the start with nothing spent — or a pull's sub-task wrote under a scope they do not open, which stops the run with nothing committed and the tree as that session left it. Retrying changes nothing, and the road out is `warlock config` |
 | `4` | Completed with failures: a run wrote the documents it could and saved the manifest, and the lines above the count name the directories that did not come out of it |
 | `130` | Cancelled: somebody pressed Ctrl-C during a run, and what had finished by then is saved and granted. 128 plus SIGINT, so a shell, `make` and CI read it as interrupted without being told anything about warlock |
 
 The three that are not 1 are not 1 because they want different things done about
 them. A 3 says this checkout is outside that boundary, so stop and go and get
-the sigil. A 4 says the work is partly on disk, so re-run over the part that is
-not. A 130 says somebody decided to stop it, so nothing should retry it at all.
+the sigil — and where a pull crossed one, the tree is still holding what that
+session wrote. A 4 says the work is partly on disk, so re-run over the part that
+is not. A 130 says somebody decided to stop it, so nothing should retry it at
+all.
 Telling those apart by their wording would be telling them apart by parsing
 prose.
