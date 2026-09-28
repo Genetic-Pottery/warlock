@@ -5,7 +5,6 @@
 //! machine the suite runs on, and the one key any of it stores is not one.
 
 use std::path::Path;
-use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant};
 
 use tempfile::TempDir;
@@ -13,14 +12,16 @@ use warlock_engine::{
     Manifest, PactEntry, PullRun, RunStatus, ScopeRecord, save_key, save_key_binding, save_sigils,
 };
 use warlock_tui::{
-    Activity, Answer, App, Assignee, Dirty, GitError, Line, NamedIssue, Priority, PullAnswered,
-    Queue, QueuedIssue, Section, StateType, Taking,
+    Activity, Answer, App, Assignee, Dirty, Line, NamedIssue, Priority, PullAnswered, Queue,
+    QueuedIssue, Section, StateType, Taking,
 };
 
-use super::{Puller, Raised, Raises, Raising, Step, activity_port};
+use super::Puller;
 use crate::error::{Error, one_line};
-use crate::freshness::{Freshened, Freshening, Freshens};
-use crate::stubs::{Boarding, Checkout, Forging, Refreshing, Sessions, Slicing, VIEWER, said};
+use crate::freshness::Freshened;
+use crate::stubs::{
+    Boarding, Checkout, Forging, Refreshing, Sessions, Slicing, VIEWER, Written, said,
+};
 
 // Not a key, and named so that nothing reading this file mistakes it for one: it
 // is stored only so that a bound name resolves.
@@ -116,100 +117,36 @@ impl Ground {
     }
 }
 
-/// The three sessions written down before the run starts, standing in for the
-/// three `claude`s a real one spends.
-///
-/// The sub-task sessions are handed this run's own activity port, which is the one
-/// thing a test cannot write down in advance: what a session is seen doing has to
-/// arrive over the same channel the headings do, or the account card is being
-/// asserted about something the panel does not do.
-#[derive(Clone)]
-struct Written {
-    split: Slicing,
-    sessions: Sessions,
-    freshen: Refreshing,
-    doing: Vec<Activity>,
-    /// The directories the pass is to be seen reaching, in the manifest's own
-    /// spelling, which the stand-in has no way to say for itself: the real one
-    /// reports them out of the descent under it, and this says them onto the
-    /// same channel before it answers.
-    refreshing: Vec<String>,
-}
-
-impl Raises for Written {
-    type Split = Slicing;
-    type Sessions = Sessions;
-    type Freshen = Refreshes;
-
-    fn raise(&self, asked: Raising<'_>) -> Raised<Slicing, Sessions, Refreshes> {
-        Raised {
-            split: self.split.clone(),
-            sessions: self
-                .sessions
-                .clone()
-                .reporting(activity_port(&asked.events), self.doing.clone()),
-            freshen: Refreshes {
-                inner: self.freshen.clone(),
-                events: asked.events,
-                directories: self.refreshing.clone(),
-            },
-        }
-    }
-}
-
-/// The freshness pass as the panel wires it: the stand-in that answers, with the
-/// per-directory events the real pass's descent reports said onto the run's own
-/// channel first.
-struct Refreshes {
-    inner: Refreshing,
-    events: Sender<Step>,
-    directories: Vec<String>,
-}
-
-impl Freshens for Refreshes {
-    fn freshen(&self, asked: &Freshening<'_>) -> Result<Freshened, GitError> {
-        for directory in &self.directories {
-            self.events
-                .send(Step::Refreshing(directory.clone()))
-                .expect("the run is listening");
-        }
-        self.inner.freshen(asked)
-    }
-}
-
 // A run that works two sub-tasks and reaches a pull request, with a session that
 // reads, thinks and spends on the way.
 fn working() -> Written {
-    Written {
-        split: Slicing::into_chain(TICKET, &["Read the queue", "Work the ticket"]),
-        sessions: Sessions::answering([
+    Written::of(
+        Slicing::into_chain(TICKET, &["Read the queue", "Work the ticket"]),
+        Sessions::answering([
             said("done", "the queue is read", None),
             said("done", "the ticket is worked", None),
         ]),
-        freshen: Refreshing::quiet(),
-        doing: vec![
-            Activity::Tool {
-                name: "Read".to_owned(),
-                detail: Some(WROTE.to_owned()),
-            },
-            Activity::Thinking,
-            Activity::Writing { bytes: 512 },
-            Activity::Cost { usd: 0.42 },
-        ],
-        refreshing: Vec::new(),
-    }
+        Refreshing::quiet(),
+    )
+    .doing([
+        Activity::Tool {
+            name: "Read".to_owned(),
+            detail: Some(WROTE.to_owned()),
+        },
+        Activity::Thinking,
+        Activity::Writing { bytes: 512 },
+        Activity::Cost { usd: 0.42 },
+    ])
 }
 
 // The sessions of a run nothing lets reach one: a split or a sub-task raised at
 // all is the failure, which an empty script panics over.
 fn unasked() -> Written {
-    Written {
-        split: Slicing::into_chain(TICKET, &["Nothing this test lets a run reach"]),
-        sessions: Sessions::answering([]),
-        freshen: Refreshing::quiet(),
-        doing: Vec::new(),
-        refreshing: Vec::new(),
-    }
+    Written::of(
+        Slicing::into_chain(TICKET, &["Nothing this test lets a run reach"]),
+        Sessions::answering([]),
+        Refreshing::quiet(),
+    )
 }
 
 fn queue(issues: impl IntoIterator<Item = QueuedIssue>) -> Queue {
@@ -693,13 +630,13 @@ fn a_finished_run_puts_a_section_per_step_on_the_account_and_only_milestones_on_
 fn a_halt_lands_as_one_line_and_takes_nothing_down() {
     let ground = Ground::new();
     let repo = checkout();
-    let mut written = working();
-    written.sessions = Sessions::answering([said(
-        "blocked",
-        "the scope is somebody else's",
-        Some("a decision only the human can make"),
-    )]);
-    written.split = Slicing::into_chain(TICKET, &["Read the queue"]);
+    let written = working()
+        .splitting(Slicing::into_chain(TICKET, &["Read the queue"]))
+        .sessioning(Sessions::answering([said(
+            "blocked",
+            "the scope is somebody else's",
+            Some("a decision only the human can make"),
+        )]));
     let mut puller = puller(
         &ground,
         board(queue([ready()])),
@@ -736,9 +673,13 @@ fn a_halt_lands_as_one_line_and_takes_nothing_down() {
 fn a_crossing_names_the_sub_task_that_wrote_past_the_boundary() {
     let ground = Ground::new();
     let repo = Checkout::clean(DEFAULT).trees([Vec::new(), wrote("crates/control/src/lib.rs")]);
-    let mut written = working();
-    written.split = Slicing::into_chain(TICKET, &["Read the queue"]);
-    written.sessions = Sessions::answering([said("done", "the queue is read", None)]);
+    let written = working()
+        .splitting(Slicing::into_chain(TICKET, &["Read the queue"]))
+        .sessioning(Sessions::answering([said(
+            "done",
+            "the queue is read",
+            None,
+        )]));
     let mut puller = puller(
         &ground,
         board(queue([ready()])),
@@ -824,13 +765,13 @@ fn a_queue_with_nothing_ready_is_an_answer_and_asks_nothing() {
 #[test]
 fn the_refresh_pass_gets_a_section_of_its_own_per_directory_between_the_work_and_the_request() {
     let ground = Ground::new();
-    let mut written = working();
-    written.freshen = Refreshing::answering(Freshened {
+    let asked = Refreshing::answering(Freshened {
         refreshed: vec!["crates/engine".to_owned()],
         left_stale: Vec::new(),
     });
-    written.refreshing = vec!["crates/engine".to_owned()];
-    let asked = written.freshen.clone();
+    let written = working()
+        .freshening(asked.clone())
+        .refreshing(&["crates/engine"]);
     let mut puller = puller(
         &ground,
         board(queue([ready()])),
@@ -871,11 +812,10 @@ fn the_refresh_pass_gets_a_section_of_its_own_per_directory_between_the_work_and
 fn a_failure_in_the_run_lands_as_one_line_and_leaves_the_panel_running() {
     let ground = Ground::new();
     let repo = checkout();
-    let mut written = working();
     // The one failure the refresh hands back rather than reporting: a checkout
     // that cannot be asked what the branch changed, which is how every other step
     // of the loop fails.
-    written.freshen = Refreshing::refusing();
+    let written = working().freshening(Refreshing::refusing());
     let forge = Forging::opening(URL);
     let mut puller = puller(
         &ground,
