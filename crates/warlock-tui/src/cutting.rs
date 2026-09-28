@@ -385,19 +385,28 @@ impl<O: Opens, A: Converses> Cutter<O, A> {
     /// `/draft` typed into the composer, with the brief it is about already
     /// spelled the manifest's way.
     ///
-    /// The two refusals are asked in the order they have to be: a cut already
-    /// running is answered before anything is read, because a machine with no
-    /// home is a fact about a request that is not going to be made anyway.
-    /// Everything past them is the worker's, so this returns having read
-    /// nothing but the clock.
+    /// The three refusals are asked in the order they have to be: a pull in
+    /// flight is answered before anything else, because a run editing this
+    /// working tree is the loudest fact about the keystroke; a cut already
+    /// running comes next, because a machine with no home is a fact about a
+    /// request that is not going to be made anyway. Everything past them is the
+    /// worker's, so this returns having read nothing but the clock.
+    ///
+    /// `pulling` is the line naming the pull, or `None` with none — handed in
+    /// rather than read here, because the pull is not this type's to ask about.
     pub(crate) fn press(
         &mut self,
         app: &mut App,
         manifest: &Manifest,
         repo_root: &Path,
         brief: &str,
+        pulling: Option<&str>,
         now: Instant,
     ) {
+        if let Some(pulling) = pulling {
+            app.panel_mut().note(refused(pulling), now);
+            return;
+        }
         if self.running() {
             app.panel_mut().note(ALREADY_CUTTING, now);
             return;
@@ -1437,6 +1446,13 @@ fn cutting_line(project: &str) -> String {
 // board answers.
 fn reading_line(brief: &str) -> String {
     format!("reading the project filed for `{brief}`")
+}
+
+// A `/draft` turned down for a pull, in the one sentence every keystroke that
+// races one shares plus what this one did not do: a cut is drafting sessions and
+// issues on a board, and none of that started.
+fn refused(pulling: &str) -> String {
+    format!("{pulling}; this `/draft` cut nothing")
 }
 
 // Every test drives a temporary repository and a temporary home, through the

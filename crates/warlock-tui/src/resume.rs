@@ -93,10 +93,6 @@ fn resumed<W: Write>(
 /// worker, while this is one file read and one file written on the round the
 /// command was typed, and a return value would be a hand-off with one caller and
 /// nowhere to be held in between.
-#[allow(
-    dead_code,
-    reason = "the loop reaches this in WAR-143.05; its tests reach it now"
-)]
 pub(crate) fn resume_press<C: Converses>(
     app: &mut App,
     chat: &mut Chat<C>,

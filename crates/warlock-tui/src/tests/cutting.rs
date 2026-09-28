@@ -155,7 +155,7 @@ fn notes(app: &App) -> Vec<String> {
 // handed to it when it was built, which is what keeps every test here off the
 // machine's.
 fn press<O: Opens, A: Converses>(app: &mut App, cutter: &mut Cutter<O, A>, repo: &Path) {
-    cutter.press(app, &a_manifest(), repo, BRIEF, now());
+    cutter.press(app, &a_manifest(), repo, BRIEF, None, now());
 }
 
 // Rounds until the fetch has reported, drained and never blocked on: the loop
@@ -364,7 +364,7 @@ fn a_machine_with_no_home_is_refused_before_anything_is_read() {
     let mut cutter = Cutter::with_client(Boarding::unopened(), None, unasked(), unasked());
     let mut app = App::default();
 
-    cutter.press(&mut app, &a_manifest(), repo.path(), BRIEF, now());
+    cutter.press(&mut app, &a_manifest(), repo.path(), BRIEF, None, now());
 
     assert_eq!(notes(&app), vec![refusal(&Error::NoHome)]);
     assert!(!cutter.fetching(), "a refusal started a draft");
@@ -2143,4 +2143,28 @@ mod reviewing {
             "a call carries the key: {calls}"
         );
     }
+}
+
+#[test]
+fn a_pull_in_flight_turns_a_draft_down_before_anything_is_read() {
+    // No home as well, so the refusal on screen is the pull's only if it is
+    // asked first: the missing home would otherwise be the line.
+    let repo = a_repository();
+    let mut cutter = Cutter::with_client(Boarding::unopened(), None, unasked(), unasked());
+    let mut app = App::default();
+
+    cutter.press(
+        &mut app,
+        &a_manifest(),
+        repo.path(),
+        BRIEF,
+        Some("`WAR-140` is being pulled"),
+        now(),
+    );
+
+    assert_eq!(
+        notes(&app),
+        ["`WAR-140` is being pulled; this `/draft` cut nothing"]
+    );
+    assert!(!cutter.fetching(), "a refused draft started a fetch");
 }

@@ -48,9 +48,11 @@ use warlock_engine::{
     Manifest, PullRun, ScopeRecord, halted_and_resumed_runs, held_sigils, to_manifest_path,
 };
 use warlock_tui::{
-    Activities, Activity, App, Board, Cancel, ChatAgent, ClaudeAgent, Commit, Dirty, Forge, Gh,
-    Git, GitError, LinearOpener, Opens, PullAnswered, PullConfirm, Repository, Split, Splitting,
-    Taking, Undertaking, Worked, Working, branch_name, choose, take_named, working_system_prompt,
+    Activities, Activity, App, Board, Cancel, ChatAgent, ClaudeAgent, Commit, Dirty,
+    FetchedProject, Forge, Gh, Git, GitError, LinearError, LinearIssue, LinearOpener,
+    LinearProject, NamedIssue, NewIssue, NewProject, Opens, PullAnswered, PullConfirm, Queue,
+    Repository, Split, Splitting, Taking, Undertaking, Worked, Working, branch_name, choose,
+    take_named, working_system_prompt,
 };
 
 use crate::cut::listed;
@@ -125,11 +127,8 @@ struct Choosing {
     work: Work,
     landings: Receiver<Landing>,
     // Never read, and that is the whole of what it does: the guard's `Drop` is
-    // the cancel, so the field being here is the session's exit path. An `allow`
-    // rather than the `expect` `cutting.rs` writes because the module carries one
-    // of its own until WAR-143.05 reaches it, and an expectation inside an allow
-    // is never fulfilled.
-    #[allow(
+    // the cancel, so the field being here is the session's exit path.
+    #[expect(
         dead_code,
         reason = "held for its drop, which is what cancels the selection in flight"
     )]
@@ -150,12 +149,12 @@ struct Underway {
     /// the tree.
     ticket: String,
     events: Receiver<Step>,
-    #[allow(
+    #[expect(
         dead_code,
         reason = "held for its drop, which latches the run's say-when"
     )]
     cancel: CancelGuard,
-    #[allow(
+    #[expect(
         dead_code,
         reason = "held for its drop, which kills the session in flight"
     )]
@@ -312,6 +311,15 @@ where
         &self.confirm
     }
 
+    /// Where the run records sit, for the one other command that reads them: a
+    /// `/resume` releases a halt of a run this value would pick up, so the two
+    /// read the same directory or they are talking about two different halts.
+    /// Read off here rather than resolved a second time in the loop, for the
+    /// reason this value was built with it — see [`Puller::with_seams`].
+    pub(crate) fn home(&self) -> Option<&Path> {
+        self.home.as_deref()
+    }
+
     // Read once a round by the loop and once per `/pull` by this value itself,
     // off the one run it keeps: a flag beside it would be a second record of
     // whether a ticket is being worked.
@@ -319,8 +327,9 @@ where
         self.underway.is_some()
     }
 
-    // The same for the queue being read, which is a pull too — it is reading the
-    // board on this conversation's behalf and it is what a Yes will work.
+    // Read by the tests alone, which wait on the selection worker through it. The
+    // loop never needs to ask: `in_flight` already words the queue being read.
+    #[cfg(test)]
     pub(crate) const fn choosing(&self) -> bool {
         self.choosing.is_some()
     }
@@ -773,7 +782,11 @@ pub(crate) struct Stopping {
 }
 
 impl Stopping {
-    fn raising(&self, cancel: Cancel) {
+    /// Called by every session as it is raised, from the worker: the handle the
+    /// child is really listening to, published where the thread that quits can
+    /// reach it. `pub(crate)` because a stand-in session in a test publishes its
+    /// own the same way — that is how a quit is driven at all.
+    pub(crate) fn raising(&self, cancel: Cancel) {
         let mut session = self.held();
         if self.stopped.load(Ordering::SeqCst) {
             cancel.cancel();
@@ -885,6 +898,96 @@ impl<R: Repository> Repository for Committing<R> {
 
     fn publish(&self, branch: &str) -> Result<(), GitError> {
         self.inner.publish(branch)
+    }
+}
+
+/// The board the run is given: asked nothing at all once the run has been
+/// stopped.
+///
+/// A wrapper rather than a question inside the loop, for [`Committing`]'s reason —
+/// which door wants it. A shell has no stop button, so `warlock pull` only ever
+/// reaches a halt with somebody waiting on it; the panel reaches one on its way
+/// out, because quitting cancels the session in flight and a cancelled session is
+/// a sub-task that failed. The record is written before the ticket is told
+/// anything, so the halt is recorded either way and `/resume` releases it — what
+/// this stops is the comment after it, which would be the ticket's account of a
+/// run nobody let finish.
+///
+/// Every method answers through [`asked`](Quiet::asked) rather than each one
+/// asking for itself, so the gate is one line and belongs to the type.
+struct Quiet<B: Board> {
+    inner: B,
+    cancel: Cancel,
+}
+
+impl<B: Board> Quiet<B> {
+    fn asked<T>(&self, ask: impl FnOnce(&B) -> Result<T, LinearError>) -> Result<T, LinearError> {
+        if self.cancel.is_cancelled() {
+            return Err(LinearError::Stopped);
+        }
+        ask(&self.inner)
+    }
+}
+
+impl<B: Board> Board for Quiet<B> {
+    fn viewer(&self) -> Result<String, LinearError> {
+        self.asked(Board::viewer)
+    }
+
+    fn team_id(&self, key: &str) -> Result<Option<String>, LinearError> {
+        self.asked(|board| board.team_id(key))
+    }
+
+    fn backlog_status(&self) -> Result<Option<String>, LinearError> {
+        self.asked(Board::backlog_status)
+    }
+
+    fn backlog_state(&self, team: &str) -> Result<Option<String>, LinearError> {
+        self.asked(|board| board.backlog_state(team))
+    }
+
+    fn workflow_state(&self, team: &str, name: &str) -> Result<Option<String>, LinearError> {
+        self.asked(|board| board.workflow_state(team, name))
+    }
+
+    fn move_issue(&self, issue: &str, state: &str) -> Result<String, LinearError> {
+        self.asked(|board| board.move_issue(issue, state))
+    }
+
+    fn issue_label_id(&self, name: &str, team: &str) -> Result<String, LinearError> {
+        self.asked(|board| board.issue_label_id(name, team))
+    }
+
+    fn fetch_project(&self, id: &str) -> Result<Option<FetchedProject>, LinearError> {
+        self.asked(|board| board.fetch_project(id))
+    }
+
+    fn scope_queue(&self, team: &str, label: &str, assignee: &str) -> Result<Queue, LinearError> {
+        self.asked(|board| board.scope_queue(team, label, assignee))
+    }
+
+    fn named_issue(&self, team: &str, number: u64) -> Result<Option<NamedIssue>, LinearError> {
+        self.asked(|board| board.named_issue(team, number))
+    }
+
+    fn create_project(&self, project: &NewProject<'_>) -> Result<LinearProject, LinearError> {
+        self.asked(|board| board.create_project(project))
+    }
+
+    fn create_issue(&self, issue: &NewIssue<'_>) -> Result<LinearIssue, LinearError> {
+        self.asked(|board| board.create_issue(issue))
+    }
+
+    fn create_relation(&self, blocker: &str, waiting: &str) -> Result<String, LinearError> {
+        self.asked(|board| board.create_relation(blocker, waiting))
+    }
+
+    fn comment_on_project(&self, project: &str, body: &str) -> Result<String, LinearError> {
+        self.asked(|board| board.comment_on_project(project, body))
+    }
+
+    fn comment_on_issue(&self, issue: &str, body: &str) -> Result<String, LinearError> {
+        self.asked(|board| board.comment_on_issue(issue, body))
     }
 }
 
@@ -1056,13 +1159,17 @@ where
             scope: work.record.name(),
             held: &work.held,
             events: events.clone(),
-            cancel,
+            cancel: cancel.clone(),
             stopping,
         });
         // Opened over here, which is what keeps the panel drawing while Linear is
         // answering: the key crosses as a field of the work and is read on this
-        // one line.
-        let board = spending.open.open(&work.value);
+        // one line. Wrapped in the run's own say-when, so a run stopped by the
+        // panel quitting tells the board nothing on its way out — see [`Quiet`].
+        let board = Quiet {
+            inner: spending.open.open(&work.value),
+            cancel,
+        };
         let repo = Committing {
             inner: spending.repo,
             events: events.clone(),

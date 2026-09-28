@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 use std::{fs, io};
 
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -24,7 +25,15 @@ fn scope_press(
     repo_root: &Path,
     in_flight: bool,
 ) -> ScopePrompt {
-    super::scope_press(app, manifest, repo_root, &Sigils::held(["*"]), in_flight)
+    super::scope_press(
+        app,
+        manifest,
+        repo_root,
+        &Sigils::held(["*"]),
+        in_flight,
+        None,
+        Instant::now(),
+    )
 }
 
 // A grant on every entry, so "the write left the grant alone" is an
@@ -164,6 +173,8 @@ fn s_is_refused_on_a_directory_whose_scope_this_machine_does_not_hold() {
         repo.path(),
         &Sigils::held(["web"]),
         false,
+        None,
+        Instant::now(),
     );
 
     // You must hold a boundary to redraw it. Without this the one key whose
@@ -196,7 +207,15 @@ fn holding_a_matching_sigil_opens_the_prompt() {
     ] {
         let mut app = app_on(repo.path(), ENGINE_ROW);
 
-        let prompt = super::scope_press(&mut app, &pacts(), repo.path(), &sigils, false);
+        let prompt = super::scope_press(
+            &mut app,
+            &pacts(),
+            repo.path(),
+            &sigils,
+            false,
+            None,
+            Instant::now(),
+        );
 
         assert_eq!(
             prompt,
@@ -224,7 +243,15 @@ fn a_machine_that_holds_no_sigil_is_refused_by_a_scoped_directory() {
     ] {
         let mut app = app_on(repo.path(), ENGINE_ROW);
 
-        let prompt = super::scope_press(&mut app, &pacts(), repo.path(), &sigils, false);
+        let prompt = super::scope_press(
+            &mut app,
+            &pacts(),
+            repo.path(),
+            &sigils,
+            false,
+            None,
+            Instant::now(),
+        );
 
         assert_eq!(
             prompt,
@@ -247,7 +274,15 @@ fn an_unscoped_directory_stays_open_to_a_machine_holding_nothing() {
     // The permissive default lives on the directory and only there, which is
     // what keeps a repository that has never scoped anything unaffected by
     // boundaries existing at all.
-    let prompt = super::scope_press(&mut app, &pacts(), repo.path(), &Sigils::Nothing, false);
+    let prompt = super::scope_press(
+        &mut app,
+        &pacts(),
+        repo.path(),
+        &Sigils::Nothing,
+        false,
+        None,
+        Instant::now(),
+    );
 
     assert_eq!(prompt, ScopePrompt::open("crates/tui", ""));
 }
@@ -265,6 +300,8 @@ fn a_directory_no_scope_covers_is_open_to_a_machine_holding_something_else() {
         repo.path(),
         &Sigils::held(["data-plane"]),
         false,
+        None,
+        Instant::now(),
     );
 
     assert_eq!(prompt, ScopePrompt::open("crates/tui", ""));
@@ -289,7 +326,9 @@ fn an_inner_scope_replaces_the_outer_one_rather_than_adding_to_it() {
             &manifest,
             repo.path(),
             &Sigils::held(["platform"]),
-            false
+            false,
+            None,
+            Instant::now()
         ),
         ScopePrompt::Closed
     );
@@ -302,7 +341,9 @@ fn an_inner_scope_replaces_the_outer_one_rather_than_adding_to_it() {
             &manifest,
             repo.path(),
             &Sigils::held(["platform"]),
-            false
+            false,
+            None,
+            Instant::now()
         ),
         ScopePrompt::open("crates/tui", "")
     );
@@ -320,6 +361,8 @@ fn a_run_in_flight_is_answered_before_the_boundary_is() {
         repo.path(),
         &Sigils::held(["web"]),
         true,
+        None,
+        Instant::now(),
     );
 
     // Both refusals apply; the in-flight one is the one on screen. It goes
@@ -1371,4 +1414,34 @@ fn the_whole_path_through_both_windows_is_one_key_at_a_time() {
     assert!(!app.is_pacting());
     assert_eq!(app.pact_line(), None);
     assert_eq!(app.message(), Some(LAST_KEY));
+}
+
+#[test]
+fn a_pull_in_flight_turns_s_down_on_the_thread_and_opens_no_window() {
+    let repo = a_repo();
+    let mut app = app_on(repo.path(), ENGINE_ROW);
+
+    let prompt = super::scope_press(
+        &mut app,
+        &pacts(),
+        repo.path(),
+        &Sigils::held(["*"]),
+        false,
+        Some("`WAR-140` is being pulled"),
+        Instant::now(),
+    );
+
+    assert_eq!(prompt, ScopePrompt::Closed);
+    let said: Vec<String> = app
+        .panel()
+        .thread()
+        .map(|thread| thread.lines(Instant::now()))
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|line| match line {
+            warlock_tui::Line::Note { text } => Some(text),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(said, ["`WAR-140` is being pulled; no scope was written"]);
 }

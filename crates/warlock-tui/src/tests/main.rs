@@ -22,11 +22,12 @@ use super::{Cli, Command, Error, FOR_CLAUDE_MD, Parts, ScopeCommand, Seams, Sess
 use crate::chatting::Chat;
 use crate::cutting::Cutter;
 use crate::pacting::Pact;
+use crate::puller::{Claudes, Puller};
 use crate::pushing::Pushes;
 use crate::query::spelled;
 use crate::rescope::ScopeRefusal;
 use crate::session::{Scope, Watched};
-use crate::stubs::{Boarding, Copying, Passing, Saying, Scripted};
+use crate::stubs::{Boarding, Checkout, Copying, Forging, Passing, Saying, Scripted};
 use crate::terminal::Screen;
 
 // `try_parse_from` wants argv as the process gets it, program name and all,
@@ -1474,6 +1475,9 @@ impl<O: Opens, A: Converses> Seams for Stubbed<O, A> {
     type Clip = Copying;
     type Board = O;
     type Draft = A;
+    type Repo = Checkout;
+    type Forge = Forging;
+    type Raise = Claudes;
 }
 
 // The drafting model is a script with nothing in it: no test driven through
@@ -1500,6 +1504,20 @@ fn driving(app: App, scope: Scope, tree: &Tree) -> Driven {
             Scripted::saying([]),
             Scripted::saying([]),
         ),
+        no_pull(Boarding::filing("")),
+    )
+}
+
+// A pull over stand-ins and with no home, for the reason the push and the cut
+// above have none: a `/pull` typed in any test driven through this is refused
+// before a board is opened, a `git` is run or a `claude` is raised.
+fn no_pull<O: Opens>(board: O) -> Puller<O, Checkout, Forging, Claudes> {
+    Puller::with_seams(
+        board,
+        Checkout::clean("main"),
+        Forging::opening(""),
+        Claudes,
+        None,
     )
 }
 
@@ -1512,6 +1530,7 @@ fn driving_over<O: Opens, A: Converses>(
     tree: &Tree,
     pushes: Pushes<O>,
     cutter: Cutter<O, A>,
+    puller: Puller<O, Checkout, Forging, Claudes>,
 ) -> Session<Stubbed<O, A>> {
     let watched = Watched::start(&scope, tree);
     let root = scope.repo_root.clone();
@@ -1522,6 +1541,7 @@ fn driving_over<O: Opens, A: Converses>(
         chat: Chat::with_agent(root, Saying::answering(ANSWER)),
         pushes,
         cutter,
+        puller,
     };
     Session::new(app, scope, Manifest::new(), watched, parts)
 }
@@ -1585,9 +1605,10 @@ fn session_reading<O: Opens, A: Converses>(
     root: &Path,
     pushes: Pushes<O>,
     cutter: Cutter<O, A>,
+    puller: Puller<O, Checkout, Forging, Claudes>,
 ) -> Session<Stubbed<O, A>> {
     let (app, scope, tree) = loading(root);
-    driving_over(app, scope, &tree, pushes, cutter)
+    driving_over(app, scope, &tree, pushes, cutter, puller)
 }
 
 fn loading(root: &Path) -> (App, Scope, Tree) {
@@ -3777,7 +3798,8 @@ mod cutting {
         let mut driven = session_reading(
             repo,
             Pushes::with_client(linear.clone(), Some(home.to_path_buf())),
-            Cutter::with_client(linear, Some(home.to_path_buf()), agent, proposer),
+            Cutter::with_client(linear.clone(), Some(home.to_path_buf()), agent, proposer),
+            super::no_pull(linear),
         );
         driven.manifest = a_manifest();
         driven

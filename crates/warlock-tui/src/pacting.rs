@@ -88,12 +88,18 @@ impl<P: Wired + Agent> Pact<P> {
         }
     }
 
+    /// `pulling` is the line naming the pull in flight, or `None` with none: a
+    /// pull is a session editing this working tree, and a pass reads and rewrites
+    /// the very documents it is writing. Handed in rather than read here for the
+    /// reason the run below is read here — whoever holds the answer says it, and
+    /// the pull is not this type's.
     pub(crate) fn press(
         &mut self,
         kind: Run,
         app: &mut App,
         manifest: &Manifest,
         scope: &Scope,
+        pulling: Option<&str>,
         now: Instant,
     ) {
         let before = app.clone();
@@ -101,11 +107,15 @@ impl<P: Wired + Agent> Pact<P> {
         // caller who would have had to look at the same field to know it.
         let running = self.running();
         let (repo_root, sigils) = (&scope.repo_root, scope.chrome.sigils());
+        let turn = TurnedDown {
+            in_flight: running,
+            pulling,
+        };
         let work = match kind {
             Run::Refresh => {
-                refresh_press(app, manifest, repo_root, sigils, running, now).map(Work::Refresh)
+                refresh_press(app, manifest, repo_root, sigils, turn, now).map(Work::Refresh)
             }
-            Run::Pact => pact_press(app, manifest, repo_root, sigils, running, now).map(Work::Pact),
+            Run::Pact => pact_press(app, manifest, repo_root, sigils, turn, now).map(Work::Pact),
         };
         if let Some(work) = work {
             // The worker, the channel and the say-when, in the one value this
@@ -312,24 +322,51 @@ fn cancelled(toggled: Toggled) -> Toggled {
     }
 }
 
-// The two refusals both keys share, in the order they have to be asked in. A
-// run already in flight is answered by rewording a line that is already on
-// screen, which is the whole of the refusal and says the same thing however
-// often it is pressed; the boundary is asked second, and both are past before
-// anything that paints rather than asks.
+/// What can already be going on when one of the two keys is pressed: this type's
+/// own run, and a pull of a ticket.
+///
+/// One value rather than two booleans threaded side by side, because they are
+/// asked together at every one of the three call sites and a pair of bare `bool`s
+/// in that order is a pair somebody swaps.
+#[derive(Debug, Clone, Copy)]
+struct TurnedDown<'a> {
+    in_flight: bool,
+    pulling: Option<&'a str>,
+}
+
+// The three refusals both keys share, in the order they have to be asked in. A
+// pull in flight is answered first and on the thread, because there is no
+// progress line on screen for a reworded line to land on and the sentence has to
+// name the ticket whose session is editing this tree. This type's own run is
+// answered by rewording a line that *is* already on screen, which says the same
+// thing however often it is pressed; the boundary is asked last, and all three
+// are past before anything that paints rather than asks.
 fn turned_down(
     app: &mut App,
     operation: Operation,
     manifest: &Manifest,
     repo_root: &Path,
     sigils: &Sigils,
-    in_flight: bool,
+    turn: TurnedDown<'_>,
+    at: Instant,
 ) -> bool {
-    if in_flight {
+    if let Some(pulling) = turn.pulling {
+        app.panel_mut().note(refused(pulling), at);
+        return true;
+    }
+    if turn.in_flight {
         app.set_pact_refused();
         return true;
     }
     closed_scope(app, operation, manifest, repo_root, sigils)
+}
+
+// A pass turned down for a pull, in the one sentence every keystroke that races
+// one shares plus what this key did not do. One wording for both keys, because
+// what they have in common is the whole of what was refused: neither started a
+// session over the documents the run is writing.
+fn refused(pulling: &str) -> String {
+    format!("{pulling}; no pass was started")
 }
 
 fn pact_press(
@@ -337,7 +374,7 @@ fn pact_press(
     manifest: &Manifest,
     repo_root: &Path,
     sigils: &Sigils,
-    in_flight: bool,
+    turn: TurnedDown<'_>,
     at: Instant,
 ) -> Option<PactToggle> {
     // Which way the press goes decides what the boundary is asked about: an
@@ -346,7 +383,7 @@ fn pact_press(
         Some(reach) if !reach.pacted => Operation::Unpact,
         _ => Operation::Pact,
     };
-    if turned_down(app, operation, manifest, repo_root, sigils, in_flight) {
+    if turned_down(app, operation, manifest, repo_root, sigils, turn, at) {
         return None;
     }
     // The boundary is past, so what is left is the app's own rules about the
@@ -367,9 +404,9 @@ fn pact_press(
     Some(toggle)
 }
 
-// `edits.rs` drives the real `p` rather than a copy of its rules; the two
-// booleans it does not care about are pinned here so a test cannot pin them
-// differently.
+// `edits.rs` drives the real `p` rather than a copy of its rules; the things it
+// does not care about — a run of its own and a pull — are pinned here so a test
+// cannot pin them differently.
 #[cfg(test)]
 pub(crate) fn pressed_p(
     app: &mut App,
@@ -377,7 +414,17 @@ pub(crate) fn pressed_p(
     repo_root: &Path,
     sigils: &Sigils,
 ) -> Option<PactToggle> {
-    pact_press(app, manifest, repo_root, sigils, false, Instant::now())
+    pact_press(
+        app,
+        manifest,
+        repo_root,
+        sigils,
+        TurnedDown {
+            in_flight: false,
+            pulling: None,
+        },
+        Instant::now(),
+    )
 }
 
 fn refresh_press(
@@ -385,7 +432,7 @@ fn refresh_press(
     manifest: &Manifest,
     repo_root: &Path,
     sigils: &Sigils,
-    in_flight: bool,
+    turn: TurnedDown<'_>,
     at: Instant,
 ) -> Option<PathBuf> {
     if turned_down(
@@ -394,7 +441,8 @@ fn refresh_press(
         manifest,
         repo_root,
         sigils,
-        in_flight,
+        turn,
+        at,
     ) {
         return None;
     }

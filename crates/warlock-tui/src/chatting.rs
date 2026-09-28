@@ -22,7 +22,8 @@ use warlock_engine::{DEFAULT_BRIEF_DIRECTORY, briefs, load_briefs, to_manifest_p
 use warlock_tui::{
     Activities, Activity, App, BRIEF_EFFORT, BRIEF_MODEL, CHAT_INSTRUCTION, Cancel, ChatAgent,
     Composed, Composer, Converses, Edited, Ending, Focus, Mode, Pasted, ScopePrompt, Submitted,
-    TemplateError, WRITE_INSTRUCTION, brief_instruction, brief_template, ending_for, submitted_for,
+    Taking, TemplateError, WRITE_INSTRUCTION, brief_instruction, brief_template, ending_for,
+    submitted_for,
 };
 
 use crate::error::one_line;
@@ -93,17 +94,49 @@ impl About {
     }
 }
 
-/// What a submitted draft hands the loop, which is a brief and what is to be
-/// done with it.
+/// What a submitted draft hands the loop: a brief and what is to be done with
+/// it, or a ticket and which of the two things that read one.
 ///
-/// Two variants rather than a second `Option<String>` beside the first: the
-/// loop answers them in two different places, and a pair of options would have
-/// a fourth state — both at once — that a submit cannot produce and every
-/// caller would still have to read.
+/// A variant each rather than one value carrying a verb: the loop answers them
+/// in four different places, and a single variant would be a value every caller
+/// had to match on a second time to find its own arm.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Wanted {
     Filed(String),
     Cut(String),
+    /// `None` is a bare `/pull`, which is answered with the scopes this machine
+    /// holds — a file under the home, which this value has not got.
+    Pull(Option<Takes>),
+    Resume(String),
+}
+
+/// The scope a `/pull` named and, where it named one, the ticket.
+///
+/// The owned twin of [`Taking`], which borrows the draft: the draft is dropped by
+/// the submit that reads it, and what goes up to the loop outlives that.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Takes {
+    scope: String,
+    ticket: Option<String>,
+}
+
+impl Takes {
+    fn of(taking: Taking<'_>) -> Self {
+        Self {
+            scope: taking.scope.to_owned(),
+            ticket: taking.ticket.map(ToOwned::to_owned),
+        }
+    }
+
+    /// Borrowed back out as the parser's own value, which is what the pull takes:
+    /// there is one shape for "a scope and maybe a ticket" and this is not a
+    /// second one.
+    pub(crate) fn taking(&self) -> Taking<'_> {
+        Taking {
+            scope: &self.scope,
+            ticket: self.ticket.as_deref(),
+        }
+    }
 }
 
 fn unreadable_template(error: &TemplateError) -> String {
@@ -388,12 +421,15 @@ impl<C: Converses> Chat<C> {
             Submitted::Cut(named) => {
                 return self.brief_for(app, named, About::Cut, now).map(Wanted::Cut);
             }
-            // Recognised and nothing else, so that the crate compiles while the
-            // two commands are only half built: WAR-143.05 turns these into
-            // `Wanted` values and routes them to the pull runner and the resume
-            // path, and until it does a `/pull` or a `/resume` typed here costs
-            // the draft and says nothing.
-            Submitted::Pull(_) | Submitted::Resume(_) => {}
+            // The two commands about a ticket, which are nothing to do with this
+            // conversation: no turn is opened, no mode moves and nothing here is
+            // refused, because every rule either of them has is about a queue, a
+            // working tree and the run records under the home — and not one of
+            // those is this value's. Both go straight up to the loop, which holds
+            // them. A bare `/pull` goes up as well rather than being refused
+            // here: the answer to it is the scopes this machine holds.
+            Submitted::Pull(taking) => return Some(Wanted::Pull(taking.map(Takes::of))),
+            Submitted::Resume(ticket) => return Some(Wanted::Resume(ticket.to_owned())),
             // The line is asked of the value rather than restated here, so the
             // list of commands that exist is written down in one place.
             said @ Submitted::Refused => {
