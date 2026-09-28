@@ -13,9 +13,9 @@ use ratatui::crossterm::event::{
 use ratatui::layout::Size;
 use warlock_tui::{
     Answered, App, CarryAnswered, Cell, Composed, Composer, CutAnswered, Edited, Focus, Hit, Modal,
-    PushAnswered, QuitConfirm, Reach, RecordEdited, Reviewed, answer_for, carry_answer_for,
-    compose_for, cut_answer_for, edit_for, hit_test, panel_reach, push_answer_for, record_edit_for,
-    review_answer_for,
+    PullAnswered, PushAnswered, QuitConfirm, Reach, RecordEdited, Reviewed, answer_for,
+    carry_answer_for, compose_for, cut_answer_for, edit_for, hit_test, panel_reach,
+    pull_answer_for, push_answer_for, record_edit_for, review_answer_for,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -126,6 +126,12 @@ pub(crate) enum Pressed {
     // not be told from the Esc that closes the same window having started
     // nothing.
     Cut(CutAnswered),
+    // The question a `/pull` asks once the ticket is chosen, for the reason
+    // `Cut` carries an answer rather than a next state: `Pull` is a run
+    // starting and the window coming down, which a `PullConfirm::Closed` could
+    // not be told from the Esc that closes the same window having checked out
+    // nothing.
+    Pull(PullAnswered),
     // One slice's drafts answered about: three answers, so its own value rather
     // than the two-answer ones above — see `Reviewed`.
     Review(Reviewed),
@@ -203,6 +209,7 @@ pub(crate) fn press_for(
             },
             Modal::Push(asked) => Pressed::Push(push_answer_for(key, asked.answer())),
             Modal::Cut(asked) => Pressed::Cut(cut_answer_for(key, asked.answer())),
+            Modal::Pull(asked) => Pressed::Pull(pull_answer_for(key, asked.answer())),
             Modal::Review(drafts) => Pressed::Review(review_answer_for(key, drafts)),
             Modal::Carry(asked) => Pressed::Carry(carry_answer_for(key, asked.answer())),
             Modal::Filing(field) => Pressed::Filing(edit_for(key, field)),

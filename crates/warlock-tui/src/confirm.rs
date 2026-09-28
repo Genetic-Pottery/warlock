@@ -388,6 +388,208 @@ pub fn cut_answer_for(key: KeyEvent, highlighted: Answer) -> CutAnswered {
     }
 }
 
+// The ticket a `/pull` is about to work and where the work will land. Named for
+// what the answer commits to — undertaking a whole ticket — rather than for the
+// command, because the run itself is `Pulling` elsewhere and one word for both
+// would read as one thing.
+//
+// Every fact here was read off the board or worked out from the run record a
+// moment ago, and is parked for [`Cutting`]'s reason: none of them can be had
+// again without a second request, and a Yes should not have to ask twice.
+//
+// There is no key field at all, which is [`Filing`]'s note taken one step
+// further: a pull resolves the board the machine's own way, so this value has
+// neither a key nor a name for one, and a dialog with nowhere to put a key
+// cannot draw one, print one or grow one in a `Debug` rendering.
+//
+// `resuming` is `Some` exactly when this is a run being carried on, and what it
+// carries is the sub-task the next session starts from. Two facts in one field
+// because they are one fact: a fresh pull resumes nothing and so has no sub-task
+// to name, and "resuming, from nowhere" is not a state a run is ever in.
+//
+// The lit answer rides along inside it for [`QuitConfirm`]'s reason — it exists
+// exactly as long as the question does — which is why this is only ever built
+// through [`PullConfirm::open`] or [`PullConfirm::resuming`].
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Undertaking {
+    ticket: String,
+    title: String,
+    scope: String,
+    team: String,
+    branch: String,
+    resuming: Option<String>,
+    answer: Answer,
+}
+
+impl Undertaking {
+    /// The ticket's identifier, in the spelling every line about this run names
+    /// it in.
+    #[must_use]
+    pub fn ticket(&self) -> &str {
+        &self.ticket
+    }
+
+    #[must_use]
+    pub fn title(&self) -> &str {
+        &self.title
+    }
+
+    /// The scope the ticket was taken from, which is the boundary the run is
+    /// allowed to work inside.
+    #[must_use]
+    pub fn scope(&self) -> &str {
+        &self.scope
+    }
+
+    #[must_use]
+    pub fn team(&self) -> &str {
+        &self.team
+    }
+
+    /// The branch the run will create, named before anything is created: see
+    /// the type's own note about why it is parked here.
+    #[must_use]
+    pub fn branch(&self) -> &str {
+        &self.branch
+    }
+
+    /// The sub-task a resumed run carries on from, and `None` for a fresh pull:
+    /// see the field's own note.
+    #[must_use]
+    pub fn resuming(&self) -> Option<&str> {
+        self.resuming.as_deref()
+    }
+
+    #[must_use]
+    pub const fn answer(&self) -> Answer {
+        self.answer
+    }
+
+    // The one way the highlight moves, for [`Filing::with_answer`]'s reason:
+    // answering re-lights the same question rather than building a second one
+    // from facts that would have to be fetched again.
+    #[must_use]
+    pub fn with_answer(&self, answer: Answer) -> Self {
+        Self {
+            answer,
+            ..self.clone()
+        }
+    }
+}
+
+/// The question a `/pull` asks between choosing the ticket and starting the
+/// run, drawn over the frame the way the other dialogs are and answered by the
+/// very same rules — [`pull_answer_for`] is [`answer_for`] with the answers
+/// renamed.
+///
+/// A separate value from [`CutConfirm`] because the two are answered about
+/// different things and say so in their types: a confirmed question there
+/// drafts tickets for a project, and a confirmed question here checks out a
+/// branch and works one ticket to a pull request.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
+pub enum PullConfirm {
+    #[default]
+    Closed,
+    Open(Undertaking),
+}
+
+impl PullConfirm {
+    /// A ticket taken fresh: No is lit on open, for the reason [`Answer::No`]
+    /// is the default — the round that puts this up and an Enter straight after
+    /// it come to nothing at all.
+    #[must_use]
+    pub fn open(
+        ticket: impl Into<String>,
+        title: impl Into<String>,
+        scope: impl Into<String>,
+        team: impl Into<String>,
+        branch: impl Into<String>,
+    ) -> Self {
+        Self::Open(Undertaking {
+            ticket: ticket.into(),
+            title: title.into(),
+            scope: scope.into(),
+            team: team.into(),
+            branch: branch.into(),
+            resuming: None,
+            answer: Answer::No,
+        })
+    }
+
+    /// The same question about a run being carried on, which names the sub-task
+    /// the next session starts from. A constructor of its own rather than an
+    /// `Option` on [`PullConfirm::open`], so a caller resuming a run cannot
+    /// forget to say where it resumes from.
+    #[must_use]
+    pub fn resuming(
+        ticket: impl Into<String>,
+        title: impl Into<String>,
+        scope: impl Into<String>,
+        team: impl Into<String>,
+        branch: impl Into<String>,
+        subtask: impl Into<String>,
+    ) -> Self {
+        Self::Open(Undertaking {
+            ticket: ticket.into(),
+            title: title.into(),
+            scope: scope.into(),
+            team: team.into(),
+            branch: branch.into(),
+            resuming: Some(subtask.into()),
+            answer: Answer::No,
+        })
+    }
+
+    #[must_use]
+    pub const fn is_open(&self) -> bool {
+        matches!(self, Self::Open(_))
+    }
+
+    /// The one way into [`pull_answer_for`] and into the drawing, for the
+    /// reason [`QuitConfirm::highlighted`] is: the caller cannot invent a
+    /// question that is not up.
+    #[must_use]
+    pub const fn undertaking(&self) -> Option<&Undertaking> {
+        match self {
+            Self::Closed => None,
+            Self::Open(undertaking) => Some(undertaking),
+        }
+    }
+
+    /// The same question with the other answer lit, and a closed dialog left
+    /// closed: an arrow key pressed at nothing lights nothing.
+    #[must_use]
+    pub fn lit(&self, answer: Answer) -> Self {
+        match self {
+            Self::Closed => Self::Closed,
+            Self::Open(undertaking) => Self::Open(undertaking.with_answer(answer)),
+        }
+    }
+}
+
+/// [`Answered`] in this dialog's vocabulary: a confirmed question here starts
+/// the pull, and warlock goes on running either way.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PullAnswered {
+    Open(Answer),
+    Cancel,
+    Pull,
+}
+
+/// The quit dialog's rules, renamed rather than restated: Esc and `n` cancel,
+/// Left then Enter starts the run, an immediate Enter cancels, a release
+/// changes nothing, and every other key leaves the question exactly as it was.
+/// Written over [`answer_for`] so the four cannot drift — a key that moves one
+/// moves them all.
+#[must_use]
+pub fn pull_answer_for(key: KeyEvent, highlighted: Answer) -> PullAnswered {
+    match answer_for(key, highlighted) {
+        Answered::Open(answer) => PullAnswered::Open(answer),
+        Answered::Close => PullAnswered::Cancel,
+        Answered::Leave => PullAnswered::Pull,
+    }
+}
+
 /// What one slice's drafts are answered with: file them, leave the slice alone,
 /// or say what is wrong with them.
 ///

@@ -1,9 +1,9 @@
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
 
 use super::{
-    Answer, Answered, Carry, CarryAnswered, Choice, CutAnswered, CutConfirm, PushAnswered,
-    PushConfirm, QuitConfirm, Review, Reviewed, answer_for, carry_answer_for, cut_answer_for,
-    push_answer_for, review_answer_for,
+    Answer, Answered, Carry, CarryAnswered, Choice, CutAnswered, CutConfirm, PullAnswered,
+    PullConfirm, PushAnswered, PushConfirm, QuitConfirm, Review, Reviewed, answer_for,
+    carry_answer_for, cut_answer_for, pull_answer_for, push_answer_for, review_answer_for,
 };
 
 fn press(code: KeyCode) -> KeyEvent {
@@ -644,6 +644,298 @@ mod cut {
             CutAnswered::Cancel,
             "Enter on No answers No, so the default answer starts nothing"
         );
+    }
+}
+
+// The question a `/pull` asks between choosing the ticket and checking anything
+// out. Its own module beside the cut dialog's because the two are answered about
+// different things, and asserted separately for the reason that one is: a test
+// about the run should be able to say `pull` without also saying which key
+// spells it.
+mod pull {
+    use super::{
+        Answer, INERT, KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers, PullAnswered,
+        PullConfirm, press, pull_answer_for,
+    };
+
+    const TICKET: &str = "WAR-143";
+
+    const TITLE: &str = "Add /pull and /resume to the panel";
+
+    const SCOPE: &str = "warlock-team";
+
+    const TEAM: &str = "Warlock";
+
+    const BRANCH: &str = "war-143/add-pull-and-resume-to-the-panel";
+
+    // The sub-task a carried-on run starts from, in the run record's own
+    // spelling.
+    const SUBTASK: &str = "WAR-143.02";
+
+    // A value no dialog holds and no rendering can therefore contain. Unlike the
+    // cut dialog there is not even a name for a key here, so this is the whole
+    // of what a leak would look like.
+    const KEY_VALUE: &str = "not-a-real-key-value";
+
+    fn open() -> PullConfirm {
+        PullConfirm::open(TICKET, TITLE, SCOPE, TEAM, BRANCH)
+    }
+
+    fn resuming() -> PullConfirm {
+        PullConfirm::resuming(TICKET, TITLE, SCOPE, TEAM, BRANCH, SUBTASK)
+    }
+
+    // The dialog answering one key, as the session answers it: the lit answer
+    // comes out of the value that is up rather than from the test.
+    fn answered(pull: &PullConfirm, code: KeyCode) -> PullAnswered {
+        let undertaking = pull.undertaking().expect("the dialog under test is up");
+        pull_answer_for(press(code), undertaking.answer())
+    }
+
+    #[test]
+    fn a_fresh_dialog_is_up_with_no_highlighted_and_carries_the_five_facts() {
+        let pull = open();
+        let undertaking = pull.undertaking().expect("an opened dialog is up");
+
+        assert!(pull.is_open());
+        assert_eq!(undertaking.answer(), Answer::No);
+        assert_eq!(undertaking.ticket(), TICKET);
+        assert_eq!(undertaking.title(), TITLE);
+        assert_eq!(undertaking.scope(), SCOPE);
+        assert_eq!(undertaking.team(), TEAM);
+        assert_eq!(undertaking.branch(), BRANCH);
+        // A fresh pull carries nothing on, so there is no sub-task to name.
+        assert_eq!(undertaking.resuming(), None);
+    }
+
+    #[test]
+    fn a_resumed_dialog_names_the_sub_task_it_carries_on_from() {
+        let pull = resuming();
+        let undertaking = pull.undertaking().expect("an opened dialog is up");
+
+        assert_eq!(undertaking.resuming(), Some(SUBTASK));
+        // And is otherwise the same question about the same ticket: resuming is
+        // one fact added, not a different dialog.
+        assert_eq!(undertaking.answer(), Answer::No);
+        assert_eq!(undertaking.ticket(), TICKET);
+        assert_eq!(undertaking.title(), TITLE);
+        assert_eq!(undertaking.scope(), SCOPE);
+        assert_eq!(undertaking.team(), TEAM);
+        assert_eq!(undertaking.branch(), BRANCH);
+    }
+
+    #[test]
+    fn there_is_nowhere_in_the_question_for_a_key_value() {
+        // The claim as a reader would check it: the dialog is built from six
+        // strings, none of which is a key or the name of one, so no arrangement
+        // of them puts a key into a `Debug` rendering — the one place a value
+        // that held one would leak into a panic message or a failing assertion.
+        for rendered in [
+            format!("{:?}", open().lit(Answer::Yes)),
+            format!("{:?}", resuming().lit(Answer::Yes)),
+        ] {
+            assert!(
+                rendered.contains(TICKET),
+                "{rendered:?} drops the ticket it is about"
+            );
+            assert!(
+                !rendered.contains(KEY_VALUE),
+                "{rendered:?} holds a key value"
+            );
+        }
+    }
+
+    #[test]
+    fn a_closed_dialog_is_the_default_and_has_nothing_to_answer() {
+        assert_eq!(PullConfirm::default(), PullConfirm::Closed);
+        assert!(!PullConfirm::Closed.is_open());
+        assert!(PullConfirm::Closed.undertaking().is_none());
+        // An arrow pressed at a window that is not up lights nothing, rather
+        // than conjuring a question out of facts nobody fetched.
+        assert_eq!(PullConfirm::Closed.lit(Answer::Yes), PullConfirm::Closed);
+    }
+
+    #[test]
+    fn an_immediate_enter_answers_no() {
+        // The round that put this up and the Enter straight after it both come
+        // to nothing: No is lit, so no branch is checked out.
+        for pull in [open(), resuming()] {
+            assert_eq!(answered(&pull, KeyCode::Enter), PullAnswered::Cancel);
+        }
+    }
+
+    #[test]
+    fn esc_answers_no_from_either_side() {
+        for lit in [Answer::Yes, Answer::No] {
+            assert_eq!(
+                answered(&open().lit(lit), KeyCode::Esc),
+                PullAnswered::Cancel,
+                "Esc should answer No with {lit:?} lit"
+            );
+        }
+    }
+
+    #[test]
+    fn left_then_enter_pulls_and_right_goes_back_to_no() {
+        let pull = open();
+
+        assert_eq!(
+            answered(&pull, KeyCode::Left),
+            PullAnswered::Open(Answer::Yes)
+        );
+        let armed = pull.lit(Answer::Yes);
+        assert_eq!(answered(&armed, KeyCode::Enter), PullAnswered::Pull);
+
+        assert_eq!(
+            answered(&armed, KeyCode::Right),
+            PullAnswered::Open(Answer::No)
+        );
+        assert_eq!(
+            answered(&armed.lit(Answer::No), KeyCode::Enter),
+            PullAnswered::Cancel
+        );
+    }
+
+    #[test]
+    fn y_and_n_answer_outright_whichever_is_lit() {
+        for lit in [Answer::Yes, Answer::No] {
+            let pull = open().lit(lit);
+            assert_eq!(
+                answered(&pull, KeyCode::Char('y')),
+                PullAnswered::Pull,
+                "y should pull with {lit:?} lit"
+            );
+            assert_eq!(
+                answered(&pull, KeyCode::Char('n')),
+                PullAnswered::Cancel,
+                "n should answer No with {lit:?} lit"
+            );
+        }
+    }
+
+    #[test]
+    fn moving_the_highlight_keeps_what_the_question_is_about() {
+        // The facts ride along: the dialog re-lit is the same dialog, not a
+        // second one built from whatever a second request might answer.
+        let moved = resuming().lit(Answer::Yes);
+        let undertaking = moved.undertaking().expect("a re-lit dialog is still up");
+
+        assert_eq!(undertaking.answer(), Answer::Yes);
+        assert_eq!(undertaking.ticket(), TICKET);
+        assert_eq!(undertaking.title(), TITLE);
+        assert_eq!(undertaking.scope(), SCOPE);
+        assert_eq!(undertaking.team(), TEAM);
+        assert_eq!(undertaking.branch(), BRANCH);
+        assert_eq!(undertaking.resuming(), Some(SUBTASK));
+        assert_eq!(moved.lit(Answer::No), resuming());
+    }
+
+    #[test]
+    fn every_other_key_leaves_the_question_exactly_as_it_was() {
+        for lit in [Answer::Yes, Answer::No] {
+            let pull = open().lit(lit);
+            for code in INERT {
+                assert_eq!(
+                    answered(&pull, code),
+                    PullAnswered::Open(lit),
+                    "{code:?} should change nothing with {lit:?} lit"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn ctrl_c_is_not_answered_here() {
+        // The loop takes it before this window, as it does before the other
+        // three: through here it is an ordinary `c` and changes nothing.
+        let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+
+        for lit in [Answer::Yes, Answer::No] {
+            assert_eq!(pull_answer_for(ctrl_c, lit), PullAnswered::Open(lit));
+        }
+    }
+
+    #[test]
+    fn releases_and_repeats_answer_nothing() {
+        for code in [
+            KeyCode::Enter,
+            KeyCode::Esc,
+            KeyCode::Char('y'),
+            KeyCode::Char('n'),
+            KeyCode::Left,
+            KeyCode::Right,
+        ] {
+            for kind in [KeyEventKind::Release, KeyEventKind::Repeat] {
+                let event = KeyEvent::new_with_kind_and_state(
+                    code,
+                    KeyModifiers::NONE,
+                    kind,
+                    KeyEventState::NONE,
+                );
+
+                assert_eq!(
+                    pull_answer_for(event, Answer::No),
+                    PullAnswered::Open(Answer::No),
+                    "{kind:?} of {code:?} should answer nothing"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn nothing_but_yes_and_enter_on_yes_ever_pulls() {
+        for lit in [Answer::Yes, Answer::No] {
+            let pull = open().lit(lit);
+            for code in INERT.into_iter().chain([
+                KeyCode::Esc,
+                KeyCode::Char('n'),
+                KeyCode::Left,
+                KeyCode::Right,
+            ]) {
+                assert_ne!(
+                    answered(&pull, code),
+                    PullAnswered::Pull,
+                    "{code:?} should not pull with {lit:?} lit"
+                );
+            }
+        }
+        assert_eq!(
+            answered(&open(), KeyCode::Enter),
+            PullAnswered::Cancel,
+            "Enter on No answers No, so the default answer starts nothing"
+        );
+    }
+
+    #[test]
+    fn the_answers_are_the_quit_questions_renamed() {
+        // The claim the function is written to keep: `pull_answer_for` is
+        // `answer_for` with the answers renamed, so a key that moves one moves
+        // them all. Asserted over every key either function is about, rather
+        // than trusted to the one line that spells it.
+        for lit in [Answer::Yes, Answer::No] {
+            for code in INERT.into_iter().chain([
+                KeyCode::Enter,
+                KeyCode::Esc,
+                KeyCode::Char('y'),
+                KeyCode::Char('n'),
+                KeyCode::Char('Y'),
+                KeyCode::Char('N'),
+                KeyCode::Left,
+                KeyCode::Right,
+            ]) {
+                let expected = match super::answer_for(press(code), lit) {
+                    super::Answered::Open(answer) => PullAnswered::Open(answer),
+                    super::Answered::Close => PullAnswered::Cancel,
+                    super::Answered::Leave => PullAnswered::Pull,
+                };
+
+                assert_eq!(
+                    pull_answer_for(press(code), lit),
+                    expected,
+                    "{code:?} should answer as the quit question does with {lit:?} lit"
+                );
+            }
+        }
     }
 }
 

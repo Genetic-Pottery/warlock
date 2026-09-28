@@ -27,7 +27,7 @@ use crate::account::{Account, Line as Entry, Voice};
 use crate::app::{App, Chrome, Focus, Row, Run, RunHeader};
 use crate::colour::{CONVERSATION_COLOUR, FOCUS_COLOUR, GUIDE_COLOUR, SYSTEM_COLOUR, colour_for};
 use crate::composer::Composer;
-use crate::confirm::{Answer, Carry, Choice, Cutting, Filing, Review};
+use crate::confirm::{Answer, Carry, Choice, Cutting, Filing, Review, Undertaking};
 use crate::modal::Modal;
 use crate::panel::Mode;
 use crate::prompt::{RecordField, RecordForm, ScopeField};
@@ -288,6 +288,40 @@ const CUT_LINES: u16 = 9;
 
 const CUT_HEIGHT: u16 = CUT_LINES + 2 * CONFIRM_MARGIN_ROWS + 2 * BORDER_THICKNESS;
 
+const PULL_QUESTION: &str = "Work this ticket to a pull request?";
+
+/// A question of its own rather than the one above with a word added, because
+/// a resumed run is not the same undertaking: the branch is already there and
+/// somebody else's halt is being carried on from.
+const PULL_RESUME_QUESTION: &str = "Resume this ticket and carry on working it?";
+
+const PULL_SCOPE: &str = "scope ";
+
+/// The same label the other two dialogs use, for [`CUT_TEAM`]'s reason: one
+/// spelling for one fact.
+const PULL_TEAM: &str = PUSH_TEAM;
+
+const PULL_BRANCH: &str = "branch ";
+
+/// Said before the sub-task a resumed run starts from, which is the one line
+/// that is on this window and on neither of the others.
+const PULL_FROM: &str = "from ";
+
+/// Question, a blank, the ticket, its title, the scope, the team, the branch, a
+/// blank, the answers — and one more row for the sub-task a resumed run carries
+/// on from, which is why this window's height is worked out rather than fixed:
+/// [`pull_lines`] asserts it draws exactly this many plus that row.
+const PULL_FIXED_LINES: u16 = 9;
+
+/// The one row a resumed run adds and a fresh pull does not: the sub-task it
+/// carries on from.
+///
+/// Nine plus this and no more, because there is deliberately no key line. A
+/// pull resolves the board the machine's own way, so [`Undertaking`] carries
+/// neither a key nor a name for one and this window has nothing of the sort to
+/// draw.
+const PULL_RESUME_LINES: u16 = 1;
+
 const REVIEW_QUESTION: &str = "File these drafts as issues?";
 
 /// The three answers, each with the space around it the other windows' two
@@ -411,6 +445,7 @@ pub fn draw(
         Some(Modal::Quit(highlighted)) => draw_confirm(frame, screen, highlighted),
         Some(Modal::Push(asked)) => draw_push(frame, screen, asked),
         Some(Modal::Cut(asked)) => draw_cut(frame, screen, asked),
+        Some(Modal::Pull(asked)) => draw_pull(frame, screen, asked),
         Some(Modal::Review(drafts)) => draw_review(frame, screen, drafts),
         Some(Modal::Carry(asked)) => draw_carry(frame, screen, asked),
         Some(Modal::Filing(field)) => {
@@ -1426,6 +1461,111 @@ fn cut_size(cutting: &Cutting) -> Size {
     Size::new(padded_width(widest, CONFIRM_MARGIN), CUT_HEIGHT)
 }
 
+// The cut dialog's window with a ticket in it instead of a project, and
+// deliberately the same everything else, for the reason that one is the quit
+// question's window: every question warlock asks is answered in the same place
+// on the screen, with the same two answers in the same order.
+fn draw_pull(frame: &mut Frame<'_>, screen: Rect, undertaking: &Undertaking) {
+    draw_over(
+        frame,
+        pull_area(screen, undertaking),
+        Padding::symmetric(CONFIRM_MARGIN, CONFIRM_MARGIN_ROWS),
+        pull_lines(undertaking),
+    );
+}
+
+fn pull_lines(undertaking: &Undertaking) -> Vec<Line<'_>> {
+    let mut lines = vec![
+        Line::from(pull_question(undertaking)).centered(),
+        Line::default(),
+        Line::from(undertaking.ticket()).bold().centered(),
+        Line::from(undertaking.title()).centered(),
+        Line::from(pull_scope_line(undertaking)).dim().centered(),
+        Line::from(pull_team_line(undertaking)).dim().centered(),
+        Line::from(pull_branch_line(undertaking)).dim().centered(),
+    ];
+    // The one row a fresh pull does not draw, said where the branch is said
+    // because it is the same kind of fact: where the next session picks the
+    // work up.
+    if let Some(from) = pull_from_line(undertaking) {
+        lines.push(Line::from(from).dim().centered());
+    }
+    lines.push(Line::default());
+    lines.push(answers_line(undertaking.answer()));
+
+    debug_assert_eq!(
+        u16::try_from(lines.len()).unwrap_or(u16::MAX),
+        pull_height(undertaking) - 2 * CONFIRM_MARGIN_ROWS - 2 * BORDER_THICKNESS,
+        "the pull dialog is not as tall as what it draws"
+    );
+
+    lines
+}
+
+// Which question is being asked, off the one fact that tells the two runs
+// apart: see [`PULL_RESUME_QUESTION`].
+fn pull_question(undertaking: &Undertaking) -> &'static str {
+    if undertaking.resuming().is_some() {
+        PULL_RESUME_QUESTION
+    } else {
+        PULL_QUESTION
+    }
+}
+
+fn pull_scope_line(undertaking: &Undertaking) -> String {
+    format!("{PULL_SCOPE}{}", undertaking.scope())
+}
+
+fn pull_team_line(undertaking: &Undertaking) -> String {
+    format!("{PULL_TEAM}{}", undertaking.team())
+}
+
+fn pull_branch_line(undertaking: &Undertaking) -> String {
+    format!("{PULL_BRANCH}{}", undertaking.branch())
+}
+
+fn pull_from_line(undertaking: &Undertaking) -> Option<String> {
+    undertaking
+        .resuming()
+        .map(|subtask| format!("{PULL_FROM}{subtask}"))
+}
+
+fn pull_size(undertaking: &Undertaking) -> Size {
+    let answers =
+        display_width(CONFIRM_YES) + display_width(CONFIRM_ANSWER_GAP) + display_width(CONFIRM_NO);
+    let widest = display_width(pull_question(undertaking))
+        .max(answers)
+        .max(display_width(undertaking.ticket()))
+        .max(display_width(undertaking.title()))
+        .max(display_width(&pull_scope_line(undertaking)))
+        .max(display_width(&pull_team_line(undertaking)))
+        .max(display_width(&pull_branch_line(undertaking)))
+        .max(
+            pull_from_line(undertaking)
+                .map(|from| display_width(&from))
+                .unwrap_or_default(),
+        );
+
+    Size::new(
+        padded_width(widest, CONFIRM_MARGIN),
+        pull_height(undertaking),
+    )
+}
+
+// One more row for a resumed run, which is the only thing that varies here:
+// see [`PULL_FIXED_LINES`].
+fn pull_height(undertaking: &Undertaking) -> u16 {
+    let resumed = if undertaking.resuming().is_some() {
+        PULL_RESUME_LINES
+    } else {
+        0
+    };
+    PULL_FIXED_LINES
+        .saturating_add(resumed)
+        .saturating_add(2 * CONFIRM_MARGIN_ROWS)
+        .saturating_add(2 * BORDER_THICKNESS)
+}
+
 // The cut dialog's window with the drafts in it instead of the board, and
 // deliberately the same everything else, for the reason that one is the quit
 // question's window: every question warlock asks is answered in the same place
@@ -1624,6 +1764,12 @@ fn push_area(screen: Rect, filing: &Filing) -> Rect {
 // `centred`, over a window sized by what this one has to say.
 fn cut_area(screen: Rect, cutting: &Cutting) -> Rect {
     centred(screen, cut_size(cutting))
+}
+
+// Where the pull dialog lands, which is where the other three land: the same
+// `centred`, over a window sized by what this one has to say.
+fn pull_area(screen: Rect, undertaking: &Undertaking) -> Rect {
+    centred(screen, pull_size(undertaking))
 }
 
 fn centred(screen: Rect, size: Size) -> Rect {

@@ -27,8 +27,9 @@ use ratatui::layout::Size;
 use warlock_engine::{Agent, Manifest, Written, write_claude_md};
 use warlock_tui::{
     App, Cell, ChatAgent, ClaudeAgent, Composed, Converses, Focus, LinearOpener, Modal, Modals,
-    Opens, Position, QuitConfirm, Reach, RecordPrompt, Run, ScopePrompt, Wired, composer_on_screen,
-    copied_text, draw, panel_height, panel_width, paste_for, position_at, tree_height,
+    Opens, Position, PullConfirm, QuitConfirm, Reach, RecordPrompt, Run, ScopePrompt, Wired,
+    composer_on_screen, copied_text, draw, panel_height, panel_width, paste_for, position_at,
+    tree_height,
 };
 
 mod boundary;
@@ -837,6 +838,9 @@ fn modals<'a, C: Converses, O: Opens, A: Converses>(
         quit,
         push: &pushing.confirm,
         cut: cutter.confirm(),
+        // Closed until WAR-143.03 gives the session a run to hold it on: the
+        // window and its keys are built, and nothing in the binary opens it yet.
+        pull: &PullConfirm::Closed,
         // The two windows the run itself puts up, read off it rather than
         // copied: they are states of the cut in flight, and a session holding a
         // copy of either would be a second answer to what a slice is waiting for.
@@ -1488,7 +1492,13 @@ impl<K: Seams> Session<K> {
             }
             // A key nothing is bound to, or one whose press has already been
             // answered where it was decided.
-            Pressed::Nothing => {}
+            //
+            // The pull dialog's answer is here for the second reason and only
+            // until WAR-143.03, which gives the session a run to hand it to:
+            // nothing in the binary opens that window yet, so this arm is
+            // reached by no keystroke — for the reason the `Submitted::Pull` arm
+            // in [`Chat::submit`] is inert.
+            Pressed::Nothing | Pressed::Pull(_) => {}
         }
 
         Ok(true)
