@@ -1017,6 +1017,198 @@ mod operations {
     }
 
     #[test]
+    fn the_branch_s_changed_paths_are_the_merge_base_diff_of_the_local_default_branch() {
+        // Two dots would be the difference between the tips, so whatever landed
+        // on `main` after this branch was cut would arrive as a path the branch
+        // changed; three is the merge base.
+        let fake = Fake::new().says(&b"crates/engine/src/read.rs\0"[..]);
+
+        let changed = fake
+            .checkout()
+            .changed_against("main")
+            .expect("the scripted diff");
+
+        assert_eq!(changed, ["crates/engine/src/read.rs"]);
+        assert_eq!(
+            words(&fake.only()),
+            [
+                "diff",
+                "--name-only",
+                "--no-renames",
+                "-z",
+                "main...HEAD",
+                "--"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_default_branch_that_is_not_main_is_the_one_the_diff_is_taken_against() {
+        for named in ["master", "trunk", "develop"] {
+            let fake = Fake::new().says("");
+
+            fake.checkout()
+                .changed_against(named)
+                .expect("the scripted diff");
+
+            assert_eq!(words(&fake.only())[4], format!("{named}...HEAD"));
+        }
+    }
+
+    #[test]
+    fn a_deletion_and_both_sides_of_a_rename_reach_the_caller() {
+        // What `--no-renames` buys: the file that left `crates/engine` is named
+        // there as well as where it landed, so the directory it left is known
+        // to have changed. With rename detection on, `--name-only` would print
+        // the new path alone and that directory would look untouched.
+        let fake = Fake::new().says(
+            &b"crates/engine/src/gone.rs\0crates/engine/src/old.rs\0crates/tui/src/new.rs\0"[..],
+        );
+
+        let changed = fake
+            .checkout()
+            .changed_against("main")
+            .expect("the scripted diff");
+
+        assert_eq!(
+            changed,
+            [
+                "crates/engine/src/gone.rs",
+                "crates/engine/src/old.rs",
+                "crates/tui/src/new.rs",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_branch_that_changed_nothing_is_an_empty_answer_and_not_a_failure() {
+        let fake = Fake::new().says("");
+
+        let changed = fake
+            .checkout()
+            .changed_against("main")
+            .expect("an empty diff is an answer");
+
+        assert!(changed.is_empty(), "{changed:?}");
+    }
+
+    #[test]
+    fn a_diff_git_refused_is_the_refusal_and_never_an_empty_list_of_paths() {
+        // The opposite answers: "the diff failed" and "the branch changed
+        // nothing" would leave every stale directory unrefreshed and say so
+        // nowhere.
+        let fake = Fake::new().refuses(128, "fatal: ambiguous argument 'main...HEAD'\n");
+
+        let error = fake
+            .checkout()
+            .changed_against("main")
+            .expect_err("a scripted refusal is not an unchanged branch");
+
+        match error {
+            Error::Refused { command, code, .. } => {
+                assert_eq!(
+                    command,
+                    "git diff --name-only --no-renames -z main...HEAD --"
+                );
+                assert_eq!(code, Some(128));
+            }
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_documents_only_commit_names_its_paths_on_the_add_and_on_the_commit() {
+        let fake = Fake::new();
+        let paths = [
+            "crates/engine/WARLOCK.md".to_owned(),
+            ".warlock/pacts.toml".to_owned(),
+        ];
+
+        fake.checkout()
+            .commit_paths("WAR-141: refresh WARLOCK.md", &paths)
+            .expect("both calls succeed");
+
+        let vectors = fake.vectors();
+        assert_eq!(
+            words(&vectors[0]),
+            [
+                "add",
+                "--",
+                "crates/engine/WARLOCK.md",
+                ".warlock/pacts.toml"
+            ]
+        );
+        // The pathspec on the commit is what keeps code out of it: anything
+        // else the index holds is not in this commit.
+        assert_eq!(
+            words(&vectors[1]),
+            [
+                "commit",
+                "-m",
+                "WAR-141: refresh WARLOCK.md",
+                "--",
+                "crates/engine/WARLOCK.md",
+                ".warlock/pacts.toml",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_commit_of_named_paths_stages_nothing_else_and_carries_no_sweep() {
+        let fake = Fake::new();
+
+        fake.checkout()
+            .commit_paths("WAR-141: refresh WARLOCK.md", &["a/WARLOCK.md".to_owned()])
+            .expect("both calls succeed");
+
+        for vector in fake.vectors() {
+            assert!(
+                !words(&vector).contains(&"-A"),
+                "a documents-only commit never stages everything: {vector:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_commit_of_no_paths_is_refused_before_any_git_runs() {
+        // `git commit -m <message> --` with an empty pathspec commits the index,
+        // which is the one way this call could sweep in code.
+        let fake = Fake::new();
+
+        let error = fake
+            .checkout()
+            .commit_paths("WAR-141: refresh WARLOCK.md", &[])
+            .expect_err("a commit of nothing is not a commit");
+
+        assert!(matches!(error, Error::Empty { .. }), "{error:?}");
+        assert!(fake.vectors().is_empty(), "{:?}", fake.vectors());
+    }
+
+    #[test]
+    fn a_refresh_commit_with_nothing_to_commit_is_the_refusal_git_gave() {
+        let fake = Fake::new().says("").answers(Ok(Ran::new(
+            Some(1),
+            "nothing to commit, working tree clean\n",
+            "",
+        )));
+
+        let error = fake
+            .checkout()
+            .commit_paths(
+                "WAR-141: refresh WARLOCK.md",
+                &[".warlock/pacts.toml".to_owned()],
+            )
+            .expect_err("git refused");
+
+        match error {
+            Error::Refused { message, .. } => {
+                assert_eq!(message, "nothing to commit, working tree clean");
+            }
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn a_push_sets_the_upstream_and_carries_no_force() {
         let fake = Fake::new();
 

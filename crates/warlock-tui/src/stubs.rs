@@ -889,6 +889,7 @@ pub(crate) struct Checkout {
     default: String,
     trees: Vec<Vec<Dirty>>,
     heads: Vec<String>,
+    changed: Vec<Vec<String>>,
 }
 
 /// Every call a pull makes on a checkout, in the pull's words rather than in
@@ -902,7 +903,9 @@ pub(crate) enum GitCall {
     CatchUp(String),
     CutBranch { branch: String, from: String },
     Head,
+    ChangedAgainst(String),
     CommitAll(String),
+    CommitPaths { message: String, paths: Vec<String> },
     Publish(String),
 }
 
@@ -915,6 +918,7 @@ impl Checkout {
             default: default.to_owned(),
             trees: vec![Vec::new()],
             heads: vec!["4e72482258".to_owned()],
+            changed: vec![Vec::new()],
         }
     }
 
@@ -934,6 +938,21 @@ impl Checkout {
         self
     }
 
+    /// What the branch is to be found to have changed against the default branch,
+    /// one answer per call, the last repeating: the paths a freshness pass decides
+    /// which pacted directories to refresh from.
+    pub(crate) fn changed(mut self, changed: impl IntoIterator<Item = Vec<&'static str>>) -> Self {
+        self.changed = changed
+            .into_iter()
+            .map(|paths| paths.into_iter().map(ToOwned::to_owned).collect())
+            .collect();
+        assert!(
+            !self.changed.is_empty(),
+            "a checkout answers every diff, with an empty list if nothing changed"
+        );
+        self
+    }
+
     pub(crate) fn calls(&self) -> Vec<GitCall> {
         self.log
             .lock()
@@ -943,11 +962,16 @@ impl Checkout {
 
     /// Every commit message this checkout was asked to make, in order: what a halt
     /// is asserted to have left empty.
+    ///
+    /// Both kinds of commit, because the question this answers is whether anything
+    /// was committed at all: a refresh commit of named paths is as much a commit as
+    /// a sub-task's, and one kind missing here would make "nothing was committed"
+    /// true of a run that committed.
     pub(crate) fn commits(&self) -> Vec<String> {
         self.calls()
             .into_iter()
             .filter_map(|call| match call {
-                GitCall::CommitAll(message) => Some(message),
+                GitCall::CommitAll(message) | GitCall::CommitPaths { message, .. } => Some(message),
                 _ => None,
             })
             .collect()
@@ -1007,8 +1031,29 @@ impl Repository for Checkout {
         Ok(Commit::new(answer))
     }
 
+    fn changed_against(&self, base: &str) -> Result<Vec<String>, GitError> {
+        let answer = self.answer(&self.changed, &GitCall::ChangedAgainst(String::new()));
+        self.note(GitCall::ChangedAgainst(base.to_owned()));
+        Ok(answer)
+    }
+
     fn commit_all(&self, message: &str) -> Result<(), GitError> {
         self.note(GitCall::CommitAll(message.to_owned()));
+        Ok(())
+    }
+
+    // The empty list is refused here as it is by `Git`, so a caller that reached
+    // this with nothing to commit fails in a test rather than passing one.
+    fn commit_paths(&self, message: &str, paths: &[String]) -> Result<(), GitError> {
+        if paths.is_empty() {
+            return Err(GitError::Empty {
+                what: "the commit of named paths".to_owned(),
+            });
+        }
+        self.note(GitCall::CommitPaths {
+            message: message.to_owned(),
+            paths: paths.to_vec(),
+        });
         Ok(())
     }
 

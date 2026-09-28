@@ -6,8 +6,8 @@ use warlock_engine::{
     Manifest, PactEntry, PullRun, PullSubtask, RunStatus, ScopeRecord, SubtaskStatus, state_path,
 };
 use warlock_tui::{
-    Dirty, Finished, HUMAN_GATE, Split, Stopped, Touched, Unsplit, Worked, commit_message,
-    pull_request_body, pull_request_title,
+    Dirty, Finished, GitError, HUMAN_GATE, Repository, Split, Stopped, Touched, Unsplit, Worked,
+    commit_message, pull_request_body, pull_request_title,
 };
 
 use super::{
@@ -1294,4 +1294,59 @@ fn a_run_that_halted_never_reaches_the_forge() {
             .iter()
             .any(|event| matches!(event, PullEvent::Heading(Heading::PullRequest { .. })))
     );
+}
+
+// Not a test of the loop but of the checkout the loop is driven through: the two
+// calls a freshness pass will make are answered out of memory and written down,
+// so the slice that makes them can be tested with no repository at all.
+#[test]
+fn a_checkout_answers_a_scripted_diff_and_writes_down_a_documents_only_commit() {
+    let repo = Checkout::clean(DEFAULT).changed([
+        vec!["crates/engine/src/read.rs", "crates/tui/src/panel.rs"],
+        vec![],
+    ]);
+
+    assert_eq!(
+        repo.changed_against(DEFAULT).expect("the scripted diff"),
+        ["crates/engine/src/read.rs", "crates/tui/src/panel.rs"]
+    );
+    // The second answer, and then the last one repeating.
+    for _ in 0..2 {
+        assert!(
+            repo.changed_against(DEFAULT)
+                .expect("the scripted diff")
+                .is_empty()
+        );
+    }
+
+    let paths = vec![
+        "crates/engine/WARLOCK.md".to_owned(),
+        ".warlock/pacts.toml".to_owned(),
+    ];
+    let message = format!("{TICKET}: refresh WARLOCK.md");
+    repo.commit_paths(&message, &paths)
+        .expect("the commit is made");
+
+    assert_eq!(
+        repo.calls(),
+        vec![
+            GitCall::ChangedAgainst(DEFAULT.to_owned()),
+            GitCall::ChangedAgainst(DEFAULT.to_owned()),
+            GitCall::ChangedAgainst(DEFAULT.to_owned()),
+            GitCall::CommitPaths {
+                message: message.clone(),
+                paths,
+            },
+        ]
+    );
+    // Written down as a commit like any other, so a halt asserted to have
+    // committed nothing still means what it says.
+    assert_eq!(repo.commits(), std::slice::from_ref(&message));
+
+    // And a commit of nothing is refused here as `Git` refuses it, rather than
+    // recorded as a commit that swept whatever was staged.
+    let error = repo
+        .commit_paths(&message, &[])
+        .expect_err("a commit of no paths is not a commit");
+    assert!(matches!(error, GitError::Empty { .. }), "{error:?}");
 }
