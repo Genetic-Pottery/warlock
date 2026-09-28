@@ -49,6 +49,16 @@ mod key;
 mod pacting;
 mod planned;
 mod pull;
+// Built and tested, and reached by nothing in the binary yet: WAR-143.05 puts
+// the runner on the session, wires its dialog into `modals`, gives it a key arm
+// and drains it at the foot of the loop. Until then every item in here is dead
+// to the binary and alive to its own tests, which is what this says rather than
+// leaving the compiler to say it as a warning per item.
+#[allow(
+    dead_code,
+    reason = "the loop reaches this module in WAR-143.05; its tests reach all of it now"
+)]
+mod puller;
 mod pulling;
 mod push;
 mod pushing;
