@@ -90,6 +90,8 @@ pub use pact::unpact_subtree;
 pub use pulls::PullRun;
 pub use pulls::PullSubtask;
 pub use pulls::ReasonMissing;
+pub use pulls::Reset;
+pub use pulls::ResetMode;
 pub use pulls::RunStatus;
 pub use pulls::ScopeRuns;
 pub use pulls::SubtaskStatus;

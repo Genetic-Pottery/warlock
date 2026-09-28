@@ -21,7 +21,7 @@ const HOME: &str = "HOME";
 
 const USERPROFILE: &str = "USERPROFILE";
 
-// The ten tails of `Error::NoRepository`'s sentence — "warlock could not find
+// The tails of `Error::NoRepository`'s sentence — "warlock could not find
 // a repository to *…*" — together because they are one vocabulary. They used to
 // sit beside their own subcommands, and two were re-typed as literals inside
 // `error.rs`'s tests, where rewording the original failed nothing.
@@ -60,6 +60,10 @@ pub(crate) const FOR_PUSH: &str = "push a brief from";
 // cut here, the sub-tasks are worked here and the tree that is checked afterwards
 // is this one.
 pub(crate) const FOR_PULL: &str = "pull a ticket into";
+
+// "in" for `FOR_PULL`'s reason: the run records are kept per checkout, so which
+// checkout this is picks which halt there is to release.
+pub(crate) const FOR_RESUME: &str = "release a halted run in";
 
 // "from" for `FOR_PUSH`'s reason and about the same document: what a cut
 // resolves is not the brief's text but the record spelled against the root that

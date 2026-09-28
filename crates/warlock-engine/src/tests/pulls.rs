@@ -3,8 +3,8 @@ use std::path::Path;
 use crate::splitting;
 
 use super::{
-    Error, PullRun, PullSubtask, ReasonMissing, RunStatus, SubtaskStatus, brief_path,
-    halted_and_resumed_runs, pulls_dir, run_dir, run_manifest_path, state_path,
+    Error, PullRun, PullSubtask, ReasonMissing, Reset, ResetMode, RunStatus, SubtaskStatus,
+    brief_path, halted_and_resumed_runs, pulls_dir, run_dir, run_manifest_path, state_path,
 };
 
 const WAR_124: &str = r#"{
@@ -422,6 +422,178 @@ fn an_unknown_key_is_refused_rather_than_ignored() {
     let text = WAR_124.replace("\"scope\"", "\"scopes\"");
 
     assert!(serde_json::from_str::<PullRun>(&text).is_err());
+}
+
+// A halted run carrying one sub-task in each of the six statuses, so a test of
+// the reset says what it does to all of them rather than to the one the run
+// happened to stop on.
+fn a_halted_run() -> PullRun {
+    let mut run = a_run();
+    for (id, status) in [
+        ("WAR-140.01", SubtaskStatus::Pending),
+        ("WAR-140.02", SubtaskStatus::InProgress),
+        ("WAR-140.03", SubtaskStatus::Done),
+        (
+            "WAR-140.04",
+            SubtaskStatus::Blocked("control-plane is closed".to_owned()),
+        ),
+        (
+            "WAR-140.05",
+            SubtaskStatus::Failed("`cargo test` came back red".to_owned()),
+        ),
+        (
+            "WAR-140.06",
+            SubtaskStatus::Crossed("wrote crates/control/src/lib.rs".to_owned()),
+        ),
+    ] {
+        let mut subtask = a_subtask(id);
+        subtask.set_status(status);
+        run.push_subtask(subtask);
+    }
+    run.set_status(RunStatus::Halted);
+    run
+}
+
+fn statuses(run: &PullRun) -> Vec<String> {
+    run.subtasks()
+        .iter()
+        .map(|subtask| format!("{} {}", subtask.id(), subtask.status()))
+        .collect()
+}
+
+fn changes(changed: &[Reset]) -> Vec<String> {
+    changed
+        .iter()
+        .map(|reset| format!("{} {}", reset.id(), reset.was()))
+        .collect()
+}
+
+#[test]
+fn a_resume_releases_every_stopped_sub_task_and_leaves_the_rest_alone() {
+    let mut run = a_halted_run();
+
+    let changed = run.resume(ResetMode::Everything);
+
+    assert_eq!(
+        changes(&changed),
+        [
+            "WAR-140.04 blocked: control-plane is closed",
+            "WAR-140.05 failed: `cargo test` came back red",
+            "WAR-140.06 crossed: wrote crates/control/src/lib.rs",
+        ],
+    );
+    assert_eq!(run.status(), RunStatus::Resumed);
+    assert_eq!(
+        statuses(&run),
+        [
+            "WAR-140.01 pending",
+            "WAR-140.02 in_progress",
+            "WAR-140.03 done",
+            "WAR-140.04 pending",
+            "WAR-140.05 pending",
+            "WAR-140.06 pending",
+        ],
+    );
+}
+
+#[test]
+fn a_failed_only_resume_leaves_a_blocker_and_a_crossing_their_status_and_reason() {
+    let mut run = a_halted_run();
+
+    let changed = run.resume(ResetMode::FailedOnly);
+
+    assert_eq!(
+        changes(&changed),
+        ["WAR-140.05 failed: `cargo test` came back red"]
+    );
+    assert_eq!(run.status(), RunStatus::Resumed);
+    assert_eq!(
+        statuses(&run),
+        [
+            "WAR-140.01 pending",
+            "WAR-140.02 in_progress",
+            "WAR-140.03 done",
+            "WAR-140.04 blocked: control-plane is closed",
+            "WAR-140.05 pending",
+            "WAR-140.06 crossed: wrote crates/control/src/lib.rs",
+        ],
+    );
+}
+
+// The run's own status is what tells a pull whether to carry the run on, so a
+// reset that released nothing must not move it: `warlock resume` refuses in that
+// case, and it can only refuse if the record it holds is still the record it
+// read.
+#[test]
+fn a_resume_with_nothing_to_release_leaves_the_run_exactly_as_it_was() {
+    for status in [
+        RunStatus::Pulled,
+        RunStatus::InProgress,
+        RunStatus::Halted,
+        RunStatus::Resumed,
+        RunStatus::InReview,
+    ] {
+        for mode in [ResetMode::Everything, ResetMode::FailedOnly] {
+            let mut run = a_run().with_subtasks([a_subtask("WAR-140.01")]);
+            run.subtask_mut("WAR-140.01")
+                .expect("the sub-task is there")
+                .set_status(SubtaskStatus::Done);
+            run.set_status(status);
+            let before = run.clone();
+
+            assert!(run.resume(mode).is_empty());
+            assert_eq!(run, before);
+        }
+    }
+}
+
+// A blocker is exactly the case `--failed-only` is for, so a run whose only halt
+// is one has nothing to release in that mode and stays `halted`.
+#[test]
+fn a_failed_only_resume_of_a_run_that_only_blocked_releases_nothing() {
+    let mut run = a_halted_run();
+    run.subtask_mut("WAR-140.05")
+        .expect("the failed sub-task is there")
+        .set_status(SubtaskStatus::Done);
+
+    assert!(run.resume(ResetMode::FailedOnly).is_empty());
+    assert_eq!(run.status(), RunStatus::Halted);
+}
+
+// The reason is dropped from the file as well as from the type: a `pending`
+// sub-task still carrying the `blocked_reason` it stopped on is a halt the
+// manifest would go on reporting after the operator released it.
+#[test]
+fn a_released_sub_task_leaves_no_reason_behind_in_the_record() {
+    let (home, root) = (
+        tempfile::tempdir().expect("a temporary home"),
+        tempfile::tempdir().expect("a temporary root"),
+    );
+    let mut run = a_halted_run();
+    run.resume(ResetMode::Everything);
+
+    run.save(home.path(), root.path()).expect("a run saves");
+
+    let text = std::fs::read_to_string(state_path(home.path(), root.path(), "WAR-140"))
+        .expect("the record reads");
+    assert_eq!(
+        text.matches("\"blocked_reason\": null").count(),
+        6,
+        "{text}"
+    );
+    for reason in [
+        "control-plane is closed",
+        "`cargo test` came back red",
+        "wrote crates/control/src/lib.rs",
+    ] {
+        assert!(!text.contains(reason), "{text}");
+        assert!(!manifest_of(home.path(), root.path()).contains(reason));
+        assert!(!brief_of(home.path(), root.path(), "WAR-140.04").contains(reason));
+    }
+    assert_eq!(
+        PullRun::load(home.path(), root.path(), "WAR-140").expect("the record reads back"),
+        run,
+    );
 }
 
 // A record with something in every field, so a round trip proves the whole shape

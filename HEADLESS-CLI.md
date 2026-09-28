@@ -29,6 +29,7 @@ piped — it reads a plain line and the terminal is never touched.
 | `warlock push <path>` | File the brief at `path` as a project on the board this machine's sigil names | one project on somebody's board and one record write |
 | `warlock draft <path>` | Cut the project filed for the brief at `path` into issues on the board that holds it | a model pass per uncut slice, the issues they become, and a record write each |
 | `warlock pull <SCOPE>` | Work the next ready ticket in that scope's queue to an open pull request | a splitting pass, a model pass per sub-task, a commit each, a pushed branch, a pull request, and two moves on somebody's board |
+| `warlock resume <TICKET>` | Put the sub-tasks a halted run stopped on back to `pending`, so the next pull of that ticket finds work | one run-record write |
 
 The two listings take the repository root when the path is left off. Every other
 path is required, and on `unpact` and `pact` that is the point rather than an
@@ -936,12 +937,100 @@ No key value is printed by any of this. The loop is handed a board that is
 already open rather than a key, so nothing inside a run has one to print, and
 the value is read on the one line that builds the client.
 
+## Resuming
+
+`warlock resume <TICKET>` is a person saying they have looked at a halt, and it
+is the only thing that turns one back into work. A halted run waits on that and
+on nothing else: its `failed`, `blocked` and `crossed` sub-tasks stay in those
+states, so a pull picking the run up again would find nothing runnable and halt
+a second time having done no work. A resume puts those sub-tasks back to
+`pending` and the run to `resumed`, which is the state a pull takes ahead of any
+ticket with no record at all. The `done`, `pending` and `in_progress` sub-tasks
+are left exactly as they were — a resume is about what stopped.
+
+The ticket is required and there is no whole-queue spelling for an omitted one
+to mean: a halt is one run, and the run records are keyed by ticket.
+`--failed-only` is the one flag, for the halt where half of it has been dealt
+with: it puts only the `failed` sub-tasks back and leaves a `blocked` or
+`crossed` one with the status and the reason it is carrying, so the test failure
+that has been fixed becomes runnable and the key that is still missing stays in
+the way. There is no `--json`, for the pull's reason — what a script reads after
+a resume is the run record, which is a file rather than a stream to catch — and
+no `--dry-run`, because a resume that would change nothing is a refusal that
+writes nothing, so the dry run is the run.
+
+```sh
+$ warlock resume WAR-142
+warlock: `WAR-142.02` was `failed` and is `pending` again — `cargo test` came back red
+warlock: `WAR-142.03` was `blocked` and is `pending` again — the Linear key for `control-plane` is not on this machine
+warlock: `WAR-142.04` was `crossed` and is `pending` again — wrote `crates/control/src/lib.rs`
+warlock: `warlock pull warlock-team --ticket WAR-142` works the ticket again
+$ echo $?
+0
+```
+
+One line per sub-task it changed and none for the ones it left alone. Each names
+the status that sub-task had and the reason that status carried, and that line
+is the only surviving copy of the reason: the reset drops it from the record,
+because a `pending` sub-task still saying why it stopped last time reads as one
+that is still stopped. The hand-off is last, and the scope on it is read out of
+the record rather than asked of anything — the run knows which queue took it,
+and sending the reader to the board for a fact the file is holding would be a
+worse line.
+
+The record is the only thing written: `state.json` is saved and the
+`manifest.md` and briefs beside it are re-rendered from it, exactly as any other
+save of a run does, and nothing inside the repository is touched. The save
+happens before a word is printed, which is the opposite of the order a push
+prints in and for the opposite reason — nothing here has happened until
+`state.json` lands, and lines printed first would tell somebody their halt was
+released by a command that then failed to write it.
+
+Nothing else is spent at all: no Linear request, no `git`, `gh` or `claude`, no
+ticket moved and no comment. That is why the scope and the sigils are never
+asked — there is nothing here for a boundary to gate — so a ticket whose scope
+this machine does not hold resumes, a dirty tree resumes, and a resume never
+exits **3**. Both of those questions belong to the pull that picks the run up,
+which asks them of the checkout it is about to work in.
+
+Two refusals, and both are ordinary **1**s. A ticket this machine holds no run
+for names the directory that was looked in, because the answer is almost always
+the wrong checkout or the wrong machine rather than the wrong ticket:
+
+```sh
+$ warlock resume WAR-9
+warlock: this machine holds no run for `WAR-9`, so there is nothing to resume: warlock looked in `/home/you/.warlock/repo-f447b89a747182e2/pulls/WAR-9`, and a record is written there by the `warlock pull` that starts the ticket
+$ echo $?
+1
+```
+
+A run with nothing to put back names the status the record was holding when it
+was read, which is the answer — a run in `in_review` has finished and one in
+`pulled` has not stopped — and then which of the two modes was asked, since the
+flag is half of why there was nothing in the run to release:
+
+```sh
+$ warlock resume WAR-142
+warlock: the run for `WAR-142` is `in_review` and has no sub-task to put back, so nothing was written: a resume puts the `failed`, `blocked` and `crossed` sub-tasks back
+$ warlock resume WAR-142 --failed-only
+warlock: the run for `WAR-142` is `halted` and has no sub-task to put back, so nothing was written: `--failed-only` puts a `failed` sub-task back and leaves a `blocked` or `crossed` one as it is
+$ echo $?
+1
+```
+
+After either of them `state.json` is byte-identical to what was read: the reset
+lives in memory until it is saved, and a refusal never saves. A record that is
+there and will not parse is neither refusal and says what would not read: a
+record broken by a hand edit describes a branch that may be holding somebody's
+uncommitted work, and being told there is no run would send the reader off to
+start the ticket over.
+
 ## Exit statuses
 
 | Status | What it means |
 | --- | --- |
 | `0` | Completed. The question was answered or the write happened, whatever the answer turned out to be — an empty listing, a queue with nothing ready to pull, and a scope closed to this machine included |
-| `1` | Warlock could not do it, or would not: the repository will not resolve, the manifest will not parse or will not save, the path has no repository-relative spelling, a scope name nothing records yet was given without all three record flags or with a blank one, a name that already has a record was given any of them, a push has no board or more than one, the brief is not one or is already filed, a draft's brief is not recorded in `.warlock/filed.toml`, its project is one Linear does not know or is not `Planned`, the scope block will not cut or has nothing left to cut, the team has no `Backlog` state, a pull's scope is one nothing records, the working tree is dirty, a named ticket is one the queue's rules turn down, a run halted, or Linear refused what was sent. The line on stderr is the thing to go and read |
+| `1` | Warlock could not do it, or would not: the repository will not resolve, the manifest will not parse or will not save, the path has no repository-relative spelling, a scope name nothing records yet was given without all three record flags or with a blank one, a name that already has a record was given any of them, a push has no board or more than one, the brief is not one or is already filed, a draft's brief is not recorded in `.warlock/filed.toml`, its project is one Linear does not know or is not `Planned`, the scope block will not cut or has nothing left to cut, the team has no `Backlog` state, a pull's scope is one nothing records, the working tree is dirty, a named ticket is one the queue's rules turn down, a run halted, a resume was asked for a ticket this machine holds no run for or a run with nothing to put back, or Linear refused what was sent. The line on stderr is the thing to go and read |
 | `2` | The command line was never a request. Clap's status and its wording, for a word warlock has no place for |
 | `3` | The sigil boundary, in the three places it is reached: this machine's sigils do not open the scope covering the path, they do not open the scope a pull was asked for — both refused at the start with nothing spent — or a pull's sub-task wrote under a scope they do not open, which stops the run with nothing committed and the tree as that session left it. Retrying changes nothing, and the road out is `warlock config` |
 | `4` | Completed with failures: a run wrote the documents it could and saved the manifest, and the lines above the count name the directories that did not come out of it |

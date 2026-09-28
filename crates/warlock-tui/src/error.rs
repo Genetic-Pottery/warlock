@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::{fmt, io};
 
 use warlock_engine::{
-    claude_md, filed, filing, keys, load, manifest, pact, pulls, route, scope, sigils,
+    RunStatus, claude_md, filed, filing, keys, load, manifest, pact, pulls, route, scope, sigils,
 };
 use warlock_tui::{BriefError, Dirty, GitError, LinearError, Refusal, ScopeBlockError};
 
@@ -297,6 +297,25 @@ pub(crate) enum Error {
     Runs {
         source: pulls::Error,
     },
+    // `warlock resume` asked about a ticket this checkout has never pulled. An
+    // ordinary **1** and not the boundary's **3** — a resume writes nothing but a
+    // machine-local record, so it has no scope question to fail.
+    NoRun {
+        ticket: String,
+        directory: PathBuf,
+    },
+    // A resume that found the run and had nothing in it to put back, refused with
+    // the record left byte-identical to what was read: the reset is in memory
+    // until it is saved, and `PullRun::resume` leaves the run's own status alone
+    // when it released nothing. Beside `NoRun` and a **1** for its reason.
+    NothingToResume {
+        ticket: String,
+        status: RunStatus,
+        // Which mode was asked, because the same record answers the two
+        // differently: a halt held by a blocker alone has nothing for
+        // `--failed-only` to release and everything for a plain resume.
+        failed_only: bool,
+    },
     // `git` itself, for the one command a pull runs before the loop: the tree read
     // to see whether there is anything in it.
     Git {
@@ -492,6 +511,34 @@ fn crossed_message(ticket: &str, subtask: &str) -> String {
         "`{subtask}` wrote under a scope this machine does not hold, so the run for `{ticket}` \
          stopped with nothing committed: the working tree is exactly as that session left it, and \
          the ticket's comment names the paths"
+    )
+}
+
+// Names the directory rather than the `state.json` inside it: the whole run lives
+// there — the record, the manifest and a brief per sub-task — and a reader told
+// there is no run wants to know where warlock went looking for one.
+fn no_run_message(ticket: &str, directory: &Path) -> String {
+    format!(
+        "this machine holds no run for `{ticket}`, so there is nothing to resume: warlock looked \
+         in `{}`, and a record is written there by the `warlock pull` that starts the ticket",
+        directory.display()
+    )
+}
+
+// The status leads, because it is the answer: a run in `in_review` has finished
+// and one in `pulled` has not stopped. Which mode was asked is on the end for the
+// variant's reason — the flag a reader typed is half of why the run had nothing to
+// put back.
+fn nothing_to_resume_message(ticket: &str, status: RunStatus, failed_only: bool) -> String {
+    let releases = if failed_only {
+        "`--failed-only` puts a `failed` sub-task back and leaves a `blocked` or `crossed` one as \
+         it is"
+    } else {
+        "a resume puts the `failed`, `blocked` and `crossed` sub-tasks back"
+    };
+    format!(
+        "the run for `{ticket}` is `{status}` and has no sub-task to put back, so nothing was \
+         written: {releases}"
     )
 }
 
@@ -740,6 +787,20 @@ impl fmt::Display for Error {
             // each carry their own multi-line news.
             Self::Pull { source } => write!(f, "{}", one_line(&source.to_string())),
             Self::Runs { source } => write!(f, "{}", one_line(&source.to_string())),
+            // The resume's two refusals, worded above for the reason the pull's
+            // are: the sentences are the interesting part of them.
+            Self::NoRun { ticket, directory } => {
+                write!(f, "{}", no_run_message(ticket, directory))
+            }
+            Self::NothingToResume {
+                ticket,
+                status,
+                failed_only,
+            } => write!(
+                f,
+                "{}",
+                nothing_to_resume_message(ticket, *status, *failed_only)
+            ),
             Self::Git { source } => write!(f, "{}", one_line(&source.to_string())),
             Self::Problems { first, rest: 0 } => write!(f, "{first}"),
             Self::Problems { first, rest } => {
@@ -821,6 +882,12 @@ impl std::error::Error for Error {
             | Self::NotPulled { .. }
             | Self::Halted { .. }
             | Self::Crossed { .. }
+            // Nor here: a ticket this checkout never pulled, and a run with
+            // nothing left to put back, are this machine's own records answering
+            // completely rather than anything underneath failing. A record that
+            // would not read is `Runs` above, which does carry its cause.
+            | Self::NoRun { .. }
+            | Self::NothingToResume { .. }
             // Nor here, and there could not be one: a run's failures are N
             // errors rather than one, they have already been printed in full,
             // and picking a first to be "the" cause would be the summary

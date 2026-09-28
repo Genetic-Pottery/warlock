@@ -53,6 +53,7 @@ mod push;
 mod pushing;
 mod query;
 mod rescope;
+mod resume;
 mod running;
 mod scoping;
 mod session;
@@ -80,6 +81,7 @@ use push::push;
 use pushing::Pushes;
 use query::{Listing, list};
 use rescope::RecordFields;
+use resume::resume;
 use running::{pact, refresh};
 use scoping::{record_edit, scope_edit, scope_press};
 use session::{Scope, Watched, load_app, start_watching};
@@ -314,6 +316,26 @@ enum Command {
         /// Print the ticket that would be taken and every one passed over; write nothing.
         #[arg(long)]
         dry_run: bool,
+    },
+    #[command(
+        about = "Release a halted run, so the next pull of that ticket finds work it can run.",
+        long_about = None
+    )]
+    Resume {
+        // Required, and a ticket rather than a scope: a halt is one run, the run
+        // records are keyed by ticket, and there is no whole-queue answer for an
+        // omitted one to mean. A `String` and not a validated type, as every
+        // ticket identifier here is — what an identifier may be is the board's.
+        /// Which ticket's halted run to release.
+        #[arg(value_name = "TICKET")]
+        ticket: String,
+        // The only flag, and there is not going to be a second: everything else a
+        // resume could be asked is a fact about the run, which is a file the
+        // operator can read. No `--dry-run` either — a resume that changed nothing
+        // is a refusal with the record untouched, so the dry run is the run.
+        /// Put only the `failed` sub-tasks back, leaving `blocked` and `crossed` ones as they are.
+        #[arg(long)]
+        failed_only: bool,
     },
 }
 
@@ -592,6 +614,18 @@ fn main() -> ExitCode {
             ticket,
             dry_run,
         }) => pull(&scope, ticket.as_deref(), dry_run),
+        // The one command that turns a halt back into runnable work, dispatched
+        // here with the rest and for their reasons — it prints its lines on the
+        // ordinary screen and takes no terminal — and the cheapest thing in this
+        // match: one file read and one file written, under the home. No board, no
+        // `git`, no session and no ticket moved, so there is nothing for a scope to
+        // gate and neither of its refusals is the boundary's **3**; both are
+        // ordinary **1**s through `status_for`'s catch-all. The pull it hands off
+        // to is where the boundary is asked. See [`mod@resume`].
+        Some(Command::Resume {
+            ticket,
+            failed_only,
+        }) => resume(&ticket, failed_only),
     };
 
     // `run` has returned, so the guard inside it has already dropped and the
