@@ -1,6 +1,10 @@
-//! `warlock resume <TICKET>`: the operator saying they have looked at a halt, so
-//! the sub-tasks it stopped are runnable again and the next `warlock pull` finds
-//! work rather than halting a second time.
+//! `warlock resume <TICKET>` and the panel's `/resume <TICKET>`: the operator
+//! saying they have looked at a halt, so the sub-tasks it stopped are runnable
+//! again and the next pull finds work rather than halting a second time.
+//!
+//! Both roads are [`release`] and differ only in where the report goes — a
+//! writer, or the thread and the composer. A release worded twice would be two
+//! accounts of one write, and the shell's is the one a reader has already met.
 //!
 //! The one write is the machine-local run record, and that is why nothing here
 //! asks the boundary: no socket is opened, no `git`, `gh` or `claude` is run and
@@ -14,9 +18,12 @@
 
 use std::io::{self, Write};
 use std::path::Path;
+use std::time::Instant;
 
 use warlock_engine::{PullRun, Reset, ResetMode, pulls, run_dir};
+use warlock_tui::{App, Converses};
 
+use crate::chatting::Chat;
 use crate::error::{Error, one_line};
 use crate::standing::{FOR_RESUME, Standing};
 
@@ -49,46 +56,134 @@ fn resumed<W: Write>(
     failed_only: bool,
     out: &mut W,
 ) -> Result<(), Error> {
+    let release = release(home, root, ticket, mode(failed_only))?;
+
+    for line in &release.lines {
+        say(out, line);
+    }
+    // The hand-off a shell needs, which is the one line the panel does not print:
+    // there, the command lands in the composer instead. See [`resume_press`].
+    say(
+        out,
+        &format!(
+            "`warlock pull {} --ticket {}` works the ticket again",
+            release.scope, release.ticket
+        ),
+    );
+
+    Ok(())
+}
+
+/// `/resume <TICKET>` on the panel: the same read and the same save, the same
+/// changes on the thread, and the command that works the ticket again left in the
+/// composer as an ordinary draft.
+///
+/// The work is [`release`]'s and is not done a second way here, so a halt released
+/// from the panel and one released at a shell are the same write reported in the
+/// same words — including both refusals, in [`mod@crate::error`]'s sentences.
+/// `--failed-only` has no spelling in the panel, so this is always the whole halt.
+///
+/// The home is handed in rather than read, for [`crate::puller::Puller`]'s reason:
+/// it cannot move under a running warlock, and a second reading per keystroke
+/// would be a second answer to where the run records are.
+///
+/// The conversation is taken whole rather than the draft handed back for the loop
+/// to offer — which is how a cut's proposed answer reaches the field. The two are
+/// not alike: a cut's question arrives at the bottom of a later round out of a
+/// worker, while this is one file read and one file written on the round the
+/// command was typed, and a return value would be a hand-off with one caller and
+/// nowhere to be held in between.
+#[allow(
+    dead_code,
+    reason = "the loop reaches this in WAR-143.05; its tests reach it now"
+)]
+pub(crate) fn resume_press<C: Converses>(
+    app: &mut App,
+    chat: &mut Chat<C>,
+    home: Option<&Path>,
+    root: &Path,
+    ticket: &str,
+    in_flight: Option<&str>,
+    now: Instant,
+) {
+    // Asked before anything is read, because a run in flight is a session editing
+    // this working tree: the sub-tasks this would put back to `pending` are the
+    // ones that run is deciding the fate of.
+    if let Some(line) = in_flight {
+        app.panel_mut().note(refused(line), now);
+        return;
+    }
+    // `Standing::home`'s own sentence, asked of the error that words it rather
+    // than written again here.
+    let Some(home) = home else {
+        app.panel_mut()
+            .note(one_line(&Error::NoHome.to_string()), now);
+        return;
+    };
+
+    match release(home, root, ticket, ResetMode::Everything) {
+        Ok(release) => {
+            for line in release.lines {
+                app.panel_mut().note(line, now);
+            }
+            // Nothing is sent: the field holds it, the cursor is at the end of
+            // it, and every editing key works on it — see [`Chat::offer`]. What
+            // a reader does about a halt they have just released is theirs, and
+            // a `/pull` warlock sent for them would start a run off a keystroke
+            // that asked for a record to be written.
+            chat.offer(&format!("/pull {} {}", release.scope, release.ticket));
+        }
+        // The ticket this checkout never pulled and the run with nothing left to
+        // put back, flattened as the thread takes a line. Neither wrote anything.
+        Err(error) => app.panel_mut().note(one_line(&error.to_string()), now),
+    }
+}
+
+// The one line every keystroke that races a pull is refused with, with the pull
+// named by the value holding it: what this adds is what this did not do.
+fn refused(in_flight: &str) -> String {
+    format!("{in_flight}; this `/resume` changed no run record")
+}
+
+/// What one release did, for whoever is reporting it.
+///
+/// The scope and the ticket come off the record rather than from the caller: a run
+/// knows which queue took it, and the command that works it again is spelled from
+/// the record on both roads out of here.
+struct Release {
+    lines: Vec<String>,
+    scope: String,
+    ticket: String,
+}
+
+// Saved before a word of it is worded, which is the opposite of what a push does
+// and for the opposite reason: a push's project exists whatever the record does
+// next, while nothing here has happened until `state.json` lands. Lines handed
+// back first would tell a reader their halt was released by a resume that then
+// failed to write it, and the next pull would halt again on the same sub-tasks.
+fn release(home: &Path, root: &Path, ticket: &str, mode: ResetMode) -> Result<Release, Error> {
     let mut run = loaded(home, root, ticket)?;
     // Read before the reset, which moves the run to `resumed`: what the refusal
     // below names is the status the record was holding when it was read.
     let status = run.status();
 
-    let changed = run.resume(mode(failed_only));
+    let changed = run.resume(mode);
     if changed.is_empty() {
         return Err(Error::NothingToResume {
             ticket: ticket.to_owned(),
             status,
-            failed_only,
+            failed_only: mode == ResetMode::FailedOnly,
         });
     }
 
-    // Saved before a word is printed, which is the opposite of what a push does
-    // and for the opposite reason: a push's project exists whatever the record
-    // does next, while nothing here has happened until `state.json` lands. Lines
-    // printed first would tell a reader their halt was released by a run that
-    // then failed to write it, and the next pull would halt again on the same
-    // sub-tasks.
     run.save(home, root)
         .map_err(|source| Error::Runs { source })?;
 
-    for reset in &changed {
-        say(out, &released(reset));
-    }
-    // The hand-off, with the scope read out of the record rather than asked of
-    // anything: a run knows which queue took it, and a resume that made the
-    // reader go and look it up would be sending them to the board for a fact
-    // this file is holding.
-    say(
-        out,
-        &format!(
-            "`warlock pull {} --ticket {}` works the ticket again",
-            run.scope(),
-            run.ticket()
-        ),
-    );
-
-    Ok(())
+    Ok(Release {
+        lines: changed.iter().map(released).collect(),
+        scope: run.scope().to_owned(),
+        ticket: run.ticket().to_owned(),
+    })
 }
 
 // A record that is absent and one that will not read are two answers here and
