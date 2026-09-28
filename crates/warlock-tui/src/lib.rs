@@ -198,6 +198,7 @@ pub use selection::copied_text;
 pub use selection::position_at;
 pub use selection::spans_at;
 pub use submission::Submitted;
+pub use submission::Taking;
 pub use submission::submitted_for;
 pub use template::DEFAULT_TEMPLATE;
 pub use template::Error as TemplateError;

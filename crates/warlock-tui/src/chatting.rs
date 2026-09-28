@@ -388,6 +388,12 @@ impl<C: Converses> Chat<C> {
             Submitted::Cut(named) => {
                 return self.brief_for(app, named, About::Cut, now).map(Wanted::Cut);
             }
+            // Recognised and nothing else, so that the crate compiles while the
+            // two commands are only half built: WAR-143.05 turns these into
+            // `Wanted` values and routes them to the pull runner and the resume
+            // path, and until it does a `/pull` or a `/resume` typed here costs
+            // the draft and says nothing.
+            Submitted::Pull(_) | Submitted::Resume(_) => {}
             // The line is asked of the value rather than restated here, so the
             // list of commands that exist is written down in one place.
             said @ Submitted::Refused => {

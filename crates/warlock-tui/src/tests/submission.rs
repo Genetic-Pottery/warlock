@@ -1,4 +1,4 @@
-use super::{Submitted, submitted_for};
+use super::{Submitted, Taking, submitted_for};
 
 #[test]
 fn each_command_word_is_its_own_command() {
@@ -7,6 +7,11 @@ fn each_command_word_is_its_own_command() {
     assert_eq!(submitted_for("/chat"), Submitted::Chat);
     assert_eq!(submitted_for("/push"), Submitted::Push(None));
     assert_eq!(submitted_for("/draft"), Submitted::Cut(None));
+    // The one command word that is worth passing up without its argument: only
+    // the panel knows which scopes this machine holds, so a bare `/pull` is
+    // answered with them rather than with the list of commands.
+    assert_eq!(submitted_for("/pull"), Submitted::Pull(None));
+    assert_eq!(submitted_for("  /pull  "), Submitted::Pull(None));
 }
 
 #[test]
@@ -53,6 +58,66 @@ fn cut_takes_the_brief_to_cut_after_it() {
 }
 
 #[test]
+fn pull_takes_a_scope_and_then_an_optional_ticket() {
+    assert_eq!(
+        submitted_for("/pull warlock-team"),
+        Submitted::Pull(Some(Taking {
+            scope: "warlock-team",
+            ticket: None,
+        }))
+    );
+    // The second word names the ticket to take instead of the next one in the
+    // scope, which is the spelling `/resume` leaves in the composer.
+    assert_eq!(
+        submitted_for("/pull warlock-team WAR-143"),
+        Submitted::Pull(Some(Taking {
+            scope: "warlock-team",
+            ticket: Some("WAR-143"),
+        }))
+    );
+    assert_eq!(
+        submitted_for("  /pull   warlock-team   WAR-143  "),
+        Submitted::Pull(Some(Taking {
+            scope: "warlock-team",
+            ticket: Some("WAR-143"),
+        }))
+    );
+    // A scope and a ticket are words, not paths, so a third word is a refusal
+    // rather than the tail of the second: `warlock-team WAR-143` is not a scope
+    // anybody has, and the refusal costs a line where going looking for it
+    // costs a screen.
+    for draft in ["/pull warlock-team WAR-143 now", "/pull one two three four"] {
+        assert_eq!(
+            submitted_for(draft),
+            Submitted::Refused,
+            "{draft:?} has more words than /pull has places"
+        );
+    }
+}
+
+#[test]
+fn resume_takes_the_ticket_to_release_after_it() {
+    assert_eq!(
+        submitted_for("/resume WAR-143"),
+        Submitted::Resume("WAR-143")
+    );
+    assert_eq!(
+        submitted_for("  /resume   WAR-143  "),
+        Submitted::Resume("WAR-143")
+    );
+    // Unlike `/pull`, a bare `/resume` is refused here: the ticket it is missing
+    // is not something warlock could offer back, and the refusal says a ticket
+    // goes after the word.
+    for draft in ["/resume", "/resume ", "/resume WAR-143 WAR-144"] {
+        assert_eq!(
+            submitted_for(draft),
+            Submitted::Refused,
+            "{draft:?} is not one ticket after the word"
+        );
+    }
+}
+
+#[test]
 fn a_push_or_a_cut_with_a_second_line_is_refused() {
     // No path has a newline in it, so this is somebody typing a message under
     // a command word and expecting it to be read.
@@ -61,6 +126,26 @@ fn a_push_or_a_cut_with_a_second_line_is_refused() {
         "/push docs/a.md\nand a thought",
         "/draft\nsome text",
         "/draft docs/a.md\nand a thought",
+    ] {
+        assert_eq!(
+            submitted_for(draft),
+            Submitted::Refused,
+            "{draft:?} is a command with a message under it"
+        );
+    }
+}
+
+#[test]
+fn a_pull_or_a_resume_with_a_second_line_is_refused() {
+    // Including the bare `/pull`, which is otherwise the one command word that
+    // passes up without an argument: with a paragraph under it, it is somebody
+    // expecting the paragraph to be read.
+    for draft in [
+        "/pull\nsome text",
+        "/pull warlock-team\nand a thought",
+        "/pull warlock-team\nWAR-143",
+        "/resume\nsome text",
+        "/resume WAR-143\nand a thought",
     ] {
         assert_eq!(
             submitted_for(draft),
@@ -117,6 +202,8 @@ fn a_second_slash_makes_it_a_path_and_so_a_message() {
         "/brief/notes",
         "/push/x",
         "/draft/x",
+        "/pull/x",
+        "/resume/x",
         "//",
     ] {
         assert_eq!(
@@ -144,6 +231,10 @@ fn a_word_that_is_not_a_command_is_refused() {
         "/Draft",
         "/CUT docs/a.md",
         "/Draft docs/a.md",
+        "/PULL",
+        "/Pull warlock-team",
+        "/RESUME WAR-143",
+        "/Resume WAR-143",
         "/",
     ] {
         assert_eq!(
@@ -191,6 +282,10 @@ fn every_refusal_is_the_same_one_line() {
         "/push docs/a.md\nand a thought",
         "/CUT",
         "/draft docs/a.md\nand a thought",
+        "/resume",
+        "/pull warlock-team WAR-143 now",
+        "/resume WAR-143 WAR-144",
+        "/pull warlock-team\nand a thought",
     ];
 
     for draft in refusals {
@@ -199,16 +294,26 @@ fn every_refusal_is_the_same_one_line() {
             .expect("a refused draft has a line");
 
         assert!(!line.contains('\n'), "{draft:?} gave more than one line");
-        for command in ["/brief", "/write", "/chat", "/push", "/draft"] {
+        for command in [
+            "/brief", "/write", "/chat", "/push", "/draft", "/pull", "/resume",
+        ] {
             assert!(
                 line.contains(command),
-                "{draft:?} did not name {command}, one of warlock's five commands"
+                "{draft:?} did not name {command}, one of warlock's seven commands"
             );
         }
-        assert!(
-            line.contains("/push and /draft take a path after them"),
-            "{draft:?} did not say which commands take a path after them"
-        );
+        // The list on its own would leave four of the seven looking like `/brief`
+        // and send somebody to a shell to find out what `/pull` wants.
+        for said in [
+            "a brief for /push and /draft",
+            "a scope and optionally a ticket for /pull",
+            "a ticket for /resume",
+        ] {
+            assert!(
+                line.contains(said),
+                "{draft:?} did not say {said}, one of the arguments the commands take"
+            );
+        }
     }
 }
 
@@ -223,6 +328,10 @@ fn nothing_but_a_refusal_has_a_line_to_say() {
         "/push",
         "/draft",
         "/draft docs/a.md",
+        "/pull",
+        "/pull warlock-team",
+        "/pull warlock-team WAR-143",
+        "/resume WAR-143",
         "why nine passes?",
         "",
     ] {

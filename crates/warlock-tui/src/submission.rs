@@ -7,23 +7,34 @@
 //! `Submitted::refusal` is the entire discovery mechanism, which is why there
 //! is no `/help`: a command whose job was to print the list would be a thing to
 //! discover before you could discover anything. Nothing here *copies* the
-//! draft's text: the two path-taking variants borrow the path out of it, so
-//! there is still one owner and no second string free to disagree with the
-//! first. And nothing here enters a mode, writes a file or opens a turn.
+//! draft's text: the four argument-taking variants borrow the argument out of
+//! it, so there is still one owner and no second string free to disagree with
+//! the first. And nothing here enters a mode, writes a file or opens a turn.
 
 // Stated once, here, because it is the only place warlock says which commands
 // exist: a second copy of this sentence in the loop or in a test fixture would
 // be a second list to keep true.
-const REFUSAL: &str = "warlock has five commands — /brief, /write, /chat, /push and /draft — and only /push and /draft take a path after them, the brief to file and the brief to cut.";
+const REFUSAL: &str = "warlock has seven commands — /brief, /write, /chat, /push, /draft, /pull and /resume — and four of them take an argument: a brief for /push and /draft, a scope and optionally a ticket for /pull, and a ticket for /resume.";
 
-// Seven variants and no eighth for "empty", because an empty draft never gets
+// Fields rather than the second half of a tuple, because one of the two is
+// optional and the other is not: `/pull <SCOPE>` takes the next ticket in the
+// scope and `/pull <SCOPE> <TICKET>` takes the one named, and a caller reading
+// `Some(("warlock-team", None))` has nothing but the order to tell it which
+// position is the scope.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Taking<'a> {
+    pub scope: &'a str,
+    pub ticket: Option<&'a str>,
+}
+
+// Nine variants and no tenth for "empty", because an empty draft never gets
 // here — `Composer::is_submittable` declines to offer one up — and a function
 // that is total anyway is worth more than a variant every caller must match on.
 //
-// The borrows in `Push` and `Cut` are what keep the module's promise that
-// nothing here copies the draft: the path is a slice of the draft the caller
-// still owns, and `&str` is `Copy`, so the value stays as cheap to pass around
-// as it was when no variant carried anything.
+// The borrows in `Push`, `Cut`, `Pull` and `Resume` are what keep the module's
+// promise that nothing here copies the draft: each argument is a slice of the
+// draft the caller still owns, and `&str` is `Copy`, so the value stays as cheap
+// to pass around as it was when no variant carried anything.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Submitted<'a> {
     Brief,
@@ -33,10 +44,20 @@ pub enum Submitted<'a> {
     Push(Option<&'a str>),
     // `None` is `/draft` on its own, which cuts what this session wrote.
     Cut(Option<&'a str>),
+    // `None` is `/pull` on its own, which is the one command word that is worth
+    // more than a refusal without its argument: the scopes this machine holds
+    // are the answer to it, this module cannot ask for them, so a bare `/pull`
+    // goes up to be answered with them named rather than with the list below.
+    Pull(Option<Taking<'a>>),
+    // Not optional, because a `/resume` with no ticket names nothing warlock
+    // could offer back — the refusal already says a ticket goes after the word.
+    Resume(&'a str),
     Message,
-    // An unknown word, a bare `/`, or one of the other three command words with
-    // something after it. It never reaches the model: the point of refusing
-    // rather than sending is that a typo costs a line and not a turn.
+    // An unknown word, a bare `/`, one of the three command words that take
+    // nothing with something after it, a `/resume` with no ticket, and an
+    // argument with more words in it than the command has places to put them. It
+    // never reaches the model: the point of refusing rather than sending is that
+    // a typo costs a line and not a turn.
     Refused,
 }
 
@@ -82,7 +103,7 @@ pub fn submitted_for(draft: &str) -> Submitted<'_> {
     // eat it.
     let after = &draft[word.len()..];
 
-    // The two commands that take an argument, because they are the commands
+    // The two commands whose argument is a path, because they are the commands
     // about a file rather than about the conversation: a brief is committed,
     // read for a day, and then filed and cut by whoever gets to it, quite
     // possibly in a session that wrote nothing and by somebody who did not
@@ -106,6 +127,36 @@ pub fn submitted_for(draft: &str) -> Submitted<'_> {
             Submitted::Push(named)
         };
     }
+
+    // The two commands about a ticket, whose arguments are names rather than
+    // paths: a scope and a ticket identifier are single words, so they are read
+    // as words and a third word is a refusal rather than the tail of the second.
+    // Reading them the way a path is read would make `/pull warlock-team WAR-1`
+    // one scope called `warlock-team WAR-1`, which exists nowhere and would be
+    // refused a screen later by whatever went looking for it.
+    //
+    // The line break is disqualifying here for `PUSH | CUT`'s reason and not for
+    // a reason of its own: a command word with a paragraph under it is somebody
+    // expecting the paragraph to be read.
+    if matches!(word, PULL | RESUME) && !after.contains('\n') {
+        let mut words = after.split_whitespace();
+        let (first, second) = (words.next(), words.next());
+        if words.next().is_some() {
+            return Submitted::Refused;
+        }
+
+        if word == PULL {
+            return Submitted::Pull(first.map(|scope| Taking {
+                scope,
+                ticket: second,
+            }));
+        }
+        return match (first, second) {
+            (Some(ticket), None) => Submitted::Resume(ticket),
+            _ => Submitted::Refused,
+        };
+    }
+
     // The trimmed draft *is* the word when nothing follows it — which covers a
     // second token and a second line in the one comparison, since both leave
     // characters the first token does not have.
@@ -126,6 +177,8 @@ pub fn submitted_for(draft: &str) -> Submitted<'_> {
 // it, and a literal in two places is two places to change.
 const PUSH: &str = "/push";
 const CUT: &str = "/draft";
+const PULL: &str = "/pull";
+const RESUME: &str = "/resume";
 
 #[cfg(test)]
 #[path = "tests/submission.rs"]
