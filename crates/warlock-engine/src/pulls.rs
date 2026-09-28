@@ -303,6 +303,89 @@ impl PullRun {
         &mut self.subtasks
     }
 
+    /// The operator saying they have looked at a halt: every `failed`, `blocked`
+    /// and `crossed` sub-task goes back to `pending` and the run becomes
+    /// [`RunStatus::Resumed`], so the pull that picks it up finds work it can
+    /// run. `done`, `pending` and `in_progress` sub-tasks are left exactly as
+    /// they were, under either [`ResetMode`].
+    ///
+    /// What changed comes back in the record's own order, each carrying the
+    /// status it had before, so a caller can print one line per change — and an
+    /// empty answer is a run with nothing to release, which is a different thing
+    /// from a reset that happened.
+    ///
+    /// ```
+    /// use warlock_engine::{PullRun, PullSubtask, ResetMode, RunStatus, SubtaskStatus};
+    ///
+    /// let mut run = PullRun::new("WAR-140", "A ticket", "warlock-team", "war-140/a-ticket", "now")
+    ///     .with_subtasks([
+    ///         PullSubtask::new("WAR-140.01", "Already worked", [] as [&str; 0]),
+    ///         PullSubtask::new("WAR-140.02", "The one that broke", [] as [&str; 0]),
+    ///     ]);
+    /// run.set_status(RunStatus::Halted);
+    /// run.subtask_mut("WAR-140.01").expect("it is in the run").set_status(SubtaskStatus::Done);
+    /// run.subtask_mut("WAR-140.02")
+    ///     .expect("it is in the run")
+    ///     .set_status(SubtaskStatus::Failed("`cargo test` came back red".into()));
+    ///
+    /// let changed = run.resume(ResetMode::Everything);
+    ///
+    /// assert_eq!(changed.len(), 1);
+    /// assert_eq!(changed[0].id(), "WAR-140.02");
+    /// assert_eq!(changed[0].was().to_string(), "failed: `cargo test` came back red");
+    /// assert_eq!(run.status(), RunStatus::Resumed);
+    /// assert_eq!(run.subtask("WAR-140.01").map(PullSubtask::status), Some(&SubtaskStatus::Done));
+    /// assert_eq!(run.subtask("WAR-140.02").map(PullSubtask::status), Some(&SubtaskStatus::Pending));
+    ///
+    /// // A second resume has nothing left to release, and says so by changing
+    /// // nothing at all.
+    /// assert!(run.resume(ResetMode::Everything).is_empty());
+    /// ```
+    // Nothing is written here and nothing may be: whether a reset reaches
+    // `state.json` is the caller's decision, and a run with nothing to release
+    // is refused by `warlock resume` with the file left byte-identical to what
+    // was read.
+    pub fn resume(&mut self, mode: ResetMode) -> Vec<Reset> {
+        let mut changed = Vec::new();
+
+        for subtask in &mut self.subtasks {
+            // Matched status by status rather than through a catch-all, so a
+            // seventh sub-task status cannot be added without this deciding
+            // whether a resume releases it.
+            let release = match &subtask.status {
+                SubtaskStatus::Failed(_) => true,
+                SubtaskStatus::Blocked(_) | SubtaskStatus::Crossed(_) => {
+                    mode == ResetMode::Everything
+                }
+                SubtaskStatus::Pending | SubtaskStatus::InProgress | SubtaskStatus::Done => false,
+            };
+            if !release {
+                continue;
+            }
+            // The reason goes with the status, so `blocked_reason` is back to
+            // `null` at the next save. It is the operator's own account of the
+            // halt that is being dropped, and dropping it is the point: they
+            // have read it, the sub-task is being run again, and a `pending`
+            // sub-task carrying the reason it stopped last time would read as a
+            // sub-task that is stopped.
+            let was = std::mem::replace(&mut subtask.status, SubtaskStatus::Pending);
+            changed.push(Reset {
+                id: subtask.id.clone(),
+                was,
+            });
+        }
+
+        // Left alone when nothing changed, rather than set to `Resumed`
+        // regardless: a resume that released nothing is refused, and a record it
+        // had already turned from `in_review` or `pulled` into `resumed` on the
+        // way would send the next pull to a branch whose work is finished.
+        if !changed.is_empty() {
+            self.status = RunStatus::Resumed;
+        }
+
+        changed
+    }
+
     /// Pretty-printed with a trailing newline, because this file is read by a
     /// person as often as by warlock: a halted run is looked at by hand, beside
     /// `.forman/<TICKET>/state.json`, which is spelled the same way.
@@ -526,6 +609,62 @@ impl PullRun {
             Err(Error::NotFound { .. }) => Ok(None),
             Err(error) => Err(error),
         }
+    }
+}
+
+/// How much of a halt [`PullRun::resume`] releases.
+///
+/// ```
+/// use warlock_engine::{PullRun, PullSubtask, ResetMode, RunStatus, SubtaskStatus};
+///
+/// let mut run = PullRun::new("WAR-140", "A ticket", "warlock-team", "war-140/a-ticket", "now")
+///     .with_subtasks([
+///         PullSubtask::new("WAR-140.01", "Blocked on a boundary", [] as [&str; 0]),
+///         PullSubtask::new("WAR-140.02", "The one that broke", [] as [&str; 0]),
+///     ]);
+/// let blocked = SubtaskStatus::Blocked("`crates/control` is scoped control-plane".to_owned());
+/// run.subtask_mut("WAR-140.01").expect("it is in the run").set_status(blocked.clone());
+/// run.subtask_mut("WAR-140.02")
+///     .expect("it is in the run")
+///     .set_status(SubtaskStatus::Failed("`cargo test` came back red".into()));
+///
+/// let changed = run.resume(ResetMode::FailedOnly);
+///
+/// assert_eq!(changed.len(), 1);
+/// assert_eq!(changed[0].id(), "WAR-140.02");
+/// // The blocker is still a blocker, and keeps its reason.
+/// assert_eq!(run.subtask("WAR-140.01").map(PullSubtask::status), Some(&blocked));
+/// assert_eq!(run.status(), RunStatus::Resumed);
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ResetMode {
+    /// Every sub-task the halt stopped: `failed`, `blocked` and `crossed`.
+    Everything,
+    /// Only the `failed` ones — `warlock resume --failed-only`, for the case
+    /// where a blocker is still unresolved and a transient failure is not.
+    FailedOnly,
+}
+
+/// One sub-task [`PullRun::resume`] put back to `pending`, and the status it had
+/// before.
+///
+/// The old status comes back whole, reason and all, because it is the only
+/// surviving copy: the reset dropped it from the record.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Reset {
+    id: String,
+    was: SubtaskStatus,
+}
+
+impl Reset {
+    #[must_use]
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    #[must_use]
+    pub const fn was(&self) -> &SubtaskStatus {
+        &self.was
     }
 }
 
