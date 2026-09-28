@@ -6,14 +6,18 @@ use warlock_engine::{
     Manifest, PactEntry, PullRun, PullSubtask, RunStatus, ScopeRecord, SubtaskStatus, state_path,
 };
 use warlock_tui::{
-    Dirty, Finished, HUMAN_GATE, Split, Stopped, Touched, Unsplit, Worked, commit_message,
-    pull_request_body, pull_request_title,
+    Dirty, Finished, Freshness, GitError, HUMAN_GATE, LeftStale, Repository, Split, Stopped,
+    Touched, Unsplit, Worked, commit_message, pull_request_body, pull_request_title,
 };
 
 use super::{
     Error, Heading, PullEvent, Pulled, Pulling, Reached, Ticket, halt_comment, next_runnable,
 };
-use crate::stubs::{Boarding, Call, Checkout, Forging, GitCall, Op, Sessions, Slicing, said};
+use crate::freshness::Freshened;
+use crate::pulling::StaleDirectory;
+use crate::stubs::{
+    Boarding, Call, Checkout, Forging, GitCall, Op, Refreshing, Sessions, Slicing, said,
+};
 
 const TICKET: &str = "WAR-140";
 
@@ -399,6 +403,7 @@ fn work(
     sessions: &Sessions,
 ) -> (Result<Reached, Error>, Vec<PullEvent>) {
     let forge = Forging::opening("https://github.com/team/repo/pull/12");
+    let freshen = Refreshing::quiet();
     let mut events = Vec::new();
     let reached = {
         let mut sink = |event: PullEvent| events.push(event);
@@ -408,6 +413,7 @@ fn work(
             forge: &forge,
             split,
             sessions,
+            freshen: &freshen,
             scope: &ground.scope,
             manifest: &ground.manifest,
             held: &ground.held,
@@ -422,6 +428,13 @@ fn work(
         forge.asked().is_empty(),
         "the sub-task loop asked for a pull request"
     );
+    // The refresh belongs to the finish, after the last sub-task's commit: a
+    // sub-task loop that asked for one would be describing directories the run is
+    // still editing.
+    assert!(
+        freshen.asked().is_empty(),
+        "the sub-task loop asked for a refresh"
+    );
     (reached, events)
 }
 
@@ -434,6 +447,28 @@ fn pull(
     split: &Slicing,
     sessions: &Sessions,
 ) -> (Result<Pulled, Error>, Vec<PullEvent>) {
+    pull_freshening(
+        ground,
+        board,
+        repo,
+        forge,
+        split,
+        sessions,
+        &Refreshing::quiet(),
+    )
+}
+
+/// The same pull with the freshness pass written down, for the tests that are
+/// about what the refresh came to rather than about the work.
+fn pull_freshening(
+    ground: &Ground,
+    board: &Boarding,
+    repo: &Checkout,
+    forge: &Forging,
+    split: &Slicing,
+    sessions: &Sessions,
+    freshen: &Refreshing,
+) -> (Result<Pulled, Error>, Vec<PullEvent>) {
     let mut events = Vec::new();
     let pulled = {
         let mut sink = |event: PullEvent| events.push(event);
@@ -443,6 +478,7 @@ fn pull(
             forge,
             split,
             sessions,
+            freshen,
             scope: &ground.scope,
             manifest: &ground.manifest,
             held: &ground.held,
@@ -1046,9 +1082,9 @@ fn two_sub_tasks() -> (Checkout, Slicing, Sessions) {
 }
 
 /// The body that run's pull request carries, built the same way the finish
-/// builds it — which is how the stale list being empty is asserted rather than
-/// described.
-fn expected_body() -> String {
+/// builds it — which is how the freshness section being absent, or saying exactly
+/// this, is asserted rather than described.
+fn expected_body(freshness: &Freshness<'_>) -> String {
     pull_request_body(
         DESCRIPTION,
         &[
@@ -1067,7 +1103,7 @@ fn expected_body() -> String {
             scope: OTHER,
             paths: vec!["docs/route.md"],
         }],
-        &[],
+        freshness,
     )
 }
 
@@ -1099,7 +1135,7 @@ fn a_finished_run_pushes_opens_the_pull_request_comments_and_moves_the_ticket() 
     assert_eq!(asked[0].base, DEFAULT);
     assert_eq!(asked[0].head, branch());
     assert_eq!(asked[0].title, pull_request_title(TICKET, TITLE));
-    assert_eq!(asked[0].body, expected_body());
+    assert_eq!(asked[0].body, expected_body(&Freshness::default()));
     assert!(asked[0].body.contains(HUMAN_GATE));
     assert!(asked[0].body.contains(OTHER));
 
@@ -1166,23 +1202,38 @@ fn a_finished_run_pushes_opens_the_pull_request_comments_and_moves_the_ticket() 
     assert_eq!(events, expected);
 }
 
-// The refresh is a seam and not a behaviour yet: slice 9 of the brief fills it.
-// What is asserted is that it costs nothing — no `git`, no session, no second
-// split — so the day it does something, this test is what says so.
+// The refresh, over the seam: what the loop asks it, where in the finish it is
+// asked, and what the body says about the answer. What the pass itself decides —
+// which directories are stale, what the boundary refuses, what a failed pass
+// reports — is `freshness.rs`'s to test, and is written down here rather than
+// produced.
 #[test]
-fn the_refresh_call_site_runs_no_git_command_and_no_pass() {
+fn a_branch_that_left_nothing_stale_refreshes_nothing_and_gets_no_freshness_headings() {
     let ground = Ground::new();
     let board = Boarding::filing("");
     let forge = Forging::opening(URL);
     let (repo, split, sessions) = two_sub_tasks();
+    let freshen = Refreshing::quiet();
 
-    let (pulled, _) = pull(&ground, &board, &repo, &forge, &split, &sessions);
+    let (pulled, _) = pull_freshening(&ground, &board, &repo, &forge, &split, &sessions, &freshen);
 
     assert!(pulled.is_ok(), "{pulled:?}");
+    // The pass is asked once — not once per sub-task and not once per directory —
+    // and what it is asked with is the run's own: the ticket the commit message is
+    // built from, the repository root, the sigils the boundary is judged against,
+    // and the manifest the loop is holding rather than one loaded again.
+    let asked = freshen.asked();
+    assert_eq!(asked.len(), 1);
+    assert_eq!(asked[0].ticket, TICKET);
+    assert_eq!(asked[0].root, ground.root.path());
+    assert_eq!(asked[0].held, ground.held);
+    assert_eq!(asked[0].pacted, ["crates/engine", "crates/control", "docs"]);
+
     // One split, one session per sub-task, and no third of either.
     assert_eq!(split.asked().len(), 1);
     assert_eq!(sessions.openings().len(), 2);
-    // One commit per sub-task: no `<TICKET>: refresh WARLOCK.md` beside them.
+    // One commit per sub-task: no `<TICKET>: refresh WARLOCK.md` beside them, because
+    // the pass found nothing to write.
     assert_eq!(
         repo.commits(),
         [
@@ -1190,8 +1241,197 @@ fn the_refresh_call_site_runs_no_git_command_and_no_pass() {
             commit_message(TICKET, "WAR-140.02", "Use the reader"),
         ]
     );
-    // And nothing was left stale, so the body has no heading for it.
-    assert!(!forge.asked()[0].body.contains("Directories left stale"));
+    // And neither heading is in the body: an empty answer says nothing at all,
+    // rather than two headings saying there was nothing.
+    let body = &forge.asked()[0].body;
+    assert_eq!(*body, expected_body(&Freshness::default()));
+    assert!(!body.contains("Documents refreshed"), "{body}");
+    assert!(!body.contains("Directories left stale"), "{body}");
+}
+
+#[test]
+fn a_refresh_names_its_directories_in_the_body_and_commits_between_the_work_and_the_push() {
+    let ground = Ground::new();
+    let board = Boarding::filing("");
+    let forge = Forging::opening(URL);
+    let (repo, split, sessions) = two_sub_tasks();
+    let message = format!("{TICKET}: refresh WARLOCK.md");
+    // Children before parents, as the pass hands them back, and the one commit it
+    // makes through the checkout it was given.
+    let freshen = Refreshing::answering(Freshened {
+        refreshed: vec!["crates/engine".to_owned(), "crates".to_owned()],
+        left_stale: Vec::new(),
+    })
+    .committing(
+        &message,
+        &["crates/engine/WARLOCK.md", ".warlock/pacts.toml"],
+    );
+
+    let (pulled, events) =
+        pull_freshening(&ground, &board, &repo, &forge, &split, &sessions, &freshen);
+
+    assert!(pulled.is_ok(), "{pulled:?}");
+    let body = &forge.asked()[0].body;
+    assert_eq!(
+        *body,
+        expected_body(&Freshness {
+            refreshed: &["crates/engine", "crates"],
+            left_stale: &[],
+        })
+    );
+    // Named in the order the passes ran, and nothing is claimed to be left stale.
+    assert!(body.contains("## Documents refreshed"), "{body}");
+    assert!(
+        body.find("- `crates/engine`") < body.find("- `crates`"),
+        "{body}"
+    );
+    assert!(!body.contains("Directories left stale"), "{body}");
+
+    // Where the pass ran, in the checkout's own log: after the last sub-task's
+    // commit and before the branch is read to push against.
+    let calls = repo.calls();
+    let last = calls
+        .iter()
+        .rposition(|call| matches!(call, GitCall::CommitAll(_)))
+        .expect("the run committed its sub-tasks");
+    assert_eq!(
+        calls[last..],
+        [
+            GitCall::CommitAll(commit_message(TICKET, "WAR-140.02", "Use the reader")),
+            GitCall::CommitPaths {
+                message: message.clone(),
+                paths: vec![
+                    "crates/engine/WARLOCK.md".to_owned(),
+                    ".warlock/pacts.toml".to_owned(),
+                ],
+            },
+            GitCall::DefaultBranch,
+            GitCall::Publish(branch()),
+        ]
+    );
+    // The refresh commit is its own, beside the sub-tasks' rather than instead of
+    // one of them.
+    assert_eq!(
+        repo.commits(),
+        [
+            commit_message(TICKET, "WAR-140.01", "Add the reader"),
+            commit_message(TICKET, "WAR-140.02", "Use the reader"),
+            message,
+        ]
+    );
+    // And the refresh opens no section of its own: the sections are still the
+    // sub-tasks' and the pull request's.
+    let mut expected = headings(&[
+        ("WAR-140.01", "Add the reader"),
+        ("WAR-140.02", "Use the reader"),
+    ]);
+    expected.push(PullEvent::Heading(Heading::PullRequest {
+        branch: branch(),
+    }));
+    assert_eq!(events, expected);
+}
+
+#[test]
+fn a_closed_scope_and_a_failed_pass_are_named_stale_and_the_pull_request_is_still_opened() {
+    let ground = Ground::new();
+    let board = Boarding::filing("");
+    let forge = Forging::opening(URL);
+    let (repo, split, sessions) = two_sub_tasks();
+    // One of each of the two reasons a directory is left stale, and one directory
+    // refreshed beside them: the three are one finding, and the body carries all
+    // three.
+    let closed = "closed to this machine, which holds no `control-plane` sigil";
+    let failed = "the refresh pass failed: `docs` — the model answered nothing";
+    let freshen = Refreshing::answering(Freshened {
+        refreshed: vec!["crates/engine".to_owned()],
+        left_stale: vec![
+            StaleDirectory {
+                directory: "crates/control".to_owned(),
+                reason: closed.to_owned(),
+            },
+            StaleDirectory {
+                directory: "docs".to_owned(),
+                reason: failed.to_owned(),
+            },
+        ],
+    });
+
+    let (pulled, _) = pull_freshening(&ground, &board, &repo, &forge, &split, &sessions, &freshen);
+
+    // A pass that failed is not the run failing: the sub-task commits are on the
+    // branch, and the request is opened with the failure named in it.
+    assert_eq!(
+        pulled.expect("a failed pass still reaches the pull request"),
+        Pulled::Opened {
+            ticket: TICKET.to_owned(),
+            url: Some(URL.to_owned()),
+        }
+    );
+    let body = &forge.asked()[0].body;
+    assert_eq!(
+        *body,
+        expected_body(&Freshness {
+            refreshed: &["crates/engine"],
+            left_stale: &[
+                LeftStale {
+                    directory: "crates/control",
+                    reason: closed,
+                },
+                LeftStale {
+                    directory: "docs",
+                    reason: failed,
+                },
+            ],
+        })
+    );
+    // Both reasons, in the pass's own words, under the one heading — and the
+    // refreshed directory above it.
+    assert!(
+        body.find("## Documents refreshed") < body.find("## Directories left stale"),
+        "{body}"
+    );
+    assert!(
+        body.contains(&format!("- `crates/control` — {closed}")),
+        "{body}"
+    );
+    assert!(body.contains(&format!("- `docs` — {failed}")), "{body}");
+    // Nothing the pass reported is a commit the loop made: the pass commits its
+    // own documents or nothing at all.
+    assert_eq!(
+        repo.commits(),
+        [
+            commit_message(TICKET, "WAR-140.01", "Add the reader"),
+            commit_message(TICKET, "WAR-140.02", "Use the reader"),
+        ]
+    );
+}
+
+#[test]
+fn a_checkout_the_pass_could_not_ask_fails_the_run_before_the_branch_is_pushed() {
+    let ground = Ground::new();
+    let board = Boarding::filing("");
+    let forge = Forging::opening(URL);
+    let (repo, split, sessions) = two_sub_tasks();
+
+    let (pulled, _) = pull_freshening(
+        &ground,
+        &board,
+        &repo,
+        &forge,
+        &split,
+        &sessions,
+        &Refreshing::refusing(),
+    );
+
+    // The one failure the pass hands back rather than reporting, and it fails the
+    // run the way every other `git` failure in this loop does: a checkout that
+    // cannot be asked what the branch changed is not a fact to put in a body.
+    let error = pulled.expect_err("the checkout could not be asked");
+    assert!(matches!(&error, Error::Git { .. }), "{error:?}");
+    // Nothing was pushed and no request was opened, so the finish stopped where it
+    // failed.
+    assert!(!repo.calls().contains(&GitCall::Publish(branch())));
+    assert!(forge.asked().is_empty());
 }
 
 #[test]
@@ -1258,7 +1498,11 @@ fn no_gh_comments_the_body_on_the_ticket_and_the_run_still_counts_as_finished() 
     assert_eq!(posted.len(), 1);
     assert!(posted[0].contains("no `gh`"), "{}", posted[0]);
     assert!(posted[0].contains(&branch()), "{}", posted[0]);
-    assert!(posted[0].ends_with(&expected_body()), "{}", posted[0]);
+    assert!(
+        posted[0].ends_with(&expected_body(&Freshness::default())),
+        "{}",
+        posted[0]
+    );
 
     // In review, with no URL to record, and the ticket moved anyway.
     let saved = ground.saved();
@@ -1294,4 +1538,59 @@ fn a_run_that_halted_never_reaches_the_forge() {
             .iter()
             .any(|event| matches!(event, PullEvent::Heading(Heading::PullRequest { .. })))
     );
+}
+
+// Not a test of the loop but of the checkout the loop is driven through: the two
+// calls a freshness pass will make are answered out of memory and written down,
+// so the slice that makes them can be tested with no repository at all.
+#[test]
+fn a_checkout_answers_a_scripted_diff_and_writes_down_a_documents_only_commit() {
+    let repo = Checkout::clean(DEFAULT).changed([
+        vec!["crates/engine/src/read.rs", "crates/tui/src/panel.rs"],
+        vec![],
+    ]);
+
+    assert_eq!(
+        repo.changed_against(DEFAULT).expect("the scripted diff"),
+        ["crates/engine/src/read.rs", "crates/tui/src/panel.rs"]
+    );
+    // The second answer, and then the last one repeating.
+    for _ in 0..2 {
+        assert!(
+            repo.changed_against(DEFAULT)
+                .expect("the scripted diff")
+                .is_empty()
+        );
+    }
+
+    let paths = vec![
+        "crates/engine/WARLOCK.md".to_owned(),
+        ".warlock/pacts.toml".to_owned(),
+    ];
+    let message = format!("{TICKET}: refresh WARLOCK.md");
+    repo.commit_paths(&message, &paths)
+        .expect("the commit is made");
+
+    assert_eq!(
+        repo.calls(),
+        vec![
+            GitCall::ChangedAgainst(DEFAULT.to_owned()),
+            GitCall::ChangedAgainst(DEFAULT.to_owned()),
+            GitCall::ChangedAgainst(DEFAULT.to_owned()),
+            GitCall::CommitPaths {
+                message: message.clone(),
+                paths,
+            },
+        ]
+    );
+    // Written down as a commit like any other, so a halt asserted to have
+    // committed nothing still means what it says.
+    assert_eq!(repo.commits(), std::slice::from_ref(&message));
+
+    // And a commit of nothing is refused here as `Git` refuses it, rather than
+    // recorded as a commit that swept whatever was staged.
+    let error = repo
+        .commit_paths(&message, &[])
+        .expect_err("a commit of no paths is not a commit");
+    assert!(matches!(error, GitError::Empty { .. }), "{error:?}");
 }

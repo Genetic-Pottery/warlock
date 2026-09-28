@@ -45,10 +45,12 @@ use warlock_engine::{
     Manifest, PullRun, PullSubtask, RunStatus, ScopeRecord, SubtaskStatus, now_rfc3339, pulls,
 };
 use warlock_tui::{
-    Activity, Board, Crossing, Dirty, Finished, Forge, GitError, IN_PROGRESS, LeftStale,
+    Activity, Board, Crossing, Dirty, Finished, Forge, Freshness, GitError, IN_PROGRESS, LeftStale,
     LinearError, PullRequest, Repository, Sibling, Split, Touched, Worked, branch_name,
     commit_message, crossings_after, pull_request_body, pull_request_title, working_opening,
 };
+
+use crate::freshness::{Freshened, Freshening, Freshens};
 
 /// Everything one pull is allowed to touch, built by whichever door is pulling.
 ///
@@ -66,6 +68,17 @@ pub(crate) struct Pulling<'a, B: Board, R: Repository, F: Forge, S: Splits, W: W
     pub(crate) forge: &'a F,
     pub(crate) split: &'a S,
     pub(crate) sessions: &'a W,
+    /// The refresh of what the branch made stale, run between the last sub-task's
+    /// commit and the push.
+    ///
+    /// A `&dyn` where its four neighbours are type parameters, and for the reason
+    /// [`Freshening`]'s own `repo` is one: this seam is a
+    /// single method taking one borrowed struct, and a sixth type parameter on
+    /// [`Pulling`] would follow it into
+    /// [`Ports`](crate::pull::Ports), into `pulled`'s signature and into every
+    /// test that builds either. Nothing is gained over a `&dyn` — there is no
+    /// generic method and no associated type to keep.
+    pub(crate) freshen: &'a dyn Freshens,
     /// The scope the ticket was pulled under, whole: the team to file against,
     /// the label the queue is read by, and the state a finished run moves the
     /// ticket to are all on it, and asking the manifest again here would be a
@@ -355,7 +368,7 @@ impl<B: Board, R: Repository, F: Forge, S: Splits, W: Works> Pulling<'_, B, R, F
         mut run: PullRun,
         touched: &[TouchedScope],
     ) -> Result<Pulled, Error> {
-        let stale = self.refresh_stale();
+        let freshened = self.refresh_stale(ticket)?;
 
         self.report(PullEvent::Heading(Heading::PullRequest {
             branch: run.branch().to_owned(),
@@ -368,11 +381,16 @@ impl<B: Board, R: Repository, F: Forge, S: Splits, W: Works> Pulling<'_, B, R, F
         self.repo.publish(run.branch()).map_err(Error::git)?;
 
         let title = pull_request_title(ticket.identifier, ticket.title);
+        let refreshed = refreshed_in(&freshened.refreshed);
+        let left_stale = stale_in(&freshened.left_stale);
         let body = pull_request_body(
             ticket.description,
             &finished_in(&run),
             &scopes_in(touched),
-            &stale_in(&stale),
+            &Freshness {
+                refreshed: &refreshed,
+                left_stale: &left_stale,
+            },
         );
         let opened = self
             .forge
@@ -415,26 +433,33 @@ impl<B: Board, R: Repository, F: Forge, S: Splits, W: Works> Pulling<'_, B, R, F
         })
     }
 
-    /// Where the refresh of stale documents goes, and nothing behind it yet.
+    /// Every pacted directory the branch made stale, described again through the
+    /// freshness seam.
     ///
-    /// Slice 9 of brief 24 — "Freshness before the pull request" — fills this
-    /// in: every pacted directory the branch made stale and this machine may
-    /// refresh, passed children before parents, committed as one
-    /// `<TICKET>: refresh WARLOCK.md` of its own, with whatever was left stale
-    /// answered back so the body can name it. Until then it runs no pass, spends
-    /// no session and issues no `git` command, and the empty answer renders as no
-    /// "Directories left stale" heading at all.
+    /// The position is what this call is for, and it is the part that would be hard
+    /// to put back later: after the last sub-task's commit, so the pass reads a tree
+    /// that holds the whole change, and before the push, so what it writes is on the
+    /// branch the pull request is opened from.
     ///
-    /// A named call rather than a comment because the position is the part that
-    /// is hard to put back later: after the last sub-task's commit, so the refresh
-    /// reads a tree that holds the whole change, and before the push, so what it
-    /// writes is on the branch the pull request is opened from.
-    #[expect(
-        clippy::unused_self,
-        reason = "the pass this stands in for reads the manifest, the sigils and the tree"
-    )]
-    fn refresh_stale(&mut self) -> Vec<StaleDirectory> {
-        Vec::new()
+    /// A closed scope and a pass that failed both come back on
+    /// [`Freshened::left_stale`] rather than as an error, so the only thing that
+    /// leaves here is the checkout's own failure — a `git` that cannot say what the
+    /// branch changed, or cannot make the commit, which is how every other step of
+    /// this loop fails.
+    ///
+    /// The whole of what the loop hands the pass is its own fields: the run
+    /// contributes only the ticket, which is the first word of the refresh commit's
+    /// message.
+    fn refresh_stale(&mut self, ticket: &Ticket<'_>) -> Result<Freshened, Error> {
+        self.freshen
+            .freshen(&Freshening {
+                ticket: ticket.identifier,
+                repo: self.repo,
+                root: self.root,
+                manifest: self.manifest,
+                held: self.held,
+            })
+            .map_err(Error::git)
     }
 
     /// A run this checkout already holds, picked up where it was left: its own
@@ -577,11 +602,10 @@ pub(crate) struct TouchedScope {
 /// and why it did not.
 ///
 /// The owned twin of [`LeftStale`], as [`TouchedScope`]
-/// is of [`Touched`]. The reason it is owned is
-/// [`refresh_stale`](Pulling::refresh_stale)'s: the pass that fills that seam
-/// builds both of these — a path relative to the root, and a sentence about a
-/// boundary or a failure — and neither is borrowed from anything that outlives
-/// the pass.
+/// is of [`Touched`]. The reason it is owned is the pass's: it builds both of
+/// these — a directory in the manifest's spelling, and a sentence about a boundary
+/// or a failure — and neither is borrowed from anything that outlives the pass, so
+/// the body borrows them back out of [`Freshened`] at the end.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct StaleDirectory {
     pub(crate) directory: String,
@@ -826,9 +850,13 @@ pub(crate) enum PullEvent {
 
 /// The three sections a run has, and the whole of what opens one.
 ///
-/// The refresh has no heading here. It is one clearly named call site in the
-/// finish, with nothing behind it yet, and a section announced for a pass that
-/// does not run would be a run reporting work it did not do.
+/// The refresh runs between the last sub-task and the pull request and opens no
+/// section of its own. What it did is reported where it is read — the refreshed
+/// directories and the ones left stale are named in the pull request body — and
+/// what it is seen doing arrives as [`Activity`] on the same port every other
+/// session reports through. A heading for it is a fourth variant every exhaustive
+/// match over this type would have to answer, bought for a pass that usually has
+/// nothing to say.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Heading {
     Split {
@@ -1021,6 +1049,13 @@ fn scopes_in(touched: &[TouchedScope]) -> Vec<Touched<'_>> {
             paths: held.paths.iter().map(String::as_str).collect(),
         })
         .collect()
+}
+
+// The refreshed directories borrowed back out of the outcome, in the order the
+// passes ran. The pass owns its strings — it built them out of the manifest — and
+// the body borrows, so the two lists the body reads are made the same way.
+fn refreshed_in(refreshed: &[String]) -> Vec<&str> {
+    refreshed.iter().map(String::as_str).collect()
 }
 
 fn stale_in(stale: &[StaleDirectory]) -> Vec<LeftStale<'_>> {
