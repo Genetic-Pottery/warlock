@@ -22,11 +22,12 @@ use super::{Cli, Command, Error, FOR_CLAUDE_MD, Parts, ScopeCommand, Seams, Sess
 use crate::chatting::Chat;
 use crate::cutting::Cutter;
 use crate::pacting::Pact;
+use crate::puller::{Claudes, Puller, Raises};
 use crate::pushing::Pushes;
 use crate::query::spelled;
 use crate::rescope::ScopeRefusal;
 use crate::session::{Scope, Watched};
-use crate::stubs::{Boarding, Copying, Passing, Saying, Scripted};
+use crate::stubs::{Boarding, Checkout, Copying, Forging, Passing, Saying, Scripted};
 use crate::terminal::Screen;
 
 // `try_parse_from` wants argv as the process gets it, program name and all,
@@ -1463,17 +1464,23 @@ impl Screen for FakeScreen {
     }
 }
 
-// The board and the drafting model are left open, because they are the whole
-// difference between a session that files and one that cuts.
-struct Stubbed<O, A>(PhantomData<(O, A)>);
+// The board, the drafting model and the sessions a pull raises are left open,
+// because they are the whole difference between a session that files, one that
+// cuts and one that works a ticket. The sessions default to the stand-in that
+// raises none: every test but `pulling`'s below is driven with no home, so a
+// `/pull` is refused long before one would be raised.
+struct Stubbed<O, A, M = Claudes>(PhantomData<(O, A, M)>);
 
-impl<O: Opens, A: Converses> Seams for Stubbed<O, A> {
+impl<O: Opens, A: Converses, M: Raises + Clone + Send + 'static> Seams for Stubbed<O, A, M> {
     type Screen = FakeScreen;
     type Pass = Passing;
     type Talk = Saying;
     type Clip = Copying;
     type Board = O;
     type Draft = A;
+    type Repo = Checkout;
+    type Forge = Forging;
+    type Raise = M;
 }
 
 // The drafting model is a script with nothing in it: no test driven through
@@ -1500,19 +1507,35 @@ fn driving(app: App, scope: Scope, tree: &Tree) -> Driven {
             Scripted::saying([]),
             Scripted::saying([]),
         ),
+        no_pull(Boarding::filing("")),
     )
 }
 
-// The two values that decide which board a session reaches and which models it
-// opens are parameters, because that is the whole difference between a session
-// that files and one that cuts: everything else here is the same loop.
-fn driving_over<O: Opens, A: Converses>(
+// A pull over stand-ins and with no home, for the reason the push and the cut
+// above have none: a `/pull` typed in any test driven through this is refused
+// before a board is opened, a `git` is run or a `claude` is raised.
+fn no_pull<O: Opens>(board: O) -> Puller<O, Checkout, Forging, Claudes> {
+    Puller::with_seams(
+        board,
+        Checkout::clean("main"),
+        Forging::opening(""),
+        Claudes,
+        None,
+    )
+}
+
+// The three values that decide which board a session reaches, which models it
+// opens and which sessions a run of a ticket spends are parameters, because that
+// is the whole difference between a session that files, one that cuts and one
+// that pulls: everything else here is the same loop.
+fn driving_over<O: Opens, A: Converses, M: Raises + Clone + Send + 'static>(
     app: App,
     scope: Scope,
     tree: &Tree,
     pushes: Pushes<O>,
     cutter: Cutter<O, A>,
-) -> Session<Stubbed<O, A>> {
+    puller: Puller<O, Checkout, Forging, M>,
+) -> Session<Stubbed<O, A, M>> {
     let watched = Watched::start(&scope, tree);
     let root = scope.repo_root.clone();
     let parts = Parts {
@@ -1522,6 +1545,7 @@ fn driving_over<O: Opens, A: Converses>(
         chat: Chat::with_agent(root, Saying::answering(ANSWER)),
         pushes,
         cutter,
+        puller,
     };
     Session::new(app, scope, Manifest::new(), watched, parts)
 }
@@ -1580,14 +1604,16 @@ fn session_over(root: &Path) -> Driven {
     driving(app, scope, &tree)
 }
 
-// The same, over whichever board and models the caller is driving.
-fn session_reading<O: Opens, A: Converses>(
+// The same, over whichever board, models and raised sessions the caller is
+// driving.
+fn session_reading<O: Opens, A: Converses, M: Raises + Clone + Send + 'static>(
     root: &Path,
     pushes: Pushes<O>,
     cutter: Cutter<O, A>,
-) -> Session<Stubbed<O, A>> {
+    puller: Puller<O, Checkout, Forging, M>,
+) -> Session<Stubbed<O, A, M>> {
     let (app, scope, tree) = loading(root);
-    driving_over(app, scope, &tree, pushes, cutter)
+    driving_over(app, scope, &tree, pushes, cutter, puller)
 }
 
 fn loading(root: &Path) -> (App, Scope, Tree) {
@@ -3777,7 +3803,8 @@ mod cutting {
         let mut driven = session_reading(
             repo,
             Pushes::with_client(linear.clone(), Some(home.to_path_buf())),
-            Cutter::with_client(linear, Some(home.to_path_buf()), agent, proposer),
+            Cutter::with_client(linear.clone(), Some(home.to_path_buf()), agent, proposer),
+            super::no_pull(linear),
         );
         driven.manifest = a_manifest();
         driven
@@ -4198,5 +4225,740 @@ mod cutting {
         for note in notes(&driven) {
             assert!(!note.contains(NOT_A_KEY), "{note} carries the key");
         }
+    }
+}
+
+/// The seventh command, driven end to end through the loop it really runs in: a
+/// ticket taken, a run stopped, and everything that races a run in flight refused
+/// while it is in flight.
+///
+/// Nothing here opens a socket, runs a `git`, raises a `claude` or reads the
+/// sigils, the binding or the key store of the machine the suite runs on. The
+/// board, the checkout, the forge and the three sessions one pull spends are all
+/// stand-ins, and every test builds a temporary home of its own — a session built
+/// with none is refused before anything under `~` is read, which is why `driving`
+/// above gives one to nothing.
+mod pulling {
+    use std::fs;
+    use std::path::Path;
+    use std::time::Instant;
+
+    use ratatui::crossterm::event::KeyCode;
+    use tempfile::TempDir;
+    use warlock_engine::{
+        Manifest, PactEntry, PullRun, PullSubtask, RunStatus, ScopeRecord, SubtaskStatus, save_key,
+        save_key_binding, save_sigils, state_path,
+    };
+    use warlock_tui::{
+        Activity, Assignee, Dirty, Focus, Line, NamedIssue, Priority, Queue, QueuedIssue,
+        ScopePrompt, StateType, submitted_for,
+    };
+
+    use super::{AT_MOST, Session, Stubbed, key, session_reading};
+    use crate::cutting::Cutter;
+    use crate::puller::Puller;
+    use crate::pushing::Pushes;
+    use crate::stubs::{
+        Boarding, Checkout, Forging, Op, Refreshing, Scripted, Sessions, Slicing, VIEWER, Written,
+        said,
+    };
+
+    // Not a key, and named so that nothing reading this file mistakes it for one:
+    // it is stored only so that a bound name resolves.
+    const NOT_A_KEY: &str = "not-a-real-key-value";
+
+    const KEY_NAME: &str = "this-tests-own-name";
+
+    const SCOPE: &str = "warlock-team";
+
+    // A scope this repository records that the home below does not hold, which is
+    // what a sub-task writing under it is a crossing of.
+    const CLOSED: &str = "control-plane";
+
+    const TEAM: &str = "WAR";
+
+    const LABEL: &str = "warlock";
+
+    const DEFAULT: &str = "main";
+
+    const TICKET: &str = "WAR-140";
+
+    const ISSUE: &str = "issue-140";
+
+    const TITLE: &str = "Add `warlock pull <SCOPE>`";
+
+    // A second ticket, halted on this machine and never pulled here: what a
+    // `/resume` refused during a run is asserted to have left alone.
+    const OTHER: &str = "WAR-141";
+
+    const URL: &str = "https://github.com/team/repo/pull/12";
+
+    const WROTE: &str = "crates/engine/src/lib.rs";
+
+    // What every refusal during a run says it did not do, beside the one sentence
+    // naming the pull. Each is the wording of the module that refuses, so a test
+    // asserting on it is asserting that the keystroke reached that module.
+    const NO_PASS: &str = "no pass was started";
+
+    const NO_SCOPE: &str = "no scope was written";
+
+    // And the composer's own, which is what a `/draft` or a `/resume` typed during
+    // a run meets: the Enter is taken before the conversation reads the draft, so
+    // the command is never recognised and neither module is reached at all.
+    const UNSENT: &str = "nothing was sent, and quitting warlock stops the pull";
+
+    // Two recorded scopes, one pacted directory under each, so a run that stays
+    // inside its boundary and one that writes past it are both reachable from the
+    // one manifest.
+    fn a_manifest() -> Manifest {
+        Manifest::with_entries([
+            pacted("crates/engine", SCOPE),
+            pacted("crates/control", CLOSED),
+        ])
+        .with_scopes([
+            ScopeRecord::new(SCOPE, TEAM, "In Review", LABEL),
+            ScopeRecord::new(CLOSED, "CTL", "In Review", LABEL),
+        ])
+    }
+
+    fn pacted(directory: &str, scope: &str) -> PactEntry {
+        PactEntry::new(".", directory, format!("{directory}/WARLOCK.md"))
+            .expect("a relative module path is inside the root")
+            .with_scope(scope)
+    }
+
+    // The checkout the session loads its tree from: a file under each pacted
+    // directory, and the `.git` that makes it a repository to everything that
+    // looks. No `git` is ever run in it — the repository seam is a stand-in.
+    fn a_repository() -> TempDir {
+        let repo = tempfile::tempdir().expect("a temporary directory");
+        for (path, text) in [
+            (".git/HEAD", "ref: refs/heads/main\n"),
+            (WROTE, "//! Core engine.\n"),
+            ("crates/control/src/lib.rs", "//! The control plane.\n"),
+        ] {
+            let at = repo.path().join(path);
+            fs::create_dir_all(at.parent().expect("every path here has a parent"))
+                .expect("a scratch directory is writable");
+            fs::write(&at, text).expect("a scratch file is writable");
+        }
+        a_manifest()
+            .save(repo.path())
+            .expect("a manifest that saves");
+        repo
+    }
+
+    // A home of this test's own: the sigils that decide which scopes may be
+    // pulled, the binding, the key store and the run records all sit under it.
+    fn a_home(root: &Path) -> TempDir {
+        let home = tempfile::tempdir().expect("a temporary directory");
+        save_sigils(home.path(), root, &[SCOPE.to_owned()]).expect("a config that writes");
+        save_key_binding(home.path(), root, KEY_NAME).expect("a binding that writes");
+        save_key(home.path(), KEY_NAME, NOT_A_KEY).expect("a key store that writes");
+        home
+    }
+
+    type Pulls = Session<Stubbed<Boarding, Scripted, Written>>;
+
+    // The session `run` builds, with its impure things replaced: the board a pull
+    // reads its queue from, the checkout it works in, the forge it opens a request
+    // on, and the three sessions it spends.
+    //
+    // The push and the cut share the board and are built with no home, as they are
+    // everywhere else in this file: what a `/draft` typed during a run does is the
+    // refusal above every other rule it has, and a cut that got past it would need
+    // a home to resolve a board under.
+    fn pulling_session(
+        repo: &Path,
+        home: &Path,
+        board: Boarding,
+        checkout: Checkout,
+        raises: Written,
+    ) -> Pulls {
+        let mut driven = session_reading(
+            repo,
+            Pushes::with_client(board.clone(), None),
+            Cutter::with_client(
+                board.clone(),
+                None,
+                Scripted::saying([]),
+                Scripted::saying([]),
+            ),
+            Puller::with_seams(
+                board,
+                checkout,
+                Forging::opening(URL),
+                raises,
+                Some(home.to_path_buf()),
+            ),
+        );
+        driven.manifest = a_manifest();
+        driven
+    }
+
+    // A run that works one sub-task and reports on the way: enough for the account
+    // to have something under its headings, and short enough that a test which
+    // drives one to the end is not driving two.
+    fn working() -> Written {
+        Written::of(
+            Slicing::into_chain(TICKET, &["Read the queue"]),
+            Sessions::answering([said("done", "the queue is read", None)]),
+            Refreshing::quiet(),
+        )
+        .doing([
+            Activity::Tool {
+                name: "Read".to_owned(),
+                detail: Some(WROTE.to_owned()),
+            },
+            Activity::Thinking,
+            Activity::Writing { bytes: 512 },
+            Activity::Cost { usd: 0.42 },
+        ])
+    }
+
+    fn queue(issues: impl IntoIterator<Item = QueuedIssue>) -> Queue {
+        Queue::new(issues.into_iter().collect(), false)
+    }
+
+    fn ready() -> QueuedIssue {
+        QueuedIssue::new(
+            ISSUE,
+            TICKET,
+            TITLE,
+            "Todo",
+            StateType::new("unstarted"),
+            Priority::Urgent,
+            Vec::new(),
+        )
+    }
+
+    // The board a `/pull <SCOPE>` reads, and — for the resume below — the one a
+    // `/pull <SCOPE> <TICKET>` names.
+    fn board() -> Boarding {
+        Boarding::filing(URL).queueing(queue([ready()]))
+    }
+
+    fn naming() -> Boarding {
+        Boarding::filing(URL).naming(NamedIssue::new(
+            ready(),
+            TEAM,
+            vec![LABEL.to_owned()],
+            Some(Assignee::new(VIEWER, "Cole")),
+        ))
+    }
+
+    fn wrote(path: &str) -> Vec<Dirty> {
+        vec![Dirty {
+            code: " M".to_owned(),
+            path: path.to_owned(),
+            from: None,
+        }]
+    }
+
+    // Clean for the look before the board is opened, and holding the session's
+    // work for every look after it.
+    fn checkout() -> Checkout {
+        Checkout::clean(DEFAULT).trees([Vec::new(), wrote(WROTE)])
+    }
+
+    fn notes(driven: &Pulls) -> Vec<String> {
+        driven
+            .app
+            .panel()
+            .thread()
+            .map(|thread| thread.lines(Instant::now()))
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|line| match line {
+                Line::Note { text } => Some(text),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn sections(driven: &Pulls) -> usize {
+        driven
+            .app
+            .panel()
+            .account()
+            .map_or(0, |account| account.sections().len())
+    }
+
+    fn pressed(driven: &mut Pulls, code: KeyCode) -> bool {
+        driven
+            .press(key(code), Instant::now())
+            .expect("no key pressed here writes to a terminal")
+    }
+
+    // One turn of `run`'s loop with no event in it: draw, then everything that
+    // happened off this thread. The draw is what tells the cards their width, so a
+    // test that only drained would be a test of half a round.
+    fn round(driven: &mut Pulls) {
+        let size = driven.size().expect("the fake screen has a size");
+        driven.draw(size).expect("the fake screen draws");
+        driven.keep_up();
+    }
+
+    // The command typed the way a reader types one: the block arrives whole, as a
+    // terminal with bracketed paste hands it over, and the Enter after it is the
+    // submit.
+    fn typing(driven: &mut Pulls, command: &str) {
+        driven.app.set_focus(Focus::Composer);
+        driven.paste(command);
+        assert!(
+            pressed(driven, KeyCode::Enter),
+            "typing {command} ended the session"
+        );
+    }
+
+    // `/pull` and the rounds the queue takes, up to the dialog and no further:
+    // which key is pressed at it is the caller's.
+    fn asked(driven: &mut Pulls, command: &str) {
+        typing(driven, command);
+        let waited = Instant::now();
+        while driven.puller.choosing() && waited.elapsed() < AT_MOST {
+            round(driven);
+        }
+        assert!(
+            driven.puller.confirm().is_open(),
+            "the dialog did not come up: {:?}",
+            notes(driven)
+        );
+    }
+
+    // The same, answered Yes: No is lit when it opens, so Left is what moves onto
+    // Yes. The keyboard is left on the tree, which is where every key the tests
+    // below press belongs.
+    fn started(driven: &mut Pulls) {
+        asked(driven, &format!("/pull {SCOPE}"));
+        assert!(pressed(driven, KeyCode::Left));
+        assert!(pressed(driven, KeyCode::Enter));
+        assert!(driven.puller.pulling(), "the Yes started no run");
+        driven.app.set_focus(Focus::Tree);
+    }
+
+    // Rounds until the run is over, so the suite leaves no worker parked.
+    fn through(driven: &mut Pulls) {
+        let waited = Instant::now();
+        while driven.puller.pulling() && waited.elapsed() < AT_MOST {
+            round(driven);
+        }
+        assert!(!driven.puller.pulling(), "the run never finished");
+    }
+
+    // A run in flight with a sub-task that answers nothing until it is stopped:
+    // what every test about racing a pull, and the one about quitting, is driven
+    // over. Rounds until the session has really been raised, so a test that asserts
+    // about stopping one is not asserting about a run that had not started it.
+    fn held(driven: &mut Pulls, raises: &Written) {
+        started(driven);
+        let waited = Instant::now();
+        while raises.raised().is_empty() && waited.elapsed() < AT_MOST {
+            round(driven);
+        }
+        assert_eq!(
+            raises.raised().len(),
+            1,
+            "the run never raised the sub-task's session"
+        );
+    }
+
+    // A halted run of the other ticket, written straight to the home: what a
+    // `/resume` would release if it were allowed to read anything.
+    fn halted(home: &Path, root: &Path) {
+        let mut run = PullRun::new(
+            OTHER,
+            "Add `warlock resume <TICKET>`",
+            SCOPE,
+            "war-141/add-warlock-resume-ticket",
+            "2026-09-28T09:00:00+00:00",
+        );
+        let mut subtask = PullSubtask::new(
+            format!("{OTHER}.01"),
+            "Read the record back",
+            Vec::<String>::new(),
+        );
+        subtask.set_status(SubtaskStatus::Failed(
+            "the attempt was cancelled".to_owned(),
+        ));
+        run.push_subtask(subtask);
+        run.set_status(RunStatus::Halted);
+        run.save(home, root).expect("a record that writes");
+    }
+
+    #[test]
+    fn a_word_nobody_made_a_command_is_refused_in_the_sentence_naming_all_seven() {
+        let repo = a_repository();
+        let home = a_home(repo.path());
+        let linear = Boarding::unopened();
+        let mut driven = pulling_session(
+            repo.path(),
+            home.path(),
+            linear.clone(),
+            checkout(),
+            Written::of(
+                Slicing::into_chain(TICKET, &["Nothing this test lets a run reach"]),
+                Sessions::answering([]),
+                Refreshing::quiet(),
+            ),
+        );
+
+        typing(&mut driven, "/pullll warlock-team");
+
+        let refusal = submitted_for("/pullll")
+            .refusal()
+            .expect("a word nobody made a command is refused");
+        assert_eq!(notes(&driven), vec![refusal.to_owned()]);
+        for command in [
+            "/brief", "/write", "/chat", "/push", "/draft", "/pull", "/resume",
+        ] {
+            assert!(
+                refusal.contains(command),
+                "{refusal:?} does not name {command}"
+            );
+        }
+        assert!(!driven.puller.choosing(), "a refusal read a queue");
+        assert!(!driven.puller.pulling(), "a refusal started a run");
+        assert_eq!(linear.requests(), 0, "a refusal reached the board");
+    }
+
+    #[test]
+    fn esc_and_an_immediate_enter_at_the_dialog_are_both_a_no_that_starts_nothing() {
+        // The dialog's two No paths as a reader reaches them through the loop: Esc,
+        // and the reflex Enter on the round it came up. Both are the same answer,
+        // and what it costs is the window — no branch is cut, no ticket moves, no
+        // session is raised, and the next `/pull` may choose the same ticket again.
+        for code in [KeyCode::Esc, KeyCode::Enter] {
+            let repo = a_repository();
+            let home = a_home(repo.path());
+            let raises = working();
+            let repository = checkout();
+            let mut driven = pulling_session(
+                repo.path(),
+                home.path(),
+                board(),
+                repository.clone(),
+                raises.clone(),
+            );
+
+            asked(&mut driven, &format!("/pull {SCOPE}"));
+            assert!(pressed(&mut driven, code));
+
+            assert!(
+                !driven.puller.confirm().is_open(),
+                "{code:?} left the question up"
+            );
+            assert!(!driven.puller.pulling(), "{code:?} started a run");
+            assert!(
+                raises.raised().is_empty(),
+                "{code:?} raised a session: {:?}",
+                raises.raised()
+            );
+            assert_eq!(
+                repository.commits(),
+                Vec::<String>::new(),
+                "{code:?} committed something"
+            );
+            assert!(
+                !state_path(home.path(), repo.path(), TICKET).exists(),
+                "{code:?} wrote a run record"
+            );
+        }
+    }
+
+    #[test]
+    fn a_no_at_the_resuming_dialog_leaves_the_run_exactly_where_it_was() {
+        let repo = a_repository();
+        let home = a_home(repo.path());
+        // The halt a `/resume` released, which is the run selection carries on from
+        // rather than taking a fresh ticket for.
+        let mut run = PullRun::new(
+            TICKET,
+            TITLE,
+            SCOPE,
+            "war-140/add-warlock-pull-scope",
+            "2026-09-28T09:00:00+00:00",
+        );
+        run.push_subtask(PullSubtask::new(
+            format!("{TICKET}.01"),
+            "Read the queue",
+            Vec::<String>::new(),
+        ));
+        run.set_status(RunStatus::Resumed);
+        run.save(home.path(), repo.path())
+            .expect("a record that writes");
+        let before =
+            fs::read(state_path(home.path(), repo.path(), TICKET)).expect("the record is on disk");
+        let raises = working();
+        let mut driven = pulling_session(
+            repo.path(),
+            home.path(),
+            naming(),
+            checkout(),
+            raises.clone(),
+        );
+
+        asked(&mut driven, &format!("/pull {SCOPE} {TICKET}"));
+
+        let undertaking = driven
+            .puller
+            .confirm()
+            .undertaking()
+            .expect("the dialog is up")
+            .clone();
+        assert_eq!(
+            undertaking.resuming(),
+            Some(format!("{TICKET}.01").as_str()),
+            "the question does not name the sub-task the run carries on from"
+        );
+        assert!(pressed(&mut driven, KeyCode::Esc));
+
+        assert!(!driven.puller.pulling(), "a No started a run");
+        assert!(raises.raised().is_empty(), "a No raised a session");
+        assert_eq!(
+            fs::read(state_path(home.path(), repo.path(), TICKET))
+                .expect("the record is still on disk"),
+            before,
+            "a No rewrote the run record"
+        );
+    }
+
+    #[test]
+    fn a_halt_lands_on_the_thread_as_one_line_and_the_panel_goes_on_running() {
+        let repo = a_repository();
+        let home = a_home(repo.path());
+        let repository = checkout();
+        let raises = working().sessioning(Sessions::answering([said(
+            "blocked",
+            "the scope is somebody else's",
+            Some("a decision only the human can make"),
+        )]));
+        let mut driven = pulling_session(
+            repo.path(),
+            home.path(),
+            board(),
+            repository.clone(),
+            raises,
+        );
+
+        started(&mut driven);
+        through(&mut driven);
+
+        let said = notes(&driven).pop().expect("the halt said nothing");
+        assert!(said.contains(TICKET), "{said:?} does not name the ticket");
+        let run =
+            PullRun::load(home.path(), repo.path(), TICKET).expect("the run wrote its record");
+        assert_eq!(run.status(), RunStatus::Halted);
+        assert_eq!(
+            repository.commits(),
+            Vec::<String>::new(),
+            "a halted sub-task was committed"
+        );
+        // The panel goes on running: the loop goes round, the account still holds
+        // what the run did, and the next `/pull` is allowed.
+        round(&mut driven);
+        assert!(sections(&driven) > 0, "the halt took the account down");
+        assert!(
+            driven.puller.in_flight().is_none(),
+            "a halted run still holds the tree"
+        );
+    }
+
+    #[test]
+    fn a_crossing_names_the_sub_task_that_wrote_past_the_boundary() {
+        let repo = a_repository();
+        let home = a_home(repo.path());
+        // The session left a file under the scope this machine does not hold,
+        // which is what the check after it is about.
+        let repository =
+            Checkout::clean(DEFAULT).trees([Vec::new(), wrote("crates/control/src/lib.rs")]);
+        let mut driven = pulling_session(
+            repo.path(),
+            home.path(),
+            board(),
+            repository.clone(),
+            working(),
+        );
+
+        started(&mut driven);
+        through(&mut driven);
+
+        let said = notes(&driven).pop().expect("the crossing said nothing");
+        assert!(
+            said.contains(&format!("{TICKET}.01")),
+            "{said:?} does not name the sub-task that crossed"
+        );
+        assert_eq!(
+            repository.commits(),
+            Vec::<String>::new(),
+            "a crossing was committed"
+        );
+        assert_eq!(
+            PullRun::load(home.path(), repo.path(), TICKET)
+                .expect("the run wrote its record")
+                .status(),
+            RunStatus::Halted
+        );
+    }
+
+    #[test]
+    fn the_composer_starts_no_turn_while_a_pull_is_in_flight() {
+        let repo = a_repository();
+        let home = a_home(repo.path());
+        let raises = working().waiting();
+        let mut driven = pulling_session(
+            repo.path(),
+            home.path(),
+            board(),
+            checkout(),
+            raises.clone(),
+        );
+        held(&mut driven, &raises);
+        let before = notes(&driven).len();
+
+        typing(&mut driven, "What does the tree hold?");
+
+        let said = notes(&driven);
+        assert_eq!(
+            said.len(),
+            before + 1,
+            "the submit said something other than one line: {said:?}"
+        );
+        let locked = said.last().expect("the submit said nothing");
+        assert!(locked.contains(TICKET), "{locked:?} does not name the pull");
+        assert!(
+            locked.contains("quitting warlock"),
+            "{locked:?} does not say how to stop it"
+        );
+        assert!(!driven.chat.answering(), "the submit opened a turn");
+        assert_eq!(
+            driven.chat.composer().draft(),
+            "What does the tree hold?",
+            "the draft was sent rather than left in the field"
+        );
+        // The thread card is still a thread: the account is the run's output
+        // window, and what a reader typed into is readable under it.
+        round(&mut driven);
+        assert!(
+            driven.app.panel().thread().is_some(),
+            "the thread card went"
+        );
+    }
+
+    #[test]
+    fn every_key_and_command_that_races_a_pull_is_refused_with_the_line_naming_it() {
+        let repo = a_repository();
+        let home = a_home(repo.path());
+        halted(home.path(), repo.path());
+        let record = state_path(home.path(), repo.path(), OTHER);
+        let before = fs::read(&record).expect("the halted record is on disk");
+        let raises = working().waiting();
+        let mut driven = pulling_session(
+            repo.path(),
+            home.path(),
+            board(),
+            checkout(),
+            raises.clone(),
+        );
+        held(&mut driven, &raises);
+        let already = notes(&driven).len();
+
+        // The three keys first, with the keyboard on the tree, and then the two
+        // commands, which need it in the field: a `p` typed into the composer is
+        // a letter and not the pact key.
+        for code in [KeyCode::Char('p'), KeyCode::Char('r'), KeyCode::Char('s')] {
+            assert!(pressed(&mut driven, code), "{code:?} ended the session");
+        }
+        typing(&mut driven, "/draft docs/brief.md");
+        typing(&mut driven, &format!("/resume {OTHER}"));
+
+        // Five keystrokes, five lines, and every one of them names the pull. The
+        // three keys are refused by the module each would have started, in its
+        // own words; the two commands never reach theirs, because the Enter that
+        // carries them is taken by the locked composer before the conversation
+        // reads the draft — which is the stronger promise of the two, since a
+        // command that was never recognised cannot have done anything.
+        let said: Vec<String> = notes(&driven).split_off(already);
+        assert_eq!(said.len(), 5, "five refusals said {said:?}");
+        for (line, what) in said
+            .iter()
+            .zip([NO_PASS, NO_PASS, NO_SCOPE, UNSENT, UNSENT])
+        {
+            assert!(line.contains(TICKET), "{line:?} does not name the pull");
+            assert!(line.contains(what), "{line:?} does not say {what:?}");
+        }
+        assert!(!driven.chat.answering(), "a refused command opened a turn");
+        assert!(!driven.pact.running(), "a refused key started a pass");
+        assert_eq!(
+            driven.prompt,
+            ScopePrompt::Closed,
+            "a refused `s` opened the window"
+        );
+        assert!(
+            !driven.cutter.fetching(),
+            "a refused `/draft` read the board"
+        );
+        assert_eq!(
+            fs::read(&record).expect("the halted record is still on disk"),
+            before,
+            "a refused `/resume` rewrote a run record"
+        );
+    }
+
+    #[test]
+    fn quitting_with_a_pull_in_flight_stops_the_session_and_records_the_halt() {
+        let repo = a_repository();
+        let home = a_home(repo.path());
+        let linear = board();
+        let repository = checkout();
+        let raises = working().waiting();
+        let mut driven = pulling_session(
+            repo.path(),
+            home.path(),
+            linear.clone(),
+            repository.clone(),
+            raises.clone(),
+        );
+        held(&mut driven, &raises);
+
+        // The reader's own way out: the question, Left onto Yes, and the Enter
+        // that ends the session. `run` returns on that answer, and returning is
+        // what drops the pull — which is the whole of how a run is stopped.
+        assert!(pressed(&mut driven, KeyCode::Char('q')));
+        assert!(pressed(&mut driven, KeyCode::Left));
+        assert!(!pressed(&mut driven, KeyCode::Enter), "the session goes on");
+        drop(driven);
+
+        let waited = Instant::now();
+        let run = loop {
+            if let Ok(run) = PullRun::load(home.path(), repo.path(), TICKET)
+                && run.status() == RunStatus::Halted
+            {
+                break run;
+            }
+            assert!(
+                waited.elapsed() < AT_MOST,
+                "the stopped run never recorded its halt"
+            );
+        };
+        let subtask = run
+            .subtasks()
+            .first()
+            .expect("the run split into sub-tasks");
+        assert!(
+            matches!(subtask.status(), SubtaskStatus::Failed(why) if why.contains("cancelled")),
+            "the sub-task in flight is {:?} rather than failed as cancelled",
+            subtask.status()
+        );
+        assert_eq!(
+            repository.commits(),
+            Vec::<String>::new(),
+            "a cancelled run committed the tree"
+        );
+        assert!(
+            !linear.ops().contains(&Op::IssueComment),
+            "a cancelled run commented on the ticket: {:?}",
+            linear.ops()
+        );
     }
 }

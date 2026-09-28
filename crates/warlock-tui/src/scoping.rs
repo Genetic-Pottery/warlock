@@ -14,6 +14,7 @@
 //! rather than being refused.
 
 use std::path::Path;
+use std::time::Instant;
 
 use warlock_engine::{Manifest, PactEntry, to_manifest_path};
 use warlock_tui::{
@@ -26,12 +27,13 @@ use crate::error::Error;
 use crate::rescope::{RecordFields, ScopeRefusal, rescope};
 use crate::session::closed_scope;
 
-// The three refusals are ordered deliberately, matching
-// [`pact_press`](crate::pacting::pact_press): a run in flight, then the
-// boundary, then whatever the app makes of the row. A refusal during a run
-// goes to the progress line rather than the message line, because a run has
+// The four refusals are ordered deliberately, matching
+// [`pact_press`](crate::pacting::pact_press): a pull in flight, a run in flight,
+// then the boundary, then whatever the app makes of the row. A refusal during a
+// run goes to the progress line rather than the message line, because a run has
 // taken the message line and a sentence left there is the one sentence the
-// reader cannot see.
+// reader cannot see; a refusal during a pull goes on the thread, where there is
+// no progress line and the ticket has to be named.
 //
 // The field opens on the scope read out of the manifest, never off a
 // [`Row`](warlock_tui::Row): a fourth row field holding this string would be a
@@ -42,7 +44,17 @@ pub(crate) fn scope_press(
     repo_root: &Path,
     sigils: &Sigils,
     in_flight: bool,
+    pulling: Option<&str>,
+    now: Instant,
 ) -> ScopePrompt {
+    // Asked before the run of this machine's own and before the boundary,
+    // because a pull is a session editing this working tree and a scope written
+    // under it would move the boundary that run's own crossing check is about to
+    // be judged against.
+    if let Some(pulling) = pulling {
+        app.panel_mut().note(refused(pulling), now);
+        return ScopePrompt::Closed;
+    }
     if in_flight {
         // The whole of the refusal: a bit of wording on a line that is already
         // on screen. Setting it again says the same thing, so a reader leaning
@@ -81,6 +93,12 @@ pub(crate) fn scope_press(
         .and_then(PactEntry::scope)
         .unwrap_or_default();
     ScopePrompt::open(module, scope)
+}
+
+// The key turned down for a pull, in the one sentence every keystroke that races
+// one shares plus what this key did not do.
+fn refused(pulling: &str) -> String {
+    format!("{pulling}; no scope was written")
 }
 
 // Both windows in one value rather than a return each, because a submit of the

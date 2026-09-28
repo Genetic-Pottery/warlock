@@ -26,9 +26,10 @@ use ratatui::crossterm::event::{self, Event, KeyEvent, MouseEvent};
 use ratatui::layout::Size;
 use warlock_engine::{Agent, Manifest, Written, write_claude_md};
 use warlock_tui::{
-    App, Cell, ChatAgent, ClaudeAgent, Composed, Converses, Focus, LinearOpener, Modal, Modals,
-    Opens, Position, QuitConfirm, Reach, RecordPrompt, Run, ScopePrompt, Wired, composer_on_screen,
-    copied_text, draw, panel_height, panel_width, paste_for, position_at, tree_height,
+    App, Cell, ChatAgent, ClaudeAgent, Composed, Converses, Focus, Forge, Gh, Git, LinearOpener,
+    Modal, Modals, Opens, Position, QuitConfirm, Reach, RecordPrompt, Repository, Run, ScopePrompt,
+    Wired, composer_on_screen, copied_text, draw, panel_height, panel_width, paste_for,
+    position_at, tree_height,
 };
 
 mod boundary;
@@ -48,6 +49,7 @@ mod key;
 mod pacting;
 mod planned;
 mod pull;
+mod puller;
 mod pulling;
 mod push;
 mod pushing;
@@ -64,7 +66,7 @@ mod terminal;
 mod viewing;
 mod writing;
 
-use chatting::{Chat, Wanted};
+use chatting::{Chat, Takes, Wanted};
 use check::check;
 use clipboard::{Clip, Clipboard};
 use config::configure;
@@ -75,13 +77,14 @@ use input::{Action, Drag, MouseAction, Pressed, drag_after, mouse_action, press_
 use key::{key_add, key_forget, key_list, key_use};
 use pacting::{Pact, Reloaded};
 use pull::pull;
+use puller::{Claudes, Puller, Raises};
 
 use cutting::Cutter;
 use push::push;
 use pushing::Pushes;
 use query::{Listing, list};
 use rescope::RecordFields;
-use resume::resume;
+use resume::{resume, resume_press};
 use running::{pact, refresh};
 use scoping::{record_edit, scope_edit, scope_press};
 use session::{Scope, Watched, load_app, start_watching};
@@ -757,6 +760,9 @@ fn run() -> Result<(), Error> {
         // `Cutter` that borrowed a `Pushes`'s home would tie the two together
         // for nothing but the four bytes it saves.
         cutter: Cutter::new(),
+        // The same two facts a third time, and `git` and `gh` in this checkout:
+        // nothing is run and no socket is opened until a `/pull` is confirmed.
+        puller: Puller::new(&scope.repo_root),
     };
     let mut session = Session::new(app, scope, manifest, watched, parts);
 
@@ -824,19 +830,29 @@ fn run() -> Result<(), Error> {
 // the pointer and the frame are all asked about the same `Modals` and take the
 // one `current` picks. A free function rather than a method for `draw`'s sake:
 // it borrows these fields while the screen is borrowed mutably.
-fn modals<'a, C: Converses, O: Opens, A: Converses>(
+fn modals<'a, C, O, A, R, F, M>(
     quit: QuitConfirm,
     scope: &'a ScopePrompt,
     record: &'a RecordPrompt,
     pushes: &'a Pushes<O>,
     cutter: &'a Cutter<O, A>,
+    puller: &'a Puller<O, R, F, M>,
     chat: &'a Chat<C>,
-) -> Modals<'a> {
+) -> Modals<'a>
+where
+    C: Converses,
+    O: Opens,
+    A: Converses,
+    R: Repository + Clone + Send + 'static,
+    F: Forge + Clone + Send + 'static,
+    M: Raises + Clone + Send + 'static,
+{
     let pushing = pushes.window();
     Modals {
         quit,
         push: &pushing.confirm,
         cut: cutter.confirm(),
+        pull: puller.confirm(),
         // The two windows the run itself puts up, read off it rather than
         // copied: they are states of the cut in flight, and a session holding a
         // copy of either would be a second answer to what a slice is waiting for.
@@ -870,6 +886,9 @@ trait Seams {
     type Clip: Clip;
     type Board: Opens;
     type Draft: Converses;
+    type Repo: Repository + Clone + Send + 'static;
+    type Forge: Forge + Clone + Send + 'static;
+    type Raise: Raises + Clone + Send + 'static;
 }
 
 struct Live;
@@ -881,6 +900,9 @@ impl Seams for Live {
     type Clip = Clipboard;
     type Board = LinearOpener;
     type Draft = ChatAgent;
+    type Repo = Git;
+    type Forge = Gh;
+    type Raise = Claudes;
 }
 
 /// What a caller hands [`Session::new`]: the one value of each seam. Everything
@@ -893,6 +915,7 @@ struct Parts<K: Seams> {
     chat: Chat<K::Talk>,
     pushes: Pushes<K::Board>,
     cutter: Cutter<K::Board, K::Draft>,
+    puller: Puller<K::Board, K::Repo, K::Forge, K::Raise>,
 }
 
 /// Everything one interactive session holds, and the seam the tests drive.
@@ -916,6 +939,11 @@ struct Session<K: Seams> {
     /// first and the reading is what it has to say. Its own [`Option`] is its
     /// own say-no to a second cut. See [`Cutter`].
     cutter: Cutter<K::Board, K::Draft>,
+    /// The same for a `/pull`, whose run is a say-no to much more than a second
+    /// pull: while it is underway a session is editing this working tree, so
+    /// `p`, `r`, `s`, `/draft`, `/resume` and the composer are all refused with
+    /// the line [`Puller::in_flight`] words. See [`Puller`].
+    puller: Puller<K::Board, K::Repo, K::Forge, K::Raise>,
     prompt: ScopePrompt,
     /// The second window the `s` key puts up, over a scope name no `[[scope]]`
     /// record claims. Never up at the same time as [`Session::prompt`]: one goes
@@ -953,6 +981,7 @@ impl<K: Seams> Session<K> {
             chat,
             pushes,
             cutter,
+            puller,
         } = parts;
         Self {
             app,
@@ -965,6 +994,7 @@ impl<K: Seams> Session<K> {
             confirm: QuitConfirm::default(),
             pushes,
             cutter,
+            puller,
             prompt: ScopePrompt::default(),
             record: RecordPrompt::default(),
             drag: None,
@@ -988,6 +1018,7 @@ impl<K: Seams> Session<K> {
             &self.record,
             &self.pushes,
             &self.cutter,
+            &self.puller,
             &self.chat,
         )
         .current()
@@ -1025,6 +1056,7 @@ impl<K: Seams> Session<K> {
             &self.record,
             &self.pushes,
             &self.cutter,
+            &self.puller,
             &self.chat,
         )
         .current();
@@ -1158,6 +1190,9 @@ impl<K: Seams> Session<K> {
         // A local because two arms further down are about the same run; what a
         // turn is doing is asked for once, here, and read nowhere else.
         let running = self.pact.running();
+        // The same for a pull, and read for the same three keys: the line each of
+        // them is refused with while a run of a ticket is editing this tree.
+        let pulling = self.puller.in_flight();
         let pressed = press_for(key, self.modal(), typing, running, self.chat.answering());
 
         match pressed {
@@ -1190,6 +1225,10 @@ impl<K: Seams> Session<K> {
             Pressed::Cut(answered) => self.cutter.confirmed(&mut self.app, answered, now),
             Pressed::Review(answered) => self.cutter.reviewed(&mut self.app, answered, now),
             Pressed::Carry(answered) => self.cutter.carried(&mut self.app, answered, now),
+            // The question a `/pull` puts up once the queue has answered: moved,
+            // declined, or confirmed, which starts the run. See
+            // [`Puller::answered`].
+            Pressed::Pull(answered) => self.puller.answered(&mut self.app, answered, now),
             // Esc with a run in flight. The handle does both halves at once — it
             // latches, so the descent stops at the next directory instead of
             // starting a pass for it, and it kills the `claude` running right now,
@@ -1271,8 +1310,14 @@ impl<K: Seams> Session<K> {
             // everything either side of it, and everything they refuse, is
             // [`Pact::press`]'s.
             Pressed::Act(Action::TogglePact) => {
-                self.pact
-                    .press(Run::Pact, &mut self.app, &self.manifest, &self.scope, now);
+                self.pact.press(
+                    Run::Pact,
+                    &mut self.app,
+                    &self.manifest,
+                    &self.scope,
+                    pulling.as_deref(),
+                    now,
+                );
             }
             Pressed::Act(Action::Refresh) => {
                 self.pact.press(
@@ -1280,6 +1325,7 @@ impl<K: Seams> Session<K> {
                     &mut self.app,
                     &self.manifest,
                     &self.scope,
+                    pulling.as_deref(),
                     now,
                 );
             }
@@ -1400,6 +1446,8 @@ impl<K: Seams> Session<K> {
                     &self.scope.repo_root,
                     self.scope.chrome.sigils(),
                     running,
+                    pulling.as_deref(),
+                    now,
                 );
                 // Put down rather than left as it was, though `press_for` only
                 // lets this key through with it already down: a record window
@@ -1526,7 +1574,20 @@ impl<K: Seams> Session<K> {
             self.cutter.answered(&mut self.app, &answer, now);
             return;
         }
+        // A run of a ticket underway takes the Enter, and nothing else: the draft
+        // stays in the field for after, and every editing key still works on it.
+        // There is nothing to say to a model while another one is editing this
+        // tree, and a command typed here — a `/draft`, a `/resume` — would be a
+        // second writer of it. Asked before the conversation sees the draft, so
+        // no turn is opened and no command in it is recognised.
+        if self.puller.pulling() && matches!(outcome, Composed::Submit) {
+            if let Some(line) = self.puller.in_flight() {
+                self.app.panel_mut().note(locked(&line), now);
+            }
+            return;
+        }
 
+        let pulling = self.puller.in_flight();
         match self.chat.compose(&mut self.app, outcome, now) {
             Some(Wanted::Filed(brief)) => {
                 self.pushes.press(
@@ -1543,6 +1604,27 @@ impl<K: Seams> Session<K> {
                     &self.manifest,
                     &self.scope.repo_root,
                     &brief,
+                    pulling.as_deref(),
+                    now,
+                );
+            }
+            Some(Wanted::Pull(takes)) => {
+                self.puller.press(
+                    &mut self.app,
+                    &self.manifest,
+                    &self.scope.repo_root,
+                    takes.as_ref().map(Takes::taking),
+                    now,
+                );
+            }
+            Some(Wanted::Resume(ticket)) => {
+                resume_press(
+                    &mut self.app,
+                    &mut self.chat,
+                    self.puller.home(),
+                    &self.scope.repo_root,
+                    &ticket,
+                    pulling.as_deref(),
                     now,
                 );
             }
@@ -1648,7 +1730,18 @@ impl<K: Seams> Session<K> {
         if let Some(proposal) = self.cutter.keep_up(&mut self.app, now) {
             self.chat.offer(&proposal);
         }
+        // And a ticket being chosen, asked about, or worked: the account's
+        // sections and the thread's milestones, drained so the frames keep coming
+        // while a run that takes an hour runs. See [`Puller::keep_up`].
+        self.puller.keep_up(&mut self.app, now);
     }
+}
+
+// The composer's Enter turned down for a pull, in the sentence every keystroke
+// that races one shares, plus the one way to stop it: the panel has no cancel key
+// for a run, and quitting is what drops it and kills the session in flight.
+fn locked(pulling: &str) -> String {
+    format!("{pulling}; nothing was sent, and quitting warlock stops the pull")
 }
 
 /// What a pointer event already read off the frame comes to on the app.

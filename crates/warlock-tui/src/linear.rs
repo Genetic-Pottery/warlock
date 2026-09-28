@@ -1644,6 +1644,11 @@ pub enum Error {
     /// ASCII in whatever was stored. It is named and not quoted: this type is
     /// printed.
     Key,
+    /// Nothing was sent, because nothing is left to hear the answer: the run the
+    /// request belonged to was stopped before it went out. Warlock's own word
+    /// rather than Linear's — no socket was opened, so the board knows nothing
+    /// about it and there is nothing to undo.
+    Stopped,
     Transport {
         source: ureq::Error,
     },
@@ -1668,6 +1673,7 @@ impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Key => write!(f, "the Linear key cannot be sent as a header value"),
+            Self::Stopped => write!(f, "the run was stopped, so nothing was sent to Linear"),
             Self::Transport { source } => write!(f, "could not reach Linear: {source}"),
             Self::Status { code } => write!(f, "Linear answered {code}"),
             Self::Malformed { detail } => write!(f, "Linear's answer was unreadable: {detail}"),
@@ -1680,7 +1686,11 @@ impl std::error::Error for Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Transport { source } => Some(source),
-            Self::Key | Self::Status { .. } | Self::Malformed { .. } | Self::Refused { .. } => None,
+            Self::Key
+            | Self::Stopped
+            | Self::Status { .. }
+            | Self::Malformed { .. }
+            | Self::Refused { .. } => None,
         }
     }
 }

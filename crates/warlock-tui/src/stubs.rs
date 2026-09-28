@@ -13,18 +13,22 @@
 use std::collections::VecDeque;
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::Sender;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
+use std::thread;
+use std::time::Duration;
 
 use warlock_engine::splitting::Numbered;
 use warlock_engine::{Agent, agent, drafting, stub_answer, working};
 use warlock_tui::{
     Activities, Activity, Board, Cancel, Commit, Converses, Dirty, FetchedProject, Forge, GitError,
     LinearError, LinearIssue, LinearProject, NamedIssue, NewIssue, NewProject, Opened, Opens,
-    PullRequest, Queue, Repository, Split, Wired, Worked,
+    PullRequest, Queue, Repository, Split, Stopped, Wired, Worked,
 };
 
 use crate::clipboard::Clip;
 use crate::freshness::{Freshened, Freshening, Freshens};
+use crate::puller::{Raised, Raises, Raising, Step, Stopping, activity_port};
 use crate::pulling::{Splits, Works};
 
 // A clipboard nothing on the machine has to provide. The refusal is kept as the
@@ -1404,6 +1408,174 @@ impl Freshens for Refreshing {
             asked.repo.commit_paths(message, paths)?;
         }
         Ok(self.answer.clone())
+    }
+}
+
+/// The three sessions one pull on the panel spends, written down before the run
+/// starts, and the seam the panel's own runner takes.
+///
+/// The sub-task sessions are handed this run's own activity port, which is the one
+/// thing a test cannot write down in advance: what a session is seen doing has to
+/// arrive over the same channel the headings do, or the account card is being
+/// asserted about something the panel does not do.
+#[derive(Clone)]
+pub(crate) struct Written {
+    split: Slicing,
+    sessions: Sessions,
+    freshen: Refreshing,
+    doing: Vec<Activity>,
+    refreshing: Vec<String>,
+    waiting: bool,
+    raised: Arc<Mutex<Vec<String>>>,
+}
+
+impl Written {
+    /// A run over the three stand-ins, reporting nothing and refreshing nowhere:
+    /// what a session is seen doing and which directories the pass reaches are
+    /// said by the two builders below, because most tests are about neither.
+    pub(crate) fn of(split: Slicing, sessions: Sessions, freshen: Refreshing) -> Self {
+        Self {
+            split,
+            sessions,
+            freshen,
+            doing: Vec::new(),
+            refreshing: Vec::new(),
+            waiting: false,
+            raised: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    pub(crate) fn splitting(mut self, split: Slicing) -> Self {
+        self.split = split;
+        self
+    }
+
+    pub(crate) fn sessioning(mut self, sessions: Sessions) -> Self {
+        self.sessions = sessions;
+        self
+    }
+
+    pub(crate) fn freshening(mut self, freshen: Refreshing) -> Self {
+        self.freshen = freshen;
+        self
+    }
+
+    /// What every sub-task session reports before it answers.
+    pub(crate) fn doing(mut self, doing: impl IntoIterator<Item = Activity>) -> Self {
+        self.doing = doing.into_iter().collect();
+        self
+    }
+
+    /// The directories the refresh pass is to be seen reaching, in the manifest's
+    /// own spelling, which the stand-in has no way to say for itself: the real one
+    /// reports them out of the descent under it, and [`Refreshes`] says them onto
+    /// the same channel before it answers.
+    pub(crate) fn refreshing(mut self, directories: &[&str]) -> Self {
+        self.refreshing = directories
+            .iter()
+            .map(|directory| (*directory).to_owned())
+            .collect();
+        self
+    }
+
+    /// Sub-task sessions that answer nothing until they are stopped, for the one
+    /// thing a run that finished cannot show: that quitting the panel reaches the
+    /// session in flight. Each answers as a cancelled `claude` does.
+    pub(crate) const fn waiting(mut self) -> Self {
+        self.waiting = true;
+        self
+    }
+
+    /// Every sub-task session the run raised, in order, whether it answered or was
+    /// stopped: what a test waits on before it quits.
+    pub(crate) fn raised(&self) -> Vec<String> {
+        self.raised
+            .lock()
+            .expect("no test panics holding this")
+            .clone()
+    }
+}
+
+impl Raises for Written {
+    type Split = Slicing;
+    type Sessions = Publishing;
+    type Freshen = Refreshes;
+
+    fn raise(&self, asked: Raising<'_>) -> Raised<Slicing, Publishing, Refreshes> {
+        let activities = activity_port(&asked.events);
+        Raised {
+            split: self.split.clone(),
+            sessions: Publishing {
+                inner: self
+                    .sessions
+                    .clone()
+                    .reporting(activities, self.doing.clone()),
+                stopping: asked.stopping,
+                waiting: self.waiting,
+                raised: Arc::clone(&self.raised),
+            },
+            freshen: Refreshes {
+                inner: self.freshen.clone(),
+                events: asked.events,
+                directories: self.refreshing.clone(),
+            },
+        }
+    }
+}
+
+/// The sub-task sessions as the panel raises them: each mints the handle its own
+/// child would answer and publishes it where the thread that quits can reach it,
+/// which is what [`Working::on`](warlock_tui::Working) does under the real one. A
+/// stand-in that skipped this would be a run nothing could stop.
+pub(crate) struct Publishing {
+    inner: Sessions,
+    stopping: Stopping,
+    waiting: bool,
+    raised: Arc<Mutex<Vec<String>>>,
+}
+
+/// How often a waiting session looks at its say-when. Spun rather than parked,
+/// because what cancels it is a `Drop` on the thread that quits and there is
+/// nothing there to notify a condition with.
+const LOOKED: Duration = Duration::from_millis(1);
+
+impl Works for Publishing {
+    fn work(&self, opening: &str) -> Worked {
+        let cancel = Cancel::new();
+        // Published before the session does anything, as the real one is: a handle
+        // attached after the first turn is a quit the child never hears about.
+        self.stopping.raising(cancel.clone());
+        self.raised
+            .lock()
+            .expect("no test panics holding this")
+            .push(opening.to_owned());
+        if self.waiting {
+            while !cancel.is_cancelled() {
+                thread::sleep(LOOKED);
+            }
+            return Worked::Halted(Stopped::Cancelled);
+        }
+        self.inner.work(opening)
+    }
+}
+
+/// The freshness pass as the panel wires it: the stand-in that answers, with the
+/// per-directory events the real pass's descent reports said onto the run's own
+/// channel first.
+pub(crate) struct Refreshes {
+    inner: Refreshing,
+    events: Sender<Step>,
+    directories: Vec<String>,
+}
+
+impl Freshens for Refreshes {
+    fn freshen(&self, asked: &Freshening<'_>) -> Result<Freshened, GitError> {
+        for directory in &self.directories {
+            self.events
+                .send(Step::Refreshing(directory.clone()))
+                .expect("the run is listening");
+        }
+        self.inner.freshen(asked)
     }
 }
 

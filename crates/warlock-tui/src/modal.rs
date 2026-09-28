@@ -1,5 +1,6 @@
 use crate::confirm::{
-    Answer, Carry, CutConfirm, Cutting, Filing, PushConfirm, QuitConfirm, Review,
+    Answer, Carry, CutConfirm, Cutting, Filing, PullConfirm, PushConfirm, QuitConfirm, Review,
+    Undertaking,
 };
 use crate::prompt::{RecordForm, RecordPrompt, ScopeField, ScopePrompt};
 
@@ -12,6 +13,7 @@ pub enum Modal<'a> {
     Quit(Answer),
     Push(&'a Filing),
     Cut(&'a Cutting),
+    Pull(&'a Undertaking),
     Review(&'a Review),
     Carry(&'a Carry),
     Filing(&'a ScopeField),
@@ -32,6 +34,7 @@ pub struct Modals<'a> {
     pub quit: QuitConfirm,
     pub push: &'a PushConfirm,
     pub cut: &'a CutConfirm,
+    pub pull: &'a PullConfirm,
     pub review: Option<&'a Review>,
     pub carry: Option<&'a Carry>,
     pub filing: &'a ScopePrompt,
@@ -46,6 +49,7 @@ impl Default for Modals<'_> {
             quit: QuitConfirm::Closed,
             push: &PushConfirm::Closed,
             cut: &CutConfirm::Closed,
+            pull: &PullConfirm::Closed,
             review: None,
             carry: None,
             filing: &ScopePrompt::Closed,
@@ -66,14 +70,18 @@ impl<'a> Modals<'a> {
     // it with nobody pressing anything — a board answering a `/draft`, a slice's
     // drafts arriving, a `/write` turn answering into its prompt.
     //
-    // The push, cut, review and carry questions before the three fields, for
-    // the same reason one step down: a field can come up under one of them on no
-    // keystroke, and the question is the window somebody is looking at. Among
-    // those four and the filing field the order is a statement rather than a
-    // choice: a `/push` or `/draft` is typed into the composer, which takes no
-    // keys while any of them is up; the filing field's submit is what puts the
-    // push dialog up; and a slice is being reviewed, or asking whether to carry
-    // on, or neither.
+    // The push, cut, pull, review and carry questions before the three fields,
+    // for the same reason one step down: a field can come up under one of them
+    // on no keystroke, and the question is the window somebody is looking at.
+    // Among those five and the filing field the order is a statement rather
+    // than a choice: a `/push`, `/draft` or `/pull` is typed into the composer,
+    // which takes no keys while any of them is up; the filing field's submit is
+    // what puts the push dialog up; and a slice is being reviewed, or asking
+    // whether to carry on, or neither.
+    //
+    // The pull question sits with the other two the composer opens rather than
+    // with the two a run puts up, because that is what it is: it is asked once,
+    // before anything is checked out, and nothing it starts asks anything else.
     //
     // The two windows the `s` key puts up before the write prompt, because
     // either can be up with it — `s` opens one from the tree while a `/write`
@@ -87,6 +95,7 @@ impl<'a> Modals<'a> {
             .map(Modal::Quit)
             .or_else(|| self.push.filing().map(Modal::Push))
             .or_else(|| self.cut.cutting().map(Modal::Cut))
+            .or_else(|| self.pull.undertaking().map(Modal::Pull))
             .or_else(|| self.review.map(Modal::Review))
             .or_else(|| self.carry.map(Modal::Carry))
             .or_else(|| self.filing.field().map(Modal::Filing))

@@ -25,8 +25,8 @@
 //! against the user the key belongs to, and nothing takes a flag past it.
 //!
 //! No key value is printed here and none can be: [`Prepared`] carries one with a
-//! redacting `Debug`, it is read on exactly one line — the opener's — and nothing
-//! that prints is given it.
+//! redacting `Debug`, it is read on one line per door — the opener's, here and in
+//! [`mod@crate::puller`] — and nothing that prints is given it.
 
 use std::fmt;
 use std::fs::OpenOptions;
@@ -284,7 +284,11 @@ impl<'m> Prepared<'m> {
         &self.held
     }
 
-    fn value(&self) -> &str {
+    /// The key the board is opened with, read on exactly one line per door — the
+    /// opener's. `pub(crate)` for the panel's sake: its run opens the board on a
+    /// worker of its own, so the value has to cross out of here, and the type it
+    /// sits on redacts it in `Debug`.
+    pub(crate) fn value(&self) -> &str {
         &self.value
     }
 }
@@ -427,7 +431,7 @@ fn would(scope: &str, named: Option<&str>, selected: &Selected) -> Vec<String> {
     lines
 }
 
-fn passed_over(skipped: &Skipped) -> String {
+pub(crate) fn passed_over(skipped: &Skipped) -> String {
     format!(
         "passed over `{}` — {}",
         skipped.issue().identifier(),
@@ -435,7 +439,7 @@ fn passed_over(skipped: &Skipped) -> String {
     )
 }
 
-fn nothing_ready(scope: &str) -> String {
+pub(crate) fn nothing_ready(scope: &str) -> String {
     format!("nothing in the queue for `{scope}` is ready to work")
 }
 
@@ -446,7 +450,7 @@ fn nothing_ready(scope: &str) -> String {
 /// No `gh` on the machine is still a finish, said as what happened: the account of
 /// the run is on the ticket instead, which is where somebody opening the request
 /// by hand will look.
-fn opened(ticket: &str, url: Option<&str>) -> String {
+pub(crate) fn opened(ticket: &str, url: Option<&str>) -> String {
     match url {
         Some(url) => format!("`{ticket}` is in review: {url}"),
         None => format!(
@@ -462,7 +466,7 @@ fn opened(ticket: &str, url: Option<&str>) -> String {
 /// identifier came off the board, the branch name also carries the folded title,
 /// and refusing to work a ticket over how its team spells identifiers would be
 /// warlock deciding what Linear may call an issue.
-fn number_in(identifier: &str) -> u32 {
+pub(crate) fn number_in(identifier: &str) -> u32 {
     identifier
         .trim()
         .rsplit_once('-')

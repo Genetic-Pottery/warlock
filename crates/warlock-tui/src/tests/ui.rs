@@ -18,18 +18,19 @@ use super::{
     GUIDE, GUIDE_BRANCH, GUIDE_LAST, HEADER_GAP, HEADER_HEIGHT, Hit, INDENT, KEY_DROP_ORDER,
     KEY_GAP, KEYS, LIVE_KEY, MARK, MARK_MARGIN, MARK_MARGIN_ROWS, MOVE_KEYS, NO_MARKER,
     NOTE_MARKER, PACTING_KEYS, PACTING_QUIT_KEY, PACTING_RUN, PANEL_INDENT, PATH_HEADING,
-    PATH_RULES, PERCENT_WIDTH, PUSH_KEY, PUSH_LINES, PUSH_QUESTION, PUSH_TEAM, QUIT_KEY,
-    RECORD_HEADING, RECORD_HEIGHT, RECORD_LABEL_GAP, RECORD_LINES, RECORD_RULES, REFRESHING_RUN,
-    REVIEW_ANSWER_GAP, REVIEW_CREATE, REVIEW_FEEDBACK, REVIEW_FIXED_LINES, REVIEW_QUESTION,
-    REVIEW_SKIP, ROW_KEY, RUN_HEADER_HEIGHT, Reach, Review, SAID_MARKER, SCOPE_CURSOR,
-    SCOPE_HEADING, SCOPE_HEIGHT, SCOPE_LINES, SCOPE_MARGIN, SCOPE_MARGIN_ROWS, SCROLLBACK_ARROW,
-    SELECTED, SELECTION_MARKER, THREAD_TITLE, TREE_MIN_WIDTH, TREE_PERCENT, areas, carry_area,
-    centred, composer_height, composer_on_screen, confirm_area, confirm_size, cut_area,
-    display_width, draw, footer_text_area, guide_prefixes, hit_test, keys_line, label_width,
-    mark_area, pacting_keys_line, pane_inner, panel_height, panel_reach, panel_row,
-    panel_rows_area, panel_width, push_area, record_lines, record_size, review_area,
-    run_header_height, run_header_line, scope_size, tree_height, tree_rows_area, tree_width,
-    truncated,
+    PATH_RULES, PERCENT_WIDTH, PULL_BRANCH, PULL_FIXED_LINES, PULL_FROM, PULL_QUESTION,
+    PULL_RESUME_LINES, PULL_RESUME_QUESTION, PULL_SCOPE, PULL_TEAM, PUSH_KEY, PUSH_LINES,
+    PUSH_QUESTION, PUSH_TEAM, QUIT_KEY, RECORD_HEADING, RECORD_HEIGHT, RECORD_LABEL_GAP,
+    RECORD_LINES, RECORD_RULES, REFRESHING_RUN, REVIEW_ANSWER_GAP, REVIEW_CREATE, REVIEW_FEEDBACK,
+    REVIEW_FIXED_LINES, REVIEW_QUESTION, REVIEW_SKIP, ROW_KEY, RUN_HEADER_HEIGHT, Reach, Review,
+    SAID_MARKER, SCOPE_CURSOR, SCOPE_HEADING, SCOPE_HEIGHT, SCOPE_LINES, SCOPE_MARGIN,
+    SCOPE_MARGIN_ROWS, SCROLLBACK_ARROW, SELECTED, SELECTION_MARKER, THREAD_TITLE, TREE_MIN_WIDTH,
+    TREE_PERCENT, areas, carry_area, centred, composer_height, composer_on_screen, confirm_area,
+    confirm_size, cut_area, display_width, draw, footer_text_area, guide_prefixes, hit_test,
+    keys_line, label_width, mark_area, pacting_keys_line, pane_inner, panel_height, panel_reach,
+    panel_row, panel_rows_area, panel_width, pull_area, push_area, record_lines, record_size,
+    review_area, run_header_height, run_header_line, scope_size, tree_height, tree_rows_area,
+    tree_width, truncated,
 };
 use crate::COMPOSER_MAX_ROWS;
 use crate::account::{Line as Entry, Outcome};
@@ -37,7 +38,7 @@ use crate::app::{App, Chrome, Focus, Row, Run, Sigils};
 use crate::claude::Activity;
 use crate::colour::{CONVERSATION_COLOUR, FOCUS_COLOUR, GUIDE_COLOUR, SYSTEM_COLOUR, colour_for};
 use crate::composer::Composer;
-use crate::confirm::{Answer, Choice, CutConfirm, PushConfirm, QuitConfirm};
+use crate::confirm::{Answer, Choice, CutConfirm, PullConfirm, PushConfirm, QuitConfirm};
 use crate::fixture;
 use crate::modal::Modals;
 use crate::panel::Mode;
@@ -383,6 +384,22 @@ fn render_push(app: &App, width: u16, height: u16, push: &PushConfirm) -> Buffer
 fn render_cut(app: &App, width: u16, height: u16, cut: &CutConfirm) -> Buffer {
     let modals = Modals {
         cut,
+        ..Modals::default()
+    };
+    render_every(
+        app,
+        &Chrome::default(),
+        width,
+        height,
+        Instant::now(),
+        modals,
+        None,
+    )
+}
+
+fn render_pull(app: &App, width: u16, height: u16, pull: &PullConfirm) -> Buffer {
+    let modals = Modals {
+        pull,
         ..Modals::default()
     };
     render_every(
@@ -6531,6 +6548,222 @@ fn the_cut_dialog_is_centred_over_the_frame_like_the_other_two() {
     let buffer = render_cut(&app, WIDTH, FIXTURE_HEIGHT, &cut);
 
     let area = cut_rect(&buffer, &cut);
+    let left = area.x;
+    let right = WIDTH - (area.x + area.width);
+    let above = area.y;
+    let below = FIXTURE_HEIGHT - (area.y + area.height);
+    assert!(
+        left.abs_diff(right) <= 1,
+        "{left} columns left, {right} right"
+    );
+    assert!(
+        above.abs_diff(below) <= 1,
+        "{above} rows above, {below} below"
+    );
+    // A window, bordered all the way round, with the frame behind it cleared
+    // rather than showing through.
+    let rows = dialog_rows(&buffer, area);
+    assert!(
+        rows[0].starts_with('┌') && rows[0].ends_with('┐'),
+        "{rows:?}"
+    );
+    let last = rows.last().expect("the window has rows");
+    assert!(last.starts_with('└') && last.ends_with('┘'), "{rows:?}");
+    for row in &rows[1..rows.len() - 1] {
+        assert!(row.starts_with('│') && row.ends_with('│'), "{rows:?}");
+        assert!(
+            !row.contains(UNDERNEATH),
+            "the frame behind shows through: {rows:?}"
+        );
+    }
+}
+
+const PULL_TICKET: &str = "WAR-143";
+
+const PULL_TITLE: &str = "Add /pull and /resume to the panel";
+
+const PULL_SCOPE_NAME: &str = "warlock-team";
+
+const PULL_BRANCH_NAME: &str = "war-143/add-pull-and-resume-to-the-panel";
+
+// The sub-task a carried-on run starts from, in the run record's own spelling.
+const PULL_SUBTASK: &str = "WAR-143.02";
+
+// A key value no window holds and no frame can therefore draw. Unlike the cut
+// dialog this one is handed no key and no name for one, so this string is here
+// only to be looked for, and so is the name beside it.
+const PULL_KEY_VALUE: &str = "lin_api_not_a_real_key_value";
+
+fn pull_dialog() -> PullConfirm {
+    PullConfirm::open(
+        PULL_TICKET,
+        PULL_TITLE,
+        PULL_SCOPE_NAME,
+        PUSH_TEAM_NAME,
+        PULL_BRANCH_NAME,
+    )
+}
+
+fn resumed_pull_dialog() -> PullConfirm {
+    PullConfirm::resuming(
+        PULL_TICKET,
+        PULL_TITLE,
+        PULL_SCOPE_NAME,
+        PUSH_TEAM_NAME,
+        PULL_BRANCH_NAME,
+        PULL_SUBTASK,
+    )
+}
+
+fn pull_rect(buffer: &Buffer, pull: &PullConfirm) -> Rect {
+    pull_area(buffer.area, pull.undertaking().expect("the dialog is up"))
+}
+
+#[test]
+fn the_pull_dialog_names_the_ticket_the_title_the_scope_the_team_and_the_branch() {
+    let base = Instant::now();
+    let app = busy_app(base, WIDTH, FIXTURE_HEIGHT);
+    let pull = pull_dialog();
+
+    let buffer = render_pull(&app, WIDTH, FIXTURE_HEIGHT, &pull);
+
+    let rows = dialog_rows(&buffer, pull_rect(&buffer, &pull));
+    let on = |needle: &str| {
+        rows.iter()
+            .position(|row| row.contains(needle))
+            .unwrap_or_else(|| panic!("{needle:?} is not on the window: {rows:?}"))
+    };
+    // The facts somebody is being asked about, in the order they are read in:
+    // which ticket, what it is called, which boundary the work is inside, where
+    // the ticket lives and what will be checked out.
+    let question = on(PULL_QUESTION);
+    let ticket = on(PULL_TICKET);
+    let title = on(PULL_TITLE);
+    let scope = on(&format!("{PULL_SCOPE}{PULL_SCOPE_NAME}"));
+    let team = on(&format!("{PULL_TEAM}{PUSH_TEAM_NAME}"));
+    let branch = on(&format!("{PULL_BRANCH}{PULL_BRANCH_NAME}"));
+    let answers = on(CONFIRM_YES.trim());
+
+    assert!(question < ticket, "{rows:?}");
+    assert!(ticket < title && title < scope, "{rows:?}");
+    assert!(scope < team && team < branch, "{rows:?}");
+    assert!(branch < answers, "{rows:?}");
+    // Nothing about resuming on a fresh pull: there is no sub-task to carry on
+    // from, so the window does not say there is.
+    assert!(
+        !rows.iter().any(|row| row.contains(PULL_RESUME_QUESTION)),
+        "a fresh pull says it is resuming: {rows:?}"
+    );
+    assert!(
+        !rows.iter().any(|row| row.contains(PULL_FROM.trim())),
+        "a fresh pull names a sub-task: {rows:?}"
+    );
+    // Two answers on that line and nothing else, in the order the other
+    // dialogs draw them.
+    assert_eq!(inside_the_border(&rows[answers]), answers_text());
+    assert!(
+        column_of(&rows[answers], CONFIRM_YES.trim())
+            < column_of(&rows[answers], CONFIRM_NO.trim()),
+        "Yes is to the left of No in every dialog: {rows:?}"
+    );
+    // The window is as tall as it says it is, border and margins included.
+    assert_eq!(u16::try_from(rows.len()).expect("a short window"), {
+        PULL_FIXED_LINES + 2 * CONFIRM_MARGIN_ROWS + 2 * BORDER_THICKNESS
+    });
+}
+
+#[test]
+fn the_resumed_pull_dialog_says_it_is_resuming_and_names_the_sub_task_it_carries_on_from() {
+    let base = Instant::now();
+    let app = busy_app(base, WIDTH, FIXTURE_HEIGHT);
+    let pull = resumed_pull_dialog();
+
+    let buffer = render_pull(&app, WIDTH, FIXTURE_HEIGHT, &pull);
+
+    let rows = dialog_rows(&buffer, pull_rect(&buffer, &pull));
+    let on = |needle: &str| {
+        rows.iter()
+            .position(|row| row.contains(needle))
+            .unwrap_or_else(|| panic!("{needle:?} is not on the window: {rows:?}"))
+    };
+    // A different question, because a resumed run is a different undertaking:
+    // the branch is already there and somebody else's halt is being carried on.
+    let question = on(PULL_RESUME_QUESTION);
+    let branch = on(&format!("{PULL_BRANCH}{PULL_BRANCH_NAME}"));
+    let from = on(&format!("{PULL_FROM}{PULL_SUBTASK}"));
+    let answers = on(CONFIRM_YES.trim());
+
+    assert!(question < branch && branch < from, "{rows:?}");
+    assert!(from < answers, "{rows:?}");
+    assert!(
+        !rows.iter().any(|row| row.contains(PULL_QUESTION)),
+        "a resumed run asks the fresh question too: {rows:?}"
+    );
+    // One row taller than a fresh pull, and that row is the sub-task's.
+    assert_eq!(u16::try_from(rows.len()).expect("a short window"), {
+        PULL_FIXED_LINES + PULL_RESUME_LINES + 2 * CONFIRM_MARGIN_ROWS + 2 * BORDER_THICKNESS
+    });
+}
+
+#[test]
+fn no_key_or_key_value_is_drawn_anywhere_on_a_frame_with_the_pull_dialog_up() {
+    // The claim as a reader would check it, over the whole frame rather than
+    // the window: a pull resolves the board the machine's own way, so the
+    // dialog is handed neither a key nor a name for one and there is nothing of
+    // the sort for a screenshot to catch.
+    let base = Instant::now();
+    let app = busy_app(base, WIDTH, FIXTURE_HEIGHT);
+
+    for pull in [pull_dialog(), resumed_pull_dialog()] {
+        let buffer = render_pull(&app, WIDTH, FIXTURE_HEIGHT, &pull);
+
+        let screen: Vec<String> = (0..FIXTURE_HEIGHT).map(|y| row_text(&buffer, y)).collect();
+        let window = dialog_rows(&buffer, pull_rect(&buffer, &pull)).join("\n");
+        assert!(window.contains(PULL_TICKET), "{window}");
+        for row in &screen {
+            assert!(
+                !row.contains(PULL_KEY_VALUE),
+                "a key value is drawn: {row:?}"
+            );
+            assert!(!row.contains(PUSH_KEY), "a key is named: {row:?}");
+        }
+    }
+}
+
+#[test]
+fn the_pull_dialog_opens_with_no_lit_and_moves_only_the_highlight() {
+    let base = Instant::now();
+    let app = busy_app(base, WIDTH, FIXTURE_HEIGHT);
+    let opened = pull_dialog();
+    let moved = opened.lit(Answer::Yes);
+
+    let first = render_pull(&app, WIDTH, FIXTURE_HEIGHT, &opened);
+    let second = render_pull(&app, WIDTH, FIXTURE_HEIGHT, &moved);
+
+    let area = pull_rect(&first, &opened);
+    // The answer that starts a run is never the one under the reader's finger
+    // when the question arrives.
+    assert_lit_in(&first, area, CONFIRM_NO);
+    assert_unlit_in(&first, area, CONFIRM_YES);
+    assert_lit_in(&second, area, CONFIRM_YES);
+    assert_unlit_in(&second, area, CONFIRM_NO);
+    // And nothing else moved: the facts are drawn in the same rows and the same
+    // columns whichever answer is lit.
+    assert_eq!(
+        dialog_rows(&first, area),
+        dialog_rows(&second, pull_rect(&second, &moved))
+    );
+}
+
+#[test]
+fn the_pull_dialog_is_centred_over_the_frame_like_the_others() {
+    let base = Instant::now();
+    let app = busy_app(base, WIDTH, FIXTURE_HEIGHT);
+    let pull = pull_dialog();
+
+    let buffer = render_pull(&app, WIDTH, FIXTURE_HEIGHT, &pull);
+
+    let area = pull_rect(&buffer, &pull);
     let left = area.x;
     let right = WIDTH - (area.x + area.width);
     let above = area.y;

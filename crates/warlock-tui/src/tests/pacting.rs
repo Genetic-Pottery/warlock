@@ -20,12 +20,21 @@ use warlock_tui::{
 use warlock_tui::Cancel;
 
 use super::{
-    CancelGuard, PACT_CANCELLED, PACT_LOST, Pact, PactEvent, Reloaded, Running, Toggled, Work,
-    activity_port, apply_toggle, run_pact, spawn_pact,
+    CancelGuard, PACT_CANCELLED, PACT_LOST, Pact, PactEvent, Reloaded, Running, Toggled,
+    TurnedDown, Work, activity_port, apply_toggle, run_pact, spawn_pact,
 };
 use crate::chatting::Chat;
 use crate::descent::RunEvent;
 use crate::session::{NOT_REFRESHED, Scope};
+
+// A run of this type's own, or none, and no pull: the tests here are about the
+// first, and the ones about a pull build their `TurnedDown` whole.
+const fn turn(in_flight: bool) -> TurnedDown<'static> {
+    TurnedDown {
+        in_flight,
+        pulling: None,
+    }
+}
 
 fn pact_press(app: &mut App, in_flight: bool, at: Instant) -> Option<PactToggle> {
     super::pact_press(
@@ -33,7 +42,7 @@ fn pact_press(app: &mut App, in_flight: bool, at: Instant) -> Option<PactToggle>
         &Manifest::new(),
         Path::new(ROOT),
         &Sigils::Nothing,
-        in_flight,
+        turn(in_flight),
         at,
     )
 }
@@ -44,7 +53,7 @@ fn refresh_press(app: &mut App, in_flight: bool, at: Instant) -> Option<PathBuf>
         &Manifest::new(),
         Path::new(ROOT),
         &Sigils::Nothing,
-        in_flight,
+        turn(in_flight),
         at,
     )
 }
@@ -1330,7 +1339,7 @@ fn p_is_refused_on_a_directory_whose_scope_this_machine_does_not_hold() {
         &scoped(),
         Path::new(ROOT),
         &Sigils::held(["web"]),
-        false,
+        turn(false),
         Instant::now(),
     );
 
@@ -1360,7 +1369,7 @@ fn the_un_pact_direction_is_refused_too_and_is_what_this_is_for() {
             &scoped(),
             Path::new(ROOT),
             &Sigils::held(["web"]),
-            false,
+            turn(false),
             Instant::now(),
         );
 
@@ -1406,7 +1415,7 @@ fn p_un_pacting_ward_is_refused_by_a_boundary_below_the_row() {
             &scoped_below(),
             Path::new(ROOT),
             &Sigils::held(["web"]),
-            false,
+            turn(false),
             Instant::now(),
         );
 
@@ -1429,7 +1438,7 @@ fn the_boundary_below_binds_the_un_pact_direction_and_no_other_key() {
         &scoped_below(),
         Path::new(ROOT),
         &Sigils::held(["web"]),
-        false,
+        turn(false),
         Instant::now(),
     )
     .expect("a pact leaves every scope below exactly as it found it");
@@ -1443,7 +1452,7 @@ fn the_boundary_below_binds_the_un_pact_direction_and_no_other_key() {
             &scoped_below(),
             Path::new(ROOT),
             &Sigils::held(["web"]),
-            false,
+            turn(false),
             Instant::now()
         ),
         Some(PathBuf::from(format!("{ROOT}/crates"))),
@@ -1462,7 +1471,7 @@ fn holding_the_boundary_below_lets_the_un_pact_through() {
             &scoped_below(),
             Path::new(ROOT),
             &sigils,
-            false,
+            turn(false),
             Instant::now(),
         )
         .unwrap_or_else(|| panic!("{sigils:?} opens the boundary below"));
@@ -1484,7 +1493,7 @@ fn r_is_refused_on_a_directory_whose_scope_this_machine_does_not_hold() {
         &scoped(),
         Path::new(ROOT),
         &Sigils::held(["web"]),
-        false,
+        turn(false),
         Instant::now(),
     );
 
@@ -1513,7 +1522,7 @@ fn holding_the_scope_lets_both_keys_through() {
             &scoped(),
             Path::new(ROOT),
             &sigils,
-            false,
+            turn(false),
             Instant::now(),
         )
         .unwrap_or_else(|| panic!("{sigils:?} opens `data-plane` for a pact"));
@@ -1527,7 +1536,7 @@ fn holding_the_scope_lets_both_keys_through() {
                 &scoped(),
                 Path::new(ROOT),
                 &sigils,
-                false,
+                turn(false),
                 Instant::now()
             ),
             Some(PathBuf::from(format!("{ROOT}/crates"))),
@@ -1551,7 +1560,7 @@ fn a_machine_that_holds_no_sigil_is_refused_by_both_keys() {
                 &scoped(),
                 Path::new(ROOT),
                 &sigils,
-                false,
+                turn(false),
                 Instant::now()
             ),
             None,
@@ -1566,7 +1575,7 @@ fn a_machine_that_holds_no_sigil_is_refused_by_both_keys() {
                 &scoped(),
                 Path::new(ROOT),
                 &sigils,
-                false,
+                turn(false),
                 Instant::now()
             ),
             None,
@@ -1587,7 +1596,7 @@ fn an_unscoped_directory_stays_open_to_a_machine_holding_nothing() {
         &Manifest::new(),
         Path::new(ROOT),
         &Sigils::Nothing,
-        false,
+        turn(false),
         Instant::now(),
     )
     .expect("nothing scopes this directory");
@@ -1610,7 +1619,7 @@ fn a_run_in_flight_is_answered_before_the_boundary_is() {
             &scoped(),
             Path::new(ROOT),
             &Sigils::held(["web"]),
-            true,
+            turn(true),
             Instant::now()
         ),
         None
@@ -5554,4 +5563,62 @@ mod watching {
             "starting a working watcher said something"
         );
     }
+}
+
+// What a key turned down for a pull put on the thread, which is where that
+// refusal goes: there is no progress line of a pass to reword.
+fn thread_notes(app: &App) -> Vec<String> {
+    app.panel()
+        .thread()
+        .map(|thread| thread.lines(Instant::now()))
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|line| match line {
+            Line::Note { text } => Some(text),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn a_pull_in_flight_turns_down_both_keys_on_the_thread_before_anything_else() {
+    const PULLING: &str = "`WAR-140` is being pulled";
+    let pulled = TurnedDown {
+        // A pass of this type's own as well, and the boundary closed: the pull
+        // is the refusal on screen all the same, because it names the ticket
+        // whose session is editing this tree.
+        in_flight: true,
+        pulling: Some(PULLING),
+    };
+
+    let mut app = app_over(NodeState::PactedStale);
+    let before = app.pact_line();
+    assert_eq!(
+        super::pact_press(
+            &mut app,
+            &scoped(),
+            Path::new(ROOT),
+            &Sigils::held(["web"]),
+            pulled,
+            Instant::now(),
+        ),
+        None
+    );
+    assert_eq!(
+        super::refresh_press(
+            &mut app,
+            &scoped(),
+            Path::new(ROOT),
+            &Sigils::held(["web"]),
+            pulled,
+            Instant::now(),
+        ),
+        None
+    );
+
+    let line = format!("{PULLING}; no pass was started");
+    assert_eq!(thread_notes(&app), [line.clone(), line]);
+    assert_eq!(app.message(), None, "the boundary spoke as well");
+    assert_eq!(app.pact_line(), before, "a pass's own refusal was said too");
+    assert!(!app.panel().has_account(), "a refused key started a run");
 }

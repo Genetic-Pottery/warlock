@@ -5380,7 +5380,9 @@ fn a_second_question_goes_under_the_first_rather_than_in_place_of_it() {
 
 #[test]
 fn a_note_brings_the_conversation_forward_and_costs_nobody_a_turn() {
-    const REFUSED: &str = "commands are /brief, /write and /chat, and take nothing after them";
+    // Not warlock's own refusal, which is `Submitted::refusal`'s and is written
+    // down in one place: any line the panel can be handed will do here.
+    const REFUSED: &str = "/plan is not a command warlock has";
 
     let base = Instant::now();
     let mut app = app_pacting(9, base);
