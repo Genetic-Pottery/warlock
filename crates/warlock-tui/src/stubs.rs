@@ -18,7 +18,7 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use warlock_engine::splitting::Numbered;
 use warlock_engine::{Agent, agent, drafting, stub_answer, working};
 use warlock_tui::{
-    Activities, Board, Cancel, Commit, Converses, Dirty, FetchedProject, Forge, GitError,
+    Activities, Activity, Board, Cancel, Commit, Converses, Dirty, FetchedProject, Forge, GitError,
     LinearError, LinearIssue, LinearProject, NamedIssue, NewIssue, NewProject, Opened, Opens,
     PullRequest, Queue, Repository, Split, Wired, Worked,
 };
@@ -271,6 +271,12 @@ pub(crate) struct Boarding {
     state: Option<String>,
     label: String,
     project: Option<FetchedProject>,
+    /// What [`Board::scope_queue`] answers with, empty until a test says
+    /// otherwise: most flows here never read a queue.
+    queue: Queue,
+    /// What [`Board::named_issue`] answers with, `None` being a board that has no
+    /// such ticket.
+    named: Option<NamedIssue>,
     created: LinearProject,
     first_issue: u32,
     refusals: Vec<Refusal>,
@@ -403,6 +409,8 @@ impl Boarding {
             state: Some("state-backlog".to_owned()),
             label: "label-held".to_owned(),
             project: None,
+            queue: Queue::new(Vec::new(), false),
+            named: None,
             created: LinearProject::new("project-filed", url),
             first_issue: 1,
             refusals: Vec::new(),
@@ -454,6 +462,22 @@ impl Boarding {
             unopened: true,
             ..Self::unreachable()
         }
+    }
+
+    /// The queue this scope's own filters came back with, which is what a pull's
+    /// selection is made over.
+    pub(crate) fn queueing(mut self, queue: Queue) -> Self {
+        self.queue = queue;
+        self
+    }
+
+    /// The one ticket this board answers `named_issue` with, whatever name is
+    /// asked: which name that was is in the recorded call, so a test asserting
+    /// that `--ticket` reached the board reads it there rather than from the
+    /// answer.
+    pub(crate) fn naming(mut self, named: NamedIssue) -> Self {
+        self.named = Some(named);
+        self
     }
 
     pub(crate) fn reading(mut self, project: FetchedProject) -> Self {
@@ -726,27 +750,26 @@ impl Board for Boarding {
         Ok(self.project.clone())
     }
 
-    /// An empty queue, and the call recorded: this stand-in serves the flows
-    /// that file and cut, none of which reads a queue. The flow that works one
-    /// gives this something to answer when it arrives.
+    /// Whatever queue the test wrote down, and the call recorded: the flows that
+    /// file and cut read none, so the default is an empty one.
     fn scope_queue(&self, team: &str, label: &str, assignee: &str) -> Result<Queue, LinearError> {
         self.ask(Call::ScopeQueue(QueueAsked {
             team: team.to_owned(),
             label: label.to_owned(),
             assignee: assignee.to_owned(),
         }))?;
-        Ok(Queue::new(Vec::new(), false))
+        Ok(self.queue.clone())
     }
 
-    /// No such ticket, and the call recorded: the flows this stand-in serves name
-    /// no ticket. The one that does is tested against a stand-in `Posts`, where
-    /// the answer is the point rather than the call.
+    /// Whatever ticket the test wrote down — `None`, a board with no such ticket,
+    /// being the default — and the call recorded, which is where a test reads the
+    /// team and number that were asked for.
     fn named_issue(&self, team: &str, number: u64) -> Result<Option<NamedIssue>, LinearError> {
         self.ask(Call::NamedIssue {
             team: team.to_owned(),
             number,
         })?;
-        Ok(None)
+        Ok(self.named.clone())
     }
 
     fn create_project(&self, project: &NewProject<'_>) -> Result<LinearProject, LinearError> {
@@ -1145,6 +1168,11 @@ pub(crate) struct Sessions {
     answers: Arc<Mutex<VecDeque<Worked>>>,
     watching: Option<PathBuf>,
     seen: Arc<Mutex<Vec<String>>>,
+    /// Where this session reports what it is seen doing, and what it reports —
+    /// the same port the real one is wired with, so a door that bridges
+    /// activities onto its own progress is driven the way it runs.
+    activities: Activities,
+    doing: Vec<Activity>,
 }
 
 impl Sessions {
@@ -1154,7 +1182,21 @@ impl Sessions {
             answers: Arc::new(Mutex::new(answers.into_iter().collect())),
             watching: None,
             seen: Arc::new(Mutex::new(Vec::new())),
+            activities: Activities::none(),
+            doing: Vec::new(),
         }
+    }
+
+    /// The same sessions, reporting `doing` into `activities` before each answers:
+    /// what a caller watching a session sees, without a `claude` on the machine.
+    pub(crate) fn reporting(
+        mut self,
+        activities: Activities,
+        doing: impl IntoIterator<Item = Activity>,
+    ) -> Self {
+        self.activities = activities;
+        self.doing = doing.into_iter().collect();
+        self
     }
 
     /// The file as it stood when each session was raised, which is the only way to
@@ -1191,6 +1233,9 @@ impl Works for Sessions {
             .lock()
             .expect("no test panics holding this")
             .push(opening.to_owned());
+        for activity in &self.doing {
+            self.activities.report(activity.clone());
+        }
         if let Some(path) = &self.watching {
             let held = std::fs::read_to_string(path).unwrap_or_default();
             self.seen

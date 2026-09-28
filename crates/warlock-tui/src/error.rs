@@ -6,11 +6,14 @@
 use std::path::{Path, PathBuf};
 use std::{fmt, io};
 
-use warlock_engine::{claude_md, filed, filing, keys, load, manifest, pact, route, scope, sigils};
-use warlock_tui::{BriefError, LinearError, ScopeBlockError};
+use warlock_engine::{
+    claude_md, filed, filing, keys, load, manifest, pact, pulls, route, scope, sigils,
+};
+use warlock_tui::{BriefError, Dirty, GitError, LinearError, Refusal, ScopeBlockError};
 
 use crate::boundary::{blocking_scopes_message, closed_scope_message};
 use crate::cut::listed;
+use crate::pulling;
 use crate::rescope::ScopeRefusal;
 
 // One vocabulary for the panel and every subcommand rather than one enum
@@ -233,6 +236,72 @@ pub(crate) enum Error {
     NoBacklog {
         team: String,
     },
+    // A scope `warlock pull` was given that no `[[scope]]` record in this
+    // repository holds. The recorded names are carried because the usual cause is
+    // a near miss against one of them, and they are the answer either way: a
+    // machine cannot pull under a scope this repository has never written down.
+    UnrecordedScope {
+        scope: String,
+        recorded: Vec<String>,
+    },
+    // The same question one file along, and the boundary's **3** rather than the
+    // ordinary **1**: the scope is recorded and this machine's sigils do not open
+    // it. Kept apart from `ClosedScope`, which is about a directory that is
+    // scoped — here the scope *is* what was named, so that sentence would say it
+    // twice — and it carries the sigils held, because the fix is a sigil and the
+    // usual cause is a typo against one this machine already has.
+    UnheldScope {
+        scope: String,
+        held: Vec<String>,
+    },
+    // The tree a pull was asked to work in, with somebody's uncommitted work in
+    // it. Every entry is named rather than a count: the operator's next move is to
+    // look at all of them, and `git status` is what they would otherwise run to
+    // find out what warlock meant.
+    DirtyTree {
+        dirty: Vec<Dirty>,
+    },
+    // Every way the loop itself stopped that is a failure rather than a halt: a
+    // `git` that refused, a board that would not answer, a run record that would
+    // not write, and the one refusal the loop makes itself — a resumed run whose
+    // tree is not clean. Boxed for `Unfiled`'s reason: the variant is this enum's
+    // largest otherwise, and every `Result<_, Error>` in the workspace would be
+    // widened by a failure only one command can reach.
+    Pull {
+        source: Box<pulling::Error>,
+    },
+    // A run that did as much as it could and stopped, which is not the loop
+    // failing: the branch holds one commit per finished sub-task and the ticket
+    // carries the account. Nothing but the ticket is named here, because that
+    // comment is the account and repeating it on one line would be a worse copy.
+    Halted {
+        ticket: String,
+    },
+    // The one halt that is a boundary and so the one that spends the **3**: a
+    // session wrote under a scope this machine does not hold, nothing was
+    // committed, and the tree was left exactly as the session left it.
+    Crossed {
+        ticket: String,
+        subtask: String,
+    },
+    // A ticket somebody named with `--ticket` that the queue's own rules leave
+    // unworkable, refused in the words the chooser would have skipped it with —
+    // including the `warlock resume` that releases a halted run.
+    NotPulled {
+        ticket: String,
+        refusal: Refusal,
+    },
+    // The run records under the home directory, when the directory holding them
+    // cannot be listed at all. One record that will not read is not this: the scan
+    // hands those back to be named, and the run carries on.
+    Runs {
+        source: pulls::Error,
+    },
+    // `git` itself, for the one command a pull runs before the loop: the tree read
+    // to see whether there is anything in it.
+    Git {
+        source: GitError,
+    },
     // `Unfiled`'s shape for the same event one layer down: the issues exist,
     // nothing on this machine records them, and the identifiers are what
     // nothing else now knows. They are carried rather than only printed because
@@ -361,6 +430,68 @@ fn no_backlog_message(team: &str) -> String {
     format!(
         "the team `{team}` has no workflow state called `Backlog`, so no issue was created: a cut \
          slice is filed into that state, and the team's workflow in Linear is where it is named"
+    )
+}
+
+// The names lead, because they are the answer: the scope that was typed is not one
+// of them, and one of them is almost certainly what was meant. A repository that
+// records none is told that in words rather than handed an empty list.
+fn unrecorded_scope_message(scope: &str, recorded: &[String]) -> String {
+    let named = if recorded.is_empty() {
+        "no `[[scope]]` record at all".to_owned()
+    } else {
+        format!("records {}", listed(recorded))
+    };
+    format!(
+        "nothing in `.warlock/pacts.toml` records the scope `{scope}`, so there is no queue to \
+         read: this repository {named}"
+    )
+}
+
+// Names the scope wanted and the sigils held, and ends where
+// `closed_scope_message` ends — at `warlock config` — because the fix is the same
+// one: the boundary is a sigil, and holding it is what opens the work.
+fn unheld_scope_message(scope: &str, held: &[String]) -> String {
+    let holding = if held.is_empty() {
+        "this machine holds no sigil at all".to_owned()
+    } else {
+        format!("this machine holds {}", listed(held))
+    };
+    format!(
+        "the scope `{scope}` is not one this machine's sigils open, so nothing was pulled: \
+         {holding} — hold that sigil with `warlock config`"
+    )
+}
+
+// Every entry, on one line, in `git status`'s own two-letter codes: the reader is
+// about to run `git status` themselves, and a refusal that renamed the codes would
+// make them translate back before they could look.
+fn dirty_tree_message(dirty: &[Dirty]) -> String {
+    let entries: Vec<String> = dirty.iter().map(|entry| format!("`{entry}`")).collect();
+    format!(
+        "the working tree is not clean, so no ticket was pulled: {} — warlock commits what a \
+         session writes, and what is already there is yours",
+        entries.join(", ")
+    )
+}
+
+// Names the branch nothing, because the ticket's comment names it: this line says
+// what happened and which of the two commands comes first, and the comment is the
+// account of the whole run.
+fn halted_message(ticket: &str) -> String {
+    format!(
+        "the run for `{ticket}` halted, so the ticket has not moved: its comment lists what \
+         finished and what did not, and `warlock resume {ticket}` releases it"
+    )
+}
+
+// The tree is the half a reader needs first: it still holds the work, warlock did
+// not commit it and will not, and what happens to it is theirs to decide.
+fn crossed_message(ticket: &str, subtask: &str) -> String {
+    format!(
+        "`{subtask}` wrote under a scope this machine does not hold, so the run for `{ticket}` \
+         stopped with nothing committed: the working tree is exactly as that session left it, and \
+         the ticket's comment names the paths"
     )
 }
 
@@ -586,6 +717,30 @@ impl fmt::Display for Error {
             Self::AllCut { path } => write!(f, "{}", all_cut_message(path)),
             Self::NoBacklog { team } => write!(f, "{}", no_backlog_message(team)),
             Self::Uncut { issues, source } => write!(f, "{}", uncut_message(issues, source)),
+            // The pull's own refusals, worded above for the reason the push's and
+            // the cut's are: the sentences are the interesting part of them.
+            Self::UnrecordedScope { scope, recorded } => {
+                write!(f, "{}", unrecorded_scope_message(scope, recorded))
+            }
+            Self::UnheldScope { scope, held } => {
+                write!(f, "{}", unheld_scope_message(scope, held))
+            }
+            Self::DirtyTree { dirty } => write!(f, "{}", dirty_tree_message(dirty)),
+            Self::Halted { ticket } => write!(f, "{}", halted_message(ticket)),
+            Self::Crossed { ticket, subtask } => {
+                write!(f, "{}", crossed_message(ticket, subtask))
+            }
+            // The queue's own sentence about the ticket, which already says what is
+            // in the way and names the command that frees a halted run.
+            Self::NotPulled { ticket, refusal } => {
+                write!(f, "`{ticket}` was not pulled: {refusal}")
+            }
+            // Flattened like the rest of the carried failures: the loop's `Dirty`
+            // lists a tree an entry to a line, and `git`, Linear and the run record
+            // each carry their own multi-line news.
+            Self::Pull { source } => write!(f, "{}", one_line(&source.to_string())),
+            Self::Runs { source } => write!(f, "{}", one_line(&source.to_string())),
+            Self::Git { source } => write!(f, "{}", one_line(&source.to_string())),
             Self::Problems { first, rest: 0 } => write!(f, "{first}"),
             Self::Problems { first, rest } => {
                 write!(f, "{first} (and {rest} more like it)")
@@ -620,6 +775,9 @@ impl std::error::Error for Error {
             Self::Filed { source } => Some(source),
             Self::Unfiled { source, .. } | Self::Uncut { source, .. } => Some(source.as_ref()),
             Self::Linear { source } => Some(source),
+            Self::Runs { source } => Some(source),
+            Self::Git { source } => Some(source),
+            Self::Pull { source } => Some(source.as_ref()),
             Self::Signal { source } => Some(source),
             Self::Clipboard { source } => Some(source),
             // No source, and there is none to have: a boundary this machine
@@ -652,6 +810,17 @@ impl std::error::Error for Error {
             // this machine's own file answering completely.
             | Self::NoBacklog { .. }
             | Self::AllCut { .. }
+            // Nor here, and for that reason once more: a scope no record holds, a
+            // scope no sigil opens and a ticket the queue's rules turn down are
+            // facts about files agreeing, and a dirty tree is a person's own work.
+            // A halt and a crossing have no cause underneath either — the run did
+            // what it could, and what stopped it is on the ticket.
+            | Self::UnrecordedScope { .. }
+            | Self::UnheldScope { .. }
+            | Self::DirtyTree { .. }
+            | Self::NotPulled { .. }
+            | Self::Halted { .. }
+            | Self::Crossed { .. }
             // Nor here, and there could not be one: a run's failures are N
             // errors rather than one, they have already been printed in full,
             // and picking a first to be "the" cause would be the summary

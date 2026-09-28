@@ -36,15 +36,6 @@
 //! [`crossings_in`]: warlock_tui::crossings_in
 //! [`pull_request_body`]: warlock_tui::pull_request_body
 
-// The door that spends the loop is not here yet, and a value nothing outside the
-// tests builds is dead code to the bin target however thoroughly the tests here
-// drive it. An `expect` rather than an `allow` so that the day everything below
-// has a caller, this line is the compile error that asks to be deleted.
-#![expect(
-    dead_code,
-    reason = "the loop lands before the subcommand that spends it"
-)]
-
 use std::fmt;
 use std::fmt::Write as _;
 use std::path::Path;
@@ -756,6 +747,17 @@ impl Pulled {
     /// there: **0** the question was answered, **1** warlock could not do it,
     /// **3** a boundary this machine's sigils do not open. A crossing is a **3**
     /// for that last reason and not because it is worse than a halt.
+    ///
+    /// Read by the tests rather than by the door, and deliberately so: `main.rs`
+    /// spends the status off an [`Error`](crate::error::Error), because a halt and
+    /// a crossing are both printed as a line before the process exits. That the
+    /// two agree is an assertion in `tests/pull.rs` — this is the statement of
+    /// what the loop thinks each ending is worth, held against what the shell
+    /// actually returns.
+    #[allow(
+        dead_code,
+        reason = "read by the tests that hold `status_for` to these numbers"
+    )]
     pub(crate) const fn status(&self) -> u8 {
         match self {
             Self::Opened { .. } => 0,
@@ -772,6 +774,10 @@ impl Pulled {
         }
     }
 
+    #[allow(
+        dead_code,
+        reason = "read by the tests; the door destructures the ending it words"
+    )]
     pub(crate) fn ticket(&self) -> &str {
         match self {
             Self::Opened { ticket, .. }
