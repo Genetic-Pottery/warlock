@@ -994,6 +994,15 @@ pub const HUMAN_GATE: &str = "The pull request and the ticket's review state are
 // the work reached past the one scope it was pulled under.
 const TOUCHED_NOTE: &str = "Held on this machine, and not the scope this ticket was pulled under.";
 
+// The refreshed list says what warlock rewrote in the reviewer's own repository,
+// so it is owed a sentence saying why: these documents are in the diff because
+// the branch made them wrong, not because the work was about them. Nothing is
+// claimed about the commit — a pass that rewrote a document into exactly what
+// was already there leaves nothing to commit and is still a directory described
+// again.
+const REFRESHED_NOTE: &str = "Left stale by this branch's own changes and described again, so the map in review matches the \
+     code in review.";
+
 /// A sub-task the run finished, as the body names it.
 ///
 /// Borrowed and flat on purpose. The run record is another ticket's to own, and a
@@ -1022,6 +1031,28 @@ pub struct LeftStale<'a> {
     pub reason: &'a str,
 }
 
+/// What the refresh before the pull request came to: the directories whose
+/// documents it put back, and the ones it did not with the reason it did not.
+///
+/// One value rather than two more parameters on
+/// [`pull_request_body`], because the two lists are one
+/// finding — every directory the branch made stale is in exactly one of them —
+/// and because two slices of directories side by side is a call that swaps them
+/// and still compiles.
+///
+/// [`Default`] is the ordinary run: a branch that left nothing stale, which
+/// renders as neither heading.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Freshness<'a> {
+    /// The directories described again, in the order the passes ran: children
+    /// before parents, because a parent's document is written from its
+    /// children's.
+    pub refreshed: &'a [&'a str],
+    /// The rest, each with its reason: a scope this machine does not hold, or a
+    /// pass that failed.
+    pub left_stale: &'a [LeftStale<'a>],
+}
+
 /// ```
 /// use warlock_tui::pull_request_title;
 ///
@@ -1042,15 +1073,15 @@ pub fn pull_request_title(ticket: &str, title: &str) -> String {
 /// is no `gh` to open one — so it stands alone, with no pull request around it.
 ///
 /// A section with nothing in it is absent rather than an empty heading: a run
-/// that crossed nothing and left nothing stale is the ordinary run, and three
-/// bare headings saying so would be the bulk of its body.
+/// that crossed nothing, refreshed nothing and left nothing stale is the ordinary
+/// run, and four bare headings saying so would be the bulk of its body.
 ///
 /// ```
-/// use warlock_tui::{HUMAN_GATE, pull_request_body};
+/// use warlock_tui::{Freshness, HUMAN_GATE, pull_request_body};
 ///
-/// // The emptiest run there is: no description, no sub-task, nothing crossed
-/// // and nothing stale.
-/// let body = pull_request_body("", &[], &[], &[]);
+/// // The emptiest run there is: no description, no sub-task, nothing crossed,
+/// // nothing refreshed and nothing stale.
+/// let body = pull_request_body("", &[], &[], &Freshness::default());
 ///
 /// assert_eq!(body, format!("{HUMAN_GATE}\n"));
 /// ```
@@ -1059,7 +1090,7 @@ pub fn pull_request_body(
     description: &str,
     finished: &[Finished<'_>],
     touched: &[Touched<'_>],
-    stale: &[LeftStale<'_>],
+    freshness: &Freshness<'_>,
 ) -> String {
     let mut blocks: Vec<String> = Vec::new();
 
@@ -1098,9 +1129,20 @@ pub fn pull_request_body(
         blocks.push(block);
     }
 
-    if !stale.is_empty() {
+    // The refreshed directories before the ones left stale, because that is the
+    // order the reviewer reads them in: what warlock put back, and then what it
+    // could not.
+    if !freshness.refreshed.is_empty() {
+        let mut block = format!("## Documents refreshed\n\n{REFRESHED_NOTE}\n");
+        for directory in freshness.refreshed {
+            let _ = write!(block, "\n- `{}`", directory.trim());
+        }
+        blocks.push(block);
+    }
+
+    if !freshness.left_stale.is_empty() {
         let mut block = String::from("## Directories left stale\n");
-        for directory in stale {
+        for directory in freshness.left_stale {
             let _ = write!(
                 block,
                 "\n- `{}` — {}",

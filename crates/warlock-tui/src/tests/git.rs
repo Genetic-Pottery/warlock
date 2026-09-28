@@ -374,7 +374,7 @@ mod unix {
 
 mod rendering {
     use super::super::{
-        Finished, HUMAN_GATE, LeftStale, Touched, pull_request_body, pull_request_title,
+        Finished, Freshness, HUMAN_GATE, LeftStale, Touched, pull_request_body, pull_request_title,
     };
 
     #[test]
@@ -415,10 +415,13 @@ mod rendering {
                 scope: "control-plane",
                 paths: vec!["crates/control/src/lib.rs", "crates/control/src/plane.rs"],
             }],
-            &[LeftStale {
-                directory: "crates/control",
-                reason: "closed to this machine, which holds no `control-plane` sigil",
-            }],
+            &Freshness {
+                refreshed: &["crates/engine", "crates"],
+                left_stale: &[LeftStale {
+                    directory: "crates/control",
+                    reason: "closed to this machine, which holds no `control-plane` sigil",
+                }],
+            },
         );
 
         assert_eq!(
@@ -446,6 +449,13 @@ mod rendering {
              - `crates/control/src/lib.rs`\n\
              - `crates/control/src/plane.rs`\n\
              \n\
+             ## Documents refreshed\n\
+             \n\
+             Left stale by this branch's own changes and described again, so the map in review matches the code in review.\n\
+             \n\
+             - `crates/engine`\n\
+             - `crates`\n\
+             \n\
              ## Directories left stale\n\
              \n\
              - `crates/control` — closed to this machine, which holds no `control-plane` sigil\n\
@@ -465,7 +475,7 @@ mod rendering {
                 summary: "`issues` sends one query and parses the blockers.",
             }],
             &[],
-            &[],
+            &Freshness::default(),
         );
 
         assert_eq!(
@@ -486,7 +496,7 @@ mod rendering {
     fn the_emptiest_run_still_says_where_the_human_gate_is() {
         // What a comment on the ticket looks like with nothing to report: one
         // sentence, and no blank lines or bare headings above it.
-        let body = pull_request_body("", &[], &[], &[]);
+        let body = pull_request_body("", &[], &[], &Freshness::default());
 
         assert_eq!(body, format!("{HUMAN_GATE}\n"));
         assert!(body.contains(HUMAN_GATE));
@@ -502,7 +512,7 @@ mod rendering {
                 summary: "   ",
             }],
             &[],
-            &[],
+            &Freshness::default(),
         );
 
         assert_eq!(
@@ -532,16 +542,19 @@ mod rendering {
                     paths: vec!["web/app.ts", "web/index.html"],
                 },
             ],
-            &[
-                LeftStale {
-                    directory: "crates/control",
-                    reason: "closed to this machine",
-                },
-                LeftStale {
-                    directory: "web",
-                    reason: "the pass failed",
-                },
-            ],
+            &Freshness {
+                refreshed: &[],
+                left_stale: &[
+                    LeftStale {
+                        directory: "crates/control",
+                        reason: "closed to this machine",
+                    },
+                    LeftStale {
+                        directory: "web",
+                        reason: "the pass failed",
+                    },
+                ],
+            },
         );
 
         assert_eq!(

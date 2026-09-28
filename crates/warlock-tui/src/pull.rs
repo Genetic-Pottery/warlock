@@ -39,12 +39,13 @@ use warlock_engine::{
     scope_opens_to,
 };
 use warlock_tui::{
-    Activities, Activity, Board, ChatAgent, Chosen, Forge, Gh, Git, LinearOpener, Named, Opens,
-    QueuedIssue, Refusal, Repository, Skipped, Split, Splitting, Worked, Working, choose, size,
-    take_named, working_system_prompt,
+    Activities, Activity, Board, Cancel, ChatAgent, Chosen, ClaudeAgent, Forge, Gh, Git, GitError,
+    LinearOpener, Named, Opens, QueuedIssue, Refusal, Repository, Skipped, Split, Splitting,
+    Worked, Working, choose, size, take_named, working_system_prompt,
 };
 
 use crate::error::Error;
+use crate::freshness::{Freshened, Freshening, Freshens, freshened};
 use crate::pulling::{Heading, PullEvent, Pulled, Pulling, Splits, Ticket, Works};
 use crate::standing::{FOR_PULL, Standing};
 
@@ -87,6 +88,7 @@ pub(crate) fn pull(scope: &str, ticket: Option<&str>, dry_run: bool) -> Result<(
             forge: &Gh::at(&root),
             split: &Splitter::new(watching(&progress)),
             sessions: &Worker::new(scope, prepared.held(), watching(&progress)),
+            freshen: &Freshener::new(watching(&progress)),
         },
         &progress,
     )
@@ -105,6 +107,11 @@ pub(crate) struct Ports<'a, O: Opens, R: Repository, F: Forge, S: Splits, W: Wor
     pub(crate) forge: &'a F,
     pub(crate) split: &'a S,
     pub(crate) sessions: &'a W,
+    /// The refresh of the documents the branch made stale, for the reason
+    /// [`Pulling`]'s own field is a `&dyn`: one method taking one borrowed struct
+    /// buys nothing from a sixth type parameter that would have to be written out
+    /// here, on [`pulled`] and in every test that builds either.
+    pub(crate) freshen: &'a dyn Freshens,
 }
 
 /// The whole subcommand, less the environment: the two directories arrive on the
@@ -217,6 +224,7 @@ pub(crate) fn pulled<O: Opens, R: Repository, F: Forge, S: Splits, W: Works, P: 
             forge: ports.forge,
             split: ports.split,
             sessions: ports.sessions,
+            freshen: ports.freshen,
             scope: record,
             manifest,
             held: prepared.held(),
@@ -674,6 +682,48 @@ impl Works for Worker {
         Working::on(&self.agent, opening)
             .reporting(self.activities.clone())
             .run()
+    }
+}
+
+/// The freshness pass on the real road: the document agent `warlock refresh`
+/// spends, and the one [`Cancel`] it and the descent under it both answer to.
+///
+/// A [`ClaudeAgent`] and not the [`ChatAgent`] the two sessions above hold,
+/// because a document pass is not a conversation: it is the agent
+/// [`descend`](crate::descent::descend) is given everywhere else, asked for on the
+/// terms a pact names rather than the reader's own model.
+struct Freshener {
+    agent: ClaudeAgent,
+    /// Nothing latches this today — no `Ctrl-C` handler is installed on this road,
+    /// so a pull is stopped by the shell killing it. It is held anyway because the
+    /// agent and the descent have to answer the *same* handle for a stop to be
+    /// honoured in both, and building one here is what makes installing a handler
+    /// later a line rather than a rethread.
+    cancel: Cancel,
+}
+
+impl Freshener {
+    fn new(activities: Activities) -> Self {
+        let cancel = Cancel::new();
+        Self {
+            agent: ClaudeAgent::new()
+                .with_cancel(cancel.clone())
+                .with_activities(activities),
+            cancel,
+        }
+    }
+}
+
+impl Freshens for Freshener {
+    /// The pass, with its per-directory events dropped.
+    ///
+    /// Dropped rather than printed: what the run is seen doing arrives on the
+    /// activity port the agent above was handed, which is the port every other
+    /// session in this door reports through, and a second stream of lines worded
+    /// here would be the refresh announcing itself twice. The headings a `warlock
+    /// refresh` prints from these events belong to that command's own progress.
+    fn freshen(&self, asked: &Freshening<'_>) -> Result<Freshened, GitError> {
+        freshened(asked, &self.agent, &self.cancel, &mut |_event| ())
     }
 }
 

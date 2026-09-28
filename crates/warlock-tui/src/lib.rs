@@ -131,6 +131,7 @@ pub use git::Dirty;
 pub use git::Error as GitError;
 pub use git::Finished;
 pub use git::Forge;
+pub use git::Freshness;
 pub use git::Gh;
 pub use git::Git;
 pub use git::HUMAN_GATE;

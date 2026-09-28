@@ -207,11 +207,6 @@ pub(crate) struct Freshened {
 /// the loop it is called from is driven in its own tests by fakes that spend no
 /// model pass. The implementation on the real road holds the agent and the
 /// say-when and calls [`freshened`].
-#[allow(
-    dead_code,
-    reason = "the loop calls through this seam, and the real implementation of it \
-              beside the sessions' one, when the pass is wired into `finish`"
-)]
 pub(crate) trait Freshens {
     fn freshen(&self, asked: &Freshening<'_>) -> Result<Freshened, GitError>;
 }
@@ -232,11 +227,6 @@ pub(crate) trait Freshens {
 /// [`descend`](crate::descent::descend) does that once per call, which is the
 /// count `warlock refresh` makes, and a save added here would be a second writer
 /// of the one file warlock promises to own.
-#[allow(
-    dead_code,
-    reason = "the implementation of `Freshens` on the real road calls this, and lands \
-              with the wiring into the pull loop"
-)]
 pub(crate) fn freshened(
     asked: &Freshening<'_>,
     agent: &dyn Agent,

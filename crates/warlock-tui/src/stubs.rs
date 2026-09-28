@@ -24,6 +24,7 @@ use warlock_tui::{
 };
 
 use crate::clipboard::Clip;
+use crate::freshness::{Freshened, Freshening, Freshens};
 use crate::pulling::{Splits, Works};
 
 // A clipboard nothing on the machine has to provide. The refusal is kept as the
@@ -1293,6 +1294,116 @@ impl Works for Sessions {
             .expect("no test panics holding this")
             .pop_front()
             .expect("a session was raised that this test wrote no answer for")
+    }
+}
+
+/// The freshness pass, written down before the run starts: one outcome, and what
+/// the loop asked it about kept.
+///
+/// One answer and not a sequence, [`Slicing`]'s reason: a run refreshes once,
+/// between the last sub-task's commit and the push, and a second answer would be a
+/// promise about a road nothing takes. Spends no session and runs no `git` — which
+/// is the whole point of the seam being here, since the real pass does both.
+#[derive(Debug, Clone)]
+pub(crate) struct Refreshing {
+    log: Arc<Mutex<Vec<FreshenAsked>>>,
+    answer: Freshened,
+    /// A checkout that could not be asked what the branch changed, which is the one
+    /// failure the pass hands back as an error rather than reporting. Not a
+    /// `GitError` held ready, because that type is not `Clone`: this says which one
+    /// to build, so a stand-in that failed once cannot silently succeed after.
+    refusing: bool,
+    /// The refresh commit to make through the checkout before answering, for the
+    /// tests that are about where in the finish the pass ran.
+    commit: Option<(String, Vec<String>)>,
+}
+
+/// What the loop handed the pass, in the spellings a test can write down.
+///
+/// The manifest arrives as the modules it records rather than as itself: what a
+/// test needs to know is that the pass was given the run's own manifest, and a
+/// `Manifest` in a failing assertion is a screenful.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct FreshenAsked {
+    pub(crate) ticket: String,
+    pub(crate) root: PathBuf,
+    pub(crate) held: Vec<String>,
+    pub(crate) pacted: Vec<String>,
+}
+
+impl Refreshing {
+    /// The ordinary branch: nothing was left stale, so nothing was refreshed.
+    pub(crate) fn quiet() -> Self {
+        Self::answering(Freshened::default())
+    }
+
+    pub(crate) fn answering(answer: Freshened) -> Self {
+        Self {
+            log: Arc::new(Mutex::new(Vec::new())),
+            answer,
+            refusing: false,
+            commit: None,
+        }
+    }
+
+    /// A pass that could not run at all because `git` could not be asked, which is
+    /// the only thing that leaves the pass as an error.
+    pub(crate) fn refusing() -> Self {
+        Self {
+            refusing: true,
+            ..Self::answering(Freshened::default())
+        }
+    }
+
+    /// The same outcome, with the documents committed through the checkout it was
+    /// handed first, as the real pass commits them.
+    ///
+    /// The one way a test can say *where in the finish* the refresh happened: the
+    /// commit lands in the checkout's own log, between the last sub-task's commit
+    /// and the reading of the branch to push against.
+    pub(crate) fn committing(mut self, message: &str, paths: &[&str]) -> Self {
+        self.commit = Some((
+            message.to_owned(),
+            paths.iter().map(|path| (*path).to_owned()).collect(),
+        ));
+        self
+    }
+
+    /// Every asking, in order: how a test says the pass was reached once, and with
+    /// the ticket, the root, the sigils and the manifest the run itself was holding.
+    pub(crate) fn asked(&self) -> Vec<FreshenAsked> {
+        self.log
+            .lock()
+            .expect("no test panics holding this")
+            .clone()
+    }
+}
+
+impl Freshens for Refreshing {
+    fn freshen(&self, asked: &Freshening<'_>) -> Result<Freshened, GitError> {
+        self.log
+            .lock()
+            .expect("no test panics holding this")
+            .push(FreshenAsked {
+                ticket: asked.ticket.to_owned(),
+                root: asked.root.to_path_buf(),
+                held: asked.held.to_vec(),
+                pacted: asked
+                    .manifest
+                    .entries()
+                    .iter()
+                    .map(|entry| entry.module().to_owned())
+                    .collect(),
+            });
+        if self.refusing {
+            return Err(GitError::NotFound {
+                program: "git".to_owned(),
+            });
+        }
+        if let Some((message, paths)) = &self.commit {
+            asked.repo.commit_paths(message, paths)?;
+        }
+        Ok(self.answer.clone())
     }
 }
 

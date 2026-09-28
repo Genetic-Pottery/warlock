@@ -15,7 +15,9 @@ use super::{Ports, Prepared, Progress, Shared, held, prepare, pulled, shared};
 use crate::error::Error;
 use crate::pulling::Pulled;
 use crate::status_for;
-use crate::stubs::{Boarding, Checkout, Forging, GitCall, Sessions, Slicing, VIEWER, said};
+use crate::stubs::{
+    Boarding, Checkout, Forging, GitCall, Refreshing, Sessions, Slicing, VIEWER, said,
+};
 
 // Not a key, and named so that nothing reading this file mistakes it for one: it
 // is stored only so that a bound name resolves.
@@ -239,6 +241,14 @@ fn no_split() -> Slicing {
     Slicing::into_chain(TICKET, &["Nothing this test lets a run reach"])
 }
 
+// The ordinary branch: nothing pacted was made stale, so the pass has nothing to
+// refresh and nothing to commit. What the pass itself does with a stale directory
+// is `freshness.rs`'s to test, and what the loop does with the answer is
+// `pulling.rs`'s.
+fn no_refresh() -> Refreshing {
+    Refreshing::quiet()
+}
+
 #[test]
 fn a_scope_no_record_holds_is_refused_and_the_recorded_scopes_are_named() {
     let ground = Ground::new();
@@ -361,6 +371,7 @@ fn a_dirty_tree_is_refused_before_the_board_is_opened() {
             forge: &Forging::opening(URL),
             split: &no_split(),
             sessions: &no_sessions(),
+            freshen: &no_refresh(),
         },
         None,
         false,
@@ -410,6 +421,7 @@ fn a_dry_run_names_the_ticket_it_would_take_and_everything_it_passed_over() {
             forge: &Forging::opening(URL),
             split: &no_split(),
             sessions: &no_sessions(),
+            freshen: &no_refresh(),
         },
         None,
         true,
@@ -472,6 +484,7 @@ fn a_dry_run_on_a_named_ticket_says_whether_that_ticket_would_be_taken() {
             forge: &Forging::opening(URL),
             split: &no_split(),
             sessions: &no_sessions(),
+            freshen: &no_refresh(),
         },
         Some(TICKET),
         true,
@@ -496,6 +509,7 @@ fn a_dry_run_on_a_named_ticket_says_whether_that_ticket_would_be_taken() {
             forge: &Forging::opening(URL),
             split: &no_split(),
             sessions: &no_sessions(),
+            freshen: &no_refresh(),
         },
         Some(TICKET),
         true,
@@ -529,6 +543,7 @@ fn nothing_ready_names_every_ticket_and_why_and_is_an_answer() {
             forge: &Forging::opening(URL),
             split: &no_split(),
             sessions: &no_sessions(),
+            freshen: &no_refresh(),
         },
         None,
         false,
@@ -568,6 +583,7 @@ fn a_named_ticket_on_a_halted_run_refuses_with_the_command_that_frees_it() {
             forge: &Forging::opening(URL),
             split: &no_split(),
             sessions: &no_sessions(),
+            freshen: &no_refresh(),
         },
         Some(TICKET),
         false,
@@ -631,6 +647,7 @@ fn a_whole_pull_prints_a_header_per_section_with_the_session_s_lines_under_it() 
             forge: &forge,
             split: &split,
             sessions: &sessions,
+            freshen: &no_refresh(),
         },
         &progress,
     );
@@ -702,6 +719,7 @@ fn a_finished_pull_on_a_machine_with_no_gh_says_where_the_body_went() {
             forge: &Forging::without_gh(),
             split: &Slicing::into_chain(TICKET, &["Read the queue"]),
             sessions: &Sessions::answering([said("done", "the queue is read", None)]),
+            freshen: &no_refresh(),
         },
         None,
         false,
@@ -736,6 +754,7 @@ fn a_crossed_sub_task_is_the_boundary_s_status_and_the_loop_and_the_shell_agree(
             forge: &forge,
             split: &Slicing::into_chain(TICKET, &["Read the queue"]),
             sessions: &Sessions::answering([said("done", "the queue is read", None)]),
+            freshen: &no_refresh(),
         },
         None,
         false,
@@ -810,6 +829,7 @@ fn a_halted_run_leaves_the_ticket_where_it_is_and_the_shell_spends_a_one() {
                 "",
                 Some("only a person can settle this"),
             )]),
+            freshen: &no_refresh(),
         },
         None,
         false,
@@ -852,6 +872,7 @@ fn an_unreadable_run_record_is_a_line_and_not_a_failure() {
             forge: &Forging::opening(URL),
             split: &no_split(),
             sessions: &no_sessions(),
+            freshen: &no_refresh(),
         },
         None,
         false,
@@ -882,6 +903,7 @@ fn a_worked_ticket_is_the_one_the_queue_chose_and_the_board_was_asked_the_scope_
             forge: &Forging::opening(URL),
             split: &split,
             sessions: &Sessions::answering([said("done", "the queue is read", None)]),
+            freshen: &no_refresh(),
         },
         None,
         false,
