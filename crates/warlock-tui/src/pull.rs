@@ -243,6 +243,10 @@ pub(crate) fn pulled<O: Opens, R: Repository, F: Forge, S: Splits, W: Works, P: 
             say(progress, &opened(&ticket, url.as_deref()));
             Ok(())
         }
+        Pulled::Unchanged { ticket } => {
+            say(progress, &unchanged(&ticket));
+            Ok(())
+        }
         // Both carry what the ticket's own comment already says at length, because
         // this is the line a shell prints and the status a script reads. Neither is
         // the loop failing: the branch holds what the run did commit.
@@ -458,6 +462,13 @@ pub(crate) fn opened(ticket: &str, url: Option<&str>) -> String {
              and the pull request's body is a comment on the ticket"
         ),
     }
+}
+
+pub(crate) fn unchanged(ticket: &str) -> String {
+    format!(
+        "`{ticket}` is in review with nothing to merge: the work was already there, so nothing \
+         was pushed and what each sub-task found is a comment on the ticket"
+    )
 }
 
 /// `WAR-140` is 140, which is the middle of the branch name.

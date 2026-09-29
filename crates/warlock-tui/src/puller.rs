@@ -60,7 +60,9 @@ use crate::descent::RunEvent;
 use crate::error::{Error, one_line};
 use crate::freshness::{Freshened, Freshening, Freshens, freshened};
 use crate::pacting::CancelGuard;
-use crate::pull::{Selected, Taken, nothing_ready, number_in, opened, passed_over, prepare};
+use crate::pull::{
+    Selected, Taken, nothing_ready, number_in, opened, passed_over, prepare, unchanged,
+};
 use crate::pulling::{Heading, PullEvent, Pulled, Pulling, Splits, Ticket, Works, next_runnable};
 use crate::standing::Standing;
 
@@ -1328,6 +1330,7 @@ fn committed_line(message: &str) -> String {
 fn ended_line(pulled: &Pulled) -> String {
     match pulled {
         Pulled::Opened { ticket, url } => opened(ticket, url.as_deref()),
+        Pulled::Unchanged { ticket } => unchanged(ticket),
         Pulled::Halted { ticket } => one_line(
             &Error::Halted {
                 ticket: ticket.clone(),

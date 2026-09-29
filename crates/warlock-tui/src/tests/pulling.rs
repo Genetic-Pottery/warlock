@@ -1144,7 +1144,8 @@ fn a_finished_run_pushes_opens_the_pull_request_comments_and_moves_the_ticket() 
     assert!(asked[0].body.contains(OTHER));
 
     // The last sub-task's commit, then the push, and nothing between them but the
-    // reading of the branch to open against.
+    // reading of the branch to open against and the check that it changed
+    // something.
     let calls = repo.calls();
     let last = calls
         .iter()
@@ -1155,6 +1156,7 @@ fn a_finished_run_pushes_opens_the_pull_request_comments_and_moves_the_ticket() 
         [
             GitCall::CommitAll(commit_message(TICKET, "WAR-140.02", "Use the reader")),
             GitCall::DefaultBranch,
+            GitCall::ChangedAgainst(DEFAULT.to_owned()),
             GitCall::Publish(branch()),
         ]
     );
@@ -1294,7 +1296,8 @@ fn a_refresh_names_its_directories_in_the_body_and_commits_between_the_work_and_
     assert!(!body.contains("Directories left stale"), "{body}");
 
     // Where the pass ran, in the checkout's own log: after the last sub-task's
-    // commit and before the branch is read to push against.
+    // commit and the check that the branch changed something, and before the
+    // push.
     let calls = repo.calls();
     let last = calls
         .iter()
@@ -1304,6 +1307,8 @@ fn a_refresh_names_its_directories_in_the_body_and_commits_between_the_work_and_
         calls[last..],
         [
             GitCall::CommitAll(commit_message(TICKET, "WAR-140.02", "Use the reader")),
+            GitCall::DefaultBranch,
+            GitCall::ChangedAgainst(DEFAULT.to_owned()),
             GitCall::CommitPaths {
                 message: message.clone(),
                 paths: vec![
@@ -1311,7 +1316,6 @@ fn a_refresh_names_its_directories_in_the_body_and_commits_between_the_work_and_
                     ".warlock/pacts.toml".to_owned(),
                 ],
             },
-            GitCall::DefaultBranch,
             GitCall::Publish(branch()),
         ]
     );
@@ -1515,6 +1519,54 @@ fn no_gh_comments_the_body_on_the_ticket_and_the_run_still_counts_as_finished() 
     assert_eq!(saved.status(), RunStatus::InReview);
     assert_eq!(saved.pr_url(), None);
     assert_eq!(board.positions_of(Op::MoveIssue).len(), 2);
+}
+
+#[test]
+fn a_run_whose_branch_changed_nothing_opens_no_pull_request_and_says_so_on_the_ticket() {
+    let ground = Ground::new();
+    let board = Boarding::filing("");
+    let forge = Forging::opening(URL);
+    let repo = Checkout::clean(DEFAULT).changed([Vec::new()]);
+    let split = Slicing::into_chain(TICKET, &["Add the reader"]);
+    let sessions = Sessions::answering([said("done", "The reader was already there.", None)]);
+
+    let (pulled, _) = pull(&ground, &board, &repo, &forge, &split, &sessions);
+
+    let Ok(ended) = pulled else {
+        panic!("a sub-task that found its work done is still a finished run: {pulled:?}");
+    };
+    assert_eq!(
+        ended,
+        Pulled::Unchanged {
+            ticket: TICKET.to_owned(),
+        }
+    );
+    assert_eq!(ended.status(), 0);
+
+    // Nothing pushed and nothing asked of the forge: `gh` refuses a pull request
+    // with no commits on it.
+    assert!(!repo.calls().contains(&GitCall::Publish(branch())));
+    assert!(forge.asked().is_empty());
+
+    // What the session found is on the ticket, and the ticket went to review.
+    let posted = comments(&board);
+    assert_eq!(posted.len(), 1);
+    assert!(
+        posted[0].starts_with("No change was needed"),
+        "{}",
+        posted[0]
+    );
+    assert!(posted[0].contains(DEFAULT), "{}", posted[0]);
+    assert!(
+        posted[0].contains("`WAR-140.01` The reader was already there."),
+        "{}",
+        posted[0]
+    );
+    assert_eq!(board.positions_of(Op::MoveIssue).len(), 2);
+
+    let saved = ground.saved();
+    assert_eq!(saved.status(), RunStatus::InReview);
+    assert_eq!(saved.pr_url(), None);
 }
 
 #[test]

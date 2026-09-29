@@ -368,16 +368,30 @@ impl<B: Board, R: Repository, F: Forge, S: Splits, W: Works> Pulling<'_, B, R, F
         mut run: PullRun,
         touched: &[TouchedScope],
     ) -> Result<Pulled, Error> {
+        // Detected again rather than carried from `start`: a resumed run never
+        // called it, and the branch a pull request merges into is not a thing to
+        // guess at from a record written on another day.
+        let base = self.repo.default_branch().map_err(Error::git)?;
+
+        // Asked of the branch rather than of this invocation's sessions, so a
+        // resumed run whose commits were made on an earlier day still counts
+        // them. Asked before the refresh, which would otherwise commit documents
+        // onto a branch that holds no work and open a pull request for them.
+        if self
+            .repo
+            .changed_against(&base)
+            .map_err(Error::git)?
+            .is_empty()
+        {
+            return self.unchanged(ticket, run, &base);
+        }
+
         let freshened = self.refresh_stale(ticket)?;
 
         self.report(PullEvent::Heading(Heading::PullRequest {
             branch: run.branch().to_owned(),
         }));
 
-        // Detected again rather than carried from `start`: a resumed run never
-        // called it, and the branch a pull request merges into is not a thing to
-        // guess at from a record written on another day.
-        let base = self.repo.default_branch().map_err(Error::git)?;
         self.repo.publish(run.branch()).map_err(Error::git)?;
 
         let title = pull_request_title(ticket.identifier, ticket.title);
@@ -430,6 +444,36 @@ impl<B: Board, R: Repository, F: Forge, S: Splits, W: Works> Pulling<'_, B, R, F
         Ok(Pulled::Opened {
             ticket: ticket.identifier.to_owned(),
             url: opened.url().map(ToOwned::to_owned),
+        })
+    }
+
+    /// Every sub-task finished and the branch holds no change: the work was
+    /// already there. Nothing is pushed, since `gh` refuses a pull request with
+    /// no commits, and the ticket still moves to review with what the sessions
+    /// found, because closing it is a person's call and not warlock's.
+    fn unchanged(
+        &mut self,
+        ticket: &Ticket<'_>,
+        mut run: PullRun,
+        base: &str,
+    ) -> Result<Pulled, Error> {
+        run.set_status(RunStatus::InReview);
+        self.save(&run)?;
+
+        self.board
+            .comment_on_issue(ticket.id, &unchanged_comment(base, &finished_in(&run)))
+            .map_err(Error::board)?;
+
+        let review = self.scope.review_state().to_owned();
+        if !self.move_ticket(ticket.id, &review)? {
+            self.report(PullEvent::NoReviewState {
+                team: self.scope.team().to_owned(),
+                state: review,
+            });
+        }
+
+        Ok(Pulled::Unchanged {
+            ticket: ticket.identifier.to_owned(),
         })
     }
 
@@ -765,6 +809,10 @@ pub(crate) enum Pulled {
     /// [`Opened::NoGh`](warlock_tui::Opened::NoGh), which is still a run that
     /// did the work: the branch is pushed and the body is on the ticket.
     Opened { ticket: String, url: Option<String> },
+    /// Every sub-task finished and the branch changed nothing, so there was no
+    /// pull request to open. The ticket is in review with what the sessions
+    /// found.
+    Unchanged { ticket: String },
     /// Nothing was runnable, and the ticket already carries
     /// [`halt_comment`]'s account of why.
     Halted { ticket: String },
@@ -794,7 +842,7 @@ impl Pulled {
     )]
     pub(crate) const fn status(&self) -> u8 {
         match self {
-            Self::Opened { .. } => 0,
+            Self::Opened { .. } | Self::Unchanged { .. } => 0,
             Self::Halted { .. } => 1,
             Self::Crossed { .. } => 3,
         }
@@ -815,6 +863,7 @@ impl Pulled {
     pub(crate) fn ticket(&self) -> &str {
         match self {
             Self::Opened { ticket, .. }
+            | Self::Unchanged { ticket }
             | Self::Halted { ticket }
             | Self::Crossed { ticket, .. } => ticket,
         }
@@ -1039,6 +1088,19 @@ fn remember(kept: &mut Vec<TouchedScope>, crossings: &warlock_tui::Crossings<'_>
 /// its sub-tasks, and a reviewer reading a body with one of them missing would
 /// go looking for the commit it does not explain. The empty summary is what
 /// [`pull_request_body`] already leaves out.
+pub(crate) fn unchanged_comment(base: &str, finished: &[Finished<'_>]) -> String {
+    use std::fmt::Write as _;
+
+    let mut comment = format!(
+        "No change was needed: the work this ticket asks for is already on `{base}`, so nothing \
+         was pushed and no pull request was opened. What each sub-task found:\n"
+    );
+    for done in finished {
+        let _ = write!(comment, "\n- `{}` {}", done.id, done.summary.trim());
+    }
+    comment
+}
+
 fn finished_in(run: &PullRun) -> Vec<Finished<'_>> {
     run.subtasks()
         .iter()

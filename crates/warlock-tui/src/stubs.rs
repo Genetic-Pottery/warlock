@@ -923,7 +923,7 @@ impl Checkout {
             default: default.to_owned(),
             trees: vec![Vec::new()],
             heads: vec!["4e72482258".to_owned()],
-            changed: vec![Vec::new()],
+            changed: vec![vec!["src/work.rs".to_owned()]],
         }
     }
 
