@@ -268,7 +268,6 @@ fn the_prompt_keeps_a_change_and_its_test_in_one_ticket() {
     // A brief-01 slice drafted as "make the change" and "add its test" got
     // pulled as one piece of work anyway, and left the second ticket with
     // nothing to do.
-    assert!(DRAFTING_PROMPT.contains("most slices are one ticket"));
     assert!(DRAFTING_PROMPT.contains("A change and the test that covers it are one ticket"));
 }
 

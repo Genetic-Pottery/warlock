@@ -679,11 +679,10 @@ work one person can pick up, finish and check. Everything you write comes from \
 the brief and the slice — do not plan work neither of them asked for, and do \
 not draft the rest of the brief.
 
-A slice is already planned as a piece of work that lands on its own, so most \
-slices are one ticket. Draft more than one only where a part of the slice can \
-land and be checked without the rest. A change and the test that covers it are \
-one ticket, and so are a change and the edit that keeps the build compiling \
-after it: split apart, the first ticket cannot pass its own checks.
+Draft a separate ticket only for a part of the slice that can land and be \
+checked without the rest. A change and the test that covers it are one ticket, \
+and so are a change and the edit that keeps the build compiling after it: \
+split apart, the first ticket cannot pass its own checks.
 
 \"drafts\": one entry per ticket, in the order the work would be done, at most \
 12 entries. Each entry is {\"title\": ..., \"body\": ..., \"blocked_by\": \

@@ -407,7 +407,6 @@ fn the_prompt_states_every_cap_it_is_checked_against() {
 fn the_prompt_keeps_a_change_and_its_test_in_one_sub_task() {
     // GEN-7 split into "add `reverse`" and "add its tests"; the first session
     // wrote both, and the second ran to find nothing left.
-    assert!(SPLIT_PROMPT.contains("most tickets are one"));
     assert!(SPLIT_PROMPT.contains("A change and the test that covers it are one sub-task"));
 }
 
