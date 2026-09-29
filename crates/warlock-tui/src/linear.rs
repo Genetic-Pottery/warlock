@@ -492,7 +492,7 @@ fn scope_queue(
 ) -> Result<Queue, Error> {
     let data = linear.post(
         r#"query ScopeQueue(
-            $team: ID!
+            $team: String!
             $label: String!
             $assignee: ID!
             $first: Int!
@@ -500,7 +500,7 @@ fn scope_queue(
         ) {
             issues(
                 filter: {
-                    team: { id: { eq: $team } }
+                    team: { key: { eq: $team } }
                     labels: { name: { eq: $label } }
                     assignee: { id: { eq: $assignee } }
                     state: { type: { nin: ["completed", "canceled"] } }

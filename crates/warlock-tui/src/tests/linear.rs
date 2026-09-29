@@ -525,7 +525,10 @@ fn the_queue_is_the_teams_labelled_work_assigned_to_the_key_holder_and_not_finis
     let asked = linear.documents().pop().expect("one request was made");
 
     assert!(asked.contains("issues("), "{asked}");
-    assert!(asked.contains("team: { id: { eq: $team } }"), "{asked}");
+    // On the key, because the scope record holds `WAR` rather than a team id:
+    // an `id` filter here is refused by Linear with "eq must be a UUID".
+    assert!(asked.contains("$team: String!"), "{asked}");
+    assert!(asked.contains("team: { key: { eq: $team } }"), "{asked}");
     assert!(
         asked.contains("labels: { name: { eq: $label } }"),
         "{asked}"

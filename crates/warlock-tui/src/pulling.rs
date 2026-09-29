@@ -517,9 +517,19 @@ impl<B: Board, R: Repository, F: Forge, S: Splits, W: Works> Pulling<'_, B, R, F
     /// and works past, and a run that stopped over it would be the board wagging
     /// the pull.
     fn move_ticket(&self, issue: &str, state: &str) -> Result<bool, Error> {
+        // The scope record holds the team key and `workflow_state` filters on
+        // the team id, so the key is resolved first. Linear refuses a key where
+        // it wants an id, and the stand-in board takes either.
+        let Some(team) = self
+            .board
+            .team_id(self.scope.team())
+            .map_err(Error::board)?
+        else {
+            return Ok(false);
+        };
         let found = self
             .board
-            .workflow_state(self.scope.team(), state)
+            .workflow_state(&team, state)
             .map_err(Error::board)?;
         let Some(state) = found else {
             return Ok(false);

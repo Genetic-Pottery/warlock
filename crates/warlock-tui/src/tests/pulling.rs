@@ -604,8 +604,9 @@ fn a_run_cuts_the_branch_moves_the_ticket_splits_it_and_commits_every_sub_task()
     assert_eq!(
         board.calls(),
         [
+            Call::Team(TEAM.to_owned()),
             Call::WorkflowState {
-                team: TEAM.to_owned(),
+                team: "team-1".to_owned(),
                 name: "In Progress".to_owned(),
             },
             Call::MoveIssue {
@@ -1003,10 +1004,13 @@ fn a_team_with_no_in_progress_state_gets_a_line_and_the_run_carries_on() {
     // The state was asked for and no move was attempted.
     assert_eq!(
         board.calls(),
-        [Call::WorkflowState {
-            team: TEAM.to_owned(),
-            name: "In Progress".to_owned(),
-        }]
+        [
+            Call::Team(TEAM.to_owned()),
+            Call::WorkflowState {
+                team: "team-1".to_owned(),
+                name: "In Progress".to_owned(),
+            }
+        ]
     );
     assert_eq!(
         repo.commits(),
@@ -1160,8 +1164,9 @@ fn a_finished_run_pushes_opens_the_pull_request_comments_and_moves_the_ticket() 
     assert_eq!(
         board.calls(),
         [
+            Call::Team(TEAM.to_owned()),
             Call::WorkflowState {
-                team: TEAM.to_owned(),
+                team: "team-1".to_owned(),
                 name: "In Progress".to_owned(),
             },
             Call::MoveIssue {
@@ -1175,8 +1180,9 @@ fn a_finished_run_pushes_opens_the_pull_request_comments_and_moves_the_ticket() 
                     branch()
                 ),
             },
+            Call::Team(TEAM.to_owned()),
             Call::WorkflowState {
-                team: TEAM.to_owned(),
+                team: "team-1".to_owned(),
                 name: REVIEW.to_owned(),
             },
             Call::MoveIssue {
@@ -1457,7 +1463,7 @@ fn a_team_with_no_review_state_gets_a_line_and_the_run_still_finishes() {
     assert_eq!(
         board.calls().last(),
         Some(&Call::WorkflowState {
-            team: TEAM.to_owned(),
+            team: "team-1".to_owned(),
             name: REVIEW.to_owned(),
         })
     );
