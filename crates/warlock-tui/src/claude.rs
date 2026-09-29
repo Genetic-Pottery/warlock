@@ -2151,7 +2151,23 @@ mod stream {
             .get("input")
             .and_then(|input| input.get(key))
             .and_then(Value::as_str)
-            .map(str::to_owned)
+            .map(one_line)
+    }
+
+    // An activity is one line of progress and one list entry in a run's log, so
+    // a multi-line script handed to Bash keeps its first line and a mark that
+    // the rest was cut.
+    fn one_line(detail: &str) -> String {
+        let mut lines = detail
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty());
+        let first = lines.next().unwrap_or_default();
+        if lines.next().is_some() {
+            format!("{first} …")
+        } else {
+            first.to_owned()
+        }
     }
 
     fn read_result(value: &Value) -> Reading {

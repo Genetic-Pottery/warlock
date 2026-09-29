@@ -2509,6 +2509,32 @@ fn each_whitelisted_tool_carries_its_one_argument_and_the_rest_carry_none() {
 }
 
 #[test]
+fn a_multi_line_detail_is_its_first_line_and_a_mark_that_more_was_cut() {
+    // Every activity is one line of progress and one entry of a run's log, so
+    // a script handed to Bash cannot carry its later lines through.
+    let cases = [
+        (r#""cd repo\ngo vet .\ngo test .""#, "cd repo …"),
+        (r#""\n\n  go test .  \n""#, "go test ."),
+        (r#""cargo test""#, "cargo test"),
+    ];
+
+    for (command, detail) in cases {
+        let line = assistant(&format!(
+            r#"{{"type":"tool_use","name":"Bash","input":{{"command":{command}}}}}"#
+        ));
+
+        assert_eq!(
+            stream::read_line(&line).activities,
+            vec![Activity::Tool {
+                name: "Bash".to_owned(),
+                detail: Some(detail.to_owned()),
+            }],
+            "Bash with command {command}"
+        );
+    }
+}
+
+#[test]
 fn a_whitelisted_tool_missing_its_argument_is_still_the_bare_name() {
     // Three ways the key is not there, none of them a reason to lose the
     // activity or to reach for some other key.
