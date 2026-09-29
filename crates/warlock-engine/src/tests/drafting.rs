@@ -264,6 +264,15 @@ fn the_prompt_states_every_cap_it_is_checked_against() {
 }
 
 #[test]
+fn the_prompt_keeps_a_change_and_its_test_in_one_ticket() {
+    // A brief-01 slice drafted as "make the change" and "add its test" got
+    // pulled as one piece of work anyway, and left the second ticket with
+    // nothing to do.
+    assert!(DRAFTING_PROMPT.contains("most slices are one ticket"));
+    assert!(DRAFTING_PROMPT.contains("A change and the test that covers it are one ticket"));
+}
+
+#[test]
 fn the_instructions_carry_the_brief_the_slice_and_the_shape() {
     let text = drafting_instructions(
         "# The brief\n\nCut a planned project into tickets.\n",
