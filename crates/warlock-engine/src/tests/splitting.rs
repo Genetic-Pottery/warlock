@@ -404,6 +404,15 @@ fn the_prompt_states_every_cap_it_is_checked_against() {
 }
 
 #[test]
+fn the_prompt_binds_every_sub_task_to_the_tickets_rules() {
+    // A split that paraphrased "unexported, exactly one route" into "exported,
+    // populate the table" handed the worker a brief that broke the ticket.
+    assert!(SPLIT_PROMPT.contains("The ticket's rules bind every sub-task"));
+    assert!(SPLIT_PROMPT.contains("Never loosen, invert or drop one"));
+    assert!(SPLIT_PROMPT.contains("copy the ticket's words"));
+}
+
+#[test]
 fn the_instructions_carry_the_ticket_and_the_shape() {
     let text = split_instructions(
         "  Split a pulled ticket into numbered sub-tasks  ",

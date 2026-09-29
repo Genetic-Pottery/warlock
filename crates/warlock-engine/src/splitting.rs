@@ -1171,6 +1171,12 @@ that alone. Cut the ticket into as few sub-tasks as it honestly takes. \
 Everything you write comes from the ticket and from what you read in the \
 repository — do not plan work the ticket did not ask for.
 
+The ticket's rules bind every sub-task: what it fixes exactly — a value, a \
+name, a count, whether something is exported — what it forbids, and what it \
+says to leave alone. Never loosen, invert or drop one. Where a sub-task touches \
+something the ticket fixes, copy the ticket's words for it into that \
+sub-task's \"definition_of_done\" rather than paraphrasing them.
+
 \"subtasks\": one entry per sub-task, in the order the work would be done, \
 between 1 and 8 entries. Each entry is {\"goal\": ..., \"depends_on\": [...], \
 \"definition_of_done\": [...], \"likely_files\": [...], \"test_plan\": ..., \

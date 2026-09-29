@@ -1365,8 +1365,15 @@ fn the_sub_task_opening_carries_the_brief_and_the_ticket_as_context() {
     // half of them another sub-task owns gets done twice.
     assert!(opening.contains(A_TICKET_TITLE));
     assert!(opening.contains("The panel offers a scope with no queue behind it."));
-    assert!(opening.contains("they are not a to-do list"), "{opening}");
+    assert!(opening.contains("not a to-do list"), "{opening}");
     assert!(opening.contains("belongs to another sub-task or to nobody"));
+    // Its rules bind all the same, and win where the brief disagrees: the split
+    // is a rewrite, and a constraint it dropped has to survive to the worker.
+    assert!(
+        opening.contains("The ticket's rules do bind you"),
+        "{opening}"
+    );
+    assert!(opening.contains("follow the ticket"), "{opening}");
 
     // The brief comes first and the ticket after it, so what to do is read
     // before the context it was cut out of.

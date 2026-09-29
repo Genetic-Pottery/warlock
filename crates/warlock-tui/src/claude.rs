@@ -578,8 +578,15 @@ pub fn working_system_prompt(scope: &str, sigils: &[String]) -> String {
 pub type Sibling<'summary> = (&'summary str, &'summary str);
 
 /// The opening turn of one sub-task session: the sub-task's own brief, the
-/// ticket it was cut out of as context, what its finished siblings did, and then
-/// the engine's contract for the object it answers with.
+/// ticket it was cut out of, what its finished siblings did, and then the
+/// engine's contract for the object it answers with.
+///
+/// The ticket is framed as binding in its rules and not in its work. The split
+/// between them is a rewrite, and a rewrite loses or inverts constraints: a
+/// ticket saying "unexported, exactly one route" once reached a worker as
+/// "exported, populate the table", and a worker told the ticket was context
+/// only followed the brief. A worker told the ticket was a to-do list would
+/// instead redo its siblings' sub-tasks.
 ///
 /// The contract is appended rather than restated, exactly as
 /// [`drafting_opening`] appends the engine's drafting instructions: two copies
@@ -630,11 +637,14 @@ pub fn working_opening(
     let mut text = format!(
         "The sub-task to work is the brief between the two rules below, and it \
          is the whole of what you are to do.\n\n---\n\n{}\n\n---\n\nIt is one \
-         sub-task of a larger ticket. That ticket's title and description \
-         follow as the context the sub-task was cut out of, and as nothing \
-         more: they are not a to-do list. Whatever is in them that your brief \
-         does not ask for belongs to another sub-task or to nobody, and is not \
-         yours to do here.\n\n---\n\n{}\n\n{}\n\n---",
+         sub-task of a larger ticket, whose title and description follow. \
+         They are not a to-do list: work the ticket asks for that your brief \
+         does not belongs to another sub-task or to nobody, and is not yours \
+         to do here. The ticket's rules do bind you: what it fixes exactly — \
+         a value, a name, a count, whether something is exported — what it \
+         forbids, and what it says to leave alone hold for this sub-task too. \
+         Where your brief disagrees with the ticket, or is silent on \
+         something the ticket fixes, follow the ticket.\n\n---\n\n{}\n\n{}\n\n---",
         brief.trim(),
         title.trim(),
         description.trim(),
