@@ -507,6 +507,22 @@ fn a_heading_inside_a_fence_is_a_document_being_quoted() {
 }
 
 #[test]
+fn depends_on_reads_the_brackets_linear_escapes() {
+    // The lines exactly as Linear hands a pushed project's content back.
+    let document = "Why.\n\n## Scope\n\n\
+                    ### 1. First\n\ndepends_on: \\[\\]\n\nProse.\n\n\
+                    ### 2. Second\n\ndepends_on: \\[1\\]\n\nProse.\n\n\
+                    ### 3. Third\n\ndepends_on: \\[1, 2\\]\n\nProse.\n";
+
+    let block = scope_block_in(document).expect("a scope block");
+
+    assert!(block.slices()[0].depends_on().is_empty());
+    assert_eq!(block.slices()[1].depends_on(), [1]);
+    assert_eq!(block.slices()[2].depends_on(), [1, 2]);
+    assert_eq!(block.slices()[1].prose(), "Prose.");
+}
+
+#[test]
 fn depends_on_is_only_the_first_line_under_a_heading() {
     let document = "Why.\n\n## Scope\n\n\
                     ### 1. No line of its own\n\n\

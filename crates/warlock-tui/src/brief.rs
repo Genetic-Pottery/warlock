@@ -653,12 +653,19 @@ const DEPENDS: &str = "depends_on:";
 // refused: `depends_on: [1, none]` is a document with a typo in one reference,
 // and throwing away the other reference with it helps nobody. The brackets
 // themselves are optional for the same reason.
+// Linear stores a pushed project's content with its brackets escaped, so the
+// board's copy reads `depends_on: \[1\]`. Without the unescape every number
+// fails to parse and the slice silently depends on nothing.
 fn depended(trimmed: &str) -> Option<Vec<usize>> {
-    let rest = trimmed.strip_prefix(DEPENDS)?.trim();
+    let rest = trimmed
+        .strip_prefix(DEPENDS)?
+        .trim()
+        .replace("\\[", "[")
+        .replace("\\]", "]");
     let inside = rest
         .strip_prefix('[')
         .and_then(|rest| rest.strip_suffix(']'))
-        .unwrap_or(rest);
+        .unwrap_or(&rest);
     Some(
         inside
             .split(',')
