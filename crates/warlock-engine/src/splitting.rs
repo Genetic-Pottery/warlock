@@ -1167,8 +1167,10 @@ nothing else.
 Each sub-task is picked up by a fresh session that has read none of the others, \
 holds no memory of this one, and has nobody to ask: it is handed its own \
 sub-task and the ticket for context, and has to finish and check the work from \
-that alone. Cut the ticket into as few sub-tasks as it honestly takes. \
-Everything you write comes from the ticket and from what you read in the \
+that alone. Cut the ticket into as few sub-tasks as it honestly takes; most \
+tickets are one. A change and the test that covers it are one sub-task, and so \
+are a change and the edit that keeps the build compiling after it: split apart, \
+the first cannot pass its own checks. Everything you write comes from the ticket and from what you read in the \
 repository — do not plan work the ticket did not ask for.
 
 The ticket's rules bind every sub-task: what it fixes exactly — a value, a \
