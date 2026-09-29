@@ -31,7 +31,7 @@ const TEMPLATE_FILE: &str = "brief-template.md";
 /// example gets copied — a model handed one produces a brief about the example's
 /// subject in the example's words, and the sections stop being questions the
 /// conversation has to answer.
-pub const DEFAULT_TEMPLATE: &str = "# A title line naming the change\n\n\
+pub const DEFAULT_TEMPLATE: &str = "# A title line naming the change, in 80 characters at most\n\n\
 Open with the problem, in prose and before any heading: what is wrong now, in \
 this repository, naming the files and the behaviour. Say what it costs to \
 leave it alone. Do not describe the document itself.\n\n\

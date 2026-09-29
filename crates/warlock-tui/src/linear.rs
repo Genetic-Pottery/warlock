@@ -1523,16 +1523,26 @@ fn answer(mut body: Value) -> Result<Value, Error> {
         })
 }
 
+// `message` stays first and whole, because `unknown_entity` matches on it. For
+// a validation failure it is only "Argument Validation Error", and the reason a
+// person can act on is in `userPresentableMessage`.
 fn refusal(body: &Value) -> Option<String> {
     let first = body.get("errors")?.as_array()?.first()?;
 
-    Some(
-        first
-            .get("message")
-            .and_then(Value::as_str)
-            .unwrap_or("no reason given")
-            .to_owned(),
-    )
+    let message = first
+        .get("message")
+        .and_then(Value::as_str)
+        .unwrap_or("no reason given");
+    let presentable = first
+        .pointer("/extensions/userPresentableMessage")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|presentable| !presentable.is_empty() && *presentable != message);
+
+    Some(match presentable {
+        Some(presentable) => format!("{message}: {presentable}"),
+        None => message.to_owned(),
+    })
 }
 
 fn nodes<'a>(data: &'a Value, connection: &str) -> Result<&'a [Value], Error> {

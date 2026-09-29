@@ -248,6 +248,51 @@ fn a_title_that_says_nothing_is_the_same_refusal_as_no_title_at_all() {
 }
 
 #[test]
+fn a_title_longer_than_linear_takes_is_refused_with_its_length() {
+    let root = a_root();
+    let title = "x".repeat(81);
+
+    let message = refusal(
+        root.path(),
+        &BRIEF.replacen("Push a brief to the board", &title, 1),
+    );
+
+    assert!(message.contains("81 characters"), "{message}");
+    assert!(message.contains("80 at most"), "{message}");
+}
+
+#[test]
+fn a_title_of_exactly_the_limit_is_a_brief() {
+    let root = a_root();
+    let title = "x".repeat(80);
+
+    let brief = read_back(
+        root.path(),
+        &BRIEF.replacen("Push a brief to the board", &title, 1),
+    );
+
+    assert_eq!(brief.name(), title);
+}
+
+#[test]
+fn a_title_is_counted_the_way_linear_counts_it() {
+    // 40 emoji are 40 chars and 80 UTF-16 units: at the limit, not over it. A
+    // 41st puts it over, though `chars().count()` would call it 41.
+    let root = a_root();
+
+    read_back(
+        root.path(),
+        &BRIEF.replacen("Push a brief to the board", &"🦀".repeat(40), 1),
+    );
+    let message = refusal(
+        root.path(),
+        &BRIEF.replacen("Push a brief to the board", &"🦀".repeat(41), 1),
+    );
+
+    assert!(message.contains("82 characters"), "{message}");
+}
+
+#[test]
 fn a_blank_first_heading_is_the_title_rather_than_a_search_for_a_better_one() {
     // The first `# ` line is the title even when it is empty, because the
     // heading under it is a section: reading past a blank title would file the

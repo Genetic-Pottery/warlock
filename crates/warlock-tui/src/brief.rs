@@ -68,10 +68,10 @@ impl Brief {
 /// # Errors
 ///
 /// [`Error`] and nothing sent: a file that is not there, one that will not
-/// read, a template that will not read, a document with no title line, and a
-/// document missing a section of the shape are five separate refusals, each a
-/// single line. Every one of them is raised before anything leaves this
-/// machine.
+/// read, a template that will not read, a document with no title line, a title
+/// longer than Linear takes as a project name, and a document missing a section
+/// of the shape are six separate refusals, each a single line. Every one of
+/// them is raised before anything leaves this machine.
 pub fn brief_at(root: impl AsRef<Path>, path: impl AsRef<Path>) -> Result<Brief, Error> {
     let path = path.as_ref();
     let document = read(path)?;
@@ -82,6 +82,13 @@ pub fn brief_at(root: impl AsRef<Path>, path: impl AsRef<Path>) -> Result<Brief,
     let brief = titled(&document).ok_or_else(|| Error::NoTitle {
         path: path.to_owned(),
     })?;
+    let length = name_length(brief.name());
+    if length > NAME_LIMIT {
+        return Err(Error::LongTitle {
+            path: path.to_owned(),
+            length,
+        });
+    }
 
     let shape = brief_template(root).map_err(|source| Error::Shape { source })?;
     // The one section check in warlock, borrowed rather than repeated: a
@@ -96,6 +103,15 @@ pub fn brief_at(root: impl AsRef<Path>, path: impl AsRef<Path>) -> Result<Brief,
     }
 
     Ok(brief)
+}
+
+// Linear's `projectCreate` refuses a longer `name`. Its validator counts UTF-16
+// code units, as JavaScript's `String.length` does, so a title of characters
+// outside the Basic Multilingual Plane counts double against the limit.
+const NAME_LIMIT: usize = 80;
+
+fn name_length(name: &str) -> usize {
+    name.encode_utf16().count()
 }
 
 // Absent is kept apart from unreadable on `template.rs`'s rule, less its third
@@ -744,8 +760,8 @@ fn listing(named: &[String]) -> String {
     format!("{} and {last}", rest.join(", "))
 }
 
-/// Five ways a file is not a brief, and no sixth: nothing here is a failure to
-/// *send* one, which belongs to the side that opens the socket.
+/// Every way a file is not a brief that can be known without asking the board.
+/// A failure to *send* one belongs to the side that opens the socket.
 #[derive(Debug)]
 pub enum Error {
     Absent {
@@ -765,6 +781,13 @@ pub enum Error {
     /// board under a placeholder is another.
     NoTitle {
         path: PathBuf,
+    },
+    /// Refused rather than cut short: the name is the title line as written,
+    /// and a project filed under a truncation is a board that no longer
+    /// matches the file.
+    LongTitle {
+        path: PathBuf,
+        length: usize,
     },
     /// Every section that is missing, not the first one noticed: the fix is to
     /// go back to the document once, and a refusal naming a section at a time
@@ -808,6 +831,12 @@ impl fmt::Display for Error {
                 "`{}` has no `# ` title line, so there is no project name to push",
                 path.display()
             ),
+            Self::LongTitle { path, length } => write!(
+                f,
+                "`{}` has a title of {length} characters and Linear takes {NAME_LIMIT} at \
+                 most as a project name, so nothing was pushed",
+                path.display()
+            ),
             Self::Sections { path, missing } => write!(
                 f,
                 "`{}` is missing {}, so nothing was pushed",
@@ -824,10 +853,13 @@ impl std::error::Error for Error {
             Self::Unreadable { source, .. } => Some(source),
             Self::Shape { source } => Some(source),
             // No source and none to have: a path nobody wrote a file at, a
-            // document with no title and a document missing a section are
-            // facts about what was typed and what was written, rather than
-            // failures something underneath reported.
-            Self::Absent { .. } | Self::NoTitle { .. } | Self::Sections { .. } => None,
+            // document with no title or too long a one, and a document missing
+            // a section are facts about what was typed and what was written,
+            // rather than failures something underneath reported.
+            Self::Absent { .. }
+            | Self::NoTitle { .. }
+            | Self::LongTitle { .. }
+            | Self::Sections { .. } => None,
         }
     }
 }

@@ -185,6 +185,45 @@ fn a_graphql_errors_array_is_a_refusal_in_linears_words() {
 }
 
 #[test]
+fn a_validation_refusal_carries_the_reason_linear_gives_a_person() {
+    let body = json!({
+        "data": null,
+        "errors": [{
+            "message": "Argument Validation Error",
+            "extensions": {
+                "userPresentableMessage": "name must be shorter than or equal to 80 characters.",
+            },
+        }],
+    });
+
+    let error = answer(body).expect_err("an `errors` array is a refusal");
+
+    assert_eq!(
+        error.to_string(),
+        "Linear refused the request: Argument Validation Error: name must be shorter than or \
+         equal to 80 characters."
+    );
+}
+
+#[test]
+fn a_presentable_message_that_repeats_the_message_is_not_said_twice() {
+    let body = json!({
+        "data": null,
+        "errors": [{
+            "message": "Entity not found",
+            "extensions": { "userPresentableMessage": "Entity not found" },
+        }],
+    });
+
+    let error = answer(body).expect_err("an `errors` array is a refusal");
+
+    assert!(
+        matches!(&error, Error::Refused { message } if message == "Entity not found"),
+        "{error:?}"
+    );
+}
+
+#[test]
 fn an_errors_entry_with_no_message_still_refuses() {
     let body = json!({ "data": null, "errors": [{ "extensions": {} }] });
 
