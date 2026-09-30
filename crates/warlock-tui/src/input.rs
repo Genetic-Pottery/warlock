@@ -13,7 +13,7 @@ use ratatui::crossterm::event::{
 use ratatui::layout::Size;
 use warlock_tui::{
     Answered, App, CarryAnswered, Cell, Composed, Composer, CutAnswered, Edited, Focus, Hit, Modal,
-    PullAnswered, PushAnswered, QuitConfirm, Reach, RecordEdited, Reviewed, answer_for,
+    PullAnswered, PushAnswered, QuitConfirm, Reach, RecordEdited, Reviewed, RunHeader, answer_for,
     carry_answer_for, compose_for, cut_answer_for, edit_for, hit_test, panel_reach,
     pull_answer_for, push_answer_for, record_edit_for, review_answer_for,
 };
@@ -351,10 +351,15 @@ pub(crate) fn mouse_action(
         // to come back with this event or not at all.
         MouseEventKind::Drag(MouseButton::Left) => cell_under(hit, app)
             .map(MouseAction::ExtendSelection)
-            .or_else(|| past_rows(mouse, size, app, composer).map(MouseAction::ExtendPastEdge)),
+            .or_else(|| {
+                past_rows(mouse, size, app, composer, header.as_ref())
+                    .map(MouseAction::ExtendPastEdge)
+            }),
         MouseEventKind::Up(MouseButton::Left) => cell_under(hit, app)
             .map(MouseAction::EndSelection)
-            .or_else(|| past_rows(mouse, size, app, composer).map(MouseAction::EndPastEdge)),
+            .or_else(|| {
+                past_rows(mouse, size, app, composer, header.as_ref()).map(MouseAction::EndPastEdge)
+            }),
         _ => None,
     }
 }
@@ -495,13 +500,13 @@ fn past_rows(
     size: Size,
     app: &App,
     composer: Option<&Composer>,
+    header: Option<&RunHeader>,
 ) -> Option<Reach> {
     if !selectable(app) {
         return None;
     }
 
-    let header = app.run_header();
-    match panel_reach(mouse.column, mouse.row, size, composer, header.as_ref()) {
+    match panel_reach(mouse.column, mouse.row, size, composer, header) {
         Reach::Inside { .. } => None,
         past => Some(past),
     }

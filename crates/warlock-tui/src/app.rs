@@ -889,7 +889,7 @@ impl App {
     pub fn select_page_up(&mut self) {
         self.movement(
             |app| app.selected.saturating_sub(app.page()),
-            |app, offset| offset.saturating_sub(app.panel_page()),
+            |app, offset| offset.saturating_sub(app.panel.page()),
         );
     }
 
@@ -899,7 +899,7 @@ impl App {
                 let last = app.rows.len().saturating_sub(1);
                 app.selected.saturating_add(app.page()).min(last)
             },
-            |app, offset| offset.saturating_add(app.panel_page()),
+            |app, offset| offset.saturating_add(app.panel.page()),
         );
     }
 
@@ -937,11 +937,13 @@ impl App {
     }
 
     pub fn scroll_panel_down(&mut self, lines: usize) {
-        self.scroll_panel_to(self.panel().scroll_offset().saturating_add(lines));
+        self.panel
+            .scroll_to(self.panel().scroll_offset().saturating_add(lines));
     }
 
     pub fn scroll_panel_up(&mut self, lines: usize) {
-        self.scroll_panel_to(self.panel().scroll_offset().saturating_sub(lines));
+        self.panel
+            .scroll_to(self.panel().scroll_offset().saturating_sub(lines));
     }
 
     // One key, two meanings: the caller supplies what the keystroke means to the
@@ -959,12 +961,8 @@ impl App {
             self.moved();
         } else if focus.drives_the_panel() {
             let offset = panel(self, self.panel().scroll_offset());
-            self.scroll_panel_to(offset);
+            self.panel.scroll_to(offset);
         }
-    }
-
-    fn scroll_panel_to(&mut self, offset: usize) {
-        self.panel.scroll_to(offset);
     }
 
     const fn page(&self) -> usize {
@@ -973,10 +971,6 @@ impl App {
         } else {
             self.viewpoint.viewport_height
         }
-    }
-
-    const fn panel_page(&self) -> usize {
-        self.panel.page()
     }
 
     fn rescroll(&mut self) {

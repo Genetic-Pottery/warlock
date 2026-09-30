@@ -185,7 +185,7 @@ fn clipped(text: &str, width: usize) -> String {
     fitted(text, width).to_owned()
 }
 
-fn fitted(text: &str, columns: usize) -> &str {
+pub(crate) fn fitted(text: &str, columns: usize) -> &str {
     let mut taken = 0;
     let mut end = 0;
     for (index, character) in text.char_indices() {
@@ -1385,10 +1385,8 @@ fn key_line(filing: &Filing) -> String {
 }
 
 fn push_size(filing: &Filing) -> Size {
-    let answers =
-        display_width(CONFIRM_YES) + display_width(CONFIRM_ANSWER_GAP) + display_width(CONFIRM_NO);
     let widest = display_width(PUSH_QUESTION)
-        .max(answers)
+        .max(answers_width())
         .max(display_width(filing.project()))
         .max(display_width(&team_line(filing)))
         .max(display_width(&key_line(filing)));
@@ -1448,10 +1446,8 @@ fn cut_key_line(cutting: &Cutting) -> String {
 }
 
 fn cut_size(cutting: &Cutting) -> Size {
-    let answers =
-        display_width(CONFIRM_YES) + display_width(CONFIRM_ANSWER_GAP) + display_width(CONFIRM_NO);
     let widest = display_width(CUT_QUESTION)
-        .max(answers)
+        .max(answers_width())
         .max(display_width(cutting.project()))
         .max(display_width(&status_line(cutting)))
         .max(display_width(&slices_line(cutting)))
@@ -1531,10 +1527,8 @@ fn pull_from_line(undertaking: &Undertaking) -> Option<String> {
 }
 
 fn pull_size(undertaking: &Undertaking) -> Size {
-    let answers =
-        display_width(CONFIRM_YES) + display_width(CONFIRM_ANSWER_GAP) + display_width(CONFIRM_NO);
     let widest = display_width(pull_question(undertaking))
-        .max(answers)
+        .max(answers_width())
         .max(display_width(undertaking.ticket()))
         .max(display_width(undertaking.title()))
         .max(display_width(&pull_scope_line(undertaking)))
@@ -1616,17 +1610,7 @@ fn review_lines(review: &Review) -> Vec<Line<'_>> {
 // the third answer left off entirely when this slice has spent its redraft — an
 // answer that is drawn is one that can be pressed.
 fn review_answers_line(review: &Review) -> Line<'static> {
-    let lit = Style::new()
-        .fg(FOCUS_COLOUR)
-        .add_modifier(Modifier::REVERSED | Modifier::BOLD);
-    let unlit = Style::new().add_modifier(Modifier::DIM);
-    let style = |choice: Choice| {
-        if choice == review.choice() {
-            lit
-        } else {
-            unlit
-        }
-    };
+    let style = |choice: Choice| answer_style(choice == review.choice());
 
     let mut spans = vec![
         Span::styled(REVIEW_CREATE, style(Choice::Create)),
@@ -1717,10 +1701,8 @@ fn carry_left_line(carry: &Carry) -> String {
 }
 
 fn carry_size(carry: &Carry) -> Size {
-    let answers =
-        display_width(CONFIRM_YES) + display_width(CONFIRM_ANSWER_GAP) + display_width(CONFIRM_NO);
     let widest = display_width(CARRY_QUESTION)
-        .max(answers)
+        .max(answers_width())
         .max(display_width(&carry_left_line(carry)));
 
     Size::new(padded_width(widest, CONFIRM_MARGIN), CARRY_HEIGHT)
@@ -1736,11 +1718,7 @@ fn draw_over(frame: &mut Frame<'_>, area: Rect, padding: Padding, lines: Vec<Lin
 }
 
 fn answers_line(highlighted: Answer) -> Line<'static> {
-    let lit = Style::new()
-        .fg(FOCUS_COLOUR)
-        .add_modifier(Modifier::REVERSED | Modifier::BOLD);
-    let unlit = Style::new().add_modifier(Modifier::DIM);
-    let style = |answer: Answer| if answer == highlighted { lit } else { unlit };
+    let style = |answer: Answer| answer_style(answer == highlighted);
 
     Line::from(vec![
         Span::styled(CONFIRM_YES, style(Answer::Yes)),
@@ -1748,6 +1726,20 @@ fn answers_line(highlighted: Answer) -> Line<'static> {
         Span::styled(CONFIRM_NO, style(Answer::No)),
     ])
     .centered()
+}
+
+fn answer_style(lit: bool) -> Style {
+    if lit {
+        Style::new()
+            .fg(FOCUS_COLOUR)
+            .add_modifier(Modifier::REVERSED | Modifier::BOLD)
+    } else {
+        Style::new().add_modifier(Modifier::DIM)
+    }
+}
+
+fn answers_width() -> usize {
+    display_width(CONFIRM_YES) + display_width(CONFIRM_ANSWER_GAP) + display_width(CONFIRM_NO)
 }
 
 fn confirm_area(screen: Rect) -> Rect {
@@ -1786,9 +1778,7 @@ fn centred(screen: Rect, size: Size) -> Rect {
 }
 
 fn confirm_size() -> Size {
-    let answers =
-        display_width(CONFIRM_YES) + display_width(CONFIRM_ANSWER_GAP) + display_width(CONFIRM_NO);
-    let widest = display_width(CONFIRM_QUESTION).max(answers);
+    let widest = display_width(CONFIRM_QUESTION).max(answers_width());
 
     Size::new(padded_width(widest, CONFIRM_MARGIN), CONFIRM_HEIGHT)
 }

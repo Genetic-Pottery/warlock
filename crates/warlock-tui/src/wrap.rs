@@ -12,7 +12,7 @@
 //! in. Reading wants the word whole; typing wants the row full.
 
 use crate::account::Line;
-use crate::ui::{NOTE_MARKER, PANEL_INDENT, SAID_MARKER, display_width};
+use crate::ui::{NOTE_MARKER, PANEL_INDENT, SAID_MARKER, display_width, fitted};
 
 // The one description of a row's shape, read by the two halves that have to
 // agree about it: `rows` wraps at the width the prefix leaves, and `panel_row`
@@ -200,19 +200,7 @@ pub(crate) fn folded(text: &str, width: usize) -> Vec<String> {
 // cut alone has to advance it. A character wider than the whole field overhangs
 // its row rather than stopping the fold.
 fn filled(text: &str, width: usize) -> usize {
-    let mut taken = 0;
-    let mut fits = 0;
-    for (index, character) in text.char_indices() {
-        let next = index + character.len_utf8();
-        let columns = display_width(&text[index..next]);
-        if taken + columns > width {
-            break;
-        }
-        taken += columns;
-        fits = next;
-    }
-
-    fits.max(first_character(text))
+    fitted(text, width).len().max(first_character(text))
 }
 
 // A space is only a candidate once a word has been seen, so a line's own
