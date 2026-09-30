@@ -3,13 +3,14 @@
 
 # crates
 
-Cargo workspace members for warlock: the core engine library (warlock-engine) and the command-line tool with its terminal panel (warlock-tui). Go here to choose between engine logic and the CLI/panel front end.
+The crates directory holds the two Rust crates that make up the project: warlock-engine, the core engine, and warlock-tui, the binary and CLI/TUI built on top of it.
 
 ## Directories
 
-- `warlock-engine/` — Core engine crate: tree and manifest models, hashing and freshness state, pact/refresh drivers, Agent boundary, document rendering, scopes, sigils, keys, filing. Go here for engine behaviour questions.
-- `warlock-tui/` — CLI and ratatui panel crate that builds the `warlock` binary and `warlock_tui` library: subcommands, panel state and drawing, chat, push to Linear, scope prompts. Go here for front-end questions.
+- `warlock-engine/` — The engine crate — models the repo as a Tree, hashes/views files, drives agent-driven document fill/validation, and enforces scope/sigil boundaries; go here for how engine behavior works.
+- `warlock-tui/` — The TUI crate — builds the `warlock` binary and `warlock_tui` library over warlock-engine, with pact/refresh/scope walks, chat/brief/draft/cut/pull/push flows, and rendering; go here for how any warlock command or screen works.
 
 ## Structure
 
-- warlock-tui depends on warlock-engine for the core logic, so the dependency runs from the front end to the engine and not the other way.
+- warlock-engine is the crate that models a repo as a Tree of pacted/unpacted modules, hashes and views files, drives agent-driven document fill/validation, and enforces scope/sigil boundaries for pulls, drafting and splitting
+- warlock-tui depends on warlock-engine

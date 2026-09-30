@@ -3,7 +3,7 @@
 
 # warlock-engine
 
-Cargo crate for the core engine library: the module tree, pact manifest, hashing and freshness state, documenting directories through an Agent boundary, and scopes, sigils, keys, filing, briefs and CLAUDE.md output. Source is in src/.
+The warlock-engine crate: models a repo as a Tree of pacted/unpacted modules, hashes and views files, drives agents to fill and validate WARLOCK.md content, and enforces scope/sigil boundaries for pulls, drafting and splitting.
 
 ## Files
 
@@ -11,8 +11,9 @@ Cargo crate for the core engine library: the module tree, pact manifest, hashing
 
 ## Directories
 
-- `src/` — All engine source: tree and manifest models, hashing, pact/refresh drivers, Agent boundary, document rendering, scope/sigil/key/filing resolution. Go here for any engine behaviour question.
+- `src/` — Crate core: Tree model, hashing, agent-driven document fill/validation, and scope/sigil enforcement — go here for how any engine behavior works.
 
 ## Structure
 
-- Cargo.toml is the crate manifest, inheriting workspace package metadata and lints; it depends on blake3, ignore, serde, serde_json and toml, with serde_test and tempfile as dev-dependencies.
+- Cargo.toml is the workspace-inherited manifest for the warlock-engine crate, depending on blake3, ignore, serde (derive), serde_json and toml, with dev-dependencies serde_test and tempfile.
+- src/ holds the crate's core: it models the repo as a Tree of pacted/unpacted modules, hashes and views files, drives agents to fill and validate WARLOCK.md content, and enforces scope/sigil boundaries for pulls, drafting and splitting.
