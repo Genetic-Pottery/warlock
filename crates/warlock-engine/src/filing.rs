@@ -162,7 +162,7 @@ fn no_candidate(manifest: &Manifest, root: &Path, held: &[String]) -> Error {
     if let Some(scope) = manifest
         .entries()
         .iter()
-        .filter_map(|entry| valid_scope(entry))
+        .filter_map(valid_scope)
         .find(|scope| scope_opens_to(Some(scope), held))
     {
         return Error::Unrecorded {

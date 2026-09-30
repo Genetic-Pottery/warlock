@@ -94,11 +94,6 @@ pub fn resolve_route(
 // same two sentences from the same `Display` instead of restating them; a second
 // copy of "bind one with `warlock key use <name>`" would drift from this one.
 //
-// `load_key_names` rather than `load_key`, for the reason `route_facts` gives:
-// no key value is ever held by this module, so nothing here can leak one into an
-// error, a `Debug` or a panic. The name is all a caller gets back, and it fetches
-// the value itself from `keys.rs`.
-//
 // A key store that is unreadable or will not parse is an error, while a binding
 // that cannot be read is nothing bound — the same asymmetry `route_facts`
 // documents, and it has to match, because `resolve_route` reads both through
@@ -110,13 +105,7 @@ pub(crate) fn bound_key(home: &Path, root: &Path) -> Result<String, Error> {
         });
     };
 
-    let stored = match load_key_names(home) {
-        Ok(names) => names.contains(&key),
-        Err(keys::Error::NotFound { .. }) => false,
-        Err(source) => return Err(Error::Keys { source }),
-    };
-
-    if !stored {
+    if !is_stored(home, &key)? {
         return Err(Error::Dangling {
             key,
             path: keys_path(home),
@@ -124,6 +113,20 @@ pub(crate) fn bound_key(home: &Path, root: &Path) -> Result<String, Error> {
     }
 
     Ok(key)
+}
+
+// `load_key_names` rather than `load_key`, so no key value is ever held by this
+// module — nothing here can then leak one into an error, a `Debug` or a panic,
+// and the never-print-a-secret rule costs no care at the other end. The name is
+// all a caller gets back, and it fetches the value itself from `keys.rs`. An
+// empty store and no store at all are one answer: both mean the bound name
+// resolves to nothing, and `warlock key add` is the fix for either.
+fn is_stored(home: &Path, name: &str) -> Result<bool, Error> {
+    match load_key_names(home) {
+        Ok(names) => Ok(names.iter().any(|stored| stored == name)),
+        Err(keys::Error::NotFound { .. }) => Ok(false),
+        Err(source) => Err(Error::Keys { source }),
+    }
 }
 
 /// ```
@@ -204,21 +207,12 @@ pub fn route_facts<'m>(
     // thing that command never does.
     let key = load_key_binding(home, root).unwrap_or_default();
 
-    // `load_key_names` rather than `load_key`, so no key value is ever held by
-    // this module — nothing here can then leak one into an error, a `Debug` or
-    // a panic, and the never-print-a-secret rule costs no care at the other
-    // end. An empty store and no store at all are one answer: both mean the
-    // bound name resolves to nothing, and `warlock key add` is the fix for
-    // either. A checkout bound to nothing does not read the store at all, which
-    // is what keeps a broken store an `Unbound` rather than a `Keys` refusal in
-    // the wrapper.
+    // A checkout bound to nothing does not read the store at all, which is what
+    // keeps a broken store an `Unbound` rather than a `Keys` refusal in the
+    // wrapper.
     let stored = match &key {
         None => false,
-        Some(name) => match load_key_names(home) {
-            Ok(names) => names.contains(name),
-            Err(keys::Error::NotFound { .. }) => false,
-            Err(source) => return Err(Error::Keys { source }),
-        },
+        Some(name) => is_stored(home, name)?,
     };
 
     Ok(RouteFacts {

@@ -2,6 +2,7 @@ use std::collections::BTreeSet;
 use std::fmt;
 use std::fmt::Write as _;
 
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 use crate::document::{Defect, turned_down};
@@ -70,9 +71,7 @@ impl From<Stated> for Draft {
         match stated {
             Stated::Title(title) => Self {
                 title,
-                body: String::new(),
-                blocked_by: Vec::new(),
-                blocks: Vec::new(),
+                ..Self::default()
             },
             Stated::Draft {
                 title,
@@ -102,8 +101,7 @@ impl Draft {
         Self {
             title: title.into(),
             body: body.into(),
-            blocked_by: Vec::new(),
-            blocks: Vec::new(),
+            ..Self::default()
         }
     }
 }
@@ -129,7 +127,7 @@ pub fn accept(answer: &str) -> Accepted {
     }
 }
 
-fn parse(answer: &str) -> Result<Fill, Defect> {
+pub(crate) fn parse<T: DeserializeOwned>(answer: &str) -> Result<T, Defect> {
     let object = match (answer.find('{'), answer.rfind('}')) {
         (Some(start), Some(end)) if start <= end => &answer[start..=end],
         _ => {
@@ -192,7 +190,13 @@ pub fn check(fill: &Fill) -> Vec<Defect> {
     defects
 }
 
-fn line(field: &str, value: &str, minimum: usize, cap: usize, defects: &mut Vec<Defect>) {
+pub(crate) fn line(
+    field: &str,
+    value: &str,
+    minimum: usize,
+    cap: usize,
+    defects: &mut Vec<Defect>,
+) {
     let trimmed = value.trim();
     if trimmed.is_empty() {
         defects.push(Defect::Empty {
@@ -271,12 +275,14 @@ fn references(field: &str, given: &[usize], defects: &mut Vec<Defect>) {
 // one is worse than an obviously empty one, because it gets filed. So every
 // line opens by saying it was not drafted. Do not dress these up.
 mod fallback {
-    use super::{BODY_CHARS, TITLE_CHARS, TITLE_MINIMUM, flattened};
+    use super::{BODY_CHARS, TITLE_CHARS, TITLE_MINIMUM, cut, fit, flattened};
 
     pub(super) fn title(slice: &str, index: usize) -> String {
         fit(
             &format!("Unwritten draft {} of {}", index + 1, named(slice)),
             "(no title was drafted)",
+            TITLE_MINIMUM,
+            TITLE_CHARS,
         )
     }
 
@@ -304,30 +310,6 @@ mod fallback {
         } else {
             format!("the slice `{slice}`")
         }
-    }
-
-    // The shape a fallback title has to hold: one line, at least
-    // `TITLE_MINIMUM` characters and at most `TITLE_CHARS`, counted as
-    // characters and cut on a character boundary so a multibyte slice title
-    // cannot split. A value out of here is never defective, which is what lets
-    // the fixpoint below settle.
-    pub(super) fn fit(line: &str, pad: &str) -> String {
-        let mut line = flattened(line);
-        // A non-empty pad adds at least one character a turn, so this ends. In
-        // practice it never runs: the shortest line built here clears the floor
-        // on its own.
-        while line.chars().count() < TITLE_MINIMUM && !pad.is_empty() {
-            if !line.is_empty() {
-                line.push(' ');
-            }
-            line.push_str(pad);
-        }
-        cut(&line, TITLE_CHARS)
-    }
-
-    fn cut(text: &str, cap: usize) -> String {
-        let cut: String = text.chars().take(cap).collect();
-        cut.trim_end().to_owned()
     }
 }
 
@@ -582,8 +564,7 @@ impl Plan {
             fill.drafts.push(Draft {
                 title: fallback::title(title, fill.drafts.len()),
                 body: fallback::body(title, prose, fill.drafts.len()),
-                blocked_by: Vec::new(),
-                blocks: Vec::new(),
+                ..Draft::default()
             });
         }
         for index in &self.filled_titles {
@@ -751,13 +732,23 @@ pub fn stub_answer(slice: &str) -> String {
     Fill {
         drafts: vec![
             Draft {
-                title: fallback::fit(&format!("Stand in for {named}"), "(stand-in)"),
+                title: fit(
+                    &format!("Stand in for {named}"),
+                    "(stand-in)",
+                    TITLE_MINIMUM,
+                    TITLE_CHARS,
+                ),
                 body: BODY.to_owned(),
                 blocked_by: Vec::new(),
                 blocks: vec![1],
             },
             Draft {
-                title: fallback::fit(&format!("Follow on from {named}"), "(stand-in)"),
+                title: fit(
+                    &format!("Follow on from {named}"),
+                    "(stand-in)",
+                    TITLE_MINIMUM,
+                    TITLE_CHARS,
+                ),
                 body: BODY.to_owned(),
                 blocked_by: vec![0],
                 blocks: Vec::new(),
@@ -767,7 +758,30 @@ pub fn stub_answer(slice: &str) -> String {
     .to_json()
 }
 
-fn flattened(text: &str) -> String {
+// The shape a title or a goal has to hold: one line, at least `minimum`
+// characters and at most `cap`, counted as characters and cut on a character
+// boundary so a multibyte slice or ticket title cannot split. A value out of
+// here is never defective, which is what lets the mend's fixpoint settle.
+pub(crate) fn fit(line: &str, pad: &str, minimum: usize, cap: usize) -> String {
+    let mut line = flattened(line);
+    // A non-empty pad adds at least one character a turn, so this ends. In
+    // practice it never runs: the shortest line built here clears the floor on
+    // its own.
+    while line.chars().count() < minimum && !pad.is_empty() {
+        if !line.is_empty() {
+            line.push(' ');
+        }
+        line.push_str(pad);
+    }
+    cut(&line, cap)
+}
+
+pub(crate) fn cut(text: &str, cap: usize) -> String {
+    let cut: String = text.chars().take(cap).collect();
+    cut.trim_end().to_owned()
+}
+
+pub(crate) fn flattened(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 

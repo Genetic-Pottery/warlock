@@ -430,14 +430,11 @@ impl PullRun {
         // written as `null` rather than skipped: the manifest is rewritten
         // before and after every sub-task, so a line that comes and goes makes
         // every diff of it unreadable.
-        match &self.pr_url {
-            Some(url) => {
-                let _ = writeln!(text, "- pull request: {url}");
-            }
-            None => {
-                let _ = writeln!(text, "- pull request: none");
-            }
-        }
+        let _ = writeln!(
+            text,
+            "- pull request: {}",
+            self.pr_url.as_deref().unwrap_or("none")
+        );
         let _ = writeln!(text);
         let _ = writeln!(text, "{DO_NOT_EDIT}");
         let _ = writeln!(text);

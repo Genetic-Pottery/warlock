@@ -298,19 +298,15 @@ fn read(reply: &str) -> Result<Stated, Unreadable> {
     let Some((last, earlier)) = objects.split_last() else {
         return Err(Unreadable::NoObject);
     };
-    match serde_json::from_str(last) {
-        Ok(stated) => Ok(stated),
-        Err(error) => {
-            for object in earlier.iter().rev() {
-                if let Ok(stated) = serde_json::from_str(object) {
-                    return Ok(stated);
-                }
-            }
-            Err(Unreadable::NotJson {
+    serde_json::from_str(last).or_else(|error| {
+        earlier
+            .iter()
+            .rev()
+            .find_map(|object| serde_json::from_str(object).ok())
+            .ok_or_else(|| Unreadable::NotJson {
                 detail: error.to_string(),
             })
-        }
-    }
+    })
 }
 
 // Every brace-balanced span of the message, outermost only and in the order

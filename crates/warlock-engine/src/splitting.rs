@@ -5,6 +5,7 @@ use std::fmt::Write as _;
 use serde::{Deserialize, Serialize};
 
 use crate::document::{Defect, turned_down};
+use crate::drafting::{cut, fit, flattened, line, parse};
 
 // The splitting road asks again exactly as often as the document and drafting
 // roads do, and a third bound would be a number to keep in step with this one
@@ -188,20 +189,6 @@ pub fn accept(answer: &str) -> Accepted {
     }
 }
 
-fn parse(answer: &str) -> Result<Fill, Defect> {
-    let object = match (answer.find('{'), answer.rfind('}')) {
-        (Some(start), Some(end)) if start <= end => &answer[start..=end],
-        _ => {
-            return Err(Defect::NotJson {
-                detail: "no object found in the answer".to_owned(),
-            });
-        }
-    };
-    serde_json::from_str(object).map_err(|error| Defect::NotJson {
-        detail: error.to_string(),
-    })
-}
-
 /// Every slot of a filled splitting answer, in [`Defect`]'s own vocabulary, with
 /// `field` spelt as the path to the slot: `subtasks`, `subtasks[2].goal`,
 /// `subtasks[2].depends_on`, `subtasks[2].definition_of_done[1]`.
@@ -281,36 +268,6 @@ pub fn check(fill: &Fill) -> Vec<Defect> {
     defects
 }
 
-fn line(field: &str, value: &str, minimum: usize, cap: usize, defects: &mut Vec<Defect>) {
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        defects.push(Defect::Empty {
-            field: field.to_owned(),
-        });
-        return;
-    }
-    if trimmed.contains(['\n', '\r']) {
-        defects.push(Defect::Multiline {
-            field: field.to_owned(),
-        });
-    }
-    let chars = trimmed.chars().count();
-    if chars < minimum {
-        defects.push(Defect::TooShort {
-            field: field.to_owned(),
-            chars,
-            minimum,
-        });
-    }
-    if chars > cap {
-        defects.push(Defect::TooLong {
-            field: field.to_owned(),
-            chars,
-            cap,
-        });
-    }
-}
-
 // The length of the list, and then each entry as its own line with no floor
 // under it: a done entry or a path is held to being written at all and to one
 // line, but `src/lib.rs` is a perfectly good `likely_files` entry and a floor
@@ -372,12 +329,14 @@ fn depends_on(field: &str, given: &[usize], defects: &mut Vec<Defect>) {
 // and works from it. So every line opens by saying it was not split out. Do not
 // dress these up.
 mod fallback {
-    use super::{NOTES_CHARS, cut, fit, flattened};
+    use super::{GOAL_CHARS, GOAL_MINIMUM, NOTES_CHARS, cut, fit, flattened};
 
     pub(super) fn goal(title: &str, index: usize) -> String {
         fit(
             &format!("Unwritten sub-task {} of {}", index + 1, named(title)),
             "(no goal was split out)",
+            GOAL_MINIMUM,
+            GOAL_CHARS,
         )
     }
 
@@ -1285,7 +1244,12 @@ pub fn stub_answer(ticket: &str) -> String {
     Fill {
         subtasks: vec![
             Subtask {
-                goal: fit(&format!("Stand in for {named}"), "(stand-in)"),
+                goal: fit(
+                    &format!("Stand in for {named}"),
+                    "(stand-in)",
+                    GOAL_MINIMUM,
+                    GOAL_CHARS,
+                ),
                 depends_on: Vec::new(),
                 definition_of_done: vec![DONE.to_owned()],
                 likely_files: vec!["src/lib.rs".to_owned()],
@@ -1293,7 +1257,12 @@ pub fn stub_answer(ticket: &str) -> String {
                 notes: NOTES.to_owned(),
             },
             Subtask {
-                goal: fit(&format!("Follow on from {named}"), "(stand-in)"),
+                goal: fit(
+                    &format!("Follow on from {named}"),
+                    "(stand-in)",
+                    GOAL_MINIMUM,
+                    GOAL_CHARS,
+                ),
                 depends_on: vec![1],
                 definition_of_done: vec![DONE.to_owned()],
                 likely_files: vec!["src/lib.rs".to_owned()],
@@ -1303,32 +1272,6 @@ pub fn stub_answer(ticket: &str) -> String {
         ],
     }
     .to_json()
-}
-
-// The shape a goal has to hold: one line, at least `GOAL_MINIMUM` characters and
-// at most `GOAL_CHARS`, counted as characters and cut on a character boundary so
-// a multibyte ticket title cannot split. A value out of here is never defective.
-fn fit(line: &str, pad: &str) -> String {
-    let mut line = flattened(line);
-    // A non-empty pad adds at least one character a turn, so this ends. In
-    // practice it never runs: the shortest line built here clears the floor on
-    // its own.
-    while line.chars().count() < GOAL_MINIMUM && !pad.is_empty() {
-        if !line.is_empty() {
-            line.push(' ');
-        }
-        line.push_str(pad);
-    }
-    cut(&line, GOAL_CHARS)
-}
-
-fn cut(text: &str, cap: usize) -> String {
-    let cut: String = text.chars().take(cap).collect();
-    cut.trim_end().to_owned()
-}
-
-fn flattened(text: &str) -> String {
-    text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 #[cfg(test)]
