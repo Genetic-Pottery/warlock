@@ -186,7 +186,10 @@ pub(crate) fn scope_submit(
     // written cannot be a different one from the entry that was read.
     let module = field.directory();
     match rescope(manifest, module, scope, RecordFields::default()) {
-        Ok(rescoped) => saved(app, manifest, repo_root, rescoped.manifest),
+        Ok(rescoped) => {
+            save(app, manifest, repo_root, rescoped.manifest);
+            Windows::closed()
+        }
         // The engine's sentence about the one rule that was broken, under the
         // field that broke it.
         Err(ScopeRefusal::Rule { rule }) => {
@@ -200,13 +203,11 @@ pub(crate) fn scope_submit(
     }
 }
 
-fn saved(app: &mut App, manifest: &mut Manifest, repo_root: &Path, next: Manifest) -> Windows {
-    if let Err(source) = next.save(repo_root) {
-        app.set_message(Error::Manifest { source }.to_string());
-        return Windows::closed();
+fn save(app: &mut App, manifest: &mut Manifest, repo_root: &Path, next: Manifest) {
+    match next.save(repo_root) {
+        Ok(()) => *manifest = next,
+        Err(source) => app.set_message(Error::Manifest { source }.to_string()),
     }
-    *manifest = next;
-    Windows::closed()
 }
 
 // [`scope_edit`]'s counterpart for the second window, and the same three roads:
@@ -271,11 +272,7 @@ pub(crate) fn record_submit(
         }
     };
 
-    if let Err(source) = next.save(repo_root) {
-        app.set_message(Error::Manifest { source }.to_string());
-        return RecordPrompt::Closed;
-    }
-    *manifest = next;
+    save(app, manifest, repo_root, next);
     RecordPrompt::Closed
 }
 

@@ -155,9 +155,7 @@ impl Opened {
             .filter(|entry| remaining.entry(entry.module()).is_none())
             .collect();
 
-        remaining
-            .save(&self.repo_root)
-            .map_err(|source| Error::Manifest { source })?;
+        self.saved(&remaining)?;
 
         Ok(unpacted_line(&path, &dropped))
     }

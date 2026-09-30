@@ -121,13 +121,7 @@ impl<P: Wired + Agent> Pact<P> {
             // The worker, the channel and the say-when, in the one value this
             // type keeps about a run it is not doing — see [`start_run`], which
             // is where both keys start theirs.
-            self.run = Some(start_run(
-                work,
-                before,
-                manifest,
-                &scope.repo_root,
-                &self.agent,
-            ));
+            self.run = Some(start_run(work, before, manifest, repo_root, &self.agent));
         }
     }
 

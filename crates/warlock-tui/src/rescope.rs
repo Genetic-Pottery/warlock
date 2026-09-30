@@ -3,6 +3,8 @@ use std::fmt;
 use warlock_engine::{Manifest, ScopeRecord, scope, validate_scope};
 use warlock_tui::RecordField;
 
+use crate::writing::listing;
+
 // The three values of a `[[scope]]` record exactly as a door was handed them:
 // absent, or a value with nothing done to it. Whether they are required,
 // forbidden or blank is a fact about what the manifest already records, so it
@@ -209,22 +211,12 @@ const fn flag(field: RecordField) -> &'static str {
     }
 }
 
-// `` `--a`, `--b` and `--c` ``, in [`writing::missing_line`](crate::writing)'s
-// shape: a refusal that names more than one thing is read as a sentence, and a
-// comma before the last of them would be read as a fourth flag.
 fn naming(fields: &[RecordField]) -> String {
     let named: Vec<String> = fields
         .iter()
         .map(|field| format!("`{}`", flag(*field)))
         .collect();
-    let Some((last, rest)) = named.split_last() else {
-        return String::new();
-    };
-    if rest.is_empty() {
-        last.clone()
-    } else {
-        format!("{} and {last}", rest.join(", "))
-    }
+    listing(&named)
 }
 
 // The shell's wording, because the shell is the door that prints every one of

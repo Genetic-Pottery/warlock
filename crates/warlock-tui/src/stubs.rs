@@ -229,8 +229,8 @@ impl Scripted {
     pub(crate) fn saying(answers: impl IntoIterator<Item = Answering>) -> Self {
         Self {
             answers: Arc::new(Mutex::new(answers.into_iter().collect())),
-            said: Arc::new(Mutex::new(Vec::new())),
-            cancels: Arc::new(Mutex::new(Vec::new())),
+            said: Arc::default(),
+            cancels: Arc::default(),
             held: None,
         }
     }
@@ -243,55 +243,38 @@ impl Scripted {
     }
 
     pub(crate) fn turns(&self) -> usize {
-        self.said.lock().expect("a stand-in nothing poisoned").len()
+        locked(&self.said).len()
     }
 
     /// Everything this model was asked, in the order it was asked: what a test
     /// reads to say that an answer somebody sent reached the session that had
     /// asked for it, in the words it was sent in.
     pub(crate) fn said(&self) -> Vec<String> {
-        self.said
-            .lock()
-            .expect("a stand-in nothing poisoned")
-            .clone()
+        locked(&self.said).clone()
     }
 
     /// Whether anything that was given a handle on a turn of this model has been
     /// told to stop.
     pub(crate) fn cancelled(&self) -> bool {
-        self.cancels
-            .lock()
-            .expect("a stand-in nothing poisoned")
-            .iter()
-            .any(Cancel::is_cancelled)
+        locked(&self.cancels).iter().any(Cancel::is_cancelled)
     }
 }
 
 impl Wired for Scripted {
     fn wired(&self, cancel: Cancel, _activities: Activities) -> Self {
-        self.cancels
-            .lock()
-            .expect("a stand-in nothing poisoned")
-            .push(cancel);
+        locked(&self.cancels).push(cancel);
         self.clone()
     }
 }
 
 impl Converses for Scripted {
     fn turn(&self, message: &str) -> Result<String, agent::Error> {
-        self.said
-            .lock()
-            .expect("a stand-in nothing poisoned")
-            .push(message.to_owned());
+        locked(&self.said).push(message.to_owned());
         if let Some(gate) = &self.held {
             gate.wait();
         }
 
-        let answer = self
-            .answers
-            .lock()
-            .expect("a stand-in nothing poisoned")
-            .pop_front();
+        let answer = locked(&self.answers).pop_front();
         match answer {
             Some(Answering::Says(text)) => Ok(text),
             Some(Answering::Missing) => Err(agent::Error::NotFound {
@@ -307,6 +290,10 @@ impl Converses for Scripted {
     fn raised(&self, _model: &str, _effort: &str) -> Self {
         self.clone()
     }
+}
+
+fn locked<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().expect("no test panics holding this")
 }
 
 /// A board that answers every operation out of memory, and the seam it arrives
@@ -464,7 +451,7 @@ impl Boarding {
     /// to read back.
     pub(crate) fn filing(url: impl Into<String>) -> Self {
         Self {
-            log: Arc::new(Mutex::new(Log::default())),
+            log: Arc::default(),
             viewer: VIEWER.to_owned(),
             team: Some("team-1".to_owned()),
             status: Some("status-backlog".to_owned()),
@@ -697,7 +684,7 @@ impl Boarding {
     }
 
     fn log(&self) -> MutexGuard<'_, Log> {
-        self.log.lock().expect("no test panics holding this")
+        locked(&self.log)
     }
 
     fn ask(&self, call: Call) -> Result<(), LinearError> {
@@ -917,14 +904,14 @@ impl Gate {
     /// test can then assert what the push said: a gate nobody opens is a thread
     /// parked until the test binary exits.
     pub(crate) fn open(&self) {
-        *self.open.lock().expect("no test panics holding this") = true;
+        *locked(&self.open) = true;
         self.changed.notify_all();
     }
 
     // Looped for the spurious wakeup `Condvar` is allowed, which is the whole of
     // why this is not a bare `park`.
     fn wait(&self) {
-        let mut open = self.open.lock().expect("no test panics holding this");
+        let mut open = locked(&self.open);
         while !*open {
             open = self
                 .changed
@@ -976,7 +963,7 @@ impl Checkout {
     /// pull starts in.
     pub(crate) fn clean(default: &str) -> Self {
         Self {
-            log: Arc::new(Mutex::new(Vec::new())),
+            log: Arc::default(),
             default: default.to_owned(),
             trees: vec![Vec::new()],
             heads: vec!["4e72482258".to_owned()],
@@ -1016,10 +1003,7 @@ impl Checkout {
     }
 
     pub(crate) fn calls(&self) -> Vec<GitCall> {
-        self.log
-            .lock()
-            .expect("no test panics holding this")
-            .clone()
+        locked(&self.log).clone()
     }
 
     /// Every commit message this checkout was asked to make, in order: what a halt
@@ -1050,10 +1034,7 @@ impl Checkout {
     }
 
     fn note(&self, call: GitCall) {
-        self.log
-            .lock()
-            .expect("no test panics holding this")
-            .push(call);
+        locked(&self.log).push(call);
     }
 }
 
@@ -1147,7 +1128,7 @@ pub(crate) struct PullRequestAsked {
 impl Forging {
     pub(crate) fn opening(url: &str) -> Self {
         Self {
-            log: Arc::new(Mutex::new(Vec::new())),
+            log: Arc::default(),
             opened: Opened::At {
                 url: url.to_owned(),
             },
@@ -1159,30 +1140,24 @@ impl Forging {
     /// do about [`Opened::NoGh`] is decided from the body it built.
     pub(crate) fn without_gh() -> Self {
         Self {
-            log: Arc::new(Mutex::new(Vec::new())),
+            log: Arc::default(),
             opened: Opened::NoGh,
         }
     }
 
     pub(crate) fn asked(&self) -> Vec<PullRequestAsked> {
-        self.log
-            .lock()
-            .expect("no test panics holding this")
-            .clone()
+        locked(&self.log).clone()
     }
 }
 
 impl Forge for Forging {
     fn open_pull_request(&self, request: PullRequest<'_>) -> Result<Opened, GitError> {
-        self.log
-            .lock()
-            .expect("no test panics holding this")
-            .push(PullRequestAsked {
-                base: request.base.to_owned(),
-                head: request.head.to_owned(),
-                title: request.title.to_owned(),
-                body: request.body.to_owned(),
-            });
+        locked(&self.log).push(PullRequestAsked {
+            base: request.base.to_owned(),
+            head: request.head.to_owned(),
+            title: request.title.to_owned(),
+            body: request.body.to_owned(),
+        });
         Ok(self.opened.clone())
     }
 }
@@ -1236,29 +1211,23 @@ impl Slicing {
 
     pub(crate) fn answering(answer: Split) -> Self {
         Self {
-            log: Arc::new(Mutex::new(Vec::new())),
+            log: Arc::default(),
             answer,
         }
     }
 
     pub(crate) fn asked(&self) -> Vec<SplitAsked> {
-        self.log
-            .lock()
-            .expect("no test panics holding this")
-            .clone()
+        locked(&self.log).clone()
     }
 }
 
 impl Splits for Slicing {
     fn split(&self, ticket: &str, title: &str, description: &str) -> Split {
-        self.log
-            .lock()
-            .expect("no test panics holding this")
-            .push(SplitAsked {
-                ticket: ticket.to_owned(),
-                title: title.to_owned(),
-                description: description.to_owned(),
-            });
+        locked(&self.log).push(SplitAsked {
+            ticket: ticket.to_owned(),
+            title: title.to_owned(),
+            description: description.to_owned(),
+        });
         self.answer.clone()
     }
 }
@@ -1285,10 +1254,10 @@ pub(crate) struct Sessions {
 impl Sessions {
     pub(crate) fn answering(answers: impl IntoIterator<Item = Worked>) -> Self {
         Self {
-            log: Arc::new(Mutex::new(Vec::new())),
+            log: Arc::default(),
             answers: Arc::new(Mutex::new(answers.into_iter().collect())),
             watching: None,
-            seen: Arc::new(Mutex::new(Vec::new())),
+            seen: Arc::default(),
             activities: Activities::none(),
             doing: Vec::new(),
         }
@@ -1317,42 +1286,28 @@ impl Sessions {
     /// Every opening a session was raised on, in order: how a test says the brief,
     /// the ticket and the finished siblings reached the session.
     pub(crate) fn openings(&self) -> Vec<String> {
-        self.log
-            .lock()
-            .expect("no test panics holding this")
-            .clone()
+        locked(&self.log).clone()
     }
 
     /// What the watched file held at each session, in order. A file that was not
     /// there reads as empty, which is a failure every test asserting on this has a
     /// sentence for.
     pub(crate) fn seen(&self) -> Vec<String> {
-        self.seen
-            .lock()
-            .expect("no test panics holding this")
-            .clone()
+        locked(&self.seen).clone()
     }
 }
 
 impl Works for Sessions {
     fn work(&self, opening: &str) -> Worked {
-        self.log
-            .lock()
-            .expect("no test panics holding this")
-            .push(opening.to_owned());
+        locked(&self.log).push(opening.to_owned());
         for activity in &self.doing {
             self.activities.report(activity.clone());
         }
         if let Some(path) = &self.watching {
             let held = std::fs::read_to_string(path).unwrap_or_default();
-            self.seen
-                .lock()
-                .expect("no test panics holding this")
-                .push(held);
+            locked(&self.seen).push(held);
         }
-        self.answers
-            .lock()
-            .expect("no test panics holding this")
+        locked(&self.answers)
             .pop_front()
             .expect("a session was raised that this test wrote no answer for")
     }
@@ -1400,7 +1355,7 @@ impl Refreshing {
 
     pub(crate) fn answering(answer: Freshened) -> Self {
         Self {
-            log: Arc::new(Mutex::new(Vec::new())),
+            log: Arc::default(),
             answer,
             refusing: false,
             commit: None,
@@ -1433,29 +1388,23 @@ impl Refreshing {
     /// Every asking, in order: how a test says the pass was reached once, and with
     /// the ticket, the root, the sigils and the manifest the run itself was holding.
     pub(crate) fn asked(&self) -> Vec<FreshenAsked> {
-        self.log
-            .lock()
-            .expect("no test panics holding this")
-            .clone()
+        locked(&self.log).clone()
     }
 }
 
 impl Freshens for Refreshing {
     fn freshen(&self, asked: &Freshening<'_>) -> Result<Freshened, GitError> {
-        self.log
-            .lock()
-            .expect("no test panics holding this")
-            .push(FreshenAsked {
-                ticket: asked.ticket.to_owned(),
-                root: asked.root.to_path_buf(),
-                held: asked.held.to_vec(),
-                pacted: asked
-                    .manifest
-                    .entries()
-                    .iter()
-                    .map(|entry| entry.module().to_owned())
-                    .collect(),
-            });
+        locked(&self.log).push(FreshenAsked {
+            ticket: asked.ticket.to_owned(),
+            root: asked.root.to_path_buf(),
+            held: asked.held.to_vec(),
+            pacted: asked
+                .manifest
+                .entries()
+                .iter()
+                .map(|entry| entry.module().to_owned())
+                .collect(),
+        });
         if self.refusing {
             return Err(GitError::NotFound {
                 program: "git".to_owned(),
@@ -1498,7 +1447,7 @@ impl Written {
             doing: Vec::new(),
             refreshing: Vec::new(),
             waiting: false,
-            raised: Arc::new(Mutex::new(Vec::new())),
+            raised: Arc::default(),
         }
     }
 
@@ -1546,10 +1495,7 @@ impl Written {
     /// Every sub-task session the run raised, in order, whether it answered or was
     /// stopped: what a test waits on before it quits.
     pub(crate) fn raised(&self) -> Vec<String> {
-        self.raised
-            .lock()
-            .expect("no test panics holding this")
-            .clone()
+        locked(&self.raised).clone()
     }
 }
 
@@ -1602,10 +1548,7 @@ impl Works for Publishing {
         // Published before the session does anything, as the real one is: a handle
         // attached after the first turn is a quit the child never hears about.
         self.stopping.raising(cancel.clone());
-        self.raised
-            .lock()
-            .expect("no test panics holding this")
-            .push(opening.to_owned());
+        locked(&self.raised).push(opening.to_owned());
         if self.waiting {
             while !cancel.is_cancelled() {
                 thread::sleep(LOOKED);

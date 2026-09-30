@@ -256,8 +256,7 @@ fn unavailable(
 /// typed or a future `--ticket war-9` should still find its own run rather than
 /// starting a second one over the same branch.
 fn run_for<'a>(runs: &'a [PullRun], identifier: &str) -> Option<&'a PullRun> {
-    runs.iter()
-        .find(|run| run.ticket().trim().eq_ignore_ascii_case(identifier.trim()))
+    runs.iter().find(|run| named(run.ticket(), identifier))
 }
 
 fn named(state: &str, name: &str) -> bool {

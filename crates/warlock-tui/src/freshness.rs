@@ -53,7 +53,6 @@
 
 use std::cmp::Ordering;
 use std::collections::BTreeSet;
-use std::fmt::Write as _;
 use std::path::Path;
 
 use warlock_engine::{
@@ -115,12 +114,8 @@ fn touched_directories(repo_root: &Path, changed: &[String]) -> BTreeSet<String>
             continue;
         };
         touched.insert(ROOT_MODULE.to_owned());
-        let mut parts: Vec<&str> = module.split('/').collect();
-        // The changed path itself.
-        parts.pop();
-        while !parts.is_empty() {
-            touched.insert(parts.join("/"));
-            parts.pop();
+        for (slash, _) in module.match_indices('/') {
+            touched.insert(module[..slash].to_owned());
         }
     }
     touched
@@ -320,26 +315,20 @@ pub(crate) fn freshened(
 /// rest dropped is the half of the list that does not help. Each sentence is the
 /// engine's own, flattened, as the headless report flattens them.
 fn failed(root: &Path, failures: &[pact::Failure]) -> Option<String> {
-    let mut reason = String::new();
-    let mut named_already: Vec<String> = Vec::new();
-    for failure in failures {
-        let directory = named(root, failure.directory());
-        if named_already.contains(&directory) {
-            continue;
-        }
-        let separator = if reason.is_empty() { "" } else { "; " };
-        let _ = write!(
-            reason,
-            "{separator}`{directory}` — {}",
-            one_line(&failure.to_string())
-        );
-        named_already.push(directory);
-    }
+    let mut named_already = BTreeSet::new();
+    let reasons: Vec<String> = failures
+        .iter()
+        .filter_map(|failure| {
+            let directory = named(root, failure.directory());
+            let reason = format!("`{directory}` — {}", one_line(&failure.to_string()));
+            named_already.insert(directory).then_some(reason)
+        })
+        .collect();
 
-    if reason.is_empty() {
+    if reasons.is_empty() {
         return None;
     }
-    Some(format!("the refresh pass failed: {reason}"))
+    Some(format!("the refresh pass failed: {}", reasons.join("; ")))
 }
 
 /// The one commit the refresh makes, or none at all.
@@ -414,7 +403,7 @@ fn refresh_message(ticket: &str) -> String {
 // and the headless progress lines all name one. The display form is the fallback
 // for a path with no spelling relative to this root, which a failure carried out
 // of the engine cannot have and which is not worth a panic if it ever does.
-fn named(root: &Path, directory: &Path) -> String {
+pub(crate) fn named(root: &Path, directory: &Path) -> String {
     to_manifest_path(root, directory).unwrap_or_else(|_| directory.display().to_string())
 }
 

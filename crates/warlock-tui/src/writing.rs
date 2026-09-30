@@ -158,19 +158,10 @@ pub(crate) fn write_submit(
         Ok(shape) => shape,
         Err(source) => return closed_saying(app, unreadable_shape_line(&source)),
     };
-    let missing = missing_sections(&shape, &document);
-    if !missing.is_empty() {
-        return closed_saying(app, missing_line(&missing));
+    match put_shaped(&path, &stored, &shape, &document) {
+        Ok(line) => app.panel_mut().note(line, now),
+        Err(line) => return closed_saying(app, line),
     }
-    if let Err(error) = put(&path, document.as_bytes()) {
-        return closed_saying(app, failure_line(&stored, &error));
-    }
-
-    // The size is the bytes just handed to the disk rather than a `stat` of what
-    // came back: it is the same number, and asking the filesystem again would be
-    // a second way for this line to fail after the write succeeded.
-    let bytes = u64::try_from(document.len()).unwrap_or(u64::MAX);
-    app.panel_mut().note(wrote_line(&stored, bytes), now);
     // The same string the line was just worded from, handed on rather than
     // spelled a second time: what the session remembers `/write` wrote and what
     // the reader was told it wrote cannot come to disagree.
@@ -226,19 +217,23 @@ pub(crate) fn landed(repo_root: &Path, typed: &str, shape: &str, reply: &str) ->
         return Landed::Path(taken(&stored));
     }
 
-    let document = document(reply);
-    let missing = missing_sections(shape, &document);
-    if !missing.is_empty() {
-        return Landed::Document(missing_line(&missing));
+    match put_shaped(&path, &stored, shape, &document(reply)) {
+        Ok(line) => Landed::Wrote(line),
+        Err(line) => Landed::Document(line),
     }
-    if let Err(error) = put(&path, document.as_bytes()) {
-        return Landed::Document(failure_line(&stored, &error));
-    }
+}
 
-    // The bytes just handed to the disk rather than a `stat` of what came back,
-    // for the reason [`write_submit`] counts them that way.
+// The size is the bytes just handed to the disk rather than a `stat` of what
+// came back: it is the same number, and asking the filesystem again would be a
+// second way for this line to fail after the write succeeded.
+fn put_shaped(path: &Path, stored: &str, shape: &str, document: &str) -> Result<String, String> {
+    let missing = missing_sections(shape, document);
+    if !missing.is_empty() {
+        return Err(missing_line(&missing));
+    }
+    put(path, document.as_bytes()).map_err(|error| failure_line(stored, &error))?;
     let bytes = u64::try_from(document.len()).unwrap_or(u64::MAX);
-    Landed::Wrote(wrote_line(&stored, bytes))
+    Ok(wrote_line(stored, bytes))
 }
 
 fn document(reply: &str) -> String {
@@ -284,13 +279,20 @@ fn missing_line(missing: &[&str]) -> String {
         .iter()
         .map(|section| format!("## {section}"))
         .collect();
-    let (last, rest) = named.split_last().expect("a refusal names what is missing");
-    let sections = if rest.is_empty() {
-        last.clone()
-    } else {
-        format!("{} and {last}", rest.join(", "))
-    };
-    format!("the document is missing {sections}, so nothing was written")
+    format!(
+        "the document is missing {}, so nothing was written",
+        listing(&named)
+    )
+}
+
+// `a, b and c`: a refusal that names more than one thing is read as a sentence,
+// and a comma before the last of them would be read as one more thing.
+pub(crate) fn listing(named: &[String]) -> String {
+    match named {
+        [] => String::new(),
+        [only] => only.clone(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+    }
 }
 
 fn unreadable_shape_line(error: &TemplateError) -> String {

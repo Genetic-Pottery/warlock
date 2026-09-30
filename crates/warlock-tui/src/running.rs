@@ -22,13 +22,14 @@ use std::path::{Path, PathBuf};
 use std::process;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use warlock_engine::{Agent, PactedSubtree, pact, to_manifest_path};
+use warlock_engine::{Agent, PactedSubtree, pact};
 use warlock_tui::{Cancel, ClaudeAgent};
 
 use crate::CANCELLED;
 use crate::descent::{Descent, RunEvent, descend};
 use crate::edits::{Opened, opened};
 use crate::error::{Error, one_line};
+use crate::freshness::named;
 
 // The headless counterpart of the panel's channel, and much smaller: no thread
 // and no screen, so where the panel draws every event, this writes the few a
@@ -132,10 +133,6 @@ impl<W: Write> Progress<W> {
             | RunEvent::Rejected { .. } => {}
         }
     }
-}
-
-fn named(root: &Path, directory: &Path) -> String {
-    to_manifest_path(root, directory).unwrap_or_else(|_| directory.display().to_string())
 }
 
 // A value rather than a printing function, for the reason `Opened::unpacted`
