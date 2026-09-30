@@ -1,4 +1,4 @@
-version = 1
+version = 2
 
 [[filed]]
 path = "docs/warlock-brief-22-push-a-brief-to-the-board-the-sigil-names.md"
@@ -15,3 +15,41 @@ url = "https://linear.app/genetic-pottery/project/cut-a-planned-project-into-tic
 scope = "warlock-team"
 team = "WAR"
 filed_at = "2026-09-21T03:17:39Z"
+
+[[filed]]
+path = "docs/warlock-brief-25-give-the-headless-cli-a-voice-questions-in-draft-and-a.md"
+project_id = "8eddc903-f59b-44be-b306-cd6d93e3450c"
+url = "https://linear.app/genetic-pottery/project/give-the-headless-cli-a-voice-questions-in-draft-and-a-warlock-brief-d1cb3521be71"
+scope = "warlock-team"
+team = "WAR"
+filed_at = "2026-09-30T09:49:30Z"
+
+[[filed.cut]]
+title = "A stdin prompt the headless verbs share"
+key = "a stdin prompt the headless verbs share"
+issues = ["WAR-144"]
+cut_at = "2026-09-30T10:40:29Z"
+
+[[filed.cut]]
+title = "`warlock draft` relays the session's questions"
+key = "`warlock draft` relays the session's questions"
+issues = ["WAR-145"]
+cut_at = "2026-09-30T10:41:52Z"
+
+[[filed.cut]]
+title = "`warlock draft` reviews the drafts before filing"
+key = "`warlock draft` reviews the drafts before filing"
+issues = ["WAR-146"]
+cut_at = "2026-09-30T10:43:01Z"
+
+[[filed.cut]]
+title = "A `warlock brief` session at the shell"
+key = "a `warlock brief` session at the shell"
+issues = ["WAR-147", "WAR-148"]
+cut_at = "2026-09-30T10:45:26Z"
+
+[[filed.cut]]
+title = "The headless documentation says what the CLI now does"
+key = "the headless documentation says what the cli now does"
+issues = ["WAR-149", "WAR-150"]
+cut_at = "2026-09-30T10:46:46Z"
