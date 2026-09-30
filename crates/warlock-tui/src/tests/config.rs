@@ -5,6 +5,7 @@ use warlock_engine::{load_sigils, scope, sigils_path};
 use super::{Held, NOTHING, PROMPT, held_for, hold, holding, preamble, prompted, sigils_in};
 use crate::error::Error;
 use crate::standing::Standing;
+use crate::stubs::Typing;
 
 // Every test that writes anything builds both its home *and* its repository
 // root out of these, so nothing here touches the developer's real home.
@@ -13,15 +14,25 @@ fn a_dir() -> tempfile::TempDir {
 }
 
 // The production composition with the two things a person supplies handed
-// in instead: the answer — `None` is EOF — and somewhere to print.
-fn prompt_with(repo: &Path, home: &Path, line: Option<&str>) -> (Result<(), Error>, String) {
+// in instead: the answer — `None` is EOF — and somewhere to print. The prompts
+// come back as the third value because they are the ask's rather than the
+// preamble's, so `out` no longer holds the cursor's own line.
+fn prompt_with(
+    repo: &Path,
+    home: &Path,
+    line: Option<&str>,
+) -> (Result<(), Error>, String, Vec<String>) {
     let standing = Standing::at(repo.to_path_buf(), repo.to_path_buf());
-    let answer = line.map(str::to_owned);
+    let mut typing = match line {
+        Some(line) => Typing::lines([line]),
+        None => Typing::nothing(),
+    };
     let mut out = Vec::new();
-    let outcome = prompted(&standing, home, || Ok(answer), &mut out);
+    let outcome = prompted(&standing, home, &mut typing, &mut out);
     (
         outcome,
         String::from_utf8(out).expect("warlock writes its own text"),
+        typing.asked().to_vec(),
     )
 }
 
@@ -29,12 +40,13 @@ fn prompt_with(repo: &Path, home: &Path, line: Option<&str>) -> (Result<(), Erro
 fn the_composition_says_what_is_held_before_it_reads_anything() {
     let (home, repo) = (a_dir(), a_dir());
 
-    let (outcome, said) = prompt_with(repo.path(), home.path(), None);
+    let (outcome, said, asked) = prompt_with(repo.path(), home.path(), None);
 
     outcome.expect("an EOF is not a failure");
-    assert!(
-        said.contains(PROMPT),
-        "the cursor's own line never got out: {said}"
+    assert_eq!(
+        asked,
+        [PROMPT],
+        "the one question, asked once, on the cursor's own line"
     );
     assert!(
         said.contains(NOTHING),
@@ -46,7 +58,7 @@ fn the_composition_says_what_is_held_before_it_reads_anything() {
 fn an_end_of_file_writes_nothing_and_says_so() {
     let (home, repo) = (a_dir(), a_dir());
 
-    let (outcome, said) = prompt_with(repo.path(), home.path(), None);
+    let (outcome, said, _) = prompt_with(repo.path(), home.path(), None);
 
     outcome.expect("an EOF is not a failure");
     assert!(said.ends_with("warlock: nothing changed\n"), "{said:?}");
@@ -60,7 +72,7 @@ fn an_end_of_file_writes_nothing_and_says_so() {
 fn a_line_of_sigils_is_written_and_the_file_is_named_back() {
     let (home, repo) = (a_dir(), a_dir());
 
-    let (outcome, said) = prompt_with(repo.path(), home.path(), Some("data-plane web\n"));
+    let (outcome, said, _) = prompt_with(repo.path(), home.path(), Some("data-plane web\n"));
 
     outcome.expect("two sigils are a line this accepts");
     let path = sigils_path(home.path(), repo.path());
@@ -81,7 +93,7 @@ fn a_line_that_is_not_sigils_writes_nothing_at_all() {
 
     // Begins with `-`, which no sigil may. Not an uppercase word: those are
     // folded to ASCII lowercase before they are judged, so `WEB` is `web`.
-    let (outcome, _) = prompt_with(repo.path(), home.path(), Some("-nope\n"));
+    let (outcome, _, _) = prompt_with(repo.path(), home.path(), Some("-nope\n"));
 
     let error = outcome.expect_err("a line of nonsense is refused");
     assert!(matches!(error, Error::Sigil { .. }), "{error:?}");
@@ -205,10 +217,14 @@ fn the_preamble_says_everything_before_the_cursor() {
     assert!(text.contains('*'), "including the wildcard: {text}");
     assert!(text.contains("replaces everything held"), "{text}");
     assert!(text.contains("a blank line clears it"), "{text}");
-    assert!(text.contains("Ctrl-C or EOF changes nothing"), "{text}");
     assert!(
-        text.ends_with(PROMPT),
-        "the prompt is the last thing, with no newline after it: {text}"
+        text.ends_with("Ctrl-C or EOF changes nothing\n"),
+        "the last of it is the two ways out, and then the cursor's own line, which \
+         the ask writes: {text}"
+    );
+    assert!(
+        !text.contains(PROMPT),
+        "the prompt is asked rather than printed here, so printing it would print it twice: {text}"
     );
 
     // The order the reader needs them in: what this is, what it is now, what
@@ -219,7 +235,6 @@ fn the_preamble_says_everything_before_the_cursor() {
     assert!(at("lowercase letters") < at("replaces everything held"));
     assert!(at("replaces everything held") < at("a blank line clears it"));
     assert!(at("a blank line clears it") < at("Ctrl-C or EOF changes nothing"));
-    assert!(at("Ctrl-C or EOF changes nothing") < at(PROMPT));
 }
 
 #[test]

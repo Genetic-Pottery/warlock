@@ -7,7 +7,7 @@
 //! above the cursor — including that a blank line clears the set. That is what
 //! buys the single entry point: no `warlock config clear`, no flag, no second
 //! spelling, and so no argument parser and no line editor here. EOF is the one
-//! answer that writes nothing, told apart from a blank line in [`read_line`]
+//! answer that writes nothing, told apart from a blank line in [`mod@crate::asking`]
 //! rather than anywhere below it. Ctrl-C needs no code at all, because this
 //! subcommand never enters raw mode and installs no panic hook.
 
@@ -17,6 +17,7 @@ use std::path::Path;
 
 use warlock_engine::{held_sigils, save_sigils, sigils_path, validate_sigil};
 
+use crate::asking::{self, Asks};
 use crate::error::{Error, one_line};
 use crate::standing::{FOR_SIGILS, Standing};
 
@@ -41,21 +42,22 @@ pub(crate) fn configure() -> Result<(), Error> {
     // an answer of "nothing held".
     let home = Standing::home()?;
 
-    prompted(&standing, &home, read_line, &mut io::stdout())
+    prompted(&standing, &home, &mut asking::Stdin, &mut io::stdout())
 }
 
 // Split from `configure` so the order is something a test can run: `ask` is a
-// canned answer under test and `out` collects what a reader would have seen.
+// scripted line under test and `out` collects what a reader would have seen.
 //
-// That order is the part worth pinning. The preamble is flushed before anything
-// is read, because the prompt carries no newline and would otherwise sit in the
-// terminal's buffer behind a cursor waiting on a person; EOF is answered before
-// anything is parsed; and the confirmation names the file only after `hold`
-// has written it.
+// That order is the part worth pinning. The preamble is flushed before the
+// question is asked, because a person is about to read it and answer; EOF is
+// answered before anything is parsed; and the confirmation names the file only
+// after `hold` has written it. The prompt itself is the ask's — see
+// [`mod@crate::asking`] — so the two halves of what is on the screen when the
+// cursor stops are written by two different things and in that order.
 fn prompted<W: Write>(
     standing: &Standing,
     home: &Path,
-    ask: impl FnOnce() -> Result<Option<String>, Error>,
+    ask: &mut impl Asks,
     out: &mut W,
 ) -> Result<(), Error> {
     let root = standing.repo_root();
@@ -66,17 +68,18 @@ fn prompted<W: Write>(
         "{}",
         preamble(root, &path, &held_for(home, root))
     ));
-    // Best effort, and the only thing that could be done about it: the prompt
-    // has no newline of its own, so it sits in the terminal's buffer until this
-    // pushes it out. A stdout that will not flush has nothing useful to say
-    // about itself, and the read below reports anything that really goes wrong.
+    // Pushed out before the question is asked rather than left to whatever
+    // buffering `out` has: what follows is a person reading these lines and
+    // deciding what to type. Best effort, and the only thing that could be done
+    // about it — a stdout that will not flush has nothing useful to say about
+    // itself, and the read below reports anything that really goes wrong.
     drop(out.flush());
 
-    let Some(line) = ask()? else {
+    let Some(line) = ask.ask(PROMPT)? else {
         // EOF, which is Ctrl-D at a terminal and an empty pipe everywhere else.
         // Nothing is parsed and nothing is written: a missing file stays missing
         // and an existing one is not opened. The newline is because the prompt
-        // above has none and the cursor is still sitting on it.
+        // just asked has none and the cursor is still sitting on it.
         drop(writeln!(out, "\nwarlock: nothing changed"));
         return Ok(());
     };
@@ -114,11 +117,11 @@ fn held_for(home: &Path, root: &Path) -> Held {
     }
 }
 
-// Pure, and it ends *without* a newline, because the last thing it composes is
-// the line the reader types on. The order is fixed by what the reader needs
-// before they can answer: what this is about, what it is now, what a legal
-// answer looks like, and only then what their answer will do — the destructive
-// one named as plainly as the other two.
+// Pure, and everything above the cursor: [`PROMPT`] itself is the ask's, so this
+// ends with the newline that puts the cursor on a line of its own. The order is
+// fixed by what the reader needs before they can answer: what this is about, what
+// it is now, what a legal answer looks like, and only then what their answer will
+// do — the destructive one named as plainly as the other two.
 fn preamble(root: &Path, path: &Path, held: &Held) -> String {
     // One `format!` rather than a line at a time, so what is on the screen is
     // read here in the order it is printed in.
@@ -129,8 +132,7 @@ fn preamble(root: &Path, path: &Path, held: &Held) -> String {
          {RULES}\n\
          a line of sigils replaces everything held for this repository\n\
          a blank line clears it\n\
-         Ctrl-C or EOF changes nothing\n\
-         {PROMPT}",
+         Ctrl-C or EOF changes nothing\n",
         root = root.display(),
         path = path.display(),
     )
@@ -206,19 +208,6 @@ fn hold(home: &Path, root: &Path, line: &str) -> Result<Vec<String>, Error> {
     let sigils = sigils_in(line)?;
     save_sigils(home, root, &sigils).map_err(|source| Error::Sigils { source })?;
     Ok(sigils)
-}
-
-// `Ok(0)` is EOF and nothing else. It is told apart from an empty line here
-// rather than further down, because everything below treats a line as text and
-// only this function can tell "they pressed Enter" from "there is no line and
-// never will be".
-fn read_line() -> Result<Option<String>, Error> {
-    let mut line = String::new();
-    match io::stdin().read_line(&mut line) {
-        Ok(0) => Ok(None),
-        Ok(_) => Ok(Some(line)),
-        Err(source) => Err(Error::Prompt { source }),
-    }
 }
 
 #[cfg(test)]
