@@ -1520,14 +1520,22 @@ impl ChatAgent {
     /// ```
     #[must_use]
     pub fn new() -> Self {
+        Self::opened(chat_args(), INVOCATION_TIMEOUT)
+    }
+
+    fn opened(args: Vec<OsString>, timeout: Duration) -> Self {
         Self {
             program: OsString::from(PROGRAM),
-            args: chat_args(),
+            args,
             session: Some(Session::new()),
-            timeout: INVOCATION_TIMEOUT,
+            timeout,
             cancel: Cancel::new(),
             activities: Activities::none(),
         }
+    }
+
+    fn briefed(args: Vec<OsString>, timeout: Duration) -> Self {
+        Converses::raised(&Self::opened(args, timeout), BRIEF_MODEL, BRIEF_EFFORT)
     }
 
     /// One slice's drafting session: its own conversation, at the register the
@@ -1551,15 +1559,7 @@ impl ChatAgent {
     /// ```
     #[must_use]
     pub fn drafting() -> Self {
-        let agent = Self {
-            program: OsString::from(PROGRAM),
-            args: drafting_args(),
-            session: Some(Session::new()),
-            timeout: INVOCATION_TIMEOUT,
-            cancel: Cancel::new(),
-            activities: Activities::none(),
-        };
-        Converses::raised(&agent, BRIEF_MODEL, BRIEF_EFFORT)
+        Self::briefed(drafting_args(), INVOCATION_TIMEOUT)
     }
 
     /// The session that proposes an answer to one question: its own
@@ -1583,15 +1583,7 @@ impl ChatAgent {
     /// ```
     #[must_use]
     pub fn proposing() -> Self {
-        let agent = Self {
-            program: OsString::from(PROGRAM),
-            args: proposing_args(),
-            session: Some(Session::new()),
-            timeout: INVOCATION_TIMEOUT,
-            cancel: Cancel::new(),
-            activities: Activities::none(),
-        };
-        Converses::raised(&agent, BRIEF_MODEL, BRIEF_EFFORT)
+        Self::briefed(proposing_args(), INVOCATION_TIMEOUT)
     }
 
     /// One pulled ticket's splitting session: its own conversation, at the
@@ -1615,15 +1607,7 @@ impl ChatAgent {
     /// ```
     #[must_use]
     pub fn splitting() -> Self {
-        let agent = Self {
-            program: OsString::from(PROGRAM),
-            args: splitting_args(),
-            session: Some(Session::new()),
-            timeout: INVOCATION_TIMEOUT,
-            cancel: Cancel::new(),
-            activities: Activities::none(),
-        };
-        Converses::raised(&agent, BRIEF_MODEL, BRIEF_EFFORT)
+        Self::briefed(splitting_args(), INVOCATION_TIMEOUT)
     }
 
     /// One sub-task's session: the only session warlock raises that may change
@@ -1655,15 +1639,7 @@ impl ChatAgent {
     /// ```
     #[must_use]
     pub fn working(system_prompt: &str) -> Self {
-        let agent = Self {
-            program: OsString::from(PROGRAM),
-            args: working_args(system_prompt),
-            session: Some(Session::new()),
-            timeout: WORKING_TIMEOUT,
-            cancel: Cancel::new(),
-            activities: Activities::none(),
-        };
-        Converses::raised(&agent, BRIEF_MODEL, BRIEF_EFFORT)
+        Self::briefed(working_args(system_prompt), WORKING_TIMEOUT)
     }
 
     #[must_use]
@@ -2647,45 +2623,21 @@ impl<C: Converses> Drafting<C> {
     /// cut fields back, and when the attempts run out the last fill that parsed
     /// is mended and cut after all — a cut ticket beats no ticket.
     fn settled(&mut self, first: drafting::Accepted) -> Result<Replied, agent::Error> {
-        let mut accepted = first;
-        let mut parsed: Option<drafting::Fill> = None;
-        // The reply in hand is attempt one, so what is left is the re-asks.
-        for _ in 1..drafting::ATTEMPTS {
-            let rejected = match accepted {
-                drafting::Accepted::Unparsed(defect) => vec![defect],
-                drafting::Accepted::Filled(fill) => {
-                    return Ok(Replied::Answer(self.repaired(&fill)));
-                }
-                drafting::Accepted::Defective { fill, defects } => {
-                    let lost = lost_to_the_cut(&defects);
-                    if lost.is_empty() {
-                        return Ok(Replied::Answer(self.repaired(&fill)));
-                    }
-                    parsed = Some(fill);
-                    lost
-                }
-            };
-            // The instructions afresh with the last attempt's defects listed as
-            // things not to repeat, which is how the document road asks again.
-            // The contract is not said a second time: it was the opening of this
-            // same conversation and has not changed.
+        // The instructions afresh with the last attempt's defects listed as
+        // things not to repeat, which is how the document road asks again. The
+        // contract is not said a second time: it was the opening of this same
+        // conversation and has not changed.
+        let settled = settle(first.into(), drafting::ATTEMPTS, |rejected| {
             let asked =
                 drafting::drafting_instructions(&self.brief, &self.title, &self.prose, &rejected);
-            let reply = self.agent.turn(&asked)?;
-            accepted = drafting::accept(&reply);
-        }
-
-        Ok(Replied::Answer(match accepted {
-            drafting::Accepted::Filled(fill) | drafting::Accepted::Defective { fill, .. } => {
-                self.repaired(&fill)
-            }
-            drafting::Accepted::Unparsed(defect) => match parsed {
-                Some(fill) => self.repaired(&fill),
-                // Four answers and not an object among them. Whoever asked for
-                // the cut hears what the last one was wrong about and decides
-                // what happens to the slice.
-                None => Drafted::Unusable(defect),
-            },
+            Ok(drafting::accept(&self.agent.turn(&asked)?).into())
+        })?;
+        Ok(Replied::Answer(match settled {
+            Settled::Fill(fill) => self.repaired(&fill),
+            // Four answers and not an object among them. Whoever asked for the
+            // cut hears what the last one was wrong about and decides what
+            // happens to the slice.
+            Settled::Unusable(defect) => Drafted::Unusable(defect),
         }))
     }
 
@@ -2891,40 +2843,22 @@ impl<C: Converses> Splitting<C> {
     /// brief 16 put under this. When the attempts run out, the last fill that
     /// parsed is mended and cut after all rather than the split halting.
     pub fn run(&mut self) -> Split {
-        let mut rejected: Vec<Defect> = Vec::new();
-        let mut parsed: Option<splitting::Fill> = None;
-        // Every road out is a `return` carrying what actually happened, which is
-        // why this is a `loop` and not a bounded one: a `while` over the count
-        // would fall out the bottom with nothing in hand and need a sentence
-        // about an ending that cannot arrive.
-        loop {
-            self.attempts += 1;
-            let asked = splitting::split_instructions(&self.title, &self.description, &rejected);
-            let reply = match self.agent.turn(&asked) {
-                Ok(reply) => reply,
-                Err(error) => return Split::Halted(Unsplit::Stopped(stopped_by(&error))),
-            };
-            match splitting::accept(&reply) {
-                splitting::Accepted::Filled(fill) => return self.numbered(&fill),
-                splitting::Accepted::Defective { fill, defects } => {
-                    let lost = lost_to_the_cut(&defects);
-                    if lost.is_empty() || self.attempts >= splitting::ATTEMPTS {
-                        return self.numbered(&fill);
-                    }
-                    parsed = Some(fill);
-                    rejected = lost;
-                }
-                splitting::Accepted::Unparsed(defect) => {
-                    if self.attempts >= splitting::ATTEMPTS {
-                        return match parsed {
-                            Some(fill) => self.numbered(&fill),
-                            None => Split::Halted(Unsplit::Unusable(defect)),
-                        };
-                    }
-                    rejected = vec![defect];
-                }
-            }
+        let settled = self.attempt(&[]).and_then(|first| {
+            settle(first, splitting::ATTEMPTS, |rejected| {
+                self.attempt(&rejected)
+            })
+        });
+        match settled {
+            Ok(Settled::Fill(fill)) => self.numbered(&fill),
+            Ok(Settled::Unusable(defect)) => Split::Halted(Unsplit::Unusable(defect)),
+            Err(error) => Split::Halted(Unsplit::Stopped(stopped_by(&error))),
         }
+    }
+
+    fn attempt(&mut self, rejected: &[Defect]) -> Result<Attempt<splitting::Fill>, agent::Error> {
+        self.attempts += 1;
+        let asked = splitting::split_instructions(&self.title, &self.description, rejected);
+        Ok(splitting::accept(&self.agent.turn(&asked)?).into())
     }
 
     /// A fill that parsed, put through the engine's repair, ordered and named.
@@ -2945,6 +2879,67 @@ impl<C: Converses> Splitting<C> {
             Err(cycle) => Split::Halted(Unsplit::Circle(cycle)),
         }
     }
+}
+
+// `drafting::Accepted` and `splitting::Accepted` are the same three shapes over
+// different fills; this is that shape once, so the attempt loop is written once.
+enum Attempt<F> {
+    Filled(F),
+    Defective { fill: F, defects: Vec<Defect> },
+    Unparsed(Defect),
+}
+
+impl From<drafting::Accepted> for Attempt<drafting::Fill> {
+    fn from(accepted: drafting::Accepted) -> Self {
+        match accepted {
+            drafting::Accepted::Filled(fill) => Self::Filled(fill),
+            drafting::Accepted::Defective { fill, defects } => Self::Defective { fill, defects },
+            drafting::Accepted::Unparsed(defect) => Self::Unparsed(defect),
+        }
+    }
+}
+
+impl From<splitting::Accepted> for Attempt<splitting::Fill> {
+    fn from(accepted: splitting::Accepted) -> Self {
+        match accepted {
+            splitting::Accepted::Filled(fill) => Self::Filled(fill),
+            splitting::Accepted::Defective { fill, defects } => Self::Defective { fill, defects },
+            splitting::Accepted::Unparsed(defect) => Self::Unparsed(defect),
+        }
+    }
+}
+
+enum Settled<F> {
+    Fill(F),
+    Unusable(Defect),
+}
+
+fn settle<F, E>(
+    first: Attempt<F>,
+    attempts: usize,
+    mut again: impl FnMut(Vec<Defect>) -> Result<Attempt<F>, E>,
+) -> Result<Settled<F>, E> {
+    let mut attempt = first;
+    let mut parsed = None;
+    for _ in 1..attempts {
+        let rejected = match attempt {
+            Attempt::Unparsed(defect) => vec![defect],
+            Attempt::Filled(fill) => return Ok(Settled::Fill(fill)),
+            Attempt::Defective { fill, defects } => {
+                let lost = lost_to_the_cut(&defects);
+                if lost.is_empty() {
+                    return Ok(Settled::Fill(fill));
+                }
+                parsed = Some(fill);
+                lost
+            }
+        };
+        attempt = again(rejected)?;
+    }
+    Ok(match attempt {
+        Attempt::Filled(fill) | Attempt::Defective { fill, .. } => Settled::Fill(fill),
+        Attempt::Unparsed(defect) => parsed.map_or(Settled::Unusable(defect), Settled::Fill),
+    })
 }
 
 // The defects a mend answers by throwing away what the model wrote — a value cut

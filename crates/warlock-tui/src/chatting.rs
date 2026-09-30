@@ -248,9 +248,9 @@ impl<C: Converses> Chat<C> {
     // whoever is waiting on it asked a question of their own and the answer is
     // not warlock's to read.
     //
-    // Emptied by replacing the value outright, as `submit` empties it, and for
-    // the same reason: the width, the muting and the label are told again by
-    // the round that draws next.
+    // Emptied by replacing the value outright rather than by unmuting: the width
+    // and the label are told again by the round that draws next, and the muting
+    // comes back from `settle_field` on the turn alone.
     pub(crate) fn taken(&mut self) -> String {
         let draft = self.composer.draft().to_owned();
         self.composer = Composer::default();
@@ -363,11 +363,7 @@ impl<C: Converses> Chat<C> {
     }
 
     fn submit(&mut self, app: &mut App, now: Instant) -> Option<Wanted> {
-        // Taken before the field is emptied, and emptied by replacing it
-        // outright rather than by unmuting: the muting comes back from
-        // `settle_field` on the turn alone.
-        let draft = self.composer.draft().to_owned();
-        self.composer = Composer::default();
+        let draft = self.taken();
 
         match submitted_for(&draft) {
             Submitted::Message => self.ask(app, &draft, now),
