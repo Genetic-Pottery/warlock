@@ -3,7 +3,7 @@
 
 # warlock
 
-The project's workspace root: a two-crate Rust project (warlock-engine and warlock-tui) built under edition 2024, pinning its own dependency versions and formatting rules and carrying its Apache 2.0 license.
+The workspace root: a Cargo workspace of two packages, warlock-engine and warlock-tui, with shared package metadata, lint rules and pinned dependency versions (serde, ratatui, clap, blake3, notify, ignore, ureq).
 
 ## Files
 
@@ -14,11 +14,11 @@ The project's workspace root: a two-crate Rust project (warlock-engine and warlo
 
 ## Directories
 
-- `crates/` — Holds the two workspace crates, warlock-engine (the repo-modeling engine) and warlock-tui (the terminal UI and CLI) — go there for how either crate works.
+- `crates/` — Holds the workspace's two Cargo packages: warlock-engine (repo-modeling/document engine) and warlock-tui (terminal UI/CLI); go there for module structure or feature flows.
 
 ## Structure
 
-- Cargo.toml declares the workspace members crates/warlock-engine and crates/warlock-tui, plus shared edition, lint and dependency versions
-- Cargo.lock pins exact resolved versions and checksums for the workspace's dependencies, including warlock-engine and warlock-tui
-- rustfmt.toml sets the formatting rules (edition 2024, style_edition 2024, LF newlines, field init shorthand) applied across the workspace
-- LICENSE provides the Apache License 2.0 text covering the project
+- Cargo.toml lists workspace members crates/warlock-engine and crates/warlock-tui, and pins shared metadata, lints and dependency versions.
+- Cargo.lock is generated from Cargo.toml, pinning exact versions and checksums for every crate the workspace depends on.
+- rustfmt.toml sets formatting rules (edition 2024, style_edition 2024, LF newlines, field init shorthand) applied across the workspace's crates.
+- LICENSE applies the Apache License 2.0 to the workspace as a whole; it has no dependency on other files.

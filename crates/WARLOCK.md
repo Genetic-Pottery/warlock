@@ -3,9 +3,9 @@
 
 # crates
 
-The crates directory holding the two Rust crates that make up the project: warlock-engine, the repo-modeling and document-driving core, and warlock-tui, the terminal UI and CLI built on it.
+The crates directory holds the workspace's two Cargo packages: the warlock-engine library and the warlock-tui binary/library built on it.
 
 ## Directories
 
-- `warlock-engine/` — Crate modeling a repo as a Tree of pacted/unpacted modules, hashing/viewing files, driving agent-filled WARLOCK.md documents, and enforcing scope/sigil boundaries — go here for how the engine works.
-- `warlock-tui/` — Crate building the `warlock` binary and `warlock_tui` library, the terminal UI and CLI for pact/refresh/pull/cut/push/chat/brief flows — go here for how a flow, screen or command works.
+- `warlock-engine/` — Repo-modeling and document engine — Tree of pacted/unpacted modules, hashing, agent-driven fill/validation, scope/sigil enforcement.
+- `warlock-tui/` — Terminal UI and CLI crate — pact/refresh/pull/cut/push/chat/brief flows, Linear/git/gh/claude integrations.
