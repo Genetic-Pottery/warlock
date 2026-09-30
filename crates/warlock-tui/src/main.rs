@@ -760,8 +760,6 @@ fn run() -> Result<(), Error> {
     // the ordinary screen. From here to the end of this function the alternate
     // screen is up, and the guard is what puts it back — on the return below,
     // on a `?`, and on a panic through the hook installed in `main`.
-    // The conversation's root, taken before `scope` moves into the session.
-    let root = scope.repo_root.clone();
     let parts: Parts<Live> = Parts {
         screen: TerminalGuard::enter()?,
         // Opened here and nowhere else, and dropped when this function returns:
@@ -771,7 +769,7 @@ fn run() -> Result<(), Error> {
         // Built once, and cheap to build: an agent is a command line and a
         // timeout, so no `claude` exists until a key asks for a pass or a turn.
         pact: Pact::new(),
-        chat: Chat::new(root),
+        chat: Chat::new(scope.repo_root.clone()),
         // Built once, for `Pact::new`'s reason and with none of its cost: the
         // seam is a unit value and no socket exists until a confirmed dialog
         // asks for one. The home under which the sigils, the binding and the
@@ -1682,9 +1680,6 @@ impl<K: Seams> Session<K> {
         clipboard::copy(&mut self.clipboard, &mut self.app, text);
     }
 
-    /// Everything that happened off this thread since the last round: what a
-    /// run has said, what a turn has, and what the disk did while this thread
-    /// was waiting on a keystroke.
     /// Takes `now` rather than reading the clock, so a test can hand it an
     /// instant ten seconds on instead of sitting there for ten seconds.
     ///
@@ -1842,18 +1837,14 @@ fn apply_mouse(app: &mut App, action: Option<MouseAction>, now: Instant) -> Opti
         // would leave the reader to take warlock's word for it.
         Some(MouseAction::EndSelection(cell)) => {
             extend(app, cell, now);
-            let text = selected_text(app);
-            return (!text.is_empty()).then_some(text);
+            return copied(app);
         }
         // The release that ends a drag held past the card's edge. The far end is
         // left where the last cell under the pointer put it — there is no cell
         // out here to move it to — and what the highlight covers is handed back
         // exactly as the arm above hands it back, so a button let go past the
         // edge still copies rather than dropping the gesture on the floor.
-        Some(MouseAction::EndPastEdge(_)) => {
-            let text = selected_text(app);
-            return (!text.is_empty()).then_some(text);
-        }
+        Some(MouseAction::EndPastEdge(_)) => return copied(app),
         // A drag held past that edge does nothing to the app *here*, which is
         // why it sits with the events that mean nothing at all: what it asks for
         // is a scroll a round at a time, and a round is not an event. The reach
@@ -1893,6 +1884,11 @@ fn extend(app: &mut App, cell: Cell, now: Instant) {
 /// a position in anything.
 fn position_under(app: &App, cell: Cell, now: Instant) -> Option<Position> {
     position_at(app.panel().thread()?, cell, now)
+}
+
+fn copied(app: &App) -> Option<String> {
+    let text = selected_text(app);
+    (!text.is_empty()).then_some(text)
 }
 
 /// What the highlight covers, as the thread's own stored text: no marker, no

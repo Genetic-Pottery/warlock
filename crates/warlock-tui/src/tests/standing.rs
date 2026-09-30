@@ -52,28 +52,6 @@ fn a_manifest_that_will_not_parse_is_an_error_rather_than_an_empty_start() {
 }
 
 #[test]
-fn the_root_itself_spells_as_a_dot() {
-    let standing = Standing::at(PathBuf::from("/repo"), PathBuf::from("/repo"));
-
-    assert_eq!(
-        standing
-            .spelled(Path::new("/repo"))
-            .expect("the root spells"),
-        ".",
-        "the manifest's own spelling of the root"
-    );
-}
-
-#[test]
-fn a_path_outside_the_repository_has_no_spelling() {
-    let standing = Standing::at(PathBuf::from("/repo"), PathBuf::from("/repo"));
-
-    standing
-        .spelled(Path::new("/elsewhere"))
-        .expect_err("nothing outside the repository has a manifest form");
-}
-
-#[test]
 fn a_missing_repository_names_what_the_subcommand_wanted_one_for() {
     // `here` reads the process's own directory, so what is pinned here is
     // the sentence rather than the walk: every tail is one of the nine

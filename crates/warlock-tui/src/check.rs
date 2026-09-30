@@ -163,17 +163,7 @@ fn checked_onto<W: Write>(
     json: bool,
     out: &mut W,
 ) -> Result<(), Error> {
-    // A missing manifest is an empty one and not a failure: a repository that
-    // has never pacted anything has never scoped anything either, and "nothing
-    // covers this path" is the answer rather than the absence of one.
-    let manifest = standing.manifest()?;
-
-    let checked = checked(
-        standing.repo_root(),
-        home,
-        &manifest,
-        &standing.target(path),
-    )?;
+    let checked = checked_at(standing, home, path)?;
 
     if json {
         write_object(out, &object(&checked));
@@ -181,6 +171,20 @@ fn checked_onto<W: Write>(
         drop(writeln!(out, "{}", prose(&checked)));
     }
     Ok(())
+}
+
+// A missing manifest is an empty one and not a failure: a repository that has
+// never pacted anything has never scoped anything either, and "nothing covers
+// this path" is the answer rather than the absence of one.
+fn checked_at(standing: &Standing, home: Option<&Path>, path: PathBuf) -> Result<Checked, Error> {
+    let manifest = standing.manifest()?;
+
+    checked(
+        standing.repo_root(),
+        home,
+        &manifest,
+        &standing.target(path),
+    )
 }
 
 // Every input is a parameter — the manifest in hand, the home the caller
@@ -255,14 +259,7 @@ pub(crate) fn gate(path: PathBuf) -> Result<(), Error> {
 // place, so a test gates against a temporary repository and a temporary home
 // rather than against the machine it runs on.
 fn gated_onto(standing: &Standing, home: Option<&Path>, path: PathBuf) -> Result<(), Error> {
-    let manifest = standing.manifest()?;
-
-    gated(&checked(
-        standing.repo_root(),
-        home,
-        &manifest,
-        &standing.target(path),
-    )?)
+    gated(&checked_at(standing, home, path)?)
 }
 
 // The gate is `check`'s own verdict read as a decision, and deliberately not a
@@ -351,14 +348,7 @@ fn hooked_onto<W: Write>(
     // Joined and spelled by exactly the road the path form takes, so an absolute
     // `file_path` from the hook and a relative one typed at a shell reach the
     // same scope.
-    let Ok(checked) = standing.manifest().and_then(|manifest| {
-        checked(
-            standing.repo_root(),
-            home,
-            &manifest,
-            &standing.target(path),
-        )
-    }) else {
+    let Ok(checked) = checked_at(standing, home, path) else {
         return Ok(());
     };
 
@@ -516,23 +506,13 @@ fn route_line(
 // says only "holding unknown", and a reader running a subcommand about a config
 // that will not parse is owed the path to go and fix.
 fn holding_line(sigils: &Sigils, config: Option<&Path>) -> String {
-    match sigils {
-        Sigils::Held(held) => format!(
-            "holding {}",
-            held.iter()
-                .map(|sigil| format!("`{sigil}`"))
-                .collect::<Vec<_>>()
-                .join(", ")
-        ),
-        Sigils::Nothing => "holding nothing".to_owned(),
-        // The `None` is unreachable today and is written out rather than
-        // unwrapped: `Unknown` is a file that exists and would not read, so
-        // there is always a home it was looked for under. If that ever stops
-        // being true, the line still says the true half of what it knows.
-        Sigils::Unknown => match config {
-            Some(path) => format!("holding unknown: `{}` could not be read", path.display()),
-            None => "holding unknown".to_owned(),
-        },
+    match (sigils, config) {
+        (Sigils::Unknown, Some(path)) => {
+            format!("holding unknown: `{}` could not be read", path.display())
+        }
+        _ => sigils
+            .line()
+            .unwrap_or_else(|| "holding nothing".to_owned()),
     }
 }
 
@@ -591,10 +571,7 @@ fn object(checked: &Checked) -> Value {
         CHECK,
         [
             (PATH, Value::String(checked.path.clone())),
-            (
-                SCOPE,
-                checked.scope.clone().map_or(Value::Null, Value::String),
-            ),
+            (SCOPE, text(checked.scope.as_deref())),
             (SIGILS, sigils_value(&checked.sigils)),
             (OPENS, Value::Bool(checked.opens)),
             (TEAM, text(checked.team.as_deref())),

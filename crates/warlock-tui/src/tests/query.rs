@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use warlock_engine::{Manifest, Node, NodeState, PactEntry, Tree};
 
-use super::{Listed, Listing, listed, listed_onto, object, state_word};
+use super::{Listed, Listing, listed, listed_onto, object, spelled, state_word};
 use crate::error::Error;
 use crate::standing::Standing;
 use crate::status_for;
@@ -270,4 +270,19 @@ fn the_state_words_are_warlocks_own_and_not_the_engines() {
     for state in NodeState::ALL {
         assert_ne!(state_word(state), format!("{state:?}"));
     }
+}
+
+#[test]
+fn the_root_itself_spells_as_a_dot() {
+    assert_eq!(
+        spelled(Path::new("/repo"), Path::new("/repo")).expect("the root spells"),
+        ".",
+        "the manifest's own spelling of the root"
+    );
+}
+
+#[test]
+fn a_path_outside_the_repository_has_no_spelling() {
+    spelled(Path::new("/repo"), Path::new("/elsewhere"))
+        .expect_err("nothing outside the repository has a manifest form");
 }

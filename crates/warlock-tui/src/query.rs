@@ -19,7 +19,7 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use serde_json::{Map, Value, json};
-use warlock_engine::{Loaded, NodeState, Tree, load_tree};
+use warlock_engine::{Loaded, NodeState, Tree, load_tree, to_manifest_path};
 
 use crate::error::Error;
 use crate::standing::{FOR_LISTING, Standing};
@@ -155,7 +155,7 @@ fn listed(tree: &Tree, repo_root: &Path, wanted: NodeState) -> Result<Vec<Listed
 // `warlock check` cannot disagree about what a path is called or about what it
 // means for one to have no name.
 pub(crate) fn spelled(repo_root: &Path, path: &Path) -> Result<String, Error> {
-    Standing::at(repo_root.to_path_buf(), repo_root.to_path_buf()).spelled(path)
+    to_manifest_path(repo_root, path).map_err(|source| Error::Unspellable { source })
 }
 
 // `directories` is an array and empty when nothing matched, never absent and

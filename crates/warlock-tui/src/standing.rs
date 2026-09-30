@@ -13,7 +13,7 @@
 use std::env;
 use std::path::{Path, PathBuf};
 
-use warlock_engine::{Manifest, manifest, repository_root, to_manifest_path};
+use warlock_engine::{Manifest, manifest, repository_root};
 
 use crate::error::Error;
 
@@ -159,13 +159,6 @@ impl Standing {
             .find_map(|variable| env::var_os(variable).filter(|value| !value.is_empty()))
             .map(PathBuf::from)
             .ok_or(Error::NoHome)
-    }
-
-    // One line, in one place, so a root check and every row of an answer cannot
-    // disagree about what a path is called or about what it means for one to
-    // have no name.
-    pub(crate) fn spelled(&self, path: &Path) -> Result<String, Error> {
-        to_manifest_path(&self.repo_root, path).map_err(|source| Error::Unspellable { source })
     }
 }
 
