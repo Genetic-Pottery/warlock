@@ -35,8 +35,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use warlock_engine::{
-    Manifest, ScopeRecord, brief_path, halted_and_resumed_runs, held_sigils, resolve_filing,
-    scope_opens_to,
+    Manifest, PullRun, ScopeRecord, brief_path, halted_and_resumed_runs, held_sigils,
+    resolve_filing, scope_opens_to,
 };
 use warlock_tui::{
     Activities, Activity, Board, Cancel, ChatAgent, Chosen, ClaudeAgent, Forge, Gh, Git, GitError,
@@ -143,10 +143,7 @@ pub(crate) fn pulled<O: Opens, R: Repository, F: Forge, S: Splits, W: Works, P: 
     // costs is a run that would fold somebody's uncommitted edit into a sub-task's
     // commit, and the cheapest place to refuse it is here.
     if !dry_run {
-        let dirty = ports.repo.dirty().map_err(|source| Error::Git { source })?;
-        if !dirty.is_empty() {
-            return Err(Error::DirtyTree { dirty });
-        }
+        clean(ports.repo)?;
     }
 
     let board = ports.open.open(prepared.value());
@@ -161,19 +158,7 @@ pub(crate) fn pulled<O: Opens, R: Repository, F: Forge, S: Splits, W: Works, P: 
         say(progress, &format!("{unreadable}"));
     }
 
-    let selected = match named {
-        Some(ticket) => Selected::Named(
-            take_named(&board, record, &assignee, ticket, runs.runs())
-                .map_err(|source| Error::Linear { source })?,
-        ),
-        None => Selected::Chosen(choose(
-            &board
-                .scope_queue(record.team(), record.label(), &assignee)
-                .map_err(|source| Error::Linear { source })?,
-            record.review_state(),
-            runs.runs(),
-        )),
-    };
+    let selected = select(&board, record, &assignee, named, runs.runs())?;
 
     if dry_run {
         for line in would(scope, named, &selected) {
@@ -367,6 +352,37 @@ pub(crate) fn prepare<'m>(
     })
 }
 
+pub(crate) fn clean<R: Repository>(repo: &R) -> Result<(), Error> {
+    let dirty = repo.dirty().map_err(|source| Error::Git { source })?;
+    if dirty.is_empty() {
+        Ok(())
+    } else {
+        Err(Error::DirtyTree { dirty })
+    }
+}
+
+pub(crate) fn select(
+    board: &impl Board,
+    record: &ScopeRecord,
+    assignee: &str,
+    named: Option<&str>,
+    runs: &[PullRun],
+) -> Result<Selected, Error> {
+    Ok(match named {
+        Some(ticket) => Selected::Named(
+            take_named(board, record, assignee, ticket, runs)
+                .map_err(|source| Error::Linear { source })?,
+        ),
+        None => Selected::Chosen(choose(
+            &board
+                .scope_queue(record.team(), record.label(), assignee)
+                .map_err(|source| Error::Linear { source })?,
+            record.review_state(),
+            runs,
+        )),
+    })
+}
+
 /// What selection came to, in the two shapes the two doors produce.
 ///
 /// One type for both because everything after it — the dry run, the skip lines
@@ -469,6 +485,14 @@ pub(crate) fn unchanged(ticket: &str) -> String {
         "`{ticket}` is in review with nothing to merge: the work was already there, so nothing \
          was pushed and what each sub-task found is a comment on the ticket"
     )
+}
+
+pub(crate) fn no_start_state(team: &str) -> String {
+    format!("the team `{team}` has no `In Progress` state, so the ticket was not moved")
+}
+
+pub(crate) fn no_review_state(team: &str, state: &str) -> String {
+    format!("the team `{team}` has no `{state}` state, so the ticket was not moved into review")
 }
 
 /// `WAR-140` is 140, which is the middle of the branch name.
@@ -615,12 +639,8 @@ impl<W: Write> Progress<W> {
             PullEvent::Repair { note } => self.say(&note),
             // Both board lines are facts about a workflow nobody has finished
             // setting up, said where the run they happened in is being read.
-            PullEvent::NoStartState { team } => self.say(&format!(
-                "the team `{team}` has no `In Progress` state, so the ticket was not moved"
-            )),
-            PullEvent::NoReviewState { team, state } => self.say(&format!(
-                "the team `{team}` has no `{state}` state, so the ticket was not moved into review"
-            )),
+            PullEvent::NoStartState { team } => self.say(&no_start_state(&team)),
+            PullEvent::NoReviewState { team, state } => self.say(&no_review_state(&team, &state)),
         }
     }
 

@@ -29,6 +29,7 @@ use warlock_tui::{
     App, Edited, LinearOpener, Opens, PushAnswered, PushConfirm, ScopeField, ScopePrompt,
 };
 
+use crate::cut::listed;
 use crate::error::{Error, one_line};
 use crate::push::{Prepared, file, prepare};
 use crate::standing::Standing;
@@ -444,11 +445,7 @@ fn no_home(app: &mut App, now: Instant) -> Pushing {
 }
 
 fn pick_one(candidates: &[String]) -> String {
-    let named: Vec<String> = candidates
-        .iter()
-        .map(|candidate| format!("`{candidate}`"))
-        .collect();
-    format!("this machine can file to {}: type one", named.join(", "))
+    format!("this machine can file to {}: type one", listed(candidates))
 }
 
 // Every test drives a temporary repository and a temporary home, through the

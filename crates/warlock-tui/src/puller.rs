@@ -51,8 +51,8 @@ use warlock_tui::{
     Activities, Activity, App, Board, Cancel, ChatAgent, ClaudeAgent, Commit, Dirty,
     FetchedProject, Forge, Gh, Git, GitError, LinearError, LinearIssue, LinearOpener,
     LinearProject, NamedIssue, NewIssue, NewProject, Opens, PullAnswered, PullConfirm, Queue,
-    Repository, Split, Splitting, Taking, Undertaking, Worked, Working, branch_name, choose,
-    take_named, working_system_prompt,
+    Repository, Split, Splitting, Taking, Undertaking, Worked, Working, branch_name,
+    working_system_prompt,
 };
 
 use crate::cut::listed;
@@ -61,7 +61,8 @@ use crate::error::{Error, one_line};
 use crate::freshness::{Freshened, Freshening, Freshens, freshened};
 use crate::pacting::CancelGuard;
 use crate::pull::{
-    Selected, Taken, nothing_ready, number_in, opened, passed_over, prepare, unchanged,
+    Taken, clean, no_review_state, no_start_state, nothing_ready, number_in, opened, passed_over,
+    prepare, select, unchanged,
 };
 use crate::pulling::{Heading, PullEvent, Pulled, Pulling, Splits, Ticket, Works, next_runnable};
 use crate::standing::Standing;
@@ -1045,10 +1046,7 @@ fn chose<O: Opens, R: Repository>(
     if cancel.is_cancelled() {
         return Err(Error::Cancelled);
     }
-    let dirty = repo.dirty().map_err(|source| Error::Git { source })?;
-    if !dirty.is_empty() {
-        return Err(Error::DirtyTree { dirty });
-    }
+    clean(repo)?;
 
     let board = open.open(&work.value);
     let assignee = board.viewer().map_err(|source| Error::Linear { source })?;
@@ -1062,19 +1060,13 @@ fn chose<O: Opens, R: Repository>(
         .map(|unreadable| one_line(&unreadable.to_string()))
         .collect();
 
-    let selected = match work.named.as_deref() {
-        Some(ticket) => Selected::Named(
-            take_named(&board, &work.record, &assignee, ticket, runs.runs())
-                .map_err(|source| Error::Linear { source })?,
-        ),
-        None => Selected::Chosen(choose(
-            &board
-                .scope_queue(work.record.team(), work.record.label(), &assignee)
-                .map_err(|source| Error::Linear { source })?,
-            work.record.review_state(),
-            runs.runs(),
-        )),
-    };
+    let selected = select(
+        &board,
+        &work.record,
+        &assignee,
+        work.named.as_deref(),
+        runs.runs(),
+    )?;
     for skipped in selected.skipped() {
         lines.push(passed_over(skipped));
     }
@@ -1241,22 +1233,9 @@ fn said(app: &mut App, event: PullEvent, now: Instant) {
         PullEvent::Repair { note } => app.panel_mut().note(note, now),
         // Both board lines are facts about a workflow nobody has finished setting
         // up, said where the run they happened in is being read.
-        PullEvent::NoStartState { team } => {
-            app.panel_mut().note(
-                format!(
-                    "the team `{team}` has no `In Progress` state, so the ticket was not moved"
-                ),
-                now,
-            );
-        }
+        PullEvent::NoStartState { team } => app.panel_mut().note(no_start_state(&team), now),
         PullEvent::NoReviewState { team, state } => {
-            app.panel_mut().note(
-                format!(
-                    "the team `{team}` has no `{state}` state, so the ticket was not moved into \
-                     review"
-                ),
-                now,
-            );
+            app.panel_mut().note(no_review_state(&team, &state), now);
         }
     }
 }

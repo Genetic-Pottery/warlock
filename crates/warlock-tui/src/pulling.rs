@@ -152,9 +152,10 @@ impl<B: Board, R: Repository, F: Forge, S: Splits, W: Works> Pulling<'_, B, R, F
         // Before the split, so the board is honest while the model works — and
         // before the record is first saved, because a team with no such state is
         // a line in the output rather than a thing the record has to remember.
-        let team = self.scope.team().to_owned();
         if !self.move_ticket(ticket.id, IN_PROGRESS)? {
-            self.report(PullEvent::NoStartState { team });
+            self.report(PullEvent::NoStartState {
+                team: self.scope.team().to_owned(),
+            });
         }
 
         // A resumed run already holds its split, and splitting it again would
@@ -433,13 +434,7 @@ impl<B: Board, R: Repository, F: Forge, S: Splits, W: Works> Pulling<'_, B, R, F
             .comment_on_issue(ticket.id, &comment)
             .map_err(Error::board)?;
 
-        let review = self.scope.review_state().to_owned();
-        if !self.move_ticket(ticket.id, &review)? {
-            self.report(PullEvent::NoReviewState {
-                team: self.scope.team().to_owned(),
-                state: review,
-            });
-        }
+        self.move_to_review(ticket)?;
 
         Ok(Pulled::Opened {
             ticket: ticket.identifier.to_owned(),
@@ -464,13 +459,7 @@ impl<B: Board, R: Repository, F: Forge, S: Splits, W: Works> Pulling<'_, B, R, F
             .comment_on_issue(ticket.id, &unchanged_comment(base, &finished_in(&run)))
             .map_err(Error::board)?;
 
-        let review = self.scope.review_state().to_owned();
-        if !self.move_ticket(ticket.id, &review)? {
-            self.report(PullEvent::NoReviewState {
-                team: self.scope.team().to_owned(),
-                state: review,
-            });
-        }
+        self.move_to_review(ticket)?;
 
         Ok(Pulled::Unchanged {
             ticket: ticket.identifier.to_owned(),
@@ -551,6 +540,17 @@ impl<B: Board, R: Repository, F: Forge, S: Splits, W: Works> Pulling<'_, B, R, F
             branch,
             now_rfc3339(),
         ))
+    }
+
+    fn move_to_review(&mut self, ticket: &Ticket<'_>) -> Result<(), Error> {
+        let review = self.scope.review_state();
+        if !self.move_ticket(ticket.id, review)? {
+            self.report(PullEvent::NoReviewState {
+                team: self.scope.team().to_owned(),
+                state: review.to_owned(),
+            });
+        }
+        Ok(())
     }
 
     /// The ticket moved to the team's state of that name, or `false` when the
@@ -1089,8 +1089,6 @@ fn remember(kept: &mut Vec<TouchedScope>, crossings: &warlock_tui::Crossings<'_>
 /// go looking for the commit it does not explain. The empty summary is what
 /// [`pull_request_body`] already leaves out.
 pub(crate) fn unchanged_comment(base: &str, finished: &[Finished<'_>]) -> String {
-    use std::fmt::Write as _;
-
     let mut comment = format!(
         "No change was needed: the work this ticket asks for is already on `{base}`, so nothing \
          was pushed and no pull request was opened. What each sub-task found:\n"

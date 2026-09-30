@@ -248,6 +248,10 @@ pub(crate) fn sent<W: Write>(
         project.url()
     ));
 
+    let unfiled = |source: filed::Error| Error::Unfiled {
+        url: project.url().to_owned(),
+        source: Box::new(source),
+    };
     filed.push(
         FiledRecord::new(
             root,
@@ -258,15 +262,9 @@ pub(crate) fn sent<W: Write>(
             destination.team(),
             now_rfc3339(),
         )
-        .map_err(|source| Error::Unfiled {
-            url: project.url().to_owned(),
-            source: Box::new(source),
-        })?,
+        .map_err(unfiled)?,
     );
-    filed.save(root).map_err(|source| Error::Unfiled {
-        url: project.url().to_owned(),
-        source: Box::new(source),
-    })?;
+    filed.save(root).map_err(unfiled)?;
 
     // The address, for a caller with no `out` to read it off. Last, so that a
     // push which hands one back is one whose record is on disk — and so that the
