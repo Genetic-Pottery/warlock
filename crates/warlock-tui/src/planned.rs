@@ -32,15 +32,16 @@ use std::path::{Path, PathBuf};
 use warlock_engine::drafting::Draft;
 use warlock_engine::{Destination, Manifest, agent, filed_path, resolve_filing, to_manifest_path};
 use warlock_tui::{
-    Board, ChatAgent, Converses, Drafted, Drafting, LinearIssue, LinearOpener, Opens, Replied,
-    Slice, scope_block_in,
+    Board, ChatAgent, Converses, Drafted, Drafting, LinearIssue, LinearOpener, NOTHING_SETTLES_IT,
+    Opens, Replied, Slice, propose_answer, scope_block_in,
 };
 
+use crate::asking::{self, Asks};
 // The module rather than its `cut` and `Slice`, which would both be a second
 // name for something this file already has: the slices here are the document's,
 // and `cut::Slice` is one slice's drafts on their way to a board.
 use crate::cut::{self, Cut, listed};
-use crate::error::Error;
+use crate::error::{Error, one_line};
 use crate::push::records;
 use crate::standing::{FOR_CUT, Standing};
 
@@ -48,6 +49,12 @@ use crate::standing::{FOR_CUT, Standing};
 // the comparison below trims and folds case, so `planned` and ` Planned ` are
 // this and `Backlog` is not.
 const PLANNED: &str = "Planned";
+
+// The cursor a question stops on. Nothing but a line is read here — no command
+// word and no answer to pick from — so the prompt is a bare mark rather than a
+// sentence: what a reader needs before they can answer is on the lines above
+// it, one of them warlock's own attempt at the question.
+const PROMPT: &str = "> ";
 
 pub(crate) fn cut(path: &Path, scope: Option<&str>, dry_run: bool) -> Result<(), Error> {
     let standing = Standing::here(FOR_CUT)?;
@@ -72,6 +79,14 @@ pub(crate) fn cut(path: &Path, scope: Option<&str>, dry_run: bool) -> Result<(),
         // what a per-slice session is for — so the sessions below are opened off
         // this one.
         &ChatAgent::drafting(),
+        // And the conversation warlock's own attempt at a question is made in,
+        // which is a different one: not the slice's own session, whose next turn
+        // is whatever the reader answers. See [`ChatAgent::proposing`]. The
+        // panel builds its two the same way and for the same reason.
+        &ChatAgent::proposing(),
+        // The real read: the prompt on stdout and one cooked line off stdin,
+        // which is what a question stops the run at until somebody answers it.
+        &mut asking::Stdin,
         &mut io::stdout(),
     )
 }
@@ -83,16 +98,24 @@ pub(crate) fn cut(path: &Path, scope: Option<&str>, dry_run: bool) -> Result<(),
 // this crate can reach the developer's real key store by standing in the wrong
 // directory.
 //
-// `open` is the socket and `agent` is the model, and a test hands in stand-ins
-// that panic when they are reached — which is what makes "a dry run drafts
-// nothing" an assertion about the order here rather than a reading of it.
+// `open` is the socket, `agent` and `proposer` are the models and `ask` is the
+// line off stdin, and a test hands in stand-ins that panic when they are
+// reached — which is what makes "a dry run drafts nothing" an assertion about
+// the order here rather than a reading of it, and what keeps every test in this
+// crate off the terminal the developer is sitting at.
+//
+// Two models and not one, for the panel's reason: a slice's session and the
+// conversation warlock's own attempt at its question is made in are two
+// conversations, and a caller that handed in one would be opening a session
+// warlock does not.
 #[expect(
     clippy::too_many_arguments,
-    reason = "the environment, the seam and the model are parameters rather \
+    reason = "the environment, the seams and the models are parameters rather \
               than reads, which is the whole of what lets every refusal run \
-              against a temporary repository and a temporary home"
+              against a temporary repository and a temporary home, and every \
+              question be answered by a written-down line"
 )]
-fn cut_with<O: Opens, A: Converses, W: Write>(
+fn cut_with<O: Opens, A: Converses, P: Converses, K: Asks, W: Write>(
     standing: &Standing,
     home: &Path,
     path: &Path,
@@ -100,6 +123,8 @@ fn cut_with<O: Opens, A: Converses, W: Write>(
     dry_run: bool,
     open: &O,
     agent: &A,
+    proposer: &P,
+    ask: &mut K,
     out: &mut W,
 ) -> Result<(), Error> {
     let manifest = standing.manifest()?;
@@ -136,7 +161,13 @@ fn cut_with<O: Opens, A: Converses, W: Write>(
         }
 
         say(out, &format!("{} — drafting", next.heading()));
-        let Some(drafts) = drafted(agent, planned.brief(), next.slice(), out) else {
+        // `?` on the read alone, and not on the drafting: a slice that came to
+        // nothing is a line and the next slice, but a stdin that cannot be read
+        // is not a fact about this slice — the question after it could not be
+        // answered either, and a run that carried on would be asking a sequence
+        // of questions into a pipe that is broken.
+        let Some(drafts) = drafted(agent, proposer, planned.brief(), next.slice(), ask, out)?
+        else {
             continue;
         };
 
@@ -168,41 +199,160 @@ fn cut_with<O: Opens, A: Converses, W: Write>(
 /// One slice drafted in one session, or `None` with what went wrong already
 /// said.
 ///
-/// [`Drafting::one_shot`] rather than [`Drafting::for_slice`]: there is nobody
-/// at a shell to put a question to, so the session is told up front that it
-/// cannot ask one and is held to no rounds at all. One session per slice, opened
-/// here and dropped at the end of this call, so nothing a slice said reaches the
-/// next one.
-fn drafted<A: Converses, W: Write>(
+/// [`Drafting::for_slice`] rather than [`Drafting::one_shot`]: there is somebody
+/// at the shell who started the run and is watching it, so a question is put to
+/// them and the line they type is the session's next turn. One session per
+/// slice, opened here and dropped at the end of this call, so nothing a slice
+/// said reaches the next one.
+///
+/// The read blocks, which is the whole of what makes the asking worth
+/// something: the run waits at the question for as long as whoever started it
+/// takes to answer, and nothing here decides on their behalf. A question is put
+/// with warlock's own attempt at it over the prompt, and that attempt is a
+/// proposal and never an answer — it is sent only when the line read is empty.
+fn drafted<A: Converses, P: Converses, K: Asks, W: Write>(
     agent: &A,
+    proposer: &P,
     brief: &str,
     slice: &Slice,
+    ask: &mut K,
     out: &mut W,
-) -> Option<Vec<Draft>> {
-    let mut session = Drafting::one_shot(agent, brief, slice.heading(), slice.prose());
+) -> Result<Option<Vec<Draft>>, Error> {
+    let mut session = Drafting::for_slice(agent, brief, slice.heading(), slice.prose());
+    // What the session had left to spend on the turn that is about to run, read
+    // before it rather than after: a question that comes back from a turn there
+    // was no round for is the one thing this cannot relay, and after the turn
+    // the count has already moved.
+    let mut rounds = session.questions_left();
+    let mut turned = session.open();
 
-    match replied(slice, session.open()) {
-        Reply::Drafts { drafts, lines } => {
-            for line in lines {
-                say(out, &line);
+    loop {
+        match replied(slice, turned) {
+            Reply::Drafts { drafts, lines } => {
+                for line in lines {
+                    say(out, &line);
+                }
+                return Ok(Some(drafts));
             }
-            Some(drafts)
+            // A session counts its own rounds and hands nothing back past the
+            // last of them, so this is unreachable — and said rather than
+            // panicked on, because a panic in the middle of a run that has
+            // filed issues is worth avoiding.
+            Reply::Question(_) if rounds == 0 => {
+                say(
+                    out,
+                    &not_drafted(
+                        slice,
+                        "the session asked a question after its last round was spent",
+                    ),
+                );
+                return Ok(None);
+            }
+            Reply::Question(question) => {
+                say(out, &question_line(slice, &question));
+                let Some(answer) = answered(proposer, brief, slice, &question, ask, out)? else {
+                    return Ok(None);
+                };
+                say(out, &answer_line(slice, &answer));
+                rounds = session.questions_left();
+                turned = session.answer(&answer);
+            }
+            Reply::Over(line) => {
+                say(out, &line);
+                return Ok(None);
+            }
         }
-        // A session with no rounds hands a question back to nobody, so this is
-        // unreachable — and said rather than panicked on, because a panic in
-        // the middle of a run that has filed issues is worth avoiding.
-        Reply::Question(_) => {
-            say(
-                out,
-                &not_drafted(
-                    slice,
-                    "the session asked a question and there is nobody to answer it",
-                ),
-            );
+    }
+}
+
+// One question put to whoever is at the shell: warlock's attempt at it, the
+// prompt, and the line that comes back. `None` is a question nothing answered,
+// with the line that says so already printed and the slice left uncut.
+//
+// Nothing here reads the line for a command or weighs it against the proposal:
+// a non-empty line is the answer whatever it says, and an empty one is the
+// proposal accepted. That is the whole of the rule, and it is what keeps
+// warlock's own attempt an offer rather than a decision.
+fn answered<P: Converses, K: Asks, W: Write>(
+    proposer: &P,
+    brief: &str,
+    slice: &Slice,
+    question: &str,
+    ask: &mut K,
+    out: &mut W,
+) -> Result<Option<String>, Error> {
+    let proposal = proposed(proposer, brief, slice, question, out);
+
+    let Some(line) = ask.ask(PROMPT)? else {
+        // EOF, which is Ctrl-D at a terminal and an exhausted pipe everywhere
+        // else. Nothing is sent: not the proposal, which is warlock's own
+        // attempt and not an answer, and not a blank turn either. The newline is
+        // because the prompt just asked has none and the cursor is still sitting
+        // on it.
+        drop(writeln!(out));
+        say(out, &not_drafted(slice, "nobody answered its question"));
+        return Ok(None);
+    };
+
+    // Trimmed rather than taken as it arrived, for `key::added`'s reason: a
+    // pipe's trailing newline is never part of what somebody meant to say, and
+    // a line of spaces is a line nobody typed anything on.
+    let typed = line.trim();
+    if !typed.is_empty() {
+        return Ok(Some(typed.to_owned()));
+    }
+    // An empty line is the proposal accepted, which is the whole of what makes
+    // it an offer.
+    let Some(proposal) = proposal else {
+        // Enter pressed at a question warlock had nothing to offer on: there is
+        // no proposal to accept and an empty turn would be the session asked to
+        // draft on silence, so the slice is left uncut and said.
+        say(
+            out,
+            &not_drafted(
+                slice,
+                "nothing was typed and warlock had no answer to propose",
+            ),
+        );
+        return Ok(None);
+    };
+
+    Ok(Some(proposal))
+}
+
+// Warlock's own attempt at the question, made in its own conversation and said
+// as it is made.
+//
+// `None` is a question there is nothing to offer on — the sentence
+// [`propose_answer`] hands back when the brief, the slice and the repository do
+// not settle it, or an attempt that never came back at all — and either way the
+// line above the prompt says which, the read below happens anyway, and the
+// answer is entirely whoever is reading's.
+//
+// One turn and no retry, exactly as the panel makes the same attempt: the
+// failures that reach here are a missing binary, a cancel and a timeout, and
+// none of the three is better the second time.
+fn proposed<P: Converses, W: Write>(
+    proposer: &P,
+    brief: &str,
+    slice: &Slice,
+    question: &str,
+    out: &mut W,
+) -> Option<String> {
+    match propose_answer(proposer, brief, slice.heading(), slice.prose(), question) {
+        // Recognised by [`propose_answer`] and not re-read here: the one place
+        // that sentence is told from a proposal is the one that asked for it,
+        // and a second reader would eventually disagree with it.
+        Ok(proposal) if proposal == NOTHING_SETTLES_IT => {
+            say(out, &settled_line(slice, &proposal));
             None
         }
-        Reply::Over(line) => {
-            say(out, &line);
+        Ok(proposal) => {
+            say(out, &proposal_line(slice, &proposal));
+            Some(proposal)
+        }
+        Err(error) => {
+            say(out, &unproposed_line(slice, &one_line(&error.to_string())));
             None
         }
     }
@@ -725,6 +875,56 @@ pub(crate) fn replied(slice: &Slice, replied: Result<Replied, agent::Error>) -> 
 
 pub(crate) fn not_drafted(slice: &Slice, why: impl fmt::Display) -> String {
     format!("{} was not drafted: {why}", named(slice))
+}
+
+// The four lines a relayed question is read back by, here rather than beside
+// either door: the shell and the panel put the same question to a person and
+// send whatever they say, and two copies of these wordings would be two doors
+// naming one conversation differently. `named` is in each of them for the same
+// reason it is `pub(crate)`.
+
+// The question in the words it was asked, flattened as a line takes it. Whoever
+// is at the door answers it, so this line and [`answer_line`] are the pair a
+// conversation is read back by: `asked` is the slice talking and `answered` is
+// the person, and the two verbs are the whole of how a reader tomorrow tells one
+// from the other.
+pub(crate) fn question_line(slice: &Slice, question: &str) -> String {
+    format!("{} asked: {}", named(slice), one_line(question))
+}
+
+// What was sent, in the words it was sent in, and the other half of that pair.
+// Warlock's attempt and something typed over it land here identically on
+// purpose: what went to the session is what the person's line came to, and a
+// line that said which of the two it was would be warlock reporting its own
+// draft rather than the answer.
+pub(crate) fn answer_line(slice: &Slice, answer: &str) -> String {
+    format!("{} was answered: {}", named(slice), one_line(answer))
+}
+
+// Warlock's own attempt, offered over the prompt on the road where there is no
+// field to put it in. Said as a proposal and never as the answer: it is sent
+// only if the line read is empty, and a reader who types anything at all has
+// replaced it.
+pub(crate) fn proposal_line(slice: &Slice, proposal: &str) -> String {
+    format!(
+        "{} — warlock's answer: {}",
+        named(slice),
+        one_line(proposal)
+    )
+}
+
+// The proposing session having nothing to offer, said in the sentence
+// [`propose_answer`] hands back and no other words: the question is still
+// somebody's, and the answer is entirely theirs.
+pub(crate) fn settled_line(slice: &Slice, settles: &str) -> String {
+    format!("{} — {settles}", named(slice))
+}
+
+// An attempt that never came back with anything. One line and the question left
+// standing: nothing was sent, and whoever is at the door answers in their own
+// words.
+pub(crate) fn unproposed_line(slice: &Slice, why: &str) -> String {
+    format!("{} — no answer was proposed: {why}", named(slice))
 }
 
 // The prefix of every line about one slice that is not its place in a walk: the

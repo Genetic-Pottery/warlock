@@ -67,9 +67,13 @@ use warlock_tui::{
 use crate::cut::{Cut, listed};
 use crate::error::{Error, one_line};
 use crate::pacting::CancelGuard;
+// The lines about a relayed question come from there rather than from here, as
+// `named` and `not_drafted` do: the shell and the panel put the same question to
+// a person, and a second set of wordings would be the two doors naming one
+// conversation differently.
 use crate::planned::{
-    self, Announcement, Next, Planned, Reply, Settled, counted, named, not_drafted, prepare,
-    replied,
+    self, Announcement, Next, Planned, Reply, Settled, answer_line, counted, named, not_drafted,
+    prepare, question_line, replied, settled_line, unproposed_line,
 };
 use crate::standing::Standing;
 
@@ -1084,7 +1088,11 @@ impl<O: Opens, A: Converses> Cutter<O, A> {
 // slice it is and how many there are first: the answer is minutes away and a
 // reader who has just said yes is looking at the conversation.
 //
-// `for_slice` and not `one_shot`: this is the road with somebody to ask.
+// `for_slice` and not `one_shot`: there is somebody at the panel to put a
+// question to, and the field is where they answer it. `warlock draft` opens the
+// same session and relays the same question to a prompt — see
+// [`planned::drafted`](crate::planned) — so the two doors differ in where the
+// answer is typed and in nothing the session is told.
 fn started<A: Converses>(
     agent: &A,
     app: &mut App,
@@ -1236,38 +1244,6 @@ fn ended<A>(slice: &Slice, turned: Option<Turned<A>>) -> Ended<A> {
         Reply::Question(question) => Ended::Asked { session, question },
         Reply::Over(line) => Ended::Over(vec![line]),
     }
-}
-
-// The question in the words it was asked, flattened as the thread takes a line.
-// Whoever is at the panel answers it, so this line and [`answer_line`] are the
-// pair a conversation is read back by: `asked` is the slice talking and
-// `answered` is the panel, and the two verbs are the whole of how a reader
-// tomorrow tells one from the other.
-fn question_line(slice: &Slice, question: &str) -> String {
-    format!("{} asked: {}", named(slice), one_line(question))
-}
-
-// What was sent, in the words it was sent in, and the other half of that pair.
-// Warlock's attempt and something typed over it land here identically on
-// purpose: what went to the session is what was in the field, and a line that
-// said which of the two it was would be warlock reporting its own draft rather
-// than the answer.
-fn answer_line(slice: &Slice, answer: &str) -> String {
-    format!("{} was answered: {}", named(slice), one_line(answer))
-}
-
-// The session having nothing to offer, said in the sentence `propose_answer`
-// hands back and no other words: the question is still up, the field is still
-// empty, and the answer is entirely whoever is reading's.
-fn settled_line(slice: &Slice, settles: &str) -> String {
-    format!("{} — {settles}", named(slice))
-}
-
-// An attempt that never came back with anything. One line and the question left
-// standing: nothing was sent, the session is still waiting, and the field is
-// empty for somebody to answer in their own words.
-fn unproposed_line(slice: &Slice, why: &str) -> String {
-    format!("{} — no answer was proposed: {why}", named(slice))
 }
 
 // What the reader told the slice about its drafts, in their own words and the

@@ -10,15 +10,16 @@ use warlock_engine::{
     save_key_binding, save_sigils,
 };
 use warlock_tui::{
-    Activities, Cancel, Converses, DRAFTING_ONE_SHOT_CONTRACT, FetchedProject, Opens,
-    ScopeBlockError, Wired,
+    Activities, Cancel, Converses, DRAFTING_CONTRACT, DRAFTING_ROUNDS, FetchedProject,
+    NOTHING_SETTLES_IT, Opens, ScopeBlockError, Wired,
 };
 
 use super::{Planned, Settled, cut_with, prepare};
+use crate::asking::Asks;
 use crate::error::Error;
 use crate::standing::Standing;
 use crate::status_for;
-use crate::stubs::{Boarding, Call, Op, VIEWER};
+use crate::stubs::{Answering, Boarding, Call, Op, Saying, Scripted, Typing, VIEWER};
 
 // Not a key, and named so that nothing reading this file mistakes it for one.
 // It is stored only so that a bound name resolves and a cut can reach the
@@ -79,6 +80,16 @@ const CIRCLE: &str = "Nothing cuts a planned project into tickets.\n\n## Scope\n
 
 const NO_SCOPE: &str = "Nothing cuts a planned project into tickets.\n\n\
                         ## Out of scope\n\nEverything.\n";
+
+// What a drafting session stops to ask about, in the tests that relay one.
+const A_QUESTION: &str = "Which of the two spellings of the status is the gate?";
+
+// Warlock's own attempt at it, out of the proposing conversation: offered over
+// the prompt, and sent only when the line read is empty.
+const PROPOSED: &str = "The board's own spelling, which is what the record names.";
+
+// And what somebody types instead, which is the answer whatever it says.
+const TYPED: &str = "Neither: the gate folds case.";
 
 // The model a read may never turn. A refusal opens no session and a dry run
 // opens none at all, so being asked for a turn is the failure rather than a
@@ -173,6 +184,19 @@ impl Converses for Sketching {
 
     fn raised(&self, _model: &str, _effort: &str) -> Self {
         self.clone()
+    }
+}
+
+// The stdin nothing may read from. A refusal asks nothing, a dry run drafts
+// nothing, and a model that never asks a question puts none to anybody — so
+// being read is the failure rather than a flag, and no test holding this can
+// block on a terminal.
+#[derive(Debug, Clone, Copy)]
+struct Unprompted;
+
+impl Asks for Unprompted {
+    fn ask(&mut self, prompt: &str) -> Result<Option<String>, Error> {
+        panic!("a line was read from stdin at `{prompt}`");
     }
 }
 
@@ -385,8 +409,9 @@ fn filing_each(planned: &mut Planned, linear: &Boarding) -> Vec<Settled> {
 }
 
 // The whole subcommand, less the environment: the repository root and the home
-// are this test's temporary directories, the socket is whatever `open` is, and
-// the model is one that panics when it is turned.
+// are this test's temporary directories, the socket is whatever `open` is, the
+// models are ones that panic when they are turned, and the stdin is one that
+// panics when it is read.
 fn cut_to<O: Opens>(
     repo: &Path,
     home: &Path,
@@ -394,6 +419,77 @@ fn cut_to<O: Opens>(
     scope: Option<&str>,
     dry_run: bool,
     open: &O,
+) -> (Result<(), Error>, String) {
+    cutting(
+        repo,
+        home,
+        path,
+        scope,
+        dry_run,
+        open,
+        &Unasked,
+        &Unasked,
+        &mut Unprompted,
+    )
+}
+
+// The whole subcommand with a model in it, which `cut_to` cannot drive: its
+// agent panics when it is turned. Never a dry run — a dry run with a model in
+// reach is the thing the reading tests are about. Nothing proposes and nothing
+// is read: a model that asks nothing puts no question to anybody, and a run that
+// reached either of those stand-ins panics rather than passing.
+fn cut_running<A: Converses>(
+    repo: &Path,
+    home: &Path,
+    linear: &Boarding,
+    agent: &A,
+) -> (Result<(), Error>, String) {
+    cutting(
+        repo,
+        home,
+        BRIEF_PATH,
+        None,
+        false,
+        linear,
+        agent,
+        &Unasked,
+        &mut Unprompted,
+    )
+}
+
+// The same run with a proposing model and a written-down line for every
+// question in it: the whole relay, driven with no `claude` on the machine and
+// nothing attached to stdin.
+fn cut_answering<A: Converses, P: Converses, K: Asks>(
+    repo: &Path,
+    home: &Path,
+    linear: &Boarding,
+    agent: &A,
+    proposer: &P,
+    ask: &mut K,
+) -> (Result<(), Error>, String) {
+    cutting(
+        repo, home, BRIEF_PATH, None, false, linear, agent, proposer, ask,
+    )
+}
+
+// The one call into the module, with everything the two drivers above differ
+// over as parameters.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the subcommand's own seams, one per parameter, so a test hands in \
+              the stand-in it is about and panicking ones for the rest"
+)]
+fn cutting<O: Opens, A: Converses, P: Converses, K: Asks>(
+    repo: &Path,
+    home: &Path,
+    path: &str,
+    scope: Option<&str>,
+    dry_run: bool,
+    open: &O,
+    agent: &A,
+    proposer: &P,
+    ask: &mut K,
 ) -> (Result<(), Error>, String) {
     let mut out = Vec::new();
     let outcome = cut_with(
@@ -403,34 +499,9 @@ fn cut_to<O: Opens>(
         scope,
         dry_run,
         open,
-        &Unasked,
-        &mut out,
-    );
-
-    (
-        outcome,
-        String::from_utf8(out).expect("warlock writes its own text"),
-    )
-}
-
-// The whole subcommand with a model in it, which `cut_to` cannot drive: its
-// agent panics when it is turned. Never a dry run — a dry run with a model in
-// reach is the thing the reading tests are about.
-fn cut_running<A: Converses>(
-    repo: &Path,
-    home: &Path,
-    linear: &Boarding,
-    agent: &A,
-) -> (Result<(), Error>, String) {
-    let mut out = Vec::new();
-    let outcome = cut_with(
-        &Standing::at(repo.to_path_buf(), repo.to_path_buf()),
-        home,
-        Path::new(BRIEF_PATH),
-        None,
-        false,
-        linear,
         agent,
+        proposer,
+        ask,
         &mut out,
     );
 
@@ -1316,14 +1387,15 @@ mod headless {
             ],
             "{lines:?}"
         );
-        // One session per slice and one turn in each of them: no question was
-        // relayed, because a one-shot session has no round to relay one with.
+        // One session per slice and one turn in each of them: this model asked
+        // nothing, so nothing was put to anybody — the stand-ins for the
+        // proposing model and for stdin both panic if they are reached.
         assert_eq!(agent.turns(), 3, "{:?}", agent.said());
         assert_eq!(linear.issues_created().len(), 6);
     }
 
     #[test]
-    fn every_slice_is_drafted_under_the_one_shot_contract_and_carries_its_own_words() {
+    fn every_slice_is_drafted_under_the_interactive_contract_and_carries_its_own_words() {
         let repo = a_scoped_repository();
         let home = a_home(repo.path());
         let linear = a_sliced_project(SLICED);
@@ -1333,9 +1405,12 @@ mod headless {
 
         let said = agent.said();
         for (turn, heading) in said.iter().zip([FIRST, SECOND, THIRD]) {
+            // The contract with somebody in front of it, and not the one-shot
+            // one: there is a shell to put a question to, so the session is
+            // told the rounds it has rather than told it has none.
             assert!(
-                turn.contains(DRAFTING_ONE_SHOT_CONTRACT),
-                "a session opened without the one-shot contract: {turn}"
+                turn.contains(DRAFTING_CONTRACT),
+                "a session opened without the interactive contract: {turn}"
             );
             // Its own slice and not the whole scope block: one session is aimed
             // at one slice, so the next slice's heading is nowhere in its
@@ -1471,9 +1546,23 @@ mod headless {
         let repo = a_scoped_repository();
         let home = a_home(repo.path());
         let linear = a_sliced_project(SLICED);
+        // A model that only ever talks spends its three rounds as questions and
+        // is then out of them, and what it says after that is an attempt that
+        // never parsed: one answer per question per slice, and the run reaches
+        // the same ending it always did.
+        let mut typing = Typing::lines(vec!["say more"; DRAFTING_ROUNDS * 3]);
 
-        let lines = cut_filing(repo.path(), home.path(), &linear, &Sketching::talking());
+        let (outcome, printed) = cut_answering(
+            repo.path(),
+            home.path(),
+            &linear,
+            &Sketching::talking(),
+            &Saying::answering(PROPOSED),
+            &mut typing,
+        );
 
+        outcome.expect("a run that files nothing still answers");
+        let lines = lines(&printed);
         for (place, heading) in [(1, FIRST), (2, SECOND), (3, THIRD)] {
             assert!(
                 lines
@@ -1674,5 +1763,274 @@ mod headless {
             fs::read_to_string(filed_path(repo.path())).expect("a record file"),
             before
         );
+    }
+}
+
+// The question a slice asks, put to whoever ran `warlock draft` and answered at
+// the prompt. Every one of these drives the whole subcommand: a scripted model
+// that asks, a scripted proposing model for warlock's own attempt, and a
+// written-down line for the read — so no test here reaches a `claude`, a
+// terminal or the stdin of whatever ran the suite.
+mod relaying {
+    use super::*;
+
+    // A model that asks once on the first slice and then drafts every slice:
+    // the shortest run that puts a question to the shell. A turn it was not
+    // scripted for panics, so the number of sessions and turns is asserted by
+    // the script rather than counted afterwards.
+    fn asking_once() -> Scripted {
+        Scripted::saying([
+            Answering::says(A_QUESTION),
+            Answering::drafts(FIRST),
+            Answering::drafts(SECOND),
+            Answering::drafts(THIRD),
+        ])
+    }
+
+    // The same first question, with the slice it was asked about left uncut:
+    // the two slices after it are the ones that draft.
+    fn asking_and_abandoned() -> Scripted {
+        Scripted::saying([
+            Answering::says(A_QUESTION),
+            Answering::drafts(SECOND),
+            Answering::drafts(THIRD),
+        ])
+    }
+
+    #[test]
+    fn a_question_is_put_to_the_shell_with_warlocks_own_answer_over_the_prompt() {
+        let repo = a_scoped_repository();
+        let home = a_home(repo.path());
+        let linear = a_sliced_project(SLICED);
+        let agent = asking_once();
+        // Enter: a line with nothing typed on it, which is the proposal
+        // accepted.
+        let mut typing = Typing::lines([""]);
+
+        let (outcome, printed) = cut_answering(
+            repo.path(),
+            home.path(),
+            &linear,
+            &agent,
+            &Saying::answering(PROPOSED),
+            &mut typing,
+        );
+
+        outcome.expect("a run that files");
+        let lines = lines(&printed);
+        // The question in the words it was asked, and the slice named the way
+        // every other line about a slice names it.
+        let asked = &lines[placed(&lines, "asked:")];
+        assert!(asked.contains(A_QUESTION), "{asked}");
+        assert!(asked.contains(&format!("slice 1 `{FIRST}`")), "{asked}");
+        // And warlock's own attempt at it, over the prompt.
+        let offered = &lines[placed(&lines, "warlock's answer:")];
+        assert!(offered.contains(PROPOSED), "{offered}");
+        assert!(offered.contains(&format!("slice 1 `{FIRST}`")), "{offered}");
+        assert!(
+            placed(&lines, "asked:") < placed(&lines, "warlock's answer:"),
+            "the answer was offered before the question was put: {lines:?}"
+        );
+        // The cursor stopped once, where a reader would have typed.
+        assert_eq!(typing.asked(), ["> "], "{:?}", typing.asked());
+        // What reached the session is the proposal, in the words it was
+        // offered in, and it is on the thread as what was sent.
+        assert!(
+            agent.said().iter().any(|said| said == PROPOSED),
+            "{:?}",
+            agent.said()
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("was answered") && line.contains(PROPOSED)),
+            "{lines:?}"
+        );
+        // A question is a pause and not an ending: every slice was cut.
+        assert_eq!(linear.issues_created().len(), 6);
+        // The key value reaches the client and nothing else, here as
+        // everywhere.
+        assert!(!printed.contains(NOT_A_KEY), "{printed}");
+    }
+
+    #[test]
+    fn a_line_somebody_types_is_what_reaches_the_session_and_the_proposal_is_not_sent() {
+        let repo = a_scoped_repository();
+        let home = a_home(repo.path());
+        let linear = a_sliced_project(SLICED);
+        let agent = asking_once();
+        // As a pipe hands it over, newline and all: what is sent is what was
+        // typed and nothing of how it arrived.
+        let mut typing = Typing::lines([format!("{TYPED}\n")]);
+
+        let (outcome, printed) = cut_answering(
+            repo.path(),
+            home.path(),
+            &linear,
+            &agent,
+            &Saying::answering(PROPOSED),
+            &mut typing,
+        );
+
+        outcome.expect("a run that files");
+        assert!(
+            agent.said().iter().any(|said| said == TYPED),
+            "{:?}",
+            agent.said()
+        );
+        for said in agent.said() {
+            assert!(
+                !said.contains(PROPOSED),
+                "warlock's own answer was sent over a typed one: {said}"
+            );
+        }
+        let lines = lines(&printed);
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("was answered") && line.contains(TYPED)),
+            "{lines:?}"
+        );
+        assert_eq!(linear.issues_created().len(), 6);
+    }
+
+    #[test]
+    fn a_question_nothing_settles_says_so_and_the_line_typed_is_still_read() {
+        let repo = a_scoped_repository();
+        let home = a_home(repo.path());
+        let linear = a_sliced_project(SLICED);
+        let agent = asking_once();
+        let mut typing = Typing::lines([TYPED]);
+
+        let (outcome, printed) = cut_answering(
+            repo.path(),
+            home.path(),
+            &linear,
+            &agent,
+            // The sentence the proposing session hands back when the brief, the
+            // slice and the repository do not settle the question.
+            &Saying::answering(NOTHING_SETTLES_IT),
+            &mut typing,
+        );
+
+        outcome.expect("a run that files");
+        let lines = lines(&printed);
+        let settled = &lines[placed(&lines, NOTHING_SETTLES_IT)];
+        assert!(settled.contains(&format!("slice 1 `{FIRST}`")), "{settled}");
+        // Nothing was offered as an answer, and the read happened anyway.
+        assert!(
+            !printed.contains("warlock's answer:"),
+            "a refusal was offered as an answer: {printed}"
+        );
+        assert_eq!(typing.asked(), ["> "], "{:?}", typing.asked());
+        assert!(
+            agent.said().iter().any(|said| said == TYPED),
+            "{:?}",
+            agent.said()
+        );
+        assert_eq!(linear.issues_created().len(), 6);
+    }
+
+    #[test]
+    fn a_proposal_that_never_came_back_says_so_and_the_line_typed_is_still_read() {
+        let repo = a_scoped_repository();
+        let home = a_home(repo.path());
+        let linear = a_sliced_project(SLICED);
+        let agent = asking_once();
+        let mut typing = Typing::lines([TYPED]);
+
+        // No `claude` for the proposing conversation, which is one of the three
+        // ways that attempt ends in a failure rather than an answer. The
+        // slice's own session is untouched by it.
+        let (outcome, printed) = cut_answering(
+            repo.path(),
+            home.path(),
+            &linear,
+            &agent,
+            &Missing,
+            &mut typing,
+        );
+
+        outcome.expect("a run that files");
+        let lines = lines(&printed);
+        let unproposed = &lines[placed(&lines, "no answer was proposed")];
+        assert!(
+            unproposed.contains(&format!("slice 1 `{FIRST}`")),
+            "{unproposed}"
+        );
+        assert_eq!(typing.asked(), ["> "], "{:?}", typing.asked());
+        assert!(
+            agent.said().iter().any(|said| said == TYPED),
+            "{:?}",
+            agent.said()
+        );
+        assert_eq!(linear.issues_created().len(), 6);
+    }
+
+    #[test]
+    fn enter_at_a_question_with_nothing_proposed_leaves_the_slice_uncut() {
+        let repo = a_scoped_repository();
+        let home = a_home(repo.path());
+        let linear = a_sliced_project(SLICED);
+        let agent = asking_and_abandoned();
+        let mut typing = Typing::lines([""]);
+
+        let (outcome, printed) = cut_answering(
+            repo.path(),
+            home.path(),
+            &linear,
+            &agent,
+            &Saying::answering(NOTHING_SETTLES_IT),
+            &mut typing,
+        );
+
+        outcome.expect("a slice that came to nothing is a line and the next slice");
+        let lines = lines(&printed);
+        let uncut = &lines[placed(&lines, "was not drafted")];
+        assert!(uncut.contains(&format!("slice 1 `{FIRST}`")), "{uncut}");
+        assert!(uncut.contains("nothing was typed"), "{uncut}");
+        // The slice is uncut and the two after it were cut: nothing was filed
+        // for it and no record names it, so the next run offers it again.
+        assert_eq!(linear.issues_created().len(), 4);
+        for (title, _) in recorded(repo.path()) {
+            assert_ne!(title, FIRST, "the uncut slice was recorded");
+        }
+    }
+
+    #[test]
+    fn a_pipe_with_nothing_in_it_leaves_the_slice_uncut_and_sends_nothing_in_its_place() {
+        let repo = a_scoped_repository();
+        let home = a_home(repo.path());
+        let linear = a_sliced_project(SLICED);
+        let agent = asking_and_abandoned();
+        // EOF at every question: nobody is there. The read waits for a line
+        // rather than deciding anything, so this is the one thing that ends the
+        // waiting without one.
+        let mut typing = Typing::nothing();
+
+        let (outcome, printed) = cut_answering(
+            repo.path(),
+            home.path(),
+            &linear,
+            &agent,
+            &Saying::answering(PROPOSED),
+            &mut typing,
+        );
+
+        outcome.expect("a slice that came to nothing is a line and the next slice");
+        assert!(
+            printed.contains("nobody answered its question"),
+            "{printed}"
+        );
+        assert!(printed.contains(&format!("slice 1 `{FIRST}`")), "{printed}");
+        // Warlock's own attempt was offered and never sent: an unanswered
+        // question is not a licence to answer it.
+        for said in agent.said() {
+            assert!(
+                !said.contains(PROPOSED),
+                "warlock answered its own question: {said}"
+            );
+        }
+        assert_eq!(linear.issues_created().len(), 4);
     }
 }
