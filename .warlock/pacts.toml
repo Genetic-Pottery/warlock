@@ -4,15 +4,9 @@ version = 1
 module = "."
 document = "WARLOCK.md"
 scope = "warlock-team"
-granted_hash = "3001c0c0a53fae0866991b73b18b621780b2459de6f4e8bc4946eb209470f2e8"
-granted_at = "2026-09-30T13:12:42Z"
+granted_hash = "6f61b71e4991bbce1a93675198eaffa9e9bd82d46fd0bc9f9ca297bf00a3e610"
+granted_at = "2026-09-30T13:58:24Z"
 carry_hash = "4103724a09d056400b9b97a7b85820f76aa28daf1a41ec1c67a87e9b28226c87"
-
-[pact.lines]
-"Cargo.lock" = "4754fbdcf5817afe48caabaa5a8602b04e83536bae9c817cd94dfc558dec8788"
-"Cargo.toml" = "8e9dba4b64b5680c3dcbd69edbc2b4e20e55a89bea98f03a58a5a44351f0a578"
-LICENSE = "fb4e87f50a10781090f2333d7c6e02216dc21e29b87fcb21df2d342f36691c3c"
-"rustfmt.toml" = "baadf893fcd3c6eb9ff6447d79a0b613dff0551bdc7356371b9ff1fd3140738f"
 
 [[pact]]
 module = "crates"
