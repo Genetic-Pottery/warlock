@@ -114,6 +114,7 @@ fn briefing<C: Converses, K: Asks, W: Write>(
     // asking what the change is, so a turn that carried somebody's own opening
     // underneath it would be answering a question before it was put.
     drop(turned(&agent, &brief_instruction(&opening.shape), out));
+    ask.discard_typed_ahead();
 
     // Lines until a blank one, then those lines as one turn. Multi-line prose is
     // what a brief is argued in, and a terminal has no other way to say "I have
@@ -146,6 +147,7 @@ fn briefing<C: Converses, K: Asks, W: Write>(
                 }
 
                 drop(turned(&agent, &typed.join("\n"), out));
+                ask.discard_typed_ahead();
                 // Cleared whatever the turn came to: the lines were sent, and a
                 // failed turn is not a reason to send them again behind the
                 // reader's back.
@@ -243,6 +245,7 @@ fn written<C: Converses, K: Asks, W: Write>(
     // every refusal: the proposal is a fact about the document rather than about
     // what somebody typed over it.
     let proposal = proposed_path(root, &opening.directory, &reply);
+    ask.discard_typed_ahead();
     loop {
         say(out, &proposing(&proposal));
         let Some(line) = ask.ask(PROMPT)? else {

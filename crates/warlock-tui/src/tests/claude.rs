@@ -1897,6 +1897,50 @@ fn an_object_that_filled_itself_badly_is_still_the_answer_rather_than_a_question
     assert_eq!(session.questions_left(), DRAFTING_ROUNDS);
 }
 
+// One draft whose body runs past `BODY_CHARS`, which only a cut can mend.
+fn an_overlong_draft() -> String {
+    let body = "b".repeat(drafting::BODY_CHARS + 128);
+    format!(
+        "{{\"drafts\":[{{\"title\":\"Sharpen the knife on the whetstone\",\"body\":\"{body}\"}}]}}"
+    )
+}
+
+#[test]
+fn a_draft_with_a_body_past_its_cap_is_asked_again_before_anything_is_cut() {
+    let agent = Scripted::answering([an_overlong_draft(), ONE_DRAFT.to_owned()]);
+    let mut session = drafting_with(&agent);
+
+    let (fill, repairs) = drafts(session.open().expect("a turn"));
+
+    assert!(repairs.is_empty(), "{repairs:?}");
+    assert_eq!(
+        fill.drafts[0].body,
+        "The knife is blunt and the whetstone is in the drawer."
+    );
+    let sent = agent.sent();
+    assert_eq!(sent.len(), 2);
+    assert!(sent[1].contains("drafts[0].body"), "{}", sent[1]);
+    // A re-ask about length is not a question, so no round was spent on it.
+    assert_eq!(session.questions_left(), DRAFTING_ROUNDS);
+}
+
+#[test]
+fn a_draft_that_stays_past_its_cap_is_cut_once_the_attempts_run_out() {
+    let agent = Scripted::answering(vec![an_overlong_draft(); drafting::ATTEMPTS]);
+    let mut session = drafting_with(&agent);
+
+    let (fill, repairs) = drafts(session.open().expect("a turn"));
+
+    assert_eq!(agent.sent().len(), drafting::ATTEMPTS);
+    assert_eq!(fill.drafts[0].body.chars().count(), drafting::BODY_CHARS);
+    assert!(
+        repairs
+            .iter()
+            .any(|repair| repair.contains("drafts[0].body")),
+        "{repairs:?}"
+    );
+}
+
 // Parses, and is wrong in four ways at once: a title over two lines, a body
 // nobody wrote, a title too short to name a ticket, and an order pointing at a
 // draft this slice does not hold.
@@ -3483,36 +3527,31 @@ fn the_opening_turn_is_the_ticket_and_the_shape_and_nothing_about_the_board() {
     );
 }
 
-#[test]
-fn a_split_that_filled_itself_badly_is_repaired_rather_than_refused() {
-    // Over the cap on both counts: a goal past `GOAL_CHARS` and a second
-    // sub-task waiting on a position the array does not hold. Neither is worth
-    // a turn of a raised-register session — the first is a cut warlock can make
-    // itself and the second is a reference to drop.
+// A split whose first goal runs past `GOAL_CHARS`, which only a cut can mend.
+fn an_overlong_split() -> String {
     let long = "s".repeat(splitting::GOAL_CHARS + 40);
-    let answer = format!(
-        "Here you go:\n\n{{\"subtasks\":[\
-         {{\"goal\":\"{long}\"}},\
-         {{\"goal\":\"Number the sub-tasks and write their briefs\",\"depends_on\":[1,9]}}]}}",
-    );
+    format!(
+        "{{\"subtasks\":[{{\"goal\":\"{long}\"}},\
+         {{\"goal\":\"Number the sub-tasks and write their briefs\"}}]}}"
+    )
+}
+
+#[test]
+fn a_split_the_mend_loses_nothing_over_is_repaired_without_another_turn() {
+    // A second sub-task waiting on a position the array does not hold: dropping
+    // the reference is the whole of the repair, so a turn would buy nothing.
+    let answer = "Here you go:\n\n{\"subtasks\":[\
+         {\"goal\":\"Read the queue and choose the ticket\"},\
+         {\"goal\":\"Number the sub-tasks and write their briefs\",\"depends_on\":[1,9]}]}"
+        .to_owned();
     let agent = Scripted::answering([answer]);
     let mut session = splitting_with(&agent);
 
     let (subtasks, repairs) = subtasks(session.run());
 
-    // One turn: a fill that parsed is never asked again.
     assert_eq!(session.attempts(), 1);
     assert_eq!(subtasks.len(), 2);
-    assert_eq!(subtasks[0].goal.chars().count(), splitting::GOAL_CHARS);
     assert_eq!(subtasks[1].depends_on, ["WAR-138.01"]);
-    // And what was done is said rather than done quietly.
-    assert_eq!(repairs.len(), 2);
-    assert!(
-        repairs
-            .iter()
-            .any(|repair| repair.contains("subtasks[0].goal")),
-        "{repairs:?}",
-    );
     // The drop is named on the sub-task that carried it, in the engine's own
     // words — a count rather than the position, because the positions have been
     // rewritten into identifiers by the time anybody reads this and `9` would
@@ -3523,8 +3562,46 @@ fn a_split_that_filled_itself_badly_is_repaired_rather_than_refused() {
             .any(|repair| repair.contains("subtasks[1].depends_on") && repair.contains("lost")),
         "the dropped reference is not named: {repairs:?}",
     );
-    // The repaired fill is clean: nothing is handed on still carrying a defect.
-    assert!(subtasks.iter().all(|subtask| !subtask.goal.is_empty()));
+}
+
+#[test]
+fn a_split_with_a_field_past_its_cap_is_asked_again_before_anything_is_cut() {
+    let agent = Scripted::answering([an_overlong_split(), a_clean_split()]);
+    let mut session = splitting_with(&agent);
+
+    let (subtasks, repairs) = subtasks(session.run());
+
+    assert_eq!(session.attempts(), 2);
+    assert!(repairs.is_empty(), "{repairs:?}");
+    assert!(
+        subtasks
+            .iter()
+            .all(|subtask| subtask.goal.chars().count() <= splitting::GOAL_CHARS)
+    );
+    // The second turn names the field that ran over, so the model shortens it
+    // rather than warlock cutting it.
+    let again = &agent.sent()[1];
+    assert!(again.contains("turned down"), "{again}");
+    assert!(again.contains("subtasks[0].goal"), "{again}");
+}
+
+#[test]
+fn a_split_that_stays_past_its_cap_is_cut_once_the_attempts_run_out() {
+    let agent = Scripted::answering(vec![an_overlong_split(); splitting::ATTEMPTS]);
+    let mut session = splitting_with(&agent);
+
+    let (subtasks, repairs) = subtasks(session.run());
+
+    // Every attempt spent, and then the cut rather than a halt: a sub-task with
+    // a shortened goal is still work a run can do.
+    assert_eq!(session.attempts(), splitting::ATTEMPTS);
+    assert_eq!(subtasks[0].goal.chars().count(), splitting::GOAL_CHARS);
+    assert!(
+        repairs
+            .iter()
+            .any(|repair| repair.contains("subtasks[0].goal")),
+        "{repairs:?}",
+    );
 }
 
 #[test]

@@ -25,6 +25,10 @@
 //! the terminal and masks the read itself; see [`mod@crate::key`].
 
 use std::io::{self, BufRead, IsTerminal, Write};
+use std::time::Duration;
+
+use ratatui::crossterm::event;
+use ratatui::crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 
 use crate::error::Error;
 
@@ -35,6 +39,15 @@ use crate::error::Error;
 /// writes for somebody who never answered.
 pub(crate) trait Asks {
     fn ask(&mut self, prompt: &str) -> Result<Option<String>, Error>;
+
+    /// Throw away whatever was typed while a model was working, called by a
+    /// verb after a session has answered and before it asks again.
+    ///
+    /// A step of its own and never part of [`Asks::ask`]: `warlock brief` asks
+    /// once per line, so a paragraph pasted at its prompt arrives as lines typed
+    /// ahead of every ask after the first, and discarding at each ask would keep
+    /// the first line of the paste and drop the rest.
+    fn discard_typed_ahead(&mut self) {}
 }
 
 /// The real one: the prompt on stdout, the line off stdin.
@@ -44,6 +57,38 @@ impl Asks for Stdin {
     fn ask(&mut self, prompt: &str) -> Result<Option<String>, Error> {
         show(prompt);
         line_in(&mut io::stdin().lock())
+    }
+
+    // Whatever a person typed while a session was working sits in the terminal's
+    // line buffer, and a cooked read would take it as the answer to a question it
+    // was typed before: an `accept` pressed during drafting would file drafts
+    // nobody read. Raw mode makes that buffer readable without waiting, so it is
+    // read and thrown away. Forman drops type-ahead before each of its gates for
+    // the same reason. Only at a terminal, because a pipe's lines were all
+    // written ahead on purpose. Best effort: a terminal that will not go raw
+    // keeps what was typed, which is how every read behaved before this.
+    fn discard_typed_ahead(&mut self) {
+        if !at_terminal() || enable_raw_mode().is_err() {
+            return;
+        }
+        let _cooked = Cooked;
+        while matches!(event::poll(Duration::ZERO), Ok(true)) {
+            if event::read().is_err() {
+                break;
+            }
+        }
+    }
+}
+
+// The restore, as a `Drop` rather than a line after the raw work: a `Drop` also
+// runs while a panic unwinds and on every early return. A terminal left in raw
+// mode outlives the process — the person gets a shell with no echo and no line
+// editing, and has to know to type `reset`.
+pub(crate) struct Cooked;
+
+impl Drop for Cooked {
+    fn drop(&mut self) {
+        drop(disable_raw_mode());
     }
 }
 

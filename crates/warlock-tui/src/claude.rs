@@ -551,7 +551,10 @@ pub fn working_system_prompt(scope: &str, sigils: &[String]) -> String {
          warlock session that may change this repository. You hold `Read`, \
          `Grep`, `Glob`, `Edit`, `Write` and `Bash`, and the working tree you \
          leave is the work — nothing else you say is put on disk. Do what your \
-         sub-task's brief asks and nothing further.\n\n{}\n\nNobody is reading \
+         sub-task's brief asks and nothing further. Where the repository \
+         already does what the brief asks and its checks pass, change nothing \
+         and report `done`: an untouched tree is a finished sub-task, and work \
+         added to have something to show is work nobody asked for.\n\n{}\n\nNobody is reading \
          while you work, and there is no one to ask: a question reaches no one \
          and an offer to check something further is thrown away. Where the \
          brief leaves open something only a person can settle, report \
@@ -2451,9 +2454,10 @@ pub enum Drafted {
 /// to ask, [`one_shot`](Drafting::one_shot) with nobody. The difference is the
 /// contract it opens with and how many questions it will relay — three, or none
 /// — and everything after the asking is the same on both: an answer that is not
-/// the object is asked again up to [`warlock_engine::drafting::ATTEMPTS`] with
-/// the last attempt's defects listed back, and an answer that parsed is repaired
-/// rather than refused.
+/// the object, or one with a field the mend would have to cut, is asked again up
+/// to [`warlock_engine::drafting::ATTEMPTS`] with the last attempt's defects
+/// listed back, and an answer that parsed is never refused — it is repaired,
+/// then or once the attempts run out.
 ///
 /// Each turn is bounded by the agent's own clock — [`INVOCATION_TIMEOUT`] for a
 /// real [`ChatAgent`] — and a turn that fails is the session's end, not
@@ -2634,19 +2638,31 @@ impl<C: Converses> Drafting<C> {
     /// The attempt loop, entered with the reply that ended the asking already in
     /// hand and counting as the first attempt.
     ///
-    /// Only `Unparsed` is asked again. A fill that parsed is kept and mended
-    /// however badly it filled itself: the mend is the floor brief 16 put under
-    /// this, [`warlock_engine::drafting::check`] over a mended fill is empty, and
-    /// spending three more turns of a raised-register session on a title that is
-    /// four characters too long buys a title warlock could have cut itself.
+    /// Two answers are asked again: one that did not parse, and a fill the mend
+    /// would have to cut ([`lost_to_the_cut`]). Every other defect is mended at
+    /// once, because the mend is the floor brief 16 put under this and a re-ask
+    /// about a field the mend fixes without losing a word buys nothing. A cut is
+    /// different: a body cut at its cap drops whatever the model wrote last, and
+    /// that was once the end of a ticket's "left alone" list. The re-ask lists the
+    /// cut fields back, and when the attempts run out the last fill that parsed
+    /// is mended and cut after all — a cut ticket beats no ticket.
     fn settled(&mut self, first: drafting::Accepted) -> Result<Replied, agent::Error> {
         let mut accepted = first;
+        let mut parsed: Option<drafting::Fill> = None;
         // The reply in hand is attempt one, so what is left is the re-asks.
         for _ in 1..drafting::ATTEMPTS {
             let rejected = match accepted {
                 drafting::Accepted::Unparsed(defect) => vec![defect],
-                drafting::Accepted::Filled(fill) | drafting::Accepted::Defective { fill, .. } => {
+                drafting::Accepted::Filled(fill) => {
                     return Ok(Replied::Answer(self.repaired(&fill)));
+                }
+                drafting::Accepted::Defective { fill, defects } => {
+                    let lost = lost_to_the_cut(&defects);
+                    if lost.is_empty() {
+                        return Ok(Replied::Answer(self.repaired(&fill)));
+                    }
+                    parsed = Some(fill);
+                    lost
                 }
             };
             // The instructions afresh with the last attempt's defects listed as
@@ -2663,10 +2679,13 @@ impl<C: Converses> Drafting<C> {
             drafting::Accepted::Filled(fill) | drafting::Accepted::Defective { fill, .. } => {
                 self.repaired(&fill)
             }
-            // Four answers and not an object among them. Whoever asked for the
-            // cut hears what the last one was wrong about and decides what
-            // happens to the slice.
-            drafting::Accepted::Unparsed(defect) => Drafted::Unusable(defect),
+            drafting::Accepted::Unparsed(defect) => match parsed {
+                Some(fill) => self.repaired(&fill),
+                // Four answers and not an object among them. Whoever asked for
+                // the cut hears what the last one was wrong about and decides
+                // what happens to the slice.
+                None => Drafted::Unusable(defect),
+            },
         }))
     }
 
@@ -2864,16 +2883,16 @@ impl<C: Converses> Splitting<C> {
     /// the same thing and a reason to treat one of them as nothing having
     /// happened — which is exactly what a split that never ran is.
     ///
-    /// Only an answer that did not parse is asked again, and it is asked with
-    /// the instructions built afresh carrying the last attempt's defect listed
-    /// back, which is how the document road asks again. A fill that parsed is
-    /// kept and repaired however badly it filled itself: the mend is the floor
-    /// brief 16 put under this, [`check`](warlock_engine::splitting::check)
-    /// over a mended fill is empty, and spending two more turns of a
-    /// raised-register session on a goal four characters too long buys a goal
-    /// warlock could have cut itself.
+    /// Two answers are asked again, with the instructions built afresh carrying
+    /// the last attempt's defects listed back, which is how the document road
+    /// asks again: one that did not parse, and a fill the mend would have to cut
+    /// ([`lost_to_the_cut`]) — a sub-task's notes cut at their cap lose whatever
+    /// the split wrote last. Every other defect is mended at once, the floor
+    /// brief 16 put under this. When the attempts run out, the last fill that
+    /// parsed is mended and cut after all rather than the split halting.
     pub fn run(&mut self) -> Split {
         let mut rejected: Vec<Defect> = Vec::new();
+        let mut parsed: Option<splitting::Fill> = None;
         // Every road out is a `return` carrying what actually happened, which is
         // why this is a `loop` and not a bounded one: a `while` over the count
         // would fall out the bottom with nothing in hand and need a sentence
@@ -2886,16 +2905,22 @@ impl<C: Converses> Splitting<C> {
                 Err(error) => return Split::Halted(Unsplit::Stopped(stopped_by(&error))),
             };
             match splitting::accept(&reply) {
-                splitting::Accepted::Filled(fill) | splitting::Accepted::Defective { fill, .. } => {
-                    return self.numbered(&fill);
+                splitting::Accepted::Filled(fill) => return self.numbered(&fill),
+                splitting::Accepted::Defective { fill, defects } => {
+                    let lost = lost_to_the_cut(&defects);
+                    if lost.is_empty() || self.attempts >= splitting::ATTEMPTS {
+                        return self.numbered(&fill);
+                    }
+                    parsed = Some(fill);
+                    rejected = lost;
                 }
-                // The one answer worth another turn — until there are no turns
-                // left, and then it is the last word on why nothing was split.
                 splitting::Accepted::Unparsed(defect) => {
                     if self.attempts >= splitting::ATTEMPTS {
-                        return Split::Halted(Unsplit::Unusable(defect));
+                        return match parsed {
+                            Some(fill) => self.numbered(&fill),
+                            None => Split::Halted(Unsplit::Unusable(defect)),
+                        };
                     }
-                    // The only thing the next turn is told about this one.
                     rejected = vec![defect];
                 }
             }
@@ -2920,6 +2945,18 @@ impl<C: Converses> Splitting<C> {
             Err(cycle) => Split::Halted(Unsplit::Circle(cycle)),
         }
     }
+}
+
+// The defects a mend answers by throwing away what the model wrote — a value cut
+// to its cap, a list cut to its first entries — and so the only ones worth a
+// re-ask on a fill that parsed. Every other defect the mend fixes without losing
+// anything the model said.
+fn lost_to_the_cut(defects: &[Defect]) -> Vec<Defect> {
+    defects
+        .iter()
+        .filter(|defect| matches!(defect, Defect::TooLong { .. } | Defect::TooMany { .. }))
+        .cloned()
+        .collect()
 }
 
 /// How many attempts one sub-task gets: the first, and at most two retries.
