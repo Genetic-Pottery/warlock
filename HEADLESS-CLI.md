@@ -574,26 +574,42 @@ repository, the home, the board, the key and the brief's own record in
 costs nothing and sends nothing. Then one read fetches the project — the only
 request a dry run makes — and the status gate, the scope parse and the skips
 are all decided off what that answer carried, with no second request behind
-them. Past that, each remaining slice in turn: one session drafts it, the team
-key becomes an id, the team's `Backlog` state and the label are resolved, the
-issues are created, the relations between them are written, and that slice's
-cut record is saved before the next slice begins. Saving per slice rather than
+them. Past that, each remaining slice in turn: one session drafts it, every
+question it stops to ask is put to whoever started the run and answered with
+the line they type, the drafts it comes back with are printed and a line is
+read, and only `accept` goes any further — the team key becomes an id, the
+team's `Backlog` state and the label are resolved, the issues are created, the
+relations between them are written, and that slice's cut record is saved before
+the next slice begins. The reading comes before all of that rather than inside
+it, so a slice nobody accepted costs no request. Saving per slice rather than
 once at the end is what stops a run that fails halfway from filing its first
 slices a second time. After the last slice, and only when something was filed,
 one comment on the project names the issues this run made and says the status
 was not moved.
 
-Progress is one line per slice as it is drafted and one naming what it filed.
-The fraction is the place in the cut order and the position is where the slice
-sits in the document, so a reader can find it in the brief — the two differ
-exactly when a `depends_on` line moved something:
+Progress is one line per slice as it is drafted, whatever it asked and was
+answered with, its drafts by title, what can be said back about them, and one
+line naming what was filed. The fraction is the place in the cut order and the
+position is where the slice sits in the document, so a reader can find it in
+the brief — the two differ exactly when a `depends_on` line moved something.
+The bare `> ` is where the run stops and waits for a line:
 
 ```sh
 $ warlock draft docs/warlock-brief-23-cut-a-planned-project-into-tickets.md
 warlock: [1/3] slice 1 `The project fetch` — already cut as `WAR-121`, `WAR-122`, so nothing was sent
 warlock: [2/3] slice 2 `The scope parser` — drafting
+warlock: slice 2 `The scope parser` asked: is a `## Scope` heading with no `### ` slices under it an empty scope or a refusal?
+warlock: slice 2 `The scope parser` — warlock's answer: a refusal, which is what the brief's own list of refusals asks for.
+> a refusal, and it names the heading
+warlock: slice 2 `The scope parser` was answered: a refusal, and it names the heading
+warlock: slice 2 `The scope parser` — drafted `Parse the scope block`, `Refuse a scope with no slices`
+warlock: slice 2 `The scope parser` — `accept` to file these, Enter or `skip` to leave it for another run, or say what these drafts should be instead
+> accept
 warlock: cut `The scope parser` into `WAR-123`, `WAR-124`
 warlock: [3/3] slice 3 `The drafting session` — drafting
+warlock: slice 3 `The drafting session` — drafted `Open a session per slice`
+warlock: slice 3 `The drafting session` — `accept` to file these, Enter or `skip` to leave it for another run, or say what these drafts should be instead
+> accept
 warlock: cut `The drafting session` into `WAR-125`
 ```
 
@@ -611,9 +627,92 @@ warlock: [2/3] slice 2 `The scope parser`
 warlock: [3/3] slice 3 `The drafting session`
 ```
 
-There is nobody at a shell to put a question to, so each session is told up
-front that it cannot ask one and is held to no rounds at all. A slice that
-comes back with something other than drafts is a reported line and the next
+Somebody started the run and is watching it, so a session that stops to ask is
+relayed rather than refused: each one gets three rounds, counted by warlock and
+not by the model. The question goes out in the words it was asked, warlock's
+own attempt at it goes out under that — made in a second conversation of its
+own and never in the slice's — and then the bare `> `, where the run waits for
+as long as whoever started it takes to answer. An empty line sends the
+proposal, and a line with anything on it is sent instead of it whatever it
+says: nothing weighs the two against each other, which is the whole of what
+keeps the attempt an offer rather than a decision. What was sent is said in the
+words it was sent in and never which of the two it was:
+
+```sh
+warlock: slice 2 `The scope parser` asked: is a `## Scope` heading with no `### ` slices under it an empty scope or a refusal?
+warlock: slice 2 `The scope parser` — warlock's answer: a refusal, which is what the brief's own list of refusals asks for.
+> 
+warlock: slice 2 `The scope parser` was answered: a refusal, which is what the brief's own list of refusals asks for.
+```
+
+A question warlock has nothing to offer on is put all the same. Where the
+brief, the slice and the repository do not settle it, the proposing session
+answers with one fixed sentence and that sentence is what is printed; an
+attempt that never came back at all — a missing binary, a cancel, the
+five-minute timeout — is one line naming why. Either way the read below it
+happens anyway, and the answer is entirely the reader's:
+
+```sh
+warlock: slice 2 `The scope parser` — The brief, this slice and the repository do not settle this question.
+warlock: slice 2 `The scope parser` — no answer was proposed: the model pass did not finish within 300s and was stopped
+```
+
+A question nothing answers leaves the slice uncut and the run goes on to the
+next slice. Ctrl-D, or a pipe that has run out, is nobody there: nothing is
+sent, the proposal included. Enter at a question warlock had no proposal for is
+that same ending in its own words, because the alternative is a session asked
+to draft on silence:
+
+```sh
+warlock: slice 2 `The scope parser` was not drafted: nobody answered its question
+warlock: slice 2 `The scope parser` was not drafted: nothing was typed and warlock had no answer to propose
+```
+
+A question relayed after the session's rounds are spent is the one thing this
+cannot pass on, and it leaves the slice uncut with a line saying exactly that.
+The count is read before each turn rather than after, so the case is named
+rather than run into — a session holds itself to its own rounds, so this is a
+line nobody should see:
+
+```sh
+warlock: slice 2 `The scope parser` was not drafted: the session asked a question after its last round was spent
+```
+
+Nothing a slice drafts becomes an issue on its own. The drafts are printed by
+title, what can be said back about them is printed under that, and a line is
+read before anything is sent to the board: `accept` files them, case folded;
+Enter or `skip` leaves the slice uncut and recorded nowhere, so a later run
+reaches it again; and anything else is feedback the same session drafts again
+from. Feedback is not read for a command or weighed against the drafts — it
+goes back as that session's next turn, and what comes back comes up for review
+again:
+
+```sh
+warlock: [3/3] slice 3 `The drafting session` — drafted `Open a session per slice and relay its questions`
+warlock: slice 3 `The drafting session` — `accept` to file these, Enter or `skip` to leave it for another run, or say what these drafts should be instead
+> the relay is its own ticket, split it off
+warlock: slice 3 `The drafting session` is being redrafted: the relay is its own ticket, split it off
+warlock: slice 3 `The drafting session` — drafted `Open a session per slice`, `Relay one question to the shell`
+warlock: slice 3 `The drafting session` — `accept` to file these, Enter or `skip` to leave it for another run, or say what these drafts should be instead
+> accept
+warlock: cut `The drafting session` into `WAR-125`, `WAR-126`
+```
+
+A skip says so, and a pipe that ended before the review says which of the two
+it was, because what a reader wants to know tomorrow is whether the next draft
+will offer this slice again — and it will:
+
+```sh
+warlock: slice 3 `The drafting session` was skipped; nothing was recorded for it
+warlock: slice 3 `The drafting session` was skipped: nobody said what to do with its drafts, so nothing was recorded for it
+```
+
+The review runs before any request, which is the whole of what makes a skip
+free: a skipped slice sends nothing, creates no issue and writes no cut record,
+so `.warlock/filed.toml` is left holding nothing that names it.
+
+A slice that comes back with something other than drafts is a reported line and
+the next
 slice rather than the end of the run — the slices left are other work, and they
 were ordered so that nothing is filed before what it waits on. The same goes
 for a relation Linear turned down and for the project's comment: the issues
