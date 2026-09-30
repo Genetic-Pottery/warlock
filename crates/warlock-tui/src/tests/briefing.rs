@@ -1,15 +1,17 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use warlock_engine::briefs_path;
+use warlock_engine::{DEFAULT_BRIEF_DIRECTORY, briefs_path, from_manifest_path};
 use warlock_tui::{
-    BRIEF_EFFORT, BRIEF_MODEL, ChatAgent, DEFAULT_TEMPLATE, Ending, brief_instruction,
+    BRIEF_EFFORT, BRIEF_MODEL, ChatAgent, DEFAULT_TEMPLATE, Ending, WRITE_INSTRUCTION,
+    brief_instruction,
 };
 
-use super::{OPENING, OVER, PROMPT, briefing, raised, reading};
+use super::{ONLY_WRITE, OPENING, OVER, PROMPT, briefing, raised, reading};
 use crate::error::Error;
 use crate::standing::Standing;
 use crate::stubs::{Answering, Scripted, Typing};
+use crate::writing::proposed_path;
 
 // Every test builds its own repository out of one of these, so nothing here
 // reads a template, a `briefs.toml` or a manifest belonging to the checkout the
@@ -296,10 +298,9 @@ fn both_files_are_read_before_the_first_turn_and_the_template_is_read_first() {
     // Neither file is needed: a repository that has written neither is the
     // built-in shape and the default directory.
     let bare = a_root();
-    assert_eq!(
-        reading(bare.path()).expect("nothing written is not a refusal"),
-        brief_instruction(DEFAULT_TEMPLATE),
-    );
+    let opening = reading(bare.path()).expect("nothing written is not a refusal");
+    assert_eq!(opening.shape, DEFAULT_TEMPLATE);
+    assert_eq!(opening.directory, DEFAULT_BRIEF_DIRECTORY);
 }
 
 #[test]
@@ -366,7 +367,7 @@ fn an_end_of_file_ends_the_conversation_and_says_so() {
 }
 
 #[test]
-fn nothing_is_written_inside_the_repository() {
+fn a_conversation_that_writes_nothing_leaves_the_repository_alone() {
     let root = a_root();
 
     let ran = run(root.path(), &["typed", ""], replying(&["asking", "said"]));
@@ -377,6 +378,276 @@ fn nothing_is_written_inside_the_repository() {
             .expect("reads the repository")
             .count(),
         0,
-        "a conversation wrote a file; nothing here writes one until `/write` does",
+        "a conversation nobody asked for a document from wrote a file",
+    );
+}
+
+// A reply in the shape the built-in template asks for, which is what a `/write`
+// turn is meant to come back with: a title line, the problem in prose, and the
+// five sections `missing_sections` goes looking for.
+fn a_brief() -> String {
+    "# Give the headless CLI a voice\n\nThe shell cannot be spoken to.\n\n\
+     ## Outcome\n\nA reader runs `warlock brief` and argues a change.\n\n\
+     ## Success criteria\n\n- a document lands where `briefs.toml` says\n\n\
+     ## Constraints\n\n- nothing about a brief is worded twice\n\n\
+     ## Out of scope\n\n- resuming an interrupted conversation\n\n\
+     ## Scope\n\n### 1. The subcommand\ndepends_on: []\n\nIt holds one session.\n"
+        .to_owned()
+}
+
+// The path `/write` offers for a reply, asked of the very rule that proposes it:
+// the test states the spelling once below and takes it from `writing.rs`
+// everywhere else, so a change to the numbering or the slug moves both.
+fn proposal_for(root: &Path, reply: &str) -> String {
+    proposed_path(root, DEFAULT_BRIEF_DIRECTORY, reply)
+}
+
+fn wrote(root: &Path, stored: &str) -> String {
+    fs::read_to_string(from_manifest_path(root, stored)).expect("the document that was written")
+}
+
+#[test]
+fn write_asks_for_the_document_and_offers_the_path_writing_proposes_for_it() {
+    let root = a_root();
+    let brief = a_brief();
+    // Asked before the run, because the proposal counts the names already in the
+    // directory: after the write there is a `01` in there and the same rule
+    // proposes `02`.
+    let proposed = proposal_for(root.path(), &brief);
+    assert_eq!(
+        proposed, "docs/warlock-brief-01-give-the-headless-cli-a-voice.md",
+        "the proposal is the numbering and the slug `writing.rs` makes",
+    );
+
+    let ran = run(
+        root.path(),
+        // The command, and then Enter on the offer.
+        &["/write", ""],
+        vec![Answering::says("asking"), Answering::says(brief.as_str())],
+    );
+
+    ran.outcome.expect("a document written");
+    assert_eq!(
+        ran.turns[1], WRITE_INSTRUCTION,
+        "the document was asked for in words of this module's own",
+    );
+    assert!(
+        ran.said.contains(&proposed),
+        "the path was never offered: {}",
+        ran.said
+    );
+    assert_eq!(
+        wrote(root.path(), &proposed),
+        brief,
+        "what landed is not the reply the write turn gave",
+    );
+    assert!(
+        ran.said.contains(&format!("warlock: wrote {proposed}")),
+        "the path written was not printed: {}",
+        ran.said
+    );
+    // The run is over on the write: the cursor is asked for the turn and for the
+    // path, and never again.
+    assert_eq!(ran.asked.len(), 2, "{:?}", ran.asked);
+    assert!(
+        !ran.said.contains(OVER),
+        "a run that wrote its document ended as one nobody wrote: {}",
+        ran.said
+    );
+}
+
+#[test]
+fn a_typed_path_replaces_the_one_that_was_offered() {
+    let root = a_root();
+    let brief = a_brief();
+
+    let ran = run(
+        root.path(),
+        &["/write", "docs/somewhere/mine.md"],
+        vec![Answering::says("asking"), Answering::says(brief.as_str())],
+    );
+
+    ran.outcome.expect("a document written");
+    assert_eq!(wrote(root.path(), "docs/somewhere/mine.md"), brief);
+    assert!(
+        !from_manifest_path(root.path(), &proposal_for(root.path(), &brief)).exists(),
+        "the offer was written as well as the path that replaced it",
+    );
+}
+
+#[test]
+fn a_path_that_already_has_a_file_is_refused_and_the_cursor_comes_back() {
+    let root = a_root();
+    let brief = a_brief();
+    let taken = from_manifest_path(root.path(), "docs/taken.md");
+    write_under(&taken, "somebody else's document\n");
+
+    let ran = run(
+        root.path(),
+        &["/write", "docs/taken.md", "docs/mine.md"],
+        vec![Answering::says("asking"), Answering::says(brief.as_str())],
+    );
+
+    ran.outcome.expect("the second path is written");
+    assert!(
+        ran.said.contains("docs/taken.md already exists"),
+        "the refusal did not name the file: {}",
+        ran.said
+    );
+    assert_eq!(
+        fs::read_to_string(&taken).expect("the file that was there"),
+        "somebody else's document\n",
+        "a refused path was written over anyway",
+    );
+    // One turn, and three lines read: the offer came back after the refusal.
+    assert_eq!(ran.turns.len(), 2, "{:?}", ran.turns);
+    assert_eq!(ran.asked.len(), 3, "{:?}", ran.asked);
+    assert_eq!(wrote(root.path(), "docs/mine.md"), brief);
+}
+
+#[test]
+fn a_document_missing_a_section_of_the_shape_is_refused_and_nothing_is_written() {
+    let root = a_root();
+    // Everything but the sections: the shape is the built-in template, which
+    // asks for five and is handed one.
+    let unshaped = "# A change\n\nThe problem.\n\n## Outcome\n\nSomething happens.\n";
+
+    let ran = run(
+        root.path(),
+        // The command, Enter on the offer, and then the conversation carrying on
+        // — which is the whole of what a document warlock will not write leaves
+        // a reader with.
+        &["/write", "", "you dropped the scope", ""],
+        replying(&["asking", unshaped, "sorry"]),
+    );
+
+    ran.outcome.expect("an EOF is not a failure");
+    assert!(
+        ran.said.contains("the document is missing"),
+        "the shape refusal was not said: {}",
+        ran.said
+    );
+    for section in ["## Success criteria", "## Constraints", "## Scope"] {
+        assert!(ran.said.contains(section), "{section}: {}", ran.said);
+    }
+    assert!(
+        !from_manifest_path(root.path(), DEFAULT_BRIEF_DIRECTORY).exists(),
+        "a document the shape turned down was written anyway",
+    );
+    // The conversation went on: the line after the refusal was sent as a turn of
+    // the same session.
+    assert_eq!(ran.turns.len(), 3, "{:?}", ran.turns);
+    assert_eq!(ran.turns[2], "you dropped the scope");
+}
+
+#[test]
+fn a_document_the_model_fenced_is_written_as_the_document_inside_the_fence() {
+    let root = a_root();
+    let brief = a_brief();
+    let fenced = format!("```markdown\n{brief}```");
+    // The path is proposed from the unwrapped document and the bytes are the
+    // unwrapped document, which is `writing.rs`'s rule and not a second one
+    // here: the slug comes off the `# ` line inside the fence. Asked before the
+    // run, for the reason the first of these tests asks before it.
+    let proposed = proposal_for(root.path(), &fenced);
+    assert_eq!(
+        proposed,
+        "docs/warlock-brief-01-give-the-headless-cli-a-voice.md"
+    );
+
+    let ran = run(
+        root.path(),
+        &["/write", ""],
+        vec![Answering::says("asking"), Answering::says(fenced.as_str())],
+    );
+
+    ran.outcome.expect("a document written");
+    assert_eq!(wrote(root.path(), &proposed), brief);
+}
+
+#[test]
+fn nothing_but_prose_and_write_is_understood_at_the_cursor() {
+    let root = a_root();
+
+    let ran = run(
+        root.path(),
+        &[
+            // Every other command the panel has, the case-folded spelling of one
+            // of them, and a bare slash.
+            "/push docs/brief.md",
+            "/chat",
+            "/BRIEF",
+            "/",
+            // And a line that opens with a path, which is prose: `submitted_for`
+            // reads a second slash as somebody talking about a file.
+            "/tmp/notes is where I keep them",
+            "",
+        ],
+        replying(&["asking", "noted"]),
+    );
+
+    ran.outcome.expect("an EOF is not a failure");
+    assert_eq!(
+        ran.said.matches(ONLY_WRITE).count(),
+        4,
+        "a command word was sent to the model or refused twice: {}",
+        ran.said
+    );
+    // Two turns: the instruction and the one line of prose. Nothing a refusal
+    // touched reached the model, and nothing a refusal touched was kept.
+    assert_eq!(ran.turns.len(), 2, "{:?}", ran.turns);
+    assert_eq!(ran.turns[1], "/tmp/notes is where I keep them");
+}
+
+#[test]
+fn a_write_turn_that_failed_asks_for_no_path_and_the_conversation_goes_on() {
+    let root = a_root();
+
+    let ran = run(
+        root.path(),
+        &["/write", "carry on", ""],
+        vec![
+            Answering::says("asking"),
+            Answering::missing(),
+            Answering::says("still here"),
+        ],
+    );
+
+    ran.outcome.expect("a turn that could not run is a line");
+    let ending = Ending::NoModel {
+        program: "claude".to_owned(),
+    };
+    assert!(ran.said.contains(&ending.line()), "{}", ran.said);
+    assert!(
+        !ran.said.contains("the document goes to"),
+        "a path was offered for a document that never arrived: {}",
+        ran.said
+    );
+    // The `/write`, the line under it, the empty line that sent it and the EOF
+    // that ended the run: no path was ever asked for.
+    assert_eq!(ran.asked.len(), 4, "{:?}", ran.asked);
+    assert_eq!(ran.turns.len(), 3, "{:?}", ran.turns);
+}
+
+#[test]
+fn an_end_of_file_at_the_path_writes_nothing_and_ends_the_run() {
+    let root = a_root();
+    let brief = a_brief();
+
+    let ran = run(
+        root.path(),
+        &["/write"],
+        vec![Answering::says("asking"), Answering::says(brief.as_str())],
+    );
+
+    ran.outcome.expect("an EOF is not a failure");
+    assert!(
+        !from_manifest_path(root.path(), DEFAULT_BRIEF_DIRECTORY).exists(),
+        "a path nobody answered was written to anyway",
+    );
+    assert!(
+        ran.said.ends_with(&format!("\nwarlock: {OVER}\n")),
+        "the run ended some other way: {:?}",
+        ran.said
     );
 }

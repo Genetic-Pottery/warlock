@@ -12,6 +12,12 @@
 //! brief with a section missing reads perfectly well and nobody finds out for
 //! days. An existing target, or a disk that will not take the file, is news for
 //! the footer and not a reason to tear the screen down.
+//!
+//! Two doors write a brief and this file holds the rules for both: [`landed`] is
+//! [`write_submit`] without a screen, for `warlock brief`'s own `/write` — see
+//! [`mod@crate::briefing`] — and it calls the very functions the window calls, so
+//! neither the path a brief is proposed at, the shape it is held to, nor the
+//! bytes that reach the disk can differ between a panel and a shell.
 
 use std::path::Path;
 use std::time::Instant;
@@ -183,6 +189,58 @@ fn closed_saying(app: &mut App, line: impl Into<String>) -> Wrote {
     Wrote::only(ScopePrompt::Closed)
 }
 
+/// What one typed path came to at a door with no window: the document on disk
+/// and the line that says so, or the rule it broke with nothing written.
+///
+/// Two refusals and not one, because the two are answered differently and are so
+/// at both doors. A rule about the *path* leaves the reader somewhere to fix it —
+/// the panel reopens the field under it, and the shell asks for a path again — and
+/// a fact about the *document* is not fixable by typing another path, so the panel
+/// closes its window and the shell goes back to the conversation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Landed {
+    Wrote(String),
+    Path(String),
+    Document(String),
+}
+
+/// [`write_submit`]'s judging and writing for a caller that holds no [`App`]:
+/// the same order — one spelling of the path, the exists check, the shape, then
+/// the bytes — through the same functions and the same wordings, so a brief
+/// written at a shell and one written in the panel land as the same bytes at the
+/// same path and are refused in the same words.
+///
+/// The shape is the caller's rather than read here, which is the one difference
+/// between the two doors and a deliberate one: the panel's conversation can
+/// outlive an edit to the template, so it reads the file at the write, while
+/// `warlock brief` holds the reply to the shape it asked the model for.
+pub(crate) fn landed(repo_root: &Path, typed: &str, shape: &str, reply: &str) -> Landed {
+    // The one spelling of the path, produced before anything is done with it,
+    // for `write_submit`'s reason: the bytes go to it and the line names it.
+    let stored = match to_manifest_path(repo_root, typed) {
+        Ok(stored) => stored,
+        Err(source) => return Landed::Path(Error::Manifest { source }.to_string()),
+    };
+    let path = from_manifest_path(repo_root, &stored);
+    if path.exists() {
+        return Landed::Path(taken(&stored));
+    }
+
+    let document = document(reply);
+    let missing = missing_sections(shape, &document);
+    if !missing.is_empty() {
+        return Landed::Document(missing_line(&missing));
+    }
+    if let Err(error) = put(&path, document.as_bytes()) {
+        return Landed::Document(failure_line(&stored, &error));
+    }
+
+    // The bytes just handed to the disk rather than a `stat` of what came back,
+    // for the reason [`write_submit`] counts them that way.
+    let bytes = u64::try_from(document.len()).unwrap_or(u64::MAX);
+    Landed::Wrote(wrote_line(&stored, bytes))
+}
+
 fn document(reply: &str) -> String {
     let body = unfenced(reply);
     if body.ends_with('\n') {
@@ -208,8 +266,17 @@ fn wrote_line(stored: &str, bytes: u64) -> String {
     format!("wrote {stored} — {}", size(bytes))
 }
 
+// The fact, which is the same at both doors, and then the way out, which is
+// not: a window is left with Esc and a shell prompt has no such key, so the door
+// puts its own tail on. Split rather than copied, so the one thing a reader has
+// to be told — the file is there and nothing was written over it — cannot come
+// to be said two ways.
+fn taken(stored: &str) -> String {
+    format!("{stored} already exists — nothing was written")
+}
+
 fn taken_rule(stored: &str) -> String {
-    format!("{stored} already exists — nothing was written; change the path or press Esc")
+    format!("{}; change the path or press Esc", taken(stored))
 }
 
 fn missing_line(missing: &[&str]) -> String {
