@@ -1173,6 +1173,15 @@ the edit that keeps the build compiling after it: split apart, the first \
 cannot pass its own checks. Everything you write comes from the ticket and from what you read in the \
 repository — do not plan work the ticket did not ask for.
 
+Cut only the work this ticket describes: the brief it came from and any other \
+ticket are context, never scope, so work they name that this ticket does not \
+belongs to their sub-tasks and not to these. Read the repository before you \
+cut. Where it already does part of what the ticket asks, leave that part out. \
+Where it already does all of it, cut one sub-task that checks the ticket's \
+definition of done against the code as it stands and changes only what \
+fails that check — never one that restates the ticket as if nothing were \
+there.
+
 The ticket's rules bind every sub-task: what it fixes exactly — a value, a \
 name, a count, whether something is exported — what it forbids, and what it \
 says to leave alone. Never loosen, invert or drop one. Where a sub-task touches \
