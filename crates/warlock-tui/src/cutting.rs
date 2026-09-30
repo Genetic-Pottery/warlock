@@ -72,8 +72,9 @@ use crate::pacting::CancelGuard;
 // a person, and a second set of wordings would be the two doors naming one
 // conversation differently.
 use crate::planned::{
-    self, Announcement, Next, Planned, Reply, Settled, answer_line, counted, named, not_drafted,
-    prepare, question_line, replied, settled_line, unproposed_line,
+    self, Announcement, Next, Planned, Reply, Settled, answer_line, counted, drafted_line,
+    feedback_line, named, not_drafted, prepare, question_line, replied, settled_line, skipped_line,
+    unproposed_line,
 };
 use crate::standing::Standing;
 
@@ -1231,7 +1232,7 @@ fn ended<A>(slice: &Slice, turned: Option<Turned<A>>) -> Ended<A> {
         // this same conversation. The titles go first, over the repairs.
         Reply::Drafts { drafts, lines } => {
             let titles: Vec<String> = drafts.iter().map(|draft| draft.title.clone()).collect();
-            let mut said = vec![format!("{} — drafted {}", named(slice), listed(&titles))];
+            let mut said = vec![drafted_line(slice, &titles)];
             said.extend(lines);
             Ended::Drafted {
                 session,
@@ -1244,17 +1245,6 @@ fn ended<A>(slice: &Slice, turned: Option<Turned<A>>) -> Ended<A> {
         Reply::Question(question) => Ended::Asked { session, question },
         Reply::Over(line) => Ended::Over(vec![line]),
     }
-}
-
-// What the reader told the slice about its drafts, in their own words and the
-// other half of the pair [`question_line`] and [`answer_line`] make: the verb
-// says this was feedback rather than an answer to anything the slice asked.
-fn feedback_line(slice: &Slice, feedback: &str) -> String {
-    format!(
-        "{} is being redrafted: {}",
-        named(slice),
-        one_line(feedback)
-    )
 }
 
 // The window down and the field waiting, said before anything is typed so that a
@@ -1301,13 +1291,6 @@ fn refused_line(slice: &Slice, refused: &str) -> String {
 // on to the next slice.
 fn unfiled_line(slice: &Slice, why: &str) -> String {
     format!("{} was not filed: {why}", named(slice))
-}
-
-// A slice left alone. `nothing was recorded` rather than `skipped` alone,
-// because what a reader wants to know tomorrow is whether the next `/draft` will
-// offer this slice again — and it will.
-fn skipped_line(slice: &Slice) -> String {
-    format!("{} was skipped; nothing was recorded for it", named(slice))
 }
 
 // The run ended by a No to the carry-on question, counting what was never

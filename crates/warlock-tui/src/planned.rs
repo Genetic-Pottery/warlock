@@ -12,6 +12,13 @@
 //! [`Planned::filing`]. The status is not moved on any road — an issue is created,
 //! an edge is written and a comment is said, and nothing else.
 //!
+//! Nothing a slice drafts becomes an issue on its own. The drafts are printed
+//! and a line is read before [`Planned::filing`] is asked for at all, so a skip
+//! costs no request, and anything that is neither `accept` nor `skip` is
+//! feedback the same session drafts again from. It is the panel's own review
+//! window in [`mod@crate::cutting`] with a line typed where that has keys, and
+//! the two doors word what they say about a slice out of the same helpers here.
+//!
 //! What every slice became lives on the [`Planned`] and is written only by
 //! [`Planned::settle`], so the edges a later slice asks for are worked out in one
 //! place whichever door is driving.
@@ -50,11 +57,22 @@ use crate::standing::{FOR_CUT, Standing};
 // this and `Backlog` is not.
 const PLANNED: &str = "Planned";
 
-// The cursor a question stops on. Nothing but a line is read here — no command
-// word and no answer to pick from — so the prompt is a bare mark rather than a
-// sentence: what a reader needs before they can answer is on the lines above
-// it, one of them warlock's own attempt at the question.
+// The cursor a read stops on, one mark for both of them: a question, and a
+// slice's drafts put up for review. A bare mark rather than a sentence, because
+// what a reader needs before they can answer is on the lines above it — for a
+// question, warlock's own attempt at it; for drafts, their titles and the two
+// words that are read as answers rather than as feedback.
 const PROMPT: &str = "> ";
+
+// The two words a review reads as answers. Everything else typed at that prompt
+// is feedback about the drafts, so these are the whole of the vocabulary: a
+// third word to remember would be a third way to mean "not these".
+//
+// Case is folded where they are matched, for `is_planned`'s reason: `Accept` is
+// somebody answering, not somebody writing feedback in one word.
+const ACCEPT: &str = "accept";
+
+const SKIP: &str = "skip";
 
 pub(crate) fn cut(path: &Path, scope: Option<&str>, dry_run: bool) -> Result<(), Error> {
     let standing = Standing::here(FOR_CUT)?;
@@ -196,8 +214,15 @@ fn cut_with<O: Opens, A: Converses, P: Converses, K: Asks, W: Write>(
     Ok(())
 }
 
-/// One slice drafted in one session, or `None` with what went wrong already
-/// said.
+/// One slice drafted in one session and reviewed, or `None` with what went
+/// wrong — or what was skipped — already said.
+///
+/// The drafts come back here rather than going on to [`Planned::filing`] on
+/// their own: they are printed, a line is read, and only `accept` hands them
+/// over. The review is in this call and not beside it because feedback is a turn
+/// of *this* session — the conversation that drafted them — and a slice
+/// redrafted by a fresh session would be one answering talk nobody in it had
+/// heard.
 ///
 /// [`Drafting::for_slice`] rather than [`Drafting::one_shot`]: there is somebody
 /// at the shell who started the run and is watching it, so a question is put to
@@ -229,10 +254,25 @@ fn drafted<A: Converses, P: Converses, K: Asks, W: Write>(
     loop {
         match replied(slice, turned) {
             Reply::Drafts { drafts, lines } => {
+                say(out, &drafted_line(slice, &titles(&drafts)));
                 for line in lines {
                     say(out, &line);
                 }
-                return Ok(Some(drafts));
+                match reviewed(slice, drafts, ask, out)? {
+                    Reviewed::File(drafts) => return Ok(Some(drafts)),
+                    // The line that says so is already printed, here as at a
+                    // question: the slice is left uncut, no record names it, and
+                    // the next run offers it again.
+                    Reviewed::Skip => return Ok(None),
+                    Reviewed::Feedback(feedback) => {
+                        say(out, &feedback_line(slice, &feedback));
+                        // Read before the turn for the reason the opening's is:
+                        // a question coming back from a turn there was no round
+                        // for is the one thing this cannot relay.
+                        rounds = session.questions_left();
+                        turned = session.answer(&feedback);
+                    }
+                }
             }
             // A session counts its own rounds and hands nothing back past the
             // last of them, so this is unreachable — and said rather than
@@ -263,6 +303,77 @@ fn drafted<A: Converses, P: Converses, K: Asks, W: Write>(
             }
         }
     }
+}
+
+/// What somebody at the shell said to do with one slice's drafts.
+///
+/// The panel's three answers ([`Reviewed`](warlock_tui::Reviewed)) read off a
+/// line rather than off a key, with one difference the road forces: there is no
+/// window to light an answer on, so the words are typed and anything that is not
+/// one of them is the feedback itself. A reader who has to say what is wrong
+/// with the drafts is already typing, and a door that made them say `feedback`
+/// first and then the feedback would be asking twice.
+///
+/// The drafts ride on [`Reviewed::File`] rather than being left with the caller,
+/// so the one answer that spends them is the only one that still holds them.
+enum Reviewed {
+    /// `accept`: these drafts, on their way to the board.
+    File(Vec<Draft>),
+    /// `skip`, an empty line, or a pipe that ended: the slice left uncut, with
+    /// the line that says so already printed.
+    Skip,
+    /// Anything else, which is what these drafts should be instead.
+    Feedback(String),
+}
+
+// One slice's drafts put to whoever is at the shell: their titles, the two words
+// that are answers, the prompt, and the line that comes back.
+//
+// Before [`Planned::filing`] is built and long before anything is opened, which
+// is the whole of what makes a skip free: nothing here sends, and the road to the
+// board starts on `accept` alone.
+fn reviewed<K: Asks, W: Write>(
+    slice: &Slice,
+    drafts: Vec<Draft>,
+    ask: &mut K,
+    out: &mut W,
+) -> Result<Reviewed, Error> {
+    say(out, &review_line(slice));
+
+    let Some(line) = ask.ask(PROMPT)? else {
+        // EOF, which is Ctrl-D at a terminal and an exhausted pipe everywhere
+        // else, read exactly as it is at a question: nobody is there, so nothing
+        // is filed and nothing is sent. The newline is because the prompt just
+        // asked has none and the cursor is still sitting on it.
+        drop(writeln!(out));
+        say(out, &unreviewed_line(slice));
+        return Ok(Reviewed::Skip);
+    };
+
+    // Trimmed for `answered`'s reason: a pipe's trailing newline is never part
+    // of what somebody meant to say, and a line of spaces is a line nobody typed
+    // anything on.
+    let typed = line.trim();
+    if typed.eq_ignore_ascii_case(ACCEPT) {
+        return Ok(Reviewed::File(drafts));
+    }
+    // An empty line is the skip, as Enter is at the panel's window: the answer
+    // that costs nothing is the one a reader reaches by pressing the key they
+    // were already resting on, and drafts are not filed by somebody who typed
+    // nothing.
+    if typed.is_empty() || typed.eq_ignore_ascii_case(SKIP) {
+        say(out, &skipped_line(slice));
+        return Ok(Reviewed::Skip);
+    }
+
+    Ok(Reviewed::Feedback(typed.to_owned()))
+}
+
+// What a draft is said by on the way past: its title, which is what the panel's
+// window shows of one and all a line has room for. The bodies are paragraphs,
+// and they are what `accept` files.
+fn titles(drafts: &[Draft]) -> Vec<String> {
+    drafts.iter().map(|draft| draft.title.clone()).collect()
 }
 
 // One question put to whoever is at the shell: warlock's attempt at it, the
@@ -899,6 +1010,52 @@ pub(crate) fn question_line(slice: &Slice, question: &str) -> String {
 // draft rather than the answer.
 pub(crate) fn answer_line(slice: &Slice, answer: &str) -> String {
     format!("{} was answered: {}", named(slice), one_line(answer))
+}
+
+// The drafts as they arrived, by title: the panel says this over the repairs and
+// the shell says it over the prompt, and it is the one line a reader decides
+// about them from.
+pub(crate) fn drafted_line(slice: &Slice, titles: &[String]) -> String {
+    format!("{} — drafted {}", named(slice), listed(titles))
+}
+
+// What can be said back about them, on the road where there is nothing to light
+// an answer on. The two words first and the third answer last, because the third
+// is whatever the reader has to say and not a word to remember.
+fn review_line(slice: &Slice) -> String {
+    format!(
+        "{} — `{ACCEPT}` to file these, Enter or `{SKIP}` to leave it for another run, or say \
+         what these drafts should be instead",
+        named(slice)
+    )
+}
+
+// A slice left alone. `nothing was recorded` rather than `skipped` alone,
+// because what a reader wants to know tomorrow is whether the next draft will
+// offer this slice again — and it will.
+pub(crate) fn skipped_line(slice: &Slice) -> String {
+    format!("{} was skipped; nothing was recorded for it", named(slice))
+}
+
+// The same slice left alone by a pipe that ended rather than by somebody saying
+// so. It is the skip either way — nothing was filed and nothing was recorded —
+// and which of the two it was is worth a reader's while tomorrow.
+fn unreviewed_line(slice: &Slice) -> String {
+    format!(
+        "{} was skipped: nobody said what to do with its drafts, so nothing was recorded for it",
+        named(slice)
+    )
+}
+
+// What the reader told the slice about its drafts, in their own words and the
+// other half of the pair [`question_line`] and [`answer_line`] make: the verb
+// says this was feedback rather than an answer to anything the slice asked.
+pub(crate) fn feedback_line(slice: &Slice, feedback: &str) -> String {
+    format!(
+        "{} is being redrafted: {}",
+        named(slice),
+        one_line(feedback)
+    )
 }
 
 // Warlock's own attempt, offered over the prompt on the road where there is no
