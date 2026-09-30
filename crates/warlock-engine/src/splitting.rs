@@ -4,8 +4,7 @@ use std::fmt::Write as _;
 
 use serde::{Deserialize, Serialize};
 
-use crate::document::{Defect, turned_down};
-use crate::drafting::{cut, fit, flattened, line, parse};
+use crate::document::{Defect, cut, fit, flattened, line, parse, turned_down};
 
 // The splitting road asks again exactly as often as the document and drafting
 // roads do, and a third bound would be a number to keep in step with this one
@@ -157,12 +156,7 @@ impl Fill {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Accepted {
-    Filled(Fill),
-    Defective { fill: Fill, defects: Vec<Defect> },
-    Unparsed(Defect),
-}
+pub type Accepted = crate::document::Accepted<Fill>;
 
 /// Read a splitting answer, in the layout [`crate::drafting::accept`] uses: the
 /// object lifted out of whatever prose surrounds it, then [`check`].

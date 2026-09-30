@@ -24,7 +24,6 @@ use std::path::{Path, PathBuf};
 
 use warlock_engine::{
     Destination, Filed, FiledRecord, Manifest, filed, manifest_path, now_rfc3339, resolve_filing,
-    to_manifest_path,
 };
 use warlock_tui::{Board, Brief, LinearOpener, NewProject, Opens, brief_at, size};
 
@@ -141,7 +140,7 @@ pub(crate) fn prepare(
     let target =
         resolve_filing(manifest, root, home, scope).map_err(|source| Error::Filing { source })?;
 
-    let spelled = to_manifest_path(root, path).map_err(|source| Error::Unspellable { source })?;
+    let spelled = crate::query::spelled(root, path)?;
     unfiled(&records(root)?, &spelled)?;
 
     let brief = brief_at(root, path).map_err(|source| Error::Brief { source })?;
@@ -217,24 +216,19 @@ pub(crate) fn sent<W: Write>(
     out: &mut W,
 ) -> Result<String, Error> {
     let team = linear
-        .team_id(destination.team())
-        .map_err(|source| Error::Linear { source })?
+        .team_id(destination.team())?
         .ok_or_else(|| Error::UnknownTeam {
             team: destination.team().to_owned(),
             path: manifest_path(root),
         })?;
     // `None` is a workspace with no status by that name, which is a project
     // filed with no status at all rather than a failure.
-    let status = linear
-        .backlog_status()
-        .map_err(|source| Error::Linear { source })?;
+    let status = linear.backlog_status()?;
 
-    let project = linear
-        .create_project(
-            &NewProject::new(brief.name(), brief.content(), &team, destination.label())
-                .with_status(status.as_deref()),
-        )
-        .map_err(|source| Error::Linear { source })?;
+    let project = linear.create_project(
+        &NewProject::new(brief.name(), brief.content(), &team, destination.label())
+            .with_status(status.as_deref()),
+    )?;
 
     // Printed before the record is saved, not after: the project exists from
     // here on and its address is the one thing that must not be lost, so it

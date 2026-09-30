@@ -37,7 +37,7 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use warlock_engine::drafting::Draft;
-use warlock_engine::{Destination, Manifest, agent, filed_path, resolve_filing, to_manifest_path};
+use warlock_engine::{Destination, Manifest, agent, filed_path, resolve_filing};
 use warlock_tui::{
     Board, ChatAgent, Converses, Drafted, Drafting, LinearIssue, LinearOpener, NOTHING_SETTLES_IT,
     Opens, Replied, Slice, propose_answer, scope_block_in,
@@ -589,7 +589,7 @@ pub(crate) fn prepare<O: Opens>(
     let target =
         resolve_filing(manifest, root, home, scope).map_err(|source| Error::Filing { source })?;
 
-    let spelled = to_manifest_path(root, path).map_err(|source| Error::Unspellable { source })?;
+    let spelled = crate::query::spelled(root, path)?;
     // `records` rather than a second `Filed::load`: the file a push appends to
     // and the file a cut resolves against are one file, and a second loader
     // here would be a second reading of what a missing one means.
@@ -606,15 +606,15 @@ pub(crate) fn prepare<O: Opens>(
     // refusal is asked here: a board that will not say who the key belongs to
     // has nothing to file for, and that is not a thing to find out once issues
     // exist.
-    let assignee = board.viewer().map_err(|source| Error::Linear { source })?;
+    let assignee = board.viewer()?;
 
-    let project = board
-        .fetch_project(record.project_id())
-        .map_err(|source| Error::Linear { source })?
-        .ok_or_else(|| Error::UnknownProject {
-            id: record.project_id().to_owned(),
-            path: filed_path(root),
-        })?;
+    let project =
+        board
+            .fetch_project(record.project_id())?
+            .ok_or_else(|| Error::UnknownProject {
+                id: record.project_id().to_owned(),
+                path: filed_path(root),
+            })?;
 
     let Some(status) = project.status().filter(|status| is_planned(status)) else {
         return Err(Error::NotPlanned {

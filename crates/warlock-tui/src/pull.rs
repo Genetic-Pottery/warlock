@@ -147,7 +147,7 @@ pub(crate) fn pulled<O: Opens, R: Repository, F: Forge, S: Splits, W: Works, P: 
     }
 
     let board = ports.open.open(prepared.value());
-    let assignee = board.viewer().map_err(|source| Error::Linear { source })?;
+    let assignee = board.viewer()?;
     // The records this checkout holds for the scope, which is what tells a ticket
     // in `In Progress` here from one in progress somewhere else. An unreadable one
     // is a line and not a failure: the scan names it, and the run it describes may
@@ -369,14 +369,9 @@ pub(crate) fn select(
     runs: &[PullRun],
 ) -> Result<Selected, Error> {
     Ok(match named {
-        Some(ticket) => Selected::Named(
-            take_named(board, record, assignee, ticket, runs)
-                .map_err(|source| Error::Linear { source })?,
-        ),
+        Some(ticket) => Selected::Named(take_named(board, record, assignee, ticket, runs)?),
         None => Selected::Chosen(choose(
-            &board
-                .scope_queue(record.team(), record.label(), assignee)
-                .map_err(|source| Error::Linear { source })?,
+            &board.scope_queue(record.team(), record.label(), assignee)?,
             record.review_state(),
             runs,
         )),

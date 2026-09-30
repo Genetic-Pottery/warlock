@@ -3,6 +3,7 @@ use std::fmt;
 use std::fmt::Write as _;
 use std::path::Path;
 
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 use crate::agent::{File, Request};
@@ -482,9 +483,9 @@ impl fmt::Display for Defect {
 impl std::error::Error for Defect {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Accepted {
-    Filled(Fill),
-    Defective { fill: Fill, defects: Vec<Defect> },
+pub enum Accepted<F = Fill> {
+    Filled(F),
+    Defective { fill: F, defects: Vec<Defect> },
     Unparsed(Defect),
 }
 
@@ -603,7 +604,7 @@ pub fn accept_synthesis(
     expected: &Expected<'_>,
     described: &Described,
 ) -> Accepted {
-    let mut parsed = match parse(answer) {
+    let mut parsed = match parse::<Fill>(answer) {
         Ok(parsed) => parsed,
         Err(defect) => return Accepted::Unparsed(defect),
     };
@@ -810,7 +811,7 @@ pub fn file_fallback(path: &str, expected: &Expected<'_>, described: &Described)
     fallback::file(path, expected, described)
 }
 
-fn parse(answer: &str) -> Result<Fill, Defect> {
+pub(crate) fn parse<T: DeserializeOwned>(answer: &str) -> Result<T, Defect> {
     let object = match (answer.find('{'), answer.rfind('}')) {
         (Some(start), Some(end)) if start <= end => &answer[start..=end],
         _ => {
@@ -958,7 +959,13 @@ fn values(fill: &Fill) -> impl Iterator<Item = (String, &str)> {
         )
 }
 
-fn line(field: &str, value: &str, minimum: usize, cap: usize, defects: &mut Vec<Defect>) {
+pub(crate) fn line(
+    field: &str,
+    value: &str,
+    minimum: usize,
+    cap: usize,
+    defects: &mut Vec<Defect>,
+) {
     let trimmed = value.trim();
     if trimmed.is_empty() {
         defects.push(Defect::Empty {
@@ -986,6 +993,31 @@ fn line(field: &str, value: &str, minimum: usize, cap: usize, defects: &mut Vec<
             cap,
         });
     }
+}
+
+// The shape a one-line value has to hold: one line, at least `minimum`
+// characters and at most `cap`, counted as characters and cut on a character
+// boundary so a multibyte name or title cannot split. A value out of
+// here is never defective, which is what lets the mend's fixpoint settle.
+pub(crate) fn fit(line: &str, pad: &str, minimum: usize, cap: usize) -> String {
+    let mut line = flattened(line);
+    // A non-empty pad adds at least one character a turn, so this ends.
+    while line.chars().count() < minimum && !pad.is_empty() {
+        if !line.is_empty() {
+            line.push(' ');
+        }
+        line.push_str(pad);
+    }
+    cut(&line, cap)
+}
+
+pub(crate) fn cut(text: &str, cap: usize) -> String {
+    let cut: String = text.chars().take(cap).collect();
+    cut.trim_end().to_owned()
+}
+
+pub(crate) fn flattened(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 fn keyed(name: &str, given: &BTreeMap<String, String>, wanted: &[&str], defects: &mut Vec<Defect>) {
@@ -1262,28 +1294,8 @@ mod fallback {
         }
     }
 
-    // The shape every fallback value has to hold: one line, at least
-    // `ENTRY_MINIMUM` characters and at most the cap, counted as characters and
-    // cut on a character boundary so a multibyte name cannot split.
     pub(super) fn fit(line: &str, pad: &str) -> String {
-        let mut line = flattened(line);
-        // A non-empty pad adds at least one character a turn, so this ends.
-        // In practice it runs once or not at all: every pad here is longer than
-        // the floor on its own.
-        while line.chars().count() < ENTRY_MINIMUM && !pad.is_empty() {
-            if !line.is_empty() {
-                line.push(' ');
-            }
-            line.push_str(pad);
-        }
-        let cut: String = line.chars().take(CAP).collect();
-        cut.trim_end().to_owned()
-    }
-
-    // Whitespace of any kind collapses to one space: a name or a symbol that
-    // carried a newline would otherwise make a one-line value into two.
-    fn flattened(text: &str) -> String {
-        text.split_whitespace().collect::<Vec<_>>().join(" ")
+        super::fit(line, pad, ENTRY_MINIMUM, CAP)
     }
 }
 

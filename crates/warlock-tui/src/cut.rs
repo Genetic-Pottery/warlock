@@ -113,8 +113,7 @@ pub(crate) fn cut<W: Write>(
     }
 
     let team = linear
-        .team_id(filing.destination.team())
-        .map_err(|source| Error::Linear { source })?
+        .team_id(filing.destination.team())?
         .ok_or_else(|| Error::UnknownTeam {
             team: filing.destination.team().to_owned(),
             path: manifest_path(root),
@@ -123,31 +122,26 @@ pub(crate) fn cut<W: Write>(
     // issue is a refusal that costs nothing, and the same question asked after
     // the first create would leave a slice half filed on the board.
     let state = linear
-        .backlog_state(&team)
-        .map_err(|source| Error::Linear { source })?
+        .backlog_state(&team)?
         .ok_or_else(|| Error::NoBacklog {
             team: filing.destination.team().to_owned(),
         })?;
-    let label = linear
-        .issue_label_id(filing.destination.label(), &team)
-        .map_err(|source| Error::Linear { source })?;
+    let label = linear.issue_label_id(filing.destination.label(), &team)?;
 
     let mut issues = Vec::with_capacity(slice.drafts.len());
     for draft in slice.drafts {
         // A create that fails partway is a refusal and not a short cut record:
         // a record says the slice is filed, so writing one for the drafts that
         // landed would be warlock promising never to file the rest.
-        let issue = linear
-            .create_issue(&NewIssue::new(
-                &draft.title,
-                &draft.body,
-                &team,
-                filing.project,
-                &label,
-                &state,
-                filing.assignee,
-            ))
-            .map_err(|source| Error::Linear { source })?;
+        let issue = linear.create_issue(&NewIssue::new(
+            &draft.title,
+            &draft.body,
+            &team,
+            filing.project,
+            &label,
+            &state,
+            filing.assignee,
+        ))?;
         issues.push(issue);
     }
 

@@ -925,6 +925,12 @@ impl std::error::Error for Error {
     }
 }
 
+impl From<LinearError> for Error {
+    fn from(source: LinearError) -> Self {
+        Self::Linear { source }
+    }
+}
+
 impl From<io::Error> for Error {
     // Everything reached by `?` once the terminal is up is the terminal:
     // entering raw mode, drawing a frame, reading an event. The load path names

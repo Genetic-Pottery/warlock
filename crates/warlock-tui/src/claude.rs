@@ -54,7 +54,7 @@ use std::time::Duration;
 // `Defect` lives in `document` and is the drafting contract's defect too: one
 // vocabulary for a slot that was filled wrong, whether the slot is a line of a
 // document or the title of a draft.
-use warlock_engine::document::Defect;
+use warlock_engine::document::{Accepted, Defect};
 use warlock_engine::{Agent, agent, drafting, splitting, working};
 
 /// The clock one invocation runs under. A child that outlives it is killed *and*
@@ -2627,10 +2627,10 @@ impl<C: Converses> Drafting<C> {
         // things not to repeat, which is how the document road asks again. The
         // contract is not said a second time: it was the opening of this same
         // conversation and has not changed.
-        let settled = settle(first.into(), drafting::ATTEMPTS, |rejected| {
+        let settled = settle(first, drafting::ATTEMPTS, |rejected| {
             let asked =
                 drafting::drafting_instructions(&self.brief, &self.title, &self.prose, &rejected);
-            Ok(drafting::accept(&self.agent.turn(&asked)?).into())
+            Ok(drafting::accept(&self.agent.turn(&asked)?))
         })?;
         Ok(Replied::Answer(match settled {
             Settled::Fill(fill) => self.repaired(&fill),
@@ -2855,10 +2855,10 @@ impl<C: Converses> Splitting<C> {
         }
     }
 
-    fn attempt(&mut self, rejected: &[Defect]) -> Result<Attempt<splitting::Fill>, agent::Error> {
+    fn attempt(&mut self, rejected: &[Defect]) -> Result<splitting::Accepted, agent::Error> {
         self.attempts += 1;
         let asked = splitting::split_instructions(&self.title, &self.description, rejected);
-        Ok(splitting::accept(&self.agent.turn(&asked)?).into())
+        Ok(splitting::accept(&self.agent.turn(&asked)?))
     }
 
     /// A fill that parsed, put through the engine's repair, ordered and named.
@@ -2881,51 +2881,23 @@ impl<C: Converses> Splitting<C> {
     }
 }
 
-// `drafting::Accepted` and `splitting::Accepted` are the same three shapes over
-// different fills; this is that shape once, so the attempt loop is written once.
-enum Attempt<F> {
-    Filled(F),
-    Defective { fill: F, defects: Vec<Defect> },
-    Unparsed(Defect),
-}
-
-impl From<drafting::Accepted> for Attempt<drafting::Fill> {
-    fn from(accepted: drafting::Accepted) -> Self {
-        match accepted {
-            drafting::Accepted::Filled(fill) => Self::Filled(fill),
-            drafting::Accepted::Defective { fill, defects } => Self::Defective { fill, defects },
-            drafting::Accepted::Unparsed(defect) => Self::Unparsed(defect),
-        }
-    }
-}
-
-impl From<splitting::Accepted> for Attempt<splitting::Fill> {
-    fn from(accepted: splitting::Accepted) -> Self {
-        match accepted {
-            splitting::Accepted::Filled(fill) => Self::Filled(fill),
-            splitting::Accepted::Defective { fill, defects } => Self::Defective { fill, defects },
-            splitting::Accepted::Unparsed(defect) => Self::Unparsed(defect),
-        }
-    }
-}
-
 enum Settled<F> {
     Fill(F),
     Unusable(Defect),
 }
 
 fn settle<F, E>(
-    first: Attempt<F>,
+    first: Accepted<F>,
     attempts: usize,
-    mut again: impl FnMut(Vec<Defect>) -> Result<Attempt<F>, E>,
+    mut again: impl FnMut(Vec<Defect>) -> Result<Accepted<F>, E>,
 ) -> Result<Settled<F>, E> {
     let mut attempt = first;
     let mut parsed = None;
     for _ in 1..attempts {
         let rejected = match attempt {
-            Attempt::Unparsed(defect) => vec![defect],
-            Attempt::Filled(fill) => return Ok(Settled::Fill(fill)),
-            Attempt::Defective { fill, defects } => {
+            Accepted::Unparsed(defect) => vec![defect],
+            Accepted::Filled(fill) => return Ok(Settled::Fill(fill)),
+            Accepted::Defective { fill, defects } => {
                 let lost = lost_to_the_cut(&defects);
                 if lost.is_empty() {
                     return Ok(Settled::Fill(fill));
@@ -2937,8 +2909,8 @@ fn settle<F, E>(
         attempt = again(rejected)?;
     }
     Ok(match attempt {
-        Attempt::Filled(fill) | Attempt::Defective { fill, .. } => Settled::Fill(fill),
-        Attempt::Unparsed(defect) => parsed.map_or(Settled::Unusable(defect), Settled::Fill),
+        Accepted::Filled(fill) | Accepted::Defective { fill, .. } => Settled::Fill(fill),
+        Accepted::Unparsed(defect) => parsed.map_or(Settled::Unusable(defect), Settled::Fill),
     })
 }
 

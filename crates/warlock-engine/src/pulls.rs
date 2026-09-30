@@ -20,7 +20,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::manifest::{temp_file_name, write_and_sync};
+use crate::manifest::write_atomically;
 use crate::sigils::project_dir;
 use crate::splitting::Numbered;
 
@@ -1189,30 +1189,11 @@ fn yaml_string(text: &str) -> String {
     serde_json::Value::String(text.to_owned()).to_string()
 }
 
-// The temporary must sit in the same directory as the target, so the rename
-// cannot cross a filesystem and stop being atomic. It is what makes a save safe
-// to do before and after every sub-task: a run killed mid-write leaves the last
-// whole file, never half of one.
+// Atomic, which is what makes a save safe to do before and after every
+// sub-task: a run killed mid-write leaves the last whole file, never half of one.
 fn write_file(dir: &Path, name: &str, text: &str) -> Result<(), Error> {
-    let temp = dir.join(temp_file_name(name));
-    let target = dir.join(name);
-
-    let written = write_and_sync(&temp, text.as_bytes())
-        .map_err(|source| Error::Io {
-            path: temp.clone(),
-            source,
-        })
-        .and_then(|()| {
-            fs::rename(&temp, &target).map_err(|source| Error::Io {
-                path: target,
-                source,
-            })
-        });
-
-    if written.is_err() {
-        drop(fs::remove_file(&temp));
-    }
-    written
+    write_atomically(dir, name, text.as_bytes())
+        .map_err(|(path, source)| Error::Io { path, source })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

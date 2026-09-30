@@ -44,9 +44,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Instant;
 
-use warlock_engine::{
-    Manifest, PullRun, ScopeRecord, halted_and_resumed_runs, held_sigils, to_manifest_path,
-};
+use warlock_engine::{Manifest, PullRun, ScopeRecord, halted_and_resumed_runs, held_sigils};
 use warlock_tui::{
     Activities, Activity, App, Board, Cancel, ChatAgent, ClaudeAgent, Commit, Dirty,
     FetchedProject, Forge, Gh, Git, GitError, LinearError, LinearIssue, LinearOpener,
@@ -755,12 +753,7 @@ impl Freshens for Freshener {
             // it says about a directory arrives as an [`Activity`] on the port
             // above, which is where every other session reports.
             if let RunEvent::Starting { directory, .. } = event {
-                // The manifest's spelling, which is how a pact's sections are
-                // headed and how every line about a directory names one; the
-                // display form is the fallback for a path with none, as
-                // `pacting.rs`'s own labelling has it.
-                let heading = to_manifest_path(asked.root, &directory)
-                    .unwrap_or_else(|_| directory.display().to_string());
+                let heading = crate::freshness::named(asked.root, &directory);
                 let _ = self.events.send(Step::Refreshing(heading));
             }
         })
@@ -1049,7 +1042,7 @@ fn chose<O: Opens, R: Repository>(
     clean(repo)?;
 
     let board = open.open(&work.value);
-    let assignee = board.viewer().map_err(|source| Error::Linear { source })?;
+    let assignee = board.viewer()?;
     let runs = halted_and_resumed_runs(&work.home, &work.root, work.record.name())
         .map_err(|source| Error::Runs { source })?;
     // An unreadable record is a line and not a failure: the scan names it, and the
