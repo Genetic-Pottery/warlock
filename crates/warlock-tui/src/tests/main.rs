@@ -544,6 +544,26 @@ fn a_scope_write_with_a_piece_missing_is_a_malformed_invocation() {
     }
 }
 
+#[test]
+fn a_brief_is_the_bare_word_and_takes_nothing_else() {
+    assert_eq!(parse(&["brief"]).unwrap().command, Some(Command::Brief));
+
+    // A path is what a reader who has confused this with `push` or `draft`
+    // types, and a flag is somebody expecting a register to leave or an output
+    // to parse — there is neither. Both are clap's 2 rather than an argument
+    // quietly ignored.
+    let malformed: [&[&str]; 3] = [
+        &["brief", "docs/brief.md"],
+        &["brief", "--json"],
+        &["brief", "--scope", "data-plane"],
+    ];
+    for args in malformed {
+        let error = parse(args).unwrap_err();
+        assert!(error.use_stderr(), "{args:?}");
+        assert_eq!(error.exit_code(), 2, "{args:?}");
+    }
+}
+
 // `warlock push docs/brief.md` with whichever of the two flags a case is
 // about, so each assertion below reads as the flags and not as the positional
 // under them.
@@ -1075,7 +1095,7 @@ fn help_prints_a_few_lines_rather_than_this_file() {
     let help = Cli::command().render_long_help().to_string();
     for subcommand in [
         "init", "config", "stale", "fresh", "check", "unpact", "pact", "refresh", "scope", "key",
-        "push", "draft", "pull", "resume",
+        "brief", "push", "draft", "pull", "resume",
     ] {
         assert!(help.contains(subcommand), "{subcommand}: {help}");
     }
@@ -1083,7 +1103,7 @@ fn help_prints_a_few_lines_rather_than_this_file() {
     // A row per subcommand plus the usage and options chrome: the ceiling is
     // what stops an `about` becoming a paragraph, so it moves by one when a
     // subcommand is added and never to make room for prose.
-    assert!(help.lines().count() < 25, "{help}");
+    assert!(help.lines().count() < 26, "{help}");
     // Every doc comment on `Cli` and its variants spells the command in
     // backticks, and no `about` above does, so a backtick reaching the help
     // is a doc comment that got lifted into it.

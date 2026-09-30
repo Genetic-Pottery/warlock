@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
-use warlock_engine::{claude_md, manifest, scope, sigils};
-use warlock_tui::ScopeBlockError;
+use warlock_engine::{briefs, claude_md, manifest, scope, sigils};
+use warlock_tui::{ScopeBlockError, TemplateError};
 
 use super::{Error, one_line};
 use crate::rescope::ScopeRefusal;
@@ -112,6 +112,27 @@ fn every_message_quoting_another_error_is_one_line_so_it_prints_as_one() {
         Error::ClaudeMd {
             source: claude_md::Error::NotText {
                 path: PathBuf::from("/repo/CLAUDE.md"),
+            },
+        },
+        // The two files `warlock brief` reads before it sends anything. Both
+        // quote the filesystem, and the brief config can quote the TOML parser
+        // as well, which is what the flattening is for.
+        Error::Template {
+            source: TemplateError {
+                path: PathBuf::from("/repo/.warlock/brief-template.md"),
+                source: std::io::Error::other("boom"),
+            },
+        },
+        Error::Briefs {
+            source: briefs::Error::Io {
+                path: PathBuf::from("/repo/.warlock/briefs.toml"),
+                source: std::io::Error::other("boom"),
+            },
+        },
+        Error::Briefs {
+            source: briefs::Error::AbsoluteDirectory {
+                path: PathBuf::from("/repo/.warlock/briefs.toml"),
+                directory: "/elsewhere".to_owned(),
             },
         },
         Error::Prompt {

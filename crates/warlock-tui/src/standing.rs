@@ -71,6 +71,12 @@ pub(crate) const FOR_RESUME: &str = "release a halted run in";
 // something to cut rather than where the file happens to sit.
 pub(crate) const FOR_CUT: &str = "cut a brief from";
 
+// "about" rather than "in" or "from", because the conversation is aimed at a
+// document about one repository and the root is what settles which one: the
+// brief template and `briefs.toml` under `.warlock/` are the two files it reads,
+// and both of them belong to the checkout rather than to the machine.
+pub(crate) const FOR_BRIEF: &str = "argue a brief about";
+
 // The working directory is kept as well as the root because the two answer
 // different questions: the root is what stored paths are spelled against, and
 // the working directory is what a relative argument is joined onto. A subcommand

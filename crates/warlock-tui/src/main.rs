@@ -34,6 +34,7 @@ use warlock_tui::{
 
 mod asking;
 mod boundary;
+mod briefing;
 mod chatting;
 mod check;
 mod clipboard;
@@ -67,6 +68,7 @@ mod terminal;
 mod viewing;
 mod writing;
 
+use briefing::brief;
 use chatting::{Chat, Takes, Wanted};
 use check::check;
 use clipboard::{Clip, Clipboard};
@@ -253,6 +255,15 @@ enum Command {
         #[command(subcommand)]
         command: KeyCommand,
     },
+    #[command(
+        about = "Argue a brief at the shell, sending a turn on a blank line.",
+        long_about = None
+    )]
+    // No argument, and there is nothing for one to name: the conversation
+    // decides what the document is about, and where it would be written is
+    // `briefs.toml`'s. No flag either — `warlock brief` cannot leave brief mode,
+    // because it is brief mode.
+    Brief,
     #[command(
         about = "File a brief as a project on the board this machine's sigil names.",
         long_about = None
@@ -581,6 +592,16 @@ fn main() -> ExitCode {
             KeyCommand::Use { name } => key_use(&name),
             KeyCommand::Forget { name } => key_forget(&name),
         },
+        // The first step of the workflow, dispatched here for `config`'s reasons:
+        // it prints on the ordinary screen and reads cooked lines off stdin for
+        // as long as somebody keeps typing, so nothing about it may touch the
+        // terminal — no alternate screen, no raw mode and no panic hook, because
+        // the hook exists to restore a session this path never starts. What it
+        // spends is one conversation with `claude`, and its only refusals — a
+        // brief template or a `briefs.toml` that will not read — are made before
+        // the first turn. Gated by nothing here: it writes no file and opens no
+        // board, so none of it is the boundary's **3**. See [`mod@briefing`].
+        Some(Command::Brief) => brief(),
         // The one subcommand that sends anything anywhere, dispatched here for
         // every reason the writes are — it prints its lines on the ordinary
         // screen and takes no terminal — and gated by nothing here: the sigil
