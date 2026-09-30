@@ -914,13 +914,17 @@ mod gate {
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
     use ratatui::layout::Size;
     use warlock_engine::NodeState;
-    use warlock_tui::{
-        Answer, App, Composed, Composer, CutConfirm, Edited, Focus, Modals, PullConfirm,
-        PushConfirm, QuitConfirm, RecordPrompt, Row, ScopeField, ScopePrompt, cut_answer_for,
-        edit_for, panel_height, pull_answer_for, push_answer_for, tree_height,
-    };
 
     use super::super::{Action, Pressed, action_for, press_for};
+    use crate::app::{App, Focus, Row};
+    use crate::composer::{Composed, Composer};
+    use crate::confirm::{
+        Answer, CutConfirm, PullConfirm, PushConfirm, QuitConfirm, cut_answer_for, pull_answer_for,
+        push_answer_for,
+    };
+    use crate::modal::Modals;
+    use crate::prompt::{Edited, RecordPrompt, ScopeField, ScopePrompt, edit_for};
+    use crate::ui::{panel_height, tree_height};
 
     const SIZE: Size = Size {
         width: 80,
@@ -2010,12 +2014,11 @@ mod gate {
     // The fourth window: the three values a brand-new scope name is recorded
     // with, which `s` puts up as it takes the scope window down.
     mod recording {
-        use warlock_tui::{RecordEdited, RecordForm, RecordPrompt, record_edit_for};
-
         use super::{
             Composer, INERT, KeyCode, KeyEvent, Modals, Pressed, QuitConfirm, ctrl_c, press,
             press_for,
         };
+        use crate::prompt::{RecordEdited, RecordForm, RecordPrompt, record_edit_for};
 
         const DIRECTORY: &str = "crates/warlock-engine";
 
@@ -2811,11 +2814,12 @@ mod gate {
     // are states of the run rather than fields of the session, so both are
     // handed to the gate as an `Option` and every round here hands one over.
     mod running {
-        use warlock_tui::{Carry, Choice, Review, Reviewed, carry_answer_for, review_answer_for};
-
         use super::{
             Composer, CutConfirm, INERT, KeyCode, KeyEvent, Modals, Pressed, QuitConfirm, ctrl_c,
             press, press_for,
+        };
+        use crate::confirm::{
+            Carry, Choice, Review, Reviewed, carry_answer_for, review_answer_for,
         };
 
         const SLICE: &str = "slice 1 `Gate the drafts`";
@@ -3895,12 +3899,15 @@ mod pointer {
     use ratatui::crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
     use ratatui::layout::Size;
     use warlock_engine::NodeState;
-    use warlock_tui::{
-        App, Carry, Cell, Composer, CutConfirm, Focus, Modal, Modals, PushConfirm, QuitConfirm,
-        Reach, RecordPrompt, Review, Row, ScopePrompt, panel_height, panel_width, tree_height,
-    };
 
     use super::super::{MouseAction, WHEEL_NOTCH, mouse_action};
+    use crate::app::{App, Focus, Row};
+    use crate::composer::Composer;
+    use crate::confirm::{Carry, CutConfirm, PushConfirm, QuitConfirm, Review};
+    use crate::modal::{Modal, Modals};
+    use crate::prompt::{RecordPrompt, ScopePrompt};
+    use crate::selection::Cell;
+    use crate::ui::{Reach, panel_height, panel_width, tree_height};
 
     // The one terminal every test below points at, and the layout it comes
     // to. Eighty columns is wide enough that the tree takes its floor of
@@ -5291,9 +5298,10 @@ mod pointer {
 // the only thing the loop's tick has to go on.
 mod holding {
     use ratatui::crossterm::event::{MouseButton, MouseEventKind};
-    use warlock_tui::{Cell, Reach};
 
     use super::super::{Drag, MouseAction, drag_after};
+    use crate::selection::Cell;
+    use crate::ui::Reach;
 
     const PRESS: MouseEventKind = MouseEventKind::Down(MouseButton::Left);
     const DRAG: MouseEventKind = MouseEventKind::Drag(MouseButton::Left);

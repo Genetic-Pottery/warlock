@@ -30,11 +30,11 @@
 //! `&mut dyn FnMut`, so a door that wants a session's activities on its
 //! [`PullEvent`] stream owns whatever joins the two.
 //!
-//! [`Activities`]: warlock_tui::Activities
-//! [`Crossings`]: warlock_tui::Crossings
-//! [`Repository::dirty`]: warlock_tui::Repository::dirty
-//! [`crossings_in`]: warlock_tui::crossings_in
-//! [`pull_request_body`]: warlock_tui::pull_request_body
+//! [`Activities`]: crate::claude::Activities
+//! [`Crossings`]: crate::crossings::Crossings
+//! [`Repository::dirty`]: crate::git::Repository::dirty
+//! [`crossings_in`]: crate::crossings::crossings_in
+//! [`pull_request_body`]: crate::git::pull_request_body
 
 use std::fmt;
 use std::fmt::Write as _;
@@ -44,13 +44,16 @@ use warlock_engine::working::Reported;
 use warlock_engine::{
     Manifest, PullRun, PullSubtask, RunStatus, ScopeRecord, SubtaskStatus, now_rfc3339, pulls,
 };
-use warlock_tui::{
-    Activity, Board, Crossing, Dirty, Finished, Forge, Freshness, GitError, IN_PROGRESS, LeftStale,
-    LinearError, PullRequest, Repository, Sibling, Split, Touched, Worked, branch_name,
-    commit_message, crossings_after, pull_request_body, pull_request_title, working_opening,
-};
 
+use crate::claude::{Activity, Sibling, Split, Worked, working_opening};
+use crate::crossings::{Crossing, crossings_after};
 use crate::freshness::{Freshened, Freshening, Freshens};
+use crate::git::{
+    Dirty, Error as GitError, Finished, Forge, Freshness, LeftStale, PullRequest, Repository,
+    Touched, branch_name, commit_message, pull_request_body, pull_request_title,
+};
+use crate::linear::{Board, Error as LinearError};
+use crate::queue::IN_PROGRESS;
 
 /// Everything one pull is allowed to touch, built by whichever door is pulling.
 ///
@@ -90,7 +93,7 @@ pub(crate) struct Pulling<'a, B: Board, R: Repository, F: Forge, S: Splits, W: W
     /// disagree with the boundary the door already judged.
     pub(crate) manifest: &'a Manifest,
     /// The flattened sigils this machine holds, as
-    /// [`crossings_in`](warlock_tui::crossings_in) and
+    /// [`crossings_in`](crate::crossings::crossings_in) and
     /// [`permits`](crate::boundary::permits) take them — a config that would not
     /// parse is the door's to say and not a third answer to give in here.
     pub(crate) held: &'a [String],
@@ -324,7 +327,7 @@ impl<B: Board, R: Repository, F: Forge, S: Splits, W: Works> Pulling<'_, B, R, F
                 }
                 // Nothing is committed and nothing is undone. The next sibling
                 // runs in the tree this one left, which is what
-                // [`working_retry`](warlock_tui::working_retry) tells a session
+                // [`working_retry`](crate::claude::working_retry) tells a session
                 // about.
                 Some(status) => {
                     run.subtask_mut(&id).expect(IN_THE_RUN).set_status(status);
@@ -668,7 +671,7 @@ pub(crate) struct StaleDirectory {
 
 /// The ticket one pull works, in what a run needs of it and nothing else.
 ///
-/// Values rather than a [`QueuedIssue`](warlock_tui::QueuedIssue), because two of
+/// Values rather than a [`QueuedIssue`](crate::linear::QueuedIssue), because two of
 /// these five are not on one: the number as a number, which
 /// [`branch_name`] takes, and the description, which the queue's query does not
 /// read. Whoever chose the ticket supplies them, and this module asks the board
@@ -698,7 +701,7 @@ pub(crate) struct Ticket<'a> {
 /// because nothing has happened yet: no session has run, so there is nothing to
 /// record and nothing to say on the ticket that the tree does not already say.
 #[derive(Debug)]
-pub(crate) enum Error {
+pub enum Error {
     Git {
         source: GitError,
     },
@@ -790,7 +793,7 @@ pub(crate) trait Splits {
 /// the assumption of.
 ///
 /// The retries are the implementation's, not the caller's:
-/// [`Working::run`](warlock_tui::Working::run) already owns which stopping earns
+/// [`Working::run`](crate::claude::Working::run) already owns which stopping earns
 /// another attempt and what a turn limit does to the next one, and a loop that
 /// asked again itself would be a second retry policy on top of that one.
 pub(crate) trait Works {
@@ -806,7 +809,7 @@ pub(crate) trait Works {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Pulled {
     /// The run reached a pull request. `None` is
-    /// [`Opened::NoGh`](warlock_tui::Opened::NoGh), which is still a run that
+    /// [`Opened::NoGh`](crate::git::Opened::NoGh), which is still a run that
     /// did the work: the branch is pushed and the body is on the ticket.
     Opened { ticket: String, url: Option<String> },
     /// Every sub-task finished and the branch changed nothing, so there was no
@@ -825,10 +828,10 @@ pub(crate) enum Pulled {
 impl Pulled {
     /// What the shell spends on it.
     ///
-    /// The numbers are `main.rs`'s `status_for` ones and mean what they mean
-    /// there: **0** the question was answered, **1** warlock could not do it,
-    /// **3** a boundary this machine's sigils do not open. A crossing is a **3**
-    /// for that last reason and not because it is worse than a halt.
+    /// The numbers are [`status_for`](crate::error::status_for)'s and mean what
+    /// they mean there: **0** the question was answered, **1** warlock could not
+    /// do it, **3** a boundary this machine's sigils do not open. A crossing is a
+    /// **3** for that last reason and not because it is worse than a halt.
     ///
     /// Read by the tests rather than by the door, and deliberately so: `main.rs`
     /// spends the status off an [`Error`](crate::error::Error), because a halt and
@@ -884,7 +887,7 @@ pub(crate) enum PullEvent {
     Heading(Heading),
     /// The session's own, carried rather than worded: two doors word one
     /// differently — a line on a pipe and a
-    /// [`Section`](warlock_tui::Section) on the panel's account card — and a
+    /// [`Section`](crate::account::Section) on the panel's account card — and a
     /// line rendered in here would be the shell's wording sent to both.
     Activity(Activity),
     /// One repair warlock made to what the split answered, in the engine's own
@@ -1061,8 +1064,8 @@ fn crossed_reason(crossed: &[Crossing<'_>]) -> String {
 ///
 /// Two sessions touching one scope is one entry in the pull request body and not
 /// two, and the order is the order the paths were first seen, following
-/// [`crossings_in`](warlock_tui::crossings_in)'s own promise about order.
-fn remember(kept: &mut Vec<TouchedScope>, crossings: &warlock_tui::Crossings<'_>) {
+/// [`crossings_in`](crate::crossings::crossings_in)'s own promise about order.
+fn remember(kept: &mut Vec<TouchedScope>, crossings: &crate::crossings::Crossings<'_>) {
     for foreign in &crossings.touched {
         let at = if let Some(at) = kept.iter().position(|held| held.scope == foreign.scope) {
             at

@@ -25,7 +25,7 @@ const USERPROFILE: &str = "USERPROFILE";
 // a repository to *…*" — together because they are one vocabulary. They used to
 // sit beside their own subcommands, and two were re-typed as literals inside
 // `error.rs`'s tests, where rewording the original failed nothing.
-pub(crate) const FOR_CLAUDE_MD: &str = "write `CLAUDE.md` at";
+pub const FOR_CLAUDE_MD: &str = "write `CLAUDE.md` at";
 
 pub(crate) const FOR_SIGILS: &str = "hold sigils for";
 
@@ -83,7 +83,7 @@ pub(crate) const FOR_BRIEF: &str = "argue a brief about";
 // that used only the root would resolve `warlock check src` against the wrong
 // place from a subdirectory.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Standing {
+pub struct Standing {
     working_dir: PathBuf,
     repo_root: PathBuf,
 }
@@ -97,7 +97,7 @@ impl Standing {
     // caller here edits or answers about one path, and walking the tree to find
     // its root would read every directory in the repository to answer a question
     // about ancestors.
-    pub(crate) fn here(wanted: &'static str) -> Result<Self, Error> {
+    pub fn here(wanted: &'static str) -> Result<Self, Error> {
         let working_dir =
             env::current_dir().map_err(|source| Error::WorkingDirectory { source })?;
         let repo_root = repository_root(&working_dir).ok_or(Error::NoRepository {
@@ -121,7 +121,8 @@ impl Standing {
         }
     }
 
-    pub(crate) fn repo_root(&self) -> &Path {
+    #[must_use]
+    pub fn repo_root(&self) -> &Path {
         &self.repo_root
     }
 

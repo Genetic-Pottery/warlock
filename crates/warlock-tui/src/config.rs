@@ -35,7 +35,7 @@ const RULES: &str = "a sigil is 1 to 24 characters of lowercase letters, digits,
                      `_`, begins with a letter and does not end with `-` or `_`; `*` on \
                      its own means anywhere";
 
-pub(crate) fn configure() -> Result<(), Error> {
+pub fn configure() -> Result<(), Error> {
     let standing = Standing::here(FOR_SIGILS)?;
     // The one subcommand that takes the error rather than `.ok()`: a home is the
     // thing it was asked to write under, so not having one is a failure and not

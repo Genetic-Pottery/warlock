@@ -64,7 +64,7 @@ const TO_FORGET: &str = "forget";
 // same store from inside any checkout or from none, so asking `Standing::here`
 // for a root would refuse `warlock key list` in a home directory over a
 // question that never needed one.
-pub(crate) fn key_add(name: &str) -> Result<(), Error> {
+pub fn key_add(name: &str) -> Result<(), Error> {
     let home = Standing::home()?;
     // A terminal on stdin means a person typing, and anything else a script that
     // wants the cooked line it has always had; the question itself is
@@ -80,7 +80,7 @@ pub(crate) fn key_add(name: &str) -> Result<(), Error> {
     }
 }
 
-pub(crate) fn key_list(json: bool) -> Result<(), Error> {
+pub fn key_list(json: bool) -> Result<(), Error> {
     let home = Standing::home()?;
 
     listed(&home, json, &mut io::stdout())
@@ -90,14 +90,14 @@ pub(crate) fn key_list(json: bool) -> Result<(), Error> {
 // writes into this checkout's config and `forget` can only say what it did to
 // this checkout by reading it. Both resolutions happen here and are passed down
 // as parameters, so nothing below reads `HOME` or the working directory.
-pub(crate) fn key_use(name: &str) -> Result<(), Error> {
+pub fn key_use(name: &str) -> Result<(), Error> {
     let standing = Standing::here(FOR_KEY)?;
     let home = Standing::home()?;
 
     bound(&home, standing.repo_root(), name, &mut io::stdout())
 }
 
-pub(crate) fn key_forget(name: &str) -> Result<(), Error> {
+pub fn key_forget(name: &str) -> Result<(), Error> {
     let standing = Standing::here(FOR_KEY)?;
     let home = Standing::home()?;
 

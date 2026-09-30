@@ -21,13 +21,14 @@ use std::path::Path;
 use std::time::Instant;
 
 use warlock_engine::{PullRun, Reset, ResetMode, pulls, run_dir};
-use warlock_tui::{App, Converses};
 
+use crate::app::App;
 use crate::chatting::Chat;
+use crate::claude::Converses;
 use crate::error::{Error, one_line};
 use crate::standing::{FOR_RESUME, Standing};
 
-pub(crate) fn resume(ticket: &str, failed_only: bool) -> Result<(), Error> {
+pub fn resume(ticket: &str, failed_only: bool) -> Result<(), Error> {
     let standing = Standing::here(FOR_RESUME)?;
     // The error rather than `check`'s `.ok()`, for [`mod@crate::push`]'s reason
     // with nothing bought by a softer reading: the run records sit under the

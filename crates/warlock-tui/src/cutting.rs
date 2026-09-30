@@ -25,7 +25,7 @@
 //! freeze the frame for as long as `claude` took to think.
 //!
 //! A slice that asks something is a *state of that run* — [`Stage::Waiting`] —
-//! and never a [`Mode`](warlock_tui::Mode): a mode is the panel's one chat
+//! and never a [`Mode`](crate::panel::Mode): a mode is the panel's one chat
 //! session said at a different level, and this is a second session under its own
 //! prompt with a question of its own out. So the relay is held here, beside the
 //! session that asked, and the loop routes the field to it for exactly as long
@@ -56,15 +56,19 @@ use std::time::Instant;
 
 use warlock_engine::drafting::Draft;
 use warlock_engine::{Manifest, agent, from_manifest_path};
-use warlock_tui::{
-    Answer, App, Cancel, Carry, CarryAnswered, ChatAgent, Choice, Converses, CutAnswered,
-    CutConfirm, Drafting, LinearOpener, NOTHING_SETTLES_IT, Opens, Replied, Review, Reviewed,
-    Slice, propose_answer,
-};
 
+use crate::app::App;
+use crate::brief::Slice;
+use crate::claude::{
+    Cancel, ChatAgent, Converses, Drafting, NOTHING_SETTLES_IT, Replied, propose_answer,
+};
+use crate::confirm::{
+    Answer, Carry, CarryAnswered, Choice, CutAnswered, CutConfirm, Review, Reviewed,
+};
 use crate::cut::{Cut, listed};
 use crate::error::{Error, one_line};
 use crate::inflight::{Lost, Once, Workers, settled};
+use crate::linear::{Opener as LinearOpener, Opens};
 use crate::pacting::CancelGuard;
 // The lines about a relayed question come from there rather than from here, as
 // `named` and `not_drafted` do: the shell and the panel put the same question to

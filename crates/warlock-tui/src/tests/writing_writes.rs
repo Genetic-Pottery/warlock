@@ -4,9 +4,11 @@ use std::time::Instant;
 
 use tempfile::TempDir;
 use warlock_engine::{Node, NodeState, Tree, manifest_path, to_manifest_path};
-use warlock_tui::{App, Line, ScopeField, ScopePrompt};
 
 use super::NO_PATH;
+use crate::account::Line;
+use crate::app::App;
+use crate::prompt::{ScopeField, ScopePrompt};
 
 // The prompt half of what a write answers with, which is what every test below
 // but `what_was_written_is_remembered_…` is about. The path it hands back is
@@ -481,13 +483,12 @@ fn a_conversation_with_no_answer_on_it_writes_nothing_and_says_so() {
 // and no keys, so what is asserted here is the judging and the bytes alone.
 // `briefing.rs` has its own tests for the conversation around it.
 mod without_a_screen {
-    use warlock_tui::ScopeField;
-
     use super::super::{Landed, landed};
     use super::{
         BRIEF, WHOLE, a_repo, app_answering, everything_under, field, fs, manifest_path, now,
         write_submit,
     };
+    use crate::prompt::ScopeField;
 
     // Two of `WHOLE`'s five sections. Every test below hands its shape in
     // rather than writing a template, because the argument is the shape.
@@ -696,10 +697,11 @@ mod without_a_screen {
 mod rounds {
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use warlock_engine::DEFAULT_BRIEF_DIRECTORY;
-    use warlock_tui::{Mode, ScopePrompt, edit_for};
 
     use super::super::{WRITE_HEADING, write_edit, write_opened};
     use super::{App, Instant, TempDir, a_repo, app_answering, everything_under, fs, notes, now};
+    use crate::panel::Mode;
+    use crate::prompt::{ScopePrompt, edit_for};
 
     const REPLY: &str = "# Scopes and sigils\n\nA boundary somebody drew.\n\n\
                              ## Outcome\n\n## Success criteria\n\n## Constraints\n\n\
@@ -869,7 +871,7 @@ mod rounds {
             &mut app,
             repo.path(),
             &ScopePrompt::Closed,
-            warlock_tui::Edited::Submit,
+            crate::prompt::Edited::Submit,
             now(),
         )
         .prompt;
@@ -896,15 +898,16 @@ mod whole {
 
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-    use warlock_tui::{Composed, Composer, Line, Mode, ScopePrompt, edit_for};
-
     use super::super::WRITE_HEADING;
     use super::{
         App, Instant, Node, NodeState, PathBuf, Tree, a_repo, everything_under, fs, notes, now,
     };
-    use warlock_tui::Converses;
-
+    use crate::account::Line;
     use crate::chatting::Chat;
+    use crate::claude::Converses;
+    use crate::composer::{Composed, Composer};
+    use crate::panel::Mode;
+    use crate::prompt::{ScopePrompt, edit_for};
     use crate::stubs::Saying;
 
     const AT_MOST: Duration = Duration::from_secs(5);

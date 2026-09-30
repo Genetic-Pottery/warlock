@@ -25,12 +25,11 @@ use warlock_engine::pact::Event;
 use warlock_engine::{
     Agent, DOCUMENT_FILE, Manifest, NodeState, PactedSubtree, Tree, fitting, pact, to_manifest_path,
 };
-use warlock_tui::{
-    Activities, Activity, App, Cancel, ClaudeAgent, Outcome, PactIntent, PactToggle, Run, Section,
-    Sigils, Wired,
-};
 
+use crate::account::{Outcome, Section};
+use crate::app::{App, PactIntent, PactToggle, Run, Sigils};
 use crate::boundary::Operation;
+use crate::claude::{Activities, Activity, Cancel, ClaudeAgent, Wired};
 use crate::descent::{Descent, descend};
 use crate::error::one_line;
 use crate::inflight::{Lost, Port, Stream, Workers, settled};

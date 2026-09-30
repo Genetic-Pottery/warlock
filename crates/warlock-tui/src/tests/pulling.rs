@@ -5,15 +5,16 @@ use warlock_engine::splitting::{Caught, Cycle, Numbered};
 use warlock_engine::{
     Manifest, PactEntry, PullRun, PullSubtask, RunStatus, ScopeRecord, SubtaskStatus, state_path,
 };
-use warlock_tui::{
-    Dirty, Finished, Freshness, GitError, HUMAN_GATE, LeftStale, Repository, Split, Stopped,
-    Touched, Unsplit, Worked, commit_message, pull_request_body, pull_request_title,
-};
 
 use super::{
     Error, Heading, PullEvent, Pulled, Pulling, Reached, Ticket, halt_comment, next_runnable,
 };
+use crate::claude::{Split, Stopped, Unsplit, Worked};
 use crate::freshness::Freshened;
+use crate::git::{
+    Dirty, Error as GitError, Finished, Freshness, HUMAN_GATE, LeftStale, Repository, Touched,
+    commit_message, pull_request_body, pull_request_title,
+};
 use crate::pulling::StaleDirectory;
 use crate::stubs::{
     Boarding, Call, Checkout, Forging, GitCall, Op, Refreshing, Sessions, Slicing, said,
@@ -362,7 +363,7 @@ fn ticket() -> Ticket<'static> {
 }
 
 fn branch() -> String {
-    warlock_tui::branch_name(TEAM, NUMBER, TITLE)
+    crate::git::branch_name(TEAM, NUMBER, TITLE)
 }
 
 /// One modified path, which is a tree with something in it to commit.

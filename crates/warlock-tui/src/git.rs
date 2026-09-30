@@ -831,19 +831,14 @@ const UNNAMED: &str = "untitled";
 // A second copy of the rule in `writing.rs`'s `slugged`, on purpose, and the
 // only two places it is written.
 //
-// It cannot be shared as the code stands: `writing.rs` is a `main.rs` module and
-// `pub(crate)` to the binary, so the library cannot call it, and lifting it here
-// would leave the document writer taking its filename rule from the module that
-// runs `git`.
-//
-// It should not be shared even then, because the two answer to different things.
-// A filename is a `docs/` name a person reads and renames at will; a branch name
-// is a ref that a run record, a pushed branch and an open pull request all have
-// to agree on, so tuning the filename rule must not quietly move every branch
-// and leave a halted run resuming onto a name that no longer exists. They
-// already differ twice over: the cap is this one's own, and a title that slugs
-// to nothing is `untitled.md` there — a name a reader fixes — and
-// `<ticket>/untitled` here, a name nobody ever types.
+// It is not shared, because the two answer to different things. A filename is a
+// `docs/` name a person reads and renames at will; a branch name is a ref that a
+// run record, a pushed branch and an open pull request all have to agree on, so
+// tuning the filename rule must not quietly move every branch and leave a halted
+// run resuming onto a name that no longer exists. They already differ twice
+// over: the cap is this one's own, and a title that slugs to nothing is
+// `untitled.md` there — a name a reader fixes — and `<ticket>/untitled` here, a
+// name nobody ever types.
 fn branch_slug(title: &str) -> String {
     let mut slug = String::new();
     for character in title.chars() {

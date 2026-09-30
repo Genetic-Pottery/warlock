@@ -38,7 +38,7 @@ use crate::selection::{Position, Selection};
 /// (see [`Row::file`]): drawn like any other row, and nothing like one
 /// otherwise — it documents nothing, holds nothing, and is counted nowhere.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct Row {
+pub(crate) struct Row {
     pub depth: usize,
     pub path: PathBuf,
     pub document: Option<PathBuf>,
@@ -50,6 +50,9 @@ pub struct Row {
     /// Set on the one file row that is its directory's own `WARLOCK.md`. Kept
     /// on the row because the comparison against the node's document cannot be
     /// made again once the tree is gone.
+    // Named for what the row is rather than shortened to `document`, which is
+    // already the path field above.
+    #[allow(clippy::struct_field_names)]
     pub document_row: bool,
     pub ignored: bool,
     pub scope: Option<String>,
@@ -57,7 +60,7 @@ pub struct Row {
 
 impl Row {
     #[must_use]
-    pub fn new(
+    pub(crate) fn new(
         depth: usize,
         path: impl Into<PathBuf>,
         document: impl IntoDocument,
@@ -77,7 +80,7 @@ impl Row {
     }
 
     #[must_use]
-    pub fn file(depth: usize, path: impl Into<PathBuf>, state: NodeState) -> Self {
+    pub(crate) fn file(depth: usize, path: impl Into<PathBuf>, state: NodeState) -> Self {
         Self {
             file: true,
             ..Self::new(depth, path, None, state)
@@ -85,52 +88,53 @@ impl Row {
     }
 
     #[must_use]
-    pub const fn with_child_count(mut self, children: usize) -> Self {
+    pub(crate) const fn with_child_count(mut self, children: usize) -> Self {
         self.children = children;
         self
     }
 
     #[must_use]
-    pub const fn with_ignored(mut self, ignored: bool) -> Self {
+    pub(crate) const fn with_ignored(mut self, ignored: bool) -> Self {
         self.ignored = ignored;
         self
     }
 
     #[must_use]
-    pub const fn with_document_row(mut self, document_row: bool) -> Self {
+    pub(crate) const fn with_document_row(mut self, document_row: bool) -> Self {
         self.document_row = document_row;
         self
     }
 
     #[must_use]
-    pub fn with_scope(mut self, scope: Option<String>) -> Self {
+    pub(crate) fn with_scope(mut self, scope: Option<String>) -> Self {
         self.scope = scope;
         self
     }
 
     #[must_use]
-    pub const fn has_children(&self) -> bool {
+    #[cfg(test)]
+    pub(crate) const fn has_children(&self) -> bool {
         self.children > 0
     }
 
     #[must_use]
-    pub const fn is_file(&self) -> bool {
+    pub(crate) const fn is_file(&self) -> bool {
         self.file
     }
 
     #[must_use]
-    pub const fn is_document(&self) -> bool {
+    pub(crate) const fn is_document(&self) -> bool {
         self.document_row
     }
 
     #[must_use]
-    pub const fn is_ignored(&self) -> bool {
+    pub(crate) const fn is_ignored(&self) -> bool {
         self.ignored
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct PactToggle {
+pub(crate) struct PactToggle {
     pub path: PathBuf,
     pub pacted: bool,
 }
@@ -141,14 +145,14 @@ pub struct PactToggle {
 /// separate is what lets a caller show the refusal — or count the nodes a pact
 /// would reach — without moving any state.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum PactIntent {
+pub(crate) enum PactIntent {
     Toggles(PactToggle),
     Refused(String),
     NoRow,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum Run {
+pub(crate) enum Run {
     Pact,
     Refresh,
 }
@@ -193,7 +197,7 @@ impl InFlight {
 /// nothing, which is what a single-directory pact used to look like from the
 /// keystroke to the document.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct RunHeader {
+pub(crate) struct RunHeader {
     run: Run,
     directory: String,
     position: usize,
@@ -203,22 +207,23 @@ pub struct RunHeader {
 
 impl RunHeader {
     #[must_use]
-    pub const fn run(&self) -> Run {
+    pub(crate) const fn run(&self) -> Run {
         self.run
     }
 
     #[must_use]
-    pub fn directory(&self) -> &str {
+    pub(crate) fn directory(&self) -> &str {
         &self.directory
     }
 
     #[must_use]
-    pub const fn position(&self) -> usize {
+    #[cfg(test)]
+    pub(crate) const fn position(&self) -> usize {
         self.position
     }
 
     #[must_use]
-    pub const fn total(&self) -> usize {
+    pub(crate) const fn total(&self) -> usize {
         self.total
     }
 
@@ -227,7 +232,7 @@ impl RunHeader {
     /// header belongs to a run in flight, and a run with nothing left in flight
     /// has no header to draw.
     #[must_use]
-    pub const fn completed(&self) -> usize {
+    pub(crate) const fn completed(&self) -> usize {
         self.position.saturating_sub(1)
     }
 
@@ -235,7 +240,7 @@ impl RunHeader {
     /// the engine's `Event::Describing`. `None` before the first file of a
     /// directory, and for a directory that pays for none.
     #[must_use]
-    pub const fn files(&self) -> Option<(usize, usize)> {
+    pub(crate) const fn files(&self) -> Option<(usize, usize)> {
         self.files
     }
 }
@@ -248,7 +253,7 @@ impl RunHeader {
 /// ([`App::select_row`], [`App::scroll_panel_down`] and their neighbours) name
 /// their pane instead and never consult the focus at all.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
-pub enum Focus {
+pub(crate) enum Focus {
     #[default]
     Tree,
     Panel,
@@ -257,7 +262,7 @@ pub enum Focus {
 
 impl Focus {
     #[must_use]
-    pub const fn next(self) -> Self {
+    pub(crate) const fn next(self) -> Self {
         match self {
             Self::Tree => Self::Panel,
             Self::Panel => Self::Composer,
@@ -266,7 +271,7 @@ impl Focus {
     }
 
     #[must_use]
-    pub const fn drives_the_tree(self) -> bool {
+    pub(crate) const fn drives_the_tree(self) -> bool {
         match self {
             Self::Tree => true,
             Self::Panel | Self::Composer => false,
@@ -274,7 +279,7 @@ impl Focus {
     }
 
     #[must_use]
-    pub const fn drives_the_panel(self) -> bool {
+    pub(crate) const fn drives_the_panel(self) -> bool {
         match self {
             Self::Panel => true,
             Self::Tree | Self::Composer => false,
@@ -289,7 +294,7 @@ impl Focus {
 /// "holding unknown". [`Sigils::held`] folds an empty list into `Nothing`, so
 /// `Held` is never empty and the line is never a dangling "holding".
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
-pub enum Sigils {
+pub(crate) enum Sigils {
     #[default]
     Nothing,
     Held(Vec<String>),
@@ -298,7 +303,7 @@ pub enum Sigils {
 
 impl Sigils {
     #[must_use]
-    pub fn held(sigils: impl IntoIterator<Item = impl Into<String>>) -> Self {
+    pub(crate) fn held(sigils: impl IntoIterator<Item = impl Into<String>>) -> Self {
         let sigils: Vec<String> = sigils.into_iter().map(Into::into).collect();
         if sigils.is_empty() {
             return Self::Nothing;
@@ -307,7 +312,7 @@ impl Sigils {
     }
 
     #[must_use]
-    pub fn as_slice(&self) -> &[String] {
+    pub(crate) fn as_slice(&self) -> &[String] {
         match self {
             Self::Nothing | Self::Unknown => &[],
             Self::Held(sigils) => sigils,
@@ -315,7 +320,7 @@ impl Sigils {
     }
 
     #[must_use]
-    pub fn line(&self) -> Option<String> {
+    pub(crate) fn line(&self) -> Option<String> {
         match self {
             Self::Nothing => None,
             Self::Held(sigils) => Some(format!(
@@ -332,7 +337,7 @@ impl Sigils {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct Chrome {
+pub(crate) struct Chrome {
     header: String,
     sigils: Sigils,
 }
@@ -342,7 +347,7 @@ impl Chrome {
     /// draws no redundant "." — and falls back to the absolute path when `root`
     /// turns out not to be under `repo_root` at all.
     #[must_use]
-    pub fn of(repo_root: impl AsRef<Path>, root: impl AsRef<Path>) -> Self {
+    pub(crate) fn of(repo_root: impl AsRef<Path>, root: impl AsRef<Path>) -> Self {
         let root = root.as_ref();
         let header = match to_manifest_path(repo_root, root) {
             Ok(relative) if relative == "." => String::new(),
@@ -356,18 +361,18 @@ impl Chrome {
     }
 
     #[must_use]
-    pub fn with_sigils(mut self, sigils: Sigils) -> Self {
+    pub(crate) fn with_sigils(mut self, sigils: Sigils) -> Self {
         self.sigils = sigils;
         self
     }
 
     #[must_use]
-    pub fn header(&self) -> &str {
+    pub(crate) fn header(&self) -> &str {
         &self.header
     }
 
     #[must_use]
-    pub const fn sigils(&self) -> &Sigils {
+    pub(crate) const fn sigils(&self) -> &Sigils {
         &self.sigils
     }
 }
@@ -384,7 +389,7 @@ impl Chrome {
 /// holds, so it goes wherever the panel goes and nowhere else: carried across a
 /// reload, kept by [`App::restore_from`] over the view it rolls back to.
 #[derive(Debug, Clone, Default, PartialEq)]
-pub struct App {
+pub(crate) struct App {
     all_rows: Vec<Row>,
     rows: Vec<Row>,
     collapsible: BTreeSet<PathBuf>,
@@ -440,7 +445,7 @@ struct Status {
 
 impl App {
     #[must_use]
-    pub fn from_tree(tree: &Tree) -> Self {
+    pub(crate) fn from_tree(tree: &Tree) -> Self {
         Self::from_rows(walk_of(tree)).with_counts(tree.counts())
     }
 
@@ -449,7 +454,7 @@ impl App {
     /// never described these rows, which is why [`App::set_subtree_state`]
     /// declines to move it rather than counting up from nothing.
     #[must_use]
-    pub fn from_rows(rows: Vec<Row>) -> Self {
+    pub(crate) fn from_rows(rows: Vec<Row>) -> Self {
         // Every field named, and no `..Default::default()` anywhere in this
         // file: a struct literal that names all of them is what turns a
         // twenty-third field into a compile error here and in [`reseat_on`],
@@ -486,7 +491,8 @@ impl App {
     }
 
     #[must_use]
-    pub fn with_collapsed(
+    #[cfg(test)]
+    pub(crate) fn with_collapsed(
         mut self,
         collapsed: impl IntoIterator<Item = impl Into<PathBuf>>,
     ) -> Self {
@@ -496,17 +502,17 @@ impl App {
     }
 
     #[must_use]
-    pub const fn with_counts(mut self, counts: StateCounts) -> Self {
+    pub(crate) const fn with_counts(mut self, counts: StateCounts) -> Self {
         self.counts = counts;
         self
     }
 
     #[must_use]
-    pub fn message(&self) -> Option<&str> {
+    pub(crate) fn message(&self) -> Option<&str> {
         self.status.message.as_deref()
     }
 
-    pub fn set_message(&mut self, message: impl Into<String>) {
+    pub(crate) fn set_message(&mut self, message: impl Into<String>) {
         self.say(message.into());
     }
 
@@ -521,7 +527,7 @@ impl App {
     /// The count of sayings, whatever they were. Paired with [`App::message`] by
     /// the session, which holds the clock this side has none of.
     #[must_use]
-    pub const fn said(&self) -> u64 {
+    pub(crate) const fn said(&self) -> u64 {
         self.status.said
     }
 
@@ -529,15 +535,21 @@ impl App {
     /// passed. Not a keystroke's business — [`App::forget_last_keystroke`] is
     /// what a movement clears — so it is separate from that and from the run
     /// line, which outlives any number of messages.
-    pub fn forget_message(&mut self) {
+    pub(crate) fn forget_message(&mut self) {
         self.status.message = None;
     }
 
-    pub fn set_pact_in_flight(&mut self, path: impl Into<PathBuf>, position: usize, total: usize) {
+    #[cfg(test)]
+    pub(crate) fn set_pact_in_flight(
+        &mut self,
+        path: impl Into<PathBuf>,
+        position: usize,
+        total: usize,
+    ) {
         self.set_run_in_flight(Run::Pact, path, position, total);
     }
 
-    pub fn set_run_in_flight(
+    pub(crate) fn set_run_in_flight(
         &mut self,
         run: Run,
         path: impl Into<PathBuf>,
@@ -569,27 +581,28 @@ impl App {
     /// anything. Monotonic within a directory because the engine counts up and
     /// `set_run_in_flight` clears this on the way in, so nothing here has to
     /// guard a fraction going backwards the way `reached` does.
-    pub fn set_files_in_flight(&mut self, position: usize, total: usize) {
+    pub(crate) fn set_files_in_flight(&mut self, position: usize, total: usize) {
         if let Some(in_flight) = self.status.in_flight.as_mut() {
             in_flight.files = Some((position, total));
         }
     }
 
-    pub fn clear_pact_in_flight(&mut self) {
+    pub(crate) fn clear_pact_in_flight(&mut self) {
         self.status.in_flight = None;
     }
 
-    pub fn set_pact_refused(&mut self) {
+    pub(crate) fn set_pact_refused(&mut self) {
         self.status.pact_refused = true;
     }
 
     #[must_use]
-    pub const fn is_pacting(&self) -> bool {
+    pub(crate) const fn is_pacting(&self) -> bool {
         self.status.in_flight.is_some()
     }
 
     #[must_use]
-    pub fn is_in_flight(&self, path: &Path) -> bool {
+    #[cfg(test)]
+    pub(crate) fn is_in_flight(&self, path: &Path) -> bool {
         self.status
             .in_flight
             .as_ref()
@@ -601,7 +614,7 @@ impl App {
     /// level down: a file under a subdirectory belongs to that subdirectory's
     /// own turn.
     #[must_use]
-    pub fn in_flight_covers(&self, row: &Row) -> bool {
+    pub(crate) fn in_flight_covers(&self, row: &Row) -> bool {
         self.status.in_flight.as_ref().is_some_and(|in_flight| {
             in_flight.path == row.path
                 || (row.is_file() && row.path.parent() == Some(in_flight.path.as_path()))
@@ -609,7 +622,7 @@ impl App {
     }
 
     #[must_use]
-    pub fn pact_line(&self) -> Option<String> {
+    pub(crate) fn pact_line(&self) -> Option<String> {
         self.status.in_flight.as_ref().map(|in_flight| {
             let label = self.label_for(&in_flight.path);
             let line = match in_flight.run {
@@ -627,7 +640,7 @@ impl App {
     }
 
     #[must_use]
-    pub fn run_header(&self) -> Option<RunHeader> {
+    pub(crate) fn run_header(&self) -> Option<RunHeader> {
         self.status.in_flight.as_ref().map(|in_flight| RunHeader {
             run: in_flight.run,
             directory: self.label_for(&in_flight.path),
@@ -640,7 +653,7 @@ impl App {
     /// A run switches the panel to its account only when there is nothing there
     /// to lose. A reader part-way through a document keeps it: the account has
     /// been opened either way and the swap key reaches it.
-    pub fn start_account(&mut self, at: Instant) {
+    pub(crate) fn start_account(&mut self, at: Instant) {
         if !self.panel.has_content() {
             self.panel.show(Showing::Account);
             self.rescue_focus();
@@ -648,12 +661,16 @@ impl App {
         self.panel.open_account(at);
     }
 
-    pub fn show_document(&mut self, lines: impl IntoIterator<Item = impl Into<String>>, cut: bool) {
+    pub(crate) fn show_document(
+        &mut self,
+        lines: impl IntoIterator<Item = impl Into<String>>,
+        cut: bool,
+    ) {
         self.panel.show_document(lines, cut);
         self.rescue_focus();
     }
 
-    pub fn swap_card(&mut self) {
+    pub(crate) fn swap_card(&mut self) {
         let Some(card) = self.panel.next_card() else {
             self.set_message(no_document_message());
             return;
@@ -666,17 +683,17 @@ impl App {
     }
 
     #[must_use]
-    pub const fn panel(&self) -> &Panel {
+    pub(crate) const fn panel(&self) -> &Panel {
         &self.panel
     }
 
-    pub const fn panel_mut(&mut self) -> &mut Panel {
+    pub(crate) const fn panel_mut(&mut self) -> &mut Panel {
         &mut self.panel
     }
 
     /// What the reader has highlighted in the thread card, if anything.
     #[must_use]
-    pub fn selection(&self) -> Option<Selection> {
+    pub(crate) fn selection(&self) -> Option<Selection> {
         self.highlight.map(|highlight| highlight.selection)
     }
 
@@ -688,7 +705,7 @@ impl App {
     ///
     /// Does nothing when there is no conversation, since a position is an offset
     /// into a thread's text and there is none to snap it against.
-    pub fn start_selection(&mut self, at: Position) {
+    pub(crate) fn start_selection(&mut self, at: Position) {
         let Some(selection) = self.selection_between(at, at) else {
             return;
         };
@@ -701,7 +718,7 @@ impl App {
     /// Moves the far end of the selection to `to`, leaving the anchor where the
     /// press put it. Does nothing until a press has put one there: a drag with
     /// no anchor behind it has no second position to make a selection from.
-    pub fn extend_selection(&mut self, to: Position) {
+    pub(crate) fn extend_selection(&mut self, to: Position) {
         let Some(highlight) = self.highlight else {
             return;
         };
@@ -714,7 +731,7 @@ impl App {
         });
     }
 
-    pub fn clear_selection(&mut self) {
+    pub(crate) fn clear_selection(&mut self) {
         self.highlight = None;
     }
 
@@ -730,7 +747,7 @@ impl App {
     /// Rolls the view back to an earlier copy — but keeps the live panel, since
     /// an account or a conversation is a record of what happened and rolling it
     /// back would discard it at the moment the reader turned to read it.
-    pub fn restore_from(&mut self, view: Self) {
+    pub(crate) fn restore_from(&mut self, view: Self) {
         let panel = mem::take(&mut self.panel);
         // Positions in the thread on the panel that stayed, so the copy's idea
         // of what was highlighted is about a conversation that is not the one
@@ -747,17 +764,18 @@ impl App {
     }
 
     #[must_use]
-    pub fn rows(&self) -> &[Row] {
+    pub(crate) fn rows(&self) -> &[Row] {
         &self.rows
     }
 
     #[must_use]
-    pub const fn collapsed(&self) -> &BTreeSet<PathBuf> {
+    #[cfg(test)]
+    pub(crate) const fn collapsed(&self) -> &BTreeSet<PathBuf> {
         &self.viewpoint.collapsed
     }
 
     #[must_use]
-    pub fn is_collapsed(&self, path: impl AsRef<Path>) -> bool {
+    pub(crate) fn is_collapsed(&self, path: impl AsRef<Path>) -> bool {
         self.viewpoint.collapsed.contains(path.as_ref())
     }
 
@@ -766,84 +784,83 @@ impl App {
     /// onto nothing, so the marker is not offered. `collapsible` is rebuilt by
     /// `drawn_rows` on every `reflow` for that reason.
     #[must_use]
-    pub fn can_collapse(&self, index: usize) -> bool {
+    pub(crate) fn can_collapse(&self, index: usize) -> bool {
         self.rows
             .get(index)
             .is_some_and(|row| self.collapsible.contains(&row.path))
     }
 
     #[must_use]
-    pub const fn pacted_only(&self) -> bool {
+    #[cfg(test)]
+    pub(crate) const fn pacted_only(&self) -> bool {
         self.viewpoint.pacted_only
     }
 
-    pub fn toggle_pacted_only(&mut self) {
+    pub(crate) fn toggle_pacted_only(&mut self) {
         self.viewpoint.pacted_only = !self.viewpoint.pacted_only;
         self.forget_last_keystroke();
         self.reflow();
     }
 
     #[must_use]
-    pub const fn show_files(&self) -> bool {
+    #[cfg(test)]
+    pub(crate) const fn show_files(&self) -> bool {
         self.viewpoint.show_files
     }
 
-    pub fn toggle_files(&mut self) {
+    pub(crate) fn toggle_files(&mut self) {
         self.viewpoint.show_files = !self.viewpoint.show_files;
         self.forget_last_keystroke();
         self.reflow();
     }
 
     #[must_use]
-    pub const fn counts(&self) -> StateCounts {
+    pub(crate) const fn counts(&self) -> StateCounts {
         self.counts
     }
 
     #[must_use]
-    pub fn is_empty(&self) -> bool {
+    #[cfg(test)]
+    pub(crate) fn is_empty(&self) -> bool {
         self.rows.is_empty()
     }
 
     #[must_use]
-    pub const fn selected(&self) -> usize {
+    pub(crate) const fn selected(&self) -> usize {
         self.selected
     }
 
     #[must_use]
-    pub fn selected_row(&self) -> Option<&Row> {
+    pub(crate) fn selected_row(&self) -> Option<&Row> {
         self.rows.get(self.selected)
     }
 
     #[must_use]
-    pub const fn scroll_offset(&self) -> usize {
+    pub(crate) const fn scroll_offset(&self) -> usize {
         self.scroll_offset
     }
 
     #[must_use]
-    pub const fn viewport_height(&self) -> usize {
+    #[cfg(test)]
+    pub(crate) const fn viewport_height(&self) -> usize {
         self.viewpoint.viewport_height
     }
 
-    pub fn set_viewport_height(&mut self, height: u16) {
+    pub(crate) fn set_viewport_height(&mut self, height: u16) {
         self.viewpoint.viewport_height = usize::from(height);
         self.rescroll();
     }
 
-    #[must_use]
-    pub const fn mouse_captured(&self) -> bool {
-        self.status.mouse_captured
-    }
-
-    pub const fn set_mouse_captured(&mut self, captured: bool) {
+    pub(crate) const fn set_mouse_captured(&mut self, captured: bool) {
         self.status.mouse_captured = captured;
     }
 
     #[must_use]
-    pub const fn focus(&self) -> Focus {
+    pub(crate) const fn focus(&self) -> Focus {
         self.viewpoint.focus
     }
 
-    pub const fn toggle_focus(&mut self) {
+    pub(crate) const fn toggle_focus(&mut self) {
         let next = self.viewpoint.focus.next();
         self.viewpoint.focus = match next {
             Focus::Composer if !self.panel().composer_showable() => next.next(),
@@ -851,7 +868,7 @@ impl App {
         };
     }
 
-    pub const fn set_focus(&mut self, focus: Focus) {
+    pub(crate) const fn set_focus(&mut self, focus: Focus) {
         self.viewpoint.focus = focus;
         self.rescue_focus();
     }
@@ -869,14 +886,14 @@ impl App {
         }
     }
 
-    pub fn select_previous(&mut self) {
+    pub(crate) fn select_previous(&mut self) {
         self.movement(
             |app| app.selected.saturating_sub(1),
             |_, offset| offset.saturating_sub(1),
         );
     }
 
-    pub fn select_next(&mut self) {
+    pub(crate) fn select_next(&mut self) {
         self.movement(
             |app| {
                 let last = app.rows.len().saturating_sub(1);
@@ -886,14 +903,14 @@ impl App {
         );
     }
 
-    pub fn select_page_up(&mut self) {
+    pub(crate) fn select_page_up(&mut self) {
         self.movement(
             |app| app.selected.saturating_sub(app.page()),
             |app, offset| offset.saturating_sub(app.panel.page()),
         );
     }
 
-    pub fn select_page_down(&mut self) {
+    pub(crate) fn select_page_down(&mut self) {
         self.movement(
             |app| {
                 let last = app.rows.len().saturating_sub(1);
@@ -903,11 +920,11 @@ impl App {
         );
     }
 
-    pub fn select_first(&mut self) {
+    pub(crate) fn select_first(&mut self) {
         self.movement(|_| 0, |_, _| 0);
     }
 
-    pub fn select_last(&mut self) {
+    pub(crate) fn select_last(&mut self) {
         // `usize::MAX` rather than the panel's last line: the panel clamps, and
         // asking it for its length here would be a second place that knows how
         // long a card is.
@@ -917,7 +934,7 @@ impl App {
     // The pointer family, from here to `scroll_panel_up`. These never consult
     // the focus — the pointer names the pane it is over — and so must not be
     // routed through `movement`.
-    pub fn select_row(&mut self, index: usize) {
+    pub(crate) fn select_row(&mut self, index: usize) {
         if index >= self.rows.len() {
             return;
         }
@@ -925,23 +942,23 @@ impl App {
         self.moved();
     }
 
-    pub fn select_next_by(&mut self, rows: usize) {
+    pub(crate) fn select_next_by(&mut self, rows: usize) {
         let last = self.rows.len().saturating_sub(1);
         self.selected = self.selected.saturating_add(rows).min(last);
         self.moved();
     }
 
-    pub fn select_previous_by(&mut self, rows: usize) {
+    pub(crate) fn select_previous_by(&mut self, rows: usize) {
         self.selected = self.selected.saturating_sub(rows);
         self.moved();
     }
 
-    pub fn scroll_panel_down(&mut self, lines: usize) {
+    pub(crate) fn scroll_panel_down(&mut self, lines: usize) {
         self.panel
             .scroll_to(self.panel().scroll_offset().saturating_add(lines));
     }
 
-    pub fn scroll_panel_up(&mut self, lines: usize) {
+    pub(crate) fn scroll_panel_up(&mut self, lines: usize) {
         self.panel
             .scroll_to(self.panel().scroll_offset().saturating_sub(lines));
     }
@@ -1010,7 +1027,7 @@ impl App {
     }
 
     #[must_use]
-    pub fn label_for(&self, path: &Path) -> String {
+    pub(crate) fn label_for(&self, path: &Path) -> String {
         match self
             .rows
             .first()
@@ -1021,7 +1038,7 @@ impl App {
         }
     }
 
-    pub fn toggle_collapsed(&mut self) {
+    pub(crate) fn toggle_collapsed(&mut self) {
         if !self.can_collapse(self.selected) {
             return;
         }
@@ -1037,7 +1054,8 @@ impl App {
         self.reflow();
     }
 
-    pub fn toggle_pact(&mut self) -> Option<PactToggle> {
+    #[cfg(test)]
+    pub(crate) fn toggle_pact(&mut self) -> Option<PactToggle> {
         match self.pact_intent() {
             PactIntent::Toggles(toggle) => {
                 self.apply_toggle(&toggle);
@@ -1052,7 +1070,7 @@ impl App {
     }
 
     #[must_use]
-    pub fn pact_intent(&self) -> PactIntent {
+    pub(crate) fn pact_intent(&self) -> PactIntent {
         let Some(row) = self.rows.get(self.selected) else {
             return PactIntent::NoRow;
         };
@@ -1070,7 +1088,7 @@ impl App {
     }
 
     #[must_use]
-    pub fn pact_reach(&self) -> Option<PactToggle> {
+    pub(crate) fn pact_reach(&self) -> Option<PactToggle> {
         let row = self.rows.get(self.selected)?;
         (!row.is_file()).then(|| PactToggle {
             path: row.path.clone(),
@@ -1078,7 +1096,7 @@ impl App {
         })
     }
 
-    pub fn apply_toggle(&mut self, toggle: &PactToggle) {
+    pub(crate) fn apply_toggle(&mut self, toggle: &PactToggle) {
         self.set_subtree_state(
             &toggle.path,
             if toggle.pacted {
@@ -1108,7 +1126,7 @@ impl App {
         Some((path, state))
     }
 
-    pub fn refresh(&mut self) -> Option<PathBuf> {
+    pub(crate) fn refresh(&mut self) -> Option<PathBuf> {
         let (path, state) = self.selected_directory()?;
         match state {
             NodeState::Unpacted => {
@@ -1126,7 +1144,7 @@ impl App {
         }
     }
 
-    pub fn scope_target(&mut self) -> Option<PathBuf> {
+    pub(crate) fn scope_target(&mut self) -> Option<PathBuf> {
         let (path, state) = self.selected_directory()?;
         match state {
             NodeState::Unpacted => {
@@ -1139,7 +1157,7 @@ impl App {
         }
     }
 
-    pub fn view_target(&mut self) -> Option<PathBuf> {
+    pub(crate) fn view_target(&mut self) -> Option<PathBuf> {
         let row = self.rows.get(self.selected)?;
         let path = row.path.clone();
         let document = row.document.clone();
@@ -1154,7 +1172,7 @@ impl App {
         None
     }
 
-    pub fn set_subtree_state(&mut self, path: impl AsRef<Path>, state: NodeState) {
+    pub(crate) fn set_subtree_state(&mut self, path: impl AsRef<Path>, state: NodeState) {
         let path = path.as_ref();
 
         // The tally first, off the unfiltered list, so that every node is
@@ -1180,7 +1198,7 @@ impl App {
         paint_subtree(&mut self.rows, path, state);
     }
 
-    pub fn insert_file_row(&mut self, path: impl AsRef<Path>) {
+    pub(crate) fn insert_file_row(&mut self, path: impl AsRef<Path>) {
         let path = path.as_ref();
         // One row per path, so a second delivery for a directory already
         // holding its document is not news.
@@ -1267,7 +1285,7 @@ fn file_row_position(rows: &[Row], directory: usize, depth: usize, path: &Path) 
 }
 
 #[must_use]
-pub fn reseat_on(view: &App, tree: &Tree) -> App {
+pub(crate) fn reseat_on(view: &App, tree: &Tree) -> App {
     // Taken before anything is rebuilt, because it is the one fact about the
     // old view that the new rows cannot be asked for.
     let selected = view.selected_row().map(|row| row.path.clone());

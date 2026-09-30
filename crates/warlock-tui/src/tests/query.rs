@@ -4,8 +4,8 @@ use warlock_engine::{Manifest, Node, NodeState, PactEntry, Tree};
 
 use super::{Listed, Listing, listed, listed_onto, object, spelled, state_word};
 use crate::error::Error;
+use crate::error::status_for;
 use crate::standing::Standing;
-use crate::status_for;
 
 fn listing_of(repo: &Path, listing: Listing, path: Option<&str>, json: bool) -> Vec<String> {
     let standing = Standing::at(repo.to_path_buf(), repo.to_path_buf());

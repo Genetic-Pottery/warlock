@@ -19,7 +19,7 @@ use crate::wrap::folded;
 /// A cap rather than a field, because the panel above loses exactly the rows the
 /// composer takes: a draft allowed to grow without limit would eat the account
 /// it is being typed next to. Past it the draft scrolls within the rows it has.
-pub const COMPOSER_MAX_ROWS: u16 = 6;
+pub(crate) const COMPOSER_MAX_ROWS: u16 = 6;
 
 // How many rows the window keeps above the cursor's row while it can. Two rather
 // than none, because a window that started at the cursor's row would scroll at
@@ -48,7 +48,7 @@ const CHORD: KeyModifiers = KeyModifiers::CONTROL
 /// built here must carry the incoming three through untouched — a keystroke
 /// that dropped one would read as a redraw to any whole-value comparison.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
-pub struct Composer {
+pub(crate) struct Composer {
     draft: String,
     /// A byte offset rather than a row and a column, so it goes on meaning the
     /// same place when the terminal is resized and the draft re-flows under it.
@@ -73,7 +73,7 @@ impl Composer {
     /// key works on it exactly as it works on something they typed, because it
     /// is the same value a typed draft is.
     #[must_use]
-    pub fn new(draft: impl Into<String>) -> Self {
+    pub(crate) fn new(draft: impl Into<String>) -> Self {
         let draft = draft.into();
         let cursor = draft.len();
 
@@ -94,7 +94,8 @@ impl Composer {
     /// come through here, so everything reaching it is a test with a wrong
     /// expectation, which should be loud rather than quietly moved.
     #[must_use]
-    pub fn at(mut self, offset: usize) -> Self {
+    #[cfg(test)]
+    pub(crate) fn at(mut self, offset: usize) -> Self {
         assert!(
             offset <= self.draft.len(),
             "cursor offset {offset} is past the end of {:?}",
@@ -111,7 +112,8 @@ impl Composer {
     }
 
     #[must_use]
-    pub const fn cursor(&self) -> usize {
+    #[cfg(test)]
+    pub(crate) const fn cursor(&self) -> usize {
         self.cursor
     }
 
@@ -123,12 +125,13 @@ impl Composer {
     ///
     /// Nothing about the draft or the cursor moves: the same bytes re-flow into
     /// different rows and the offset goes on meaning the byte it always meant.
-    pub const fn set_width(&mut self, width: u16) {
+    pub(crate) const fn set_width(&mut self, width: u16) {
         self.width = width;
     }
 
     #[must_use]
-    pub const fn width(&self) -> u16 {
+    #[cfg(test)]
+    pub(crate) const fn width(&self) -> u16 {
         self.width
     }
 
@@ -138,12 +141,12 @@ impl Composer {
     ///
     /// The draft does not move: muting is about which keys the field hears, not
     /// about what somebody has written.
-    pub const fn set_muted(&mut self, muted: bool) {
+    pub(crate) const fn set_muted(&mut self, muted: bool) {
         self.muted = muted;
     }
 
     #[must_use]
-    pub const fn is_muted(&self) -> bool {
+    pub(crate) const fn is_muted(&self) -> bool {
         self.muted
     }
 
@@ -154,27 +157,27 @@ impl Composer {
     /// The draft does not move. What this changes is what the field is drawn as
     /// and nothing about what is in it, because a question relayed into the
     /// field is answered with whatever somebody sends — theirs or warlock's.
-    pub fn set_answering(&mut self, answering: Option<String>) {
+    pub(crate) fn set_answering(&mut self, answering: Option<String>) {
         self.answering = answering;
     }
 
     #[must_use]
-    pub fn answering(&self) -> Option<&str> {
+    pub(crate) fn answering(&self) -> Option<&str> {
         self.answering.as_deref()
     }
 
     #[must_use]
-    pub fn draft(&self) -> &str {
+    pub(crate) fn draft(&self) -> &str {
         &self.draft
     }
 
     #[must_use]
-    pub fn is_submittable(&self) -> bool {
+    pub(crate) fn is_submittable(&self) -> bool {
         !self.draft.trim().is_empty()
     }
 
     #[must_use]
-    pub fn height(&self, width: u16) -> u16 {
+    pub(crate) fn height(&self, width: u16) -> u16 {
         // At most `COMPOSER_MAX_ROWS`, and the row count is at least one, so
         // this never truncates and never comes back zero.
         u16::try_from(self.rows(width).len())
@@ -199,7 +202,7 @@ impl Composer {
     /// caret row of zero, which is the one window whose caret is not a row of
     /// its own rows.
     #[must_use]
-    pub fn window(&self, width: u16, height: u16) -> ComposerWindow {
+    pub(crate) fn window(&self, width: u16, height: u16) -> ComposerWindow {
         let (row, column) = self.place(self.cursor, width);
         let height = usize::from(height);
         if height == 0 {
@@ -332,7 +335,7 @@ impl Composer {
 /// scrolled off the rows beside it. [`Composer::window`] is the only thing that
 /// builds one.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct ComposerWindow {
+pub(crate) struct ComposerWindow {
     pub rows: Vec<String>,
     /// An index into *these* rows and not into the draft's, so the drawing adds
     /// nothing to it and cannot add the scroll twice.
@@ -351,7 +354,7 @@ pub struct ComposerWindow {
 /// was typed and no way for a submission to disagree with the field it came
 /// from.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum Composed {
+pub(crate) enum Composed {
     Typing(Composer),
     Leave,
     Submit,
@@ -366,7 +369,7 @@ pub enum Composed {
 /// than as well, so while the field has the keyboard `j`, `p` and `r` are
 /// letters somebody is typing.
 #[must_use]
-pub fn compose_for(key: KeyEvent, composer: &Composer) -> Composed {
+pub(crate) fn compose_for(key: KeyEvent, composer: &Composer) -> Composed {
     if key.kind != KeyEventKind::Press {
         return Composed::Typing(composer.clone());
     }
@@ -492,7 +495,7 @@ pub fn compose_for(key: KeyEvent, composer: &Composer) -> Composed {
 /// two behind the mute that turn put up, and a negative promise held by a return
 /// type is one no call site can forget.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum Pasted {
+pub(crate) enum Pasted {
     Typing(Composer),
 }
 
@@ -505,7 +508,7 @@ pub enum Pasted {
 /// its caller and this does not: a paste is a single arrival carrying however
 /// much was copied, so a gate missed at a call site would land the lot.
 #[must_use]
-pub fn paste_for(text: &str, composer: &Composer) -> Pasted {
+pub(crate) fn paste_for(text: &str, composer: &Composer) -> Pasted {
     if composer.muted {
         return Pasted::Typing(composer.clone());
     }

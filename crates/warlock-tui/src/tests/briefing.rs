@@ -2,15 +2,14 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use warlock_engine::{DEFAULT_BRIEF_DIRECTORY, briefs_path, from_manifest_path};
-use warlock_tui::{
-    BRIEF_EFFORT, BRIEF_MODEL, ChatAgent, DEFAULT_TEMPLATE, Ending, WRITE_INSTRUCTION,
-    brief_instruction,
-};
 
 use super::{ONLY_WRITE, OPENING, OVER, PROMPT, briefing, raised, reading};
+use crate::claude::{BRIEF_EFFORT, BRIEF_MODEL, ChatAgent, WRITE_INSTRUCTION, brief_instruction};
 use crate::error::Error;
 use crate::standing::Standing;
 use crate::stubs::{Answering, Scripted, Typing};
+use crate::template::DEFAULT_TEMPLATE;
+use crate::thread::Ending;
 use crate::writing::proposed_path;
 
 // Every test builds its own repository out of one of these, so nothing here

@@ -21,11 +21,11 @@ use std::process::Command;
 use std::{env, io};
 
 use warlock_engine::{Manifest, Viewed, view_file};
-use warlock_tui::App;
 
+use crate::app::App;
 use crate::error::one_line;
+use crate::screen::Screen;
 use crate::session::{Scope, note, reload};
-use crate::terminal::Screen;
 
 const EDITOR_VAR: &str = "EDITOR";
 

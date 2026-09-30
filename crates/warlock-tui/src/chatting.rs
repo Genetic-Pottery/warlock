@@ -1,5 +1,6 @@
-//! The conversation the binary keeps: an agent, at most one turn in flight, the
-//! draft at the foot of the panel, and the window a written brief opens in.
+//! The conversation an interactive session keeps: an agent, at most one turn in
+//! flight, the draft at the foot of the panel, and the window a written brief
+//! opens in.
 //!
 //! The register the conversation is in is deliberately not held here. It lives
 //! on the panel, the one part of the app a failed pact restores untouched, so a
@@ -18,16 +19,21 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use warlock_engine::{DEFAULT_BRIEF_DIRECTORY, briefs, load_briefs, to_manifest_path};
-use warlock_tui::{
-    Activities, Activity, App, BRIEF_EFFORT, BRIEF_MODEL, CHAT_INSTRUCTION, Cancel, ChatAgent,
-    Composed, Composer, Converses, Edited, Ending, Focus, Mode, Pasted, ScopePrompt, Submitted,
-    Taking, TemplateError, WRITE_INSTRUCTION, brief_instruction, brief_template, ending_for,
-    submitted_for,
-};
 
+use crate::app::{App, Focus};
+use crate::claude::{
+    Activities, Activity, BRIEF_EFFORT, BRIEF_MODEL, CHAT_INSTRUCTION, Cancel, ChatAgent,
+    Converses, WRITE_INSTRUCTION, brief_instruction,
+};
+use crate::composer::{Composed, Composer, Pasted};
 use crate::error::one_line;
 use crate::inflight::{Lost, Port, Stream, Workers, settled};
 use crate::pacting::CancelGuard;
+use crate::panel::Mode;
+use crate::prompt::{Edited, ScopePrompt};
+use crate::submission::{Submitted, Taking, submitted_for};
+use crate::template::{Error as TemplateError, brief_template};
+use crate::thread::{Ending, ending_for};
 use crate::writing::{write_edit, write_opened};
 
 // Said of a lost turn. Worded as the tail of `Ending::Broke`'s sentence rather

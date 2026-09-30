@@ -6,15 +6,15 @@ use warlock_engine::{
     Manifest, PactEntry, PullRun, RunStatus, ScopeRecord, brief_path, pulls_dir, save_key,
     save_key_binding, save_sigils, state_path,
 };
-use warlock_tui::{
-    Activity, Assignee, Blocker, Dirty, NamedIssue, Opened, Priority, Queue, QueuedIssue, Reason,
-    Refusal, StateType,
-};
 
 use super::{Ports, Prepared, Progress, Shared, held, prepare, pulled, shared};
+use crate::claude::Activity;
 use crate::error::Error;
+use crate::error::status_for;
+use crate::git::{Dirty, Opened};
+use crate::linear::{Assignee, Blocker, NamedIssue, Priority, Queue, QueuedIssue, StateType};
 use crate::pulling::Pulled;
-use crate::status_for;
+use crate::queue::{Reason, Refusal};
 use crate::stubs::{
     Boarding, Checkout, Forging, GitCall, Refreshing, Sessions, Slicing, VIEWER, said,
 };

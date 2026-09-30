@@ -4,11 +4,11 @@ use std::path::Path;
 use tempfile::TempDir;
 use warlock_engine::drafting::Draft;
 use warlock_engine::{CutRecord, Destination, Filed, FiledRecord, filed_path};
-use warlock_tui::{Board, LinearIssue};
 
 use super::{Cut, Filing, Slice, announce, cut};
 use crate::error::Error;
-use crate::status_for;
+use crate::error::status_for;
+use crate::linear::{Board, Issue as LinearIssue};
 use crate::stubs::{Boarding, Call, IssueAsked, Op, VIEWER};
 
 const SCOPE: &str = "warlock-team";

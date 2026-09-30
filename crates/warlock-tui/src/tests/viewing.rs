@@ -4,9 +4,10 @@ use std::time::Instant;
 
 use tempfile::TempDir;
 use warlock_engine::{Node, NodeState, PER_FILE_BYTE_CAP, Tree, Viewed, view_file};
-use warlock_tui::{App, Line};
 
 use super::view_press;
+use crate::account::Line;
+use crate::app::App;
 
 // The line the last keystroke left on the footer. A successful read is not
 // allowed to spend it: showing a file says nothing.

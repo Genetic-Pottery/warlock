@@ -22,7 +22,7 @@ const REFUSAL: &str = "warlock has seven commands — /brief, /write, /chat, /pu
 // `Some(("warlock-team", None))` has nothing but the order to tell it which
 // position is the scope.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct Taking<'a> {
+pub(crate) struct Taking<'a> {
     pub scope: &'a str,
     pub ticket: Option<&'a str>,
 }
@@ -36,7 +36,7 @@ pub struct Taking<'a> {
 // draft the caller still owns, and `&str` is `Copy`, so the value stays as cheap
 // to pass around as it was when no variant carried anything.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum Submitted<'a> {
+pub(crate) enum Submitted<'a> {
     Brief,
     Write,
     Chat,
@@ -65,7 +65,7 @@ impl Submitted<'_> {
     // A method rather than a bare constant, so the caller asks the value what
     // it has to say instead of asking itself which variant deserves a line.
     #[must_use]
-    pub const fn refusal(self) -> Option<&'static str> {
+    pub(crate) const fn refusal(self) -> Option<&'static str> {
         match self {
             Self::Refused => Some(REFUSAL),
             _ => None,
@@ -84,7 +84,7 @@ impl Submitted<'_> {
 // refused would be one invisible character deciding between a mode change and a
 // complaint.
 #[must_use]
-pub fn submitted_for(draft: &str) -> Submitted<'_> {
+pub(crate) fn submitted_for(draft: &str) -> Submitted<'_> {
     let draft = draft.trim();
     let Some(word) = draft.split_whitespace().next() else {
         return Submitted::Message;

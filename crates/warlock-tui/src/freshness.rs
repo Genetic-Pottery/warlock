@@ -60,11 +60,12 @@ use warlock_engine::{
     Agent, Manifest, NodeState, PactEntry, decide_state, from_manifest_path, manifest_path, pact,
     subtree_hash, to_manifest_path,
 };
-use warlock_tui::{Cancel, GitError, Repository};
 
 use crate::boundary::{Operation, permits};
+use crate::claude::Cancel;
 use crate::descent::{Descent, descend};
 use crate::error::one_line;
+use crate::git::{Error as GitError, Repository};
 use crate::pulling::StaleDirectory;
 
 // The manifest's spelling of the repository root, which is a pacted module like
@@ -74,7 +75,7 @@ const ROOT_MODULE: &str = ".";
 /// The manifest spelling of every directory to refresh, deepest first.
 ///
 /// `changed` is the branch's changed paths as
-/// [`changed_against`](warlock_tui::Repository::changed_against) gives them:
+/// [`changed_against`](crate::git::Repository::changed_against) gives them:
 /// repository-root-relative, and including the ones the branch deleted, which
 /// still count as changing the directory they were in.
 ///
@@ -157,8 +158,8 @@ fn depth(module: &str) -> usize {
 /// them passed in the wrong position.
 ///
 /// `repo` is a `&dyn` where the loop's own field is generic, so the seam crosses
-/// into a `main.rs` module without a sixth type parameter following it; nothing
-/// here calls anything a stand-in cannot answer.
+/// into this module without a sixth type parameter following it; nothing here
+/// calls anything a stand-in cannot answer.
 ///
 /// No `Debug`, for [`Pulling`](crate::pulling::Pulling)'s reason: this is a
 /// manifest, a sigil list and a checkout, and a failing assertion anywhere in the
@@ -197,12 +198,9 @@ pub(crate) struct Freshened {
 /// The freshness pass, behind a seam, as [`Splits`](crate::pulling::Splits) and
 /// [`Works`](crate::pulling::Works) are.
 ///
-/// A trait because the pass is a `main.rs` module —
-/// [`descend`](crate::descent::descend) and
-/// [`permits`](crate::boundary::permits) are private to the binary — and because
-/// the loop it is called from is driven in its own tests by fakes that spend no
-/// model pass. The implementation on the real road holds the agent and the
-/// say-when and calls [`freshened`].
+/// A trait because the loop it is called from is driven in its own tests by
+/// fakes that spend no model pass. The implementation on the real road holds the
+/// agent and the say-when and calls [`freshened`].
 pub(crate) trait Freshens {
     fn freshen(&self, asked: &Freshening<'_>) -> Result<Freshened, GitError>;
 }

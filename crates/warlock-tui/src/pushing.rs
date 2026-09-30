@@ -24,13 +24,14 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use warlock_engine::{Manifest, filing, from_manifest_path};
-use warlock_tui::{
-    App, Edited, LinearOpener, Opens, PushAnswered, PushConfirm, ScopeField, ScopePrompt,
-};
 
+use crate::app::App;
+use crate::confirm::{PushAnswered, PushConfirm};
 use crate::cut::listed;
 use crate::error::{Error, one_line};
 use crate::inflight::{Lost, Once, Workers, settled};
+use crate::linear::{Opener as LinearOpener, Opens};
+use crate::prompt::{Edited, ScopeField, ScopePrompt};
 use crate::push::{Prepared, file, prepare};
 use crate::standing::Standing;
 

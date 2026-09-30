@@ -24,11 +24,12 @@ use std::time::Instant;
 use std::{fs, io};
 
 use warlock_engine::{from_manifest_path, to_manifest_path};
-use warlock_tui::{
-    App, Edited, ScopeField, ScopePrompt, TemplateError, brief_template, missing_sections, size,
-};
 
+use crate::account::size;
+use crate::app::App;
 use crate::error::{Error, one_line};
+use crate::prompt::{Edited, ScopeField, ScopePrompt};
+use crate::template::{Error as TemplateError, brief_template, missing_sections};
 
 pub(crate) const WRITE_HEADING: &str = "Write the brief to";
 

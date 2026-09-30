@@ -1,8 +1,8 @@
 use std::fmt;
 
 use warlock_engine::{Manifest, ScopeRecord, scope, validate_scope};
-use warlock_tui::RecordField;
 
+use crate::prompt::RecordField;
 use crate::writing::listing;
 
 // The three values of a `[[scope]]` record exactly as a door was handed them:
@@ -10,10 +10,10 @@ use crate::writing::listing;
 // forbidden or blank is a fact about what the manifest already records, so it
 // is judged inside [`rescope`] and never before it.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) struct RecordFields<'a> {
-    pub(crate) team: Option<&'a str>,
-    pub(crate) review_state: Option<&'a str>,
-    pub(crate) label: Option<&'a str>,
+pub struct RecordFields<'a> {
+    pub team: Option<&'a str>,
+    pub review_state: Option<&'a str>,
+    pub label: Option<&'a str>,
 }
 
 impl<'a> RecordFields<'a> {
@@ -45,7 +45,7 @@ pub(crate) struct Rescoped {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum ScopeRefusal {
+pub enum ScopeRefusal {
     Rule {
         rule: scope::Rule,
     },

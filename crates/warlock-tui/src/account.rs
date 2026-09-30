@@ -780,7 +780,7 @@ fn spend(cost: Option<f64>) -> String {
 /// file on disk — and two formatters would be two spellings the day either
 /// changed.
 #[must_use]
-pub fn size(bytes: u64) -> String {
+pub(crate) fn size(bytes: u64) -> String {
     const KB: u64 = 1024;
     const MB: u64 = KB * KB;
 

@@ -9,16 +9,17 @@ use warlock_engine::{
     CutRecord, Filed, FiledRecord, Manifest, PactEntry, ScopeRecord, agent, filed_path, save_key,
     save_key_binding, save_sigils,
 };
-use warlock_tui::{
-    Activities, Cancel, Converses, DRAFTING_CONTRACT, DRAFTING_ROUNDS, FetchedProject,
-    NOTHING_SETTLES_IT, Opens, ScopeBlockError, Wired,
-};
 
 use super::{ACCEPT, Planned, SKIP, Settled, cut_with, prepare};
 use crate::asking::Asks;
+use crate::brief::ScopeBlockError;
+use crate::claude::{
+    Activities, Cancel, Converses, DRAFTING_CONTRACT, DRAFTING_ROUNDS, NOTHING_SETTLES_IT, Wired,
+};
 use crate::error::Error;
+use crate::error::status_for;
+use crate::linear::{FetchedProject, Opens};
 use crate::standing::Standing;
-use crate::status_for;
 use crate::stubs::{Answering, Boarding, Call, Op, Saying, Scripted, Typing, VIEWER};
 
 // Not a key, and named so that nothing reading this file mistakes it for one.
@@ -98,28 +99,6 @@ const OFFERED: &str = "`accept` to file these, Enter or `skip` to leave it for a
 
 // A line that is none of the two words, which is feedback whatever it says.
 const FEEDBACK: &str = "Two tickets is one too many; say it in one.";
-
-// The model a read may never turn. A refusal opens no session and a dry run
-// opens none at all, so being asked for a turn is the failure rather than a
-// flag.
-#[derive(Debug, Clone, Copy)]
-struct Unasked;
-
-impl Wired for Unasked {
-    fn wired(&self, _cancel: Cancel, _activities: Activities) -> Self {
-        *self
-    }
-}
-
-impl Converses for Unasked {
-    fn turn(&self, _message: &str) -> Result<String, agent::Error> {
-        panic!("a drafting session was opened");
-    }
-
-    fn raised(&self, _model: &str, _effort: &str) -> Self {
-        *self
-    }
-}
 
 // A model that answers every turn with the drafting road's own stub object,
 // modelled on `stubs.rs`'s `Saying` and keeping what it was asked so that the
@@ -435,8 +414,8 @@ fn cut_to<O: Opens>(
         scope,
         dry_run,
         open,
-        &Unasked,
-        &Unasked,
+        &Scripted::saying([]),
+        &Scripted::saying([]),
         &mut Unprompted,
     )
 }
@@ -469,7 +448,7 @@ fn cut_running<A: Converses>(
         false,
         linear,
         agent,
-        &Unasked,
+        &Scripted::saying([]),
         &mut accepting(),
     )
 }
@@ -484,7 +463,15 @@ fn cut_reviewing<A: Converses, K: Asks>(
     ask: &mut K,
 ) -> (Result<(), Error>, String) {
     cutting(
-        repo, home, BRIEF_PATH, None, false, linear, agent, &Unasked, ask,
+        repo,
+        home,
+        BRIEF_PATH,
+        None,
+        false,
+        linear,
+        agent,
+        &Scripted::saying([]),
+        ask,
     )
 }
 

@@ -24,11 +24,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use warlock_engine::pact::Event;
 use warlock_engine::{Agent, PactedSubtree, pact};
-use warlock_tui::{Cancel, ClaudeAgent};
 
-use crate::CANCELLED;
+use crate::claude::{Cancel, ClaudeAgent};
 use crate::descent::{Descent, descend};
 use crate::edits::{Opened, opened};
+use crate::error::CANCELLED;
 use crate::error::{Error, one_line};
 use crate::freshness::named;
 
@@ -348,11 +348,11 @@ fn descended<O: Write, E: Write>(
 
 // One line, for the reason `edits::unpact` is two: the whole of the command is
 // [`started`], and what tells it from the refresh below is the tag it is handed.
-pub(crate) fn pact(path: &Path) -> Result<(), Error> {
+pub fn pact(path: &Path) -> Result<(), Error> {
     started(Descent::Pact, path)
 }
 
-pub(crate) fn refresh(path: &Path) -> Result<(), Error> {
+pub fn refresh(path: &Path) -> Result<(), Error> {
     started(Descent::Refresh, path)
 }
 

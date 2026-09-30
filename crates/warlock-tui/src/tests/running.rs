@@ -8,9 +8,8 @@ use warlock_engine::{
     stub_answer,
 };
 
-use warlock_tui::Cancel;
-
 use super::{Descent, Report, descended, named};
+use crate::claude::Cancel;
 use crate::edits::Opened;
 use crate::error::Error;
 use crate::session::load_manifest;
@@ -19,7 +18,7 @@ use crate::session::load_manifest;
 // about one boundary, and a test holding its own copy of those words would
 // go on passing while the doors drifted apart.
 use crate::boundary::closed_scope_message;
-use crate::status_for;
+use crate::error::status_for;
 
 fn a_dir() -> tempfile::TempDir {
     tempfile::tempdir().expect("a temporary directory")

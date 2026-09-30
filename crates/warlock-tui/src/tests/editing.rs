@@ -2,9 +2,9 @@ use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
 use warlock_engine::{Node, NodeState, Tree};
-use warlock_tui::App;
 
 use super::{Editor, NO_EDITOR, came_back, edit_target, editor_command, run_editor};
+use crate::app::App;
 
 // The line the last keystroke left on the footer, so "the refusal did not go
 // through the message line" is an assertion about a line that is really there.
@@ -300,9 +300,10 @@ mod back {
     use warlock_engine::{
         Loaded, Manifest, NodeState, PactEntry, load_tree, repository_root, subtree_hash,
     };
-    use warlock_tui::{App, Chrome, Line};
 
     use super::came_back;
+    use crate::account::Line;
+    use crate::app::{App, Chrome};
     use crate::session::Scope;
 
     // Room for more lines than any file here has, so what a test reads off the panel

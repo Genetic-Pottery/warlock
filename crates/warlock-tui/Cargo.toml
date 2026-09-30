@@ -11,9 +11,9 @@ repository.workspace = true
 name = "warlock"
 path = "src/main.rs"
 
-# The pure parts of the front end (state-to-colour, app state) live in the
-# library so they are ordinary reachable API that the binary and the tests both
-# use; `src/main.rs` is the thin shell around them.
+# Everything but argv, the terminal and the event loop lives in the library, so
+# its tests share one set of stand-ins and only the argv tests are the
+# binary's; `src/main.rs` is the thin shell around it.
 [lib]
 name = "warlock_tui"
 path = "src/lib.rs"

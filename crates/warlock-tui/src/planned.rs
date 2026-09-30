@@ -38,12 +38,13 @@ use std::path::{Path, PathBuf};
 
 use warlock_engine::drafting::Draft;
 use warlock_engine::{Destination, Manifest, agent, filed_path, resolve_filing};
-use warlock_tui::{
-    Board, ChatAgent, Converses, Drafted, Drafting, LinearIssue, LinearOpener, NOTHING_SETTLES_IT,
-    Opens, Replied, Slice, propose_answer, scope_block_in,
-};
 
 use crate::asking::{self, Asks};
+use crate::brief::{Slice, scope_block_in};
+use crate::claude::{
+    ChatAgent, Converses, Drafted, Drafting, NOTHING_SETTLES_IT, Replied, propose_answer,
+};
+use crate::linear::{Board, Issue as LinearIssue, Opener as LinearOpener, Opens};
 // The module rather than its `cut` and `Slice`, which would both be a second
 // name for something this file already has: the slices here are the document's,
 // and `cut::Slice` is one slice's drafts on their way to a board.
@@ -74,7 +75,7 @@ const ACCEPT: &str = "accept";
 
 const SKIP: &str = "skip";
 
-pub(crate) fn cut(path: &Path, scope: Option<&str>, dry_run: bool) -> Result<(), Error> {
+pub fn cut(path: &Path, scope: Option<&str>, dry_run: bool) -> Result<(), Error> {
     let standing = Standing::here(FOR_CUT)?;
     // The error rather than `check`'s `.ok()`, for [`mod@crate::push`]'s reason:
     // the sigils under the home pick the board and the key store beside them is
@@ -307,7 +308,7 @@ fn drafted<A: Converses, P: Converses, K: Asks, W: Write>(
 
 /// What somebody at the shell said to do with one slice's drafts.
 ///
-/// The panel's three answers ([`Reviewed`](warlock_tui::Reviewed)) read off a
+/// The panel's three answers ([`Reviewed`](crate::confirm::Reviewed)) read off a
 /// line rather than off a key, with one difference the road forces: there is no
 /// window to light an answer on, so the words are typed and anything that is not
 /// one of them is the feedback itself. A reader who has to say what is wrong

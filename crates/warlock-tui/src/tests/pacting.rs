@@ -12,12 +12,12 @@ use warlock_engine::{
     document::{ATTEMPTS, ENTRY_CHARS, FILE_PROMPT},
     load_tree, repository_root, stub_answer, subtree_hash,
 };
-use warlock_tui::{
-    Account, Activities, Activity, App, Chrome, ClaudeAgent, Line, Mode, PactToggle, Run, Section,
-    Sigils,
-};
 
-use warlock_tui::Cancel;
+use crate::account::{Account, Line, Section};
+use crate::app::{App, Chrome, PactToggle, Run, Sigils};
+use crate::claude::Cancel;
+use crate::claude::{Activities, Activity, ClaudeAgent};
+use crate::panel::Mode;
 
 use super::{
     CancelGuard, PACT_CANCELLED, PACT_LOST, Pact, PactEvent, Reloaded, Running, Toggled,
@@ -2297,7 +2297,7 @@ fn a_cancelled_refresh_saves_what_it_finished_and_says_it_was_stopped() {
             // where a cancel is recorded.
             format!(
                 "0:20 waiting · 0 files, {}",
-                warlock_tui::size(document_bytes(&scratch, "crates/alpha/src"))
+                crate::account::size(document_bytes(&scratch, "crates/alpha/src"))
             ),
             "0:30 Read crates/alpha".to_owned(),
             "1:00 thinking".to_owned(),
@@ -5111,7 +5111,6 @@ mod watching {
     use std::time::{Duration, Instant};
 
     use warlock_engine::manifest_path;
-    use warlock_tui::{QUIET_PERIOD, RELOAD_CEILING, WatchPolicy, Watching};
 
     use super::{
         Canned, Loaded, Manifest, NodeState, PactEntry, PactEvent, Reloaded, Scope, Scratch,
@@ -5120,6 +5119,7 @@ mod watching {
     };
     use crate::POLL_INTERVAL;
     use crate::session::{NOT_WATCHING, Watched, note, start_watching};
+    use crate::watch::{QUIET_PERIOD, RELOAD_CEILING, WatchPolicy, Watching};
 
     fn unwatched(scope: &Scope) -> Watched {
         let Loaded { tree, .. } =
@@ -5180,7 +5180,7 @@ mod watching {
             &scratch.root,
             &toggle(&scratch, "crates", true),
             &agent,
-            &warlock_tui::Cancel::new(),
+            &crate::claude::Cancel::new(),
             &mut |_| {},
         )
         .expect("a subtree that walks and a manifest that writes");

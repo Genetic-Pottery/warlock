@@ -11,17 +11,20 @@ use tempfile::TempDir;
 use warlock_engine::{
     Manifest, PactEntry, PullRun, RunStatus, ScopeRecord, save_key, save_key_binding, save_sigils,
 };
-use warlock_tui::{
-    Activity, Answer, App, Assignee, Dirty, Line, NamedIssue, Priority, PullAnswered, Queue,
-    QueuedIssue, Section, StateType, Taking,
-};
 
 use super::Puller;
+use crate::account::{Line, Section};
+use crate::app::App;
+use crate::claude::Activity;
+use crate::confirm::{Answer, PullAnswered};
 use crate::error::{Error, one_line};
 use crate::freshness::Freshened;
+use crate::git::Dirty;
+use crate::linear::{Assignee, NamedIssue, Priority, Queue, QueuedIssue, StateType};
 use crate::stubs::{
     Boarding, Checkout, Forging, Refreshing, Sessions, Slicing, VIEWER, Written, said,
 };
+use crate::submission::Taking;
 
 // Not a key, and named so that nothing reading this file mistakes it for one: it
 // is stored only so that a bound name resolves.

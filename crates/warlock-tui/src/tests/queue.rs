@@ -468,14 +468,13 @@ fn every_skip_in_a_queue_with_nothing_ready_is_reported_in_the_queues_order() {
 // three checks have to be made against fields of the board's own answer rather
 // than against a filter nobody can see the effect of.
 mod named {
-    use std::sync::{Arc, Mutex};
-
     use serde_json::{Value, json};
     use warlock_engine::ScopeRecord;
 
     use super::{PullRun, Reason, RunStatus, run};
-    use crate::linear::{Error as LinearError, Linear, Posts};
+    use crate::linear::{Error as LinearError, Linear};
     use crate::queue::{Named, Refusal, take_named};
+    use crate::stubs::Posting;
 
     // The user the key belongs to, which is the only person whose work `pull`
     // takes.
@@ -487,63 +486,13 @@ mod named {
         ScopeRecord::new("warlock-team", "WAR", "In Review", "warlock")
     }
 
-    // A board that answers one named-ticket read from memory, and keeps what it
-    // was asked. Cloneable over one shared answer because `Linear` owns what it
-    // posts through, and a test still has to say what reached the wire.
-    #[derive(Clone)]
-    struct Posting(Arc<Asked>);
-
-    #[derive(Debug)]
-    struct Asked {
-        answer: Mutex<Option<Result<Value, LinearError>>>,
-        variables: Mutex<Vec<Value>>,
-    }
-
-    impl Posting {
-        fn answering(answer: Result<Value, LinearError>) -> Self {
-            Self(Arc::new(Asked {
-                answer: Mutex::new(Some(answer)),
-                variables: Mutex::new(Vec::new()),
-            }))
-        }
-
-        fn board(&self) -> Linear<Self> {
-            Linear::new(self.clone())
-        }
-
-        fn variables(&self) -> Vec<Value> {
-            self.0
-                .variables
-                .lock()
-                .expect("the stand-in was not used across a panic")
-                .clone()
-        }
-    }
-
-    impl Posts for Posting {
-        fn post(&self, _document: &str, variables: Value) -> Result<Value, LinearError> {
-            self.0
-                .variables
-                .lock()
-                .expect("the stand-in was not used across a panic")
-                .push(variables);
-
-            self.0
-                .answer
-                .lock()
-                .expect("the stand-in was not used across a panic")
-                .take()
-                .expect("one request per question, with no retry")
-        }
-    }
-
     // A board holding that one ticket, and one holding nothing.
     fn holding(node: &Value) -> Posting {
-        Posting::answering(Ok(json!({ "issues": { "nodes": [node] } })))
+        Posting::answering([Ok(json!({ "issues": { "nodes": [node] } }))])
     }
 
     fn holding_nothing() -> Posting {
-        Posting::answering(Ok(json!({ "issues": { "nodes": [] } })))
+        Posting::answering([Ok(json!({ "issues": { "nodes": [] } }))])
     }
 
     // `WAR-133` as the board answers it when everything about it is in order: on
@@ -575,7 +524,8 @@ mod named {
     }
 
     fn asked_for(posting: &Posting, ticket: &str, runs: &[PullRun]) -> Named {
-        take_named(&posting.board(), &record(), ME, ticket, runs).expect("the stand-in answered")
+        take_named(&Linear::new(posting.clone()), &record(), ME, ticket, runs)
+            .expect("the stand-in answered")
     }
 
     // The ticket that was taken, or `None` when it was refused.
@@ -857,9 +807,9 @@ mod named {
 
     #[test]
     fn a_board_that_could_not_be_reached_is_a_failure_and_not_a_refusal() {
-        let posting = Posting::answering(Err(LinearError::Status { code: 500 }));
+        let posting = Posting::answering([Err(LinearError::Status { code: 500 })]);
 
-        let error = take_named(&posting.board(), &record(), ME, "WAR-133", &[])
+        let error = take_named(&Linear::new(posting.clone()), &record(), ME, "WAR-133", &[])
             .expect_err("the stand-in refused");
 
         // Nothing is said about the ticket: warlock does not know anything about

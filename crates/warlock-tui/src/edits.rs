@@ -234,7 +234,7 @@ pub(crate) fn opened(
 // boundary and the resolution, `Opened::unpacted` is the edit and the sentence,
 // and this is the subcommand. `main` prints a refusal on stderr and takes the
 // status from the error — a 3 for a closed boundary, a 1 for everything else.
-pub(crate) fn unpact(path: &Path) -> Result<(), Error> {
+pub fn unpact(path: &Path) -> Result<(), Error> {
     println!(
         "warlock: {}",
         opened(FOR_UNPACT, Operation::Unpact, path)?.unpacted()?
@@ -242,7 +242,7 @@ pub(crate) fn unpact(path: &Path) -> Result<(), Error> {
     Ok(())
 }
 
-pub(crate) fn scope_add(path: &Path, scope: &str, flags: RecordFields<'_>) -> Result<(), Error> {
+pub fn scope_add(path: &Path, scope: &str, flags: RecordFields<'_>) -> Result<(), Error> {
     println!(
         "warlock: {}",
         opened(FOR_SCOPE_ADD, Operation::Scope, path)?.scoped(scope, flags)?
@@ -250,7 +250,7 @@ pub(crate) fn scope_add(path: &Path, scope: &str, flags: RecordFields<'_>) -> Re
     Ok(())
 }
 
-pub(crate) fn scope_remove(path: &Path) -> Result<(), Error> {
+pub fn scope_remove(path: &Path) -> Result<(), Error> {
     println!(
         "warlock: {}",
         opened(FOR_SCOPE_REMOVE, Operation::Scope, path)?.unscoped()?

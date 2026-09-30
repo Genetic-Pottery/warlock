@@ -5,9 +5,9 @@ use warlock_engine::{
     Manifest, Node, NodeState, PactEntry, ScopeRecord, Tree, manifest_path, route_facts,
     save_sigils, validate_scope,
 };
-use warlock_tui::App;
 
 use super::{Opened, scoped_line, unpacted_line, unscoped_line};
+use crate::app::App;
 use crate::error::Error;
 use crate::rescope::{RecordFields, ScopeRefusal};
 // The other door onto the un-pact rule, pressed here so that the two are
@@ -18,8 +18,8 @@ use crate::pacting::pressed_p;
 // words, and a test holding a copy of those words is a test that would go on
 // passing while the two doors drifted apart.
 use crate::boundary::{Operation, closed_scope_message};
+use crate::error::status_for;
 use crate::session::{load_manifest, sigils_under};
-use crate::status_for;
 
 // A grant on every entry, so that "the scope write left the run's own fields
 // alone" is an assertion about two values that are really there.

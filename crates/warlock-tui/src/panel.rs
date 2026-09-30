@@ -4,7 +4,7 @@
 //! is anything to see in.
 //!
 //! It is a module because everything here was a private struct inside `app.rs`
-//! with twenty-three [`App`](crate::App) methods reaching into it, so a question
+//! with twenty-three [`App`](crate::app::App) methods reaching into it, so a question
 //! about card-swapping or panel scrolling could only be asked by building a
 //! whole `App` — a `Tree`, a row list, a selection and a scroll offset, none of
 //! which the panel has ever had an opinion about. `App` still forwards every one
@@ -58,7 +58,7 @@ use crate::wrap::rows as wrap_rows;
 /// on a brief and then pacts a clean directory should not find the conversation
 /// back in chat mode because a *pact* rolled back.
 #[derive(Debug, Clone, Default, PartialEq)]
-pub struct Panel {
+pub(crate) struct Panel {
     account: Card<Account>,
     thread: Card<Thread>,
     document: Card<Vec<Line>>,
@@ -68,12 +68,12 @@ pub struct Panel {
     width: usize,
 }
 
-/// Three variants and no fourth, for [`Focus`](crate::Focus)'s reason: the panel
+/// Three variants and no fourth, for [`Focus`](crate::app::Focus)'s reason: the panel
 /// holds three named things, not an index into a list somebody could grow. There
 /// is no `Nothing` — an empty card showing draws warlock's mark, which is a fact
 /// about the card rather than a fourth thing to be showing.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
-pub enum Showing {
+pub(crate) enum Showing {
     Account,
     #[default]
     Thread,
@@ -100,7 +100,7 @@ impl Showing {
 /// A mode is not a second system prompt and not a second session — it is this
 /// word plus one ordinary turn sent into the conversation already in progress
 /// (see [`brief_instruction`](crate::brief_instruction) and
-/// [`CHAT_INSTRUCTION`](crate::CHAT_INSTRUCTION)) — so everything the word
+/// [`CHAT_INSTRUCTION`](crate::claude::CHAT_INSTRUCTION)) — so everything the word
 /// changes is said out loud somewhere else: which instruction a command sends,
 /// how hard the turn is asked to think, and which model is asked.
 ///
@@ -113,7 +113,7 @@ impl Showing {
 /// with, and not on a row of the card, which would spend a row of the
 /// conversation saying what the border says for nothing.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
-pub enum Mode {
+pub(crate) enum Mode {
     #[default]
     Chat,
     Brief,
@@ -288,7 +288,7 @@ impl Shown for Thread {
 }
 
 /// A document is its lines, already worded — the file's own, plus the one
-/// sentence about a read the cap cut short. [`App`](crate::App) never holds the
+/// sentence about a read the cap cut short. [`App`](crate::app::App) never holds the
 /// path it came from and never opens anything: what reaches it is text, from
 /// whoever did the reading.
 impl Shown for Vec<Line> {
@@ -320,7 +320,7 @@ fn row_window(lines: &[Line], offset: usize, height: usize, width: usize) -> Vec
 
 impl Panel {
     #[must_use]
-    pub fn scroll_offset(&self) -> usize {
+    pub(crate) fn scroll_offset(&self) -> usize {
         match self.showing {
             Showing::Account => self.account.scroll_offset(self.height, self.width),
             Showing::Thread => self.thread.scroll_offset(self.height, self.width),
@@ -329,7 +329,7 @@ impl Panel {
     }
 
     #[must_use]
-    pub fn window(&self, now: Instant) -> Vec<Line> {
+    pub(crate) fn window(&self, now: Instant) -> Vec<Line> {
         match self.showing {
             Showing::Account => self.account.window(self.height, self.width, now),
             Showing::Thread => self.thread.window(self.height, self.width, now),
@@ -338,7 +338,7 @@ impl Panel {
     }
 
     #[must_use]
-    pub fn lines_below(&self) -> usize {
+    pub(crate) fn lines_below(&self) -> usize {
         match self.showing {
             Showing::Account => self.account.lines_below(self.height, self.width),
             Showing::Thread => self.thread.lines_below(self.height, self.width),
@@ -349,7 +349,7 @@ impl Panel {
     /// One call for both directions, so whoever owns the gesture can say what it
     /// is on every tick rather than having to catch both edges of it. The thread
     /// and nothing else, because a drag selects in the conversation.
-    pub fn hold_thread(&mut self, holding: bool) {
+    pub(crate) fn hold_thread(&mut self, holding: bool) {
         if holding {
             self.thread.pause(self.height, self.width);
         } else {
@@ -357,7 +357,7 @@ impl Panel {
         }
     }
 
-    pub fn scroll_to(&mut self, offset: usize) {
+    pub(crate) fn scroll_to(&mut self, offset: usize) {
         let (height, width) = (self.height, self.width);
         match self.showing {
             Showing::Account => self.account.scroll_to(offset, height, width),
@@ -381,7 +381,12 @@ impl Panel {
 /// A viewport of zero rows — a panel nobody has drawn — has no screen to scroll,
 /// and the honest offset for it is the top, exactly as the tree's rule says.
 #[must_use]
-pub fn panel_offset_for(lines: usize, viewport: usize, offset: usize, following: bool) -> usize {
+pub(crate) fn panel_offset_for(
+    lines: usize,
+    viewport: usize,
+    offset: usize,
+    following: bool,
+) -> usize {
     if viewport == 0 {
         return 0;
     }
@@ -389,14 +394,14 @@ pub fn panel_offset_for(lines: usize, viewport: usize, offset: usize, following:
     if following { end } else { offset.min(end) }
 }
 
-/// Every one of these used to be a method on [`App`](crate::App) that touched
+/// Every one of these used to be a method on [`App`](crate::app::App) that touched
 /// `self.panel` and nothing else. They are here so the panel can be built,
 /// driven and asserted about without a tree, a row list, a selection or a scroll
 /// offset anywhere near it.
 impl Panel {
     #[cfg(test)]
     #[must_use]
-    pub const fn showing(&self) -> Showing {
+    pub(crate) const fn showing(&self) -> Showing {
         self.showing
     }
 
@@ -405,7 +410,7 @@ impl Panel {
     /// needs to know is that the other two kept their place while it was not.
     #[cfg(test)]
     #[must_use]
-    pub fn window_of(&self, card: Showing) -> (usize, bool) {
+    pub(crate) fn window_of(&self, card: Showing) -> (usize, bool) {
         // An arm each rather than one over a borrowed card, because the three
         // hold different things and so are three different types. The shape is
         // the same in all three, which is what `Shown` is for.
@@ -427,27 +432,31 @@ impl Panel {
 
     #[cfg(test)]
     #[must_use]
-    pub fn document_lines(&self) -> &[Line] {
+    pub(crate) fn document_lines(&self) -> &[Line] {
         self.document.held.as_deref().unwrap_or_default()
     }
 
-    pub const fn show(&mut self, card: Showing) {
+    pub(crate) const fn show(&mut self, card: Showing) {
         self.showing = card;
     }
 
-    pub fn open_account(&mut self, at: Instant) {
+    pub(crate) fn open_account(&mut self, at: Instant) {
         self.account.place(Account::new(at), true);
     }
 
     /// One operation rather than two, because a document nobody was shown is a
     /// file read for nothing: every caller that refills wants it up.
-    pub fn show_document(&mut self, lines: impl IntoIterator<Item = impl Into<String>>, cut: bool) {
+    pub(crate) fn show_document(
+        &mut self,
+        lines: impl IntoIterator<Item = impl Into<String>>,
+        cut: bool,
+    ) {
         self.refill_document(lines, cut);
         self.showing = Showing::Document;
     }
 
     #[must_use]
-    pub const fn has_content(&self) -> bool {
+    pub(crate) const fn has_content(&self) -> bool {
         match self.showing {
             Showing::Account => self.has_account(),
             Showing::Thread => self.has_thread(),
@@ -471,7 +480,7 @@ impl Panel {
     /// not a candidate. `None` is the key having done nothing, which the caller
     /// says out loud.
     #[must_use]
-    pub fn next_card(&self) -> Option<Showing> {
+    pub(crate) fn next_card(&self) -> Option<Showing> {
         let next = self.showing.next();
         [next, next.next()]
             .into_iter()
@@ -484,15 +493,15 @@ impl Panel {
     ///
     /// Does nothing when there is no account to write to, which is a run nobody
     /// started through
-    /// [`App::start_account`](crate::App::start_account) — a test driving events
+    /// [`App::start_account`](crate::app::App::start_account) — a test driving events
     /// straight down the channel. Dropping the line is the honest way to fail.
-    pub fn write_run(&mut self, write: impl FnOnce(&mut Account)) {
+    pub(crate) fn write_run(&mut self, write: impl FnOnce(&mut Account)) {
         if let Some(account) = self.account.held.as_mut() {
             write(account);
         }
     }
 
-    /// [`App::show_document`](crate::App::show_document) without the one thing
+    /// [`App::show_document`](crate::app::App::show_document) without the one thing
     /// the view key does. `v` is a reader asking to look at a file, so it brings
     /// the file to the front; this is the file somebody has just edited being
     /// read again underneath them, and a panel that flipped to the document
@@ -503,7 +512,7 @@ impl Panel {
     /// deliberately not kept: the file has been rewritten under them, so line
     /// forty of the file they were reading is not line forty of the file that is
     /// there now.
-    pub fn refill_document(
+    pub(crate) fn refill_document(
         &mut self,
         lines: impl IntoIterator<Item = impl Into<String>>,
         cut: bool,
@@ -527,9 +536,9 @@ impl Panel {
     /// `Card::accrue`'s whole reason for existing beside `Card::place`.
     ///
     /// The message is the reader's own text, never a path or a prompt this type
-    /// built: [`App`](crate::App) runs nothing and asks nobody, so whoever took
+    /// built: [`App`](crate::app::App) runs nothing and asks nobody, so whoever took
     /// the draft starts the worker themselves.
-    pub fn start_turn(&mut self, message: impl Into<String>, at: Instant) {
+    pub(crate) fn start_turn(&mut self, message: impl Into<String>, at: Instant) {
         self.thread.accrue().ask(message, at);
         self.showing = Showing::Thread;
     }
@@ -541,56 +550,56 @@ impl Panel {
     ///
     /// One unclocked row, and no turn is opened, closed or frozen by it — see
     /// [`Thread::note`].
-    pub fn note(&mut self, text: impl Into<String>, at: Instant) {
+    pub(crate) fn note(&mut self, text: impl Into<String>, at: Instant) {
         self.thread.accrue().note(text, at);
         self.showing = Showing::Thread;
     }
 
-    pub fn record_turn(&mut self, activity: &Activity, at: Instant) {
+    pub(crate) fn record_turn(&mut self, activity: &Activity, at: Instant) {
         if let Some(thread) = self.thread.held.as_mut() {
             thread.record(activity, at);
         }
     }
 
-    pub fn answer_turn(&mut self, answer: impl Into<String>, at: Instant) {
+    pub(crate) fn answer_turn(&mut self, answer: impl Into<String>, at: Instant) {
         if let Some(thread) = self.thread.held.as_mut() {
             thread.answer(answer, at);
         }
     }
 
-    pub fn end_turn(&mut self, ending: &Ending, at: Instant) {
+    pub(crate) fn end_turn(&mut self, ending: &Ending, at: Instant) {
         if let Some(thread) = self.thread.held.as_mut() {
             thread.end(ending, at);
         }
     }
 
     #[must_use]
-    pub const fn thread(&self) -> Option<&Thread> {
+    pub(crate) const fn thread(&self) -> Option<&Thread> {
         self.thread.held.as_ref()
     }
 
     #[must_use]
-    pub const fn has_account(&self) -> bool {
+    pub(crate) const fn has_account(&self) -> bool {
         self.account.held.is_some()
     }
 
     #[must_use]
-    pub const fn has_thread(&self) -> bool {
+    pub(crate) const fn has_thread(&self) -> bool {
         self.thread.held.is_some()
     }
 
     #[must_use]
-    pub const fn has_document(&self) -> bool {
+    pub(crate) const fn has_document(&self) -> bool {
         self.document.held.is_some()
     }
 
     #[must_use]
-    pub const fn showing_thread(&self) -> bool {
+    pub(crate) const fn showing_thread(&self) -> bool {
         matches!(self.showing, Showing::Thread)
     }
 
     #[must_use]
-    pub const fn mode(&self) -> Mode {
+    pub(crate) const fn mode(&self) -> Mode {
         self.mode
     }
 
@@ -602,23 +611,24 @@ impl Panel {
     ///
     /// It sets one word and touches nothing else: the card showing does not move,
     /// no turn is started or ended, and the run header is not consulted.
-    pub fn set_mode(&mut self, mode: Mode) -> bool {
+    pub(crate) fn set_mode(&mut self, mode: Mode) -> bool {
         let changed = self.mode != mode;
         self.mode = mode;
         changed
     }
 
     #[must_use]
-    pub const fn account(&self) -> Option<&Account> {
+    pub(crate) const fn account(&self) -> Option<&Account> {
         self.account.held.as_ref()
     }
 
-    pub const fn account_mut(&mut self) -> Option<&mut Account> {
+    #[cfg(test)]
+    pub(crate) const fn account_mut(&mut self) -> Option<&mut Account> {
         self.account.held.as_mut()
     }
 
     #[must_use]
-    pub const fn height(&self) -> usize {
+    pub(crate) const fn height(&self) -> usize {
         self.height
     }
 
@@ -627,12 +637,12 @@ impl Panel {
     /// frame: nothing has to be brought back into line afterwards, because the
     /// offset is clamped when it is read and a window that was following is still
     /// following.
-    pub fn set_height(&mut self, height: u16) {
+    pub(crate) fn set_height(&mut self, height: u16) {
         self.height = usize::from(height);
     }
 
     #[must_use]
-    pub const fn width(&self) -> usize {
+    pub(crate) const fn width(&self) -> usize {
         self.width
     }
 
@@ -649,7 +659,7 @@ impl Panel {
     ///
     /// A width of `0` — a panel nobody has measured — wraps nothing: the lines
     /// are drawn as they are and cut to the width by the renderer.
-    pub fn set_width(&mut self, width: u16) {
+    pub(crate) fn set_width(&mut self, width: u16) {
         self.width = usize::from(width);
     }
 
@@ -666,7 +676,8 @@ impl Panel {
     /// actually is comes from [`Panel::scroll_offset`], which is where the hold is
     /// accounted for.
     #[must_use]
-    pub const fn follows(&self) -> bool {
+    #[cfg(test)]
+    pub(crate) const fn follows(&self) -> bool {
         match self.showing {
             Showing::Account => self.account.follows,
             Showing::Thread => self.thread.follows,
@@ -688,7 +699,7 @@ impl Panel {
     /// draft: a composer holding nothing is still showable, and a draft somebody
     /// typed is not thrown away by the card that hides it.
     #[must_use]
-    pub const fn composer_showable(&self) -> bool {
+    pub(crate) const fn composer_showable(&self) -> bool {
         match self.showing {
             Showing::Thread => true,
             Showing::Account | Showing::Document => false,
@@ -696,7 +707,7 @@ impl Panel {
     }
 
     #[must_use]
-    pub const fn page(&self) -> usize {
+    pub(crate) const fn page(&self) -> usize {
         if self.height == 0 { 1 } else { self.height }
     }
 }

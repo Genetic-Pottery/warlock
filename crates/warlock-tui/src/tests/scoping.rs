@@ -7,12 +7,13 @@ use tempfile::TempDir;
 use warlock_engine::{
     Manifest, Node, NodeState, PactEntry, ScopeRecord, Tree, manifest, route_facts, validate_scope,
 };
-use warlock_tui::{
-    App, Edited, RecordEdited, RecordField, RecordForm, RecordPrompt, ScopeField, ScopePrompt,
-    Sigils, edit_for, record_edit_for,
-};
 
 use super::{Windows, record_edit, record_submit, scope_edit, scope_submit};
+use crate::app::{App, Sigils};
+use crate::prompt::{
+    Edited, RecordEdited, RecordField, RecordForm, RecordPrompt, ScopeField, ScopePrompt, edit_for,
+    record_edit_for,
+};
 
 // `super::scope_press` with no boundary in the way, so these tests are about
 // the prompt rather than about being refused. The wildcard rather than
@@ -1439,7 +1440,7 @@ fn a_pull_in_flight_turns_s_down_on_the_thread_and_opens_no_window() {
         .unwrap_or_default()
         .into_iter()
         .filter_map(|line| match line {
-            warlock_tui::Line::Note { text } => Some(text),
+            crate::account::Line::Note { text } => Some(text),
             _ => None,
         })
         .collect();

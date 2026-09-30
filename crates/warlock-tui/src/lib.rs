@@ -1,91 +1,100 @@
-//! The front end minus the terminal. Nothing in this crate opens a terminal,
-//! reads a key or owns an event loop: `src/main.rs` does all of that and hands
-//! values in, which is what keeps the draw path assertable against an in-memory
-//! buffer and everything else against plain values. Four modules reach past
-//! that rule on purpose — `claude` runs the CLI as a child process because the
-//! engine's port spawns nothing, `git` runs `git` and `gh` through `claude`'s own
-//! process plumbing because a pull request is made of subprocesses, `linear`
-//! opens a socket because the board is somewhere else, and `watch` holds a
-//! filesystem watcher — and all four are built so the decisions made about what
-//! they hear are values a test can drive without any of them.
+//! Everything warlock does except own the terminal. `src/main.rs` parses argv,
+//! takes and restores the terminal, and runs the session's event loop; it hands
+//! each subcommand to its function here and each key, click and paste to
+//! [`Interactive`]. Nothing in this crate enters the alternate screen or runs
+//! that loop, and a session reaches its screen only through [`Screen`]: that is
+//! what lets a whole session be driven round by round in a test, and the draw
+//! path be asserted against an in-memory buffer.
+//!
+//! The rest of the outside world is reached on purpose — `claude` runs the CLI
+//! as a child process because the engine's port spawns nothing, `git` runs `git`
+//! and `gh` through `claude`'s process plumbing because a pull request is made of
+//! subprocesses, `linear` opens a socket because the board is somewhere else,
+//! `watch` holds a filesystem watcher, and `asking` and `key` read stdin at a
+//! shell, raw only for the length of one read. The stand-ins tests drive those
+//! seams with are in `stubs.rs`, one set for every test in the crate, so a
+//! second copy of one beside the test that wants it is a duplicate.
 
 mod account;
 mod app;
+mod asking;
+mod boundary;
 mod brief;
+mod briefing;
+mod chatting;
+pub mod check;
 mod claude;
+mod clipboard;
 mod colour;
 mod composer;
+mod config;
 mod confirm;
 mod crossings;
+mod cut;
+mod cutting;
+mod descent;
+mod editing;
+mod edits;
+mod error;
 #[cfg(test)]
 mod fixture;
+mod freshness;
 mod git;
+mod inflight;
+mod input;
+mod interactive;
+mod key;
 mod linear;
 mod modal;
-pub mod panel;
+mod pacting;
+mod panel;
+pub mod planned;
 mod prompt;
+mod pull;
+mod puller;
+mod pulling;
+mod push;
+mod pushing;
+mod query;
 mod queue;
+mod rescope;
+mod resume;
+mod running;
+mod scoping;
+mod screen;
 mod selection;
+mod session;
+mod standing;
+#[cfg(test)]
+mod stubs;
 mod submission;
 mod template;
 mod thread;
 mod ui;
+mod viewing;
 mod watch;
 mod wrap;
+mod writing;
 
 pub use account::Account;
 pub use account::Line;
-pub use account::Outcome;
-pub use account::Section;
 pub use account::Voice;
-pub use account::size;
-pub use app::App;
-pub use app::Chrome;
-pub use app::Focus;
-pub use app::PactIntent;
-pub use app::PactToggle;
-pub use app::Row;
-pub use app::Run;
-pub use app::RunHeader;
-pub use app::Sigils;
-pub use app::reseat_on;
-pub use brief::Brief;
 pub use brief::Error as BriefError;
-pub use brief::ScopeBlock;
 pub use brief::ScopeBlockError;
-pub use brief::Slice;
 pub use brief::brief_at;
 pub use brief::scope_block_in;
+pub use briefing::brief;
 pub use claude::Activities;
 pub use claude::Activity;
-pub use claude::BRIEF_EFFORT;
-pub use claude::BRIEF_MODEL;
-pub use claude::Bounded;
-pub use claude::CHAT_INSTRUCTION;
 pub use claude::Cancel;
 pub use claude::ChatAgent;
 pub use claude::ClaudeAgent;
-pub use claude::Converses;
-pub use claude::DRAFT_NOW_INSTRUCTION;
 pub use claude::DRAFTING_CONTRACT;
-pub use claude::DRAFTING_ONE_SHOT_CONTRACT;
-pub use claude::DRAFTING_ROUNDS;
-pub use claude::Drafted;
 pub use claude::Drafting;
 pub use claude::INVOCATION_TIMEOUT;
 pub use claude::NOTHING_SETTLES_IT;
-pub use claude::Replied;
-pub use claude::Sibling;
-pub use claude::Split;
 pub use claude::Splitting;
-pub use claude::Stopped;
-pub use claude::Unsplit;
-pub use claude::WORKING_ATTEMPTS;
 pub use claude::WORKING_TIMEOUT;
-pub use claude::WORKING_TURNS;
-pub use claude::WRITE_INSTRUCTION;
-pub use claude::Wired;
-pub use claude::Worked;
 pub use claude::Working;
 pub use claude::brief_instruction;
 pub use claude::drafting_opening;
@@ -95,138 +104,66 @@ pub use claude::working_opening;
 pub use claude::working_retry;
 pub use claude::working_system_prompt;
 pub use colour::colour_for;
-pub use composer::COMPOSER_MAX_ROWS;
-pub use composer::Composed;
-pub use composer::Composer;
-pub use composer::ComposerWindow;
-pub use composer::Pasted;
-pub use composer::compose_for;
-pub use composer::paste_for;
-pub use confirm::Answer;
-pub use confirm::Answered;
-pub use confirm::Carry;
-pub use confirm::CarryAnswered;
-pub use confirm::Choice;
-pub use confirm::CutAnswered;
-pub use confirm::CutConfirm;
-pub use confirm::Cutting;
-pub use confirm::Filing;
-pub use confirm::PullAnswered;
-pub use confirm::PullConfirm;
-pub use confirm::PushAnswered;
-pub use confirm::PushConfirm;
-pub use confirm::QuitConfirm;
-pub use confirm::Review;
-pub use confirm::Reviewed;
-pub use confirm::Undertaking;
-pub use confirm::answer_for;
-pub use confirm::carry_answer_for;
-pub use confirm::cut_answer_for;
-pub use confirm::pull_answer_for;
-pub use confirm::push_answer_for;
-pub use confirm::review_answer_for;
+pub use config::configure;
 pub use crossings::Crossing;
-pub use crossings::Crossings;
 pub use crossings::crossings_after;
 pub use crossings::crossings_in;
+pub use edits::scope_add;
+pub use edits::scope_remove;
+pub use edits::unpact;
+pub use error::Error;
+pub use error::status_for;
 pub use git::COMMAND_TIMEOUT;
 pub use git::Commit;
 pub use git::Dirty;
 pub use git::Error as GitError;
-pub use git::Finished;
 pub use git::Forge;
 pub use git::Freshness;
 pub use git::Gh;
 pub use git::Git;
 pub use git::HUMAN_GATE;
 pub use git::Head;
-pub use git::LeftStale;
 pub use git::Opened;
 pub use git::PullRequest;
 pub use git::Ran;
 pub use git::Repository;
 pub use git::Runs;
 pub use git::Spawner;
-pub use git::Touched;
 pub use git::branch_name;
 pub use git::commit_message;
 pub use git::pull_request_body;
 pub use git::pull_request_title;
-pub use linear::Assignee;
-pub use linear::Blocker;
-pub use linear::Board;
+pub use interactive::Interactive;
+pub use interactive::POLL_INTERVAL;
+pub use key::key_add;
+pub use key::key_forget;
+pub use key::key_list;
+pub use key::key_use;
 pub use linear::Client as LinearClient;
 pub use linear::Error as LinearError;
-pub use linear::FetchedProject;
-pub use linear::Issue as LinearIssue;
-pub use linear::Linear as LinearBoard;
-pub use linear::NamedIssue;
-pub use linear::NewIssue;
-pub use linear::NewProject;
-pub use linear::Opener as LinearOpener;
-pub use linear::Opens;
 pub use linear::Posts;
 pub use linear::Priority;
-pub use linear::Project as LinearProject;
 pub use linear::Queue;
 pub use linear::QueuedIssue;
 pub use linear::REQUEST_TIMEOUT;
 pub use linear::StateType;
-pub use modal::Modal;
-pub use modal::Modals;
-pub use panel::Mode;
-pub use panel::Panel;
-pub use prompt::Edited;
-pub use prompt::RecordEdited;
-pub use prompt::RecordField;
-pub use prompt::RecordForm;
-pub use prompt::RecordPrompt;
-pub use prompt::ScopeField;
-pub use prompt::ScopePrompt;
-pub use prompt::edit_for;
-pub use prompt::record_edit_for;
-pub use queue::Chosen;
-pub use queue::IN_PROGRESS;
-pub use queue::Named;
-pub use queue::Reason;
-pub use queue::Refusal;
-pub use queue::Skipped;
+pub use pull::pull;
+pub use push::push;
+pub use query::Listing;
+pub use query::list;
 pub use queue::choose;
-pub use queue::take_named;
-pub use selection::Cell;
-pub use selection::Position;
-pub use selection::Selection;
-pub use selection::Span;
-pub use selection::Window;
-pub use selection::copied_text;
-pub use selection::position_at;
-pub use selection::spans_at;
-pub use submission::Submitted;
-pub use submission::Taking;
-pub use submission::submitted_for;
+pub use rescope::RecordFields;
+pub use resume::resume;
+pub use running::pact;
+pub use running::refresh;
+pub use screen::Screen;
+pub use standing::FOR_CLAUDE_MD;
+pub use standing::Standing;
 pub use template::DEFAULT_TEMPLATE;
-pub use template::Error as TemplateError;
 pub use template::brief_template;
 pub use template::missing_sections;
 pub use thread::Ending;
 pub use thread::Thread;
-pub use thread::Turn;
-pub use thread::ending_for;
-pub use ui::Hit;
-pub use ui::Reach;
-pub use ui::composer_height;
-pub use ui::composer_on_screen;
-pub use ui::draw;
-pub use ui::hit_test;
-pub use ui::panel_height;
-pub use ui::panel_reach;
-pub use ui::panel_width;
-pub use ui::run_header_height;
-pub use ui::tree_height;
-pub use watch::COALESCED_RELOADS;
 pub use watch::NodeSet;
 pub use watch::QUIET_PERIOD;
-pub use watch::RELOAD_CEILING;
-pub use watch::Watch;
 pub use watch::WatchPolicy;
-pub use watch::Watching;

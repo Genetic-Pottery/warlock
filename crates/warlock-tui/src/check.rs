@@ -42,8 +42,8 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 use warlock_engine::{Manifest, route_facts, scope_opens_to, sigils_path};
-use warlock_tui::Sigils;
 
+use crate::app::Sigils;
 use crate::boundary::closed_scope_message;
 use crate::error::Error;
 use crate::query::{envelope, spelled, write_object};
@@ -135,7 +135,7 @@ struct Checked {
 // there. `path` is joined onto the working directory, which leaves an absolute
 // one as it stands, and a `..` that climbs out of the repository is refused by
 // the spelling below rather than resolved into something inside it.
-pub(crate) fn check(path: PathBuf, json: bool) -> Result<(), Error> {
+pub fn check(path: PathBuf, json: bool) -> Result<(), Error> {
     // A home that cannot be resolved is `None` and reads as nothing held — see
     // the module docs for why it is not `Unknown`.
     checked_onto(
@@ -246,7 +246,7 @@ fn checked(
 // The refusal travels through `Error::ClosedScope`, which is the register the
 // headless writes already refuse in: one line, exit **3**, and re-running will
 // never work. No new status and no `--force`.
-pub(crate) fn gate(path: PathBuf) -> Result<(), Error> {
+pub fn gate(path: PathBuf) -> Result<(), Error> {
     gated_onto(
         &Standing::here(FOR_CHECK)?,
         Standing::home().ok().as_deref(),
@@ -304,7 +304,7 @@ fn gated(checked: &Checked) -> Result<(), Error> {
 // payload as bytes and a test runs the code a hook runs. It is read to the end
 // rather than a line at a time, unlike `key`'s: the payload is one object and the
 // hook closes the stream behind it.
-pub(crate) fn hook() -> Result<(), Error> {
+pub fn hook() -> Result<(), Error> {
     let mut payload = Vec::new();
     // The first two of the four quiet exits, and all four are the same reading:
     // a hook cannot refuse a write it cannot name, so a stdin that will not read

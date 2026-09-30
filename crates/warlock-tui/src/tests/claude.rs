@@ -17,6 +17,7 @@ use super::{
 };
 use crate::brief::scope_block_in;
 use crate::panel::Mode;
+use crate::stubs::{Answering, Scripted};
 use crate::template::DEFAULT_TEMPLATE;
 use warlock_engine::document::Defect;
 use warlock_engine::{Agent, agent, drafting, splitting, working};
@@ -1692,60 +1693,8 @@ fn the_three_drafting_instructions_are_each_said_in_their_own_words() {
     }
 }
 
-// A conversation written down in advance: what it was sent is kept, and what it
-// says back was decided by the test. Here rather than in `stubs.rs` because that
-// module belongs to the binary crate and this one is `claude.rs`'s own.
-//
-// Shared through `Arc` so that a copy handed out by `wired` is the same
-// stand-in: a session wires the agent it was given before it sends anything,
-// and a double that recorded into its own clone would record nothing the test
-// could read.
-#[derive(Debug, Clone, Default)]
-struct Scripted {
-    sent: Arc<Mutex<Vec<String>>>,
-    answers: Arc<Mutex<Vec<String>>>,
-}
-
-impl Scripted {
-    fn answering<S: Into<String>>(answers: impl IntoIterator<Item = S>) -> Self {
-        let answers = answers.into_iter().map(Into::into).collect();
-        Self {
-            sent: Arc::new(Mutex::new(Vec::new())),
-            answers: Arc::new(Mutex::new(answers)),
-        }
-    }
-
-    fn sent(&self) -> Vec<String> {
-        self.sent
-            .lock()
-            .expect("the script is not poisoned")
-            .clone()
-    }
-}
-
-impl Wired for Scripted {
-    fn wired(&self, _cancel: Cancel, _activities: Activities) -> Self {
-        self.clone()
-    }
-}
-
-impl Converses for Scripted {
-    fn turn(&self, message: &str) -> Result<String, agent::Error> {
-        self.sent
-            .lock()
-            .expect("the script is not poisoned")
-            .push(message.to_owned());
-        let mut answers = self.answers.lock().expect("the script is not poisoned");
-        assert!(
-            !answers.is_empty(),
-            "a turn was taken the script has no answer for: {message}",
-        );
-        Ok(answers.remove(0))
-    }
-
-    fn raised(&self, _model: &str, _effort: &str) -> Self {
-        self.clone()
-    }
+fn scripted<S: Into<String>>(answers: impl IntoIterator<Item = S>) -> Scripted {
+    Scripted::saying(answers.into_iter().map(Answering::says))
 }
 
 fn asking(replied: Replied) -> String {
@@ -1805,7 +1754,7 @@ fn three_questions_are_relayed_and_the_fourth_turn_says_to_draft_with_what_it_ha
     // Four questions, and then the object: the fourth is past the rounds, so
     // it is a failed attempt rather than a question, and the session asks
     // again rather than stopping there.
-    let agent = Scripted::answering(FOUR_QUESTIONS.into_iter().chain([ONE_DRAFT]));
+    let agent = scripted(FOUR_QUESTIONS.into_iter().chain([ONE_DRAFT]));
     let mut session = drafting_with(&agent);
 
     assert_eq!(session.questions_left(), DRAFTING_ROUNDS);
@@ -1833,7 +1782,7 @@ fn three_questions_are_relayed_and_the_fourth_turn_says_to_draft_with_what_it_ha
         "a clean object was repaired: {repairs:?}"
     );
 
-    let sent = agent.sent();
+    let sent = agent.said();
     assert_eq!(
         sent.len(),
         5,
@@ -1862,7 +1811,7 @@ fn three_questions_are_relayed_and_the_fourth_turn_says_to_draft_with_what_it_ha
 
 #[test]
 fn a_reply_shaped_like_the_drafts_object_is_the_answer_and_ends_the_asking() {
-    let agent = Scripted::answering([ONE_DRAFT, "And now, a question?"]);
+    let agent = scripted([ONE_DRAFT, "And now, a question?"]);
     let mut session = drafting_with(&agent);
 
     let (fill, repairs) = drafts(session.open().expect("a turn"));
@@ -1876,7 +1825,7 @@ fn a_reply_shaped_like_the_drafts_object_is_the_answer_and_ends_the_asking() {
     // One turn: the object ends the conversation on the spot, with all
     // three rounds unspent, so the second answer in the script is never
     // reached.
-    assert_eq!(agent.sent().len(), 1);
+    assert_eq!(agent.said().len(), 1);
     assert_eq!(session.questions_left(), DRAFTING_ROUNDS);
 }
 
@@ -1885,7 +1834,7 @@ fn an_object_that_filled_itself_badly_is_still_the_answer_rather_than_a_question
     // It parsed, so it is the drafts however badly it filled them: a slice
     // nobody drafted is something to repair, and a repair is not a question
     // for the person who asked for this cut.
-    let agent = Scripted::answering(["Here you go:\n\n{\"drafts\": []}"]);
+    let agent = scripted(["Here you go:\n\n{\"drafts\": []}"]);
     let mut session = drafting_with(&agent);
 
     let (fill, repairs) = drafts(session.open().expect("a turn"));
@@ -1893,7 +1842,7 @@ fn an_object_that_filled_itself_badly_is_still_the_answer_rather_than_a_question
     assert_eq!(fill.drafts.len(), 1, "the mend left the slice uncut");
     assert!(!repairs.is_empty(), "a repair went unreported");
     // One turn: it was repaired, not asked again, and not put to anybody.
-    assert_eq!(agent.sent().len(), 1);
+    assert_eq!(agent.said().len(), 1);
     assert_eq!(session.questions_left(), DRAFTING_ROUNDS);
 }
 
@@ -1907,7 +1856,7 @@ fn an_overlong_draft() -> String {
 
 #[test]
 fn a_draft_with_a_body_past_its_cap_is_asked_again_before_anything_is_cut() {
-    let agent = Scripted::answering([an_overlong_draft(), ONE_DRAFT.to_owned()]);
+    let agent = scripted([an_overlong_draft(), ONE_DRAFT.to_owned()]);
     let mut session = drafting_with(&agent);
 
     let (fill, repairs) = drafts(session.open().expect("a turn"));
@@ -1917,7 +1866,7 @@ fn a_draft_with_a_body_past_its_cap_is_asked_again_before_anything_is_cut() {
         fill.drafts[0].body,
         "The knife is blunt and the whetstone is in the drawer."
     );
-    let sent = agent.sent();
+    let sent = agent.said();
     assert_eq!(sent.len(), 2);
     assert!(sent[1].contains("drafts[0].body"), "{}", sent[1]);
     // A re-ask about length is not a question, so no round was spent on it.
@@ -1926,12 +1875,12 @@ fn a_draft_with_a_body_past_its_cap_is_asked_again_before_anything_is_cut() {
 
 #[test]
 fn a_draft_that_stays_past_its_cap_is_cut_once_the_attempts_run_out() {
-    let agent = Scripted::answering(vec![an_overlong_draft(); drafting::ATTEMPTS]);
+    let agent = scripted(vec![an_overlong_draft(); drafting::ATTEMPTS]);
     let mut session = drafting_with(&agent);
 
     let (fill, repairs) = drafts(session.open().expect("a turn"));
 
-    assert_eq!(agent.sent().len(), drafting::ATTEMPTS);
+    assert_eq!(agent.said().len(), drafting::ATTEMPTS);
     assert_eq!(fill.drafts[0].body.chars().count(), drafting::BODY_CHARS);
     assert!(
         repairs
@@ -1952,14 +1901,14 @@ const A_BAD_OBJECT: &str = "{\"drafts\":[\
 
 #[test]
 fn a_defective_answer_comes_back_repaired_with_a_line_for_every_repair() {
-    let agent = Scripted::answering([A_BAD_OBJECT]);
+    let agent = scripted([A_BAD_OBJECT]);
     let mut session = drafting_with(&agent);
 
     let (fill, repairs) = drafts(session.open().expect("a turn"));
 
     // Repaired, not refused and not asked again: one turn, and what comes
     // back is clean by the contract's own check.
-    assert_eq!(agent.sent().len(), 1);
+    assert_eq!(agent.said().len(), 1);
     assert!(
         drafting::check(&fill).is_empty(),
         "a defective fill was handed back unmended: {fill:?}",
@@ -1995,13 +1944,13 @@ fn an_answer_that_is_not_the_object_is_asked_again_with_what_was_wrong_with_it()
     const PROSE: &str = "I would start with the whetstone, I think.";
     // The one-shot road, where there are no rounds at all, so the first
     // reply that is not the object is a failed attempt and nothing else.
-    let agent = Scripted::answering([PROSE, ONE_DRAFT]);
+    let agent = scripted([PROSE, ONE_DRAFT]);
     let mut session = one_shot_with(&agent);
 
     let (fill, _) = drafts(session.open().expect("a turn"));
     assert_eq!(fill.drafts.len(), 1);
 
-    let sent = agent.sent();
+    let sent = agent.said();
     assert_eq!(sent.len(), 2, "the attempt was not made again: {sent:?}");
 
     // The second message is the request again, carrying the first attempt's
@@ -2029,7 +1978,7 @@ fn the_one_shot_road_puts_nothing_to_anybody_and_stops_at_the_attempt_count() {
     // Every reply prose, which on the interactive road is three questions
     // and then the instruction. Here there is nobody to ask, so all of it is
     // the attempt loop.
-    let agent = Scripted::answering(
+    let agent = scripted(
         (1..=drafting::ATTEMPTS).map(|round| format!("Question {round}, since nobody said?")),
     );
     let mut session = one_shot_with(&agent);
@@ -2044,7 +1993,7 @@ fn the_one_shot_road_puts_nothing_to_anybody_and_stops_at_the_attempt_count() {
     );
     assert_eq!(session.questions_left(), 0);
 
-    let sent = agent.sent();
+    let sent = agent.said();
     assert_eq!(
         sent.len(),
         drafting::ATTEMPTS,
@@ -2060,7 +2009,7 @@ fn the_one_shot_road_puts_nothing_to_anybody_and_stops_at_the_attempt_count() {
 
 #[test]
 fn a_session_is_a_value_its_caller_holds_and_can_stop() {
-    let agent = Scripted::answering(["a question?"]);
+    let agent = scripted(["a question?"]);
     let session = drafting_with(&agent);
     let cancel = session.cancel();
 
@@ -2073,7 +2022,7 @@ fn a_session_is_a_value_its_caller_holds_and_can_stop() {
 
     assert!(session.cancel().is_cancelled());
     assert!(
-        agent.sent().is_empty(),
+        agent.said().is_empty(),
         "a session spawns nothing until it is opened"
     );
 }
@@ -2133,11 +2082,11 @@ fn proposal_from<C: Converses>(agent: &C) -> Result<String, agent::Error> {
 fn a_proposal_is_one_turn_carrying_the_question_and_the_slice_and_nothing_kept_after_it() {
     const PROPOSED: &str = "The one in the drawer: the brief names it and the slice \
                             adds no other.";
-    let agent = Scripted::answering([PROPOSED, "A second answer, to a second call."]);
+    let agent = scripted([PROPOSED, "A second answer, to a second call."]);
 
     assert_eq!(proposal_from(&agent).expect("a turn"), PROPOSED);
 
-    let sent = agent.sent();
+    let sent = agent.said();
     assert_eq!(
         sent.len(),
         1,
@@ -2161,7 +2110,7 @@ fn a_proposal_is_one_turn_carrying_the_question_and_the_slice_and_nothing_kept_a
         proposal_from(&agent).expect("a turn"),
         "A second answer, to a second call.",
     );
-    let sent = agent.sent();
+    let sent = agent.said();
     assert_eq!(sent.len(), 2);
     assert_eq!(sent[1], sent[0], "the second call remembered the first");
 }
@@ -2180,7 +2129,7 @@ fn a_reply_that_settles_nothing_comes_back_as_the_fixed_sentence_and_not_the_mod
     ];
 
     for reply in replies {
-        let agent = Scripted::answering([reply.clone()]);
+        let agent = scripted([reply.clone()]);
 
         let proposal = proposal_from(&agent).expect("a turn");
 
@@ -2188,12 +2137,12 @@ fn a_reply_that_settles_nothing_comes_back_as_the_fixed_sentence_and_not_the_mod
             proposal, NOTHING_SETTLES_IT,
             "a reply settling nothing came back as something else: {reply:?}",
         );
-        assert_eq!(agent.sent().len(), 1);
+        assert_eq!(agent.said().len(), 1);
     }
 
     // The guess that rode in with the sentence is gone, rather than handed on
     // for somebody to send to the board as a decision.
-    let agent = Scripted::answering([invented]);
+    let agent = scripted([invented]);
     assert!(
         !proposal_from(&agent)
             .expect("a turn")
@@ -2203,7 +2152,7 @@ fn a_reply_that_settles_nothing_comes_back_as_the_fixed_sentence_and_not_the_mod
 
     // And an answer that does not say it is what it says: the sentence is
     // recognised, not every reply that mentions the brief.
-    let agent = Scripted::answering(["The brief settles it: the one in the drawer."]);
+    let agent = scripted(["The brief settles it: the one in the drawer."]);
     assert_eq!(
         proposal_from(&agent).expect("a turn"),
         "The brief settles it: the one in the drawer.",
@@ -2229,8 +2178,8 @@ fn a_turn_that_failed_is_the_callers_to_report_and_is_not_taken_again() {
 
 #[test]
 fn a_proposal_and_a_live_drafting_session_leave_each_other_alone() {
-    let drafter = Scripted::answering(["Which whetstone is meant?", ONE_DRAFT]);
-    let proposer = Scripted::answering(["The one in the drawer."]);
+    let drafter = scripted(["Which whetstone is meant?", ONE_DRAFT]);
+    let proposer = scripted(["The one in the drawer."]);
     let mut session = drafting_with(&drafter);
 
     let question = asking(session.open().expect("a turn"));
@@ -2242,18 +2191,18 @@ fn a_proposal_and_a_live_drafting_session_leave_each_other_alone() {
         proposal_from(&proposer).expect("a turn"),
         "The one in the drawer.",
     );
-    assert_eq!(proposer.sent().len(), 1);
+    assert_eq!(proposer.said().len(), 1);
 
     // Nothing the proposal did reached the drafting session: not a turn, not
     // the cancel it runs under, and not the count of rounds it has left.
-    assert_eq!(drafter.sent().len(), 1);
+    assert_eq!(drafter.said().len(), 1);
     assert!(!session.cancel().is_cancelled());
     assert_eq!(session.questions_left(), DRAFTING_ROUNDS - 1);
 
     // And the session still answers its next turn, which is the drafts.
     let (fill, _) = drafts(session.answer("the one in the drawer").expect("a turn"));
     assert_eq!(fill.drafts.len(), 1);
-    let sent = drafter.sent();
+    let sent = drafter.said();
     assert_eq!(sent.len(), 2);
     assert_eq!(sent[1], "the one in the drawer");
     for message in &sent {
@@ -2262,7 +2211,7 @@ fn a_proposal_and_a_live_drafting_session_leave_each_other_alone() {
             "a proposing turn reached the drafting session: {message}",
         );
     }
-    assert_eq!(proposer.sent().len(), 1);
+    assert_eq!(proposer.said().len(), 1);
 }
 
 #[test]
@@ -3001,11 +2950,11 @@ fn cancelling_with_no_pass_running_is_a_no_op_that_still_latches() {
 // stand-in would have to be a second binary to build.
 // A sub-task session written down before it runs: one entry per attempt, taken
 // in the order the attempts come. Its own double rather than [`Scripted`],
-// because what this session does with an attempt that *failed* is the whole of
-// what is under test and a stand-in that can only succeed says nothing about
-// it. Shared through `Arc` for `Scripted`'s reason: the session wires the agent
-// it was given before it sends anything, and a copy that recorded into itself
-// would record nothing a test could read.
+// because what this session does with each way an attempt can fail — a non-zero
+// exit, the clock, a cancel — is the whole of what is under test, and `Scripted`
+// fails only one way. Shared through `Arc` because the session wires the agent it
+// was given before it sends anything, and a copy that recorded into itself would
+// record nothing a test could read.
 #[derive(Debug)]
 enum Attempt {
     /// The session's last message.
@@ -3488,7 +3437,7 @@ fn a_clean_split() -> String {
 
 #[test]
 fn a_split_that_fits_its_caps_comes_back_numbered_with_nothing_repaired() {
-    let agent = Scripted::answering([a_clean_split()]);
+    let agent = scripted([a_clean_split()]);
     let mut session = splitting_with(&agent);
 
     let (subtasks, repairs) = subtasks(session.run());
@@ -3506,12 +3455,12 @@ fn a_split_that_fits_its_caps_comes_back_numbered_with_nothing_repaired() {
 
 #[test]
 fn the_opening_turn_is_the_ticket_and_the_shape_and_nothing_about_the_board() {
-    let agent = Scripted::answering([a_clean_split()]);
+    let agent = scripted([a_clean_split()]);
     let mut session = splitting_with(&agent);
 
     let _ = session.run();
 
-    let sent = agent.sent();
+    let sent = agent.said();
     assert_eq!(sent.len(), 1);
     let opening = &sent[0];
     assert!(opening.starts_with(splitting::SPLIT_PROMPT));
@@ -3544,7 +3493,7 @@ fn a_split_the_mend_loses_nothing_over_is_repaired_without_another_turn() {
          {\"goal\":\"Read the queue and choose the ticket\"},\
          {\"goal\":\"Number the sub-tasks and write their briefs\",\"depends_on\":[1,9]}]}"
         .to_owned();
-    let agent = Scripted::answering([answer]);
+    let agent = scripted([answer]);
     let mut session = splitting_with(&agent);
 
     let (subtasks, repairs) = subtasks(session.run());
@@ -3566,7 +3515,7 @@ fn a_split_the_mend_loses_nothing_over_is_repaired_without_another_turn() {
 
 #[test]
 fn a_split_with_a_field_past_its_cap_is_asked_again_before_anything_is_cut() {
-    let agent = Scripted::answering([an_overlong_split(), a_clean_split()]);
+    let agent = scripted([an_overlong_split(), a_clean_split()]);
     let mut session = splitting_with(&agent);
 
     let (subtasks, repairs) = subtasks(session.run());
@@ -3580,14 +3529,14 @@ fn a_split_with_a_field_past_its_cap_is_asked_again_before_anything_is_cut() {
     );
     // The second turn names the field that ran over, so the model shortens it
     // rather than warlock cutting it.
-    let again = &agent.sent()[1];
+    let again = &agent.said()[1];
     assert!(again.contains("turned down"), "{again}");
     assert!(again.contains("subtasks[0].goal"), "{again}");
 }
 
 #[test]
 fn a_split_that_stays_past_its_cap_is_cut_once_the_attempts_run_out() {
-    let agent = Scripted::answering(vec![an_overlong_split(); splitting::ATTEMPTS]);
+    let agent = scripted(vec![an_overlong_split(); splitting::ATTEMPTS]);
     let mut session = splitting_with(&agent);
 
     let (subtasks, repairs) = subtasks(session.run());
@@ -3606,7 +3555,7 @@ fn a_split_that_stays_past_its_cap_is_cut_once_the_attempts_run_out() {
 
 #[test]
 fn a_split_that_is_not_the_object_is_asked_again_with_what_was_wrong_with_it() {
-    let agent = Scripted::answering([
+    let agent = scripted([
         "I had a look and I do not think this ticket needs splitting.".to_owned(),
         a_clean_split(),
     ]);
@@ -3620,7 +3569,7 @@ fn a_split_that_is_not_the_object_is_asked_again_with_what_was_wrong_with_it() {
     // The second turn is the instructions afresh — the ticket is in it again,
     // because a session with no memory of the first turn has to be told — with
     // the last attempt's defect listed as something not to repeat.
-    let sent = agent.sent();
+    let sent = agent.said();
     assert_eq!(sent.len(), 2);
     let again = &sent[1];
     assert!(again.starts_with(splitting::SPLIT_PROMPT));
@@ -3638,14 +3587,14 @@ fn a_ticket_that_never_parses_is_reported_rather_than_split_by_warlock() {
         "Once more.",
     ];
     assert!(prose.len() >= splitting::ATTEMPTS);
-    let agent = Scripted::answering(prose);
+    let agent = scripted(prose);
     let mut session = splitting_with(&agent);
 
     let halted = unsplit(session.run());
 
     // Every attempt spent and no fifth taken.
     assert_eq!(session.attempts(), splitting::ATTEMPTS);
-    assert_eq!(agent.sent().len(), splitting::ATTEMPTS);
+    assert_eq!(agent.said().len(), splitting::ATTEMPTS);
     assert!(
         matches!(halted, Unsplit::Unusable(Defect::NotJson { .. })),
         "{halted:?}",
@@ -3668,7 +3617,7 @@ fn sub_tasks_that_wait_on_one_another_halt_the_split_with_the_circle_named() {
     let answer = "{\"subtasks\":[\
                   {\"goal\":\"Number the sub-tasks once the briefs exist\",\"depends_on\":[2]},\
                   {\"goal\":\"Write the briefs once the numbering exists\",\"depends_on\":[1]}]}";
-    let agent = Scripted::answering([answer]);
+    let agent = scripted([answer]);
     let mut session = splitting_with(&agent);
 
     let halted = unsplit(session.run());
@@ -3714,11 +3663,11 @@ fn a_session_that_never_answers_halts_the_split_rather_than_failing_the_caller()
 
 #[test]
 fn nothing_is_asked_until_a_splitting_session_is_run() {
-    let agent = Scripted::answering([a_clean_split()]);
+    let agent = scripted([a_clean_split()]);
     let session = splitting_with(&agent);
 
     assert_eq!(session.attempts(), 0);
-    assert!(agent.sent().is_empty());
+    assert!(agent.said().is_empty());
 
     // And the handle it hands out is pressable before anything has started.
     session.cancel().cancel();
@@ -4744,10 +4693,8 @@ mod unix {
 
         use super::super::{value_of, words};
         use super::{clean_up, scratch};
-        use crate::{
-            ChatAgent, Stopped, WORKING_ATTEMPTS, WORKING_TURNS, Worked, Working, working_opening,
-            working_system_prompt,
-        };
+        use crate::claude::{Stopped, WORKING_ATTEMPTS, WORKING_TURNS, Worked};
+        use crate::{ChatAgent, Working, working_opening, working_system_prompt};
 
         // Set by the shell that runs the stand-in, and so present in the
         // child's environment without anybody having put them there.

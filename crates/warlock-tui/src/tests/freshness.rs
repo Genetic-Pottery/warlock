@@ -6,11 +6,12 @@ use warlock_engine::pact::Event;
 use warlock_engine::{
     Agent, Manifest, NodeState, PactEntry, agent, decide_state, from_manifest_path, subtree_hash,
 };
-use warlock_tui::{Cancel, Dirty};
 
 use super::{Freshened, Freshening, freshened, made_stale};
 use crate::boundary::closed_scope_message;
+use crate::claude::Cancel;
 use crate::descent::{Descent, descend};
+use crate::git::Dirty;
 use crate::stubs::{Checkout, GitCall, Passing};
 
 // Never read back, and no clock is consulted: the grant's timestamp plays no

@@ -3,9 +3,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::{env, fs, process};
 
 use warlock_engine::{Manifest, PactEntry, manifest_path, save_sigils, sigils_path};
-use warlock_tui::{App, Chrome, Sigils};
 
 use super::{NOT_CLEANED, Scope, load_app_in, load_manifest, reload, sigils_under};
+use crate::app::{App, Chrome, Sigils};
 use crate::error::Error;
 
 #[test]

@@ -17,13 +17,13 @@ use std::path::Path;
 use std::time::Instant;
 
 use warlock_engine::{Manifest, PactEntry, to_manifest_path};
-use warlock_tui::{
-    App, Edited, RecordEdited, RecordField, RecordForm, RecordPrompt, ScopeField, ScopePrompt,
-    Sigils,
-};
 
+use crate::app::{App, Sigils};
 use crate::boundary::Operation;
 use crate::error::Error;
+use crate::prompt::{
+    Edited, RecordEdited, RecordField, RecordForm, RecordPrompt, ScopeField, ScopePrompt,
+};
 use crate::rescope::{RecordFields, ScopeRefusal, rescope};
 use crate::session::closed_scope;
 
@@ -36,7 +36,7 @@ use crate::session::closed_scope;
 // no progress line and the ticket has to be named.
 //
 // The field opens on the scope read out of the manifest, never off a
-// [`Row`](warlock_tui::Row): a fourth row field holding this string would be a
+// [`Row`](crate::app::Row): a fourth row field holding this string would be a
 // copy of the manifest to keep in step with the manifest.
 pub(crate) fn scope_press(
     app: &mut App,
@@ -141,7 +141,7 @@ impl Windows {
 //
 // The `None` arm is unreachable rather than silent —
 // [`press_for`](crate::input::press_for) only consults
-// [`edit_for`](warlock_tui::edit_for) while a prompt is up.
+// [`edit_for`](crate::prompt::edit_for) while a prompt is up.
 pub(crate) fn scope_edit(
     app: &mut App,
     manifest: &mut Manifest,
@@ -217,7 +217,7 @@ fn save(app: &mut App, manifest: &mut Manifest, repo_root: &Path, next: Manifest
 // road to disk.
 //
 // The `None` arm is unreachable for `scope_edit`'s reason: `press_for` only
-// consults [`record_edit_for`](warlock_tui::record_edit_for) while this window
+// consults [`record_edit_for`](crate::prompt::record_edit_for) while this window
 // is up.
 pub(crate) fn record_edit(
     app: &mut App,

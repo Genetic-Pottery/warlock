@@ -341,7 +341,7 @@ const COMPOSER_CURSOR: &str = SCOPE_CURSOR;
 
 const COMPOSER_MIN_HEIGHT: u16 = 1 + 2 * BORDER_THICKNESS;
 
-pub fn draw(
+pub(crate) fn draw(
     frame: &mut Frame<'_>,
     app: &App,
     chrome: &Chrome,
@@ -433,12 +433,12 @@ fn split_column(column: Rect, composer: Option<&Composer>) -> (Rect, Option<Rect
     (panel, Some(field))
 }
 
-// Exported so the binary can route a keystroke by the same question the frame
-// was cut by. `on_screen` below is this one over an `Option`, and `draw` and
-// `areas` both go through it: if the two answers ever came from two rules, keys
-// would go to a field the reader cannot see.
+// Called from `interactive.rs` too, so a keystroke is routed by the same
+// question the frame was cut by. `on_screen` below is this one over an
+// `Option`, and `draw` and `areas` both go through it: if the two answers ever
+// came from two rules, keys would go to a field the reader cannot see.
 #[must_use]
-pub fn composer_on_screen<'a>(app: &App, composer: &'a Composer) -> Option<&'a Composer> {
+pub(crate) fn composer_on_screen<'a>(app: &App, composer: &'a Composer) -> Option<&'a Composer> {
     app.panel().composer_showable().then_some(composer)
 }
 
@@ -497,17 +497,22 @@ fn panel_rows_area(panel: Rect, header: Option<&RunHeader>) -> Rect {
 }
 
 #[must_use]
-pub fn tree_height(size: Size) -> u16 {
+pub(crate) fn tree_height(size: Size) -> u16 {
     tree_rows_area(areas(Rect::from(size), None).tree).height
 }
 
 #[must_use]
-pub fn panel_height(size: Size, composer: Option<&Composer>, header: Option<&RunHeader>) -> u16 {
+pub(crate) fn panel_height(
+    size: Size,
+    composer: Option<&Composer>,
+    header: Option<&RunHeader>,
+) -> u16 {
     panel_rows_area(areas(Rect::from(size), composer).panel, header).height
 }
 
 #[must_use]
-pub fn run_header_height(
+#[cfg(test)]
+pub(crate) fn run_header_height(
     size: Size,
     composer: Option<&Composer>,
     header: Option<&RunHeader>,
@@ -518,19 +523,20 @@ pub fn run_header_height(
 }
 
 #[must_use]
-pub fn composer_height(size: Size, composer: Option<&Composer>) -> u16 {
+#[cfg(test)]
+pub(crate) fn composer_height(size: Size, composer: Option<&Composer>) -> u16 {
     areas(Rect::from(size), composer)
         .composer
         .map_or(0, |area| area.height)
 }
 
 #[must_use]
-pub fn panel_width(size: Size) -> u16 {
+pub(crate) fn panel_width(size: Size) -> u16 {
     pane_inner(areas(Rect::from(size), None).panel).width
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum Hit {
+pub(crate) enum Hit {
     Offscreen,
     Footer,
     Border,
@@ -543,7 +549,7 @@ pub enum Hit {
 }
 
 #[must_use]
-pub fn hit_test(
+pub(crate) fn hit_test(
     column: u16,
     row: u16,
     size: Size,
@@ -611,7 +617,7 @@ pub fn hit_test(
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum Reach {
+pub(crate) enum Reach {
     Above { rows: u16, column: u16 },
     Inside { column: u16 },
     Below { rows: u16, column: u16 },
@@ -631,7 +637,7 @@ pub enum Reach {
 /// wandered sideways — onto the border, the tree, past the right edge of the
 /// screen — still names the cell of the card nearest it.
 #[must_use]
-pub fn panel_reach(
+pub(crate) fn panel_reach(
     column: u16,
     row: u16,
     size: Size,

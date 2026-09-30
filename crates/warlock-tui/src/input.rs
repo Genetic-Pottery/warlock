@@ -11,12 +11,18 @@ use ratatui::crossterm::event::{
     KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 use ratatui::layout::Size;
-use warlock_tui::{
-    Answered, App, CarryAnswered, Cell, Composed, Composer, CutAnswered, Edited, Focus, Hit, Modal,
-    PullAnswered, PushAnswered, QuitConfirm, Reach, RecordEdited, Reviewed, RunHeader, answer_for,
-    carry_answer_for, compose_for, cut_answer_for, edit_for, hit_test, panel_reach,
-    pull_answer_for, push_answer_for, record_edit_for, review_answer_for,
+
+use crate::app::{App, Focus, RunHeader};
+use crate::composer::{Composed, Composer, compose_for};
+use crate::confirm::{
+    Answered, CarryAnswered, CutAnswered, PullAnswered, PushAnswered, QuitConfirm, Reviewed,
+    answer_for, carry_answer_for, cut_answer_for, pull_answer_for, push_answer_for,
+    review_answer_for,
 };
+use crate::modal::Modal;
+use crate::prompt::{Edited, RecordEdited, edit_for, record_edit_for};
+use crate::selection::Cell;
+use crate::ui::{Hit, Reach, hit_test, panel_reach};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Action {

@@ -19,7 +19,7 @@
 //! so every question about which path is a crossing is answered by fabricated
 //! bytes in a test, and the only thing the reading function adds is the call.
 //!
-//! This is not the binary's `boundary::permits`: that answers whether an
+//! This is not [`permits`](crate::boundary::permits): that answers whether an
 //! operator may perform an operation *at* a directory, before it happens. This
 //! reads what already happened, over paths rather than directories, and refuses
 //! nothing.
@@ -92,7 +92,7 @@ impl Crossings<'_> {
 /// ```
 ///
 /// `held` is the flattened list of sigils rather than the header's
-/// [`Sigils`](crate::Sigils), for the same reason `boundary::permits` takes a
+/// [`Sigils`](crate::app::Sigils), for the same reason `boundary::permits` takes a
 /// slice: a config that would not parse is a thing to say and not a third answer
 /// to give here.
 #[must_use]

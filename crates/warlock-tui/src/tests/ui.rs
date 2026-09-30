@@ -29,11 +29,11 @@ use super::{
     panel_width, run_header_height, run_header_line, tree_height, tree_rows_area, tree_width,
     truncated,
 };
-use crate::COMPOSER_MAX_ROWS;
 use crate::account::{Line as Entry, Outcome};
 use crate::app::{App, Chrome, Focus, Row, Run, Sigils};
 use crate::claude::Activity;
 use crate::colour::{CONVERSATION_COLOUR, FOCUS_COLOUR, GUIDE_COLOUR, SYSTEM_COLOUR, colour_for};
+use crate::composer::COMPOSER_MAX_ROWS;
 use crate::composer::Composer;
 use crate::confirm::{Answer, Choice, CutConfirm, PullConfirm, PushConfirm, QuitConfirm};
 use crate::fixture;

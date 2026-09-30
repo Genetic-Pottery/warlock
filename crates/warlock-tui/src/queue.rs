@@ -18,7 +18,7 @@
 //! to be read before anything can be judged about it. What is judged is the same
 //! four rules, in the same function, so the two doors lead to the same room.
 //!
-//! [`scope_queue`]: crate::Board::scope_queue
+//! [`scope_queue`]: crate::linear::Board::scope_queue
 
 use std::cmp::Reverse;
 use std::collections::HashMap;
@@ -34,7 +34,7 @@ use crate::linear::{Assignee, Blocker, Board, Error as LinearError, Priority, Qu
 /// because `In progress` and `In Progress` are the same column to everyone
 /// except a string comparison, and a team that renamed the case would otherwise
 /// have every one of its started tickets read as somebody else's work.
-pub const IN_PROGRESS: &str = "In Progress";
+pub(crate) const IN_PROGRESS: &str = "In Progress";
 
 /// What choosing came to: the ticket to work, and every issue it walked past.
 ///
@@ -324,7 +324,7 @@ fn number_in(identifier: &str) -> Option<u64> {
 /// [`LinearError`] is what failure looks like, and it stays in the `Result` around
 /// this.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Named {
+pub(crate) enum Named {
     /// The ticket, held to every rule [`choose`] holds a queue to.
     Taken(QueuedIssue),
     Refused(Refusal),
@@ -420,7 +420,7 @@ impl fmt::Display for Refusal {
 ///
 /// There is no way here to work somebody else's ticket. The assignee is checked
 /// by id against the user the key belongs to, and nothing takes a flag past it.
-pub fn take_named(
+pub(crate) fn take_named(
     board: &impl Board,
     record: &ScopeRecord,
     assignee: &str,

@@ -1,11 +1,14 @@
 use std::sync::mpsc::{self, Sender};
 use std::time::{Duration, Instant};
 
-use warlock_tui::{Activity, App, ChatAgent, Ending, INVOCATION_TIMEOUT, Line, Mode};
-
 use super::{Asked, Chat, Chatting, TurnEvent, apply_turn};
+use crate::account::Line;
+use crate::app::App;
+use crate::claude::{Activity, ChatAgent, INVOCATION_TIMEOUT};
 use crate::inflight::Stream;
 use crate::pacting::CancelGuard;
+use crate::panel::Mode;
+use crate::thread::Ending;
 
 const ASKED: &str = "what is in crates/warlock-engine?";
 
@@ -397,7 +400,7 @@ fn a_second_question_runs_as_ordinarily_as_the_first_did() {
     );
 }
 
-fn words(agent: &warlock_tui::ChatAgent) -> Vec<String> {
+fn words(agent: &crate::claude::ChatAgent) -> Vec<String> {
     agent
         .args()
         .iter()
@@ -418,9 +421,9 @@ fn a_mode_asks_the_one_conversation_at_a_different_level_and_nothing_else() {
     // a second `ChatAgent`, and neither does the function under test — both
     // vectors name the same session, which is the property the whole design
     // rests on.
-    let agent = warlock_tui::ChatAgent::new();
-    let question = words(&super::asking(&agent, warlock_tui::Mode::Chat));
-    let brief = words(&super::asking(&agent, warlock_tui::Mode::Brief));
+    let agent = crate::claude::ChatAgent::new();
+    let question = words(&super::asking(&agent, crate::panel::Mode::Chat));
+    let brief = words(&super::asking(&agent, crate::panel::Mode::Brief));
 
     assert_eq!(
         question,
@@ -441,9 +444,12 @@ fn a_mode_asks_the_one_conversation_at_a_different_level_and_nothing_else() {
     );
     assert_eq!(
         value_of(&brief, "--effort"),
-        Some(warlock_tui::BRIEF_EFFORT)
+        Some(crate::claude::BRIEF_EFFORT)
     );
-    assert_eq!(value_of(&brief, "--model"), Some(warlock_tui::BRIEF_MODEL));
+    assert_eq!(
+        value_of(&brief, "--model"),
+        Some(crate::claude::BRIEF_MODEL)
+    );
     assert_eq!(
         value_of(&brief, "--session-id"),
         value_of(&question, "--session-id"),
@@ -489,10 +495,10 @@ fn a_mode_change_is_a_state_of_the_conversation_and_never_a_second_one() {
     for draft in ["why nine passes?", "/brief", "/brief", "/chat"] {
         chat.compose(
             &mut app,
-            warlock_tui::Composed::Typing(warlock_tui::Composer::new(draft)),
+            crate::composer::Composed::Typing(crate::composer::Composer::new(draft)),
             base,
         );
-        chat.compose(&mut app, warlock_tui::Composed::Submit, base);
+        chat.compose(&mut app, crate::composer::Composed::Submit, base);
     }
 
     // The register was really entered and really left — otherwise the
@@ -550,13 +556,15 @@ mod unix {
     use std::time::{Duration, Instant};
     use std::{env, fs, process, thread};
 
-    use warlock_tui::{Activity, App, Cancel, ChatAgent, Ending, Mode, ScopePrompt};
-
-    use warlock_tui::Converses;
-
     use super::super::{Asked, Chat, TurnEvent, run_turn, spawn_turn, start_turn, wired};
     use super::{ASKED, at, chatting, clocked, drain, rows, said};
+    use crate::app::App;
+    use crate::claude::Converses;
+    use crate::claude::{Activity, Cancel, ChatAgent};
     use crate::inflight::Port;
+    use crate::panel::Mode;
+    use crate::prompt::ScopePrompt;
+    use crate::thread::Ending;
 
     const AT_MOST: Duration = Duration::from_secs(5);
 
@@ -889,7 +897,7 @@ mod unix {
                 super::clocked(2, "Read src/lib.rs"),
                 super::clocked(2, "thinking"),
                 super::clocked(2, "writing"),
-                warlock_tui::Line::Text {
+                crate::account::Line::Text {
                     text: ANSWER.to_owned()
                 },
             ]
@@ -942,7 +950,7 @@ mod unix {
         // Composed here, as the loop composes it: what is sent is a string
         // built around a shape, and this test only cares that whatever was
         // built is what the child read.
-        let instruction = warlock_tui::brief_instruction(warlock_tui::DEFAULT_TEMPLATE);
+        let instruction = crate::claude::brief_instruction(crate::template::DEFAULT_TEMPLATE);
 
         chat.say(&mut app, "/brief", &instruction, Asked::Answer, base);
         settle(&mut chat, &mut app, at(base, 1));
@@ -952,13 +960,13 @@ mod unix {
         assert_eq!(
             rows(&app, at(base, 1)),
             vec![
-                warlock_tui::Line::Said {
+                crate::account::Line::Said {
                     text: "/brief".to_owned()
                 },
                 clocked(1, "Read src/lib.rs"),
                 clocked(1, "thinking"),
                 clocked(1, "writing"),
-                warlock_tui::Line::Text {
+                crate::account::Line::Text {
                     text: ANSWER.to_owned()
                 },
             ]
@@ -1017,13 +1025,13 @@ mod unix {
             vec![
                 said(),
                 clocked(1, &line),
-                warlock_tui::Line::Said {
+                crate::account::Line::Said {
                     text: AGAIN.to_owned()
                 },
                 clocked(2, "Read src/lib.rs"),
                 clocked(2, "thinking"),
                 clocked(2, "writing"),
-                warlock_tui::Line::Text {
+                crate::account::Line::Text {
                     text: ANSWER.to_owned()
                 },
             ]
@@ -1047,7 +1055,7 @@ mod unix {
         chat.say(
             &mut app,
             "/write",
-            warlock_tui::WRITE_INSTRUCTION,
+            crate::claude::WRITE_INSTRUCTION,
             Asked::Document,
             base,
         );
@@ -1068,13 +1076,13 @@ mod unix {
         assert_eq!(
             rows(&app, at(base, 1)),
             vec![
-                warlock_tui::Line::Said {
+                crate::account::Line::Said {
                     text: "/write".to_owned()
                 },
                 clocked(1, "Read src/lib.rs"),
                 clocked(1, "thinking"),
                 clocked(1, "writing"),
-                warlock_tui::Line::Text {
+                crate::account::Line::Text {
                     text: ANSWER.to_owned()
                 },
             ],
@@ -1107,7 +1115,7 @@ mod unix {
         chat.say(
             &mut app,
             "/write",
-            warlock_tui::WRITE_INSTRUCTION,
+            crate::claude::WRITE_INSTRUCTION,
             Asked::Document,
             base,
         );
@@ -1125,7 +1133,7 @@ mod unix {
         assert_eq!(
             rows(&app, at(base, 30)),
             vec![
-                warlock_tui::Line::Said {
+                crate::account::Line::Said {
                     text: "/write".to_owned()
                 },
                 clocked(1, &line),
@@ -1144,7 +1152,7 @@ mod unix {
 
         assert_eq!(
             rows(&app, at(base, 12)).last(),
-            Some(&warlock_tui::Line::Text {
+            Some(&crate::account::Line::Text {
                 text: ANSWER.to_owned()
             })
         );
@@ -1159,18 +1167,21 @@ mod submitting {
     use std::time::{Duration, Instant};
 
     use warlock_engine::{DEFAULT_BRIEF_DIRECTORY, briefs_path, load_briefs};
-    use warlock_tui::{
-        Activity, App, ChatAgent, Composed, Composer, DEFAULT_TEMPLATE, Ending, Line, Mode,
-        Submitted, brief_instruction,
-    };
-
-    use warlock_tui::Converses;
 
     use super::super::{
         ALREADY_CHATTING, About, BRIEF_COMMAND, BRIEF_NOTE, CHAT_COMMAND, CHAT_NOTE, CUT_COMMAND,
         Chat, NOT_BRIEFING, PUSH_COMMAND, WRITE_COMMAND, Wanted, brief_asking,
     };
+    use crate::account::Line;
+    use crate::app::App;
+    use crate::claude::Converses;
+    use crate::claude::{Activity, ChatAgent, brief_instruction};
+    use crate::composer::{Composed, Composer};
     use crate::error::one_line;
+    use crate::panel::Mode;
+    use crate::submission::Submitted;
+    use crate::template::DEFAULT_TEMPLATE;
+    use crate::thread::Ending;
     use crate::writing::write_opened;
 
     const NOT_A_PROGRAM: &str = "/warlock/no/such/program";
@@ -1638,7 +1649,7 @@ mod submitting {
         let repo = a_root();
         let path = write_template(repo.path(), "");
         fs::write(&path, [0x23, 0x20, 0xff, 0xfe, 0x0a]).expect("a template file");
-        let reason = warlock_tui::brief_template(repo.path())
+        let reason = crate::template::brief_template(repo.path())
             .expect_err("a template that cannot be read")
             .to_string();
         let mut app = App::default();

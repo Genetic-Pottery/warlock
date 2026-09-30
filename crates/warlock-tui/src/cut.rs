@@ -20,9 +20,9 @@ use std::path::Path;
 
 use warlock_engine::drafting::Draft;
 use warlock_engine::{CutRecord, Destination, fold_title, manifest_path, now_rfc3339};
-use warlock_tui::{Board, LinearIssue, NewIssue};
 
 use crate::error::Error;
+use crate::linear::{Board, Issue as LinearIssue, NewIssue};
 use crate::push::records;
 
 /// Where one slice's issues go, which is what [`resolve_filing`] and the

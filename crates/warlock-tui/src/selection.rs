@@ -20,24 +20,26 @@ use crate::wrap::{Shape, rows, shape, wrapped_at};
 /// A byte offset, so the arithmetic is the string's own; [`Selection::new`] is
 /// what keeps one on a char boundary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub struct Position {
+pub(crate) struct Position {
     piece: usize,
     offset: usize,
 }
 
 impl Position {
     #[must_use]
-    pub const fn new(piece: usize, offset: usize) -> Self {
+    pub(crate) const fn new(piece: usize, offset: usize) -> Self {
         Self { piece, offset }
     }
 
     #[must_use]
-    pub const fn piece(self) -> usize {
+    #[cfg(test)]
+    pub(crate) const fn piece(self) -> usize {
         self.piece
     }
 
     #[must_use]
-    pub const fn offset(self) -> usize {
+    #[cfg(test)]
+    pub(crate) const fn offset(self) -> usize {
         self.offset
     }
 }
@@ -45,7 +47,7 @@ impl Position {
 /// Start and end in reading order, whichever way the two positions arrived, so
 /// a drag upwards and the same drag downwards are one value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Selection {
+pub(crate) struct Selection {
     start: Position,
     end: Position,
 }
@@ -56,7 +58,7 @@ impl Selection {
     /// here and nowhere else, which is why every other function in this file may
     /// slice with `[..]`.
     #[must_use]
-    pub fn new(pieces: &[&str], start: Position, end: Position) -> Self {
+    pub(crate) fn new(pieces: &[&str], start: Position, end: Position) -> Self {
         let start = snapped(pieces, start);
         let end = snapped(pieces, end);
         let (start, end) = if end < start {
@@ -68,12 +70,14 @@ impl Selection {
     }
 
     #[must_use]
-    pub const fn start(self) -> Position {
+    #[cfg(test)]
+    pub(crate) const fn start(self) -> Position {
         self.start
     }
 
     #[must_use]
-    pub const fn end(self) -> Position {
+    #[cfg(test)]
+    pub(crate) const fn end(self) -> Position {
         self.end
     }
 }
@@ -82,7 +86,7 @@ impl Selection {
 /// else: no marker, no indent, and no break where the panel wrapped. Work rows
 /// cannot appear because they are not pieces.
 #[must_use]
-pub fn copied_text(pieces: &[&str], selection: Selection) -> String {
+pub(crate) fn copied_text(pieces: &[&str], selection: Selection) -> String {
     let Selection { start, end } = selection;
 
     pieces
@@ -109,10 +113,10 @@ pub fn copied_text(pieces: &[&str], selection: Selection) -> String {
 
 /// A cell of the thread card, in the panel's own terms: `column` and `row`
 /// counted from the first cell of the panel's rows area, which is the pair
-/// [`Hit::PanelLine`](crate::Hit::PanelLine) reports, and `scroll` and `width`
+/// [`Hit::PanelLine`](crate::ui::Hit::PanelLine) reports, and `scroll` and `width`
 /// the panel's own — so `scroll + row` is the row of the card under the pointer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Cell {
+pub(crate) struct Cell {
     pub column: usize,
     pub row: usize,
     pub scroll: usize,
@@ -132,7 +136,7 @@ pub struct Cell {
 /// is a place a reader can put the pointer and not a position in the
 /// conversation.
 #[must_use]
-pub fn position_at(thread: &Thread, cell: Cell, now: Instant) -> Option<Position> {
+pub(crate) fn position_at(thread: &Thread, cell: Cell, now: Instant) -> Option<Position> {
     let mut wanted = cell.scroll.checked_add(cell.row)?;
     let pieces = thread.pieces();
 
@@ -173,7 +177,7 @@ fn at_row(sourced: &Sourced, row: usize, cell: Cell) -> Position {
 /// what a [`Cell`] carries; the height is here because a span is only wanted for
 /// a row that is on screen.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Window {
+pub(crate) struct Window {
     pub scroll: usize,
     pub width: usize,
     pub height: usize,
@@ -187,7 +191,7 @@ pub struct Window {
 /// Never empty and never a prefix column: a row holding none of the selected
 /// text has no span at all rather than one of no width.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Span {
+pub(crate) struct Span {
     pub row: usize,
     pub from: usize,
     pub to: usize,
@@ -204,7 +208,12 @@ pub struct Span {
 /// A selection with nothing between its ends covers no cell at all — the press
 /// that starts a drag nobody makes has to leave the card exactly as it was.
 #[must_use]
-pub fn spans_at(thread: &Thread, selection: Selection, window: Window, now: Instant) -> Vec<Span> {
+pub(crate) fn spans_at(
+    thread: &Thread,
+    selection: Selection,
+    window: Window,
+    now: Instant,
+) -> Vec<Span> {
     if selection.start == selection.end {
         return Vec::new();
     }

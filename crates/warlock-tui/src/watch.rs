@@ -11,7 +11,7 @@
 //! microseconds with no sleeping and no real disk.
 //!
 //! Nothing here reloads: the policy says a reload is *owed*, and reading the
-//! tree again is the binary's business, on the thread that draws.
+//! tree again is `session.rs`'s business, on the thread that draws.
 
 use std::collections::HashSet;
 use std::fmt;
@@ -34,7 +34,7 @@ pub const QUIET_PERIOD: Duration = Duration::from_millis(250);
 /// checkout` or a formatter run over the repository emits faster than
 /// [`QUIET_PERIOD`], so the quiet a pure debounce waits for never comes and the
 /// tree would sit stale for as long as the burst lasted.
-pub const RELOAD_CEILING: Duration = Duration::from_secs(2);
+pub(crate) const RELOAD_CEILING: Duration = Duration::from_secs(2);
 
 /// How many further reloads the events arriving *during* a reload are worth
 /// between them, however many of them there were. Held as one bit rather than a
@@ -42,7 +42,8 @@ pub const RELOAD_CEILING: Duration = Duration::from_secs(2);
 /// already see them runs: remembering each would leave the loop owing a reload
 /// per event and re-walking until the backlog drained. Named rather than left
 /// implicit in the code because the number is the rule, and it cannot grow.
-pub const COALESCED_RELOADS: usize = 1;
+#[cfg(test)]
+pub(crate) const COALESCED_RELOADS: usize = 1;
 
 /// One path per node of the [`Tree`] a load returned: the filter every
 /// filesystem event is held against.
@@ -253,7 +254,7 @@ impl WatchPolicy {
 /// system's own words as a plain [`String`], so no `notify` type leaves this
 /// module and the caller is left free to frame it for the footer.
 #[derive(Debug)]
-pub enum Watching {
+pub(crate) enum Watching {
     Live(Watch),
     Off(String),
 }
@@ -262,7 +263,7 @@ pub enum Watching {
 /// decides nothing: every path is passed on as it arrived, because a filter
 /// here would be a second one living in the half that cannot be tested without
 /// a real disk.
-pub struct Watch {
+pub(crate) struct Watch {
     /// Held only to keep the watch alive: `notify` stops watching when the
     /// handle is dropped. Nothing is read through this field — what the watcher
     /// has to say arrives on `events`.
@@ -281,7 +282,7 @@ impl Watch {
     /// window changes what every node's colour should be while nothing inside
     /// the tree has moved.
     #[must_use]
-    pub fn start(root: impl AsRef<Path>, repo_root: impl AsRef<Path>) -> Watching {
+    pub(crate) fn start(root: impl AsRef<Path>, repo_root: impl AsRef<Path>) -> Watching {
         let (sender, events) = mpsc::channel();
         // The closure runs on `notify`'s own thread. It unwraps each event into
         // the paths it was about and sends them on; an error from the watcher
@@ -318,7 +319,7 @@ impl Watch {
     /// A watcher that died takes the channel with it, which surfaces here as an
     /// empty drain and [`live`](Watch::live) going false — not an error, and
     /// never a reason to stop.
-    pub fn drain(&mut self) -> Vec<PathBuf> {
+    pub(crate) fn drain(&mut self) -> Vec<PathBuf> {
         let mut paths = Vec::new();
         loop {
             match self.events.try_recv() {
@@ -336,7 +337,8 @@ impl Watch {
     /// Only a drain can notice the watcher going, since nothing else here
     /// touches the channel.
     #[must_use]
-    pub fn live(&self) -> bool {
+    #[cfg(test)]
+    pub(crate) fn live(&self) -> bool {
         self.live
     }
 }

@@ -32,7 +32,7 @@ const DIRECTORIES: &str = "directories";
 // and the word the object names the command with are two facts that have to
 // agree, and a caller holding them separately can disagree with itself.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Listing {
+pub enum Listing {
     Stale,
     Fresh,
 }
@@ -81,7 +81,7 @@ const fn state_word(state: NodeState) -> &'static str {
 // both. It is not normalised here: `load_tree` does that and comes back rooted
 // at the path it walked, which is the form worth measuring against the
 // repository root afterwards.
-pub(crate) fn list(listing: Listing, path: Option<PathBuf>, json: bool) -> Result<(), Error> {
+pub fn list(listing: Listing, path: Option<PathBuf>, json: bool) -> Result<(), Error> {
     // Stood up *first*, before the load below, because it is what "path omitted"
     // means: `load_tree` finds the repository root above whatever it is handed,
     // which for `warlock stale crates` would be the same root by a longer road

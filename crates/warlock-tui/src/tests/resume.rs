@@ -9,7 +9,7 @@ use warlock_engine::{
 
 use super::resumed;
 use crate::error::Error;
-use crate::status_for;
+use crate::error::status_for;
 
 const TICKET: &str = "WAR-142";
 
@@ -373,14 +373,15 @@ fn a_record_that_will_not_read_is_not_a_ticket_nobody_pulled() {
 mod panel {
     use std::time::Instant;
 
-    use warlock_tui::{App, Line, Mode};
-
     use super::{
         BLOCKED, CROSSED, FAILED, Ground, MARKER, PullRun, RunStatus, SCOPE, SubtaskStatus, TICKET,
         a_run, halted, saving, state_path, stopped,
     };
+    use crate::account::Line;
+    use crate::app::App;
     use crate::chatting::Chat;
     use crate::error::Error;
+    use crate::panel::Mode;
     use crate::resume::resume_press;
     use crate::stubs::Saying;
 

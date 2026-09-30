@@ -5,12 +5,12 @@ use serde_json::json;
 use warlock_engine::{
     Manifest, PactEntry, ScopeRecord, save_key, save_key_binding, save_sigils, sigils_path,
 };
-use warlock_tui::Sigils;
 
 use super::{Checked, checked, checked_onto, gated_onto, hooked_onto, object, prose};
+use crate::app::Sigils;
 use crate::error::Error;
+use crate::error::status_for;
 use crate::standing::Standing;
-use crate::status_for;
 
 fn standing_in(repo: &Path) -> Standing {
     Standing::at(repo.to_path_buf(), repo.to_path_buf())

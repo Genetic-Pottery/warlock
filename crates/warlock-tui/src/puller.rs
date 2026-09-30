@@ -45,18 +45,22 @@ use std::time::Instant;
 
 use warlock_engine::pact::Event;
 use warlock_engine::{Manifest, PullRun, ScopeRecord, halted_and_resumed_runs, held_sigils};
-use warlock_tui::{
-    Activities, Activity, App, Board, Cancel, ChatAgent, ClaudeAgent, Commit, Dirty,
-    FetchedProject, Forge, Gh, Git, GitError, LinearError, LinearIssue, LinearOpener,
-    LinearProject, NamedIssue, NewIssue, NewProject, Opens, PullAnswered, PullConfirm, Queue,
-    Repository, Split, Splitting, Taking, Undertaking, Worked, Working, branch_name,
+
+use crate::app::App;
+use crate::claude::{
+    Activities, Activity, Cancel, ChatAgent, ClaudeAgent, Split, Splitting, Worked, Working,
     working_system_prompt,
 };
-
+use crate::confirm::{PullAnswered, PullConfirm, Undertaking};
 use crate::cut::listed;
 use crate::error::{Error, one_line};
 use crate::freshness::{Freshened, Freshening, Freshens, freshened};
+use crate::git::{Commit, Dirty, Error as GitError, Forge, Gh, Git, Repository, branch_name};
 use crate::inflight::{Lost, Once, Port, Stream, Workers, settled};
+use crate::linear::{
+    Board, Error as LinearError, FetchedProject, Issue as LinearIssue, NamedIssue, NewIssue,
+    NewProject, Opener as LinearOpener, Opens, Project as LinearProject, Queue,
+};
 use crate::pacting::CancelGuard;
 use crate::pull::{
     Taken, clean, no_review_state, no_start_state, nothing_ready, number_in, opened, passed_over,
@@ -64,6 +68,7 @@ use crate::pull::{
 };
 use crate::pulling::{Heading, PullEvent, Pulled, Pulling, Splits, Ticket, Works, next_runnable};
 use crate::standing::Standing;
+use crate::submission::Taking;
 
 // Said of a lost selection: nothing was read, which is the honest answer for a
 // sequence that reads a tree and a queue and writes neither.

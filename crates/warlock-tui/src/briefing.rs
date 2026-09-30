@@ -7,8 +7,8 @@
 //! there is no chat to come from and none to go back to, which is what keeps the
 //! prompt's vocabulary to prose and `/write`. No `/chat` here, because this
 //! command *is* brief mode; and the two register words are not this module's to
-//! choose, so [`raised`] names them once and takes them from the library's
-//! `claude.rs`, which is where the panel takes them from too.
+//! choose, so [`raised`] names them once and takes them from `claude.rs`, which
+//! is where the panel takes them from too.
 //!
 //! `/write` decides nothing about a brief either. The request is the panel's
 //! [`WRITE_INSTRUCTION`], the path is [`proposed_path`]'s, and the shape, the
@@ -32,14 +32,16 @@ use std::io::{self, Write};
 use std::path::Path;
 
 use warlock_engine::load_briefs;
-use warlock_tui::{
-    BRIEF_EFFORT, BRIEF_MODEL, ChatAgent, Converses, Submitted, WRITE_INSTRUCTION,
-    brief_instruction, brief_template, ending_for, submitted_for,
-};
 
 use crate::asking::{self, Asks};
+use crate::claude::{
+    BRIEF_EFFORT, BRIEF_MODEL, ChatAgent, Converses, WRITE_INSTRUCTION, brief_instruction,
+};
 use crate::error::Error;
 use crate::standing::{FOR_BRIEF, Standing};
+use crate::submission::{Submitted, submitted_for};
+use crate::template::brief_template;
+use crate::thread::ending_for;
 use crate::writing::{Landed, landed, proposed_path};
 
 // The cursor a turn is typed on, and `planned.rs`'s prompt down to the bytes: a
@@ -73,7 +75,7 @@ const ONLY_WRITE: &str = "/write is the only command here and takes nothing afte
                           other line is the brief; `warlock push` and `warlock draft` are \
                           commands of their own";
 
-pub(crate) fn brief() -> Result<(), Error> {
+pub fn brief() -> Result<(), Error> {
     let standing = Standing::here(FOR_BRIEF)?;
 
     briefing(
@@ -132,7 +134,7 @@ fn briefing<C: Converses, K: Asks, W: Write>(
         // The panel's own parser and not a comparison here, so `/write ` with
         // the space a hand leaves behind is the command, `/WRITE` is not, and a
         // line that opens with a path is prose — three rules this module would
-        // otherwise be stating a second time. See the library's `submission.rs`.
+        // otherwise be stating a second time. See `submission.rs`.
         match submitted_for(line) {
             Submitted::Message => {
                 if !line.trim().is_empty() {

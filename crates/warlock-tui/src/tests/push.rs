@@ -6,12 +6,13 @@ use warlock_engine::{
     Destination, Filed, FiledRecord, Manifest, PactEntry, ScopeRecord, filed_path, keys_path,
     manifest_path, route, save_key, save_key_binding, save_sigils, sigils_path,
 };
-use warlock_tui::{Brief, Opens, brief_at};
 
 use super::{Prepared, file, prepare, pushed, sent};
+use crate::brief::{Brief, brief_at};
 use crate::error::Error;
+use crate::error::status_for;
+use crate::linear::Opens;
 use crate::standing::Standing;
-use crate::status_for;
 use crate::stubs::{Boarding, Op, ProjectAsked};
 
 // Not a key, and named so that nothing reading this file mistakes it for one.

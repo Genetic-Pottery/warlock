@@ -20,11 +20,12 @@ use std::time::Instant;
 use warlock_engine::{
     Loaded, Manifest, Tree, held_sigils, load_tree, manifest_path, repository_root, unpact_ignored,
 };
-use warlock_tui::{App, Chrome, Sigils, Watch, WatchPolicy, Watching, reseat_on};
 
+use crate::app::{App, Chrome, Sigils, reseat_on};
 use crate::boundary::{Operation, permits};
 use crate::error::{Error, one_line};
 use crate::standing::Standing;
+use crate::watch::{Watch, WatchPolicy, Watching};
 
 // Says what the reader lost, which is the refresh and nothing else: the run is
 // over, its documents are on disk, its manifest is saved, and the rows under

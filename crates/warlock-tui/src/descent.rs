@@ -23,8 +23,8 @@ use warlock_engine::pact::Event;
 use warlock_engine::{
     Agent, Manifest, PactedSubtree, Pacting, pact_subtree, refresh_subtree, unpact_subtree,
 };
-use warlock_tui::Cancel;
 
+use crate::claude::Cancel;
 use crate::error::Error;
 use crate::standing::{FOR_PACT, FOR_REFRESH};
 

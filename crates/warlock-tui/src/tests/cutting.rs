@@ -13,11 +13,14 @@ use warlock_engine::{
     CutRecord, Filed, FiledRecord, Manifest, PactEntry, ScopeRecord, save_key, save_key_binding,
     save_sigils,
 };
-use warlock_tui::{App, Converses, Line, Opens};
 
 use super::{ALREADY_CUTTING, Cutter};
+use crate::account::Line;
+use crate::app::App;
+use crate::claude::Converses;
 use crate::error::{Error, one_line};
 use crate::inflight::Workers;
+use crate::linear::Opens;
 use crate::stubs::{Answering, Boarding, Gate, Scripted};
 
 // Not a key, and named so that nothing reading this file mistakes it for one:
@@ -550,13 +553,13 @@ fn dropping_the_session_ends_the_cut_without_waiting_for_it() {
 // these drive the same three calls `Session::cut_answered` makes.
 mod asking {
     use tempfile::TempDir;
-    use warlock_tui::Answer;
 
     use super::{
         Answering, App, BRIEF, Boarding, Cutter, FIRST, Instant, KEY_NAME, NAME, NOT_A_KEY, SLICED,
         STATUS, Scripted, TEAM, a_home, a_project, a_repository, asked_over, filed, landing, notes,
         now, press, refusal, unasked,
     };
+    use crate::confirm::Answer;
     use crate::error::Error;
 
     fn asked() -> (App, Cutter<Boarding, Scripted>, TempDir, TempDir) {
@@ -1050,12 +1053,12 @@ mod cutting {
 // something these tests can say.
 mod relaying {
     use tempfile::TempDir;
-    use warlock_tui::NOTHING_SETTLES_IT;
 
     use super::{
         Answering, App, Boarding, Cutter, FIRST, Gate, SECOND, Scripted, THIRD, a_project,
         asked_held, asked_proposing, notes, now, rounds, through,
     };
+    use crate::claude::NOTHING_SETTLES_IT;
 
     // The question the first slice comes back with, and warlock's attempt at it:
     // prose with a round left is a question, and the model that answers it is a
@@ -1457,12 +1460,12 @@ mod relaying {
 mod reviewing {
     use tempfile::TempDir;
     use warlock_engine::{CutRecord, Filed, filed_path};
-    use warlock_tui::{Answer, Choice};
 
     use super::{
         Answering, App, BRIEF, Cutter, FIRST, NOT_A_KEY, PREPARED, PROJECT_ID, SECOND, Scripted,
         THIRD, a_project, asked_over, fs, notes, now, rounds,
     };
+    use crate::confirm::{Answer, Choice};
     use crate::stubs::{Boarding, Op, VIEWER};
 
     // What somebody types about drafts they have just read, which is the one

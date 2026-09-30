@@ -1,7 +1,7 @@
 //! The view key. [`view_press`] is the two steps between
 //! [`App::view_target`], which decides what the press means over the selected
 //! row and words every refusal itself, and
-//! [`App::show_document`](warlock_tui::App::show_document), which takes lines
+//! [`App::show_document`](crate::app::App::show_document), which takes lines
 //! and never a path.
 //!
 //! Two things here are choices rather than consequences. The press consults no
@@ -14,8 +14,8 @@
 use std::path::PathBuf;
 
 use warlock_engine::{Viewed, view_file};
-use warlock_tui::App;
 
+use crate::app::App;
 use crate::error::one_line;
 
 // The file that is now on the document card, and `None` for a press that put

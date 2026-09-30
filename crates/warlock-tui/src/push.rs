@@ -25,12 +25,14 @@ use std::path::{Path, PathBuf};
 use warlock_engine::{
     Destination, Filed, FiledRecord, Manifest, filed, manifest_path, now_rfc3339, resolve_filing,
 };
-use warlock_tui::{Board, Brief, LinearOpener, NewProject, Opens, brief_at, size};
 
+use crate::account::size;
+use crate::brief::{Brief, brief_at};
 use crate::error::Error;
+use crate::linear::{Board, NewProject, Opener as LinearOpener, Opens};
 use crate::standing::{FOR_PUSH, Standing};
 
-pub(crate) fn push(path: &Path, scope: Option<&str>, dry_run: bool) -> Result<(), Error> {
+pub fn push(path: &Path, scope: Option<&str>, dry_run: bool) -> Result<(), Error> {
     let standing = Standing::here(FOR_PUSH)?;
     // The error rather than `check`'s `.ok()`: the sigils under the home pick
     // the board and the key store beside them is what files to it, so a machine

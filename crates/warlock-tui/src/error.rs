@@ -10,20 +10,22 @@ use warlock_engine::{
     RunStatus, briefs, claude_md, filed, filing, keys, load, manifest, pact, pulls, route, scope,
     sigils,
 };
-use warlock_tui::{
-    BriefError, Dirty, GitError, LinearError, Refusal, ScopeBlockError, TemplateError,
-};
 
 use crate::boundary::{blocking_scopes_message, closed_scope_message};
+use crate::brief::{Error as BriefError, ScopeBlockError};
 use crate::cut::listed;
+use crate::git::{Dirty, Error as GitError};
+use crate::linear::Error as LinearError;
 use crate::pulling;
+use crate::queue::Refusal;
 use crate::rescope::ScopeRefusal;
+use crate::template::Error as TemplateError;
 
 // One vocabulary for the panel and every subcommand rather than one enum
 // each: they fail in the same ways and are printed by the same line of `main`,
 // so a second enum would be a second wording of the same sentences.
 #[derive(Debug)]
-pub(crate) enum Error {
+pub enum Error {
     WorkingDirectory {
         source: io::Error,
     },
@@ -169,8 +171,8 @@ pub(crate) enum Error {
     // The repository's brief shape, refused before a conversation is opened:
     // `warlock brief` reads the template first, and a file that is there and
     // will not read is never quietly replaced by the built-in default, which is
-    // the library's `template.rs` own reasoning. Absent is not a failure, so
-    // nothing but an unreadable file reaches this.
+    // `template.rs`'s own reasoning. Absent is not a failure, so nothing but an
+    // unreadable file reaches this.
     Template {
         source: TemplateError,
     },
@@ -939,6 +941,60 @@ impl From<io::Error> for Error {
         Self::Terminal { source }
     }
 }
+
+/// The process's exit status.
+///
+/// Four non-zero registers, kept distinct so a script can tell them apart
+/// without reading a word of the message: **2** is clap's, for a command line
+/// it could not parse; **1** is warlock could not do it; **3** is a boundary
+/// this machine's sigils do not open, refused with nothing spent; **4** is a
+/// run that finished with some directories failed, which is the one non-zero
+/// status that comes with the work having been done and saved; and
+/// [`CANCELLED`] is a run somebody stopped, likewise saved.
+///
+/// **0** means the question was answered whatever the answer was — an empty
+/// listing is "nothing is stale", and a closed scope is `check`'s answer rather
+/// than a failure to reach one.
+#[must_use]
+pub const fn status_for(outcome: &Result<(), Error>) -> u8 {
+    match outcome {
+        Ok(()) => 0,
+        // The boundary, and only the upward one: see the decision above.
+        //
+        // A pull's two boundary refusals spend the same register and nothing else
+        // does: a scope this machine's sigils do not open, refused before a request
+        // with nothing spent, and a session that wrote under one, which is a run
+        // that stopped with nothing committed and the tree left as it was. The
+        // numbers here and `Pulled::status`'s are one decision, asserted against
+        // each other in the tests.
+        Err(Error::ClosedScope { .. } | Error::UnheldScope { .. } | Error::Crossed { .. }) => 3,
+        // A run that finished with some of its directories failed. Above the
+        // catch-all rather than folded into it, because it is the one non-zero
+        // status that comes with the work having been done: the documents that
+        // could be written are written and the manifest is saved, and the line
+        // printed for it is a count under a list already on stderr.
+        Err(Error::Failures { .. }) => 4,
+        // A run somebody stopped, and the one status here that is not warlock's
+        // verdict on anything: the work up to the Ctrl-C is saved, so this sits
+        // beside the 4 rather than under the catch-all, and it is the number a
+        // shell already spells an interrupted process with.
+        Err(Error::Cancelled) => CANCELLED,
+        // Everything else, and that includes `warlock scope add`'s three
+        // refusals about a `[[scope]]` record — deliberately, rather than for
+        // want of somewhere to put them. A **1** and not clap's **2**: which
+        // flags a run needs depends on what the manifest already records, so
+        // the rule is warlock's to word rather than a command line clap could
+        // have parsed, and a scope name the engine refuses already spends this
+        // register. Not a **3** either — that one is the sigil boundary's
+        // alone, and a script reading it as "ask for a sigil" would be sent to
+        // `warlock config` over a missing `--team`.
+        Err(_) => 1,
+    }
+}
+
+/// The status a shell already spells an interrupted process with, so warlock
+/// does not invent a second one.
+pub(crate) const CANCELLED: u8 = 130;
 
 #[cfg(test)]
 #[path = "tests/error.rs"]

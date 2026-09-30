@@ -17,7 +17,7 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind};
 use warlock_engine::Destination;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
-pub enum Answer {
+pub(crate) enum Answer {
     Yes,
     // The default, so the keystroke that opens the dialog and an Enter straight
     // after it come to nothing at all: the dangerous answer is never the one
@@ -30,7 +30,7 @@ pub enum Answer {
 // with Yes highlighted" is not a state that can be written down: the highlight
 // exists exactly as long as the question does.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
-pub enum QuitConfirm {
+pub(crate) enum QuitConfirm {
     #[default]
     Closed,
     Open(Answer),
@@ -41,19 +41,20 @@ impl QuitConfirm {
     // which answer a fresh dialog starts on is decided here rather than wherever
     // Esc happens to be handled.
     #[must_use]
-    pub const fn open() -> Self {
+    pub(crate) const fn open() -> Self {
         Self::Open(Answer::No)
     }
 
     #[must_use]
-    pub const fn is_open(self) -> bool {
+    #[cfg(test)]
+    pub(crate) const fn is_open(self) -> bool {
         matches!(self, Self::Open(_))
     }
 
     // The one way into `answer_for`: the `Option` is what keeps the key handler
     // from having to invent an answer for a dialog that is not up.
     #[must_use]
-    pub const fn highlighted(self) -> Option<Answer> {
+    pub(crate) const fn highlighted(self) -> Option<Answer> {
         match self {
             Self::Closed => None,
             Self::Open(answer) => Some(answer),
@@ -66,7 +67,7 @@ impl QuitConfirm {
 // nothing here leaves the question where it was, which is `Open` with the same
 // answer in it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum Answered {
+pub(crate) enum Answered {
     Open(Answer),
     Close,
     Leave,
@@ -83,7 +84,7 @@ pub enum Answered {
 // would open the dialog and immediately close it again, which is a gate that is
 // not there.
 #[must_use]
-pub fn answer_for(key: KeyEvent, highlighted: Answer) -> Answered {
+pub(crate) fn answer_for(key: KeyEvent, highlighted: Answer) -> Answered {
     if key.kind != KeyEventKind::Press {
         return Answered::Open(highlighted);
     }
@@ -113,7 +114,7 @@ pub fn answer_for(key: KeyEvent, highlighted: Answer) -> Answered {
 // exactly as long as the question does — which is why this is only ever built
 // through [`PushConfirm::open`].
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct Filing {
+pub(crate) struct Filing {
     project: String,
     destination: Destination,
     answer: Answer,
@@ -121,17 +122,17 @@ pub struct Filing {
 
 impl Filing {
     #[must_use]
-    pub fn project(&self) -> &str {
+    pub(crate) fn project(&self) -> &str {
         &self.project
     }
 
     #[must_use]
-    pub const fn destination(&self) -> &Destination {
+    pub(crate) const fn destination(&self) -> &Destination {
         &self.destination
     }
 
     #[must_use]
-    pub const fn answer(&self) -> Answer {
+    pub(crate) const fn answer(&self) -> Answer {
         self.answer
     }
 
@@ -139,7 +140,7 @@ impl Filing {
     // rather than building a second one from strings it would have to be handed
     // again.
     #[must_use]
-    pub fn with_answer(&self, answer: Answer) -> Self {
+    pub(crate) fn with_answer(&self, answer: Answer) -> Self {
         Self {
             answer,
             ..self.clone()
@@ -155,7 +156,7 @@ impl Filing {
 /// different things and say so in their types: a confirmed question here sends
 /// a brief and leaves the session exactly where it was.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
-pub enum PushConfirm {
+pub(crate) enum PushConfirm {
     #[default]
     Closed,
     Open(Filing),
@@ -166,7 +167,7 @@ impl PushConfirm {
     /// keystroke that opened the dialog and an Enter straight after it come to
     /// nothing at all.
     #[must_use]
-    pub fn open(project: impl Into<String>, destination: Destination) -> Self {
+    pub(crate) fn open(project: impl Into<String>, destination: Destination) -> Self {
         Self::Open(Filing {
             project: project.into(),
             destination,
@@ -175,7 +176,8 @@ impl PushConfirm {
     }
 
     #[must_use]
-    pub const fn is_open(&self) -> bool {
+    #[cfg(test)]
+    pub(crate) const fn is_open(&self) -> bool {
         matches!(self, Self::Open(_))
     }
 
@@ -183,7 +185,7 @@ impl PushConfirm {
     /// reason [`QuitConfirm::highlighted`] is: the caller cannot invent a
     /// question that is not up.
     #[must_use]
-    pub const fn filing(&self) -> Option<&Filing> {
+    pub(crate) const fn filing(&self) -> Option<&Filing> {
         match self {
             Self::Closed => None,
             Self::Open(filing) => Some(filing),
@@ -193,7 +195,7 @@ impl PushConfirm {
     /// The same question with the other answer lit, and a closed dialog left
     /// closed: an arrow key pressed at nothing lights nothing.
     #[must_use]
-    pub fn lit(&self, answer: Answer) -> Self {
+    pub(crate) fn lit(&self, answer: Answer) -> Self {
         match self {
             Self::Closed => Self::Closed,
             Self::Open(filing) => Self::Open(filing.with_answer(answer)),
@@ -204,7 +206,7 @@ impl PushConfirm {
 /// [`Answered`] in this dialog's vocabulary: a confirmed question here means
 /// send, and warlock goes on running either way.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum PushAnswered {
+pub(crate) enum PushAnswered {
     Open(Answer),
     Cancel,
     Send,
@@ -216,7 +218,7 @@ pub enum PushAnswered {
 /// over [`answer_for`] so the two cannot drift — a key that moves one moves the
 /// other.
 #[must_use]
-pub fn push_answer_for(key: KeyEvent, highlighted: Answer) -> PushAnswered {
+pub(crate) fn push_answer_for(key: KeyEvent, highlighted: Answer) -> PushAnswered {
     match answer_for(key, highlighted) {
         Answered::Open(answer) => PushAnswered::Open(answer),
         Answered::Close => PushAnswered::Cancel,
@@ -244,7 +246,7 @@ pub fn push_answer_for(key: KeyEvent, highlighted: Answer) -> PushAnswered {
 // exactly as long as the question does — which is why this is only ever built
 // through [`CutConfirm::open`].
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct Cutting {
+pub(crate) struct Cutting {
     project: String,
     status: String,
     slices: usize,
@@ -255,37 +257,37 @@ pub struct Cutting {
 
 impl Cutting {
     #[must_use]
-    pub fn project(&self) -> &str {
+    pub(crate) fn project(&self) -> &str {
         &self.project
     }
 
     /// The status as the board spelled it: see the type's own note.
     #[must_use]
-    pub fn status(&self) -> &str {
+    pub(crate) fn status(&self) -> &str {
         &self.status
     }
 
     /// How many slices the project's scope has, which is how much work the
     /// answer is about.
     #[must_use]
-    pub const fn slices(&self) -> usize {
+    pub(crate) const fn slices(&self) -> usize {
         self.slices
     }
 
     #[must_use]
-    pub fn team(&self) -> &str {
+    pub(crate) fn team(&self) -> &str {
         &self.team
     }
 
     /// The *name* the key is held under, never a key value: see the type's own
     /// note.
     #[must_use]
-    pub fn key(&self) -> &str {
+    pub(crate) fn key(&self) -> &str {
         &self.key
     }
 
     #[must_use]
-    pub const fn answer(&self) -> Answer {
+    pub(crate) const fn answer(&self) -> Answer {
         self.answer
     }
 
@@ -293,7 +295,7 @@ impl Cutting {
     // answering re-lights the same question rather than building a second one
     // from facts that would have to be fetched again.
     #[must_use]
-    pub fn with_answer(&self, answer: Answer) -> Self {
+    pub(crate) fn with_answer(&self, answer: Answer) -> Self {
         Self {
             answer,
             ..self.clone()
@@ -310,7 +312,7 @@ impl Cutting {
 /// one brief, and a confirmed question here starts a run over every uncut slice
 /// of a project.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
-pub enum CutConfirm {
+pub(crate) enum CutConfirm {
     #[default]
     Closed,
     Open(Cutting),
@@ -321,7 +323,7 @@ impl CutConfirm {
     /// round that puts this up and an Enter straight after it come to nothing
     /// at all.
     #[must_use]
-    pub fn open(
+    pub(crate) fn open(
         project: impl Into<String>,
         status: impl Into<String>,
         slices: usize,
@@ -339,7 +341,8 @@ impl CutConfirm {
     }
 
     #[must_use]
-    pub const fn is_open(&self) -> bool {
+    #[cfg(test)]
+    pub(crate) const fn is_open(&self) -> bool {
         matches!(self, Self::Open(_))
     }
 
@@ -347,7 +350,7 @@ impl CutConfirm {
     /// reason [`QuitConfirm::highlighted`] is: the caller cannot invent a
     /// question that is not up.
     #[must_use]
-    pub const fn cutting(&self) -> Option<&Cutting> {
+    pub(crate) const fn cutting(&self) -> Option<&Cutting> {
         match self {
             Self::Closed => None,
             Self::Open(cutting) => Some(cutting),
@@ -357,7 +360,7 @@ impl CutConfirm {
     /// The same question with the other answer lit, and a closed dialog left
     /// closed: an arrow key pressed at nothing lights nothing.
     #[must_use]
-    pub fn lit(&self, answer: Answer) -> Self {
+    pub(crate) fn lit(&self, answer: Answer) -> Self {
         match self {
             Self::Closed => Self::Closed,
             Self::Open(cutting) => Self::Open(cutting.with_answer(answer)),
@@ -368,7 +371,7 @@ impl CutConfirm {
 /// [`Answered`] in this dialog's vocabulary: a confirmed question here starts
 /// the run, and warlock goes on running either way.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum CutAnswered {
+pub(crate) enum CutAnswered {
     Open(Answer),
     Cancel,
     Cut,
@@ -380,7 +383,7 @@ pub enum CutAnswered {
 /// [`answer_for`] so the three cannot drift — a key that moves one moves them
 /// all.
 #[must_use]
-pub fn cut_answer_for(key: KeyEvent, highlighted: Answer) -> CutAnswered {
+pub(crate) fn cut_answer_for(key: KeyEvent, highlighted: Answer) -> CutAnswered {
     match answer_for(key, highlighted) {
         Answered::Open(answer) => CutAnswered::Open(answer),
         Answered::Close => CutAnswered::Cancel,
@@ -411,7 +414,7 @@ pub fn cut_answer_for(key: KeyEvent, highlighted: Answer) -> CutAnswered {
 // exactly as long as the question does — which is why this is only ever built
 // through [`PullConfirm::open`] or [`PullConfirm::resuming`].
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct Undertaking {
+pub(crate) struct Undertaking {
     ticket: String,
     title: String,
     scope: String,
@@ -425,43 +428,43 @@ impl Undertaking {
     /// The ticket's identifier, in the spelling every line about this run names
     /// it in.
     #[must_use]
-    pub fn ticket(&self) -> &str {
+    pub(crate) fn ticket(&self) -> &str {
         &self.ticket
     }
 
     #[must_use]
-    pub fn title(&self) -> &str {
+    pub(crate) fn title(&self) -> &str {
         &self.title
     }
 
     /// The scope the ticket was taken from, which is the boundary the run is
     /// allowed to work inside.
     #[must_use]
-    pub fn scope(&self) -> &str {
+    pub(crate) fn scope(&self) -> &str {
         &self.scope
     }
 
     #[must_use]
-    pub fn team(&self) -> &str {
+    pub(crate) fn team(&self) -> &str {
         &self.team
     }
 
     /// The branch the run will create, named before anything is created: see
     /// the type's own note about why it is parked here.
     #[must_use]
-    pub fn branch(&self) -> &str {
+    pub(crate) fn branch(&self) -> &str {
         &self.branch
     }
 
     /// The sub-task a resumed run carries on from, and `None` for a fresh pull:
     /// see the field's own note.
     #[must_use]
-    pub fn resuming(&self) -> Option<&str> {
+    pub(crate) fn resuming(&self) -> Option<&str> {
         self.resuming.as_deref()
     }
 
     #[must_use]
-    pub const fn answer(&self) -> Answer {
+    pub(crate) const fn answer(&self) -> Answer {
         self.answer
     }
 
@@ -469,7 +472,7 @@ impl Undertaking {
     // answering re-lights the same question rather than building a second one
     // from facts that would have to be fetched again.
     #[must_use]
-    pub fn with_answer(&self, answer: Answer) -> Self {
+    pub(crate) fn with_answer(&self, answer: Answer) -> Self {
         Self {
             answer,
             ..self.clone()
@@ -487,7 +490,7 @@ impl Undertaking {
 /// drafts tickets for a project, and a confirmed question here checks out a
 /// branch and works one ticket to a pull request.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
-pub enum PullConfirm {
+pub(crate) enum PullConfirm {
     #[default]
     Closed,
     Open(Undertaking),
@@ -498,7 +501,7 @@ impl PullConfirm {
     /// is the default — the round that puts this up and an Enter straight after
     /// it come to nothing at all.
     #[must_use]
-    pub fn open(
+    pub(crate) fn open(
         ticket: impl Into<String>,
         title: impl Into<String>,
         scope: impl Into<String>,
@@ -521,7 +524,7 @@ impl PullConfirm {
     /// `Option` on [`PullConfirm::open`], so a caller resuming a run cannot
     /// forget to say where it resumes from.
     #[must_use]
-    pub fn resuming(
+    pub(crate) fn resuming(
         ticket: impl Into<String>,
         title: impl Into<String>,
         scope: impl Into<String>,
@@ -541,7 +544,8 @@ impl PullConfirm {
     }
 
     #[must_use]
-    pub const fn is_open(&self) -> bool {
+    #[cfg(test)]
+    pub(crate) const fn is_open(&self) -> bool {
         matches!(self, Self::Open(_))
     }
 
@@ -549,7 +553,7 @@ impl PullConfirm {
     /// reason [`QuitConfirm::highlighted`] is: the caller cannot invent a
     /// question that is not up.
     #[must_use]
-    pub const fn undertaking(&self) -> Option<&Undertaking> {
+    pub(crate) const fn undertaking(&self) -> Option<&Undertaking> {
         match self {
             Self::Closed => None,
             Self::Open(undertaking) => Some(undertaking),
@@ -559,7 +563,7 @@ impl PullConfirm {
     /// The same question with the other answer lit, and a closed dialog left
     /// closed: an arrow key pressed at nothing lights nothing.
     #[must_use]
-    pub fn lit(&self, answer: Answer) -> Self {
+    pub(crate) fn lit(&self, answer: Answer) -> Self {
         match self {
             Self::Closed => Self::Closed,
             Self::Open(undertaking) => Self::Open(undertaking.with_answer(answer)),
@@ -570,7 +574,7 @@ impl PullConfirm {
 /// [`Answered`] in this dialog's vocabulary: a confirmed question here starts
 /// the pull, and warlock goes on running either way.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum PullAnswered {
+pub(crate) enum PullAnswered {
     Open(Answer),
     Cancel,
     Pull,
@@ -582,7 +586,7 @@ pub enum PullAnswered {
 /// Written over [`answer_for`] so the four cannot drift — a key that moves one
 /// moves them all.
 #[must_use]
-pub fn pull_answer_for(key: KeyEvent, highlighted: Answer) -> PullAnswered {
+pub(crate) fn pull_answer_for(key: KeyEvent, highlighted: Answer) -> PullAnswered {
     match answer_for(key, highlighted) {
         Answered::Open(answer) => PullAnswered::Open(answer),
         Answered::Close => PullAnswered::Cancel,
@@ -598,7 +602,7 @@ pub fn pull_answer_for(key: KeyEvent, highlighted: Answer) -> PullAnswered {
 /// asks which of three things to do. [`answer_for`] cannot be written over for
 /// the same reason — there is no third answer for it to hand back.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
-pub enum Choice {
+pub(crate) enum Choice {
     /// File this slice's drafts as issues.
     Create,
     /// The default, for [`Answer::No`]'s reason: the round that puts the window
@@ -647,7 +651,7 @@ impl Choice {
 /// as long as that slice is waiting, and a caller with no run has nothing to
 /// hold.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct Review {
+pub(crate) struct Review {
     /// The slice, named in the words every line about it is named in: the window
     /// and the thread are talking about the same slice and say so alike.
     slice: String,
@@ -664,7 +668,7 @@ impl Review {
     /// default elsewhere: the round that puts this up and an Enter straight
     /// after it cost nothing.
     #[must_use]
-    pub fn open(slice: impl Into<String>, titles: Vec<String>, feedback: bool) -> Self {
+    pub(crate) fn open(slice: impl Into<String>, titles: Vec<String>, feedback: bool) -> Self {
         Self {
             slice: slice.into(),
             titles,
@@ -674,23 +678,23 @@ impl Review {
     }
 
     #[must_use]
-    pub fn slice(&self) -> &str {
+    pub(crate) fn slice(&self) -> &str {
         &self.slice
     }
 
     #[must_use]
-    pub fn titles(&self) -> &[String] {
+    pub(crate) fn titles(&self) -> &[String] {
         &self.titles
     }
 
     /// Whether the third answer is offered: see the field's own note.
     #[must_use]
-    pub const fn feedback(&self) -> bool {
+    pub(crate) const fn feedback(&self) -> bool {
         self.feedback
     }
 
     #[must_use]
-    pub const fn choice(&self) -> Choice {
+    pub(crate) const fn choice(&self) -> Choice {
         self.choice
     }
 
@@ -698,7 +702,7 @@ impl Review {
     // answering re-lights the same window rather than building a second one from
     // drafts that would have to be handed over again.
     #[must_use]
-    pub fn with_choice(&self, choice: Choice) -> Self {
+    pub(crate) fn with_choice(&self, choice: Choice) -> Self {
         Self {
             choice,
             ..self.clone()
@@ -713,7 +717,7 @@ impl Review {
 /// Esc — is [`Reviewed::Skip`], which is the answer that files nothing and asks
 /// what to do next.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum Reviewed {
+pub(crate) enum Reviewed {
     Open(Choice),
     Create,
     Skip,
@@ -734,7 +738,7 @@ pub enum Reviewed {
 /// depends on the drafts: a slice that has spent its redraft has no third answer
 /// for `f` or a Right to reach.
 #[must_use]
-pub fn review_answer_for(key: KeyEvent, review: &Review) -> Reviewed {
+pub(crate) fn review_answer_for(key: KeyEvent, review: &Review) -> Reviewed {
     let lit = review.choice();
     if key.kind != KeyEventKind::Press {
         return Reviewed::Open(lit);
@@ -762,7 +766,7 @@ pub fn review_answer_for(key: KeyEvent, review: &Review) -> Reviewed {
 /// a field of the session — and a two-answer question for the plainest one:
 /// what it asks has a yes and a no.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct Carry {
+pub(crate) struct Carry {
     /// What is left to offer, in the run's own words. A count said here would be
     /// a second place that has to know whether one slice is `1 slice` or
     /// `1 slices`.
@@ -775,7 +779,7 @@ impl Carry {
     /// on by somebody saying so, and Esc after a skip leaves the rest of the
     /// project alone.
     #[must_use]
-    pub fn open(left: impl Into<String>) -> Self {
+    pub(crate) fn open(left: impl Into<String>) -> Self {
         Self {
             left: left.into(),
             answer: Answer::No,
@@ -783,18 +787,18 @@ impl Carry {
     }
 
     #[must_use]
-    pub fn left(&self) -> &str {
+    pub(crate) fn left(&self) -> &str {
         &self.left
     }
 
     #[must_use]
-    pub const fn answer(&self) -> Answer {
+    pub(crate) const fn answer(&self) -> Answer {
         self.answer
     }
 
     // The one way the highlight moves, for [`Filing::with_answer`]'s reason.
     #[must_use]
-    pub fn with_answer(&self, answer: Answer) -> Self {
+    pub(crate) fn with_answer(&self, answer: Answer) -> Self {
         Self {
             answer,
             ..self.clone()
@@ -806,7 +810,7 @@ impl Carry {
 /// drafts the next slice, and a refused one ends the run with the rest of the
 /// project untouched.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum CarryAnswered {
+pub(crate) enum CarryAnswered {
     Open(Answer),
     Stop,
     Carry,
@@ -817,7 +821,7 @@ pub enum CarryAnswered {
 /// one is: Esc and `n` stop, Left then Enter carries on, an immediate Enter
 /// stops, a release changes nothing.
 #[must_use]
-pub fn carry_answer_for(key: KeyEvent, highlighted: Answer) -> CarryAnswered {
+pub(crate) fn carry_answer_for(key: KeyEvent, highlighted: Answer) -> CarryAnswered {
     match answer_for(key, highlighted) {
         Answered::Open(answer) => CarryAnswered::Open(answer),
         Answered::Close => CarryAnswered::Stop,

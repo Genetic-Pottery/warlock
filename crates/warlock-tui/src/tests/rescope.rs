@@ -2,9 +2,9 @@ use std::fs;
 use std::path::Path;
 
 use warlock_engine::{Manifest, PactEntry, ScopeRecord, route_facts, scope, validate_scope};
-use warlock_tui::RecordField;
 
 use super::{RecordFields, Rescoped, ScopeRefusal, records_scope, rescope};
+use crate::prompt::RecordField;
 
 const HASH: &str = "d0f5a1";
 

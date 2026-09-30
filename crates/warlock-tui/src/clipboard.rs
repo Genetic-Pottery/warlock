@@ -1,5 +1,4 @@
-use warlock_tui::App;
-
+use crate::app::App;
 use crate::error::{Error, one_line};
 
 // A seam, like `Screen`, `Wired` and `Converses`, and for their reason: what

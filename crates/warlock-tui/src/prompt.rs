@@ -5,7 +5,7 @@
 //! being typed in.
 //!
 //! [`ScopePrompt`] and [`RecordPrompt`] are values of their own and *not* fields
-//! on [`App`](crate::App), because Esc has to leave the app exactly as it was and
+//! on [`App`](crate::app::App), because Esc has to leave the app exactly as it was and
 //! an app that never heard of the prompt is a cheaper guarantee of that than
 //! putting every field back. The cursor is a byte offset into that text and
 //! every key here keeps it on a character boundary, because the text is sliced
@@ -34,7 +34,7 @@ const CHORD: KeyModifiers = KeyModifiers::CONTROL
 // are only ever meaningful together — there is no directory being scoped without
 // a field to type in, and no rule line without a submit that broke one.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
-pub struct ScopeField {
+pub(crate) struct ScopeField {
     // A manifest path in every real use, held as a plain `String` because this
     // module only ever prints it.
     directory: String,
@@ -53,7 +53,7 @@ impl ScopeField {
     // that would silently clear it. No rule line: a prompt that opens already
     // complaining is complaining about somebody else's typing.
     #[must_use]
-    pub fn new(directory: impl Into<String>, text: impl Into<String>) -> Self {
+    pub(crate) fn new(directory: impl Into<String>, text: impl Into<String>) -> Self {
         let text = text.into();
         Self {
             directory: directory.into(),
@@ -70,7 +70,7 @@ impl ScopeField {
     // it looking at what they typed, one character away from fixing it, rather
     // than at an empty field and a complaint about a string no longer on screen.
     #[must_use]
-    pub fn refused(self, rule: impl Into<String>) -> Self {
+    pub(crate) fn refused(self, rule: impl Into<String>) -> Self {
         Self {
             rule: Some(rule.into()),
             ..self
@@ -78,24 +78,24 @@ impl ScopeField {
     }
 
     #[must_use]
-    pub fn directory(&self) -> &str {
+    pub(crate) fn directory(&self) -> &str {
         &self.directory
     }
 
     #[must_use]
-    pub fn text(&self) -> &str {
+    pub(crate) fn text(&self) -> &str {
         &self.text
     }
 
     #[must_use]
-    pub fn rule(&self) -> Option<&str> {
+    pub(crate) fn rule(&self) -> Option<&str> {
         self.rule.as_deref()
     }
 
     /// A byte offset into [`ScopeField::text`], on a character boundary, so the
     /// frame can slice the text at it to put the caret down.
     #[must_use]
-    pub const fn cursor(&self) -> usize {
+    pub(crate) const fn cursor(&self) -> usize {
         self.cursor
     }
 }
@@ -104,7 +104,7 @@ impl ScopeField {
 // half a scope typed" is not a state that can be written down: there is one
 // place the text can be, and it exists exactly as long as the question does.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
-pub enum ScopePrompt {
+pub(crate) enum ScopePrompt {
     #[default]
     Closed,
     Open(ScopeField),
@@ -115,19 +115,20 @@ impl ScopePrompt {
     // site: what a fresh prompt starts on is decided here rather than wherever
     // the `s` key happens to be handled.
     #[must_use]
-    pub fn open(directory: impl Into<String>, text: impl Into<String>) -> Self {
+    pub(crate) fn open(directory: impl Into<String>, text: impl Into<String>) -> Self {
         Self::Open(ScopeField::new(directory, text))
     }
 
     #[must_use]
-    pub const fn is_open(&self) -> bool {
+    #[cfg(test)]
+    pub(crate) const fn is_open(&self) -> bool {
         matches!(self, Self::Open(_))
     }
 
     // The one way into `edit_for`: an `Option` here is what keeps the key
     // handler from having to invent a field for a prompt that is not up.
     #[must_use]
-    pub const fn field(&self) -> Option<&ScopeField> {
+    pub(crate) const fn field(&self) -> Option<&ScopeField> {
         match self {
             Self::Closed => None,
             Self::Open(field) => Some(field),
@@ -141,7 +142,7 @@ impl ScopePrompt {
 /// means nothing here leaves the prompt exactly where it was, which is
 /// [`Edited::Open`] with the same field in it.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum Edited {
+pub(crate) enum Edited {
     Open(ScopeField),
     Close,
     /// Offered up. It carries no text of its own, so there is one copy of what
@@ -172,7 +173,7 @@ pub enum Edited {
 /// has it: acting on a release would type the release of the very key that
 /// opened the prompt.
 #[must_use]
-pub fn edit_for(key: KeyEvent, field: &ScopeField) -> Edited {
+pub(crate) fn edit_for(key: KeyEvent, field: &ScopeField) -> Edited {
     if key.kind != KeyEventKind::Press {
         return Edited::Open(field.clone());
     }
@@ -295,7 +296,7 @@ impl RecordField {
 // boundaries and the rule line are the same problem three times over, and
 // reusing the field is what keeps one set of answers to it.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
-pub struct RecordForm {
+pub(crate) struct RecordForm {
     path: String,
     // Already folded by the caller, and stored so the window can show which name
     // is being recorded: the record written from this form has to be the one the
@@ -311,7 +312,7 @@ impl RecordForm {
     // Empty fields, not defaults: nothing here is guessable from the scope name,
     // and a pre-filled team would be somebody else's team saved by an Enter.
     #[must_use]
-    pub fn new(path: impl Into<String>, scope: impl Into<String>) -> Self {
+    pub(crate) fn new(path: impl Into<String>, scope: impl Into<String>) -> Self {
         let path = path.into();
         let empty = ScopeField::new(path.as_str(), "");
         Self {
@@ -325,22 +326,22 @@ impl RecordForm {
     }
 
     #[must_use]
-    pub fn path(&self) -> &str {
+    pub(crate) fn path(&self) -> &str {
         &self.path
     }
 
     #[must_use]
-    pub fn scope(&self) -> &str {
+    pub(crate) fn scope(&self) -> &str {
         &self.scope
     }
 
     #[must_use]
-    pub const fn focus(&self) -> RecordField {
+    pub(crate) const fn focus(&self) -> RecordField {
         self.focus
     }
 
     #[must_use]
-    pub const fn field(&self, which: RecordField) -> &ScopeField {
+    pub(crate) const fn field(&self, which: RecordField) -> &ScopeField {
         match which {
             RecordField::Team => &self.team,
             RecordField::ReviewState => &self.review_state,
@@ -349,7 +350,7 @@ impl RecordForm {
     }
 
     #[must_use]
-    pub const fn focused(&self) -> &ScopeField {
+    pub(crate) const fn focused(&self) -> &ScopeField {
         self.field(self.focus)
     }
 
@@ -357,7 +358,7 @@ impl RecordForm {
     // after a refusal fixes the thing that was refused rather than editing
     // whichever field the reader happened to leave it in.
     #[must_use]
-    pub fn refused(mut self, which: RecordField, rule: impl Into<String>) -> Self {
+    pub(crate) fn refused(mut self, which: RecordField, rule: impl Into<String>) -> Self {
         let field = std::mem::take(self.slot(which)).refused(rule);
         *self.slot(which) = field;
         self.focus = which;
@@ -380,7 +381,7 @@ impl RecordForm {
 // because a `Box` cannot be dereferenced in a const fn.
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
-pub enum RecordPrompt {
+pub(crate) enum RecordPrompt {
     #[default]
     Closed,
     Open(RecordForm),
@@ -388,17 +389,18 @@ pub enum RecordPrompt {
 
 impl RecordPrompt {
     #[must_use]
-    pub fn open(path: impl Into<String>, scope: impl Into<String>) -> Self {
+    pub(crate) fn open(path: impl Into<String>, scope: impl Into<String>) -> Self {
         Self::Open(RecordForm::new(path, scope))
     }
 
     #[must_use]
-    pub const fn is_open(&self) -> bool {
+    #[cfg(test)]
+    pub(crate) const fn is_open(&self) -> bool {
         matches!(self, Self::Open(_))
     }
 
     #[must_use]
-    pub const fn form(&self) -> Option<&RecordForm> {
+    pub(crate) const fn form(&self) -> Option<&RecordForm> {
         match self {
             Self::Closed => None,
             Self::Open(form) => Some(form),
@@ -416,7 +418,7 @@ impl RecordPrompt {
 // lived still: it is read by the caller that asked for it and dropped.
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum RecordEdited {
+pub(crate) enum RecordEdited {
     Open(RecordForm),
     Close,
     Submit,
@@ -435,7 +437,7 @@ pub enum RecordEdited {
 /// being left stays up — it names something wrong with text that has not
 /// changed.
 #[must_use]
-pub fn record_edit_for(key: KeyEvent, form: &RecordForm) -> RecordEdited {
+pub(crate) fn record_edit_for(key: KeyEvent, form: &RecordForm) -> RecordEdited {
     if key.kind != KeyEventKind::Press {
         return RecordEdited::Open(form.clone());
     }

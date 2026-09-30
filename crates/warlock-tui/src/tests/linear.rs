@@ -1,7 +1,5 @@
-use std::collections::VecDeque;
 use std::error::Error as _;
 use std::io;
-use std::sync::Mutex;
 
 use serde_json::{Value, json};
 
@@ -14,62 +12,10 @@ use super::{
     workflow_state,
 };
 
-use crate::IN_PROGRESS;
+use crate::queue::IN_PROGRESS;
+use crate::stubs::Posting;
 
 const KEY: &str = "lin_api_a_key_nobody_holds_8f3a1c";
-
-// A Linear that answers from memory: it hands back what it was given, in the
-// order it was given, and keeps every document it was asked so that a test can
-// say which call came first. Answers are popped rather than cloned because
-// `Error` is not `Clone` — carrying a refusal that could only happen once is the
-// point, not a limitation.
-#[derive(Debug, Default)]
-struct Posting {
-    answers: Mutex<VecDeque<Result<Value, Error>>>,
-    asked: Mutex<Vec<(String, Value)>>,
-}
-
-impl Posting {
-    fn answering(answers: impl IntoIterator<Item = Result<Value, Error>>) -> Self {
-        Self {
-            answers: Mutex::new(answers.into_iter().collect()),
-            asked: Mutex::new(Vec::new()),
-        }
-    }
-
-    fn documents(&self) -> Vec<String> {
-        self.asked
-            .lock()
-            .expect("the stand-in was not used across a panic")
-            .iter()
-            .map(|(document, _)| document.clone())
-            .collect()
-    }
-
-    fn variables(&self) -> Vec<Value> {
-        self.asked
-            .lock()
-            .expect("the stand-in was not used across a panic")
-            .iter()
-            .map(|(_, variables)| variables.clone())
-            .collect()
-    }
-}
-
-impl Posts for Posting {
-    fn post(&self, document: &str, variables: Value) -> Result<Value, Error> {
-        self.asked
-            .lock()
-            .expect("the stand-in was not used across a panic")
-            .push((document.to_owned(), variables));
-
-        self.answers
-            .lock()
-            .expect("the stand-in was not used across a panic")
-            .pop_front()
-            .unwrap_or_else(|| panic!("the stand-in was asked more times than it was answered"))
-    }
-}
 
 fn variants() -> Vec<Error> {
     vec![

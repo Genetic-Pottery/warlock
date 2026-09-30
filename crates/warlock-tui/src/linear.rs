@@ -125,7 +125,7 @@ impl Posts for Client {
 /// The flows are written against this and not against [`Posts`], so a flow's
 /// test fake answers operations instead of recognising query text: Linear's
 /// spelling is [`Linear`]'s business, checked in this module's own tests.
-pub trait Board {
+pub(crate) trait Board {
     fn viewer(&self) -> Result<String, Error>;
     fn team_id(&self, key: &str) -> Result<Option<String>, Error>;
     fn backlog_status(&self) -> Result<Option<String>, Error>;
@@ -145,13 +145,13 @@ pub trait Board {
 
 /// The one [`Board`] that speaks GraphQL, over whatever [`Posts`] it holds.
 #[derive(Debug)]
-pub struct Linear<P = Client> {
+pub(crate) struct Linear<P = Client> {
     posts: P,
 }
 
 impl<P: Posts> Linear<P> {
     #[must_use]
-    pub const fn new(posts: P) -> Self {
+    pub(crate) const fn new(posts: P) -> Self {
         Self { posts }
     }
 }
@@ -226,7 +226,7 @@ impl<P: Posts> Board for Linear<P> {
 /// outlives the press, which is the associated type's side; and the opener
 /// itself crosses onto a thread, because the panel's cut resolves its board
 /// over there and so opens it there too.
-pub trait Opens: Clone + Send + 'static {
+pub(crate) trait Opens: Clone + Send + 'static {
     type Board: Board + Send + 'static;
 
     fn open(&self, key: &str) -> Self::Board;
@@ -236,7 +236,7 @@ pub trait Opens: Clone + Send + 'static {
 /// does. Holds nothing: a board is built per request run, from a key read on
 /// one line and dropped with whatever used it.
 #[derive(Debug, Clone, Copy, Default)]
-pub struct Opener;
+pub(crate) struct Opener;
 
 impl Opens for Opener {
     type Board = Linear<Client>;
@@ -406,7 +406,7 @@ fn fetch_project(linear: &impl Posts, id: &str) -> Result<Option<FetchedProject>
 /// and a description can be emptied in Linear after it was filed, which the
 /// caller that parses it will refuse in its own words.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FetchedProject {
+pub(crate) struct FetchedProject {
     name: String,
     content: String,
     url: String,
@@ -415,7 +415,8 @@ pub struct FetchedProject {
 
 impl FetchedProject {
     #[must_use]
-    pub fn new(
+    #[cfg(test)]
+    pub(crate) fn new(
         name: impl Into<String>,
         content: impl Into<String>,
         url: impl Into<String>,
@@ -430,22 +431,23 @@ impl FetchedProject {
     }
 
     #[must_use]
-    pub fn name(&self) -> &str {
+    pub(crate) fn name(&self) -> &str {
         &self.name
     }
 
     #[must_use]
-    pub fn content(&self) -> &str {
+    pub(crate) fn content(&self) -> &str {
         &self.content
     }
 
     #[must_use]
-    pub fn url(&self) -> &str {
+    #[cfg(test)]
+    pub(crate) fn url(&self) -> &str {
         &self.url
     }
 
     #[must_use]
-    pub fn status(&self) -> Option<&str> {
+    pub(crate) fn status(&self) -> Option<&str> {
         self.status.as_deref()
     }
 }
@@ -939,7 +941,7 @@ fn named_issue(linear: &impl Posts, team: &str, number: u64) -> Result<Option<Na
 /// as facts here — which is what lets a refusal name which one failed instead of
 /// saying only that the ticket is not in the queue.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NamedIssue {
+pub(crate) struct NamedIssue {
     issue: QueuedIssue,
     team: String,
     labels: Vec<String>,
@@ -948,7 +950,8 @@ pub struct NamedIssue {
 
 impl NamedIssue {
     #[must_use]
-    pub fn new(
+    #[cfg(test)]
+    pub(crate) fn new(
         issue: QueuedIssue,
         team: impl Into<String>,
         labels: Vec<String>,
@@ -963,33 +966,33 @@ impl NamedIssue {
     }
 
     #[must_use]
-    pub const fn issue(&self) -> &QueuedIssue {
+    pub(crate) const fn issue(&self) -> &QueuedIssue {
         &self.issue
     }
 
     /// The ticket itself, once the checks on the rest are through: what is worked
     /// is an issue and not a membership.
     #[must_use]
-    pub fn into_issue(self) -> QueuedIssue {
+    pub(crate) fn into_issue(self) -> QueuedIssue {
         self.issue
     }
 
     /// The team's key — `WAR` — which is how a scope record names a team, so the
     /// two are comparable without resolving either to an id.
     #[must_use]
-    pub fn team(&self) -> &str {
+    pub(crate) fn team(&self) -> &str {
         &self.team
     }
 
     /// Every label on the ticket, because a refusal says what it carries as well
     /// as what it is missing.
     #[must_use]
-    pub fn labels(&self) -> &[String] {
+    pub(crate) fn labels(&self) -> &[String] {
         &self.labels
     }
 
     #[must_use]
-    pub const fn assignee(&self) -> Option<&Assignee> {
+    pub(crate) const fn assignee(&self) -> Option<&Assignee> {
         self.assignee.as_ref()
     }
 }
@@ -1001,14 +1004,15 @@ impl NamedIssue {
 /// is yours — two people in a workspace can share a display name. The name is the
 /// half a person reads in a refusal.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Assignee {
+pub(crate) struct Assignee {
     id: String,
     name: String,
 }
 
 impl Assignee {
     #[must_use]
-    pub fn new(id: impl Into<String>, name: impl Into<String>) -> Self {
+    #[cfg(test)]
+    pub(crate) fn new(id: impl Into<String>, name: impl Into<String>) -> Self {
         Self {
             id: id.into(),
             name: name.into(),
@@ -1016,12 +1020,12 @@ impl Assignee {
     }
 
     #[must_use]
-    pub fn id(&self) -> &str {
+    pub(crate) fn id(&self) -> &str {
         &self.id
     }
 
     #[must_use]
-    pub fn name(&self) -> &str {
+    pub(crate) fn name(&self) -> &str {
         &self.name
     }
 }
@@ -1140,7 +1144,7 @@ fn create_project(linear: &impl Posts, project: &NewProject<'_>) -> Result<Proje
 /// in the workspace rather than an id, because the create path is what resolves
 /// it.
 #[derive(Debug, Clone, Copy)]
-pub struct NewProject<'a> {
+pub(crate) struct NewProject<'a> {
     name: &'a str,
     content: &'a str,
     team: &'a str,
@@ -1150,7 +1154,12 @@ pub struct NewProject<'a> {
 
 impl<'a> NewProject<'a> {
     #[must_use]
-    pub const fn new(name: &'a str, content: &'a str, team: &'a str, label: &'a str) -> Self {
+    pub(crate) const fn new(
+        name: &'a str,
+        content: &'a str,
+        team: &'a str,
+        label: &'a str,
+    ) -> Self {
         Self {
             name,
             content,
@@ -1161,33 +1170,38 @@ impl<'a> NewProject<'a> {
     }
 
     #[must_use]
-    pub const fn with_status(mut self, status: Option<&'a str>) -> Self {
+    pub(crate) const fn with_status(mut self, status: Option<&'a str>) -> Self {
         self.status = status;
         self
     }
 
     #[must_use]
-    pub const fn name(&self) -> &'a str {
+    #[cfg(test)]
+    pub(crate) const fn name(&self) -> &'a str {
         self.name
     }
 
     #[must_use]
-    pub const fn content(&self) -> &'a str {
+    #[cfg(test)]
+    pub(crate) const fn content(&self) -> &'a str {
         self.content
     }
 
     #[must_use]
-    pub const fn team(&self) -> &'a str {
+    #[cfg(test)]
+    pub(crate) const fn team(&self) -> &'a str {
         self.team
     }
 
     #[must_use]
-    pub const fn status(&self) -> Option<&'a str> {
+    #[cfg(test)]
+    pub(crate) const fn status(&self) -> Option<&'a str> {
         self.status
     }
 
     #[must_use]
-    pub const fn label(&self) -> &'a str {
+    #[cfg(test)]
+    pub(crate) const fn label(&self) -> &'a str {
         self.label
     }
 }
@@ -1196,14 +1210,15 @@ impl<'a> NewProject<'a> {
 /// never lose, so it comes back from the create rather than being built from the
 /// id here.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Project {
+pub(crate) struct Project {
     id: String,
     url: String,
 }
 
 impl Project {
     #[must_use]
-    pub fn new(id: impl Into<String>, url: impl Into<String>) -> Self {
+    #[cfg(test)]
+    pub(crate) fn new(id: impl Into<String>, url: impl Into<String>) -> Self {
         Self {
             id: id.into(),
             url: url.into(),
@@ -1211,12 +1226,12 @@ impl Project {
     }
 
     #[must_use]
-    pub fn id(&self) -> &str {
+    pub(crate) fn id(&self) -> &str {
         &self.id
     }
 
     #[must_use]
-    pub fn url(&self) -> &str {
+    pub(crate) fn url(&self) -> &str {
         &self.url
     }
 }
@@ -1270,7 +1285,7 @@ fn create_issue(linear: &impl Posts, issue: &NewIssue<'_>) -> Result<Issue, Erro
 /// `label` an *issue label* id from [`Board::issue_label_id`]; neither a project
 /// status nor a project label is usable here.
 #[derive(Debug, Clone, Copy)]
-pub struct NewIssue<'a> {
+pub(crate) struct NewIssue<'a> {
     title: &'a str,
     body: &'a str,
     team: &'a str,
@@ -1282,7 +1297,7 @@ pub struct NewIssue<'a> {
 
 impl<'a> NewIssue<'a> {
     #[must_use]
-    pub const fn new(
+    pub(crate) const fn new(
         title: &'a str,
         body: &'a str,
         team: &'a str,
@@ -1303,37 +1318,44 @@ impl<'a> NewIssue<'a> {
     }
 
     #[must_use]
-    pub const fn title(&self) -> &'a str {
+    #[cfg(test)]
+    pub(crate) const fn title(&self) -> &'a str {
         self.title
     }
 
     #[must_use]
-    pub const fn body(&self) -> &'a str {
+    #[cfg(test)]
+    pub(crate) const fn body(&self) -> &'a str {
         self.body
     }
 
     #[must_use]
-    pub const fn team(&self) -> &'a str {
+    #[cfg(test)]
+    pub(crate) const fn team(&self) -> &'a str {
         self.team
     }
 
     #[must_use]
-    pub const fn project(&self) -> &'a str {
+    #[cfg(test)]
+    pub(crate) const fn project(&self) -> &'a str {
         self.project
     }
 
     #[must_use]
-    pub const fn label(&self) -> &'a str {
+    #[cfg(test)]
+    pub(crate) const fn label(&self) -> &'a str {
         self.label
     }
 
     #[must_use]
-    pub const fn state(&self) -> &'a str {
+    #[cfg(test)]
+    pub(crate) const fn state(&self) -> &'a str {
         self.state
     }
 
     #[must_use]
-    pub const fn assignee(&self) -> &'a str {
+    #[cfg(test)]
+    pub(crate) const fn assignee(&self) -> &'a str {
         self.assignee
     }
 }
@@ -1342,7 +1364,7 @@ impl<'a> NewIssue<'a> {
 /// name one: the id relations are written with, the identifier a cut record
 /// stores and a person types, and the URL a failure downstream must not lose.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Issue {
+pub(crate) struct Issue {
     id: String,
     identifier: String,
     url: String,
@@ -1350,7 +1372,8 @@ pub struct Issue {
 
 impl Issue {
     #[must_use]
-    pub fn new(
+    #[cfg(test)]
+    pub(crate) fn new(
         id: impl Into<String>,
         identifier: impl Into<String>,
         url: impl Into<String>,
@@ -1377,7 +1400,7 @@ impl Issue {
     /// turns down is one reported line and leaves every issue filed, so the
     /// worst this can come to is the ordering a person adds on the board.
     #[must_use]
-    pub fn recorded(identifier: &str) -> Self {
+    pub(crate) fn recorded(identifier: &str) -> Self {
         Self {
             id: identifier.to_owned(),
             identifier: identifier.to_owned(),
@@ -1386,19 +1409,20 @@ impl Issue {
     }
 
     #[must_use]
-    pub fn id(&self) -> &str {
+    pub(crate) fn id(&self) -> &str {
         &self.id
     }
 
     /// `WAR-125`, which is what a cut record holds: the id is a UUID that means
     /// nothing to a reader and changes nothing about which issue was filed.
     #[must_use]
-    pub fn identifier(&self) -> &str {
+    pub(crate) fn identifier(&self) -> &str {
         &self.identifier
     }
 
     #[must_use]
-    pub fn url(&self) -> &str {
+    #[cfg(test)]
+    pub(crate) fn url(&self) -> &str {
         &self.url
     }
 }

@@ -6,10 +6,10 @@ use crate::prompt::{RecordForm, RecordPrompt, ScopeField, ScopePrompt};
 
 // Three variants over `ScopeField` rather than one carrying a tag, so the field
 // a key is typed into and the heading it is drawn under cannot come from two
-// different windows: the binary answers a submit from each differently, and the
-// frame words each differently.
+// different windows: the session answers a submit from each differently, and
+// the frame words each differently.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Modal<'a> {
+pub(crate) enum Modal<'a> {
     Quit(Answer),
     Push(&'a Filing),
     Cut(&'a Cutting),
@@ -30,7 +30,7 @@ pub enum Modal<'a> {
 // window with no keystroke. So this does not make two open impossible; it makes
 // [`Modals::current`] the one answer to which of them counts.
 #[derive(Debug, Clone, Copy)]
-pub struct Modals<'a> {
+pub(crate) struct Modals<'a> {
     pub quit: QuitConfirm,
     pub push: &'a PushConfirm,
     pub cut: &'a CutConfirm,
@@ -89,7 +89,7 @@ impl<'a> Modals<'a> {
     // is the one somebody is typing in. The scope and record windows are never
     // both up: one opens exactly as the other closes.
     #[must_use]
-    pub fn current(self) -> Option<Modal<'a>> {
+    pub(crate) fn current(self) -> Option<Modal<'a>> {
         self.quit
             .highlighted()
             .map(Modal::Quit)

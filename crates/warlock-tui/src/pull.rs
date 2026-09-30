@@ -38,15 +38,17 @@ use warlock_engine::{
     Manifest, PullRun, ScopeRecord, brief_path, halted_and_resumed_runs, held_sigils,
     resolve_filing, scope_opens_to,
 };
-use warlock_tui::{
-    Activities, Activity, Board, Cancel, ChatAgent, Chosen, ClaudeAgent, Forge, Gh, Git, GitError,
-    LinearOpener, Named, Opens, QueuedIssue, Refusal, Repository, Skipped, Split, Splitting,
-    Worked, Working, choose, take_named, working_system_prompt,
-};
 
+use crate::claude::{
+    Activities, Activity, Cancel, ChatAgent, ClaudeAgent, Split, Splitting, Worked, Working,
+    working_system_prompt,
+};
 use crate::error::Error;
 use crate::freshness::{Freshened, Freshening, Freshens, freshened};
+use crate::git::{Error as GitError, Forge, Gh, Git, Repository};
+use crate::linear::{Board, Opener as LinearOpener, Opens, QueuedIssue};
 use crate::pulling::{Heading, PullEvent, Pulled, Pulling, Splits, Ticket, Works};
+use crate::queue::{Chosen, Named, Refusal, Skipped, choose, take_named};
 use crate::standing::{FOR_PULL, Standing};
 
 /// The subcommand, and the only function here that reads the environment.
@@ -60,7 +62,7 @@ use crate::standing::{FOR_PULL, Standing};
 /// sigils it answers with are what the sub-task sessions' system prompt is built
 /// from, and reading them a second time to build it could disagree with the
 /// boundary this run was allowed through on.
-pub(crate) fn pull(scope: &str, ticket: Option<&str>, dry_run: bool) -> Result<(), Error> {
+pub fn pull(scope: &str, ticket: Option<&str>, dry_run: bool) -> Result<(), Error> {
     let standing = Standing::here(FOR_PULL)?;
     // The error rather than `check`'s `.ok()`, for [`mod@crate::push`]'s reason:
     // the sigils under the home say whether this scope is this machine's to work

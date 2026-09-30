@@ -90,7 +90,7 @@ impl Ending {
 /// error — a killed child is a broken pipe, and nothing about the errno says who
 /// killed it — so [`Ending::Cancelled`] is the caller's to choose.
 #[must_use]
-pub fn ending_for(error: &agent::Error) -> Ending {
+pub(crate) fn ending_for(error: &agent::Error) -> Ending {
     match error {
         agent::Error::NotFound { program } => Ending::NoModel {
             program: program.clone(),
@@ -458,7 +458,7 @@ impl Thread {
     /// inside it.
     ///
     /// An answer follows its own message and nothing filed later, which is what
-    /// keeps a [`Position`](crate::Position) taken while a turn was still
+    /// keeps a [`Position`](crate::selection::Position) taken while a turn was still
     /// running pointing at the same text once the answer lands. Reordering this
     /// moves every position taken before the answer arrived.
     #[must_use]

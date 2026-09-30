@@ -77,9 +77,9 @@ const MODEL: &str = "claude-sonnet-5";
 
 const EFFORT: &str = "low";
 
-pub const BRIEF_EFFORT: &str = "high";
+pub(crate) const BRIEF_EFFORT: &str = "high";
 
-pub const BRIEF_MODEL: &str = "claude-opus-5";
+pub(crate) const BRIEF_MODEL: &str = "claude-opus-5";
 
 const SYSTEM_PROMPT: &str = "You write technical documentation. \
 Follow the instructions in the user message exactly, and output only what they \
@@ -170,7 +170,7 @@ pub fn brief_instruction(template: &str) -> String {
     format!("{BRIEF_ARTIFACT}{shape}\n\n{BRIEF_ARGUMENT}")
 }
 
-pub const CHAT_INSTRUCTION: &str = "That is the end of the brief. We are not \
+pub(crate) const CHAT_INSTRUCTION: &str = "That is the end of the brief. We are not \
 converging on a document any more, there is no artifact, and nothing you say \
 from here is written to a file. Drop the shape you were given. Do not \
 summarise what we decided and do not ask what to do next.\n\nGo back to \
@@ -178,7 +178,7 @@ answering questions about this repository as they come: one answer per \
 question, short and plain, consulting the repository with the tools you have, \
 and saying when you do not know. Wait for the next question.";
 
-pub const WRITE_INSTRUCTION: &str = "Write the brief now. Your entire reply is \
+pub(crate) const WRITE_INSTRUCTION: &str = "Write the brief now. Your entire reply is \
 the document and nothing else: no preamble, no sign-off, no commentary on it, \
 no question at the end, and no offer to revise it. Do not wrap it in a code \
 fence. Everything you say in this reply is copied verbatim into the file, so a \
@@ -414,7 +414,7 @@ nothing else.";
 /// told it may ask and then told the asking is capped at zero still spends its
 /// one turn on a question, so the headless path says there is no one there at
 /// all.
-pub const DRAFTING_ONE_SHOT_CONTRACT: &str = "Nobody is reading your replies. \
+pub(crate) const DRAFTING_ONE_SHOT_CONTRACT: &str = "Nobody is reading your replies. \
 This is the only turn there is: no person sees what you say until the tickets \
 are filed, so a question reaches no one and an offer to clarify is thrown \
 away.\n\nDraft from the brief, the slice and what you can read in the \
@@ -424,7 +424,7 @@ line, rather than asking about it or inventing a decision nobody made. Your \
 whole reply is the JSON object described below and nothing else.";
 
 /// The fourth turn, once the three rounds are spent.
-pub const DRAFT_NOW_INSTRUCTION: &str = "That was the third question, which is \
+pub(crate) const DRAFT_NOW_INSTRUCTION: &str = "That was the third question, which is \
 all there is. Nothing further is coming back to you: draft the tickets now from \
 the brief, the slice and what you have been told and have read. Where something \
 you asked about was left unanswered, say so in a line in the body of the ticket \
@@ -575,7 +575,7 @@ pub fn working_system_prompt(scope: &str, sigils: &[String]) -> String {
 /// finished and where a summary is read from are the caller's questions — the
 /// record holds six statuses and a log that may be absent — and this file's job
 /// is the prose around whatever it is handed.
-pub type Sibling<'summary> = (&'summary str, &'summary str);
+pub(crate) type Sibling<'summary> = (&'summary str, &'summary str);
 
 /// The opening turn of one sub-task session: the sub-task's own brief, the
 /// ticket it was cut out of, what its finished siblings did, and then the
@@ -875,7 +875,7 @@ pub const WORKING_TIMEOUT: Duration = Duration::from_mins(30);
 /// also spend its turns in a minute. Sized so that a turn limit reached is
 /// news — enough turns to read, change and check a sub-task's worth of files —
 /// and low enough that doubling it on a retry is still a bound.
-pub const WORKING_TURNS: u32 = 60;
+pub(crate) const WORKING_TURNS: u32 = 60;
 
 /// The tool calls the gate hook is asked about: every built-in that puts bytes
 /// in a file. Matched by the CLI as a regular expression against the tool's
@@ -2355,7 +2355,7 @@ impl Bounded for ChatAgent {
 /// number so the fourth turn is the end of something that was announced instead
 /// of a conversation cut off mid-question, but a session that took the model's
 /// word for how many it had spent would have no bound at all.
-pub const DRAFTING_ROUNDS: usize = 3;
+pub(crate) const DRAFTING_ROUNDS: usize = 3;
 
 /// What one turn of a [`Drafting`] session came back as, and the whole of the
 /// contract in the type: a reply is either a question for somebody or the
@@ -2409,7 +2409,7 @@ pub enum Drafted {
 /// One slice's drafting conversation, driven a turn at a time by whoever owns
 /// it.
 ///
-/// Not a [`Mode`](crate::Mode): a mode is the panel's one chat session said at a
+/// Not a [`Mode`](crate::panel::Mode): a mode is the panel's one chat session said at a
 /// different level, and this is a second conversation that has heard none of
 /// that talk, runs under its own system prompt and answers in JSON. So it is a
 /// value — the caller holds it, drives it, and drops it when the slice is done.
@@ -2888,7 +2888,7 @@ impl<C: Converses> Splitting<C> {
 /// being generous here is paid in edits nobody asked for. A caller cannot pass
 /// its own number: how many times warlock will re-enter a tree it has already
 /// half-changed is a property of warlock, not a knob.
-pub const WORKING_ATTEMPTS: usize = 3;
+pub(crate) const WORKING_ATTEMPTS: usize = 3;
 
 /// Why a session warlock raised ended with no answer to read.
 ///

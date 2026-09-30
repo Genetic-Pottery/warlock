@@ -17,19 +17,21 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread;
 use std::time::Duration;
 
+use serde_json::Value;
 use warlock_engine::splitting::Numbered;
 use warlock_engine::{Agent, agent, drafting, stub_answer, working};
-use warlock_tui::{
-    Activities, Activity, Board, Cancel, Commit, Converses, Dirty, FetchedProject, Forge, GitError,
-    LinearError, LinearIssue, LinearProject, NamedIssue, NewIssue, NewProject, Opened, Opens,
-    PullRequest, Queue, Repository, Split, Stopped, Wired, Worked,
-};
 
 use crate::asking::Asks;
+use crate::claude::{Activities, Activity, Cancel, Converses, Split, Stopped, Wired, Worked};
 use crate::clipboard::Clip;
 use crate::error::Error;
 use crate::freshness::{Freshened, Freshening, Freshens};
+use crate::git::{Commit, Dirty, Error as GitError, Forge, Opened, PullRequest, Repository};
 use crate::inflight::Port;
+use crate::linear::{
+    Board, Error as LinearError, FetchedProject, Issue as LinearIssue, NamedIssue, NewIssue,
+    NewProject, Opens, Posts, Project as LinearProject, Queue,
+};
 use crate::puller::{Raised, Raises, Raising, Step, Stopping, activity_port};
 use crate::pulling::{Splits, Works};
 
@@ -294,6 +296,55 @@ impl Converses for Scripted {
 
 fn locked<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().expect("no test panics holding this")
+}
+
+/// A Linear that answers from memory: it hands back what it was given, in the
+/// order it was given, and keeps every document and set of variables it was
+/// asked, so a test can say which call came first and what reached the wire.
+/// Answers are popped rather than cloned because `Error` is not `Clone`.
+///
+/// Cloneable over one shared record because a [`Linear`](crate::linear::Linear)
+/// owns what it posts through, and a test still has to read what was asked of
+/// the copy it handed over.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct Posting(Arc<Posted>);
+
+#[derive(Debug, Default)]
+pub(crate) struct Posted {
+    answers: Mutex<VecDeque<Result<Value, LinearError>>>,
+    asked: Mutex<Vec<(String, Value)>>,
+}
+
+impl Posting {
+    pub(crate) fn answering(answers: impl IntoIterator<Item = Result<Value, LinearError>>) -> Self {
+        Self(Arc::new(Posted {
+            answers: Mutex::new(answers.into_iter().collect()),
+            asked: Mutex::default(),
+        }))
+    }
+
+    pub(crate) fn documents(&self) -> Vec<String> {
+        locked(&self.0.asked)
+            .iter()
+            .map(|(document, _)| document.clone())
+            .collect()
+    }
+
+    pub(crate) fn variables(&self) -> Vec<Value> {
+        locked(&self.0.asked)
+            .iter()
+            .map(|(_, variables)| variables.clone())
+            .collect()
+    }
+}
+
+impl Posts for Posting {
+    fn post(&self, document: &str, variables: Value) -> Result<Value, LinearError> {
+        locked(&self.0.asked).push((document.to_owned(), variables));
+        locked(&self.0.answers)
+            .pop_front()
+            .unwrap_or_else(|| panic!("the stand-in was asked more times than it was answered"))
+    }
 }
 
 /// A board that answers every operation out of memory, and the seam it arrives
@@ -942,7 +993,7 @@ pub(crate) struct Checkout {
 }
 
 /// Every call a pull makes on a checkout, in the pull's words rather than in
-/// `git`'s: the argv is [`Git`](warlock_tui::Git)'s business and is asserted on the
+/// `git`'s: the argv is [`Git`](crate::git::Git)'s business and is asserted on the
 /// real adapter.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum GitCall {
@@ -1528,7 +1579,7 @@ impl Raises for Written {
 
 /// The sub-task sessions as the panel raises them: each mints the handle its own
 /// child would answer and publishes it where the thread that quits can reach it,
-/// which is what [`Working::on`](warlock_tui::Working) does under the real one. A
+/// which is what [`Working::on`](crate::claude::Working) does under the real one. A
 /// stand-in that skipped this would be a run nothing could stop.
 pub(crate) struct Publishing {
     inner: Sessions,

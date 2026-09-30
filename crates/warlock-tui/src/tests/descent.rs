@@ -3,9 +3,9 @@ use std::path::Path;
 
 use warlock_engine::pact::Event;
 use warlock_engine::{Agent, Manifest, PactEntry, agent, stub_answer};
-use warlock_tui::Cancel;
 
 use super::{Descent, descend};
+use crate::claude::Cancel;
 use crate::error::Error;
 
 struct Answering;
