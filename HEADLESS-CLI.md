@@ -27,7 +27,7 @@ piped — it reads a plain line and the terminal is never touched.
 | `warlock pact <path>` | Describe a directory and everything below it, a `WARLOCK.md` each | a model pass per directory |
 | `warlock refresh <path>` | The same over only the directories that are not fresh | a model pass per stale directory |
 | `warlock push <path>` | File the brief at `path` as a project on the board this machine's sigil names | one project on somebody's board and one record write |
-| `warlock draft <path>` | Cut the project filed for the brief at `path` into issues on the board that holds it | a model pass per uncut slice, the issues they become, and a record write each |
+| `warlock draft <path>` | Cut the project filed for the brief at `path` into issues on the board that holds it | a drafting session per uncut slice with a turn for each answer or piece of feedback, a proposing pass per question, and for each accepted slice its issues and a record write |
 | `warlock pull <SCOPE>` | Work the next ready ticket in that scope's queue to an open pull request | a splitting pass, a model pass per sub-task, a commit each, a pushed branch, a pull request, and two moves on somebody's board |
 | `warlock resume <TICKET>` | Put the sub-tasks a halted run stopped on back to `pending`, so the next pull of that ticket finds work | one run-record write |
 
@@ -712,10 +712,9 @@ free: a skipped slice sends nothing, creates no issue and writes no cut record,
 so `.warlock/filed.toml` is left holding nothing that names it.
 
 A slice that comes back with something other than drafts is a reported line and
-the next
-slice rather than the end of the run — the slices left are other work, and they
-were ordered so that nothing is filed before what it waits on. The same goes
-for a relation Linear turned down and for the project's comment: the issues
+the next slice rather than the end of the run — the slices left are other work,
+and they were ordered so that nothing is filed before what it waits on. The same
+goes for a relation Linear turned down and for the project's comment: the issues
 exist and are recorded by then, and an edge that is missing is something a
 person can fix on the board only if they are told it is missing.
 
