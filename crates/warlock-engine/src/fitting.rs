@@ -38,7 +38,7 @@ fn elided_or_whole(path: &Path, relative: String, size: u64, bytes: Vec<u8>) -> 
     let stripped = languages::without_comments(path, text);
     let source = stripped.as_deref().unwrap_or(text);
     match languages::elide(path, source) {
-        Some(elided) => agent::File::elided(relative, size, elided.text),
+        Some(elided) => agent::File::elided(relative, size, elided),
         None => match stripped {
             Some(stripped) => agent::File::present(relative, stripped.into_bytes()),
             None => agent::File::present(relative, bytes),
@@ -146,9 +146,10 @@ impl Snapshot {
         observer: &mut dyn Observer,
     ) -> Result<Assembled, Error> {
         let directory = self.directory();
+        let nothing_recorded = BTreeMap::new();
         let (page, recorded) = match carried {
-            Some((page, recorded)) => (document::lines_of(page), recorded.clone()),
-            None => (BTreeMap::new(), BTreeMap::new()),
+            Some((page, recorded)) => (document::lines_of(page), recorded),
+            None => (BTreeMap::new(), &nothing_recorded),
         };
 
         // Every file is settled against the page before the first pass runs, so
@@ -456,6 +457,9 @@ pub(crate) fn one_file(
     ))
 }
 
+// Saturating rather than fallible or panicking: the clamp is unreachable on
+// every target this builds for, and the digests in `hash` are the last place to
+// introduce a panic over a case that cannot happen.
 pub(crate) fn byte_count(bytes: usize) -> u64 {
     u64::try_from(bytes).unwrap_or(u64::MAX)
 }

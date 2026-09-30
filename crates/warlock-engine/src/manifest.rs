@@ -232,27 +232,8 @@ impl Manifest {
             source,
         })?;
 
-        // The temporary must sit in the same directory as the target, so the
-        // rename below cannot cross a filesystem and stops being atomic.
-        let temp = dir.join(temp_file_name(MANIFEST_FILE));
-        let target = dir.join(MANIFEST_FILE);
-
-        let written = write_and_sync(&temp, text.as_bytes())
-            .map_err(|source| Error::Io {
-                path: temp.clone(),
-                source,
-            })
-            .and_then(|()| {
-                fs::rename(&temp, &target).map_err(|source| Error::Io {
-                    path: target,
-                    source,
-                })
-            });
-
-        if written.is_err() {
-            drop(fs::remove_file(&temp));
-        }
-        written
+        write_atomically(&dir, MANIFEST_FILE, text.as_bytes())
+            .map_err(|(path, source)| Error::Io { path, source })
     }
 
     /// ```
@@ -665,6 +646,25 @@ pub(crate) fn temp_file_name(target: &str) -> String {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
     format!(".{target}.{}.{n}.tmp", std::process::id())
+}
+
+// The temporary must sit in the same directory as the target, so the rename
+// cannot cross a filesystem and stop being atomic. The error names the path that
+// failed: the temporary when the write did, the target when the rename did.
+pub(crate) fn write_atomically(
+    dir: &Path,
+    name: &str,
+    bytes: &[u8],
+) -> Result<(), (PathBuf, std::io::Error)> {
+    let temp = dir.join(temp_file_name(name));
+    let target = dir.join(name);
+    let written = write_and_sync(&temp, bytes)
+        .map_err(|source| (temp.clone(), source))
+        .and_then(|()| fs::rename(&temp, &target).map_err(|source| (target, source)));
+    if written.is_err() {
+        drop(fs::remove_file(&temp));
+    }
+    written
 }
 
 pub(crate) fn write_and_sync(path: &Path, bytes: &[u8]) -> std::io::Result<()> {

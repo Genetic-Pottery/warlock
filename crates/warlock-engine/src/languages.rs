@@ -648,13 +648,7 @@ pub(crate) fn without_comments(path: &Path, text: &str) -> Option<String> {
     Some(kept)
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Elided {
-    pub(crate) text: String,
-    pub(crate) dropped: u64,
-}
-
-pub(crate) fn elide(path: &Path, text: &str) -> Option<Elided> {
+pub(crate) fn elide(path: &Path, text: &str) -> Option<String> {
     let language = language_of(path)?;
     let name = path.file_name()?.to_str()?;
 
@@ -665,22 +659,12 @@ pub(crate) fn elide(path: &Path, text: &str) -> Option<Elided> {
         keep_outside_blocks(language, &lines)?
     };
 
-    let text = kept.join("\n");
-    let before = byte_length(&lines);
-    let after = byte_length(&kept);
-    if after >= before {
-        return None;
-    }
-    Some(Elided {
-        dropped: before - after,
-        text,
-    })
+    (byte_length(&kept) < byte_length(&lines)).then(|| kept.join("\n"))
 }
 
-fn byte_length(lines: &[impl AsRef<str>]) -> u64 {
+fn byte_length(lines: &[impl AsRef<str>]) -> usize {
     let content: usize = lines.iter().map(|line| line.as_ref().len()).sum();
-    let separators = lines.len().saturating_sub(1);
-    (content + separators) as u64
+    content + lines.len().saturating_sub(1)
 }
 
 fn keep_declarations(language: &Language, lines: &[&str], from: usize, to: usize) -> Vec<String> {

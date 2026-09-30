@@ -8,6 +8,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
+use crate::fitting::byte_count;
 use crate::manifest;
 use crate::walk::{self, DOCUMENT_FILE};
 
@@ -161,7 +162,7 @@ pub(crate) fn carry_hash(directory: &Path) -> Option<String> {
 }
 
 fn update_section(hasher: &mut blake3::Hasher, entries: &BTreeMap<String, PathBuf>) -> Option<()> {
-    hasher.update(&length(entries.len()).to_le_bytes());
+    hasher.update(&byte_count(entries.len()).to_le_bytes());
     for (name, path) in entries {
         update_prefixed(hasher, name.as_bytes());
         update_prefixed(hasher, &fs::read(path).ok()?);
@@ -170,15 +171,8 @@ fn update_section(hasher: &mut blake3::Hasher, entries: &BTreeMap<String, PathBu
 }
 
 fn update_prefixed(hasher: &mut blake3::Hasher, bytes: &[u8]) {
-    hasher.update(&length(bytes.len()).to_le_bytes());
+    hasher.update(&byte_count(bytes.len()).to_le_bytes());
     hasher.update(bytes);
-}
-
-/// Saturating rather than fallible or panicking: the clamp is unreachable on
-/// every target this builds for, and a hash function is the last place to
-/// introduce a panic over a case that cannot happen.
-pub(crate) fn length(bytes: usize) -> u64 {
-    u64::try_from(bytes).unwrap_or(u64::MAX)
 }
 
 /// Hand-rolled like [`manifest::Error`] rather than pulling in an

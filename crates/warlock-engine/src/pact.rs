@@ -7,7 +7,7 @@ use crate::document::{self, Defect};
 use crate::fitting::{Assembled, Problem, Snapshot, Synthesised};
 use crate::hash::carry_hash;
 use crate::ignores;
-use crate::manifest::{ROOT_MODULE, temp_file_name, write_and_sync};
+use crate::manifest::{ROOT_MODULE, write_atomically};
 use crate::scope::at_or_below;
 use crate::walk::{self, DOCUMENT_FILE};
 use crate::{
@@ -246,43 +246,27 @@ struct Grant {
 
 impl Outcome {
     fn apply(self, entry: &mut PactEntry) {
-        let lines = self.grant.as_ref().map(|grant| grant.lines.clone());
-        entry.overwrite_run_fields(
-            self.module,
-            self.document,
-            self.grant.map(
-                |Grant {
-                     hash, at, carry, ..
-                 }| (hash, at, carry),
-            ),
-        );
+        let (grant, lines) = match self.grant {
+            Some(Grant {
+                hash,
+                at,
+                carry,
+                lines,
+            }) => (Some((hash, at, carry)), lines),
+            None => (None, BTreeMap::new()),
+        };
+        entry.overwrite_run_fields(self.module, self.document, grant);
         // After `overwrite_run_fields`, which clears the field: what this run
         // recorded is what stands, and a run that granted nothing leaves the
         // entry saying no line is reusable.
-        if let Some(lines) = lines.filter(|lines| !lines.is_empty()) {
+        if !lines.is_empty() {
             entry.set_lines(lines);
         }
     }
 
     fn into_entry(self) -> PactEntry {
-        let entry = PactEntry::stored(self.module, self.document);
-        let Some(Grant {
-            hash,
-            at,
-            carry,
-            lines,
-        }) = self.grant
-        else {
-            return entry;
-        };
-
-        let mut entry = entry.with_grant(hash, at);
-        if let Some(carry) = carry {
-            entry = entry.with_carry_hash(carry);
-        }
-        if !lines.is_empty() {
-            entry = entry.with_lines(lines);
-        }
+        let mut entry = PactEntry::stored(self.module.clone(), self.document.clone());
+        self.apply(&mut entry);
         entry
     }
 }
@@ -847,22 +831,14 @@ fn announce_repair(
     }
 }
 
-// Written beside and renamed over, the same idiom as `Manifest::save`. A front
-// end that quits mid-pact — killing the pass, restoring the terminal, never
-// waiting for this function to come back — must not be able to leave half a
-// document behind, and a rename is the only way to make that safe: the file is
-// the old document or the new one, never a prefix of either. The temporary is
-// named with a leading dot because hidden entries are skipped by every
-// [`ignore`] walk in this crate, so it is in no tree, no subtree hash and no
-// request for the moment it exists.
+// Written beside and renamed over. A front end that quits mid-pact — killing
+// the pass, restoring the terminal, never waiting for this function to come back
+// — must not be able to leave half a document behind, and a rename is the only
+// way to make that safe: the file is the old document or the new one, never a
+// prefix of either.
 fn write_document(directory: &Path, text: &str) -> Result<PathBuf, Error> {
     let document = directory.join(DOCUMENT_FILE);
-    let temp = directory.join(temp_file_name(DOCUMENT_FILE));
-    let write = write_and_sync(&temp, text.as_bytes()).and_then(|()| fs::rename(&temp, &document));
-    if let Err(source) = write {
-        // Best effort: the caller is already being told the document was not
-        // written, and a stray dot file is invisible to everything here.
-        drop(fs::remove_file(&temp));
+    if let Err((_, source)) = write_atomically(directory, DOCUMENT_FILE, text.as_bytes()) {
         return Err(Error::Write {
             // The document, not the temporary: the caller asked for
             // `WARLOCK.md`, and how it got written is not theirs to hear about.

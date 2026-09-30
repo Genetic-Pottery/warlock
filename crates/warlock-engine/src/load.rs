@@ -4,8 +4,8 @@ use std::path::{Component, Path, PathBuf};
 
 use crate::walk::{self, DOCUMENT_FILE};
 use crate::{
-    Manifest, Node, NodeState, Tree, decide_state, hash, ignores, manifest, scope, subtree_hash,
-    to_manifest_path, validate_scope,
+    Manifest, Node, NodeState, PactEntry, Tree, decide_state, hash, ignores, manifest, scope,
+    subtree_hash, to_manifest_path, validate_scope,
 };
 
 const GIT_DIR: &str = ".git";
@@ -234,8 +234,15 @@ impl Builder {
             None => (None, Vec::new(), false),
         };
 
-        let state = self.state_of(dir, ignored, problems);
-        let scope = self.scope_of(dir, problems);
+        // A path with no manifest form — not valid UTF-8, say — can match no
+        // entry, so it is unpacted rather than an error: an oddly named
+        // directory should not fail the load, and it is nobody's problem to
+        // report because nobody pacted it.
+        let entry = to_manifest_path(&self.repo_root, dir)
+            .ok()
+            .and_then(|key| self.manifest.entry(&key));
+        let state = state_of(dir, entry, ignored, problems);
+        let scope = scope_of(dir, entry, problems);
 
         Node::new(dir, document, state)
             .with_children(children)
@@ -255,75 +262,71 @@ impl Builder {
             .take_while(move |path| path.starts_with(dir))
             .filter(move |path| path.parent() == Some(dir))
     }
+}
 
-    // The manifest is consulted before anything is hashed, and that ordering is
-    // the whole of the "hash only pacted subtrees" rule: an unpacted node is
-    // unpacted whatever is under it, so reading those bytes would buy nothing.
-    fn state_of(&self, dir: &Path, ignored: bool, problems: &mut Vec<Problem>) -> NodeState {
-        // Before the manifest is read, so that an entry left over from before
-        // the rule was written cannot send an excluded directory to
-        // `subtree_hash`. That hash skips excluded content, so it could never
-        // match the grant again: the row would be yellow for good, and the only
-        // repair would be hand-editing the file this tree exists to replace.
-        if ignored {
-            return NodeState::Unpacted;
-        }
+// The manifest is consulted before anything is hashed, and that ordering is
+// the whole of the "hash only pacted subtrees" rule: an unpacted node is
+// unpacted whatever is under it, so reading those bytes would buy nothing.
+fn state_of(
+    dir: &Path,
+    entry: Option<&PactEntry>,
+    ignored: bool,
+    problems: &mut Vec<Problem>,
+) -> NodeState {
+    // Before the entry is consulted, so that an entry left over from before
+    // the rule was written cannot send an excluded directory to
+    // `subtree_hash`. That hash skips excluded content, so it could never
+    // match the grant again: the row would be yellow for good, and the only
+    // repair would be hand-editing the file this tree exists to replace.
+    if ignored {
+        return NodeState::Unpacted;
+    }
+    let Some(entry) = entry else {
+        return NodeState::Unpacted;
+    };
 
-        // A path with no manifest form — not valid UTF-8, say — can match no
-        // entry, so it is unpacted rather than an error: an oddly named
-        // directory should not fail the load, and it is nobody's problem to
-        // report because nobody pacted it.
-        let Ok(key) = to_manifest_path(&self.repo_root, dir) else {
-            return NodeState::Unpacted;
-        };
-        let Some(entry) = self.manifest.entry(&key) else {
-            return NodeState::Unpacted;
-        };
-
-        // `dir` itself, not the manifest-relative key: a pact is granted
-        // against the content of its own module, so the same module hashes the
-        // same wherever the repository is checked out to.
-        match subtree_hash(dir) {
-            Ok(hash) => decide_state(Some(entry), &hash),
-            Err(cause) => {
-                // Stale, and no digest of any kind reaches `decide_state`:
-                // hashing the error text or the bytes that were read would give
-                // a comparison that looks like it happened, and one that could
-                // match. Content that cannot be read cannot be vouched for, and
-                // one such file is one node's problem rather than the tree's.
-                problems.push(Problem {
-                    path: dir.to_path_buf(),
-                    cause: ProblemCause::Hash(cause),
-                });
-                NodeState::PactedStale
-            }
+    // `dir` itself, not the manifest-relative key: a pact is granted
+    // against the content of its own module, so the same module hashes the
+    // same wherever the repository is checked out to.
+    match subtree_hash(dir) {
+        Ok(hash) => decide_state(Some(entry), &hash),
+        Err(cause) => {
+            // Stale, and no digest of any kind reaches `decide_state`:
+            // hashing the error text or the bytes that were read would give
+            // a comparison that looks like it happened, and one that could
+            // match. Content that cannot be read cannot be vouched for, and
+            // one such file is one node's problem rather than the tree's.
+            problems.push(Problem {
+                path: dir.to_path_buf(),
+                cause: ProblemCause::Hash(cause),
+            });
+            NodeState::PactedStale
         }
     }
+}
 
-    // `dir`'s own scope and never an ancestor's: a node says which boundary
-    // starts at it, and `scope_covering` answers the other question by walking
-    // up. So a directory nobody pacted has no scope here whatever sits above it.
-    fn scope_of(&self, dir: &Path, problems: &mut Vec<Problem>) -> Option<String> {
-        let key = to_manifest_path(&self.repo_root, dir).ok()?;
-        let stored = self.manifest.entry(&key)?.scope()?;
+// `dir`'s own scope and never an ancestor's: a node says which boundary
+// starts at it, and `scope_covering` answers the other question by walking
+// up. So a directory nobody pacted has no scope here whatever sits above it.
+fn scope_of(dir: &Path, entry: Option<&PactEntry>, problems: &mut Vec<Problem>) -> Option<String> {
+    let stored = entry?.scope()?;
 
-        match validate_scope(stored) {
-            Ok(()) => Some(stored.to_owned()),
-            Err(rule) => {
-                // Reported, not corrected and not fatal. Rewriting the string
-                // into something valid was rejected: those bytes are committed,
-                // so the next save would put a line in a diff nobody authored.
-                // Failing the load was too, since a scope gates nothing on its
-                // own and one typo would take a whole tree gray.
-                problems.push(Problem {
-                    path: dir.to_path_buf(),
-                    cause: ProblemCause::Scope {
-                        scope: stored.to_owned(),
-                        rule,
-                    },
-                });
-                None
-            }
+    match validate_scope(stored) {
+        Ok(()) => Some(stored.to_owned()),
+        Err(rule) => {
+            // Reported, not corrected and not fatal. Rewriting the string
+            // into something valid was rejected: those bytes are committed,
+            // so the next save would put a line in a diff nobody authored.
+            // Failing the load was too, since a scope gates nothing on its
+            // own and one typo would take a whole tree gray.
+            problems.push(Problem {
+                path: dir.to_path_buf(),
+                cause: ProblemCause::Scope {
+                    scope: stored.to_owned(),
+                    rule,
+                },
+            });
+            None
         }
     }
 }

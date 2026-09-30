@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Deserializer, Serialize};
 
-use crate::manifest::{self, temp_file_name, to_manifest_path, write_and_sync};
+use crate::manifest::{self, to_manifest_path, write_atomically};
 use crate::walk::MANIFEST_DIR;
 
 const FILED_FILE: &str = "filed.toml";
@@ -286,27 +286,8 @@ impl Filed {
             source,
         })?;
 
-        // The temporary must sit in the same directory as the target, so the
-        // rename below cannot cross a filesystem and stops being atomic.
-        let temp = dir.join(temp_file_name(FILED_FILE));
-        let target = dir.join(FILED_FILE);
-
-        let written = write_and_sync(&temp, text.as_bytes())
-            .map_err(|source| Error::Io {
-                path: temp.clone(),
-                source,
-            })
-            .and_then(|()| {
-                fs::rename(&temp, &target).map_err(|source| Error::Io {
-                    path: target,
-                    source,
-                })
-            });
-
-        if written.is_err() {
-            drop(fs::remove_file(&temp));
-        }
-        written
+        write_atomically(&dir, FILED_FILE, text.as_bytes())
+            .map_err(|(path, source)| Error::Io { path, source })
     }
 
     /// ```

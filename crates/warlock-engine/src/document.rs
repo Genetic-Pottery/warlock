@@ -791,14 +791,7 @@ pub fn accept_file(
     // name is witnessed and stands. What it refuses is a name with nothing
     // behind it here — which, once comments stop counting, means a name with
     // nothing behind it at all.
-    for name in referenced(line) {
-        if !evidence.knows(&name) {
-            defects.push(Defect::UnknownTarget {
-                field: field.clone(),
-                name,
-            });
-        }
-    }
+    unwitnessed(&field, line, evidence, &mut defects);
 
     if defects.is_empty() {
         Ok(line.trim().to_owned())
@@ -864,16 +857,8 @@ fn check(fill: &Fill, expected: &Expected<'_>, described: &Described) -> Vec<Def
     // and not even the tool-naming guard below, which `values` still does not
     // reach. `Decoder::decode()` arrived in one of them.
     for (path, line) in &fill.files {
-        if !expected.files.contains_key(path.as_str()) {
-            continue;
-        }
-        for name in referenced(line) {
-            if !evidence.knows(&name) {
-                defects.push(Defect::UnknownTarget {
-                    field: format!("files[{path:?}]"),
-                    name,
-                });
-            }
+        if expected.files.contains_key(path.as_str()) {
+            unwitnessed(&format!("files[{path:?}]"), line, evidence, &mut defects);
         }
     }
 
@@ -921,6 +906,17 @@ fn referenced(line: &str) -> BTreeSet<String> {
         note_reference(&line[from..], false, &mut found);
     }
     found
+}
+
+fn unwitnessed(field: &str, line: &str, evidence: Evidence<'_>, defects: &mut Vec<Defect>) {
+    for name in referenced(line) {
+        if !evidence.knows(&name) {
+            defects.push(Defect::UnknownTarget {
+                field: field.to_owned(),
+                name,
+            });
+        }
+    }
 }
 
 fn note_reference(chunk: &str, called: bool, found: &mut BTreeSet<String>) {
@@ -1634,24 +1630,9 @@ fn slot(field: &str) -> Slot {
     match head {
         // `check` writes a key with `{key:?}`, which is JSON's own escaping of
         // a string, so serde reads it back.
-        "directories" => {
-            let Ok(key) = serde_json::from_str::<String>(inside) else {
-                return Slot::Unknown;
-            };
-            Slot::Directory(key)
-        }
-        "files" => {
-            let Ok(key) = serde_json::from_str::<String>(inside) else {
-                return Slot::Unknown;
-            };
-            Slot::FileLine(key)
-        }
-        "structure" => {
-            let Ok(index) = inside.parse::<usize>() else {
-                return Slot::Unknown;
-            };
-            Slot::Entry(index)
-        }
+        "directories" => serde_json::from_str(inside).map_or(Slot::Unknown, Slot::Directory),
+        "files" => serde_json::from_str(inside).map_or(Slot::Unknown, Slot::FileLine),
+        "structure" => inside.parse().map_or(Slot::Unknown, Slot::Entry),
         _ => Slot::Unknown,
     }
 }
