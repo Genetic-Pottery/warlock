@@ -3,7 +3,7 @@
 
 # src
 
-The warlock-tui crate's source: a terminal UI and CLI for pacting/refreshing scopes, chatting and drafting briefs, filing and pulling Linear tickets, and rendering the freshness ledger against a repository's manifest and git/gh state.
+The warlock-tui crate's source: the TUI application, its CLI commands, and the engine driving pact/refresh/scope/pull/push/cut/draft flows against a repo's manifest and a Linear board.
 
 ## Files
 
@@ -22,7 +22,7 @@ The warlock-tui crate's source: a terminal UI and CLI for pacting/refreshing sco
 - `confirm.rs` (28.3 KB) — Confirmation-dialog state and key-handling for TUI prompts: quit, push, cut, pull, review, and carry, each with an Answer/Answered pair and a *_answer_for function. · declares `Answer`, `QuitConfirm`, `is_open`, `highlighted`, `Answered`, `answer_for`, `Filing`, `project`, `destination`, `answer`, `with_answer`, `PushConfirm`, `filing`, `lit`, `PushAnswered`, `push_answer_for` (+34)
 - `crossings.rs` (9.0 KB) — Detects scope crossings: crossings_in/crossings_after build Crossings{crossed, touched} from dirty paths vs held scopes via scope_covering/scope_opens_to. · declares `Crossing`, `Crossings`, `is_empty`, `crossings_in`, `crossings_after`
 - `cut.rs` (10.2 KB) — cut.rs: files a slice's drafts as Linear issues via cut(), recording blocks/needs edges, dedupes via CutRecord key, plus announce() and listed(). · declares `Filing`, `Slice`, `Cut`, `cut`, `announce`, `listed`, `edges`, `relate`
-- `cutting.rs` (62.5 KB) — Cutter drives /draft's fetch→slice→draft→review→file state machine: Cutter, Slicing, Stage, Filing, Waiting, Asking, Reviewing · declares `ALREADY_CUTTING`, `Cutter`, `new`, `with_client`, `confirm`, `fetching`, `drafting`, `press`, `keep_up`, `relaying`, `answering`, `reviewing`, `carrying`, `answered`, `confirmed`, `reviewed` (+63)
+- `cutting.rs` (61.6 KB) — Cutter<O,A> drives /draft: fetches a Planned brief, drafts slices via Drafting sessions, handles review/feedback/carry choices, and files accepted drafts as tickets via spawn_filing/spawn_announcement. · declares `ALREADY_CUTTING`, `Cutter`, `new`, `with_client`, `confirm`, `fetching`, `drafting`, `press`, `keep_up`, `relaying`, `answering`, `reviewing`, `carrying`, `answered`, `confirmed`, `reviewed` (+59)
 - `descent.rs` (8.1 KB) — Descent enum (Pact/Refresh/Unpact) and descend() drive one pact/refresh/unpact walk plus its single manifest save; RunEvent and the Relay observer forward engine callbacks to the panel/shell sink. · declares `Descent`, `wanted`, `descend`, `RunEvent`, `Relay`, `starting`, `describing`, `requesting`, `rejected`, `repaired`, `documented`, `unchanged`, `skipped`, `carry_on`
 - `editing.rs` (9.2 KB) — Handles the `e` key: runs `$EDITOR` on the selected file as a foreground child via edit_press, run_editor and editor_command, then reloads the tree with came_back. · declares `edit_press`, `EDITOR_VAR`, `NO_EDITOR`, `Editor`, `came_back`, `edit_target`, `editor_command`, `run_editor`
 - `edits.rs` (14.3 KB) — Opened::{unpacted, scoped, unscoped} plus opened/unpact/scope_add/scope_remove: gates a target through boundary::permits, then edits pact/scope state and prints the resulting warlock: line · declares `Opened`, `new`, `repo_root`, `manifest`, `target`, `opened`, `unpact`, `scope_add`, `scope_remove`, `unpacted`, `scoped`, `unscoped`, `saved`, `unpacted_line`, `scoped_line`, `unscoped_line`
@@ -38,7 +38,7 @@ The warlock-tui crate's source: a terminal UI and CLI for pacting/refreshing sco
 - `modal.rs` (4.6 KB) — Modal/Modals: enum and precedence-ordered aggregate picking the active TUI modal (quit, push, cut, pull, review, carry, filing, scope, record, write) via Modals::current · declares `Modal`, `Modals`, `current`
 - `pacting.rs` (35.5 KB) — Runs a pact/refresh pass via Pact<P>, spawning run_pact on a thread and draining PactEvent into the App's account/panel, producing Toggled and Reloaded results. · declares `Pact`, `Reloaded`, `new`, `with_run`, `with_agent`, `running`, `stop`, `press`, `keep_up`, `Running`, `Work`, `path`, `descent`, `kind`, `CancelGuard`, `over` (+30)
 - `panel.rs` (28.2 KB) — Panel: the right-hand pane state — Account/Thread/Document cards, Showing and Mode enums, Card<T> windowing, and panel_offset_for scroll logic. · declares `Panel`, `Showing`, `Mode`, `hold_thread`, `panel_offset_for`, `showing`, `window_of`, `document_lines`, `show`, `open_account`, `show_document`, `has_content`, `next_card`, `write_run`, `refill_document`, `start_turn` (+36)
-- `planned.rs` (27.7 KB) — Drives `warlock cut`: Planned walks a project's slices, drafts each via Drafting, files it through Filing/Cut, and reports via Settled/Announcement. · declares `cut`, `Planned`, `prepare`, `name`, `status`, `brief`, `destination`, `total`, `left`, `next`, `next_uncut`, `filing`, `settle`, `finish`, `Next`, `slice` (+21)
+- `planned.rs` (36.9 KB) — Drives `warlock cut`: `Planned` walks a project's slices through drafting and filing, `Filing`/`Settled`/`Announcement` file and report each cut. · declares `cut`, `Planned`, `prepare`, `name`, `status`, `brief`, `destination`, `total`, `left`, `next`, `next_uncut`, `filing`, `settle`, `finish`, `Next`, `slice` (+29)
 - `prompt.rs` (16.8 KB) — Text-input state and key handling for two TUI prompts: ScopeField/ScopePrompt with edit_for, and the RecordForm/RecordPrompt/RecordField (team, review state, label) form with record_edit_for. · declares `ScopeField`, `new`, `refused`, `directory`, `text`, `rule`, `cursor`, `ScopePrompt`, `is_open`, `field`, `Edited`, `edit_for`, `RecordField`, `ALL`, `name`, `next` (+12)
 - `pull.rs` (29.7 KB) — pull.rs — runs `pull`, selecting a ticket via `Selected`/`Taken`, then drives `Pulling` through Split/Works/Freshens ports and streams progress via `Progress`. · declares `pull`, `Ports`, `pulled`, `Prepared`, `root`, `home`, `record`, `held`, `value`, `prepare`, `Selected`, `Taken`, `taken`, `skipped`, `passed_over`, `nothing_ready` (+22)
 - `puller.rs` (54.9 KB) — Puller: TUI-side driver of `/pull`, running ticket choice and the pull itself off-thread via Choosing/Underway state, Raises/Claudes/Splitter/Worker/Freshener seams, and Step events. · declares `Puller`, `Step`, `new`, `with_seams`, `confirm`, `home`, `pulling`, `choosing`, `in_flight`, `press`, `keep_up`, `answered`, `Raises`, `Raising`, `Raised`, `Claudes` (+73)
@@ -67,15 +67,15 @@ The warlock-tui crate's source: a terminal UI and CLI for pacting/refreshing sco
 
 ## Structure
 
-- lib.rs — Crate root: declares modules (account, app, brief, claude, colour, composer, confirm, crossings, git, linear, modal, panel, prompt, queue, selection, submission, template, thread, ui, watch, wrap) and re-exports their public types, constants and functions.
-- main.rs — CLI entry point: parses warlock's subcommands (Init, Config, Stale, Fresh, Check, Pact, Refresh, Scope, Key, Push, Cut, Pull, Resume) and runs the TUI event loop via Session<Seams> when invoked bare.
-- descent.rs — Descent enum (Pact/Refresh/Unpact) and descend() drive one pact/refresh/unpact walk plus its single manifest save; RunEvent and the Relay observer forward engine callbacks to the panel/shell sink.
-- running.rs — running.rs: CLI-facing pact/refresh entrypoints wiring Descent through descend(), reporting via Progress and Report, and ctrlc-based Cancel in listening().
-- boundary.rs — Boundary checks for pact/refresh/scope/unpact ops against manifest scopes: `permits` yields `Verdict::Open/Closed/ClosedBelow`, with sigil-hint messages.
-- edits.rs — Opened::{unpacted, scoped, unscoped} plus opened/unpact/scope_add/scope_remove: gates a target through boundary::permits, then edits pact/scope state and prints the resulting warlock: line.
-- chatting.rs — Chat<C>: drives chat/brief turns, dispatches /brief /chat /write /push /draft /pull /resume, and runs turns via Chatting/TurnEvent on a background thread.
-- cutting.rs — Cutter drives /draft's fetch→slice→draft→review→file state machine: Cutter, Slicing, Stage, Filing, Waiting, Asking, Reviewing.
-- planned.rs — Drives `warlock cut`: Planned walks a project's slices, drafts each via Drafting, files it through Filing/Cut, and reports via Settled/Announcement.
-- cut.rs — cut.rs: files a slice's drafts as Linear issues via cut(), recording blocks/needs edges, dedupes via CutRecord key, plus announce() and listed().
-- pulling.rs — Pulling: drives a ticket through its PullRun, running PullSubtasks via Works/Splits, committing, checking scope crossings, and opening a pull request or Pulled::Halted/Crossed outcome.
-- puller.rs — Puller: TUI-side driver of `/pull`, running ticket choice and the pull itself off-thread via Choosing/Underway state, Raises/Claudes/Splitter/Worker/Freshener seams, and Step events.
+- Account/Section/Log: clocked, no-first-person record of a pact's directories and lines, with size/money/clock formatting helpers (size, money, clock).
+- App: front-end state — Row, App, Focus, Sigils, PactIntent, RunHeader — flattens a Tree into rows and derives the drawn view by filters
+- Boundary checks for pact/refresh/scope/unpact ops against manifest scopes: `permits` yields `Verdict::Open/Closed/ClosedBelow`, with sigil-hint messages
+- Chat<C>: drives chat/brief turns, dispatches /brief /chat /write /push /draft /pull /resume, and runs turns via Chatting/TurnEvent on a background thread.
+- Wraps the `claude` CLI as an Agent: builds prompts/system-prompts for chat, brief-drafting, ticket-splitting and working sessions, spawns/streams the process (ClaudeAgent, ChatAgent, Cancel, Activities), and drives Drafting/Splitting/Working retry loops.
+- Detects scope crossings: crossings_in/crossings_after build Crossings{crossed, touched} from dirty paths vs held scopes via scope_covering/scope_opens_to.
+- cut.rs: files a slice's drafts as Linear issues via cut(), recording blocks/needs edges, dedupes via CutRecord key, plus announce() and listed().
+- Cutter<O,A> drives /draft: fetches a Planned brief, drafts slices via Drafting sessions, handles review/feedback/carry choices, and files accepted drafts as tickets via spawn_filing/spawn_announcement.
+- Descent enum (Pact/Refresh/Unpact) and descend() drive one pact/refresh/unpact walk plus its single manifest save; RunEvent and the Relay observer forward engine callbacks to the panel/shell sink.
+- Wraps git/gh subprocess calls behind Runs, Repository (Git) and Forge (Gh) traits, plus branch_name, commit_message and pull_request_body/title builders.
+- pull.rs — runs `pull`, selecting a ticket via `Selected`/`Taken`, then drives `Pulling` through Split/Works/Freshens ports and streams progress via `Progress`.
+- Pulling: drives a ticket through its PullRun, running PullSubtasks via Works/Splits, committing, checking scope crossings, and opening a pull request or Pulled::Halted/Crossed outcome.

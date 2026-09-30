@@ -41,7 +41,7 @@ use warlock_engine::{
 use warlock_tui::{
     Activities, Activity, Board, Cancel, ChatAgent, Chosen, ClaudeAgent, Forge, Gh, Git, GitError,
     LinearOpener, Named, Opens, QueuedIssue, Refusal, Repository, Skipped, Split, Splitting,
-    Worked, Working, choose, size, take_named, working_system_prompt,
+    Worked, Working, choose, take_named, working_system_prompt,
 };
 
 use crate::error::Error;
@@ -539,6 +539,11 @@ pub(crate) struct Progress<W: Write> {
     /// activity is appended. `None` outside a sub-task — the split and the pull
     /// request have no brief of their own to write into.
     subtask: Option<String>,
+    /// The last activity line said, so a stretch of thinking or writing is one
+    /// line rather than one per report. The panel redraws its activity line in
+    /// place, and a session reports `Writing` again with every delta; printed on a
+    /// screen that only scrolls, that was a column of identical lines.
+    said: Option<String>,
 }
 
 impl<W: Write> Progress<W> {
@@ -549,6 +554,7 @@ impl<W: Write> Progress<W> {
             root: root.to_path_buf(),
             ticket: None,
             subtask: None,
+            said: None,
         }
     }
 
@@ -572,6 +578,7 @@ impl<W: Write> Progress<W> {
         match event {
             PullEvent::Heading(Heading::Split { ticket, title }) => {
                 self.subtask = None;
+                self.said = None;
                 self.say(&format!("splitting `{ticket}` — {title}"));
             }
             // The fraction is the loop's own, one-based, and its denominator is the
@@ -584,16 +591,26 @@ impl<W: Write> Progress<W> {
             }) => {
                 self.say(&format!("[{position}/{total}] `{id}` {goal}"));
                 self.subtask = Some(id);
+                self.said = None;
             }
             PullEvent::Heading(Heading::PullRequest { branch }) => {
                 self.subtask = None;
+                self.said = None;
                 self.say(&format!("`{branch}` is pushed, opening a pull request"));
             }
             PullEvent::Activity(activity) => {
-                if let Some(line) = activity_line(&activity) {
-                    self.say(&line);
-                    self.append(&line);
+                let Some(line) = activity_line(&activity) else {
+                    return;
+                };
+                // A tool line repeats only when the session really did the same
+                // thing twice, so only the two running states are collapsed.
+                let running = matches!(activity, Activity::Thinking | Activity::Writing { .. });
+                if running && self.said.as_deref() == Some(line.as_str()) {
+                    return;
                 }
+                self.say(&line);
+                self.append(&line);
+                self.said = Some(line);
             }
             PullEvent::Repair { note } => self.say(&note),
             // Both board lines are facts about a workflow nobody has finished
@@ -641,8 +658,9 @@ fn activity_line(activity: &Activity) -> Option<String> {
             None => name.clone(),
         }),
         Activity::Thinking => Some("thinking".to_owned()),
-        Activity::Writing { bytes: 0 } => Some("writing".to_owned()),
-        Activity::Writing { bytes } => Some(format!("writing · {}", size(*bytes))),
+        // No byte count: the count is only worth reading where it can tick up in
+        // place, and here it would make every report a different line.
+        Activity::Writing { .. } => Some("writing".to_owned()),
         Activity::Cost { .. } => None,
     }
 }

@@ -705,6 +705,86 @@ fn a_whole_pull_prints_a_header_per_section_with_the_session_s_lines_under_it() 
 }
 
 #[test]
+fn a_stretch_of_thinking_or_writing_is_one_line_and_a_repeated_tool_is_not_collapsed() {
+    let ground = Ground::new();
+    let prepared = ground.prepared();
+    let repo = Checkout::clean(DEFAULT).trees([Vec::new(), wrote("crates/engine/src/lib.rs")]);
+    let forge = Forging::opening(URL);
+    let split = Slicing::into_chain(TICKET, &["Work the ticket"]);
+    let read = || Activity::Tool {
+        name: "Read".to_owned(),
+        detail: Some("crates/engine/src/lib.rs".to_owned()),
+    };
+
+    let progress = shared(Progress::new(
+        Vec::new(),
+        ground.home.path(),
+        ground.root.path(),
+    ));
+    let sessions = Sessions::answering([said("done", "the ticket is worked", None)]).reporting(
+        super::watching(&progress),
+        [
+            Activity::Thinking,
+            Activity::Thinking,
+            Activity::Writing { bytes: 0 },
+            Activity::Writing { bytes: 400 },
+            Activity::Writing { bytes: 900 },
+            read(),
+            read(),
+            Activity::Writing { bytes: 0 },
+            Activity::Writing { bytes: 120 },
+        ],
+    );
+
+    let outcome = pulled(
+        &ground.manifest,
+        &prepared,
+        None,
+        false,
+        &Ports {
+            open: &board(queue([ready()])),
+            repo: &repo,
+            forge: &forge,
+            split: &split,
+            sessions: &sessions,
+            freshen: &no_refresh(),
+        },
+        &progress,
+    );
+    let printed = printed(&progress);
+
+    assert!(outcome.is_ok(), "{outcome:?}: {printed}");
+    assert_eq!(
+        printed.matches("warlock: thinking\n").count(),
+        1,
+        "{printed}"
+    );
+    // Once per stretch: the tool lines between the two stretches end the first.
+    assert_eq!(
+        printed.matches("warlock: writing\n").count(),
+        2,
+        "{printed}"
+    );
+    assert_eq!(
+        printed
+            .matches("warlock: Read crates/engine/src/lib.rs\n")
+            .count(),
+        2,
+        "{printed}"
+    );
+    assert!(!printed.contains("writing ·"), "{printed}");
+
+    let brief = fs::read_to_string(brief_path(
+        ground.home.path(),
+        ground.root.path(),
+        TICKET,
+        "WAR-140.01",
+    ))
+    .expect("the run rendered the sub-task's brief");
+    assert_eq!(brief.matches("- writing\n").count(), 2, "{brief}");
+}
+
+#[test]
 fn a_finished_pull_on_a_machine_with_no_gh_says_where_the_body_went() {
     let ground = Ground::new();
     let prepared = ground.prepared();
