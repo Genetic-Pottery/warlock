@@ -7,9 +7,12 @@ use std::path::{Path, PathBuf};
 use std::{fmt, io};
 
 use warlock_engine::{
-    RunStatus, claude_md, filed, filing, keys, load, manifest, pact, pulls, route, scope, sigils,
+    RunStatus, briefs, claude_md, filed, filing, keys, load, manifest, pact, pulls, route, scope,
+    sigils,
 };
-use warlock_tui::{BriefError, Dirty, GitError, LinearError, Refusal, ScopeBlockError};
+use warlock_tui::{
+    BriefError, Dirty, GitError, LinearError, Refusal, ScopeBlockError, TemplateError,
+};
 
 use crate::boundary::{blocking_scopes_message, closed_scope_message};
 use crate::cut::listed;
@@ -162,6 +165,21 @@ pub(crate) enum Error {
     // every other refusal a push has.
     Brief {
         source: BriefError,
+    },
+    // The repository's brief shape, refused before a conversation is opened:
+    // `warlock brief` reads the template first, and a file that is there and
+    // will not read is never quietly replaced by the built-in default, which is
+    // the library's `template.rs` own reasoning. Absent is not a failure, so
+    // nothing but an unreadable file reaches this.
+    Template {
+        source: TemplateError,
+    },
+    // And the file beside it, which says where a written brief goes. Refused
+    // beside the template and for its reason: both are read before the first
+    // turn, so a conversation is never opened on a setting warlock could not
+    // read. A missing file is the default rather than this.
+    Briefs {
+        source: briefs::Error,
     },
     Filed {
         source: filed::Error,
@@ -732,6 +750,12 @@ impl fmt::Display for Error {
             // The reader's own sentence about the document, which already ends
             // in what it cost — nothing was pushed.
             Self::Brief { source } => write!(f, "{source}"),
+            // Both flattened like the `CLAUDE.md` write above: what the
+            // filesystem says about a file it would not read can run to more
+            // than one line, and a `briefs.toml` that will not parse carries the
+            // TOML parser's own multi-line diagnostic.
+            Self::Template { source } => write!(f, "{}", one_line(&source.to_string())),
+            Self::Briefs { source } => write!(f, "{}", one_line(&source.to_string())),
             // Flattened like the manifest's: filed records are TOML and a file
             // that will not parse carries the parser's diagnostic.
             Self::Filed { source } => write!(f, "{}", one_line(&source.to_string())),
@@ -832,6 +856,8 @@ impl std::error::Error for Error {
             Self::Route { source } => Some(source),
             Self::Filing { source } => Some(source),
             Self::Brief { source } => Some(source),
+            Self::Template { source } => Some(source),
+            Self::Briefs { source } => Some(source),
             Self::ScopeBlock { source } => Some(source),
             Self::Filed { source } => Some(source),
             Self::Unfiled { source, .. } | Self::Uncut { source, .. } => Some(source.as_ref()),
