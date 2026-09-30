@@ -1,10 +1,11 @@
 use std::fs;
 use std::path::Path;
 
+use warlock_engine::pact::Event;
 use warlock_engine::{Agent, Manifest, PactEntry, agent, stub_answer};
 use warlock_tui::Cancel;
 
-use super::{Descent, carry_on, descend};
+use super::{Descent, descend};
 use crate::error::Error;
 
 struct Answering;
@@ -306,22 +307,56 @@ fn an_un_pact_of_a_path_the_manifest_cannot_spell_is_a_manifest_error() {
 }
 
 #[test]
-fn a_pulled_say_when_stops_a_run_and_an_unpulled_one_does_not() {
+fn a_pulled_say_when_stops_a_run_before_it_announces_anything() {
+    let repo = a_checkout();
     let cancel = Cancel::new();
-
-    assert_eq!(
-        carry_on(&cancel),
-        warlock_engine::Pacting::Continue,
-        "nobody has said stop"
-    );
-
     cancel.cancel();
+    let mut heard = Vec::new();
 
-    assert_eq!(
-        carry_on(&cancel),
-        warlock_engine::Pacting::Stop,
-        "the latch both doors read was pulled and one of them carried on"
+    let subtree = descend(
+        Descent::Pact,
+        repo.path(),
+        repo.path(),
+        &Manifest::new(),
+        &Never,
+        &cancel,
+        &mut |event| heard.push(event),
+    )
+    .expect("a cancelled pact is a finished one, not an error");
+
+    assert!(
+        heard.is_empty(),
+        "a cancelled run announced a directory it will not describe: {heard:?}"
     );
+    assert!(subtree.failures.is_empty(), "{:?}", subtree.failures);
+}
+
+#[test]
+fn an_unpulled_say_when_announces_every_directory_it_describes() {
+    let repo = a_checkout();
+    let mut heard = Vec::new();
+
+    descend(
+        Descent::Pact,
+        repo.path(),
+        repo.path(),
+        &Manifest::new(),
+        &Answering,
+        &Cancel::new(),
+        &mut |event| heard.push(event),
+    )
+    .expect("a pact of a readable subtree");
+
+    let offered: Vec<_> = heard
+        .iter()
+        .filter_map(|event| match event {
+            Event::Starting {
+                position, total, ..
+            } => Some((*position, *total)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(offered, [(1, 2), (2, 2)], "{heard:?}");
 }
 
 #[test]

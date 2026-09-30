@@ -232,7 +232,7 @@ impl RunHeader {
     }
 
     /// Files described of files this directory is paying for, straight from
-    /// the engine's `Observer::describing`. `None` before the first file of a
+    /// the engine's `Event::Describing`. `None` before the first file of a
     /// directory, and for a directory that pays for none.
     #[must_use]
     pub const fn files(&self) -> Option<(usize, usize)> {

@@ -55,6 +55,7 @@ use std::cmp::Ordering;
 use std::collections::BTreeSet;
 use std::path::Path;
 
+use warlock_engine::pact::Event;
 use warlock_engine::{
     Agent, Manifest, NodeState, PactEntry, decide_state, from_manifest_path, manifest_path, pact,
     subtree_hash, to_manifest_path,
@@ -62,7 +63,7 @@ use warlock_engine::{
 use warlock_tui::{Cancel, GitError, Repository};
 
 use crate::boundary::{Operation, permits};
-use crate::descent::{Descent, RunEvent, descend};
+use crate::descent::{Descent, descend};
 use crate::error::one_line;
 use crate::pulling::StaleDirectory;
 
@@ -226,7 +227,7 @@ pub(crate) fn freshened(
     asked: &Freshening<'_>,
     agent: &dyn Agent,
     cancel: &Cancel,
-    sink: &mut dyn FnMut(RunEvent),
+    sink: &mut dyn FnMut(Event),
 ) -> Result<Freshened, GitError> {
     let base = asked.repo.default_branch()?;
     let changed = asked.repo.changed_against(&base)?;

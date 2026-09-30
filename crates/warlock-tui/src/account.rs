@@ -14,6 +14,7 @@
 //! only thing on screen telling a slow pass from a hung one. Text is stored
 //! whole; cutting a line to a width belongs to whoever knows the width.
 
+use std::fmt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -531,7 +532,7 @@ impl Account {
     /// live section.
     pub fn record_rejected(
         &mut self,
-        defects: &[String],
+        defects: &[impl fmt::Display],
         attempt: usize,
         attempts: usize,
         at: Instant,
@@ -543,7 +544,9 @@ impl Account {
         // The first defect and a count of the rest: a line, not the list. The
         // engine's own refusal carries the whole list, and the footer shows
         // that when the directory fails.
-        let first = defects.first().map_or("no answer", String::as_str);
+        let first = defects
+            .first()
+            .map_or_else(|| "no answer".to_owned(), ToString::to_string);
         let rest = match defects.len() {
             0 | 1 => String::new(),
             more => format!(" (+{})", more - 1),

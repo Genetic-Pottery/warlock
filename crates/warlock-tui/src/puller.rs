@@ -44,6 +44,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Instant;
 
+use warlock_engine::pact::Event;
 use warlock_engine::{Manifest, PullRun, ScopeRecord, halted_and_resumed_runs, held_sigils};
 use warlock_tui::{
     Activities, Activity, App, Board, Cancel, ChatAgent, ClaudeAgent, Commit, Dirty,
@@ -54,7 +55,6 @@ use warlock_tui::{
 };
 
 use crate::cut::listed;
-use crate::descent::RunEvent;
 use crate::error::{Error, one_line};
 use crate::freshness::{Freshened, Freshening, Freshens, freshened};
 use crate::pacting::CancelGuard;
@@ -752,7 +752,7 @@ impl Freshens for Freshener {
             // The one event of the descent's that is a section: everything else
             // it says about a directory arrives as an [`Activity`] on the port
             // above, which is where every other session reports.
-            if let RunEvent::Starting { directory, .. } = event {
+            if let Event::Starting { directory, .. } = event {
                 let heading = crate::freshness::named(asked.root, &directory);
                 let _ = self.events.send(Step::Refreshing(heading));
             }

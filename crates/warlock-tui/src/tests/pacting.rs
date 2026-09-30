@@ -24,8 +24,8 @@ use super::{
     TurnedDown, Work, activity_port, apply_toggle, run_pact, spawn_pact,
 };
 use crate::chatting::Chat;
-use crate::descent::RunEvent;
 use crate::session::{NOT_REFRESHED, Scope};
+use warlock_engine::pact::Event;
 
 // A run of this type's own, or none, and no pull: the tests here are about the
 // first, and the ones about a pull build their `TurnedDown` whole.
@@ -763,18 +763,18 @@ fn fractions(events: &[PactEvent]) -> Vec<(usize, usize)> {
     events
         .iter()
         .filter_map(|event| match event {
-            PactEvent::Run(RunEvent::Starting {
+            PactEvent::Run(Event::Starting {
                 position, total, ..
             }) => Some((*position, *total)),
             PactEvent::Doing(_)
             | PactEvent::Run(
-                RunEvent::Describing { .. }
-                | RunEvent::Requesting { .. }
-                | RunEvent::Rejected { .. }
-                | RunEvent::Repaired { .. }
-                | RunEvent::Documented { .. }
-                | RunEvent::Unchanged { .. }
-                | RunEvent::Skipped { .. },
+                Event::Describing { .. }
+                | Event::Requesting { .. }
+                | Event::Rejected { .. }
+                | Event::Repaired { .. }
+                | Event::Documented { .. }
+                | Event::Unchanged { .. }
+                | Event::Skipped { .. },
             )
             | PactEvent::Finished(_) => None,
         })
@@ -785,18 +785,16 @@ fn announced(events: &[PactEvent], scratch: &Scratch) -> Vec<PathBuf> {
     events
         .iter()
         .filter_map(|event| match event {
-            PactEvent::Run(RunEvent::Starting { directory, .. }) => {
-                Some(scratch.relative(directory))
-            }
+            PactEvent::Run(Event::Starting { directory, .. }) => Some(scratch.relative(directory)),
             PactEvent::Doing(_)
             | PactEvent::Run(
-                RunEvent::Describing { .. }
-                | RunEvent::Requesting { .. }
-                | RunEvent::Rejected { .. }
-                | RunEvent::Repaired { .. }
-                | RunEvent::Documented { .. }
-                | RunEvent::Unchanged { .. }
-                | RunEvent::Skipped { .. },
+                Event::Describing { .. }
+                | Event::Requesting { .. }
+                | Event::Rejected { .. }
+                | Event::Repaired { .. }
+                | Event::Documented { .. }
+                | Event::Unchanged { .. }
+                | Event::Skipped { .. },
             )
             | PactEvent::Finished(_) => None,
         })
@@ -863,7 +861,7 @@ fn the_worker_names_each_directory_in_turn_and_then_says_how_the_run_went() {
     // pass is handed it and answered by the word that its pass delivered,
     // and then exactly one outcome and nothing after it.
     let [
-        PactEvent::Run(RunEvent::Starting {
+        PactEvent::Run(Event::Starting {
             directory: first,
             position: 1,
             total: 2,
@@ -872,22 +870,22 @@ fn the_worker_names_each_directory_in_turn_and_then_says_how_the_run_went() {
         // file, then the handover to the pass that fits the lines
         // together. The parent below has no file of its own, so it reports
         // only the second.
-        PactEvent::Run(RunEvent::Describing {
+        PactEvent::Run(Event::Describing {
             position: 1,
             total: 1,
             ..
         }),
-        PactEvent::Run(RunEvent::Requesting { .. }),
-        PactEvent::Run(RunEvent::Documented {
+        PactEvent::Run(Event::Requesting { .. }),
+        PactEvent::Run(Event::Documented {
             directory: first_done,
         }),
-        PactEvent::Run(RunEvent::Starting {
+        PactEvent::Run(Event::Starting {
             directory: second,
             position: 2,
             total: 2,
         }),
-        PactEvent::Run(RunEvent::Requesting { .. }),
-        PactEvent::Run(RunEvent::Documented {
+        PactEvent::Run(Event::Requesting { .. }),
+        PactEvent::Run(Event::Documented {
             directory: second_done,
         }),
         PactEvent::Finished(Ok(Toggled {
@@ -948,7 +946,7 @@ fn what_each_pass_is_doing_arrives_between_its_directory_and_the_next() {
     // arrive whole and unaltered — this channel carries them, it does not
     // interpret them.
     let [
-        PactEvent::Run(RunEvent::Starting {
+        PactEvent::Run(Event::Starting {
             directory: first,
             position: 1,
             total: 2,
@@ -957,31 +955,31 @@ fn what_each_pass_is_doing_arrives_between_its_directory_and_the_next() {
         // activities between the directory it belongs to and the next: a
         // per-file directory reports two passes' worth, in order, and
         // nothing of either lands under its neighbour.
-        PactEvent::Run(RunEvent::Describing { .. }),
+        PactEvent::Run(Event::Describing { .. }),
         PactEvent::Doing(Activity::Tool {
             name: first_tool,
             detail: Some(first_detail),
         }),
         PactEvent::Doing(Activity::Thinking),
         PactEvent::Doing(Activity::Cost { usd: first_cost }),
-        PactEvent::Run(RunEvent::Requesting { .. }),
+        PactEvent::Run(Event::Requesting { .. }),
         PactEvent::Doing(Activity::Tool { .. }),
         PactEvent::Doing(Activity::Thinking),
         PactEvent::Doing(Activity::Cost { .. }),
-        PactEvent::Run(RunEvent::Documented { .. }),
-        PactEvent::Run(RunEvent::Starting {
+        PactEvent::Run(Event::Documented { .. }),
+        PactEvent::Run(Event::Starting {
             directory: second,
             position: 2,
             total: 2,
         }),
-        PactEvent::Run(RunEvent::Requesting { .. }),
+        PactEvent::Run(Event::Requesting { .. }),
         PactEvent::Doing(Activity::Tool {
             detail: Some(second_detail),
             ..
         }),
         PactEvent::Doing(Activity::Thinking),
         PactEvent::Doing(Activity::Cost { .. }),
-        PactEvent::Run(RunEvent::Documented { .. }),
+        PactEvent::Run(Event::Documented { .. }),
         PactEvent::Finished(Ok(Toggled { granted: true, .. })),
     ] = events.as_slice()
     else {
@@ -2054,7 +2052,7 @@ fn a_directory_the_run_carried_is_announced_unchanged_rather_than_documented() {
     let carried: Vec<PathBuf> = events
         .iter()
         .filter_map(|event| match event {
-            PactEvent::Run(RunEvent::Unchanged { directory }) => Some(scratch.relative(directory)),
+            PactEvent::Run(Event::Unchanged { directory }) => Some(scratch.relative(directory)),
             _ => None,
         })
         .collect();
@@ -2069,7 +2067,7 @@ fn a_directory_the_run_carried_is_announced_unchanged_rather_than_documented() {
     let documented: Vec<PathBuf> = events
         .iter()
         .filter_map(|event| match event {
-            PactEvent::Run(RunEvent::Documented { directory }) => Some(scratch.relative(directory)),
+            PactEvent::Run(Event::Documented { directory }) => Some(scratch.relative(directory)),
             _ => None,
         })
         .collect();
@@ -2142,7 +2140,7 @@ fn a_refresh_describes_the_stale_directories_and_leaves_the_fresh_ones_as_they_w
         ]
     );
     // And the fraction counts the run rather than the subtree: three of
-    // three, from the engine's observer, with five directories under the
+    // three, from the engine's events, with five directories under the
     // key that was pressed.
     assert_eq!(fractions(&events), [(1, 3), (2, 3), (3, 3)]);
 
@@ -2369,7 +2367,7 @@ fn a_run_says_it_ended_on_one_round_and_no_other() {
 
     // Still going: the worker has named a directory and nothing more.
     events
-        .send(PactEvent::Run(RunEvent::Starting {
+        .send(PactEvent::Run(Event::Starting {
             directory: PathBuf::from("/repo/crates/engine"),
             position: 1,
             total: 1,
@@ -2422,7 +2420,7 @@ fn a_pass_fills_the_panel_under_the_directory_it_is_working_on() {
     // The first directory, on its own: the run has reached it and the
     // pass has not said anything yet.
     events
-        .send(PactEvent::Run(RunEvent::Starting {
+        .send(PactEvent::Run(Event::Starting {
             directory: PathBuf::from("/repo/crates/engine"),
             position: 1,
             total: 2,
@@ -2514,7 +2512,7 @@ fn the_request_a_directory_was_handed_draws_a_line_under_it() {
     let mut pact = Pact::with_run(running);
 
     events
-        .send(PactEvent::Run(RunEvent::Starting {
+        .send(PactEvent::Run(Event::Starting {
             directory: PathBuf::from("/repo/crates/engine"),
             position: 1,
             total: 1,
@@ -2529,7 +2527,7 @@ fn the_request_a_directory_was_handed_draws_a_line_under_it() {
 
     // Twenty seconds of reading files, and then the handover.
     events
-        .send(PactEvent::Run(RunEvent::Requesting {
+        .send(PactEvent::Run(Event::Requesting {
             files: 11,
             bytes: 34 * 1024,
         }))
@@ -2572,7 +2570,7 @@ fn a_subtree_pact_reads_as_a_section_per_directory_in_walk_order() {
     let mut pact = Pact::with_run(running);
 
     events
-        .send(PactEvent::Run(RunEvent::Starting {
+        .send(PactEvent::Run(Event::Starting {
             directory: PathBuf::from("/repo/crates/engine"),
             position: 1,
             total: 2,
@@ -2591,7 +2589,7 @@ fn a_subtree_pact_reads_as_a_section_per_directory_in_walk_order() {
     // section above it stops where the run left it — seventy seconds in,
     // which is where its last line stays however long the run goes on.
     events
-        .send(PactEvent::Run(RunEvent::Starting {
+        .send(PactEvent::Run(Event::Starting {
             directory: PathBuf::from("/repo/crates/tui"),
             position: 2,
             total: 2,
@@ -2684,15 +2682,15 @@ fn a_documented_directory_turns_green_the_moment_the_engine_says_so() {
     // The deepest directory's pass delivers, and the run moves on to the
     // one above it without ending.
     for event in [
-        PactEvent::Run(RunEvent::Starting {
+        PactEvent::Run(Event::Starting {
             directory: PathBuf::from("/repo/crates/engine/src"),
             position: 1,
             total: 3,
         }),
-        PactEvent::Run(RunEvent::Documented {
+        PactEvent::Run(Event::Documented {
             directory: PathBuf::from("/repo/crates/engine/src"),
         }),
-        PactEvent::Run(RunEvent::Starting {
+        PactEvent::Run(Event::Starting {
             directory: PathBuf::from("/repo/crates/engine"),
             position: 2,
             total: 3,
@@ -2770,7 +2768,7 @@ fn the_document_a_pass_wrote_appears_under_its_directory_as_the_run_goes() {
     let on_screen: Vec<_> = app.rows().iter().map(|row| row.path.clone()).collect();
 
     events
-        .send(PactEvent::Run(RunEvent::Documented {
+        .send(PactEvent::Run(Event::Documented {
             directory: PathBuf::from("/repo/crates/engine"),
         }))
         .expect("the loop is still listening");
@@ -2834,7 +2832,7 @@ fn a_second_document_for_the_same_directory_inserts_nothing() {
 
     for _ in 0..2 {
         events
-            .send(PactEvent::Run(RunEvent::Documented {
+            .send(PactEvent::Run(Event::Documented {
                 directory: PathBuf::from("/repo/crates/engine"),
             }))
             .expect("the loop is still listening");
@@ -2866,7 +2864,7 @@ fn a_documented_directory_with_no_row_changes_nothing() {
     let (events, mut pact) = running_over(&app, pact_of("/repo/crates"));
 
     events
-        .send(PactEvent::Run(RunEvent::Documented {
+        .send(PactEvent::Run(Event::Documented {
             directory: PathBuf::from("/repo/docs/adr"),
         }))
         .expect("the loop is still listening");
@@ -2897,7 +2895,7 @@ fn the_document_rows_a_run_writes_cost_no_reload() {
 
     for directory in ["/repo/crates/engine/src", "/repo/crates/engine"] {
         events
-            .send(PactEvent::Run(RunEvent::Documented {
+            .send(PactEvent::Run(Event::Documented {
                 directory: PathBuf::from(directory),
             }))
             .expect("the loop is still listening");
@@ -2966,7 +2964,7 @@ fn the_reader_keeps_the_tree_while_the_panel_fills_up() {
     // The first directory, and then the three keys that shape the tree.
     let mut round = |now: Instant, directory: &str, position: usize, app: &mut App| {
         events
-            .send(PactEvent::Run(RunEvent::Starting {
+            .send(PactEvent::Run(Event::Starting {
                 directory: PathBuf::from(directory),
                 position,
                 total: 2,
@@ -3036,7 +3034,7 @@ fn a_run_that_dies_leaves_the_account_of_what_it_managed_on_screen() {
     });
 
     events
-        .send(PactEvent::Run(RunEvent::Starting {
+        .send(PactEvent::Run(Event::Starting {
             directory: PathBuf::from("/repo/crates/engine"),
             position: 1,
             total: 2,
@@ -3792,7 +3790,7 @@ fn a_run_that_finishes_under_a_document_leaves_it_showing_and_fills_the_card_beh
 
     // A directory opening a section, and then a line under it.
     events
-        .send(PactEvent::Run(RunEvent::Starting {
+        .send(PactEvent::Run(Event::Starting {
             directory: PathBuf::from("/repo/crates/engine"),
             position: 1,
             total: 1,
@@ -3934,7 +3932,7 @@ fn a_run_whose_end_puts_the_view_back_leaves_the_document_showing() {
         reading_a_file(&mut app);
 
         events
-            .send(PactEvent::Run(RunEvent::Starting {
+            .send(PactEvent::Run(Event::Starting {
                 directory: PathBuf::from("/repo/crates/engine"),
                 position: 1,
                 total: 2,
@@ -4347,7 +4345,7 @@ fn a_run_whose_end_puts_the_view_back_keeps_the_conversation_beside_it() {
         let mut pact = Pact::with_run(running);
 
         events
-            .send(PactEvent::Run(RunEvent::Starting {
+            .send(PactEvent::Run(Event::Starting {
                 directory: PathBuf::from("/repo/crates/engine"),
                 position: 1,
                 total: 2,
@@ -4558,7 +4556,7 @@ fn a_refresh_counts_what_it_will_visit_rather_than_the_subtree_it_was_pointed_at
         base,
     );
 
-    // The verb is the run's and the fraction is the engine observer's:
+    // The verb is the run's and the fraction is the engine's:
     // seven of seven, and not one of seventeen.
     assert_eq!(
         progress,
@@ -4719,7 +4717,7 @@ fn a_worker_that_says_nothing_more_ends_the_run_rather_than_hanging() {
     let (events, mut pact) = running_over(&app, pact_of("/repo/crates"));
 
     events
-        .send(PactEvent::Run(RunEvent::Starting {
+        .send(PactEvent::Run(Event::Starting {
             directory: PathBuf::from("/repo/crates"),
             position: 1,
             total: 1,

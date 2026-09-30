@@ -21,6 +21,7 @@ use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::time::Instant;
 use std::{fs, io, thread};
 
+use warlock_engine::pact::Event;
 use warlock_engine::{
     Agent, DOCUMENT_FILE, Manifest, NodeState, PactedSubtree, Tree, fitting, pact, to_manifest_path,
 };
@@ -30,7 +31,7 @@ use warlock_tui::{
 };
 
 use crate::boundary::Operation;
-use crate::descent::{Descent, RunEvent, descend};
+use crate::descent::{Descent, descend};
 use crate::error::one_line;
 use crate::session::{Scope, closed_scope, reload};
 
@@ -234,7 +235,7 @@ impl Drop for CancelGuard {
 
 #[derive(Debug)]
 pub(crate) enum PactEvent {
-    Run(RunEvent),
+    Run(Event),
     Doing(Activity),
     Finished(Result<Toggled, String>),
 }
@@ -445,6 +446,10 @@ fn refresh_press(
     Some(directory)
 }
 
+// Over the pedantic line count because it is one exhaustive match over the
+// engine's events, and a second function holding half the arms would be a
+// second place to look for what a run puts on screen.
+#[allow(clippy::too_many_lines)]
 fn drain(
     run: &mut Option<Running>,
     app: &mut App,
@@ -460,7 +465,7 @@ fn drain(
 
     let outcome = loop {
         match running.events.try_recv() {
-            Ok(PactEvent::Run(RunEvent::Starting {
+            Ok(PactEvent::Run(Event::Starting {
                 directory,
                 position,
                 total,
@@ -481,12 +486,11 @@ fn drain(
                 let heading = section_label(&scope.root, &directory);
                 app.panel_mut()
                     .write_run(|account| account.open_section(&heading, now));
-                // The fraction is the observer's own, whichever run is
-                // reporting: a refresh of a subtree of forty directories with
-                // seven stale ones counts to seven, because seven is what the
-                // engine planned to visit and said so. Nothing here counts
-                // anything. The kind rides along so the line reads as
-                // refreshing rather than pacting — see `Work::kind`.
+                // The fraction is the engine's own, whichever run is
+                // reporting: a refresh of forty directories with seven stale
+                // counts to seven, because seven is what the engine planned to
+                // visit. The kind rides along so the line reads as refreshing
+                // rather than pacting — see `Work::kind`.
                 app.set_run_in_flight(running.work.kind(), directory, position, total);
             }
             // Filed under whichever directory is open, which is the one the
@@ -519,7 +523,7 @@ fn drain(
             // request went over, while the placeholder counts from the section
             // opening and would label a multi-pass directory's whole wait with
             // it. See `Account::record_waiting`.
-            Ok(PactEvent::Run(RunEvent::Requesting { files, bytes })) => {
+            Ok(PactEvent::Run(Event::Requesting { files, bytes })) => {
                 app.panel_mut()
                     .write_run(|account| account.record_waiting(files, bytes, now));
             }
@@ -528,10 +532,11 @@ fn drain(
             // the footer's bar fills by it. The bar is the only reason this
             // reaches the footer at all — the line there still names the
             // directory of how many, because that is the question it answers.
-            Ok(PactEvent::Run(RunEvent::Describing {
+            Ok(PactEvent::Run(Event::Describing {
                 position,
                 total,
                 bytes,
+                ..
             })) => {
                 app.panel_mut()
                     .write_run(|account| account.record_describing(position, total, bytes, now));
@@ -540,10 +545,11 @@ fn drain(
             // The panel only, and one line, filed like the request line above
             // it: why this directory is about to cost a second pass, or why it
             // is about to fail, in the engine's own words.
-            Ok(PactEvent::Run(RunEvent::Rejected {
+            Ok(PactEvent::Run(Event::Rejected {
                 defects,
                 attempt,
                 attempts,
+                ..
             })) => {
                 app.panel_mut()
                     .write_run(|account| account.record_rejected(&defects, attempt, attempts, now));
@@ -559,9 +565,9 @@ fn drain(
             // events should have to infer which. Nothing is done with it here:
             // the line lands where every line of a pass lands, in the section
             // the `Starting` before it opened, which is that same directory's.
-            Ok(PactEvent::Run(RunEvent::Repaired { mend, .. })) => {
+            Ok(PactEvent::Run(Event::Repaired { mend, .. })) => {
                 app.panel_mut()
-                    .write_run(|account| account.record_repaired(&mend, now));
+                    .write_run(|account| account.record_repaired(&mend.to_string(), now));
             }
             // The one recolouring a run does before it is over. The engine
             // only says this of a directory whose whole subtree delivered —
@@ -572,7 +578,7 @@ fn drain(
             // the end repaints from the manifest either way, which is what
             // catches the one thing this preview cannot know: a hash that
             // fails in phase two.
-            Ok(PactEvent::Run(RunEvent::Documented { directory })) => {
+            Ok(PactEvent::Run(Event::Documented { directory })) => {
                 app.set_subtree_state(&directory, NodeState::PactedFresh);
                 // The document the pass just wrote, put on screen where it was
                 // written: beside the directory, in the colour the paint above
@@ -599,7 +605,7 @@ fn drain(
             // afterwards whether the document on disk was written by this run
             // or kept from the last, and the section's closing line turns on
             // exactly that.
-            Ok(PactEvent::Run(RunEvent::Unchanged { directory })) => {
+            Ok(PactEvent::Run(Event::Unchanged { directory })) => {
                 app.set_subtree_state(&directory, NodeState::PactedFresh);
                 app.insert_file_row(directory.join(DOCUMENT_FILE));
                 running.unchanged.push(directory);
@@ -609,7 +615,7 @@ fn drain(
             // the colour it should be. Remembered so its section can close
             // saying what happened rather than reading the document on disk and
             // calling it a write.
-            Ok(PactEvent::Run(RunEvent::Skipped { directory, below })) => {
+            Ok(PactEvent::Run(Event::Skipped { directory, below })) => {
                 running.skipped.push((directory, below));
             }
             Ok(PactEvent::Finished(outcome)) => break Some(outcome),
@@ -827,7 +833,7 @@ fn apply_toggle(
     work: &Work,
     agent: &dyn Agent,
     cancel: &Cancel,
-    sink: &mut dyn FnMut(RunEvent),
+    sink: &mut dyn FnMut(Event),
 ) -> Result<Toggled, String> {
     // The descent and the one save are [`descend`]'s, shared with the shell's
     // `warlock pact` and `warlock refresh` — see [`mod@crate::descent`]. What is

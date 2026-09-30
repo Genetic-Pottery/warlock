@@ -18,8 +18,8 @@ use crate::{
 /// ```
 /// use std::fs;
 /// use warlock_engine::{
-///     Agent, Manifest, NodeState, PactedSubtree, Unwatched, agent, decide_state,
-///     document, pact_subtree, subtree_hash,
+///     Agent, Manifest, NodeState, PactedSubtree, agent, decide_state, document,
+///     pact_subtree, subtree_hash, unwatched,
 /// };
 ///
 /// /// The engine's own tests reach a model exactly like this: they don't.
@@ -36,9 +36,9 @@ use crate::{
 /// fs::create_dir_all(engine.join("src"))?;
 /// fs::write(engine.join("src").join("lib.rs"), "//! Core engine.\n")?;
 ///
-/// // `Unwatched` is the caller with nothing to report and nothing to cancel.
+/// // `unwatched` is the caller with nothing to report and nothing to cancel.
 /// let PactedSubtree { manifest, failures, .. } =
-///     pact_subtree(&engine, repo.path(), &Manifest::new(), &Canned, &mut Unwatched)?;
+///     pact_subtree(&engine, repo.path(), &Manifest::new(), &Canned, &mut unwatched)?;
 ///
 /// assert!(failures.is_empty());
 /// assert_eq!(manifest.entries().len(), 2, "the directory, and the one below it");
@@ -55,7 +55,7 @@ pub fn pact_subtree(
     root: impl AsRef<Path>,
     manifest: &Manifest,
     agent: &dyn Agent,
-    observer: &mut dyn Observer,
+    sink: &mut dyn FnMut(Event) -> Pacting,
 ) -> Result<PactedSubtree, Error> {
     let (directory, root) = (directory.as_ref(), root.as_ref());
     let directories = pactable_directories(directory)?;
@@ -72,7 +72,7 @@ pub fn pact_subtree(
         &BTreeMap::new(),
         AboveFailure::Describe,
         agent,
-        observer,
+        sink,
     );
 
     Ok(PactedSubtree {
@@ -87,8 +87,8 @@ pub fn pact_subtree(
 /// use std::cell::Cell;
 /// use std::fs;
 /// use warlock_engine::{
-///     Agent, Manifest, NodeState, PactedSubtree, Unwatched, agent, decide_state,
-///     document, pact_subtree, refresh_subtree, subtree_hash,
+///     Agent, Manifest, NodeState, PactedSubtree, agent, decide_state, document,
+///     pact_subtree, refresh_subtree, subtree_hash, unwatched,
 /// };
 ///
 /// /// The engine's own tests reach a model exactly like this: they don't.
@@ -113,14 +113,14 @@ pub fn pact_subtree(
 ///
 /// // A pact first, to have something to refresh: both directories go green.
 /// let PactedSubtree { manifest, .. } =
-///     pact_subtree(&engine, repo.path(), &Manifest::new(), &agent, &mut Unwatched)?;
+///     pact_subtree(&engine, repo.path(), &Manifest::new(), &agent, &mut unwatched)?;
 /// // One pass per file, then one over the lines to say how they fit together:
 /// // `src` has a file and the directory above it has none, so three.
 /// assert_eq!(agent.passes.get(), 3, "children before parents");
 ///
 /// // Nothing has moved, so a refresh describes nothing and costs nothing.
 /// let PactedSubtree { manifest, .. } =
-///     refresh_subtree(&engine, repo.path(), &manifest, &agent, &mut Unwatched)?;
+///     refresh_subtree(&engine, repo.path(), &manifest, &agent, &mut unwatched)?;
 /// assert_eq!(agent.passes.get(), 3, "nothing stale, no pass");
 ///
 /// // Now a file changes in the parent directory only.
@@ -128,7 +128,7 @@ pub fn pact_subtree(
 /// fs::write(engine.join("Cargo.toml"), "[package]\nname = \"engine\"\n")?;
 ///
 /// let PactedSubtree { manifest, failures, .. } =
-///     refresh_subtree(&engine, repo.path(), &manifest, &agent, &mut Unwatched)?;
+///     refresh_subtree(&engine, repo.path(), &manifest, &agent, &mut unwatched)?;
 ///
 /// assert!(failures.is_empty());
 /// // One new file to describe, and one pass over the lines to place it. The
@@ -144,7 +144,7 @@ pub fn refresh_subtree(
     root: impl AsRef<Path>,
     manifest: &Manifest,
     agent: &dyn Agent,
-    observer: &mut dyn Observer,
+    sink: &mut dyn FnMut(Event) -> Pacting,
 ) -> Result<PactedSubtree, Error> {
     let (directory, root) = (directory.as_ref(), root.as_ref());
     let stale: Vec<PathBuf> = pactable_directories(directory)?
@@ -185,7 +185,7 @@ pub fn refresh_subtree(
         &line_hashes,
         AboveFailure::Skip,
         agent,
-        observer,
+        sink,
     );
 
     // The empty slice, not `stale`: `rewrite` drops an entry only where the run
@@ -344,7 +344,7 @@ fn describe_and_grant(
     line_hashes: &BTreeMap<PathBuf, BTreeMap<String, String>>,
     above_failure: AboveFailure,
     agent: &dyn Agent,
-    observer: &mut dyn Observer,
+    sink: &mut dyn FnMut(Event) -> Pacting,
 ) -> Described {
     let mut failures = Vec::new();
     let mut problems = Vec::new();
@@ -359,7 +359,12 @@ fn describe_and_grant(
         // Asked before the pass, so a front end names the directory being
         // worked rather than the one that just finished, and a cancel arriving
         // now costs no pass at all.
-        if observer.starting(pacted, index + 1, total) == Pacting::Stop {
+        let starting = Event::Starting {
+            directory: pacted.clone(),
+            position: index + 1,
+            total,
+        };
+        if sink(starting) == Pacting::Stop {
             // Offered and turned down, recorded the way a failure is so phase
             // two's partial rule need know nothing about cancellation — but
             // with no `Failure` beside it, because nothing went wrong.
@@ -376,7 +381,10 @@ fn describe_and_grant(
         if above_failure == AboveFailure::Skip
             && let Some(below) = failure_below(&undocumented, pacted)
         {
-            observer.skipped(pacted, below);
+            sink(Event::Skipped {
+                directory: pacted.clone(),
+                below: below.clone(),
+            });
             continue;
         }
 
@@ -389,7 +397,9 @@ fn describe_and_grant(
             carries.insert(pacted.clone(), carry);
             documents.insert(pacted.clone(), carried);
             if failure_below(&undocumented, pacted).is_none() {
-                observer.unchanged(pacted);
+                sink(Event::Unchanged {
+                    directory: pacted.clone(),
+                });
             }
             continue;
         }
@@ -399,7 +409,7 @@ fn describe_and_grant(
             .as_deref()
             .zip(line_hashes.get(pacted))
             .filter(|_| above_failure == AboveFailure::Skip);
-        match pact_directory_watched(pacted, reusable, agent, observer) {
+        match pact_directory_watched(pacted, reusable, agent, sink) {
             Ok(Pacted {
                 document,
                 problems: caps,
@@ -425,7 +435,9 @@ fn describe_and_grant(
                 // front end colours done, and a directory above a failure will
                 // be recorded without a grant.
                 if failure_below(&undocumented, pacted).is_none() {
-                    observer.documented(pacted);
+                    sink(Event::Documented {
+                        directory: pacted.clone(),
+                    });
                 }
             }
             Err(error) => {
@@ -766,14 +778,14 @@ fn ancestry<'module>(module: &'module str, loaded: &str) -> Vec<&'module str> {
 /// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
 pub fn pact_directory(directory: impl AsRef<Path>, agent: &dyn Agent) -> Result<Pacted, Error> {
-    pact_directory_watched(directory.as_ref(), None, agent, &mut Unwatched)
+    pact_directory_watched(directory.as_ref(), None, agent, &mut unwatched)
 }
 
 fn pact_directory_watched(
     directory: &Path,
     carried: Option<(&str, &BTreeMap<String, String>)>,
     agent: &dyn Agent,
-    observer: &mut dyn Observer,
+    sink: &mut dyn FnMut(Event) -> Pacting,
 ) -> Result<Pacted, Error> {
     let snapshot =
         Snapshot::take(directory).map_err(|source| Error::from_walk(directory, source))?;
@@ -789,7 +801,7 @@ fn pact_directory_watched(
         mended,
         problems,
         ..
-    } = snapshot.assemble(carried, agent, observer)?;
+    } = snapshot.assemble(carried, agent, sink)?;
 
     let mut repairs: Vec<Repaired> = mended
         .iter()
@@ -798,15 +810,15 @@ fn pact_directory_watched(
                 field: format!("files[{name:?}]"),
                 done: document::Mended::Supplied,
             };
-            announce_repair(directory, mend, observer)
+            announce_repair(directory, mend, sink)
         })
         .collect();
 
-    let Synthesised { fill, mends } = snapshot.fill(&lines, agent, observer)?;
+    let Synthesised { fill, mends } = snapshot.fill(&lines, agent, sink)?;
     repairs.extend(
         mends
             .into_iter()
-            .map(|mend| announce_repair(directory, mend, observer)),
+            .map(|mend| announce_repair(directory, mend, sink)),
     );
 
     let document = write_document(directory, &snapshot.render(&fill))?;
@@ -822,9 +834,12 @@ fn pact_directory_watched(
 fn announce_repair(
     directory: &Path,
     mend: document::Mend,
-    observer: &mut dyn Observer,
+    sink: &mut dyn FnMut(Event) -> Pacting,
 ) -> Repaired {
-    observer.repaired(directory, &mend);
+    sink(Event::Repaired {
+        directory: directory.to_path_buf(),
+        mend: mend.clone(),
+    });
     Repaired {
         directory: directory.to_path_buf(),
         mend,
@@ -855,25 +870,37 @@ pub(crate) fn pactable_directories(root: &Path) -> Result<Vec<PathBuf>, Error> {
 }
 
 /// ```
-/// use std::path::{Path, PathBuf};
+/// use std::path::PathBuf;
 /// use warlock_engine::{pact, Pacting};
 ///
-/// /// Remembers where the pact got to, and gives up after two directories.
-/// struct Impatient(Vec<PathBuf>);
-///
-/// impl pact::Observer for Impatient {
-///     fn starting(&mut self, directory: &Path, position: usize, total: usize) -> Pacting {
+/// // Remembers where the pact got to, and gives up after two directories.
+/// let mut offered: Vec<PathBuf> = Vec::new();
+/// let mut impatient = |event: pact::Event| match event {
+///     pact::Event::Starting { directory, position, total } => {
 ///         assert!((1..=total).contains(&position), "1-based, and inside the total");
-///         self.0.push(directory.to_path_buf());
+///         offered.push(directory);
 ///         if position > 2 { Pacting::Stop } else { Pacting::Continue }
 ///     }
-/// }
+///     _ => Pacting::Continue,
+/// };
+/// let _: &mut dyn FnMut(pact::Event) -> Pacting = &mut impatient;
 /// ```
-pub trait Observer {
-    fn starting(&mut self, directory: &Path, position: usize, total: usize) -> Pacting;
-
-    /// One file about to be described, and the fraction it is of the files this
-    /// directory is paying for.
+///
+/// Owned, so a front end can send one to another thread.
+///
+/// The sink's answer is read after `Starting` and nowhere else: a pass that
+/// has already started is the agent's own to give up on, so a `Stop` answered
+/// to any other event is ignored rather than abandoning a directory half
+/// described.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Event {
+    Starting {
+        directory: PathBuf,
+        position: usize,
+        total: usize,
+    },
+    /// One file about to be described, and the fraction it is of the files
+    /// this directory is paying for.
     ///
     /// `position` and `total` count the files a pass will be spent on and not
     /// the files in the directory: a file whose line came off the page
@@ -881,52 +908,49 @@ pub trait Observer {
     /// eighteen files with four moved counts to four. That is the denominator a
     /// progress bar can be drawn against, because it is the work that remains.
     ///
-    /// Fired once per file, not once per attempt — a second attempt at the same
-    /// file is [`rejected`](Observer::rejected), which is where a front end
-    /// learns the first one was thrown away.
-    fn describing(
-        &mut self,
-        directory: &Path,
-        name: &str,
+    /// Sent once per file, not once per attempt — a second attempt at the same
+    /// file is [`Rejected`](Event::Rejected), which is where a front end learns
+    /// the first one was thrown away.
+    Describing {
+        directory: PathBuf,
+        name: String,
         bytes: u64,
         position: usize,
         total: usize,
-    ) {
-        let _ = (directory, name, bytes, position, total);
-    }
-
+    },
     /// The handover to the synthesis pass: every line assembled, and the bytes
     /// they come to. One per directory, after the last
-    /// [`describing`](Observer::describing).
-    fn requesting(&mut self, files: usize, bytes: u64) {
-        let _ = (files, bytes);
-    }
-
-    fn rejected(&mut self, directory: &Path, defects: &[Defect], attempt: usize, attempts: usize) {
-        let _ = (directory, defects, attempt, attempts);
-    }
-
+    /// [`Describing`](Event::Describing).
+    Requesting {
+        files: usize,
+        bytes: u64,
+    },
+    Rejected {
+        directory: PathBuf,
+        defects: Vec<Defect>,
+        attempt: usize,
+        attempts: usize,
+    },
     /// One slot warlock mended itself, once the attempts behind
-    /// [`rejected`](Observer::rejected) ran out. The document was still
-    /// written: this is what it cost, not a reason it was not.
-    fn repaired(&mut self, directory: &Path, mend: &document::Mend) {
-        let _ = (directory, mend);
-    }
-
-    fn documented(&mut self, directory: &Path) {
-        let _ = directory;
-    }
-
-    fn unchanged(&mut self, directory: &Path) {
-        let _ = directory;
-    }
-
+    /// [`Rejected`](Event::Rejected) ran out. The document was still written:
+    /// this is what it cost, not a reason it was not.
+    Repaired {
+        directory: PathBuf,
+        mend: document::Mend,
+    },
+    Documented {
+        directory: PathBuf,
+    },
+    Unchanged {
+        directory: PathBuf,
+    },
     /// A directory a refresh did not describe, because `below` — a directory
     /// under it — failed and took its grant with it. No pass ran and nothing
     /// was written; the document it has is the one it had.
-    fn skipped(&mut self, directory: &Path, below: &Path) {
-        let _ = (directory, below);
-    }
+    Skipped {
+        directory: PathBuf,
+        below: PathBuf,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -935,13 +959,10 @@ pub enum Pacting {
     Stop,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct Unwatched;
-
-impl Observer for Unwatched {
-    fn starting(&mut self, _directory: &Path, _position: usize, _total: usize) -> Pacting {
-        Pacting::Continue
-    }
+/// The sink with nothing to report and nothing to cancel.
+#[must_use]
+pub fn unwatched(_event: Event) -> Pacting {
+    Pacting::Continue
 }
 
 #[derive(Debug)]

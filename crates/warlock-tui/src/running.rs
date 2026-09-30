@@ -22,11 +22,12 @@ use std::path::{Path, PathBuf};
 use std::process;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use warlock_engine::pact::Event;
 use warlock_engine::{Agent, PactedSubtree, pact};
 use warlock_tui::{Cancel, ClaudeAgent};
 
 use crate::CANCELLED;
-use crate::descent::{Descent, RunEvent, descend};
+use crate::descent::{Descent, descend};
 use crate::edits::{Opened, opened};
 use crate::error::{Error, one_line};
 use crate::freshness::named;
@@ -80,7 +81,7 @@ impl<W: Write> Progress<W> {
         let _ = writeln!(self.out, "warlock: {fact}");
     }
 
-    fn on(&mut self, event: RunEvent) {
+    fn on(&mut self, event: Event) {
         match event {
             // The fraction is the engine's own, unaltered and one-based, and its
             // denominator does not move for the length of the run — so `[3/12]`
@@ -88,7 +89,7 @@ impl<W: Write> Progress<W> {
             // redefines itself. It is on this line and not the completion line
             // because this is where it means something: it counts the
             // directories offered.
-            RunEvent::Starting {
+            Event::Starting {
                 directory,
                 position,
                 total,
@@ -106,20 +107,20 @@ impl<W: Write> Progress<W> {
             // run. A log read tomorrow should still be able to tell a repaired
             // entry from a written one, so it says which slot and what was done
             // to it.
-            RunEvent::Repaired { directory, mend } => {
+            Event::Repaired { directory, mend } => {
                 self.say(&format!("{} — {mend}", named(&self.root, &directory)));
             }
-            RunEvent::Documented { directory } => {
+            Event::Documented { directory } => {
                 self.say(&format!("documented {}", named(&self.root, &directory)));
             }
-            RunEvent::Unchanged { directory } => {
+            Event::Unchanged { directory } => {
                 self.say(&format!("unchanged {}", named(&self.root, &directory)));
             }
             // Both names on the line. A headless run is read in a log after the
             // fact, often by whoever has to explain why a directory is still
             // yellow, and `skipped crates/tui` on its own is the half of the
             // answer that does not help.
-            RunEvent::Skipped { directory, below } => {
+            Event::Skipped { directory, below } => {
                 self.say(&format!(
                     "skipped {} — {} below it was not documented",
                     named(&self.root, &directory),
@@ -128,9 +129,7 @@ impl<W: Write> Progress<W> {
             }
             // A pipe is read a line per directory; the panel's per-file
             // fractions and retries would bury those lines.
-            RunEvent::Describing { .. }
-            | RunEvent::Requesting { .. }
-            | RunEvent::Rejected { .. } => {}
+            Event::Describing { .. } | Event::Requesting { .. } | Event::Rejected { .. } => {}
         }
     }
 }

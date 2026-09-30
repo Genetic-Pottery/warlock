@@ -2,6 +2,7 @@ use std::fs;
 use std::path::Path;
 
 use tempfile::TempDir;
+use warlock_engine::pact::Event;
 use warlock_engine::{
     Agent, Manifest, NodeState, PactEntry, agent, decide_state, from_manifest_path, subtree_hash,
 };
@@ -9,7 +10,7 @@ use warlock_tui::{Cancel, Dirty};
 
 use super::{Freshened, Freshening, freshened, made_stale};
 use crate::boundary::closed_scope_message;
-use crate::descent::{Descent, RunEvent, descend};
+use crate::descent::{Descent, descend};
 use crate::stubs::{Checkout, GitCall, Passing};
 
 // Never read back, and no clock is consulted: the grant's timestamp plays no
@@ -425,11 +426,11 @@ fn document(repo: &Repo, relative: &str) -> Vec<u8> {
 
 // Every directory a pass was spent on, in the order the passes ran, as the
 // descents themselves report it.
-fn described(events: &[RunEvent], root: &Path) -> Vec<String> {
+fn described(events: &[Event], root: &Path) -> Vec<String> {
     events
         .iter()
         .filter_map(|event| match event {
-            RunEvent::Starting { directory, .. } => Some(
+            Event::Starting { directory, .. } => Some(
                 warlock_engine::to_manifest_path(root, directory)
                     .expect("a directory inside the root"),
             ),

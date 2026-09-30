@@ -923,7 +923,7 @@ pub(crate) enum Heading {
         title: String,
     },
     /// The fraction is one-based and its denominator is the split's answer, as
-    /// [`RunEvent::Starting`](crate::descent::RunEvent)'s is: a sub-task that is
+    /// [`Event::Starting`](warlock_engine::pact::Event::Starting)'s is: a sub-task that is
     /// re-attempted does not move it, because the run's size is not a running
     /// total.
     Subtask {

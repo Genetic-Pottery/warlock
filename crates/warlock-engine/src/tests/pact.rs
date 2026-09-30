@@ -3,8 +3,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use super::{
-    DOCUMENT_FILE, Failure, Observer, PactedSubtree, Pacting, Refusal, Unwatched, pact_directory,
-    pact_subtree, pactable_directories, refresh_subtree, unpact_ignored, unpact_subtree,
+    DOCUMENT_FILE, Event, Failure, PactedSubtree, Pacting, Refusal, pact_directory, pact_subtree,
+    pactable_directories, refresh_subtree, unpact_ignored, unpact_subtree, unwatched,
 };
 use crate::document::{self, STAMP};
 use crate::fitting::{Omission, Snapshot};
@@ -256,41 +256,6 @@ fn named(root: &Path, path: &Path) -> String {
         .expect("one directory in, one name out")
 }
 
-#[derive(Default)]
-struct Mending {
-    rejections: Vec<(PathBuf, usize)>,
-    repairs: Vec<(PathBuf, document::Mend)>,
-}
-
-impl Mending {
-    fn turned_down(&self, root: &Path) -> Vec<(String, usize)> {
-        self.rejections
-            .iter()
-            .map(|(directory, attempt)| (named(root, directory), *attempt))
-            .collect()
-    }
-}
-
-impl Observer for Mending {
-    fn starting(&mut self, _directory: &Path, _position: usize, _total: usize) -> Pacting {
-        Pacting::Continue
-    }
-
-    fn rejected(
-        &mut self,
-        directory: &Path,
-        _defects: &[document::Defect],
-        attempt: usize,
-        _attempts: usize,
-    ) {
-        self.rejections.push((directory.to_path_buf(), attempt));
-    }
-
-    fn repaired(&mut self, directory: &Path, mend: &document::Mend) {
-        self.repairs.push((directory.to_path_buf(), mend.clone()));
-    }
-}
-
 struct Lining {
     answer: String,
     passes: std::cell::Cell<usize>,
@@ -340,7 +305,7 @@ fn a_line_is_reused_only_where_the_file_has_not_moved() {
 
     // Nothing recorded: every file is asked about.
     let first = taken(dir.path())
-        .assemble(None, &agent, &mut Unwatched)
+        .assemble(None, &agent, &mut unwatched)
         .expect("lines");
     assert_eq!(agent.passes.get(), 2);
     assert_eq!(first.asked, ["reading.rs", "writing.rs"]);
@@ -356,7 +321,7 @@ fn a_line_is_reused_only_where_the_file_has_not_moved() {
     );
 
     let again = taken(dir.path())
-        .assemble(Some((&page, &first.hashes)), &agent, &mut Unwatched)
+        .assemble(Some((&page, &first.hashes)), &agent, &mut unwatched)
         .expect("lines");
     assert_eq!(agent.passes.get(), 3, "one changed file, one pass");
     assert_eq!(again.asked, ["writing.rs"]);
@@ -389,7 +354,7 @@ fn one_file_is_one_pass_and_one_line() {
     fs::write(dir.path().join("reading.rs"), "pub fn read_one() {}\n").expect("writes");
 
     let described = taken(dir.path())
-        .line("reading.rs", &Lined, &mut Unwatched)
+        .line("reading.rs", &Lined, &mut unwatched)
         .expect("a line");
     assert_eq!(
         described.line,
@@ -439,7 +404,7 @@ fn synthesis_is_shown_the_lines_and_checked_against_the_directory() {
     .collect();
 
     let synthesised = taken(dir.path())
-        .fill(&lines, &agent, &mut Unwatched)
+        .fill(&lines, &agent, &mut unwatched)
         .expect("a fill either way");
 
     assert_eq!(agent.passes.get(), 1, "a clean answer is taken at once");
@@ -467,7 +432,7 @@ fn synthesis_that_cannot_be_got_right_is_mended_rather_than_lost() {
     .collect();
 
     let synthesised = taken(dir.path())
-        .fill(&lines, &agent, &mut Unwatched)
+        .fill(&lines, &agent, &mut unwatched)
         .expect("a fill either way");
 
     assert_eq!(agent.passes.get(), document::ATTEMPTS);
@@ -495,7 +460,7 @@ fn a_hash_with_no_line_on_the_page_is_asked_about_again() {
     let recorded = [("reading.rs".to_owned(), hash)].into_iter().collect();
 
     let assembled = taken(dir.path())
-        .assemble(Some(("", &recorded)), &agent, &mut Unwatched)
+        .assemble(Some(("", &recorded)), &agent, &mut unwatched)
         .expect("lines");
 
     assert_eq!(assembled.asked, ["reading.rs"]);
@@ -513,7 +478,7 @@ fn a_line_with_no_hash_behind_it_is_asked_about_again() {
     let page = page_of(&[("reading.rs", "The line already on the page.")]);
 
     let assembled = taken(dir.path())
-        .assemble(Some((&page, &BTreeMap::new())), &agent, &mut Unwatched)
+        .assemble(Some((&page, &BTreeMap::new())), &agent, &mut unwatched)
         .expect("lines");
 
     assert_eq!(assembled.asked, ["reading.rs"]);
@@ -537,7 +502,7 @@ fn a_file_the_page_and_the_hashes_agree_on_costs_nothing() {
     let page = page_of(&[("reading.rs", LINE)]);
 
     let assembled = taken(dir.path())
-        .assemble(Some((&page, &recorded)), &agent, &mut Unwatched)
+        .assemble(Some((&page, &recorded)), &agent, &mut unwatched)
         .expect("lines");
 
     assert_eq!(agent.passes.get(), 0, "the run paid for nothing");
@@ -569,7 +534,7 @@ fn a_line_edited_on_the_page_is_described_again_however_still_its_file_is() {
     let page = page_of(&[("reading.rs", "maintained by a unicorn, actually")]);
 
     let assembled = taken(dir.path())
-        .assemble(Some((&page, &recorded)), &agent, &mut Unwatched)
+        .assemble(Some((&page, &recorded)), &agent, &mut unwatched)
         .expect("lines");
 
     assert_eq!(agent.passes.get(), 1, "the edited line costs one pass");
@@ -614,7 +579,7 @@ fn a_hand_edited_line_survives_neither_a_refresh_nor_a_pact() {
         repo.path(),
         &Manifest::new(),
         &Canned::filling(),
-        &mut Unwatched,
+        &mut unwatched,
     )
     .expect("pacts");
     assert!(failures.is_empty(), "{failures:?}");
@@ -630,7 +595,7 @@ fn a_hand_edited_line_survives_neither_a_refresh_nor_a_pact() {
         repo.path(),
         &manifest,
         &Canned::filling(),
-        &mut Unwatched,
+        &mut unwatched,
     )
     .expect("refreshes");
     assert!(failures.is_empty(), "{failures:?}");
@@ -654,7 +619,7 @@ fn a_hand_edited_line_survives_neither_a_refresh_nor_a_pact() {
         repo.path(),
         &refreshed,
         &Canned::filling(),
-        &mut Unwatched,
+        &mut unwatched,
     )
     .expect("pacts again");
     assert!(failures.is_empty(), "{failures:?}");
@@ -696,7 +661,7 @@ fn a_line_for_a_file_that_is_gone_is_left_off_the_page() {
     ]);
 
     let assembled = taken(dir.path())
-        .assemble(Some((&page, &recorded)), &agent, &mut Unwatched)
+        .assemble(Some((&page, &recorded)), &agent, &mut unwatched)
         .expect("lines");
 
     assert_eq!(agent.passes.get(), 0, "the file that is left was reused");
@@ -719,7 +684,7 @@ fn a_file_warlock_had_to_write_itself_is_named_as_such() {
     let agent = Lining::saying("prose where an object was asked for");
 
     let assembled = taken(dir.path())
-        .assemble(None, &agent, &mut Unwatched)
+        .assemble(None, &agent, &mut unwatched)
         .expect("lines");
 
     assert_eq!(assembled.asked, ["reading.rs"]);
@@ -734,7 +699,7 @@ fn a_file_whose_line_is_never_usable_is_written_by_warlock_rather_than_refused()
     let agent = Lining::saying(format!("{{\"line\": \"{over}\"}}"));
 
     let described = taken(dir.path())
-        .line("reading.rs", &agent, &mut Unwatched)
+        .line("reading.rs", &agent, &mut unwatched)
         .expect("a line either way");
 
     assert_eq!(
@@ -766,7 +731,7 @@ fn a_file_answered_with_prose_is_mended_where_a_directory_would_be_refused() {
     let agent = Lining::saying("Here is some prose instead of the object you asked for.");
 
     let described = taken(dir.path())
-        .line("reading.rs", &agent, &mut Unwatched)
+        .line("reading.rs", &agent, &mut unwatched)
         .expect("a line either way");
 
     assert!(described.mended);
@@ -783,7 +748,7 @@ fn a_file_that_is_not_there_is_an_error_and_not_a_line_about_nothing() {
     let agent = Lining::saying(r#"{"line": "a line about a file that does not exist"}"#);
 
     let error = taken(dir.path())
-        .line("writing.rs", &agent, &mut Unwatched)
+        .line("writing.rs", &agent, &mut unwatched)
         .expect_err("the caller walked the directory to get this name");
 
     assert!(matches!(error, super::Error::Walk { .. }), "{error:?}");
@@ -806,7 +771,7 @@ fn a_mended_directory_is_not_a_failure_and_the_subtree_is_still_pacted() {
         repo.path(),
         &Manifest::new(),
         &agent,
-        &mut Unwatched,
+        &mut unwatched,
     )
     .expect("a subtree of mended passes is a pacted subtree");
 
@@ -852,11 +817,18 @@ fn every_mend_is_carried_out_of_the_run_and_announced_as_it_is_made() {
     let repo = project();
     let src = repo.path().join("crates/tui/src");
     let agent = Defective::with(blank_purpose_and_overlong_entries);
-    let mut observer = Mending::default();
+    let mut observer = Watching::patient();
 
     let PactedSubtree {
         failures, repairs, ..
-    } = pact_subtree(&src, repo.path(), &Manifest::new(), &agent, &mut observer).expect("pacts");
+    } = pact_subtree(
+        &src,
+        repo.path(),
+        &Manifest::new(),
+        &agent,
+        &mut observer.sink(),
+    )
+    .expect("pacts");
 
     assert!(failures.is_empty(), "{failures:?}");
     assert_eq!(
@@ -1146,9 +1118,7 @@ impl Agent for FailsFor {
 #[derive(Default)]
 struct Watching {
     stop_after: Option<usize>,
-    calls: Vec<(PathBuf, usize, usize)>,
-    documented: Vec<PathBuf>,
-    skipped: Vec<(PathBuf, PathBuf)>,
+    events: Vec<Event>,
 }
 
 impl Watching {
@@ -1163,50 +1133,105 @@ impl Watching {
         }
     }
 
+    fn sink(&mut self) -> impl FnMut(Event) -> Pacting + '_ {
+        |event| {
+            let answer = match (&event, self.stop_after) {
+                (Event::Starting { position, .. }, Some(limit)) if *position > limit => {
+                    Pacting::Stop
+                }
+                _ => Pacting::Continue,
+            };
+            self.events.push(event);
+            answer
+        }
+    }
+
     fn calls(&self, root: &Path) -> Vec<(String, usize, usize)> {
-        self.calls
+        self.events
             .iter()
-            .map(|(directory, position, total)| (named(root, directory), *position, *total))
+            .filter_map(|event| match event {
+                Event::Starting {
+                    directory,
+                    position,
+                    total,
+                } => Some((named(root, directory), *position, *total)),
+                _ => None,
+            })
             .collect()
     }
 
     fn offered(&self) -> Vec<PathBuf> {
-        self.calls
+        self.events
             .iter()
-            .map(|(directory, ..)| directory.clone())
+            .filter_map(|event| match event {
+                Event::Starting { directory, .. } => Some(directory.clone()),
+                _ => None,
+            })
             .collect()
     }
 
     fn done(&self, root: &Path) -> Vec<String> {
-        relative_to(root, &self.documented)
+        let documented: Vec<PathBuf> = self
+            .events
+            .iter()
+            .filter_map(|event| match event {
+                Event::Documented { directory } => Some(directory.clone()),
+                _ => None,
+            })
+            .collect();
+        relative_to(root, &documented)
     }
 
     // Both halves, because the pair is the announcement: the directory that
     // got no pass is only half an answer without the one that cost it.
     fn passed_over(&self, root: &Path) -> Vec<(String, String)> {
-        self.skipped
+        self.events
             .iter()
-            .map(|(directory, below)| (named(root, directory), named(root, below)))
+            .filter_map(|event| match event {
+                Event::Skipped { directory, below } => {
+                    Some((named(root, directory), named(root, below)))
+                }
+                _ => None,
+            })
             .collect()
     }
-}
 
-impl Observer for Watching {
-    fn starting(&mut self, directory: &Path, position: usize, total: usize) -> Pacting {
-        self.calls.push((directory.to_path_buf(), position, total));
-        match self.stop_after {
-            Some(limit) if position > limit => Pacting::Stop,
-            _ => Pacting::Continue,
-        }
+    fn turned_down(&self, root: &Path) -> Vec<(String, usize)> {
+        self.events
+            .iter()
+            .filter_map(|event| match event {
+                Event::Rejected {
+                    directory, attempt, ..
+                } => Some((named(root, directory), *attempt)),
+                _ => None,
+            })
+            .collect()
     }
 
-    fn documented(&mut self, directory: &Path) {
-        self.documented.push(directory.to_path_buf());
+    fn described(&self) -> Vec<(String, u64, usize, usize)> {
+        self.events
+            .iter()
+            .filter_map(|event| match event {
+                Event::Describing {
+                    name,
+                    bytes,
+                    position,
+                    total,
+                    ..
+                } => Some((name.clone(), *bytes, *position, *total)),
+                _ => None,
+            })
+            .collect()
     }
 
-    fn skipped(&mut self, directory: &Path, below: &Path) {
-        self.skipped
-            .push((directory.to_path_buf(), below.to_path_buf()));
+    fn requested(&self) -> Vec<(usize, u64)> {
+        self.events
+            .iter()
+            .filter_map(|event| match event {
+                Event::Requesting { files, bytes } => Some((*files, *bytes)),
+                _ => None,
+            })
+            .collect()
     }
 }
 
@@ -1253,7 +1278,7 @@ fn every_directory_is_pacted_before_the_one_above_it() {
         repo.path(),
         &Manifest::new(),
         &agent,
-        &mut Unwatched,
+        &mut unwatched,
     )
     .expect("pacts");
 
@@ -1318,7 +1343,7 @@ fn a_directory_the_repository_excluded_is_no_part_of_a_pact_above_it() {
         repo.path(),
         &Manifest::new(),
         &Canned::filling(),
-        &mut Unwatched,
+        &mut unwatched,
     )
     .expect("pacts");
 
@@ -1354,7 +1379,7 @@ fn rules_that_cannot_be_parsed_fail_the_pact_rather_than_meaning_no_rules() {
         repo.path(),
         &Manifest::new(),
         &agent,
-        &mut Unwatched,
+        &mut unwatched,
     )
     .expect_err("a pact that cannot tell what is excluded must not run");
 
@@ -1383,7 +1408,7 @@ fn a_directory_with_no_document_gets_no_entry_and_costs_its_ancestors_their_gran
         repo.path(),
         &Manifest::new(),
         &agent,
-        &mut Unwatched,
+        &mut unwatched,
     )
     .expect("one directory failing is not the pact failing");
 
@@ -1452,7 +1477,7 @@ fn the_repository_root_is_a_module_like_any_other_and_stores_as_a_dot() {
         repo.path(),
         &Manifest::new(),
         &Canned::filling(),
-        &mut Unwatched,
+        &mut unwatched,
     )
     .expect("pacts");
 
@@ -1512,7 +1537,7 @@ fn a_directory_that_cannot_be_hashed_is_pacted_without_a_grant() {
         repo.path(),
         &Manifest::new(),
         &Canned::filling(),
-        &mut Unwatched,
+        &mut unwatched,
     )
     .expect("a file nobody can read never fails the pact");
 
@@ -1550,7 +1575,7 @@ fn a_directory_that_cannot_be_hashed_is_pacted_without_a_grant() {
     fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o644)).expect("chmods back");
 }
 
-// Progress and cancellation: the observer port.
+// Progress and cancellation: the event sink.
 
 #[test]
 fn every_directory_is_announced_once_before_it_is_pacted() {
@@ -1564,7 +1589,7 @@ fn every_directory_is_announced_once_before_it_is_pacted() {
         repo.path(),
         &Manifest::new(),
         &agent,
-        &mut observer,
+        &mut observer.sink(),
     )
     .expect("pacts");
 
@@ -1608,7 +1633,7 @@ fn a_directory_is_announced_documented_the_moment_its_pass_delivers() {
         repo.path(),
         &Manifest::new(),
         &Canned::filling(),
-        &mut observer,
+        &mut observer.sink(),
     )
     .expect("pacts");
 
@@ -1642,7 +1667,7 @@ fn a_directory_above_a_failure_is_never_announced_documented() {
         repo.path(),
         &Manifest::new(),
         &agent,
-        &mut observer,
+        &mut observer.sink(),
     )
     .expect("one refused pass does not fail the pact");
 
@@ -1668,7 +1693,7 @@ fn a_cancelled_pact_stops_between_directories_and_keeps_what_it_wrote() {
         repo.path(),
         &Manifest::new(),
         &Canned::filling(),
-        &mut observer,
+        &mut observer.sink(),
     )
     .expect("a pact somebody stopped is not a pact that failed");
 
@@ -1735,7 +1760,7 @@ fn a_cancel_leaves_a_documented_ancestor_of_a_failure_pacted_without_a_grant() {
         repo.path(),
         &Manifest::new(),
         &agent,
-        &mut observer,
+        &mut observer.sink(),
     )
     .expect("neither a failure nor a cancel fails the pact");
 
@@ -1795,7 +1820,7 @@ fn an_unwatched_pact_is_the_pact_that_never_stops() {
         repo.path(),
         &Manifest::new(),
         &Canned::filling(),
-        &mut Unwatched,
+        &mut unwatched,
     )
     .expect("pacts");
 
@@ -1810,39 +1835,18 @@ fn an_unwatched_pact_is_the_pact_that_never_stops() {
         ],
         "the caller that watches nothing gets every directory pacted",
     );
-    assert_eq!(Unwatched.starting(&engine, 1, 4), Pacting::Continue);
+    assert_eq!(
+        unwatched(Event::Starting {
+            directory: engine,
+            position: 1,
+            total: 4,
+        }),
+        Pacting::Continue
+    );
 }
 
 // Announcing the passes themselves: a file at a time, then the handover to
 // the one that fits them together.
-
-#[derive(Default)]
-struct Weighing {
-    described: Vec<(String, u64, usize, usize)>,
-    requested: Vec<(usize, u64)>,
-}
-
-impl Observer for Weighing {
-    fn starting(&mut self, _directory: &Path, _position: usize, _total: usize) -> Pacting {
-        Pacting::Continue
-    }
-
-    fn describing(
-        &mut self,
-        _directory: &Path,
-        name: &str,
-        bytes: u64,
-        position: usize,
-        total: usize,
-    ) {
-        self.described
-            .push((name.to_owned(), bytes, position, total));
-    }
-
-    fn requesting(&mut self, files: usize, bytes: u64) {
-        self.requested.push((files, bytes));
-    }
-}
 
 #[test]
 fn every_file_a_directory_pays_for_is_announced_once_and_counted_to_the_same_total() {
@@ -1850,14 +1854,14 @@ fn every_file_a_directory_pays_for_is_announced_once_and_counted_to_the_same_tot
     write(dir.path(), "reading.rs", "pub fn read() {}\n");
     write(dir.path(), "writing.rs", "pub fn write() {}\n");
     let agent = Lining::saying(r#"{"line": "A line about one file alone."}"#);
-    let mut watched = Weighing::default();
+    let mut watched = Watching::patient();
 
     taken(dir.path())
-        .assemble(None, &agent, &mut watched)
+        .assemble(None, &agent, &mut watched.sink())
         .expect("lines");
 
     assert_eq!(
-        watched.described,
+        watched.described(),
         [
             ("reading.rs".to_owned(), 17, 1, 2),
             ("writing.rs".to_owned(), 18, 2, 2),
@@ -1882,13 +1886,13 @@ fn a_file_taken_off_the_page_is_never_announced_and_never_counted() {
         .into_iter()
         .collect();
     let page = page_of(&[("reading.rs", LINE)]);
-    let mut watched = Weighing::default();
+    let mut watched = Watching::patient();
 
     taken(dir.path())
-        .assemble(Some((&page, &recorded)), &agent, &mut watched)
+        .assemble(Some((&page, &recorded)), &agent, &mut watched.sink())
         .expect("lines");
 
-    assert_eq!(watched.described, [("writing.rs".to_owned(), 18, 1, 1)]);
+    assert_eq!(watched.described(), [("writing.rs".to_owned(), 18, 1, 1)]);
 }
 
 #[test]
@@ -1897,15 +1901,15 @@ fn a_file_asked_about_twice_is_announced_once() {
     // on a retry would be counting the asking rather than the work.
     let dir = one_file_directory();
     let agent = Lining::saying("prose where an object was asked for");
-    let mut watched = Weighing::default();
+    let mut watched = Watching::patient();
 
     let assembled = taken(dir.path())
-        .assemble(None, &agent, &mut watched)
+        .assemble(None, &agent, &mut watched.sink())
         .expect("lines");
 
     assert_eq!(assembled.mended, ["reading.rs"], "every attempt was spent");
     assert!(agent.passes.get() > 1, "the retries this is about happened");
-    assert_eq!(watched.described.len(), 1);
+    assert_eq!(watched.described().len(), 1);
 }
 
 #[test]
@@ -1917,14 +1921,14 @@ fn the_handover_counts_the_lines_and_the_documents_below_and_not_the_files() {
     write(dir.path(), "src/lib.rs", "pub fn one() {}\n");
     write(dir.path(), "src/WARLOCK.md", "# src\n\nA document below.\n");
     let agent = Lining::saying("prose where an object was asked for");
-    let mut watched = Weighing::default();
+    let mut watched = Watching::patient();
 
     taken(dir.path())
-        .fill(&BTreeMap::new(), &agent, &mut watched)
+        .fill(&BTreeMap::new(), &agent, &mut watched.sink())
         .expect("a fill");
 
     assert_eq!(
-        watched.requested,
+        watched.requested(),
         [(0, 25)],
         "no lines of its own, and the bytes of the document below it",
     );
@@ -2253,7 +2257,7 @@ fn a_run_that_rewrites_the_entries_leaves_the_records_alone() {
         repo.path(),
         &before,
         &Canned::filling(),
-        &mut Unwatched,
+        &mut unwatched,
     )
     .expect("pacts");
 
@@ -2277,7 +2281,7 @@ fn un_pacting_a_real_subtree_leaves_every_document_on_disk_untouched() {
         repo.path(),
         &pacted(&["crates/tui"]),
         &Canned::filling(),
-        &mut Unwatched,
+        &mut unwatched,
     )
     .expect("pacts");
     assert_eq!(
@@ -2341,7 +2345,7 @@ fn refreshable(repo: &Path) -> Manifest {
         repo,
         &Manifest::new(),
         &Canned::filling(),
-        &mut Unwatched,
+        &mut unwatched,
     )
     .expect("pacts");
 
@@ -2400,7 +2404,7 @@ fn a_refresh_describes_every_stale_directory_and_none_it_calls_fresh() {
 
     let PactedSubtree {
         manifest, failures, ..
-    } = refresh_subtree(&engine, repo.path(), &manifest, &agent, &mut Unwatched)
+    } = refresh_subtree(&engine, repo.path(), &manifest, &agent, &mut unwatched)
         .expect("refreshes");
 
     assert!(failures.is_empty(), "{failures:?}");
@@ -2444,7 +2448,7 @@ fn a_refresh_leaves_the_entry_of_every_directory_it_skipped_as_it_found_it() {
 
     let PactedSubtree {
         manifest, failures, ..
-    } = refresh_subtree(&engine, repo.path(), &before, &agent, &mut Unwatched).expect("refreshes");
+    } = refresh_subtree(&engine, repo.path(), &before, &agent, &mut unwatched).expect("refreshes");
 
     assert!(failures.is_empty(), "{failures:?}");
     let described = [
@@ -2500,7 +2504,7 @@ fn a_change_in_every_directory_costs_one_pass_for_each_of_them_and_no_others() {
     let agent = Canned::filling();
 
     let PactedSubtree { failures, .. } =
-        refresh_subtree(&engine, repo.path(), &manifest, &agent, &mut Unwatched)
+        refresh_subtree(&engine, repo.path(), &manifest, &agent, &mut unwatched)
             .expect("refreshes");
 
     assert!(failures.is_empty(), "{failures:?}");
@@ -2547,7 +2551,7 @@ fn a_hand_edited_document_is_never_carried_forward_by_the_cutoff() {
 
     let agent = Canned::filling();
     let PactedSubtree { failures, .. } =
-        refresh_subtree(&engine, repo.path(), &manifest, &agent, &mut Unwatched)
+        refresh_subtree(&engine, repo.path(), &manifest, &agent, &mut unwatched)
             .expect("refreshes");
 
     assert!(failures.is_empty(), "{failures:?}");
@@ -2581,7 +2585,7 @@ fn a_change_below_an_unmoved_request_costs_no_pass_at_the_directory_above_it() {
     let agent = Canned::filling();
 
     let PactedSubtree { failures, .. } =
-        refresh_subtree(&engine, repo.path(), &manifest, &agent, &mut Unwatched)
+        refresh_subtree(&engine, repo.path(), &manifest, &agent, &mut unwatched)
             .expect("refreshes");
 
     assert!(failures.is_empty(), "{failures:?}");
@@ -2622,7 +2626,8 @@ fn a_refresh_with_nothing_stale_runs_no_pass_and_changes_no_entry() {
         failures,
         problems,
         ..
-    } = refresh_subtree(&engine, repo.path(), &before, &agent, &mut observer).expect("refreshes");
+    } = refresh_subtree(&engine, repo.path(), &before, &agent, &mut observer.sink())
+        .expect("refreshes");
 
     assert!(
         agent.seen.borrow().is_empty(),
@@ -2659,7 +2664,7 @@ fn the_total_announced_counts_the_directories_a_refresh_will_describe() {
         repo.path(),
         &manifest,
         &Canned::filling(),
-        &mut observer,
+        &mut observer.sink(),
     )
     .expect("refreshes");
 
@@ -2681,36 +2686,6 @@ fn the_total_announced_counts_the_directories_a_refresh_will_describe() {
     );
 }
 
-#[cfg(unix)]
-#[derive(Default)]
-struct Probing {
-    said: Vec<String>,
-}
-
-impl Observer for Probing {
-    fn starting(&mut self, directory: &Path, _position: usize, _total: usize) -> Pacting {
-        self.said.push(format!("starting {}", directory.display()));
-        Pacting::Continue
-    }
-
-    fn unchanged(&mut self, directory: &Path) {
-        self.said.push(format!("unchanged {}", directory.display()));
-    }
-
-    fn skipped(&mut self, directory: &Path, below: &Path) {
-        self.said.push(format!(
-            "skipped {} below {}",
-            directory.display(),
-            below.display()
-        ));
-    }
-
-    fn documented(&mut self, directory: &Path) {
-        self.said
-            .push(format!("documented {}", directory.display()));
-    }
-}
-
 #[test]
 fn a_directory_whose_hash_fails_while_staleness_is_decided_is_described_anyway() {
     use std::os::unix::fs::PermissionsExt as _;
@@ -2728,10 +2703,10 @@ fn a_directory_whose_hash_fails_while_staleness_is_decided_is_described_anyway()
     }
 
     let agent = Canned::filling();
-    let mut probe = Probing::default();
+    let mut probe = Watching::patient();
     let PactedSubtree {
         manifest, failures, ..
-    } = refresh_subtree(&engine, repo.path(), &manifest, &agent, &mut probe)
+    } = refresh_subtree(&engine, repo.path(), &manifest, &agent, &mut probe.sink())
         .expect("a hash nobody can take is a directory to describe, not an error");
 
     assert_eq!(
@@ -2741,14 +2716,14 @@ fn a_directory_whose_hash_fails_while_staleness_is_decided_is_described_anyway()
              for`, so the directory holding the unreadable file is described",
     );
     assert!(
-        probe
-            .said
-            .contains(&format!("unchanged {}", engine.display())),
+        probe.events.contains(&Event::Unchanged {
+            directory: engine.clone(),
+        }),
         "and the one above it is offered and then cut off: its own files and \
              its children's documents are where they were, so re-describing it \
              would buy the same document twice. Being unhashable is what keeps \
              it from a grant, not what earns it a pass: {:?}",
-        probe.said,
+        probe.events,
     );
     // And then it plays out exactly as the module docs say it does: phase
     // two hashes them again, that hash fails again, and each lands as a
@@ -2794,7 +2769,7 @@ fn a_refresh_whose_passes_all_fail_removes_no_entry_and_drops_no_grant() {
         repo.path(),
         &before,
         &Fails(|| agent::Error::EmptyOutput),
-        &mut Unwatched,
+        &mut unwatched,
     )
     .expect("a refused pass does not fail the refresh");
 
@@ -2840,7 +2815,7 @@ fn a_cancelled_refresh_keeps_what_it_described_and_leaves_the_rest_alone() {
 
     let PactedSubtree {
         manifest, failures, ..
-    } = refresh_subtree(&engine, repo.path(), &before, &agent, &mut observer)
+    } = refresh_subtree(&engine, repo.path(), &before, &agent, &mut observer.sink())
         .expect("a refresh somebody stopped is not a refresh that failed");
 
     assert_eq!(
@@ -2908,7 +2883,7 @@ fn a_refresh_above_a_failed_pass_skips_the_ancestor_rather_than_paying_for_it() 
 
     let PactedSubtree {
         manifest, failures, ..
-    } = refresh_subtree(&engine, repo.path(), &before, &agent, &mut observer)
+    } = refresh_subtree(&engine, repo.path(), &before, &agent, &mut observer.sink())
         .expect("one refused pass does not fail the refresh");
 
     assert_eq!(failures.len(), 1, "{failures:?}");
@@ -3106,7 +3081,7 @@ fn a_pact_and_a_refresh_over_a_granted_manifest_write_these_exact_bytes() {
         repo.path(),
         &before,
         &Canned::filling(),
-        &mut Unwatched,
+        &mut unwatched,
     )
     .expect("pacts");
     assert!(failures.is_empty(), "{failures:?}");
@@ -3152,7 +3127,7 @@ fn a_pact_and_a_refresh_over_a_granted_manifest_write_these_exact_bytes() {
         repo.path(),
         &manifest,
         &Canned::filling(),
-        &mut Unwatched,
+        &mut unwatched,
     )
     .expect("refreshes");
     assert!(failures.is_empty(), "{failures:?}");
@@ -3210,7 +3185,7 @@ fn a_refresh_leaves_every_scope_exactly_as_it_found_it() {
 
     let PactedSubtree {
         manifest, failures, ..
-    } = refresh_subtree(&engine, repo.path(), &before, &agent, &mut Unwatched).expect("refreshes");
+    } = refresh_subtree(&engine, repo.path(), &before, &agent, &mut unwatched).expect("refreshes");
 
     assert!(failures.is_empty(), "{failures:?}");
     assert_eq!(
@@ -3257,7 +3232,7 @@ fn a_cancelled_run_keeps_every_scope() {
 
     let PactedSubtree {
         manifest, failures, ..
-    } = refresh_subtree(&engine, repo.path(), &before, &agent, &mut observer)
+    } = refresh_subtree(&engine, repo.path(), &before, &agent, &mut observer.sink())
         .expect("a refresh somebody stopped is not a refresh that failed");
 
     assert!(failures.is_empty(), "{failures:?}");
@@ -3307,7 +3282,7 @@ fn a_partly_completed_refresh_keeps_every_scope() {
         repo.path(),
         &before,
         &FailsFor::at(engine.join("src").join("inner")),
-        &mut Unwatched,
+        &mut unwatched,
     )
     .expect("one refused pass does not fail the refresh");
 
@@ -3337,7 +3312,7 @@ fn a_partly_completed_pact_keeps_the_scope_of_every_entry_it_keeps() {
         repo.path(),
         &before,
         &FailsFor::at(engine.join("src").join("inner")),
-        &mut Unwatched,
+        &mut unwatched,
     )
     .expect("one refused pass does not fail the pact");
 

@@ -4,7 +4,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::document::{self, Defect, Described};
-use crate::pact::{Error, Observer, Refusal};
+use crate::pact::{Error, Event, Pacting, Refusal};
 use crate::{Agent, agent, hash, languages, walk};
 
 pub const PER_FILE_BYTE_CAP: u64 = 1024 * 1024;
@@ -143,7 +143,7 @@ impl Snapshot {
         &self,
         carried: Option<(&str, &BTreeMap<String, String>)>,
         agent: &dyn Agent,
-        observer: &mut dyn Observer,
+        sink: &mut dyn FnMut(Event) -> Pacting,
     ) -> Result<Assembled, Error> {
         let directory = self.directory();
         let nothing_recorded = BTreeMap::new();
@@ -153,7 +153,7 @@ impl Snapshot {
         };
 
         // Every file is settled against the page before the first pass runs, so
-        // that `Observer::describing` can be handed a denominator: what a front end
+        // that `Event::Describing` can carry a denominator: what a front end
         // needs is the count of files this directory will *pay* for.
         //
         // A line is kept only where the recorded digest matches the file as it
@@ -187,8 +187,14 @@ impl Snapshot {
                 assembled.kept.push(name.clone());
             } else {
                 position += 1;
-                observer.describing(directory, name, measured.size, position, paying);
-                let described = self.line(name, agent, observer)?;
+                sink(Event::Describing {
+                    directory: directory.to_path_buf(),
+                    name: name.clone(),
+                    bytes: measured.size,
+                    position,
+                    total: paying,
+                });
+                let described = self.line(name, agent, sink)?;
                 if described.mended {
                     assembled.mended.push(name.clone());
                 }
@@ -217,7 +223,7 @@ impl Snapshot {
         &self,
         name: &str,
         agent: &dyn Agent,
-        observer: &mut dyn Observer,
+        sink: &mut dyn FnMut(Event) -> Pacting,
     ) -> Result<DescribedFile, Error> {
         let directory = self.directory();
         let (request, described, problem) = one_file(document::FILE_PROMPT, directory, name)
@@ -227,7 +233,7 @@ impl Snapshot {
         let answered = ask(
             directory,
             agent,
-            observer,
+            sink,
             |rejected| {
                 request
                     .clone()
@@ -257,19 +263,22 @@ impl Snapshot {
         &self,
         lines: &BTreeMap<String, String>,
         agent: &dyn Agent,
-        observer: &mut dyn Observer,
+        sink: &mut dyn FnMut(Event) -> Pacting,
     ) -> Result<Synthesised, Error> {
         // Announced before the first attempt waits on a model, so a front end's
         // clock counts what is being waited on rather than going quiet after the
         // last file.
-        observer.requesting(lines.len(), self.carried_bytes(lines));
+        sink(Event::Requesting {
+            files: lines.len(),
+            bytes: self.carried_bytes(lines),
+        });
 
         let expected = self.expected();
         let mut best = None;
         let answered = ask(
             self.directory(),
             agent,
-            observer,
+            sink,
             |rejected| {
                 self.request
                     .clone()
@@ -324,7 +333,7 @@ impl Snapshot {
 fn ask<T>(
     directory: &Path,
     agent: &dyn Agent,
-    observer: &mut dyn Observer,
+    sink: &mut dyn FnMut(Event) -> Pacting,
     request: impl Fn(&[Defect]) -> agent::Request,
     mut accept: impl FnMut(&str) -> Result<T, Vec<Defect>>,
 ) -> Result<Option<T>, Error> {
@@ -339,7 +348,12 @@ fn ask<T>(
         match accept(answer.text()) {
             Ok(taken) => return Ok(Some(taken)),
             Err(defects) => {
-                observer.rejected(directory, &defects, attempt, document::ATTEMPTS);
+                sink(Event::Rejected {
+                    directory: directory.to_path_buf(),
+                    defects: defects.clone(),
+                    attempt,
+                    attempts: document::ATTEMPTS,
+                });
                 rejected = defects;
             }
         }
