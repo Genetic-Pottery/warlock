@@ -3,7 +3,7 @@
 
 # warlock-tui
 
-The warlock-tui crate's Cargo manifest: builds the `warlock` binary from src/main.rs and the `warlock_tui` library from src/lib.rs, depending on warlock-engine, ratatui, clap, notify, arboard, ureq, ctrlc and serde_json.
+The warlock-tui crate: builds the `warlock` binary and the warlock_tui library, providing the TUI application, CLI commands, and the engine driving pact/refresh/scope/pull/push/cut/draft flows against a repo's manifest and a Linear board.
 
 ## Files
 
@@ -11,9 +11,9 @@ The warlock-tui crate's Cargo manifest: builds the `warlock` binary from src/mai
 
 ## Directories
 
-- `src/` — The crate's source: TUI and CLI for pacting/refreshing scopes, chatting/drafting briefs, filing/pulling Linear tickets, and rendering the freshness ledger; go there for how any command or view works.
+- `src/` — The crate's source: TUI application, CLI commands, and the engine behind pact/refresh/scope/pull/push/cut/draft; consult it for any question about how a specific command or view is implemented.
 
 ## Structure
 
-- Cargo.toml defines the warlock binary built from src/main.rs and the warlock_tui library built from src/lib.rs.
-- Cargo.toml declares the crate's dependencies: warlock-engine, ratatui, clap, notify, arboard, ureq, ctrlc, serde_json.
+- Cargo manifest for the warlock-tui crate: builds the `warlock` binary (src/main.rs) and the `warlock_tui` library (src/lib.rs).
+- Depends on warlock-engine, ratatui, clap, notify, arboard, ureq, ctrlc, serde_json.
