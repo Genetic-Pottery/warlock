@@ -3,7 +3,7 @@
 
 # warlock
 
-The root of the project's Cargo workspace, holding the two-crate build (warlock-engine, warlock-tui), its pinned dependency lockfile, and shared formatting/license configuration.
+Workspace root for the warlock Rust project, holding the Cargo workspace manifest and lockfile, license, and formatting config for the crates beneath it.
 
 ## Files
 
@@ -14,11 +14,11 @@ The root of the project's Cargo workspace, holding the two-crate build (warlock-
 
 ## Directories
 
-- `crates/` — Holds warlock-engine and warlock-tui, the two crates the workspace builds; go here for how engine behavior or any warlock command/screen works.
+- `crates/` — Rust source: warlock-engine (repo-modeling core) and warlock-tui (binary/TUI/CLI); go there for implementation questions.
 
 ## Structure
 
-- Cargo.toml lists workspace members crates/warlock-engine and crates/warlock-tui, and shared package metadata, lints and dependency versions
-- Cargo.lock pins exact versions and checksums for warlock-engine and warlock-tui and their dependencies
-- rustfmt.toml sets workspace formatting config applied across the workspace
-- LICENSE is the Apache License 2.0 text covering the project
+- Cargo.toml declares workspace members crates/warlock-engine and crates/warlock-tui with shared package metadata, lints, and pinned dependency versions
+- Cargo.lock pins exact versions and checksums for warlock-engine, warlock-tui, and their dependencies as generated from Cargo.toml
+- rustfmt.toml sets workspace-wide formatting rules applied across the crates
+- LICENSE provides the Apache License 2.0 text covering the workspace
