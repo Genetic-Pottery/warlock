@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 
-use crate::document::Defect;
+use crate::fill::Defect;
 
 use super::{
     Accepted, Caught, DEPENDS_ON_PER_SUBTASK, DONE_CHARS, DONE_PER_SUBTASK, FILE_CHARS,

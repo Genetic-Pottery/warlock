@@ -4,6 +4,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::document::{self, Defect, Described};
+use crate::fill::{self, Accepted, Settled};
 use crate::pact::{Error, Event, Pacting, Refusal};
 use crate::{Agent, agent, hash, languages, walk};
 
@@ -243,12 +244,12 @@ impl Snapshot {
         )?;
 
         Ok(match answered {
-            Some(line) => DescribedFile {
+            Settled::Taken(line) => DescribedFile {
                 line,
                 mended: false,
                 problem,
             },
-            None => DescribedFile {
+            Settled::Spent(_) | Settled::Unusable(_) => DescribedFile {
                 line: document::file_fallback(name, &expected, &described),
                 mended: true,
                 problem,
@@ -274,7 +275,6 @@ impl Snapshot {
         });
 
         let expected = self.expected();
-        let mut best = None;
         let answered = ask(
             self.directory(),
             agent,
@@ -286,26 +286,21 @@ impl Snapshot {
                         &self.name, lines, &expected, rejected,
                     ))
             },
-            |answer| match document::accept_synthesis(answer, lines, &expected, &self.described) {
-                document::Accepted::Filled(fill) => Ok(fill),
-                document::Accepted::Defective { fill, defects } => {
-                    best = Some(fill);
-                    Err(defects)
-                }
-                document::Accepted::Unparsed(defect) => Err(vec![defect]),
-            },
+            |answer| document::accept_synthesis(answer, lines, &expected, &self.described),
         )?;
-        if let Some(fill) = answered {
-            return Ok(Synthesised {
-                fill,
-                mends: Vec::new(),
-            });
-        }
-
-        let unusable = best.unwrap_or_else(|| document::Fill {
-            files: lines.clone(),
-            ..document::Fill::default()
-        });
+        let unusable = match answered {
+            Settled::Taken(fill) => {
+                return Ok(Synthesised {
+                    fill,
+                    mends: Vec::new(),
+                });
+            }
+            Settled::Spent(fill) => fill,
+            Settled::Unusable(_) => document::Fill {
+                files: lines.clone(),
+                ..document::Fill::default()
+            },
+        };
         let (fill, mends) = document::mend(&unusable, &expected, &self.described);
         Ok(Synthesised { fill, mends })
     }
@@ -327,38 +322,33 @@ impl Snapshot {
     }
 }
 
-// A transport failure ends it at once: a pass that produced no answer is not a
-// pass that produced a wrong one, and retrying a missing `claude` finds it
-// still missing.
-fn ask<T>(
+fn ask<F>(
     directory: &Path,
     agent: &dyn Agent,
     sink: &mut dyn FnMut(Event) -> Pacting,
     request: impl Fn(&[Defect]) -> agent::Request,
-    mut accept: impl FnMut(&str) -> Result<T, Vec<Defect>>,
-) -> Result<Option<T>, Error> {
-    let mut rejected = Vec::new();
-    for attempt in 1..=document::ATTEMPTS {
-        let answer = agent
-            .run(&request(&rejected))
-            .map_err(|source| Error::Refused {
-                directory: directory.to_path_buf(),
-                cause: Refusal::Agent { source },
-            })?;
-        match accept(answer.text()) {
-            Ok(taken) => return Ok(Some(taken)),
-            Err(defects) => {
-                sink(Event::Rejected {
+    accept: impl Fn(&str) -> Accepted<F>,
+) -> Result<Settled<F>, Error> {
+    fill::settle(
+        document::ASKING,
+        |rejected| {
+            let answer = agent
+                .run(&request(rejected))
+                .map_err(|source| Error::Refused {
                     directory: directory.to_path_buf(),
-                    defects: defects.clone(),
-                    attempt,
-                    attempts: document::ATTEMPTS,
-                });
-                rejected = defects;
-            }
-        }
-    }
-    Ok(None)
+                    cause: Refusal::Agent { source },
+                })?;
+            Ok(accept(answer.text()))
+        },
+        |defects, attempt| {
+            sink(Event::Rejected {
+                directory: directory.to_path_buf(),
+                defects: defects.to_vec(),
+                attempt,
+                attempts: document::ASKING.attempts,
+            });
+        },
+    )
 }
 
 #[derive(Debug, Default)]

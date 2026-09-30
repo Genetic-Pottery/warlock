@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 
-use crate::document::Defect;
+use crate::fill::Defect;
 
 use super::{
     Accepted, BODY_CHARS, DRAFTING_PROMPT, DRAFTS_PER_SLICE, Draft, Fill, MEND_PASSES, Mend,

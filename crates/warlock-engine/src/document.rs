@@ -3,11 +3,13 @@ use std::fmt;
 use std::fmt::Write as _;
 use std::path::Path;
 
-use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 use crate::agent::{File, Request};
+use crate::fill::{self, Asking, Reask, Rewrite, fit, line, turned_down};
 use crate::languages;
+
+pub use crate::fill::Defect;
 
 pub const ENTRY_CHARS: usize = 280;
 
@@ -32,6 +34,11 @@ pub const DECLARED_SHOWN: usize = 16;
 // oscillation ends in the mend, which keeps nothing the model wrote for the
 // slot.
 pub const ATTEMPTS: usize = 4;
+
+pub const ASKING: Asking = Asking {
+    attempts: ATTEMPTS,
+    reask: Reask::Any,
+};
 
 // No date in here, though every instinct says to put one: `granted_at` in
 // `.warlock/pacts.toml` already records when the document was granted, and a
@@ -406,88 +413,7 @@ fn shown(file: &File) -> Shown<'_> {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum Defect {
-    NotJson {
-        detail: String,
-    },
-    Missing {
-        field: String,
-    },
-    Empty {
-        field: String,
-    },
-    Multiline {
-        field: String,
-    },
-    TooShort {
-        field: String,
-        chars: usize,
-        minimum: usize,
-    },
-    TooLong {
-        field: String,
-        chars: usize,
-        cap: usize,
-    },
-    TooMany {
-        field: String,
-        count: usize,
-        cap: usize,
-    },
-    UnknownTarget {
-        field: String,
-        name: String,
-    },
-    ToolNamed {
-        field: String,
-    },
-}
-
-impl fmt::Display for Defect {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::NotJson { detail } => write!(f, "the answer is not a JSON object: {detail}"),
-            Self::Missing { field } => write!(f, "{field} is missing"),
-            Self::Empty { field } => write!(f, "{field} is empty"),
-            Self::Multiline { field } => write!(f, "{field} runs to more than one line"),
-            Self::TooShort {
-                field,
-                chars,
-                minimum,
-            } => write!(
-                f,
-                "{field} is {chars} characters, under the {minimum} it has to reach"
-            ),
-            Self::TooLong { field, chars, cap } => {
-                write!(f, "{field} is {chars} characters, over the cap of {cap}")
-            }
-            Self::TooMany { field, count, cap } => {
-                write!(f, "{field} has {count} entries, over the cap of {cap}")
-            }
-            Self::ToolNamed { field } => write!(
-                f,
-                "{field} names warlock, which is the tool writing this document and not \
-                 something the files mention"
-            ),
-            Self::UnknownTarget { field, name } => write!(
-                f,
-                "{field} names `{name}`, which is not a file, a subdirectory, or a name \
-                 declared in one of them"
-            ),
-        }
-    }
-}
-
-impl std::error::Error for Defect {}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Accepted<F = Fill> {
-    Filled(F),
-    Defective { fill: F, defects: Vec<Defect> },
-    Unparsed(Defect),
-}
+pub type Accepted<F = Fill> = fill::Accepted<F>;
 
 // The synthesis pass: the slots that are about a directory rather than about
 // one file in it, written from the lines and not from the source.
@@ -529,19 +455,6 @@ WARLOCK.md, which follows below, and do not restate that document's contents.
 Every value is one line. Write about the directory in its own voice: no first \
 person, and nothing about this request or about what you were or were not \
 shown.";
-
-pub(crate) fn turned_down(text: &mut String, rejected: &[Defect]) {
-    if rejected.is_empty() {
-        return;
-    }
-    text.push_str(
-        "\n\nA previous answer to exactly this request was turned down. Do not repeat \
-         these defects:",
-    );
-    for defect in rejected {
-        let _ = write!(text, "\n- {defect}");
-    }
-}
 
 #[must_use]
 pub fn synthesis_instructions(
@@ -604,7 +517,7 @@ pub fn accept_synthesis(
     expected: &Expected<'_>,
     described: &Described,
 ) -> Accepted {
-    let mut parsed = match parse::<Fill>(answer) {
+    let mut parsed = match fill::parse::<Fill>(answer) {
         Ok(parsed) => parsed,
         Err(defect) => return Accepted::Unparsed(defect),
     };
@@ -633,15 +546,13 @@ pub fn accept_synthesis(
         .filter(|(child, _)| expected.directories.contains_key(child.as_str()))
         .collect();
     let defects = check(&parsed, expected, described);
-    let fill = Fill {
-        files: lines.clone(),
-        ..parsed
-    };
-    if defects.is_empty() {
-        Accepted::Filled(fill)
-    } else {
-        Accepted::Defective { fill, defects }
-    }
+    Accepted::judged(
+        Fill {
+            files: lines.clone(),
+            ..parsed
+        },
+        defects,
+    )
 }
 
 /// Read the file lines back out of a document warlock wrote.
@@ -750,18 +661,18 @@ pub fn accept_file(
     path: &str,
     expected: &Expected<'_>,
     described: &Described,
-) -> Result<String, Vec<Defect>> {
+) -> Accepted<String> {
     let field = format!("files[{path:?}]");
     let parsed: serde_json::Value = match serde_json::from_str(answer) {
         Ok(parsed) => parsed,
         Err(error) => {
-            return Err(vec![Defect::NotJson {
+            return Accepted::Unparsed(Defect::NotJson {
                 detail: error.to_string(),
-            }]);
+            });
         }
     };
     let Some(line) = parsed.get("line").and_then(serde_json::Value::as_str) else {
-        return Err(vec![Defect::Missing { field }]);
+        return Accepted::Unparsed(Defect::Missing { field });
     };
 
     let mut defects = Vec::new();
@@ -794,11 +705,7 @@ pub fn accept_file(
     // nothing behind it at all.
     unwitnessed(&field, line, evidence, &mut defects);
 
-    if defects.is_empty() {
-        Ok(line.trim().to_owned())
-    } else {
-        Err(defects)
-    }
+    Accepted::judged(line.trim().to_owned(), defects)
 }
 
 /// The line warlock writes itself when a per-file pass never produced one.
@@ -809,20 +716,6 @@ pub fn accept_file(
 #[must_use]
 pub fn file_fallback(path: &str, expected: &Expected<'_>, described: &Described) -> String {
     fallback::file(path, expected, described)
-}
-
-pub(crate) fn parse<T: DeserializeOwned>(answer: &str) -> Result<T, Defect> {
-    let object = match (answer.find('{'), answer.rfind('}')) {
-        (Some(start), Some(end)) if start <= end => &answer[start..=end],
-        _ => {
-            return Err(Defect::NotJson {
-                detail: "no object found in the answer".to_owned(),
-            });
-        }
-    };
-    serde_json::from_str(object).map_err(|error| Defect::NotJson {
-        detail: error.to_string(),
-    })
 }
 
 // The `files` loop below is reached from `mend` and never from
@@ -957,67 +850,6 @@ fn values(fill: &Fill) -> impl Iterator<Item = (String, &str)> {
                 .enumerate()
                 .map(|(index, entry)| (format!("structure[{index}]"), entry.line.as_str())),
         )
-}
-
-pub(crate) fn line(
-    field: &str,
-    value: &str,
-    minimum: usize,
-    cap: usize,
-    defects: &mut Vec<Defect>,
-) {
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        defects.push(Defect::Empty {
-            field: field.to_owned(),
-        });
-        return;
-    }
-    if trimmed.contains(['\n', '\r']) {
-        defects.push(Defect::Multiline {
-            field: field.to_owned(),
-        });
-    }
-    let chars = trimmed.chars().count();
-    if chars < minimum {
-        defects.push(Defect::TooShort {
-            field: field.to_owned(),
-            chars,
-            minimum,
-        });
-    }
-    if chars > cap {
-        defects.push(Defect::TooLong {
-            field: field.to_owned(),
-            chars,
-            cap,
-        });
-    }
-}
-
-// The shape a one-line value has to hold: one line, at least `minimum`
-// characters and at most `cap`, counted as characters and cut on a character
-// boundary so a multibyte name or title cannot split. A value out of
-// here is never defective, which is what lets the mend's fixpoint settle.
-pub(crate) fn fit(line: &str, pad: &str, minimum: usize, cap: usize) -> String {
-    let mut line = flattened(line);
-    // A non-empty pad adds at least one character a turn, so this ends.
-    while line.chars().count() < minimum && !pad.is_empty() {
-        if !line.is_empty() {
-            line.push(' ');
-        }
-        line.push_str(pad);
-    }
-    cut(&line, cap)
-}
-
-pub(crate) fn cut(text: &str, cap: usize) -> String {
-    let cut: String = text.chars().take(cap).collect();
-    cut.trim_end().to_owned()
-}
-
-pub(crate) fn flattened(text: &str) -> String {
-    text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 fn keyed(name: &str, given: &BTreeMap<String, String>, wanted: &[&str], defects: &mut Vec<Defect>) {
@@ -1310,14 +1142,7 @@ mod fallback {
 // spin between two rules instead of writing a document.
 pub const MEND_PASSES: usize = 4;
 
-// `field` is the slot in `Defect`'s own spelling — `files["writing.rs"]`,
-// `purpose`, `structure` — so a caller can line a mend up against the defect it
-// answers without parsing prose.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Mend {
-    pub field: String,
-    pub done: Mended,
-}
+pub type Mend = fill::Mend<Mended>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mended {
@@ -1333,6 +1158,15 @@ pub enum Mended {
     // The slot fell to the factual line: the name, the size and the symbols
     // warlock measured. See [`fallback`].
     Supplied,
+}
+
+impl From<Rewrite> for Mended {
+    fn from(rewrite: Rewrite) -> Self {
+        match rewrite {
+            Rewrite::FirstLine => Self::FirstLine,
+            Rewrite::Cut { from, to } => Self::Cut { from, to },
+        }
+    }
 }
 
 impl fmt::Display for Mend {
@@ -1367,8 +1201,7 @@ impl fmt::Display for Mend {
 // [`Defect`] but `NotJson` has a repair here, and none of them reaches a model
 // — the evidence is the answer's own text, the file names and sizes warlock
 // measured and the symbols `languages.rs` extracted. A fill that comes back
-// from here is not defective: `check` over it is empty, which is the property
-// the loop below exists to hold.
+// from here is not defective: `check` over it is empty.
 #[must_use]
 pub fn mend(fill: &Fill, expected: &Expected<'_>, described: &Described) -> (Fill, Vec<Mend>) {
     let (fill, mends, _) = mended(fill, expected, described);
@@ -1382,82 +1215,61 @@ fn mended(fill: &Fill, expected: &Expected<'_>, described: &Described) -> (Fill,
     let mut fill = fill.clone();
     fill.directories
         .retain(|key, _| expected.directories.contains_key(key.as_str()));
-
-    let mut mends = Vec::new();
-    let mut passes = 0;
-    for _ in 0..MEND_PASSES {
-        let defects = check(&fill, expected, described);
-        if defects.is_empty() {
-            break;
-        }
-        passes += 1;
-        sweep(&mut fill, &defects, expected, described, &mut mends);
-    }
-
-    (fill, mends, passes)
+    fill::mend(
+        &Mending {
+            expected,
+            described,
+        },
+        fill,
+    )
 }
 
-// One pass of the fixpoint. The order inside it is what keeps a list's indices
-// meaning what the defects say they mean: what to drop and what to fill is
-// decided first, then the values that survive are rewritten in place, and only
-// then does anything move — so a defect naming `structure[3]` is never applied
-// to whatever slid into position 3.
-fn sweep(
-    fill: &mut Fill,
-    defects: &[Defect],
-    expected: &Expected<'_>,
-    described: &Described,
-    mends: &mut Vec<Mend>,
-) {
-    let mut plan = Plan::default();
-    // Drops before fills before rewrites. An entry that names something which
-    // is not here goes whatever else is wrong with it, so deciding that first
-    // keeps the pass from recording a fill or a cut it then undoes.
-    for defect in defects {
-        plan.note_drop(defect, mends);
+struct Mending<'a, 'r> {
+    expected: &'a Expected<'r>,
+    described: &'a Described,
+}
+
+impl fill::Schema for Mending<'_, '_> {
+    type Fill = Fill;
+    type Mended = Mended;
+    type Plan = Plan;
+
+    const MEND_PASSES: usize = MEND_PASSES;
+
+    fn check(&self, fill: &Fill) -> Vec<Defect> {
+        check(fill, self.expected, self.described)
     }
-    for defect in defects {
-        plan.note_fill(defect, mends);
+
+    // Drops before fills. An entry that names something which is not here goes
+    // whatever else is wrong with it, so deciding that first keeps the pass
+    // from recording a fill or a cut it then undoes.
+    fn plan(&self, defects: &[Defect], mends: &mut Vec<Mend>) -> Plan {
+        let mut plan = Plan::default();
+        for defect in defects {
+            plan.note_drop(defect, mends);
+        }
+        for defect in defects {
+            plan.note_fill(defect, mends);
+        }
+        plan
     }
-    for defect in defects {
-        let (field, done) = match defect {
-            Defect::Multiline { field } => (field, Mended::FirstLine),
-            Defect::TooLong { field, chars, cap } => (
-                field,
-                Mended::Cut {
-                    from: *chars,
-                    to: *cap,
-                },
-            ),
-            _ => continue,
-        };
-        // A slot already on its way out, or already being filled in whole, is
-        // not worth rewriting first: the record would name work the same pass
-        // undoes.
+
+    fn rewritable<'f>(plan: &Plan, fill: &'f mut Fill, field: &str) -> Option<&'f mut String> {
         if plan.covers(field) {
-            continue;
+            return None;
         }
-        let Some(value) = target(fill, field) else {
-            continue;
-        };
-        match done {
-            // The first line of the value as the check reads it: `line`
-            // measures the trimmed value, so a value that opens with a blank
-            // line keeps the first line of what was actually written.
-            Mended::FirstLine => {
-                *value = value.trim().lines().next().unwrap_or_default().to_owned();
-            }
-            // Characters, not bytes, and so on a character boundary. No trim:
-            // the cut lands where it lands, and `render` trims on the way out.
-            Mended::Cut { to, .. } => *value = value.chars().take(to).collect(),
-            _ => {}
+        match slot(field) {
+            Slot::Purpose => Some(&mut fill.purpose),
+            Slot::Directory(key) => fill.directories.get_mut(&key),
+            Slot::Entry(index) => fill.structure.get_mut(index).map(|e| &mut e.line),
+            Slot::FileLine(path) => fill.files.get_mut(&path),
+            Slot::List(_) | Slot::Unknown => None,
         }
-        mends.push(Mend {
-            field: field.clone(),
-            done,
-        });
     }
-    plan.carry_out(fill, expected, described);
+
+    fn carry_out(&self, plan: Plan, fill: &mut Fill) {
+        plan.carry_out(fill, self.expected, self.described);
+    }
 }
 
 #[derive(Debug, Default)]
@@ -1646,17 +1458,6 @@ fn slot(field: &str) -> Slot {
         "files" => serde_json::from_str(inside).map_or(Slot::Unknown, Slot::FileLine),
         "structure" => inside.parse().map_or(Slot::Unknown, Slot::Entry),
         _ => Slot::Unknown,
-    }
-}
-
-// The value a rewrite writes over.
-fn target<'f>(fill: &'f mut Fill, field: &str) -> Option<&'f mut String> {
-    match slot(field) {
-        Slot::Purpose => Some(&mut fill.purpose),
-        Slot::Directory(key) => fill.directories.get_mut(&key),
-        Slot::Entry(index) => fill.structure.get_mut(index).map(|e| &mut e.line),
-        Slot::FileLine(path) => fill.files.get_mut(&path),
-        Slot::List(_) | Slot::Unknown => None,
     }
 }
 

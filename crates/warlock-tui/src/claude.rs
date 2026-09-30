@@ -51,10 +51,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-// `Defect` lives in `document` and is the drafting contract's defect too: one
-// vocabulary for a slot that was filled wrong, whether the slot is a line of a
-// document or the title of a draft.
-use warlock_engine::document::{Accepted, Defect};
+use warlock_engine::fill::{self, Defect, Settled};
 use warlock_engine::{Agent, agent, drafting, splitting, working};
 
 /// The clock one invocation runs under. A child that outlives it is killed *and*
@@ -2612,28 +2609,33 @@ impl<C: Converses> Drafting<C> {
     }
 
     /// The attempt loop, entered with the reply that ended the asking already in
-    /// hand and counting as the first attempt.
-    ///
-    /// Two answers are asked again: one that did not parse, and a fill the mend
-    /// would have to cut ([`lost_to_the_cut`]). Every other defect is mended at
-    /// once, because the mend is the floor brief 16 put under this and a re-ask
-    /// about a field the mend fixes without losing a word buys nothing. A cut is
-    /// different: a body cut at its cap drops whatever the model wrote last, and
-    /// that was once the end of a ticket's "left alone" list. The re-ask lists the
-    /// cut fields back, and when the attempts run out the last fill that parsed
-    /// is mended and cut after all — a cut ticket beats no ticket.
+    /// hand and counting as the first attempt, and asking again as
+    /// [`drafting::ASKING`] says. When the attempts run out the last fill that
+    /// parsed is mended and cut after all — a cut ticket beats no ticket.
     fn settled(&mut self, first: drafting::Accepted) -> Result<Replied, agent::Error> {
+        let mut first = Some(first);
         // The instructions afresh with the last attempt's defects listed as
         // things not to repeat, which is how the document road asks again. The
         // contract is not said a second time: it was the opening of this same
         // conversation and has not changed.
-        let settled = settle(first, drafting::ATTEMPTS, |rejected| {
-            let asked =
-                drafting::drafting_instructions(&self.brief, &self.title, &self.prose, &rejected);
-            Ok(drafting::accept(&self.agent.turn(&asked)?))
-        })?;
+        let settled = fill::settle(
+            drafting::ASKING,
+            |rejected| {
+                if let Some(first) = first.take() {
+                    return Ok(first);
+                }
+                let asked = drafting::drafting_instructions(
+                    &self.brief,
+                    &self.title,
+                    &self.prose,
+                    rejected,
+                );
+                Ok(drafting::accept(&self.agent.turn(&asked)?))
+            },
+            |_, _| {},
+        )?;
         Ok(Replied::Answer(match settled {
-            Settled::Fill(fill) => self.repaired(&fill),
+            Settled::Taken(fill) | Settled::Spent(fill) => self.repaired(&fill),
             // Four answers and not an object among them. Whoever asked for the
             // cut hears what the last one was wrong about and decides what
             // happens to the slice.
@@ -2835,21 +2837,18 @@ impl<C: Converses> Splitting<C> {
     /// the same thing and a reason to treat one of them as nothing having
     /// happened — which is exactly what a split that never ran is.
     ///
-    /// Two answers are asked again, with the instructions built afresh carrying
-    /// the last attempt's defects listed back, which is how the document road
-    /// asks again: one that did not parse, and a fill the mend would have to cut
-    /// ([`lost_to_the_cut`]) — a sub-task's notes cut at their cap lose whatever
-    /// the split wrote last. Every other defect is mended at once, the floor
-    /// brief 16 put under this. When the attempts run out, the last fill that
+    /// Asked again as [`splitting::ASKING`] says, with the instructions built
+    /// afresh carrying the last attempt's defects listed back, which is how the
+    /// document road asks again. When the attempts run out, the last fill that
     /// parsed is mended and cut after all rather than the split halting.
     pub fn run(&mut self) -> Split {
-        let settled = self.attempt(&[]).and_then(|first| {
-            settle(first, splitting::ATTEMPTS, |rejected| {
-                self.attempt(&rejected)
-            })
-        });
+        let settled = fill::settle(
+            splitting::ASKING,
+            |rejected| self.attempt(rejected),
+            |_, _| {},
+        );
         match settled {
-            Ok(Settled::Fill(fill)) => self.numbered(&fill),
+            Ok(Settled::Taken(fill) | Settled::Spent(fill)) => self.numbered(&fill),
             Ok(Settled::Unusable(defect)) => Split::Halted(Unsplit::Unusable(defect)),
             Err(error) => Split::Halted(Unsplit::Stopped(stopped_by(&error))),
         }
@@ -2879,51 +2878,6 @@ impl<C: Converses> Splitting<C> {
             Err(cycle) => Split::Halted(Unsplit::Circle(cycle)),
         }
     }
-}
-
-enum Settled<F> {
-    Fill(F),
-    Unusable(Defect),
-}
-
-fn settle<F, E>(
-    first: Accepted<F>,
-    attempts: usize,
-    mut again: impl FnMut(Vec<Defect>) -> Result<Accepted<F>, E>,
-) -> Result<Settled<F>, E> {
-    let mut attempt = first;
-    let mut parsed = None;
-    for _ in 1..attempts {
-        let rejected = match attempt {
-            Accepted::Unparsed(defect) => vec![defect],
-            Accepted::Filled(fill) => return Ok(Settled::Fill(fill)),
-            Accepted::Defective { fill, defects } => {
-                let lost = lost_to_the_cut(&defects);
-                if lost.is_empty() {
-                    return Ok(Settled::Fill(fill));
-                }
-                parsed = Some(fill);
-                lost
-            }
-        };
-        attempt = again(rejected)?;
-    }
-    Ok(match attempt {
-        Accepted::Filled(fill) | Accepted::Defective { fill, .. } => Settled::Fill(fill),
-        Accepted::Unparsed(defect) => parsed.map_or(Settled::Unusable(defect), Settled::Fill),
-    })
-}
-
-// The defects a mend answers by throwing away what the model wrote — a value cut
-// to its cap, a list cut to its first entries — and so the only ones worth a
-// re-ask on a fill that parsed. Every other defect the mend fixes without losing
-// anything the model said.
-fn lost_to_the_cut(defects: &[Defect]) -> Vec<Defect> {
-    defects
-        .iter()
-        .filter(|defect| matches!(defect, Defect::TooLong { .. } | Defect::TooMany { .. }))
-        .cloned()
-        .collect()
 }
 
 /// How many attempts one sub-task gets: the first, and at most two retries.

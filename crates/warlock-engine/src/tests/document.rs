@@ -109,13 +109,18 @@ fn a_stub_is_accepted_for_any_request() {
 
     let one = Request::new(FILE_PROMPT, "/repo/crates/engine")
         .with_files([File::present("lib.rs", *b"pub mod pact;\n")]);
-    accept_file(
-        &stub_answer(&one),
-        "lib.rs",
-        &Expected::of(&one),
-        &Described::default(),
-    )
-    .expect("accepted too");
+    assert!(
+        matches!(
+            accept_file(
+                &stub_answer(&one),
+                "lib.rs",
+                &Expected::of(&one),
+                &Described::default(),
+            ),
+            Accepted::Filled(_)
+        ),
+        "accepted too"
+    );
 
     // Anything that is neither kind of pass gets plain prose.
     assert!(!stub_answer(&request).trim_start().starts_with('{'));
@@ -175,11 +180,14 @@ fn a_bare_word_is_a_skipped_slot_and_not_an_entry() {
             &Expected::of(&request),
             &Described::default()
         ),
-        Err(vec![Defect::TooShort {
-            field: "files[\"lib.rs\"]".to_owned(),
-            chars: 9,
-            minimum: ENTRY_MINIMUM
-        }])
+        Accepted::Defective {
+            fill: "duplicate".to_owned(),
+            defects: vec![Defect::TooShort {
+                field: "files[\"lib.rs\"]".to_owned(),
+                chars: 9,
+                minimum: ENTRY_MINIMUM
+            }]
+        }
     );
 }
 
@@ -214,11 +222,14 @@ fn every_value_is_one_line_under_its_cap() {
             &Expected::of(&request),
             &Described::default()
         ),
-        Err(vec![Defect::TooLong {
-            field: "files[\"lib.rs\"]".to_owned(),
-            chars: ENTRY_CHARS + 1,
-            cap: ENTRY_CHARS
-        }]),
+        Accepted::Defective {
+            fill: "x".repeat(ENTRY_CHARS + 1),
+            defects: vec![Defect::TooLong {
+                field: "files[\"lib.rs\"]".to_owned(),
+                chars: ENTRY_CHARS + 1,
+                cap: ENTRY_CHARS
+            }]
+        },
         "a file's line is held to the same cap by the pass that writes it"
     );
 }
@@ -1800,13 +1811,17 @@ fn the_pass_that_writes_a_files_line_is_the_one_that_checks_its_names() {
 
     let asserted = "Defines VAULT_LIMIT constant and is_settled(open) checking if open \
                     account count is zero; referenced by Decoder::decode()'s validation flow.";
-    let refused = accept_file(
+    let Accepted::Defective {
+        defects: refused, ..
+    } = accept_file(
         &format!("{{\"line\": {asserted:?}}}"),
         "balance.rs",
         &expected,
         &described,
     )
-    .expect_err("the invented mechanism is refused");
+    else {
+        panic!("the invented mechanism is refused");
+    };
     assert!(
         refused.iter().any(|defect| matches!(
             defect,
@@ -1820,13 +1835,18 @@ fn the_pass_that_writes_a_files_line_is_the_one_that_checks_its_names() {
     // that routes to the file it is about.
     let honest = "Defines VAULT_LIMIT constant and is_settled(open), which reports whether \
                   the open account count is zero.";
-    accept_file(
-        &format!("{{\"line\": {honest:?}}}"),
-        "balance.rs",
-        &expected,
-        &described,
-    )
-    .expect("a line resting on the file's own code is accepted");
+    assert!(
+        matches!(
+            accept_file(
+                &format!("{{\"line\": {honest:?}}}"),
+                "balance.rs",
+                &expected,
+                &described,
+            ),
+            Accepted::Filled(_)
+        ),
+        "a line resting on the file's own code is accepted"
+    );
 }
 
 #[test]

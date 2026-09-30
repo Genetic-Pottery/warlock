@@ -4,12 +4,17 @@ use std::fmt::Write as _;
 
 use serde::{Deserialize, Serialize};
 
-use crate::document::{Defect, cut, fit, flattened, line, parse, turned_down};
+use crate::fill::{self, Asking, Defect, Reask, Rewrite, cut, fit, flattened, line, turned_down};
 
 // The splitting road asks again exactly as often as the document and drafting
 // roads do, and a third bound would be a number to keep in step with this one
 // for no gain.
 pub use crate::document::ATTEMPTS;
+
+pub const ASKING: Asking = Asking {
+    attempts: ATTEMPTS,
+    reask: Reask::Cut,
+};
 
 // One to eight. The floor is what makes a split a split — a ticket nobody could
 // cut into even one sub-task is a ticket nothing can work — and the ceiling is
@@ -156,7 +161,7 @@ impl Fill {
     }
 }
 
-pub type Accepted = crate::document::Accepted<Fill>;
+pub type Accepted = fill::Accepted<Fill>;
 
 /// Read a splitting answer, in the layout [`crate::drafting::accept`] uses: the
 /// object lifted out of whatever prose surrounds it, then [`check`].
@@ -171,16 +176,7 @@ pub type Accepted = crate::document::Accepted<Fill>;
 /// ```
 #[must_use]
 pub fn accept(answer: &str) -> Accepted {
-    let fill = match parse(answer) {
-        Ok(fill) => fill,
-        Err(defect) => return Accepted::Unparsed(defect),
-    };
-    let defects = check(&fill);
-    if defects.is_empty() {
-        Accepted::Filled(fill)
-    } else {
-        Accepted::Defective { fill, defects }
-    }
+    fill::accept(answer, check)
 }
 
 /// Every slot of a filled splitting answer, in [`Defect`]'s own vocabulary, with
@@ -368,14 +364,7 @@ mod fallback {
 // second bound would be a number to keep in step with that one for no gain.
 pub use crate::drafting::MEND_PASSES;
 
-// `field` is the slot in [`Defect`]'s own spelling — `subtasks`,
-// `subtasks[2].goal`, `subtasks[2].definition_of_done[1]` — so a caller can line
-// a mend up against the defect it answers without parsing prose.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Mend {
-    pub field: String,
-    pub done: Mended,
-}
+pub type Mend = fill::Mend<Mended>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mended {
@@ -394,6 +383,15 @@ pub enum Mended {
     // The slot was never answered and fell to warlock's own line about the
     // ticket. See [`fallback`].
     Supplied,
+}
+
+impl From<Rewrite> for Mended {
+    fn from(rewrite: Rewrite) -> Self {
+        match rewrite {
+            Rewrite::FirstLine => Self::FirstLine,
+            Rewrite::Cut { from, to } => Self::Cut { from, to },
+        }
+    }
 }
 
 impl fmt::Display for Mend {
@@ -441,17 +439,7 @@ pub fn mend(fill: &Fill, title: &str, description: &str) -> (Fill, Vec<Mend>) {
 // is a fact about this function and not about the split; the test for the bound
 // is the only caller that has any use for it.
 fn mended(fill: &Fill, title: &str, description: &str) -> (Fill, Vec<Mend>, usize) {
-    let mut fill = fill.clone();
-    let mut mends = Vec::new();
-    let mut passes = 0;
-    for _ in 0..MEND_PASSES {
-        let defects = check(&fill);
-        if defects.is_empty() {
-            break;
-        }
-        passes += 1;
-        sweep(&mut fill, &defects, title, description, &mut mends);
-    }
+    let (mut fill, mut mends, passes) = fill::mend(&Mending { title, description }, fill.clone());
     prune(&mut fill, &mut mends);
 
     (fill, mends, passes)
@@ -484,67 +472,72 @@ fn prune(fill: &mut Fill, mends: &mut Vec<Mend>) {
     }
 }
 
-// One pass of the fixpoint. The order inside it is what keeps the indices
-// meaning what the defects say they mean: what the array cuts off is decided
-// first, then what to fill and what to drop, then the values that survive are
-// rewritten in place, and only then do the arrays themselves move — so a defect
-// naming `subtasks[3]` is never applied to whatever slid into position 3.
-fn sweep(
-    fill: &mut Fill,
-    defects: &[Defect],
-    title: &str,
-    description: &str,
-    mends: &mut Vec<Mend>,
-) {
-    let mut plan = Plan::default();
-    for defect in defects {
-        plan.note_array(defect, mends);
+struct Mending<'a> {
+    title: &'a str,
+    description: &'a str,
+}
+
+impl fill::Schema for Mending<'_> {
+    type Fill = Fill;
+    type Mended = Mended;
+    type Plan = Plan;
+
+    const MEND_PASSES: usize = MEND_PASSES;
+
+    fn check(&self, fill: &Fill) -> Vec<Defect> {
+        check(fill)
     }
-    for defect in defects {
-        plan.note_cut(defect, mends);
+
+    fn plan(&self, defects: &[Defect], mends: &mut Vec<Mend>) -> Plan {
+        let mut plan = Plan::default();
+        for defect in defects {
+            plan.note_array(defect, mends);
+        }
+        for defect in defects {
+            plan.note_cut(defect, mends);
+        }
+        for defect in defects {
+            plan.note_fill(defect, mends);
+        }
+        plan
     }
-    for defect in defects {
-        plan.note_fill(defect, mends);
-    }
-    for defect in defects {
-        let (field, done) = match defect {
-            Defect::Multiline { field } => (field, Mended::FirstLine),
-            Defect::TooLong { field, chars, cap } => (
-                field,
-                Mended::Cut {
-                    from: *chars,
-                    to: *cap,
-                },
-            ),
-            _ => continue,
-        };
-        // A slot already being filled in whole, or hanging off the end of an
-        // array this pass cuts back, is not worth rewriting first: the record
-        // would name work the same pass undoes.
+
+    fn rewritable<'f>(plan: &Plan, fill: &'f mut Fill, field: &str) -> Option<&'f mut String> {
         if plan.covers(field) {
-            continue;
+            return None;
         }
-        let Some(value) = target(fill, field) else {
-            continue;
-        };
-        match done {
-            // The first line of the value as the check reads it: `line`
-            // measures the trimmed value, so a goal that opens with a blank
-            // line keeps the first line of what was actually written.
-            Mended::FirstLine => {
-                *value = value.trim().lines().next().unwrap_or_default().to_owned();
-            }
-            // Characters, not bytes, and so on a character boundary. No trim:
-            // the cut lands where it lands.
-            Mended::Cut { to, .. } => *value = value.chars().take(to).collect(),
-            _ => {}
+        match slot(field) {
+            Slot::Goal(index) => fill
+                .subtasks
+                .get_mut(index)
+                .map(|subtask| &mut subtask.goal),
+            Slot::Done(index, Some(entry)) => fill
+                .subtasks
+                .get_mut(index)
+                .and_then(|subtask| subtask.definition_of_done.get_mut(entry)),
+            Slot::Files(index, Some(entry)) => fill
+                .subtasks
+                .get_mut(index)
+                .and_then(|subtask| subtask.likely_files.get_mut(entry)),
+            Slot::TestPlan(index) => fill
+                .subtasks
+                .get_mut(index)
+                .map(|subtask| &mut subtask.test_plan),
+            Slot::Notes(index) => fill
+                .subtasks
+                .get_mut(index)
+                .map(|subtask| &mut subtask.notes),
+            Slot::Subtasks
+            | Slot::DependsOn(_)
+            | Slot::Done(_, None)
+            | Slot::Files(_, None)
+            | Slot::Unknown => None,
         }
-        mends.push(Mend {
-            field: field.clone(),
-            done,
-        });
     }
-    plan.carry_out(fill, title, description);
+
+    fn carry_out(&self, plan: Plan, fill: &mut Fill) {
+        plan.carry_out(fill, self.title, self.description);
+    }
 }
 
 #[derive(Debug, Default)]
@@ -804,37 +797,6 @@ fn listed(index: usize, tail: &str) -> Slot {
         ".definition_of_done" => Slot::Done(index, entry),
         ".likely_files" => Slot::Files(index, entry),
         _ => Slot::Unknown,
-    }
-}
-
-// The value a rewrite writes over.
-fn target<'f>(fill: &'f mut Fill, field: &str) -> Option<&'f mut String> {
-    match slot(field) {
-        Slot::Goal(index) => fill
-            .subtasks
-            .get_mut(index)
-            .map(|subtask| &mut subtask.goal),
-        Slot::Done(index, Some(entry)) => fill
-            .subtasks
-            .get_mut(index)
-            .and_then(|subtask| subtask.definition_of_done.get_mut(entry)),
-        Slot::Files(index, Some(entry)) => fill
-            .subtasks
-            .get_mut(index)
-            .and_then(|subtask| subtask.likely_files.get_mut(entry)),
-        Slot::TestPlan(index) => fill
-            .subtasks
-            .get_mut(index)
-            .map(|subtask| &mut subtask.test_plan),
-        Slot::Notes(index) => fill
-            .subtasks
-            .get_mut(index)
-            .map(|subtask| &mut subtask.notes),
-        Slot::Subtasks
-        | Slot::DependsOn(_)
-        | Slot::Done(_, None)
-        | Slot::Files(_, None)
-        | Slot::Unknown => None,
     }
 }
 
