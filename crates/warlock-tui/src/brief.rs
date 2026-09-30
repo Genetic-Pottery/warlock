@@ -195,25 +195,15 @@ const CRITERIA: &str = "Success criteria";
 // than for this repository.
 fn for_the_board(content: &str) -> String {
     let mut board = String::with_capacity(content.len());
-    let mut fence: Option<String> = None;
+    let mut fence = None;
     let mut joining = false;
     let mut criteria = false;
 
     for line in content.lines() {
         let trimmed = line.trim();
 
-        if let Some(marker) = &fence {
-            if trimmed.starts_with(marker.as_str()) {
-                fence = None;
-            }
-            board.push_str(line);
-            board.push('\n');
-            continue;
-        }
-
-        if let Some(marker) = fenced(trimmed) {
+        if fencing(&mut fence, trimmed) {
             ended(&mut board, &mut joining);
-            fence = Some(marker.to_owned());
             board.push_str(line);
             board.push('\n');
             continue;
@@ -268,19 +258,26 @@ fn ended(board: &mut String, joining: &mut bool) {
     }
 }
 
-// The marker itself and not just its length, so a block opened with backticks
-// is closed by backticks: a `~~~` inside a ``` block is content.
-fn fenced(trimmed: &str) -> Option<&str> {
-    ["```", "~~~"]
+// Whether the line opens, sits inside or closes a fenced block. The open
+// fence's marker itself is held and not just its length, so a block opened with
+// backticks is closed by backticks: a `~~~` inside a ``` block is content.
+fn fencing(fence: &mut Option<&'static str>, trimmed: &str) -> bool {
+    if let Some(marker) = *fence {
+        if trimmed.starts_with(marker) {
+            *fence = None;
+        }
+        return true;
+    }
+    *fence = ["```", "~~~"]
         .into_iter()
-        .find(|marker| trimmed.starts_with(marker))
+        .find(|marker| trimmed.starts_with(marker));
+    fence.is_some()
 }
 
 fn headed(trimmed: &str) -> Option<&str> {
     trimmed
         .strip_prefix('#')
         .map(|rest| rest.trim_start_matches('#').trim())
-        .filter(|_| trimmed.starts_with('#'))
 }
 
 // The three markers markdown takes, and a numbered item, which is what a
@@ -539,20 +536,13 @@ const SCOPE: &str = "Scope";
 // version of this, a paragraph that merely says the words.
 fn split(content: &str) -> Option<(String, &str)> {
     let mut before = 0;
-    let mut fence: Option<String> = None;
+    let mut fence = None;
 
     for line in content.split_inclusive('\n') {
         let trimmed = line.trim();
         before += line.len();
 
-        if let Some(marker) = &fence {
-            if trimmed.starts_with(marker.as_str()) {
-                fence = None;
-            }
-            continue;
-        }
-        if let Some(marker) = fenced(trimmed) {
-            fence = Some(marker.to_owned());
+        if fencing(&mut fence, trimmed) {
             continue;
         }
 
@@ -569,29 +559,17 @@ fn sliced(block: &str) -> (Vec<Slice>, usize) {
     let mut unreadable = 0;
     let mut open: Option<(Option<usize>, String)> = None;
     let mut body: Vec<&str> = Vec::new();
-    let mut fence: Option<String> = None;
+    let mut fence = None;
 
     for line in block.lines() {
         let trimmed = line.trim();
 
-        if let Some(marker) = &fence {
-            if trimmed.starts_with(marker.as_str()) {
-                fence = None;
-            }
-            if open.is_some() {
-                body.push(line);
-            }
-            continue;
-        }
-        if let Some(marker) = fenced(trimmed) {
-            fence = Some(marker.to_owned());
-            if open.is_some() {
-                body.push(line);
-            }
-            continue;
-        }
-
-        let Some(heading) = headed(trimmed) else {
+        let heading = if fencing(&mut fence, trimmed) {
+            None
+        } else {
+            headed(trimmed)
+        };
+        let Some(heading) = heading else {
             if open.is_some() {
                 body.push(line);
             }

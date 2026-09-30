@@ -230,6 +230,23 @@ impl Composer {
         }
     }
 
+    // The one place `width`, `muted` and `answering` are carried into a new
+    // value, and it carries them untouched: neither a keystroke nor a paste is a
+    // redraw, nor where a turn starts or ends, nor where a question is relayed or
+    // answered.
+    //
+    // Written literally rather than through `Composer::at`, so every caller must
+    // hand in a `cursor` that is a boundary of `draft`.
+    fn edited(&self, draft: String, cursor: usize) -> Self {
+        Self {
+            draft,
+            cursor,
+            width: self.width,
+            muted: self.muted,
+            answering: self.answering.clone(),
+        }
+    }
+
     fn rows(&self, width: u16) -> Vec<String> {
         self.placed_rows(width)
             .into_iter()
@@ -355,23 +372,11 @@ pub fn compose_for(key: KeyEvent, composer: &Composer) -> Composed {
     }
 
     let unchanged = || Composed::Typing(composer.clone());
-    // The builders below are written literally rather than through
-    // `Composer::at`, and each holds that constructor's invariant by
-    // construction: `composer.cursor` is a boundary of the draft, so the halves
-    // it splits into are whole strings and the offset after a whole character of
-    // the result is a boundary of the result. `typing` is the one place
-    // `width`, `muted` and `answering` are carried through, and it carries them
-    // untouched — this function is neither a redraw, nor where a turn starts or
-    // ends, nor where a question is relayed or answered.
-    let typing = |draft: String, cursor: usize| {
-        Composed::Typing(Composer {
-            draft,
-            cursor,
-            width: composer.width,
-            muted: composer.muted,
-            answering: composer.answering.clone(),
-        })
-    };
+    // Each builder below holds `Composer::at`'s invariant by construction:
+    // `composer.cursor` is a boundary of the draft, so the halves it splits into
+    // are whole strings and the offset after a whole character of the result is
+    // a boundary of the result.
+    let typing = |draft: String, cursor: usize| Composed::Typing(composer.edited(draft, cursor));
     let inserted = |character: char| {
         let cursor = composer.cursor;
         let mut draft = String::with_capacity(composer.draft.len() + character.len_utf8());
@@ -505,18 +510,10 @@ pub fn paste_for(text: &str, composer: &Composer) -> Pasted {
         return Pasted::Typing(composer.clone());
     }
 
-    let mut draft = composer.draft.clone();
-    draft.push_str(text);
+    let draft = composer.draft.clone() + text;
+    let cursor = draft.len();
 
-    // The width and the two flags come through untouched, as they do at a
-    // keystroke.
-    Pasted::Typing(Composer {
-        cursor: draft.len(),
-        draft,
-        width: composer.width,
-        muted: composer.muted,
-        answering: composer.answering.clone(),
-    })
+    Pasted::Typing(composer.edited(draft, cursor))
 }
 
 #[cfg(test)]

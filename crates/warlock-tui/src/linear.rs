@@ -389,9 +389,9 @@ fn fetch_project(linear: &impl Posts, id: &str) -> Result<Option<FetchedProject>
 
     Ok(Some(FetchedProject {
         name: text(project, "name")?,
-        content: optional(project, "content")?.unwrap_or_default(),
+        content: nullable(project, "content", |_| text(project, "content"))?.unwrap_or_default(),
         url: text(project, "url")?,
-        status: status_name(project)?,
+        status: nullable(project, "status", |status| text(status, "name"))?,
     }))
 }
 
@@ -598,7 +598,7 @@ fn blocker(relation: &Value) -> Result<Blocker, Error> {
 
     Ok(Blocker {
         identifier: text(blocker, "identifier")?,
-        assignee: assignee_name(blocker)?,
+        assignee: nullable(blocker, "assignee", |assignee| text(assignee, "name"))?,
         state_type: StateType(text(state, "type")?),
     })
 }
@@ -921,7 +921,12 @@ fn named_issue(linear: &impl Posts, team: &str, number: u64) -> Result<Option<Na
         issue,
         team: text(team, "key")?,
         labels: label_names(node)?,
-        assignee: assigned(node)?,
+        assignee: nullable(node, "assignee", |assignee| {
+            Ok(Assignee {
+                id: node_id(assignee)?,
+                name: text(assignee, "name")?,
+            })
+        })?,
     }))
 }
 
@@ -1452,14 +1457,7 @@ fn move_issue(linear: &impl Posts, issue: &str, state: &str) -> Result<String, E
 /// which id the input carries — so a `projectId` here is the whole of what makes
 /// this a project comment.
 fn comment_on_project(linear: &impl Posts, project: &str, body: &str) -> Result<String, Error> {
-    let data = linear.post(
-        "mutation CommentCreate($input: CommentCreateInput!) {
-            commentCreate(input: $input) { comment { id } }
-        }",
-        json!({ "input": { "projectId": project, "body": body } }),
-    )?;
-
-    node_id(payload(&data, "commentCreate", "comment")?)
+    comment(linear, &json!({ "projectId": project, "body": body }))
 }
 
 /// Comment on an issue, by id.
@@ -1473,11 +1471,15 @@ fn comment_on_project(linear: &impl Posts, project: &str, body: &str) -> Result<
 /// a create is not idempotent, so a retried comment is how a halt gets explained
 /// twice on the same ticket. A comment that did not land is a line to print.
 fn comment_on_issue(linear: &impl Posts, issue: &str, body: &str) -> Result<String, Error> {
+    comment(linear, &json!({ "issueId": issue, "body": body }))
+}
+
+fn comment(linear: &impl Posts, input: &Value) -> Result<String, Error> {
     let data = linear.post(
         "mutation CommentCreate($input: CommentCreateInput!) {
             commentCreate(input: $input) { comment { id } }
         }",
-        json!({ "input": { "issueId": issue, "body": body } }),
+        json!({ "input": input }),
     )?;
 
     node_id(payload(&data, "commentCreate", "comment")?)
@@ -1571,33 +1573,15 @@ fn node_id(node: &Value) -> Result<String, Error> {
 /// A field that was asked for and may be answered `null`. Missing from the
 /// answer altogether is still malformed: a document that named the field and an
 /// answer that does not carry it are not the same call.
-fn optional(node: &Value, field: &str) -> Result<Option<String>, Error> {
+fn nullable<T>(
+    node: &Value,
+    field: &str,
+    read: impl FnOnce(&Value) -> Result<T, Error>,
+) -> Result<Option<T>, Error> {
     match node.get(field) {
         Some(Value::Null) => Ok(None),
-        Some(_) => text(node, field).map(Some),
+        Some(value) => read(value).map(Some),
         None => Err(missing(field)),
-    }
-}
-
-fn assignee_name(issue: &Value) -> Result<Option<String>, Error> {
-    match issue.get("assignee") {
-        Some(Value::Null) => Ok(None),
-        Some(assignee) => text(assignee, "name").map(Some),
-        None => Err(missing("assignee")),
-    }
-}
-
-/// Who a named ticket is assigned to, as both of the things a gate needs: an
-/// unassigned issue is `None` rather than a broken answer, and an `assignee` the
-/// answer left out altogether is malformed for [`optional`]'s reason.
-fn assigned(issue: &Value) -> Result<Option<Assignee>, Error> {
-    match issue.get("assignee") {
-        Some(Value::Null) => Ok(None),
-        Some(assignee) => Ok(Some(Assignee {
-            id: node_id(assignee)?,
-            name: text(assignee, "name")?,
-        })),
-        None => Err(missing("assignee")),
     }
 }
 
@@ -1619,14 +1603,6 @@ fn has_next_page(data: &Value, connection: &str) -> Result<bool, Error> {
         .and_then(|info| info.get("hasNextPage"))
         .and_then(Value::as_bool)
         .ok_or_else(|| missing("hasNextPage"))
-}
-
-fn status_name(project: &Value) -> Result<Option<String>, Error> {
-    match project.get("status") {
-        Some(Value::Null) => Ok(None),
-        Some(status) => text(status, "name").map(Some),
-        None => Err(missing("status")),
-    }
 }
 
 fn unknown_entity(message: &str) -> bool {

@@ -474,26 +474,21 @@ impl<O: Opens, A: Converses> Cutter<O, A> {
             Err(TryRecvError::Empty) => return,
             Err(TryRecvError::Disconnected) => Err(CUT_LOST.to_owned()),
         };
-        let line = match &landing {
-            Ok(planned) => fetched_line(planned),
-            // The worker's own sentence, which is `error.rs`'s wording of
-            // whatever stopped it: a machine that cannot say which board it
-            // stands at, a brief nothing filed, a project Linear no longer has,
-            // one that is not planned, content that is not a scope, or a
-            // project with nothing left to cut.
-            Err(line) => line.clone(),
-        };
         // Taken before the line is put on the thread, so the round that reports
         // a cut is a round on which the next `/draft` is already allowed.
         self.fetching = None;
-        app.panel_mut().note(line, now);
-        // The question goes up on the round the answer landed, over the line
-        // that reports it: what a reader is being asked to confirm is what they
-        // have just read. A fetch that failed put its own sentence on the
-        // thread and there is nothing to ask about, so nothing opens.
-        if let Ok(planned) = landing {
-            self.confirm = asking(&planned);
-            self.ready = Some(planned);
+        match landing {
+            // The question goes up on the round the answer landed, over the
+            // line that reports it: what a reader is being asked to confirm is
+            // what they have just read.
+            Ok(planned) => {
+                app.panel_mut().note(fetched_line(&planned), now);
+                self.confirm = asking(&planned);
+                self.ready = Some(planned);
+            }
+            // The worker's own sentence, which is `error.rs`'s wording of
+            // whatever stopped it, and nothing to ask about.
+            Err(line) => app.panel_mut().note(line, now),
         }
     }
 
@@ -581,12 +576,12 @@ impl<O: Opens, A: Converses> Cutter<O, A> {
             Ended::Drafted {
                 session,
                 drafts,
+                titles,
                 lines,
             } => {
                 for line in lines {
                     app.panel_mut().note(line, now);
                 }
-                let titles = drafts.iter().map(|draft| draft.title.clone()).collect();
                 // The redraft is offered exactly once per slice, so the second
                 // time round the window goes up with two answers and the
                 // session goes with the drafts it has already given.
@@ -812,7 +807,6 @@ impl<O: Opens, A: Converses> Cutter<O, A> {
         let Some(mut slicing) = self.slicing.take() else {
             return;
         };
-        let slice = slicing.next.slice().clone();
         slicing.stage = match slicing.stage {
             // Not waiting on anybody, so there is nothing this answers: the
             // stage goes back exactly as it was.
@@ -821,11 +815,13 @@ impl<O: Opens, A: Converses> Cutter<O, A> {
             | Stage::Filing(_)
             | Stage::Carrying(_)) => stage,
             Stage::Waiting(waiting) => {
-                app.panel_mut().note(answer_line(&slice, answer), now);
+                app.panel_mut()
+                    .note(answer_line(slicing.next.slice(), answer), now);
                 Stage::Drafting(asked(waiting.session, answer))
             }
             Stage::Feedback(session) => {
-                app.panel_mut().note(feedback_line(&slice, answer), now);
+                app.panel_mut()
+                    .note(feedback_line(slicing.next.slice(), answer), now);
                 // Said here rather than where the answer was asked for, so the
                 // slice is spent by the turn that redrafts it and not by a
                 // reader who chose feedback and then thought better of it.
@@ -937,13 +933,12 @@ impl<O: Opens, A: Converses> Cutter<O, A> {
     /// question whose only answer is "there is nothing left" is one nobody
     /// should have to press a key for.
     fn skip(&mut self, app: &mut App, now: Instant) {
-        let Some(mut slicing) = self.slicing.take() else {
+        let Some(mut slicing) = self
+            .slicing
+            .take_if(|slicing| matches!(slicing.stage, Stage::Reviewing(_)))
+        else {
             return;
         };
-        if !matches!(slicing.stage, Stage::Reviewing(_)) {
-            self.slicing = Some(slicing);
-            return;
-        }
 
         app.panel_mut()
             .note(skipped_line(slicing.next.slice()), now);
@@ -968,27 +963,16 @@ impl<O: Opens, A: Converses> Cutter<O, A> {
         let Some(mut slicing) = self.slicing.take() else {
             return;
         };
-        let reviewing = match slicing.stage {
-            Stage::Reviewing(reviewing) => reviewing,
+        let session = match slicing.stage {
+            Stage::Reviewing(Reviewing {
+                session: Some(session),
+                ..
+            }) => session,
             stage => {
                 slicing.stage = stage;
                 self.slicing = Some(slicing);
                 return;
             }
-        };
-        let Reviewing {
-            review,
-            drafts,
-            session,
-        } = reviewing;
-        let Some(session) = session else {
-            slicing.stage = Stage::Reviewing(Reviewing {
-                review,
-                drafts,
-                session: None,
-            });
-            self.slicing = Some(slicing);
-            return;
         };
 
         app.panel_mut()
@@ -1009,13 +993,12 @@ impl<O: Opens, A: Converses> Cutter<O, A> {
 
     /// A Yes to the carry-on question: on to the next slice.
     fn carry_on(&mut self, app: &mut App, now: Instant) {
-        let Some(slicing) = self.slicing.take() else {
+        let Some(slicing) = self
+            .slicing
+            .take_if(|slicing| matches!(slicing.stage, Stage::Carrying(_)))
+        else {
             return;
         };
-        if !matches!(slicing.stage, Stage::Carrying(_)) {
-            self.slicing = Some(slicing);
-            return;
-        }
 
         self.onwards(slicing, app, now);
     }
@@ -1026,13 +1009,12 @@ impl<O: Opens, A: Converses> Cutter<O, A> {
     /// and nothing sent about them — so the next `/draft` finds them exactly as
     /// this one did.
     fn stop(&mut self, app: &mut App, now: Instant) {
-        let Some(slicing) = self.slicing.take() else {
+        let Some(slicing) = self
+            .slicing
+            .take_if(|slicing| matches!(slicing.stage, Stage::Carrying(_)))
+        else {
             return;
         };
-        if !matches!(slicing.stage, Stage::Carrying(_)) {
-            self.slicing = Some(slicing);
-            return;
-        }
 
         app.panel_mut().note(stopped_line(slicing.next.left()), now);
         self.finished(&slicing.planned);
@@ -1126,15 +1108,11 @@ fn asked<A: Converses>(session: Drafting<A>, answer: &str) -> Asking<A> {
 // [`CancelGuard::over`] — so it reaches the `claude` this turn is actually
 // running.
 //
-// The `JoinHandle` is dropped on purpose, as every other worker's is: joining is
-// waiting, and this thread exists precisely so nobody waits for it. The guard
-// the caller keeps is what stops it.
-//
 // The session is moved in and sent back out with the reply rather than shared
 // behind a lock: it is the one thing that carries what this slice's
 // conversation has already said, and the event loop's thread has no business
 // touching it while a turn is running.
-fn turning<A, F>(session: Drafting<A>, turn: F) -> Asking<A>
+fn turning<A, F>(mut session: Drafting<A>, turn: F) -> Asking<A>
 where
     A: Converses,
     F: FnOnce(&mut Drafting<A>) -> Result<Replied, agent::Error> + Send + 'static,
@@ -1142,23 +1120,23 @@ where
     let cancel = CancelGuard::over(session.cancel());
 
     Asking {
-        replies: spawn_turn(session, turn),
+        replies: worker(move || {
+            let replied = turn(&mut session);
+            (session, replied)
+        }),
         cancel,
     }
 }
 
-fn spawn_turn<A, F>(mut session: Drafting<A>, turn: F) -> Receiver<Turned<A>>
-where
-    A: Converses,
-    F: FnOnce(&mut Drafting<A>) -> Result<Replied, agent::Error> + Send + 'static,
-{
+// Every thread this module starts. The `JoinHandle` is dropped on purpose:
+// joining is waiting, and each thread exists precisely so nobody waits for it.
+// The send is ignored because a receiver that has gone away is a panel nobody is
+// looking at any more — an application quitting, which is also what cancels a
+// run.
+fn worker<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> Receiver<T> {
     let (events, received) = mpsc::channel();
     thread::spawn(move || {
-        let replied = turn(&mut session);
-        // Ignored for the reason every other worker's send is: a receiver that
-        // has gone away is an application that is quitting, which is also the
-        // one thing that cancels a run.
-        let _ = events.send((session, replied));
+        let _ = events.send(work());
     });
 
     received
@@ -1181,17 +1159,10 @@ fn spawn_proposal<A: Converses>(
     slice: &Slice,
     question: &str,
 ) -> Receiver<Result<String, agent::Error>> {
-    let (events, received) = mpsc::channel();
     let (agent, brief, question) = (agent.clone(), brief.to_owned(), question.to_owned());
     let (title, prose) = (slice.heading().to_owned(), slice.prose().to_owned());
-    thread::spawn(move || {
-        let proposed = propose_answer(&agent, &brief, &title, &prose, &question);
-        // Ignored for the reason above: a receiver that has gone away is a
-        // question nobody is waiting on any more.
-        let _ = events.send(proposed);
-    });
 
-    received
+    worker(move || propose_answer(&agent, &brief, &title, &prose, &question))
 }
 
 /// What one slice's turn came to: a question to put to somebody, drafts to be
@@ -1211,6 +1182,7 @@ enum Ended<A> {
     Drafted {
         session: Drafting<A>,
         drafts: Vec<Draft>,
+        titles: Vec<String>,
         /// What to say about them as they arrive: the titles, then one line per
         /// repair.
         lines: Vec<String>,
@@ -1237,6 +1209,7 @@ fn ended<A>(slice: &Slice, turned: Option<Turned<A>>) -> Ended<A> {
             Ended::Drafted {
                 session,
                 drafts,
+                titles,
                 lines: said,
             }
         }
@@ -1321,50 +1294,25 @@ struct Work {
 //
 // `io::sink` where [`cut::cut`](crate::cut::cut)'s progress would have gone,
 // exactly as `pushing.rs` gives `push::file` nowhere to print: the panel's lines
-// are the panel's own and worded beside the slice they are about.
-//
-// The `JoinHandle` is dropped on purpose, as every other worker's is.
+// are the panel's own and worded beside the slice they are about. A send nobody
+// hears loses nothing: what this worker did is on the board and in the cut
+// record beside the brief, which is where the next `/draft` reads it from.
 fn spawn_filing<O: Opens>(open: O, filing: planned::Filing) -> Receiver<Result<Cut, String>> {
-    let (events, received) = mpsc::channel();
-    thread::spawn(move || {
-        let landing = filing
+    worker(move || {
+        filing
             .file(&open, &mut io::sink())
-            .map_err(|error| one_line(&error.to_string()));
-        // Ignored for the reason every other worker's send is: a receiver that
-        // has gone away is a panel nobody is looking at any more. What this
-        // worker did is on the board and in the cut record beside the brief,
-        // which is where the next `/draft` reads it from.
-        let _ = events.send(landing);
-    });
-
-    received
+            .map_err(|error| one_line(&error.to_string()))
+    })
 }
 
 // The project's one comment, on a worker for the reason a create is on one: it
 // is a request, and the panel keeps drawing while Linear answers it.
 fn spawn_announcement<O: Opens>(open: O, announcement: Announcement) -> Receiver<Option<String>> {
-    let (events, received) = mpsc::channel();
-    thread::spawn(move || {
-        let _ = events.send(announcement.post(&open));
-    });
-
-    received
+    worker(move || announcement.post(&open))
 }
 
-// The `JoinHandle` is dropped on purpose, as a turn's and a push's are: joining
-// is waiting, and this thread exists precisely so nobody waits for it. The
-// guard the caller keeps is what stops it.
 fn spawn_fetch<O: Opens>(open: O, work: Work, cancel: Cancel) -> Receiver<Landing> {
-    let (events, received) = mpsc::channel();
-    thread::spawn(move || {
-        let landing = fetched(&open, &work, &cancel).map_err(|error| one_line(&error.to_string()));
-        // Ignored for the reason every other worker's send is: a receiver that
-        // has gone away is an application that is quitting, which is also the
-        // one thing that cancels a cut.
-        let _ = events.send(landing);
-    });
-
-    received
+    worker(move || fetched(&open, &work, &cancel).map_err(|error| one_line(&error.to_string())))
 }
 
 // The cancel is asked either side of [`prepare`] and nowhere else. A socket
