@@ -11,26 +11,23 @@ use warlock_engine::{Destination, NodeState, scope};
 
 use super::{
     Areas, BAR_EMPTY, BAR_FILLED, BAR_MIN_WIDTH, BORDER_THICKNESS, BRIEF_THREAD_TITLE, CANCEL_KEY,
-    CARRY_LEFT, CARRY_LINES, CARRY_QUESTION, COLLAPSE_KEY, COMPOSER_CURSOR, COMPOSER_MIN_HEIGHT,
-    CONFIRM_ANSWER_GAP, CONFIRM_HEIGHT, CONFIRM_LINES, CONFIRM_MARGIN, CONFIRM_MARGIN_ROWS,
-    CONFIRM_NO, CONFIRM_QUESTION, CONFIRM_YES, CUT_KEY, CUT_LINES, CUT_QUESTION, CUT_SLICES,
-    CUT_STATUS, CUT_TEAM, Carry, ELLIPSIS, FILES_KEY, FILING_HEADING, FILING_RULES, FOOTER_HEIGHT,
-    GUIDE, GUIDE_BRANCH, GUIDE_LAST, HEADER_GAP, HEADER_HEIGHT, Hit, INDENT, KEY_DROP_ORDER,
-    KEY_GAP, KEYS, LIVE_KEY, MARK, MARK_MARGIN, MARK_MARGIN_ROWS, MOVE_KEYS, NO_MARKER,
-    NOTE_MARKER, PACTING_KEYS, PACTING_QUIT_KEY, PACTING_RUN, PANEL_INDENT, PATH_HEADING,
-    PATH_RULES, PERCENT_WIDTH, PULL_BRANCH, PULL_FIXED_LINES, PULL_FROM, PULL_QUESTION,
-    PULL_RESUME_LINES, PULL_RESUME_QUESTION, PULL_SCOPE, PULL_TEAM, PUSH_KEY, PUSH_LINES,
-    PUSH_QUESTION, PUSH_TEAM, QUIT_KEY, RECORD_HEADING, RECORD_HEIGHT, RECORD_LABEL_GAP,
-    RECORD_LINES, RECORD_RULES, REFRESHING_RUN, REVIEW_ANSWER_GAP, REVIEW_CREATE, REVIEW_FEEDBACK,
-    REVIEW_FIXED_LINES, REVIEW_QUESTION, REVIEW_SKIP, ROW_KEY, RUN_HEADER_HEIGHT, Reach, Review,
-    SAID_MARKER, SCOPE_CURSOR, SCOPE_HEADING, SCOPE_HEIGHT, SCOPE_LINES, SCOPE_MARGIN,
-    SCOPE_MARGIN_ROWS, SCROLLBACK_ARROW, SELECTED, SELECTION_MARKER, THREAD_TITLE, TREE_MIN_WIDTH,
-    TREE_PERCENT, areas, carry_area, centred, composer_height, composer_on_screen, confirm_area,
-    confirm_size, cut_area, display_width, draw, footer_text_area, guide_prefixes, hit_test,
-    keys_line, label_width, mark_area, pacting_keys_line, pane_inner, panel_height, panel_reach,
-    panel_row, panel_rows_area, panel_width, pull_area, push_area, record_lines, record_size,
-    review_area, run_header_height, run_header_line, scope_size, tree_height, tree_rows_area,
-    tree_width, truncated,
+    CARRY_LEFT, CARRY_QUESTION, COLLAPSE_KEY, COMPOSER_CURSOR, COMPOSER_MIN_HEIGHT,
+    CONFIRM_ANSWER_GAP, CONFIRM_NO, CONFIRM_QUESTION, CONFIRM_YES, CUT_KEY, CUT_QUESTION,
+    CUT_SLICES, CUT_STATUS, CUT_TEAM, Carry, DIALOG_MARGIN, DIALOG_MARGIN_ROWS, Dialog, ELLIPSIS,
+    FILES_KEY, FILING_HEADING, FILING_RULES, FOOTER_HEIGHT, GUIDE, GUIDE_BRANCH, GUIDE_LAST,
+    HEADER_GAP, HEADER_HEIGHT, Hit, INDENT, KEY_DROP_ORDER, KEY_GAP, KEYS, LIVE_KEY, MARK,
+    MARK_MARGIN, MARK_MARGIN_ROWS, MOVE_KEYS, NO_MARKER, NOTE_MARKER, PACTING_KEYS,
+    PACTING_QUIT_KEY, PACTING_RUN, PANEL_INDENT, PATH_HEADING, PATH_RULES, PERCENT_WIDTH,
+    PULL_BRANCH, PULL_FROM, PULL_QUESTION, PULL_RESUME_QUESTION, PULL_SCOPE, PULL_TEAM, PUSH_KEY,
+    PUSH_QUESTION, PUSH_TEAM, QUIT_KEY, RECORD_HEADING, RECORD_LABEL_GAP, RECORD_RULES,
+    REFRESHING_RUN, REVIEW_ANSWER_GAP, REVIEW_CREATE, REVIEW_FEEDBACK, REVIEW_QUESTION,
+    REVIEW_SKIP, ROW_KEY, RUN_HEADER_HEIGHT, Reach, Review, SAID_MARKER, SCOPE_CURSOR,
+    SCOPE_HEADING, SCROLLBACK_ARROW, SELECTED, SELECTION_MARKER, THREAD_TITLE, TREE_MIN_WIDTH,
+    TREE_PERCENT, areas, composer_height, composer_on_screen, display_width, draw,
+    footer_text_area, guide_prefixes, hit_test, keys_line, label_width, mark_area,
+    pacting_keys_line, pane_inner, panel_height, panel_reach, panel_row, panel_rows_area,
+    panel_width, run_header_height, run_header_line, tree_height, tree_rows_area, tree_width,
+    truncated,
 };
 use crate::COMPOSER_MAX_ROWS;
 use crate::account::{Line as Entry, Outcome};
@@ -5878,7 +5875,7 @@ fn busy_app(base: Instant, width: u16, height: u16) -> App {
 }
 
 fn confirm_rect(buffer: &Buffer) -> Rect {
-    confirm_area(buffer.area)
+    Dialog::quit(Answer::No).area(buffer.area)
 }
 
 fn confirm_rows(buffer: &Buffer) -> Vec<String> {
@@ -5967,20 +5964,16 @@ fn the_window_is_sized_by_what_it_says_plus_its_margins_and_its_border() {
     // Measured off the text rather than written down, so a reworded
     // question is drawn whole rather than cut off by a width somebody
     // forgot to widen.
-    let Size { width, height } = confirm_size();
+    let Size { width, height } = Dialog::quit(Answer::No).size();
     let answers =
         display_width(CONFIRM_YES) + display_width(CONFIRM_ANSWER_GAP) + display_width(CONFIRM_NO);
     let text = display_width(CONFIRM_QUESTION).max(answers);
 
     assert_eq!(
         usize::from(width),
-        text + usize::from(2 * CONFIRM_MARGIN + 2 * BORDER_THICKNESS)
+        text + usize::from(2 * DIALOG_MARGIN + 2 * BORDER_THICKNESS)
     );
-    assert_eq!(height, CONFIRM_HEIGHT);
-    assert_eq!(
-        height,
-        CONFIRM_LINES + 2 * CONFIRM_MARGIN_ROWS + 2 * BORDER_THICKNESS
-    );
+    assert_eq!(height, 3 + 2 * DIALOG_MARGIN_ROWS + 2 * BORDER_THICKNESS);
 }
 
 #[test]
@@ -5991,7 +5984,7 @@ fn the_confirmation_is_a_small_window_centred_on_the_terminal() {
     let buffer = render_confirm(&app, WIDTH, FIXTURE_HEIGHT, base, QuitConfirm::open());
 
     let area = confirm_rect(&buffer);
-    let Size { width, height } = confirm_size();
+    let Size { width, height } = Dialog::quit(Answer::No).size();
     // Small: a window over the frame, not a second screen instead of it.
     assert_eq!((area.width, area.height), (width, height));
     assert!(area.width < WIDTH / 2, "the window is half the terminal");
@@ -6281,7 +6274,7 @@ fn push_dialog() -> PushConfirm {
 }
 
 fn push_rect(buffer: &Buffer, push: &PushConfirm) -> Rect {
-    push_area(buffer.area, push.filing().expect("the dialog is up"))
+    Dialog::push(push.filing().expect("the dialog is up")).area(buffer.area)
 }
 
 #[test]
@@ -6319,7 +6312,7 @@ fn the_push_dialog_names_the_project_the_team_and_the_key_by_name() {
     );
     // The window is as tall as it says it is, border and margins included.
     assert_eq!(u16::try_from(rows.len()).expect("a short window"), {
-        PUSH_LINES + 2 * CONFIRM_MARGIN_ROWS + 2 * BORDER_THICKNESS
+        7 + 2 * DIALOG_MARGIN_ROWS + 2 * BORDER_THICKNESS
     });
 }
 
@@ -6438,7 +6431,7 @@ fn cut_dialog() -> CutConfirm {
 }
 
 fn cut_rect(buffer: &Buffer, cut: &CutConfirm) -> Rect {
-    cut_area(buffer.area, cut.cutting().expect("the dialog is up"))
+    Dialog::cut(cut.cutting().expect("the dialog is up")).area(buffer.area)
 }
 
 #[test]
@@ -6480,7 +6473,7 @@ fn the_cut_dialog_names_the_project_the_status_the_slices_the_team_and_the_key_b
     );
     // The window is as tall as it says it is, border and margins included.
     assert_eq!(u16::try_from(rows.len()).expect("a short window"), {
-        CUT_LINES + 2 * CONFIRM_MARGIN_ROWS + 2 * BORDER_THICKNESS
+        9 + 2 * DIALOG_MARGIN_ROWS + 2 * BORDER_THICKNESS
     });
 }
 
@@ -6616,7 +6609,7 @@ fn resumed_pull_dialog() -> PullConfirm {
 }
 
 fn pull_rect(buffer: &Buffer, pull: &PullConfirm) -> Rect {
-    pull_area(buffer.area, pull.undertaking().expect("the dialog is up"))
+    Dialog::pull(pull.undertaking().expect("the dialog is up")).area(buffer.area)
 }
 
 #[test]
@@ -6668,7 +6661,7 @@ fn the_pull_dialog_names_the_ticket_the_title_the_scope_the_team_and_the_branch(
     );
     // The window is as tall as it says it is, border and margins included.
     assert_eq!(u16::try_from(rows.len()).expect("a short window"), {
-        PULL_FIXED_LINES + 2 * CONFIRM_MARGIN_ROWS + 2 * BORDER_THICKNESS
+        9 + 2 * DIALOG_MARGIN_ROWS + 2 * BORDER_THICKNESS
     });
 }
 
@@ -6701,7 +6694,7 @@ fn the_resumed_pull_dialog_says_it_is_resuming_and_names_the_sub_task_it_carries
     );
     // One row taller than a fresh pull, and that row is the sub-task's.
     assert_eq!(u16::try_from(rows.len()).expect("a short window"), {
-        PULL_FIXED_LINES + PULL_RESUME_LINES + 2 * CONFIRM_MARGIN_ROWS + 2 * BORDER_THICKNESS
+        9 + 1 + 2 * DIALOG_MARGIN_ROWS + 2 * BORDER_THICKNESS
     });
 }
 
@@ -6853,7 +6846,7 @@ fn the_review_window_names_the_slice_every_title_and_the_three_answers() {
 
     let buffer = render_review(&app, WIDTH, FIXTURE_HEIGHT, &review);
 
-    let area = review_area(buffer.area, &review);
+    let area = Dialog::review(&review).area(buffer.area);
     let rows = dialog_rows(&buffer, area);
     let on = |needle: &str| {
         rows.iter()
@@ -6887,9 +6880,8 @@ fn the_review_window_names_the_slice_every_title_and_the_three_answers() {
     // One row per title on top of the fixed five, so nothing being answered
     // about is cut off.
     assert_eq!(u16::try_from(rows.len()).expect("a short window"), {
-        REVIEW_FIXED_LINES
-            + u16::try_from(REVIEW_TITLES.len()).expect("two titles")
-            + 2 * CONFIRM_MARGIN_ROWS
+        5 + u16::try_from(REVIEW_TITLES.len()).expect("two titles")
+            + 2 * DIALOG_MARGIN_ROWS
             + 2 * BORDER_THICKNESS
     });
 }
@@ -6915,7 +6907,7 @@ fn the_review_window_opens_on_skip_and_moves_only_the_highlight() {
     let first = render_review(&app, WIDTH, FIXTURE_HEIGHT, &opened);
     let second = render_review(&app, WIDTH, FIXTURE_HEIGHT, &moved);
 
-    let area = review_area(first.area, &opened);
+    let area = Dialog::review(&opened).area(first.area);
     // The answer that files issues is never the one under the reader's finger
     // when the drafts arrive.
     assert_lit_in(&first, area, REVIEW_SKIP);
@@ -6927,7 +6919,7 @@ fn the_review_window_opens_on_skip_and_moves_only_the_highlight() {
     // rows whichever answer is lit.
     assert_eq!(
         dialog_rows(&first, area),
-        dialog_rows(&second, review_area(second.area, &moved))
+        dialog_rows(&second, Dialog::review(&moved).area(second.area))
     );
 }
 
@@ -6941,7 +6933,7 @@ fn a_slice_that_has_spent_its_redraft_is_drawn_with_two_answers() {
 
     let buffer = render_review(&app, WIDTH, FIXTURE_HEIGHT, &review);
 
-    let rows = dialog_rows(&buffer, review_area(buffer.area, &review));
+    let rows = dialog_rows(&buffer, Dialog::review(&review).area(buffer.area));
     let answers = rows
         .iter()
         .position(|row| row.contains(REVIEW_SKIP.trim()))
@@ -6966,7 +6958,7 @@ fn the_review_window_is_centred_and_bordered_like_every_other_question() {
 
     let buffer = render_review(&app, WIDTH, FIXTURE_HEIGHT, &review);
 
-    let area = review_area(buffer.area, &review);
+    let area = Dialog::review(&review).area(buffer.area);
     let left = area.x;
     let right = WIDTH - (area.x + area.width);
     let above = area.y;
@@ -7009,7 +7001,7 @@ fn the_carry_on_question_says_what_is_left_and_opens_on_no() {
     let buffer = render_carry(&app, WIDTH, FIXTURE_HEIGHT, &opened);
     let lit = render_carry(&app, WIDTH, FIXTURE_HEIGHT, &moved);
 
-    let area = carry_area(buffer.area, &opened);
+    let area = Dialog::carry(&opened).area(buffer.area);
     let rows = dialog_rows(&buffer, area);
     let on = |needle: &str| {
         rows.iter()
@@ -7025,9 +7017,9 @@ fn the_carry_on_question_says_what_is_left_and_opens_on_no() {
     assert_eq!(inside_the_border(&rows[answers]), answers_text());
     assert_lit_in(&buffer, area, CONFIRM_NO);
     assert_unlit_in(&buffer, area, CONFIRM_YES);
-    assert_lit_in(&lit, carry_area(lit.area, &moved), CONFIRM_YES);
+    assert_lit_in(&lit, Dialog::carry(&moved).area(lit.area), CONFIRM_YES);
     assert_eq!(u16::try_from(rows.len()).expect("a short window"), {
-        CARRY_LINES + 2 * CONFIRM_MARGIN_ROWS + 2 * BORDER_THICKNESS
+        5 + 2 * DIALOG_MARGIN_ROWS + 2 * BORDER_THICKNESS
     });
 }
 
@@ -7036,7 +7028,7 @@ const SCOPED: &str = "crates/warlock-engine";
 const CARRIED: &str = "data-plane";
 
 fn window_rect(buffer: &Buffer, field: &ScopeField, heading: &str, rules: &str) -> Rect {
-    centred(buffer.area, scope_size(field, heading, rules))
+    Dialog::scope(field, heading, rules).area(buffer.area)
 }
 
 fn window_rows(buffer: &Buffer, field: &ScopeField, heading: &str, rules: &str) -> Vec<String> {
@@ -7051,8 +7043,8 @@ fn window_cursor(buffer: &Buffer, field: &ScopeField, heading: &str, rules: &str
     let typed = u16::try_from(display_width(field.text())).expect("a short line");
 
     Position::new(
-        area.x + BORDER_THICKNESS + SCOPE_MARGIN + typed,
-        area.y + BORDER_THICKNESS + SCOPE_MARGIN_ROWS + FIELD_LINE,
+        area.x + BORDER_THICKNESS + DIALOG_MARGIN + typed,
+        area.y + BORDER_THICKNESS + DIALOG_MARGIN_ROWS + FIELD_LINE,
     )
 }
 
@@ -7092,7 +7084,7 @@ fn the_scope_window_is_sized_by_what_it_says_plus_its_margins_and_its_border() {
         ScopeField::new("a", ""),
         refused.clone(),
     ] {
-        let Size { width, height } = scope_size(&field, SCOPE_HEADING, scope::RULES);
+        let Size { width, height } = Dialog::scope(&field, SCOPE_HEADING, scope::RULES).size();
         let widest = (display_width(SCOPE_HEADING) + display_width(field.directory()))
             .max(display_width(field.text()) + display_width(SCOPE_CURSOR))
             .max(field.rule().map_or(0, display_width))
@@ -7100,22 +7092,18 @@ fn the_scope_window_is_sized_by_what_it_says_plus_its_margins_and_its_border() {
 
         assert_eq!(
             usize::from(width),
-            widest + usize::from(2 * SCOPE_MARGIN + 2 * BORDER_THICKNESS),
+            widest + usize::from(2 * DIALOG_MARGIN + 2 * BORDER_THICKNESS),
             "{field:?}"
         );
         // And it is the same height whatever is in it: the row the broken
         // rule goes in is there before one is broken, so a refusal does not
         // move the field out from under the reader's eye.
-        assert_eq!(height, SCOPE_HEIGHT, "{field:?}");
         assert_eq!(
             height,
-            SCOPE_LINES + 2 * SCOPE_MARGIN_ROWS + 2 * BORDER_THICKNESS
+            5 + 2 * DIALOG_MARGIN_ROWS + 2 * BORDER_THICKNESS,
+            "{field:?}"
         );
     }
-    assert_eq!(
-        scope_size(&ScopeField::new(SCOPED, ""), SCOPE_HEADING, scope::RULES).height,
-        SCOPE_HEIGHT
-    );
 }
 
 #[test]
@@ -7154,7 +7142,7 @@ fn the_scope_prompt_names_the_directory_the_field_and_the_rules() {
     assert!(heading < rules, "{rows:?}");
     assert_eq!(
         heading,
-        usize::from(BORDER_THICKNESS + SCOPE_MARGIN_ROWS),
+        usize::from(BORDER_THICKNESS + DIALOG_MARGIN_ROWS),
         "{rows:?}"
     );
     // The rules are the engine's sentence, word for word: nothing in this
@@ -7163,7 +7151,7 @@ fn the_scope_prompt_names_the_directory_the_field_and_the_rules() {
     // The field is empty because the directory carries no scope, and the
     // cursor is at the front of it waiting for the first character.
     assert_eq!(
-        inside_the_border(&rows[usize::from(BORDER_THICKNESS + SCOPE_MARGIN_ROWS + FIELD_LINE)]),
+        inside_the_border(&rows[usize::from(BORDER_THICKNESS + DIALOG_MARGIN_ROWS + FIELD_LINE)]),
         ""
     );
     let cursor = cursor_cell(&buffer, &field);
@@ -7190,7 +7178,7 @@ fn the_field_opens_on_the_scope_the_directory_carries_with_the_cursor_after_it()
     // What is already true is on screen, so Enter on an untouched prompt
     // would set what is already set rather than clear it.
     let rows = scope_rows(&buffer, &field);
-    let line = usize::from(BORDER_THICKNESS + SCOPE_MARGIN_ROWS + FIELD_LINE);
+    let line = usize::from(BORDER_THICKNESS + DIALOG_MARGIN_ROWS + FIELD_LINE);
     assert_eq!(inside_the_border(&rows[line]), CARRIED, "{rows:?}");
     // And the cursor is where the next character will land, which on a
     // prompt nobody has moved it on is one column past the text.
@@ -7249,7 +7237,7 @@ fn the_caret_is_drawn_on_the_character_the_cursor_was_moved_onto() {
         !buffer[end].modifier.contains(Modifier::REVERSED),
         "the caret was drawn past the text as well as on it"
     );
-    let line = usize::from(BORDER_THICKNESS + SCOPE_MARGIN_ROWS + FIELD_LINE);
+    let line = usize::from(BORDER_THICKNESS + DIALOG_MARGIN_ROWS + FIELD_LINE);
     assert_eq!(
         inside_the_border(&rows[line]),
         CARRIED,
@@ -7277,7 +7265,7 @@ fn a_broken_rule_is_drawn_under_the_field_with_the_text_still_in_it() {
     );
 
     let rows = scope_rows(&refused, &field);
-    let line = usize::from(BORDER_THICKNESS + SCOPE_MARGIN_ROWS + FIELD_LINE);
+    let line = usize::from(BORDER_THICKNESS + DIALOG_MARGIN_ROWS + FIELD_LINE);
     // The text that was refused is still in the field, one character away
     // from being fixed, and the reason is on the row under it.
     assert_eq!(inside_the_border(&rows[line]), typed, "{rows:?}");
@@ -7449,7 +7437,7 @@ fn the_path_window_heads_itself_holds_the_proposal_and_takes_a_refusal_under_it(
     assert!(last.starts_with('└') && last.ends_with('┘'), "{rows:?}");
     // What it is asking for, on the row the scope prompt heads itself in.
     // Nothing goes in front of it: the whole heading rides in the field.
-    let heading = usize::from(BORDER_THICKNESS + SCOPE_MARGIN_ROWS);
+    let heading = usize::from(BORDER_THICKNESS + DIALOG_MARGIN_ROWS);
     let line = heading + usize::from(FIELD_LINE);
     assert_eq!(inside_the_border(&rows[heading]), HEADED, "{rows:?}");
     // The path is already typed, so an Enter with nothing else pressed
@@ -7526,7 +7514,7 @@ fn the_filing_field_heads_itself_takes_the_candidates_under_it_and_draws_no_dial
         rows[0].starts_with('┌') && rows[0].ends_with('┐'),
         "{rows:?}"
     );
-    let heading = usize::from(BORDER_THICKNESS + SCOPE_MARGIN_ROWS);
+    let heading = usize::from(BORDER_THICKNESS + DIALOG_MARGIN_ROWS);
     let line = heading + usize::from(FIELD_LINE);
     // Nothing is typed yet, so the row the name goes on is empty and the
     // candidates are the only thing the reader has to go on.
@@ -7574,7 +7562,7 @@ fn record_pressed(form: &RecordForm, code: ratatui::crossterm::event::KeyCode) -
 }
 
 fn record_rect(buffer: &Buffer, form: &RecordForm) -> Rect {
-    centred(buffer.area, record_size(form))
+    Dialog::record(form).area(buffer.area)
 }
 
 fn record_rows(buffer: &Buffer, form: &RecordForm) -> Vec<String> {
@@ -7593,7 +7581,7 @@ fn field_row(which: RecordField) -> usize {
         .position(|field| field == which)
         .expect("every field is in ALL");
 
-    usize::from(BORDER_THICKNESS + SCOPE_MARGIN_ROWS + RECORD_FIELD_LINE) + 2 * index
+    usize::from(BORDER_THICKNESS + DIALOG_MARGIN_ROWS + RECORD_FIELD_LINE) + 2 * index
 }
 
 fn record_caret(buffer: &Buffer, form: &RecordForm) -> Position {
@@ -7606,7 +7594,7 @@ fn record_caret(buffer: &Buffer, form: &RecordForm) -> Position {
     let row = u16::try_from(field_row(form.focus())).expect("a short window");
 
     Position::new(
-        area.x + BORDER_THICKNESS + SCOPE_MARGIN + typed,
+        area.x + BORDER_THICKNESS + DIALOG_MARGIN + typed,
         area.y + row,
     )
 }
@@ -7638,7 +7626,7 @@ fn the_record_window_is_sized_by_what_it_says_plus_its_margins_and_its_border() 
         filled("a", "b", ["c", "d", "e"]),
         refused,
     ] {
-        let Size { width, height } = record_size(&form);
+        let Size { width, height } = Dialog::record(&form).size();
         let label = label_width() + display_width(RECORD_LABEL_GAP);
         let widest = RecordField::ALL.into_iter().fold(
             (display_width(RECORD_HEADING) + display_width(form.scope()))
@@ -7654,17 +7642,16 @@ fn the_record_window_is_sized_by_what_it_says_plus_its_margins_and_its_border() 
 
         assert_eq!(
             usize::from(width),
-            widest + usize::from(2 * SCOPE_MARGIN + 2 * BORDER_THICKNESS),
+            widest + usize::from(2 * DIALOG_MARGIN + 2 * BORDER_THICKNESS),
             "{form:?}"
         );
         // The same height whatever is in it: every field's refusal row is
         // there before a rule is broken, so a refusal moves no field.
-        assert_eq!(height, RECORD_HEIGHT, "{form:?}");
         assert_eq!(
             height,
-            RECORD_LINES + 2 * SCOPE_MARGIN_ROWS + 2 * BORDER_THICKNESS
+            3 + 2 * 3 + 1 + 2 * DIALOG_MARGIN_ROWS + 2 * BORDER_THICKNESS,
+            "{form:?}"
         );
-        assert_eq!(record_lines(&form).len(), usize::from(RECORD_LINES));
     }
 }
 
@@ -7673,7 +7660,7 @@ fn the_record_window_holds_its_width_as_the_cursor_and_the_focus_move() {
     use ratatui::crossterm::event::KeyCode;
 
     let form = filled(SCOPED, RECORDED, RECORD_VALUES);
-    let width = record_size(&form).width;
+    let width = Dialog::record(&form).size().width;
 
     // Left along a field and Tab between them: what the window measures is the
     // widest thing it could say, not what it is saying now, so neither walking
@@ -7681,12 +7668,12 @@ fn the_record_window_holds_its_width_as_the_cursor_and_the_focus_move() {
     let mut walked = form.clone();
     for _ in 0..=RECORD_VALUES[0].chars().count() {
         walked = record_pressed(&walked, KeyCode::Left);
-        assert_eq!(record_size(&walked).width, width, "{walked:?}");
+        assert_eq!(Dialog::record(&walked).size().width, width, "{walked:?}");
     }
     let mut tabbed = form;
     for _ in 0..RecordField::ALL.len() {
         tabbed = record_pressed(&tabbed, KeyCode::Tab);
-        assert_eq!(record_size(&tabbed).width, width, "{tabbed:?}");
+        assert_eq!(Dialog::record(&tabbed).size().width, width, "{tabbed:?}");
     }
 }
 
@@ -7715,7 +7702,7 @@ fn the_record_window_names_the_directory_the_scope_and_its_three_fields() {
 
     // What is being recorded: the name the pact will carry, and the directory
     // carrying it, on the two rows the scope window heads itself in.
-    let heading = usize::from(BORDER_THICKNESS + SCOPE_MARGIN_ROWS);
+    let heading = usize::from(BORDER_THICKNESS + DIALOG_MARGIN_ROWS);
     assert_eq!(
         inside_the_border(&rows[heading]),
         format!("{RECORD_HEADING}{RECORDED}"),
@@ -7751,7 +7738,7 @@ fn the_record_window_names_the_directory_the_scope_and_its_three_fields() {
     // sentence: nothing here is the engine's rule about a scope's spelling.
     assert_eq!(
         inside_the_border(
-            &rows[usize::from(RECORD_HEIGHT - BORDER_THICKNESS - SCOPE_MARGIN_ROWS - 1)]
+            &rows[rows.len() - usize::from(BORDER_THICKNESS + DIALOG_MARGIN_ROWS) - 1]
         ),
         RECORD_RULES,
         "{rows:?}"

@@ -241,13 +241,9 @@ const CONFIRM_NO: &str = " No ";
 
 const CONFIRM_ANSWER_GAP: &str = "    ";
 
-const CONFIRM_MARGIN: u16 = 3;
+const DIALOG_MARGIN: u16 = 3;
 
-const CONFIRM_MARGIN_ROWS: u16 = 1;
-
-const CONFIRM_LINES: u16 = 3;
-
-const CONFIRM_HEIGHT: u16 = CONFIRM_LINES + 2 * CONFIRM_MARGIN_ROWS + 2 * BORDER_THICKNESS;
+const DIALOG_MARGIN_ROWS: u16 = 1;
 
 const PUSH_QUESTION: &str = "File this brief to the board?";
 
@@ -257,13 +253,6 @@ const PUSH_TEAM: &str = "team ";
 /// one: the dialog's value carries no key bytes at all, so this label can only
 /// ever be followed by the name it is held under.
 const PUSH_KEY: &str = "key ";
-
-/// Question, a blank, the project, the team, the key, a blank, the answers:
-/// [`push_lines`] asserts it draws exactly this many, the way [`RECORD_LINES`]
-/// does.
-const PUSH_LINES: u16 = 7;
-
-const PUSH_HEIGHT: u16 = PUSH_LINES + 2 * CONFIRM_MARGIN_ROWS + 2 * BORDER_THICKNESS;
 
 const CUT_QUESTION: &str = "Draft tickets for this project?";
 
@@ -280,13 +269,6 @@ const CUT_SLICES: &str = "slices ";
 const CUT_TEAM: &str = PUSH_TEAM;
 
 const CUT_KEY: &str = PUSH_KEY;
-
-/// Question, a blank, the project, the status, the slices, the team, the key, a
-/// blank, the answers: [`cut_lines`] asserts it draws exactly this many, as
-/// [`push_lines`] does.
-const CUT_LINES: u16 = 9;
-
-const CUT_HEIGHT: u16 = CUT_LINES + 2 * CONFIRM_MARGIN_ROWS + 2 * BORDER_THICKNESS;
 
 const PULL_QUESTION: &str = "Work this ticket to a pull request?";
 
@@ -307,21 +289,6 @@ const PULL_BRANCH: &str = "branch ";
 /// that is on this window and on neither of the others.
 const PULL_FROM: &str = "from ";
 
-/// Question, a blank, the ticket, its title, the scope, the team, the branch, a
-/// blank, the answers — and one more row for the sub-task a resumed run carries
-/// on from, which is why this window's height is worked out rather than fixed:
-/// [`pull_lines`] asserts it draws exactly this many plus that row.
-const PULL_FIXED_LINES: u16 = 9;
-
-/// The one row a resumed run adds and a fresh pull does not: the sub-task it
-/// carries on from.
-///
-/// Nine plus this and no more, because there is deliberately no key line. A
-/// pull resolves the board the machine's own way, so [`Undertaking`] carries
-/// neither a key nor a name for one and this window has nothing of the sort to
-/// draw.
-const PULL_RESUME_LINES: u16 = 1;
-
 const REVIEW_QUESTION: &str = "File these drafts as issues?";
 
 /// The three answers, each with the space around it the other windows' two
@@ -335,18 +302,7 @@ const REVIEW_FEEDBACK: &str = " Feedback ";
 
 const REVIEW_ANSWER_GAP: &str = CONFIRM_ANSWER_GAP;
 
-/// Question, a blank, the slice, a blank, the answers — and one row per draft
-/// title, which is why this window's height is worked out rather than fixed:
-/// what is being answered about is a list, and a window that cut it off would be
-/// asking about drafts it had not shown.
-const REVIEW_FIXED_LINES: u16 = 5;
-
 const CARRY_QUESTION: &str = "Carry on to the next slice?";
-
-/// Question, a blank, what is left, a blank, the answers.
-const CARRY_LINES: u16 = 5;
-
-const CARRY_HEIGHT: u16 = CARRY_LINES + 2 * CONFIRM_MARGIN_ROWS + 2 * BORDER_THICKNESS;
 
 /// Said after the count the run handed over, which words the noun: `3 slices`
 /// becomes `3 slices left`.
@@ -365,15 +321,7 @@ const FILING_HEADING: &str = "";
 
 const FILING_RULES: &str = "Enter files the brief to that scope, Esc files nothing";
 
-const SCOPE_MARGIN: u16 = CONFIRM_MARGIN;
-
-const SCOPE_MARGIN_ROWS: u16 = CONFIRM_MARGIN_ROWS;
-
 const SCOPE_CURSOR: &str = " ";
-
-const SCOPE_LINES: u16 = 5;
-
-const SCOPE_HEIGHT: u16 = SCOPE_LINES + 2 * SCOPE_MARGIN_ROWS + 2 * BORDER_THICKNESS;
 
 const RECORD_HEADING: &str = "Record for ";
 
@@ -381,15 +329,6 @@ const RECORD_RULES: &str =
     "Tab moves to the next field, Enter writes the scope and record, Esc writes nothing";
 
 const RECORD_LABEL_GAP: &str = "  ";
-
-/// Heading, directory, a blank, then each of the three fields with the row its
-/// own refusal goes in under it, then the rules: [`record_lines`] asserts it
-/// draws exactly this many. Every field's rule row is there before any rule is
-/// broken, so a refusal moves no field out from under the reader's eye — the
-/// same reason [`SCOPE_LINES`] counts a row nothing is usually in.
-const RECORD_LINES: u16 = 3 + 2 * 3 + 1;
-
-const RECORD_HEIGHT: u16 = RECORD_LINES + 2 * SCOPE_MARGIN_ROWS + 2 * BORDER_THICKNESS;
 
 /// Reversed rather than a background colour of its own. Colour on the thread
 /// already means whose words these are — the model's, the reader's, warlock's —
@@ -440,22 +379,8 @@ pub fn draw(
     // Over the finished frame rather than instead of it, clearing only the cells
     // behind it, so what a window is answered against is still on screen around
     // it.
-    match modal {
-        None => {}
-        Some(Modal::Quit(highlighted)) => draw_confirm(frame, screen, highlighted),
-        Some(Modal::Push(asked)) => draw_push(frame, screen, asked),
-        Some(Modal::Cut(asked)) => draw_cut(frame, screen, asked),
-        Some(Modal::Pull(asked)) => draw_pull(frame, screen, asked),
-        Some(Modal::Review(drafts)) => draw_review(frame, screen, drafts),
-        Some(Modal::Carry(asked)) => draw_carry(frame, screen, asked),
-        Some(Modal::Filing(field)) => {
-            draw_scope(frame, screen, field, FILING_HEADING, FILING_RULES);
-        }
-        Some(Modal::Scope(field)) => {
-            draw_scope(frame, screen, field, SCOPE_HEADING, scope::RULES);
-        }
-        Some(Modal::Record(form)) => draw_record(frame, screen, form),
-        Some(Modal::Write(field)) => draw_scope(frame, screen, field, PATH_HEADING, PATH_RULES),
+    if let Some(modal) = modal {
+        Dialog::of(modal).draw(frame, screen);
     }
 }
 
@@ -1330,50 +1255,217 @@ const fn noun(state: NodeState) -> &'static str {
     }
 }
 
-fn draw_confirm(frame: &mut Frame<'_>, screen: Rect, highlighted: Answer) {
-    draw_over(
-        frame,
-        confirm_area(screen),
-        Padding::symmetric(CONFIRM_MARGIN, CONFIRM_MARGIN_ROWS),
-        vec![
+// Every window warlock puts over the frame, sized off the lines it draws: the
+// width is the widest of them, the height is how many there are, and both carry
+// the same margins and border, so every question is answered in the same place
+// on the screen.
+struct Dialog<'a> {
+    lines: Vec<Line<'a>>,
+    floor: usize,
+}
+
+impl<'a> Dialog<'a> {
+    fn of(modal: Modal<'a>) -> Self {
+        match modal {
+            Modal::Quit(highlighted) => Self::quit(highlighted),
+            Modal::Push(filing) => Self::push(filing),
+            Modal::Cut(cutting) => Self::cut(cutting),
+            Modal::Pull(undertaking) => Self::pull(undertaking),
+            Modal::Review(review) => Self::review(review),
+            Modal::Carry(carry) => Self::carry(carry),
+            Modal::Filing(field) => Self::scope(field, FILING_HEADING, FILING_RULES),
+            Modal::Scope(field) => Self::scope(field, SCOPE_HEADING, scope::RULES),
+            Modal::Record(form) => Self::record(form),
+            Modal::Write(field) => Self::scope(field, PATH_HEADING, PATH_RULES),
+        }
+    }
+
+    fn new(lines: Vec<Line<'a>>) -> Self {
+        Self { lines, floor: 0 }
+    }
+
+    // A width the text keeps even when no line is that wide yet: the field
+    // windows hold a column for the caret whether or not it is drawn there.
+    fn at_least(self, floor: usize) -> Self {
+        Self { floor, ..self }
+    }
+
+    fn quit(highlighted: Answer) -> Self {
+        Self::new(vec![
             Line::from(CONFIRM_QUESTION).centered(),
             Line::default(),
             answers_line(highlighted),
-        ],
-    );
-}
+        ])
+    }
 
-// The quit dialog's window with four more lines in it, and deliberately the
-// same everything else: `draw_over`, `centred`, `padded_width`, the confirm
-// margins and `answers_line`, so the two questions are answered in the same
-// place on the screen with the answers in the same order.
-fn draw_push(frame: &mut Frame<'_>, screen: Rect, filing: &Filing) {
-    draw_over(
-        frame,
-        push_area(screen, filing),
-        Padding::symmetric(CONFIRM_MARGIN, CONFIRM_MARGIN_ROWS),
-        push_lines(filing),
-    );
-}
+    fn push(filing: &'a Filing) -> Self {
+        Self::new(vec![
+            Line::from(PUSH_QUESTION).centered(),
+            Line::default(),
+            Line::from(filing.project()).bold().centered(),
+            Line::from(team_line(filing)).dim().centered(),
+            Line::from(key_line(filing)).dim().centered(),
+            Line::default(),
+            answers_line(filing.answer()),
+        ])
+    }
 
-fn push_lines(filing: &Filing) -> Vec<Line<'_>> {
-    let lines = vec![
-        Line::from(PUSH_QUESTION).centered(),
-        Line::default(),
-        Line::from(filing.project()).bold().centered(),
-        Line::from(team_line(filing)).dim().centered(),
-        Line::from(key_line(filing)).dim().centered(),
-        Line::default(),
-        answers_line(filing.answer()),
-    ];
+    fn cut(cutting: &'a Cutting) -> Self {
+        Self::new(vec![
+            Line::from(CUT_QUESTION).centered(),
+            Line::default(),
+            Line::from(cutting.project()).bold().centered(),
+            Line::from(status_line(cutting)).dim().centered(),
+            Line::from(slices_line(cutting)).dim().centered(),
+            Line::from(cut_team_line(cutting)).dim().centered(),
+            Line::from(cut_key_line(cutting)).dim().centered(),
+            Line::default(),
+            answers_line(cutting.answer()),
+        ])
+    }
 
-    debug_assert_eq!(
-        u16::try_from(lines.len()).unwrap_or(u16::MAX),
-        PUSH_LINES,
-        "the push dialog is no longer {PUSH_LINES} lines tall"
-    );
+    fn pull(undertaking: &'a Undertaking) -> Self {
+        let mut lines = vec![
+            Line::from(pull_question(undertaking)).centered(),
+            Line::default(),
+            Line::from(undertaking.ticket()).bold().centered(),
+            Line::from(undertaking.title()).centered(),
+            Line::from(pull_scope_line(undertaking)).dim().centered(),
+            Line::from(pull_team_line(undertaking)).dim().centered(),
+            Line::from(pull_branch_line(undertaking)).dim().centered(),
+        ];
+        // The one row a fresh pull does not draw, said where the branch is said
+        // because it is the same kind of fact: where the next session picks the
+        // work up.
+        if let Some(from) = pull_from_line(undertaking) {
+            lines.push(Line::from(from).dim().centered());
+        }
+        lines.push(Line::default());
+        lines.push(answers_line(undertaking.answer()));
 
-    lines
+        Self::new(lines)
+    }
+
+    fn review(review: &'a Review) -> Self {
+        let mut lines = vec![
+            Line::from(REVIEW_QUESTION).centered(),
+            Line::default(),
+            Line::from(review.slice()).bold().centered(),
+        ];
+        // Every title and not the first few: they are what the answer is about, and
+        // a window that showed three of five would be asking about two drafts
+        // nobody had read.
+        lines.extend(
+            review
+                .titles()
+                .iter()
+                .map(|title| Line::from(title.as_str()).dim().centered()),
+        );
+        lines.push(Line::default());
+        lines.push(review_answers_line(review));
+
+        Self::new(lines)
+    }
+
+    fn carry(carry: &Carry) -> Self {
+        Self::new(vec![
+            Line::from(CARRY_QUESTION).centered(),
+            Line::default(),
+            Line::from(carry_left_line(carry)).dim().centered(),
+            Line::default(),
+            answers_line(carry.answer()),
+        ])
+    }
+
+    // The refusal row is drawn, empty, before any rule is broken, so a refusal
+    // does not move the field out from under the reader's eye. The record
+    // window keeps one under each of its fields for the same reason.
+    fn scope(field: &'a ScopeField, heading: &'a str, rules: &'a str) -> Self {
+        Self::new(vec![
+            Line::from(vec![
+                Span::raw(heading),
+                Span::raw(field.directory()).bold(),
+            ]),
+            Line::default(),
+            Line::from(typed_spans(field)),
+            Line::from(field.rule().unwrap_or_default()),
+            Line::from(rules).dim(),
+        ])
+        .at_least(display_width(field.text()) + display_width(SCOPE_CURSOR))
+    }
+
+    // Its own constructor rather than a third heading-and-rules argument to
+    // `scope`: three fields, three refusal rows and a column of labels is a
+    // different shape of window.
+    fn record(form: &'a RecordForm) -> Self {
+        let mut lines = vec![
+            Line::from(vec![
+                Span::raw(RECORD_HEADING),
+                Span::raw(form.scope()).bold(),
+            ]),
+            Line::from(form.path()).dim(),
+            Line::default(),
+        ];
+        for which in RecordField::ALL {
+            let field = form.field(which);
+            let mut spans = vec![Span::raw(label_column(which)).dim()];
+            // The caret goes in the focused field and nowhere else: three carets
+            // would say three fields were taking the next character.
+            if which == form.focus() {
+                spans.extend(typed_spans(field));
+            } else {
+                spans.push(Span::raw(field.text()));
+            }
+            lines.push(Line::from(spans));
+            lines.push(Line::from(field.rule().unwrap_or_default()));
+        }
+        lines.push(Line::from(RECORD_RULES).dim());
+
+        // Every field is measured with a caret column, focused or not, so that
+        // tabbing between them moves nothing sideways.
+        let label = label_width() + display_width(RECORD_LABEL_GAP);
+        let floor = RecordField::ALL
+            .into_iter()
+            .map(|which| label + display_width(form.field(which).text()))
+            .max()
+            .unwrap_or(0)
+            + display_width(SCOPE_CURSOR);
+
+        Self::new(lines).at_least(floor)
+    }
+
+    fn size(&self) -> Size {
+        let widest = self
+            .lines
+            .iter()
+            .map(Line::width)
+            .fold(self.floor, usize::max);
+        let rows = u16::try_from(self.lines.len()).unwrap_or(u16::MAX);
+
+        Size::new(
+            u16::try_from(widest)
+                .unwrap_or(u16::MAX)
+                .saturating_add(2 * DIALOG_MARGIN)
+                .saturating_add(2 * BORDER_THICKNESS),
+            rows.saturating_add(2 * DIALOG_MARGIN_ROWS)
+                .saturating_add(2 * BORDER_THICKNESS),
+        )
+    }
+
+    fn area(&self, screen: Rect) -> Rect {
+        centred(screen, self.size())
+    }
+
+    fn draw(self, frame: &mut Frame<'_>, screen: Rect) {
+        let area = self.area(screen);
+        let block =
+            Block::bordered().padding(Padding::symmetric(DIALOG_MARGIN, DIALOG_MARGIN_ROWS));
+        let inner = block.inner(area);
+
+        frame.render_widget(Clear, area);
+        frame.render_widget(block, area);
+        frame.render_widget(Paragraph::new(self.lines), inner);
+    }
 }
 
 fn team_line(filing: &Filing) -> String {
@@ -1382,51 +1474,6 @@ fn team_line(filing: &Filing) -> String {
 
 fn key_line(filing: &Filing) -> String {
     format!("{PUSH_KEY}{}", filing.destination().key())
-}
-
-fn push_size(filing: &Filing) -> Size {
-    let widest = display_width(PUSH_QUESTION)
-        .max(answers_width())
-        .max(display_width(filing.project()))
-        .max(display_width(&team_line(filing)))
-        .max(display_width(&key_line(filing)));
-
-    Size::new(padded_width(widest, CONFIRM_MARGIN), PUSH_HEIGHT)
-}
-
-// The push dialog's window with two more lines in it, and deliberately the
-// same everything else, for the reason that one is the quit question's window:
-// three questions answered in the same place on the screen with the answers in
-// the same order.
-fn draw_cut(frame: &mut Frame<'_>, screen: Rect, cutting: &Cutting) {
-    draw_over(
-        frame,
-        cut_area(screen, cutting),
-        Padding::symmetric(CONFIRM_MARGIN, CONFIRM_MARGIN_ROWS),
-        cut_lines(cutting),
-    );
-}
-
-fn cut_lines(cutting: &Cutting) -> Vec<Line<'_>> {
-    let lines = vec![
-        Line::from(CUT_QUESTION).centered(),
-        Line::default(),
-        Line::from(cutting.project()).bold().centered(),
-        Line::from(status_line(cutting)).dim().centered(),
-        Line::from(slices_line(cutting)).dim().centered(),
-        Line::from(cut_team_line(cutting)).dim().centered(),
-        Line::from(cut_key_line(cutting)).dim().centered(),
-        Line::default(),
-        answers_line(cutting.answer()),
-    ];
-
-    debug_assert_eq!(
-        u16::try_from(lines.len()).unwrap_or(u16::MAX),
-        CUT_LINES,
-        "the draft dialog is no longer {CUT_LINES} lines tall"
-    );
-
-    lines
 }
 
 fn status_line(cutting: &Cutting) -> String {
@@ -1443,59 +1490,6 @@ fn cut_team_line(cutting: &Cutting) -> String {
 
 fn cut_key_line(cutting: &Cutting) -> String {
     format!("{CUT_KEY}{}", cutting.key())
-}
-
-fn cut_size(cutting: &Cutting) -> Size {
-    let widest = display_width(CUT_QUESTION)
-        .max(answers_width())
-        .max(display_width(cutting.project()))
-        .max(display_width(&status_line(cutting)))
-        .max(display_width(&slices_line(cutting)))
-        .max(display_width(&cut_team_line(cutting)))
-        .max(display_width(&cut_key_line(cutting)));
-
-    Size::new(padded_width(widest, CONFIRM_MARGIN), CUT_HEIGHT)
-}
-
-// The cut dialog's window with a ticket in it instead of a project, and
-// deliberately the same everything else, for the reason that one is the quit
-// question's window: every question warlock asks is answered in the same place
-// on the screen, with the same two answers in the same order.
-fn draw_pull(frame: &mut Frame<'_>, screen: Rect, undertaking: &Undertaking) {
-    draw_over(
-        frame,
-        pull_area(screen, undertaking),
-        Padding::symmetric(CONFIRM_MARGIN, CONFIRM_MARGIN_ROWS),
-        pull_lines(undertaking),
-    );
-}
-
-fn pull_lines(undertaking: &Undertaking) -> Vec<Line<'_>> {
-    let mut lines = vec![
-        Line::from(pull_question(undertaking)).centered(),
-        Line::default(),
-        Line::from(undertaking.ticket()).bold().centered(),
-        Line::from(undertaking.title()).centered(),
-        Line::from(pull_scope_line(undertaking)).dim().centered(),
-        Line::from(pull_team_line(undertaking)).dim().centered(),
-        Line::from(pull_branch_line(undertaking)).dim().centered(),
-    ];
-    // The one row a fresh pull does not draw, said where the branch is said
-    // because it is the same kind of fact: where the next session picks the
-    // work up.
-    if let Some(from) = pull_from_line(undertaking) {
-        lines.push(Line::from(from).dim().centered());
-    }
-    lines.push(Line::default());
-    lines.push(answers_line(undertaking.answer()));
-
-    debug_assert_eq!(
-        u16::try_from(lines.len()).unwrap_or(u16::MAX),
-        pull_height(undertaking) - 2 * CONFIRM_MARGIN_ROWS - 2 * BORDER_THICKNESS,
-        "the pull dialog is not as tall as what it draws"
-    );
-
-    lines
 }
 
 // Which question is being asked, off the one fact that tells the two runs
@@ -1526,85 +1520,6 @@ fn pull_from_line(undertaking: &Undertaking) -> Option<String> {
         .map(|subtask| format!("{PULL_FROM}{subtask}"))
 }
 
-fn pull_size(undertaking: &Undertaking) -> Size {
-    let widest = display_width(pull_question(undertaking))
-        .max(answers_width())
-        .max(display_width(undertaking.ticket()))
-        .max(display_width(undertaking.title()))
-        .max(display_width(&pull_scope_line(undertaking)))
-        .max(display_width(&pull_team_line(undertaking)))
-        .max(display_width(&pull_branch_line(undertaking)))
-        .max(
-            pull_from_line(undertaking)
-                .map(|from| display_width(&from))
-                .unwrap_or_default(),
-        );
-
-    Size::new(
-        padded_width(widest, CONFIRM_MARGIN),
-        pull_height(undertaking),
-    )
-}
-
-// One more row for a resumed run, which is the only thing that varies here:
-// see [`PULL_FIXED_LINES`].
-fn pull_height(undertaking: &Undertaking) -> u16 {
-    let resumed = if undertaking.resuming().is_some() {
-        PULL_RESUME_LINES
-    } else {
-        0
-    };
-    PULL_FIXED_LINES
-        .saturating_add(resumed)
-        .saturating_add(2 * CONFIRM_MARGIN_ROWS)
-        .saturating_add(2 * BORDER_THICKNESS)
-}
-
-// The cut dialog's window with the drafts in it instead of the board, and
-// deliberately the same everything else, for the reason that one is the quit
-// question's window: every question warlock asks is answered in the same place
-// on the screen.
-fn draw_review(frame: &mut Frame<'_>, screen: Rect, review: &Review) {
-    draw_over(
-        frame,
-        review_area(screen, review),
-        Padding::symmetric(CONFIRM_MARGIN, CONFIRM_MARGIN_ROWS),
-        review_lines(review),
-    );
-}
-
-// Where the review window lands, which is where every other question lands.
-fn review_area(screen: Rect, review: &Review) -> Rect {
-    centred(screen, review_size(review))
-}
-
-fn review_lines(review: &Review) -> Vec<Line<'_>> {
-    let mut lines = vec![
-        Line::from(REVIEW_QUESTION).centered(),
-        Line::default(),
-        Line::from(review.slice()).bold().centered(),
-    ];
-    // Every title and not the first few: they are what the answer is about, and
-    // a window that showed three of five would be asking about two drafts
-    // nobody had read.
-    lines.extend(
-        review
-            .titles()
-            .iter()
-            .map(|title| Line::from(title.as_str()).dim().centered()),
-    );
-    lines.push(Line::default());
-    lines.push(review_answers_line(review));
-
-    debug_assert_eq!(
-        u16::try_from(lines.len()).unwrap_or(u16::MAX),
-        review_height(review) - 2 * CONFIRM_MARGIN_ROWS - 2 * BORDER_THICKNESS,
-        "the review window is not as tall as what it draws"
-    );
-
-    lines
-}
-
 // The answers line with three answers on it: the same lit and unlit styles as
 // every other question's, so what is under the finger reads the same way, and
 // the third answer left off entirely when this slice has spent its redraft — an
@@ -1625,96 +1540,8 @@ fn review_answers_line(review: &Review) -> Line<'static> {
     Line::from(spans).centered()
 }
 
-fn review_size(review: &Review) -> Size {
-    let widest = display_width(REVIEW_QUESTION)
-        .max(review_answers_width(review))
-        .max(display_width(review.slice()))
-        .max(
-            review
-                .titles()
-                .iter()
-                .map(|title| display_width(title))
-                .max()
-                .unwrap_or_default(),
-        );
-
-    Size::new(padded_width(widest, CONFIRM_MARGIN), review_height(review))
-}
-
-fn review_answers_width(review: &Review) -> usize {
-    let two = display_width(REVIEW_CREATE)
-        + display_width(REVIEW_ANSWER_GAP)
-        + display_width(REVIEW_SKIP);
-    if review.feedback() {
-        two + display_width(REVIEW_ANSWER_GAP) + display_width(REVIEW_FEEDBACK)
-    } else {
-        two
-    }
-}
-
-// One row per title on top of the fixed five: a slice is drafted into a handful
-// of tickets, and `centred` clamps the window to the screen either way.
-fn review_height(review: &Review) -> u16 {
-    let titles = u16::try_from(review.titles().len()).unwrap_or(u16::MAX);
-    REVIEW_FIXED_LINES
-        .saturating_add(titles)
-        .saturating_add(2 * CONFIRM_MARGIN_ROWS)
-        .saturating_add(2 * BORDER_THICKNESS)
-}
-
-// The quit question's window with what is left named in it, and answered by the
-// same two answers in the same order.
-fn draw_carry(frame: &mut Frame<'_>, screen: Rect, carry: &Carry) {
-    draw_over(
-        frame,
-        carry_area(screen, carry),
-        Padding::symmetric(CONFIRM_MARGIN, CONFIRM_MARGIN_ROWS),
-        carry_lines(carry),
-    );
-}
-
-// And where the question behind a skipped slice lands, likewise.
-fn carry_area(screen: Rect, carry: &Carry) -> Rect {
-    centred(screen, carry_size(carry))
-}
-
-fn carry_lines(carry: &Carry) -> Vec<Line<'_>> {
-    let lines = vec![
-        Line::from(CARRY_QUESTION).centered(),
-        Line::default(),
-        Line::from(carry_left_line(carry)).dim().centered(),
-        Line::default(),
-        answers_line(carry.answer()),
-    ];
-
-    debug_assert_eq!(
-        u16::try_from(lines.len()).unwrap_or(u16::MAX),
-        CARRY_LINES,
-        "the carry-on question is no longer {CARRY_LINES} lines tall"
-    );
-
-    lines
-}
-
 fn carry_left_line(carry: &Carry) -> String {
     format!("{}{CARRY_LEFT}", carry.left())
-}
-
-fn carry_size(carry: &Carry) -> Size {
-    let widest = display_width(CARRY_QUESTION)
-        .max(answers_width())
-        .max(display_width(&carry_left_line(carry)));
-
-    Size::new(padded_width(widest, CONFIRM_MARGIN), CARRY_HEIGHT)
-}
-
-fn draw_over(frame: &mut Frame<'_>, area: Rect, padding: Padding, lines: Vec<Line<'_>>) {
-    let block = Block::bordered().padding(padding);
-    let inner = block.inner(area);
-
-    frame.render_widget(Clear, area);
-    frame.render_widget(block, area);
-    frame.render_widget(Paragraph::new(lines), inner);
 }
 
 fn answers_line(highlighted: Answer) -> Line<'static> {
@@ -1738,32 +1565,6 @@ fn answer_style(lit: bool) -> Style {
     }
 }
 
-fn answers_width() -> usize {
-    display_width(CONFIRM_YES) + display_width(CONFIRM_ANSWER_GAP) + display_width(CONFIRM_NO)
-}
-
-fn confirm_area(screen: Rect) -> Rect {
-    centred(screen, confirm_size())
-}
-
-// Where the push dialog lands, which is where the quit question lands: the
-// same `centred`, over a window sized by what this one has to say.
-fn push_area(screen: Rect, filing: &Filing) -> Rect {
-    centred(screen, push_size(filing))
-}
-
-// Where the cut dialog lands, which is where the other two land: the same
-// `centred`, over a window sized by what this one has to say.
-fn cut_area(screen: Rect, cutting: &Cutting) -> Rect {
-    centred(screen, cut_size(cutting))
-}
-
-// Where the pull dialog lands, which is where the other three land: the same
-// `centred`, over a window sized by what this one has to say.
-fn pull_area(screen: Rect, undertaking: &Undertaking) -> Rect {
-    centred(screen, pull_size(undertaking))
-}
-
 fn centred(screen: Rect, size: Size) -> Rect {
     let Size { width, height } = size;
     let width = width.min(screen.width);
@@ -1777,45 +1578,10 @@ fn centred(screen: Rect, size: Size) -> Rect {
     }
 }
 
-fn confirm_size() -> Size {
-    let widest = display_width(CONFIRM_QUESTION).max(answers_width());
-
-    Size::new(padded_width(widest, CONFIRM_MARGIN), CONFIRM_HEIGHT)
-}
-
-fn padded_width(widest: usize, margin: u16) -> u16 {
-    u16::try_from(widest)
-        .unwrap_or(u16::MAX)
-        .saturating_add(2 * margin)
-        .saturating_add(2 * BORDER_THICKNESS)
-}
-
-fn draw_scope(frame: &mut Frame<'_>, screen: Rect, field: &ScopeField, heading: &str, rules: &str) {
-    draw_over(
-        frame,
-        centred(screen, scope_size(field, heading, rules)),
-        Padding::symmetric(SCOPE_MARGIN, SCOPE_MARGIN_ROWS),
-        scope_lines(field, heading, rules),
-    );
-}
-
-fn scope_lines<'a>(field: &'a ScopeField, heading: &'a str, rules: &'a str) -> Vec<Line<'a>> {
-    vec![
-        Line::from(vec![
-            Span::raw(heading),
-            Span::raw(field.directory()).bold(),
-        ]),
-        Line::default(),
-        Line::from(typed_spans(field)),
-        Line::from(field.rule().unwrap_or_default()),
-        Line::from(rules).dim(),
-    ]
-}
-
 /// The text with the caret on the character the cursor names, and past the last
-/// one a blank of its own. Both sizers leave the column for that blank whether
-/// or not the cursor is in the text, so a window does not change width as the
-/// cursor walks a field.
+/// one a blank of its own. The windows that draw this reserve the blank's column
+/// whether or not the cursor is in the text (see [`Dialog::at_least`]), so a
+/// window does not change width as the cursor walks a field.
 fn typed_spans(field: &ScopeField) -> Vec<Span<'_>> {
     let (before, rest) = field.text().split_at(field.cursor());
     let (at, after) = match rest.chars().next() {
@@ -1830,63 +1596,6 @@ fn typed_spans(field: &ScopeField) -> Vec<Span<'_>> {
     ]
 }
 
-fn scope_size(field: &ScopeField, heading: &str, rules: &str) -> Size {
-    let heading = display_width(heading) + display_width(field.directory());
-    let typed = display_width(field.text()) + display_width(SCOPE_CURSOR);
-    let widest = heading
-        .max(typed)
-        .max(field.rule().map_or(0, display_width))
-        .max(display_width(rules));
-
-    Size::new(padded_width(widest, SCOPE_MARGIN), SCOPE_HEIGHT)
-}
-
-// A sibling of `draw_scope` rather than a third heading-and-rules argument to
-// it: three fields, three refusal rows and a column of labels is a different
-// shape of window, and the two share what they are actually the same about —
-// `draw_over`, `centred`, `padded_width` and the margins.
-fn draw_record(frame: &mut Frame<'_>, screen: Rect, form: &RecordForm) {
-    draw_over(
-        frame,
-        centred(screen, record_size(form)),
-        Padding::symmetric(SCOPE_MARGIN, SCOPE_MARGIN_ROWS),
-        record_lines(form),
-    );
-}
-
-fn record_lines(form: &RecordForm) -> Vec<Line<'_>> {
-    let mut lines = vec![
-        Line::from(vec![
-            Span::raw(RECORD_HEADING),
-            Span::raw(form.scope()).bold(),
-        ]),
-        Line::from(form.path()).dim(),
-        Line::default(),
-    ];
-    for which in RecordField::ALL {
-        let field = form.field(which);
-        let mut spans = vec![Span::raw(label_column(which)).dim()];
-        // The caret goes in the focused field and nowhere else: three carets
-        // would say three fields were taking the next character.
-        if which == form.focus() {
-            spans.extend(typed_spans(field));
-        } else {
-            spans.push(Span::raw(field.text()));
-        }
-        lines.push(Line::from(spans));
-        lines.push(Line::from(field.rule().unwrap_or_default()));
-    }
-    lines.push(Line::from(RECORD_RULES).dim());
-
-    debug_assert_eq!(
-        u16::try_from(lines.len()).unwrap_or(u16::MAX),
-        RECORD_LINES,
-        "the record window is no longer {RECORD_LINES} lines tall"
-    );
-
-    lines
-}
-
 fn label_column(which: RecordField) -> String {
     let width = label_width();
 
@@ -1899,27 +1608,6 @@ fn label_width() -> usize {
         .map(|which| display_width(which.name()))
         .max()
         .unwrap_or(0)
-}
-
-fn record_size(form: &RecordForm) -> Size {
-    let heading = display_width(RECORD_HEADING) + display_width(form.scope());
-    let label = label_width() + display_width(RECORD_LABEL_GAP);
-    // Every field is measured with a cursor column, focused or not, so that
-    // tabbing between them moves nothing sideways — the window is the width of
-    // the widest thing it could say rather than of what it is saying now.
-    let widest = RecordField::ALL.into_iter().fold(
-        heading
-            .max(display_width(form.path()))
-            .max(display_width(RECORD_RULES)),
-        |widest, which| {
-            let field = form.field(which);
-            widest
-                .max(label + display_width(field.text()) + display_width(SCOPE_CURSOR))
-                .max(field.rule().map_or(0, display_width))
-        },
-    );
-
-    Size::new(padded_width(widest, SCOPE_MARGIN), RECORD_HEIGHT)
 }
 
 #[cfg(test)]
