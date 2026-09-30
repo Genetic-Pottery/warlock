@@ -14,7 +14,7 @@ use warlock_tui::{
     NOTHING_SETTLES_IT, Opens, ScopeBlockError, Wired,
 };
 
-use super::{Planned, Settled, cut_with, prepare};
+use super::{ACCEPT, Planned, SKIP, Settled, cut_with, prepare};
 use crate::asking::Asks;
 use crate::error::Error;
 use crate::standing::Standing;
@@ -90,6 +90,14 @@ const PROPOSED: &str = "The board's own spelling, which is what the record names
 
 // And what somebody types instead, which is the answer whatever it says.
 const TYPED: &str = "Neither: the gate folds case.";
+
+// What a review offers, less the slice it names: the two words that are answers,
+// and the third that is whatever the reader has to say.
+const OFFERED: &str = "`accept` to file these, Enter or `skip` to leave it for another run, or \
+                       say what these drafts should be instead";
+
+// A line that is none of the two words, which is feedback whatever it says.
+const FEEDBACK: &str = "Two tickets is one too many; say it in one.";
 
 // The model a read may never turn. A refusal opens no session and a dry run
 // opens none at all, so being asked for a turn is the failure rather than a
@@ -433,11 +441,20 @@ fn cut_to<O: Opens>(
     )
 }
 
+// Every review answered `accept`, which is what a run that files everything is
+// told. More lines than any run here can reach, because a script that ran out
+// would be EOF at a prompt — a skipped slice, which is the opposite of the
+// filing these drive.
+fn accepting() -> Typing {
+    Typing::lines(vec![ACCEPT; 9])
+}
+
 // The whole subcommand with a model in it, which `cut_to` cannot drive: its
 // agent panics when it is turned. Never a dry run — a dry run with a model in
-// reach is the thing the reading tests are about. Nothing proposes and nothing
-// is read: a model that asks nothing puts no question to anybody, and a run that
-// reached either of those stand-ins panics rather than passing.
+// reach is the thing the reading tests are about. Nothing proposes, because a
+// model that asks nothing puts no question to anybody and a run that reached
+// that stand-in panics rather than passing; every slice's drafts are accepted,
+// because nothing reaches the board until somebody says so.
 fn cut_running<A: Converses>(
     repo: &Path,
     home: &Path,
@@ -453,13 +470,27 @@ fn cut_running<A: Converses>(
         linear,
         agent,
         &Unasked,
-        &mut Unprompted,
+        &mut accepting(),
+    )
+}
+
+// The same run with the reviews written down rather than all accepted, and still
+// nothing proposing: what a test says `skip` or feedback through.
+fn cut_reviewing<A: Converses, K: Asks>(
+    repo: &Path,
+    home: &Path,
+    linear: &Boarding,
+    agent: &A,
+    ask: &mut K,
+) -> (Result<(), Error>, String) {
+    cutting(
+        repo, home, BRIEF_PATH, None, false, linear, agent, &Unasked, ask,
     )
 }
 
 // The same run with a proposing model and a written-down line for every
-// question in it: the whole relay, driven with no `claude` on the machine and
-// nothing attached to stdin.
+// question and every review in it: the whole relay, driven with no `claude` on
+// the machine and nothing attached to stdin.
 fn cut_answering<A: Converses, P: Converses, K: Asks>(
     repo: &Path,
     home: &Path,
@@ -1373,20 +1404,25 @@ mod headless {
 
         let lines = cut_filing(repo.path(), home.path(), &linear, &agent);
 
-        // One line per slice as it is drafted and one naming what it filed, in
-        // the order the slices are cut in and with nothing else between them.
-        assert_eq!(
-            lines,
-            [
-                format!("[1/3] slice 1 `{FIRST}` — drafting"),
-                format!("cut `{FIRST}` into `WAR-1`, `WAR-2`"),
-                format!("[2/3] slice 2 `{SECOND}` — drafting"),
-                format!("cut `{SECOND}` into `WAR-3`, `WAR-4`"),
-                format!("[3/3] slice 3 `{THIRD}` — drafting"),
-                format!("cut `{THIRD}` into `WAR-5`, `WAR-6`"),
-            ],
-            "{lines:?}"
-        );
+        // Per slice: the walk's own line as it is drafted, the drafts that came
+        // back, what can be said about them, and what saying `accept` filed them
+        // as — in the order the slices are cut in and with nothing else between
+        // them.
+        let expected: Vec<String> = [(1, FIRST, 1, 2), (2, SECOND, 3, 4), (3, THIRD, 5, 6)]
+            .into_iter()
+            .flat_map(|(place, heading, first, second)| {
+                [
+                    format!("[{place}/3] slice {place} `{heading}` — drafting"),
+                    format!(
+                        "slice {place} `{heading}` — drafted `Stand in for slice {place}`, \
+                         `Follow on from slice {place}`"
+                    ),
+                    format!("slice {place} `{heading}` — {OFFERED}"),
+                    format!("cut `{heading}` into `WAR-{first}`, `WAR-{second}`"),
+                ]
+            })
+            .collect();
+        assert_eq!(lines, expected, "{lines:?}");
         // One session per slice and one turn in each of them: this model asked
         // nothing, so nothing was put to anybody — the stand-ins for the
         // proposing model and for stdin both panic if they are reached.
@@ -1803,9 +1839,9 @@ mod relaying {
         let home = a_home(repo.path());
         let linear = a_sliced_project(SLICED);
         let agent = asking_once();
-        // Enter: a line with nothing typed on it, which is the proposal
-        // accepted.
-        let mut typing = Typing::lines([""]);
+        // Enter at the question, which is the proposal accepted, and then the
+        // three reviews the three slices' drafts come up for.
+        let mut typing = Typing::lines(["", ACCEPT, ACCEPT, ACCEPT]);
 
         let (outcome, printed) = cut_answering(
             repo.path(),
@@ -1831,8 +1867,10 @@ mod relaying {
             placed(&lines, "asked:") < placed(&lines, "warlock's answer:"),
             "the answer was offered before the question was put: {lines:?}"
         );
-        // The cursor stopped once, where a reader would have typed.
-        assert_eq!(typing.asked(), ["> "], "{:?}", typing.asked());
+        // The cursor stopped at the question and at each of the three reviews,
+        // on the same bare mark every time: what is being answered is on the
+        // lines above it rather than in the prompt.
+        assert_eq!(typing.asked(), ["> "; 4], "{:?}", typing.asked());
         // What reached the session is the proposal, in the words it was
         // offered in, and it is on the thread as what was sent.
         assert!(
@@ -1860,8 +1898,14 @@ mod relaying {
         let linear = a_sliced_project(SLICED);
         let agent = asking_once();
         // As a pipe hands it over, newline and all: what is sent is what was
-        // typed and nothing of how it arrived.
-        let mut typing = Typing::lines([format!("{TYPED}\n")]);
+        // typed and nothing of how it arrived. The three reviews after it are
+        // accepted, so the run files what it drafted.
+        let mut typing = Typing::lines([
+            format!("{TYPED}\n"),
+            ACCEPT.to_owned(),
+            ACCEPT.to_owned(),
+            ACCEPT.to_owned(),
+        ]);
 
         let (outcome, printed) = cut_answering(
             repo.path(),
@@ -1900,7 +1944,7 @@ mod relaying {
         let home = a_home(repo.path());
         let linear = a_sliced_project(SLICED);
         let agent = asking_once();
-        let mut typing = Typing::lines([TYPED]);
+        let mut typing = Typing::lines([TYPED, ACCEPT, ACCEPT, ACCEPT]);
 
         let (outcome, printed) = cut_answering(
             repo.path(),
@@ -1922,7 +1966,7 @@ mod relaying {
             !printed.contains("warlock's answer:"),
             "a refusal was offered as an answer: {printed}"
         );
-        assert_eq!(typing.asked(), ["> "], "{:?}", typing.asked());
+        assert_eq!(typing.asked(), ["> "; 4], "{:?}", typing.asked());
         assert!(
             agent.said().iter().any(|said| said == TYPED),
             "{:?}",
@@ -1937,7 +1981,7 @@ mod relaying {
         let home = a_home(repo.path());
         let linear = a_sliced_project(SLICED);
         let agent = asking_once();
-        let mut typing = Typing::lines([TYPED]);
+        let mut typing = Typing::lines([TYPED, ACCEPT, ACCEPT, ACCEPT]);
 
         // No `claude` for the proposing conversation, which is one of the three
         // ways that attempt ends in a failure rather than an answer. The
@@ -1958,7 +2002,7 @@ mod relaying {
             unproposed.contains(&format!("slice 1 `{FIRST}`")),
             "{unproposed}"
         );
-        assert_eq!(typing.asked(), ["> "], "{:?}", typing.asked());
+        assert_eq!(typing.asked(), ["> "; 4], "{:?}", typing.asked());
         assert!(
             agent.said().iter().any(|said| said == TYPED),
             "{:?}",
@@ -1973,7 +2017,9 @@ mod relaying {
         let home = a_home(repo.path());
         let linear = a_sliced_project(SLICED);
         let agent = asking_and_abandoned();
-        let mut typing = Typing::lines([""]);
+        // Enter at the question, and then the two reviews the slices that did
+        // draft come up for: the slice this is about never reaches one.
+        let mut typing = Typing::lines(["", ACCEPT, ACCEPT]);
 
         let (outcome, printed) = cut_answering(
             repo.path(),
@@ -1998,14 +2044,15 @@ mod relaying {
     }
 
     #[test]
-    fn a_pipe_with_nothing_in_it_leaves_the_slice_uncut_and_sends_nothing_in_its_place() {
+    fn a_pipe_with_nothing_in_it_leaves_every_slice_uncut_and_sends_nothing_in_its_place() {
         let repo = a_scoped_repository();
         let home = a_home(repo.path());
         let linear = a_sliced_project(SLICED);
         let agent = asking_and_abandoned();
-        // EOF at every question: nobody is there. The read waits for a line
-        // rather than deciding anything, so this is the one thing that ends the
-        // waiting without one.
+        // EOF at every read: nobody is there. A read waits for a line rather
+        // than deciding anything, so this is the one thing that ends the
+        // waiting without one — at the question the first slice asked, and at
+        // the review the two that drafted came up for.
         let mut typing = Typing::nothing();
 
         let (outcome, printed) = cut_answering(
@@ -2031,6 +2078,262 @@ mod relaying {
                 "warlock answered its own question: {said}"
             );
         }
+        // And the two that did draft were left uncut as well: a pipe that ends
+        // at the review is nobody saying what to do with the drafts, which files
+        // nothing.
+        assert!(
+            linear.issues_created().is_empty(),
+            "{:?}",
+            linear.issues_created()
+        );
+        assert!(recorded(repo.path()).is_empty());
+    }
+}
+
+// One slice's drafts put up before anything is sent, and what the line read
+// makes of them. Every one of these drives the whole subcommand off a
+// written-down script, so no test here reaches a `claude`, a terminal or the
+// stdin of whatever ran the suite.
+mod reviewing {
+    use super::*;
+
+    // What the second drafts of a redrafted slice are named for, so the tickets
+    // that were filed are told from the ones that were thought better of.
+    const AGAIN: &str = "Read the project back, in one ticket";
+
+    // What a reader is told one slice's drafts are, in the titles the drafting
+    // road's own stub gives them.
+    fn drafted(position: usize, heading: &str, stub: &str) -> String {
+        format!(
+            "slice {position} `{heading}` — drafted `Stand in for {stub}`, \
+             `Follow on from {stub}`"
+        )
+    }
+
+    // A model that drafts every slice and asks nothing: the shortest run that
+    // puts three reviews to the shell and no question at all. A turn it was not
+    // scripted for panics, so the number of sessions is asserted by the script
+    // rather than counted afterwards.
+    fn drafting_each() -> Scripted {
+        Scripted::saying([
+            Answering::drafts(FIRST),
+            Answering::drafts(SECOND),
+            Answering::drafts(THIRD),
+        ])
+    }
+
+    // The whole run over that model, with the reviews written down.
+    fn reviewing(repo: &Path, home: &Path, linear: &Boarding, ask: &mut Typing) -> String {
+        let (outcome, printed) = cut_reviewing(repo, home, linear, &drafting_each(), ask);
+
+        outcome.expect("a reviewed slice is a line and the next slice");
+        printed
+    }
+
+    #[test]
+    fn the_drafts_are_printed_and_a_line_is_read_before_the_slice_is_filed() {
+        let repo = a_scoped_repository();
+        let home = a_home(repo.path());
+        let linear = a_sliced_project(SLICED);
+        let mut typing = Typing::lines([ACCEPT, ACCEPT, ACCEPT]);
+
+        let printed = reviewing(repo.path(), home.path(), &linear, &mut typing);
+
+        let lines = lines(&printed);
+        // The drafts by title, then what can be said back about them, then the
+        // filing: the order is the promise, because a reader answers about
+        // drafts they have been shown.
+        let shown = placed(&lines, &drafted(1, FIRST, FIRST));
+        let offered = placed(&lines, OFFERED);
+        let filed = placed(&lines, &format!("cut `{FIRST}` into"));
+        assert!(shown < offered && offered < filed, "{lines:?}");
+        assert!(
+            lines[offered].contains(&format!("slice 1 `{FIRST}`")),
+            "{lines:?}"
+        );
+        // One read per slice, at the bare mark both roads stop on.
+        assert_eq!(typing.asked(), ["> "; 3], "{:?}", typing.asked());
+        assert_eq!(linear.issues_created().len(), 6);
+    }
+
+    #[test]
+    fn skip_leaves_the_slice_uncut_and_the_run_goes_on_to_the_next_one() {
+        let repo = a_scoped_repository();
+        let home = a_home(repo.path());
+        let linear = a_sliced_project(SLICED);
+        let mut typing = Typing::lines([SKIP, ACCEPT, ACCEPT]);
+
+        let printed = reviewing(repo.path(), home.path(), &linear, &mut typing);
+
+        let lines = lines(&printed);
+        let skipped = &lines[placed(&lines, "was skipped")];
+        assert!(skipped.contains(&format!("slice 1 `{FIRST}`")), "{skipped}");
+        assert!(skipped.contains("nothing was recorded for it"), "{skipped}");
+        // The two after it were drafted and filed, and nothing of the skipped
+        // slice reached the board.
         assert_eq!(linear.issues_created().len(), 4);
+        for issue in linear.issues_created() {
+            assert!(!issue.title.contains(FIRST), "{issue:?}");
+        }
+    }
+
+    #[test]
+    fn an_empty_line_is_the_skip_the_panel_s_own_window_opens_lit() {
+        let repo = a_scoped_repository();
+        let home = a_home(repo.path());
+        let linear = a_sliced_project(SLICED);
+        // Enter, then a line with nothing but spaces on it: neither is somebody
+        // saying to file anything, and neither is feedback about the drafts.
+        let mut typing = Typing::lines(["", "   ", ACCEPT]);
+
+        let printed = reviewing(repo.path(), home.path(), &linear, &mut typing);
+
+        let skipped = lines(&printed)
+            .iter()
+            .filter(|line| line.contains("was skipped"))
+            .count();
+        assert_eq!(skipped, 2, "{printed}");
+        // And the one slice that was accepted is the only one on the board.
+        assert_eq!(linear.issues_created().len(), 2);
+    }
+
+    #[test]
+    fn a_skipped_slice_costs_no_request_at_all() {
+        let repo = a_scoped_repository();
+        let home = a_home(repo.path());
+        let linear = a_sliced_project(SLICED);
+        let mut typing = Typing::lines([SKIP, SKIP, SKIP]);
+
+        reviewing(repo.path(), home.path(), &linear, &mut typing);
+
+        // The two reads `prepare` makes and nothing else: the review is asked
+        // before a filing is built at all, so a slice nobody accepted reaches no
+        // issue create, no edge and no comment.
+        assert_eq!(linear.calls(), read_by_prepare(), "{:?}", linear.calls());
+    }
+
+    #[test]
+    fn a_skipped_slice_writes_no_cut_record_so_a_later_run_reaches_it_again() {
+        let repo = a_scoped_repository();
+        let home = a_home(repo.path());
+        let linear = a_sliced_project(SLICED);
+        let mut typing = Typing::lines([SKIP, ACCEPT, ACCEPT]);
+
+        reviewing(repo.path(), home.path(), &linear, &mut typing);
+
+        // The file on disk, which is what a later run reads: the two slices that
+        // were filed are in it, and the skipped one is nowhere in it at all.
+        assert_eq!(
+            recorded(repo.path()),
+            [
+                (
+                    SECOND.to_owned(),
+                    vec!["WAR-1".to_owned(), "WAR-2".to_owned()]
+                ),
+                (
+                    THIRD.to_owned(),
+                    vec!["WAR-3".to_owned(), "WAR-4".to_owned()]
+                ),
+            ]
+        );
+        let held = fs::read_to_string(filed_path(repo.path())).expect("a record file");
+        assert!(
+            !held.contains(FIRST),
+            "the skipped slice was recorded: {held}"
+        );
+
+        // And a second run over the same repository reaches it: the slice is
+        // offered again, drafted again and filed.
+        let lines = cut_filing(repo.path(), home.path(), &linear, &Sketching::drafting());
+
+        assert!(
+            lines.contains(&format!("cut `{FIRST}` into `WAR-5`, `WAR-6`")),
+            "{lines:?}"
+        );
+    }
+
+    #[test]
+    fn anything_else_is_feedback_to_the_same_session_and_the_slice_is_drafted_again() {
+        let repo = a_scoped_repository();
+        let home = a_home(repo.path());
+        let linear = a_sliced_project(SLICED);
+        // Four answers for three slices: the first slice drafts, is told to
+        // think again, and drafts something else.
+        let agent = Scripted::saying([
+            Answering::drafts(FIRST),
+            Answering::drafts(AGAIN),
+            Answering::drafts(SECOND),
+            Answering::drafts(THIRD),
+        ]);
+        let mut typing = Typing::lines([FEEDBACK, ACCEPT, ACCEPT, ACCEPT]);
+
+        let (outcome, printed) =
+            cut_reviewing(repo.path(), home.path(), &linear, &agent, &mut typing);
+
+        outcome.expect("a redrafted slice is still filed");
+        // What was typed reached the session that drafted them, in the words it
+        // was typed in: feedback is a turn of that same conversation and never a
+        // second one.
+        assert_eq!(
+            agent.said().iter().filter(|said| *said == FEEDBACK).count(),
+            1,
+            "{:?}",
+            agent.said()
+        );
+        let lines = lines(&printed);
+        let redrafting = &lines[placed(&lines, "is being redrafted")];
+        assert!(redrafting.contains(FEEDBACK), "{redrafting}");
+        assert!(
+            redrafting.contains(&format!("slice 1 `{FIRST}`")),
+            "{redrafting}"
+        );
+        // The drafts that came back were put up the same way — two readings for
+        // the one slice, four for the run — and what was filed is the second
+        // set rather than the one the feedback was about.
+        assert_eq!(typing.asked(), ["> "; 4], "{:?}", typing.asked());
+        assert!(lines.contains(&drafted(1, FIRST, AGAIN)), "{lines:?}");
+        let filed: Vec<String> = linear
+            .issues_created()
+            .into_iter()
+            .map(|issue| issue.title)
+            .collect();
+        assert!(
+            filed.contains(&format!("Stand in for {AGAIN}")),
+            "{filed:?}"
+        );
+        assert!(
+            !filed.contains(&format!("Stand in for {FIRST}")),
+            "the drafts the feedback was about were filed: {filed:?}"
+        );
+        // And the key value reaches the client and nothing else, here as
+        // everywhere.
+        assert!(!printed.contains(NOT_A_KEY), "{printed}");
+    }
+
+    #[test]
+    fn a_pipe_that_ends_at_the_review_leaves_the_slice_uncut_and_sends_nothing() {
+        let repo = a_scoped_repository();
+        let home = a_home(repo.path());
+        let linear = a_sliced_project(SLICED);
+        let mut typing = Typing::nothing();
+
+        let printed = reviewing(repo.path(), home.path(), &linear, &mut typing);
+
+        assert!(
+            printed.contains("nobody said what to do with its drafts"),
+            "{printed}"
+        );
+        assert!(printed.contains(&format!("slice 1 `{FIRST}`")), "{printed}");
+        // Every slice was drafted and offered, and none was filed: nothing was
+        // created, nothing was recorded, and a run that filed nothing has
+        // nothing to say on the project.
+        assert_eq!(typing.asked(), ["> "; 3], "{:?}", typing.asked());
+        assert!(
+            linear.issues_created().is_empty(),
+            "{:?}",
+            linear.issues_created()
+        );
+        assert!(recorded(repo.path()).is_empty());
+        assert!(linear.comments().is_empty(), "{:?}", linear.comments());
     }
 }
