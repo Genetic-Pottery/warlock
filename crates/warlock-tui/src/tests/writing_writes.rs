@@ -477,6 +477,218 @@ fn a_conversation_with_no_answer_on_it_writes_nothing_and_says_so() {
     assert_eq!(everything_under(repo.path()), Vec::<String>::new());
 }
 
+// The other door, called the way its one caller calls it: no `App`, no window
+// and no keys, so what is asserted here is the judging and the bytes alone.
+// `briefing.rs` has its own tests for the conversation around it.
+mod without_a_screen {
+    use warlock_tui::ScopeField;
+
+    use super::super::{Landed, landed};
+    use super::{
+        BRIEF, WHOLE, a_repo, app_answering, everything_under, field, fs, manifest_path, now,
+        write_submit,
+    };
+
+    // Two of `WHOLE`'s five sections. Every test below hands its shape in
+    // rather than writing a template, because the argument is the shape.
+    const SHAPE: &str = "# A title\n\n## Outcome\n\n## Scope\n";
+
+    #[test]
+    fn a_typed_path_is_written_and_the_line_names_the_stored_spelling() {
+        let repo = a_repo();
+
+        // Typed with a leading `./` and answered manifest-relative: the one
+        // spelling, and the one a `/push` afterwards files.
+        let answer = landed(repo.path(), &format!("./{BRIEF}"), SHAPE, WHOLE);
+
+        assert_eq!(
+            answer,
+            Landed::Wrote(format!("wrote {BRIEF} — {} bytes", WHOLE.len()))
+        );
+        assert_eq!(
+            fs::read_to_string(repo.path().join(BRIEF)).expect("the artifact reads back"),
+            WHOLE,
+            "the bytes on disk are not the reply handed in"
+        );
+        // The output directory was not there: the write made it, and made
+        // nothing else.
+        assert_eq!(everything_under(repo.path()), ["docs", BRIEF]);
+    }
+
+    #[test]
+    fn the_bytes_are_the_unfenced_reply_with_the_last_newline_ensured() {
+        // The panel's own table, against the same two functions: a document
+        // written at a shell and one written in the window are the same bytes.
+        for (reply, written) in [
+            ("# Freshness\n\nProse.\n", "# Freshness\n\nProse.\n"),
+            ("# Freshness\n\nProse.", "# Freshness\n\nProse.\n"),
+            ("# Freshness\n\n\n\n", "# Freshness\n\n\n\n"),
+            (
+                "```markdown\n# Freshness\n\nProse.\n```\n",
+                "# Freshness\n\nProse.\n",
+            ),
+            (
+                "# Freshness\n\n```rust\nlet x = 1;\n```\n\n  indented   \n",
+                "# Freshness\n\n```rust\nlet x = 1;\n```\n\n  indented   \n",
+            ),
+        ] {
+            let repo = a_repo();
+
+            // A shape that asks for nothing, so each reply stays the literal
+            // it is meant to be.
+            let answer = landed(repo.path(), BRIEF, "", reply);
+
+            assert!(
+                matches!(answer, Landed::Wrote(_)),
+                "{reply:?} was refused: {answer:?}"
+            );
+            assert_eq!(
+                fs::read_to_string(repo.path().join(BRIEF)).expect("the artifact reads back"),
+                written,
+                "{reply:?} was interfered with"
+            );
+        }
+    }
+
+    #[test]
+    fn a_path_that_already_exists_is_refused_and_nothing_is_written_over() {
+        let repo = a_repo();
+        fs::create_dir_all(repo.path().join("docs")).expect("makes the output directory");
+        fs::write(repo.path().join(BRIEF), "what was already there\n").expect("writes it first");
+
+        let answer = landed(repo.path(), BRIEF, SHAPE, WHOLE);
+
+        assert_eq!(
+            answer,
+            Landed::Path(format!("{BRIEF} already exists — nothing was written"))
+        );
+        assert_eq!(
+            fs::read_to_string(repo.path().join(BRIEF)).expect("the file reads back"),
+            "what was already there\n",
+            "the write went over a file that was already there"
+        );
+    }
+
+    #[test]
+    fn the_panels_refusal_is_that_sentence_and_the_way_out_of_its_window() {
+        // The one thing both doors have to say — the file is there and nothing
+        // was written over it — is worded once. The tail is the window's alone,
+        // because a shell prompt has no Esc.
+        let repo = a_repo();
+        fs::create_dir_all(repo.path().join("docs")).expect("makes the output directory");
+        fs::write(repo.path().join(BRIEF), "what was already there\n").expect("writes it first");
+        let mut app = app_answering(repo.path(), WHOLE);
+
+        let Landed::Path(rule) = landed(repo.path(), BRIEF, SHAPE, WHOLE) else {
+            panic!("a path already taken is a rule about the path");
+        };
+        let prompt = write_submit(&mut app, repo.path(), &field(BRIEF), now());
+
+        let under_the_field = format!("{rule}; change the path or press Esc");
+        assert_eq!(
+            prompt.field().and_then(ScopeField::rule),
+            Some(under_the_field.as_str()),
+        );
+    }
+
+    #[test]
+    fn a_path_that_climbs_out_of_the_repository_is_a_rule_about_the_path() {
+        let repo = a_repo();
+        let outside = repo.path().join("outside");
+        let root = repo.path().join("repo");
+        fs::create_dir_all(&outside).expect("makes a directory beside the repository");
+        fs::create_dir_all(&root).expect("makes the repository");
+
+        let answer = landed(&root, "../outside/brief.md", SHAPE, WHOLE);
+
+        assert!(
+            matches!(&answer, Landed::Path(rule) if !rule.is_empty()),
+            "a path outside the repository was answered with {answer:?}"
+        );
+        assert_eq!(everything_under(&outside), Vec::<String>::new());
+        assert_eq!(everything_under(&root), Vec::<String>::new());
+    }
+
+    #[test]
+    fn the_shape_is_the_callers_rather_than_the_repositorys_template() {
+        // The one deliberate difference from the panel, which reads this very
+        // file at the write.
+        let repo = a_repo();
+        let template = manifest_path(repo.path()).with_file_name("brief-template.md");
+        fs::create_dir_all(template.parent().expect("the template sits in a directory"))
+            .expect("makes .warlock");
+        fs::write(&template, "# A title\n\n## Rollout\n").expect("writes a template");
+
+        let answer = landed(repo.path(), BRIEF, SHAPE, WHOLE);
+
+        assert_eq!(
+            answer,
+            Landed::Wrote(format!("wrote {BRIEF} — {} bytes", WHOLE.len())),
+            "the template on disk was read instead of the shape handed in"
+        );
+
+        // And the same document against a shape asking for what the template
+        // asks for: refused, with the template untouched either way.
+        let second = "docs/warlock-brief-14-sigils.md";
+        let answer = landed(repo.path(), second, "# A title\n\n## Rollout\n", WHOLE);
+
+        assert_eq!(
+            answer,
+            Landed::Document(
+                "the document is missing ## Rollout, so nothing was written".to_owned()
+            )
+        );
+        assert!(!repo.path().join(second).exists(), "{second} was written");
+    }
+
+    #[test]
+    fn a_document_missing_sections_is_refused_and_nothing_reaches_the_disk() {
+        let repo = a_repo();
+        let dropped = "# Freshness\n\nProse.\n\n## Success criteria\n\n## Out of scope\n";
+
+        let answer = landed(
+            repo.path(),
+            BRIEF,
+            "## Outcome\n## Success criteria\n## Constraints\n## Out of scope\n## Scope\n",
+            dropped,
+        );
+
+        assert_eq!(
+            answer,
+            Landed::Document(
+                "the document is missing ## Outcome, ## Constraints and ## Scope, \
+                 so nothing was written"
+                    .to_owned()
+            ),
+        );
+        assert_eq!(everything_under(repo.path()), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_write_that_will_not_happen_answers_with_what_it_cost() {
+        // A file where the output directory has to be: the parent cannot be
+        // made, which is the cheapest real version of a disk that will not take
+        // the write.
+        let repo = a_repo();
+        fs::write(repo.path().join("docs"), "not a directory\n")
+            .expect("writes a file in the way of the output directory");
+
+        let answer = landed(repo.path(), BRIEF, SHAPE, WHOLE);
+
+        let Landed::Document(line) = answer else {
+            panic!("a write that failed said nothing about the document")
+        };
+        assert!(
+            line.starts_with(&format!("could not write {BRIEF}: ")) && !line.ends_with(": "),
+            "a write that failed said {line:?}"
+        );
+        assert_eq!(
+            fs::read_to_string(repo.path().join("docs")).expect("the file in the way reads back"),
+            "not a directory\n"
+        );
+    }
+}
+
 // `scoping.rs`'s counterpart for the other prompt, driven exactly as it
 // drives that one: the window is opened the way the loop opens it, every key
 // goes through `edit_for` as `press_for` would send it, and what comes back
