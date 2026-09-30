@@ -8,8 +8,9 @@ use warlock_engine::{
 
 use ratatui::crossterm::event::{KeyCode, KeyModifiers};
 
-use super::{Typed, added, bound, forgotten, listed, typed};
+use super::{PROMPT, Typed, added, bound, forgotten, listed, typed};
 use crate::error::Error;
+use crate::stubs::Typing;
 
 // Every value stored anywhere below is this one string, so a test asserting
 // that nothing printed a key has one needle to look for and a new rendering
@@ -40,10 +41,25 @@ fn add_reading(
     masked: bool,
     line: Option<&str>,
 ) -> (Result<(), Error>, String) {
-    let answer = line.map(str::to_owned);
+    let (outcome, said, _) = add_asking(home, name, masked, line);
+    (outcome, said)
+}
+
+// The same, with the prompts the run asked kept: they are the ask's rather than
+// the preamble's, so `out` no longer holds the cursor's own line.
+fn add_asking(
+    home: &Path,
+    name: &str,
+    masked: bool,
+    line: Option<&str>,
+) -> (Result<(), Error>, String, Vec<String>) {
+    let mut typing = match line {
+        Some(line) => Typing::lines([line]),
+        None => Typing::nothing(),
+    };
     let mut out = Vec::new();
-    let outcome = added(home, name, masked, || Ok(answer), &mut out);
-    (outcome, text(out))
+    let outcome = added(home, name, masked, &mut typing, &mut out);
+    (outcome, text(out), typing.asked().to_vec())
 }
 
 fn listing(home: &Path, json: bool) -> String {
@@ -96,6 +112,23 @@ fn a_piped_key_round_trips_and_never_appears_on_the_screen() {
         "the confirmation does not name the file it wrote: {said}"
     );
     assert!(!said.contains(SECRET), "the key reached the screen: {said}");
+}
+
+// One question, asked once through the shared read and not printed with the
+// preamble as well: two copies of the prompt would leave a reader looking at two
+// cursors, one of them nobody is waiting behind.
+#[test]
+fn the_one_question_is_asked_once_and_never_printed_twice() {
+    let home = a_dir();
+
+    let (outcome, said, asked) = add_asking(home.path(), "acme", false, Some(SECRET));
+
+    outcome.expect("a line holding a key is stored");
+    assert_eq!(asked, [PROMPT], "the cursor's own line, asked once");
+    assert!(
+        !said.contains(PROMPT),
+        "the prompt was printed as well as asked: {said}"
+    );
 }
 
 // The two preambles, asserted as the promise each makes rather than as a whole

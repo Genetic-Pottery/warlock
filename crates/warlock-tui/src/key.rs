@@ -6,9 +6,10 @@
 //! written into a shell history file afterwards.
 //!
 //! How that line is read depends on what stdin is, and nothing else does. A
-//! pipe is read in cooked mode exactly as it always was, so `warlock key add
-//! acme < key.txt` and every script around it are untouched. A terminal is read
-//! a keystroke at a time with echo off, because the alternative was a person
+//! pipe is read in cooked mode exactly as it always was — through the read every
+//! headless verb shares, in [`mod@crate::asking`] — so `warlock key add acme <
+//! key.txt` and every script around it are untouched. A terminal is read a
+//! keystroke at a time with echo off, because the alternative was a person
 //! pasting a live credential onto a screen they may be sharing — and a pasted
 //! key cannot be un-pasted. This is the one place in the family that takes the
 //! terminal, which is why the restore in [`read_masked`] sits in a `Drop`: an
@@ -21,7 +22,7 @@
 //! value.
 
 use std::fmt;
-use std::io::{self, IsTerminal, Write};
+use std::io::{self, Write};
 use std::path::Path;
 
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -32,6 +33,7 @@ use warlock_engine::{
     save_key_binding, sigils_path, validate_scope,
 };
 
+use crate::asking::{self, Asks};
 use crate::error::{Error, one_line};
 use crate::query::{envelope, write_object};
 use crate::standing::{FOR_KEY, Standing};
@@ -64,13 +66,18 @@ const TO_FORGET: &str = "forget";
 // question that never needed one.
 pub(crate) fn key_add(name: &str) -> Result<(), Error> {
     let home = Standing::home()?;
-    // Stdin and not stdout, because stdin is what is about to be read: a
-    // terminal there means a person typing, and anything else means a script
-    // that wants the cooked line it has always had.
-    let masked = io::stdin().is_terminal();
-    let ask: fn() -> Result<Option<String>, Error> = if masked { read_masked } else { read_line };
-
-    added(&home, name, masked, ask, &mut io::stdout())
+    // A terminal on stdin means a person typing, and anything else a script that
+    // wants the cooked line it has always had; the question itself is
+    // `asking`'s, because what it decides is the echo. Two calls rather than one
+    // over a chosen value: the two reads are two types, and the only thing
+    // `added` does with the answer is word its preamble.
+    let masked = asking::at_terminal();
+    let mut out = io::stdout();
+    if masked {
+        added(&home, name, masked, &mut Masked, &mut out)
+    } else {
+        added(&home, name, masked, &mut asking::Stdin, &mut out)
+    }
 }
 
 pub(crate) fn key_list(json: bool) -> Result<(), Error> {
@@ -98,21 +105,21 @@ pub(crate) fn key_forget(name: &str) -> Result<(), Error> {
 }
 
 // Split from `key_add` so the order is something a test can run against a
-// temporary home: `ask` is a canned answer under test, `masked` is which of the
+// temporary home: `ask` is a scripted line under test, `masked` is which of the
 // two reads the caller picked, and `out` collects what a reader would have
 // seen. `masked` is passed rather than asked for here because a test has no
 // terminal, and the preamble's wording is the thing under test.
 //
 // That order is the part worth pinning, and it is `config::prompted`'s. The
-// preamble is flushed before anything is read, because the prompt carries no
-// newline and would otherwise sit in the terminal's buffer behind a cursor
-// waiting on a person; EOF is answered before anything is looked at; and the
-// confirmation names the file only after the engine has written it.
+// preamble is flushed before the question is asked, because a person is about to
+// read it and answer; EOF is answered before anything is looked at; and the
+// confirmation names the file only after the engine has written it. The prompt
+// itself is the ask's, whichever of the two reads is underneath it.
 fn added<W: Write>(
     home: &Path,
     name: &str,
     masked: bool,
-    ask: impl FnOnce() -> Result<Option<String>, Error>,
+    ask: &mut impl Asks,
     out: &mut W,
 ) -> Result<(), Error> {
     // Judged before the preamble is printed rather than left to the save, which
@@ -130,17 +137,18 @@ fn added<W: Write>(
         "{}",
         preamble(name, &path, &stored_under(home, name), masked)
     ));
-    // Best effort, and the only thing that could be done about it: the prompt
-    // has no newline of its own, so it sits in the terminal's buffer until this
-    // pushes it out. A stdout that will not flush has nothing useful to say
-    // about itself, and the read below reports anything that really goes wrong.
+    // Pushed out before the question is asked rather than left to whatever
+    // buffering `out` has: what follows is a person reading these lines and
+    // deciding what to type. Best effort, and the only thing that could be done
+    // about it — a stdout that will not flush has nothing useful to say about
+    // itself, and the read below reports anything that really goes wrong.
     drop(out.flush());
 
-    let Some(line) = ask()? else {
+    let Some(line) = ask.ask(PROMPT)? else {
         // EOF, which is Ctrl-D at a terminal and an empty pipe everywhere else.
         // Nothing is stored: a missing store stays missing and an existing one
-        // is not opened. The newline is because the prompt above has none and
-        // the cursor is still sitting on it.
+        // is not opened. The newline is because the prompt just asked has none
+        // and the cursor is still sitting on it.
         drop(writeln!(out, "\nwarlock: nothing changed"));
         return Ok(());
     };
@@ -213,10 +221,11 @@ impl fmt::Display for Stored {
     }
 }
 
-// Pure, and it ends *without* a newline, because the last thing it composes is
-// the line the reader types on. The order is fixed by what they need before they
-// can answer: what this is about, where it lands, what is there now, what the
-// screen will show of the key, and what changes nothing.
+// Pure, and everything above the cursor: [`PROMPT`] itself is the ask's, so this
+// ends with the newline that puts the cursor on a line of its own. The order is
+// fixed by what they need before they can answer: what this is about, where it
+// lands, what is there now, what the screen will show of the key, and what
+// changes nothing.
 //
 // The fourth line is the only one that moves, and it has to: telling somebody
 // their key is hidden when the terminal is about to echo it is the one lie here
@@ -238,8 +247,7 @@ fn preamble(name: &str, path: &Path, stored: &Stored, masked: bool) -> String {
          stored at `{path}`\n\
          {stored}\n\
          {showing}\n\
-         Ctrl-C or EOF changes nothing\n\
-         {PROMPT}",
+         Ctrl-C or EOF changes nothing\n",
         path = path.display(),
     )
 }
@@ -364,6 +372,21 @@ fn forgotten<W: Write>(home: &Path, root: &Path, name: &str, out: &mut W) -> Res
     Ok(())
 }
 
+// The terminal read behind the shared seam, so `added` asks its one question the
+// same way whichever read is underneath it. The prompt goes out through
+// `asking::show` rather than being written here, because both reads have to put
+// the same bytes on the screen — and it goes out *before* raw mode is enabled, so
+// the preamble and the prompt land on a terminal still in its ordinary line
+// discipline.
+struct Masked;
+
+impl Asks for Masked {
+    fn ask(&mut self, prompt: &str) -> Result<Option<String>, Error> {
+        asking::show(prompt);
+        read_masked()
+    }
+}
+
 // The restore, as a `Drop` rather than a line at the end of `read_masked`: a
 // `Drop` also runs while a panic unwinds, and the two reads below both return
 // early. A terminal left in raw mode outlives the process — the person gets a
@@ -430,7 +453,7 @@ fn typed(code: KeyCode, modifiers: KeyModifiers) -> Typed {
     }
 }
 
-// The terminal read, which answers the same three things `read_line` does — a
+// The terminal read, which answers the same three things the shared read does — a
 // key, nothing typed, or no answer at all — from keystrokes instead of a line.
 //
 // A paste arrives as its characters, one `Press` each, because bracketed paste
@@ -464,7 +487,7 @@ fn read_masked() -> Result<Option<String>, Error> {
 
         match typed(code, modifiers) {
             Typed::Done => break,
-            // Answered as the `None` `read_line` gives back at EOF, so `added`
+            // Answered as the `None` [`Asks`] gives back at EOF, so `added`
             // has one shape of "nobody answered" to handle and prints its own
             // newline for it once this has dropped back to cooked mode.
             Typed::Cancel => return Ok(None),
@@ -494,19 +517,6 @@ fn read_masked() -> Result<Option<String>, Error> {
     drop(write!(out, "\r\n"));
     drop(out.flush());
     Ok(Some(key))
-}
-
-// `Ok(0)` is EOF and nothing else. It is told apart from an empty line here
-// rather than further down, because everything above treats a line as text and
-// only this function can tell "they pressed Enter" from "there is no line and
-// never will be".
-fn read_line() -> Result<Option<String>, Error> {
-    let mut line = String::new();
-    match io::stdin().read_line(&mut line) {
-        Ok(0) => Ok(None),
-        Ok(_) => Ok(Some(line)),
-        Err(source) => Err(Error::Prompt { source }),
-    }
 }
 
 #[cfg(test)]

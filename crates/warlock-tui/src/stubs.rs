@@ -26,7 +26,9 @@ use warlock_tui::{
     PullRequest, Queue, Repository, Split, Stopped, Wired, Worked,
 };
 
+use crate::asking::Asks;
 use crate::clipboard::Clip;
+use crate::error::Error;
 use crate::freshness::{Freshened, Freshening, Freshens};
 use crate::puller::{Raised, Raises, Raising, Step, Stopping, activity_port};
 use crate::pulling::{Splits, Works};
@@ -67,6 +69,50 @@ impl Clip for Copying {
         }
         self.copied.push(text.to_owned());
         Ok(())
+    }
+}
+
+/// The lines a headless verb is answered with, written down before it runs, and
+/// every prompt it was asked kept.
+///
+/// A line per question rather than one answer to all of them, because a run may
+/// ask more than once and each question is its own. A question the script has run
+/// out of lines for is EOF — which is what a pipe read to the end answers, and
+/// what [`Typing::nothing`] is every question: there is no third thing a prompt
+/// can say.
+///
+/// The prompts are the point of the record. A verb's preamble goes to the writer
+/// it was handed and the prompt goes to stdout through the ask, so this is the
+/// only place a test can read the cursor's own line back from.
+#[derive(Debug, Default)]
+pub(crate) struct Typing {
+    lines: VecDeque<String>,
+    asked: Vec<String>,
+}
+
+impl Typing {
+    pub(crate) fn lines<S: Into<String>>(lines: impl IntoIterator<Item = S>) -> Self {
+        Self {
+            lines: lines.into_iter().map(Into::into).collect(),
+            asked: Vec::new(),
+        }
+    }
+
+    /// A pipe with nothing in it: every question is answered with EOF.
+    pub(crate) fn nothing() -> Self {
+        Self::default()
+    }
+
+    /// Every prompt this was asked, in order.
+    pub(crate) fn asked(&self) -> &[String] {
+        &self.asked
+    }
+}
+
+impl Asks for Typing {
+    fn ask(&mut self, prompt: &str) -> Result<Option<String>, Error> {
+        self.asked.push(prompt.to_owned());
+        Ok(self.lines.pop_front())
     }
 }
 

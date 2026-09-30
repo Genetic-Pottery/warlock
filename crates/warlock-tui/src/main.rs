@@ -32,6 +32,7 @@ use warlock_tui::{
     position_at, tree_height,
 };
 
+mod asking;
 mod boundary;
 mod chatting;
 mod check;

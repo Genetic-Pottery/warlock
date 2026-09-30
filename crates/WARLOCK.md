@@ -3,14 +3,14 @@
 
 # crates
 
-The crates directory holds the two Rust crates that make up the project: warlock-engine, the core engine, and warlock-tui, the binary and CLI/TUI built on top of it.
+The crates directory holds the workspace's two Rust crates, warlock-engine and warlock-tui, that together implement the repo-modeling engine and the TUI/CLI built on it.
 
 ## Directories
 
-- `warlock-engine/` — The engine crate — models the repo as a Tree, hashes/views files, drives agent-driven document fill/validation, and enforces scope/sigil boundaries; go here for how engine behavior works.
-- `warlock-tui/` — The TUI crate — builds the `warlock` binary and `warlock_tui` library over warlock-engine, with pact/refresh/scope walks, chat/brief/draft/cut/pull/push flows, and rendering; go here for how any warlock command or screen works.
+- `warlock-engine/` — Crate modeling a repo as a Tree of pacted/unpacted modules, hashing/viewing files, agent-driven WARLOCK.md fill/validation, and scope/sigil enforcement.
+- `warlock-tui/` — Crate providing the warlock binary and warlock_tui library: TUI/CLI for pacting, drafting, filing/pulling tickets, and rendering the freshness ledger.
 
 ## Structure
 
-- warlock-engine is the crate that models a repo as a Tree of pacted/unpacted modules, hashes and views files, drives agent-driven document fill/validation, and enforces scope/sigil boundaries for pulls, drafting and splitting
-- warlock-tui depends on warlock-engine
+- warlock-engine holds the crate core: Tree model, hashing, agent-driven document fill/validation, and scope/sigil enforcement.
+- warlock-tui builds the warlock binary from src/main.rs and the warlock_tui library from src/lib.rs, depending on warlock-engine.
