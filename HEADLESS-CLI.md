@@ -26,6 +26,7 @@ piped — it reads a plain line and the terminal is never touched.
 | `warlock scope remove <path>` | Clear the scope on a pacted directory | one manifest write |
 | `warlock pact <path>` | Describe a directory and everything below it, a `WARLOCK.md` each | a model pass per directory |
 | `warlock refresh <path>` | The same over only the directories that are not fresh | a model pass per stale directory |
+| `warlock brief` | Argue a brief in one conversation at the shell, and write it where `briefs.toml` says | a turn per blank line, one more for `/write`, and the document it writes |
 | `warlock push <path>` | File the brief at `path` as a project on the board this machine's sigil names | one project on somebody's board and one record write |
 | `warlock draft <path>` | Cut the project filed for the brief at `path` into issues on the board that holds it | a drafting session per uncut slice with a turn for each answer or piece of feedback, a proposing pass per question, and for each accepted slice its issues and a record write |
 | `warlock pull <SCOPE>` | Work the next ready ticket in that scope's queue to an open pull request | a splitting pass, a model pass per sub-task, a commit each, a pushed branch, a pull request, and two moves on somebody's board |
@@ -407,6 +408,135 @@ finished is hashed, granted and saved before the process leaves with **130**.
 The second press is `q`: it exits at once, saving nothing and printing nothing.
 Nothing is corrupted by taking it — every document and the manifest are written
 beside and renamed over, so what is on disk is always a whole file.
+
+## Briefing
+
+`warlock brief` is step zero of brief → push → draft → pull, and it takes no
+argument and no flag. There is nothing for either to name: what the
+document is about is what the conversation decides, and where it goes is
+`.warlock/briefs.toml`'s. There is no `--json` — `push`, `draft`, `pull` and
+`resume` each decline one, and what a script reads after a brief is the
+document it wrote — and no way out of brief mode, because this command *is*
+brief mode.
+
+Both of the repository's brief files are read before a word is sent:
+`.warlock/brief-template.md`, for the shape the model is asked for and the
+document is held to, and `.warlock/briefs.toml`, for the directory a written
+brief lands in. Neither is required — a repository that has written neither
+gets warlock's own shape and `docs` — but a file that is there and will not
+read is a refusal with nothing spent, rather than a conversation opened and
+then found to have no shape to converge on. The template is read first, so a
+repository with both files broken is one refusal and not warlock's reading
+order read off a screen.
+
+One agent and one session for the whole run. The register is said once, and
+then the instruction paragraph goes out as its own first turn — the panel's
+own, built from the shape that was just read — so the conversation opens on the
+model's question rather than on a bare cursor:
+
+```sh
+$ warlock brief
+warlock: brief mode — this conversation is converging on a document
+warlock: What is the change?
+> 
+```
+
+Typed lines accumulate at the `> ` cursor and a blank line sends them as one
+turn. A brief is argued in paragraphs and a terminal has no other way to say "I
+have not finished typing", so the cost is written down rather than hidden: a
+turn cannot itself contain a blank line. The end of a line is trimmed and the
+start of one is not, so an indented list reaches the model indented.
+
+```sh
+> the headless CLI cannot be spoken to
+>   both are one mechanism
+> 
+warlock: Two changes, one mechanism.
+```
+
+Enter on a line with nothing typed above it sends nothing at all — an empty
+turn is the model asked to answer silence, and it would cost somebody money to
+be told so. A turn that failed is a line and the cursor again rather than the
+end of the run: what reaches it is a missing binary, a timeout and a cancel,
+the session id has not moved, and ending an argument twenty turns old over any
+of the three would throw away the one thing the command exists to produce.
+
+`/write` is the only command at the prompt and it takes nothing after it. Every
+other line is the brief, and a command word that is not it is refused on a line
+rather than sent, so a mistyped command costs a line here instead of a turn:
+
+```sh
+> /push docs/brief.md
+warlock: /write is the only command here and takes nothing after it — every other line is the brief; `warlock push` and `warlock draft` are commands of their own
+```
+
+It is the panel's own parser that reads the line, so `/write ` with the space a
+hand leaves behind is the command, `/WRITE` is not, and a line opening with a
+path — `/tmp/notes is where I keep them` — is prose. Lines typed and not yet
+sent are left exactly where they are: a `/write` is about the conversation that
+has happened, and lines nobody has sent are not part of it.
+
+A `/write` asks the conversation for the document, prints the reply as every
+other reply is printed, and then proposes a path for it: the directory
+`briefs.toml` names, the next number among the names already in it, and a slug
+off the document's first `# ` line. Enter accepts the proposal and any other
+text replaces it entirely — nothing weighs the two against each other. The file
+is what the conversation was for, so the prompt does not come back after it:
+the run ends on the line that named the path, and that is a **0**.
+
+```sh
+> /write
+warlock: # Give the headless CLI a voice
+…
+warlock: the document goes to `docs/warlock-brief-01-give-the-headless-cli-a-voice.md` — Enter writes it there, another path replaces it
+> 
+warlock: wrote docs/warlock-brief-01-give-the-headless-cli-a-voice.md — 3.4 KB
+```
+
+Two refusals at that prompt, and they are answered differently because they are
+fixed in different places. A path that already has a file is the rule and then
+the same offer again, because a path is the one mistake a reader fixes by
+typing; a document missing a section of the shape is not fixable by typing
+another path, so it goes back to the conversation and the next turn is where it
+gets fixed. Nothing is written by either, and a missing section is never
+repaired into the document — a brief with a section missing reads perfectly
+well and nobody finds out for days:
+
+```sh
+warlock: docs/taken.md already exists — nothing was written
+warlock: the document is missing ## Success criteria, ## Constraints and ## Scope, so nothing was written
+```
+
+EOF — Ctrl-D at a terminal, an exhausted pipe everywhere else — ends the run
+with nothing written, at the conversation's cursor and at the path prompt
+alike. Nothing is kept either: the session id this process never wrote down is
+a conversation that ends when the process does.
+
+```sh
+> 
+warlock: the conversation is over
+```
+
+Ctrl-C needs no code at all here, because nothing in this command takes the
+terminal: the prompt is a cooked line off stdin, with no alternate screen, no
+raw mode and no panic hook, which is what lets a whole conversation be driven
+from a script with no terminal anywhere. `warlock key add` is still the one
+subcommand in the family that takes the terminal.
+
+The statuses are two. A write prints the path it wrote and the size and exits
+**0**, and so does a run that ended at an EOF with nothing written — nobody
+asked for a file. The two file refusals are an ordinary **1** with nothing
+sent, the conversation never opened and the register never said:
+
+```sh
+warlock: could not read `/repo/.warlock/brief-template.md`: Permission denied (os error 13)
+warlock: malformed brief config at `/repo/.warlock/briefs.toml`: TOML parse error at line 1, column 6 …
+```
+
+The boundary's **3** is never spent by a brief and could not be: nothing in the
+command asks a scope or holds a sigil up against one, so there is nothing here
+for the boundary to refuse. A script reading a 3 from warlock is reading it
+from something else.
 
 ## Pushing
 
@@ -1128,7 +1258,7 @@ start the ticket over.
 | Status | What it means |
 | --- | --- |
 | `0` | Completed. The question was answered or the write happened, whatever the answer turned out to be — an empty listing, a queue with nothing ready to pull, and a scope closed to this machine included |
-| `1` | Warlock could not do it, or would not: the repository will not resolve, the manifest will not parse or will not save, the path has no repository-relative spelling, a scope name nothing records yet was given without all three record flags or with a blank one, a name that already has a record was given any of them, a push has no board or more than one, the brief is not one or is already filed, a draft's brief is not recorded in `.warlock/filed.toml`, its project is one Linear does not know or is not `Planned`, the scope block will not cut or has nothing left to cut, the team has no `Backlog` state, a pull's scope is one nothing records, the working tree is dirty, a named ticket is one the queue's rules turn down, a run halted, a resume was asked for a ticket this machine holds no run for or a run with nothing to put back, or Linear refused what was sent. The line on stderr is the thing to go and read |
+| `1` | Warlock could not do it, or would not: the repository will not resolve, the manifest will not parse or will not save, the path has no repository-relative spelling, a scope name nothing records yet was given without all three record flags or with a blank one, a name that already has a record was given any of them, a brief's template or `briefs.toml` will not read, a push has no board or more than one, the brief is not one or is already filed, a draft's brief is not recorded in `.warlock/filed.toml`, its project is one Linear does not know or is not `Planned`, the scope block will not cut or has nothing left to cut, the team has no `Backlog` state, a pull's scope is one nothing records, the working tree is dirty, a named ticket is one the queue's rules turn down, a run halted, a resume was asked for a ticket this machine holds no run for or a run with nothing to put back, or Linear refused what was sent. The line on stderr is the thing to go and read |
 | `2` | The command line was never a request. Clap's status and its wording, for a word warlock has no place for |
 | `3` | The sigil boundary, in the three places it is reached: this machine's sigils do not open the scope covering the path, they do not open the scope a pull was asked for — both refused at the start with nothing spent — or a pull's sub-task wrote under a scope they do not open, which stops the run with nothing committed and the tree as that session left it. Retrying changes nothing, and the road out is `warlock config` |
 | `4` | Completed with failures: a run wrote the documents it could and saved the manifest, and the lines above the count name the directories that did not come out of it |
