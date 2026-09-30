@@ -1871,6 +1871,9 @@ mod relaying {
         // on the same bare mark every time: what is being answered is on the
         // lines above it rather than in the prompt.
         assert_eq!(typing.asked(), ["> "; 4], "{:?}", typing.asked());
+        // And type-ahead thrown away before each of those four, since a model
+        // had just been working before every one of them.
+        assert_eq!(typing.discards(), 4);
         // What reached the session is the proposal, in the words it was
         // offered in, and it is on the thread as what was sent.
         assert!(
@@ -2153,6 +2156,7 @@ mod reviewing {
         );
         // One read per slice, at the bare mark both roads stop on.
         assert_eq!(typing.asked(), ["> "; 3], "{:?}", typing.asked());
+        assert_eq!(typing.discards(), 3);
         assert_eq!(linear.issues_created().len(), 6);
     }
 

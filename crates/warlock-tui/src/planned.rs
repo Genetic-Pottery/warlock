@@ -340,6 +340,7 @@ fn reviewed<K: Asks, W: Write>(
 ) -> Result<Reviewed, Error> {
     say(out, &review_line(slice));
 
+    ask.discard_typed_ahead();
     let Some(line) = ask.ask(PROMPT)? else {
         // EOF, which is Ctrl-D at a terminal and an exhausted pipe everywhere
         // else, read exactly as it is at a question: nobody is there, so nothing
@@ -394,6 +395,7 @@ fn answered<P: Converses, K: Asks, W: Write>(
 ) -> Result<Option<String>, Error> {
     let proposal = proposed(proposer, brief, slice, question, out);
 
+    ask.discard_typed_ahead();
     let Some(line) = ask.ask(PROMPT)? else {
         // EOF, which is Ctrl-D at a terminal and an exhausted pipe everywhere
         // else. Nothing is sent: not the proposal, which is warlock's own

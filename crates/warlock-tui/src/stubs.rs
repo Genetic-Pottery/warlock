@@ -88,6 +88,7 @@ impl Clip for Copying {
 pub(crate) struct Typing {
     lines: VecDeque<String>,
     asked: Vec<String>,
+    discards: usize,
 }
 
 impl Typing {
@@ -95,6 +96,7 @@ impl Typing {
         Self {
             lines: lines.into_iter().map(Into::into).collect(),
             asked: Vec::new(),
+            discards: 0,
         }
     }
 
@@ -107,12 +109,21 @@ impl Typing {
     pub(crate) fn asked(&self) -> &[String] {
         &self.asked
     }
+
+    /// How many times type-ahead was thrown away.
+    pub(crate) fn discards(&self) -> usize {
+        self.discards
+    }
 }
 
 impl Asks for Typing {
     fn ask(&mut self, prompt: &str) -> Result<Option<String>, Error> {
         self.asked.push(prompt.to_owned());
         Ok(self.lines.pop_front())
+    }
+
+    fn discard_typed_ahead(&mut self) {
+        self.discards += 1;
     }
 }
 

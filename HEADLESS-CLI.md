@@ -5,10 +5,14 @@ exits: no alternate screen, nothing drawn. What each has to say is lines on
 stdout, so a script, a CI job or an agent reads the answer through a pipe
 rather than into a repaint.
 
-One subcommand takes the terminal, and only when there is a person at it:
-`warlock key add` turns the echo off for the length of the read so a key is not
-typed onto a visible screen. Everywhere a script runs — stdin redirected or
-piped — it reads a plain line and the terminal is never touched.
+One subcommand takes the terminal for its read, and only when there is a person
+at it: `warlock key add` turns the echo off for the length of the read so a key
+is not typed onto a visible screen. Every other prompt reads a cooked line. A
+prompt that follows a model's work — `draft`'s questions and reviews, `brief`'s
+next turn — first throws away at a terminal whatever was typed while the model
+worked, so a word typed early is never taken as the answer to a question it was
+typed before. Everywhere a script runs — stdin redirected or piped — it reads a
+plain line and the terminal is never touched.
 
 | Command | What it does | What it spends |
 | --- | --- | --- |
@@ -517,11 +521,12 @@ a conversation that ends when the process does.
 warlock: the conversation is over
 ```
 
-Ctrl-C needs no code at all here, because nothing in this command takes the
-terminal: the prompt is a cooked line off stdin, with no alternate screen, no
-raw mode and no panic hook, which is what lets a whole conversation be driven
-from a script with no terminal anywhere. `warlock key add` is still the one
-subcommand in the family that takes the terminal.
+Ctrl-C needs no code at all here, because nothing in this command holds the
+terminal: the prompt is a cooked line off stdin, with no alternate screen and no
+panic hook, which is what lets a whole conversation be driven from a script with
+no terminal anywhere. At a terminal, lines typed while the model was answering
+are thrown away before the cursor comes back, so they are not sent as the next
+turn.
 
 The statuses are two. A write prints the path it wrote and the size and exits
 **0**, and so does a run that ended at an EOF with nothing written — nobody

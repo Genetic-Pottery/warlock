@@ -26,14 +26,14 @@ use std::io::{self, Write};
 use std::path::Path;
 
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
-use ratatui::crossterm::terminal::{disable_raw_mode, enable_raw_mode};
+use ratatui::crossterm::terminal::enable_raw_mode;
 use serde_json::Value;
 use warlock_engine::{
     Forgotten, forget_key, keys, keys_path, load_key_binding, load_key_names, save_key,
     save_key_binding, sigils_path, validate_scope,
 };
 
-use crate::asking::{self, Asks};
+use crate::asking::{self, Asks, Cooked};
 use crate::error::{Error, one_line};
 use crate::query::{envelope, write_object};
 use crate::standing::{FOR_KEY, Standing};
@@ -384,18 +384,6 @@ impl Asks for Masked {
     fn ask(&mut self, prompt: &str) -> Result<Option<String>, Error> {
         asking::show(prompt);
         read_masked()
-    }
-}
-
-// The restore, as a `Drop` rather than a line at the end of `read_masked`: a
-// `Drop` also runs while a panic unwinds, and the two reads below both return
-// early. A terminal left in raw mode outlives the process — the person gets a
-// shell with no echo and no line editing, and has to know to type `reset`.
-struct Cooked;
-
-impl Drop for Cooked {
-    fn drop(&mut self) {
-        drop(disable_raw_mode());
     }
 }
 

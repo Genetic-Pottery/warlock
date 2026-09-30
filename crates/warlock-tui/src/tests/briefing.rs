@@ -42,6 +42,7 @@ struct Ran {
     // Every message the model was handed, in order and in the words it was sent
     // in.
     turns: Vec<String>,
+    discards: usize,
 }
 
 fn run(root: &Path, lines: &[&str], answers: Vec<Answering>) -> Ran {
@@ -57,6 +58,7 @@ fn run(root: &Path, lines: &[&str], answers: Vec<Answering>) -> Ran {
         said: String::from_utf8(out).expect("warlock writes its own text"),
         asked: typing.asked().to_vec(),
         turns: agent.said(),
+        discards: typing.discards(),
     }
 }
 
@@ -64,6 +66,29 @@ fn run(root: &Path, lines: &[&str], answers: Vec<Answering>) -> Ran {
 // said back.
 fn replying(answers: &[&str]) -> Vec<Answering> {
     answers.iter().map(|text| Answering::says(*text)).collect()
+}
+
+#[test]
+fn type_ahead_is_discarded_after_each_turn_and_never_between_typed_lines() {
+    let root = a_root();
+
+    // Three lines of one paragraph, which is what a paste arrives as: a discard
+    // between them would drop the second and third.
+    let ran = run(
+        root.path(),
+        &["first line", "second line", "third line", ""],
+        replying(&["What is the change?", "Noted."]),
+    );
+
+    ran.outcome.expect("an EOF is not a failure");
+    assert_eq!(
+        ran.turns.last().map(String::as_str),
+        Some("first line\nsecond line\nthird line"),
+        "{:?}",
+        ran.turns
+    );
+    // One after the opening turn and one after the paragraph's turn.
+    assert_eq!(ran.discards, 2);
 }
 
 #[test]
