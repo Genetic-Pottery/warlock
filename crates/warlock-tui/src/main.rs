@@ -46,6 +46,7 @@ mod editing;
 mod edits;
 mod error;
 mod freshness;
+mod inflight;
 mod input;
 mod key;
 mod pacting;

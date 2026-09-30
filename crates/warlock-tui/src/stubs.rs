@@ -13,7 +13,6 @@
 use std::collections::VecDeque;
 use std::fmt;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::Sender;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread;
 use std::time::Duration;
@@ -30,6 +29,7 @@ use crate::asking::Asks;
 use crate::clipboard::Clip;
 use crate::error::Error;
 use crate::freshness::{Freshened, Freshening, Freshens};
+use crate::inflight::Port;
 use crate::puller::{Raised, Raises, Raising, Step, Stopping, activity_port};
 use crate::pulling::{Splits, Works};
 
@@ -1564,16 +1564,14 @@ impl Works for Publishing {
 /// channel first.
 pub(crate) struct Refreshes {
     inner: Refreshing,
-    events: Sender<Step>,
+    events: Port<Step>,
     directories: Vec<String>,
 }
 
 impl Freshens for Refreshes {
     fn freshen(&self, asked: &Freshening<'_>) -> Result<Freshened, GitError> {
         for directory in &self.directories {
-            self.events
-                .send(Step::Refreshing(directory.clone()))
-                .expect("the run is listening");
+            self.events.send(Step::Refreshing(directory.clone()));
         }
         self.inner.freshen(asked)
     }

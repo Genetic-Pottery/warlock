@@ -37,11 +37,10 @@
 //! thread: there is no relay into a session that is editing the tree.
 
 use std::mem;
+use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::{Arc, Mutex};
-use std::thread;
 use std::time::Instant;
 
 use warlock_engine::pact::Event;
@@ -57,6 +56,7 @@ use warlock_tui::{
 use crate::cut::listed;
 use crate::error::{Error, one_line};
 use crate::freshness::{Freshened, Freshening, Freshens, freshened};
+use crate::inflight::{Lost, Once, Port, Stream, Workers, settled};
 use crate::pacting::CancelGuard;
 use crate::pull::{
     Taken, clean, no_review_state, no_start_state, nothing_ready, number_in, opened, passed_over,
@@ -65,14 +65,11 @@ use crate::pull::{
 use crate::pulling::{Heading, PullEvent, Pulled, Pulling, Splits, Ticket, Works, next_runnable};
 use crate::standing::Standing;
 
-// The worker reports on every path it takes, so a channel that closes with
-// nothing on it is a panic. The hook has already printed it; what is left to say
-// is that nothing was read, which is the honest answer for a sequence that reads
-// a tree and a queue and writes neither.
+// Said of a lost selection: nothing was read, which is the honest answer for a
+// sequence that reads a tree and a queue and writes neither.
 const CHOICE_LOST: &str = "the pull stopped while choosing a ticket; nothing was read or changed";
 
-// The same for the run's worker, and it promises far less: a run that died
-// half-way through has a branch with commits on it and a record under the home
+// Said of a lost run, and it promises far less: a run that died half-way through has a branch with commits on it and a record under the home
 // saying how far it got, which is what `/resume` and the next `/pull` read.
 const PULL_LOST: &str = "the pull stopped without saying how it went; the run record under your home says how far it \
      got";
@@ -115,6 +112,7 @@ pub(crate) struct Puller<O: Opens, R: Repository, F: Forge, M: Raises> {
     /// working tree, and anything else that reads or writes it while that
     /// happens is reading somebody else's half-finished edit.
     underway: Option<Underway>,
+    workers: Workers,
 }
 
 // The selection worker, and the handle that is the whole of how it is stopped.
@@ -126,7 +124,7 @@ struct Choosing {
     /// back through the channel, so what the reader confirmed is what was
     /// prepared.
     work: Work,
-    landings: Receiver<Landing>,
+    landings: Once<Landing>,
     // Never read, and that is the whole of what it does: the guard's `Drop` is
     // the cancel, so the field being here is the session's exit path.
     #[expect(
@@ -149,7 +147,7 @@ struct Underway {
     /// that named nothing would leave the reader to guess which pull is holding
     /// the tree.
     ticket: String,
-    events: Receiver<Step>,
+    events: Stream<Step>,
     #[expect(
         dead_code,
         reason = "held for its drop, which latches the run's say-when"
@@ -303,6 +301,15 @@ where
             confirm: PullConfirm::Closed,
             ready: None,
             underway: None,
+            workers: Workers::Threaded,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn inline(self) -> Self {
+        Self {
+            workers: Workers::Inline,
+            ..self
         }
     }
 
@@ -426,6 +433,7 @@ where
         let cancel = CancelGuard::new();
         self.choosing = Some(Choosing {
             landings: spawn_choice(
+                self.workers,
                 self.open.clone(),
                 self.repo.clone(),
                 work.clone(),
@@ -472,23 +480,13 @@ where
     // the one taken — or one line, for a queue with nothing ready and for every
     // way the reading failed.
     fn chosen(&mut self, app: &mut App, now: Instant) {
-        let Some(choosing) = self.choosing.as_ref() else {
+        let Some((choosing, landing)) =
+            settled(&mut self.choosing, |choosing| choosing.landings.landed())
+        else {
             return;
         };
-        let landing = match choosing.landings.try_recv() {
-            Ok(landing) => landing,
-            // Still reading, and nothing new to say.
-            Err(TryRecvError::Empty) => return,
-            Err(TryRecvError::Disconnected) => Err(CHOICE_LOST.to_owned()),
-        };
-        // Taken before anything is said, so the round that reports a selection is
-        // a round on which the next `/pull` is already allowed.
-        let choosing = self
-            .choosing
-            .take()
-            .expect("the selection drained just above is still here");
 
-        let chose = match landing {
+        let chose = match landing.unwrap_or_else(|Lost| Err(CHOICE_LOST.to_owned())) {
             Ok(chose) => chose,
             Err(line) => {
                 app.panel_mut().note(line, now);
@@ -510,35 +508,26 @@ where
     }
 
     // Everything the run has done since the last round, in the order it did it.
-    // Drained to the end of the batch rather than one event a round, as a pact's
-    // is: a session reports faster than ten times a second, and a queue that
-    // emptied one line per frame would draw a run minutes behind itself.
     fn stepped(&mut self, app: &mut App, now: Instant) {
-        let Some(underway) = self.underway.as_ref() else {
+        let Some((_, ending)) = settled(&mut self.underway, |underway| {
+            underway.events.drained(|step| {
+                match step {
+                    Step::Pull(event) => said(app, event, now),
+                    // A section of its own per directory, opened as the pass
+                    // reaches it: the pass is one `claude` per directory, and its
+                    // activities belong under the directory they were spent on.
+                    Step::Refreshing(directory) => section(app, &directory, now),
+                    Step::Committed(message) => {
+                        app.panel_mut().note(committed_line(&message), now);
+                    }
+                    Step::Finished(ending) => return ControlFlow::Break(ending),
+                }
+                ControlFlow::Continue(())
+            })
+        }) else {
             return;
         };
-        let ending = loop {
-            match underway.events.try_recv() {
-                Ok(Step::Pull(event)) => said(app, event, now),
-                // A section of its own per directory, opened as the pass reaches
-                // it: the pass is one `claude` per directory, and its activities
-                // belong under the directory they were spent on.
-                Ok(Step::Refreshing(directory)) => section(app, &directory, now),
-                Ok(Step::Committed(message)) => {
-                    app.panel_mut().note(committed_line(&message), now);
-                }
-                Ok(Step::Finished(ending)) => break ending,
-                // Still running, and nothing new to say. The run stays exactly
-                // as it is, which is what keeps the next round draining it.
-                Err(TryRecvError::Empty) => return,
-                // The worker panicked: the hook has already printed it, and what
-                // is left to say is that the run cannot account for itself.
-                Err(TryRecvError::Disconnected) => break Err(PULL_LOST.to_owned()),
-            }
-        };
-        // Taken before the ending is said, for the reason a selection is: the
-        // round that reports a run is a round on which the next one is allowed.
-        self.underway = None;
+        let ending = ending.unwrap_or_else(|Lost| Err(PULL_LOST.to_owned()));
         // No outcome is worded onto the sections and the account is not
         // finished. `Outcome`'s five endings are a document pass's — wrote,
         // unchanged, skipped, refused, cancelled — and not one of them says what
@@ -598,6 +587,7 @@ where
         let cancel = CancelGuard::new();
         let stopping = Stopping::default();
         let events = spawn_run(
+            self.workers,
             Spending {
                 open: self.open.clone(),
                 repo: self.repo.clone(),
@@ -643,7 +633,7 @@ pub(crate) struct Raising<'a> {
     pub(crate) held: &'a [String],
     /// Where everything a session is seen doing goes, and where the refresh pass
     /// says which directory it has reached.
-    pub(crate) events: Sender<Step>,
+    pub(crate) events: Port<Step>,
     /// The run's say-when, which the freshness pass's agent and the descent under
     /// it both answer. The sessions' own handles cannot be this one — see
     /// [`Stopping`].
@@ -743,7 +733,7 @@ pub(crate) struct Freshener {
     /// The one handle the agent and the descent under it both answer, so a stop is
     /// honoured in both.
     cancel: Cancel,
-    events: Sender<Step>,
+    events: Port<Step>,
 }
 
 impl Freshens for Freshener {
@@ -754,7 +744,7 @@ impl Freshens for Freshener {
             // above, which is where every other session reports.
             if let Event::Starting { directory, .. } = event {
                 let heading = crate::freshness::named(asked.root, &directory);
-                let _ = self.events.send(Step::Refreshing(heading));
+                self.events.send(Step::Refreshing(heading));
             }
         })
     }
@@ -837,15 +827,12 @@ struct Spending<O: Opens, R: Repository, F: Forge, M: Raises> {
 /// one line to keep true rather than two.
 struct Committing<R: Repository> {
     inner: R,
-    events: Sender<Step>,
+    events: Port<Step>,
 }
 
 impl<R: Repository> Committing<R> {
     fn said(&self, message: &str) {
-        // Ignored for the reason every other send here is: a receiver that has
-        // gone away is a panel that has quit, and the commit is in the branch
-        // either way.
-        let _ = self.events.send(Step::Committed(message.to_owned()));
+        self.events.send(Step::Committed(message.to_owned()));
     }
 }
 
@@ -992,33 +979,26 @@ impl<B: Board> Board for Quiet<B> {
 ///
 /// [`Activities`] takes a `Fn(Activity) + Send + Sync + 'static`, so the port a
 /// `claude` reports into cannot borrow anything the run owns.
-pub(crate) fn activity_port(events: &Sender<Step>) -> Activities {
+pub(crate) fn activity_port(events: &Port<Step>) -> Activities {
     let events = events.clone();
     Activities::new(move |activity: Activity| {
-        let _ = events.send(Step::Pull(PullEvent::Activity(activity)));
+        events.send(Step::Pull(PullEvent::Activity(activity)));
     })
 }
 
 // The tree, the board and the queue, on a worker: a `git status`, one request for
 // the user the key belongs to, the run records this checkout holds and the queue
-// itself. The `JoinHandle` is dropped on purpose, as every other worker's is.
+// itself.
 fn spawn_choice<O: Opens, R: Repository + Send + 'static>(
+    workers: Workers,
     open: O,
     repo: R,
     work: Work,
     cancel: Cancel,
-) -> Receiver<Landing> {
-    let (events, received) = mpsc::channel();
-    thread::spawn(move || {
-        let landing =
-            chose(&open, &repo, &work, &cancel).map_err(|error| one_line(&error.to_string()));
-        // Ignored for the reason every other worker's send is: a receiver that
-        // has gone away is an application that is quitting, which is also the one
-        // thing that cancels a selection.
-        let _ = events.send(landing);
-    });
-
-    received
+) -> Once<Landing> {
+    workers.once(move || {
+        chose(&open, &repo, &work, &cancel).map_err(|error| one_line(&error.to_string()))
+    })
 }
 
 /// Which ticket this pull would work, in `pulled`'s own order: the tree before the
@@ -1124,70 +1104,65 @@ fn chose<O: Opens, R: Repository>(
 }
 
 // The whole run on a worker, because every step of it blocks: a request, a `git`,
-// a model pass. The `JoinHandle` is dropped on purpose, as every other worker's
-// is — joining is waiting, and this thread exists precisely so the event loop
-// never waits.
+// a model pass.
 fn spawn_run<O, R, F, M>(
+    workers: Workers,
     spending: Spending<O, R, F, M>,
     ready: Ready,
     cancel: Cancel,
     stopping: Stopping,
-) -> Receiver<Step>
+) -> Stream<Step>
 where
     O: Opens,
     R: Repository + Send + 'static,
     F: Forge + Send + 'static,
     M: Raises + Send + 'static,
 {
-    let (events, received) = mpsc::channel();
-    thread::spawn(move || {
-        let Ready { work, undertook } = ready;
-        let raised = spending.raises.raise(Raising {
-            scope: work.record.name(),
-            held: &work.held,
-            events: events.clone(),
-            cancel: cancel.clone(),
-            stopping,
-        });
-        // Opened over here, which is what keeps the panel drawing while Linear is
-        // answering: the key crosses as a field of the work and is read on this
-        // one line. Wrapped in the run's own say-when, so a run stopped by the
-        // panel quitting tells the board nothing on its way out — see [`Quiet`].
-        let board = Quiet {
-            inner: spending.open.open(&work.value),
-            cancel,
-        };
-        let repo = Committing {
-            inner: spending.repo,
-            events: events.clone(),
-        };
-        let reporting = events.clone();
-        let mut progress = move |event: PullEvent| {
-            // Ignored for the reason every other send here is.
-            let _ = reporting.send(Step::Pull(event));
-        };
-        let pulled = Pulling {
-            board: &board,
-            repo: &repo,
-            forge: &spending.forge,
-            split: &raised.split,
-            sessions: &raised.sessions,
-            freshen: &raised.freshen,
-            scope: &work.record,
-            manifest: &work.manifest,
-            held: &work.held,
-            root: &work.root,
-            home: &work.home,
-            progress: &mut progress,
+    workers.stream(|events| {
+        move || {
+            let Ready { work, undertook } = ready;
+            let raised = spending.raises.raise(Raising {
+                scope: work.record.name(),
+                held: &work.held,
+                events: events.clone(),
+                cancel: cancel.clone(),
+                stopping,
+            });
+            // Opened over here, which is what keeps the panel drawing while Linear is
+            // answering: the key crosses as a field of the work and is read on this
+            // one line. Wrapped in the run's own say-when, so a run stopped by the
+            // panel quitting tells the board nothing on its way out — see [`Quiet`].
+            let board = Quiet {
+                inner: spending.open.open(&work.value),
+                cancel,
+            };
+            let repo = Committing {
+                inner: spending.repo,
+                events: events.clone(),
+            };
+            let reporting = events.clone();
+            let mut progress = move |event: PullEvent| reporting.send(Step::Pull(event));
+            let pulled = Pulling {
+                board: &board,
+                repo: &repo,
+                forge: &spending.forge,
+                split: &raised.split,
+                sessions: &raised.sessions,
+                freshen: &raised.freshen,
+                scope: &work.record,
+                manifest: &work.manifest,
+                held: &work.held,
+                root: &work.root,
+                home: &work.home,
+                progress: &mut progress,
+            }
+            .pull(&undertook.ticket.ticket());
+
+            events.send(Step::Finished(
+                pulled.map_err(|error| one_line(&error.to_string())),
+            ));
         }
-        .pull(&undertook.ticket.ticket());
-
-        let _ = events.send(Step::Finished(
-            pulled.map_err(|error| one_line(&error.to_string())),
-        ));
-    });
-
-    received
+    })
 }
 
 /// One of the loop's events, on the card it belongs to.

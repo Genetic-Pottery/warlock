@@ -24,6 +24,7 @@ use super::{
     TurnedDown, Work, activity_port, apply_toggle, run_pact, spawn_pact,
 };
 use crate::chatting::Chat;
+use crate::inflight::Port;
 use crate::session::{NOT_REFRESHED, Scope};
 use warlock_engine::pact::Event;
 
@@ -388,6 +389,7 @@ fn run_and_apply(
 ) {
     let before = app.clone();
     let (events, received) = mpsc::channel();
+    let events = Port::from(events);
     run_pact(
         manifest,
         &scratch.root,
@@ -398,7 +400,7 @@ fn run_and_apply(
     );
 
     let mut pact = Pact::with_run(Running {
-        events: received,
+        events: received.into(),
         cancel: CancelGuard::new(),
         work: work.clone(),
         before,
@@ -749,6 +751,7 @@ fn events_from(
     cancel: &Cancel,
 ) -> Vec<PactEvent> {
     let (events, received) = mpsc::channel();
+    let events = Port::from(events);
     run_pact(manifest, &scratch.root, work, agent, cancel, &events);
     // The worker's body runs on this thread, so the sender has to be
     // dropped before anything is read or the iterator below never ends.
@@ -922,6 +925,7 @@ fn what_each_pass_is_doing_arrives_between_its_directory_and_the_next() {
     // very port `spawn_pact` gives this run's agent: one function, one
     // route, and no second channel anywhere in the picture.
     let (events, received) = mpsc::channel();
+    let events = Port::from(events);
     let agent = Canned::new(&scratch, []).reporting(activity_port(&events));
 
     run_pact(
@@ -1080,7 +1084,7 @@ fn a_spawned_run_reports_what_its_passes_do_over_the_channel_it_hands_back() {
     // and the one inside the port on the agent it owns. That it returns
     // at all is half the assertion: a port that outlived its run would
     // hang this line rather than fail it.
-    let events: Vec<PactEvent> = received.into_iter().collect();
+    let events: Vec<PactEvent> = received.into_receiver().into_iter().collect();
 
     let activities: Vec<&Activity> = events
         .iter()
@@ -2320,7 +2324,7 @@ fn a_run_that_goes_out_of_scope_takes_its_claude_with_it() {
     let watching = cancel.handle();
     let (_events, received) = mpsc::channel();
     let running = Running {
-        events: received,
+        events: received.into(),
         cancel,
         work: pact_of("/repo/crates"),
         before: App::from_tree(&tree),
@@ -2349,7 +2353,7 @@ fn a_run_in_flight(base: Instant) -> (App, App, Manifest, mpsc::Sender<PactEvent
     app.start_account(base);
     let (events, received) = mpsc::channel();
     let running = Running {
-        events: received,
+        events: received.into(),
         cancel: CancelGuard::new(),
         work: pact_of("/repo/crates"),
         before: before.clone(),
@@ -2735,7 +2739,7 @@ fn one_directory_with_files(state: NodeState) -> Tree {
 fn running_over(app: &App, work: Work) -> (Sender<PactEvent>, Pact<ClaudeAgent>) {
     let (events, received) = mpsc::channel();
     let running = Running {
-        events: received,
+        events: received.into(),
         cancel: CancelGuard::new(),
         work,
         before: app.clone(),
@@ -3025,7 +3029,7 @@ fn a_run_that_dies_leaves_the_account_of_what_it_managed_on_screen() {
     let mut manifest = Manifest::new();
     let (events, received) = mpsc::channel();
     let mut pact = Pact::with_run(Running {
-        events: received,
+        events: received.into(),
         cancel: CancelGuard::new(),
         work: pact_of("/repo/crates"),
         before: before.clone(),
@@ -3076,7 +3080,7 @@ fn recorded(
     scratch: &Scratch,
     relative: &str,
     cancel: &Cancel,
-    agent: impl FnOnce(&Sender<PactEvent>) -> Canned,
+    agent: impl FnOnce(&Port<PactEvent>) -> Canned,
 ) -> Vec<PactEvent> {
     recorded_from(
         scratch,
@@ -3092,9 +3096,10 @@ fn recorded_from(
     manifest: &Manifest,
     work: &Work,
     cancel: &Cancel,
-    agent: impl FnOnce(&Sender<PactEvent>) -> Canned,
+    agent: impl FnOnce(&Port<PactEvent>) -> Canned,
 ) -> Vec<PactEvent> {
     let (events, received) = mpsc::channel();
+    let events = Port::from(events);
     let agent = agent(&events);
     run_pact(manifest, &scratch.root, work, &agent, cancel, &events);
     // Both ends the worker would have held: its own, and the one inside
@@ -3134,7 +3139,7 @@ fn replay_work(
 ) -> Vec<String> {
     let (events, received) = mpsc::channel();
     let mut pact = Pact::with_run(Running {
-        events: received,
+        events: received.into(),
         cancel,
         work: work.clone(),
         before: app.clone(),
@@ -4321,7 +4326,7 @@ fn a_run_in_flight_during_a_conversation(
     app.start_account(base);
     let (events, received) = mpsc::channel();
     let running = Running {
-        events: received,
+        events: received.into(),
         cancel: CancelGuard::new(),
         work: pact_of("/repo/crates"),
         before: before.clone(),
@@ -4646,7 +4651,7 @@ fn a_pass_that_never_said_what_it_cost_leaves_the_total_incomplete() {
             {
                 return;
             }
-            let _ = events.send(PactEvent::Doing(activity));
+            events.send(PactEvent::Doing(activity));
         });
         Canned::new(&scratch, []).reporting(port)
     });

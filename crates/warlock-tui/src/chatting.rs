@@ -13,9 +13,8 @@
 //! register entered by a refusal. The mode is then set before the turn is sent,
 //! because [`asking`] reads it off the app at the moment the worker starts.
 
+use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
-use std::thread;
 use std::time::Instant;
 
 use warlock_engine::{DEFAULT_BRIEF_DIRECTORY, briefs, load_briefs, to_manifest_path};
@@ -27,13 +26,12 @@ use warlock_tui::{
 };
 
 use crate::error::one_line;
+use crate::inflight::{Lost, Port, Stream, Workers, settled};
 use crate::pacting::CancelGuard;
 use crate::writing::{write_edit, write_opened};
 
-// The worker reports on every path it takes itself, so a closed channel with no
-// `Finished` on it means it panicked. Worded as the tail of `Ending::Broke`'s
-// sentence rather than as a sentence of its own, so the line reads like every
-// other failed turn.
+// Said of a lost turn. Worded as the tail of `Ending::Broke`'s sentence rather
+// than as a sentence of its own, so the line reads like every other failed turn.
 const TURN_LOST: &str = "it stopped without saying how it went";
 
 // What the commands are shown as on the card — never what is sent, which for
@@ -506,8 +504,7 @@ impl<C: Converses> Chat<C> {
 // keeps the app as it stood before the keystroke so a failed pact can put it
 // back, and a turn needs no such thing because it changes no row and no file.
 pub(crate) struct Chatting {
-    // Closed by the worker dropping its end, which is how a panic is noticed.
-    pub(crate) events: Receiver<TurnEvent>,
+    pub(crate) events: Stream<TurnEvent>,
     pub(crate) cancel: CancelGuard,
     // Never read by the worker: this is the drain's, and it decides whether the
     // answer is handed back as well as put on the card.
@@ -538,16 +535,13 @@ pub(crate) enum TurnEvent {
 // Made per turn, attached to a copy of the agent that dies with the worker, so a
 // `claude` still writing to a pipe after its turn was abandoned has nowhere to
 // report into the turn after it. Called on the worker's thread from inside the
-// run, so it does the least it can: one send and back. A failed send is ignored —
-// a receiver that has gone away is an application that is quitting.
-fn activity_port(events: &Sender<TurnEvent>) -> Activities {
+// run, so it does the least it can: one send and back.
+fn activity_port(events: &Port<TurnEvent>) -> Activities {
     let events = events.clone();
-    Activities::new(move |activity| {
-        let _ = events.send(TurnEvent::Doing(activity));
-    })
+    Activities::new(move |activity| events.send(TurnEvent::Doing(activity)))
 }
 
-fn wired<C: Converses>(agent: &C, cancel: &Cancel, events: &Sender<TurnEvent>) -> C {
+fn wired<C: Converses>(agent: &C, cancel: &Cancel, events: &Port<TurnEvent>) -> C {
     agent.wired(cancel.clone(), activity_port(events))
 }
 
@@ -569,18 +563,17 @@ fn asking<C: Converses>(agent: &C, mode: Mode) -> C {
 
 // The worker owns its own copy of the message and of the agent, so nothing is
 // shared with the event loop but the channel and `cancel` — which is what makes
-// the thread safe to abandon. The `JoinHandle` is dropped on purpose: joining is
-// waiting, and this thread exists precisely so nobody waits for it.
+// the thread safe to abandon.
 pub(crate) fn spawn_turn<C: Converses>(
     message: &str,
     agent: &C,
     cancel: Cancel,
-) -> Receiver<TurnEvent> {
-    let (events, received) = mpsc::channel();
+) -> Stream<TurnEvent> {
     let message = message.to_owned();
-    let agent = wired(agent, &cancel, &events);
-    thread::spawn(move || run_turn(&message, &agent, &cancel, &events));
-    received
+    Workers::Threaded.stream(|events| {
+        let agent = wired(agent, &cancel, &events);
+        move || run_turn(&message, &agent, &cancel, &events)
+    })
 }
 
 // A fresh guard every turn, because a cancel is final: the turn after a cancelled
@@ -603,15 +596,13 @@ pub(crate) fn start_turn<C: Converses>(message: &str, agent: &C, asked: Asked) -
 // failure with the handle latched is read as a cancel here. An answer that beat
 // the cancel by a hair is kept — it is a real answer, and discarding it would be
 // a lie in the other direction.
-fn run_turn<C: Converses>(message: &str, agent: &C, cancel: &Cancel, events: &Sender<TurnEvent>) {
+fn run_turn<C: Converses>(message: &str, agent: &C, cancel: &Cancel, events: &Port<TurnEvent>) {
     let finished = match agent.turn(message) {
         Ok(answer) => Ok(answer),
         Err(_) if cancel.is_cancelled() => Err(Ending::Cancelled),
         Err(error) => Err(ending_for(&error)),
     };
-    // Ignored for the reason the activity port's sends are: a receiver that has
-    // gone away is an application that is quitting.
-    let _ = events.send(TurnEvent::Finished(finished));
+    events.send(TurnEvent::Finished(finished));
 }
 
 // Drained rather than received, so a burst of tool calls between two frames all
@@ -634,30 +625,22 @@ pub(crate) fn apply_turn(
     app: &mut App,
     now: Instant,
 ) -> Option<String> {
-    let chatting = chat.as_ref()?;
-    let asked = chatting.asked;
-
-    let finished = loop {
-        match chatting.events.try_recv() {
+    let (chatting, finished) = settled(chat, |chatting| {
+        chatting.events.drained(|event| match event {
             // Filed under the live turn, which is the one this worker is
             // answering: what each activity comes to is the thread's business
             // and not this file's — a tool is its name and its one detail,
             // thinking and writing are the words for them, and a cost is summed
             // rather than drawn. See `Thread::record`.
-            Ok(TurnEvent::Doing(activity)) => app.panel_mut().record_turn(&activity, now),
-            Ok(TurnEvent::Finished(finished)) => break Some(finished),
-            // Still going, and nothing new to say.
-            Err(TryRecvError::Empty) => return None,
-            Err(TryRecvError::Disconnected) => break None,
-        }
-    };
-
-    // The turn is over on every path below, so the loop stops holding it before
-    // anything is worded: what the reader does next — another question, or the
-    // key that cancels — is answered by an empty slot rather than by a receiver
-    // nobody will ever hear from again.
-    chat.take();
-    let finished = finished.unwrap_or_else(|| {
+            TurnEvent::Doing(activity) => {
+                app.panel_mut().record_turn(&activity, now);
+                ControlFlow::Continue(())
+            }
+            TurnEvent::Finished(finished) => ControlFlow::Break(finished),
+        })
+    })?;
+    let asked = chatting.asked;
+    let finished = finished.unwrap_or_else(|Lost| {
         Err(Ending::Broke {
             reason: TURN_LOST.to_owned(),
         })

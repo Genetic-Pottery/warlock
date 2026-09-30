@@ -5,7 +5,7 @@
 //! machine the suite runs on, and the one key any of it stores is not one.
 
 use std::path::Path;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use tempfile::TempDir;
 use warlock_engine::{
@@ -51,10 +51,6 @@ const TITLE: &str = "Add `warlock pull <SCOPE>`";
 const URL: &str = "https://github.com/team/repo/pull/12";
 
 const WROTE: &str = "crates/engine/src/lib.rs";
-
-// Long enough that a worker which never reports fails the test rather than
-// hanging the suite, and short enough that it is a failure rather than a wait.
-const AT_MOST: Duration = Duration::from_secs(10);
 
 fn now() -> Instant {
     Instant::now()
@@ -208,6 +204,7 @@ fn puller(
         raises,
         Some(ground.home.path().to_path_buf()),
     )
+    .inline()
 }
 
 type Panel = Puller<Boarding, Checkout, Forging, Written>;
@@ -226,24 +223,16 @@ fn press(app: &mut App, puller: &mut Panel, ground: &Ground, ticket: Option<&str
     );
 }
 
-// Rounds until selection has reported, drained and never blocked on: the loop
-// draws and then drains, so a test that waited on the channel would be a test of
-// something the panel does not do.
+// The round after the press: the worker ran inline, so one drain reports it.
 fn chosen(app: &mut App, puller: &mut Panel) {
-    let waited = Instant::now();
-    while puller.choosing() && waited.elapsed() < AT_MOST {
-        puller.keep_up(app, now());
-    }
+    puller.keep_up(app, now());
     assert!(!puller.choosing(), "the pull never chose a ticket");
 }
 
 // And the same for the run, answered Yes first.
 fn through(app: &mut App, puller: &mut Panel) {
     puller.answered(app, PullAnswered::Pull, now());
-    let waited = Instant::now();
-    while puller.pulling() && waited.elapsed() < AT_MOST {
-        puller.keep_up(app, now());
-    }
+    puller.keep_up(app, now());
     assert!(!puller.pulling(), "the run never finished");
 }
 

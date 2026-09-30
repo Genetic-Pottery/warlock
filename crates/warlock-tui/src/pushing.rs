@@ -18,11 +18,10 @@
 //! A confirmed dialog files the [`Prepared`] it was drawn from, with nothing
 //! resolved again: what the reader said yes to is what is sent.
 
+use std::io;
 use std::mem;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::Instant;
-use std::{io, thread};
 
 use warlock_engine::{Manifest, filing, from_manifest_path};
 use warlock_tui::{
@@ -31,6 +30,7 @@ use warlock_tui::{
 
 use crate::cut::listed;
 use crate::error::{Error, one_line};
+use crate::inflight::{Lost, Once, Workers, settled};
 use crate::push::{Prepared, file, prepare};
 use crate::standing::Standing;
 
@@ -46,10 +46,8 @@ const NO_SCOPE: &str = "type the name of a scope to file to, or press Esc to fil
 pub(crate) const ALREADY_FILING: &str =
     "a brief is already on its way to the board; this one was not sent";
 
-// The worker sends on every path it takes, so a channel that closes with nothing
-// on it is a panic. The hook has already printed it; what is left to say is that
-// nobody here knows how far it got, which is the honest answer for a mutation
-// that is not idempotent.
+// Said of a lost push: nobody here knows how far it got, which is the honest
+// answer for a mutation that is not idempotent.
 const PUSH_LOST: &str =
     "the push stopped without saying how it went; look at the board before filing it again";
 
@@ -134,6 +132,7 @@ pub(crate) struct Pushes<O: Opens> {
     home: Option<PathBuf>,
     window: Pushing,
     sending: Option<Sending>,
+    workers: Workers,
 }
 
 // The channel and the board its answer is about. The team rides along because
@@ -141,7 +140,7 @@ pub(crate) struct Pushes<O: Opens> {
 // that says it landed names the board the line that started it named.
 #[derive(Debug)]
 struct Sending {
-    events: Receiver<Landing>,
+    events: Once<Landing>,
     team: String,
 }
 
@@ -165,6 +164,15 @@ impl<O: Opens> Pushes<O> {
             home,
             window: Pushing::closed(),
             sending: None,
+            workers: Workers::Threaded,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn inline(self) -> Self {
+        Self {
+            workers: Workers::Inline,
+            ..self
         }
     }
 
@@ -305,7 +313,7 @@ impl<O: Opens> Pushes<O> {
         app.panel_mut().note(filing_line(&team), now);
         self.sending = Some(Sending {
             team,
-            events: spawn_push(self.open.clone(), ready),
+            events: spawn_push(self.workers, self.open.clone(), ready),
         });
     }
 
@@ -316,27 +324,19 @@ impl<O: Opens> Pushes<O> {
     /// here blocks, so frames keep being drawn, the tree keeps scrolling and the
     /// clocks keep ticking while the request is in flight.
     pub(crate) fn keep_up(&mut self, app: &mut App, now: Instant) {
-        let Some(sending) = self.sending.as_ref() else {
+        let Some((sending, landing)) =
+            settled(&mut self.sending, |sending| sending.events.landed())
+        else {
             return;
         };
-
-        let landing = match sending.events.try_recv() {
-            Ok(landing) => landing,
-            // Still in flight, and nothing new to say.
-            Err(TryRecvError::Empty) => return,
-            Err(TryRecvError::Disconnected) => Err(PUSH_LOST.to_owned()),
-        };
-        let line = match &landing {
-            Ok(url) => filed_line(&sending.team, url),
+        let line = match landing.unwrap_or_else(|Lost| Err(PUSH_LOST.to_owned())) {
+            Ok(url) => filed_line(&sending.team, &url),
             // The worker's own sentence, which is `push.rs`'s wording of
             // whatever went wrong: a transport failure, Linear's refusal, a
             // record written since the dialog opened, a record that would not
             // save.
-            Err(line) => line.clone(),
+            Err(line) => line,
         };
-        // Taken before the line is put on the thread, so the round that reports
-        // a push is a round on which the next `/push` is already allowed.
-        self.sending = None;
         app.panel_mut().note(line, now);
     }
 
@@ -349,26 +349,17 @@ impl<O: Opens> Pushes<O> {
     }
 }
 
-// The `JoinHandle` is dropped on purpose, as a turn's and a pass's are: joining
-// is waiting, and this thread exists precisely so nobody waits for it. There is
-// no cancel handle either — one request per operation, no retry and no backoff
-// (see `linear.rs`), and a mutation that may already have run is not something a
+// No cancel handle — one request per operation, no retry and no backoff (see
+// `linear.rs`), and a mutation that may already have run is not something a
 // keystroke can take back.
 //
 // `io::sink` is where the line `file` prints would have gone. The panel words its
 // own — a conversation is not a terminal — and the address it needs comes back
 // from the call rather than out of the bytes.
-fn spawn_push<O: Opens>(open: O, ready: Prepared) -> Receiver<Landing> {
-    let (events, received) = mpsc::channel();
-    thread::spawn(move || {
-        let landing =
-            file(&ready, &open, &mut io::sink()).map_err(|error| one_line(&error.to_string()));
-        // Ignored for the reason every other worker's send is: a receiver that
-        // has gone away is an application that is quitting.
-        let _ = events.send(landing);
-    });
-
-    received
+fn spawn_push<O: Opens>(workers: Workers, open: O, ready: Prepared) -> Once<Landing> {
+    workers.once(move || {
+        file(&ready, &open, &mut io::sink()).map_err(|error| one_line(&error.to_string()))
+    })
 }
 
 fn filing_line(team: &str) -> String {

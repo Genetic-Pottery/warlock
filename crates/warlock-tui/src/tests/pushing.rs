@@ -1,6 +1,6 @@
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use tempfile::TempDir;
@@ -460,16 +460,13 @@ fn a_yes_files_what_the_dialog_was_drawn_from_without_resolving_it_again() {
     let home = a_home(repo.path(), &[SCOPE]);
     let mut app = App::default();
     let linear = Boarding::filing(URL);
-    let mut pushes = Pushes::with_client(linear.clone(), Some(home.path().to_path_buf()));
+    let mut pushes = Pushes::with_client(linear.clone(), Some(home.path().to_path_buf())).inline();
     pushes.press(&mut app, &a_manifest(), repo.path(), WRITTEN, now());
     assert!(pushes.window.confirm.is_open(), "{:?}", notes(&app));
     save_sigils(home.path(), repo.path(), &[]).expect("a config that writes");
 
     pushes.answer(&mut app, PushAnswered::Send, now());
-    let waited = Instant::now();
-    while pushes.sending() && waited.elapsed() < Duration::from_secs(10) {
-        pushes.keep_up(&mut app, now());
-    }
+    pushes.keep_up(&mut app, now());
 
     assert!(!pushes.sending(), "the push never reported");
     assert_eq!(pushes.window, Pushing::closed(), "the dialog is still up");

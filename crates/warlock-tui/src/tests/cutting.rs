@@ -17,6 +17,7 @@ use warlock_tui::{App, Converses, Line, Opens};
 
 use super::{ALREADY_CUTTING, Cutter};
 use crate::error::{Error, one_line};
+use crate::inflight::Workers;
 use crate::stubs::{Answering, Boarding, Gate, Scripted};
 
 // Not a key, and named so that nothing reading this file mistakes it for one:
@@ -66,7 +67,14 @@ const THIRD: &str = "File the drafts";
 
 // Long enough that a worker which never reports fails the test rather than
 // hanging the suite, and short enough that it is a failure rather than a wait.
+// Only a test holding a gate runs its workers on threads, and only those wait
+// on the clock.
 const AT_MOST: Duration = Duration::from_secs(10);
+
+// More rounds than any run here has steps. Inline workers have landed before
+// the round that drains them, so a helper that runs out of these is a flow that
+// stopped moving rather than one that is slow.
+const ROUNDS: usize = 64;
 
 // What a `/draft` reads before it offers anything: the user the key belongs to,
 // once for the run, and the project the filed record names. Every assertion
@@ -158,18 +166,31 @@ fn press<O: Opens, A: Converses>(app: &mut App, cutter: &mut Cutter<O, A>, repo:
     cutter.press(app, &a_manifest(), repo, BRIEF, None, now());
 }
 
+// The rounds a helper may drive before it gives up: a count for inline workers,
+// and the clock for the threaded ones a gated test holds open.
+fn rounds<O: Opens, A: Converses>(cutter: &Cutter<O, A>) -> Box<dyn Iterator<Item = ()>> {
+    match cutter.workers {
+        Workers::Inline => Box::new(std::iter::repeat_n((), ROUNDS)),
+        Workers::Threaded => {
+            let waited = Instant::now();
+            Box::new(std::iter::from_fn(move || {
+                (waited.elapsed() < AT_MOST).then_some(())
+            }))
+        }
+    }
+}
+
 // Rounds until the fetch has reported, drained and never blocked on: the loop
 // draws and then drains, so a test that waited on the channel would be a test
 // of something the panel does not do.
-fn landing<O: Opens, A: Converses>(app: &mut App, cutter: &mut Cutter<O, A>) -> usize {
-    let waited = Instant::now();
-    let mut rounds = 0;
-    while cutter.fetching() && waited.elapsed() < AT_MOST {
+fn landing<O: Opens, A: Converses>(app: &mut App, cutter: &mut Cutter<O, A>) {
+    for () in rounds(cutter) {
+        if !cutter.fetching() {
+            break;
+        }
         cutter.keep_up(app, now());
-        rounds += 1;
     }
     assert!(!cutter.fetching(), "the draft never reported");
-    rounds
 }
 
 // Rounds until the run is over, drained and never blocked on — the loop draws
@@ -182,8 +203,10 @@ fn landing<O: Opens, A: Converses>(app: &mut App, cutter: &mut Cutter<O, A>) -> 
 // are two questions: every test that drives this one is about the first, and the
 // second is `reviewing`'s own.
 fn through<O: Opens, A: Converses>(app: &mut App, cutter: &mut Cutter<O, A>) {
-    let waited = Instant::now();
-    while cutter.drafting() && waited.elapsed() < AT_MOST {
+    for () in rounds(cutter) {
+        if !cutter.drafting() {
+            break;
+        }
         drop(cutter.keep_up(app, now()));
         if cutter.reviewing().is_some() {
             cutter.skip(app, now());
@@ -241,7 +264,29 @@ fn asked_proposing<O: Opens>(
     let repo = a_repository();
     let home = a_home(repo.path());
     filed(repo.path(), &[]);
-    let mut cutter = Cutter::with_client(linear, Some(home.path().to_path_buf()), agent, proposer);
+    let cutter = Cutter::with_client(linear, Some(home.path().to_path_buf()), agent, proposer);
+    fetched(cutter.inline(), repo, home)
+}
+
+// The same, for a test that holds one of the seams at a gate: its workers are
+// threads, because an inline one would hold the test itself at the gate.
+fn asked_held<O: Opens>(
+    linear: O,
+    agent: Scripted,
+    proposer: Scripted,
+) -> (App, Cutter<O, Scripted>, TempDir, TempDir) {
+    let repo = a_repository();
+    let home = a_home(repo.path());
+    filed(repo.path(), &[]);
+    let cutter = Cutter::with_client(linear, Some(home.path().to_path_buf()), agent, proposer);
+    fetched(cutter, repo, home)
+}
+
+fn fetched<O: Opens>(
+    mut cutter: Cutter<O, Scripted>,
+    repo: TempDir,
+    home: TempDir,
+) -> (App, Cutter<O, Scripted>, TempDir, TempDir) {
     let mut app = App::default();
     press(&mut app, &mut cutter, repo.path());
     landing(&mut app, &mut cutter);
@@ -263,7 +308,8 @@ fn a_cut_reports_the_project_its_status_and_how_many_slices_are_left() {
         Some(home.path().to_path_buf()),
         unasked(),
         unasked(),
-    );
+    )
+    .inline();
     let mut app = App::default();
 
     press(&mut app, &mut cutter, repo.path());
@@ -304,7 +350,8 @@ fn slices_already_cut_are_left_out_of_what_is_still_to_cut() {
         Some(home.path().to_path_buf()),
         unasked(),
         unasked(),
-    );
+    )
+    .inline();
     let mut app = App::default();
 
     press(&mut app, &mut cutter, repo.path());
@@ -332,7 +379,8 @@ fn a_project_that_is_not_planned_is_one_line_with_nothing_torn_down() {
         Some(home.path().to_path_buf()),
         unasked(),
         unasked(),
-    );
+    )
+    .inline();
     let mut app = App::default();
 
     press(&mut app, &mut cutter, repo.path());
@@ -547,7 +595,8 @@ mod asking {
             Some(home.path().to_path_buf()),
             unasked(),
             unasked(),
-        );
+        )
+        .inline();
         let mut app = App::default();
 
         press(&mut app, &mut cutter, repo.path());
@@ -663,8 +712,8 @@ mod cutting {
 
     use super::{
         AT_MOST, Answering, App, Boarding, Cutter, FIRST, Gate, Instant, NAME, PREPARED, SECOND,
-        Scripted, THIRD, a_home, a_project, a_repository, asked_over, filed, landing, notes, now,
-        press, through, unasked,
+        Scripted, THIRD, a_home, a_project, a_repository, asked_held, asked_over, filed, landing,
+        notes, now, press, through, unasked,
     };
 
     // The three `[n/total]` prefixes a run over this project says, in the order
@@ -683,6 +732,16 @@ mod cutting {
         agent: Scripted,
     ) -> (App, Cutter<Boarding, Scripted>, TempDir, TempDir) {
         let (mut app, mut cutter, repo, home) = asked_over(linear, agent);
+        cutter.cut(&mut app, now());
+        (app, cutter, repo, home)
+    }
+
+    // The same over a model held at a gate, on threads.
+    fn cut_held(
+        linear: Boarding,
+        agent: Scripted,
+    ) -> (App, Cutter<Boarding, Scripted>, TempDir, TempDir) {
+        let (mut app, mut cutter, repo, home) = asked_held(linear, agent, unasked());
         cutter.cut(&mut app, now());
         (app, cutter, repo, home)
     }
@@ -750,7 +809,8 @@ mod cutting {
             Some(home.path().to_path_buf()),
             agent.clone(),
             unasked(),
-        );
+        )
+        .inline();
         let mut app = App::default();
         press(&mut app, &mut cutter, repo.path());
         landing(&mut app, &mut cutter);
@@ -884,7 +944,7 @@ mod cutting {
             Answering::drafts(THIRD),
         ])
         .held_at(&gate);
-        let (mut app, mut cutter, _repo, _home) = cut(a_project(), agent);
+        let (mut app, mut cutter, _repo, _home) = cut_held(a_project(), agent);
         let held = notes(&app).len();
 
         for _ in 0..3 {
@@ -907,7 +967,7 @@ mod cutting {
         // sessions would be two runs cutting one project.
         let gate = Gate::shut();
         let linear = a_project();
-        let (mut app, mut cutter, repo, _home) = cut(
+        let (mut app, mut cutter, repo, _home) = cut_held(
             linear.clone(),
             Scripted::saying([Answering::drafts(FIRST)]).held_at(&gate),
         );
@@ -935,7 +995,7 @@ mod cutting {
         // did.
         let gate = Gate::shut();
         let agent = Scripted::saying([Answering::drafts(FIRST)]).held_at(&gate);
-        let (_app, cutter, _repo, _home) = cut(a_project(), agent.clone());
+        let (_app, cutter, _repo, _home) = cut_held(a_project(), agent.clone());
         assert!(cutter.drafting(), "there is no run to cancel");
 
         let dropped = Instant::now();
@@ -993,8 +1053,8 @@ mod relaying {
     use warlock_tui::NOTHING_SETTLES_IT;
 
     use super::{
-        AT_MOST, Answering, App, Boarding, Cutter, FIRST, Gate, Instant, SECOND, Scripted, THIRD,
-        a_project, asked_proposing, notes, now, through,
+        Answering, App, Boarding, Cutter, FIRST, Gate, SECOND, Scripted, THIRD, a_project,
+        asked_held, asked_proposing, notes, now, rounds, through,
     };
 
     // The question the first slice comes back with, and warlock's attempt at it:
@@ -1012,27 +1072,29 @@ mod relaying {
     // written down: the slice asks, is answered, and drafts, and the two after
     // it draft first time.
     fn asking(proposer: Scripted) -> (App, Cutter<Boarding, Scripted>, TempDir, TempDir) {
-        let (mut app, mut cutter, repo, home) = asked_proposing(
-            a_project(),
-            Scripted::saying([
-                Answering::says(ASKED),
-                Answering::drafts(FIRST),
-                Answering::drafts(SECOND),
-                Answering::drafts(THIRD),
-            ]),
-            proposer,
-        );
+        let (mut app, mut cutter, repo, home) = asked_proposing(a_project(), slice(), proposer);
         cutter.cut(&mut app, now());
         waiting(&mut app, &mut cutter);
         (app, cutter, repo, home)
+    }
+
+    fn slice() -> Scripted {
+        Scripted::saying([
+            Answering::says(ASKED),
+            Answering::drafts(FIRST),
+            Answering::drafts(SECOND),
+            Answering::drafts(THIRD),
+        ])
     }
 
     // Rounds until the slice under way is waiting on an answer, drained and
     // never blocked on: the loop draws and then drains, so a test that waited on
     // a channel would be a test of something the panel does not do.
     fn waiting(app: &mut App, cutter: &mut Cutter<Boarding, Scripted>) {
-        let waited = Instant::now();
-        while !cutter.relaying() && waited.elapsed() < AT_MOST {
+        for () in rounds(cutter) {
+            if cutter.relaying() {
+                break;
+            }
             round(app, cutter);
         }
         assert!(cutter.relaying(), "no question was ever put");
@@ -1043,9 +1105,8 @@ mod relaying {
     // Both are one round in the panel's life, which is why one helper waits for
     // either.
     fn attempted(app: &mut App, cutter: &mut Cutter<Boarding, Scripted>) -> Option<String> {
-        let waited = Instant::now();
         let said = notes(app).len();
-        while waited.elapsed() < AT_MOST {
+        for () in rounds(cutter) {
             if let Some(draft) = cutter.keep_up(app, now()) {
                 return Some(draft);
             }
@@ -1164,8 +1225,13 @@ mod relaying {
         // would freeze the panel for as long as a second `claude` took to read a
         // repository, with a question up and nobody able to type an answer.
         let gate = Gate::shut();
-        let (mut app, mut cutter, _repo, _home) =
-            asking(Scripted::saying([Answering::says(PROPOSED)]).held_at(&gate));
+        let (mut app, mut cutter, _repo, _home) = asked_held(
+            a_project(),
+            slice(),
+            Scripted::saying([Answering::says(PROPOSED)]).held_at(&gate),
+        );
+        cutter.cut(&mut app, now());
+        waiting(&mut app, &mut cutter);
         let held = notes(&app).len();
 
         for _ in 0..3 {
@@ -1359,7 +1425,7 @@ mod relaying {
             Answering::drafts(SECOND),
             Answering::drafts(THIRD),
         ]);
-        let (mut app, mut cutter, _repo, _home) = asked_proposing(
+        let (mut app, mut cutter, _repo, _home) = asked_held(
             a_project(),
             agent.clone(),
             Scripted::saying([Answering::says(PROPOSED)]).held_at(&gate),
@@ -1394,8 +1460,8 @@ mod reviewing {
     use warlock_tui::{Answer, Choice};
 
     use super::{
-        AT_MOST, Answering, App, BRIEF, Cutter, FIRST, Instant, NOT_A_KEY, PREPARED, PROJECT_ID,
-        SECOND, Scripted, THIRD, a_project, asked_over, fs, notes, now,
+        Answering, App, BRIEF, Cutter, FIRST, NOT_A_KEY, PREPARED, PROJECT_ID, SECOND, Scripted,
+        THIRD, a_project, asked_over, fs, notes, now, rounds,
     };
     use crate::stubs::{Boarding, Op, VIEWER};
 
@@ -1442,8 +1508,10 @@ mod reviewing {
     // Rounds until the slice under way is waiting behind the window, drained and
     // never blocked on, for the reason every other helper here is.
     fn offered(app: &mut App, cutter: &mut Cutter<Boarding, Scripted>) {
-        let waited = Instant::now();
-        while cutter.reviewing().is_none() && waited.elapsed() < AT_MOST {
+        for () in rounds(cutter) {
+            if cutter.reviewing().is_some() {
+                break;
+            }
             drop(cutter.keep_up(app, now()));
         }
         assert!(
@@ -1457,8 +1525,10 @@ mod reviewing {
     // the next slice's window, or a run that is over. Both are endings, and a
     // helper per ending would be two ways of saying the same wait.
     fn settled(app: &mut App, cutter: &mut Cutter<Boarding, Scripted>) {
-        let waited = Instant::now();
-        while cutter.drafting() && cutter.reviewing().is_none() && waited.elapsed() < AT_MOST {
+        for () in rounds(cutter) {
+            if !cutter.drafting() || cutter.reviewing().is_some() {
+                break;
+            }
             drop(cutter.keep_up(app, now()));
         }
         assert!(
@@ -1481,8 +1551,10 @@ mod reviewing {
     // Rounds until nothing of the cut is left in flight — the project's one
     // comment included — for the reason every other helper here drains.
     fn over(app: &mut App, cutter: &mut Cutter<Boarding, Scripted>) {
-        let waited = Instant::now();
-        while cutter.running() && waited.elapsed() < AT_MOST {
+        for () in rounds(cutter) {
+            if !cutter.running() {
+                break;
+            }
             drop(cutter.keep_up(app, now()));
         }
         assert!(

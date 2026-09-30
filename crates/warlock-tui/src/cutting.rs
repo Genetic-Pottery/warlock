@@ -52,8 +52,6 @@
 use std::io;
 use std::mem;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{self, Receiver, TryRecvError};
-use std::thread;
 use std::time::Instant;
 
 use warlock_engine::drafting::Draft;
@@ -66,6 +64,7 @@ use warlock_tui::{
 
 use crate::cut::{Cut, listed};
 use crate::error::{Error, one_line};
+use crate::inflight::{Lost, Once, Workers, settled};
 use crate::pacting::CancelGuard;
 // The lines about a relayed question come from there rather than from here, as
 // `named` and `not_drafted` do: the shell and the panel put the same question to
@@ -85,17 +84,14 @@ use crate::standing::Standing;
 // its own rather than a queue.
 pub(crate) const ALREADY_CUTTING: &str = "a draft is already running; this one read nothing";
 
-// The worker sends on every path it takes, so a channel that closes with
-// nothing on it is a panic. The hook has already printed it; what is left to
-// say is that nothing was read — which is the honest answer for a sequence that
-// only reads, and the reason this sentence promises more than a lost push's
-// does.
+// Said of a lost fetch: nothing was read — which is the honest answer for a
+// sequence that only reads, and the reason this sentence promises more than a
+// lost push's does.
 const CUT_LOST: &str = "the draft stopped without saying how it went; nothing was read or changed";
 
-// The same for a slice's worker, which also sends on every path it takes. One
-// slice is one session and one thread, so a channel that closed with nothing on
-// it took that slice down and nothing else — which is why this is a line about
-// the slice and the run carries on to the next.
+// Said of a lost slice. One slice is one session and one worker, so a lost one
+// took that slice down and nothing else — which is why this is a line about the
+// slice and the run carries on to the next.
 //
 // A proposal's worker is worded the same way for the same reason, and costs even
 // less: the question is still up and the field is still somebody's to type into.
@@ -179,7 +175,8 @@ pub(crate) struct Cutter<O: Opens, A: Converses> {
     // The project's one comment, in flight after the run that owed it. No
     // cancel guard, for [`Filing`]'s reason: it is a mutation, and a receiver
     // dropped by quitting leaves a worker that finishes into nowhere.
-    announcing: Option<Receiver<Option<String>>>,
+    announcing: Option<Once<Option<String>>>,
+    workers: Workers,
 }
 
 // The channel, and the handle that is the whole of how a cut is stopped.
@@ -191,7 +188,7 @@ pub(crate) struct Cutter<O: Opens, A: Converses> {
 // on this side can interrupt a socket that is already waiting.
 #[derive(Debug)]
 struct Fetching {
-    events: Receiver<Landing>,
+    events: Once<Landing>,
     // Never read, and that is the whole of what it does: the guard's `Drop` is
     // the cancel, so the field being here is the session's exit path. A handle
     // somebody had to remember to call would be one somebody could forget to.
@@ -276,7 +273,7 @@ struct Reviewing<A> {
 // lose issues.
 #[derive(Debug)]
 struct Filing {
-    landings: Receiver<Result<Cut, String>>,
+    landings: Once<Result<Cut, String>>,
 }
 
 /// A question put to whoever is at the panel: the session that asked it, and
@@ -298,7 +295,7 @@ struct Waiting<A> {
     /// keeps it, which is the honest shape for one turn nothing else can reach:
     /// quitting drops the receiver and the worker finishes into nowhere, having
     /// read a brief, a slice and a repository and written nothing.
-    proposing: Option<Receiver<Result<String, agent::Error>>>,
+    proposing: Option<Once<Result<String, agent::Error>>>,
 }
 
 // One slice's session, from the panel's side: what the worker will say, and the
@@ -310,7 +307,7 @@ struct Waiting<A> {
 // a run: losing the session loses the run, and losing the run cancels.
 #[derive(Debug)]
 struct Asking<A> {
-    replies: Receiver<Turned<A>>,
+    replies: Once<Turned<A>>,
     #[expect(
         dead_code,
         reason = "held for its drop, which is what cancels the slice in flight"
@@ -358,6 +355,15 @@ impl<O: Opens, A: Converses> Cutter<O, A> {
             ready: None,
             slicing: None,
             announcing: None,
+            workers: Workers::Threaded,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn inline(self) -> Self {
+        Self {
+            workers: Workers::Inline,
+            ..self
         }
     }
 
@@ -437,7 +443,7 @@ impl<O: Opens, A: Converses> Cutter<O, A> {
         app.panel_mut().note(reading_line(brief), now);
         let cancel = CancelGuard::new();
         self.fetching = Some(Fetching {
-            events: spawn_fetch(self.open.clone(), work, cancel.handle()),
+            events: spawn_fetch(self.workers, self.open.clone(), work, cancel.handle()),
             cancel,
         });
     }
@@ -464,20 +470,11 @@ impl<O: Opens, A: Converses> Cutter<O, A> {
     }
 
     fn landed(&mut self, app: &mut App, now: Instant) {
-        let Some(fetching) = self.fetching.as_ref() else {
+        let Some((_, landing)) = settled(&mut self.fetching, |fetching| fetching.events.landed())
+        else {
             return;
         };
-
-        let landing = match fetching.events.try_recv() {
-            Ok(landing) => landing,
-            // Still in flight, and nothing new to say.
-            Err(TryRecvError::Empty) => return,
-            Err(TryRecvError::Disconnected) => Err(CUT_LOST.to_owned()),
-        };
-        // Taken before the line is put on the thread, so the round that reports
-        // a cut is a round on which the next `/draft` is already allowed.
-        self.fetching = None;
-        match landing {
+        match landing.unwrap_or_else(|Lost| Err(CUT_LOST.to_owned())) {
             // The question goes up on the round the answer landed, over the
             // line that reports it: what a reader is being asked to confirm is
             // what they have just read.
@@ -496,16 +493,10 @@ impl<O: Opens, A: Converses> Cutter<O, A> {
     // said on the project and not again here, and one Linear turned down is a
     // line rather than a failure, because the issues it names exist either way.
     fn announced(&mut self, app: &mut App, now: Instant) {
-        let Some(announcing) = self.announcing.as_ref() else {
+        let Some((_, line)) = settled(&mut self.announcing, |once| once.landed()) else {
             return;
         };
-        let line = match announcing.try_recv() {
-            Ok(line) => line,
-            Err(TryRecvError::Empty) => return,
-            Err(TryRecvError::Disconnected) => Some(ANNOUNCE_LOST.to_owned()),
-        };
-        self.announcing = None;
-        if let Some(line) = line {
+        if let Some(line) = line.unwrap_or_else(|Lost| Some(ANNOUNCE_LOST.to_owned())) {
             app.panel_mut().note(line, now);
         }
     }
@@ -533,23 +524,13 @@ impl<O: Opens, A: Converses> Cutter<O, A> {
     // The run is taken out rather than borrowed because the agent the next
     // session is opened off sits beside it on this value.
     fn turned(&mut self, app: &mut App, now: Instant) {
-        let Some(mut slicing) = self.slicing.take() else {
+        let Some((mut slicing, turned)) =
+            settled(&mut self.slicing, |slicing| match &slicing.stage {
+                Stage::Drafting(asking) => asking.replies.landed(),
+                _ => None,
+            })
+        else {
             return;
-        };
-        let Stage::Drafting(asking) = &slicing.stage else {
-            self.slicing = Some(slicing);
-            return;
-        };
-        let turned = match asking.replies.try_recv() {
-            Ok(turned) => Some(turned),
-            // Still drafting, and nothing new to say.
-            Err(TryRecvError::Empty) => {
-                self.slicing = Some(slicing);
-                return;
-            }
-            // The worker panicked: the hook has already printed it, and what is
-            // left to say is that this slice came to nothing.
-            Err(TryRecvError::Disconnected) => None,
         };
 
         match ended(slicing.next.slice(), turned) {
@@ -561,8 +542,13 @@ impl<O: Opens, A: Converses> Cutter<O, A> {
             Ended::Asked { session, question } => {
                 let slice = slicing.next.slice();
                 app.panel_mut().note(question_line(slice, &question), now);
-                let proposing =
-                    spawn_proposal(&self.proposer, slicing.planned.brief(), slice, &question);
+                let proposing = spawn_proposal(
+                    self.workers,
+                    &self.proposer,
+                    slicing.planned.brief(),
+                    slice,
+                    &question,
+                );
                 slicing.stage = Stage::Waiting(Waiting {
                     session,
                     proposing: Some(proposing),
@@ -619,6 +605,7 @@ impl<O: Opens, A: Converses> Cutter<O, A> {
         };
         slicing.redrafted = false;
         slicing.stage = Stage::Drafting(started(
+            self.workers,
             &self.agent,
             app,
             slicing.planned.brief(),
@@ -634,7 +621,11 @@ impl<O: Opens, A: Converses> Cutter<O, A> {
     // and the cut decides whether one is owed.
     fn finished(&mut self, planned: &Planned) {
         if let Some(announcement) = planned.finish() {
-            self.announcing = Some(spawn_announcement(self.open.clone(), announcement));
+            self.announcing = Some(spawn_announcement(
+                self.workers,
+                self.open.clone(),
+                announcement,
+            ));
         }
     }
 
@@ -647,26 +638,18 @@ impl<O: Opens, A: Converses> Cutter<O, A> {
     // filed before what it waits on, and a run that stopped would leave the
     // reader typing `/draft` again to reach it.
     fn cutting(&mut self, app: &mut App, now: Instant) {
-        let Some(mut slicing) = self.slicing.take() else {
+        let Some((mut slicing, landing)) =
+            settled(&mut self.slicing, |slicing| match &slicing.stage {
+                Stage::Filing(filing) => filing.landings.landed(),
+                _ => None,
+            })
+        else {
             return;
         };
-        let Stage::Filing(filing) = &slicing.stage else {
-            self.slicing = Some(slicing);
-            return;
-        };
-        let landing = match filing.landings.try_recv() {
-            Ok(landing) => landing,
-            // Still filing, and nothing new to say.
-            Err(TryRecvError::Empty) => {
-                self.slicing = Some(slicing);
-                return;
-            }
-            // The worker panicked: the hook has already printed it, and what is
-            // left to say is that this slice cannot be reported on. Whatever it
-            // created is on the board with its record beside it, which is what
-            // the next `/draft` will read.
-            Err(TryRecvError::Disconnected) => Err(SLICE_LOST.to_owned()),
-        };
+        // A lost filing cannot be reported on. Whatever it created is on the
+        // board with its record beside it, which is what the next `/draft` will
+        // read.
+        let landing = landing.unwrap_or_else(|Lost| Err(SLICE_LOST.to_owned()));
 
         let settled = landing.map(|cut| slicing.planned.settle(&slicing.next, cut));
         let slice = slicing.next.slice();
@@ -700,16 +683,13 @@ impl<O: Opens, A: Converses> Cutter<O, A> {
         let Stage::Waiting(waiting) = &mut slicing.stage else {
             return None;
         };
-        let proposal = match waiting.proposing.as_ref()?.try_recv() {
+        let (_, proposal) = settled(&mut waiting.proposing, |once| once.landed())?;
+        let proposal = match proposal {
             Ok(Ok(proposal)) => Ok(proposal),
             Ok(Err(error)) => Err(one_line(&error.to_string())),
-            // Still thinking, and nothing new to say.
-            Err(TryRecvError::Empty) => return None,
-            // The worker panicked: the hook has already printed it, and the
-            // question is still up with nothing in the field.
-            Err(TryRecvError::Disconnected) => Err(SLICE_LOST.to_owned()),
+            // The question is still up with nothing in the field.
+            Err(Lost) => Err(SLICE_LOST.to_owned()),
         };
-        waiting.proposing = None;
 
         let slice = slicing.next.slice();
         match proposal {
@@ -817,7 +797,7 @@ impl<O: Opens, A: Converses> Cutter<O, A> {
             Stage::Waiting(waiting) => {
                 app.panel_mut()
                     .note(answer_line(slicing.next.slice(), answer), now);
-                Stage::Drafting(asked(waiting.session, answer))
+                Stage::Drafting(asked(self.workers, waiting.session, answer))
             }
             Stage::Feedback(session) => {
                 app.panel_mut()
@@ -826,7 +806,7 @@ impl<O: Opens, A: Converses> Cutter<O, A> {
                 // slice is spent by the turn that redrafts it and not by a
                 // reader who chose feedback and then thought better of it.
                 slicing.redrafted = true;
-                Stage::Drafting(asked(session, answer))
+                Stage::Drafting(asked(self.workers, session, answer))
             }
         };
         self.slicing = Some(slicing);
@@ -914,6 +894,7 @@ impl<O: Opens, A: Converses> Cutter<O, A> {
 
         app.panel_mut().note(filing_line(slicing.next.slice()), now);
         let landings = spawn_filing(
+            self.workers,
             self.open.clone(),
             slicing.planned.filing(&slicing.next, reviewing.drafts),
         );
@@ -1057,7 +1038,7 @@ impl<O: Opens, A: Converses> Cutter<O, A> {
         let Some(next) = planned.next_uncut() else {
             return;
         };
-        let asking = started(&self.agent, app, planned.brief(), &next, now);
+        let asking = started(self.workers, &self.agent, app, planned.brief(), &next, now);
         self.slicing = Some(Slicing {
             planned,
             next,
@@ -1077,6 +1058,7 @@ impl<O: Opens, A: Converses> Cutter<O, A> {
 // [`planned::drafted`](crate::planned) — so the two doors differ in where the
 // answer is typed and in nothing the session is told.
 fn started<A: Converses>(
+    workers: Workers,
     agent: &A,
     app: &mut App,
     brief: &str,
@@ -1088,7 +1070,7 @@ fn started<A: Converses>(
     let slice = next.slice();
     let session = Drafting::for_slice(agent, brief, slice.heading(), slice.prose());
 
-    turning(session, Drafting::open)
+    turning(workers, session, Drafting::open)
 }
 
 // The same session told what somebody answered, back on a worker. Nothing is
@@ -1098,9 +1080,9 @@ fn started<A: Converses>(
 // The answer is the session's to word from here on — an answer given after the
 // last round carries [`Drafting`]'s own instruction to draft now — so nothing on
 // this side counts rounds or decides when the asking is over.
-fn asked<A: Converses>(session: Drafting<A>, answer: &str) -> Asking<A> {
+fn asked<A: Converses>(workers: Workers, session: Drafting<A>, answer: &str) -> Asking<A> {
     let answer = answer.to_owned();
-    turning(session, move |session| session.answer(&answer))
+    turning(workers, session, move |session| session.answer(&answer))
 }
 
 // A session handed to a worker for one turn, with the handle that stops the turn
@@ -1112,7 +1094,7 @@ fn asked<A: Converses>(session: Drafting<A>, answer: &str) -> Asking<A> {
 // behind a lock: it is the one thing that carries what this slice's
 // conversation has already said, and the event loop's thread has no business
 // touching it while a turn is running.
-fn turning<A, F>(mut session: Drafting<A>, turn: F) -> Asking<A>
+fn turning<A, F>(workers: Workers, mut session: Drafting<A>, turn: F) -> Asking<A>
 where
     A: Converses,
     F: FnOnce(&mut Drafting<A>) -> Result<Replied, agent::Error> + Send + 'static,
@@ -1120,26 +1102,12 @@ where
     let cancel = CancelGuard::over(session.cancel());
 
     Asking {
-        replies: worker(move || {
+        replies: workers.once(move || {
             let replied = turn(&mut session);
             (session, replied)
         }),
         cancel,
     }
-}
-
-// Every thread this module starts. The `JoinHandle` is dropped on purpose:
-// joining is waiting, and each thread exists precisely so nobody waits for it.
-// The send is ignored because a receiver that has gone away is a panel nobody is
-// looking at any more — an application quitting, which is also what cancels a
-// run.
-fn worker<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> Receiver<T> {
-    let (events, received) = mpsc::channel();
-    thread::spawn(move || {
-        let _ = events.send(work());
-    });
-
-    received
 }
 
 // Warlock's attempt at one question, on a worker of its own for the reason a
@@ -1154,15 +1122,16 @@ fn worker<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> Recei
 // the register, the one turn, and which replies are the session saying it has
 // nothing.
 fn spawn_proposal<A: Converses>(
+    workers: Workers,
     agent: &A,
     brief: &str,
     slice: &Slice,
     question: &str,
-) -> Receiver<Result<String, agent::Error>> {
+) -> Once<Result<String, agent::Error>> {
     let (agent, brief, question) = (agent.clone(), brief.to_owned(), question.to_owned());
     let (title, prose) = (slice.heading().to_owned(), slice.prose().to_owned());
 
-    worker(move || propose_answer(&agent, &brief, &title, &prose, &question))
+    workers.once(move || propose_answer(&agent, &brief, &title, &prose, &question))
 }
 
 /// What one slice's turn came to: a question to put to somebody, drafts to be
@@ -1193,8 +1162,8 @@ enum Ended<A> {
 // The session is dropped on the endings alone. Nothing after one has anything
 // more to say to it: the slice is uncut, and asking again is a turn spent on an
 // answer that was not better the first time.
-fn ended<A>(slice: &Slice, turned: Option<Turned<A>>) -> Ended<A> {
-    let Some((session, replied_with)) = turned else {
+fn ended<A>(slice: &Slice, turned: Result<Turned<A>, Lost>) -> Ended<A> {
+    let Ok((session, replied_with)) = turned else {
         return Ended::Over(vec![not_drafted(slice, SLICE_LOST)]);
     };
 
@@ -1297,8 +1266,12 @@ struct Work {
 // are the panel's own and worded beside the slice they are about. A send nobody
 // hears loses nothing: what this worker did is on the board and in the cut
 // record beside the brief, which is where the next `/draft` reads it from.
-fn spawn_filing<O: Opens>(open: O, filing: planned::Filing) -> Receiver<Result<Cut, String>> {
-    worker(move || {
+fn spawn_filing<O: Opens>(
+    workers: Workers,
+    open: O,
+    filing: planned::Filing,
+) -> Once<Result<Cut, String>> {
+    workers.once(move || {
         filing
             .file(&open, &mut io::sink())
             .map_err(|error| one_line(&error.to_string()))
@@ -1307,12 +1280,17 @@ fn spawn_filing<O: Opens>(open: O, filing: planned::Filing) -> Receiver<Result<C
 
 // The project's one comment, on a worker for the reason a create is on one: it
 // is a request, and the panel keeps drawing while Linear answers it.
-fn spawn_announcement<O: Opens>(open: O, announcement: Announcement) -> Receiver<Option<String>> {
-    worker(move || announcement.post(&open))
+fn spawn_announcement<O: Opens>(
+    workers: Workers,
+    open: O,
+    announcement: Announcement,
+) -> Once<Option<String>> {
+    workers.once(move || announcement.post(&open))
 }
 
-fn spawn_fetch<O: Opens>(open: O, work: Work, cancel: Cancel) -> Receiver<Landing> {
-    worker(move || fetched(&open, &work, &cancel).map_err(|error| one_line(&error.to_string())))
+fn spawn_fetch<O: Opens>(workers: Workers, open: O, work: Work, cancel: Cancel) -> Once<Landing> {
+    workers
+        .once(move || fetched(&open, &work, &cancel).map_err(|error| one_line(&error.to_string())))
 }
 
 // The cancel is asked either side of [`prepare`] and nowhere else. A socket

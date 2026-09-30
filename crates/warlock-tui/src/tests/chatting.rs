@@ -1,9 +1,10 @@
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::mpsc::{self, Sender};
 use std::time::{Duration, Instant};
 
 use warlock_tui::{Activity, App, ChatAgent, Ending, INVOCATION_TIMEOUT, Line, Mode};
 
 use super::{Asked, Chat, Chatting, TurnEvent, apply_turn};
+use crate::inflight::Stream;
 use crate::pacting::CancelGuard;
 
 const ASKED: &str = "what is in crates/warlock-engine?";
@@ -28,13 +29,13 @@ fn started(shown: &str, asked: Asked, base: Instant) -> (App, Sender<TurnEvent>,
     (app, events, Some(turn_for(received, asked)))
 }
 
-fn chatting(received: Receiver<TurnEvent>) -> Chatting {
+fn chatting(received: impl Into<Stream<TurnEvent>>) -> Chatting {
     turn_for(received, Asked::Answer)
 }
 
-fn turn_for(received: Receiver<TurnEvent>, asked: Asked) -> Chatting {
+fn turn_for(received: impl Into<Stream<TurnEvent>>, asked: Asked) -> Chatting {
     Chatting {
-        events: received,
+        events: received.into(),
         cancel: CancelGuard::new(),
         asked,
     }
@@ -555,6 +556,7 @@ mod unix {
 
     use super::super::{Asked, Chat, TurnEvent, run_turn, spawn_turn, start_turn, wired};
     use super::{ASKED, at, chatting, clocked, drain, rows, said};
+    use crate::inflight::Port;
 
     const AT_MOST: Duration = Duration::from_secs(5);
 
@@ -607,6 +609,7 @@ mod unix {
 
     fn turned(agent: &ChatAgent, cancel: &Cancel) -> Vec<TurnEvent> {
         let (events, received) = mpsc::channel();
+        let events = Port::from(events);
         run_turn(ASKED, &wired(agent, cancel, &events), cancel, &events);
         received.try_iter().collect()
     }
@@ -785,7 +788,8 @@ mod unix {
         // kill does not reach holding stdout open for the full 300s, and
         // whether the cancel lands before or after that fork is a race.
         // Not waiting on such a survivor is pinned in `claude.rs`, not here.
-        let received = spawn_turn(ASKED, &stand_in("exec sleep 300"), cancel.handle());
+        let received =
+            spawn_turn(ASKED, &stand_in("exec sleep 300"), cancel.handle()).into_receiver();
 
         let started = Instant::now();
         cancel.cancel();

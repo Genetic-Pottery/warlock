@@ -16,10 +16,10 @@
 //! painting; the single `reload` at the foot of [`drain`] is not an
 //! optimisation but the only point at which disk is the honest account.
 
+use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::time::Instant;
-use std::{fs, io, thread};
+use std::{fs, io};
 
 use warlock_engine::pact::Event;
 use warlock_engine::{
@@ -33,11 +33,10 @@ use warlock_tui::{
 use crate::boundary::Operation;
 use crate::descent::{Descent, descend};
 use crate::error::one_line;
+use crate::inflight::{Lost, Port, Stream, Workers, settled};
 use crate::session::{Scope, closed_scope, reload};
 
-// The worker reports on every path it takes itself, so the only way the channel
-// closes without a `Finished` is a panic. The hook has already printed it; what
-// is left to say on the footer is that the record did not move.
+// Said on the footer of a lost pact: the record did not move.
 const PACT_LOST: &str = "the pact stopped without saying how it went; nothing new was recorded";
 
 const PACT_CANCELLED: &str = "the pact was cancelled; what it finished first is recorded";
@@ -138,7 +137,7 @@ impl<P: Wired + Agent> Pact<P> {
 }
 
 pub(crate) struct Running {
-    pub(crate) events: Receiver<PactEvent>,
+    pub(crate) events: Stream<PactEvent>,
     pub(crate) cancel: CancelGuard,
     pub(crate) work: Work,
     pub(crate) before: App,
@@ -240,11 +239,9 @@ pub(crate) enum PactEvent {
     Finished(Result<Toggled, String>),
 }
 
-fn activity_port(events: &Sender<PactEvent>) -> Activities {
+fn activity_port(events: &Port<PactEvent>) -> Activities {
     let events = events.clone();
-    Activities::new(move |activity| {
-        let _ = events.send(PactEvent::Doing(activity));
-    })
+    Activities::new(move |activity| events.send(PactEvent::Doing(activity)))
 }
 
 pub(crate) fn spawn_pact<P: Wired + Agent>(
@@ -253,19 +250,20 @@ pub(crate) fn spawn_pact<P: Wired + Agent>(
     work: &Work,
     agent: &P,
     cancel: Cancel,
-) -> Receiver<PactEvent> {
-    let (events, received) = mpsc::channel();
+) -> Stream<PactEvent> {
     let (manifest, repo_root, work) = (manifest.clone(), repo_root.to_path_buf(), work.clone());
-    // This run's copy of the agent, and the only one that answers to this run's
-    // handle: the agent the event loop keeps has a handle of its own that nobody
-    // else holds, so cancelling one run can never reach into the next.
-    //
-    // The activity port is attached the same way and for the same reason, in the
-    // same breath — see `activity_port`. Both are one-per-run, and both die with
-    // the copy of the agent this thread owns.
-    let agent = agent.wired(cancel.clone(), activity_port(&events));
-    thread::spawn(move || run_pact(&manifest, &repo_root, &work, &agent, &cancel, &events));
-    received
+    Workers::Threaded.stream(|events| {
+        // This run's copy of the agent, and the only one that answers to this
+        // run's handle: the agent the event loop keeps has a handle of its own
+        // that nobody else holds, so cancelling one run can never reach into the
+        // next.
+        //
+        // The activity port is attached the same way and for the same reason, in
+        // the same breath — see `activity_port`. Both are one-per-run, and both
+        // die with the copy of the agent the worker owns.
+        let agent = agent.wired(cancel.clone(), activity_port(&events));
+        move || run_pact(&manifest, &repo_root, &work, &agent, &cancel, &events)
+    })
 }
 
 fn start_run<P: Wired + Agent>(
@@ -292,12 +290,10 @@ fn run_pact(
     work: &Work,
     agent: &dyn Agent,
     cancel: &Cancel,
-    events: &Sender<PactEvent>,
+    events: &Port<PactEvent>,
 ) {
     let outcome = apply_toggle(manifest, repo_root, work, agent, cancel, &mut |event| {
-        // Ignored: a receiver that has gone away is an application that is
-        // quitting.
-        let _ = events.send(PactEvent::Run(event));
+        events.send(PactEvent::Run(event));
     });
     // Every run that spends minutes on model passes is stoppable, and both of
     // them are: a refresh is reworded here exactly as a pact is. The one run
@@ -306,7 +302,7 @@ fn run_pact(
         Ok(toggled) if work.is_cancellable() && cancel.is_cancelled() => Ok(cancelled(toggled)),
         outcome => outcome,
     };
-    let _ = events.send(PactEvent::Finished(outcome));
+    events.send(PactEvent::Finished(outcome));
 }
 
 fn cancelled(toggled: Toggled) -> Toggled {
@@ -458,183 +454,177 @@ fn drain(
     now: Instant,
 ) -> Option<Reloaded> {
     // No run, nothing drained, nothing reloaded — which is what almost every
-    // frame of warlock's life does here. Taken mutably because a carried
-    // directory is recorded on the run as its event arrives; the borrow is over
-    // before the `take` below.
-    let running = run.as_mut()?;
-
-    let outcome = loop {
-        match running.events.try_recv() {
-            Ok(PactEvent::Run(Event::Starting {
-                directory,
-                position,
-                total,
-            })) => {
-                // Two places, one fact, and they are two because they are read
-                // at two different speeds: the footer says which directory of
-                // how many is being worked *now* and replaces itself every time,
-                // while the panel keeps a section per directory for as long as
-                // the run lasts. The section is opened first so that the
-                // activities drained after it — which may be in this same batch
-                // — land under the directory they belong to.
+    // frame of warlock's life does here.
+    let (running, outcome) = settled(run, |running| {
+        running.events.drained(|event| {
+            match event {
+                PactEvent::Run(Event::Starting {
+                    directory,
+                    position,
+                    total,
+                }) => {
+                    // Two places, one fact, and they are two because they are read
+                    // at two different speeds: the footer says which directory of
+                    // how many is being worked *now* and replaces itself every time,
+                    // while the panel keeps a section per directory for as long as
+                    // the run lasts. The section is opened first so that the
+                    // activities drained after it — which may be in this same batch
+                    // — land under the directory they belong to.
+                    //
+                    // The panel goes through `App::write_run`, here and for every
+                    // other event below: one way in, so a line of a run cannot be
+                    // put on the panel by two different routes. The label is
+                    // computed once, outside the closure — one spelling of a
+                    // directory, handed to the account holding this run.
+                    let heading = section_label(&scope.root, &directory);
+                    app.panel_mut()
+                        .write_run(|account| account.open_section(&heading, now));
+                    // The fraction is the engine's own, whichever run is
+                    // reporting: a refresh of forty directories with seven stale
+                    // counts to seven, because seven is what the engine planned to
+                    // visit. The kind rides along so the line reads as refreshing
+                    // rather than pacting — see `Work::kind`.
+                    app.set_run_in_flight(running.work.kind(), directory, position, total);
+                }
+                // Filed under whichever directory is open, which is the one the
+                // `Starting` before it named: an activity carries no directory
+                // because it needs none, and the account's live section is the
+                // answer. An account is
+                // always there during a run — the press that started it made one —
+                // so a run with neither is one nobody started this way, which is a
+                // test driving the events directly; dropping the line is the honest
+                // thing to do with it either way. See `App::write_run`.
                 //
-                // The panel goes through `App::write_run`, here and for every
-                // other event below: one way in, so a line of a run cannot be
-                // put on the panel by two different routes. The label is
-                // computed once, outside the closure — one spelling of a
-                // directory, handed to the account holding this run.
-                let heading = section_label(&scope.root, &directory);
-                app.panel_mut()
-                    .write_run(|account| account.open_section(&heading, now));
-                // The fraction is the engine's own, whichever run is
-                // reporting: a refresh of forty directories with seven stale
-                // counts to seven, because seven is what the engine planned to
-                // visit. The kind rides along so the line reads as refreshing
-                // rather than pacting — see `Work::kind`.
-                app.set_run_in_flight(running.work.kind(), directory, position, total);
-            }
-            // Filed under whichever directory is open, which is the one the
-            // `Starting` before it named: an activity carries no directory
-            // because it needs none, and the account's live section is the
-            // answer. An account is
-            // always there during a run — the press that started it made one —
-            // so a run with neither is one nobody started this way, which is a
-            // test driving the events directly; dropping the line is the honest
-            // thing to do with it either way. See `App::write_run`.
-            //
-            // What each activity comes to is the account's business and not this
-            // file's: a tool is its name and its one detail, thinking is the
-            // word `thinking`, and a cost is added to the section's spend rather
-            // than drawn as a line of its own. See `Account::record`.
-            Ok(PactEvent::Doing(activity)) => {
-                app.panel_mut()
-                    .write_run(|account| account.record(&activity, now));
-            }
-            // The panel only, and one line: the request this directory's pass
-            // was handed, filed under whichever section the `Starting` before
-            // it opened, exactly as an activity is.
-            // The footer is left alone — it is already saying which directory
-            // of how many is being worked, which is the question it answers,
-            // and a byte total is not that.
-            //
-            // Filed at the handover rather than drawn on the placeholder
-            // above, because the clock is the point: this line counts the
-            // silence of *this* directory's own pass, from the moment its
-            // request went over, while the placeholder counts from the section
-            // opening and would label a multi-pass directory's whole wait with
-            // it. See `Account::record_waiting`.
-            Ok(PactEvent::Run(Event::Requesting { files, bytes })) => {
-                app.panel_mut()
-                    .write_run(|account| account.record_waiting(files, bytes, now));
-            }
-            // Both places again, and for the same reason `Starting` is both: the
-            // panel keeps the stretch of file passes as one reworded line, and
-            // the footer's bar fills by it. The bar is the only reason this
-            // reaches the footer at all — the line there still names the
-            // directory of how many, because that is the question it answers.
-            Ok(PactEvent::Run(Event::Describing {
-                position,
-                total,
-                bytes,
-                ..
-            })) => {
-                app.panel_mut()
-                    .write_run(|account| account.record_describing(position, total, bytes, now));
-                app.set_files_in_flight(position, total);
-            }
-            // The panel only, and one line, filed like the request line above
-            // it: why this directory is about to cost a second pass, or why it
-            // is about to fail, in the engine's own words.
-            Ok(PactEvent::Run(Event::Rejected {
-                defects,
-                attempt,
-                attempts,
-                ..
-            })) => {
-                app.panel_mut()
-                    .write_run(|account| account.record_rejected(&defects, attempt, attempts, now));
-            }
-            // The panel only, and one line per mend, filed under the same
-            // section as the rejections above it: the asking ran out and the
-            // document was written anyway, so this is the one place a reader
-            // learns that a slot of it is warlock's own words rather than the
-            // model's.
-            //
-            // The engine names the directory and the event carries it, because
-            // a repair is a fact about one directory and nothing reading these
-            // events should have to infer which. Nothing is done with it here:
-            // the line lands where every line of a pass lands, in the section
-            // the `Starting` before it opened, which is that same directory's.
-            Ok(PactEvent::Run(Event::Repaired { mend, .. })) => {
-                app.panel_mut()
-                    .write_run(|account| account.record_repaired(&mend.to_string(), now));
-            }
-            // The one recolouring a run does before it is over. The engine
-            // only says this of a directory whose whole subtree delivered —
-            // the very condition its grant is decided on — so painting the
-            // subtree green here repeats the engine's judgement rather than
-            // second-guessing it, and a directory that finished third of five
-            // is green while the fourth is still being paid for. The reload at
-            // the end repaints from the manifest either way, which is what
-            // catches the one thing this preview cannot know: a hash that
-            // fails in phase two.
-            Ok(PactEvent::Run(Event::Documented { directory })) => {
-                app.set_subtree_state(&directory, NodeState::PactedFresh);
-                // The document the pass just wrote, put on screen where it was
-                // written: beside the directory, in the colour the paint above
-                // has this moment given it. The paint comes first so the row is
-                // born green rather than repainted into it, though the order is
-                // not load-bearing — `set_subtree_state` paints a directory's
-                // files along with the directory, so an insertion above it
-                // would end up the same colour by the other road.
+                // What each activity comes to is the account's business and not this
+                // file's: a tool is its name and its one detail, thinking is the
+                // word `thinking`, and a cost is added to the section's spend rather
+                // than drawn as a line of its own. See `Account::record`.
+                PactEvent::Doing(activity) => {
+                    app.panel_mut()
+                        .write_run(|account| account.record(&activity, now));
+                }
+                // The panel only, and one line: the request this directory's pass
+                // was handed, filed under whichever section the `Starting` before
+                // it opened, exactly as an activity is.
+                // The footer is left alone — it is already saying which directory
+                // of how many is being worked, which is the question it answers,
+                // and a byte total is not that.
                 //
-                // And no reload, here or anywhere else mid-run. The manifest on
-                // disk is still the pre-pact one until the single save at the
-                // end of the run, so re-reading the tree now would re-derive
-                // every row's state from that stale record and wipe the green
-                // the run has been painting a directory at a time. That is why
-                // the one reload stays at the bottom of this function, after the
-                // outcome has landed and the manifest is written: by then disk
-                // is the honest account, and this preview is the thing it
-                // corrects rather than the thing it contradicts.
-                app.insert_file_row(directory.join(DOCUMENT_FILE));
+                // Filed at the handover rather than drawn on the placeholder
+                // above, because the clock is the point: this line counts the
+                // silence of *this* directory's own pass, from the moment its
+                // request went over, while the placeholder counts from the section
+                // opening and would label a multi-pass directory's whole wait with
+                // it. See `Account::record_waiting`.
+                PactEvent::Run(Event::Requesting { files, bytes }) => {
+                    app.panel_mut()
+                        .write_run(|account| account.record_waiting(files, bytes, now));
+                }
+                // Both places again, and for the same reason `Starting` is both: the
+                // panel keeps the stretch of file passes as one reworded line, and
+                // the footer's bar fills by it. The bar is the only reason this
+                // reaches the footer at all — the line there still names the
+                // directory of how many, because that is the question it answers.
+                PactEvent::Run(Event::Describing {
+                    position,
+                    total,
+                    bytes,
+                    ..
+                }) => {
+                    app.panel_mut().write_run(|account| {
+                        account.record_describing(position, total, bytes, now);
+                    });
+                    app.set_files_in_flight(position, total);
+                }
+                // The panel only, and one line, filed like the request line above
+                // it: why this directory is about to cost a second pass, or why it
+                // is about to fail, in the engine's own words.
+                PactEvent::Run(Event::Rejected {
+                    defects,
+                    attempt,
+                    attempts,
+                    ..
+                }) => {
+                    app.panel_mut().write_run(|account| {
+                        account.record_rejected(&defects, attempt, attempts, now);
+                    });
+                }
+                // The panel only, and one line per mend, filed under the same
+                // section as the rejections above it: the asking ran out and the
+                // document was written anyway, so this is the one place a reader
+                // learns that a slot of it is warlock's own words rather than the
+                // model's.
+                //
+                // The engine names the directory and the event carries it, because
+                // a repair is a fact about one directory and nothing reading these
+                // events should have to infer which. Nothing is done with it here:
+                // the line lands where every line of a pass lands, in the section
+                // the `Starting` before it opened, which is that same directory's.
+                PactEvent::Run(Event::Repaired { mend, .. }) => {
+                    app.panel_mut()
+                        .write_run(|account| account.record_repaired(&mend.to_string(), now));
+                }
+                // The one recolouring a run does before it is over. The engine
+                // only says this of a directory whose whole subtree delivered —
+                // the very condition its grant is decided on — so painting the
+                // subtree green here repeats the engine's judgement rather than
+                // second-guessing it, and a directory that finished third of five
+                // is green while the fourth is still being paid for. The reload at
+                // the end repaints from the manifest either way, which is what
+                // catches the one thing this preview cannot know: a hash that
+                // fails in phase two.
+                PactEvent::Run(Event::Documented { directory }) => {
+                    app.set_subtree_state(&directory, NodeState::PactedFresh);
+                    // The document the pass just wrote, put on screen where it was
+                    // written: beside the directory, in the colour the paint above
+                    // has this moment given it. The paint comes first so the row is
+                    // born green rather than repainted into it, though the order is
+                    // not load-bearing — `set_subtree_state` paints a directory's
+                    // files along with the directory, so an insertion above it
+                    // would end up the same colour by the other road.
+                    //
+                    // And no reload, here or anywhere else mid-run. The manifest on
+                    // disk is still the pre-pact one until the single save at the
+                    // end of the run, so re-reading the tree now would re-derive
+                    // every row's state from that stale record and wipe the green
+                    // the run has been painting a directory at a time. That is why
+                    // the one reload stays at the bottom of this function, after the
+                    // outcome has landed and the manifest is written: by then disk
+                    // is the honest account, and this preview is the thing it
+                    // corrects rather than the thing it contradicts.
+                    app.insert_file_row(directory.join(DOCUMENT_FILE));
+                }
+                // The same two paints as `Documented` — the tree cannot tell the
+                // two apart and should not try — and one thing besides: the
+                // directory is remembered, because the filesystem cannot say
+                // afterwards whether the document on disk was written by this run
+                // or kept from the last, and the section's closing line turns on
+                // exactly that.
+                PactEvent::Run(Event::Unchanged { directory }) => {
+                    app.set_subtree_state(&directory, NodeState::PactedFresh);
+                    app.insert_file_row(directory.join(DOCUMENT_FILE));
+                    running.unchanged.push(directory);
+                }
+                // No paint at all, and that is the point: a skipped directory is
+                // one the refresh found stale and left stale, so the row is already
+                // the colour it should be. Remembered so its section can close
+                // saying what happened rather than reading the document on disk and
+                // calling it a write.
+                PactEvent::Run(Event::Skipped { directory, below }) => {
+                    running.skipped.push((directory, below));
+                }
+                PactEvent::Finished(outcome) => return ControlFlow::Break(outcome),
             }
-            // The same two paints as `Documented` — the tree cannot tell the
-            // two apart and should not try — and one thing besides: the
-            // directory is remembered, because the filesystem cannot say
-            // afterwards whether the document on disk was written by this run
-            // or kept from the last, and the section's closing line turns on
-            // exactly that.
-            Ok(PactEvent::Run(Event::Unchanged { directory })) => {
-                app.set_subtree_state(&directory, NodeState::PactedFresh);
-                app.insert_file_row(directory.join(DOCUMENT_FILE));
-                running.unchanged.push(directory);
-            }
-            // No paint at all, and that is the point: a skipped directory is
-            // one the refresh found stale and left stale, so the row is already
-            // the colour it should be. Remembered so its section can close
-            // saying what happened rather than reading the document on disk and
-            // calling it a write.
-            Ok(PactEvent::Run(Event::Skipped { directory, below })) => {
-                running.skipped.push((directory, below));
-            }
-            Ok(PactEvent::Finished(outcome)) => break Some(outcome),
-            // Still running, and nothing new to say.
-            Err(TryRecvError::Empty) => return None,
-            Err(TryRecvError::Disconnected) => break None,
-        }
-    };
-
-    let running = run
-        .take()
-        .expect("the pact drained just above is still here");
+            ControlFlow::Continue(())
+        })
+    })?;
     app.clear_pact_in_flight();
     // Read before the outcome is taken apart, because one arm below moves the
     // rest of the run out from under it: whether the reader stopped this run is
     // what decides how the panel's last section ends.
     let cancelled = running.cancel.is_cancelled();
     let refusals = match outcome {
-        Some(Ok(Toggled {
+        Ok(Ok(Toggled {
             manifest: next,
             granted,
             message,
@@ -677,14 +667,14 @@ fn drain(
         // says what it said before, so the rows go back to matching it and the
         // reason goes on the app's line — the same one a refused toggle uses —
         // rather than out of the loop, which would take the screen with it.
-        Some(Err(message)) => {
+        Ok(Err(message)) => {
             restore(app, running.before, message);
             Vec::new()
         }
         // The worker died with the manifest in this thread's hand untouched, so
         // the rows go back to matching it exactly as they do for a run that
         // recorded nothing, and the footer says the run is over.
-        None => {
+        Err(Lost) => {
             restore(app, running.before, PACT_LOST);
             Vec::new()
         }
