@@ -4,8 +4,8 @@ version = 1
 module = "."
 document = "WARLOCK.md"
 scope = "warlock-team"
-granted_hash = "6f61b71e4991bbce1a93675198eaffa9e9bd82d46fd0bc9f9ca297bf00a3e610"
-granted_at = "2026-09-30T13:58:24Z"
+granted_hash = "9f9989c0ef8c14f2be577e621382b26de6abce393a5c7e433beec7fb1fd2bcfb"
+granted_at = "2026-09-30T14:12:33Z"
 carry_hash = "4103724a09d056400b9b97a7b85820f76aa28daf1a41ec1c67a87e9b28226c87"
 
 [[pact]]
