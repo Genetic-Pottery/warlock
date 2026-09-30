@@ -476,6 +476,39 @@ fn a_typed_path_replaces_the_one_that_was_offered() {
 }
 
 #[test]
+fn the_document_is_offered_and_written_where_briefs_toml_says() {
+    let root = a_root();
+    let brief = a_brief();
+    write_under(&briefs_path(root.path()), "directory = \"notes/briefs\"\n");
+    // The same rule that proposes it, asked with the directory the file names:
+    // the numbering and the slug are `writing.rs`'s either way, and only where
+    // they land moves.
+    let proposed = proposed_path(root.path(), "notes/briefs", &brief);
+    assert_eq!(
+        proposed,
+        "notes/briefs/warlock-brief-01-give-the-headless-cli-a-voice.md"
+    );
+
+    let ran = run(
+        root.path(),
+        &["/write", ""],
+        vec![Answering::says("asking"), Answering::says(brief.as_str())],
+    );
+
+    ran.outcome.expect("a document written");
+    assert!(
+        ran.said.contains(&proposed),
+        "the path offered is not the one `briefs.toml` names: {}",
+        ran.said
+    );
+    assert_eq!(wrote(root.path(), &proposed), brief);
+    assert!(
+        !from_manifest_path(root.path(), DEFAULT_BRIEF_DIRECTORY).exists(),
+        "the default directory was written to as well",
+    );
+}
+
+#[test]
 fn a_path_that_already_has_a_file_is_refused_and_the_cursor_comes_back() {
     let root = a_root();
     let brief = a_brief();
@@ -499,9 +532,17 @@ fn a_path_that_already_has_a_file_is_refused_and_the_cursor_comes_back() {
         "somebody else's document\n",
         "a refused path was written over anyway",
     );
-    // One turn, and three lines read: the offer came back after the refusal.
+    // One `/write` turn, three lines read, and the offer printed both times: a
+    // refused path is the same proposal again and another cursor, and the
+    // document is asked for once however many paths are typed at it.
     assert_eq!(ran.turns.len(), 2, "{:?}", ran.turns);
     assert_eq!(ran.asked.len(), 3, "{:?}", ran.asked);
+    assert_eq!(
+        ran.said.matches("the document goes to").count(),
+        2,
+        "the offer did not come back under the refusal: {}",
+        ran.said
+    );
     assert_eq!(wrote(root.path(), "docs/mine.md"), brief);
 }
 
