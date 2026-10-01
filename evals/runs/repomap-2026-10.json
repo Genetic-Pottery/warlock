@@ -1,0 +1,1892 @@
+[
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "document.rs",
+    "symbol": "Evidence",
+    "arm": "repomap",
+    "run": 0,
+    "said_file": "scope.rs",
+    "said_symbol": "scope_opens_to"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "document.rs",
+    "symbol": "Evidence",
+    "arm": "repomap",
+    "run": 1,
+    "said_file": "scope.rs",
+    "said_symbol": "scope_opens_to"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "document.rs",
+    "symbol": "Evidence",
+    "arm": "repomap",
+    "run": 2,
+    "said_file": "scope.rs",
+    "said_symbol": "scope_opens_to"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "pact.rs",
+    "symbol": "ancestry",
+    "arm": "repomap",
+    "run": 0,
+    "said_file": "scope.rs",
+    "said_symbol": "at_or_below"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "pact.rs",
+    "symbol": "ancestry",
+    "arm": "repomap",
+    "run": 1,
+    "said_file": "scope.rs",
+    "said_symbol": "at_or_below"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "pact.rs",
+    "symbol": "ancestry",
+    "arm": "repomap",
+    "run": 2,
+    "said_file": "scope.rs",
+    "said_symbol": "at_or_below"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "splitting.rs",
+    "symbol": "split_instructions",
+    "arm": "repomap",
+    "run": 0,
+    "said_file": "pulls.rs",
+    "said_symbol": "brief_text"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "splitting.rs",
+    "symbol": "split_instructions",
+    "arm": "repomap",
+    "run": 1,
+    "said_file": "pulls.rs",
+    "said_symbol": "brief_text"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "splitting.rs",
+    "symbol": "split_instructions",
+    "arm": "repomap",
+    "run": 2,
+    "said_file": "pulls.rs",
+    "said_symbol": "brief_text"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "keys.rs",
+    "symbol": "save_key",
+    "arm": "repomap",
+    "run": 0,
+    "said_file": "keys.rs",
+    "said_symbol": "write"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "keys.rs",
+    "symbol": "save_key",
+    "arm": "repomap",
+    "run": 1,
+    "said_file": "keys.rs",
+    "said_symbol": "write"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "keys.rs",
+    "symbol": "save_key",
+    "arm": "repomap",
+    "run": 2,
+    "said_file": "keys.rs",
+    "said_symbol": "write"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "state.rs",
+    "symbol": "NodeState",
+    "arm": "repomap",
+    "run": 0,
+    "said_file": "state.rs",
+    "said_symbol": "NodeState"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "state.rs",
+    "symbol": "NodeState",
+    "arm": "repomap",
+    "run": 1,
+    "said_file": "state.rs",
+    "said_symbol": "NodeState"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "state.rs",
+    "symbol": "NodeState",
+    "arm": "repomap",
+    "run": 2,
+    "said_file": "state.rs",
+    "said_symbol": "NodeState"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "fill.rs",
+    "symbol": "settle",
+    "arm": "repomap",
+    "run": 0,
+    "said_file": "pulls.rs",
+    "said_symbol": "SubtaskStatus"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "fill.rs",
+    "symbol": "settle",
+    "arm": "repomap",
+    "run": 1,
+    "said_file": "pulls.rs",
+    "said_symbol": "SubtaskStatus"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "fill.rs",
+    "symbol": "settle",
+    "arm": "repomap",
+    "run": 2,
+    "said_file": "pulls.rs",
+    "said_symbol": "ReasonMissing"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "fitting.rs",
+    "symbol": "Omission",
+    "arm": "repomap",
+    "run": 0,
+    "said_file": "tree.rs",
+    "said_symbol": "StateCounts"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "fitting.rs",
+    "symbol": "Omission",
+    "arm": "repomap",
+    "run": 1,
+    "said_file": "scope.rs",
+    "said_symbol": "validate_scope"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "fitting.rs",
+    "symbol": "Omission",
+    "arm": "repomap",
+    "run": 2,
+    "said_file": "tree.rs",
+    "said_symbol": "StateCounts"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "languages.rs",
+    "symbol": "without_comments",
+    "arm": "repomap",
+    "run": 0,
+    "said_file": "scope.rs",
+    "said_symbol": "is_separator"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "languages.rs",
+    "symbol": "without_comments",
+    "arm": "repomap",
+    "run": 1,
+    "said_file": "fitting.rs",
+    "said_symbol": "byte_count"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "languages.rs",
+    "symbol": "without_comments",
+    "arm": "repomap",
+    "run": 2,
+    "said_file": "fitting.rs",
+    "said_symbol": "byte_count"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "route.rs",
+    "symbol": "is_stored",
+    "arm": "repomap",
+    "run": 0,
+    "said_file": "keys.rs",
+    "said_symbol": "write"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "route.rs",
+    "symbol": "is_stored",
+    "arm": "repomap",
+    "run": 1,
+    "said_file": "keys.rs",
+    "said_symbol": "write"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "route.rs",
+    "symbol": "is_stored",
+    "arm": "repomap",
+    "run": 2,
+    "said_file": "keys.rs",
+    "said_symbol": "write"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "working.rs",
+    "symbol": "stub_reply",
+    "arm": "repomap",
+    "run": 0,
+    "said_file": "pulls.rs",
+    "said_symbol": "WireStatus"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "working.rs",
+    "symbol": "stub_reply",
+    "arm": "repomap",
+    "run": 1,
+    "said_file": "pulls.rs",
+    "said_symbol": "WireStatus"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "working.rs",
+    "symbol": "stub_reply",
+    "arm": "repomap",
+    "run": 2,
+    "said_file": "pulls.rs",
+    "said_symbol": "WireStatus"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "filing.rs",
+    "symbol": "no_candidate",
+    "arm": "repomap",
+    "run": 0,
+    "said_file": "scope.rs",
+    "said_symbol": "scope_opens_to"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "filing.rs",
+    "symbol": "no_candidate",
+    "arm": "repomap",
+    "run": 1,
+    "said_file": "pulls.rs",
+    "said_symbol": "ReasonMissing"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "filing.rs",
+    "symbol": "no_candidate",
+    "arm": "repomap",
+    "run": 2,
+    "said_file": "scope.rs",
+    "said_symbol": "scope_opens_to"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "walk.rs",
+    "symbol": "is_prose",
+    "arm": "repomap",
+    "run": 0,
+    "said_file": "scope.rs",
+    "said_symbol": "is_separator"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "walk.rs",
+    "symbol": "is_prose",
+    "arm": "repomap",
+    "run": 1,
+    "said_file": "manifest.rs",
+    "said_symbol": "to_manifest_path"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "walk.rs",
+    "symbol": "is_prose",
+    "arm": "repomap",
+    "run": 2,
+    "said_file": "tree.rs",
+    "said_symbol": "IntoDocument"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "decide.rs",
+    "symbol": "decide_state",
+    "arm": "repomap",
+    "run": 0,
+    "said_file": "state.rs",
+    "said_symbol": "NodeState"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "decide.rs",
+    "symbol": "decide_state",
+    "arm": "repomap",
+    "run": 1,
+    "said_file": "state.rs",
+    "said_symbol": "NodeState"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "decide.rs",
+    "symbol": "decide_state",
+    "arm": "repomap",
+    "run": 2,
+    "said_file": "state.rs",
+    "said_symbol": "NodeState"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "drafting.rs",
+    "symbol": "drafting_instructions",
+    "arm": "repomap",
+    "run": 0,
+    "said_file": "pulls.rs",
+    "said_symbol": "PullSubtask"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "drafting.rs",
+    "symbol": "drafting_instructions",
+    "arm": "repomap",
+    "run": 1,
+    "said_file": "pulls.rs",
+    "said_symbol": "brief_text"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "drafting.rs",
+    "symbol": "drafting_instructions",
+    "arm": "repomap",
+    "run": 2,
+    "said_file": "pulls.rs",
+    "said_symbol": "brief_text"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "ignores.rs",
+    "symbol": "walk_one_deep",
+    "arm": "repomap",
+    "run": 0,
+    "said_file": "scope.rs",
+    "said_symbol": "scope_opens_to"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "ignores.rs",
+    "symbol": "walk_one_deep",
+    "arm": "repomap",
+    "run": 1,
+    "said_file": "tree.rs",
+    "said_symbol": "StateCounts"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "ignores.rs",
+    "symbol": "walk_one_deep",
+    "arm": "repomap",
+    "run": 2,
+    "said_file": "scope.rs",
+    "said_symbol": "scope_opens_to"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "running.rs",
+    "symbol": "ending",
+    "arm": "repomap",
+    "run": 0,
+    "said_file": "pacting.rs",
+    "said_symbol": "apply_toggle"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "running.rs",
+    "symbol": "ending",
+    "arm": "repomap",
+    "run": 1,
+    "said_file": "pacting.rs",
+    "said_symbol": "apply_toggle"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "running.rs",
+    "symbol": "ending",
+    "arm": "repomap",
+    "run": 2,
+    "said_file": "pacting.rs",
+    "said_symbol": "apply_toggle"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "git.rs",
+    "symbol": "success",
+    "arm": "repomap",
+    "run": 0,
+    "said_file": "claude.rs",
+    "said_symbol": "collect"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "git.rs",
+    "symbol": "success",
+    "arm": "repomap",
+    "run": 1,
+    "said_file": "claude.rs",
+    "said_symbol": "collect"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "git.rs",
+    "symbol": "success",
+    "arm": "repomap",
+    "run": 2,
+    "said_file": "claude.rs",
+    "said_symbol": "collect"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "check.rs",
+    "symbol": "reason",
+    "arm": "repomap",
+    "run": 0,
+    "said_file": "standing.rs",
+    "said_symbol": "here"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "check.rs",
+    "symbol": "reason",
+    "arm": "repomap",
+    "run": 1,
+    "said_file": "standing.rs",
+    "said_symbol": "Standing::here"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "check.rs",
+    "symbol": "reason",
+    "arm": "repomap",
+    "run": 2,
+    "said_file": "standing.rs",
+    "said_symbol": "here"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "puller.rs",
+    "symbol": "Ready",
+    "arm": "repomap",
+    "run": 0,
+    "said_file": "confirm.rs",
+    "said_symbol": "Undertaking"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "puller.rs",
+    "symbol": "Ready",
+    "arm": "repomap",
+    "run": 1,
+    "said_file": "confirm.rs",
+    "said_symbol": "Undertaking"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "puller.rs",
+    "symbol": "Ready",
+    "arm": "repomap",
+    "run": 2,
+    "said_file": "confirm.rs",
+    "said_symbol": "Undertaking"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "claude.rs",
+    "symbol": "Activities",
+    "arm": "repomap",
+    "run": 0,
+    "said_file": "pacting.rs",
+    "said_symbol": "apply_toggle"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "claude.rs",
+    "symbol": "Activities",
+    "arm": "repomap",
+    "run": 1,
+    "said_file": "pacting.rs",
+    "said_symbol": "apply_toggle"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "claude.rs",
+    "symbol": "Activities",
+    "arm": "repomap",
+    "run": 2,
+    "said_file": "pacting.rs",
+    "said_symbol": "apply_toggle"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "app.rs",
+    "symbol": "is_collapsed",
+    "arm": "repomap",
+    "run": 0,
+    "said_file": "app.rs",
+    "said_symbol": "selected_directory"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "app.rs",
+    "symbol": "is_collapsed",
+    "arm": "repomap",
+    "run": 1,
+    "said_file": "app.rs",
+    "said_symbol": "is_empty"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "app.rs",
+    "symbol": "is_collapsed",
+    "arm": "repomap",
+    "run": 2,
+    "said_file": "app.rs",
+    "said_symbol": "is_ignored"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "key.rs",
+    "symbol": "key_list",
+    "arm": "repomap",
+    "run": 0,
+    "said_file": "standing.rs",
+    "said_symbol": "Standing::home"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "key.rs",
+    "symbol": "key_list",
+    "arm": "repomap",
+    "run": 1,
+    "said_file": "push.rs",
+    "said_symbol": "push"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "key.rs",
+    "symbol": "key_list",
+    "arm": "repomap",
+    "run": 2,
+    "said_file": "push.rs",
+    "said_symbol": "push"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "queue.rs",
+    "symbol": "order_of",
+    "arm": "repomap",
+    "run": 0,
+    "said_file": "pacting.rs",
+    "said_symbol": "apply_toggle"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "queue.rs",
+    "symbol": "order_of",
+    "arm": "repomap",
+    "run": 1,
+    "said_file": "pacting.rs",
+    "said_symbol": "apply_toggle"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "queue.rs",
+    "symbol": "order_of",
+    "arm": "repomap",
+    "run": 2,
+    "said_file": "app.rs",
+    "said_symbol": "index_for"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "account.rs",
+    "symbol": "spent",
+    "arm": "repomap",
+    "run": 0,
+    "said_file": "account.rs",
+    "said_symbol": "Section::cost"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "account.rs",
+    "symbol": "spent",
+    "arm": "repomap",
+    "run": 1,
+    "said_file": "account.rs",
+    "said_symbol": "Section::cost"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "account.rs",
+    "symbol": "spent",
+    "arm": "repomap",
+    "run": 2,
+    "said_file": "account.rs",
+    "said_symbol": "cost"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "confirm.rs",
+    "symbol": "Review",
+    "arm": "repomap",
+    "run": 0,
+    "said_file": "confirm.rs",
+    "said_symbol": "Cutting"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "confirm.rs",
+    "symbol": "Review",
+    "arm": "repomap",
+    "run": 1,
+    "said_file": "confirm.rs",
+    "said_symbol": "Review"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "confirm.rs",
+    "symbol": "Review",
+    "arm": "repomap",
+    "run": 2,
+    "said_file": "confirm.rs",
+    "said_symbol": "Cutting"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "pulling.rs",
+    "symbol": "refresh_stale",
+    "arm": "repomap",
+    "run": 0,
+    "said_file": "pacting.rs",
+    "said_symbol": "apply_toggle"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "pulling.rs",
+    "symbol": "refresh_stale",
+    "arm": "repomap",
+    "run": 1,
+    "said_file": "pacting.rs",
+    "said_symbol": "apply_toggle"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "pulling.rs",
+    "symbol": "refresh_stale",
+    "arm": "repomap",
+    "run": 2,
+    "said_file": "pacting.rs",
+    "said_symbol": "apply_toggle"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "prompt.rs",
+    "symbol": "RecordPrompt",
+    "arm": "repomap",
+    "run": 0,
+    "said_file": "prompt.rs",
+    "said_symbol": "ScopeField"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "prompt.rs",
+    "symbol": "RecordPrompt",
+    "arm": "repomap",
+    "run": 1,
+    "said_file": "prompt.rs",
+    "said_symbol": "ScopePrompt"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "prompt.rs",
+    "symbol": "RecordPrompt",
+    "arm": "repomap",
+    "run": 2,
+    "said_file": "prompt.rs",
+    "said_symbol": "ScopePrompt"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "cutting.rs",
+    "symbol": "already_line",
+    "arm": "repomap",
+    "run": 0,
+    "said_file": "confirm.rs",
+    "said_symbol": "Carry::open"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "cutting.rs",
+    "symbol": "already_line",
+    "arm": "repomap",
+    "run": 1,
+    "said_file": "pacting.rs",
+    "said_symbol": "apply_toggle"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "cutting.rs",
+    "symbol": "already_line",
+    "arm": "repomap",
+    "run": 2,
+    "said_file": "pacting.rs",
+    "said_symbol": "apply_toggle"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "brief.rs",
+    "symbol": "position",
+    "arm": "repomap",
+    "run": 0,
+    "said_file": "pacting.rs",
+    "said_symbol": "apply_toggle"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "brief.rs",
+    "symbol": "position",
+    "arm": "repomap",
+    "run": 1,
+    "said_file": "push.rs",
+    "said_symbol": "push"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "brief.rs",
+    "symbol": "position",
+    "arm": "repomap",
+    "run": 2,
+    "said_file": "pacting.rs",
+    "said_symbol": "apply_toggle"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "crossings.rs",
+    "symbol": "crossings_in",
+    "arm": "repomap",
+    "run": 0,
+    "said_file": "crossings.rs",
+    "said_symbol": "crossings_in"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "crossings.rs",
+    "symbol": "crossings_in",
+    "arm": "repomap",
+    "run": 1,
+    "said_file": "crossings.rs",
+    "said_symbol": "crossings_in"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "crossings.rs",
+    "symbol": "crossings_in",
+    "arm": "repomap",
+    "run": 2,
+    "said_file": "crossings.rs",
+    "said_symbol": "crossings_in"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "composer.rs",
+    "symbol": "compose_for",
+    "arm": "repomap",
+    "run": 0,
+    "said_file": "prompt.rs",
+    "said_symbol": "ScopePrompt"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "composer.rs",
+    "symbol": "compose_for",
+    "arm": "repomap",
+    "run": 1,
+    "said_file": "prompt.rs",
+    "said_symbol": "ScopeField"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "composer.rs",
+    "symbol": "compose_for",
+    "arm": "repomap",
+    "run": 2,
+    "said_file": "app.rs",
+    "said_symbol": "rescue_focus"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "panel.rs",
+    "symbol": "accrue",
+    "arm": "repomap",
+    "run": 0,
+    "said_file": "panel.rs",
+    "said_symbol": "Card::place"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "panel.rs",
+    "symbol": "accrue",
+    "arm": "repomap",
+    "run": 1,
+    "said_file": "panel.rs",
+    "said_symbol": "place"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "panel.rs",
+    "symbol": "accrue",
+    "arm": "repomap",
+    "run": 2,
+    "said_file": "panel.rs",
+    "said_symbol": "Card::place"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "pull.rs",
+    "symbol": "value",
+    "arm": "repomap",
+    "run": 0,
+    "said_file": "confirm.rs",
+    "said_symbol": "Filing"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "pull.rs",
+    "symbol": "value",
+    "arm": "repomap",
+    "run": 1,
+    "said_file": "confirm.rs",
+    "said_symbol": "Cutting::status"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "pull.rs",
+    "symbol": "value",
+    "arm": "repomap",
+    "run": 2,
+    "said_file": "standing.rs",
+    "said_symbol": "Standing"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "cut.rs",
+    "symbol": "edges",
+    "arm": "repomap",
+    "run": 0,
+    "said_file": "crossings.rs",
+    "said_symbol": "crossings_in"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "cut.rs",
+    "symbol": "edges",
+    "arm": "repomap",
+    "run": 1,
+    "said_file": "crossings.rs",
+    "said_symbol": "crossings_in"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "cut.rs",
+    "symbol": "edges",
+    "arm": "repomap",
+    "run": 2,
+    "said_file": "crossings.rs",
+    "said_symbol": "crossings_in"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "interactive.rs",
+    "symbol": "Interactive",
+    "arm": "repomap",
+    "run": 0,
+    "said_file": "app.rs",
+    "said_symbol": "forget_last_keystroke"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "interactive.rs",
+    "symbol": "Interactive",
+    "arm": "repomap",
+    "run": 1,
+    "said_file": "app.rs",
+    "said_symbol": "forget_last_keystroke"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "interactive.rs",
+    "symbol": "Interactive",
+    "arm": "repomap",
+    "run": 2,
+    "said_file": "app.rs",
+    "said_symbol": "forget_last_keystroke"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "freshness.rs",
+    "symbol": "freshened",
+    "arm": "repomap",
+    "run": 0,
+    "said_file": "pacting.rs",
+    "said_symbol": "apply_toggle"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "freshness.rs",
+    "symbol": "freshened",
+    "arm": "repomap",
+    "run": 1,
+    "said_file": "pacting.rs",
+    "said_symbol": "apply_toggle"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "freshness.rs",
+    "symbol": "freshened",
+    "arm": "repomap",
+    "run": 2,
+    "said_file": "pacting.rs",
+    "said_symbol": "apply_toggle"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "config.rs",
+    "symbol": "prompted",
+    "arm": "repomap",
+    "run": 0,
+    "said_file": "standing.rs",
+    "said_symbol": "Standing::here"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "config.rs",
+    "symbol": "prompted",
+    "arm": "repomap",
+    "run": 1,
+    "said_file": "prompt.rs",
+    "said_symbol": "ScopePrompt"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "config.rs",
+    "symbol": "prompted",
+    "arm": "repomap",
+    "run": 2,
+    "said_file": "standing.rs",
+    "said_symbol": "here"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "rescope.rs",
+    "symbol": "RecordFields",
+    "arm": "repomap",
+    "run": 0,
+    "said_file": "confirm.rs",
+    "said_symbol": "Filing"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "rescope.rs",
+    "symbol": "RecordFields",
+    "arm": "repomap",
+    "run": 1,
+    "said_file": "confirm.rs",
+    "said_symbol": "Undertaking"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "rescope.rs",
+    "symbol": "RecordFields",
+    "arm": "repomap",
+    "run": 2,
+    "said_file": "confirm.rs",
+    "said_symbol": "Cutting"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "query.rs",
+    "symbol": "Listing",
+    "arm": "repomap",
+    "run": 0,
+    "said_file": "colour.rs",
+    "said_symbol": "colour_for"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "query.rs",
+    "symbol": "Listing",
+    "arm": "repomap",
+    "run": 1,
+    "said_file": "colour.rs",
+    "said_symbol": "colour_for"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "query.rs",
+    "symbol": "Listing",
+    "arm": "repomap",
+    "run": 2,
+    "said_file": "colour.rs",
+    "said_symbol": "colour_for"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "modal.rs",
+    "symbol": "Modal",
+    "arm": "repomap",
+    "run": 0,
+    "said_file": "ui.rs",
+    "said_symbol": "Modal"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "modal.rs",
+    "symbol": "Modal",
+    "arm": "repomap",
+    "run": 1,
+    "said_file": "ui.rs",
+    "said_symbol": "Dialog"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "modal.rs",
+    "symbol": "Modal",
+    "arm": "repomap",
+    "run": 2,
+    "said_file": "ui.rs",
+    "said_symbol": "Dialog"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "asking.rs",
+    "symbol": "at_terminal",
+    "arm": "repomap",
+    "run": 0,
+    "said_file": "standing.rs",
+    "said_symbol": "here"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "asking.rs",
+    "symbol": "at_terminal",
+    "arm": "repomap",
+    "run": 1,
+    "said_file": "standing.rs",
+    "said_symbol": "here"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "asking.rs",
+    "symbol": "at_terminal",
+    "arm": "repomap",
+    "run": 2,
+    "said_file": "standing.rs",
+    "said_symbol": "Standing::here"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "session.rs",
+    "symbol": "round",
+    "arm": "repomap",
+    "run": 0,
+    "said_file": "watch.rs",
+    "said_symbol": "watch_manifest"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "session.rs",
+    "symbol": "round",
+    "arm": "repomap",
+    "run": 1,
+    "said_file": "watch.rs",
+    "said_symbol": "WatchPolicy"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "session.rs",
+    "symbol": "round",
+    "arm": "repomap",
+    "run": 2,
+    "said_file": "watch.rs",
+    "said_symbol": "watch_manifest"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "clipboard.rs",
+    "symbol": "Clipboard",
+    "arm": "repomap",
+    "run": 0,
+    "said_file": "ui.rs",
+    "said_symbol": "display_width"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "clipboard.rs",
+    "symbol": "Clipboard",
+    "arm": "repomap",
+    "run": 1,
+    "said_file": "error.rs",
+    "said_symbol": "one_line"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "clipboard.rs",
+    "symbol": "Clipboard",
+    "arm": "repomap",
+    "run": 2,
+    "said_file": "ui.rs",
+    "said_symbol": "display_width"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "planned.rs",
+    "symbol": "Planned",
+    "arm": "repomap",
+    "run": 0,
+    "said_file": "confirm.rs",
+    "said_symbol": "Carry"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "planned.rs",
+    "symbol": "Planned",
+    "arm": "repomap",
+    "run": 1,
+    "said_file": "pacting.rs",
+    "said_symbol": "apply_toggle"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "planned.rs",
+    "symbol": "Planned",
+    "arm": "repomap",
+    "run": 2,
+    "said_file": "pacting.rs",
+    "said_symbol": "apply_toggle"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "edits.rs",
+    "symbol": "scoped_line",
+    "arm": "repomap",
+    "run": 0,
+    "said_file": "edits.rs",
+    "said_symbol": "Opened"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "edits.rs",
+    "symbol": "scoped_line",
+    "arm": "repomap",
+    "run": 1,
+    "said_file": "ui.rs",
+    "said_symbol": "scope"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "edits.rs",
+    "symbol": "scoped_line",
+    "arm": "repomap",
+    "run": 2,
+    "said_file": "pacting.rs",
+    "said_symbol": "apply_toggle"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "boundary.rs",
+    "symbol": "Verdict",
+    "arm": "repomap",
+    "run": 0,
+    "said_file": "edits.rs",
+    "said_symbol": "Opened"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "boundary.rs",
+    "symbol": "Verdict",
+    "arm": "repomap",
+    "run": 1,
+    "said_file": "edits.rs",
+    "said_symbol": "Opened"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "boundary.rs",
+    "symbol": "Verdict",
+    "arm": "repomap",
+    "run": 2,
+    "said_file": "edits.rs",
+    "said_symbol": "Opened"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "writing.rs",
+    "symbol": "failure_line",
+    "arm": "repomap",
+    "run": 0,
+    "said_file": "error.rs",
+    "said_symbol": "one_line"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "writing.rs",
+    "symbol": "failure_line",
+    "arm": "repomap",
+    "run": 1,
+    "said_file": "error.rs",
+    "said_symbol": "one_line"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "writing.rs",
+    "symbol": "failure_line",
+    "arm": "repomap",
+    "run": 2,
+    "said_file": "error.rs",
+    "said_symbol": "one_line"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "submission.rs",
+    "symbol": "submitted_for",
+    "arm": "repomap",
+    "run": 0,
+    "said_file": "prompt.rs",
+    "said_symbol": "ScopePrompt"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "submission.rs",
+    "symbol": "submitted_for",
+    "arm": "repomap",
+    "run": 1,
+    "said_file": "prompt.rs",
+    "said_symbol": "ScopePrompt"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "submission.rs",
+    "symbol": "submitted_for",
+    "arm": "repomap",
+    "run": 2,
+    "said_file": "prompt.rs",
+    "said_symbol": "ScopePrompt"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "fixture.rs",
+    "symbol": "files",
+    "arm": "repomap",
+    "run": 0,
+    "said_file": "app.rs",
+    "said_symbol": "with_document_row"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "fixture.rs",
+    "symbol": "files",
+    "arm": "repomap",
+    "run": 1,
+    "said_file": "app.rs",
+    "said_symbol": "App::from_rows"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "fixture.rs",
+    "symbol": "files",
+    "arm": "repomap",
+    "run": 2,
+    "said_file": "app.rs",
+    "said_symbol": "with_document_row"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "resume.rs",
+    "symbol": "resumed",
+    "arm": "repomap",
+    "run": 0,
+    "said_file": "edits.rs",
+    "said_symbol": "Opened"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "resume.rs",
+    "symbol": "resumed",
+    "arm": "repomap",
+    "run": 1,
+    "said_file": "edits.rs",
+    "said_symbol": "Opened"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "resume.rs",
+    "symbol": "resumed",
+    "arm": "repomap",
+    "run": 2,
+    "said_file": "push.rs",
+    "said_symbol": "pushed"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "briefing.rs",
+    "symbol": "Opening",
+    "arm": "repomap",
+    "run": 0,
+    "said_file": "edits.rs",
+    "said_symbol": "Opened"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "briefing.rs",
+    "symbol": "Opening",
+    "arm": "repomap",
+    "run": 1,
+    "said_file": "edits.rs",
+    "said_symbol": "Opened"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "briefing.rs",
+    "symbol": "Opening",
+    "arm": "repomap",
+    "run": 2,
+    "said_file": "edits.rs",
+    "said_symbol": "Opened"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "standing.rs",
+    "symbol": "Standing",
+    "arm": "repomap",
+    "run": 0,
+    "said_file": "edits.rs",
+    "said_symbol": "Opened"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "standing.rs",
+    "symbol": "Standing",
+    "arm": "repomap",
+    "run": 1,
+    "said_file": "edits.rs",
+    "said_symbol": "Opened"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "standing.rs",
+    "symbol": "Standing",
+    "arm": "repomap",
+    "run": 2,
+    "said_file": "edits.rs",
+    "said_symbol": "Opened"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "descent.rs",
+    "symbol": "Descent",
+    "arm": "repomap",
+    "run": 0,
+    "said_file": "pacting.rs",
+    "said_symbol": "apply_toggle"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "descent.rs",
+    "symbol": "Descent",
+    "arm": "repomap",
+    "run": 1,
+    "said_file": "pacting.rs",
+    "said_symbol": "apply_toggle"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "descent.rs",
+    "symbol": "Descent",
+    "arm": "repomap",
+    "run": 2,
+    "said_file": "pacting.rs",
+    "said_symbol": "apply_toggle"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "pulls.rs",
+    "symbol": "set_finished_at",
+    "arm": "repomap",
+    "run": 0,
+    "said_file": "pulls.rs",
+    "said_symbol": "PullSubtask"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "pulls.rs",
+    "symbol": "set_finished_at",
+    "arm": "repomap",
+    "run": 1,
+    "said_file": "pulls.rs",
+    "said_symbol": "SubtaskStatus::Done"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "pulls.rs",
+    "symbol": "set_finished_at",
+    "arm": "repomap",
+    "run": 2,
+    "said_file": "pulls.rs",
+    "said_symbol": "SubtaskStatus"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "agent.rs",
+    "symbol": "is_omitted",
+    "arm": "repomap",
+    "run": 0,
+    "said_file": "state.rs",
+    "said_symbol": "NodeState"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "agent.rs",
+    "symbol": "is_omitted",
+    "arm": "repomap",
+    "run": 1,
+    "said_file": "tree.rs",
+    "said_symbol": "StateCounts"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "agent.rs",
+    "symbol": "is_omitted",
+    "arm": "repomap",
+    "run": 2,
+    "said_file": "manifest.rs",
+    "said_symbol": "PactEntry"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "load.rs",
+    "symbol": "mark_excluded",
+    "arm": "repomap",
+    "run": 0,
+    "said_file": "scope.rs",
+    "said_symbol": "at_or_below"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "load.rs",
+    "symbol": "mark_excluded",
+    "arm": "repomap",
+    "run": 1,
+    "said_file": "scope.rs",
+    "said_symbol": "at_or_below"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "load.rs",
+    "symbol": "mark_excluded",
+    "arm": "repomap",
+    "run": 2,
+    "said_file": "tree.rs",
+    "said_symbol": "IntoDocument"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "claude_md.rs",
+    "symbol": "Written",
+    "arm": "repomap",
+    "run": 0,
+    "said_file": "manifest.rs",
+    "said_symbol": "write_atomically"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "claude_md.rs",
+    "symbol": "Written",
+    "arm": "repomap",
+    "run": 1,
+    "said_file": "manifest.rs",
+    "said_symbol": "write_atomically"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "claude_md.rs",
+    "symbol": "Written",
+    "arm": "repomap",
+    "run": 2,
+    "said_file": "manifest.rs",
+    "said_symbol": "write_atomically"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "stubs.rs",
+    "symbol": "refuse",
+    "arm": "repomap",
+    "run": 0,
+    "said_file": "pacting.rs",
+    "said_symbol": "apply_toggle"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "stubs.rs",
+    "symbol": "refuse",
+    "arm": "repomap",
+    "run": 1,
+    "said_file": "pacting.rs",
+    "said_symbol": "apply_toggle"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "stubs.rs",
+    "symbol": "refuse",
+    "arm": "repomap",
+    "run": 2,
+    "said_file": "pacting.rs",
+    "said_symbol": "apply_toggle"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "thread.rs",
+    "symbol": "sourced",
+    "arm": "repomap",
+    "run": 0,
+    "said_file": "panel.rs",
+    "said_symbol": "row_count"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "thread.rs",
+    "symbol": "sourced",
+    "arm": "repomap",
+    "run": 1,
+    "said_file": "thread.rs",
+    "said_symbol": "line_count"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "thread.rs",
+    "symbol": "sourced",
+    "arm": "repomap",
+    "run": 2,
+    "said_file": "panel.rs",
+    "said_symbol": "row_count"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "error.rs",
+    "symbol": "from_problems",
+    "arm": "repomap",
+    "run": 0,
+    "said_file": "app.rs",
+    "said_symbol": "from_tree"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "error.rs",
+    "symbol": "from_problems",
+    "arm": "repomap",
+    "run": 1,
+    "said_file": "fixture.rs",
+    "said_symbol": "files"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "error.rs",
+    "symbol": "from_problems",
+    "arm": "repomap",
+    "run": 2,
+    "said_file": "edits.rs",
+    "said_symbol": "Opened"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "pushing.rs",
+    "symbol": "home_or_note",
+    "arm": "repomap",
+    "run": 0,
+    "said_file": "standing.rs",
+    "said_symbol": "Standing::here"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "pushing.rs",
+    "symbol": "home_or_note",
+    "arm": "repomap",
+    "run": 1,
+    "said_file": "standing.rs",
+    "said_symbol": "Standing::here"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "pushing.rs",
+    "symbol": "home_or_note",
+    "arm": "repomap",
+    "run": 2,
+    "said_file": "standing.rs",
+    "said_symbol": "here"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "inflight.rs",
+    "symbol": "stream",
+    "arm": "repomap",
+    "run": 0,
+    "said_file": "inflight.rs",
+    "said_symbol": "Port"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "inflight.rs",
+    "symbol": "stream",
+    "arm": "repomap",
+    "run": 1,
+    "said_file": "claude.rs",
+    "said_symbol": "stream"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "inflight.rs",
+    "symbol": "stream",
+    "arm": "repomap",
+    "run": 2,
+    "said_file": "claude.rs",
+    "said_symbol": "stream"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "main.rs",
+    "symbol": "ScopeCommand",
+    "arm": "repomap",
+    "run": 0,
+    "said_file": "prompt.rs",
+    "said_symbol": "ScopePrompt"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "main.rs",
+    "symbol": "ScopeCommand",
+    "arm": "repomap",
+    "run": 1,
+    "said_file": "prompt.rs",
+    "said_symbol": "ScopePrompt"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "main.rs",
+    "symbol": "ScopeCommand",
+    "arm": "repomap",
+    "run": 2,
+    "said_file": "prompt.rs",
+    "said_symbol": "ScopePrompt"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "terminal.rs",
+    "symbol": "restore_terminal",
+    "arm": "repomap",
+    "run": 0,
+    "said_file": "terminal.rs",
+    "said_symbol": "restore_terminal"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "terminal.rs",
+    "symbol": "restore_terminal",
+    "arm": "repomap",
+    "run": 1,
+    "said_file": "terminal.rs",
+    "said_symbol": "restore_terminal"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "terminal.rs",
+    "symbol": "restore_terminal",
+    "arm": "repomap",
+    "run": 2,
+    "said_file": "terminal.rs",
+    "said_symbol": "restore_terminal"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "view.rs",
+    "symbol": "read_capped",
+    "arm": "repomap",
+    "run": 0,
+    "said_file": "fitting.rs",
+    "said_symbol": "byte_count"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "view.rs",
+    "symbol": "read_capped",
+    "arm": "repomap",
+    "run": 1,
+    "said_file": "fitting.rs",
+    "said_symbol": "byte_count"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "view.rs",
+    "symbol": "read_capped",
+    "arm": "repomap",
+    "run": 2,
+    "said_file": "fitting.rs",
+    "said_symbol": "byte_count"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "filed.rs",
+    "symbol": "FiledRecord",
+    "arm": "repomap",
+    "run": 0,
+    "said_file": "sigils.rs",
+    "said_symbol": "project_dir"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "filed.rs",
+    "symbol": "FiledRecord",
+    "arm": "repomap",
+    "run": 1,
+    "said_file": "sigils.rs",
+    "said_symbol": "project_dir"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "filed.rs",
+    "symbol": "FiledRecord",
+    "arm": "repomap",
+    "run": 2,
+    "said_file": "sigils.rs",
+    "said_symbol": "project_dir"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "briefs.rs",
+    "symbol": "Briefs",
+    "arm": "repomap",
+    "run": 0,
+    "said_file": "pulls.rs",
+    "said_symbol": "pulls_dir"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "briefs.rs",
+    "symbol": "Briefs",
+    "arm": "repomap",
+    "run": 1,
+    "said_file": "pulls.rs",
+    "said_symbol": "pulls_dir"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "briefs.rs",
+    "symbol": "Briefs",
+    "arm": "repomap",
+    "run": 2,
+    "said_file": "keys.rs",
+    "said_symbol": "write"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "tree.rs",
+    "symbol": "IntoDocument",
+    "arm": "repomap",
+    "run": 0,
+    "said_file": "tree.rs",
+    "said_symbol": "IntoDocument"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "tree.rs",
+    "symbol": "IntoDocument",
+    "arm": "repomap",
+    "run": 1,
+    "said_file": "tree.rs",
+    "said_symbol": "IntoDocument"
+  },
+  {
+    "dir": "crates/warlock-engine/src",
+    "file": "tree.rs",
+    "symbol": "IntoDocument",
+    "arm": "repomap",
+    "run": 2,
+    "said_file": "tree.rs",
+    "said_symbol": "IntoDocument"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "ui.rs",
+    "symbol": "panel_height",
+    "arm": "repomap",
+    "run": 0,
+    "said_file": "panel.rs",
+    "said_symbol": "Shown for Thread"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "ui.rs",
+    "symbol": "panel_height",
+    "arm": "repomap",
+    "run": 1,
+    "said_file": "panel.rs",
+    "said_symbol": "line_count"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "ui.rs",
+    "symbol": "panel_height",
+    "arm": "repomap",
+    "run": 2,
+    "said_file": "panel.rs",
+    "said_symbol": "line_count"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "scoping.rs",
+    "symbol": "Windows",
+    "arm": "repomap",
+    "run": 0,
+    "said_file": "prompt.rs",
+    "said_symbol": "ScopePrompt"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "scoping.rs",
+    "symbol": "Windows",
+    "arm": "repomap",
+    "run": 1,
+    "said_file": "prompt.rs",
+    "said_symbol": "ScopePrompt"
+  },
+  {
+    "dir": "crates/warlock-tui/src",
+    "file": "scoping.rs",
+    "symbol": "Windows",
+    "arm": "repomap",
+    "run": 2,
+    "said_file": "app.rs",
+    "said_symbol": "App"
+  }
+]

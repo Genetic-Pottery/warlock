@@ -1,15 +1,16 @@
 """Build the question set: routing questions with a gold file and symbol.
 
 Questions come from the source and never from a document. A document is one of
-the things on trial, so a question phrased out of its own `## Where to look`
-line would be scoring the arms on a test one of them wrote.
+the things on trial, so a question phrased out of its own lines would be scoring
+the arms on a test one of them wrote.
 
 Only names unique within their directory are used, because a gold answer two
 files could satisfy is not a gold answer, and any generated question that spells
-its own symbol or filename is thrown away — about half of them are.
+its own symbol or filename is thrown away — about a third of them are.
 
-Writes questions.json. Costs roughly two model calls per kept question, so run
-it when the question set needs rebuilding and not before.
+Adds to questions.json, only for files it doesn't cover yet; delete it first to
+rebuild from nothing. Costs one model call per file sampled, so run it when the
+question set needs rebuilding and not before.
 """
 
 import json
@@ -116,7 +117,7 @@ def build_questions(per_dir=20, seed=11):
 
 if __name__ == "__main__":
     # Per-directory sample size and seed: a second seed tops the set up with
-    # files the first one missed, which is how 36 was reached.
+    # files the first one missed: seeds 11, 12 and 13 reached 70.
     build_questions(
         per_dir=int(sys.argv[1]) if len(sys.argv) > 1 else 20,
         seed=int(sys.argv[2]) if len(sys.argv) > 2 else 11,

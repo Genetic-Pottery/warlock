@@ -1,6 +1,6 @@
 """Count hits in a run.
 
-    python3 evals/score.py runs/isolation-arms.json
+    python3 evals/score.py evals/runs/baseline-arms.json
 
 Two numbers per arm: whether the right file was named, and whether the right
 file and symbol both were. The file is the number that matters — it is what a
@@ -8,9 +8,9 @@ document is for — and the symbol number is low for every arm ever measured,
 because a gold name is often internal and a file line carries only its first
 `DECLARED_SHOWN`.
 
-Read differences against the noise floor, not against zero: identical content
-has scored 91.7% and 87.0% on two runs, so about four answers in 108 is the
-smallest thing worth claiming.
+Read differences against the noise floor, not against zero: the same document
+has scored 55, 51 and 55 out of 70 on three runs, so about four answers in 70 is
+the smallest thing worth claiming.
 """
 
 from __future__ import annotations

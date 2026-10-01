@@ -3,9 +3,9 @@
 
 # crates
 
-The crates directory holds the workspace's two Cargo packages: the warlock-engine library and the warlock-tui binary/library built on it.
+The crates directory holds warlock's two Cargo packages: the warlock-engine library with the core repo/pact/draft/pull logic, and the warlock-tui package building the warlock binary and warlock_tui library that drive the CLI and TUI.
 
 ## Directories
 
-- `warlock-engine/` — Repo-modeling and document engine — Tree of pacted/unpacted modules, hashing, agent-driven fill/validation, scope/sigil enforcement.
-- `warlock-tui/` — Terminal UI and CLI crate — pact/refresh/pull/cut/push/chat/brief flows, Linear/git/gh/claude integrations.
+- `warlock-engine/` — Core library crate for walking/hashing repo trees, pacted freshness, LLM document fills, scopes, sigils, keys, pulls, drafting and ticket-splitting/filing — open for how any of that logic works.
+- `warlock-tui/` — Package building the warlock binary and warlock_tui library: the TUI app, CLI, brief/draft/push/pull flows, and git/Claude/Linear integrations — open for how a command or screen works.

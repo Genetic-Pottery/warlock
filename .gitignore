@@ -1,3 +1,6 @@
 /target
 .red
 .forman
+# aider writes its tag cache beside whatever evals/arms.py maps.
+.aider*
+demo.cast

@@ -55,11 +55,17 @@ def as_json(text: str) -> dict | None:
     text = text.strip()
     if text.startswith("```"):
         text = re.sub(r"^```[a-z]*\n|\n```$", "", text)
+    # The first object only, and None rather than a raise: one malformed answer
+    # out of hundreds must score as a miss, not take the run's other answers
+    # down with it.
+    start = text.find("{")
+    if start < 0:
+        return None
     try:
-        return json.loads(text)
+        found, _ = json.JSONDecoder().raw_decode(text, start)
     except json.JSONDecodeError:
-        found = re.search(r"\{.*\}", text, re.S)
-        return json.loads(found.group(0)) if found else None
+        return None
+    return found if isinstance(found, dict) else None
 
 
 def load(name: str):

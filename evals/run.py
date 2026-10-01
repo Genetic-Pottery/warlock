@@ -2,12 +2,12 @@
 
     python3 evals/run.py <name> document repomap listing
 
-Costs one model call per question per arm — 36 questions, so an arm is 36
-calls. Writes runs/<name>.json.
+Costs one model call per question per arm, so an arm is as many calls as
+questions.json has entries. Writes runs/<name>.json.
 
 An arm run more than once is how the noise floor is measured: pass --runs 3 and
-score.py reports each run separately, because the same content has scored 91.7%
-and 87.0% on two passes and nothing smaller than that spread is a finding.
+score.py reports each run separately, because the same document has scored 55,
+51 and 55 out of 70 and nothing smaller than that spread is a finding.
 """
 
 from __future__ import annotations
@@ -36,7 +36,7 @@ Answer with JSON only: {{"file": "<one filename from that directory>", "symbol":
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("name", help="what to call this run: runs/<name>.json")
-    parser.add_argument("arms", nargs="+", help="document, declares8, isolated, listing, repomap, ...")
+    parser.add_argument("arms", nargs="+", help="document, declares8, no_structure, listing, repomap")
     parser.add_argument("--runs", type=int, default=1, help="times to repeat each arm")
     parser.add_argument("--workers", type=int, default=8)
     args = parser.parse_args()

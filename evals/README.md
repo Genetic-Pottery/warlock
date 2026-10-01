@@ -8,24 +8,25 @@ find a file.
 
 This is not a test suite and must never gate anything. It is stochastic, it
 costs model calls, and it produces a number with noise around it rather than a
-verdict. **The same content has scored 91.7% and 87.0% on two runs with nothing
-changed**, so about four answers in 108 is the smallest difference worth
-claiming. Every conclusion drawn here is written up with its date in `docs/`.
+verdict. **The same document has scored 55, 51, and 55 out of 70 on three runs
+with nothing changed**, so about four answers in 70 is the smallest difference
+worth claiming. Every conclusion drawn here is written up with its date in
+`docs/`.
 
 ## What it measures
 
 A document exists to answer one question: given something I want to do, which
-file do I open? So that question is put 36 times, to one map at a time, and the
+file do I open? So that question is put 70 times, to one map at a time, and the
 answers are counted.
 
-The questions come from the source and never from a document — a document is one
-of the things on trial, and a question phrased out of its own `## Where to look`
-line would be scoring the arms on a test one of them wrote. Each has a gold file
-and symbol taken from a declaration unique to that file.
+The questions come from the source and never from a document. A document is one
+of the things on trial, and a question phrased out of its own lines would be
+scoring the arms on a test one of them wrote. Each question has a gold file and
+a symbol declared in that file alone.
 
 ## Running it
 
-Needs the `claude` CLI on `PATH`. One arm is 36 model calls.
+Needs the `claude` CLI on `PATH`. One arm is one model call per question.
 
     python3 evals/run.py my-run document listing
     python3 evals/score.py evals/runs/my-run.json
@@ -34,43 +35,47 @@ Needs the `claude` CLI on `PATH`. One arm is 36 model calls.
     python3 evals/run.py steadiness document --runs 3
 
 Arms are built from the **currently committed documents**, so a run measures the
-repository as it stands. Available: `document` (as committed, sixteen declared
-names), `declares8` / `declares32` / any count, `isolated` (file lines written
-one file at a time), `document_no_synthesis` and `isolated_no_synthesis` (the
-three cross-file sections stripped), `listing` (names and sizes, the floor), and
-`repomap`.
+repository as it stands. Before a run, refresh the measured directories with
+`warlock refresh` and regenerate `declared.json`; a stale document measures the
+code as it was. Available arms:
 
-`repomap` is aider's tree-sitter and PageRank map at a matched token budget — the
-free bar a written line has to beat. It needs its own virtualenv, because aider
-will not build on Python 3.14 and scipy's wheel cannot find libstdc++ on NixOS:
+- `document`: the committed document, sixteen declared names.
+- `declares8`, `declares32`, or any count: the same document with that many
+  declared names.
+- `no_structure`: the committed document without `## Structure`.
+- `listing`: names and sizes, the floor.
+- `repomap`: aider's map at a matched token budget.
 
-    nix-shell -p python312 --run 'python3.12 -m venv /tmp/av && /tmp/av/bin/pip install aider-chat'
+`repomap` is aider's tree-sitter and PageRank map, the free bar a written line
+has to beat. It needs its own virtualenv in `evals/av/`, because aider won't
+build on Python 3.14 and scipy's wheel can't find libstdc++ on NixOS:
+
+    nix-shell -p python312 --run 'python3.12 -m venv evals/av && evals/av/bin/pip install aider-chat'
     nix-shell -p gcc --run 'LD_LIBRARY_PATH=$(dirname $(gcc -print-file-name=libstdc++.so.6)) \
-        /tmp/av/bin/python evals/run.py baseline document repomap listing'
+        evals/av/bin/python evals/run.py baseline document repomap listing'
 
 ## The files
 
-- `common.py` — paths, the model and effort a document pass runs at, the one
+- `common.py`: paths, the model and effort a document pass runs at, and the one
   place a question is put to a model.
-- `questions.py` — builds `questions.json`. Roughly two calls per kept question;
-  about half are thrown away for naming their own answer. Run only when the set
-  needs rebuilding.
-- `arms.py` — every map under test. Parses warlock's own rendered file lines to
-  vary one thing and hold the rest still.
-- `isolated.py` — writes `isolated_lines.json`: one line per file from a pass
-  shown that file alone. One call per file.
-- `run.py`, `score.py` — ask and count.
-- `runs/` — the answers behind the write-ups in `docs/`, kept so a claim can be
+- `questions.py`: builds `questions.json`, one question per file at most. It
+  costs one call per file sampled, and about a third of the questions are thrown
+  away for naming their own answer. A later seed only adds questions for files
+  the set doesn't cover yet. To rebuild from nothing, delete `questions.json`
+  first.
+- `arms.py`: every map under test. It parses warlock's own rendered file lines
+  to vary one thing and hold the rest still.
+- `run.py`, `score.py`: ask and count.
+- `runs/`: the answers behind the write-ups in `docs/`, kept so a claim can be
   checked without paying for it again.
 
-## The two dumps
+## The declared-names dump
 
-`declared.json` and `skeletons.json` are warlock's own measurements — the
-declared names behind a `· declares` list, and the reduced source a pass is
-actually shown. Both are snapshots taken through a temporary test in
-`crates/warlock-engine/src/languages.rs`, because `declared_names` and `skeleton`
-are `pub(crate)` and making them public to serve a measuring tool is a worse
-trade than a probe that is deleted afterwards:
+`declared.json` is warlock's own measurement: the declared names behind a
+`· declares` list. It's a snapshot taken through a temporary test appended to
+`crates/warlock-engine/src/tests/languages.rs`, because `declared_names` is
+`pub(crate)`, and making it public to serve a measuring tool is a worse trade
+than a probe that's deleted afterwards:
 
 ```rust
 #[test]
@@ -101,18 +106,28 @@ fn dump_declared_names() {
         cargo test -p warlock-engine --lib dump_declared_names -- --ignored --nocapture \
         | grep '^DUMP' | sed 's/^DUMP//' > evals/declared.json
 
-`skeletons.json` is the same shape with `super::skeleton(&path, &text)` and its
-`.text`. Both go stale as the source changes; regenerate before a run that
-depends on them being current.
+The dump goes stale as the source changes. To check that it's current, compare
+`declares(rel, 16)` from `arms.py` against the committed document; they must
+match byte for byte.
 
 ## What has been settled here
 
-- `DECLARED_SHOWN` went from 8 to 16: same routing to the file, 33.3% to 45.4%
-  naming the right symbol, over three runs.
-- A written line beats the free map it has to beat: 91.7% against aider's 38.9%
-  and a bare listing's 58.3%, at a matched budget.
-- A line written without its siblings routes as well as one written with them,
-  which is what unblocked per-file granularity.
+On the 70-question set, 2026-10-01:
 
-See `docs/warlock-aider-baseline-measurement.md` and
-`docs/warlock-per-file-isolation-measurement.md`.
+- A written line routes to the right file 76.7% of the time, against 26.7% for
+  a bare listing and 17.1% for aider's map at a matched budget.
+- Sixteen declared names route better than eight: 76.7% against 70.5%.
+- `## Structure` routes nobody to a file: 77.6% without it.
+
+On the earlier 36-question set, 2026-09-14, which can't be compared with the
+numbers above:
+
+- `DECLARED_SHOWN` went from 8 to 16 on these results.
+- A line written without its siblings routes as well as one written with them,
+  which unblocked per-file granularity.
+- `## Where to look` routed nobody, and was removed.
+
+See `docs/warlock-eval-rebaseline-measurement.md`,
+`docs/warlock-aider-baseline-measurement.md`,
+`docs/warlock-per-file-isolation-measurement.md`, and
+`docs/warlock-routes-ablation-measurement.md`.
