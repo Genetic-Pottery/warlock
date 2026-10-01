@@ -177,6 +177,10 @@ impl Converses for Saying {
     fn raised(&self, _model: &str, _effort: &str) -> Self {
         self.clone()
     }
+
+    fn fresh(&self) -> Self {
+        self.clone()
+    }
 }
 
 /// One turn's answer, written down before the run starts.
@@ -225,6 +229,12 @@ pub(crate) struct Scripted {
     said: Arc<Mutex<Vec<String>>>,
     cancels: Arc<Mutex<Vec<Cancel>>>,
     held: Option<Arc<Gate>>,
+    activities: Activities,
+    doing: Vec<Activity>,
+    /// The handle this copy was wired to, which a turn refuses under once it
+    /// is latched, as the real transport does: a stand-in that ran a cancelled
+    /// turn anyway hid a session cancelling itself between its own turns.
+    cancel: Option<Cancel>,
 }
 
 impl Scripted {
@@ -234,7 +244,18 @@ impl Scripted {
             said: Arc::default(),
             cancels: Arc::default(),
             held: None,
+            activities: Activities::none(),
+            doing: Vec::new(),
+            cancel: None,
         }
+    }
+
+    /// The same model, reporting `doing` to whatever it is wired to at the
+    /// start of every turn, before the gate: what a session watched while it
+    /// works looks like, without a `claude` on the machine.
+    pub(crate) fn doing(mut self, doing: impl IntoIterator<Item = Activity>) -> Self {
+        self.doing = doing.into_iter().collect();
+        self
     }
 
     /// The same model, answering nothing until the gate is opened: what a turn
@@ -263,15 +284,30 @@ impl Scripted {
 }
 
 impl Wired for Scripted {
-    fn wired(&self, cancel: Cancel, _activities: Activities) -> Self {
-        locked(&self.cancels).push(cancel);
-        self.clone()
+    fn wired(&self, cancel: Cancel, activities: Activities) -> Self {
+        locked(&self.cancels).push(cancel.clone());
+        Self {
+            activities,
+            cancel: Some(cancel),
+            ..self.clone()
+        }
     }
 }
 
 impl Converses for Scripted {
     fn turn(&self, message: &str) -> Result<String, agent::Error> {
+        if self.cancel.as_ref().is_some_and(Cancel::is_cancelled) {
+            return Err(agent::Error::Io {
+                source: std::io::Error::new(
+                    std::io::ErrorKind::Interrupted,
+                    "the model pass was cancelled before it finished",
+                ),
+            });
+        }
         locked(&self.said).push(message.to_owned());
+        for activity in &self.doing {
+            self.activities.report(activity.clone());
+        }
         if let Some(gate) = &self.held {
             gate.wait();
         }
@@ -290,6 +326,10 @@ impl Converses for Scripted {
     }
 
     fn raised(&self, _model: &str, _effort: &str) -> Self {
+        self.clone()
+    }
+
+    fn fresh(&self) -> Self {
         self.clone()
     }
 }

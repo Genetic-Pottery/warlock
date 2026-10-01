@@ -291,10 +291,16 @@ const PULL_FROM: &str = "from ";
 
 const REVIEW_QUESTION: &str = "File these drafts as issues?";
 
+/// After the count of drafts. The keys are the ones `input.rs` gives the panel
+/// while this window is up.
+const REVIEW_READ: &str = " on the panel — ↑ ↓ PgUp PgDn to read";
+
 /// The three answers, each with the space around it the other windows' two
 /// carry, so a reader who has answered one of those is looking at the same
 /// shapes in the same place.
 const REVIEW_CREATE: &str = " Create ";
+
+const REVIEW_EDIT: &str = " Edit ";
 
 const REVIEW_SKIP: &str = " Skip ";
 
@@ -1267,11 +1273,12 @@ const fn noun(state: NodeState) -> &'static str {
 
 // Every window warlock puts over the frame, sized off the lines it draws: the
 // width is the widest of them, the height is how many there are, and both carry
-// the same margins and border, so every question is answered in the same place
-// on the screen.
+// the same margins and border. Centred, so every question is answered in the
+// same place on the screen — except the one `at_bottom` says otherwise for.
 struct Dialog<'a> {
     lines: Vec<Line<'a>>,
     floor: usize,
+    bottom: bool,
 }
 
 impl<'a> Dialog<'a> {
@@ -1291,7 +1298,21 @@ impl<'a> Dialog<'a> {
     }
 
     fn new(lines: Vec<Line<'a>>) -> Self {
-        Self { lines, floor: 0 }
+        Self {
+            lines,
+            floor: 0,
+            bottom: false,
+        }
+    }
+
+    // The review window is the one question asked about text on the panel
+    // behind it, so it sits on the bottom edge rather than over the middle of
+    // the drafts it asks about.
+    fn at_bottom(self) -> Self {
+        Self {
+            bottom: true,
+            ..self
+        }
     }
 
     // A width the text keeps even when no line is that wide yet: the field
@@ -1357,24 +1378,16 @@ impl<'a> Dialog<'a> {
     }
 
     fn review(review: &'a Review) -> Self {
-        let mut lines = vec![
+        let lines = vec![
             Line::from(REVIEW_QUESTION).centered(),
             Line::default(),
             Line::from(review.slice()).bold().centered(),
+            Line::from(review_read_line(review)).dim().centered(),
+            Line::default(),
+            review_answers_line(review),
         ];
-        // Every title and not the first few: they are what the answer is about, and
-        // a window that showed three of five would be asking about two drafts
-        // nobody had read.
-        lines.extend(
-            review
-                .titles()
-                .iter()
-                .map(|title| Line::from(title.as_str()).dim().centered()),
-        );
-        lines.push(Line::default());
-        lines.push(review_answers_line(review));
 
-        Self::new(lines)
+        Self::new(lines).at_bottom()
     }
 
     fn carry(carry: &Carry) -> Self {
@@ -1463,7 +1476,15 @@ impl<'a> Dialog<'a> {
     }
 
     fn area(&self, screen: Rect) -> Rect {
-        centred(screen, self.size())
+        let area = centred(screen, self.size());
+        if self.bottom {
+            Rect {
+                y: screen.y + screen.height - area.height,
+                ..area
+            }
+        } else {
+            area
+        }
     }
 
     fn draw(self, frame: &mut Frame<'_>, screen: Rect) {
@@ -1530,24 +1551,27 @@ fn pull_from_line(undertaking: &Undertaking) -> Option<String> {
         .map(|subtask| format!("{PULL_FROM}{subtask}"))
 }
 
-// The answers line with three answers on it: the same lit and unlit styles as
-// every other question's, so what is under the finger reads the same way, and
-// the third answer left off entirely when this slice has spent its redraft — an
-// answer that is drawn is one that can be pressed.
+// The same lit and unlit styles as every other question's, so what is under
+// the finger reads the same way.
 fn review_answers_line(review: &Review) -> Line<'static> {
     let style = |choice: Choice| answer_style(choice == review.choice());
 
-    let mut spans = vec![
+    Line::from(vec![
         Span::styled(REVIEW_CREATE, style(Choice::Create)),
         Span::raw(REVIEW_ANSWER_GAP),
+        Span::styled(REVIEW_EDIT, style(Choice::Edit)),
+        Span::raw(REVIEW_ANSWER_GAP),
         Span::styled(REVIEW_SKIP, style(Choice::Skip)),
-    ];
-    if review.feedback() {
-        spans.push(Span::raw(REVIEW_ANSWER_GAP));
-        spans.push(Span::styled(REVIEW_FEEDBACK, style(Choice::Feedback)));
-    }
+        Span::raw(REVIEW_ANSWER_GAP),
+        Span::styled(REVIEW_FEEDBACK, style(Choice::Feedback)),
+    ])
+    .centered()
+}
 
-    Line::from(spans).centered()
+fn review_read_line(review: &Review) -> String {
+    let count = review.titles().len();
+    let noun = if count == 1 { "draft" } else { "drafts" };
+    format!("{count} {noun}{REVIEW_READ}")
 }
 
 fn carry_left_line(carry: &Carry) -> String {

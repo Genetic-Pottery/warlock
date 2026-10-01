@@ -23,7 +23,7 @@ fn the_precedence_is_quit_the_five_questions_then_the_four_fields() {
         "Warlock",
         "war-143/add-pull-and-resume",
     );
-    let review = Review::open("slice 1", vec!["A draft".to_owned()], true);
+    let review = Review::open("slice 1", vec!["A draft".to_owned()]);
     let carry = Carry::open("2 slices");
     let filing = ScopePrompt::open("Which board", "work");
     let scope = ScopePrompt::open("crates/warlock-engine", "data-plane");

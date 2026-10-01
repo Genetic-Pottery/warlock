@@ -51,23 +51,25 @@
 
 use std::io;
 use std::mem;
+use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use warlock_engine::drafting::Draft;
 use warlock_engine::{Manifest, agent, from_manifest_path};
 
-use crate::app::App;
+use crate::app::{App, Focus};
 use crate::brief::Slice;
 use crate::claude::{
-    Cancel, ChatAgent, Converses, Drafting, NOTHING_SETTLES_IT, Replied, propose_answer,
+    Activities, Activity, Cancel, ChatAgent, Converses, Drafting, NOTHING_SETTLES_IT, Replied,
+    propose_answer,
 };
 use crate::confirm::{
     Answer, Carry, CarryAnswered, Choice, CutAnswered, CutConfirm, Review, Reviewed,
 };
 use crate::cut::{Cut, listed};
 use crate::error::{Error, one_line};
-use crate::inflight::{Lost, Once, Workers, settled};
+use crate::inflight::{Lost, Once, Stream, Workers, settled};
 use crate::linear::{Opener as LinearOpener, Opens};
 use crate::pacting::CancelGuard;
 // The lines about a relayed question come from there rather than from here, as
@@ -76,8 +78,8 @@ use crate::pacting::CancelGuard;
 // conversation differently.
 use crate::planned::{
     self, Announcement, Next, Planned, Reply, Settled, answer_line, counted, drafted_line,
-    feedback_line, named, not_drafted, prepare, question_line, replied, settled_line, skipped_line,
-    unproposed_line,
+    drafts_document, feedback_line, named, not_drafted, prepare, replied, settled_line,
+    skipped_line, stopped_line, unedited_line, unproposed_line,
 };
 use crate::standing::Standing;
 
@@ -213,11 +215,6 @@ struct Fetching {
 struct Slicing<A: Converses> {
     planned: Planned,
     next: Next,
-    // Whether this slice has spent its one redraft. Cleared as the run moves on,
-    // because it is a fact about the slice under way and not about the run: one
-    // feedback each, and the second review of a redrafted slice is offered with
-    // two answers rather than three.
-    redrafted: bool,
     stage: Stage<A>,
 }
 
@@ -303,7 +300,9 @@ struct Waiting<A> {
 }
 
 // One slice's session, from the panel's side: what the worker will say, and the
-// handle that stops the turn it is in.
+// handle that stops the turn it is in. What it is seen doing on the way arrives
+// on the same stream, so a turn that takes minutes is a section on the account
+// with a clock running rather than one line on the thread and nothing after it.
 //
 // The handle is the session's own — see [`CancelGuard::over`] — because the
 // session wired its agent to it before the turn started, so this is the flag the
@@ -311,11 +310,7 @@ struct Waiting<A> {
 // a run: losing the session loses the run, and losing the run cancels.
 #[derive(Debug)]
 struct Asking<A> {
-    replies: Once<Turned<A>>,
-    #[expect(
-        dead_code,
-        reason = "held for its drop, which is what cancels the slice in flight"
-    )]
+    replies: Stream<Turning<A>>,
     cancel: CancelGuard,
 }
 
@@ -323,6 +318,12 @@ struct Asking<A> {
 /// worker, because a [`Drafting`] is stateful across turns and each turn blocks
 /// on a subprocess, and it has to come back for the next one.
 type Turned<A> = (Drafting<A>, Result<Replied, agent::Error>);
+
+#[derive(Debug)]
+enum Turning<A> {
+    Doing(Activity),
+    Turned(Turned<A>),
+}
 
 impl Cutter<LinearOpener, ChatAgent> {
     pub(crate) fn new() -> Self {
@@ -530,13 +531,24 @@ impl<O: Opens, A: Converses> Cutter<O, A> {
     fn turned(&mut self, app: &mut App, now: Instant) {
         let Some((mut slicing, turned)) =
             settled(&mut self.slicing, |slicing| match &slicing.stage {
-                Stage::Drafting(asking) => asking.replies.landed(),
+                Stage::Drafting(asking) => asking.replies.drained(|event| match event {
+                    Turning::Doing(activity) => {
+                        app.panel_mut().record_turn(&activity, now);
+                        ControlFlow::Continue(())
+                    }
+                    Turning::Turned(turned) => ControlFlow::Break(turned),
+                }),
                 _ => None,
             })
         else {
             return;
         };
-
+        // Before this stage is replaced and the guard dropped: the turn is over,
+        // and the handle it guards is the session's own, which the next turn —
+        // an answer, or feedback — runs under.
+        if let Stage::Drafting(asking) = &mut slicing.stage {
+            asking.cancel.disarm();
+        }
         match ended(slicing.next.slice(), turned) {
             // A question, which is the one ending that leaves the slice where it
             // is: the session is parked with the question on the thread in the
@@ -545,11 +557,16 @@ impl<O: Opens, A: Converses> Cutter<O, A> {
             // thing this slice says depends on what they say.
             Ended::Asked { session, question } => {
                 let slice = slicing.next.slice();
-                app.panel_mut().note(question_line(slice, &question), now);
+                // The work turn's answer, whole: what the session said, in its
+                // own voice and on its own lines, as a chat answer is drawn.
+                app.panel_mut().answer_turn(question.clone(), now);
+                // Where the answer is typed, whatever had the keys while the
+                // session worked.
+                app.set_focus(Focus::Composer);
                 let proposing = spawn_proposal(
                     self.workers,
                     &self.proposer,
-                    slicing.planned.brief(),
+                    &slicing.planned.drafting_brief(),
                     slice,
                     &question,
                 );
@@ -569,22 +586,29 @@ impl<O: Opens, A: Converses> Cutter<O, A> {
                 titles,
                 lines,
             } => {
+                // The drafts whole, as the work turn's answer — Forman prints
+                // them above its prompt — and then the line naming them and
+                // any repairs.
+                app.panel_mut().answer_turn(
+                    drafts_document(slicing.next.slice(), &drafts).join("\n"),
+                    now,
+                );
                 for line in lines {
                     app.panel_mut().note(line, now);
                 }
-                // The redraft is offered exactly once per slice, so the second
-                // time round the window goes up with two answers and the
-                // session goes with the drafts it has already given.
-                let feedback = !slicing.redrafted;
+                // Feedback every time, as Forman offers it: there is no count
+                // of redrafts, and the session goes with the drafts so the next
+                // feedback is a turn of the same conversation.
                 slicing.stage = Stage::Reviewing(Reviewing {
-                    review: Review::open(named(slicing.next.slice()), titles, feedback),
+                    review: Review::open(named(slicing.next.slice()), titles),
                     drafts,
-                    session: feedback.then_some(session),
+                    session: Some(session),
                 });
                 self.slicing = Some(slicing);
                 return;
             }
             Ended::Over(lines) => {
+                app.panel_mut().settle_turn(now);
                 for line in lines {
                     app.panel_mut().note(line, now);
                 }
@@ -607,12 +631,11 @@ impl<O: Opens, A: Converses> Cutter<O, A> {
             self.finished(&slicing.planned);
             return;
         };
-        slicing.redrafted = false;
         slicing.stage = Stage::Drafting(started(
             self.workers,
             &self.agent,
             app,
-            slicing.planned.brief(),
+            &slicing.planned.drafting_brief(),
             &next,
             now,
         ));
@@ -801,15 +824,13 @@ impl<O: Opens, A: Converses> Cutter<O, A> {
             Stage::Waiting(waiting) => {
                 app.panel_mut()
                     .note(answer_line(slicing.next.slice(), answer), now);
+                app.panel_mut().start_work(now);
                 Stage::Drafting(asked(self.workers, waiting.session, answer))
             }
             Stage::Feedback(session) => {
                 app.panel_mut()
                     .note(feedback_line(slicing.next.slice(), answer), now);
-                // Said here rather than where the answer was asked for, so the
-                // slice is spent by the turn that redrafts it and not by a
-                // reader who chose feedback and then thought better of it.
-                slicing.redrafted = true;
+                app.panel_mut().start_work(now);
                 Stage::Drafting(asked(self.workers, session, answer))
             }
         };
@@ -835,18 +856,60 @@ impl<O: Opens, A: Converses> Cutter<O, A> {
 
     /// One slice's drafts, answered about. An arrow re-lights the window — the
     /// titles it was opened with ride along, since they are what is being
-    /// answered about — and each of the three answers takes it down.
+    /// answered about — and create, skip and feedback each take it down.
     ///
     /// Create is the only one that sends anything, and it sends it from a
-    /// worker; skip records nothing and asks whether to carry on; feedback
-    /// leaves the field taking whatever the reader has to say. Whichever it is,
-    /// the session goes on exactly where it was.
+    /// worker; skip records the slice and asks whether to carry on; feedback
+    /// leaves the field taking whatever the reader has to say. Edit is the
+    /// loop's, because it hands the screen to `$EDITOR`: see
+    /// [`Cutter::editing`] and [`Cutter::edited`].
     pub(crate) fn reviewed(&mut self, app: &mut App, answered: Reviewed, now: Instant) {
         match answered {
             Reviewed::Open(choice) => self.review_lit(choice),
             Reviewed::Create => self.create(app, now),
             Reviewed::Skip => self.skip(app, now),
             Reviewed::Feedback => self.feedback(app, now),
+            Reviewed::Edit => {}
+        }
+    }
+
+    /// The slice and the drafts the window is up for, for the loop to hand to
+    /// `$EDITOR`, or `None` with no window up.
+    pub(crate) fn editing(&self) -> Option<(Slice, Vec<Draft>)> {
+        let slicing = self.slicing.as_ref()?;
+        match &slicing.stage {
+            Stage::Reviewing(reviewing) => {
+                Some((slicing.next.slice().clone(), reviewing.drafts.clone()))
+            }
+            _ => None,
+        }
+    }
+
+    /// What came back from `$EDITOR`: the drafts the window now asks about and
+    /// the panel now shows, or the line saying why nothing changed. The window
+    /// stays up either way, as Forman's prompt comes back after an edit.
+    pub(crate) fn edited(
+        &mut self,
+        app: &mut App,
+        edited: Result<Vec<Draft>, String>,
+        now: Instant,
+    ) {
+        let Some(slicing) = self.slicing.as_mut() else {
+            return;
+        };
+        let Stage::Reviewing(reviewing) = &mut slicing.stage else {
+            return;
+        };
+        let slice = slicing.next.slice();
+        match edited {
+            Ok(drafts) => {
+                let titles = drafts.iter().map(|draft| draft.title.clone()).collect();
+                reviewing.review = Review::open(named(slice), titles);
+                app.panel_mut()
+                    .say(drafts_document(slice, &drafts).join("\n"), now);
+                reviewing.drafts = drafts;
+            }
+            Err(why) => app.panel_mut().note(unedited_line(slice, &why), now),
         }
     }
 
@@ -927,6 +990,9 @@ impl<O: Opens, A: Converses> Cutter<O, A> {
 
         app.panel_mut()
             .note(skipped_line(slicing.next.slice()), now);
+        if let Err(error) = slicing.planned.skip_slice(&slicing.next) {
+            app.panel_mut().note(error.to_string(), now);
+        }
         let left = slicing.next.left();
         if left == 0 {
             self.finished(&slicing.planned);
@@ -938,12 +1004,8 @@ impl<O: Opens, A: Converses> Cutter<O, A> {
     }
 
     /// Feedback: the window down and the field taking whatever the reader has
-    /// to say about these drafts.
-    ///
-    /// A slice that has spent its redraft has no session to hear it, and this
-    /// is a no-op there rather than a second conversation: the window it was
-    /// answered from does not draw the answer at all (see [`Review::feedback`]),
-    /// so a call with none left is a key that reached the wrong window.
+    /// to say about these drafts. A no-op unless a review holding its session
+    /// is up, so a stray call cannot start a turn of a session that moved on.
     fn feedback(&mut self, app: &mut App, now: Instant) {
         let Some(mut slicing) = self.slicing.take() else {
             return;
@@ -962,6 +1024,7 @@ impl<O: Opens, A: Converses> Cutter<O, A> {
 
         app.panel_mut()
             .note(asking_feedback_line(slicing.next.slice()), now);
+        app.set_focus(Focus::Composer);
         slicing.stage = Stage::Feedback(session);
         self.slicing = Some(slicing);
     }
@@ -1042,11 +1105,17 @@ impl<O: Opens, A: Converses> Cutter<O, A> {
         let Some(next) = planned.next_uncut() else {
             return;
         };
-        let asking = started(self.workers, &self.agent, app, planned.brief(), &next, now);
+        let asking = started(
+            self.workers,
+            &self.agent,
+            app,
+            &planned.drafting_brief(),
+            &next,
+            now,
+        );
         self.slicing = Some(Slicing {
             planned,
             next,
-            redrafted: false,
             stage: Stage::Drafting(asking),
         });
     }
@@ -1071,6 +1140,7 @@ fn started<A: Converses>(
 ) -> Asking<A> {
     app.panel_mut()
         .note(format!("{} — drafting", next.heading()), now);
+    app.panel_mut().start_work(now);
     let slice = next.slice();
     let session = Drafting::for_slice(agent, brief, slice.heading(), slice.prose());
 
@@ -1098,7 +1168,7 @@ fn asked<A: Converses>(workers: Workers, session: Drafting<A>, answer: &str) -> 
 // behind a lock: it is the one thing that carries what this slice's
 // conversation has already said, and the event loop's thread has no business
 // touching it while a turn is running.
-fn turning<A, F>(workers: Workers, mut session: Drafting<A>, turn: F) -> Asking<A>
+fn turning<A, F>(workers: Workers, session: Drafting<A>, turn: F) -> Asking<A>
 where
     A: Converses,
     F: FnOnce(&mut Drafting<A>) -> Result<Replied, agent::Error> + Send + 'static,
@@ -1106,9 +1176,15 @@ where
     let cancel = CancelGuard::over(session.cancel());
 
     Asking {
-        replies: workers.once(move || {
-            let replied = turn(&mut session);
-            (session, replied)
+        replies: workers.stream(move |port| {
+            let doing = port.clone();
+            let mut session = session.reporting(Activities::new(move |activity| {
+                doing.send(Turning::Doing(activity));
+            }));
+            move || {
+                let replied = turn(&mut session);
+                port.send(Turning::Turned((session, replied)));
+            }
         }),
         cancel,
     }
@@ -1219,9 +1295,9 @@ fn filed_line(slice: &Slice, issues: &[String]) -> String {
 // said.
 fn already_line(slice: &Slice, issues: &[String]) -> String {
     format!(
-        "{} — already cut as {}, so nothing was sent",
+        "{} — {}, so nothing was sent",
         named(slice),
-        listed(issues)
+        crate::cut::settled_as(issues)
     )
 }
 
@@ -1237,13 +1313,6 @@ fn refused_line(slice: &Slice, refused: &str) -> String {
 // on to the next slice.
 fn unfiled_line(slice: &Slice, why: &str) -> String {
     format!("{} was not filed: {why}", named(slice))
-}
-
-// The run ended by a No to the carry-on question, counting what was never
-// offered: those slices are untouched rather than refused, so the next `/draft`
-// finds them exactly as this one did.
-fn stopped_line(left: usize) -> String {
-    format!("the run stopped; {} left for another draft", counted(left))
 }
 
 // Everything the fetch's worker owns, and the whole of what crosses the thread

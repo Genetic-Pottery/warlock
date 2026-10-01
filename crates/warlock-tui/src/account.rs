@@ -94,6 +94,11 @@ impl Log {
         self.entries.len().max(1)
     }
 
+    /// Whether anything was filed under it at all.
+    pub(crate) const fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
     /// Idempotent: work can be frozen by its own ending, by the next stretch
     /// starting or by the run ending, and the first of those is the honest
     /// instant. A plain assignment would let the end of a run re-date a pass

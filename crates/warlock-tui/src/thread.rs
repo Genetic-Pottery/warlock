@@ -115,7 +115,11 @@ pub(crate) fn ending_for(error: &agent::Error) -> Ending {
 /// can be filed under, and a closed turn never moves again.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Turn {
-    message: String,
+    /// `None` for warlock's own work rather than a question somebody asked: a
+    /// `/draft` slice being drafted is a turn whose rows tick and whose answer
+    /// is what the session said, with nobody's message above it. See
+    /// [`Thread::work`].
+    message: Option<String>,
     log: Log,
     answer: Option<String>,
     ending: Option<Ending>,
@@ -124,7 +128,20 @@ pub struct Turn {
 impl Turn {
     #[must_use]
     pub fn message(&self) -> &str {
-        &self.message
+        self.message.as_deref().unwrap_or_default()
+    }
+
+    // The work rows, unless this is warlock saying something whole with no
+    // work behind it (see [`Thread::said`]): a `waiting` placeholder frozen at
+    // zero over text that arrived at once would be a clock about nothing.
+    fn shows_work(&self) -> bool {
+        self.message.is_some() || !self.log.is_empty() || self.answer.is_none()
+    }
+
+    // Where this turn's answer sits among the thread's pieces, after its
+    // message when it has one.
+    fn answer_piece(&self, piece: usize) -> usize {
+        piece + usize::from(self.message.is_some())
     }
 
     /// Whole and unwrapped, as it arrived. Breaking it into rows happens on the
@@ -154,8 +171,14 @@ impl Turn {
     /// At least one work row, because a turn that has heard nothing still draws
     /// the `waiting` placeholder.
     fn line_count(&self) -> usize {
-        broken(&self.message).count()
-            + self.log.row_count()
+        self.message
+            .as_deref()
+            .map_or(0, |message| broken(message).count())
+            + if self.shows_work() {
+                self.log.row_count()
+            } else {
+                0
+            }
             + self
                 .answer
                 .as_deref()
@@ -170,7 +193,10 @@ impl Turn {
     /// An ending needs no arm of its own: it is filed as an ordinary line when
     /// the turn closes, so it clocks and freezes like everything else.
     fn sourced(&self, piece: usize, now: Instant) -> Vec<Sourced> {
-        let mut rows: Vec<Sourced> = broken(&self.message)
+        let mut rows: Vec<Sourced> = self
+            .message
+            .iter()
+            .flat_map(|message| broken(message))
             .map(|(offset, text)| Sourced {
                 line: Line::Said {
                     text: text.to_owned(),
@@ -184,13 +210,17 @@ impl Turn {
         // A work row is nobody's text — the live one's clock is recomputed every
         // frame — so it stands for the end of the question above it, which is
         // there before the answer is.
-        rows.extend(self.log.rows(now).map(|line| Sourced {
-            line,
-            piece,
-            offset: self.message.len(),
-            work: true,
-        }));
+        if self.shows_work() {
+            let offset = self.message.as_deref().map_or(0, str::len);
+            rows.extend(self.log.rows(now).map(|line| Sourced {
+                line,
+                piece,
+                offset,
+                work: true,
+            }));
+        }
 
+        let answer_piece = self.answer_piece(piece);
         rows.extend(
             self.answer
                 .iter()
@@ -199,7 +229,7 @@ impl Turn {
                     line: Line::Text {
                         text: text.to_owned(),
                     },
-                    piece: piece + 1,
+                    piece: answer_piece,
                     offset,
                     work: false,
                 }),
@@ -209,7 +239,7 @@ impl Turn {
     }
 
     fn pieces(&self) -> Vec<&str> {
-        let mut pieces = vec![self.message.as_str()];
+        let mut pieces: Vec<&str> = self.message.iter().map(String::as_str).collect();
         pieces.extend(self.answer.as_deref());
         pieces
     }
@@ -371,11 +401,47 @@ impl Thread {
     pub fn ask(&mut self, message: impl Into<String>, at: Instant) {
         self.freeze_last(at);
         self.entries.push(Entry::Turn(Turn {
-            message: message.into(),
+            message: Some(message.into()),
             log: Log::opened_at(at),
             answer: None,
             ending: None,
         }));
+    }
+
+    /// [`Thread::ask`] for warlock's own work: a live turn with no message, its
+    /// rows ticking under whatever note said what the work is, and its answer
+    /// what the session doing it said.
+    pub fn work(&mut self, at: Instant) {
+        self.freeze_last(at);
+        self.entries.push(Entry::Turn(Turn {
+            message: None,
+            log: Log::opened_at(at),
+            answer: None,
+            ending: None,
+        }));
+    }
+
+    /// Warlock putting something whole on the thread in the model's voice, with
+    /// no work behind it: drafts read back from an edit, for one. A closed turn,
+    /// so nothing is filed under it.
+    pub fn said(&mut self, text: impl Into<String>, at: Instant) {
+        self.freeze_last(at);
+        let mut log = Log::opened_at(at);
+        log.freeze(at);
+        self.entries.push(Entry::Turn(Turn {
+            message: None,
+            log,
+            answer: Some(text.into()),
+            ending: None,
+        }));
+    }
+
+    /// The live turn stopped where it got to, with no answer and no ending
+    /// line: what follows it on the thread says how it went.
+    pub fn settle(&mut self, at: Instant) {
+        if let Some(turn) = self.live() {
+            turn.freeze(at);
+        }
     }
 
     /// It touches no turn at all: nothing is opened, closed or frozen, so a note

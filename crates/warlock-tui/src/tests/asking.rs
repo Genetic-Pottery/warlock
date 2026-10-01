@@ -81,3 +81,83 @@ fn a_stand_in_holding_nothing_is_end_of_file_from_the_first_question() {
     assert_eq!(typing.ask("> ").expect("an EOF is not a failure"), None);
     assert_eq!(typing.asked().len(), 2, "both questions were asked");
 }
+
+mod editing {
+    use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+
+    use super::super::{Step, step};
+
+    fn key(code: KeyCode) -> Event {
+        Event::Key(KeyEvent::new(code, KeyModifiers::NONE))
+    }
+
+    fn control(character: char) -> Event {
+        Event::Key(KeyEvent::new(
+            KeyCode::Char(character),
+            KeyModifiers::CONTROL,
+        ))
+    }
+
+    #[test]
+    fn a_bracketed_paste_keeps_every_line_and_only_a_typed_enter_submits() {
+        // The cut-off Red and Forman have: a multi-line paste read as several
+        // Enters. Here the paste is one event and its newlines stay in.
+        let mut answer = String::new();
+
+        let echoed = step(
+            &mut answer,
+            &Event::Paste("first\r\nsecond\nthird".to_owned()),
+            false,
+        );
+
+        assert_eq!(answer, "first\nsecond\nthird");
+        assert_eq!(echoed, Step::Echo("first\r\nsecond\r\nthird".to_owned()));
+        assert_eq!(step(&mut answer, &key(KeyCode::Enter), false), Step::Done);
+        assert_eq!(answer, "first\nsecond\nthird");
+    }
+
+    #[test]
+    fn an_enter_with_input_queued_behind_it_is_a_pasted_newline() {
+        // A terminal that does not bracket pastes sends a paste's newlines as
+        // Enters, with the rest of the paste already waiting behind each.
+        let mut answer = "first".to_owned();
+
+        assert_eq!(
+            step(&mut answer, &key(KeyCode::Enter), true),
+            Step::Echo("\r\n".to_owned())
+        );
+        assert_eq!(answer, "first\n");
+    }
+
+    #[test]
+    fn typing_and_backspace_edit_the_answer_but_never_back_over_a_newline() {
+        let mut answer = String::new();
+        for character in "ab".chars() {
+            step(&mut answer, &key(KeyCode::Char(character)), false);
+        }
+        assert_eq!(answer, "ab");
+
+        assert_eq!(
+            step(&mut answer, &key(KeyCode::Backspace), false),
+            Step::Echo("\u{8} \u{8}".to_owned())
+        );
+        assert_eq!(answer, "a");
+
+        let mut pasted = "line\n".to_owned();
+        step(&mut pasted, &key(KeyCode::Backspace), false);
+        assert_eq!(pasted, "line\n");
+    }
+
+    #[test]
+    fn control_d_on_nothing_is_end_of_file_and_control_c_interrupts() {
+        let mut empty = String::new();
+        assert_eq!(step(&mut empty, &control('d'), false), Step::End);
+
+        let mut typed = "x".to_owned();
+        assert_eq!(
+            step(&mut typed, &control('d'), false),
+            Step::Echo(String::new())
+        );
+        assert_eq!(step(&mut typed, &control('c'), false), Step::Interrupt);
+    }
+}

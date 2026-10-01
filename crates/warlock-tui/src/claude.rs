@@ -58,6 +58,16 @@ use warlock_engine::{Agent, agent, drafting, splitting, working};
 /// reaped rather than abandoned.
 pub const INVOCATION_TIMEOUT: Duration = Duration::from_mins(5);
 
+/// No clock at all, for the sessions that read a repository to draft a slice or
+/// propose an answer. Five minutes was sized for one document pass, and it
+/// killed a drafting session that was still working; Forman's drafting has run
+/// with no timeout and never hung. Cancel still stops one.
+///
+/// `Duration::MAX` rather than an `Option`, because `invoke` waits with
+/// `recv_timeout`, which blocks without a deadline when `now + timeout`
+/// overflows instead of panicking.
+pub const UNTIMED: Duration = Duration::MAX;
+
 const PROGRAM: &str = "claude";
 
 /// The flags every invocation carries. `--output-format stream-json` needs
@@ -191,10 +201,17 @@ done or not done; then `## Constraints`, what must not change and what the work 
 may not reach for; then `## Out of scope`, named and refused rather than left \
 unsaid; then `## Scope`, the work as numbered slices, each a \
 `### N. What the slice does` line followed by a line reading \
-`depends_on: [<the numbers it needs first>]` and then what that slice decides \
-and why. No other sections, and no plan of which files to edit.\n\nWrite what we \
-decided rather than a summary of how we got there. Where something was left \
-open, say so in a line instead of inventing an answer.";
+`depends_on: [<the numbers it needs first>]` and then the slice in paragraphs: \
+what exists now, naming the files and functions it touches; what changes and \
+why this shape rather than the alternatives we weighed; and what a later edit \
+must not break. No other sections.\n\nThe rule about short replies is for the \
+conversation, not for this document. The brief is the only thing the session \
+that cuts each slice into tickets reads, and the only thing the agents that \
+then do the work are given, so carry the reasoning and not just the decision: \
+a slice that says what changes without saying why is a ticket somebody has to \
+guess at. Write what we decided rather than a summary of how we got there. \
+Where something was left open, say so in a line instead of inventing an \
+answer.";
 
 /// What a drafting session is running under, and the half of its terms that is
 /// not in the opening turn.
@@ -384,7 +401,7 @@ pub fn propose_answer<C: Converses>(
     prose: &str,
     question: &str,
 ) -> Result<String, agent::Error> {
-    let agent = agent.wired(Cancel::new(), Activities::none());
+    let agent = agent.fresh().wired(Cancel::new(), Activities::none());
     let reply = agent.turn(&proposing_instruction(brief, title, prose, question))?;
     Ok(proposed(&reply))
 }
@@ -401,12 +418,26 @@ pub const DRAFTING_CONTRACT: &str = "Somebody is reading your replies and can \
 answer you, and warlock decides what each reply is by its shape. A reply that \
 is the JSON object described below is the drafts, and it ends the conversation. \
 A reply that is anything else is a question, and is put to the person who asked \
-for this cut.\n\nYou get at most three questions, one per reply, and then you \
-draft. Ask only about something the brief and the slice leave open that changes \
-what the tickets are or how they are ordered — never about style, and never \
-about anything you could settle yourself with the tools you have, which you \
-should use first. When you have what you need, reply with the object and \
-nothing else.";
+for this cut.\n\nBefore drafting, check whether you have these five things. \
+They are what the agent executing the tickets needs in order to work, and \
+nothing outside this list justifies a question:\n\n1. The problem. What is \
+broken or missing, and why it matters.\n2. Acceptance criteria. Observable \
+outcomes someone could check without reading the author's mind. This is what \
+done will be measured against.\n3. Where to look. Files, modules, endpoints and \
+earlier tickets the executor needs.\n4. Out of scope. What must not be touched. \
+Without this, the work sprawls into unrelated code.\n5. Whether this slice is \
+one ticket or several independently shippable ones, and if several, what order \
+they have to happen in.\n\nAnswer as many of these as you can yourself by \
+reading the repository you are in. Always prefer looking over asking: a \
+question you could have settled by opening a file is a question you should not \
+ask. Do not write or edit any code.\n\nThen ask only for the gaps that remain, \
+all in one message rather than one question at a time. Keep it short and \
+concrete. If the brief and the slice already cover everything, ask nothing at \
+all and draft immediately. You have at most three rounds of questions; after \
+that, draft with what you have and record the remaining uncertainty under \
+out_of_scope or context.\n\nWhile you still have questions, write them as plain \
+prose and nothing else. Emit no JSON until you are ready to draft, because the \
+JSON is the signal that you are done asking.";
 
 /// The same session with nobody in front of it.
 ///
@@ -419,16 +450,18 @@ This is the only turn there is: no person sees what you say until the tickets \
 are filed, so a question reaches no one and an offer to clarify is thrown \
 away.\n\nDraft from the brief, the slice and what you can read in the \
 repository with the tools you have. Where the brief and the slice genuinely \
-leave something open, say so in the body of the ticket it belongs to, in a \
-line, rather than asking about it or inventing a decision nobody made. Your \
+leave something open, record it under the context or out_of_scope of the \
+ticket it belongs to, in a line, rather than asking about it or inventing a \
+decision nobody made. Your \
 whole reply is the JSON object described below and nothing else.";
 
 /// The fourth turn, once the three rounds are spent.
 pub(crate) const DRAFT_NOW_INSTRUCTION: &str = "That was the third question, which is \
 all there is. Nothing further is coming back to you: draft the tickets now from \
 the brief, the slice and what you have been told and have read. Where something \
-you asked about was left unanswered, say so in a line in the body of the ticket \
-it belongs to rather than asking again or deciding it yourself. Your whole \
+you asked about was left unanswered, record it in a line under the context or \
+out_of_scope of the ticket it belongs to rather than asking again or deciding it \
+yourself. Your whole \
 reply is the JSON object you were given the shape of and nothing else.";
 
 /// The opening turn of one slice's drafting session: the terms it is held to,
@@ -798,8 +831,14 @@ fn render(request: &agent::Request) -> String {
     rendered
 }
 
+// `--strict-mcp-config` with no `--mcp-config` beside it is no MCP server at
+// all, on every session warlock raises. `--tools` fences only the CLI's
+// built-ins: without this, a session also holds every MCP tool the machine's
+// own plugins bring — a browser that runs code among them — which no session
+// warlock raises was ever meant to reach.
 fn args_for(tools: &str, system_prompt: &str) -> Vec<OsString> {
     let mut args: Vec<OsString> = ARGS.iter().map(OsString::from).collect();
+    args.push(OsString::from("--strict-mcp-config"));
     args.extend([
         OsString::from("--model"),
         overridden(MODEL_VAR, MODEL),
@@ -859,22 +898,12 @@ fn splitting_args() -> Vec<OsString> {
 /// of the machine as this fence can honestly claim to hold.
 const WORKING_TOOLS: &str = "Read,Grep,Glob,Edit,Write,Bash";
 
-/// The clock a sub-task session runs under, and deliberately not
-/// [`INVOCATION_TIMEOUT`]: five minutes is sized for one pass writing one
-/// document, and a sub-task reads a brief, edits files and runs a test suite
-/// that is minutes on its own. A backstop rather than a budget — a session that
-/// reaches this was stuck, not thorough — and the reason it is a number at all
-/// is that nobody is watching the panel to notice.
-pub const WORKING_TIMEOUT: Duration = Duration::from_mins(30);
-
 /// How many turns a sub-task session gets before the CLI stops it, passed as
-/// `--max-turns`.
-///
-/// A second bound beside [`WORKING_TIMEOUT`] and not a duplicate of it: a
-/// session can spin cheaply for half an hour inside one tool loop, and it can
-/// also spend its turns in a minute. Sized so that a turn limit reached is
-/// news — enough turns to read, change and check a sub-task's worth of files —
-/// and low enough that doubling it on a retry is still a bound.
+/// `--max-turns`, and the only bound on one: there is no clock, as there is
+/// none on a `forman pull` spawn, because a pull's sub-tasks run past half an
+/// hour doing real work. Sized so that a turn limit reached is news — enough
+/// turns to read, change and check a sub-task's worth of files — and low enough
+/// that doubling it on a retry is still a bound.
 pub(crate) const WORKING_TURNS: u32 = 60;
 
 /// The tool calls the gate hook is asked about: every built-in that puts bytes
@@ -941,14 +970,13 @@ fn gate_settings() -> String {
 /// scope the ticket was pulled under and the sigils this machine holds, and both
 /// are read at the moment the session is raised.
 ///
-/// Three things are kept out on purpose. `--setting-sources ""` refuses this
-/// machine's user, project and local settings, so the session is not told what
-/// some repository's `CLAUDE.md` or somebody's global hooks would tell it;
-/// `--strict-mcp-config` with no `--mcp-config` beside it leaves the session no
-/// MCP server at all, so it cannot reach Linear or anything else except through
-/// warlock; and no permission mode is passed, because `--allowedTools` is how
-/// this session goes unprompted and `bypassPermissions` would be the fence
-/// turned off rather than opened.
+/// Two things are kept out on purpose, beside the MCP servers every session is
+/// kept from (see `args_for`). `--setting-sources ""` refuses this machine's
+/// user, project and local settings, so the session is not told what some
+/// repository's `CLAUDE.md` or somebody's global hooks would tell it; and no
+/// permission mode is passed, because `--allowedTools` is how this session goes
+/// unprompted and `bypassPermissions` would be the fence turned off rather than
+/// opened.
 fn working_args(system_prompt: &str) -> Vec<OsString> {
     let mut args = args_for(WORKING_TOOLS, system_prompt);
     args.extend([
@@ -956,7 +984,6 @@ fn working_args(system_prompt: &str) -> Vec<OsString> {
         OsString::from(WORKING_TOOLS),
         OsString::from("--setting-sources"),
         OsString::from(NO_SETTINGS),
-        OsString::from("--strict-mcp-config"),
         OsString::from("--settings"),
         OsString::from(gate_settings()),
         OsString::from("--max-turns"),
@@ -1251,6 +1278,15 @@ pub trait Converses: Wired {
     /// argument vector a mode change moves.
     #[must_use]
     fn raised(&self, model: &str, effort: &str) -> Self;
+
+    /// The same terms in a conversation nobody has spoken in yet. Every other
+    /// copy of an agent — [`raised`](Converses::raised), [`wired`](Wired::wired),
+    /// a plain clone — stays in its conversation, so a caller that means one
+    /// conversation per piece of work has to say so here: one agent held for a
+    /// run and wired per slice resumed the first slice's conversation for every
+    /// slice after it.
+    #[must_use]
+    fn fresh(&self) -> Self;
 }
 
 /// A conversation that can be re-let with a different turn bound.
@@ -1546,17 +1582,17 @@ impl ChatAgent {
     /// model they reach for.
     ///
     /// ```
-    /// use warlock_tui::{ChatAgent, INVOCATION_TIMEOUT};
+    /// use warlock_tui::{ChatAgent, UNTIMED};
     ///
     /// let agent = ChatAgent::drafting();
     ///
-    /// assert_eq!(agent.timeout(), INVOCATION_TIMEOUT);
+    /// assert_eq!(agent.timeout(), UNTIMED);
     /// // A conversation of its own, and not the one on the panel.
     /// assert!(agent.args().iter().any(|arg| arg == "--session-id"));
     /// ```
     #[must_use]
     pub fn drafting() -> Self {
-        Self::briefed(drafting_args(), INVOCATION_TIMEOUT)
+        Self::briefed(drafting_args(), UNTIMED)
     }
 
     /// The session that proposes an answer to one question: its own
@@ -1570,17 +1606,17 @@ impl ChatAgent {
     /// holding a tool that changes one.
     ///
     /// ```
-    /// use warlock_tui::{ChatAgent, INVOCATION_TIMEOUT};
+    /// use warlock_tui::{ChatAgent, UNTIMED};
     ///
     /// let agent = ChatAgent::proposing();
     ///
-    /// assert_eq!(agent.timeout(), INVOCATION_TIMEOUT);
+    /// assert_eq!(agent.timeout(), UNTIMED);
     /// // A conversation of its own, and not the one being cut.
     /// assert!(agent.args().iter().any(|arg| arg == "--session-id"));
     /// ```
     #[must_use]
     pub fn proposing() -> Self {
-        Self::briefed(proposing_args(), INVOCATION_TIMEOUT)
+        Self::briefed(proposing_args(), UNTIMED)
     }
 
     /// One pulled ticket's splitting session: its own conversation, at the
@@ -1594,17 +1630,17 @@ impl ChatAgent {
     /// which model they reach for.
     ///
     /// ```
-    /// use warlock_tui::{ChatAgent, INVOCATION_TIMEOUT};
+    /// use warlock_tui::{ChatAgent, UNTIMED};
     ///
     /// let agent = ChatAgent::splitting();
     ///
-    /// assert_eq!(agent.timeout(), INVOCATION_TIMEOUT);
+    /// assert_eq!(agent.timeout(), UNTIMED);
     /// // A conversation of its own, and not the one on the panel.
     /// assert!(agent.args().iter().any(|arg| arg == "--session-id"));
     /// ```
     #[must_use]
     pub fn splitting() -> Self {
-        Self::briefed(splitting_args(), INVOCATION_TIMEOUT)
+        Self::briefed(splitting_args(), UNTIMED)
     }
 
     /// One sub-task's session: the only session warlock raises that may change
@@ -1617,26 +1653,23 @@ impl ChatAgent {
     /// `warlock check --gate`, so a write outside the scopes this machine holds
     /// is refused where it is attempted rather than found afterwards. No
     /// settings sources and no MCP server, so the session is told what warlock
-    /// told it and can reach nothing except through warlock. Its own
-    /// [`WORKING_TIMEOUT`] and its own [`WORKING_TURNS`], because the five
-    /// minutes of [`INVOCATION_TIMEOUT`] are one document's worth of thinking
-    /// and this one runs a test suite. And the register the brief and the
-    /// tickets were written at, since a session that writes code has less
+    /// told it and can reach nothing except through warlock. No clock and its
+    /// own [`WORKING_TURNS`]; see that constant. And the register the brief and
+    /// the tickets were written at, since a session that writes code has less
     /// business being cheap than one that answers a question.
     ///
     /// ```
-    /// use warlock_tui::{ChatAgent, INVOCATION_TIMEOUT, WORKING_TIMEOUT};
+    /// use warlock_tui::{ChatAgent, UNTIMED};
     ///
     /// let agent = ChatAgent::working("You are working one sub-task.");
     ///
-    /// assert_eq!(agent.timeout(), WORKING_TIMEOUT);
-    /// assert_ne!(agent.timeout(), INVOCATION_TIMEOUT);
+    /// assert_eq!(agent.timeout(), UNTIMED);
     /// // A conversation of its own, opened by the first turn to run.
     /// assert!(agent.args().iter().any(|arg| arg == "--session-id"));
     /// ```
     #[must_use]
     pub fn working(system_prompt: &str) -> Self {
-        Self::briefed(working_args(system_prompt), WORKING_TIMEOUT)
+        Self::briefed(working_args(system_prompt), UNTIMED)
     }
 
     #[must_use]
@@ -2341,6 +2374,13 @@ impl Converses for ChatAgent {
     fn raised(&self, model: &str, effort: &str) -> Self {
         self.at_effort(effort).at_model(model)
     }
+
+    fn fresh(&self) -> Self {
+        Self {
+            session: self.session.as_ref().map(|_| Session::new()),
+            ..self.clone()
+        }
+    }
 }
 
 impl Bounded for ChatAgent {
@@ -2520,7 +2560,7 @@ impl<C: Converses> Drafting<C> {
     ) -> Self {
         let cancel = Cancel::new();
         Self {
-            agent: agent.wired(cancel.clone(), Activities::none()),
+            agent: agent.fresh().wired(cancel.clone(), Activities::none()),
             cancel,
             opening: Some(drafting_opening(brief, title, prose, contract)),
             brief: brief.to_owned(),
@@ -2795,7 +2835,8 @@ impl<C: Converses> Splitting<C> {
     pub fn for_ticket(agent: &C, ticket: &str, title: &str, description: &str) -> Self {
         let cancel = Cancel::new();
         Self {
-            agent: agent.wired(cancel.clone(), Activities::none()),
+            // Its own conversation, for `Working::on`'s reason.
+            agent: agent.fresh().wired(cancel.clone(), Activities::none()),
             cancel,
             ticket: ticket.to_owned(),
             title: title.to_owned(),
@@ -2921,7 +2962,7 @@ pub enum Stopped {
     RateLimit,
     /// The credential the CLI is logged in with was refused.
     BadCredential,
-    /// [`WORKING_TIMEOUT`] spent, and the child stopped.
+    /// The agent's timeout spent, and the child stopped.
     TimedOut,
     /// Somebody pressed stop.
     Cancelled,
@@ -2930,17 +2971,13 @@ pub enum Stopped {
 }
 
 impl Stopped {
-    /// Whether a second attempt is worth the half hour.
-    ///
-    /// Only the turn limit, and only because the retry is run on different
-    /// terms — twice the turns. Every other stopping either answers the same
-    /// way again (a usage limit, a rate limit, a credential), was warlock's own
-    /// bound being reached (the clock), was asked for (a cancel) or is the
-    /// plumbing rather than the work (a missing binary, a crash), and none of
-    /// those is a sub-task that could go better on the second read.
+    /// Whether a second attempt is worth making, by Forman's `is_retryable`:
+    /// anything but a stopping that answers the same way again however soon it
+    /// is asked — a usage limit, a rate limit, a credential — or one somebody
+    /// asked for. A crash or a turn limit can go better on the second read.
     #[must_use]
     pub const fn retryable(&self) -> bool {
-        matches!(self, Self::TurnLimit)
+        matches!(self, Self::TurnLimit | Self::TimedOut | Self::Broke(_))
     }
 }
 
@@ -3053,9 +3090,8 @@ pub enum Worked {
 /// so every branch below is driven against in-memory stand-ins with no `claude`
 /// on the machine. Against a real [`ChatAgent::working`] it runs through the
 /// plumbing at the top of this module — the writer thread, the two reader
-/// threads, the polling waiter and the [`Cancel`] — under
-/// [`WORKING_TIMEOUT`] and [`WORKING_TURNS`], because that plumbing *is*
-/// [`ChatAgent::turn`] and this drives nothing else.
+/// threads, the polling waiter and the [`Cancel`] — under [`WORKING_TURNS`],
+/// because that plumbing *is* [`ChatAgent::turn`] and this drives nothing else.
 ///
 /// It stops at the outcome. The commit, the check of what the tree actually
 /// holds afterwards and the loop that decides what happens to the sub-task are
@@ -3112,7 +3148,11 @@ impl<C: Bounded> Working<C> {
     pub fn on(agent: &C, opening: &str) -> Self {
         let cancel = Cancel::new();
         Self {
-            agent: agent.wired(cancel.clone(), Activities::none()),
+            // A conversation of its own, as every `forman pull` spawn is: the
+            // run holds one agent for every sub-task, and a wired copy of it
+            // would resume the sub-task before this one. A retry of this
+            // sub-task stays in this conversation; see `again`.
+            agent: agent.fresh().wired(cancel.clone(), Activities::none()),
             cancel,
             opening: opening.to_owned(),
             turns: WORKING_TURNS,
@@ -3185,9 +3225,13 @@ impl<C: Bounded> Working<C> {
                 working::Reported::Failed(reason) => Some(reason.clone()),
                 working::Reported::Done | working::Reported::Blocked(_) => None,
             },
+            // Twice the turns only after a turn limit, as Forman's retry
+            // budget doubles only then: a crash is retried on the same terms.
             Worked::Halted(stopped) if stopped.retryable() => {
-                self.turns = self.turns.saturating_mul(2);
-                self.agent = self.agent.at_turns(self.turns);
+                if *stopped == Stopped::TurnLimit {
+                    self.turns = self.turns.saturating_mul(2);
+                    self.agent = self.agent.at_turns(self.turns);
+                }
                 Some(stopped.to_string())
             }
             Worked::Halted(_) => None,

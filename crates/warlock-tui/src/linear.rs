@@ -514,6 +514,7 @@ fn scope_queue(
                     id
                     identifier
                     title
+                    description
                     priority
                     state { name type }
                     inverseRelations(first: $blockers) {
@@ -576,6 +577,13 @@ fn queued_issue(node: &Value) -> Result<(QueuedIssue, usize), Error> {
         id: node_id(node)?,
         identifier: text(node, "identifier")?,
         title: text(node, "title")?,
+        // Null on a ticket nobody described, which is a ticket with nothing more
+        // to say than its title rather than an unreadable answer.
+        description: node
+            .get("description")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned(),
         state: text(state, "name")?,
         state_type: StateType(text(state, "type")?),
         priority: priority(node)?,
@@ -687,6 +695,7 @@ pub struct QueuedIssue {
     id: String,
     identifier: String,
     title: String,
+    description: String,
     state: String,
     state_type: StateType,
     priority: Priority,
@@ -708,11 +717,27 @@ impl QueuedIssue {
             id: id.into(),
             identifier: identifier.into(),
             title: title.into(),
+            description: String::new(),
             state: state.into(),
             state_type,
             priority,
             blockers,
         }
+    }
+
+    #[must_use]
+    pub fn with_description(self, description: impl Into<String>) -> Self {
+        Self {
+            description: description.into(),
+            ..self
+        }
+    }
+
+    /// What the ticket says, which `forman pull` hands every sub-task as the
+    /// parent ticket.
+    #[must_use]
+    pub fn description(&self) -> &str {
+        &self.description
     }
 
     #[must_use]
@@ -885,6 +910,7 @@ fn named_issue(linear: &impl Posts, team: &str, number: u64) -> Result<Option<Na
                     id
                     identifier
                     title
+                    description
                     priority
                     state { name type }
                     team { key }
@@ -1399,6 +1425,17 @@ impl Issue {
     /// Linear's to say, and this promises nothing about it: an edge the API
     /// turns down is one reported line and leaves every issue filed, so the
     /// worst this can come to is the ordering a person adds on the board.
+    /// An open ticket the queue listed, with the id a relation is written
+    /// with: what a draft that waits on `WAR-142` is blocked by.
+    #[must_use]
+    pub(crate) fn listed(open: &QueuedIssue) -> Self {
+        Self {
+            id: open.id().to_owned(),
+            identifier: open.identifier().to_owned(),
+            url: String::new(),
+        }
+    }
+
     #[must_use]
     pub(crate) fn recorded(identifier: &str) -> Self {
         Self {

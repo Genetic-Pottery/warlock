@@ -555,6 +555,27 @@ impl Panel {
         self.showing = Showing::Thread;
     }
 
+    /// A turn of warlock's own work, live, with the conversation brought to
+    /// the front for [`Panel::start_turn`]'s reason. See [`Thread::work`].
+    pub(crate) fn start_work(&mut self, at: Instant) {
+        self.thread.accrue().work(at);
+        self.showing = Showing::Thread;
+    }
+
+    /// Something whole in the model's voice, with no work behind it. See
+    /// [`Thread::said`].
+    pub(crate) fn say(&mut self, text: impl Into<String>, at: Instant) {
+        self.thread.accrue().said(text, at);
+        self.showing = Showing::Thread;
+    }
+
+    /// The live turn stopped with no answer. See [`Thread::settle`].
+    pub(crate) fn settle_turn(&mut self, at: Instant) {
+        if let Some(thread) = self.thread.held.as_mut() {
+            thread.settle(at);
+        }
+    }
+
     pub(crate) fn record_turn(&mut self, activity: &Activity, at: Instant) {
         if let Some(thread) = self.thread.held.as_mut() {
             thread.record(activity, at);

@@ -188,7 +188,9 @@ pub fn choose(queue: &Queue, review_state: &str, runs: &[PullRun]) -> Chosen {
             continue;
         }
 
-        if status == Some(RunStatus::Resumed) {
+        // A run this machine stopped without a halt is picked up like a
+        // resumed one, rather than passed over as somebody else's.
+        if matches!(status, Some(RunStatus::Resumed | RunStatus::InProgress)) {
             resumed.push(issue);
         } else {
             ready.push(issue);

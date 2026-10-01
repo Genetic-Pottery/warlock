@@ -2649,11 +2649,13 @@ mod cutting {
             agent.said()
         );
         let said = notes(&driven);
-        assert!(
-            said.iter()
-                .any(|line| line.contains("asked:") && line.contains(ASKED)),
-            "the question is not on the thread: {said:?}"
-        );
+        let asked = driven.app.panel().thread().is_some_and(|thread| {
+            thread
+                .turns()
+                .iter()
+                .any(|turn| turn.answer() == Some(ASKED))
+        });
+        assert!(asked, "the question is not on the thread: {said:?}");
         assert!(
             said.iter()
                 .any(|line| line.contains("was answered:") && line.contains(PROPOSED)),

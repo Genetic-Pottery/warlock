@@ -10,7 +10,13 @@ use warlock_engine::{
     save_key_binding, save_sigils,
 };
 
-use super::{ACCEPT, Planned, SKIP, Settled, cut_with, prepare};
+use super::{Planned, Settled, cut_with, prepare};
+
+// Two of Forman's review words, spelled out in full so a test reads as the
+// answer it gives.
+const ACCEPT: &str = "create";
+
+const SKIP: &str = "quit";
 use crate::asking::Asks;
 use crate::brief::ScopeBlockError;
 use crate::claude::{
@@ -20,7 +26,7 @@ use crate::error::Error;
 use crate::error::status_for;
 use crate::linear::{FetchedProject, Opens};
 use crate::standing::Standing;
-use crate::stubs::{Answering, Boarding, Call, Op, Saying, Scripted, Typing, VIEWER};
+use crate::stubs::{Answering, Boarding, Call, Op, QueueAsked, Saying, Scripted, Typing, VIEWER};
 
 // Not a key, and named so that nothing reading this file mistakes it for one.
 // It is stored only so that a bound name resolves and a cut can reach the
@@ -94,8 +100,11 @@ const TYPED: &str = "Neither: the gate folds case.";
 
 // What a review offers, less the slice it names: the two words that are answers,
 // and the third that is whatever the reader has to say.
-const OFFERED: &str = "`accept` to file these, Enter or `skip` to leave it for another run, or \
-                       say what these drafts should be instead";
+// Forman's review prompt, for a slice the stand-in drafts two tickets for.
+const REVIEWED: &str = "[c]reate 2 ticket(s), [e]dit, [q]uit, or type feedback to redraft: ";
+
+// Red's carry-on question after a skip.
+const CARRY: &str = "carry on with the remaining slices? [y/N] ";
 
 // A line that is none of the two words, which is feedback whatever it says.
 const FEEDBACK: &str = "Two tickets is one too many; say it in one.";
@@ -172,6 +181,10 @@ impl Converses for Sketching {
     fn raised(&self, _model: &str, _effort: &str) -> Self {
         self.clone()
     }
+
+    fn fresh(&self) -> Self {
+        self.clone()
+    }
 }
 
 // The stdin nothing may read from. A refusal asks nothing, a dry run drafts
@@ -206,6 +219,10 @@ impl Converses for Missing {
     }
 
     fn raised(&self, _model: &str, _effort: &str) -> Self {
+        *self
+    }
+
+    fn fresh(&self) -> Self {
         *self
     }
 }
@@ -329,8 +346,22 @@ fn a_project(status: Option<&str>) -> Boarding {
 // Everything `prepare` sends, in order: the user the key belongs to, resolved
 // once for the run so every issue it files can be assigned, then the project the
 // record names. Two reads and no write.
-fn read_by_prepare() -> [Call; 2] {
+// What a refusal on the project's own state reads: the backlog is only asked
+// for once there is a draft to show it to.
+fn read_before_refusing() -> [Call; 2] {
     [Call::Viewer, Call::FetchProject(PROJECT_ID.to_owned())]
+}
+
+fn read_by_prepare() -> [Call; 3] {
+    [
+        Call::Viewer,
+        Call::FetchProject(PROJECT_ID.to_owned()),
+        Call::ScopeQueue(QueueAsked {
+            team: TEAM.to_owned(),
+            label: LABEL.to_owned(),
+            assignee: VIEWER.to_owned(),
+        }),
+    ]
 }
 
 // The module's first step, less the environment: the repository root and the
@@ -371,12 +402,14 @@ fn drafts_for(title: &str) -> Vec<Draft> {
             body: body.clone(),
             blocked_by: Vec::new(),
             blocks: vec![1],
+            waits_on: Vec::new(),
         },
         Draft {
             title: format!("Follow on from {title}"),
             body,
             blocked_by: vec![0],
             blocks: Vec::new(),
+            waits_on: Vec::new(),
         },
     ]
 }
@@ -521,6 +554,7 @@ fn cutting<O: Opens, A: Converses, P: Converses, K: Asks>(
         proposer,
         ask,
         &mut out,
+        Activities::none,
     );
 
     (
@@ -625,7 +659,7 @@ mod preparing {
         // The id out of `.warlock/filed.toml` and no other selector, in one
         // request, alongside the one that resolved who the run files for.
         assert_eq!(linear.calls(), read_by_prepare());
-        assert_eq!(linear.requests(), 2, "one call per operation");
+        assert_eq!(linear.requests(), 3, "one call per operation");
         assert_eq!(linear.opened_with(), [NOT_A_KEY.to_owned()]);
         assert!(
             !format!("{planned:?}").contains(NOT_A_KEY),
@@ -737,7 +771,7 @@ mod preparing {
         // Nothing is read or sent after the status: the scope block in the
         // content that came back is never parsed, and no second request is
         // made.
-        assert_eq!(linear.calls(), read_by_prepare());
+        assert_eq!(linear.calls(), read_before_refusing());
     }
 
     #[test]
@@ -866,7 +900,7 @@ mod preparing {
         assert!(message.contains(".warlock/filed.toml"), "{message}");
         // Refused where the answer that said so arrived: the fetch and nothing
         // after it, and the record file as it was.
-        assert_eq!(linear.calls(), read_by_prepare());
+        assert_eq!(linear.calls(), read_before_refusing());
         assert_eq!(
             fs::read_to_string(filed_path(repo.path())).expect("a record file"),
             before
@@ -1392,9 +1426,11 @@ mod headless {
         let lines = cut_filing(repo.path(), home.path(), &linear, &agent);
 
         // Per slice: the walk's own line as it is drafted, the drafts that came
-        // back, what can be said about them, and what saying `accept` filed them
-        // as — in the order the slices are cut in and with nothing else between
-        // them.
+        // back by title and then whole, what can be said about them, and what
+        // saying `accept` filed them as — in the order the slices are cut in and
+        // with nothing else between them.
+        let body = "A stand-in ticket body, written by a test double that read no repository \
+                    and made no plan. It says what the slice said and nothing more.";
         let expected: Vec<String> = [(1, FIRST, 1, 2), (2, SECOND, 3, 4), (3, THIRD, 5, 6)]
             .into_iter()
             .flat_map(|(place, heading, first, second)| {
@@ -1404,7 +1440,19 @@ mod headless {
                         "slice {place} `{heading}` — drafted `Stand in for slice {place}`, \
                          `Follow on from slice {place}`"
                     ),
-                    format!("slice {place} `{heading}` — {OFFERED}"),
+                    format!("# slice {place} `{heading}`"),
+                    String::new(),
+                    format!("## 1. Stand in for slice {place}"),
+                    String::new(),
+                    body.to_owned(),
+                    String::new(),
+                    "Blocks #2".to_owned(),
+                    String::new(),
+                    format!("## 2. Follow on from slice {place}"),
+                    String::new(),
+                    body.to_owned(),
+                    String::new(),
+                    "Blocked by #1".to_owned(),
                     format!("cut `{heading}` into `WAR-{first}`, `WAR-{second}`"),
                 ]
             })
@@ -1701,6 +1749,7 @@ mod headless {
                     op,
                     Op::Viewer
                         | Op::FetchProject
+                        | Op::ScopeQueue
                         | Op::Team
                         | Op::BacklogState
                         | Op::IssueLabel
@@ -1821,6 +1870,50 @@ mod relaying {
     }
 
     #[test]
+    fn a_question_with_lettered_options_is_printed_a_line_per_option() {
+        // The contract asks for the options on lines of their own; flattening
+        // them into one line would bury the choice being offered.
+        let repo = a_scoped_repository();
+        let home = a_home(repo.path());
+        let linear = a_sliced_project(SLICED);
+        let agent = Scripted::saying([
+            Answering::says(
+                "The brief does not say where the gate lives.\n\n\
+                 a) one ticket that adds it to the walk\n\
+                 b) two tickets, the gate first\n\n\
+                 Or tell me something else.",
+            ),
+            Answering::drafts(FIRST),
+            Answering::drafts(SECOND),
+            Answering::drafts(THIRD),
+        ]);
+        let mut typing = Typing::lines(["", ACCEPT, ACCEPT, ACCEPT]);
+
+        let (outcome, printed) = cut_answering(
+            repo.path(),
+            home.path(),
+            &linear,
+            &agent,
+            &Saying::answering(PROPOSED),
+            &mut typing,
+        );
+
+        outcome.expect("a run that files");
+        let lines = lines(&printed);
+        let asked = placed(&lines, "asked:");
+        assert_eq!(
+            lines[asked..asked + 4],
+            [
+                format!("slice 1 `{FIRST}` asked: The brief does not say where the gate lives."),
+                "a) one ticket that adds it to the walk".to_owned(),
+                "b) two tickets, the gate first".to_owned(),
+                "Or tell me something else.".to_owned(),
+            ],
+            "{lines:?}"
+        );
+    }
+
+    #[test]
     fn a_question_is_put_to_the_shell_with_warlocks_own_answer_over_the_prompt() {
         let repo = a_scoped_repository();
         let home = a_home(repo.path());
@@ -1857,7 +1950,12 @@ mod relaying {
         // The cursor stopped at the question and at each of the three reviews,
         // on the same bare mark every time: what is being answered is on the
         // lines above it rather than in the prompt.
-        assert_eq!(typing.asked(), ["> "; 4], "{:?}", typing.asked());
+        assert_eq!(
+            typing.asked(),
+            ["> ", REVIEWED, REVIEWED, REVIEWED],
+            "{:?}",
+            typing.asked()
+        );
         // And type-ahead thrown away before each of those four, since a model
         // had just been working before every one of them.
         assert_eq!(typing.discards(), 4);
@@ -1956,7 +2054,12 @@ mod relaying {
             !printed.contains("warlock's answer:"),
             "a refusal was offered as an answer: {printed}"
         );
-        assert_eq!(typing.asked(), ["> "; 4], "{:?}", typing.asked());
+        assert_eq!(
+            typing.asked(),
+            ["> ", REVIEWED, REVIEWED, REVIEWED],
+            "{:?}",
+            typing.asked()
+        );
         assert!(
             agent.said().iter().any(|said| said == TYPED),
             "{:?}",
@@ -1992,7 +2095,12 @@ mod relaying {
             unproposed.contains(&format!("slice 1 `{FIRST}`")),
             "{unproposed}"
         );
-        assert_eq!(typing.asked(), ["> "; 4], "{:?}", typing.asked());
+        assert_eq!(
+            typing.asked(),
+            ["> ", REVIEWED, REVIEWED, REVIEWED],
+            "{:?}",
+            typing.asked()
+        );
         assert!(
             agent.said().iter().any(|said| said == TYPED),
             "{:?}",
@@ -2130,19 +2238,37 @@ mod reviewing {
         let printed = reviewing(repo.path(), home.path(), &linear, &mut typing);
 
         let lines = lines(&printed);
-        // The drafts by title, then what can be said back about them, then the
-        // filing: the order is the promise, because a reader answers about
-        // drafts they have been shown.
+        // The drafts by title, then whole, then the filing: the order is the
+        // promise, because a reader answers about drafts they have been shown.
         let shown = placed(&lines, &drafted(1, FIRST, FIRST));
-        let offered = placed(&lines, OFFERED);
-        let filed = placed(&lines, &format!("cut `{FIRST}` into"));
-        assert!(shown < offered && offered < filed, "{lines:?}");
+        let offered = placed(&lines, &format!("cut `{FIRST}` into"));
+        // And whole: every draft numbered with its body and its edges by those
+        // numbers, between the titles and the prompt, so what is accepted is
+        // what was read.
+        let first = placed(&lines, &format!("## 1. Stand in for {FIRST}"));
+        let second = placed(&lines, &format!("## 2. Follow on from {FIRST}"));
         assert!(
-            lines[offered].contains(&format!("slice 1 `{FIRST}`")),
+            shown < first && first < second && second < offered,
             "{lines:?}"
         );
-        // One read per slice, at the bare mark both roads stop on.
-        assert_eq!(typing.asked(), ["> "; 3], "{:?}", typing.asked());
+        assert!(
+            lines[first..second]
+                .iter()
+                .any(|line| line.starts_with("A stand-in ticket body")),
+            "{lines:?}"
+        );
+        assert!(
+            lines[first..second].iter().any(|line| line == "Blocks #2"),
+            "{lines:?}"
+        );
+        assert!(
+            lines[second..offered]
+                .iter()
+                .any(|line| line == "Blocked by #1"),
+            "{lines:?}"
+        );
+        // One read per slice, at Forman's own prompt.
+        assert_eq!(typing.asked(), [REVIEWED; 3], "{:?}", typing.asked());
         assert_eq!(typing.discards(), 3);
         assert_eq!(linear.issues_created().len(), 6);
     }
@@ -2152,14 +2278,21 @@ mod reviewing {
         let repo = a_scoped_repository();
         let home = a_home(repo.path());
         let linear = a_sliced_project(SLICED);
-        let mut typing = Typing::lines([SKIP, ACCEPT, ACCEPT]);
+        let mut typing = Typing::lines([SKIP, "y", ACCEPT, ACCEPT]);
 
         let printed = reviewing(repo.path(), home.path(), &linear, &mut typing);
 
         let lines = lines(&printed);
         let skipped = &lines[placed(&lines, "was skipped")];
         assert!(skipped.contains(&format!("slice 1 `{FIRST}`")), "{skipped}");
-        assert!(skipped.contains("nothing was recorded for it"), "{skipped}");
+        assert!(skipped.contains("nothing was created for it"), "{skipped}");
+        // Red's question, asked once, after the skip and before the next slice.
+        assert_eq!(
+            typing.asked(),
+            [REVIEWED, CARRY, REVIEWED, REVIEWED],
+            "{:?}",
+            typing.asked()
+        );
         // The two after it were drafted and filed, and nothing of the skipped
         // slice reached the board.
         assert_eq!(linear.issues_created().len(), 4);
@@ -2169,23 +2302,40 @@ mod reviewing {
     }
 
     #[test]
-    fn an_empty_line_is_the_skip_the_panel_s_own_window_opens_lit() {
+    fn an_empty_line_files_the_drafts_as_forman_reads_it() {
+        // Forman's `parse_decision`: somebody who has read the drafts and
+        // pressed Enter has agreed with them, and a line of spaces is the same
+        // line.
         let repo = a_scoped_repository();
         let home = a_home(repo.path());
         let linear = a_sliced_project(SLICED);
-        // Enter, then a line with nothing but spaces on it: neither is somebody
-        // saying to file anything, and neither is feedback about the drafts.
-        let mut typing = Typing::lines(["", "   ", ACCEPT]);
+        let mut typing = Typing::lines(["", "   ", "Y"]);
 
         let printed = reviewing(repo.path(), home.path(), &linear, &mut typing);
 
-        let skipped = lines(&printed)
-            .iter()
-            .filter(|line| line.contains("was skipped"))
-            .count();
-        assert_eq!(skipped, 2, "{printed}");
-        // And the one slice that was accepted is the only one on the board.
-        assert_eq!(linear.issues_created().len(), 2);
+        assert!(!printed.contains("was skipped"), "{printed}");
+        assert_eq!(linear.issues_created().len(), 6);
+    }
+
+    #[test]
+    fn a_no_at_the_carry_on_question_stops_the_run_and_leaves_the_rest() {
+        let repo = a_scoped_repository();
+        let home = a_home(repo.path());
+        let linear = a_sliced_project(SLICED);
+        // Red's default: an empty answer is no.
+        let mut typing = Typing::lines([SKIP, ""]);
+
+        let printed = reviewing(repo.path(), home.path(), &linear, &mut typing);
+
+        assert!(
+            printed.contains("the run stopped; 2 slices left"),
+            "{printed}"
+        );
+        assert!(linear.issues_created().is_empty());
+        assert_eq!(
+            recorded(repo.path()),
+            [(FIRST.to_owned(), Vec::<String>::new())]
+        );
     }
 
     #[test]
@@ -2193,7 +2343,7 @@ mod reviewing {
         let repo = a_scoped_repository();
         let home = a_home(repo.path());
         let linear = a_sliced_project(SLICED);
-        let mut typing = Typing::lines([SKIP, SKIP, SKIP]);
+        let mut typing = Typing::lines([SKIP, "y", SKIP, "y", SKIP]);
 
         reviewing(repo.path(), home.path(), &linear, &mut typing);
 
@@ -2204,19 +2354,21 @@ mod reviewing {
     }
 
     #[test]
-    fn a_skipped_slice_writes_no_cut_record_so_a_later_run_reaches_it_again() {
+    fn a_skipped_slice_is_recorded_so_a_later_run_passes_it_over() {
+        // Red's rule: a skip is a human saying no at the gate, and is never
+        // retried on its own.
         let repo = a_scoped_repository();
         let home = a_home(repo.path());
         let linear = a_sliced_project(SLICED);
-        let mut typing = Typing::lines([SKIP, ACCEPT, ACCEPT]);
+        let mut typing = Typing::lines([SKIP, "y", ACCEPT, ACCEPT]);
 
         reviewing(repo.path(), home.path(), &linear, &mut typing);
 
-        // The file on disk, which is what a later run reads: the two slices that
-        // were filed are in it, and the skipped one is nowhere in it at all.
+        // A cut that filed nothing is how the record says so.
         assert_eq!(
             recorded(repo.path()),
             [
+                (FIRST.to_owned(), Vec::<String>::new()),
                 (
                     SECOND.to_owned(),
                     vec!["WAR-1".to_owned(), "WAR-2".to_owned()]
@@ -2227,20 +2379,17 @@ mod reviewing {
                 ),
             ]
         );
-        let held = fs::read_to_string(filed_path(repo.path())).expect("a record file");
-        assert!(
-            !held.contains(FIRST),
-            "the skipped slice was recorded: {held}"
-        );
 
-        // And a second run over the same repository reaches it: the slice is
-        // offered again, drafted again and filed.
-        let lines = cut_filing(repo.path(), home.path(), &linear, &Sketching::drafting());
+        // And a second run over the same repository has nothing to offer: the
+        // skipped slice is settled like the filed ones.
+        let (outcome, _) = cut_running(repo.path(), home.path(), &linear, &Scripted::saying([]));
 
+        let error = outcome.expect_err("every slice is settled");
         assert!(
-            lines.contains(&format!("cut `{FIRST}` into `WAR-5`, `WAR-6`")),
-            "{lines:?}"
+            error.to_string().contains("already cut or skipped"),
+            "{error}"
         );
+        assert_eq!(linear.issues_created().len(), 4);
     }
 
     #[test]
@@ -2281,7 +2430,7 @@ mod reviewing {
         // The drafts that came back were put up the same way — two readings for
         // the one slice, four for the run — and what was filed is the second
         // set rather than the one the feedback was about.
-        assert_eq!(typing.asked(), ["> "; 4], "{:?}", typing.asked());
+        assert_eq!(typing.asked(), [REVIEWED; 4], "{:?}", typing.asked());
         assert!(lines.contains(&drafted(1, FIRST, AGAIN)), "{lines:?}");
         let filed: Vec<String> = linear
             .issues_created()
@@ -2318,7 +2467,7 @@ mod reviewing {
         // Every slice was drafted and offered, and none was filed: nothing was
         // created, nothing was recorded, and a run that filed nothing has
         // nothing to say on the project.
-        assert_eq!(typing.asked(), ["> "; 3], "{:?}", typing.asked());
+        assert_eq!(typing.asked(), [REVIEWED; 3], "{:?}", typing.asked());
         assert!(
             linear.issues_created().is_empty(),
             "{:?}",
@@ -2326,5 +2475,233 @@ mod reviewing {
         );
         assert!(recorded(repo.path()).is_empty());
         assert!(linear.comments().is_empty(), "{:?}", linear.comments());
+    }
+}
+
+// What a slice's session is seen doing at the shell. The printer itself writes
+// to stdout, which no test can read, so what is asserted is the two halves on
+// either side of it: the session is wired to the port, and the port's lines
+// collapse a stretch of thinking or writing.
+mod watching {
+    use std::sync::Mutex;
+
+    use super::*;
+    use crate::claude::Activity;
+    use crate::planned::Watched;
+
+    // A `fn` and not a closure, because that is what `cut_with` takes: a fresh
+    // port per session. Read by the one test below and by nothing else, so the
+    // suite running in parallel cannot put another test's activity in it.
+    static SEEN: Mutex<Vec<Activity>> = Mutex::new(Vec::new());
+
+    fn recording() -> Activities {
+        Activities::new(|activity| {
+            SEEN.lock()
+                .expect("nothing panics holding it")
+                .push(activity);
+        })
+    }
+
+    #[test]
+    fn every_slice_session_reports_into_the_port_the_run_was_given() {
+        let repo = a_scoped_repository();
+        let home = a_home(repo.path());
+        let linear = a_sliced_project(SLICED);
+        let read = Activity::Tool {
+            name: "Read".to_owned(),
+            detail: Some("src/lib.rs".to_owned()),
+        };
+        let agent = Scripted::saying([
+            Answering::drafts(FIRST),
+            Answering::drafts(SECOND),
+            Answering::drafts(THIRD),
+        ])
+        .doing([read.clone()]);
+        let mut typing = Typing::lines([ACCEPT, ACCEPT, ACCEPT]);
+        let mut out = Vec::new();
+
+        cut_with(
+            &Standing::at(repo.path().to_path_buf(), repo.path().to_path_buf()),
+            home.path(),
+            Path::new(BRIEF_PATH),
+            None,
+            false,
+            &linear,
+            &agent,
+            &Scripted::saying([]),
+            &mut typing,
+            &mut out,
+            recording,
+        )
+        .expect("a run that files");
+
+        assert_eq!(
+            *SEEN.lock().expect("nothing panics holding it"),
+            [read.clone(), read.clone(), read],
+            "one report per slice's one turn"
+        );
+    }
+
+    #[test]
+    fn a_stretch_of_thinking_or_writing_is_one_line_and_a_tool_is_every_time() {
+        let mut watched = Watched::default();
+        let read = Activity::Tool {
+            name: "Read".to_owned(),
+            detail: Some("src/lib.rs".to_owned()),
+        };
+
+        let said: Vec<Option<String>> = [
+            Activity::Thinking,
+            Activity::Thinking,
+            read.clone(),
+            read,
+            Activity::Writing { bytes: 10 },
+            Activity::Writing { bytes: 20 },
+            Activity::Cost { usd: 0.01 },
+            Activity::Thinking,
+        ]
+        .iter()
+        .map(|activity| watched.line(activity))
+        .collect();
+
+        assert_eq!(
+            said,
+            [
+                Some("thinking".to_owned()),
+                None,
+                Some("Read src/lib.rs".to_owned()),
+                Some("Read src/lib.rs".to_owned()),
+                Some("writing".to_owned()),
+                None,
+                None,
+                Some("thinking".to_owned()),
+            ]
+        );
+    }
+}
+
+// Forman's `[e]dit`: the drafts written out as the panel shows them, changed in
+// an editor, and read back.
+mod editing {
+    use super::*;
+    use crate::brief::scope_block_in;
+    use crate::planned::{drafts_document, drafts_from_document, edited_drafts};
+
+    fn slice() -> crate::brief::Slice {
+        scope_block_in("Brief.\n\n## Scope\n\n### 1. Rename the field\n\nThe prose.\n")
+            .expect("a scope block")
+            .slices()[0]
+            .clone()
+    }
+
+    fn drafts() -> Vec<Draft> {
+        vec![
+            Draft {
+                title: "Rename the field on the record".to_owned(),
+                body: "## Problem\nThe field says team.\n\n## Acceptance criteria\n- [ ] Renamed"
+                    .to_owned(),
+                blocked_by: Vec::new(),
+                blocks: vec![1],
+                waits_on: vec!["WAR-142".to_owned()],
+            },
+            Draft {
+                title: "Fix every call site of the field".to_owned(),
+                body: "Every caller.".to_owned(),
+                blocked_by: vec![0],
+                blocks: Vec::new(),
+                waits_on: Vec::new(),
+            },
+        ]
+    }
+
+    #[test]
+    fn the_document_reads_back_into_the_drafts_it_was_written_from() {
+        // A body's own `## Problem` sections stay in the body: a draft's
+        // heading starts with its number, and theirs does not.
+        let text = drafts_document(&slice(), &drafts()).join("\n");
+
+        assert_eq!(drafts_from_document(&text), Ok(drafts()));
+    }
+
+    #[test]
+    fn what_is_saved_in_the_editor_is_what_comes_back() {
+        let edited = edited_drafts(&slice(), &drafts(), |path| {
+            let text = fs::read_to_string(path).expect("the drafts were written");
+            let text = text.replace("Fix every call site", "Fix the call sites");
+            fs::write(path, text).expect("the edit was saved");
+            None
+        })
+        .expect("an edit that reads back");
+
+        assert_eq!(edited[1].title, "Fix the call sites of the field");
+        assert_eq!(edited[1].blocked_by, [0]);
+    }
+
+    #[test]
+    fn an_edit_that_leaves_no_draft_or_a_wrong_edge_changes_nothing() {
+        assert!(drafts_from_document("# slice 1\n\nNothing here.").is_err());
+        assert!(
+            drafts_from_document("## 1. A title long enough\n\nBody.\n\nBlocks #7")
+                .is_err_and(|why| why.contains("#7"))
+        );
+        let failed = edited_drafts(&slice(), &drafts(), |_| Some("`vim` exited".to_owned()));
+        assert_eq!(failed, Err("`vim` exited".to_owned()));
+    }
+}
+
+// Forman's backlog digest: the open tickets a session can name in `blocked_by`.
+mod backlog {
+    use super::*;
+    use crate::linear::{Priority, Queue, QueuedIssue, StateType};
+
+    fn open(identifier: &str, title: &str) -> QueuedIssue {
+        QueuedIssue::new(
+            format!("id-{identifier}"),
+            identifier,
+            title,
+            "Todo",
+            StateType::new("unstarted"),
+            Priority::None,
+            Vec::new(),
+        )
+    }
+
+    #[test]
+    fn the_brief_a_session_is_given_lists_the_open_tickets_in_forman_s_words() {
+        let repo = a_scoped_repository();
+        let home = a_home(repo.path());
+        let linear = a_sliced_project(SLICED).queueing(Queue::new(
+            vec![
+                open("WAR-10", "The tenth ticket"),
+                open("WAR-9", "The ninth ticket"),
+            ],
+            false,
+        ));
+
+        let brief = prepared(repo.path(), home.path(), &linear).drafting_brief();
+
+        // Ordered as a person counts, WAR-9 before WAR-10.
+        assert!(
+            brief.ends_with(
+                "These tickets already exist and are still open. If what you are drafting \
+                 cannot start until one of them has landed, put that identifier in \
+                 blocked_by:\n\nWAR-9  [Todo]  The ninth ticket\nWAR-10  [Todo]  The tenth ticket"
+            ),
+            "{brief}"
+        );
+    }
+
+    #[test]
+    fn with_nothing_open_the_brief_is_the_brief() {
+        let repo = a_scoped_repository();
+        let home = a_home(repo.path());
+        let linear = a_sliced_project(SLICED);
+
+        let brief = prepared(repo.path(), home.path(), &linear).drafting_brief();
+
+        assert!(
+            !brief.contains("already exist and are still open"),
+            "{brief}"
+        );
     }
 }

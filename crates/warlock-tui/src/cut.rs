@@ -56,6 +56,9 @@ pub(crate) struct Slice<'a> {
     pub(crate) title: &'a str,
     pub(crate) drafts: &'a [Draft],
     pub(crate) needs: &'a [&'a [LinearIssue]],
+    /// The open tickets the drafting session was shown, which are the only ones
+    /// a draft's `waits_on` can name.
+    pub(crate) open: &'a [LinearIssue],
 }
 
 /// What filing one slice came to.
@@ -103,11 +106,15 @@ pub(crate) fn cut<W: Write>(
     let key = fold_title(slice.title);
     if let Some(already) = record.cuts().iter().find(|cut| cut.key() == key) {
         let issues = already.issues().to_vec();
+        let said = if issues.is_empty() {
+            "was skipped in an earlier run".to_owned()
+        } else {
+            format!("is already cut as {}", listed(&issues))
+        };
         drop(writeln!(
             out,
-            "warlock: `{}` is already cut as {}, so nothing was sent",
-            slice.title,
-            listed(&issues)
+            "warlock: `{}` {said}, so nothing was sent",
+            slice.title
         ));
         return Ok(Cut::Already(issues));
     }
@@ -148,7 +155,8 @@ pub(crate) fn cut<W: Write>(
     // After the loop above and never inside it: an edge can only be written
     // between two issues that exist, and a draft is blocked by drafts on either
     // side of it in the slice.
-    let reported = relate(linear, &edges(slice, &issues));
+    let mut reported = relate(linear, &edges(slice, &issues));
+    reported.extend(unshown(slice));
 
     let identifiers: Vec<String> = issues
         .iter()
@@ -178,6 +186,43 @@ pub(crate) fn cut<W: Write>(
     Ok(Cut::Filed { issues, reported })
 }
 
+/// A slice somebody said no to at the review, recorded as a cut that filed
+/// nothing, so the next run passes it over as it passes over a filed one. Red's
+/// rule: a skip is a real answer and is never retried on its own; retitling the
+/// slice in the brief makes it a new slice, and that is how it comes back.
+///
+/// An empty `issues` is the whole of the record's saying so. A real cut always
+/// files at least one issue, because the drafting repairs always leave a draft.
+pub(crate) fn skip(root: &Path, brief: &str, title: &str) -> Result<(), Error> {
+    let mut filed = records(root)?;
+    let record = filed.record_mut(brief).ok_or_else(|| Error::NoRecord {
+        path: brief.to_owned(),
+    })?;
+    let key = fold_title(title);
+    if record.cuts().iter().any(|cut| cut.key() == key) {
+        return Ok(());
+    }
+    record.push_cut(CutRecord::new(
+        title,
+        std::iter::empty::<&str>(),
+        now_rfc3339(),
+    ));
+    filed.save(root).map_err(|source| Error::Unskipped {
+        title: title.to_owned(),
+        source: Box::new(source),
+    })
+}
+
+/// How a settled slice is said after its heading and a dash: by the issues it
+/// became, or as skipped when the record names none. See [`skip`].
+pub(crate) fn settled_as(issues: &[String]) -> String {
+    if issues.is_empty() {
+        "skipped in an earlier run".to_owned()
+    } else {
+        format!("already cut as {}", listed(issues))
+    }
+}
+
 /// Every edge this slice asks for, as the pair of issues it is written between:
 /// the blocker first, then the issue it holds up.
 ///
@@ -204,6 +249,13 @@ fn edges<'a>(
         for blocked in draft.blocks.iter().filter_map(|at| issues.get(*at)) {
             edges.push((waiting, blocked));
         }
+        for blocker in draft
+            .waits_on
+            .iter()
+            .filter_map(|name| shown(slice.open, name))
+        {
+            edges.push((blocker, waiting));
+        }
     }
 
     for earlier in slice.needs {
@@ -217,6 +269,33 @@ fn edges<'a>(
     let mut seen = HashSet::new();
     edges.retain(|(blocker, waiting)| seen.insert((blocker.id(), waiting.id())));
     edges
+}
+
+fn shown<'a>(open: &'a [LinearIssue], name: &str) -> Option<&'a LinearIssue> {
+    open.iter()
+        .find(|issue| issue.identifier().eq_ignore_ascii_case(name.trim()))
+}
+
+// A ticket a draft waits on that the session was not shown: not resolved by
+// asking the board, because what the session cannot see it cannot have judged.
+fn unshown(slice: Slice<'_>) -> Vec<String> {
+    slice
+        .drafts
+        .iter()
+        .flat_map(|draft| {
+            draft
+                .waits_on
+                .iter()
+                .filter(|name| shown(slice.open, name).is_none())
+                .map(move |name| {
+                    format!(
+                        "`{}` waits on `{name}`, which is not one of the open tickets its \
+                         session was shown, so no edge was written",
+                        draft.title
+                    )
+                })
+        })
+        .collect()
 }
 
 fn relate(linear: &impl Board, edges: &[(&LinearIssue, &LinearIssue)]) -> Vec<String> {

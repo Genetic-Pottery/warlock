@@ -1,12 +1,11 @@
-//! The one line warlock reads from stdin.
+//! The one answer warlock reads from stdin.
 //!
-//! `warlock config` and `warlock key add` both print what a reader needs on the
-//! ordinary screen and then read one cooked line back, and this is where that
-//! read lives: the prompt written, stdout flushed while the cursor is still on
-//! it, `Ok(0)` told apart from a line somebody just pressed Enter on, and an io
-//! failure raised as [`Error::Prompt`]. Those four decisions were a byte-for-byte
-//! copy in each of the two subcommands, which is one copy too many — the way one
-//! of them goes wrong is by being EOF-blind on its own.
+//! The headless verbs print what a reader needs on the ordinary screen and then
+//! read an answer back, and this is where that read lives: the prompt written,
+//! stdout flushed while the cursor is still on it, end of file told apart from
+//! an answer somebody just pressed Enter on, and an io failure raised as
+//! [`Error::Prompt`]. At a terminal the answer is read raw, so a multi-line
+//! paste arrives whole (see [`Stdin`]); from a pipe it is one cooked line.
 //!
 //! [`Asks`] is the seam. A headless verb takes `&mut impl Asks` rather than
 //! reaching for stdin itself, so a whole run is driven off a written-down script
@@ -25,9 +24,14 @@
 //! the terminal and masks the read itself; see [`mod@crate::key`].
 
 use std::io::{self, BufRead, IsTerminal, Write};
+use std::process;
 use std::time::Duration;
 
-use ratatui::crossterm::event;
+use ratatui::crossterm::event::{
+    self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEvent, KeyEventKind,
+    KeyModifiers,
+};
+use ratatui::crossterm::execute;
 use ratatui::crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 
 use crate::error::Error;
@@ -43,10 +47,9 @@ pub(crate) trait Asks {
     /// Throw away whatever was typed while a model was working, called by a
     /// verb after a session has answered and before it asks again.
     ///
-    /// A step of its own and never part of [`Asks::ask`]: `warlock brief` asks
-    /// once per line, so a paragraph pasted at its prompt arrives as lines typed
-    /// ahead of every ask after the first, and discarding at each ask would keep
-    /// the first line of the paste and drop the rest.
+    /// A step of its own and never part of [`Asks::ask`]: a verb that asks
+    /// several times with no model between, as `warlock brief` does line by
+    /// line, must keep what was typed between its questions.
     fn discard_typed_ahead(&mut self) {}
 }
 
@@ -54,8 +57,25 @@ pub(crate) trait Asks {
 pub(crate) struct Stdin;
 
 impl Asks for Stdin {
+    // At a terminal the answer is read raw, with bracketed paste on, so a
+    // multi-line paste is one answer: a cooked read hands back the paste's first
+    // line as the whole answer, and the rest is thrown away as type-ahead before
+    // the next question. That cut-off is the one thing wrong with Red and
+    // Forman's prompts, and this is where it is not copied. A pipe keeps the
+    // cooked line, because its lines were each written as an answer.
     fn ask(&mut self, prompt: &str) -> Result<Option<String>, Error> {
         show(prompt);
+        if at_terminal() && enable_raw_mode().is_ok() {
+            let cooked = Cooked;
+            let answer = edited();
+            drop(cooked);
+            return match answer {
+                // What Ctrl-C did at a cooked prompt, with the terminal put
+                // back first: the process ends, as SIGINT ends it.
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => process::exit(130),
+                answer => answer.map_err(|source| Error::Prompt { source }),
+            };
+        }
         line_in(&mut io::stdin().lock())
     }
 
@@ -118,6 +138,124 @@ pub(crate) fn show(prompt: &str) {
     let mut out = io::stdout();
     drop(write!(out, "{prompt}"));
     drop(out.flush());
+}
+
+// The terminal half of [`Stdin::ask`]: events in, echo out, until [`step`]
+// says the answer is done. Bracketed paste is turned on for the read and off
+// again whatever happens, like raw mode, so a shell is never left with it.
+fn edited() -> io::Result<Option<String>> {
+    let mut out = io::stdout();
+    let _pasting = Pasting::on(&mut out);
+    let mut answer = String::new();
+    loop {
+        let event = event::read()?;
+        // An Enter with more input already waiting behind it is a newline
+        // inside a paste, on a terminal that does not bracket pastes: a person
+        // pressing Enter has nothing queued behind the key.
+        let queued = matches!(event::poll(PASTE_GAP), Ok(true));
+        match step(&mut answer, &event, queued) {
+            Step::Echo(text) => {
+                drop(write!(out, "{text}"));
+                drop(out.flush());
+            }
+            Step::Done => {
+                drop(write!(out, "\r\n"));
+                drop(out.flush());
+                return Ok(Some(answer));
+            }
+            Step::End => {
+                drop(write!(out, "\r\n"));
+                drop(out.flush());
+                return Ok(None);
+            }
+            // Raw mode turns Ctrl-C into a key; `Stdin::ask` ends the process
+            // on it once the terminal is restored.
+            Step::Interrupt => {
+                drop(write!(out, "^C\r\n"));
+                drop(out.flush());
+                return Err(io::Error::from(io::ErrorKind::Interrupted));
+            }
+        }
+    }
+}
+
+// How long an Enter waits to see whether more input follows it. Pasted bytes
+// arrive together, so a few milliseconds tells a paste from a person.
+const PASTE_GAP: Duration = Duration::from_millis(5);
+
+struct Pasting;
+
+impl Pasting {
+    fn on(out: &mut io::Stdout) -> Self {
+        drop(execute!(out, EnableBracketedPaste));
+        Self
+    }
+}
+
+impl Drop for Pasting {
+    fn drop(&mut self) {
+        drop(execute!(io::stdout(), DisableBracketedPaste));
+    }
+}
+
+/// What one terminal event does to the answer being typed.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Step {
+    /// Keep reading, after putting this on the screen.
+    Echo(String),
+    /// The answer is finished.
+    Done,
+    /// Ctrl-D on an empty answer: end of file, as at a cooked prompt.
+    End,
+    /// Ctrl-C.
+    Interrupt,
+}
+
+/// The line editor, without a terminal: `queued` is whether more input was
+/// already waiting when this event was read. Kept to what a cooked prompt
+/// offers — characters, Backspace, Enter, Ctrl-D and Ctrl-C — plus a paste
+/// that keeps its newlines.
+pub(crate) fn step(answer: &mut String, event: &Event, queued: bool) -> Step {
+    match event {
+        Event::Paste(text) => {
+            let text = text.replace("\r\n", "\n").replace('\r', "\n");
+            answer.push_str(&text);
+            Step::Echo(text.replace('\n', "\r\n"))
+        }
+        Event::Key(KeyEvent {
+            code,
+            modifiers,
+            kind: KeyEventKind::Press,
+            ..
+        }) => {
+            let control = modifiers.contains(KeyModifiers::CONTROL);
+            match code {
+                KeyCode::Char('c') if control => Step::Interrupt,
+                KeyCode::Char('d') if control && answer.is_empty() => Step::End,
+                KeyCode::Enter if queued => {
+                    answer.push('\n');
+                    Step::Echo("\r\n".to_owned())
+                }
+                KeyCode::Enter => Step::Done,
+                // Never back over a newline: the cursor cannot follow it up a
+                // line without redrawing everything above, so what was pasted
+                // above stays as it was pasted.
+                KeyCode::Backspace => match answer.chars().last() {
+                    Some(last) if last != '\n' => {
+                        answer.pop();
+                        Step::Echo("\u{8} \u{8}".to_owned())
+                    }
+                    _ => Step::Echo(String::new()),
+                },
+                KeyCode::Char(character) if !control => {
+                    answer.push(*character);
+                    Step::Echo(character.to_string())
+                }
+                _ => Step::Echo(String::new()),
+            }
+        }
+        _ => Step::Echo(String::new()),
+    }
 }
 
 // `Ok(0)` is EOF and nothing else. It is told apart from an empty line here

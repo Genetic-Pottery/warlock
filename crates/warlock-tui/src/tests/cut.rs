@@ -73,6 +73,7 @@ fn a_draft(title: &str, body: &str) -> Draft {
         body: body.to_owned(),
         blocked_by: Vec::new(),
         blocks: Vec::new(),
+        waits_on: Vec::new(),
     }
 }
 
@@ -147,6 +148,7 @@ fn cut_after(
             title,
             drafts,
             needs,
+            open: &[],
         },
         &mut out,
     );
@@ -175,6 +177,7 @@ fn cut_assigning(repo: &Path, linear: &impl Board, assignee: &str) -> Result<Cut
             title: TITLE,
             drafts: &two_drafts(),
             needs: &[],
+            open: &[],
         },
         &mut out,
     )
@@ -724,4 +727,37 @@ fn a_refused_comment_is_a_reported_line_and_leaves_the_slice_filed() {
         ["WAR-125", "WAR-126"],
         "a refused comment took the cut record with it"
     );
+}
+
+// Forman's `blocked_by: ["TEAM-42"]`: a draft waiting on a ticket that already
+// exists, which is one of the open tickets its session was shown.
+#[test]
+fn a_draft_waiting_on_an_open_ticket_it_was_shown_is_blocked_by_it_and_no_other() {
+    let repo = a_repository();
+    let mut drafts = two_drafts();
+    drafts[0].waits_on = vec!["war-142".to_owned()];
+    drafts[1].waits_on = vec!["WAR-999".to_owned()];
+    let open = [LinearIssue::new("issue-142", "WAR-142", "")];
+    let linear = a_whole_cut();
+    let mut out = Vec::new();
+
+    let outcome = cut(
+        &linear,
+        repo.path(),
+        filing(&destination()),
+        Slice {
+            title: TITLE,
+            drafts: &drafts,
+            needs: &[],
+            open: &open,
+        },
+        &mut out,
+    );
+
+    // Matched without regard to case, as Linear's identifiers are.
+    assert_eq!(linear.relations(), [edge("issue-142", "issue-125")]);
+    // And a ticket nobody showed the session is a line, not a lookup.
+    let reported = reported(outcome);
+    assert_eq!(reported.len(), 1, "{reported:?}");
+    assert!(reported[0].contains("`WAR-999`"), "{reported:?}");
 }

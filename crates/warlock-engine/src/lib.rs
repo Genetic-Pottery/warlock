@@ -97,7 +97,7 @@ pub use pulls::RunStatus;
 pub use pulls::ScopeRuns;
 pub use pulls::SubtaskStatus;
 pub use pulls::brief_path;
-pub use pulls::halted_and_resumed_runs;
+pub use pulls::held_runs;
 pub use pulls::pulls_dir;
 pub use pulls::run_dir;
 pub use pulls::run_manifest_path;

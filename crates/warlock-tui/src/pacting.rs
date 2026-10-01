@@ -192,12 +192,14 @@ impl Work {
 #[derive(Debug)]
 pub(crate) struct CancelGuard {
     cancel: Cancel,
+    armed: bool,
 }
 
 impl CancelGuard {
     pub(crate) fn new() -> Self {
         Self {
             cancel: Cancel::new(),
+            armed: true,
         }
     }
 
@@ -205,7 +207,18 @@ impl CancelGuard {
     // own, wires its agent to it and runs every turn under it, so a guard built
     // with `new` beside one would latch a flag no child is listening to.
     pub(crate) const fn over(cancel: Cancel) -> Self {
-        Self { cancel }
+        Self {
+            cancel,
+            armed: true,
+        }
+    }
+
+    // The work it guards is over, so dropping it stops nothing. Needed by a
+    // guard built with `over`: the handle outlives the turn, a cancel is final,
+    // and a drafting session's next turn would start already cancelled if the
+    // guard of the turn before it latched the session's handle on its way out.
+    pub(crate) const fn disarm(&mut self) {
+        self.armed = false;
     }
 
     pub(crate) fn handle(&self) -> Cancel {
@@ -227,7 +240,9 @@ impl CancelGuard {
 // goes through `cancel()` directly, leaving the run alive to save what it has.
 impl Drop for CancelGuard {
     fn drop(&mut self) {
-        self.cancel();
+        if self.armed {
+            self.cancel();
+        }
     }
 }
 

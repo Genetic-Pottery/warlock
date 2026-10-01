@@ -4,7 +4,7 @@ use crate::splitting;
 
 use super::{
     Error, PullRun, PullSubtask, ReasonMissing, Reset, ResetMode, RunStatus, SubtaskStatus,
-    brief_path, halted_and_resumed_runs, pulls_dir, run_dir, run_manifest_path, state_path,
+    brief_path, held_runs, pulls_dir, run_dir, run_manifest_path, state_path,
 };
 
 const WAR_124: &str = r#"{
@@ -1309,7 +1309,7 @@ fn a_checkout_that_has_never_pulled_holds_no_run_and_no_open_ones() {
         None
     );
 
-    let found = halted_and_resumed_runs(home.path(), root.path(), "warlock-team")
+    let found = held_runs(home.path(), root.path(), "warlock-team")
         .expect("a missing pulls directory is not an error");
     assert!(found.is_empty());
     assert!(found.runs().is_empty());
@@ -1356,32 +1356,34 @@ fn two_scopes(home: &Path, root: &Path) {
 }
 
 #[test]
-fn the_scope_lookup_returns_the_halted_and_resumed_runs_of_that_scope_only() {
+fn the_scope_lookup_returns_the_held_runs_of_that_scope_only() {
     let (home, root) = (
         tempfile::tempdir().expect("a temporary home"),
         tempfile::tempdir().expect("a temporary root"),
     );
     two_scopes(home.path(), root.path());
 
-    let team = halted_and_resumed_runs(home.path(), root.path(), "warlock-team")
-        .expect("the scan reads the home");
+    let team =
+        held_runs(home.path(), root.path(), "warlock-team").expect("the scan reads the home");
 
-    // `pulled`, `in_progress` and `in_review` are somebody else's problem: the
-    // first two are a pull's to carry, and the third is waiting on a reviewer.
-    assert_eq!(tickets(team.runs()), ["WAR-142", "WAR-143"]);
-    assert_eq!(team.runs()[0].status(), RunStatus::Halted);
-    assert_eq!(team.runs()[1].status(), RunStatus::Resumed);
+    // `in_progress` is held too: a run found in it by a new pull is one whose
+    // process stopped without a halt. `pulled` is never saved by a pull, and
+    // `in_review` is waiting on a reviewer.
+    assert_eq!(tickets(team.runs()), ["WAR-141", "WAR-142", "WAR-143"]);
+    assert_eq!(team.runs()[0].status(), RunStatus::InProgress);
+    assert_eq!(team.runs()[1].status(), RunStatus::Halted);
+    assert_eq!(team.runs()[2].status(), RunStatus::Resumed);
     assert!(team.unreadable().is_empty());
 
     // The other scope's runs are in the same directory and stay out of the
     // answer, including its own halted and resumed ones.
-    let docs = halted_and_resumed_runs(home.path(), root.path(), "warlock-docs")
-        .expect("the scan reads the home");
-    assert_eq!(tickets(docs.runs()), ["WAR-10", "WAR-9"]);
+    let docs =
+        held_runs(home.path(), root.path(), "warlock-docs").expect("the scan reads the home");
+    assert_eq!(tickets(docs.runs()), ["WAR-10", "WAR-11", "WAR-9"]);
 
     // A scope nothing was ever pulled for reads empty rather than everything.
     assert!(
-        halted_and_resumed_runs(home.path(), root.path(), "warlock-control")
+        held_runs(home.path(), root.path(), "warlock-control")
             .expect("the scan reads the home")
             .is_empty()
     );
@@ -1405,10 +1407,10 @@ fn the_scope_lookup_is_ordered_by_ticket_identifier() {
         );
     }
 
-    let first = halted_and_resumed_runs(home.path(), root.path(), "warlock-team")
-        .expect("the scan reads the home");
-    let again = halted_and_resumed_runs(home.path(), root.path(), "warlock-team")
-        .expect("the scan reads the home");
+    let first =
+        held_runs(home.path(), root.path(), "warlock-team").expect("the scan reads the home");
+    let again =
+        held_runs(home.path(), root.path(), "warlock-team").expect("the scan reads the home");
 
     // Sorted by identifier as text, so `WAR-10` precedes `WAR-9`. Ordering by the
     // number in the identifier is selection's job, not this lookup's.
@@ -1474,12 +1476,12 @@ fn a_malformed_record_is_named_by_the_scope_lookup_rather_than_skipped() {
     let mangled = state_path(home.path(), root.path(), "WAR-142");
     std::fs::write(&mangled, "{ not json at all").expect("the record is mangled");
 
-    let found = halted_and_resumed_runs(home.path(), root.path(), "warlock-team")
+    let found = held_runs(home.path(), root.path(), "warlock-team")
         .expect("one broken record does not fail the scan");
 
     // The rest of the scope still comes back, so one bad record cannot stop a
     // resumed run being taken.
-    assert_eq!(tickets(found.runs()), ["WAR-143"]);
+    assert_eq!(tickets(found.runs()), ["WAR-141", "WAR-143"]);
     assert!(!found.is_empty());
 
     // And the broken one is named, with the path to fix.
@@ -1494,7 +1496,7 @@ fn a_malformed_record_is_named_by_the_scope_lookup_rather_than_skipped() {
 
     // Its scope is the field that will not parse, so it is named for whichever
     // scope asked.
-    let docs = halted_and_resumed_runs(home.path(), root.path(), "warlock-docs")
+    let docs = held_runs(home.path(), root.path(), "warlock-docs")
         .expect("one broken record does not fail the scan");
     assert_eq!(docs.unreadable().len(), 1);
 }
@@ -1522,7 +1524,7 @@ fn a_sub_task_missing_its_reason_is_named_by_the_scope_lookup() {
     )
     .expect("the record is written");
 
-    let found = halted_and_resumed_runs(home.path(), root.path(), "warlock-team")
+    let found = held_runs(home.path(), root.path(), "warlock-team")
         .expect("one broken record does not fail the scan");
 
     assert!(found.runs().is_empty());
@@ -1559,8 +1561,8 @@ fn a_name_under_pulls_that_is_not_a_run_is_passed_over() {
     std::fs::write(pulls.join("WAR-999").join("manifest.md"), "# WAR-999\n")
         .expect("a directory with no record is left");
 
-    let found = halted_and_resumed_runs(home.path(), root.path(), "warlock-team")
-        .expect("the scan reads the home");
+    let found =
+        held_runs(home.path(), root.path(), "warlock-team").expect("the scan reads the home");
 
     // Passed over in silence: none of them is a record that broke, so none is
     // worth telling the operator about.
@@ -1599,12 +1601,58 @@ fn the_lookups_only_see_this_checkouts_runs() {
         RunStatus::Resumed,
     );
 
-    let found = halted_and_resumed_runs(home.path(), here.path(), "warlock-team")
-        .expect("the scan reads the home");
+    let found =
+        held_runs(home.path(), here.path(), "warlock-team").expect("the scan reads the home");
 
     assert_eq!(tickets(found.runs()), ["WAR-142"]);
     assert_eq!(
         PullRun::find(home.path(), here.path(), "WAR-143").expect("a missing run is not an error"),
         None
+    );
+}
+
+#[test]
+fn releasing_an_interrupted_run_puts_back_only_what_was_in_progress() {
+    let mut run = PullRun::new(
+        "WAR-140",
+        "A ticket",
+        "warlock-team",
+        "war-140/a-ticket",
+        "now",
+    );
+    run.push_subtask(PullSubtask::new(
+        "WAR-140.01",
+        "Done already",
+        [] as [&str; 0],
+    ));
+    run.push_subtask(PullSubtask::new(
+        "WAR-140.02",
+        "The one the kill stopped",
+        [] as [&str; 0],
+    ));
+    run.push_subtask(PullSubtask::new(
+        "WAR-140.03",
+        "Not reached",
+        [] as [&str; 0],
+    ));
+    run.subtask_mut("WAR-140.01")
+        .expect("held")
+        .set_status(SubtaskStatus::Done);
+    run.subtask_mut("WAR-140.02")
+        .expect("held")
+        .set_status(SubtaskStatus::InProgress);
+
+    let released = run.release_interrupted();
+
+    assert_eq!(released.len(), 1);
+    assert_eq!(released[0].id(), "WAR-140.02");
+    let statuses: Vec<SubtaskStatus> = run.subtasks().iter().map(|s| s.status().clone()).collect();
+    assert_eq!(
+        statuses,
+        [
+            SubtaskStatus::Done,
+            SubtaskStatus::Pending,
+            SubtaskStatus::Pending
+        ]
     );
 }

@@ -1109,6 +1109,9 @@ mod gate {
             Pressed::Review(reviewed) => {
                 panic!("{reviewed:?} came from a review window that is not up")
             }
+            Pressed::Scroll(scroll) => {
+                panic!("{scroll:?} came from a review window that is not up")
+            }
             Pressed::Carry(answered) => {
                 panic!("{answered:?} came from a carry-on question that is not up")
             }
@@ -2821,11 +2824,12 @@ mod gate {
         use crate::confirm::{
             Carry, Choice, Review, Reviewed, carry_answer_for, review_answer_for,
         };
+        use crate::input::Scroll;
 
         const SLICE: &str = "slice 1 `Gate the drafts`";
 
         fn review() -> Review {
-            Review::open(SLICE, vec!["Put a window in the way".to_owned()], true)
+            Review::open(SLICE, vec!["Put a window in the way".to_owned()])
         }
 
         fn carry() -> Carry {
@@ -2859,16 +2863,24 @@ mod gate {
         fn every_tree_binding_is_the_review_windows_and_none_of_them_reaches_the_app() {
             // While drafts are waiting to be answered about there is no `p`
             // that pacts, no `j` that moves a selection behind the window and
-            // no `q` that puts the quit question up under it.
+            // no `q` that puts the quit question up under it. The keys that
+            // move through a page scroll the drafts on the panel instead.
             let drafts = review();
 
             for code in INERT.into_iter().chain([KeyCode::Char('q'), KeyCode::Esc]) {
                 let key = press(code);
+                let expected = match code {
+                    KeyCode::Up | KeyCode::Char('k') => Pressed::Scroll(Scroll::LineUp),
+                    KeyCode::Down | KeyCode::Char('j') => Pressed::Scroll(Scroll::LineDown),
+                    KeyCode::PageUp => Pressed::Scroll(Scroll::PageUp),
+                    KeyCode::PageDown => Pressed::Scroll(Scroll::PageDown),
+                    _ => Pressed::Review(review_answer_for(key, &drafts)),
+                };
 
                 assert_eq!(
                     asking(key, Some(&drafts), None, None, false),
-                    Pressed::Review(review_answer_for(key, &drafts)),
-                    "{code:?} should have been answered by the review window"
+                    expected,
+                    "{code:?} while the review window is up"
                 );
             }
         }
@@ -2896,7 +2908,7 @@ mod gate {
             let asked = carry();
             let draft = Composer::new("say something");
 
-            for code in [KeyCode::Char('j'), KeyCode::Tab, KeyCode::Enter] {
+            for code in [KeyCode::Char('a'), KeyCode::Tab, KeyCode::Enter] {
                 let key = press(code);
 
                 assert_eq!(
@@ -2981,7 +2993,7 @@ mod gate {
                     None,
                     false
                 ),
-                Pressed::Review(Reviewed::Skip)
+                Pressed::Review(Reviewed::Create)
             );
         }
 
@@ -4979,7 +4991,6 @@ mod pointer {
         let review = Review::open(
             "slice 1 `Gate the drafts`",
             vec!["Put a window in the way".to_owned()],
-            true,
         );
         let carry = Carry::open("2 slices");
         for mouse in [

@@ -44,12 +44,12 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use warlock_engine::pact::Event;
-use warlock_engine::{Manifest, PullRun, ScopeRecord, halted_and_resumed_runs, held_sigils};
+use warlock_engine::{Manifest, PullRun, ScopeRecord, held_runs, held_sigils};
 
 use crate::app::App;
 use crate::claude::{
-    Activities, Activity, Cancel, ChatAgent, ClaudeAgent, Split, Splitting, Worked, Working,
-    working_system_prompt,
+    Activities, Activity, Cancel, ChatAgent, ClaudeAgent, Split, Splitting, UNTIMED, Worked,
+    Working, working_system_prompt,
 };
 use crate::confirm::{PullAnswered, PullConfirm, Undertaking};
 use crate::cut::listed;
@@ -196,19 +196,18 @@ struct Held {
     identifier: String,
     number: u32,
     title: String,
+    description: String,
 }
 
 impl Held {
-    // The loop's own view of it, borrowed back out. The description is empty for
-    // the reason `pull.rs` leaves it empty: the queue's query does not read one,
-    // and nothing here asks the board about a ticket it was handed.
+    // The loop's own view of it, borrowed back out.
     fn ticket(&self) -> Ticket<'_> {
         Ticket {
             id: &self.id,
             identifier: &self.identifier,
             number: self.number,
             title: &self.title,
-            description: "",
+            description: &self.description,
         }
     }
 }
@@ -681,6 +680,7 @@ impl Raises for Claudes {
             },
             freshen: Freshener {
                 agent: ClaudeAgent::new()
+                    .with_timeout(UNTIMED)
                     .with_cancel(asked.cancel.clone())
                     .with_activities(activities),
                 cancel: asked.cancel,
@@ -1028,7 +1028,7 @@ fn chose<O: Opens, R: Repository>(
 
     let board = open.open(&work.value);
     let assignee = board.viewer()?;
-    let runs = halted_and_resumed_runs(&work.home, &work.root, work.record.name())
+    let runs = held_runs(&work.home, &work.root, work.record.name())
         .map_err(|source| Error::Runs { source })?;
     // An unreadable record is a line and not a failure: the scan names it, and the
     // run it describes may be holding uncommitted work on a branch.
@@ -1077,6 +1077,7 @@ fn chose<O: Opens, R: Repository>(
         identifier: issue.identifier().to_owned(),
         number: number_in(issue.identifier()),
         title: issue.title().to_owned(),
+        description: issue.description().to_owned(),
     };
     // What the dialog names, and the one thing here that is not the queue's: a run
     // this checkout already holds keeps the branch its record names and carries on

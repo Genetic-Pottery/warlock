@@ -970,7 +970,7 @@ fn an_unreadable_run_record_is_a_line_and_not_a_failure() {
 fn a_worked_ticket_is_the_one_the_queue_chose_and_the_board_was_asked_the_scope_s_own_words() {
     let ground = Ground::new();
     let prepared = ground.prepared();
-    let board = board(queue([ready()]));
+    let board = board(queue([ready().with_description("The queue is unread.")]));
     let repo = Checkout::clean(DEFAULT).trees([Vec::new(), wrote("crates/engine/src/lib.rs")]);
     let split = Slicing::into_chain(TICKET, &["Read the queue"]);
 
@@ -990,13 +990,14 @@ fn a_worked_ticket_is_the_one_the_queue_chose_and_the_board_was_asked_the_scope_
     );
 
     assert!(outcome.is_ok(), "{outcome:?}: {printed}");
-    // The split was asked about the ticket the queue chose, with the title the
-    // board gave and the empty description the queue's query does not read.
+    // The split was asked about the ticket the queue chose, with the title and
+    // the description the board gave: what `forman pull` hands every sub-task
+    // as the parent ticket.
     let asked = split.asked();
     assert_eq!(asked.len(), 1);
     assert_eq!(asked[0].ticket, TICKET);
     assert_eq!(asked[0].title, TITLE);
-    assert_eq!(asked[0].description, "");
+    assert_eq!(asked[0].description, "The queue is unread.");
     // And the branch carries the number out of the identifier.
     assert!(
         ground.saved().branch().starts_with("war-140/"),

@@ -34,13 +34,13 @@ const EDITOR_VAR: &str = "EDITOR";
 // text. It names the variable and one way to set it, because a reader who has
 // never exported `EDITOR` needs the name of the thing to set rather than a fact
 // about warlock.
-const NO_EDITOR: &str = "`$EDITOR` names no editor to run, so nothing was opened: \
+pub(crate) const NO_EDITOR: &str = "`$EDITOR` names no editor to run, so nothing was opened: \
                          set it (for example `EDITOR=nvim`) and press `e` again";
 
 // A pair rather than a `Command`, so the whole of what was read out of the
 // environment can be compared and asserted about without spawning anything.
 #[derive(Debug, PartialEq, Eq)]
-struct Editor {
+pub(crate) struct Editor {
     program: String,
     args: Vec<String>,
 }
@@ -158,6 +158,11 @@ fn edit_target(app: &mut App, in_flight: bool) -> Option<PathBuf> {
 // `claude::or_default` is written that way: setting a real environment variable
 // is process-wide, racy against every other test on the runner and unsafe
 // besides.
+/// `$EDITOR`, read and split, or `None` for [`NO_EDITOR`]'s four cases.
+pub(crate) fn editor() -> Option<Editor> {
+    editor_command(env::var_os(EDITOR_VAR).as_deref())
+}
+
 fn editor_command(value: Option<&OsStr>) -> Option<Editor> {
     let mut words = value?.to_str()?.split_whitespace();
     let program = words.next()?.to_owned();
@@ -180,7 +185,7 @@ fn editor_command(value: Option<&OsStr>) -> Option<Editor> {
 // their own editor can see that they have. The other two name the program,
 // because "it did not work" about a program the reader named in their own
 // environment is not something they can act on.
-fn run_editor(editor: &Editor, path: &Path) -> Option<String> {
+pub(crate) fn run_editor(editor: &Editor, path: &Path) -> Option<String> {
     let program = &editor.program;
     match Command::new(program).args(&editor.args).arg(path).status() {
         Ok(status) if status.success() => None,

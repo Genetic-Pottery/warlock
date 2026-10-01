@@ -35,21 +35,25 @@
 use std::fmt;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
-use warlock_engine::drafting::Draft;
+use warlock_engine::drafting::{self, Draft};
 use warlock_engine::{Destination, Manifest, agent, filed_path, resolve_filing};
 
 use crate::asking::{self, Asks};
 use crate::brief::{Slice, scope_block_in};
 use crate::claude::{
-    ChatAgent, Converses, Drafted, Drafting, NOTHING_SETTLES_IT, Replied, propose_answer,
+    Activities, Activity, ChatAgent, Converses, Drafted, Drafting, NOTHING_SETTLES_IT, Replied,
+    propose_answer,
 };
-use crate::linear::{Board, Issue as LinearIssue, Opener as LinearOpener, Opens};
+use crate::linear::{Board, Issue as LinearIssue, Opener as LinearOpener, Opens, QueuedIssue};
 // The module rather than its `cut` and `Slice`, which would both be a second
 // name for something this file already has: the slices here are the document's,
 // and `cut::Slice` is one slice's drafts on their way to a board.
 use crate::cut::{self, Cut, listed};
+use crate::editing::{self, NO_EDITOR, run_editor};
 use crate::error::{Error, one_line};
+use crate::pull::activity_line;
 use crate::push::records;
 use crate::standing::{FOR_CUT, Standing};
 
@@ -58,22 +62,36 @@ use crate::standing::{FOR_CUT, Standing};
 // this and `Backlog` is not.
 const PLANNED: &str = "Planned";
 
-// The cursor a read stops on, one mark for both of them: a question, and a
-// slice's drafts put up for review. A bare mark rather than a sentence, because
-// what a reader needs before they can answer is on the lines above it — for a
-// question, warlock's own attempt at it; for drafts, their titles and the two
-// words that are read as answers rather than as feedback.
+// The cursor a question stops on. A bare mark rather than a sentence, because
+// what a reader needs before they can answer is on the lines above it:
+// warlock's own attempt at it.
 const PROMPT: &str = "> ";
 
-// The two words a review reads as answers. Everything else typed at that prompt
-// is feedback about the drafts, so these are the whole of the vocabulary: a
-// third word to remember would be a third way to mean "not these".
-//
-// Case is folded where they are matched, for `is_planned`'s reason: `Accept` is
-// somebody answering, not somebody writing feedback in one word.
-const ACCEPT: &str = "accept";
+// Forman's review words, read as Forman's `parse_decision` reads them: case
+// folded and trimmed, an empty line is assent, and anything that is none of them
+// is feedback, because the alternative is scolding somebody for describing what
+// they want in their own words.
+const CREATE: [&str; 4] = ["c", "create", "y", "yes"];
 
-const SKIP: &str = "skip";
+const QUIT: [&str; 4] = ["q", "quit", "n", "no"];
+
+const EDIT: [&str; 2] = ["e", "edit"];
+
+// Red's question after a skip, and its default: a run carries on by somebody
+// saying so.
+const CARRY_PROMPT: &str = "carry on with the remaining slices? [y/N] ";
+
+// How many open tickets a session is shown: Forman's number, enough to cover a
+// project's worth of in-flight work without turning the brief into a backlog.
+const BACKLOG_LIMIT: usize = 40;
+
+// `WAR-9` before `WAR-10`.
+fn natural(identifier: &str) -> (String, u64) {
+    match identifier.rsplit_once('-') {
+        Some((team, number)) => (team.to_owned(), number.parse().unwrap_or(u64::MAX)),
+        None => (identifier.to_owned(), u64::MAX),
+    }
+}
 
 pub fn cut(path: &Path, scope: Option<&str>, dry_run: bool) -> Result<(), Error> {
     let standing = Standing::here(FOR_CUT)?;
@@ -107,7 +125,48 @@ pub fn cut(path: &Path, scope: Option<&str>, dry_run: bool) -> Result<(), Error>
         // which is what a question stops the run at until somebody answers it.
         &mut asking::Stdin,
         &mut io::stdout(),
+        printing,
     )
+}
+
+// What a slice's session is seen doing, on stdout as it happens rather than
+// after the turn: a slice is minutes of a session working, and a shell that
+// said `drafting` and then nothing reads as hung. Straight to stdout because
+// [`Activities`] wants a `'static` sink and `out` is borrowed; on this road the
+// two are the same stream, and nothing is written to `out` while a turn runs.
+fn printing() -> Activities {
+    let watched = Mutex::new(Watched::default());
+    Activities::new(move |activity| {
+        let line = watched
+            .lock()
+            .expect("nothing panics holding the watch")
+            .line(&activity);
+        if let Some(line) = line {
+            say(&mut io::stdout(), &line);
+        }
+    })
+}
+
+/// The activity lines of one session, with a stretch of thinking or writing
+/// said once: a session reports `Writing` again with every delta, and printed on
+/// a screen that only scrolls that is a column of identical lines. A tool line
+/// repeats only when the session did the same thing twice, so it is never
+/// collapsed. `/pull`'s shell door collapses the same way.
+#[derive(Debug, Default)]
+struct Watched {
+    said: Option<String>,
+}
+
+impl Watched {
+    fn line(&mut self, activity: &Activity) -> Option<String> {
+        let line = activity_line(activity)?;
+        let running = matches!(activity, Activity::Thinking | Activity::Writing { .. });
+        if running && self.said.as_deref() == Some(line.as_str()) {
+            return None;
+        }
+        self.said = Some(line.clone());
+        Some(line)
+    }
 }
 
 // Split from `cut` the way `pushed` is split from `push`: the environment — the
@@ -145,6 +204,7 @@ fn cut_with<O: Opens, A: Converses, P: Converses, K: Asks, W: Write>(
     proposer: &P,
     ask: &mut K,
     out: &mut W,
+    watching: fn() -> Activities,
 ) -> Result<(), Error> {
     let manifest = standing.manifest()?;
     let mut planned = prepare(
@@ -171,9 +231,9 @@ fn cut_with<O: Opens, A: Converses, P: Converses, K: Asks, W: Write>(
             say(
                 out,
                 &format!(
-                    "{} — already cut as {}, so nothing was sent",
+                    "{} — {}, so nothing was sent",
                     next.heading(),
-                    listed(issues)
+                    cut::settled_as(issues)
                 ),
             );
             continue;
@@ -185,9 +245,32 @@ fn cut_with<O: Opens, A: Converses, P: Converses, K: Asks, W: Write>(
         // is not a fact about this slice — the question after it could not be
         // answered either, and a run that carried on would be asking a sequence
         // of questions into a pipe that is broken.
-        let Some(drafts) = drafted(agent, proposer, planned.brief(), next.slice(), ask, out)?
-        else {
-            continue;
+        let drafts = match drafted(
+            agent,
+            proposer,
+            &planned.drafting_brief(),
+            next.slice(),
+            ask,
+            out,
+            watching(),
+        )? {
+            Ended::File(drafts) => drafts,
+            Ended::Left => continue,
+            Ended::Skipped => {
+                if let Err(error) = planned.skip_slice(&next) {
+                    say(out, &error.to_string());
+                }
+                if next.left() == 0 {
+                    continue;
+                }
+                ask.discard_typed_ahead();
+                let carry = ask.ask(CARRY_PROMPT)?.unwrap_or_default();
+                if matches!(carry.trim().to_lowercase().as_str(), "y" | "yes") {
+                    continue;
+                }
+                say(out, &stopped_line(next.left()));
+                break;
+            }
         };
 
         // `?`, and not a reported line: what reaches here is a team with no
@@ -243,8 +326,10 @@ fn drafted<A: Converses, P: Converses, K: Asks, W: Write>(
     slice: &Slice,
     ask: &mut K,
     out: &mut W,
-) -> Result<Option<Vec<Draft>>, Error> {
-    let mut session = Drafting::for_slice(agent, brief, slice.heading(), slice.prose());
+    watching: Activities,
+) -> Result<Ended, Error> {
+    let mut session =
+        Drafting::for_slice(agent, brief, slice.heading(), slice.prose()).reporting(watching);
     // What the session had left to spend on the turn that is about to run, read
     // before it rather than after: a question that comes back from a turn there
     // was no round for is the one thing this cannot relay, and after the turn
@@ -254,26 +339,51 @@ fn drafted<A: Converses, P: Converses, K: Asks, W: Write>(
 
     loop {
         match replied(slice, turned) {
-            Reply::Drafts { drafts, lines } => {
+            Reply::Drafts { mut drafts, lines } => {
                 say(out, &drafted_line(slice, &titles(&drafts)));
                 for line in lines {
                     say(out, &line);
                 }
-                match reviewed(slice, drafts, ask, out)? {
-                    Reviewed::File(drafts) => return Ok(Some(drafts)),
-                    // The line that says so is already printed, here as at a
-                    // question: the slice is left uncut, no record names it, and
-                    // the next run offers it again.
-                    Reviewed::Skip => return Ok(None),
-                    Reviewed::Feedback(feedback) => {
-                        say(out, &feedback_line(slice, &feedback));
-                        // Read before the turn for the reason the opening's is:
-                        // a question coming back from a turn there was no round
-                        // for is the one thing this cannot relay.
-                        rounds = session.questions_left();
-                        turned = session.answer(&feedback);
+                // Round again after an edit: the drafts as saved are printed
+                // and asked about, exactly as Forman's loop goes back to its
+                // prompt with them.
+                let feedback = loop {
+                    for line in drafts_document(slice, &drafts) {
+                        say(out, &line);
                     }
-                }
+                    match reviewed(slice, drafts, ask, out)? {
+                        Reviewed::File(drafts) => return Ok(Ended::File(drafts)),
+                        // The line that says so is already printed in both.
+                        Reviewed::Skip => return Ok(Ended::Skipped),
+                        Reviewed::Unanswered => return Ok(Ended::Left),
+                        Reviewed::Edit(before) => {
+                            drafts = match editing::editor() {
+                                None => {
+                                    say(out, &unedited_line(slice, NO_EDITOR));
+                                    before
+                                }
+                                Some(editor) => {
+                                    match edited_drafts(slice, &before, |path| {
+                                        run_editor(&editor, path)
+                                    }) {
+                                        Ok(edited) => edited,
+                                        Err(why) => {
+                                            say(out, &unedited_line(slice, &why));
+                                            before
+                                        }
+                                    }
+                                }
+                            };
+                        }
+                        Reviewed::Feedback(feedback) => break feedback,
+                    }
+                };
+                say(out, &feedback_line(slice, &feedback));
+                // Read before the turn for the reason the opening's is: a
+                // question coming back from a turn there was no round for is the
+                // one thing this cannot relay.
+                rounds = session.questions_left();
+                turned = session.answer(&feedback);
             }
             // A session counts its own rounds and hands nothing back past the
             // last of them, so this is unreachable — and said rather than
@@ -287,12 +397,14 @@ fn drafted<A: Converses, P: Converses, K: Asks, W: Write>(
                         "the session asked a question after its last round was spent",
                     ),
                 );
-                return Ok(None);
+                return Ok(Ended::Left);
             }
             Reply::Question(question) => {
-                say(out, &question_line(slice, &question));
+                for line in question_lines(slice, &question) {
+                    say(out, &line);
+                }
                 let Some(answer) = answered(proposer, brief, slice, &question, ask, out)? else {
-                    return Ok(None);
+                    return Ok(Ended::Left);
                 };
                 say(out, &answer_line(slice, &answer));
                 rounds = session.questions_left();
@@ -300,80 +412,81 @@ fn drafted<A: Converses, P: Converses, K: Asks, W: Write>(
             }
             Reply::Over(line) => {
                 say(out, &line);
-                return Ok(None);
+                return Ok(Ended::Left);
             }
         }
     }
 }
 
-/// What somebody at the shell said to do with one slice's drafts.
-///
-/// The panel's three answers ([`Reviewed`](crate::confirm::Reviewed)) read off a
-/// line rather than off a key, with one difference the road forces: there is no
-/// window to light an answer on, so the words are typed and anything that is not
-/// one of them is the feedback itself. A reader who has to say what is wrong
-/// with the drafts is already typing, and a door that made them say `feedback`
-/// first and then the feedback would be asking twice.
-///
-/// The drafts ride on [`Reviewed::File`] rather than being left with the caller,
-/// so the one answer that spends them is the only one that still holds them.
-enum Reviewed {
-    /// `accept`: these drafts, on their way to the board.
+/// How one slice's drafting came out at the shell.
+enum Ended {
+    /// Accepted, on their way to the board.
     File(Vec<Draft>),
-    /// `skip`, an empty line, or a pipe that ended: the slice left uncut, with
-    /// the line that says so already printed.
+    /// Somebody said no at the review: recorded, and never offered again.
+    Skipped,
+    /// Nothing to file and nothing decided — a session that failed, a question
+    /// nobody answered, a pipe that ended — so the next run offers it again.
+    Left,
+}
+
+/// What somebody at the shell said to do with one slice's drafts, read the way
+/// Forman's terminal reviewer reads it. The drafts ride on [`Reviewed::File`]
+/// rather than being left with the caller, so the one answer that spends them
+/// is the only one that still holds them.
+enum Reviewed {
+    File(Vec<Draft>),
+    /// `[e]dit`, holding the drafts to open.
+    Edit(Vec<Draft>),
     Skip,
-    /// Anything else, which is what these drafts should be instead.
+    /// A pipe that ended or Ctrl-D: nobody is there, so it is no answer at all.
+    Unanswered,
     Feedback(String),
 }
 
-// One slice's drafts put to whoever is at the shell: their titles, the two words
-// that are answers, the prompt, and the line that comes back.
+// One slice's drafts put to whoever is at the shell, after every draft has been
+// printed whole: Forman's prompt, the line that comes back, and what it means.
 //
 // Before [`Planned::filing`] is built and long before anything is opened, which
 // is the whole of what makes a skip free: nothing here sends, and the road to the
-// board starts on `accept` alone.
+// board starts on a create alone.
 fn reviewed<K: Asks, W: Write>(
     slice: &Slice,
     drafts: Vec<Draft>,
     ask: &mut K,
     out: &mut W,
 ) -> Result<Reviewed, Error> {
-    say(out, &review_line(slice));
-
     ask.discard_typed_ahead();
-    let Some(line) = ask.ask(PROMPT)? else {
+    let Some(line) = ask.ask(&review_prompt(drafts.len()))? else {
         // EOF, which is Ctrl-D at a terminal and an exhausted pipe everywhere
         // else, read exactly as it is at a question: nobody is there, so nothing
-        // is filed and nothing is sent. The newline is because the prompt just
-        // asked has none and the cursor is still sitting on it.
+        // is filed, nothing is sent and nothing is recorded. The newline is
+        // because the prompt just asked has none and the cursor is still on it.
         drop(writeln!(out));
         say(out, &unreviewed_line(slice));
-        return Ok(Reviewed::Skip);
+        return Ok(Reviewed::Unanswered);
     };
 
-    // Trimmed for `answered`'s reason: a pipe's trailing newline is never part
-    // of what somebody meant to say, and a line of spaces is a line nobody typed
-    // anything on.
     let typed = line.trim();
-    if typed.eq_ignore_ascii_case(ACCEPT) {
+    let folded = typed.to_lowercase();
+    if typed.is_empty() || CREATE.contains(&folded.as_str()) {
         return Ok(Reviewed::File(drafts));
     }
-    // An empty line is the skip, as Enter is at the panel's window: the answer
-    // that costs nothing is the one a reader reaches by pressing the key they
-    // were already resting on, and drafts are not filed by somebody who typed
-    // nothing.
-    if typed.is_empty() || typed.eq_ignore_ascii_case(SKIP) {
+    if QUIT.contains(&folded.as_str()) {
         say(out, &skipped_line(slice));
         return Ok(Reviewed::Skip);
+    }
+    if EDIT.contains(&folded.as_str()) {
+        return Ok(Reviewed::Edit(drafts));
     }
 
     Ok(Reviewed::Feedback(typed.to_owned()))
 }
 
-// What a draft is said by on the way past: its title, which is what the panel's
-// window shows of one and all a line has room for. The bodies are paragraphs,
-// and they are what `accept` files.
+// Forman's own prompt, count and all.
+fn review_prompt(count: usize) -> String {
+    format!("[c]reate {count} ticket(s), [e]dit, [q]uit, or type feedback to redraft: ")
+}
+
 fn titles(drafts: &[Draft]) -> Vec<String> {
     drafts.iter().map(|draft| draft.title.clone()).collect()
 }
@@ -498,7 +611,7 @@ fn would(mut planned: Planned) -> Vec<String> {
 
     while let Some(next) = planned.next() {
         lines.push(match next.already() {
-            Some(issues) => format!("{} — already cut as {}", next.heading(), listed(issues)),
+            Some(issues) => format!("{} — {}", next.heading(), cut::settled_as(issues)),
             None => next.heading(),
         });
     }
@@ -533,6 +646,9 @@ pub(crate) struct Planned {
     // is all such a record keeps of an issue, and `None` for a slice still to
     // draft.
     already: Vec<Option<Vec<String>>>,
+    // The open tickets the scope's queue held when the run started: Forman's
+    // backlog digest, and what a draft's `waits_on` resolves against.
+    open: Vec<QueuedIssue>,
     // One entry per slice of the *document*, indexed by position: what a
     // `depends_on` names is a position. Seeded from the cut records, so a slice
     // an earlier run filed can still be named as a blocker, and filled as this
@@ -645,6 +761,18 @@ pub(crate) fn prepare<O: Opens>(
                 .map(|(_, cut)| cut.issues().to_vec())
         })
         .collect();
+    // Forman's backlog digest: the open tickets this scope's queue holds for
+    // the assignee, so a draft can wait on one by identifier. A queue that
+    // cannot be read is not worth failing a draft over.
+    let open = board
+        .scope_queue(
+            target.destination().team(),
+            target.destination().label(),
+            &assignee,
+        )
+        .map(|queue| queue.issues().to_vec())
+        .unwrap_or_default();
+
     let mut became = vec![Vec::new(); ordered.len()];
     for (slice, issues) in ordered.iter().zip(&already) {
         if let (Some(issues), Some(entry)) = (issues, became.get_mut(at(slice))) {
@@ -667,20 +795,51 @@ pub(crate) fn prepare<O: Opens>(
         became,
         created: Vec::new(),
         at: 0,
+        open,
     })
 }
 
 impl Planned {
+    /// The brief a slice's session and a proposal are given: the brief, then
+    /// Forman's digest of the open tickets, in Forman's words, which is what a
+    /// draft's `blocked_by` can name by identifier.
+    pub(crate) fn drafting_brief(&self) -> String {
+        let mut open: Vec<&QueuedIssue> = self.open.iter().collect();
+        if open.is_empty() {
+            return self.brief.clone();
+        }
+        open.sort_by_key(|issue| natural(issue.identifier()));
+        let rows: Vec<String> = open
+            .iter()
+            .take(BACKLOG_LIMIT)
+            .map(|issue| {
+                format!(
+                    "{}  [{}]  {}",
+                    issue.identifier(),
+                    issue.state(),
+                    issue.title()
+                )
+            })
+            .collect();
+        format!(
+            "{}\n\nThese tickets already exist and are still open. If what you are drafting \
+             cannot start until one of them has landed, put that identifier in blocked_by:\n\n{}",
+            self.brief.trim_end(),
+            rows.join("\n")
+        )
+    }
+
+    /// Records `next` as skipped, so no later run offers it. See [`cut::skip`].
+    pub(crate) fn skip_slice(&self, next: &Next) -> Result<(), Error> {
+        cut::skip(&self.root, &self.spelled, next.slice.heading())
+    }
+
     pub(crate) fn name(&self) -> &str {
         &self.name
     }
 
     pub(crate) fn status(&self) -> &str {
         &self.status
-    }
-
-    pub(crate) fn brief(&self) -> &str {
-        &self.brief
     }
 
     pub(crate) const fn destination(&self) -> &Destination {
@@ -758,6 +917,7 @@ impl Planned {
             title: next.slice.heading().to_owned(),
             drafts,
             needs,
+            open: self.open.iter().map(LinearIssue::listed).collect(),
         }
     }
 
@@ -861,6 +1021,7 @@ pub(crate) struct Filing {
     title: String,
     drafts: Vec<Draft>,
     needs: Vec<Vec<LinearIssue>>,
+    open: Vec<LinearIssue>,
 }
 
 impl fmt::Debug for Filing {
@@ -875,6 +1036,7 @@ impl fmt::Debug for Filing {
             .field("title", &self.title)
             .field("drafts", &self.drafts)
             .field("needs", &self.needs)
+            .field("open", &self.open)
             .finish()
     }
 }
@@ -899,6 +1061,7 @@ impl Filing {
                 title: &self.title,
                 drafts: &self.drafts,
                 needs: &needs,
+                open: &self.open,
             },
             out,
         )
@@ -997,13 +1160,130 @@ pub(crate) fn not_drafted(slice: &Slice, why: impl fmt::Display) -> String {
 // naming one conversation differently. `named` is in each of them for the same
 // reason it is `pub(crate)`.
 
-// The question in the words it was asked, flattened as a line takes it. Whoever
-// is at the door answers it, so this line and [`answer_line`] are the pair a
-// conversation is read back by: `asked` is the slice talking and `answered` is
-// the person, and the two verbs are the whole of how a reader tomorrow tells one
-// from the other.
-pub(crate) fn question_line(slice: &Slice, question: &str) -> String {
-    format!("{} asked: {}", named(slice), one_line(question))
+/// Drafts read back out of [`drafts_document`]'s layout: a `## N. title` line
+/// opens each, everything under it is its body, and trailing `Blocked by #N` and
+/// `Blocks #N` lines are its edges. Anything above the first draft — the slice's
+/// heading — is not part of any draft. The body's own `## Problem` sections do
+/// not open a draft, because a draft's heading starts with its number.
+pub(crate) fn drafts_from_document(text: &str) -> Result<Vec<Draft>, String> {
+    let mut opened: Vec<(String, Vec<&str>)> = Vec::new();
+    for line in text.lines() {
+        if let Some(title) = draft_heading(line) {
+            opened.push((title.to_owned(), Vec::new()));
+        } else if let Some((_, body)) = opened.last_mut() {
+            body.push(line);
+        }
+    }
+    if opened.is_empty() {
+        return Err("no draft is left in it: each starts with a `## 1. title` line".to_owned());
+    }
+    let count = opened.len();
+    let mut drafts = Vec::with_capacity(count);
+    for (title, mut body) in opened {
+        let mut draft = Draft {
+            title,
+            ..Draft::default()
+        };
+        loop {
+            while body.last().is_some_and(|line| line.trim().is_empty()) {
+                body.pop();
+            }
+            let Some(last) = body.last() else { break };
+            if let Some(edges) = last.trim().strip_prefix("Blocked by ") {
+                (draft.blocked_by, draft.waits_on) = edge_numbers(edges, count)?;
+            } else if let Some(edges) = last.trim().strip_prefix("Blocks ") {
+                (draft.blocks, _) = edge_numbers(edges, count)?;
+            } else {
+                break;
+            }
+            body.pop();
+        }
+        body.join("\n").trim().clone_into(&mut draft.body);
+        drafts.push(draft);
+    }
+    Ok(drafts)
+}
+
+fn draft_heading(line: &str) -> Option<&str> {
+    let (number, title) = line.strip_prefix("## ")?.split_once(". ")?;
+    (!number.is_empty() && number.chars().all(|c| c.is_ascii_digit())).then(|| title.trim())
+}
+
+// `#2, WAR-142` back to the positions they name, counting from 0 as the drafts
+// do, and the existing tickets by identifier.
+fn edge_numbers(edges: &str, count: usize) -> Result<(Vec<usize>, Vec<String>), String> {
+    let mut positions = Vec::new();
+    let mut named = Vec::new();
+    for edge in edges.split(',').map(str::trim) {
+        if drafting::is_identifier(edge) {
+            named.push(edge.to_owned());
+            continue;
+        }
+        match edge.trim_start_matches('#').parse::<usize>() {
+            Ok(at) if (1..=count).contains(&at) => positions.push(at - 1),
+            _ => {
+                return Err(format!(
+                    "`{edge}` is not one of the drafts, which are #1 to #{count}, or a ticket \
+                     like `WAR-42`"
+                ));
+            }
+        }
+    }
+    Ok((positions, named))
+}
+
+/// Forman's `[e]dit`: the drafts written out, `run` handed the file (it runs
+/// `$EDITOR` and says what went wrong, if anything did), and what was saved
+/// read back and put through the same repairs a model's answer gets, so the
+/// caps and the edges hold whatever was typed. `Err` is one line saying why
+/// nothing changed.
+pub(crate) fn edited_drafts(
+    slice: &Slice,
+    drafts: &[Draft],
+    run: impl FnOnce(&Path) -> Option<String>,
+) -> Result<Vec<Draft>, String> {
+    let path = std::env::temp_dir().join(format!(
+        "warlock-drafts-{}-{}.md",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |since| since.as_nanos())
+    ));
+    let mut text = drafts_document(slice, drafts).join("\n");
+    text.push('\n');
+    std::fs::write(&path, text).map_err(|error| one_line(&error.to_string()))?;
+    let said = run(&path);
+    let read = std::fs::read_to_string(&path);
+    drop(std::fs::remove_file(&path));
+    if let Some(said) = said {
+        return Err(said);
+    }
+    let read = read.map_err(|error| one_line(&error.to_string()))?;
+    let drafts = drafts_from_document(&read)?;
+    let (mended, _) = drafting::mend(&drafting::Fill { drafts }, slice.heading(), slice.prose());
+    Ok(mended.drafts)
+}
+
+// What a failed edit says: the reason, and that the drafts are as they were.
+pub(crate) fn unedited_line(slice: &Slice, why: &str) -> String {
+    format!("{} was not edited: {why}, so nothing changed", named(slice))
+}
+
+// The question in the words it was asked, a printed line per line of it: the
+// contract asks for lettered options on lines of their own, and flattening them
+// into one would bury the choice being offered. Whoever is at the door answers
+// it, so these lines and [`answer_line`] are the pair a conversation is read
+// back by: `asked` is the slice talking and `answered` is the person, and the
+// two verbs are the whole of how a reader tomorrow tells one from the other.
+pub(crate) fn question_lines(slice: &Slice, question: &str) -> Vec<String> {
+    let mut lines = question
+        .lines()
+        .map(one_line)
+        .filter(|line| !line.is_empty());
+    let first = lines.next().unwrap_or_default();
+    let mut said = vec![format!("{} asked: {first}", named(slice))];
+    said.extend(lines);
+    said
 }
 
 // What was sent, in the words it was sent in, and the other half of that pair.
@@ -1016,28 +1296,59 @@ pub(crate) fn answer_line(slice: &Slice, answer: &str) -> String {
 }
 
 // The drafts as they arrived, by title: the panel says this over the repairs and
-// the shell says it over the prompt, and it is the one line a reader decides
-// about them from.
+// the shell says it over the prompt.
 pub(crate) fn drafted_line(slice: &Slice, titles: &[String]) -> String {
     format!("{} — drafted {}", named(slice), listed(titles))
 }
 
-// What can be said back about them, on the road where there is nothing to light
-// an answer on. The two words first and the third answer last, because the third
-// is whatever the reader has to say and not a word to remember.
-fn review_line(slice: &Slice) -> String {
+/// Every draft whole — title, body and the edges between them — as the issues
+/// `accept` would file. The panel puts it on the document card and the shell
+/// prints it, both before the review: an answer about drafts nobody has read is
+/// an answer about their titles, and feedback on a title is feedback on a guess.
+///
+/// Numbered from one, and the edges by those numbers: a draft's `blocked_by`
+/// is an index into this slice's own drafts, which is the order printed here.
+///
+/// [`drafts_from_document`] reads this layout back, which is what Forman's
+/// `[e]dit` is here: the drafts in `$EDITOR`, and whatever is saved is what the
+/// review asks about next.
+pub(crate) fn drafts_document(slice: &Slice, drafts: &[Draft]) -> Vec<String> {
+    let mut lines = vec![format!("# {}", named(slice)), String::new()];
+    for (index, draft) in drafts.iter().enumerate() {
+        lines.push(format!("## {}. {}", index + 1, draft.title.trim()));
+        lines.push(String::new());
+        lines.extend(draft.body.trim().lines().map(str::to_owned));
+        for (word, edges, named) in [
+            ("Blocked by", &draft.blocked_by, draft.waits_on.as_slice()),
+            ("Blocks", &draft.blocks, &[][..]),
+        ] {
+            let mut names: Vec<String> = edges.iter().map(|at| format!("#{}", at + 1)).collect();
+            names.extend(named.iter().cloned());
+            if !names.is_empty() {
+                lines.push(String::new());
+                lines.push(format!("{word} {}", names.join(", ")));
+            }
+        }
+        lines.push(String::new());
+    }
+    lines.pop_if(|line| line.is_empty());
+    lines
+}
+
+// A slice somebody said no to, in Red's words, and what that means for the
+// next run: it is recorded, so it is not offered again.
+pub(crate) fn skipped_line(slice: &Slice) -> String {
     format!(
-        "{} — `{ACCEPT}` to file these, Enter or `{SKIP}` to leave it for another run, or say \
-         what these drafts should be instead",
+        "{} was skipped: nothing was created for it, and the next draft passes it over",
         named(slice)
     )
 }
 
-// A slice left alone. `nothing was recorded` rather than `skipped` alone,
-// because what a reader wants to know tomorrow is whether the next draft will
-// offer this slice again — and it will.
-pub(crate) fn skipped_line(slice: &Slice) -> String {
-    format!("{} was skipped; nothing was recorded for it", named(slice))
+// The run ended by a No to the carry-on question, counting what was never
+// offered: those slices are untouched rather than refused, so the next draft
+// finds them exactly as this one did.
+pub(crate) fn stopped_line(left: usize) -> String {
+    format!("the run stopped; {} left for another draft", counted(left))
 }
 
 // The same slice left alone by a pipe that ended rather than by somebody saying
@@ -1045,13 +1356,14 @@ pub(crate) fn skipped_line(slice: &Slice) -> String {
 // and which of the two it was is worth a reader's while tomorrow.
 fn unreviewed_line(slice: &Slice) -> String {
     format!(
-        "{} was skipped: nobody said what to do with its drafts, so nothing was recorded for it",
+        "{} was left: nobody said what to do with its drafts, so nothing was recorded and the \
+         next draft offers it again",
         named(slice)
     )
 }
 
 // What the reader told the slice about its drafts, in their own words and the
-// other half of the pair [`question_line`] and [`answer_line`] make: the verb
+// other half of the pair [`question_lines`] and [`answer_line`] make: the verb
 // says this was feedback rather than an answer to anything the slice asked.
 pub(crate) fn feedback_line(slice: &Slice, feedback: &str) -> String {
     format!(

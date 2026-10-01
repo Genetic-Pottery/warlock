@@ -594,22 +594,20 @@ pub(crate) fn pull_answer_for(key: KeyEvent, highlighted: Answer) -> PullAnswere
     }
 }
 
-/// What one slice's drafts are answered with: file them, leave the slice alone,
-/// or say what is wrong with them.
+/// What one slice's drafts are answered with, in the order of Forman's prompt:
+/// file them, edit them, leave the slice alone, or say what is wrong with them.
 ///
-/// Three answers and so a value of its own rather than [`Answer`] renamed a
-/// fourth time: the windows above ask one thing and take a yes or a no, and this
-/// asks which of three things to do. [`answer_for`] cannot be written over for
-/// the same reason — there is no third answer for it to hand back.
+/// Four answers and so a value of its own rather than [`Answer`] renamed:
+/// the windows above ask one thing and take a yes or a no, and this asks which
+/// of four things to do.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub(crate) enum Choice {
-    /// File this slice's drafts as issues.
-    Create,
-    /// The default, for [`Answer::No`]'s reason: the round that puts the window
-    /// up and an Enter straight after it file nothing at all. It is also the
-    /// answer in the middle, so the one that spends is a deliberate press
-    /// either way.
+    /// File this slice's drafts as issues. The default: see [`Review::open`].
     #[default]
+    Create,
+    /// Open the drafts in `$EDITOR`, and ask again about what was saved.
+    Edit,
+    /// Leave the slice, recorded so no later run offers it.
     Skip,
     /// Redraft this slice with something typed into the composer.
     Feedback,
@@ -621,18 +619,17 @@ impl Choice {
     // finger of somebody pressing Right twice.
     const fn leftwards(self) -> Self {
         match self {
-            Self::Create | Self::Skip => Self::Create,
+            Self::Create | Self::Edit => Self::Create,
+            Self::Skip => Self::Edit,
             Self::Feedback => Self::Skip,
         }
     }
 
-    // `offered` is whether this slice still has its one redraft. A third answer
-    // that is not drawn is not one a key can land on.
-    const fn rightwards(self, offered: bool) -> Self {
+    const fn rightwards(self) -> Self {
         match self {
-            Self::Create => Self::Skip,
-            Self::Skip | Self::Feedback if offered => Self::Feedback,
-            answer => answer,
+            Self::Create => Self::Edit,
+            Self::Edit => Self::Skip,
+            Self::Skip | Self::Feedback => Self::Feedback,
         }
     }
 }
@@ -640,10 +637,9 @@ impl Choice {
 /// One slice's drafts, waiting to be answered about: what was drafted, for which
 /// slice, and which of the answers is lit.
 ///
-/// The titles are what the model settled on and the whole of what the window
-/// shows of a draft: a body is paragraphs and a window that drew them would be a
-/// document card with three answers under it. They are on the thread as well,
-/// said as they arrived, so a reader who wants more than a title scrolls.
+/// The window shows how many drafts there are and nothing of them: every draft
+/// is on the panel's document card behind it, whole, so the window stays small
+/// and off the text it is asking about.
 ///
 /// There is no `Closed` variant beside this the way there is for the three
 /// dialogs above, and deliberately: those are fields of the session, which is
@@ -656,24 +652,20 @@ pub(crate) struct Review {
     /// and the thread are talking about the same slice and say so alike.
     slice: String,
     titles: Vec<String>,
-    /// Whether the third answer is offered at all. A slice is redrafted once —
-    /// see [`Choice::Feedback`]'s caller — so the second time round this window
-    /// goes up with two answers on it.
-    feedback: bool,
     choice: Choice,
 }
 
 impl Review {
-    /// [`Choice::Skip`] is lit on open, for the reason [`Answer::No`] is the
-    /// default elsewhere: the round that puts this up and an Enter straight
-    /// after it cost nothing.
+    /// [`Choice::Create`] is lit on open, as Forman reads an empty line at its
+    /// review: somebody who has read the drafts and pressed Enter has agreed
+    /// with them. The drafts are on the panel behind this window before it is
+    /// up.
     #[must_use]
-    pub(crate) fn open(slice: impl Into<String>, titles: Vec<String>, feedback: bool) -> Self {
+    pub(crate) fn open(slice: impl Into<String>, titles: Vec<String>) -> Self {
         Self {
             slice: slice.into(),
             titles,
-            feedback,
-            choice: Choice::Skip,
+            choice: Choice::Create,
         }
     }
 
@@ -685,12 +677,6 @@ impl Review {
     #[must_use]
     pub(crate) fn titles(&self) -> &[String] {
         &self.titles
-    }
-
-    /// Whether the third answer is offered: see the field's own note.
-    #[must_use]
-    pub(crate) const fn feedback(&self) -> bool {
-        self.feedback
     }
 
     #[must_use]
@@ -720,6 +706,7 @@ impl Review {
 pub(crate) enum Reviewed {
     Open(Choice),
     Create,
+    Edit,
     Skip,
     Feedback,
 }
@@ -733,10 +720,6 @@ pub(crate) enum Reviewed {
 /// character for [`answer_for`]'s reason: terminals disagree about whether shift
 /// rides along with an upper-case letter, and a reader with caps lock on is
 /// still answering.
-///
-/// The whole window and not just the lit answer, because what a key means
-/// depends on the drafts: a slice that has spent its redraft has no third answer
-/// for `f` or a Right to reach.
 #[must_use]
 pub(crate) fn review_answer_for(key: KeyEvent, review: &Review) -> Reviewed {
     let lit = review.choice();
@@ -746,15 +729,17 @@ pub(crate) fn review_answer_for(key: KeyEvent, review: &Review) -> Reviewed {
 
     match key.code {
         KeyCode::Left => Reviewed::Open(lit.leftwards()),
-        KeyCode::Right => Reviewed::Open(lit.rightwards(review.feedback())),
+        KeyCode::Right => Reviewed::Open(lit.rightwards()),
         KeyCode::Enter => match lit {
             Choice::Create => Reviewed::Create,
+            Choice::Edit => Reviewed::Edit,
             Choice::Skip => Reviewed::Skip,
             Choice::Feedback => Reviewed::Feedback,
         },
         KeyCode::Char('c' | 'C') => Reviewed::Create,
+        KeyCode::Char('e' | 'E') => Reviewed::Edit,
         KeyCode::Char('s' | 'S') | KeyCode::Esc => Reviewed::Skip,
-        KeyCode::Char('f' | 'F') if review.feedback() => Reviewed::Feedback,
+        KeyCode::Char('f' | 'F') => Reviewed::Feedback,
         _ => Reviewed::Open(lit),
     }
 }

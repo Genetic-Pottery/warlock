@@ -35,13 +35,13 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use warlock_engine::{
-    Manifest, PullRun, ScopeRecord, brief_path, halted_and_resumed_runs, held_sigils,
-    resolve_filing, scope_opens_to,
+    Manifest, PullRun, ScopeRecord, brief_path, held_runs, held_sigils, resolve_filing,
+    scope_opens_to,
 };
 
 use crate::claude::{
-    Activities, Activity, Cancel, ChatAgent, ClaudeAgent, Split, Splitting, Worked, Working,
-    working_system_prompt,
+    Activities, Activity, Cancel, ChatAgent, ClaudeAgent, Split, Splitting, UNTIMED, Worked,
+    Working, working_system_prompt,
 };
 use crate::error::Error;
 use crate::freshness::{Freshened, Freshening, Freshens, freshened};
@@ -154,8 +154,7 @@ pub(crate) fn pulled<O: Opens, R: Repository, F: Forge, S: Splits, W: Works, P: 
     // in `In Progress` here from one in progress somewhere else. An unreadable one
     // is a line and not a failure: the scan names it, and the run it describes may
     // be holding uncommitted work on a branch.
-    let runs =
-        halted_and_resumed_runs(home, root, scope).map_err(|source| Error::Runs { source })?;
+    let runs = held_runs(home, root, scope).map_err(|source| Error::Runs { source })?;
     for unreadable in runs.unreadable() {
         say(progress, &format!("{unreadable}"));
     }
@@ -195,11 +194,7 @@ pub(crate) fn pulled<O: Opens, R: Repository, F: Forge, S: Splits, W: Works, P: 
         identifier: issue.identifier(),
         number: number_in(issue.identifier()),
         title: issue.title(),
-        // The queue's query does not read a description and this module asks the
-        // board for nothing about a ticket it was handed, so the split and every
-        // session see the title and no more. Empty is what `Ticket` already
-        // documents as a description nobody read.
-        description: "",
+        description: issue.description(),
     };
     held(progress).about(ticket.identifier);
 
@@ -668,7 +663,7 @@ impl<W: Write> Progress<W> {
 /// A cost is no line at all, following the panel's account card: it is a fact
 /// about the pass rather than an action, and a run that printed one per report
 /// would be a column of money in the middle of the work.
-fn activity_line(activity: &Activity) -> Option<String> {
+pub(crate) fn activity_line(activity: &Activity) -> Option<String> {
     match activity {
         Activity::Tool { name, detail } => Some(match detail {
             Some(detail) => format!("{name} {detail}"),
@@ -757,6 +752,7 @@ impl Freshener {
         let cancel = Cancel::new();
         Self {
             agent: ClaudeAgent::new()
+                .with_timeout(UNTIMED)
                 .with_cancel(cancel.clone())
                 .with_activities(activities),
             cancel,

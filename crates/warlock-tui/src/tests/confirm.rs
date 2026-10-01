@@ -958,21 +958,12 @@ mod review {
         ]
     }
 
-    // A slice with its redraft still to spend, which is how a window first goes
-    // up.
     fn open() -> Review {
-        Review::open(SLICE, titles(), true)
-    }
-
-    // The same slice once it has been redrafted: two answers, and the third
-    // nowhere a key can reach.
-    fn spent() -> Review {
-        Review::open(SLICE, titles(), false)
+        Review::open(SLICE, titles())
     }
 
     // The window answering one key as the session answers it: what is lit comes
-    // off the value that is up, and the whole window goes in because a key's
-    // meaning depends on whether the redraft is still there.
+    // off the value that is up.
     fn answered(review: &Review, code: KeyCode) -> Reviewed {
         review_answer_for(press(code), review)
     }
@@ -988,50 +979,41 @@ mod review {
     }
 
     #[test]
-    fn a_fresh_window_is_up_on_skip_with_the_drafts_it_is_about() {
-        // Skip is lit for No's reason elsewhere: the round that puts this up
-        // and an Enter straight after it file nothing at all.
+    fn a_fresh_window_is_up_on_create_with_the_drafts_it_is_about() {
+        // Forman's empty line: somebody who has read the drafts on the panel
+        // and pressed Enter has agreed with them.
         let review = open();
 
-        assert_eq!(review.choice(), Choice::Skip);
+        assert_eq!(review.choice(), Choice::Create);
         assert_eq!(review.slice(), SLICE);
         assert_eq!(review.titles(), titles().as_slice());
-        assert!(review.feedback(), "a fresh slice has its redraft to spend");
-        assert_eq!(answered(&review, KeyCode::Enter), Reviewed::Skip);
+        assert_eq!(answered(&review, KeyCode::Enter), Reviewed::Create);
     }
 
     #[test]
-    fn the_arrows_walk_the_three_answers_and_stop_at_both_ends() {
+    fn the_arrows_walk_the_four_answers_and_stop_at_both_ends() {
         // A highlight that wrapped would put the answer that files issues under
-        // the finger of somebody pressing Right twice.
-        let create = open().with_choice(Choice::Create);
-        let feedback = open().with_choice(Choice::Feedback);
-
+        // the finger of somebody pressing Right from the far end.
+        let order = [Choice::Create, Choice::Edit, Choice::Skip, Choice::Feedback];
+        for pair in order.windows(2) {
+            assert_eq!(
+                answered(&open().with_choice(pair[0]), KeyCode::Right),
+                Reviewed::Open(pair[1])
+            );
+            assert_eq!(
+                answered(&open().with_choice(pair[1]), KeyCode::Left),
+                Reviewed::Open(pair[0])
+            );
+        }
         assert_eq!(
-            answered(&open(), KeyCode::Left),
-            Reviewed::Open(Choice::Create)
-        );
-        assert_eq!(
-            answered(&open(), KeyCode::Right),
-            Reviewed::Open(Choice::Feedback)
-        );
-        assert_eq!(
-            answered(&create, KeyCode::Left),
+            answered(&open().with_choice(Choice::Create), KeyCode::Left),
             Reviewed::Open(Choice::Create),
             "Left walked off the left end"
         );
         assert_eq!(
-            answered(&feedback, KeyCode::Right),
+            answered(&open().with_choice(Choice::Feedback), KeyCode::Right),
             Reviewed::Open(Choice::Feedback),
             "Right walked off the right end"
-        );
-        assert_eq!(
-            answered(&feedback, KeyCode::Left),
-            Reviewed::Open(Choice::Skip)
-        );
-        assert_eq!(
-            answered(&create, KeyCode::Right),
-            Reviewed::Open(Choice::Skip)
         );
     }
 
@@ -1039,6 +1021,7 @@ mod review {
     fn enter_answers_with_whatever_is_lit() {
         for (choice, answer) in [
             (Choice::Create, Reviewed::Create),
+            (Choice::Edit, Reviewed::Edit),
             (Choice::Skip, Reviewed::Skip),
             (Choice::Feedback, Reviewed::Feedback),
         ] {
@@ -1059,6 +1042,8 @@ mod review {
             for (code, answer) in [
                 (KeyCode::Char('c'), Reviewed::Create),
                 (KeyCode::Char('C'), Reviewed::Create),
+                (KeyCode::Char('e'), Reviewed::Edit),
+                (KeyCode::Char('E'), Reviewed::Edit),
                 (KeyCode::Char('s'), Reviewed::Skip),
                 (KeyCode::Char('S'), Reviewed::Skip),
                 (KeyCode::Char('f'), Reviewed::Feedback),
@@ -1085,28 +1070,6 @@ mod review {
                 "Esc with {lit:?} lit did not skip"
             );
         }
-    }
-
-    #[test]
-    fn a_spent_redraft_is_neither_pressed_nor_walked_onto() {
-        // One redraft each. The third answer is not drawn on a window that has
-        // spent it, and a key that is not drawn is not one that can be pressed.
-        let spent = spent();
-
-        assert_eq!(
-            answered(&spent, KeyCode::Char('f')),
-            Reviewed::Open(Choice::Skip),
-            "`f` asked for a second redraft"
-        );
-        assert_eq!(
-            answered(&spent, KeyCode::Right),
-            Reviewed::Open(Choice::Skip),
-            "Right lit an answer that is not on the window"
-        );
-        assert_eq!(
-            answered(&spent.with_choice(Choice::Create), KeyCode::Right),
-            Reviewed::Open(Choice::Skip)
-        );
     }
 
     #[test]
@@ -1144,7 +1107,7 @@ mod review {
 
                 assert_eq!(
                     review_answer_for(event, &open()),
-                    Reviewed::Open(Choice::Skip),
+                    Reviewed::Open(Choice::Create),
                     "{kind:?} of {code:?} should answer nothing"
                 );
             }
@@ -1173,8 +1136,8 @@ mod review {
         }
         assert_eq!(
             answered(&open(), KeyCode::Enter),
-            Reviewed::Skip,
-            "Enter on Skip skips, so the default answer files nothing"
+            Reviewed::Create,
+            "Enter on the fresh window files, as Forman's empty line does"
         );
     }
 }

@@ -285,9 +285,10 @@ fn a_project_with_every_slice_cut_names_the_brief_and_the_file_recording_them() 
 
     assert_eq!(
         error.to_string(),
-        "every slice of the project filed for `docs/brief.md` is already cut, so there is \
-         nothing to draft: `.warlock/filed.toml` holds a record for each of them, and \
-         warlock cuts a slice once"
+        "every slice of the project filed for `docs/brief.md` is already cut or skipped, so \
+         there is nothing to draft: `.warlock/filed.toml` holds a record for each of them, and \
+         warlock offers a slice once — retitle a skipped slice in the brief to have it offered \
+         again"
     );
 }
 

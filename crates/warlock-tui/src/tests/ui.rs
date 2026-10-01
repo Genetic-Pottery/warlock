@@ -20,14 +20,14 @@ use super::{
     PACTING_QUIT_KEY, PACTING_RUN, PANEL_INDENT, PATH_HEADING, PATH_RULES, PERCENT_WIDTH,
     PULL_BRANCH, PULL_FROM, PULL_QUESTION, PULL_RESUME_QUESTION, PULL_SCOPE, PULL_TEAM, PUSH_KEY,
     PUSH_QUESTION, PUSH_TEAM, QUIT_KEY, RECORD_HEADING, RECORD_LABEL_GAP, RECORD_RULES,
-    REFRESHING_RUN, REVIEW_ANSWER_GAP, REVIEW_CREATE, REVIEW_FEEDBACK, REVIEW_QUESTION,
-    REVIEW_SKIP, ROW_KEY, RUN_HEADER_HEIGHT, Reach, Review, SAID_MARKER, SCOPE_CURSOR,
-    SCOPE_HEADING, SCROLLBACK_ARROW, SELECTED, SELECTION_MARKER, THREAD_TITLE, TREE_MIN_WIDTH,
-    TREE_PERCENT, areas, composer_height, composer_on_screen, display_width, draw,
-    footer_text_area, guide_prefixes, hit_test, keys_line, label_width, mark_area,
-    pacting_keys_line, pane_inner, panel_height, panel_reach, panel_row, panel_rows_area,
-    panel_width, run_header_height, run_header_line, tree_height, tree_rows_area, tree_width,
-    truncated,
+    REFRESHING_RUN, REVIEW_ANSWER_GAP, REVIEW_CREATE, REVIEW_EDIT, REVIEW_FEEDBACK,
+    REVIEW_QUESTION, REVIEW_READ, REVIEW_SKIP, ROW_KEY, RUN_HEADER_HEIGHT, Reach, Review,
+    SAID_MARKER, SCOPE_CURSOR, SCOPE_HEADING, SCROLLBACK_ARROW, SELECTED, SELECTION_MARKER,
+    THREAD_TITLE, TREE_MIN_WIDTH, TREE_PERCENT, areas, composer_height, composer_on_screen,
+    display_width, draw, footer_text_area, guide_prefixes, hit_test, keys_line, label_width,
+    mark_area, pacting_keys_line, pane_inner, panel_height, panel_reach, panel_row,
+    panel_rows_area, panel_width, run_header_height, run_header_line, tree_height, tree_rows_area,
+    tree_width, truncated,
 };
 use crate::account::{Line as Entry, Outcome};
 use crate::app::{App, Chrome, Focus, Row, Run, Sigils};
@@ -6807,12 +6807,8 @@ const REVIEW_TITLES: [&str; 2] = [
     "Report what a create became by identifier",
 ];
 
-fn review_window(feedback: bool) -> Review {
-    Review::open(
-        REVIEW_SLICE,
-        REVIEW_TITLES.map(str::to_owned).to_vec(),
-        feedback,
-    )
+fn review_window() -> Review {
+    Review::open(REVIEW_SLICE, REVIEW_TITLES.map(str::to_owned).to_vec())
 }
 
 // The two windows a confirmed cut puts up, each on a frame with nothing else
@@ -6851,10 +6847,10 @@ fn render_carry(app: &App, width: u16, height: u16, carry: &Carry) -> Buffer {
 }
 
 #[test]
-fn the_review_window_names_the_slice_every_title_and_the_three_answers() {
+fn the_review_window_names_the_slice_counts_the_drafts_and_offers_four_answers() {
     let base = Instant::now();
     let app = busy_app(base, WIDTH, FIXTURE_HEIGHT);
-    let review = review_window(true);
+    let review = review_window();
 
     let buffer = render_review(&app, WIDTH, FIXTURE_HEIGHT, &review);
 
@@ -6865,20 +6861,24 @@ fn the_review_window_names_the_slice_every_title_and_the_three_answers() {
             .position(|row| row.contains(needle))
             .unwrap_or_else(|| panic!("{needle:?} is not on the window: {rows:?}"))
     };
-    // What is being asked, which slice it is about, what was drafted for it,
-    // and the three things that can be done about that.
+    // What is being asked, which slice it is about, where its drafts are to
+    // be read, and the three things that can be done about them.
     let question = on(REVIEW_QUESTION);
     let slice = on(REVIEW_SLICE);
-    let first = on(REVIEW_TITLES[0]);
-    let second = on(REVIEW_TITLES[1]);
+    let read = on(&format!("2 drafts{REVIEW_READ}"));
     let answers = on(REVIEW_SKIP.trim());
 
-    assert!(question < slice, "{rows:?}");
-    assert!(slice < first && first < second, "{rows:?}");
-    assert!(second < answers, "{rows:?}");
+    assert!(
+        question < slice && slice < read && read < answers,
+        "{rows:?}"
+    );
+    // The titles are on the panel with their bodies, and not over them here.
+    for title in REVIEW_TITLES {
+        assert!(rows.iter().all(|row| !row.contains(title)), "{rows:?}");
+    }
     // Three answers on that line and nothing else, in the order a reader walks
     // them with the arrows.
-    assert_eq!(inside_the_border(&rows[answers]), review_answers_text(true));
+    assert_eq!(inside_the_border(&rows[answers]), review_answers_text());
     assert!(
         column_of(&rows[answers], REVIEW_CREATE.trim())
             < column_of(&rows[answers], REVIEW_SKIP.trim()),
@@ -6889,45 +6889,36 @@ fn the_review_window_names_the_slice_every_title_and_the_three_answers() {
             < column_of(&rows[answers], REVIEW_FEEDBACK.trim()),
         "{rows:?}"
     );
-    // One row per title on top of the fixed five, so nothing being answered
-    // about is cut off.
-    assert_eq!(u16::try_from(rows.len()).expect("a short window"), {
-        5 + u16::try_from(REVIEW_TITLES.len()).expect("two titles")
-            + 2 * DIALOG_MARGIN_ROWS
-            + 2 * BORDER_THICKNESS
-    });
 }
 
-fn review_answers_text(feedback: bool) -> String {
-    let two = format!("{REVIEW_CREATE}{REVIEW_ANSWER_GAP}{REVIEW_SKIP}");
-    if feedback {
-        format!("{two}{REVIEW_ANSWER_GAP}{REVIEW_FEEDBACK}")
-    } else {
-        two
-    }
+fn review_answers_text() -> String {
+    format!(
+        "{REVIEW_CREATE}{REVIEW_ANSWER_GAP}{REVIEW_EDIT}{REVIEW_ANSWER_GAP}{REVIEW_SKIP}\
+         {REVIEW_ANSWER_GAP}{REVIEW_FEEDBACK}"
+    )
     .trim()
     .to_owned()
 }
 
 #[test]
-fn the_review_window_opens_on_skip_and_moves_only_the_highlight() {
+fn the_review_window_opens_on_create_and_moves_only_the_highlight() {
     let base = Instant::now();
     let app = busy_app(base, WIDTH, FIXTURE_HEIGHT);
-    let opened = review_window(true);
-    let moved = opened.with_choice(Choice::Create);
+    let opened = review_window();
+    let moved = opened.with_choice(Choice::Skip);
 
     let first = render_review(&app, WIDTH, FIXTURE_HEIGHT, &opened);
     let second = render_review(&app, WIDTH, FIXTURE_HEIGHT, &moved);
 
     let area = Dialog::review(&opened).area(first.area);
-    // The answer that files issues is never the one under the reader's finger
-    // when the drafts arrive.
-    assert_lit_in(&first, area, REVIEW_SKIP);
-    assert_unlit_in(&first, area, REVIEW_CREATE);
+    // Create is under the finger when the drafts arrive, as Forman's empty
+    // line files them.
+    assert_lit_in(&first, area, REVIEW_CREATE);
+    assert_unlit_in(&first, area, REVIEW_SKIP);
     assert_unlit_in(&first, area, REVIEW_FEEDBACK);
-    assert_lit_in(&second, area, REVIEW_CREATE);
-    assert_unlit_in(&second, area, REVIEW_SKIP);
-    // And nothing else moved: the slice and its titles are drawn in the same
+    assert_lit_in(&second, area, REVIEW_SKIP);
+    assert_unlit_in(&second, area, REVIEW_CREATE);
+    // And nothing else moved: the slice and its count are drawn in the same
     // rows whichever answer is lit.
     assert_eq!(
         dialog_rows(&first, area),
@@ -6936,37 +6927,10 @@ fn the_review_window_opens_on_skip_and_moves_only_the_highlight() {
 }
 
 #[test]
-fn a_slice_that_has_spent_its_redraft_is_drawn_with_two_answers() {
-    // One redraft each, and a window that still drew the third would be
-    // offering something no key can reach.
+fn the_review_window_sits_on_the_bottom_edge_bordered_like_every_other_question() {
     let base = Instant::now();
     let app = busy_app(base, WIDTH, FIXTURE_HEIGHT);
-    let review = review_window(false);
-
-    let buffer = render_review(&app, WIDTH, FIXTURE_HEIGHT, &review);
-
-    let rows = dialog_rows(&buffer, Dialog::review(&review).area(buffer.area));
-    let answers = rows
-        .iter()
-        .position(|row| row.contains(REVIEW_SKIP.trim()))
-        .expect("the answers are drawn");
-    assert_eq!(
-        inside_the_border(&rows[answers]),
-        review_answers_text(false)
-    );
-    for row in &rows {
-        assert!(
-            !row.contains(REVIEW_FEEDBACK.trim()),
-            "a spent redraft is drawn: {rows:?}"
-        );
-    }
-}
-
-#[test]
-fn the_review_window_is_centred_and_bordered_like_every_other_question() {
-    let base = Instant::now();
-    let app = busy_app(base, WIDTH, FIXTURE_HEIGHT);
-    let review = review_window(true);
+    let review = review_window();
 
     let buffer = render_review(&app, WIDTH, FIXTURE_HEIGHT, &review);
 
@@ -6979,10 +6943,9 @@ fn the_review_window_is_centred_and_bordered_like_every_other_question() {
         left.abs_diff(right) <= 1,
         "{left} columns left, {right} right"
     );
-    assert!(
-        above.abs_diff(below) <= 1,
-        "{above} rows above, {below} below"
-    );
+    // On the bottom edge and not the middle: the drafts it asks about are on
+    // the panel behind it, and a centred window would sit over them.
+    assert_eq!(below, 0, "{above} rows above, {below} below");
     let rows = dialog_rows(&buffer, area);
     assert!(
         rows[0].starts_with('┌') && rows[0].ends_with('┐'),

@@ -141,8 +141,19 @@ impl<B: Board, R: Repository, F: Forge, S: Splits, W: Works> Pulling<'_, B, R, F
     pub(crate) fn work(&mut self, ticket: &Ticket<'_>) -> Result<Reached, Error> {
         let mut run =
             match PullRun::find(self.home, self.root, ticket.identifier).map_err(Error::record)? {
-                Some(held) => {
+                Some(mut held) => {
                     self.take_up(&held)?;
+                    // A run whose process stopped without a halt left the
+                    // sub-task it was on `in_progress`; it is run again.
+                    for reset in held.release_interrupted() {
+                        self.report(PullEvent::Repair {
+                            note: format!(
+                                "`{}` was in progress when the last run stopped, and is \
+                                 pending again",
+                                reset.id()
+                            ),
+                        });
+                    }
                     held
                 }
                 None => self.start(ticket)?,
@@ -160,10 +171,17 @@ impl<B: Board, R: Repository, F: Forge, S: Splits, W: Works> Pulling<'_, B, R, F
                 team: self.scope.team().to_owned(),
             });
         }
+        // Saved before the split, as Forman saves its state before it
+        // decomposes: a run killed while the split is thinking is then a record
+        // this machine holds and the next pull picks up, rather than a ticket
+        // in `In Progress` with no record that every pull skips as somebody
+        // else's.
+        self.save(&run)?;
 
         // A resumed run already holds its split, and splitting it again would
         // spend a session and append a second `.01` beside the first. A held run
-        // with no sub-tasks is one whose split halted, and is owed the split.
+        // with no sub-tasks is one whose split halted or never finished, and is
+        // owed the split.
         if run.subtasks().is_empty()
             && let Some(reached) = self.split_into(ticket, &mut run)
         {
@@ -671,11 +689,10 @@ pub(crate) struct StaleDirectory {
 
 /// The ticket one pull works, in what a run needs of it and nothing else.
 ///
-/// Values rather than a [`QueuedIssue`](crate::linear::QueuedIssue), because two of
-/// these five are not on one: the number as a number, which
-/// [`branch_name`] takes, and the description, which the queue's query does not
-/// read. Whoever chose the ticket supplies them, and this module asks the board
-/// for nothing about the ticket it was handed.
+/// Values rather than a [`QueuedIssue`](crate::linear::QueuedIssue), because the
+/// number is wanted as a number, which [`branch_name`] takes. Whoever chose the
+/// ticket supplies them, and this module asks the board for nothing about the
+/// ticket it was handed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Ticket<'a> {
     /// The board's own identifier for the issue, which is what a move and a
@@ -688,8 +705,8 @@ pub(crate) struct Ticket<'a> {
     pub(crate) number: u32,
     pub(crate) title: &'a str,
     /// What the ticket says, as the context the split and every sub-task session
-    /// are given. Empty is a ticket whose description nobody read, and it reads
-    /// as a ticket with nothing more to say than its title.
+    /// are given, as `forman pull` gives them the parent ticket. Empty is a
+    /// ticket nobody described.
     pub(crate) description: &'a str,
 }
 

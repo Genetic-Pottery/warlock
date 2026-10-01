@@ -14,14 +14,18 @@ use crate::claude::{ChatAgent, ClaudeAgent, Converses, Wired};
 use crate::clipboard::{self, Clip, Clipboard};
 use crate::composer::{Composed, paste_for};
 use crate::confirm::QuitConfirm;
+use crate::confirm::Reviewed;
 use crate::cutting::Cutter;
-use crate::editing::edit_press;
+use crate::editing::{NO_EDITOR, edit_press, editor, run_editor};
 use crate::error::Error;
 use crate::git::{Forge, Gh, Git, Repository};
-use crate::input::{Action, Drag, MouseAction, Pressed, drag_after, mouse_action, press_for};
+use crate::input::{
+    Action, Drag, MouseAction, Pressed, Scroll, drag_after, mouse_action, press_for,
+};
 use crate::linear::{Opener as LinearOpener, Opens};
 use crate::modal::{Modal, Modals};
 use crate::pacting::{Pact, Reloaded};
+use crate::planned::edited_drafts;
 use crate::prompt::{RecordPrompt, ScopePrompt};
 use crate::puller::{Claudes, Puller, Raises};
 use crate::pushing::Pushes;
@@ -533,7 +537,30 @@ impl<K: Seams> Session<K> {
             // slice's drafts, and whether a skipped slice ends the run. See
             // [`Cutter::confirmed`], [`Cutter::reviewed`] and [`Cutter::carried`].
             Pressed::Cut(answered) => self.cutter.confirmed(&mut self.app, answered, now),
+            // Forman's `[e]dit`, here rather than in the cut because it hands
+            // the screen to `$EDITOR` the way `e` on a file does. The window
+            // stays up behind it and asks about whatever was saved.
+            Pressed::Review(Reviewed::Edit) => {
+                if let Some((slice, drafts)) = self.cutter.editing() {
+                    let edited = match editor() {
+                        None => Err(NO_EDITOR.to_owned()),
+                        Some(editor) => self.screen.suspended(self.mouse_captured, || {
+                            edited_drafts(&slice, &drafts, |path| run_editor(&editor, path))
+                        })?,
+                    };
+                    self.cutter.edited(&mut self.app, edited, now);
+                }
+            }
             Pressed::Review(answered) => self.cutter.reviewed(&mut self.app, answered, now),
+            Pressed::Scroll(scroll) => {
+                let page = self.app.panel().page();
+                match scroll {
+                    Scroll::LineUp => self.app.scroll_panel_up(1),
+                    Scroll::LineDown => self.app.scroll_panel_down(1),
+                    Scroll::PageUp => self.app.scroll_panel_up(page),
+                    Scroll::PageDown => self.app.scroll_panel_down(page),
+                }
+            }
             Pressed::Carry(answered) => self.cutter.carried(&mut self.app, answered, now),
             // The question a `/pull` puts up once the queue has answered: moved,
             // declined, or confirmed, which starts the run. See

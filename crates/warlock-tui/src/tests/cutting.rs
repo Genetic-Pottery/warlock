@@ -80,9 +80,10 @@ const AT_MOST: Duration = Duration::from_secs(10);
 const ROUNDS: usize = 64;
 
 // What a `/draft` reads before it offers anything: the user the key belongs to,
-// once for the run, and the project the filed record names. Every assertion
-// below that a run sent nothing to the board is this number and not zero.
-const PREPARED: usize = 2;
+// once for the run, the project the filed record names, and the open tickets a
+// draft may wait on. Every assertion below that a run sent nothing to the board
+// is this number and not zero.
+const PREPARED: usize = 3;
 
 fn now() -> Instant {
     Instant::now()
@@ -147,6 +148,21 @@ fn filed(root: &Path, cuts: &[&str]) {
     Filed::with_records([record])
         .save(root)
         .expect("a record file that saves");
+}
+
+// What the thread's turns answered with: for a `/draft`, what each slice's
+// session said — a question, or its drafts whole.
+fn answers(app: &App) -> Vec<String> {
+    app.panel()
+        .thread()
+        .map(|thread| {
+            thread
+                .turns()
+                .iter()
+                .filter_map(|turn| turn.answer().map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn notes(app: &App) -> Vec<String> {
@@ -397,9 +413,11 @@ fn a_project_that_is_not_planned_is_one_line_with_nothing_torn_down() {
         })),
         "the line is not the engine's own sentence",
     );
+    // The project's status is read before the backlog is, so a refusal on it
+    // never asks for the open tickets.
     assert_eq!(
         linear.requests(),
-        PREPARED,
+        PREPARED - 1,
         "the gate sent a request of its own"
     );
     assert!(!cutter.fetching(), "a refusal left a draft running");
@@ -718,6 +736,7 @@ mod cutting {
         Scripted, THIRD, a_home, a_project, a_repository, asked_held, asked_over, filed, landing,
         notes, now, press, through, unasked,
     };
+    use crate::claude::Activity;
 
     // The three `[n/total]` prefixes a run over this project says, in the order
     // it says them: the fraction is the place in the cut order and the position
@@ -936,6 +955,33 @@ mod cutting {
     }
 
     #[test]
+    fn a_slice_that_came_to_nothing_stops_its_turn_and_says_why_under_it() {
+        let (mut app, mut cutter, _repo, _home) = cut(
+            a_project(),
+            Scripted::saying([
+                Answering::missing(),
+                Answering::drafts(SECOND),
+                Answering::drafts(THIRD),
+            ]),
+        );
+
+        through(&mut app, &mut cutter);
+
+        let thread = app.panel().thread().expect("the run is on the thread");
+        assert!(
+            thread.turns().iter().all(|turn| turn.is_closed()),
+            "a slice's clock ran on"
+        );
+        assert!(
+            notes(&app)
+                .iter()
+                .any(|line| line.contains(&format!("slice 1 `{FIRST}` was not drafted"))),
+            "{:?}",
+            notes(&app)
+        );
+    }
+
+    #[test]
     fn the_rounds_go_on_while_a_slice_is_drafting() {
         // The whole reason a turn is on a worker: a drain that blocked would
         // freeze the panel for as long as the model took to think, which for a
@@ -961,6 +1007,63 @@ mod cutting {
             "a round with nothing to report said something"
         );
         gate.open();
+        through(&mut app, &mut cutter);
+    }
+
+    #[test]
+    fn a_slice_being_drafted_is_a_live_turn_on_the_thread_and_stops_when_it_lands() {
+        // The complaint this answers: one `drafting` line and then minutes of
+        // nothing. What the session is seen doing ticks under that line, in the
+        // conversation, as a chat turn's work does.
+        let gate = Gate::shut();
+        let agent = Scripted::saying([
+            Answering::drafts(FIRST),
+            Answering::drafts(SECOND),
+            Answering::drafts(THIRD),
+        ])
+        .doing([
+            Activity::Thinking,
+            Activity::Tool {
+                name: "Read".to_owned(),
+                detail: Some("src/lib.rs".to_owned()),
+            },
+        ])
+        .held_at(&gate);
+        let (mut app, mut cutter, _repo, _home) = cut_held(a_project(), agent);
+
+        let waited = Instant::now();
+        let read = |app: &App| {
+            app.panel().thread().is_some_and(|thread| {
+                thread
+                    .lines(now())
+                    .iter()
+                    .any(|line| format!("{line:?}").contains("src/lib.rs"))
+            })
+        };
+        while !read(&app) && waited.elapsed() < AT_MOST {
+            cutter.keep_up(&mut app, now());
+        }
+
+        assert!(read(&app), "the tool call never reached the thread");
+        assert_eq!(app.panel().showing(), crate::panel::Showing::Thread);
+        let live = app.panel().thread().and_then(|thread| thread.in_flight());
+        assert!(live.is_some(), "no live turn while the slice drafts");
+        assert_eq!(
+            live.map(crate::thread::Turn::message),
+            Some(""),
+            "the work turn has a message"
+        );
+
+        gate.open();
+        while cutter.reviewing().is_none() && waited.elapsed() < AT_MOST {
+            cutter.keep_up(&mut app, now());
+        }
+        assert!(
+            app.panel()
+                .thread()
+                .is_some_and(|thread| thread.in_flight().is_none()),
+            "the slice's clock ran on behind the review"
+        );
         through(&mut app, &mut cutter);
     }
 
@@ -1140,18 +1243,9 @@ mod relaying {
         // depends on what it is told.
         let (app, cutter, _repo, _home) = asking(Scripted::saying([Answering::says(PROPOSED)]));
 
+        // The slice's work turn answered with the question, word for word.
+        assert_eq!(super::answers(&app), [ASKED.to_owned()]);
         let said = notes(&app);
-        let asked: Vec<&String> = said.iter().filter(|line| line.contains(ASKED)).collect();
-        assert_eq!(
-            asked.len(),
-            1,
-            "the question is not on the thread: {said:?}"
-        );
-        assert!(
-            asked[0].starts_with(&format!("slice 1 `{FIRST}` asked:")),
-            "{:?} does not mark the slice as having asked",
-            asked[0]
-        );
         assert!(
             !said.iter().any(|line| line.contains(SECOND)),
             "the run walked past a question: {said:?}"
@@ -1311,7 +1405,7 @@ mod relaying {
             format!("slice 1 `{FIRST}` was answered: {PROPOSED}")
         );
         assert!(
-            said.iter().any(|line| line.contains("asked:")),
+            super::answers(&app).contains(&ASKED.to_owned()),
             "the question it answers is not on the thread: {said:?}"
         );
         assert!(
@@ -1606,10 +1700,8 @@ mod reviewing {
                 format!("Follow on from {FIRST}"),
             ]
         );
-        // Skip is lit, so the round that put this up and an Enter straight
-        // after it file nothing at all.
-        assert_eq!(review.choice(), Choice::Skip);
-        assert!(review.feedback(), "the one redraft is not offered");
+        // Create is lit: Forman's empty line, with the drafts on the panel.
+        assert_eq!(review.choice(), Choice::Create);
         let said = notes(&app);
         assert!(
             about(&said, FIRST)
@@ -1622,6 +1714,38 @@ mod reviewing {
             !said.iter().any(|line| line.contains(SECOND)),
             "the run walked past a window: {said:?}"
         );
+    }
+
+    #[test]
+    fn a_slices_drafts_are_on_the_thread_whole_while_the_window_asks() {
+        // The window asks about the drafts, so the conversation shows them —
+        // titles, bodies and edges — as what the slice's session said, the way
+        // Forman prints them above its prompt.
+        let linear = a_project();
+        let (mut app, mut cutter, _repo, _home) = cut(linear, drafting_each());
+
+        offered(&mut app, &mut cutter);
+
+        assert!(cutter.reviewing().is_some(), "a window is up");
+        assert_eq!(app.panel().showing(), crate::panel::Showing::Thread);
+        let said = super::answers(&app);
+        let drafts = said.last().expect("the drafts are an answer on the thread");
+        assert!(
+            drafts.starts_with(&format!("# slice 1 `{FIRST}`")),
+            "{drafts}"
+        );
+        for wanted in [
+            format!("## 1. Stand in for {FIRST}"),
+            format!("## 2. Follow on from {FIRST}"),
+            "Blocks #2".to_owned(),
+            "Blocked by #1".to_owned(),
+            "A stand-in ticket body".to_owned(),
+        ] {
+            assert!(
+                drafts.contains(&wanted),
+                "{wanted:?} is not shown: {drafts}"
+            );
+        }
     }
 
     #[test]
@@ -1760,9 +1884,9 @@ mod reviewing {
     }
 
     #[test]
-    fn a_skip_records_nothing_and_asks_whether_to_carry_on() {
-        // A skipped slice is one the next `/draft` offers again, which is the
-        // whole difference between skipping drafts and filing them.
+    fn a_skip_is_recorded_and_asks_whether_to_carry_on() {
+        // Red's rule: a skip is a human saying no at the gate, recorded as a
+        // cut that filed nothing so no later `/draft` offers the slice again.
         let linear = a_project();
         let (mut app, mut cutter, repo, _home) = cut(linear.clone(), drafting_each());
         offered(&mut app, &mut cutter);
@@ -1773,7 +1897,7 @@ mod reviewing {
         assert!(
             about(&said, FIRST)
                 .iter()
-                .any(|line| line.contains("was skipped; nothing was recorded for it")),
+                .any(|line| line.contains("was skipped: nothing was created for it")),
             "the skip is not on the thread: {said:?}"
         );
         assert_eq!(
@@ -1781,7 +1905,9 @@ mod reviewing {
             PREPARED,
             "a skip sent something to the board"
         );
-        assert!(cuts(repo.path()).is_empty(), "a skip wrote a cut record");
+        let recorded = cuts(repo.path());
+        assert_eq!(recorded.len(), 1, "{recorded:?}");
+        assert!(recorded[0].issues().is_empty(), "{recorded:?}");
         let carry = cutter.carrying().expect("the carry-on question is up");
         assert_eq!(carry.left(), "2 slices");
         // No is lit, so the answer that is under the finger is the one that
@@ -1916,63 +2042,28 @@ mod reviewing {
     }
 
     #[test]
-    fn a_second_feedback_is_not_offered_and_answers_nothing() {
-        // One redraft each: the window that comes back from one is drawn with
-        // two answers, and the key that would ask for another reaches a window
-        // that does not have it.
+    fn feedback_is_offered_again_after_a_redraft() {
+        // Forman counts no redrafts: each review takes feedback, and each
+        // feedback is a turn of the same session.
         let linear = a_project();
-        let agent = redrafting();
+        let agent = Scripted::saying([
+            Answering::drafts(FIRST),
+            Answering::drafts(REDRAFTED),
+            Answering::drafts(REDRAFTED),
+            Answering::drafts(SECOND),
+            Answering::drafts(THIRD),
+        ]);
         let (mut app, mut cutter, _repo, _home) = cut(linear, agent.clone());
         offered(&mut app, &mut cutter);
-        cutter.feedback(&mut app, now());
-        cutter.answered(&mut app, FEEDBACK, now());
-        offered(&mut app, &mut cutter);
-        let said = notes(&app).len();
+        for _ in 0..2 {
+            cutter.feedback(&mut app, now());
+            assert!(cutter.relaying(), "feedback did not ask for text");
+            cutter.answered(&mut app, FEEDBACK, now());
+            offered(&mut app, &mut cutter);
+        }
 
-        assert!(
-            !cutter
-                .reviewing()
-                .expect("the window is up again")
-                .feedback(),
-            "a second redraft is offered"
-        );
-        cutter.feedback(&mut app, now());
-
-        assert!(
-            cutter.reviewing().is_some(),
-            "a second feedback took the window down"
-        );
-        assert!(!cutter.relaying(), "a second feedback asked for text");
-        assert_eq!(agent.turns(), 2, "the slice was redrafted twice");
-        assert_eq!(
-            notes(&app).len(),
-            said,
-            "a key that reached the wrong window said something"
-        );
-    }
-
-    #[test]
-    fn the_run_carries_on_past_a_redraft_with_its_own_redraft_back() {
-        // The redraft is spent by the slice that used it and not by the run: the
-        // slice after a redrafted one is offered its own.
-        let linear = a_project();
-        let (mut app, mut cutter, _repo, _home) = cut(linear, redrafting());
-        offered(&mut app, &mut cutter);
-        cutter.feedback(&mut app, now());
-        cutter.answered(&mut app, FEEDBACK, now());
-        offered(&mut app, &mut cutter);
-
-        cutter.skip(&mut app, now());
-        cutter.carry_on(&mut app, now());
-        offered(&mut app, &mut cutter);
-
-        assert!(
-            cutter
-                .reviewing()
-                .expect("the next slice's window is up")
-                .feedback(),
-            "the next slice has no redraft of its own"
-        );
+        assert_eq!(agent.turns(), 3, "the slice was not redrafted twice");
+        assert!(cutter.reviewing().is_some(), "the window is not up again");
     }
 
     #[test]

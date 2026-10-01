@@ -94,7 +94,7 @@ pub use claude::Drafting;
 pub use claude::INVOCATION_TIMEOUT;
 pub use claude::NOTHING_SETTLES_IT;
 pub use claude::Splitting;
-pub use claude::WORKING_TIMEOUT;
+pub use claude::UNTIMED;
 pub use claude::Working;
 pub use claude::brief_instruction;
 pub use claude::drafting_opening;

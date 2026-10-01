@@ -154,7 +154,31 @@ pub(crate) enum Pressed {
     Write(Edited),
     Compose(Composed),
     Act(Action),
+    Scroll(Scroll),
     Nothing,
+}
+
+/// The panel moved, wherever the focus is: a window up holds the keys, and the
+/// pane they would otherwise drive is not the one being read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Scroll {
+    LineUp,
+    LineDown,
+    PageUp,
+    PageDown,
+}
+
+fn review_scroll(key: KeyEvent) -> Option<Scroll> {
+    if key.kind != KeyEventKind::Press {
+        return None;
+    }
+    match key.code {
+        KeyCode::Up | KeyCode::Char('k') => Some(Scroll::LineUp),
+        KeyCode::Down | KeyCode::Char('j') => Some(Scroll::LineDown),
+        KeyCode::PageUp => Some(Scroll::PageUp),
+        KeyCode::PageDown => Some(Scroll::PageDown),
+        _ => None,
+    }
 }
 
 // Spelled here rather than reached for through `action_for`, because
@@ -216,7 +240,12 @@ pub(crate) fn press_for(
             Modal::Push(asked) => Pressed::Push(push_answer_for(key, asked.answer())),
             Modal::Cut(asked) => Pressed::Cut(cut_answer_for(key, asked.answer())),
             Modal::Pull(asked) => Pressed::Pull(pull_answer_for(key, asked.answer())),
-            Modal::Review(drafts) => Pressed::Review(review_answer_for(key, drafts)),
+            // The drafts are on the panel behind this window, so the keys that
+            // move through a page move through them and answer nothing.
+            Modal::Review(drafts) => review_scroll(key).map_or_else(
+                || Pressed::Review(review_answer_for(key, drafts)),
+                Pressed::Scroll,
+            ),
             Modal::Carry(asked) => Pressed::Carry(carry_answer_for(key, asked.answer())),
             Modal::Filing(field) => Pressed::Filing(edit_for(key, field)),
             Modal::Scope(field) => Pressed::Scope(edit_for(key, field)),

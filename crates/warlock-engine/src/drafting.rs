@@ -4,7 +4,7 @@ use std::fmt::Write as _;
 
 use serde::{Deserialize, Serialize};
 
-use crate::fill::{self, Asking, Defect, Reask, Rewrite, cut, fit, flattened, line, turned_down};
+use crate::fill::{self, Asking, Defect, Reask, Rewrite, fit, flattened, line, turned_down};
 
 // The drafting road asks again exactly as often as the document road does, and
 // a second bound would be a number to keep in step with this one for no gain.
@@ -20,8 +20,6 @@ pub const DRAFTS_PER_SLICE: usize = 12;
 pub const TITLE_CHARS: usize = 120;
 
 pub const TITLE_MINIMUM: usize = 12;
-
-pub const BODY_CHARS: usize = 4000;
 
 // A reference is an index into this slice's own drafts, so a list longer than
 // the array cap can only be repeating itself or pointing outside the slice —
@@ -45,6 +43,56 @@ pub struct Draft {
     pub blocked_by: Vec<usize>,
     #[serde(default)]
     pub blocks: Vec<usize>,
+    /// Open tickets that already exist and that this draft cannot start before,
+    /// by identifier: Forman's `blocked_by` naming `TEAM-42` rather than a
+    /// position. Opaque here; the filing road resolves them against the tickets
+    /// the pass was shown and drops the rest.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub waits_on: Vec<String>,
+}
+
+/// One entry of a `blocked_by` list as a pass writes it: a position among this
+/// slice's drafts, or an existing ticket's identifier.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum Reference {
+    Position(usize),
+    Named(String),
+}
+
+// A position written as a string is still a position; anything else that reads
+// as `TEAM-42` is a ticket, and the rest is dropped as unreadable.
+fn split_references(given: Vec<Reference>) -> (Vec<usize>, Vec<String>) {
+    let mut positions = Vec::new();
+    let mut named = Vec::new();
+    for reference in given {
+        match reference {
+            Reference::Position(at) => positions.push(at),
+            Reference::Named(text) => {
+                let text = text.trim();
+                if let Ok(at) = text.parse::<usize>() {
+                    positions.push(at);
+                } else if is_identifier(text) {
+                    named.push(text.to_owned());
+                }
+            }
+        }
+    }
+    (positions, named)
+}
+
+/// `TEAM-42`: a letter, letters and digits, a dash, and a number.
+#[must_use]
+pub fn is_identifier(text: &str) -> bool {
+    let Some((team, number)) = text.rsplit_once('-') else {
+        return false;
+    };
+    team.chars()
+        .next()
+        .is_some_and(|first| first.is_ascii_alphabetic())
+        && team.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        && !number.is_empty()
+        && number.chars().all(|c| c.is_ascii_digit())
 }
 
 // Answering a draft with a bare title rather than the object asked for is the
@@ -54,6 +102,12 @@ pub struct Draft {
 // leniently and the same slip is a draft with an empty body, which the repair
 // road already handles: asked about once, and filled from the slice's own text
 // if the answer comes back no better.
+//
+// The pass is asked for Forman's four sections rather than a body, and they are
+// rendered into `body` here, as the answer is read: every cap, check and repair
+// below works on the one string and needs no second copy for each section. A
+// draft written with a bare `body` is still read, which is what `Fill::to_json`
+// writes and what an answer from before the sections said.
 #[derive(Deserialize)]
 #[serde(untagged)]
 enum Stated {
@@ -64,9 +118,19 @@ enum Stated {
         #[serde(default)]
         body: String,
         #[serde(default)]
-        blocked_by: Vec<usize>,
+        problem: String,
+        #[serde(default)]
+        acceptance_criteria: Vec<String>,
+        #[serde(default)]
+        context: String,
+        #[serde(default)]
+        out_of_scope: String,
+        #[serde(default)]
+        blocked_by: Vec<Reference>,
         #[serde(default)]
         blocks: Vec<usize>,
+        #[serde(default)]
+        waits_on: Vec<String>,
     },
 }
 
@@ -80,16 +144,81 @@ impl From<Stated> for Draft {
             Stated::Draft {
                 title,
                 body,
+                problem,
+                acceptance_criteria,
+                context,
+                out_of_scope,
                 blocked_by,
                 blocks,
-            } => Self {
-                title,
-                body,
-                blocked_by,
-                blocks,
-            },
+                waits_on,
+            } => {
+                let (blocked_by, mut named) = split_references(blocked_by);
+                named.extend(
+                    waits_on
+                        .into_iter()
+                        .filter(|name| is_identifier(name.trim())),
+                );
+                let sectioned = !problem.trim().is_empty()
+                    || acceptance_criteria
+                        .iter()
+                        .any(|line| !line.trim().is_empty())
+                    || !context.trim().is_empty()
+                    || !out_of_scope.trim().is_empty();
+                Self {
+                    title,
+                    body: if sectioned {
+                        sections(&problem, &acceptance_criteria, &context, &out_of_scope)
+                    } else {
+                        body
+                    },
+                    blocked_by,
+                    blocks,
+                    waits_on: named,
+                }
+            }
         }
     }
+}
+
+/// The ticket body Forman files, section for section, with its placeholders
+/// for a section left empty. Forman's `forman pull` was built to execute
+/// tickets of exactly this shape, and the checkboxes are what it reads as done.
+#[must_use]
+pub fn sections(problem: &str, criteria: &[String], context: &str, out_of_scope: &str) -> String {
+    let or = |text: &str, placeholder: &str| {
+        let text = text.trim();
+        if text.is_empty() {
+            placeholder.to_owned()
+        } else {
+            text.to_owned()
+        }
+    };
+    let mut lines = vec![
+        "## Problem".to_owned(),
+        or(problem, "(not described)"),
+        String::new(),
+        "## Acceptance criteria".to_owned(),
+    ];
+    let checks: Vec<String> = criteria
+        .iter()
+        .map(|line| line.trim())
+        .filter(|line| !line.is_empty())
+        .map(|line| format!("- [ ] {line}"))
+        .collect();
+    if checks.is_empty() {
+        lines.push("- [ ] (none given)".to_owned());
+    } else {
+        lines.extend(checks);
+    }
+    lines.extend([
+        String::new(),
+        "## Context / pointers".to_owned(),
+        or(context, "(none)"),
+        String::new(),
+        "## Out of scope".to_owned(),
+        or(out_of_scope, "(none stated)"),
+    ]);
+    lines.join("\n")
 }
 
 impl Fill {
@@ -167,23 +296,14 @@ pub fn check(fill: &Fill) -> Vec<Defect> {
 }
 
 // A body is the ticket's own description and runs to paragraphs, so it is held
-// to a cap and to being written at all — never to one line, and to no minimum:
-// the title carries the floor, and a one-sentence ticket body is a short ticket
-// rather than a defective one.
+// only to being written at all — never to one line, no minimum, and no cap.
+// Forman files a body of any length, and a cap here re-asked whole slices over
+// a few hundred characters of acceptance criteria and then cut the ticket
+// mid-sentence.
 fn prose(field: &str, value: &str, defects: &mut Vec<Defect>) {
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
+    if value.trim().is_empty() {
         defects.push(Defect::Empty {
             field: field.to_owned(),
-        });
-        return;
-    }
-    let chars = trimmed.chars().count();
-    if chars > BODY_CHARS {
-        defects.push(Defect::TooLong {
-            field: field.to_owned(),
-            chars,
-            cap: BODY_CHARS,
         });
     }
 }
@@ -215,7 +335,7 @@ fn references(field: &str, given: &[usize], defects: &mut Vec<Defect>) {
 // one is worse than an obviously empty one, because it gets filed. So every
 // line opens by saying it was not drafted. Do not dress these up.
 mod fallback {
-    use super::{BODY_CHARS, TITLE_CHARS, TITLE_MINIMUM, cut, fit, flattened};
+    use super::{TITLE_CHARS, TITLE_MINIMUM, fit, flattened};
 
     pub(super) fn title(slice: &str, index: usize) -> String {
         fit(
@@ -240,7 +360,7 @@ mod fallback {
             text.push_str(" The brief says of the slice:\n\n");
             text.push_str(prose);
         }
-        cut(&text, BODY_CHARS)
+        text
     }
 
     fn named(slice: &str) -> String {
@@ -567,10 +687,12 @@ slice of work described below it into tickets, and output the filled object \
 and nothing else.
 
 You are shown the brief the work was planned in and one slice of that brief. \
-Draft the tickets that slice is worth and no others: a ticket is a piece of \
-work one person can pick up, finish and check. Everything you write comes from \
-the brief and the slice — do not plan work neither of them asked for, and do \
-not draft the rest of the brief.
+Draft the tickets that slice is worth and no others. Each ticket will later be \
+executed by an agent working WITHOUT supervision, which reads only that ticket, \
+splits it into sub-tasks and writes code against it, so a ticket has to be \
+executable on its own. Everything you write comes from the brief, the slice and \
+the repository — do not plan work neither the brief nor the slice asked for, \
+and do not draft the rest of the brief.
 
 Draft a separate ticket only for a part of the slice that can land and be \
 checked without the rest. A change and the test that covers it are one ticket, \
@@ -578,20 +700,32 @@ and so are a change and the edit that keeps the build compiling after it: \
 split apart, the first ticket cannot pass its own checks.
 
 \"drafts\": one entry per ticket, in the order the work would be done, at most \
-12 entries. Each entry is {\"title\": ..., \"body\": ..., \"blocked_by\": \
-[...], \"blocks\": [...]}.
+12 entries.
 
 \"title\": one line, between 12 and 120 characters, saying what the ticket does \
 in the words the brief uses for it.
 
-\"body\": what the ticket asks for, what would show it was done, and what it \
-leaves alone. It may run to several paragraphs, at most 4000 characters.
+\"problem\": what is broken or missing, and why it matters, in two to four \
+sentences.
+
+\"acceptance_criteria\": observable outcomes, one per entry, that someone could \
+check without reading your mind. This is what done is measured against.
+
+\"context\": the files, functions, endpoints and earlier tickets the person \
+doing the work will need.
+
+\"out_of_scope\": what the ticket must not touch, so the work does not sprawl \
+into unrelated code.
 
 \"blocked_by\" and \"blocks\": the order the drafts have to be done in, given \
 as positions in the array above, counting from 0, at most 12 positions per \
-list. A draft refers only to the other drafts of this slice: never to itself, \
-never to a position the array does not hold, and never to work outside the \
-slice. Where nothing is ordered, both lists are empty.
+list. A position refers only to the other drafts of this slice: never to \
+itself and never to a position the array does not hold. Where a draft cannot \
+start until a ticket that already exists has landed, and that ticket is one of \
+the open tickets listed with the brief, put its identifier in \"blocked_by\" \
+as a string, such as \"WAR-42\": ordering written anywhere else is invisible \
+to whoever executes these tickets. Where nothing is ordered, both lists are \
+empty.
 
 Write each ticket in its own voice: no first person, and nothing about this \
 request or about what you were or were not shown.";
@@ -614,7 +748,15 @@ pub fn drafting_instructions(brief: &str, title: &str, prose: &str, rejected: &[
         prose.trim(),
     );
     let shape = serde_json::json!({
-        "drafts": [{"title": "", "body": "", "blocked_by": [], "blocks": []}],
+        "drafts": [{
+            "title": "",
+            "problem": "",
+            "acceptance_criteria": [""],
+            "context": "",
+            "out_of_scope": "",
+            "blocked_by": [],
+            "blocks": [],
+        }],
     });
     let _ = write!(
         text,
@@ -653,6 +795,7 @@ pub fn stub_answer(slice: &str) -> String {
                 body: BODY.to_owned(),
                 blocked_by: Vec::new(),
                 blocks: vec![1],
+                waits_on: Vec::new(),
             },
             Draft {
                 title: fit(
@@ -664,6 +807,7 @@ pub fn stub_answer(slice: &str) -> String {
                 body: BODY.to_owned(),
                 blocked_by: vec![0],
                 blocks: Vec::new(),
+                waits_on: Vec::new(),
             },
         ],
     }

@@ -350,6 +350,11 @@ pub enum Error {
         // Boxed for `Unfiled`'s reason.
         source: Box<filed::Error>,
     },
+    Unskipped {
+        title: String,
+        // Boxed for `Unfiled`'s reason.
+        source: Box<filed::Error>,
+    },
     Terminal {
         source: io::Error,
     },
@@ -455,9 +460,9 @@ fn not_planned_message(path: &str, status: Option<&str>) -> String {
 // here and the issues it made are where the work goes on.
 fn all_cut_message(path: &str) -> String {
     format!(
-        "every slice of the project filed for `{path}` is already cut, so there is nothing to \
-         draft: `.warlock/filed.toml` holds a record for each of them, and warlock cuts a slice \
-         once"
+        "every slice of the project filed for `{path}` is already cut or skipped, so there is \
+         nothing to draft: `.warlock/filed.toml` holds a record for each of them, and warlock \
+         offers a slice once — retitle a skipped slice in the brief to have it offered again"
     )
 }
 
@@ -790,6 +795,12 @@ impl fmt::Display for Error {
             Self::AllCut { path } => write!(f, "{}", all_cut_message(path)),
             Self::NoBacklog { team } => write!(f, "{}", no_backlog_message(team)),
             Self::Uncut { issues, source } => write!(f, "{}", uncut_message(issues, source)),
+            Self::Unskipped { title, source } => write!(
+                f,
+                "`{title}` was skipped, and warlock could not record the skip, so the next \
+                 draft offers it again: {}",
+                one_line(&source.to_string())
+            ),
             // The pull's own refusals, worded above for the reason the push's and
             // the cut's are: the sentences are the interesting part of them.
             Self::UnrecordedScope { scope, recorded } => {
@@ -862,7 +873,9 @@ impl std::error::Error for Error {
             Self::Briefs { source } => Some(source),
             Self::ScopeBlock { source } => Some(source),
             Self::Filed { source } => Some(source),
-            Self::Unfiled { source, .. } | Self::Uncut { source, .. } => Some(source.as_ref()),
+            Self::Unfiled { source, .. }
+            | Self::Uncut { source, .. }
+            | Self::Unskipped { source, .. } => Some(source.as_ref()),
             Self::Linear { source } => Some(source),
             Self::Runs { source } => Some(source),
             Self::Git { source } => Some(source),

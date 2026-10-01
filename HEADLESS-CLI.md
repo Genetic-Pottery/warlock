@@ -783,13 +783,13 @@ warlock: slice 2 `The scope parser` was answered: a refusal, which is what the b
 A question warlock has nothing to offer on is put all the same. Where the
 brief, the slice and the repository do not settle it, the proposing session
 answers with one fixed sentence and that sentence is what is printed; an
-attempt that never came back at all — a missing binary, a cancel, the
-five-minute timeout — is one line naming why. Either way the read below it
-happens anyway, and the answer is entirely the reader's:
+attempt that never came back at all — a missing binary or a cancel — is one
+line naming why. Either way the read below it happens anyway, and the answer is
+entirely the reader's:
 
 ```sh
 warlock: slice 2 `The scope parser` — The brief, this slice and the repository do not settle this question.
-warlock: slice 2 `The scope parser` — no answer was proposed: the model pass did not finish within 300s and was stopped
+warlock: slice 2 `The scope parser` — no answer was proposed: the model pass was cancelled before it finished
 ```
 
 A question nothing answers leaves the slice uncut and the run goes on to the
@@ -1008,6 +1008,8 @@ machine holds is passed over and names `warlock resume <TICKET>`, which is the
 command that frees it; nothing a pull does releases a run by itself. A run this
 machine holds as `resumed` is taken before any ticket with no record at all,
 because somebody has already looked at it and there is a branch waiting on it.
+So is a run left `in_progress` by a pull that was killed or crashed part-way:
+the sub-task it was on goes back to pending, and the run carries on from there.
 Nothing ready is an answer rather than a failure, and it is a **0**:
 
 ```sh

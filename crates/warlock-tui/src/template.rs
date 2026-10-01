@@ -54,9 +54,11 @@ refusal. Something refused with a reason is a decision a reader can argue with; 
 something merely left out is an oversight nobody can tell from one.\n\n\
 ## Scope\n\n\
 The work as numbered slices, each `### N. What the slice does` followed by a \
-line reading `depends_on: [<the numbers it needs first>]`, then what that slice \
-decides and why. A slice is a piece of work that lands on its own; the \
-dependencies say what order they can land in.";
+line reading `depends_on: [<the numbers it needs first>]`, then the slice in \
+paragraphs: what exists now, naming the files and functions it touches; what \
+changes and why this shape rather than the alternatives the conversation \
+weighed; and what a later edit must not break. A slice is a piece of work that \
+lands on its own; the dependencies say what order they can land in.";
 
 // Built from `manifest_path` rather than by joining `.warlock` here, because the
 // name of that directory is the engine's to spell and a second copy of the

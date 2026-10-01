@@ -10,7 +10,7 @@ use super::{
     Cancel, ChatAgent, ClaudeAgent, Converses, DRAFT_NOW_INSTRUCTION, DRAFTING_CONTRACT,
     DRAFTING_ONE_SHOT_CONTRACT, DRAFTING_ROUNDS, Drafted, Drafting, EFFORT, EFFORT_VAR,
     INVOCATION_TIMEOUT, MODEL, MODEL_VAR, NOTHING_SETTLES_IT, OsString, PROPOSING_SYSTEM_PROMPT,
-    Replied, SYSTEM_PROMPT, Split, Splitting, Stopped, Unsplit, WORKING_ATTEMPTS, WORKING_TIMEOUT,
+    Replied, SYSTEM_PROMPT, Split, Splitting, Stopped, UNTIMED, Unsplit, WORKING_ATTEMPTS,
     WORKING_TURNS, WRITE_INSTRUCTION, Wired, Worked, Working, brief_instruction, drafting_opening,
     or_default, overridden, propose_answer, proposing_instruction, render, session_id,
     working_opening, working_retry, working_system_prompt,
@@ -61,9 +61,9 @@ fn the_defaults_are_the_real_thing() {
         "five minutes, per invocation"
     );
     // Exactly this, in this order: print mode, the streaming output format,
-    // the `--verbose` the CLI insists on before it will stream at all, and
-    // then the three answers a pact refuses to inherit — which model, how
-    // hard it thinks, and what it may reach for.
+    // the `--verbose` the CLI insists on before it will stream at all, no MCP
+    // server, and then the three answers a pact refuses to inherit — which
+    // model, how hard it thinks, and what it may reach for.
     assert_eq!(
         args(&agent),
         [
@@ -72,6 +72,7 @@ fn the_defaults_are_the_real_thing() {
             "stream-json",
             "--verbose",
             "--include-partial-messages",
+            "--strict-mcp-config",
             "--model",
             "claude-sonnet-5",
             "--effort",
@@ -320,10 +321,10 @@ fn a_turns_defaults_are_the_real_thing_too() {
     assert_eq!(agent.program(), "claude");
     assert_eq!(agent.timeout(), INVOCATION_TIMEOUT);
     assert!(is_uuid_shaped(session), "not UUID-shaped: {session}");
-    // The same five leading arguments a pass has, because the transport
-    // reads the same stream; then the three answers a turn refuses to
-    // inherit, warlock's own system prompt, and the conversation this
-    // agent's turns all belong to.
+    // The same six leading arguments a pass has, because the transport
+    // reads the same stream and no session reaches an MCP server; then the
+    // three answers a turn refuses to inherit, warlock's own system prompt,
+    // and the conversation this agent's turns all belong to.
     assert_eq!(
         vector,
         [
@@ -332,6 +333,7 @@ fn a_turns_defaults_are_the_real_thing_too() {
             "stream-json",
             "--verbose",
             "--include-partial-messages",
+            "--strict-mcp-config",
             "--model",
             "claude-sonnet-5",
             "--effort",
@@ -488,6 +490,47 @@ fn every_turn_of_one_agent_is_one_conversation_and_two_agents_are_two() {
 
     assert_eq!(others.len(), 64, "two agents shared a conversation");
     assert!(!others.contains(session));
+}
+
+#[test]
+fn every_slice_drafted_off_one_agent_is_a_conversation_of_its_own() {
+    // The cut holds one agent for the run and drafts every slice off it. A
+    // wired copy stays in its agent's conversation, so before `fresh` every
+    // slice after the first resumed the first slice's talk — and by the
+    // third, carried two slices of reading past the invocation timeout.
+    let agent = ChatAgent::drafting().with_program("/bin/sh");
+
+    let mut first = Drafting::for_slice(&agent, "the brief", "one", "the first slice");
+    let _ = first.open();
+    let opened = turn_args(&first.agent);
+    let first_id = value_of(&opened, "--resume")
+        .expect("the first slice's next turn resumes its own conversation")
+        .to_owned();
+
+    let second = Drafting::for_slice(&agent, "the brief", "two", "the second slice");
+    let second_args = turn_args(&second.agent);
+    let second_id = value_of(&second_args, "--session-id")
+        .expect("the second slice opens a conversation rather than resuming one");
+
+    assert_ne!(second_id, first_id, "two slices shared a conversation");
+    // And the agent the run holds was never the one spoken in.
+    assert!(value_of(&turn_args(&agent), "--session-id").is_some());
+}
+
+#[test]
+fn a_proposal_is_made_in_a_conversation_of_its_own() {
+    // One proposer for the run, as one drafting agent: a proposal for the
+    // second question must not resume the conversation the first was made in.
+    let proposer = ChatAgent::proposing().with_program("/bin/sh");
+    let before = turn_args(&proposer);
+
+    let _ = propose_answer(&proposer, "the brief", "one", "the slice", "which?");
+
+    assert_eq!(
+        turn_args(&proposer),
+        before,
+        "the proposal was made in the proposer's own conversation"
+    );
 }
 
 #[test]
@@ -877,7 +920,7 @@ fn a_drafting_session_is_its_own_conversation_at_the_brief_register() {
     let vector = turn_args(&agent);
 
     assert_eq!(agent.program(), "claude");
-    assert_eq!(agent.timeout(), INVOCATION_TIMEOUT);
+    assert_eq!(agent.timeout(), UNTIMED);
     // Read through the same seam the constructor did, so a machine with
     // `WARLOCK_MODEL` or `WARLOCK_EFFORT` set is asserting that the
     // reader's choice still wins rather than failing on it.
@@ -960,7 +1003,7 @@ fn a_proposing_session_may_read_the_repository_and_do_nothing_whatever_else() {
     assert_eq!(granted.split(',').count(), 3);
 
     names_no_writing_tool(&vector, "a proposing turn");
-    assert_eq!(ChatAgent::proposing().timeout(), INVOCATION_TIMEOUT);
+    assert_eq!(ChatAgent::proposing().timeout(), UNTIMED);
 }
 
 #[test]
@@ -1024,7 +1067,7 @@ fn a_splitting_session_may_read_the_repository_and_do_nothing_whatever_else() {
         Some(prompt),
     );
     assert!(prompt.contains("sub-tasks") && prompt.contains("WARLOCK.md"));
-    assert_eq!(ChatAgent::splitting().timeout(), INVOCATION_TIMEOUT);
+    assert_eq!(ChatAgent::splitting().timeout(), UNTIMED);
 }
 
 // Stands in for the prompt sub-task 4 writes: this file is about the fence, and
@@ -1145,24 +1188,14 @@ fn the_sub_task_session_carries_the_gate_hook_inline_with_no_file_on_disk() {
 }
 
 #[test]
-fn the_sub_task_session_runs_under_its_own_clock_and_its_own_turn_limit() {
+fn the_sub_task_session_runs_under_no_clock_and_its_own_turn_limit() {
     let agent = ChatAgent::working(WORKING_PROMPT);
 
-    // Not the five minutes a pass gets: that clock is sized for one document,
-    // and this session edits files and runs a test suite that is minutes on
-    // its own.
-    assert_eq!(agent.timeout(), WORKING_TIMEOUT);
-    assert_ne!(agent.timeout(), INVOCATION_TIMEOUT);
-    assert_ne!(
-        WORKING_TIMEOUT.as_secs(),
-        300,
-        "the sub-task session is running on a pass's five minutes",
-    );
-    assert!(WORKING_TIMEOUT > INVOCATION_TIMEOUT);
+    // No clock, as `forman pull` has none: a pull's sub-tasks run past half an
+    // hour doing real work, and a timeout killed working sessions.
+    assert_eq!(agent.timeout(), UNTIMED);
 
-    // The second bound, and a different kind: a session can spin cheaply
-    // inside one tool loop for half an hour, and it can also spend its turns
-    // in a minute.
+    // The turn limit is the bound instead.
     let vector = turn_args(&agent);
     assert_eq!(
         value_of(&vector, "--max-turns"),
@@ -1655,7 +1688,7 @@ fn the_three_drafting_instructions_are_each_said_in_their_own_words() {
         "JSON object",
         "is the drafts",
         "is a question",
-        "at most three questions",
+        "at most three rounds of questions",
     ] {
         assert!(
             DRAFTING_CONTRACT.contains(said),
@@ -1846,16 +1879,14 @@ fn an_object_that_filled_itself_badly_is_still_the_answer_rather_than_a_question
     assert_eq!(session.questions_left(), DRAFTING_ROUNDS);
 }
 
-// One draft whose body runs past `BODY_CHARS`, which only a cut can mend.
+// One draft whose title runs past `TITLE_CHARS`, which only a cut can mend.
 fn an_overlong_draft() -> String {
-    let body = "b".repeat(drafting::BODY_CHARS + 128);
-    format!(
-        "{{\"drafts\":[{{\"title\":\"Sharpen the knife on the whetstone\",\"body\":\"{body}\"}}]}}"
-    )
+    let title = "t".repeat(drafting::TITLE_CHARS + 128);
+    format!("{{\"drafts\":[{{\"title\":\"{title}\",\"body\":\"The knife is blunt.\"}}]}}")
 }
 
 #[test]
-fn a_draft_with_a_body_past_its_cap_is_asked_again_before_anything_is_cut() {
+fn a_draft_with_a_title_past_its_cap_is_asked_again_before_anything_is_cut() {
     let agent = scripted([an_overlong_draft(), ONE_DRAFT.to_owned()]);
     let mut session = drafting_with(&agent);
 
@@ -1868,7 +1899,7 @@ fn a_draft_with_a_body_past_its_cap_is_asked_again_before_anything_is_cut() {
     );
     let sent = agent.said();
     assert_eq!(sent.len(), 2);
-    assert!(sent[1].contains("drafts[0].body"), "{}", sent[1]);
+    assert!(sent[1].contains("drafts[0].title"), "{}", sent[1]);
     // A re-ask about length is not a question, so no round was spent on it.
     assert_eq!(session.questions_left(), DRAFTING_ROUNDS);
 }
@@ -1881,11 +1912,11 @@ fn a_draft_that_stays_past_its_cap_is_cut_once_the_attempts_run_out() {
     let (fill, repairs) = drafts(session.open().expect("a turn"));
 
     assert_eq!(agent.said().len(), drafting::ATTEMPTS);
-    assert_eq!(fill.drafts[0].body.chars().count(), drafting::BODY_CHARS);
+    assert_eq!(fill.drafts[0].title.chars().count(), drafting::TITLE_CHARS);
     assert!(
         repairs
             .iter()
-            .any(|repair| repair.contains("drafts[0].body")),
+            .any(|repair| repair.contains("drafts[0].title")),
         "{repairs:?}"
     );
 }
@@ -2058,6 +2089,10 @@ impl Converses for Failing {
     }
 
     fn raised(&self, _model: &str, _effort: &str) -> Self {
+        self.clone()
+    }
+
+    fn fresh(&self) -> Self {
         self.clone()
     }
 }
@@ -2962,8 +2997,6 @@ enum Attempt {
     /// The run exited non-zero with this on its stderr — the text the
     /// classification reads, and in these tests the CLI's own words.
     Failed(String),
-    /// The clock ran out and the child was stopped.
-    RanLong,
     /// Somebody pressed stop while the attempt was in flight: the handle the
     /// session wired is latched, and the turn ends as `cancelled` makes it end.
     Interrupted,
@@ -3041,9 +3074,6 @@ impl Converses for Attempting {
                 code: Some(1),
                 stderr: said,
             }),
-            Attempt::RanLong => Err(agent::Error::TimedOut {
-                after: WORKING_TIMEOUT,
-            }),
             Attempt::Interrupted => {
                 // Where a real cancel comes from: a handle somebody else
                 // pressed, which is the one this session minted and wired.
@@ -3063,6 +3093,10 @@ impl Converses for Attempting {
     }
 
     fn raised(&self, _model: &str, _effort: &str) -> Self {
+        self.clone()
+    }
+
+    fn fresh(&self) -> Self {
         self.clone()
     }
 }
@@ -3341,10 +3375,27 @@ fn what_the_account_or_the_credential_refuses_is_named_and_not_taken_again() {
 }
 
 #[test]
-fn a_failure_the_list_does_not_name_keeps_what_the_run_said_and_is_not_retried() {
+fn a_crash_is_retried_as_forman_retries_one() {
+    // Forman's `is_retryable`: a crash can go better on the second read, so it
+    // is taken again, and what the second attempt said is the answer.
     let agent = Attempting::taking([
         Attempt::Failed("Segmentation fault".to_owned()),
-        Attempt::Says(working::stub_answer("an attempt nobody allowed")),
+        Attempt::Says(working::stub_answer("the second read went fine")),
+    ]);
+    let mut session = a_session(&agent);
+
+    let worked = session.run();
+
+    assert_eq!(told(&worked).summary(), "the second read went fine");
+    assert_eq!(agent.turns(), 2);
+}
+
+#[test]
+fn a_crash_on_every_attempt_keeps_what_the_last_run_said() {
+    let agent = Attempting::taking([
+        Attempt::Failed("Segmentation fault".to_owned()),
+        Attempt::Failed("Segmentation fault".to_owned()),
+        Attempt::Failed("Segmentation fault".to_owned()),
     ]);
     let mut session = a_session(&agent);
 
@@ -3354,23 +3405,7 @@ fn a_failure_the_list_does_not_name_keeps_what_the_run_said_and_is_not_retried()
         panic!("a crash was read as something warlock has a plan for: {worked:?}");
     };
     assert!(said.contains("Segmentation fault"), "{said}");
-    assert_eq!(agent.turns(), 1);
-}
-
-#[test]
-fn an_attempt_that_runs_out_of_clock_is_the_end_of_the_sub_task() {
-    let agent = Attempting::taking([
-        Attempt::RanLong,
-        Attempt::Says(working::stub_answer("an attempt nobody allowed")),
-    ]);
-    let mut session = a_session(&agent);
-
-    let worked = session.run();
-
-    // Not retried: the clock is warlock's own bound, and half an hour that ran
-    // out is not half an hour that would have been enough twice.
-    assert_eq!(stopping(&worked), &Stopped::TimedOut);
-    assert_eq!(agent.turns(), 1);
+    assert_eq!(agent.turns(), WORKING_ATTEMPTS);
 }
 
 #[test]
@@ -4771,10 +4806,18 @@ mod unix {
                 "something other than the opening reached the child",
             );
 
-            // The whole vector, word for word: what the child was given is what
-            // warlock built and nothing else was appended on the way.
+            // The whole vector, word for word, but for the conversation it names:
+            // what the child was given is what warlock built and nothing else
+            // was appended on the way. The id is a new one, because a sub-task
+            // is a conversation of its own and not the held agent's.
             let handed = nul_separated(&argv);
-            assert_eq!(handed, built);
+            assert_eq!(handed[..handed.len() - 2], built[..built.len() - 2]);
+            assert_eq!(handed[handed.len() - 2], "--session-id");
+            assert_ne!(
+                handed.last(),
+                built.last(),
+                "the sub-task resumed the held agent's conversation"
+            );
             for word in &handed {
                 let word = word.to_lowercase();
                 for shape in A_SECRET_LOOKS_LIKE {

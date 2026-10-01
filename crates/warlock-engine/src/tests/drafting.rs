@@ -3,9 +3,9 @@ use std::collections::BTreeSet;
 use crate::fill::Defect;
 
 use super::{
-    Accepted, BODY_CHARS, DRAFTING_PROMPT, DRAFTS_PER_SLICE, Draft, Fill, MEND_PASSES, Mend,
-    Mended, REFERENCES_PER_LIST, TITLE_CHARS, TITLE_MINIMUM, accept, check, drafting_instructions,
-    mend, mended, stub_answer,
+    Accepted, DRAFTING_PROMPT, DRAFTS_PER_SLICE, Draft, Fill, MEND_PASSES, Mend, Mended,
+    REFERENCES_PER_LIST, TITLE_CHARS, TITLE_MINIMUM, accept, check, drafting_instructions, mend,
+    mended, stub_answer,
 };
 
 const BODY: &str = "What the ticket asks for, and what it does not.";
@@ -55,6 +55,7 @@ fn a_bare_string_where_a_draft_was_asked_for_is_read_as_a_draft() {
             body: String::new(),
             blocked_by: Vec::new(),
             blocks: Vec::new(),
+            waits_on: Vec::new(),
         },
         "the string carries the title and the lists come back empty"
     );
@@ -73,7 +74,7 @@ fn the_stub_answer_is_a_fill_inside_every_cap() {
         let title = draft.title.chars().count();
         assert!((TITLE_MINIMUM..=TITLE_CHARS).contains(&title), "{title}");
         assert!(!draft.title.contains(['\n', '\r']));
-        assert!(!draft.body.is_empty() && draft.body.chars().count() <= BODY_CHARS);
+        assert!(!draft.body.is_empty());
         assert!(draft.blocked_by.len() <= REFERENCES_PER_LIST);
         assert!(draft.blocks.len() <= REFERENCES_PER_LIST);
         assert!(
@@ -181,15 +182,13 @@ fn a_title_under_the_minimum_is_reported_at_its_slot() {
 }
 
 #[test]
-fn a_body_over_its_cap_is_reported_at_its_slot() {
-    let body = "b".repeat(BODY_CHARS + 1);
+fn a_long_body_is_no_defect() {
+    // No cap, as Forman has none: acceptance criteria and context are where a
+    // ticket's detail goes, and a cap cut tickets mid-sentence.
+    let body = "b".repeat(20_000);
     assert_eq!(
-        check(&third(Draft::of("A draft with too much body", body))),
-        vec![Defect::TooLong {
-            field: "drafts[2].body".to_owned(),
-            chars: BODY_CHARS + 1,
-            cap: BODY_CHARS,
-        }]
+        check(&third(Draft::of("A draft with a lot of body", body))),
+        []
     );
 }
 
@@ -253,7 +252,6 @@ fn the_prompt_states_every_cap_it_is_checked_against() {
     for stated in [
         format!("at most {DRAFTS_PER_SLICE} entries"),
         format!("between {TITLE_MINIMUM} and {TITLE_CHARS} characters"),
-        format!("at most {BODY_CHARS} characters"),
         format!("at most {REFERENCES_PER_LIST} positions"),
     ] {
         assert!(
@@ -286,7 +284,8 @@ fn the_instructions_carry_the_brief_the_slice_and_the_shape() {
     assert!(text.contains("A slice's drafts, filled by a pass and checked by warlock."));
     assert!(
         text.ends_with(
-            "{\"drafts\":[{\"title\":\"\",\"body\":\"\",\"blocked_by\":[],\"blocks\":[]}]}"
+            "{\"drafts\":[{\"title\":\"\",\"problem\":\"\",\"acceptance_criteria\":[\"\"],\
+             \"context\":\"\",\"out_of_scope\":\"\",\"blocked_by\":[],\"blocks\":[]}]}"
         ),
         "{text}"
     );
@@ -303,9 +302,9 @@ fn a_rejected_defect_is_listed_back_as_one_not_to_repeat() {
             field: "drafts[2].title".to_owned(),
         },
         Defect::TooLong {
-            field: "drafts[0].body".to_owned(),
-            chars: BODY_CHARS + 40,
-            cap: BODY_CHARS,
+            field: "drafts[0].title".to_owned(),
+            chars: TITLE_CHARS + 40,
+            cap: TITLE_CHARS,
         },
     ];
 
@@ -425,31 +424,18 @@ fn a_reference_list_over_its_cap_keeps_its_first_entries() {
 }
 
 #[test]
-fn a_multiline_title_keeps_its_first_line_and_an_over_cap_body_is_cut() {
-    let draft = Draft::of(
-        "Parse the scope section\nand file what it holds",
-        "b".repeat(BODY_CHARS + 5),
-    );
+fn a_multiline_title_keeps_its_first_line() {
+    let draft = Draft::of("Parse the scope section\nand file what it holds", "A body.");
 
     let (repaired, mends) = mend(&third(draft), SLICE, PROSE);
 
     assert_eq!(repaired.drafts[2].title, "Parse the scope section");
-    assert_eq!(repaired.drafts[2].body.chars().count(), BODY_CHARS);
     assert_eq!(
         mends,
-        vec![
-            Mend {
-                field: "drafts[2].title".to_owned(),
-                done: Mended::FirstLine,
-            },
-            Mend {
-                field: "drafts[2].body".to_owned(),
-                done: Mended::Cut {
-                    from: BODY_CHARS + 5,
-                    to: BODY_CHARS,
-                },
-            },
-        ]
+        vec![Mend {
+            field: "drafts[2].title".to_owned(),
+            done: Mended::FirstLine,
+        }]
     );
     assert_eq!(check(&repaired), []);
 }
@@ -581,7 +567,7 @@ type Mutation = (&'static str, fn(&mut Fill));
 // and a few that collide on purpose: two mutations over the same slot are how a
 // repair comes to answer a slot another repair already moved. Every one of them
 // tolerates an array another mutation emptied or replaced.
-fn mutations() -> [Mutation; 11] {
+fn mutations() -> [Mutation; 10] {
     [
         ("Empty", |fill| {
             if let Some(draft) = fill.drafts.first_mut() {
@@ -606,11 +592,6 @@ fn mutations() -> [Mutation; 11] {
         ("Empty", |fill| {
             if let Some(draft) = fill.drafts.get_mut(2) {
                 draft.body = "\n \n".to_owned();
-            }
-        }),
-        ("TooLong", |fill| {
-            if let Some(draft) = fill.drafts.get_mut(2) {
-                draft.body = "b".repeat(BODY_CHARS + 40);
             }
         }),
         ("TooMany", |fill| {
@@ -700,4 +681,59 @@ fn a_mended_fill_is_never_defective_whatever_was_wrong_with_it() {
          handed a fill, not an answer — and `UnknownTarget` and `ToolNamed` belong to the \
          document road, which has an evidence witness this one has not"
     );
+}
+
+#[test]
+fn forman_s_four_sections_are_read_into_the_body_in_forman_s_layout() {
+    // The shape `forman pull` executes: a pass answers the sections and warlock
+    // writes the body, so a ticket filed from a slice reads like one Forman
+    // filed, checkboxes and placeholders included.
+    let accepted = accept(
+        r#"{"drafts":[{"title":"Rename the field on the record",
+            "problem":"The field says team and holds a key.",
+            "acceptance_criteria":["The field is spelled team_key", "  ", "The doctests use a key"],
+            "context":"crates/warlock-engine/src/route.rs",
+            "out_of_scope":"",
+            "blocked_by":[],"blocks":[]}]}"#,
+    );
+    let Accepted::Filled(fill) = accepted else {
+        panic!("a sectioned draft is clean: {accepted:?}");
+    };
+
+    assert_eq!(
+        fill.drafts[0].body,
+        "## Problem\nThe field says team and holds a key.\n\n## Acceptance criteria\n\
+         - [ ] The field is spelled team_key\n- [ ] The doctests use a key\n\n\
+         ## Context / pointers\ncrates/warlock-engine/src/route.rs\n\n## Out of scope\n\
+         (none stated)"
+    );
+}
+
+#[test]
+fn a_draft_written_with_a_bare_body_is_still_read() {
+    let accepted =
+        accept(r#"{"drafts":[{"title":"Rename the field on the record","body":"Just prose."}]}"#);
+    let Accepted::Filled(fill) = accepted else {
+        panic!("a bare body is clean: {accepted:?}");
+    };
+
+    assert_eq!(fill.drafts[0].body, "Just prose.");
+}
+
+#[test]
+fn blocked_by_takes_positions_and_existing_tickets_side_by_side() {
+    // Forman's two ways of naming a ticket in one list: a position among this
+    // slice's drafts, or an identifier from the open tickets the pass was shown.
+    let accepted = accept(
+        r#"{"drafts":[
+            {"title":"The first ticket of the slice","body":"One.","blocked_by":[],"blocks":[]},
+            {"title":"The second ticket of the slice","body":"Two.",
+             "blocked_by":[0, "WAR-142", "1", "not a ticket"],"blocks":[]}]}"#,
+    );
+    let (Accepted::Filled(fill) | Accepted::Defective { fill, .. }) = accepted else {
+        panic!("a mixed list is read: {accepted:?}");
+    };
+
+    assert_eq!(fill.drafts[1].blocked_by, [0, 1]);
+    assert_eq!(fill.drafts[1].waits_on, ["WAR-142"]);
 }

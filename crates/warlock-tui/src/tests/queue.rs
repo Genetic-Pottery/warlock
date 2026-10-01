@@ -313,6 +313,21 @@ fn a_resumed_run_is_taken_ahead_of_any_issue_with_no_record() {
 }
 
 #[test]
+fn a_run_this_machine_stopped_without_a_halt_is_picked_up_first() {
+    // A kill or a crash leaves the record `in_progress` and the ticket in
+    // `In Progress`: the next pull takes it back, rather than passing it over as
+    // somebody else's.
+    let queue = queue_of(vec![
+        todo("WAR-1", Priority::Urgent),
+        issue("WAR-10", IN_PROGRESS, Priority::None, Vec::new()),
+    ]);
+    let runs = [run("WAR-10", RunStatus::InProgress)];
+
+    assert_eq!(taken(&queue, "In Review", &runs).as_deref(), Some("WAR-10"));
+    assert!(reasons(&queue, "In Review", &runs).is_empty());
+}
+
+#[test]
 fn several_resumed_runs_come_out_in_the_queues_order() {
     let queue = queue_of(vec![
         issue("WAR-30", IN_PROGRESS, Priority::None, Vec::new()),

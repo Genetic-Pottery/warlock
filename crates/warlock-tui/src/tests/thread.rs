@@ -834,3 +834,52 @@ fn the_seams_failures_become_the_panels_endings() {
         },
     );
 }
+
+#[test]
+fn a_work_turn_draws_no_message_and_its_answer_is_what_was_said() {
+    // Warlock's own work: nobody asked anything, so there is no message row in
+    // anybody's voice above the work, and what the session said is the answer.
+    let start = Instant::now();
+    let mut thread = Thread::new();
+    thread.work(start);
+    thread.record(&Activity::Thinking, start);
+    thread.answer("Which record does this slice write?", start);
+
+    let lines = thread.lines(start);
+    assert!(
+        !lines.iter().any(|line| matches!(line, Line::Said { .. })),
+        "{lines:?}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| matches!(line, Line::Clocked { .. })),
+        "{lines:?}"
+    );
+    assert_eq!(
+        lines.last(),
+        Some(&Line::Text {
+            text: "Which record does this slice write?".to_owned()
+        })
+    );
+    assert_eq!(thread.line_count(), lines.len());
+}
+
+#[test]
+fn something_said_whole_draws_no_clock_and_settling_closes_the_live_turn() {
+    let start = Instant::now();
+    let mut thread = Thread::new();
+    thread.said("## 1. A draft", start);
+
+    assert_eq!(
+        thread.lines(start),
+        [Line::Text {
+            text: "## 1. A draft".to_owned()
+        }]
+    );
+
+    thread.work(start);
+    assert!(thread.in_flight().is_some());
+    thread.settle(start);
+    assert!(thread.in_flight().is_none());
+}

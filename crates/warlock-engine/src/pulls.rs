@@ -345,6 +345,24 @@ impl PullRun {
     // `state.json` is the caller's decision, and a run with nothing to release
     // is refused by `warlock resume` with the file left byte-identical to what
     // was read.
+    /// The sub-tasks a stopped process left `in_progress`, put back to
+    /// `pending`: what picking up a run that ended without a halt does before
+    /// it carries on. Nothing else moves, and the run's own status is the
+    /// pull's to set.
+    pub fn release_interrupted(&mut self) -> Vec<Reset> {
+        let mut changed = Vec::new();
+        for subtask in &mut self.subtasks {
+            if subtask.status == SubtaskStatus::InProgress {
+                let was = std::mem::replace(&mut subtask.status, SubtaskStatus::Pending);
+                changed.push(Reset {
+                    id: subtask.id.clone(),
+                    was,
+                });
+            }
+        }
+        changed
+    }
+
     pub fn resume(&mut self, mode: ResetMode) -> Vec<Reset> {
         let mut changed = Vec::new();
 
@@ -671,7 +689,7 @@ impl Reset {
 /// The two lists are separate because they are answered differently and both
 /// have to be said: the runs are what selection acts on, and an unreadable
 /// record is something only the operator can fix. See
-/// [`halted_and_resumed_runs`].
+/// [`held_runs`].
 #[derive(Debug, Default)]
 pub struct ScopeRuns {
     runs: Vec<PullRun>,
@@ -700,31 +718,35 @@ impl ScopeRuns {
     }
 }
 
-/// The runs in `scope` that are waiting on the operator or on a pull to pick
-/// them up again: a `resumed` run is taken before any fresh issue, and a
+/// The runs in `scope` that this machine still holds: a `resumed` run, and an
+/// `in_progress` one whose process stopped without a halt (a kill, a crash, a
+/// `git` or Linear failure part-way), are taken before any fresh issue; a
 /// `halted` one is skipped and named with the `warlock resume` that releases it.
+/// A run that is really in flight is in this process, which is not pulling a
+/// second ticket, so an `in_progress` record found by a new pull is one whose
+/// pull has ended.
 ///
 /// Both lists come back ordered by ticket identifier as text, so two calls over
 /// one home agree.
 ///
 /// ```
-/// use warlock_engine::{PullRun, RunStatus, halted_and_resumed_runs};
+/// use warlock_engine::{PullRun, RunStatus, held_runs};
 ///
 /// let (home, root) = (tempfile::tempdir()?, tempfile::tempdir()?);
 ///
 /// // No `pulls` directory at all is an empty answer, not a failure.
-/// assert!(halted_and_resumed_runs(home.path(), root.path(), "warlock-team")?.is_empty());
+/// assert!(held_runs(home.path(), root.path(), "warlock-team")?.is_empty());
 ///
 /// let mut run = PullRun::new("WAR-140", "A ticket", "warlock-team", "war-140/a-ticket", "now");
 /// run.set_status(RunStatus::Halted);
 /// run.save(home.path(), root.path())?;
 ///
-/// let found = halted_and_resumed_runs(home.path(), root.path(), "warlock-team")?;
+/// let found = held_runs(home.path(), root.path(), "warlock-team")?;
 ///
 /// assert_eq!(found.runs().len(), 1);
 /// assert_eq!(found.runs()[0].ticket(), "WAR-140");
 /// // A run belongs to the scope that pulled it, and to no other.
-/// assert!(halted_and_resumed_runs(home.path(), root.path(), "warlock-docs")?.is_empty());
+/// assert!(held_runs(home.path(), root.path(), "warlock-docs")?.is_empty());
 /// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
 ///
@@ -732,7 +754,7 @@ impl ScopeRuns {
 ///
 /// Only when `pulls/` itself cannot be listed. One record that cannot be read
 /// does not fail the scan — it is returned by [`ScopeRuns::unreadable`].
-pub fn halted_and_resumed_runs(
+pub fn held_runs(
     home: impl AsRef<Path>,
     root: impl AsRef<Path>,
     scope: &str,
@@ -804,7 +826,10 @@ pub fn halted_and_resumed_runs(
             // nothing about which scope pulled it.
             Ok(run) => {
                 if run.scope == scope
-                    && matches!(run.status, RunStatus::Halted | RunStatus::Resumed)
+                    && matches!(
+                        run.status,
+                        RunStatus::Halted | RunStatus::Resumed | RunStatus::InProgress
+                    )
                 {
                     found.runs.push(run);
                 }
