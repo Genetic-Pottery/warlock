@@ -3,24 +3,24 @@
 
 # warlock
 
-Repository root of the warlock workspace: a Cargo workspace manifest and lockfile tying together the warlock-engine and warlock-tui crates, plus licensing, formatting config, and a recorded terminal session demonstrating the warlock TUI.
+The repository root of warlock: a Cargo workspace with two crates, warlock-engine and warlock-tui, plus licensing, formatting config, and a demo recording of a warlock TUI session.
 
 ## Files
 
-- `Cargo.lock` (78.6 KB) — Cargo-generated lockfile pinning exact versions/checksums for warlock-engine and warlock-tui's dependency graph; not hand-edited.
-- `Cargo.toml` (10.4 KB) — Workspace manifest: members warlock-engine and warlock-tui, shared package metadata, lint config, and pinned dependency versions (serde, ratatui, clap, blake3, notify, etc.).
-- `LICENSE` (11.0 KB) — Full text of the Apache License, Version 2.0, under which this repository is licensed.
-- `brief.cast` (71.2 KB) — Asciinema cast of a cargo run session: `warlock` TUI boot, brief mode, and a test-oracle conversation; terminal replay data, not readable code.
-- `rustfmt.toml` (1.3 KB) — rustfmt.toml: formatting config — edition 2024, style_edition 2024, Unix newlines, field init shorthand enabled.
+- `Cargo.lock` (78.6 KB) — Cargo.lock: generated lockfile pinning exact dependency versions/checksums for the warlock-engine and warlock-tui crates; not edited by hand.
+- `Cargo.toml` (10.4 KB) — Workspace manifest: members crates/warlock-engine and warlock-tui, shared package metadata, lints, and pinned dependency versions.
+- `LICENSE` (11.0 KB) — Standard Apache License 2.0 full text; governs use and distribution of the repository's code.
+- `brief.cast` (71.2 KB) — asciinema recording of a warlock TUI session drafting a brief about adding tests/a test oracle, Warp terminal cast format.
+- `rustfmt.toml` (1.3 KB) — rustfmt config: edition 2024, style_edition 2024, Unix newlines, use_field_init_shorthand enabled.
 
 ## Directories
 
-- `crates/` — Workspace members warlock-engine and warlock-tui; go here for engine logic, terminal UI, CLI or client-integration questions.
+- `crates/` — Holds the warlock-engine core library crate and the warlock-tui terminal UI/CLI crate; go here for how the project's crates are organized or split.
 
 ## Structure
 
-- Workspace manifest: members warlock-engine and warlock-tui, shared package metadata, lint config, and pinned dependency versions (serde, ratatui, clap, blake3, notify, etc.).
-- Cargo-generated lockfile pinning exact versions/checksums for warlock-engine and warlock-tui's dependency graph; not hand-edited.
-- Asciinema cast of a cargo run session: warlock TUI boot, brief mode, and a test-oracle conversation; terminal replay data, not readable code.
-- rustfmt.toml: formatting config — edition 2024, style_edition 2024, Unix newlines, field init shorthand enabled.
-- Full text of the Apache License, Version 2.0, under which this repository is licensed.
+- Workspace manifest: members crates/warlock-engine and warlock-tui, shared package metadata, lints, and pinned dependency versions.
+- Cargo.lock: generated lockfile pinning exact dependency versions/checksums for the warlock-engine and warlock-tui crates; not edited by hand.
+- asciinema recording of a warlock TUI session drafting a brief about adding tests/a test oracle, Warp terminal cast format.
+- rustfmt config: edition 2024, style_edition 2024, Unix newlines, use_field_init_shorthand enabled.
+- Standard Apache License 2.0 full text; governs use and distribution of the repository's code.

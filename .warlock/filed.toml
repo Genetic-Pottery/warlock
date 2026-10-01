@@ -53,3 +53,35 @@ title = "The headless documentation says what the CLI now does"
 key = "the headless documentation says what the cli now does"
 issues = ["WAR-149", "WAR-150"]
 cut_at = "2026-09-30T10:46:46Z"
+
+[[filed]]
+path = "docs/warlock-brief-26-rename-the-scope-record-s-team-to-team-key-and-fix-the-push.md"
+project_id = "2f7bbca3-d445-45e3-8824-076b04b8c57b"
+url = "https://linear.app/genetic-pottery/project/rename-the-scope-records-team-to-team-key-and-fix-the-push-refusal-944012f7b81d"
+scope = "warlock-team"
+team = "WAR"
+filed_at = "2026-10-01T05:36:04Z"
+
+[[filed.cut]]
+title = "The push refusal names the repository before the machine"
+key = "the push refusal names the repository before the machine"
+issues = ["WAR-154"]
+cut_at = "2026-10-01T12:39:43Z"
+
+[[filed.cut]]
+title = "The three record types spell the field `team_key`"
+key = "the three record types spell the field `team_key`"
+issues = ["WAR-155"]
+cut_at = "2026-10-01T12:43:50Z"
+
+[[filed.cut]]
+title = "The flag becomes `--team-key`"
+key = "the flag becomes `--team-key`"
+issues = ["WAR-156"]
+cut_at = "2026-10-01T12:45:50Z"
+
+[[filed.cut]]
+title = "The prompt and the help text say team key"
+key = "the prompt and the help text say team key"
+issues = ["WAR-157"]
+cut_at = "2026-10-01T12:48:35Z"

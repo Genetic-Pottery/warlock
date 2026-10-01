@@ -42,6 +42,13 @@ Workflow
 ![writing a brief demo](./assets/write.gif)
 > type /write once your shared understanding with the AI has been reached and a document will be written which eventually will be turned into tickets
 
+### Pushing a brief
+![pushing a brief demo](./assets/push.gif)
+> type /push [PATH_TO_BRIEF] to push a brief to Linear as a Project
+
+![pushed brief in Linear demo](./assets/push-linear.png)
+> the Project will land in Linear with a set format which future workflows can digest and turn into Issues
+
 ## Why this exists
 
 Editors and AI-enabled IDEs bolt AI on the side. The file tree is still the
