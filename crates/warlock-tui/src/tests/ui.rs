@@ -4687,7 +4687,7 @@ fn the_run_headers_bar_is_the_fraction_and_moves_only_when_the_run_does() {
 }
 
 #[test]
-fn the_bar_fills_by_the_file_and_is_exact_where_a_directory_ends() {
+fn the_bar_fills_by_the_file_and_never_falls_back_at_a_directory_boundary() {
     // The whole point of reporting files: a directory of eighteen is no
     // longer one jump of the bar with several minutes of nothing either
     // side of it.
@@ -4702,8 +4702,8 @@ fn the_bar_fills_by_the_file_and_is_exact_where_a_directory_ends() {
     };
 
     // Inside the second directory of four: the bar starts where the first
-    // directory left it and walks to where the second one ends, a file at
-    // a time and never backwards.
+    // directory left it and walks a file at a time, never backwards. The
+    // file being described is not yet described, so file `f` counts `f - 1`.
     let mut drawn = 0;
     for file in 1..=files {
         app.set_files_in_flight(file, files);
@@ -4713,23 +4713,35 @@ fn the_bar_fills_by_the_file_and_is_exact_where_a_directory_ends() {
         assert!(now >= drawn, "the bar fell back at file {file}/{files}");
         assert_eq!(
             now,
-            (columns * (files + file)) / (total * files),
+            (columns * (files + file - 1)) / (total * files),
             "at file {file}/{files} of directory 2/{total}"
         );
         drawn = now;
     }
 
-    // And the last file of the directory leaves the bar exactly where the
-    // next directory's `starting` would put it, so nothing jumps when one
-    // hands over to the other.
+    // The last file leaves the bar one file short of the boundary, and the
+    // next directory's `starting` moves it forward, never back.
     app.set_run_in_flight(Run::Pact, RUNNING_ON, 3, total);
-    assert_eq!(
-        run_header_row(&app, WIDTH, HEIGHT, at(base, 99))
-            .matches(BAR_FILLED)
-            .count(),
-        drawn,
-        "the bar moved at the boundary the fraction was built to line up"
-    );
+    let next = run_header_row(&app, WIDTH, HEIGHT, at(base, 99))
+        .matches(BAR_FILLED)
+        .count();
+    assert!(next >= drawn, "the bar fell back at the boundary");
+    assert_eq!(next, columns * 2 / total);
+}
+
+#[test]
+fn a_run_over_one_file_draws_an_empty_bar_while_that_file_is_described() {
+    // The directory-level mistake one level down: `Describing` is sent before
+    // its file's pass, so `(1, 1)` is one file started and none finished, and
+    // counting it drew a full bar over a refresh that had done nothing.
+    let base = Instant::now();
+    let mut app = running_app(base, WIDTH, HEIGHT, Run::Refresh, 1, 1);
+    fill_account(&mut app, base, usize::from(HEIGHT) * 2);
+    app.set_files_in_flight(1, 1);
+
+    let row = run_header_row(&app, WIDTH, HEIGHT, at(base, 99));
+    assert_eq!(row.matches(BAR_FILLED).count(), 0, "{row:?}");
+    assert!(row.ends_with("  0%"), "{row:?}");
 }
 
 #[test]
@@ -4764,7 +4776,7 @@ fn the_percentage_beside_the_bar_is_the_same_fraction_the_bar_is() {
     );
 
     for (position, file, files, percent) in
-        [(1, 4, 8, 10), (2, 0, 0, 20), (3, 2, 4, 50), (5, 7, 8, 97)]
+        [(1, 4, 8, 7), (2, 0, 0, 20), (3, 2, 4, 45), (5, 8, 8, 97)]
     {
         app.set_run_in_flight(Run::Pact, RUNNING_ON, position, total);
         if files > 0 {

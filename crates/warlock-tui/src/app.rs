@@ -236,9 +236,11 @@ impl RunHeader {
         self.position.saturating_sub(1)
     }
 
-    /// Files described of files this directory is paying for, straight from
-    /// the engine's `Event::Describing`. `None` before the first file of a
-    /// directory, and for a directory that pays for none.
+    /// The file being described of the files this directory is paying for,
+    /// straight from the engine's `Event::Describing`: the first is `1` the
+    /// moment its pass starts, so this counts files started and not files
+    /// finished. `None` before the first file of a directory, and for a
+    /// directory that pays for none.
     #[must_use]
     pub(crate) const fn files(&self) -> Option<(usize, usize)> {
         self.files

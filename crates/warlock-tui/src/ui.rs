@@ -817,27 +817,31 @@ const fn run_word(run: Run) -> &'static str {
 /// unit is the finest the run has reported.
 ///
 /// Directories while a directory is all the engine has said, and files once it
-/// has: a run of five directories working the second of them, four files in of
-/// eight, is `1 * 8 + 4` of `5 * 8`. Scaling the whole run by *this*
-/// directory's file count is deliberate and is why the denominator moves — the
-/// alternative is knowing every directory's file count before the run starts,
-/// which costs a walk of the whole subtree to answer a question about a
-/// progress bar. What the reader gets instead is a bar that advances inside a
-/// directory and is exact at every directory boundary, which is the property
-/// that matters: it never goes backwards past one.
+/// has: a run of five directories working the second of them, describing the
+/// fourth file of eight, is `1 * 8 + 3` of `5 * 8`. Scaling the whole run by
+/// *this* directory's file count is deliberate and is why the denominator moves
+/// — the alternative is knowing every directory's file count before the run
+/// starts, which costs a walk of the whole subtree to answer a question about a
+/// progress bar. The bar advances inside a directory and never goes backwards
+/// past a boundary: the last file of a directory leaves it one file short of
+/// the next directory's start, and the start moves it forward.
+///
+/// Both counts are what the run has finished, not what it has started. The
+/// engine's `Describing` is sent before its file's pass, as `position` is the
+/// directory being worked (see [`RunHeader::completed`]), so each is one less
+/// than the number reported. Counting the one in flight is what drew a full bar
+/// over a single-file refresh that had finished nothing.
 ///
 /// Saturating rather than checked because the products are small — a run is
 /// directories times files, both of them counts of things on a disk — and a
 /// saturated total still divides.
 fn fraction(header: &RunHeader) -> (usize, usize) {
-    // What the run has finished, not what it has started: see
-    // [`RunHeader::completed`].
     match header.files() {
         Some((position, total)) if total > 0 => (
             header
                 .completed()
                 .saturating_mul(total)
-                .saturating_add(position),
+                .saturating_add(position.saturating_sub(1)),
             header.total().saturating_mul(total),
         ),
         _ => (header.completed(), header.total()),

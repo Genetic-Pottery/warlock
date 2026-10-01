@@ -3,7 +3,7 @@
 
 # warlock-tui
 
-The warlock-tui package: builds the `warlock` binary and warlock_tui library, the TUI application and CLI driving scope/pact/refresh, briefs, drafting, pushing to Linear and pulling tickets, plus the git/Claude agent integrations those flows need.
+The warlock-tui crate: a terminal UI and CLI binary (warlock) for filing briefs to Linear, pulling tickets through agent-run work, and maintaining a repo's freshness ledger across scopes and sigils.
 
 ## Files
 
@@ -11,7 +11,7 @@ The warlock-tui package: builds the `warlock` binary and warlock_tui library, th
 
 ## Directories
 
-- `src/` — The crate's source: TUI app, CLI, brief/draft/push/pull flows, and git/Claude/Linear integrations — open it for how any command or screen works.
+- `src/` — All crate source: entrypoint, TUI event loop and rendering, Linear/git/claude clients, pull/push/draft flows, and boundary/scope logic.
 
 ## Structure
 

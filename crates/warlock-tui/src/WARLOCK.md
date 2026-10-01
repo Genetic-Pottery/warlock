@@ -3,12 +3,12 @@
 
 # src
 
-The warlock_tui crate's source: the TUI application and CLI that drive scope/pact/refresh, brief writing and drafting, pushing briefs and pulling tickets through Linear, and the git/Claude agent integrations those flows depend on.
+The warlock-tui crate's source: a terminal UI and CLI for filing briefs to Linear, pulling tickets through agent-run work, and maintaining a repo's freshness ledger across scopes and sigils.
 
 ## Files
 
 - `account.rs` (30.7 KB) — account.rs — Account/Section/Log/Outcome/Line/Voice: builds the TUI's run ledger, turning Activity events into clocked rows, costs, and a finish summary · declares `THINKING`, `WAITING`, `WRITING`, `DESCRIBING`, `Log`, `opened_at`, `started`, `closed_at`, `is_closed`, `row_count`, `freeze`, `push`, `extend_or_open`, `rewrite_or_open`, `rows`, `Outcome` (+43)
-- `app.rs` (51.5 KB) — App: TUI state machine holding Row, Focus, Sigils, Chrome, Viewpoint and Status; drives selection, reflow, pact/refresh/scope intents and run-in-flight tracking. · declares `Row`, `new`, `file`, `with_child_count`, `with_ignored`, `with_document_row`, `with_scope`, `has_children`, `is_file`, `is_document`, `is_ignored`, `PactToggle`, `PactIntent`, `Run`, `RunHeader`, `run` (+127)
+- `app.rs` (51.6 KB) — Defines App, the TUI's root state: Row, Focus, Sigils, Chrome, RunHeader, PactIntent/PactToggle, and the selection/reflow/pact logic driving tree and panel. · declares `Row`, `new`, `file`, `with_child_count`, `with_ignored`, `with_document_row`, `with_scope`, `has_children`, `is_file`, `is_document`, `is_ignored`, `PactToggle`, `PactIntent`, `Run`, `RunHeader`, `run` (+127)
 - `asking.rs` (6.0 KB) — Defines Asks trait and Stdin prompt reader: ask() writes a prompt and reads a line, discard_typed_ahead() drains pending input via raw-mode crossterm polling (Cooked restores cooked mode). · declares `Asks`, `Stdin`, `Cooked`, `at_terminal`, `show`, `ask`, `discard_typed_ahead`, `drop`, `line_in`
 - `boundary.rs` (6.1 KB) — Boundary checks for pact/refresh/scope/unpact ops against manifest scopes: `permits` yields `Verdict::Open/Closed/ClosedBelow`, with sigil-hint messages · declares `Operation`, `Verdict`, `message`, `permits`, `closed_scope_message`, `blocking_scopes_message`, `from`
 - `brief.rs` (30.8 KB) — Brief/ScopeBlock parsing: brief_at validates title/length/sections, scope_block_in cuts `## Scope` into dependency-ordered Slices. · declares `Brief`, `name`, `content`, `brief_at`, `ScopeBlock`, `brief`, `slices`, `ordered`, `unreadable`, `Slice`, `position`, `number`, `heading`, `depends_on`, `prose`, `scope_block_in` (+27)
@@ -63,7 +63,7 @@ The warlock_tui crate's source: the TUI application and CLI that drive scope/pac
 - `template.rs` (8.3 KB) — Loads the brief template (brief-template.md or DEFAULT_TEMPLATE) via brief_template(), and checks a document's headings against it with missing_sections()/sections_of()/carries(). · declares `DEFAULT_TEMPLATE`, `brief_template`, `Error`, `missing_sections`, `TEMPLATE_FILE`, `template_path`, `fmt`, `source`, `sections_of`, `carries`
 - `terminal.rs` (5.7 KB) — TerminalGuard: RAII crossterm/ratatui terminal setup via enter(), implements warlock_tui::Screen (size, draw, suspended, report_mouse); install_panic_hook restores terminal on panic. · declares `TerminalGuard`, `enter`, `install_panic_hook`, `size`, `draw`, `suspended`, `report_mouse`, `take_terminal`, `drop`, `restore_terminal`
 - `thread.rs` (21.1 KB) — Turn/Thread conversation model: Turn holds message/log/answer/ending, Ending variants for how a turn stopped, Thread tracks turns and notes and builds Sourced/Line rows for display. · declares `Ending`, `line`, `ending_for`, `Turn`, `message`, `answer`, `ending`, `started`, `is_closed`, `Sourced`, `Thread`, `new`, `ask`, `note`, `record`, `end` (+21)
-- `ui.rs` (55.1 KB) — ui.rs renders the TUI frame: layout math (areas, tree_width, panel_split), tree/panel/footer/composer drawing, Hit/Reach hit-testing, and the Dialog modal renderer for Quit/Push/Cut/Pull/Review/Carry/Scope/Record. · declares `PANEL_INDENT`, `SAID_MARKER`, `NOTE_MARKER`, `fitted`, `draw`, `composer_on_screen`, `tree_height`, `panel_height`, `run_header_height`, `composer_height`, `panel_width`, `Hit`, `hit_test`, `Reach`, `panel_reach`, `display_width` (+163)
+- `ui.rs` (55.4 KB) — Renders the TUI frame: panel, tree, footer, composer and modal dialogs (Dialog, draw, areas, hit_test, panel_reach). · declares `PANEL_INDENT`, `SAID_MARKER`, `NOTE_MARKER`, `fitted`, `draw`, `composer_on_screen`, `tree_height`, `panel_height`, `run_header_height`, `composer_height`, `panel_width`, `Hit`, `hit_test`, `Reach`, `panel_reach`, `display_width` (+163)
 - `viewing.rs` (2.2 KB) — view_press(): loads the selected file via view_file, shows text/cut via App::show_document, or sets a one-line error message · declares `view_press`
 - `watch.rs` (14.9 KB) — Filesystem watcher: NodeSet of watched dirs, WatchPolicy debouncing events (QUIET_PERIOD, RELOAD_CEILING), and Watch/Watching wrapping notify::RecommendedWatcher. · declares `QUIET_PERIOD`, `RELOAD_CEILING`, `COALESCED_RELOADS`, `NodeSet`, `from_tree`, `accepts`, `len`, `is_empty`, `WatchPolicy`, `new`, `follow`, `watched`, `saw`, `accepted`, `due`, `reload_started` (+9)
 - `wrap.rs` (9.2 KB) — Wraps panel Line values into Shape and re-flows long text into multiple Line::Wrapped rows; wrapped/wrapped_at/folded split strings at width, break_at finds the cut point. · declares `Shape`, `shape`, `rows`, `wrapped`, `wrapped_at`, `folded`, `continued`, `filled`, `break_at`, `first_character`
@@ -71,15 +71,15 @@ The warlock_tui crate's source: the TUI application and CLI that drive scope/pac
 
 ## Structure
 
-- account.rs — Account/Section/Log/Outcome/Line/Voice: builds the TUI's run ledger, turning Activity events into clocked rows, costs, and a finish summary
-- app.rs — App: TUI state machine holding Row, Focus, Sigils, Chrome, Viewpoint and Status
-- interactive.rs — Interactive<S>: the TUI event loop wiring App, Pact, Chat, Pushes, Cutter and Puller via Session<Seams>
-- lib.rs — Crate root declaring all modules and re-exporting their public items: Account, Brief, Git, Linear client, Thread, Screen, pull, push, refresh
-- main.rs — CLI entrypoint: defines Cli/Command/ScopeCommand/KeyCommand (clap), dispatches init/configure/pact/push/pull/etc., and runs the interactive TUI loop via run()
-- pacting.rs — Drives the TUI's Pact/Refresh runs: Pact<P> spawns run_pact via spawn_pact, drain() streams PactEvent into the panel account
-- pulling.rs — Pulling drives a ticket through split, per-subtask work, and finish: splits via Splits, runs sessions via Works
-- push.rs — Pushes a brief to Linear: prepare() resolves filing/scope and brief_at, file()/sent() create the project via Board and append a FiledRecord
-- cutting.rs — Cutter state machine driving /draft: fetches Planned via prepare, drafts each Slice with Drafting sessions, files slices into tickets via Filing/Cut
-- linear.rs — Linear GraphQL client: Client/Posts for HTTP, Linear/Board trait with queries and mutations
-- claude.rs — Claude CLI agent wrapper: ClaudeAgent/ChatAgent process invocation, system prompts, Drafting/Splitting/Working session types
-- git.rs — Shells git/gh via Spawner's Runs trait: Git<R> (Repository) and Gh<R> (Forge: open_pull_request)
+- lib.rs — Crate root declaring all modules and re-exporting their public items: Account, Brief, Git, Linear client, Thread, Screen, pull, push, refresh, and related types/constants.
+- main.rs — CLI entrypoint: defines Cli/Command/ScopeCommand/KeyCommand (clap), dispatches init/configure/pact/push/pull/etc., and runs the interactive TUI loop via run().
+- interactive.rs — Interactive<S>: the TUI event loop wiring App, Pact, Chat, Pushes, Cutter and Puller via Session<Seams>, dispatching key presses, mouse actions, paste and keep_up ticks
+- app.rs — Defines App, the TUI's root state: Row, Focus, Sigils, Chrome, RunHeader, PactIntent/PactToggle, and the selection/reflow/pact logic driving tree and panel.
+- ui.rs — Renders the TUI frame: panel, tree, footer, composer and modal dialogs (Dialog, draw, areas, hit_test, panel_reach).
+- session.rs — session.rs: reload/Scope/Watched lifecycle — reload(), Watched::round/caught_up, closed_scope, load_app/load_app_in building App, Scope, Tree, Manifest at startup.
+- pulling.rs — Pulling drives a ticket through split, per-subtask work, and finish: splits via Splits, runs sessions via Works, checks crossings, commits, opens PRs or halts (Pulled, Error, PullEvent, halt_comment).
+- cutting.rs — Cutter state machine driving /draft: fetches Planned via prepare, drafts each Slice with Drafting sessions, runs Review/Carry confirms, and files slices into tickets via Filing/Cut.
+- push.rs — Pushes a brief to Linear: prepare() resolves filing/scope and brief_at, file()/sent() create the project via Board and append a FiledRecord; dry-run prints would().
+- claude.rs — Claude CLI agent wrapper: ClaudeAgent/ChatAgent process invocation, system prompts, Drafting/Splitting/Working session types, Stopped/Activity reporting, and gate_settings for edit permissions.
+- boundary.rs — Boundary checks for pact/refresh/scope/unpact ops against manifest scopes: `permits` yields `Verdict::Open/Closed/ClosedBelow`, with sigil-hint messages
+- git.rs — Shells git/gh via Spawner's Runs trait: Git<R> (Repository: dirty, head, branch, commit, publish) and Gh<R> (Forge: open_pull_request), plus PR body/branch-name formatting.

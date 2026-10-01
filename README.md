@@ -2,7 +2,7 @@
 
 # warlock
 
-(Currently under development)
+(Currently under development, internal release phase)
 
 See your codebase the way your AI does. A TUI where documentation is the interface.
 
@@ -27,6 +27,20 @@ Workflow
 - brief: The ability to talk to the AI and discuss large feature of work you wish to create, you will have you assumptions pushed up against and at the end of the conversation you can write a document to the repo.
 - draft: The ability to turn a brief into multiple tickets with dependency graph relationships.
 - pull: Warlock will pull the next available ticket, cut it into sub-tickets locally and work within your allowed scope. There is local state and ability to recover from going over limits or crashes.
+
+## Walk through
+
+### File tree navigation
+![file tree demo](./assets/file-tree.gif)
+> move up / down, collapse directories, show / hide only pacted directories, show / hide files
+
+### Brief creation
+![brief creation demo](./assets/brief.gif)
+> type /brief and begin a conversation defining a large scope of work where the AI challenges you for more details of the scope
+
+### Writing a brief
+![writing a brief demo](./assets/write.gif)
+> type /write once your shared understanding with the AI has been reached and a document will be written which eventually will be turned into tickets
 
 ## Why this exists
 
