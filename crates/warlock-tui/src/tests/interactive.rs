@@ -3088,12 +3088,19 @@ mod pulling {
             .collect()
     }
 
+    // How many of the run's phases the thread holds: a note with a work turn
+    // directly under it.
     fn sections(driven: &Pulls) -> usize {
-        driven
+        let lines = driven
             .app
             .panel()
-            .account()
-            .map_or(0, |account| account.sections().len())
+            .thread()
+            .map(|thread| thread.lines(Instant::now()))
+            .unwrap_or_default();
+        lines
+            .windows(2)
+            .filter(|pair| matches!(pair, [Line::Note { .. }, Line::Clocked { .. }]))
+            .count()
     }
 
     fn pressed(driven: &mut Pulls, code: KeyCode) -> bool {
@@ -3366,10 +3373,10 @@ mod pulling {
             Vec::<String>::new(),
             "a halted sub-task was committed"
         );
-        // The panel goes on running: the loop goes round, the account still holds
+        // The panel goes on running: the loop goes round, the thread still holds
         // what the run did, and the next `/pull` is allowed.
         round(&mut driven);
-        assert!(sections(&driven) > 0, "the halt took the account down");
+        assert!(sections(&driven) > 0, "the halt took the run's phases down");
         assert!(
             driven.puller.in_flight().is_none(),
             "a halted run still holds the tree"

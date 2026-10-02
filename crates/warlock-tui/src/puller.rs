@@ -13,12 +13,12 @@
 //! here re-decides what a sub-task is, what a halt is or what goes on the ticket.
 //! What this module owns is the reporting. [`Pulling::progress`] is a `&mut dyn
 //! FnMut` and [`Activities`] wants a `Fn + Send + Sync + 'static`, so the worker
-//! joins the two onto one channel of [`Step`] and [`Puller::keep_up`] routes it:
-//! headings open sections on the account card, activities are recorded in the
-//! section that is open, and milestones — the ticket taken, each commit, each
-//! repair, the halt or the pull request — are lines on the thread. No tool call,
-//! thinking line or writing line ever reaches the thread, which is what keeps the
-//! conversation readable while a run is editing the tree.
+//! joins the two onto one channel of [`Step`] and [`Puller::keep_up`] routes it,
+//! all of it onto the thread, as `forman pull` prints all of it to the terminal:
+//! each heading is a line with a live work turn under it, activities tick in that
+//! turn, and milestones — the ticket taken, each commit, each repair, the halt or
+//! the pull request — are lines between them. A run read anywhere else looked
+//! hung to somebody watching the conversation.
 //!
 //! Two things a shell never needs are bought here. A commit is a milestone and the
 //! loop reports none, so the checkout the run is given is wrapped
@@ -517,10 +517,16 @@ where
             underway.events.drained(|step| {
                 match step {
                     Step::Pull(event) => said(app, event, now),
-                    // A section of its own per directory, opened as the pass
+                    // A phase of its own per directory, opened as the pass
                     // reaches it: the pass is one `claude` per directory, and its
                     // activities belong under the directory they were spent on.
-                    Step::Refreshing(directory) => section(app, &directory, now),
+                    Step::Refreshing(directory) => {
+                        phase(
+                            app,
+                            &format!("{directory} — refreshing its WARLOCK.md"),
+                            now,
+                        );
+                    }
                     Step::Committed(message) => {
                         app.panel_mut().note(committed_line(&message), now);
                     }
@@ -532,13 +538,9 @@ where
             return;
         };
         let ending = ending.unwrap_or_else(|Lost| Err(PULL_LOST.to_owned()));
-        // No outcome is worded onto the sections and the account is not
-        // finished. `Outcome`'s five endings are a document pass's — wrote,
-        // unchanged, skipped, refused, cancelled — and not one of them says what
-        // a split, a sub-task or a pull request came to; what each of those came
-        // to is the milestone below, which is where a reader looks for it. The
-        // sections are frozen as they go all the same, because opening the next
-        // one freezes the one above it.
+        // The last phase's clock stops here; every earlier one stopped when the
+        // phase after it opened.
+        app.panel_mut().settle_turn(now);
         // One line either way, and nothing else comes down: a halt, a crossing
         // and a failure are all a pull that stopped, and the panel goes on
         // running. What each of them left behind is the branch, the run record
@@ -583,10 +585,6 @@ where
         // The one milestone said before anything happens, because it is the fact
         // every line under it belongs to: this run, of this ticket.
         app.panel_mut().note(taking_line(undertaking), now);
-        // The account is the run's output window, opened on the round the answer
-        // was given: the sections below it are the split, the sub-tasks, the
-        // refresh's directories and the pull request.
-        app.start_account(now);
 
         let cancel = CancelGuard::new();
         let stopping = Stopping::default();
@@ -1179,28 +1177,31 @@ where
 /// the app's.
 fn said(app: &mut App, event: PullEvent, now: Instant) {
     match event {
-        // The three headings, each opening a section of the account. Opening one
-        // freezes the section above it, which is what stops two clocks running at
-        // once.
+        // The three headings, each a phase on the thread. Opening one stops the
+        // clock of the one above it, so two never run at once.
         PullEvent::Heading(Heading::Split { ticket, title }) => {
-            section(app, &format!("{ticket} — splitting {title}"), now);
+            phase(app, &format!("{ticket} — splitting {title}"), now);
         }
-        PullEvent::Heading(Heading::Subtask { id, goal, .. }) => {
-            section(app, &format!("{id} {goal}"), now);
+        PullEvent::Heading(Heading::Subtask {
+            id,
+            goal,
+            position,
+            total,
+        }) => {
+            phase(app, &format!("[{position}/{total}] `{id}` {goal}"), now);
         }
         PullEvent::Heading(Heading::PullRequest { branch }) => {
-            section(app, &format!("{branch} — pull request"), now);
+            phase(
+                app,
+                &format!("`{branch}` is pushed, opening a pull request"),
+                now,
+            );
         }
-        // Filed under whichever section is open, which is the one the heading
-        // before it opened, and never on the thread: a conversation with a
-        // session's tool calls in it is a conversation nobody can read. What each
-        // activity comes to is the account's business — a tool is its name and its
-        // one detail, thinking is the word, and a cost is added to the section's
-        // spend rather than drawn. See `Account::record`.
-        PullEvent::Activity(activity) => {
-            app.panel_mut()
-                .write_run(|account| account.record(&activity, now));
-        }
+        // Filed under the live phase, which is the one the heading before it
+        // opened. What each activity comes to is the thread's business — a tool is
+        // its name and its one detail, thinking and writing are the words for
+        // them, and a cost is dropped. See `Thread::record`.
+        PullEvent::Activity(activity) => app.panel_mut().record_turn(&activity, now),
         // A milestone: the sub-tasks a run works are not quite the ones the split
         // wrote, and a manifest nobody was told had been mended reads as one the
         // model produced.
@@ -1214,13 +1215,12 @@ fn said(app: &mut App, event: PullEvent, now: Instant) {
     }
 }
 
-// One section of the account, through `App::write_run` as every other run's is:
-// one way in, so a line of a run cannot be put on the card by two routes. A
-// session that reports with no account open has its line dropped, which is the
-// honest thing to do with it — see `App::write_run`.
-fn section(app: &mut App, heading: &str, now: Instant) {
-    app.panel_mut()
-        .write_run(|account| account.open_section(heading, now));
+// One phase of the run on the thread, as `/draft`'s slices are: the line that
+// says what it is, and a live work turn under it that the session's activity
+// ticks in. The whole run is read in the conversation, as Forman prints it.
+fn phase(app: &mut App, heading: &str, now: Instant) {
+    app.panel_mut().note(heading, now);
+    app.panel_mut().start_work(now);
 }
 
 fn asking(undertook: &Undertook, record: &ScopeRecord) -> PullConfirm {
