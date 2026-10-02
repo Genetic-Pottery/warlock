@@ -680,7 +680,7 @@ impl fmt::Display for Error {
                 refusal: refusal @ ScopeRefusal::Recorded { .. },
             } => write!(
                 f,
-                "{refusal}: run without `--team`, `--review-state` and `--label` to write the \
+                "{refusal}: run without `--team-key`, `--review-state` and `--label` to write the \
                  scope, or edit the file to change the record"
             ),
             Self::Scope { refusal } => write!(f, "{refusal}"),
@@ -1000,7 +1000,7 @@ pub const fn status_for(outcome: &Result<(), Error>) -> u8 {
         // have parsed, and a scope name the engine refuses already spends this
         // register. Not a **3** either — that one is the sigil boundary's
         // alone, and a script reading it as "ask for a sigil" would be sent to
-        // `warlock config` over a missing `--team`.
+        // `warlock config` over a missing `--team-key`.
         Err(_) => 1,
     }
 }

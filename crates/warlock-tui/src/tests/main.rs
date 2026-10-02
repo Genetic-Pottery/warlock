@@ -330,7 +330,7 @@ fn the_two_scope_writes_are_a_noun_and_a_verb_rather_than_two_words_run_together
                 // Absent is what clap hands over for a flag nobody passed;
                 // whether that is legal is the manifest's answer and is asked
                 // past the boundary, not here.
-                team: None,
+                team_key: None,
                 review_state: None,
                 label: None,
             }
@@ -351,12 +351,12 @@ fn the_two_scope_writes_are_a_noun_and_a_verb_rather_than_two_words_run_together
 // `warlock scope add crates/engine data-plane` with whichever of the three
 // record flags a case is about, so each assertion below reads as the flags and
 // not as the two positionals under them.
-fn added(team: Option<&str>, review_state: Option<&str>, label: Option<&str>) -> Command {
+fn added(team_key: Option<&str>, review_state: Option<&str>, label: Option<&str>) -> Command {
     Command::Scope {
         command: ScopeCommand::Add {
             path: PathBuf::from("crates/engine"),
             scope: "data-plane".to_owned(),
-            team: team.map(str::to_owned),
+            team_key: team_key.map(str::to_owned),
             review_state: review_state.map(str::to_owned),
             label: label.map(str::to_owned),
         },
@@ -371,7 +371,7 @@ fn the_three_record_flags_reach_the_add_exactly_as_they_were_typed() {
             "add",
             "crates/engine",
             "data-plane",
-            "--team",
+            "--team-key",
             "Data Plane",
             "--review-state",
             "In Review",
@@ -397,7 +397,7 @@ fn the_three_record_flags_reach_the_add_exactly_as_they_were_typed() {
             "area/data-plane",
             "--review-state",
             "In Review",
-            "--team",
+            "--team-key",
             "Data Plane",
             "crates/engine",
             "data-plane",
@@ -420,7 +420,7 @@ fn the_three_record_flags_reach_the_add_exactly_as_they_were_typed() {
             "add",
             "crates/engine",
             "data-plane",
-            "--team",
+            "--team-key",
             "  ",
             "--review-state",
             "",
@@ -441,7 +441,7 @@ fn the_three_record_flags_reach_the_add_exactly_as_they_were_typed() {
             "add",
             "crates/engine",
             "data-plane",
-            "--team",
+            "--team-key",
             "Data Plane",
         ])
         .unwrap()
@@ -488,7 +488,7 @@ fn a_scope_is_taken_as_it_was_typed_and_judged_by_the_engine_rather_than_by_clap
                 command: ScopeCommand::Add {
                     path: PathBuf::from("crates"),
                     scope: typed.to_owned(),
-                    team: None,
+                    team_key: None,
                     review_state: None,
                     label: None,
                 }

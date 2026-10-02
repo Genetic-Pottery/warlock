@@ -249,8 +249,8 @@ fn the_shell_adds_its_flag_advice_to_a_recorded_refusal_and_the_panel_does_not()
     assert_eq!(
         crate::error::Error::Scope { refusal }.to_string(),
         "`data-plane` already has a record in `.warlock/pacts.toml`, and warlock does not \
-         rewrite one: run without `--team`, `--review-state` and `--label` to write the \
-         scope, or edit the file to change the record"
+         rewrite one: run without `--team-key`, `--review-state` and `--label` to write \
+         the scope, or edit the file to change the record"
     );
 }
 

@@ -313,11 +313,11 @@ enum ScopeCommand {
         // already-recorded scope, and clap has not read `.warlock/pacts.toml`.
         // Judged in [`mod@edits`], past the boundary, where what the manifest
         // holds may be looked at. Values are stored exactly as typed — what a
-        // team, a review state or a label may be belongs to somebody else's
-        // tracker.
-        /// The team a new scope's reviews belong to.
-        #[arg(long, value_name = "TEAM")]
-        team: Option<String>,
+        // team key, a review state or a label may be belongs to somebody
+        // else's tracker.
+        /// The key of the team a new scope's reviews belong to.
+        #[arg(long, value_name = "TEAM_KEY")]
+        team_key: Option<String>,
         /// The review state a new scope's issues are routed to.
         #[arg(long, value_name = "REVIEW_STATE")]
         review_state: Option<String>,
@@ -491,14 +491,14 @@ fn main() -> ExitCode {
             ScopeCommand::Add {
                 path,
                 scope,
-                team,
+                team_key,
                 review_state,
                 label,
             } => scope_add(
                 &path,
                 &scope,
                 RecordFields {
-                    team_key: team.as_deref(),
+                    team_key: team_key.as_deref(),
                     review_state: review_state.as_deref(),
                     label: label.as_deref(),
                 },
