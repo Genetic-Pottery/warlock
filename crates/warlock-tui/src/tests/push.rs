@@ -289,7 +289,7 @@ fn a_push_that_files_says_the_team_the_label_the_name_and_the_url_and_records_th
     assert_eq!(record.project_id(), PROJECT_ID);
     assert_eq!(record.url(), URL);
     assert_eq!(record.scope(), SCOPE);
-    assert_eq!(record.team(), TEAM);
+    assert_eq!(record.team_key(), TEAM);
 }
 
 #[test]
@@ -540,7 +540,7 @@ fn a_scope_that_is_a_candidate_is_honoured_and_one_that_is_not_names_the_candida
     // Honoured: the named candidate's team is the board, and the other one is
     // nowhere in it.
     let ready = preparing(repo.path(), home.path(), Some("web")).expect("a named candidate");
-    assert_eq!(ready.destination().team(), "WEB");
+    assert_eq!(ready.destination().team_key(), "WEB");
     assert_eq!(ready.destination().scope(), "web");
 
     // And a name that is not one of them is refused with both of them named.

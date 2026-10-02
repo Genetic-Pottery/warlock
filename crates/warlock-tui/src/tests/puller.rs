@@ -13,7 +13,7 @@ use warlock_engine::{
 };
 
 use super::Puller;
-use crate::account::{Line, Section};
+use crate::account::Line;
 use crate::app::App;
 use crate::claude::Activity;
 use crate::confirm::{Answer, PullAnswered};
@@ -256,33 +256,36 @@ fn thread(app: &App) -> String {
     notes(app).join("\n")
 }
 
+// The run's phases as the thread draws them: a note with a live work turn
+// directly under it, which a milestone never has.
 fn sections(app: &App) -> Vec<String> {
-    app.panel()
-        .account()
-        .map(|account| {
-            account
-                .sections()
-                .iter()
-                .map(|section| Section::directory(section).display().to_string())
-                .collect()
+    let lines = app
+        .panel()
+        .thread()
+        .map(|thread| thread.lines(now()))
+        .unwrap_or_default();
+    lines
+        .windows(2)
+        .filter_map(|pair| match pair {
+            [Line::Note { text }, Line::Clocked { .. }] => Some(text.clone()),
+            _ => None,
         })
-        .unwrap_or_default()
+        .collect()
 }
 
 // Every line of the account card, headings and all: what a section holds is asked
 // of this rather than of the log, because the card is what a reader sees.
+// The work rows the phases ticked, which is where a session's activity goes.
 fn account(app: &App) -> String {
     app.panel()
-        .account()
-        .map(|account| {
-            account
-                .lines(now())
-                .into_iter()
-                .map(|line| format!("{line:?}"))
-                .collect::<Vec<String>>()
-                .join("\n")
-        })
+        .thread()
+        .map(|thread| thread.lines(now()))
         .unwrap_or_default()
+        .into_iter()
+        .filter(|line| matches!(line, Line::Clocked { .. }))
+        .map(|line| format!("{line:?}"))
+        .collect::<Vec<String>>()
+        .join("\n")
 }
 
 // The engine's own sentence for a refusal, flattened as the thread takes it: the
@@ -550,7 +553,7 @@ fn a_run_this_checkout_holds_is_offered_as_a_resume_from_the_sub_task_it_stopped
 }
 
 #[test]
-fn a_finished_run_puts_a_section_per_step_on_the_account_and_only_milestones_on_the_thread() {
+fn a_finished_run_puts_a_phase_per_step_on_the_thread_with_its_work_under_it() {
     let ground = Ground::new();
     let repo = checkout();
     let forge = Forging::opening(URL);
@@ -567,7 +570,7 @@ fn a_finished_run_puts_a_section_per_step_on_the_account_and_only_milestones_on_
     chosen(&mut app, &mut puller);
     through(&mut app, &mut puller);
 
-    // One section for the split, one per sub-task headed by its id and goal, and
+    // One phase for the split, one per sub-task headed by its id and goal, and
     // one for the pull request.
     let sections = sections(&app);
     assert!(
@@ -577,9 +580,9 @@ fn a_finished_run_puts_a_section_per_step_on_the_account_and_only_milestones_on_
         "{sections:?} does not open with the split"
     );
     assert!(
-        sections.contains(&"WAR-140.01 Read the queue".to_owned())
-            && sections.contains(&"WAR-140.02 Work the ticket".to_owned()),
-        "{sections:?} is missing a sub-task's section"
+        sections.contains(&"[1/2] `WAR-140.01` Read the queue".to_owned())
+            && sections.contains(&"[2/2] `WAR-140.02` Work the ticket".to_owned()),
+        "{sections:?} is missing a sub-task's phase"
     );
     assert!(
         sections
@@ -588,7 +591,8 @@ fn a_finished_run_puts_a_section_per_step_on_the_account_and_only_milestones_on_
         "{sections:?} does not end with the pull request"
     );
 
-    // The session's own lines are on the card and nowhere else.
+    // The session's own lines tick under the phase they were spent in, and are
+    // never a line of their own.
     let account = account(&app);
     for seen in ["Read", WROTE, "thinking", "writing"] {
         assert!(account.contains(seen), "{account} is missing `{seen}`");
@@ -656,9 +660,12 @@ fn a_halt_lands_as_one_line_and_takes_nothing_down() {
         "a halted sub-task was committed"
     );
     // The panel goes on running: the run is over, the next `/pull` is allowed,
-    // and the account card still holds what the run did.
+    // and the thread still holds what the run did.
     assert!(!puller.pulling());
-    assert!(!sections(&app).is_empty(), "the halt took the account down");
+    assert!(
+        !sections(&app).is_empty(),
+        "the halt took the run's phases down"
+    );
 }
 
 #[test]
@@ -782,7 +789,7 @@ fn the_refresh_pass_gets_a_section_of_its_own_per_directory_between_the_work_and
     let at = sections
         .iter()
         .position(|heading| heading.contains("crates/engine"))
-        .unwrap_or_else(|| panic!("{sections:?} has no section for the directory refreshed"));
+        .unwrap_or_else(|| panic!("{sections:?} has no phase for the directory refreshed"));
     // Between the last sub-task and the pull request, which is where the pass
     // runs: after the section of the sub-task whose commit it refreshes from, and
     // before the request opened from what it wrote.
@@ -829,12 +836,12 @@ fn a_failure_in_the_run_lands_as_one_line_and_leaves_the_panel_running() {
     );
     assert_eq!(said, one_line(said.trim()), "the failure is not one line");
     // Nothing came down with it: the run is over, the next `/pull` is allowed, the
-    // work the run did commit is committed, and the account still holds it.
+    // work the run did commit is committed, and the thread still holds it.
     assert!(!puller.pulling(), "a failure left the run in flight");
     assert_eq!(repo.commits().len(), 2, "{:?}", repo.commits());
     assert!(
         !sections(&app).is_empty(),
-        "a failure took the account down"
+        "a failure took the run's phases down"
     );
     assert!(
         forge.asked().is_empty(),

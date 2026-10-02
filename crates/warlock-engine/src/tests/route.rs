@@ -65,7 +65,7 @@ fn a_scope_this_machine_holds_no_sigil_for_still_routes() {
 
     assert_eq!(route.scope(), "data-plane");
     assert_eq!(route.record().name(), "data-plane");
-    assert_eq!(route.record().team(), "Data Plane");
+    assert_eq!(route.record().team_key(), "Data Plane");
     assert_eq!(route.record().review_state(), "In Review");
     assert_eq!(route.record().label(), "area/data-plane");
     assert_eq!(route.key(), "work");
@@ -106,7 +106,7 @@ fn the_sigil_fact_is_scope_opens_to_and_never_changes_the_route() {
             "the fact is the rule's answer and not a second copy of it: {held:?}"
         );
         assert_eq!(route.scope(), "data-plane", "{held:?}");
-        assert_eq!(route.record().team(), "Data Plane", "{held:?}");
+        assert_eq!(route.record().team_key(), "Data Plane", "{held:?}");
         assert_eq!(route.record().review_state(), "In Review", "{held:?}");
         assert_eq!(route.record().label(), "area/data-plane", "{held:?}");
         assert_eq!(
@@ -280,7 +280,7 @@ fn a_recorded_scope_and_a_stored_key_report_every_fact() {
     let record = facts
         .record()
         .expect("the scope carries a `[[scope]]` record");
-    assert_eq!(record.team(), "Data Plane");
+    assert_eq!(record.team_key(), "Data Plane");
     assert_eq!(record.review_state(), "In Review");
     assert_eq!(record.label(), "area/data-plane");
     assert_eq!(facts.key(), Some("work"));

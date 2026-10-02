@@ -56,6 +56,16 @@ Workflow
 ![drafted issues in Linear demo](./assets/draft-linear.png)
 > Issues appear in backlog with a customizable label, Project association, and assigned to self
 
+### Pulling issues
+![pulling an issue demo](./assets/pull.gif)
+> work is pulled for specific scopes; an Issues is pulled which has no blocking tickets, is assigned to you, and has the custom label
+
+![pulled issue finished in Linear demo](./assets/pull-linear.png)
+> when work is being worked on it is In Progress and once it is completed it is moved to a customizable final state, in this case In Review
+
+![pulled issue finished in Github demo](./assets/pull-github.png)
+> once work is complete the Linear ticket and dialog will display the Github URL where the PR is awaiting a human review
+
 ## Why this exists
 
 Editors and AI-enabled IDEs bolt AI on the side. The file tree is still the

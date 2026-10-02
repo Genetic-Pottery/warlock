@@ -218,9 +218,9 @@ pub(crate) fn sent<W: Write>(
     out: &mut W,
 ) -> Result<String, Error> {
     let team = linear
-        .team_id(destination.team())?
+        .team_id(destination.team_key())?
         .ok_or_else(|| Error::UnknownTeam {
-            team: destination.team().to_owned(),
+            team: destination.team_key().to_owned(),
             path: manifest_path(root),
         })?;
     // `None` is a workspace with no status by that name, which is a project
@@ -239,7 +239,7 @@ pub(crate) fn sent<W: Write>(
         out,
         "warlock: filed `{}` to `{}`, labelled `{}`: {}",
         brief.name(),
-        destination.team(),
+        destination.team_key(),
         destination.label(),
         project.url()
     ));
@@ -255,7 +255,7 @@ pub(crate) fn sent<W: Write>(
             project.id(),
             project.url(),
             destination.scope(),
-            destination.team(),
+            destination.team_key(),
             now_rfc3339(),
         )
         .map_err(unfiled)?,
@@ -290,7 +290,7 @@ fn would(prepared: &Prepared) -> String {
         "warlock: would file `{}` to `{}`, under the scope `{}`, with the key `{}` — {} of \
          content, and nothing was sent",
         brief.name(),
-        destination.team(),
+        destination.team_key(),
         destination.scope(),
         destination.key(),
         size(bytes)

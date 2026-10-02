@@ -292,7 +292,7 @@ fn a_scope_record_round_trips_byte_for_byte() {
         "scope = \"data-plane\"\n\n",
         "[[scope]]\n",
         "name = \"data-plane\"\n",
-        "team = \"Data Plane \"\n",
+        "team = \"War \"\n",
         "review_state = \"In Review\"\n",
         "label = \"area/Data_Plane\"\n",
     );
@@ -302,14 +302,14 @@ fn a_scope_record_round_trips_byte_for_byte() {
     assert_eq!(
         loaded,
         Manifest::with_entries([unjudged().with_scope("data-plane")]).with_scopes([
-            ScopeRecord::new("data-plane", "Data Plane ", "In Review", "area/Data_Plane")
+            ScopeRecord::new("data-plane", "War ", "In Review", "area/Data_Plane")
         ]),
         "the file and the constructed manifest are the same manifest"
     );
 
     let record = &loaded.scopes()[0];
     assert_eq!(record.name(), "data-plane");
-    assert_eq!(record.team(), "Data Plane ", "not trimmed");
+    assert_eq!(record.team_key(), "War ", "neither trimmed nor folded");
     assert_eq!(record.review_state(), "In Review", "not folded");
     assert_eq!(record.label(), "area/Data_Plane", "not folded either");
 

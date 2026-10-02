@@ -220,7 +220,7 @@ fn one_candidate_opens_the_dialog_over_the_project_the_team_and_the_key_name() {
     );
     let destination = filing.destination();
     assert_eq!(
-        destination.team(),
+        destination.team_key(),
         TEAM,
         "the team is the `[[scope]]` record's"
     );
@@ -320,7 +320,7 @@ fn a_candidate_submitted_takes_the_field_down_and_puts_the_dialog_up() {
         "the answer picked no board"
     );
     assert_eq!(
-        filing.destination().team(),
+        filing.destination().team_key(),
         OTHER_TEAM,
         "the team is the other record's"
     );
@@ -484,7 +484,7 @@ fn a_yes_files_what_the_dialog_was_drawn_from_without_resolving_it_again() {
         filed
             .record(WRITTEN)
             .expect("a record for the brief")
-            .team(),
+            .team_key(),
         TEAM
     );
 }

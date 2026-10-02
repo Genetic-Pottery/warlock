@@ -65,7 +65,7 @@ fn one_candidate_is_the_board_and_carries_the_key() {
 
     assert_eq!(target.scope(), "data-plane");
     assert_eq!(target.record().name(), "data-plane");
-    assert_eq!(target.record().team(), "Team data-plane");
+    assert_eq!(target.record().team_key(), "Team data-plane");
     assert_eq!(target.record().label(), "warlock");
     assert_eq!(target.key(), "work");
     assert_eq!(
@@ -159,7 +159,7 @@ fn a_name_among_the_candidates_picks_that_board() {
         .expect("a name answers the question the refusal asks");
 
     assert_eq!(target.scope(), "web");
-    assert_eq!(target.record().team(), "Team web");
+    assert_eq!(target.record().team_key(), "Team web");
 }
 
 #[test]

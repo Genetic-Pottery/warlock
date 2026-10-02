@@ -1258,7 +1258,7 @@ fn the_record_submit_writes_the_scope_and_the_record_in_one_save() {
     // somebody's tracker.
     let record = written.scopes().last().expect("the record was written");
     assert_eq!(record.name(), "billing");
-    assert_eq!(record.team(), " Billing Squad ");
+    assert_eq!(record.team_key(), " Billing Squad ");
     assert_eq!(record.review_state(), "In Review");
     assert_eq!(record.label(), "Area/Billing");
     assert_eq!(app, before, "the write moved the view");
@@ -1292,7 +1292,7 @@ fn the_router_finds_the_team_review_state_and_label_the_window_was_given() {
     let facts =
         route_facts("crates/tui", ".", &written, None).expect("the module path is inside the root");
     let record = facts.record().expect("the router found no record");
-    assert_eq!(record.team(), "Billing");
+    assert_eq!(record.team_key(), "Billing");
     assert_eq!(record.review_state(), "In Review");
     assert_eq!(record.label(), "area/billing");
 }
@@ -1407,7 +1407,7 @@ fn the_whole_path_through_both_windows_is_one_key_at_a_time() {
     assert_eq!(scope_on(&written, "crates/tui"), Some("billing"));
     let record = written.scopes().last().expect("the record was written");
     assert_eq!(record.name(), "billing");
-    assert_eq!(record.team(), "Billing Squad");
+    assert_eq!(record.team_key(), "Billing Squad");
     assert_eq!(record.review_state(), "In Review");
     assert_eq!(record.label(), "area/billing");
     // And the run state and the message line came through the whole of it
