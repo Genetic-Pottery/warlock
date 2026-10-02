@@ -49,6 +49,13 @@ Workflow
 ![pushed brief in Linear demo](./assets/push-linear.png)
 > the Project will land in Linear with a set format which future workflows can digest and turn into Issues
 
+### Drafting into issues
+![drafting into issues demo](./assets/draft.gif)
+> type /draft [PATH_TO_BRIEF] to draft a Linear Project into Linear Issues
+
+![drafted issues in Linear demo](./assets/draft-linear.png)
+> Issues appear in backlog with a customizable label, Project association, and assigned to self
+
 ## Why this exists
 
 Editors and AI-enabled IDEs bolt AI on the side. The file tree is still the
