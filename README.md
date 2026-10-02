@@ -51,7 +51,7 @@ Workflow
 
 ### Drafting into issues
 ![drafting into issues demo](./assets/draft.gif)
-> type /draft [PATH_TO_BRIEF] to draft a Linear Project into Linear Issues
+> type /draft [PATH_TO_BRIEF] to draft a Linear Project into Linear Issues, if a model requires more information to make a well scoped Issue it will ask you to provide clarification
 
 ![drafted issues in Linear demo](./assets/draft-linear.png)
 > Issues appear in backlog with a customizable label, Project association, and assigned to self
