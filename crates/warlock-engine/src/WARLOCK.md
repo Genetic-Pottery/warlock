@@ -3,7 +3,7 @@
 
 # src
 
-The warlock-engine core: it walks a repo tree, tracks per-directory freshness against a pacts.toml manifest, drives LLM agent calls to fill and validate WARLOCK.md documents, and manages scopes, sigils, pulls and filed tickets.
+The warlock-engine crate root: walks repositories into a Tree of Nodes, hashes and decides freshness state per directory, calls the Agent trait to fill and render WARLOCK.md documents, and tracks pacts, scopes, sigils, pulls, and ticket drafting/splitting/filing across them.
 
 ## Files
 
@@ -13,7 +13,7 @@ The warlock-engine core: it walks a repo tree, tracks per-directory freshness ag
 - `clock.rs` (5.0 KB) — now_rfc3339() renders a SystemTime as UTC RFC 3339 to the second via hand-rolled proleptic Gregorian arithmetic (civil_from_days), infallible and clamped to years 0000-9999. · declares `now_rfc3339`, `SECONDS_PER_DAY`, `DAYS_FROM_SHIFTED_EPOCH_TO_UNIX_EPOCH`, `DAYS_PER_ERA`, `MIN_REPRESENTABLE`, `MAX_REPRESENTABLE`, `rfc3339_from_unix_seconds`, `civil_from_days`
 - `decide.rs` (1.8 KB) — decide_state(entry: Option<&PactEntry>, computed_hash: &str) -> NodeState: pure rule mapping manifest entry plus a computed hash to Unpacted/PactedFresh/PactedStale. · declares `decide_state`
 - `document.rs` (56.9 KB) — Builds and validates WARLOCK.md fills: Fill, Entry, Described, Expected, Evidence structs, prompts, accept/mend/render for per-file and directory synthesis passes. · declares `ENTRY_CHARS`, `ENTRY_MINIMUM`, `PURPOSE_CHARS`, `LIST_CAP`, `DECLARED_SHOWN`, `ATTEMPTS`, `ASKING`, `STAMP`, `Fill`, `Entry`, `Described`, `written_anywhere`, `mentions_tool`, `identifiers`, `stub`, `to_json` (+68)
-- `drafting.rs` (29.2 KB) — Drafting fill schema: Fill/Draft, check/mend defect repair, DRAFTING_PROMPT and drafting_instructions() cutting a slice into tickets, stub_answer() for tests. · declares `ASKING`, `DRAFTS_PER_SLICE`, `TITLE_CHARS`, `TITLE_MINIMUM`, `BODY_CHARS`, `REFERENCES_PER_LIST`, `Fill`, `Draft`, `is_identifier`, `sections`, `to_json`, `Accepted`, `accept`, `check`, `title`, `body` (+30)
+- `drafting.rs` (28.8 KB) — Fill/Draft schema and mending for cutting one brief slice into tickets: Draft{title,body,blocked_by,blocks}, check(), mend(), drafting_instructions(), stub_answer(). · declares `ASKING`, `DRAFTS_PER_SLICE`, `TITLE_CHARS`, `TITLE_MINIMUM`, `REFERENCES_PER_LIST`, `Fill`, `Draft`, `is_identifier`, `sections`, `to_json`, `Accepted`, `accept`, `check`, `title`, `body`, `MEND_PASSES` (+29)
 - `filed.rs` (24.6 KB) — Filed/FiledRecord/CutRecord: TOML-backed record of filed tickets and their cut titles at filed.toml, with versioned load/save and cut_state matching against supplied titles. · declares `SCHEMA_VERSION`, `Filed`, `new`, `with_records`, `version`, `records`, `push`, `record`, `record_mut`, `cut_state`, `to_toml_string`, `from_toml_str`, `save`, `load`, `FiledRecord`, `path` (+26)
 - `filing.rs` (12.8 KB) — resolve_filing() picks the ScopeRecord a machine's held sigils can file to and pairs it with its bound key/value as a Target; Destination and Error (Unsigiled, Unmatched, Unrecorded, Several, Unknown) cover the outcomes. · declares `resolve_filing`, `Target`, `scope`, `record`, `key`, `value`, `destination`, `Destination`, `new`, `team`, `label`, `Error`, `no_candidate`, `named`, `listed`, `fmt` (+1)
 - `fill.rs` (12.3 KB) — Validates and repairs LLM JSON fills: Defect enum, accept/settle (Reask::Any/Cut retry policy), Schema trait, and mend() for defect auto-rewrite. · declares `Defect`, `Accepted`, `judged`, `accept`, `Reask`, `Asking`, `Settled`, `settle`, `Mend`, `Rewrite`, `Schema`, `mend`, `turned_down`, `parse`, `line`, `fit` (+12)
@@ -39,15 +39,15 @@ The warlock-engine core: it walks a repo tree, tracks per-directory freshness ag
 
 ## Structure
 
-- lib.rs — Crate root: declares modules (agent, briefs, pact, pulls, route, scope, sigils, tree, etc.) and re-exports their public items as the engine's API.
-- load.rs — load_tree walks the repo from a working dir, pairs it with the pact Manifest, and builds the Tree of Nodes, flagging Problems for unhashable or invalid-scope directories.
-- pact.rs — Orchestrates documenting a directory subtree: pact_subtree, refresh_subtree, pact_directory, unpact_subtree/unpact_ignored, granting manifest entries and emitting Event/Pacted/Failure/Error.
-- fitting.rs — Snapshot takes a directory walk and builds per-file/synthesis agent requests; Assembled/Synthesised carry results, Problem/Omission report too-large or unreadable files, PER_FILE_BYTE_CAP=1MiB.
-- document.rs — Builds and validates WARLOCK.md fills: Fill, Entry, Described, Expected, Evidence structs, prompts, accept/mend/render for per-file and directory synthesis passes.
-- fill.rs — Validates and repairs LLM JSON fills: Defect enum, accept/settle (Reask::Any/Cut retry policy), Schema trait, and mend() for defect auto-rewrite.
-- decide.rs — decide_state(entry: Option<&PactEntry>, computed_hash: &str) -> NodeState: pure rule mapping manifest entry plus a computed hash to Unpacted/PactedFresh/PactedStale.
-- route.rs — resolve_route and route_facts resolve a path to its covering scope, manifest ScopeRecord, bound key and sigil-opens status; Route, RouteFacts and Error types carry the result
-- filing.rs — resolve_filing() picks the ScopeRecord a machine's held sigils can file to and pairs it with its bound key/value as a Target; Destination and Error (Unsigiled, Unmatched, Unrecorded, Several, Unknown) cover the outcomes.
-- pulls.rs — PullRun/PullSubtask state for a held pull: JSON state.json, rendered manifest.md and per-subtask brief.md, RunStatus/SubtaskStatus, resume/reset, held_runs scan.
-- drafting.rs and splitting.rs both define ticket-building Fill schemas consumed through fill.rs's check/mend cycle.
-- walk.rs — Shared walker over the filesystem: subtree_files, pactable_directories and own gather files/child WARLOCK.md documents so hash, pact and generation agree on content
+- Crate root: declares modules (agent, briefs, pact, pulls, route, scope, sigils, tree, etc.) and re-exports their public items as the engine's API.
+- load_tree walks the repo from a working dir, pairs it with the pact Manifest, and builds the Tree of Nodes, flagging Problems for unhashable or invalid-scope directories.
+- Orchestrates documenting a directory subtree: pact_subtree, refresh_subtree, pact_directory, unpact_subtree/unpact_ignored, granting manifest entries and emitting Event/Pacted/Failure/Error.
+- Snapshot takes a directory walk and builds per-file/synthesis agent requests; Assembled/Synthesised carry results, Problem/Omission report too-large or unreadable files, PER_FILE_BYTE_CAP=1MiB.
+- Builds and validates WARLOCK.md fills: Fill, Entry, Described, Expected, Evidence structs, prompts, accept/mend/render for per-file and directory synthesis passes.
+- Defines the Agent trait and its Request/File/ChildDocument/Response/Error types, the model-call boundary the engine spawns no subprocess across.
+- decide_state(entry: Option<&PactEntry>, computed_hash: &str) -> NodeState: pure rule mapping manifest entry plus a computed hash to Unpacted/PactedFresh/PactedStale.
+- Manifest struct (version, entries, scopes) and PactEntry/ScopeRecord: pacts.toml load/save, path<->manifest-path conversion, atomic writes, and Error/ScopeFault types.
+- resolve_route and route_facts resolve a path to its covering scope, manifest ScopeRecord, bound key and sigil-opens status; Route, RouteFacts and Error types carry the result
+- resolve_filing() picks the ScopeRecord a machine's held sigils can file to and pairs it with its bound key/value as a Target; Destination and Error (Unsigiled, Unmatched, Unrecorded, Several, Unknown) cover the outcomes.
+- PullRun/PullSubtask state for a held pull: JSON state.json, rendered manifest.md and per-subtask brief.md, RunStatus/SubtaskStatus, resume/reset, held_runs scan.
+- Defines the ticket-splitting Fill schema (Subtask with goal/depends_on/definition_of_done/likely_files/test_plan/notes), its check/mend logic, number() ordering subtasks via topological sort with Cycle detection, SPLIT_PROMPT, and stub_answer().

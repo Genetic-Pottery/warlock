@@ -3,7 +3,7 @@
 
 # warlock
 
-The repository root of warlock: a Cargo workspace with two crates, warlock-engine and warlock-tui, plus licensing, formatting config, and a demo recording of a warlock TUI session.
+The repository root: a Rust workspace of two crates, warlock-engine and warlock-tui, with its workspace manifest, lockfile, license, formatting config, and a recorded demo session of drafting a brief.
 
 ## Files
 
@@ -15,7 +15,7 @@ The repository root of warlock: a Cargo workspace with two crates, warlock-engin
 
 ## Directories
 
-- `crates/` — Holds the warlock-engine core library crate and the warlock-tui terminal UI/CLI crate; go here for how the project's crates are organized or split.
+- `crates/` — Holds warlock-engine (repo walking, freshness, document fill/render, pacts/scopes/sigils/pulls) and warlock-tui (CLI and TUI); go there for engine or command/UI logic.
 
 ## Structure
 

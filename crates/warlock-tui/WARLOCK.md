@@ -3,7 +3,7 @@
 
 # warlock-tui
 
-The warlock-tui crate: a terminal UI state machine, event loop, and rendering plus the CLI subcommands (pact, push, pull, cut, check, key, list, resume) that drive the manifest, boundary, brief, and Linear-filing logic.
+The warlock-tui crate: packages the `warlock` CLI binary and warlock_tui library, pulling in warlock-engine, ratatui, clap and notify to run the interactive TUI and its pacting, briefing, drafting, pulling and pushing engine.
 
 ## Files
 
@@ -11,9 +11,8 @@ The warlock-tui crate: a terminal UI state machine, event loop, and rendering pl
 
 ## Directories
 
-- `src/` — The crate's source, including the state machine, event loop, rendering, and CLI subcommands; go there for how any TUI or CLI behavior is implemented.
+- `src/` — The crate source: CLI entrypoint, TUI event loop, rendering, and the pact/brief/draft/pull/push engine against a repo's boundary scopes; go here for any command or state-machine question.
 
 ## Structure
 
-- Cargo.toml defines the "warlock" binary at src/main.rs and the warlock_tui library at src/lib.rs.
-- The package depends on warlock-engine, ratatui, clap, and notify.
+- Cargo.toml: warlock-tui package manifest — bin "warlock" (src/main.rs) and lib warlock_tui (src/lib.rs), deps on warlock-engine, ratatui, clap, notify.

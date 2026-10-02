@@ -3,14 +3,9 @@
 
 # crates
 
-The crates directory holds the two Rust crates that make up the project: warlock-engine, the core library, and warlock-tui, the terminal UI and CLI.
+The crates directory holding the two crates that make up the workspace: warlock-engine, the repository-walking and document-filling engine, and warlock-tui, the CLI and TUI built on top of it.
 
 ## Directories
 
-- `warlock-engine/` — The core library crate: walks a repo tree, tracks freshness against pacts.toml, drives LLM fills of WARLOCK.md documents, and manages scopes, sigils, pulls and filed tickets.
-- `warlock-tui/` — The terminal UI and CLI crate: a state machine, event loop, and rendering plus subcommands (pact, push, pull, cut, check, key, list, resume) driving manifest, boundary, brief, and Linear-filing logic.
-
-## Structure
-
-- warlock-engine holds the warlock-engine crate.
-- warlock-tui holds the warlock-tui crate.
+- `warlock-engine/` — Walks repos, hashes and decides freshness, fills and renders WARLOCK.md documents, and tracks pacts, scopes, sigils and pulls; go here for engine logic.
+- `warlock-tui/` — Packages the warlock CLI and TUI, running the pact/brief/draft/pull/push engine against a repo's boundary scopes; go here for command or UI behavior.

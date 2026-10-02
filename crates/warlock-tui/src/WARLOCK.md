@@ -3,7 +3,7 @@
 
 # src
 
-The warlock-tui crate's source: the terminal UI's state machine, event loop, rendering, and the CLI subcommands (pact, push, pull, cut, check, key, list, resume) that drive the manifest, boundary, brief, and Linear-filing logic behind it.
+The warlock-tui crate source: the CLI entrypoint, interactive TUI event loop, and the engine for pacting, briefing, drafting, pulling and pushing tickets against a repo's boundary scopes.
 
 ## Files
 
@@ -15,7 +15,7 @@ The warlock-tui crate's source: the terminal UI's state machine, event loop, ren
 - `briefing.rs` (15.7 KB) — briefing.rs — runs the interactive brief loop: brief(), briefing() reading/turning agent replies, /write handling via written(), Opening, Landing enum · declares `brief`, `PROMPT`, `OPENING`, `OVER`, `ONLY_WRITE`, `briefing`, `Opening`, `reading`, `Landing`, `written`, `proposing`, `raised`, `turned`, `say`
 - `chatting.rs` (29.6 KB) — Chat<C> drives chat/brief turns and /brief, /chat, /write, /push, /draft, /pull, /resume commands via Submitted, Wanted, Takes, Chatting, Asked, TurnEvent. · declares `Wanted`, `Takes`, `taking`, `Chat`, `new`, `with_agent`, `composer`, `set_composer_width`, `set_composer_answering`, `taken`, `offer`, `write_prompt`, `directory`, `answering`, `ask`, `say` (+36)
 - `check.rs` (27.3 KB) — implements `warlock check`, `gate`, and the `hook` PreToolUse denial path: resolves scope/sigil coverage for a path and renders it as prose or JSON via `object` · declares `check`, `gate`, `hook`, `CHECK`, `PATH`, `SCOPE`, `SIGILS`, `OPENS`, `TEAM`, `REVIEW_STATE`, `LABEL`, `KEY`, `KEY_FOUND`, `TOOL_INPUT`, `FILE_PATH`, `HOOK_OUTPUT` (+23)
-- `claude.rs` (138.1 KB) — Spawns the `claude` CLI as agent: ClaudeAgent/ChatAgent, prompts for brief/chat/draft/split/work, Cancel, Activities, Stopped, Drafting/Splitting/Working runners. · declares `INVOCATION_TIMEOUT`, `UNTIMED`, `BRIEF_EFFORT`, `BRIEF_MODEL`, `brief_instruction`, `CHAT_INSTRUCTION`, `WRITE_INSTRUCTION`, `NOTHING_SETTLES_IT`, `proposing_instruction`, `propose_answer`, `DRAFTING_CONTRACT`, `DRAFTING_ONE_SHOT_CONTRACT`, `DRAFT_NOW_INSTRUCTION`, `drafting_opening`, `working_system_prompt`, `Sibling` (+135)
+- `claude.rs` (138.4 KB) — ClaudeAgent/ChatAgent: spawns the `claude` CLI, builds prompts and system prompts for chat, drafting, splitting and working, streams JSON output, and classifies Stopped/Worked/Split/Drafted outcomes. · declares `INVOCATION_TIMEOUT`, `UNTIMED`, `BRIEF_EFFORT`, `BRIEF_MODEL`, `brief_instruction`, `CHAT_INSTRUCTION`, `WRITE_INSTRUCTION`, `NOTHING_SETTLES_IT`, `proposing_instruction`, `propose_answer`, `DRAFTING_CONTRACT`, `DRAFTING_ONE_SHOT_CONTRACT`, `DRAFT_NOW_INSTRUCTION`, `drafting_opening`, `working_system_prompt`, `Sibling` (+135)
 - `clipboard.rs` (3.0 KB) — Clipboard trait and arboard-backed impl with put(text); copy() writes text and sets app status via App::set_message to a character count or Error::Clipboard. · declares `Clip`, `Clipboard`, `copy`, `put`
 - `colour.rs` (3.3 KB) — Pinned indexed colours for the TUI: colour_for(NodeState) plus FOCUS_COLOUR, SYSTEM_COLOUR, GUIDE_COLOUR, CONVERSATION_COLOUR, held pairwise-distinct by tests. · declares `colour_for`, `FOCUS_COLOUR`, `SYSTEM_COLOUR`, `GUIDE_COLOUR`, `CONVERSATION_COLOUR`
 - `composer.rs` (22.1 KB) — Composer struct holding draft text, cursor and wrapped-row state; compose_for/paste_for turn key events and pastes into Composed/Pasted edits. · declares `COMPOSER_MAX_ROWS`, `Composer`, `new`, `at`, `cursor`, `set_width`, `width`, `set_muted`, `is_muted`, `set_answering`, `answering`, `draft`, `is_submittable`, `height`, `window`, `ComposerWindow` (+11)
@@ -71,15 +71,15 @@ The warlock-tui crate's source: the terminal UI's state machine, event loop, ren
 
 ## Structure
 
-- main.rs — CLI entrypoint: defines Cli/Command/ScopeCommand/KeyCommand (clap), dispatches init/configure/pact/push/pull/etc., and runs the interactive TUI loop via run().
-- interactive.rs — Interactive<S>: TUI event loop wiring App, Pact, Chat, Pushes, Cutter, Puller; handles press/point/paste/draw/keep_up and modal dispatch.
-- app.rs — App state machine for the TUI: Row, Focus, Sigils, Chrome, PactToggle/PactIntent, and App itself, driving tree selection, collapsing, pacting, scrolling, and panel focus.
-- ui.rs — Ratatui rendering: draw() lays out panel/tree/composer/footer and Dialog renders modal confirmations (quit, push, cut, pull, review, carry, scope, record).
-- pulling.rs — Pulling drives a ticket through split, sub-task sessions, crossing checks, commit and PR via Pulling::pull/work; defines Ticket, Pulled, PullEvent, TouchedScope, halt_comment.
-- cutting.rs — Cutter<O,A> drives brief→draft→cut: fetches a Planned, runs the drafting/review/feedback/carry Stage machine, and files slices via Cut/Opens
-- push.rs — Pushes a brief to Linear: prepare() resolves filing/scope and brief_at, file()/sent() create the project via Board and append a FiledRecord; dry-run prints would().
-- linear.rs — Linear GraphQL client: Client/Linear implement Board (viewer, team_id, scope_queue, named_issue, create_project/issue, move_issue, comments); Queue, QueuedIssue, Blocker, Priority, Error types.
-- check.rs — implements `warlock check`, `gate`, and the `hook` PreToolUse denial path: resolves scope/sigil coverage for a path and renders it as prose or JSON via `object`
-- boundary.rs — Boundary checks for pact/refresh/scope/unpact ops against manifest scopes: `permits` yields `Verdict::Open/Closed/ClosedBelow`, with sigil-hint messages
-- claude.rs — Spawns the `claude` CLI as agent: ClaudeAgent/ChatAgent, prompts for brief/chat/draft/split/work, Cancel, Activities, Stopped, Drafting/Splitting/Working runners.
-- stubs.rs — Test stand-ins (Copying, Typing, Passing, Saying, Scripted, Posting, Boarding, Gate, Checkout, Forging, Slicing, Sessions, Refreshing, Written) implementing the crate's traits for scripted, cancellable, call-logging fakes in tests.
+- Crate root: declares all modules and re-exports their public items (Account, Brief, ClaudeAgent, Git, LinearClient, pull, push, Thread, Screen, etc).
+- CLI entrypoint: defines Cli/Command/ScopeCommand/KeyCommand (clap), dispatches init/configure/pact/push/pull/etc., and runs the interactive TUI loop via run().
+- Interactive<S>: TUI event loop wiring App, Pact, Chat, Pushes, Cutter, Puller; handles press/point/paste/draw/keep_up and modal dispatch.
+- Ratatui rendering: draw() lays out panel/tree/composer/footer and Dialog renders modal confirmations (quit, push, cut, pull, review, carry, scope, record).
+- Cutter<O,A> drives brief→draft→cut: fetches a Planned, runs the drafting/review/feedback/carry Stage machine, and files slices via Cut/Opens
+- Runs `warlock cut`: drafts each brief Slice via Drafting sessions, reviews/edits in Planned/Filing, and files tickets through cut::cut.
+- Puller drives `/pull`: Work, Choosing, Ready, Underway states choose a ticket via chose() then run it via Pulling in spawn_run, reporting Step events to the panel.
+- Pulling drives a ticket through split, sub-task sessions, crossing checks, commit and PR via Pulling::pull/work; defines Ticket, Pulled, PullEvent, TouchedScope, halt_comment.
+- Pushes a brief to Linear: prepare() resolves filing/scope and brief_at, file()/sent() create the project via Board and append a FiledRecord; dry-run prints would().
+- Pact<P>: runs/cancels a pact or refresh pass, draining PactEvent via Running into App/Manifest, producing Toggled and Refusal outcomes for the account panel.
+- Chat<C> drives chat/brief turns and /brief, /chat, /write, /push, /draft, /pull, /resume commands via Submitted, Wanted, Takes, Chatting, Asked, TurnEvent.
+- ClaudeAgent/ChatAgent: spawns the `claude` CLI, builds prompts and system prompts for chat, drafting, splitting and working, streams JSON output, and classifies Stopped/Worked/Split/Drafted outcomes.
