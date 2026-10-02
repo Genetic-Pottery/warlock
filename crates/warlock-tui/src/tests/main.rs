@@ -453,19 +453,19 @@ fn the_three_record_flags_reach_the_add_exactly_as_they_were_typed() {
 #[test]
 fn a_record_flag_wants_a_value_on_an_add_and_buys_no_other_word() {
     // Each of the three takes a value, so the flag on its own is a value that
-    // went missing rather than a switch; a clear records nothing, so none of
-    // them is a word `remove` knows; and having passed them buys nothing at
-    // the boundary — `--force`, `--yes` and `--json` are refused beside a
-    // filled-in record exactly as they are without one.
-    let malformed: [&[&str]; 8] = [
-        &["scope", "add", "crates", "web", "--team"],
+    // went missing rather than a switch; the key is asked for by its key's
+    // spelling and `--team` is not a word the add has, so a team name typed
+    // where a key goes is refused here rather than recorded; a clear records
+    // nothing, so none of them is a word `remove` knows; and having passed
+    // them buys nothing at the boundary — `--force`, `--yes` and `--json` are
+    // refused beside a filled-in record exactly as they are without one.
+    let malformed: [&[&str]; 6] = [
+        &["scope", "add", "crates", "web", "--team-key"],
         &["scope", "add", "crates", "web", "--review-state"],
         &["scope", "add", "crates", "web", "--label"],
-        &["scope", "remove", "crates", "--team", "Data Plane"],
+        &["scope", "add", "crates", "web", "--team", "Web"],
+        &["scope", "remove", "crates", "--team-key", "WAR"],
         &["scope", "remove", "crates", "--review-state", "In Review"],
-        &["scope", "add", "crates", "web", "--team", "Web", "--force"],
-        &["scope", "add", "crates", "web", "--team", "Web", "--yes"],
-        &["scope", "add", "crates", "web", "--team", "Web", "--json"],
     ];
 
     for args in malformed {
@@ -473,6 +473,22 @@ fn a_record_flag_wants_a_value_on_an_add_and_buys_no_other_word() {
         assert!(error.use_stderr(), "{args:?}");
         assert_eq!(error.exit_code(), 2, "{args:?}");
     }
+
+    // The three override words, each beside a filled-in key, read as a loop
+    // rather than as three more rows above: what changes between them is one
+    // word on the end.
+    for word in ["--force", "--yes", "--json"] {
+        let error =
+            parse(&["scope", "add", "crates", "web", "--team-key", "WEB", word]).unwrap_err();
+        assert!(error.use_stderr(), "{word}");
+        assert_eq!(error.exit_code(), 2, "{word}");
+    }
+
+    // And `--team` in particular is refused for not being a word rather than
+    // for anything about the value beside it, so no alias and no hidden
+    // spelling is quietly taking a team name.
+    let error = parse(&["scope", "add", "crates", "web", "--team", "Web"]).unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::UnknownArgument);
 }
 
 #[test]
@@ -1159,7 +1175,7 @@ fn no_argument_the_parser_accepts_gets_a_write_past_the_boundary() {
         vec!["scope", "remove"],
     ] {
         let allowed: &[&str] = if names == ["scope", "add"] {
-            &["help", "team", "review-state", "label"]
+            &["help", "team-key", "review-state", "label"]
         } else {
             &["help"]
         };
