@@ -315,7 +315,7 @@ enum ScopeCommand {
         // holds may be looked at. Values are stored exactly as typed — what a
         // team key, a review state or a label may be belongs to somebody
         // else's tracker.
-        /// The key of the team a new scope's reviews belong to.
+        /// The Linear team key a new scope's issues are filed to.
         #[arg(long, value_name = "TEAM_KEY")]
         team_key: Option<String>,
         /// The review state a new scope's issues are routed to.

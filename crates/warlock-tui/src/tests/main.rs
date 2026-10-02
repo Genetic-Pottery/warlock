@@ -492,6 +492,35 @@ fn a_record_flag_wants_a_value_on_an_add_and_buys_no_other_word() {
 }
 
 #[test]
+fn the_add_help_asks_for_a_team_key_and_says_whose_it_is() {
+    // The help a reader meets without opening `linear.rs`, read off the
+    // parser: the value is the key Linear's own `teams(filter: { key: ... })`
+    // matches, so the prose names it a Linear team key and the placeholder is
+    // spelled `TEAM_KEY`. A team name typed here resolves to nothing, and the
+    // mistake surfaces at a push against a live workspace rather than at the
+    // parse, which is why this surface says which of the two it wants. The
+    // other two flags are asserted beside it unchanged, so the wording of the
+    // first cannot be spread across all three.
+    let help = subcommand(&["scope", "add"]).render_long_help().to_string();
+    for said in [
+        "The Linear team key a new scope's issues are filed to",
+        "--team-key <TEAM_KEY>",
+        "The review state a new scope's issues are routed to",
+        "--review-state <REVIEW_STATE>",
+        "The label a new scope's issues carry",
+        "--label <LABEL>",
+    ] {
+        assert!(help.contains(said), "{said}: {help}");
+    }
+
+    // And neither the bare placeholder nor a word for a name is left anywhere
+    // in it, so `TEAM` on its own cannot come back beside the key's spelling.
+    for absent in ["<TEAM>", "team name"] {
+        assert!(!help.contains(absent), "{absent}: {help}");
+    }
+}
+
+#[test]
 fn a_scope_is_taken_as_it_was_typed_and_judged_by_the_engine_rather_than_by_clap() {
     // Both of these are refusals — one is not a scope, the other is the
     // `Empty` rule — and both are warlock's to word and to spend a 1 on.
