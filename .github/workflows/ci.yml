@@ -12,9 +12,15 @@ jobs:
       - name: Check out the repository
         uses: actions/checkout@v4
 
-      - name: Install the stable Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+      # Pinned to the workspace's `rust-version`, which is the toolchain this
+      # repository is built with locally (nixpkgs, not rustup). `stable` moved to
+      # a release whose new clippy lints and deprecations failed every branch
+      # while the same code passed locally, and the fix for one of them does not
+      # compile on the toolchain in use. Move this and `rust-version` together.
+      - name: Install the pinned Rust toolchain
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: 1.97.1
           components: rustfmt, clippy
 
       - name: Cache the cargo registry and target directory
