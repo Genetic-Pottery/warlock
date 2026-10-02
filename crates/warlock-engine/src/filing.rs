@@ -147,11 +147,26 @@ pub fn resolve_filing<'m>(
     })
 }
 
-// Three sentences rather than one "nothing to file to", because the machine
-// holding nothing, the machine holding something this repository has never
-// heard of and the repository owing a `[[scope]]` record are fixed in three
-// different files by three different people.
+// Four sentences rather than one "nothing to file to", because a repository
+// that records no scope at all, a machine holding nothing, a machine holding
+// something this repository has never heard of and a scope some pact carries
+// with no `[[scope]]` record are fixed in four different files by four
+// different people.
+//
+// The repository is asked about first, before anything about this machine,
+// because the candidates above are built from `scopes()` alone: with no record
+// there, no sigil this machine could hold would make a board, so the sentence
+// about holding one is advice that cannot work — the person holds a sigil,
+// pushes again, and fails again on a different sentence. Each absence gets one
+// sentence naming one fix, so the order is which fix comes first and not which
+// absence is worse.
 fn no_candidate(manifest: &Manifest, root: &Path, held: &[String]) -> Error {
+    if manifest.scopes().is_empty() {
+        return Error::Boardless {
+            path: manifest_path(root),
+        };
+    }
+
     if held.is_empty() {
         return Error::Unsigiled;
     }
@@ -308,6 +323,9 @@ impl fmt::Debug for Target<'_> {
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum Error {
+    Boardless {
+        path: PathBuf,
+    },
     Unsigiled,
     Unmatched {
         held: Vec<String>,
@@ -335,6 +353,14 @@ pub enum Error {
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            // No sigil named and no `warlock config`: the fix is a line in the
+            // file this names, and a sentence about what the machine holds would
+            // send the person to the other one of the two.
+            Self::Boardless { path } => write!(
+                f,
+                "`{}` records no `[[scope]]` record, so there is nowhere to file: add one",
+                path.display()
+            ),
             Self::Unsigiled => write!(
                 f,
                 "this machine holds no sigil, so nothing says which board to file to: hold one with `warlock config`"
@@ -375,7 +401,8 @@ impl std::error::Error for Error {
         match self {
             Self::Key { source } => Some(source),
             Self::Sigils { source } => Some(source),
-            Self::Unsigiled
+            Self::Boardless { .. }
+            | Self::Unsigiled
             | Self::Unmatched { .. }
             | Self::Unrecorded { .. }
             | Self::Several { .. }
