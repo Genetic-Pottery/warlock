@@ -3,7 +3,7 @@
 
 # warlock
 
-The repository root of the workspace, holding the Cargo workspace manifest tying together the warlock-engine and warlock-tui crates, the generated lockfile, formatting configuration, and licensing.
+The repository root of the workspace: the Cargo workspace manifest tying together the warlock-engine and warlock-tui crates, the pinned lockfile, formatting config, and license.
 
 ## Files
 
@@ -14,7 +14,7 @@ The repository root of the workspace, holding the Cargo workspace manifest tying
 
 ## Directories
 
-- `crates/` — Holds the two workspace crates, warlock-engine and warlock-tui; open for how the engine or the CLI/TUI works.
+- `crates/` — The workspace's two crates: warlock-engine (the freshness ledger engine) and warlock-tui (the TUI and CLI built on it); go there for how the engine or any command/UI piece works.
 
 ## Structure
 

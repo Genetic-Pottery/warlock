@@ -3,7 +3,7 @@
 
 # warlock-tui
 
-The warlock-tui crate: a binary (warlock) and library (warlock_tui) providing the terminal UI and CLI, with App state driving tree/panel rendering and the pact, pull, push, cut, draft and refresh subcommand flows against a repo's manifest and boundary.
+The warlock-tui crate: a Cargo package building the `warlock` binary and the warlock_tui library, which together provide the interactive TUI and CLI entry points for pact, refresh, scope, push, cut, pull and chat/brief flows, plus the Linear and git/gh clients they call through.
 
 ## Files
 
@@ -11,7 +11,7 @@ The warlock-tui crate: a binary (warlock) and library (warlock_tui) providing th
 
 ## Directories
 
-- `src/` — Crate root holding the App state machine, rendering, and all subcommand flows; go here for any question about CLI commands, TUI screens, pact/pull/push/cut/draft/refresh behavior, or Linear/Claude integration.
+- `src/` — The interactive TUI, CLI entry points and engine driving pact, refresh, scope, push, cut, pull, chat/brief and the Linear/git/gh clients; open it for how any specific command or UI piece works.
 
 ## Structure
 
