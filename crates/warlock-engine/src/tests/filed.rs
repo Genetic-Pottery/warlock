@@ -108,7 +108,7 @@ fn a_version_1_file_loads_as_the_records_it_spells() {
         "https://linear.app/acme/project/warlock-brief-21"
     );
     assert_eq!(record.scope(), " Data Plane ");
-    assert_eq!(record.team(), "dp");
+    assert_eq!(record.team_key(), "dp");
     assert_eq!(record.filed_at(), "2026-09-19T09:00:00+01:00");
     assert!(
         record.cuts().is_empty(),
@@ -502,7 +502,7 @@ fn a_record_this_warlock_did_not_write_survives_an_append_byte_for_byte() {
         "https://linear.app/acme/project/warlock-brief-21"
     );
     assert_eq!(kept.scope(), " Data Plane ", "not trimmed");
-    assert_eq!(kept.team(), "dp", "not folded");
+    assert_eq!(kept.team_key(), "dp", "not folded");
     assert_eq!(
         kept.filed_at(),
         "2026-09-19T09:00:00+01:00",

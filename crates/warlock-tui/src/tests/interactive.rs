@@ -2000,7 +2000,7 @@ mod filing {
             .expect("the push recorded what it filed");
         assert_eq!(filed.records().len(), 1, "{:?}", filed.records());
         assert_eq!(record.url(), URL);
-        assert_eq!(record.team(), TEAM);
+        assert_eq!(record.team_key(), TEAM);
         assert_eq!(record.scope(), SCOPE);
         assert!(
             said(&driven, record.path()),

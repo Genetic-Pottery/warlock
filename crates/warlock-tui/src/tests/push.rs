@@ -289,7 +289,7 @@ fn a_push_that_files_says_the_team_the_label_the_name_and_the_url_and_records_th
     assert_eq!(record.project_id(), PROJECT_ID);
     assert_eq!(record.url(), URL);
     assert_eq!(record.scope(), SCOPE);
-    assert_eq!(record.team(), TEAM);
+    assert_eq!(record.team_key(), TEAM);
 }
 
 #[test]

@@ -484,7 +484,7 @@ fn a_yes_files_what_the_dialog_was_drawn_from_without_resolving_it_again() {
         filed
             .record(WRITTEN)
             .expect("a record for the brief")
-            .team(),
+            .team_key(),
         TEAM
     );
 }

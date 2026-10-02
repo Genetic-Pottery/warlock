@@ -342,7 +342,13 @@ pub struct FiledRecord {
     project_id: String,
     url: String,
     scope: String,
-    team: String,
+    // The field says what the value is — a Linear team key, `WAR` — and the
+    // TOML key cannot follow it: `team` is what every committed
+    // `.warlock/filed.toml` already spells, those bytes are hand-edited, and
+    // `deny_unknown_fields` above turns a renamed key into a refusal to read a
+    // file that was valid yesterday.
+    #[serde(rename = "team")]
+    team_key: String,
     // Supplied by the caller and never read from a clock in this module, the
     // way the home is a parameter through `sigils.rs`. `clock::now_rfc3339`
     // called here would make every test of this module depend on the wall clock
@@ -393,7 +399,7 @@ impl FiledRecord {
         project_id: impl Into<String>,
         url: impl Into<String>,
         scope: impl Into<String>,
-        team: impl Into<String>,
+        team_key: impl Into<String>,
         filed_at: impl Into<String>,
     ) -> Result<Self, Error> {
         Ok(Self {
@@ -403,7 +409,7 @@ impl FiledRecord {
             project_id: project_id.into(),
             url: url.into(),
             scope: scope.into(),
-            team: team.into(),
+            team_key: team_key.into(),
             filed_at: filed_at.into(),
             cuts: Vec::new(),
         })
@@ -430,8 +436,8 @@ impl FiledRecord {
     }
 
     #[must_use]
-    pub fn team(&self) -> &str {
-        &self.team
+    pub fn team_key(&self) -> &str {
+        &self.team_key
     }
 
     #[must_use]
