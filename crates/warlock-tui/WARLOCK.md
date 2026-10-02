@@ -3,7 +3,7 @@
 
 # warlock-tui
 
-The warlock-tui crate: a Cargo package building the `warlock` binary and the warlock_tui library, which together provide the interactive TUI and CLI entry points for pact, refresh, scope, push, cut, pull and chat/brief flows, plus the Linear and git/gh clients they call through.
+The warlock-tui crate: packages the warlock binary and library, providing every CLI subcommand (init, config, pact, refresh, scope, key, brief, push, draft, pull, resume, check) plus the interactive terminal event loop.
 
 ## Files
 
@@ -11,8 +11,9 @@ The warlock-tui crate: a Cargo package building the `warlock` binary and the war
 
 ## Directories
 
-- `src/` — The interactive TUI, CLI entry points and engine driving pact, refresh, scope, push, cut, pull, chat/brief and the Linear/git/gh clients; open it for how any specific command or UI piece works.
+- `src/` — The crate's source: subcommand handlers, the TUI event loop and rendering, and the Claude/Linear/git integrations — look here for how any command or on-screen behavior is implemented.
 
 ## Structure
 
-- Cargo.toml: warlock-tui package manifest — bin "warlock" (src/main.rs) and lib warlock_tui (src/lib.rs), deps on warlock-engine, ratatui, clap, notify.
+- Cargo.toml defines the warlock-tui package manifest with bin "warlock" built from src/main.rs and lib warlock_tui built from src/lib.rs.
+- Cargo.toml declares dependencies on warlock-engine, ratatui, clap, and notify.
