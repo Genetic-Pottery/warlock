@@ -3,9 +3,14 @@
 
 # crates
 
-The crates directory holding the two crates that make up the workspace: warlock-engine, the repository-walking and document-filling engine, and warlock-tui, the CLI and TUI built on top of it.
+Holds the two crates making up the project: warlock-engine, which walks and analyzes a repo and orchestrates document fill/validation, and warlock-tui, which provides the CLI and terminal UI built on it.
 
 ## Directories
 
-- `warlock-engine/` — Walks repos, hashes and decides freshness, fills and renders WARLOCK.md documents, and tracks pacts, scopes, sigils and pulls; go here for engine logic.
-- `warlock-tui/` — Packages the warlock CLI and TUI, running the pact/brief/draft/pull/push engine against a repo's boundary scopes; go here for command or UI behavior.
+- `warlock-engine/` — The engine crate: repo walking, hashing, scoping, agent orchestration, and pact/pull/draft state; go here for questions about how documents get filled or validated.
+- `warlock-tui/` — The TUI/CLI crate: App state, rendering, and the pact/pull/push/cut/draft/refresh subcommands; go here for questions about CLI commands or terminal UI behavior.
+
+## Structure
+
+- The warlock-engine crate: it walks a repo, hashes and scopes directories, orchestrates LLM agents to fill and validate WARLOCK.md documents, and tracks pact/pull/draft state across runs.
+- The warlock-tui crate: a binary (warlock) and library (warlock_tui) providing the terminal UI and CLI, with App state driving tree/panel rendering and the pact, pull, push, cut, draft and refresh subcommand flows against a repo's manifest and boundary.

@@ -3,7 +3,7 @@
 
 # warlock
 
-The repository root: a Rust workspace of two crates, warlock-engine and warlock-tui, with its workspace manifest, lockfile, license, formatting config, and a recorded demo session of drafting a brief.
+The repository root: a Cargo workspace building warlock, a tool that walks a repo and fills/validates WARLOCK.md documents through an engine and a terminal UI/CLI.
 
 ## Files
 
@@ -15,7 +15,7 @@ The repository root: a Rust workspace of two crates, warlock-engine and warlock-
 
 ## Directories
 
-- `crates/` — Holds warlock-engine (repo walking, freshness, document fill/render, pacts/scopes/sigils/pulls) and warlock-tui (CLI and TUI); go there for engine or command/UI logic.
+- `crates/` — Holds the warlock-engine and warlock-tui crates; go here for how documents get filled/validated or how CLI/TUI commands work.
 
 ## Structure
 
@@ -23,4 +23,3 @@ The repository root: a Rust workspace of two crates, warlock-engine and warlock-
 - Cargo.lock: generated lockfile pinning exact dependency versions/checksums for the warlock-engine and warlock-tui crates; not edited by hand.
 - asciinema recording of a warlock TUI session drafting a brief about adding tests/a test oracle, Warp terminal cast format.
 - rustfmt config: edition 2024, style_edition 2024, Unix newlines, use_field_init_shorthand enabled.
-- Standard Apache License 2.0 full text; governs use and distribution of the repository's code.

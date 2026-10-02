@@ -3,7 +3,7 @@
 
 # warlock-tui
 
-The warlock-tui crate: packages the `warlock` CLI binary and warlock_tui library, pulling in warlock-engine, ratatui, clap and notify to run the interactive TUI and its pacting, briefing, drafting, pulling and pushing engine.
+The warlock-tui crate: a binary (warlock) and library (warlock_tui) providing the terminal UI and CLI, with App state driving tree/panel rendering and the pact, pull, push, cut, draft and refresh subcommand flows against a repo's manifest and boundary.
 
 ## Files
 
@@ -11,7 +11,7 @@ The warlock-tui crate: packages the `warlock` CLI binary and warlock_tui library
 
 ## Directories
 
-- `src/` — The crate source: CLI entrypoint, TUI event loop, rendering, and the pact/brief/draft/pull/push engine against a repo's boundary scopes; go here for any command or state-machine question.
+- `src/` — Crate root holding the App state machine, rendering, and all subcommand flows; go here for any question about CLI commands, TUI screens, pact/pull/push/cut/draft/refresh behavior, or Linear/Claude integration.
 
 ## Structure
 

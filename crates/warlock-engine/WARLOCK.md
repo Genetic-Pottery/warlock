@@ -3,7 +3,7 @@
 
 # warlock-engine
 
-The warlock-engine crate: walks repositories into a Tree of Nodes, hashes and decides freshness state per directory, calls the Agent trait to fill and render WARLOCK.md documents, and tracks pacts, scopes, sigils, pulls, and ticket drafting/splitting/filing.
+The warlock-engine crate: it walks a repo, hashes and scopes directories, orchestrates LLM agents to fill and validate WARLOCK.md documents, and tracks pact/pull/draft state across runs.
 
 ## Files
 
@@ -11,7 +11,7 @@ The warlock-engine crate: walks repositories into a Tree of Nodes, hashes and de
 
 ## Directories
 
-- `src/` — Crate root source: Tree/Node walking, hashing, Agent trait, pact/scope/sigil/pull orchestration, and WARLOCK.md document fill and render logic.
+- `src/` — All crate source lives here: agent boundary, document fill/validation, pact/pull orchestration, scope/route/sigil resolution, and shared walk/hash/state helpers.
 
 ## Structure
 
