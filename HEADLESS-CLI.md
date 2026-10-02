@@ -26,7 +26,7 @@ plain line and the terminal is never touched.
 | `warlock fresh [path]` | The same for the fresh ones | nothing |
 | `warlock check <path>` | Say which scope covers `path`, where work under it is filed, what this machine holds, and whether the two meet — or, with `--gate`, refuse a closed scope instead of describing it | nothing |
 | `warlock unpact <path>` | Drop the pact on a directory and every pact below it | one manifest write |
-| `warlock scope add <path> <scope>` | Write a scope onto a pacted directory, and — `--team`, `--review-state`, `--label` — the `[[scope]]` record routing it, when nothing records the name yet | one manifest write |
+| `warlock scope add <path> <scope>` | Write a scope onto a pacted directory, and — `--team-key`, `--review-state`, `--label` — the `[[scope]]` record routing it, when nothing records the name yet | one manifest write |
 | `warlock scope remove <path>` | Clear the scope on a pacted directory | one manifest write |
 | `warlock pact <path>` | Describe a directory and everything below it, a `WARLOCK.md` each | a model pass per directory |
 | `warlock refresh <path>` | The same over only the directories that are not fresh | a model pass per stale directory |
@@ -316,13 +316,14 @@ it is an ordinary **1**, and the sentence offers the road that needs no sigil:
 un-pact the parts you hold.
 
 `scope add` has two refusals of its own beside the boundary's, both of them
-about the `[[scope]]` record rather than the place. `--team`, `--review-state`
-and `--label` are that record's three values, and whether they are required is a
-fact about the manifest rather than about the command line: a scope name nothing
-records yet is written with all three or not at all, and a name that already has
-a record takes none of them. Both refusals are an ordinary **1** and both leave
-the file byte-identical — not the 3, which is the sigil boundary's alone and
-would send a script to `warlock config` over a missing `--team`.
+about the `[[scope]]` record rather than the place. `--team-key`,
+`--review-state` and `--label` are that record's three values, and whether
+they are required is a fact about the manifest rather than about the command
+line: a scope name nothing records yet is written with all three or not at all,
+and a name that already has a record takes none of them. Both refusals are an
+ordinary **1** and both leave the file byte-identical — not the 3, which is the
+sigil boundary's alone and would send a script to `warlock config` over a
+missing `--team-key`.
 
 A new name with a record is one manifest write and not two. The scope on the
 pact and the `[[scope]]` record are built together and saved once, so no run
@@ -331,7 +332,7 @@ when the second half is the half that fails. The refusal names every flag that
 was left out, so the command is retyped once rather than three times:
 
 ```sh
-$ warlock scope add src platform --team 'Platform'
+$ warlock scope add src platform --team-key 'Platform'
 warlock: nothing records `platform` yet, so nothing was written: writing a scope by that name needs a team, a review state and a label, given as `--review-state` and `--label`
 ```
 
@@ -341,8 +342,8 @@ different mistakes, and one sentence for both would send somebody looking for a
 shell problem they do not have.
 
 ```sh
-$ warlock scope add src platform --team ' ' --review-state 'In Review' --label ''
-warlock: `--team` and `--label` cannot be blank, so nothing was written
+$ warlock scope add src platform --team-key ' ' --review-state 'In Review' --label ''
+warlock: `--team-key` and `--label` cannot be blank, so nothing was written
 ```
 
 Not blank is the whole rule. A team, a review state and a label belong to
@@ -359,8 +360,8 @@ only that:
 $ warlock scope add src data-plane
 warlock: src is scoped `data-plane`
 
-$ warlock scope add src data-plane --team 'Data Plane'
-warlock: `data-plane` already has a record in `.warlock/pacts.toml`, and warlock does not rewrite one: run without `--team`, `--review-state` and `--label` to write the scope, or edit the file to change the record
+$ warlock scope add src data-plane --team-key 'Data Plane'
+warlock: `data-plane` already has a record in `.warlock/pacts.toml`, and warlock does not rewrite one: run without `--team-key`, `--review-state` and `--label` to write the scope, or edit the file to change the record
 ```
 
 A value handed to a name that already routes would be a value dropped on the
