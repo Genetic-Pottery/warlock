@@ -4,30 +4,29 @@ version = 1
 module = "."
 document = "WARLOCK.md"
 scope = "warlock-team"
-granted_hash = "ff65d487c0f13a744c7a4733ca1074a19309253a384e4353ea38d20917269798"
-granted_at = "2026-10-02T02:36:24Z"
-carry_hash = "a8c65af0a0b98e6ee8bf08ff50cc1f94e2280112eb842a8566ff06789472fe15"
+granted_hash = "135a01a744a491c4339e4da50cb97f13c550fcd06367f0a0b62e2c6271739a08"
+granted_at = "2026-10-02T03:20:32Z"
+carry_hash = "790088aba10762d8607ceb1d00734fad09368c3c9e40c0d41dde71e5bc0ba8c0"
 
 [pact.lines]
 "Cargo.lock" = "38b6c3eb85f0d3a908dd8d446b941784cd05037ff8bccb7e0cf456b4b90adb08"
 "Cargo.toml" = "b201dd0384a2a206e7a980b2fcb34895c3d82feb8b130f4a4244a2cbd1aa2aa4"
 LICENSE = "0bbb83830d53af2ac82bad4f6d89f2488fa4d4542696707dea8bedf7848daa68"
-"brief.cast" = "dd741d9c6e2ef099fc8aced43d0916e3cc8dce142b1c744315b3f101c991db7d"
 "rustfmt.toml" = "5ae552b68acc562f2987f6eeadec5672bd710d7062341a81fbdc64d66e70a7cd"
 
 [[pact]]
 module = "crates"
 document = "crates/WARLOCK.md"
-granted_hash = "50965db800eef1f55c86507614e4573b7d26b8136751b8eaf1be8382991cdddb"
-granted_at = "2026-10-02T02:36:19Z"
-carry_hash = "0750c161a5cecae4113a48e948029947459a26751dd3e1f51d3e1b51111f8a9f"
+granted_hash = "1c4e4ab69e6dabaf73278ffc27ddd2e7c346c99e927b36b083d7f1b8492a11b0"
+granted_at = "2026-10-02T03:20:26Z"
+carry_hash = "449bd01d49dc7bbf1ee9effd3bd2999f66c6bb4fad1c15f79c62da0042b67846"
 
 [[pact]]
 module = "crates/warlock-engine"
 document = "crates/warlock-engine/WARLOCK.md"
-granted_hash = "8dc25ac489c80360966f5b4731c6a5dee874c679b7822bba8d0052f8ba42248f"
-granted_at = "2026-10-02T02:36:00Z"
-carry_hash = "51f32981e3cf28604f4ce029d7d1affd2b1fe8e52171fc8be994ff329ff8ddae"
+granted_hash = "293f61313269f73175ecc935e332af58c6cccb5a8562709a003060a591fc0491"
+granted_at = "2026-10-02T03:20:15Z"
+carry_hash = "ab57b13249050edf5fd249799a594dfd04bfde4b20a3a85908c5a5123cd87d1d"
 
 [pact.lines]
 "Cargo.toml" = "646c6fbb6e285e1399f582a68d7577fb3531c9e0e1172443d05eef8c7491ea6c"
@@ -35,9 +34,9 @@ carry_hash = "51f32981e3cf28604f4ce029d7d1affd2b1fe8e52171fc8be994ff329ff8ddae"
 [[pact]]
 module = "crates/warlock-engine/src"
 document = "crates/warlock-engine/src/WARLOCK.md"
-granted_hash = "365b36f49772dd3a11fc5a0f1e1ea137691581c886d037424a7cf1691a91536c"
-granted_at = "2026-10-02T02:34:16Z"
-carry_hash = "3672bef896e86e138d42bed5081398a35fcf95301e4d9ea77474a6cd13973775"
+granted_hash = "895a7a2369287c0195512b2267d1dcf5f198febe5078362f21bfeaf7ae82e55c"
+granted_at = "2026-10-02T03:19:49Z"
+carry_hash = "0044cf585926f321f6f6fc711837e84b77e8687c37ce134375e76f21f554c7d0"
 
 [pact.lines]
 "agent.rs" = "22978ea49970b8ef12cd60c1405c72654ded600351f882c9d90cf8d66770ac5f"
@@ -48,7 +47,7 @@ carry_hash = "3672bef896e86e138d42bed5081398a35fcf95301e4d9ea77474a6cd13973775"
 "document.rs" = "146735ef7874c81031687c36129486466e5606bd0310f68f1e98d01d9781d532"
 "drafting.rs" = "cc298b56ee5d9550e5b8877aa4b6de6035b00ef20693dd881d9380ccef945aaa"
 "filed.rs" = "15585bd865cb35eb0d75b66d79f153cab3bee3d2965844a56e14c22ea088c5d0"
-"filing.rs" = "cbff132f2181cccd0079660f13d746e4c9137753fcacb01385bc8a084dba234d"
+"filing.rs" = "f8337ae0c57501bbca63d0201edd791ebe617fd1f29b9ca4acab41a0e3eb3ca8"
 "fill.rs" = "651299d75e3b2fab71d39fe6aaf978b484873de6e8ca864117d4d8b165c9f72c"
 "fitting.rs" = "de2d4e3334057229ef0bd37f504fd30527a7e812ba9d794b35f34b6e49ca8f29"
 "hash.rs" = "72562b36abf0423473cf66adfef5577b90c896b5b6f13d75d436076a7b1e3819"

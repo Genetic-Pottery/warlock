@@ -601,10 +601,14 @@ each of them is its own sentence because each is fixed in a different file by a
 different person. A brief is not about a directory, so there is nothing to walk
 up and no nearest scope to win: the sigils are the whole statement of which
 board this is, and anything other than exactly one candidate refuses rather
-than guesses. Nothing held, something held this repository has never heard of,
-and a scope held with no `[[scope]]` record are the three ways of having none:
+than guesses. A repository that records no `[[scope]]` at all is the first of
+the four ways of having none, and it is answered before what this machine holds
+is read, because no sigil would make a board here and a sentence about holding
+one would be advice that cannot work; then nothing held, something held this
+repository has never heard of, and a scope held with no `[[scope]]` record:
 
 ```sh
+warlock: `/repo/.warlock/pacts.toml` records no `[[scope]]` record, so there is nowhere to file: add one
 warlock: this machine holds no sigil, so nothing says which board to file to: hold one with `warlock config`
 warlock: this machine holds `platform`, and `/repo/.warlock/pacts.toml` records no scope of any of those names
 warlock: this machine holds `platform`, and that scope has no `[[scope]]` record: add one to `/repo/.warlock/pacts.toml`

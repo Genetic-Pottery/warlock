@@ -192,8 +192,38 @@ fn a_name_that_is_not_a_candidate_is_refused_with_every_candidate_named() {
 }
 
 #[test]
-fn the_three_ways_to_have_no_candidate_are_three_different_refusals() {
+fn the_four_ways_to_have_no_candidate_are_four_different_refusals() {
     let manifest = a_manifest(&["data-plane"]);
+
+    // A repository that records no scope, asked before anything about this
+    // machine: the candidates come from the records alone, so no sigil held here
+    // would make a board and the fix is a line in the manifest. Held nothing,
+    // held one name and held the wildcard all land on this one sentence, because
+    // all three are the same repository.
+    let (empty_home, empty_root) = (a_dir(), a_dir());
+    bound(empty_home.path(), empty_root.path());
+    let recordless = Manifest::with_entries([entry("crates").with_scope("data-plane")]);
+    let mut boardless = Vec::new();
+    for sigils in [&[][..], &["data-plane"][..], &["*"][..]] {
+        holds(empty_home.path(), empty_root.path(), sigils);
+        let error = resolve_filing(&recordless, empty_root.path(), empty_home.path(), None)
+            .expect_err("no `[[scope]]` record is nowhere to file, whatever is held");
+        assert!(
+            matches!(error, Error::Boardless { .. }),
+            "holding {sigils:?}: {error:?}"
+        );
+        let text = error.to_string();
+        assert!(
+            text.contains("[[scope]]")
+                && text.contains(&manifest_path(empty_root.path()).display().to_string()),
+            "the refusal names the file to go and fix: {text}"
+        );
+        assert!(
+            !text.contains("sigil") && !text.contains("warlock config"),
+            "the fix is in the repository, not on this machine: {text}"
+        );
+        boardless.push(error);
+    }
 
     // Nothing held at all, and a machine nobody has configured for this checkout:
     // `load_sigils` saying NotFound is a machine that holds nothing here.
@@ -239,8 +269,12 @@ fn the_three_ways_to_have_no_candidate_are_three_different_refusals() {
     );
 
     // And a held sigil some pact carries with no `[[scope]]` record: the manifest
-    // is one line short rather than the machine being wrong.
-    let unrecorded_manifest = Manifest::with_entries([entry("crates").with_scope("data-plane")]);
+    // is one line short rather than the machine being wrong. It records `web`,
+    // because a manifest recording nothing at all is the refusal above rather
+    // than this one — this is a file one line short, not a file nobody has
+    // started.
+    let unrecorded_manifest = Manifest::with_entries([entry("crates").with_scope("data-plane")])
+        .with_scopes([ScopeRecord::new("web", "Team web", "In Review", "warlock")]);
     let (bare_home, bare_root) = (a_dir(), a_dir());
     bound(bare_home.path(), bare_root.path());
     holds(bare_home.path(), bare_root.path(), &["data-plane"]);
@@ -263,7 +297,7 @@ fn the_three_ways_to_have_no_candidate_are_three_different_refusals() {
         "the refusal names the file to go and fix: {text}"
     );
 
-    let refusals = [&unsigiled, &unmatched, &unrecorded];
+    let refusals = [&boardless[0], &unsigiled, &unmatched, &unrecorded];
     for (index, one) in refusals.iter().enumerate() {
         for other in &refusals[index + 1..] {
             assert_ne!(
@@ -273,6 +307,29 @@ fn the_three_ways_to_have_no_candidate_are_three_different_refusals() {
             );
         }
     }
+}
+
+#[test]
+fn a_recorded_scope_no_pact_carries_is_still_a_board() {
+    // The refusal above is on `scopes()` and not on the entries: where a brief
+    // files is the `[[scope]]` record's question alone, and a repository that has
+    // recorded a board before granting any directory to it can still push. A test
+    // written against the entries would have made this a refusal.
+    let (home, root) = (a_dir(), a_dir());
+    bound(home.path(), root.path());
+    holds(home.path(), root.path(), &["data-plane"]);
+
+    let manifest = Manifest::with_entries([entry("crates")]).with_scopes([ScopeRecord::new(
+        "data-plane",
+        "WAR",
+        "In Review",
+        "warlock",
+    )]);
+    let target = resolve_filing(&manifest, root.path(), home.path(), None)
+        .expect("one record of the held name is one board, carried by no pact or not");
+
+    assert_eq!(target.scope(), "data-plane");
+    assert_eq!(target.record().team_key(), "WAR");
 }
 
 #[test]

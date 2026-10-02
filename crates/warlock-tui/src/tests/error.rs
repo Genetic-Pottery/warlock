@@ -645,7 +645,7 @@ fn every_refusal_a_push_has_is_the_ordinary_one_and_never_the_boundarys_three() 
     let refusals = [
         Error::Filing {
             source: resolve_filing(&Manifest::new(), repo.path(), home.path(), None)
-                .expect_err("a machine that holds no sigil files nowhere"),
+                .expect_err("a repository that records no scope has nowhere to file"),
         },
         Error::Brief {
             source: brief_at(repo.path(), repo.path().join("docs/brief.md"))
