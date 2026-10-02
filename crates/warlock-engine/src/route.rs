@@ -21,7 +21,7 @@ use crate::sigils::{self, held_sigils, load_key_binding, sigils_path};
 /// let manifest = Manifest::with_entries([
 ///     PactEntry::new(root.path(), "crates", "crates/WARLOCK.md")?.with_scope("data-plane"),
 /// ])
-/// .with_scopes([ScopeRecord::new("data-plane", "Data Plane", "In Review", "area/data-plane")]);
+/// .with_scopes([ScopeRecord::new("data-plane", "WAR", "In Review", "area/data-plane")]);
 ///
 /// save_sigils(home.path(), root.path(), &["web".to_owned()])?;
 /// save_key_binding(home.path(), root.path(), "work")?;
@@ -29,7 +29,7 @@ use crate::sigils::{self, held_sigils, load_key_binding, sigils_path};
 ///
 /// let route = resolve_route("crates/engine/src", root.path(), &manifest, home.path())?;
 /// assert_eq!(route.scope(), "data-plane");
-/// assert_eq!(route.record().team(), "Data Plane");
+/// assert_eq!(route.record().team_key(), "WAR");
 /// assert_eq!(route.record().review_state(), "In Review");
 /// assert_eq!(route.key(), "work");
 /// // This machine holds no sigil for that scope: a fact beside the route,

@@ -25,8 +25,8 @@ use crate::sigils::{self, held_sigils};
 ///     PactEntry::new(root.path(), "crates", "crates/WARLOCK.md")?.with_scope("data-plane"),
 /// ])
 /// .with_scopes([
-///     ScopeRecord::new("data-plane", "Data Plane", "In Review", "warlock"),
-///     ScopeRecord::new("web", "Web", "In Review", "warlock"),
+///     ScopeRecord::new("data-plane", "WAR", "In Review", "warlock"),
+///     ScopeRecord::new("web", "WEB", "In Review", "warlock"),
 /// ]);
 ///
 /// save_sigils(home.path(), root.path(), &["data-plane".to_owned()])?;
@@ -36,7 +36,7 @@ use crate::sigils::{self, held_sigils};
 /// // One sigil, one record of that name: one board, and no question to ask.
 /// let target = resolve_filing(&manifest, root.path(), home.path(), None)?;
 /// assert_eq!(target.scope(), "data-plane");
-/// assert_eq!(target.record().team(), "Data Plane");
+/// assert_eq!(target.record().team_key(), "WAR");
 /// assert_eq!(target.key(), "work");
 /// assert_eq!(target.value(), "lin_api_example");
 ///
@@ -51,7 +51,7 @@ use crate::sigils::{self, held_sigils};
 ///
 /// // A name picks one of them, and a name that is not a candidate is refused.
 /// let target = resolve_filing(&manifest, root.path(), home.path(), Some("web"))?;
-/// assert_eq!(target.record().team(), "Web");
+/// assert_eq!(target.record().team_key(), "WEB");
 /// assert!(matches!(
 ///     resolve_filing(&manifest, root.path(), home.path(), Some("billing")),
 ///     Err(filing::Error::Unknown { .. })
@@ -227,7 +227,7 @@ impl<'m> Target<'m> {
     pub fn destination(&self) -> Destination {
         Destination {
             scope: self.scope.to_owned(),
-            team: self.record.team().to_owned(),
+            team: self.record.team_key().to_owned(),
             label: self.record.label().to_owned(),
             key: self.key.clone(),
         }

@@ -1092,7 +1092,7 @@ fn chose<O: Opens, R: Repository>(
             next_runnable(run).map(|next| next.id().to_owned()),
         ),
         None => (
-            branch_name(work.record.team(), ticket.number, &ticket.title),
+            branch_name(work.record.team_key(), ticket.number, &ticket.title),
             None,
         ),
     };
@@ -1237,7 +1237,7 @@ fn asking(undertook: &Undertook, record: &ScopeRecord) -> PullConfirm {
             &ticket.identifier,
             &ticket.title,
             record.name(),
-            record.team(),
+            record.team_key(),
             branch,
             subtask,
         ),
@@ -1245,7 +1245,7 @@ fn asking(undertook: &Undertook, record: &ScopeRecord) -> PullConfirm {
             &ticket.identifier,
             &ticket.title,
             record.name(),
-            record.team(),
+            record.team_key(),
             branch,
         ),
     }

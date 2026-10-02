@@ -840,7 +840,7 @@ fn the_router_finds_the_team_review_state_and_label_the_flags_wrote() {
         .expect("the module path is inside the root");
     assert_eq!(facts.scope(), Some("billing"));
     let record = facts.record().expect("the router found no record");
-    assert_eq!(record.team(), "Billing");
+    assert_eq!(record.team_key(), "Billing");
     assert_eq!(record.review_state(), "In Review");
     assert_eq!(record.label(), "area/billing");
 }

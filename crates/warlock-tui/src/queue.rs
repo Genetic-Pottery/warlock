@@ -441,9 +441,9 @@ pub(crate) fn take_named(
         }));
     };
 
-    if !named(found.team(), record.team()) {
+    if !named(found.team(), record.team_key()) {
         return Ok(Named::Refused(Refusal::NotOnTeam {
-            team: record.team().to_owned(),
+            team: record.team_key().to_owned(),
             found: found.team().to_owned(),
         }));
     }

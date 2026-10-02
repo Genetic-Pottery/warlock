@@ -368,7 +368,7 @@ pub(crate) fn select(
     Ok(match named {
         Some(ticket) => Selected::Named(take_named(board, record, assignee, ticket, runs)?),
         None => Selected::Chosen(choose(
-            &board.scope_queue(record.team(), record.label(), assignee)?,
+            &board.scope_queue(record.team_key(), record.label(), assignee)?,
             record.review_state(),
             runs,
         )),

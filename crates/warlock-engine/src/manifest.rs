@@ -61,7 +61,7 @@ impl Manifest {
     /// use warlock_engine::{Manifest, PactEntry, ScopeRecord};
     ///
     /// let manifest = Manifest::with_entries([PactEntry::new(".", "crates/engine", "crates/engine/WARLOCK.md")?])
-    ///     .with_scopes([ScopeRecord::new("data-plane", "Data Plane", "In Review", "area/data-plane")]);
+    ///     .with_scopes([ScopeRecord::new("data-plane", "WAR", "In Review", "area/data-plane")]);
     ///
     /// // Every pact gone, and the record that no pact now names is still there.
     /// let emptied = manifest.rebuilt_with([]);
@@ -499,10 +499,16 @@ pub struct ScopeRecord {
     // one on the way through would put a line in the diff of somebody who only
     // asked to pact something else. `name` is judged by `validate_scope` when
     // the manifest is read and never repaired; the other three are not judged at
-    // all, because what a team slug, a review state or a label may contain is
+    // all, because what a team key, a review state or a label may contain is
     // the tracker's business and not this crate's.
     name: String,
-    team: String,
+    // The field says what the value is — a Linear team key, `WAR` — and the
+    // TOML key cannot follow it: `team` is what every committed
+    // `.warlock/pacts.toml` already spells, those bytes are hand-edited, and
+    // `deny_unknown_fields` above turns a renamed key into a refusal to read a
+    // manifest that was valid yesterday.
+    #[serde(rename = "team")]
+    team_key: String,
     review_state: String,
     label: String,
 }
@@ -511,24 +517,24 @@ impl ScopeRecord {
     /// ```
     /// use warlock_engine::ScopeRecord;
     ///
-    /// let record = ScopeRecord::new("data-plane", "Data Plane", "In Review", "area/data");
+    /// let record = ScopeRecord::new("data-plane", "WAR", "In Review", "area/data");
     ///
     /// assert_eq!(record.name(), "data-plane");
     /// // Stored as spelled: no folding, no trimming, no judgement.
-    /// assert_eq!(record.team(), "Data Plane");
+    /// assert_eq!(record.team_key(), "WAR");
     /// assert_eq!(record.review_state(), "In Review");
     /// assert_eq!(record.label(), "area/data");
     /// ```
     #[must_use]
     pub fn new(
         name: impl Into<String>,
-        team: impl Into<String>,
+        team_key: impl Into<String>,
         review_state: impl Into<String>,
         label: impl Into<String>,
     ) -> Self {
         Self {
             name: name.into(),
-            team: team.into(),
+            team_key: team_key.into(),
             review_state: review_state.into(),
             label: label.into(),
         }
@@ -540,8 +546,8 @@ impl ScopeRecord {
     }
 
     #[must_use]
-    pub fn team(&self) -> &str {
-        &self.team
+    pub fn team_key(&self) -> &str {
+        &self.team_key
     }
 
     #[must_use]

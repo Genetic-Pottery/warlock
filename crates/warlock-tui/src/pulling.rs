@@ -168,7 +168,7 @@ impl<B: Board, R: Repository, F: Forge, S: Splits, W: Works> Pulling<'_, B, R, F
         // a line in the output rather than a thing the record has to remember.
         if !self.move_ticket(ticket.id, IN_PROGRESS)? {
             self.report(PullEvent::NoStartState {
-                team: self.scope.team().to_owned(),
+                team: self.scope.team_key().to_owned(),
             });
         }
         // Saved before the split, as Forman saves its state before it
@@ -549,7 +549,7 @@ impl<B: Board, R: Repository, F: Forge, S: Splits, W: Works> Pulling<'_, B, R, F
         self.repo.switch_to(&default).map_err(Error::git)?;
         self.repo.catch_up(&default).map_err(Error::git)?;
 
-        let branch = branch_name(self.scope.team(), ticket.number, ticket.title);
+        let branch = branch_name(self.scope.team_key(), ticket.number, ticket.title);
         self.repo
             .cut_branch(&branch, &default)
             .map_err(Error::git)?;
@@ -567,7 +567,7 @@ impl<B: Board, R: Repository, F: Forge, S: Splits, W: Works> Pulling<'_, B, R, F
         let review = self.scope.review_state();
         if !self.move_ticket(ticket.id, review)? {
             self.report(PullEvent::NoReviewState {
-                team: self.scope.team().to_owned(),
+                team: self.scope.team_key().to_owned(),
                 state: review.to_owned(),
             });
         }
@@ -587,7 +587,7 @@ impl<B: Board, R: Repository, F: Forge, S: Splits, W: Works> Pulling<'_, B, R, F
         // it wants an id, and the stand-in board takes either.
         let Some(team) = self
             .board
-            .team_id(self.scope.team())
+            .team_id(self.scope.team_key())
             .map_err(Error::board)?
         else {
             return Ok(false);

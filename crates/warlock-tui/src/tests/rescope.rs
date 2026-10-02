@@ -288,7 +288,7 @@ fn a_new_record_is_stored_as_given_after_the_ones_already_there() {
     assert_eq!(manifest.scopes()[..3], recorded().scopes()[..]);
     let record = manifest.scopes().last().expect("the record was added");
     assert_eq!(record.name(), "billing");
-    assert_eq!(record.team(), " Billing Squad ");
+    assert_eq!(record.team_key(), " Billing Squad ");
     assert_eq!(record.review_state(), "In Review");
     assert_eq!(record.label(), "Area/Billing");
 
