@@ -113,7 +113,7 @@ fn scope_add(
 // test about something else says what it is about rather than filling a form.
 fn a_record() -> RecordFields<'static> {
     RecordFields {
-        team: Some("Billing"),
+        team_key: Some("Billing"),
         review_state: Some("In Review"),
         label: Some("area/billing"),
     }
@@ -640,7 +640,7 @@ fn every_scope_refusal_is_one_line_a_1_and_nothing_written() {
             "docs",
             "billing",
             RecordFields {
-                team: Some(" "),
+                team_key: Some(" "),
                 ..a_record()
             },
         ),
@@ -673,7 +673,7 @@ fn a_name_nothing_records_gets_its_scope_and_its_record_from_one_write() {
         "docs",
         "billing",
         RecordFields {
-            team: Some(TEAM),
+            team_key: Some(TEAM),
             review_state: Some("In Review"),
             label: Some("area/billing"),
         },
@@ -800,7 +800,7 @@ fn a_closed_boundary_answers_before_a_single_flag_is_looked_at() {
         (
             "billing",
             RecordFields {
-                team: Some("  "),
+                team_key: Some("  "),
                 ..a_record()
             },
         ),

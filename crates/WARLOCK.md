@@ -3,9 +3,9 @@
 
 # crates
 
-The crates directory holds the workspace's two Rust crates: warlock-engine, the freshness ledger engine, and warlock-tui, the terminal UI and CLI built on it.
+The workspace's two crates: warlock-engine, the freshness ledger engine, and warlock-tui, the interactive TUI and CLI built on it.
 
 ## Directories
 
-- `warlock-engine/` — The engine crate: hashing/scoping, agent-driven document and ticket generation, and pact/pull/filed-ticket tracking; open for how the engine works.
-- `warlock-tui/` — The TUI/CLI crate: App state, rendering, and pact/pull/push/cut/draft/refresh subcommand flows; open for CLI or TUI behavior.
+- `warlock-engine/` — The freshness ledger engine crate: hashing/scoping, agent-driven document and ticket generation, and pact/pull/filed-ticket tracking; go there for how the engine itself works.
+- `warlock-tui/` — The warlock binary and warlock_tui library: TUI and CLI for pact, refresh, scope, push, cut, pull, chat/brief, plus Linear and git/gh clients; go there for any specific command or UI piece.

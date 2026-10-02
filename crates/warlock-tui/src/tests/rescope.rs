@@ -33,7 +33,7 @@ fn recorded() -> Manifest {
 
 fn a_record() -> RecordFields<'static> {
     RecordFields {
-        team: Some("Billing"),
+        team_key: Some("Billing"),
         review_state: Some("In Review"),
         label: Some("area/billing"),
     }
@@ -119,7 +119,7 @@ fn a_name_nothing_records_names_every_field_that_was_not_given() {
         (
             RecordFields::default(),
             vec![
-                RecordField::Team,
+                RecordField::TeamKey,
                 RecordField::ReviewState,
                 RecordField::Label,
             ],
@@ -134,10 +134,10 @@ fn a_name_nothing_records_names_every_field_that_was_not_given() {
         ),
         (
             RecordFields {
-                team: None,
+                team_key: None,
                 ..a_record()
             },
-            vec![RecordField::Team],
+            vec![RecordField::TeamKey],
         ),
     ] {
         assert_eq!(
@@ -153,14 +153,14 @@ fn a_name_nothing_records_names_every_field_that_was_not_given() {
     let said = ScopeRefusal::NeedsRecord {
         scope: "billing".to_owned(),
         missing: vec![
-            RecordField::Team,
+            RecordField::TeamKey,
             RecordField::ReviewState,
             RecordField::Label,
         ],
     }
     .to_string();
     assert!(
-        said.contains("`--team`, `--review-state` and `--label`"),
+        said.contains("`--team-key`, `--review-state` and `--label`"),
         "{said}"
     );
     assert!(said.contains("nothing was written"), "{said}");
@@ -171,10 +171,10 @@ fn a_blank_value_is_refused_rather_than_trimmed_into_acceptability() {
     for (record, blank) in [
         (
             RecordFields {
-                team: Some(""),
+                team_key: Some(""),
                 ..a_record()
             },
-            vec![RecordField::Team],
+            vec![RecordField::TeamKey],
         ),
         (
             RecordFields {
@@ -185,12 +185,12 @@ fn a_blank_value_is_refused_rather_than_trimmed_into_acceptability() {
         ),
         (
             RecordFields {
-                team: Some(" "),
+                team_key: Some(" "),
                 review_state: Some(""),
                 label: Some("\t "),
             },
             vec![
-                RecordField::Team,
+                RecordField::TeamKey,
                 RecordField::ReviewState,
                 RecordField::Label,
             ],
@@ -221,7 +221,7 @@ fn a_value_at_a_name_something_already_records_is_refused_before_it_is_judged_bl
             ..RecordFields::default()
         },
         RecordFields {
-            team: Some(""),
+            team_key: Some(""),
             ..RecordFields::default()
         },
     ] {
@@ -249,8 +249,8 @@ fn the_shell_adds_its_flag_advice_to_a_recorded_refusal_and_the_panel_does_not()
     assert_eq!(
         crate::error::Error::Scope { refusal }.to_string(),
         "`data-plane` already has a record in `.warlock/pacts.toml`, and warlock does not \
-         rewrite one: run without `--team`, `--review-state` and `--label` to write the \
-         scope, or edit the file to change the record"
+         rewrite one: run without `--team-key`, `--review-state` and `--label` to write \
+         the scope, or edit the file to change the record"
     );
 }
 
@@ -278,7 +278,7 @@ fn a_new_record_is_stored_as_given_after_the_ones_already_there() {
         "crates/tui",
         Some("billing"),
         RecordFields {
-            team: Some(" Billing Squad "),
+            team_key: Some(" Billing Squad "),
             review_state: Some("In Review"),
             label: Some("Area/Billing"),
         },

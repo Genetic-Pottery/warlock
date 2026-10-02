@@ -330,7 +330,7 @@ fn the_two_scope_writes_are_a_noun_and_a_verb_rather_than_two_words_run_together
                 // Absent is what clap hands over for a flag nobody passed;
                 // whether that is legal is the manifest's answer and is asked
                 // past the boundary, not here.
-                team: None,
+                team_key: None,
                 review_state: None,
                 label: None,
             }
@@ -351,12 +351,12 @@ fn the_two_scope_writes_are_a_noun_and_a_verb_rather_than_two_words_run_together
 // `warlock scope add crates/engine data-plane` with whichever of the three
 // record flags a case is about, so each assertion below reads as the flags and
 // not as the two positionals under them.
-fn added(team: Option<&str>, review_state: Option<&str>, label: Option<&str>) -> Command {
+fn added(team_key: Option<&str>, review_state: Option<&str>, label: Option<&str>) -> Command {
     Command::Scope {
         command: ScopeCommand::Add {
             path: PathBuf::from("crates/engine"),
             scope: "data-plane".to_owned(),
-            team: team.map(str::to_owned),
+            team_key: team_key.map(str::to_owned),
             review_state: review_state.map(str::to_owned),
             label: label.map(str::to_owned),
         },
@@ -371,7 +371,7 @@ fn the_three_record_flags_reach_the_add_exactly_as_they_were_typed() {
             "add",
             "crates/engine",
             "data-plane",
-            "--team",
+            "--team-key",
             "Data Plane",
             "--review-state",
             "In Review",
@@ -397,7 +397,7 @@ fn the_three_record_flags_reach_the_add_exactly_as_they_were_typed() {
             "area/data-plane",
             "--review-state",
             "In Review",
-            "--team",
+            "--team-key",
             "Data Plane",
             "crates/engine",
             "data-plane",
@@ -420,7 +420,7 @@ fn the_three_record_flags_reach_the_add_exactly_as_they_were_typed() {
             "add",
             "crates/engine",
             "data-plane",
-            "--team",
+            "--team-key",
             "  ",
             "--review-state",
             "",
@@ -441,7 +441,7 @@ fn the_three_record_flags_reach_the_add_exactly_as_they_were_typed() {
             "add",
             "crates/engine",
             "data-plane",
-            "--team",
+            "--team-key",
             "Data Plane",
         ])
         .unwrap()
@@ -453,19 +453,19 @@ fn the_three_record_flags_reach_the_add_exactly_as_they_were_typed() {
 #[test]
 fn a_record_flag_wants_a_value_on_an_add_and_buys_no_other_word() {
     // Each of the three takes a value, so the flag on its own is a value that
-    // went missing rather than a switch; a clear records nothing, so none of
-    // them is a word `remove` knows; and having passed them buys nothing at
-    // the boundary — `--force`, `--yes` and `--json` are refused beside a
-    // filled-in record exactly as they are without one.
-    let malformed: [&[&str]; 8] = [
-        &["scope", "add", "crates", "web", "--team"],
+    // went missing rather than a switch; the key is asked for by its key's
+    // spelling and `--team` is not a word the add has, so a team name typed
+    // where a key goes is refused here rather than recorded; a clear records
+    // nothing, so none of them is a word `remove` knows; and having passed
+    // them buys nothing at the boundary — `--force`, `--yes` and `--json` are
+    // refused beside a filled-in record exactly as they are without one.
+    let malformed: [&[&str]; 6] = [
+        &["scope", "add", "crates", "web", "--team-key"],
         &["scope", "add", "crates", "web", "--review-state"],
         &["scope", "add", "crates", "web", "--label"],
-        &["scope", "remove", "crates", "--team", "Data Plane"],
+        &["scope", "add", "crates", "web", "--team", "Web"],
+        &["scope", "remove", "crates", "--team-key", "WAR"],
         &["scope", "remove", "crates", "--review-state", "In Review"],
-        &["scope", "add", "crates", "web", "--team", "Web", "--force"],
-        &["scope", "add", "crates", "web", "--team", "Web", "--yes"],
-        &["scope", "add", "crates", "web", "--team", "Web", "--json"],
     ];
 
     for args in malformed {
@@ -473,6 +473,22 @@ fn a_record_flag_wants_a_value_on_an_add_and_buys_no_other_word() {
         assert!(error.use_stderr(), "{args:?}");
         assert_eq!(error.exit_code(), 2, "{args:?}");
     }
+
+    // The three override words, each beside a filled-in key, read as a loop
+    // rather than as three more rows above: what changes between them is one
+    // word on the end.
+    for word in ["--force", "--yes", "--json"] {
+        let error =
+            parse(&["scope", "add", "crates", "web", "--team-key", "WEB", word]).unwrap_err();
+        assert!(error.use_stderr(), "{word}");
+        assert_eq!(error.exit_code(), 2, "{word}");
+    }
+
+    // And `--team` in particular is refused for not being a word rather than
+    // for anything about the value beside it, so no alias and no hidden
+    // spelling is quietly taking a team name.
+    let error = parse(&["scope", "add", "crates", "web", "--team", "Web"]).unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::UnknownArgument);
 }
 
 #[test]
@@ -488,7 +504,7 @@ fn a_scope_is_taken_as_it_was_typed_and_judged_by_the_engine_rather_than_by_clap
                 command: ScopeCommand::Add {
                     path: PathBuf::from("crates"),
                     scope: typed.to_owned(),
-                    team: None,
+                    team_key: None,
                     review_state: None,
                     label: None,
                 }
@@ -1159,7 +1175,7 @@ fn no_argument_the_parser_accepts_gets_a_write_past_the_boundary() {
         vec!["scope", "remove"],
     ] {
         let allowed: &[&str] = if names == ["scope", "add"] {
-            &["help", "team", "review-state", "label"]
+            &["help", "team-key", "review-state", "label"]
         } else {
             &["help"]
         };

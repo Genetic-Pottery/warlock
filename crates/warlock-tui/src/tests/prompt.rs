@@ -476,7 +476,7 @@ fn a_fresh_record_is_up_over_the_path_and_the_scope_with_three_empty_fields() {
     assert_eq!(prompt.form().map(RecordForm::path), Some(DIRECTORY));
     assert_eq!(prompt.form().map(RecordForm::scope), Some(SCOPE));
     assert_eq!(texts(&form()), ["", "", ""]);
-    assert_eq!(form().focus(), RecordField::Team);
+    assert_eq!(form().focus(), RecordField::TeamKey);
     // Nothing is guessable from the scope name, so no field opens complaining
     // about text nobody has typed yet.
     for which in RecordField::ALL {
@@ -510,7 +510,7 @@ fn tab_walks_the_fields_forward_and_back_tab_walks_them_back() {
         RecordField::ReviewState,
         RecordField::Label,
         // Wrapped: there is nothing past the last field but the first one.
-        RecordField::Team,
+        RecordField::TeamKey,
     ] {
         current = after_record(press(KeyCode::Tab), &current);
         assert_eq!(current.focus(), expected);
@@ -519,7 +519,7 @@ fn tab_walks_the_fields_forward_and_back_tab_walks_them_back() {
     for expected in [
         RecordField::Label,
         RecordField::ReviewState,
-        RecordField::Team,
+        RecordField::TeamKey,
     ] {
         current = after_record(press(KeyCode::BackTab), &current);
         assert_eq!(current.focus(), expected);
@@ -553,7 +553,7 @@ fn moving_between_fields_types_nothing_and_edits_nothing() {
             ["platform", "", ""],
             "{code:?} typed something"
         );
-        assert_eq!(next.field(RecordField::Team).cursor(), 8);
+        assert_eq!(next.field(RecordField::TeamKey).cursor(), 8);
     }
 }
 
@@ -567,7 +567,7 @@ fn a_refusal_names_the_field_it_is_about_and_puts_the_cursor_in_it() {
         refused.field(RecordField::Label).rule(),
         Some("a label cannot be blank")
     );
-    assert_eq!(refused.field(RecordField::Team).rule(), None);
+    assert_eq!(refused.field(RecordField::TeamKey).rule(), None);
     assert_eq!(
         texts(&refused),
         ["platform", "", ""],
@@ -577,30 +577,30 @@ fn a_refusal_names_the_field_it_is_about_and_puts_the_cursor_in_it() {
 
 #[test]
 fn a_rule_line_survives_a_move_and_goes_down_on_an_edit_to_that_field() {
-    let refused = form().refused(RecordField::Team, "a team cannot be blank");
+    let refused = form().refused(RecordField::TeamKey, "a team cannot be blank");
 
     let walked = after_record(press(KeyCode::Tab), &refused);
     assert_eq!(
-        walked.field(RecordField::Team).rule(),
+        walked.field(RecordField::TeamKey).rule(),
         Some("a team cannot be blank"),
         "walking off the field left the text just as blank"
     );
 
     let back = after_record(press(KeyCode::BackTab), &walked);
     assert_eq!(
-        back.field(RecordField::Team).rule(),
+        back.field(RecordField::TeamKey).rule(),
         Some("a team cannot be blank")
     );
     assert_eq!(
         after_record(press(KeyCode::Home), &back)
-            .field(RecordField::Team)
+            .field(RecordField::TeamKey)
             .rule(),
         Some("a team cannot be blank"),
         "a cursor move inside the field is not an edit either"
     );
 
     let edited = after_record(press(KeyCode::Char('p')), &back);
-    assert_eq!(edited.field(RecordField::Team).rule(), None);
+    assert_eq!(edited.field(RecordField::TeamKey).rule(), None);
     // Only the field that was typed into: a complaint about the label is about
     // text nobody has touched.
     let elsewhere = form().refused(RecordField::Label, "a label cannot be blank");
@@ -628,7 +628,7 @@ fn the_focused_field_edits_exactly_as_the_scope_field_does() {
     .fold(typed, |current, code| after_record(press(*code), &current));
 
     assert_eq!(texts(&fixed), ["platform!", "", ""]);
-    assert_eq!(fixed.field(RecordField::Team).cursor(), 9);
+    assert_eq!(fixed.field(RecordField::TeamKey).cursor(), 9);
 }
 
 #[test]
@@ -694,7 +694,7 @@ fn a_chord_or_a_control_character_is_not_text_in_the_record_either() {
             KeyEvent::new(KeyCode::Char('W'), KeyModifiers::SHIFT),
             &before
         )
-        .field(RecordField::Team)
+        .field(RecordField::TeamKey)
         .text(),
         "platformW",
         "shift still types"
@@ -733,7 +733,7 @@ fn releases_and_repeats_change_nothing_in_the_record() {
 fn no_key_ever_changes_the_path_or_the_scope_being_recorded() {
     // Both are settled by the prompt that came before this one: the record
     // written from here has to be the one the pact names.
-    let before = form().refused(RecordField::Team, "a team cannot be blank");
+    let before = form().refused(RecordField::TeamKey, "a team cannot be blank");
 
     for code in BINDINGS.into_iter().chain([
         KeyCode::Backspace,

@@ -251,20 +251,20 @@ pub(crate) fn edit_for(key: KeyEvent, field: &ScopeField) -> Edited {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub enum RecordField {
     #[default]
-    Team,
+    TeamKey,
     ReviewState,
     Label,
 }
 
 impl RecordField {
-    pub const ALL: [Self; 3] = [Self::Team, Self::ReviewState, Self::Label];
+    pub const ALL: [Self; 3] = [Self::TeamKey, Self::ReviewState, Self::Label];
 
     /// What the frame prints beside the field, and what a refusal about it
     /// names.
     #[must_use]
     pub const fn name(self) -> &'static str {
         match self {
-            Self::Team => "team",
+            Self::TeamKey => "team",
             Self::ReviewState => "review state",
             Self::Label => "label",
         }
@@ -276,17 +276,17 @@ impl RecordField {
     #[must_use]
     pub const fn next(self) -> Self {
         match self {
-            Self::Team => Self::ReviewState,
+            Self::TeamKey => Self::ReviewState,
             Self::ReviewState => Self::Label,
-            Self::Label => Self::Team,
+            Self::Label => Self::TeamKey,
         }
     }
 
     #[must_use]
     pub const fn previous(self) -> Self {
         match self {
-            Self::Team => Self::Label,
-            Self::ReviewState => Self::Team,
+            Self::TeamKey => Self::Label,
+            Self::ReviewState => Self::TeamKey,
             Self::Label => Self::ReviewState,
         }
     }
@@ -320,7 +320,7 @@ impl RecordForm {
             team: empty.clone(),
             review_state: empty.clone(),
             label: empty,
-            focus: RecordField::Team,
+            focus: RecordField::TeamKey,
             path,
         }
     }
@@ -343,7 +343,7 @@ impl RecordForm {
     #[must_use]
     pub(crate) const fn field(&self, which: RecordField) -> &ScopeField {
         match which {
-            RecordField::Team => &self.team,
+            RecordField::TeamKey => &self.team,
             RecordField::ReviewState => &self.review_state,
             RecordField::Label => &self.label,
         }
@@ -367,7 +367,7 @@ impl RecordForm {
 
     const fn slot(&mut self, which: RecordField) -> &mut ScopeField {
         match which {
-            RecordField::Team => &mut self.team,
+            RecordField::TeamKey => &mut self.team,
             RecordField::ReviewState => &mut self.review_state,
             RecordField::Label => &mut self.label,
         }

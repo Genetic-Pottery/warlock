@@ -11,7 +11,7 @@ use crate::writing::listing;
 // is judged inside [`rescope`] and never before it.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct RecordFields<'a> {
-    pub team: Option<&'a str>,
+    pub team_key: Option<&'a str>,
     pub review_state: Option<&'a str>,
     pub label: Option<&'a str>,
 }
@@ -21,7 +21,7 @@ impl<'a> RecordFields<'a> {
     // names them in the order a reader meets them in either door.
     const fn given(self) -> [(RecordField, Option<&'a str>); 3] {
         [
-            (RecordField::Team, self.team),
+            (RecordField::TeamKey, self.team_key),
             (RecordField::ReviewState, self.review_state),
             (RecordField::Label, self.label),
         ]
@@ -61,8 +61,8 @@ pub enum ScopeRefusal {
     },
     // Kept apart from `NeedsRecord` even though the fix rhymes: a flag that was
     // never passed and a flag passed an empty string are different mistakes,
-    // and saying "you did not pass `--team`" to somebody who just typed
-    // `--team ''` sends them looking for a shell problem they do not have.
+    // and saying "you did not pass `--team-key`" to somebody who just typed
+    // `--team-key ''` sends them looking for a shell problem they do not have.
     BlankRecord {
         fields: Vec<RecordField>,
     },
@@ -126,8 +126,8 @@ pub(crate) fn rescope(
         }
         with_scope_on(manifest, module, Some(&scope))
     } else {
-        let (Some(team), Some(review_state), Some(label)) =
-            (record.team, record.review_state, record.label)
+        let (Some(team_key), Some(review_state), Some(label)) =
+            (record.team_key, record.review_state, record.label)
         else {
             return Err(ScopeRefusal::NeedsRecord {
                 missing: record.named(|value| value.is_none()),
@@ -141,7 +141,7 @@ pub(crate) fn rescope(
         if !blank.is_empty() {
             return Err(ScopeRefusal::BlankRecord { fields: blank });
         }
-        with_scope_recorded(manifest, module, &scope, team, review_state, label)
+        with_scope_recorded(manifest, module, &scope, team_key, review_state, label)
     };
 
     Ok(Rescoped {
@@ -189,13 +189,13 @@ fn with_scope_recorded(
     manifest: &Manifest,
     module: &str,
     scope: &str,
-    team: &str,
+    team_key: &str,
     review_state: &str,
     label: &str,
 ) -> Manifest {
     let recorded = manifest.scopes().iter().cloned().chain([ScopeRecord::new(
         scope,
-        team,
+        team_key,
         review_state,
         label,
     )]);
@@ -205,7 +205,7 @@ fn with_scope_recorded(
 
 const fn flag(field: RecordField) -> &'static str {
     match field {
-        RecordField::Team => "--team",
+        RecordField::TeamKey => "--team-key",
         RecordField::ReviewState => "--review-state",
         RecordField::Label => "--label",
     }
