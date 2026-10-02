@@ -1179,6 +1179,28 @@ fn a_blank_value_is_refused_under_its_own_field_and_writes_nothing() {
 }
 
 #[test]
+fn a_blank_team_key_is_refused_in_the_words_the_field_is_labelled_in() {
+    let repo = a_repo();
+    let mut app = app_on(repo.path(), TUI_ROW);
+    let mut manifest = pacts();
+    let typed = filled(
+        &RecordForm::new("crates/tui", "billing"),
+        ["", "In Review", "area/billing"],
+    );
+
+    let prompt = record_submit(&mut app, &mut manifest, repo.path(), &typed);
+
+    // Spelled out rather than built from `name()`: the sentence a reader is
+    // stopped by is the one place the value is called a key, so it is read
+    // here as a reader reads it.
+    let form = prompt.form().expect("a blank team key closed the window");
+    assert_eq!(
+        form.field(RecordField::TeamKey).rule(),
+        Some("a team key cannot be blank"),
+    );
+}
+
+#[test]
 fn esc_on_the_record_window_leaves_the_file_byte_identical() {
     let repo = a_repo();
     let fixture = recorded();

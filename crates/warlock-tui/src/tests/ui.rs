@@ -7725,6 +7725,58 @@ fn the_record_window_names_the_directory_the_scope_and_its_three_fields() {
 }
 
 #[test]
+fn the_record_window_labels_its_first_field_team_key_without_moving_the_column() {
+    let base = Instant::now();
+    let app = busy_app(base, WIDTH, FIXTURE_HEIGHT);
+    // A scope being recorded for the first time, with nothing typed into it:
+    // the three labels are the whole of what is drawn beside the fields.
+    let form = RecordForm::new(SCOPED, RECORDED);
+
+    let buffer = render_record(
+        &app,
+        WIDTH,
+        FIXTURE_HEIGHT,
+        base,
+        &RecordPrompt::Open(form.clone()),
+    );
+
+    // The value is a Linear team key, and this is where a reader meets it, so
+    // the label says so: `team` reads as a team's name, which resolves to
+    // nothing.
+    let rows = record_rows(&buffer, &form);
+    for (which, label) in RecordField::ALL
+        .into_iter()
+        .zip(["team key", "review state", "label"])
+    {
+        assert_eq!(
+            inside_the_border(&rows[field_row(which)]).trim_end(),
+            label,
+            "{which:?}: {rows:?}"
+        );
+    }
+
+    // And the longer label has not moved the column the three texts start in:
+    // `label_width` measures it from `name()`, and `review state` is still the
+    // widest of the three. The drawn caret sits in the column that measurement
+    // puts it in, and the window is wide enough for it.
+    assert_eq!(
+        label_width(),
+        display_width(RecordField::ReviewState.name())
+    );
+    assert_eq!(
+        reversed_cells(&buffer, &form),
+        vec![record_caret(&buffer, &form)],
+        "{rows:?}"
+    );
+    let label = label_width() + display_width(RECORD_LABEL_GAP) + display_width(SCOPE_CURSOR);
+    assert!(
+        usize::from(Dialog::record(&form).size().width)
+            >= label + usize::from(2 * DIALOG_MARGIN + 2 * BORDER_THICKNESS),
+        "{rows:?}"
+    );
+}
+
+#[test]
 fn the_caret_is_in_the_focused_field_and_in_no_other() {
     use ratatui::crossterm::event::KeyCode;
 
