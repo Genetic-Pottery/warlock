@@ -3,7 +3,7 @@
 
 # src
 
-The interactive TUI, its CLI entry points and the engine driving pact, refresh, scope, push, cut, pull and chat/brief flows, plus the Linear and git/gh clients they call through.
+The CLI and TUI crate for warlock: implements every subcommand (init, config, pact, refresh, scope, key, brief, push, draft, pull, resume, check) and drives the interactive terminal event loop over App, Panel and the modal dialogs.
 
 ## Files
 
@@ -37,12 +37,12 @@ The interactive TUI, its CLI entry points and the engine driving pact, refresh, 
 - `key.rs` (21.0 KB) — key.rs: `warlock key add/list/use/forget` CLI commands — stores, lists, binds, and forgets named keys via warlock_engine's keys/sigils, with masked terminal input. · declares `key_add`, `key_list`, `key_use`, `key_forget`, `COMMAND`, `NAMES`, `PROMPT`, `BULLET`, `ERASE`, `TO_BIND`, `TO_FORGET`, `added`, `Stored`, `stored_under`, `fmt`, `preamble` (+9)
 - `lib.rs` (4.3 KB) — Crate root: declares all modules and re-exports their public items (Account, Brief, ClaudeAgent, Git, LinearClient, pull, push, Thread, Screen, etc).
 - `linear.rs` (60.1 KB) — Linear GraphQL client: Client/Linear implement Board (viewer, team_id, scope_queue, named_issue, create_project/issue, move_issue, comments); Queue, QueuedIssue, Blocker, Priority, Error types. · declares `REQUEST_TIMEOUT`, `Posts`, `Client`, `new`, `timeout`, `Board`, `Linear`, `Opens`, `Opener`, `FetchedProject`, `name`, `content`, `url`, `status`, `Queue`, `issues` (+76)
-- `main.rs` (32.6 KB) — CLI entry point: defines Cli/Command/ScopeCommand/KeyCommand via clap, dispatches to init, configure, pact/unpact/refresh, scope/key, brief, push, planned::cut, pull, resume, and runs the interactive TUI loop in run(). · declares `CREATED`, `UPDATED`, `Cli`, `Command`, `ScopeCommand`, `KeyCommand`, `main`, `init`, `run`
+- `main.rs` (32.6 KB) — Parses the warlock CLI's subcommands (init, config, stale, fresh, check, pact, unpact, refresh, scope, key, brief, push, draft, pull, resume) and dispatches each to its handler; with no subcommand, runs the interactive TUI event loop. · declares `CREATED`, `UPDATED`, `Cli`, `Command`, `ScopeCommand`, `KeyCommand`, `main`, `init`, `run`
 - `modal.rs` (4.6 KB) — Defines Modal<'a> enum and Modals<'a> struct aggregating modal states (Quit, Push, Cut, Pull, Review, Carry, Filing, Scope, Record, Write); current() resolves the active one. · declares `Modal`, `Modals`, `current`
 - `pacting.rs` (36.1 KB) — Pact<P>: runs/cancels a pact or refresh pass, draining PactEvent via Running into App/Manifest, producing Toggled and Refusal outcomes for the account panel. · declares `Pact`, `Reloaded`, `new`, `with_run`, `with_agent`, `running`, `stop`, `press`, `keep_up`, `Running`, `Work`, `path`, `descent`, `kind`, `CancelGuard`, `over` (+31)
 - `panel.rs` (29.4 KB) — Panel: holds account/thread/document Card<T> views with scroll offsets, Showing/Mode state, and window()/scroll_to() for the TUI's single visible pane · declares `Panel`, `Showing`, `Mode`, `hold_thread`, `panel_offset_for`, `showing`, `window_of`, `document_lines`, `show`, `open_account`, `show_document`, `has_content`, `next_card`, `write_run`, `refill_document`, `start_turn` (+39)
 - `planned.rs` (56.0 KB) — Drives `warlock cut`: Planned/Next/Filing/Settled/Announcement, drafting a project's slices into Linear issues through drafted/reviewed/edited_drafts and drafts_from_document. · declares `cut`, `Planned`, `prepare`, `drafting_brief`, `skip_slice`, `name`, `status`, `destination`, `total`, `left`, `next`, `next_uncut`, `filing`, `settle`, `finish`, `Next` (+55)
-- `prompt.rs` (17.1 KB) — ScopeField/ScopePrompt and RecordField/RecordForm/RecordPrompt text-input state plus edit_for/record_edit_for key handlers turning KeyEvents into Open/Close/Submit edits. · declares `ScopeField`, `new`, `refused`, `directory`, `text`, `rule`, `cursor`, `ScopePrompt`, `is_open`, `field`, `Edited`, `edit_for`, `RecordField`, `ALL`, `name`, `next` (+12)
+- `prompt.rs` (17.1 KB) — ScopeField/ScopePrompt and RecordForm/RecordPrompt text-input state plus edit_for/record_edit_for key handlers turning KeyEvents into Open/Close/Submit edits. · declares `ScopeField`, `new`, `refused`, `directory`, `text`, `rule`, `cursor`, `ScopePrompt`, `is_open`, `field`, `Edited`, `edit_for`, `RecordField`, `ALL`, `name`, `next` (+12)
 - `pull.rs` (30.7 KB) — pull.rs drives `warlock pull`: selects a ticket, runs Pulling via Splitter/Worker/Freshener ports, and reports progress through Progress, say(), opened(), unchanged() and no_start_state()/no_review_state(). · declares `pull`, `Ports`, `pulled`, `Prepared`, `root`, `home`, `record`, `held`, `value`, `prepare`, `clean`, `select`, `Selected`, `Taken`, `taken`, `skipped` (+26)
 - `puller.rs` (51.5 KB) — Puller<O,R,F,M> drives /pull: Choosing a ticket then Underway execution via Raises/Claudes, Stopping, and Committing/Quiet wrappers; emits Step events. · declares `Puller`, `Step`, `new`, `with_seams`, `inline`, `confirm`, `home`, `pulling`, `choosing`, `in_flight`, `press`, `keep_up`, `answered`, `Raises`, `Raising`, `Raised` (+74)
 - `pulling.rs` (52.5 KB) — Pulling drives a ticket through split, sub-task sessions, crossing checks, commits and PR opening, via Pulling, Reached, Pulled, PullEvent and halt_comment. · declares `Pulling`, `report`, `pull`, `work`, `finish`, `Reached`, `TouchedScope`, `StaleDirectory`, `Ticket`, `Error`, `Splits`, `Works`, `Pulled`, `status`, `ticket`, `PullEvent` (+33)
@@ -71,15 +71,15 @@ The interactive TUI, its CLI entry points and the engine driving pact, refresh, 
 
 ## Structure
 
-- Crate root: declares all modules and re-exports their public items (Account, Brief, ClaudeAgent, Git, LinearClient, pull, push, Thread, Screen, etc).
-- CLI entry point: defines Cli/Command/ScopeCommand/KeyCommand via clap, dispatches to init, configure, pact/unpact/refresh, scope/key, brief, push, planned::cut, pull, resume, and runs the interactive TUI loop in run().
-- Interactive<S>: TUI event loop wiring App, Pact, Chat, Pushes, Cutter, Puller; handles press/point/paste/draw/keep_up and modal dispatch.
-- App state machine for the TUI: Row, Focus, Sigils, Chrome, PactToggle/PactIntent, and App itself, driving tree selection, collapsing, pacting, scrolling, and panel focus.
-- Renders the TUI frame — tree pane, panel, composer, footer and Dialog modal layouts — from App/Chrome state; layout math, hit-testing (Hit, Reach) and drawing, no state mutation.
-- Defines Modal<'a> enum and Modals<'a> struct aggregating modal states (Quit, Push, Cut, Pull, Review, Carry, Filing, Scope, Record, Write); current() resolves the active one.
-- Drives `warlock cut`: Planned/Next/Filing/Settled/Announcement, drafting a project's slices into Linear issues through drafted/reviewed/edited_drafts and drafts_from_document.
-- pull.rs drives `warlock pull`: selects a ticket, runs Pulling via Splitter/Worker/Freshener ports, and reports progress through Progress, say(), opened(), unchanged() and no_start_state()/no_review_state().
-- Wires pact/refresh CLI entry points: Progress and Report event handlers, ctrlc-based cancellation via listening(), and descended()/started() driving Descent through the agent.
-- Linear GraphQL client: Client/Linear implement Board (viewer, team_id, scope_queue, named_issue, create_project/issue, move_issue, comments); Queue, QueuedIssue, Blocker, Priority, Error types.
-- Shells git/gh via Spawner's Runs trait: Git<R> (Repository: dirty, head, branch, commit, publish) and Gh<R> (Forge: open_pull_request), plus PR body/branch-name formatting.
-- ClaudeAgent/ChatAgent: spawns the `claude` CLI, builds prompts and system prompts for chat, drafting, splitting and working, streams JSON output, and classifies Stopped/Worked/Split/Drafted outcomes.
+- main.rs parses the warlock CLI's subcommands and dispatches each to its handler; with no subcommand, runs the interactive TUI event loop.
+- lib.rs declares all modules and re-exports their public items (Account, Brief, ClaudeAgent, Git, LinearClient, pull, push, Thread, Screen, etc).
+- interactive.rs: Interactive<S> wires App, Pact, Chat, Pushes, Cutter, Puller; handles press/point/paste/draw/keep_up and modal dispatch.
+- ui.rs renders the TUI frame from App/Chrome state; layout math, hit-testing and drawing, no state mutation.
+- descent.rs's descend() dispatches to pact_subtree/refresh_subtree/unpact_subtree and saves the resulting manifest.
+- cutting.rs's Cutter<O, A> drives /draft's state machine, fetching a Planned from planned.rs and filing via cut.rs.
+- pulling.rs's Pulling drives a ticket through split, sub-task sessions, crossing checks, commits and PR opening.
+- claude.rs's ClaudeAgent spawns the claude CLI and streams JSON output used by chatting.rs, cutting.rs and pulling.rs.
+- linear.rs's Client/Linear implement Board, used by cut.rs, planned.rs and queue.rs to file and move issues.
+- git.rs's Git<R> and Gh<R> shell out via Spawner's Runs trait, used by pulling.rs and pushing.rs for commits and PRs.
+- boundary.rs's permits yields Verdict consulted by edits.rs, rescope.rs and crossings.rs when checking scope.
+- stubs.rs implements the crate's traits as scripted fakes used by tests throughout the crate.

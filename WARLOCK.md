@@ -3,7 +3,7 @@
 
 # warlock
 
-The repository root of the workspace: the Cargo workspace manifest tying together the warlock-engine and warlock-tui crates, the pinned lockfile, formatting config, and license.
+The repository root: a Cargo workspace of two crates, warlock-engine and warlock-tui, building the freshness-ledger tool and its CLI/TUI.
 
 ## Files
 
@@ -14,11 +14,9 @@ The repository root of the workspace: the Cargo workspace manifest tying togethe
 
 ## Directories
 
-- `crates/` — The workspace's two crates: warlock-engine (the freshness ledger engine) and warlock-tui (the TUI and CLI built on it); go there for how the engine or any command/UI piece works.
+- `crates/` — The two workspace crates, warlock-engine (the engine) and warlock-tui (the binary and TUI); go here for how either works.
 
 ## Structure
 
 - Workspace manifest: members crates/warlock-engine and warlock-tui, shared package metadata, lints, and pinned dependency versions.
 - Cargo.lock: generated lockfile pinning exact dependency versions/checksums for the warlock-engine and warlock-tui crates; not edited by hand.
-- rustfmt config: edition 2024, style_edition 2024, Unix newlines, use_field_init_shorthand enabled.
-- Standard Apache License 2.0 full text; governs use and distribution of the repository's code.

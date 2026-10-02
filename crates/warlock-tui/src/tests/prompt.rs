@@ -577,25 +577,25 @@ fn a_refusal_names_the_field_it_is_about_and_puts_the_cursor_in_it() {
 
 #[test]
 fn a_rule_line_survives_a_move_and_goes_down_on_an_edit_to_that_field() {
-    let refused = form().refused(RecordField::TeamKey, "a team cannot be blank");
+    let refused = form().refused(RecordField::TeamKey, "a team key cannot be blank");
 
     let walked = after_record(press(KeyCode::Tab), &refused);
     assert_eq!(
         walked.field(RecordField::TeamKey).rule(),
-        Some("a team cannot be blank"),
+        Some("a team key cannot be blank"),
         "walking off the field left the text just as blank"
     );
 
     let back = after_record(press(KeyCode::BackTab), &walked);
     assert_eq!(
         back.field(RecordField::TeamKey).rule(),
-        Some("a team cannot be blank")
+        Some("a team key cannot be blank")
     );
     assert_eq!(
         after_record(press(KeyCode::Home), &back)
             .field(RecordField::TeamKey)
             .rule(),
-        Some("a team cannot be blank"),
+        Some("a team key cannot be blank"),
         "a cursor move inside the field is not an edit either"
     );
 
@@ -733,7 +733,7 @@ fn releases_and_repeats_change_nothing_in_the_record() {
 fn no_key_ever_changes_the_path_or_the_scope_being_recorded() {
     // Both are settled by the prompt that came before this one: the record
     // written from here has to be the one the pact names.
-    let before = form().refused(RecordField::TeamKey, "a team cannot be blank");
+    let before = form().refused(RecordField::TeamKey, "a team key cannot be blank");
 
     for code in BINDINGS.into_iter().chain([
         KeyCode::Backspace,

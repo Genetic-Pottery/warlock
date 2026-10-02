@@ -264,7 +264,7 @@ impl RecordField {
     #[must_use]
     pub const fn name(self) -> &'static str {
         match self {
-            Self::TeamKey => "team",
+            Self::TeamKey => "team key",
             Self::ReviewState => "review state",
             Self::Label => "label",
         }
