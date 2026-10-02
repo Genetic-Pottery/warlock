@@ -540,7 +540,7 @@ fn a_scope_that_is_a_candidate_is_honoured_and_one_that_is_not_names_the_candida
     // Honoured: the named candidate's team is the board, and the other one is
     // nowhere in it.
     let ready = preparing(repo.path(), home.path(), Some("web")).expect("a named candidate");
-    assert_eq!(ready.destination().team(), "WEB");
+    assert_eq!(ready.destination().team_key(), "WEB");
     assert_eq!(ready.destination().scope(), "web");
 
     // And a name that is not one of them is refused with both of them named.

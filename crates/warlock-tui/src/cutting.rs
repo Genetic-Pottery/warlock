@@ -135,7 +135,7 @@ fn asking(planned: &Planned) -> CutConfirm {
         planned.name(),
         planned.status(),
         planned.total(),
-        planned.destination().team(),
+        planned.destination().team_key(),
         planned.destination().key(),
     )
 }

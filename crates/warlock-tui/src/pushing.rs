@@ -307,7 +307,7 @@ impl<O: Opens> Pushes<O> {
             return;
         }
 
-        let team = ready.destination().team().to_owned();
+        let team = ready.destination().team_key().to_owned();
         // Before the worker starts, so the thread says which board is being
         // filed to from the instant it is: the answer may be seconds away and a
         // reader who has just said yes is looking at the conversation.

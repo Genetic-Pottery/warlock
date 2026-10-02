@@ -227,7 +227,7 @@ impl<'m> Target<'m> {
     pub fn destination(&self) -> Destination {
         Destination {
             scope: self.scope.to_owned(),
-            team: self.record.team_key().to_owned(),
+            team_key: self.record.team_key().to_owned(),
             label: self.record.label().to_owned(),
             key: self.key.clone(),
         }
@@ -245,7 +245,7 @@ impl<'m> Target<'m> {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Destination {
     scope: String,
-    team: String,
+    team_key: String,
     label: String,
     key: String,
 }
@@ -254,13 +254,13 @@ impl Destination {
     #[must_use]
     pub fn new(
         scope: impl Into<String>,
-        team: impl Into<String>,
+        team_key: impl Into<String>,
         label: impl Into<String>,
         key: impl Into<String>,
     ) -> Self {
         Self {
             scope: scope.into(),
-            team: team.into(),
+            team_key: team_key.into(),
             label: label.into(),
             key: key.into(),
         }
@@ -272,8 +272,8 @@ impl Destination {
     }
 
     #[must_use]
-    pub fn team(&self) -> &str {
-        &self.team
+    pub fn team_key(&self) -> &str {
+        &self.team_key
     }
 
     #[must_use]

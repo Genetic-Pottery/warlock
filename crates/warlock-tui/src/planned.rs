@@ -603,7 +603,7 @@ fn would(mut planned: Planned) -> Vec<String> {
          nothing was drafted",
         planned.name(),
         planned.status(),
-        destination.team(),
+        destination.team_key(),
         destination.scope(),
         counted(planned.total()),
         planned.total() - planned.left()
@@ -766,7 +766,7 @@ pub(crate) fn prepare<O: Opens>(
     // cannot be read is not worth failing a draft over.
     let open = board
         .scope_queue(
-            target.destination().team(),
+            target.destination().team_key(),
             target.destination().label(),
             &assignee,
         )

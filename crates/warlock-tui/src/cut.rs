@@ -120,9 +120,9 @@ pub(crate) fn cut<W: Write>(
     }
 
     let team = linear
-        .team_id(filing.destination.team())?
+        .team_id(filing.destination.team_key())?
         .ok_or_else(|| Error::UnknownTeam {
-            team: filing.destination.team().to_owned(),
+            team: filing.destination.team_key().to_owned(),
             path: manifest_path(root),
         })?;
     // Before the label and before every create: a team with nowhere to put an
@@ -131,7 +131,7 @@ pub(crate) fn cut<W: Write>(
     let state = linear
         .backlog_state(&team)?
         .ok_or_else(|| Error::NoBacklog {
-            team: filing.destination.team().to_owned(),
+            team: filing.destination.team_key().to_owned(),
         })?;
     let label = linear.issue_label_id(filing.destination.label(), &team)?;
 

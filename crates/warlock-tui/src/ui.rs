@@ -1500,7 +1500,7 @@ impl<'a> Dialog<'a> {
 }
 
 fn team_line(filing: &Filing) -> String {
-    format!("{PUSH_TEAM}{}", filing.destination().team())
+    format!("{PUSH_TEAM}{}", filing.destination().team_key())
 }
 
 fn key_line(filing: &Filing) -> String {
