@@ -253,7 +253,7 @@ pub(crate) fn record_submit(
     form: &RecordForm,
 ) -> RecordPrompt {
     let record = RecordFields {
-        team: Some(form.field(RecordField::Team).text()),
+        team_key: Some(form.field(RecordField::TeamKey).text()),
         review_state: Some(form.field(RecordField::ReviewState).text()),
         label: Some(form.field(RecordField::Label).text()),
     };

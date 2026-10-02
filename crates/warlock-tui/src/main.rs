@@ -498,7 +498,7 @@ fn main() -> ExitCode {
                 &path,
                 &scope,
                 RecordFields {
-                    team: team.as_deref(),
+                    team_key: team.as_deref(),
                     review_state: review_state.as_deref(),
                     label: label.as_deref(),
                 },

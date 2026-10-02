@@ -1146,7 +1146,7 @@ fn a_blank_value_is_refused_under_its_own_field_and_writes_nothing() {
     let repo = a_repo();
 
     for (which, values) in [
-        (RecordField::Team, ["", "In Review", "area/billing"]),
+        (RecordField::TeamKey, ["", "In Review", "area/billing"]),
         (RecordField::ReviewState, ["Billing", "   ", "area/billing"]),
         (RecordField::Label, ["Billing", "In Review", ""]),
     ] {
