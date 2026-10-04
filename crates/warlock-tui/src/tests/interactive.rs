@@ -2357,12 +2357,12 @@ mod cutting {
     // two things arriving on two rounds: the question, and then the attempt.
     fn offered(driven: &mut Driven) {
         let waited = Instant::now();
-        while driven.chat.composer().draft().is_empty() && waited.elapsed() < AT_MOST {
+        while driven.chat.composer().ghost().is_none() && waited.elapsed() < AT_MOST {
             round(driven);
         }
         assert!(
-            !driven.chat.composer().draft().is_empty(),
-            "nothing was ever offered for the field: {:?}",
+            driven.chat.composer().ghost().is_some(),
+            "nothing was ever suggested for the field: {:?}",
             notes(driven)
         );
     }
@@ -2518,10 +2518,9 @@ mod cutting {
     }
 
     #[test]
-    fn warlocks_attempt_is_an_ordinary_draft_with_the_cursor_at_its_end() {
-        // It is the value a typed draft is, so every editing key works on it:
-        // Backspace takes the last character, Home goes to the start, and a
-        // character typed there lands there.
+    fn warlocks_attempt_is_a_suggestion_and_never_part_of_the_draft() {
+        // Shown dimmed in the empty field and not written into it, so nobody
+        // has to delete it to type their own answer.
         let repo = a_repository();
         let home = a_home(repo.path());
         let mut driven = cutting_session(
@@ -2534,29 +2533,40 @@ mod cutting {
         confirmed(&mut driven);
         offered(&mut driven);
 
-        assert_eq!(driven.chat.composer().draft(), PROPOSED);
-        assert_eq!(
-            driven.chat.composer().cursor(),
-            PROPOSED.len(),
-            "the cursor is not at the end of what was offered"
+        assert_eq!(driven.chat.composer().draft(), "");
+        assert_eq!(driven.chat.composer().ghost(), Some(PROPOSED));
+        assert!(
+            !driven.chat.answering(),
+            "the suggestion started a turn of the conversation"
         );
+        assert!(pressed(&mut driven, KeyCode::Enter));
+        through(&mut driven);
+    }
+
+    #[test]
+    fn right_takes_the_suggestion_into_the_field_to_edit() {
+        let repo = a_repository();
+        let home = a_home(repo.path());
+        let mut driven = cutting_session(
+            repo.path(),
+            home.path(),
+            a_slice_that_asks(),
+            Scripted::saying([Answering::says(PROPOSED)]),
+        );
+
+        confirmed(&mut driven);
+        offered(&mut driven);
+        assert!(pressed(&mut driven, KeyCode::Right));
+
+        assert_eq!(driven.chat.composer().draft(), PROPOSED);
+        assert_eq!(driven.chat.composer().cursor(), PROPOSED.len());
         assert!(pressed(&mut driven, KeyCode::Backspace));
         assert_eq!(
             driven.chat.composer().draft(),
             &PROPOSED[..PROPOSED.len() - 1]
         );
-        assert!(pressed(&mut driven, KeyCode::Home));
-        assert_eq!(driven.chat.composer().cursor(), 0);
-        assert!(pressed(&mut driven, KeyCode::Char('B')));
-        assert!(
-            driven.chat.composer().draft().starts_with('B'),
-            "a character typed at the start did not land there: {:?}",
-            driven.chat.composer().draft()
-        );
-        assert!(
-            !driven.chat.answering(),
-            "editing the offer started a turn of the conversation"
-        );
+        assert!(pressed(&mut driven, KeyCode::Enter));
+        through(&mut driven);
     }
 
     #[test]
@@ -2587,6 +2597,11 @@ mod cutting {
             "",
             "the field kept the answer that was sent"
         );
+        assert_eq!(
+            driven.chat.composer().ghost(),
+            None,
+            "the field kept the suggestion that was sent"
+        );
         through(&mut driven);
         assert!(
             agent.said().iter().any(|turn| turn == PROPOSED),
@@ -2609,9 +2624,10 @@ mod cutting {
     }
 
     #[test]
-    fn a_draft_cleared_and_typed_over_is_what_the_slice_is_told() {
+    fn what_is_typed_over_a_suggestion_is_what_the_slice_is_told() {
         // Enter sends whatever the field holds. Warlock's attempt has no
-        // standing over it: cleared and typed over, it is the typing that goes.
+        // standing over it: anything typed is what goes, with nothing to delete
+        // first.
         let repo = a_repository();
         let home = a_home(repo.path());
         let agent = a_slice_that_asks();
@@ -2624,10 +2640,6 @@ mod cutting {
 
         confirmed(&mut driven);
         offered(&mut driven);
-        for _ in 0..PROPOSED.len() {
-            assert!(pressed(&mut driven, KeyCode::Backspace));
-        }
-        assert_eq!(driven.chat.composer().draft(), "");
         assert!(pressed(&mut driven, KeyCode::Char('N')));
         assert!(pressed(&mut driven, KeyCode::Char('o')));
         assert!(pressed(&mut driven, KeyCode::Enter));
@@ -2696,9 +2708,6 @@ mod cutting {
 
         confirmed(&mut driven);
         offered(&mut driven);
-        for _ in 0..PROPOSED.len() {
-            assert!(pressed(&mut driven, KeyCode::Backspace));
-        }
         driven.paste("/chat");
         assert!(pressed(&mut driven, KeyCode::Enter));
         through(&mut driven);

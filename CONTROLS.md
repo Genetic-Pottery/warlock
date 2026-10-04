@@ -92,12 +92,19 @@ draft.
 | `Enter` | Send the draft |
 | `Alt-Enter` | Put a newline in the draft |
 | `Backspace` | Delete the last character |
+| `Ctrl-U` | Delete back to the start of the line; press again at the start to join the line above, so holding it clears the draft |
+| `→` / `End` | With the draft empty and a suggestion showing, take the suggestion into the draft to edit |
 | `Esc` | Hand the keyboard back and keep the draft exactly as it was |
 | `Tab` | Move the focus on — the one key the composer does not take |
 | `Ctrl-C` | Cancel the turn if one is being answered; otherwise quit |
 | `/brief` | Enter brief mode: the same conversation is now converging on a document, sent the instruction the brief template describes |
 | `/write` | Only in brief mode: ask for the document, then open an editable path prompt already holding a proposal like `docs/warlock-brief-13-scopes-and-sigils.md` |
 | `/chat` | Leave brief mode, writing nothing — back to answering questions as they come |
+
+While a `/draft` slice is asking a question, warlock's suggested answer shows
+dimmed in the empty chat bar. It's never part of the draft: type your own
+answer over it, press `Enter` on the empty bar to send the suggestion, or press
+`→` to take it in and edit it.
 
 ## At the quit question
 

@@ -42,11 +42,11 @@ const CHORD: KeyModifiers = KeyModifiers::CONTROL
 /// a `char` boundary of `draft` and at most its length. [`Composer::at`] is the
 /// only road in from outside and it panics rather than clamps.
 ///
-/// `width`, `muted` and `answering` are facts about the session rather than
-/// about the draft, told in once a round by whoever is about to draw. All three
+/// `width`, `muted`, `answering` and `ghost` are facts about the session rather
+/// than about the draft, told in by whoever is about to draw or offer. All four
 /// take part in [`PartialEq`] and [`Hash`] with everything else, so every value
-/// built here must carry the incoming three through untouched — a keystroke
-/// that dropped one would read as a redraw to any whole-value comparison.
+/// built here must carry the incoming four through untouched — a keystroke that
+/// dropped one would read as a redraw to any whole-value comparison.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
 pub(crate) struct Composer {
     draft: String,
@@ -65,6 +65,11 @@ pub(crate) struct Composer {
     /// A line to draw and not a destination: nothing here knows where a
     /// submission goes, and whoever routes it is the same value that says this.
     answering: Option<String>,
+    /// A suggestion drawn dimmed while the draft is empty, and never part of it:
+    /// typing over a suggestion that filled the field meant deleting it first.
+    /// Enter on an empty draft sends it, and Right or End at an empty draft
+    /// takes it into the draft to edit.
+    ghost: Option<String>,
 }
 
 impl Composer {
@@ -83,6 +88,7 @@ impl Composer {
             width: 0,
             muted: false,
             answering: None,
+            ghost: None,
         }
     }
 
@@ -157,8 +163,47 @@ impl Composer {
     /// The draft does not move. What this changes is what the field is drawn as
     /// and nothing about what is in it, because a question relayed into the
     /// field is answered with whatever somebody sends — theirs or warlock's.
+    ///
+    /// A question that is over takes its suggestion with it, so a stale one
+    /// cannot be sent into the conversation by an Enter on an empty field.
     pub(crate) fn set_answering(&mut self, answering: Option<String>) {
+        if answering.is_none() {
+            self.ghost = None;
+        }
         self.answering = answering;
+    }
+
+    pub(crate) fn set_ghost(&mut self, ghost: Option<String>) {
+        self.ghost = ghost.filter(|ghost| !ghost.trim().is_empty());
+    }
+
+    #[must_use]
+    #[cfg(test)]
+    pub(crate) fn ghost(&self) -> Option<&str> {
+        self.ghost.as_deref()
+    }
+
+    /// What Enter sends: the draft, or the suggestion when nothing was typed.
+    #[must_use]
+    pub(crate) fn submission(&self) -> &str {
+        match &self.ghost {
+            Some(ghost) if self.draft.trim().is_empty() => ghost,
+            _ => &self.draft,
+        }
+    }
+
+    /// The suggestion as it draws, folded to the field's width, at most `height`
+    /// rows. Empty while there is a draft, which hides it.
+    #[must_use]
+    pub(crate) fn ghost_rows(&self, width: u16, height: u16) -> Vec<String> {
+        match &self.ghost {
+            Some(ghost) if self.draft.is_empty() => Self::new(ghost.as_str())
+                .rows(width)
+                .into_iter()
+                .take(usize::from(height))
+                .collect(),
+            _ => Vec::new(),
+        }
     }
 
     #[must_use]
@@ -167,20 +212,26 @@ impl Composer {
     }
 
     #[must_use]
+    #[cfg(test)]
     pub(crate) fn draft(&self) -> &str {
         &self.draft
     }
 
     #[must_use]
     pub(crate) fn is_submittable(&self) -> bool {
-        !self.draft.trim().is_empty()
+        !self.submission().trim().is_empty()
     }
 
     #[must_use]
     pub(crate) fn height(&self, width: u16) -> u16 {
         // At most `COMPOSER_MAX_ROWS`, and the row count is at least one, so
-        // this never truncates and never comes back zero.
-        u16::try_from(self.rows(width).len())
+        // this never truncates and never comes back zero. A suggestion on show
+        // is given the rows it needs, so it can be read before it is sent.
+        let rows = self
+            .rows(width)
+            .len()
+            .max(self.ghost_rows(width, COMPOSER_MAX_ROWS).len());
+        u16::try_from(rows)
             .unwrap_or(COMPOSER_MAX_ROWS)
             .min(COMPOSER_MAX_ROWS)
     }
@@ -233,10 +284,10 @@ impl Composer {
         }
     }
 
-    // The one place `width`, `muted` and `answering` are carried into a new
-    // value, and it carries them untouched: neither a keystroke nor a paste is a
-    // redraw, nor where a turn starts or ends, nor where a question is relayed or
-    // answered.
+    // The one place `width`, `muted`, `answering` and `ghost` are carried into a
+    // new value, and it carries them untouched: neither a keystroke nor a paste
+    // is a redraw, nor where a turn starts or ends, nor where a question is
+    // relayed or answered.
     //
     // Written literally rather than through `Composer::at`, so every caller must
     // hand in a `cursor` that is a boundary of `draft`.
@@ -247,6 +298,7 @@ impl Composer {
             width: self.width,
             muted: self.muted,
             answering: self.answering.clone(),
+            ghost: self.ghost.clone(),
         }
     }
 
@@ -421,6 +473,24 @@ pub(crate) fn compose_for(key: KeyEvent, composer: &Composer) -> Composed {
             }
         }
         KeyCode::Esc => Composed::Leave,
+        // The suggestion taken into the draft, at the end of it, to edit:
+        // fish's key for taking an autosuggestion.
+        KeyCode::Right | KeyCode::End if composer.draft.is_empty() && composer.ghost.is_some() => {
+            let ghost = composer.ghost.clone().unwrap_or_default();
+            let cursor = ghost.len();
+            typing(ghost, cursor)
+        }
+        // Readline's kill to the start of the line. At the start of a line it
+        // takes the line break before it, so holding it clears the whole draft.
+        KeyCode::Char('u') if key.modifiers == KeyModifiers::CONTROL => {
+            let before = &composer.draft[..composer.cursor];
+            let start = match before.rfind('\n') {
+                Some(at) if at + 1 == composer.cursor => at,
+                Some(at) => at + 1,
+                None => 0,
+            };
+            removed(start, composer.cursor)
+        }
         // Backspace at offset zero is still `Typing`: one press past the start
         // of the draft is a typo, and Esc is the only key that hands the
         // keyboard back.

@@ -221,21 +221,22 @@ impl<C: Converses> Chat<C> {
     // and the label are told again by the round that draws next, and the muting
     // comes back from `settle_field` on the turn alone.
     pub(crate) fn taken(&mut self) -> String {
-        let draft = self.composer.draft().to_owned();
+        let draft = self.composer.submission().to_owned();
         self.composer = Composer::default();
         draft
     }
 
-    // A draft put into the field from outside, cursor at the end. It is an
-    // ordinary draft from that moment on — every editing key works on it, Enter
-    // sends whatever the field then holds, and clearing it and typing sends
-    // that instead — because it *is* the value a typed draft is.
-    //
-    // Whatever was in the field is replaced. What is offered here was asked for
-    // by the round that put the question up, and a field that refused it would
-    // leave the offer nowhere to be read.
+    // A draft put into the field from outside, cursor at the end, replacing what
+    // was there: a command warlock has worked out for the reader to send.
     pub(crate) fn offer(&mut self, draft: &str) {
         self.composer = Composer::new(draft);
+    }
+
+    // A suggestion drawn dimmed while the field is empty and never written into
+    // it: whatever was typed stays, Enter on an empty field sends the suggestion,
+    // and Right or End takes it in to edit.
+    pub(crate) fn suggest(&mut self, suggestion: &str) {
+        self.composer.set_ghost(Some(suggestion.to_owned()));
     }
 
     pub(crate) const fn write_prompt(&self) -> &ScopePrompt {
