@@ -8,8 +8,9 @@ use super::{
     LABELS_PAGE, Linear, NamedIssue, NewIssue, NewProject, Posts, Priority, QUEUE_PAGE,
     QueuedIssue, REQUEST_TIMEOUT, SKIP_NOTE, StateType, answer, authorization, backlog_state,
     backlog_status, comment_on_issue, comment_on_project, create_issue, create_project,
-    create_relation, fetch_project, issue_label_id, label_id, move_issue, named_issue,
-    planned_projects, project_named, scope_queue, team_id, viewer, workflow_state,
+    create_relation, fetch_project, issue_label_id, label_id, move_issue, move_project,
+    named_issue, planned_projects, project_named, project_status, scope_queue, team_id, viewer,
+    workflow_state,
 };
 
 use crate::queue::IN_PROGRESS;
@@ -1402,6 +1403,51 @@ fn a_workspace_with_no_backlog_status_is_a_none_rather_than_an_error() {
     let status = backlog_status(&linear).expect("no `Backlog` is an ordinary answer");
 
     assert_eq!(status, None, "the caller creates with no status");
+}
+
+#[test]
+fn a_project_status_is_found_by_name_ignoring_case_and_spaces() {
+    let linear = Posting::answering([Ok(json!({
+        "projectStatuses": {
+            "nodes": [
+                { "id": "status-planned", "name": "Planned" },
+                { "id": "status-doing", "name": " in progress " },
+            ],
+        },
+    }))]);
+
+    let status = project_status(&linear, IN_PROGRESS).expect("the stand-in answered");
+
+    assert_eq!(status.as_deref(), Some("status-doing"));
+    assert_eq!(linear.documents().len(), 1, "one request per operation");
+}
+
+#[test]
+fn a_workspace_with_no_such_project_status_is_a_none_rather_than_an_error() {
+    let linear = Posting::answering([Ok(json!({
+        "projectStatuses": { "nodes": [{ "id": "status-planned", "name": "Planned" }] },
+    }))]);
+
+    let status = project_status(&linear, IN_PROGRESS).expect("an ordinary answer");
+
+    assert_eq!(status, None);
+}
+
+#[test]
+fn a_project_move_writes_the_status_and_nothing_else() {
+    let linear = Posting::answering([Ok(json!({
+        "projectUpdate": { "project": { "id": "project-1" } },
+    }))]);
+
+    let moved = move_project(&linear, "project-1", "status-doing").expect("the stand-in answered");
+
+    assert_eq!(moved, "project-1");
+    let asked = linear.documents().pop().expect("one request was made");
+    assert!(asked.contains("projectUpdate("), "{asked}");
+    assert_eq!(
+        linear.variables(),
+        [json!({ "id": "project-1", "input": { "statusId": "status-doing" } })]
+    );
 }
 
 fn workflow_states() -> Value {

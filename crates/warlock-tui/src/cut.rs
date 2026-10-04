@@ -25,6 +25,7 @@ use warlock_engine::{Destination, manifest_path};
 
 use crate::error::Error;
 use crate::linear::{Board, CUT_NOTE, Issue as LinearIssue, NewIssue, SKIP_NOTE};
+use crate::queue::IN_PROGRESS;
 
 /// Where one slice's issues go: the board [`resolve_filing`] answered and the
 /// project the draft was named with, by Linear's own id.
@@ -141,6 +142,29 @@ pub(crate) fn cut<W: Write>(
         })?;
 
     Ok(Cut { issues, reported })
+}
+
+/// The project moved to `In Progress`, said as one line however it went: the
+/// issues exist whatever happens here, so a workspace with no such status or a
+/// move Linear turns down is reported rather than failed.
+pub(crate) fn finish(linear: &impl Board, project: &str) -> String {
+    let moved = linear.project_status(IN_PROGRESS).and_then(|status| {
+        status
+            .map(|status| linear.move_project(project, &status))
+            .transpose()
+    });
+    match moved {
+        Ok(Some(_)) => {
+            format!("every slice is settled, so the project moved to `{IN_PROGRESS}`")
+        }
+        Ok(None) => format!(
+            "every slice is settled, and the workspace has no project status called \
+             `{IN_PROGRESS}`, so the project was not moved"
+        ),
+        Err(error) => format!(
+            "every slice is settled, and the project was not moved to `{IN_PROGRESS}`: {error}"
+        ),
+    }
 }
 
 /// A slice somebody said no to at the review, noted on the project as a cut that

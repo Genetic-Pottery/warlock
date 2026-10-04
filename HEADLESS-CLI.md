@@ -670,9 +670,22 @@ names: the slug is taken exactly or refused.
 With `SLUG`, the project is read back, its `## Scope` section is parsed into
 slices, the slices its comments already note as cut or skipped are passed over,
 and every other one is drafted by a session of its own and filed as issues on
-the same board. The project's status is not moved: a draft creates issues,
-writes the relations between them, and comments on the project once per
-settled slice, and nothing else.
+the same board. A draft creates issues, writes the relations between them,
+and comments on the project once per settled slice.
+
+When the last slice settles and at least one slice became issues, the draft
+moves the project to `In Progress`, so it drops out of the list. A run that
+stops early leaves the project in `Planned`, and the list still offers it. A
+project whose every slice was skipped stays in `Planned` too, because no issue
+exists to be in progress. The move prints one line:
+
+```sh
+warlock: every slice is settled, so the project moved to `In Progress`
+```
+
+A workspace with no project status called `In Progress`, matched ignoring case
+and spaces, or a move Linear turns down, prints a line saying the project was
+not moved. The issues stand either way.
 
 Those comments are the whole record of what was cut. Each starts with
 `Warlock cut slice` or `Warlock skipped slice`, names the slice in backticks,

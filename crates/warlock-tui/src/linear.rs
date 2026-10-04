@@ -129,6 +129,8 @@ pub(crate) trait Board {
     fn viewer(&self) -> Result<String, Error>;
     fn team_id(&self, key: &str) -> Result<Option<String>, Error>;
     fn backlog_status(&self) -> Result<Option<String>, Error>;
+    fn project_status(&self, name: &str) -> Result<Option<String>, Error>;
+    fn move_project(&self, project: &str, status: &str) -> Result<String, Error>;
     fn backlog_state(&self, team: &str) -> Result<Option<String>, Error>;
     fn workflow_state(&self, team: &str, name: &str) -> Result<Option<String>, Error>;
     fn move_issue(&self, issue: &str, state: &str) -> Result<String, Error>;
@@ -169,6 +171,14 @@ impl<P: Posts> Board for Linear<P> {
 
     fn backlog_status(&self) -> Result<Option<String>, Error> {
         backlog_status(&self.posts)
+    }
+
+    fn project_status(&self, name: &str) -> Result<Option<String>, Error> {
+        project_status(&self.posts, name)
+    }
+
+    fn move_project(&self, project: &str, status: &str) -> Result<String, Error> {
+        move_project(&self.posts, project, status)
     }
 
     fn backlog_state(&self, team: &str) -> Result<Option<String>, Error> {
@@ -307,6 +317,42 @@ fn backlog_status(linear: &impl Posts) -> Result<Option<String>, Error> {
         .find(|status| status.get("name").and_then(Value::as_str) == Some(BACKLOG))
         .map(node_id)
         .transpose()
+}
+
+/// The id of the project status by name, or `None` when the workspace has none.
+///
+/// Matched trimmed and case-insensitively, as [`workflow_state`] matches, unlike
+/// [`backlog_status`]'s exact match: a status that cannot be found here costs a
+/// project its move and nothing else, so the looser match is the cheaper error.
+fn project_status(linear: &impl Posts, name: &str) -> Result<Option<String>, Error> {
+    let data = linear.post(
+        "query ProjectStatuses { projectStatuses(first: 250) { nodes { id name } } }",
+        json!({}),
+    )?;
+
+    nodes(&data, "projectStatuses")?
+        .iter()
+        .find(|status| {
+            status
+                .get("name")
+                .and_then(Value::as_str)
+                .is_some_and(|found| found.trim().eq_ignore_ascii_case(name.trim()))
+        })
+        .map(node_id)
+        .transpose()
+}
+
+/// Move a project to a status, by ids. One request and no retry, per this
+/// module's rule.
+fn move_project(linear: &impl Posts, project: &str, status: &str) -> Result<String, Error> {
+    let data = linear.post(
+        "mutation ProjectUpdate($id: String!, $input: ProjectUpdateInput!) {
+            projectUpdate(id: $id, input: $input) { project { id } }
+        }",
+        json!({ "id": project, "input": { "statusId": status } }),
+    )?;
+
+    node_id(payload(&data, "projectUpdate", "project")?)
 }
 
 /// The id of the team's workflow state named [`BACKLOG`], or `None` when that

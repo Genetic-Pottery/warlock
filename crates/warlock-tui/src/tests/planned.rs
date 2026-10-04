@@ -47,6 +47,8 @@ const SLUG: &str = "1a2b3c4d5e6f";
 // issues are created in and notes are said on.
 const PROJECT_ID: &str = "project-1";
 
+const MOVED: &str = "every slice is settled, so the project moved to `In Progress`";
+
 const URL: &str = "https://linear.app/acme/project/draft-a-brief-1a2b3c";
 
 const NAME: &str = "Cut a planned project into tickets";
@@ -1109,7 +1111,7 @@ mod filing {
                 },
                 Settled {
                     issues: vec!["WAR-5".to_owned(), "WAR-6".to_owned()],
-                    reported: Vec::new(),
+                    reported: vec![MOVED.to_owned()],
                 },
             ]
         );
@@ -1365,7 +1367,7 @@ mod headless {
         // with nothing else between them.
         let body = "A stand-in ticket body, written by a test double that read no repository \
                     and made no plan. It says what the slice said and nothing more.";
-        let expected: Vec<String> = [(1, FIRST, 1, 2), (2, SECOND, 3, 4), (3, THIRD, 5, 6)]
+        let mut expected: Vec<String> = [(1, FIRST, 1, 2), (2, SECOND, 3, 4), (3, THIRD, 5, 6)]
             .into_iter()
             .flat_map(|(place, heading, first, second)| {
                 [
@@ -1391,6 +1393,7 @@ mod headless {
                 ]
             })
             .collect();
+        expected.push(MOVED.to_owned());
         assert_eq!(lines, expected, "{lines:?}");
         // One session per slice and one turn in each of them: this model asked
         // nothing, so nothing was put to anybody — the stand-ins for the
@@ -1641,18 +1644,18 @@ mod headless {
     }
 
     #[test]
-    fn nothing_the_run_sends_moves_a_status_or_writes_a_field_warlock_would_have_to_invent() {
+    fn nothing_the_run_sends_writes_a_field_warlock_would_have_to_invent() {
         let repo = a_scoped_repository();
         let home = a_home(repo.path());
         let linear = a_sliced_project(SLICED);
 
         cut_filing(repo.path(), home.path(), &linear, &Sketching::drafting());
 
-        // A board has no operation that moves a status, and an issue create has
-        // no field beyond the seven a draft, its slice and the run's own viewer
-        // resolve: what the latter puts on the wire is held by `linear.rs`'s own
-        // tests. What a run can still get wrong is asking for something a cut has
-        // no business asking.
+        // An issue create has no field beyond the seven a draft, its slice and
+        // the run's own viewer resolve: what it puts on the wire is held by
+        // `linear.rs`'s own tests. What a run can still get wrong is asking for
+        // something a cut has no business asking, and the one status it moves
+        // is the project's, once.
         for op in linear.ops() {
             assert!(
                 matches!(
@@ -1666,10 +1669,16 @@ mod headless {
                         | Op::CreateIssue
                         | Op::Relation
                         | Op::Comment
+                        | Op::ProjectStatus
+                        | Op::MoveProject
                 ),
                 "a run asked for {op:?}"
             );
         }
+        assert_eq!(
+            linear.moves(),
+            [(PROJECT_ID.to_owned(), "status-in-progress".to_owned())]
+        );
     }
 
     #[test]
@@ -2609,6 +2618,116 @@ mod backlog {
         assert!(
             !brief.contains("already exist and are still open"),
             "{brief}"
+        );
+    }
+}
+
+mod finishing {
+    use super::*;
+
+    // Every uncut slice skipped, in order.
+    fn skipping_each(planned: &mut Planned, linear: &Boarding) -> Vec<Option<String>> {
+        let mut said = Vec::new();
+        while let Some(next) = planned.next_uncut() {
+            said.push(
+                planned
+                    .skipping(&next)
+                    .post(linear)
+                    .expect("a skip that is noted"),
+            );
+        }
+        said
+    }
+
+    #[test]
+    fn a_project_moves_only_when_its_last_slice_settles() {
+        let repo = a_scoped_repository();
+        let home = a_home(repo.path());
+        let linear = a_sliced_project(SLICED);
+        let mut planned = prepared(repo.path(), home.path(), &linear);
+
+        let first = planned.next_uncut().expect("a first slice");
+        let cut = planned
+            .filing(&first, drafts_for(FIRST))
+            .file(&linear, &mut io::sink())
+            .expect("a slice that files");
+        planned.settle(&first, cut);
+
+        assert!(linear.moves().is_empty(), "two slices are still to draft");
+    }
+
+    #[test]
+    fn a_skip_that_settles_the_last_slice_moves_a_project_with_issues() {
+        let repo = a_scoped_repository();
+        let home = a_home(repo.path());
+        let linear = a_noted_project(SLICED, [a_cut(FIRST, &["WAR-1"]), a_skip(SECOND)]);
+        let mut planned = prepared(repo.path(), home.path(), &linear);
+
+        let said = skipping_each(&mut planned, &linear);
+
+        assert_eq!(said, [Some(MOVED.to_owned())]);
+        assert_eq!(
+            linear.moves(),
+            [(PROJECT_ID.to_owned(), "status-in-progress".to_owned())]
+        );
+    }
+
+    #[test]
+    fn a_project_every_slice_of_which_was_skipped_stays_planned() {
+        let repo = a_scoped_repository();
+        let home = a_home(repo.path());
+        let linear = a_sliced_project(SLICED);
+        let mut planned = prepared(repo.path(), home.path(), &linear);
+
+        let said = skipping_each(&mut planned, &linear);
+
+        assert_eq!(said, [None, None, None]);
+        assert!(
+            linear.moves().is_empty(),
+            "no issue exists to be in progress"
+        );
+    }
+
+    #[test]
+    fn a_workspace_with_no_in_progress_status_is_a_line_and_not_a_failure() {
+        let repo = a_scoped_repository();
+        let home = a_home(repo.path());
+        let linear = a_noted_project(SLICED, [a_cut(FIRST, &["WAR-1"]), a_skip(SECOND)])
+            .without_project_status();
+        let mut planned = prepared(repo.path(), home.path(), &linear);
+
+        let said = skipping_each(&mut planned, &linear);
+
+        assert_eq!(
+            said,
+            [Some(
+                "every slice is settled, and the workspace has no project status called \
+                 `In Progress`, so the project was not moved"
+                    .to_owned()
+            )]
+        );
+        assert!(linear.moves().is_empty());
+    }
+
+    #[test]
+    fn a_move_linear_turns_down_is_a_line_and_the_issues_stand() {
+        let repo = a_scoped_repository();
+        let home = a_home(repo.path());
+        let linear = a_noted_project(
+            SLICED,
+            [a_cut(FIRST, &["WAR-1"]), a_cut(SECOND, &["WAR-2"])],
+        )
+        .refuse(Op::MoveProject, "the workspace would not");
+        let mut planned = prepared(repo.path(), home.path(), &linear);
+
+        let settled = filing_each(&mut planned, &linear);
+
+        assert_eq!(settled.len(), 1);
+        assert_eq!(settled[0].issues.len(), 2);
+        assert!(
+            settled[0].reported[0].contains("the project was not moved to `In Progress`"),
+            "{:?}",
+            settled[0].reported
         );
     }
 }
