@@ -570,6 +570,10 @@ impl<B: Board, R: Repository, F: Forge, S: Splits, W: Works> Pulling<'_, B, R, F
                 team: self.scope.team_key().to_owned(),
                 state: review.to_owned(),
             });
+            return Ok(());
+        }
+        if let Some(line) = project_review(self.board, ticket.id, review) {
+            self.report(PullEvent::Project { line });
         }
         Ok(())
     }
@@ -925,6 +929,59 @@ pub(crate) enum PullEvent {
         team: String,
         state: String,
     },
+    /// What became of the ticket's project once the ticket reached review,
+    /// worded here because both doors say it the same way.
+    Project {
+        line: String,
+    },
+}
+
+/// The ticket's project moved to the review state when it is `In Progress` —
+/// every slice drafted — and each of its issues is in review or closed. `None`
+/// when there is nothing to say: no project, a project still being drafted, or
+/// an issue still open.
+///
+/// Every failure is a line, never an error: the ticket is in review by now, and
+/// a pull is not undone by the project it belongs to.
+fn project_review(board: &impl Board, issue: &str, review: &str) -> Option<String> {
+    let project = match board.issue_project(issue) {
+        Ok(Some(project)) => project,
+        Ok(None) => return None,
+        Err(error) => {
+            return Some(format!(
+                "the ticket's project was not read, so it was not moved: {error}"
+            ));
+        }
+    };
+    let drafted = project
+        .status()
+        .is_some_and(|status| status.trim().eq_ignore_ascii_case(IN_PROGRESS));
+    if !drafted {
+        return None;
+    }
+    let name = project.name();
+    let reviewed = project
+        .states()
+        .iter()
+        .all(|(state, kind)| kind.settled() || state.trim().eq_ignore_ascii_case(review.trim()));
+    if !reviewed {
+        return None;
+    }
+
+    let moved = board.project_status(review).and_then(|status| {
+        status
+            .map(|status| board.move_project(project.id(), &status))
+            .transpose()
+    });
+    let every = format!("every issue in `{name}` is in review or closed");
+    Some(match moved {
+        Ok(Some(_)) => format!("{every}, so the project moved to `{review}`"),
+        Ok(None) => format!(
+            "{every}, and the workspace has no project status called `{review}`, so the project \
+             was not moved"
+        ),
+        Err(error) => format!("{every}, and the project was not moved to `{review}`: {error}"),
+    })
 }
 
 /// The three sections a run has, and the whole of what opens one.

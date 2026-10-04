@@ -29,8 +29,8 @@ use crate::freshness::{Freshened, Freshening, Freshens};
 use crate::git::{Commit, Dirty, Error as GitError, Forge, Opened, PullRequest, Repository};
 use crate::inflight::Port;
 use crate::linear::{
-    Board, Error as LinearError, FetchedProject, Issue as LinearIssue, Listing, NamedIssue,
-    NewIssue, NewProject, Opens, Posts, Project as LinearProject, Queue,
+    Board, Error as LinearError, FetchedProject, Issue as LinearIssue, IssueProject, Listing,
+    NamedIssue, NewIssue, NewProject, Opens, Posts, Project as LinearProject, Queue,
 };
 use crate::puller::{Raised, Raises, Raising, Step, Stopping, activity_port};
 use crate::pulling::{Splits, Works};
@@ -410,6 +410,9 @@ pub(crate) struct Boarding {
     status: Option<String>,
     /// What [`Board::project_status`] answers with, whatever name is asked.
     moved_to: Option<String>,
+    /// What [`Board::issue_project`] answers with: `None`, an issue in no
+    /// project, until a test says otherwise.
+    issue_project: Option<IssueProject>,
     state: Option<String>,
     label: String,
     project: Option<FetchedProject>,
@@ -448,6 +451,7 @@ pub(crate) enum Call {
     BacklogStatus,
     ProjectStatus(String),
     MoveProject { project: String, status: String },
+    IssueProject(String),
     BacklogState(String),
     WorkflowState { team: String, name: String },
     MoveIssue { issue: String, state: String },
@@ -472,6 +476,7 @@ impl Call {
             Self::BacklogStatus => Op::BacklogStatus,
             Self::ProjectStatus(_) => Op::ProjectStatus,
             Self::MoveProject { .. } => Op::MoveProject,
+            Self::IssueProject(_) => Op::IssueProject,
             Self::BacklogState(_) => Op::BacklogState,
             Self::WorkflowState { .. } => Op::WorkflowState,
             Self::MoveIssue { .. } => Op::MoveIssue,
@@ -497,6 +502,7 @@ pub(crate) enum Op {
     BacklogStatus,
     ProjectStatus,
     MoveProject,
+    IssueProject,
     BacklogState,
     WorkflowState,
     MoveIssue,
@@ -565,6 +571,7 @@ impl Boarding {
             team: Some("team-1".to_owned()),
             status: Some("status-backlog".to_owned()),
             moved_to: Some("status-in-progress".to_owned()),
+            issue_project: None,
             state: Some("state-backlog".to_owned()),
             label: "label-held".to_owned(),
             project: None,
@@ -659,6 +666,11 @@ impl Boarding {
 
     pub(crate) fn creating_project(mut self, id: &str, url: &str) -> Self {
         self.created = LinearProject::new(id, url);
+        self
+    }
+
+    pub(crate) fn in_project(mut self, project: IssueProject) -> Self {
+        self.issue_project = Some(project);
         self
     }
 
@@ -885,6 +897,11 @@ impl Board for Boarding {
     fn project_status(&self, name: &str) -> Result<Option<String>, LinearError> {
         self.ask(Call::ProjectStatus(name.to_owned()))?;
         Ok(self.moved_to.clone())
+    }
+
+    fn issue_project(&self, issue: &str) -> Result<Option<IssueProject>, LinearError> {
+        self.ask(Call::IssueProject(issue.to_owned()))?;
+        Ok(self.issue_project.clone())
     }
 
     fn move_project(&self, project: &str, status: &str) -> Result<String, LinearError> {

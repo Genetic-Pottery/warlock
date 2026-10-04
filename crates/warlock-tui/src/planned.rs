@@ -324,9 +324,9 @@ fn print_listing<W: Write>(out: &mut W, destination: &Destination, listing: &Lis
     }
 }
 
-/// One line per project, `slug  name`, then a line when the page was capped;
-/// one line saying so when there is nothing to list. The panel notes the same
-/// lines, so the two doors list projects identically.
+/// One line per project, `slug  name`, or one line saying so when there is
+/// nothing to list. The panel notes the same lines, so the two doors list
+/// projects identically.
 pub(crate) fn listing_lines(destination: &Destination, listing: &Listing) -> Vec<String> {
     if listing.projects().is_empty() {
         return vec![format!(
@@ -336,18 +336,11 @@ pub(crate) fn listing_lines(destination: &Destination, listing: &Listing) -> Vec
         )];
     }
 
-    let mut lines: Vec<String> = listing
+    listing
         .projects()
         .iter()
         .map(|(slug, name)| format!("{slug}  {name}"))
-        .collect();
-    if listing.capped() {
-        lines.push(format!(
-            "warlock: more projects are planned than one page holds; these are the first {}",
-            listing.projects().len()
-        ));
-    }
-    lines
+        .collect()
 }
 
 /// One slice drafted in one session and reviewed, or `None` with what went

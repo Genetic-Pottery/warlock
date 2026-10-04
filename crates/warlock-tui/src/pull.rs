@@ -633,6 +633,7 @@ impl<W: Write> Progress<W> {
             // setting up, said where the run they happened in is being read.
             PullEvent::NoStartState { team } => self.say(&no_start_state(&team)),
             PullEvent::NoReviewState { team, state } => self.say(&no_review_state(&team, &state)),
+            PullEvent::Project { line } => self.say(&line),
         }
     }
 
