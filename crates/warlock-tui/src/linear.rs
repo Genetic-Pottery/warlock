@@ -308,21 +308,23 @@ fn team_id(linear: &impl Posts, key: &str) -> Result<Option<String>, Error> {
 /// The id of the [`BACKLOG`] status, or `None` when the workspace has no status
 /// by that name.
 fn backlog_status(linear: &impl Posts) -> Result<Option<String>, Error> {
-    // `projectStatuses` takes no filter, so the one request this operation is
-    // allowed asks for Linear's largest page and the match happens here. A
-    // workspace with more than 250 project statuses would need a second page;
-    // paginating for that is a loop around a create path, which this module
-    // does not have.
-    let data = linear.post(
-        "query ProjectStatuses { projectStatuses(first: 250) { nodes { id name } } }",
+    // `projectStatuses` takes no filter, so every page is read and the match
+    // happens here.
+    paged(
+        linear,
+        "query ProjectStatuses($after: String) {
+            projectStatuses(first: 250, after: $after) {
+                pageInfo { hasNextPage endCursor }
+                nodes { id name }
+            }
+        }",
         json!({}),
-    )?;
-
-    nodes(&data, "projectStatuses")?
-        .iter()
-        .find(|status| status.get("name").and_then(Value::as_str) == Some(BACKLOG))
-        .map(node_id)
-        .transpose()
+        &["projectStatuses"],
+    )?
+    .iter()
+    .find(|status| status.get("name").and_then(Value::as_str) == Some(BACKLOG))
+    .map(node_id)
+    .transpose()
 }
 
 /// The id of the project status by name, or `None` when the workspace has none.
@@ -331,21 +333,26 @@ fn backlog_status(linear: &impl Posts) -> Result<Option<String>, Error> {
 /// [`backlog_status`]'s exact match: a status that cannot be found here costs a
 /// project its move and nothing else, so the looser match is the cheaper error.
 fn project_status(linear: &impl Posts, name: &str) -> Result<Option<String>, Error> {
-    let data = linear.post(
-        "query ProjectStatuses { projectStatuses(first: 250) { nodes { id name } } }",
+    paged(
+        linear,
+        "query ProjectStatuses($after: String) {
+            projectStatuses(first: 250, after: $after) {
+                pageInfo { hasNextPage endCursor }
+                nodes { id name }
+            }
+        }",
         json!({}),
-    )?;
-
-    nodes(&data, "projectStatuses")?
-        .iter()
-        .find(|status| {
-            status
-                .get("name")
-                .and_then(Value::as_str)
-                .is_some_and(|found| found.trim().eq_ignore_ascii_case(name.trim()))
-        })
-        .map(node_id)
-        .transpose()
+        &["projectStatuses"],
+    )?
+    .iter()
+    .find(|status| {
+        status
+            .get("name")
+            .and_then(Value::as_str)
+            .is_some_and(|found| found.trim().eq_ignore_ascii_case(name.trim()))
+    })
+    .map(node_id)
+    .transpose()
 }
 
 /// Move a project to a status, by ids. One request and no retry, per this
@@ -424,29 +431,54 @@ fn paged(
             .iter()
             .try_fold(&data, |node, field| node.get(*field))
             .ok_or_else(|| missing(path.last().copied().unwrap_or("data")))?;
-        found.extend(
-            connection
-                .get("nodes")
-                .and_then(Value::as_array)
-                .ok_or_else(|| missing("nodes"))?
-                .iter()
-                .cloned(),
-        );
-        let info = connection
-            .get("pageInfo")
-            .ok_or_else(|| missing("pageInfo"))?;
-        if !info
-            .get("hasNextPage")
-            .and_then(Value::as_bool)
-            .ok_or_else(|| missing("hasNextPage"))?
-        {
+        let (nodes, after) = page_of(connection)?;
+        found.extend(nodes.iter().cloned());
+        let Some(after) = after else {
             return Ok(found);
-        }
-        let cursor = text(info, "endCursor")?;
+        };
         if let Some(fields) = variables.as_object_mut() {
-            fields.insert("after".to_owned(), json!(cursor));
+            fields.insert("after".to_owned(), json!(after));
         }
     }
+}
+
+/// A connection that arrived inside a larger answer, made whole: its own nodes,
+/// then — when its `pageInfo` says there is more — every later page through
+/// [`paged`], starting at its `endCursor`.
+fn completed(
+    linear: &impl Posts,
+    connection: &Value,
+    document: &str,
+    mut variables: Value,
+    path: &[&str],
+) -> Result<Vec<Value>, Error> {
+    let (nodes, after) = page_of(connection)?;
+    let mut found = nodes.to_vec();
+    if let Some(after) = after {
+        if let Some(fields) = variables.as_object_mut() {
+            fields.insert("after".to_owned(), json!(after));
+        }
+        found.extend(paged(linear, document, variables, path)?);
+    }
+    Ok(found)
+}
+
+/// A connection's nodes, and the cursor to read on from when there is a page
+/// after them.
+fn page_of(connection: &Value) -> Result<(&[Value], Option<String>), Error> {
+    let nodes = connection
+        .get("nodes")
+        .and_then(Value::as_array)
+        .ok_or_else(|| missing("nodes"))?;
+    let info = connection
+        .get("pageInfo")
+        .ok_or_else(|| missing("pageInfo"))?;
+    let more = info
+        .get("hasNextPage")
+        .and_then(Value::as_bool)
+        .ok_or_else(|| missing("hasNextPage"))?;
+    let after = more.then(|| text(info, "endCursor")).transpose()?;
+    Ok((nodes, after))
 }
 
 /// What [`Board::issue_project`] answers: the project, and each of its issues'
@@ -526,28 +558,29 @@ fn backlog_state(linear: &impl Posts, team: &str) -> Result<Option<String>, Erro
 /// backwards for four words of code.
 ///
 /// Workflow states belong to a team and not to the workspace, so this takes the
-/// id [`team_id`] answered rather than the team key. One request, asking for
-/// Linear's largest page and matching here, as [`backlog_status`] does.
+/// id [`team_id`] answered rather than the team key. Every page is read and the
+/// match happens here, as [`backlog_status`] does.
 fn workflow_state(linear: &impl Posts, team: &str, name: &str) -> Result<Option<String>, Error> {
-    let data = linear.post(
-        "query WorkflowStates($team: ID!) {
-            workflowStates(filter: { team: { id: { eq: $team } } }, first: 250) {
+    paged(
+        linear,
+        "query WorkflowStates($team: ID!, $after: String) {
+            workflowStates(filter: { team: { id: { eq: $team } } }, first: 250, after: $after) {
+                pageInfo { hasNextPage endCursor }
                 nodes { id name }
             }
         }",
         json!({ "team": team }),
-    )?;
-
-    nodes(&data, "workflowStates")?
-        .iter()
-        .find(|state| {
-            state
-                .get("name")
-                .and_then(Value::as_str)
-                .is_some_and(|found| found.trim().eq_ignore_ascii_case(name.trim()))
-        })
-        .map(node_id)
-        .transpose()
+        &["workflowStates"],
+    )?
+    .iter()
+    .find(|state| {
+        state
+            .get("name")
+            .and_then(Value::as_str)
+            .is_some_and(|found| found.trim().eq_ignore_ascii_case(name.trim()))
+    })
+    .map(node_id)
+    .transpose()
 }
 
 /// A project already on the board, by the slug at the end of its URL, or `None`
@@ -559,22 +592,20 @@ fn workflow_state(linear: &impl Posts, team: &str, name: &str) -> Result<Option<
 ///
 /// Only the comments that are warlock's cut and skip notes come back, filtered
 /// on the wire: they are the whole of what records which slices are cut, and a
-/// project's other talk would spend the page on nothing. One page and no
-/// `pageInfo`, rejected rather than forgotten: a note is written per slice
-/// settled, so a page of 250 is a brief of 250 slices, and a loop for that is a
-/// loop nobody will run.
+/// project's other talk would spend the pages on nothing. Every page is read,
+/// because a note missed is a slice filed twice.
 fn fetch_project(linear: &impl Posts, slug: &str) -> Result<Option<FetchedProject>, Error> {
     let data = match linear.post(
         "query Project($id: String!, $cut: String!, $skipped: String!) {
             project(id: $id) {
                 id name content url status { name }
-                comments(
-                    filter: { or: [
-                        { body: { startsWith: $cut } }
-                        { body: { startsWith: $skipped } }
-                    ] }
-                    first: 250
-                ) { nodes { body } }
+                comments(filter: { or: [
+                    { body: { startsWith: $cut } }
+                    { body: { startsWith: $skipped } }
+                ] }, first: 250) {
+                    pageInfo { hasNextPage endCursor }
+                    nodes { body }
+                }
             }
         }",
         json!({ "id": slug, "cut": CUT_NOTE, "skipped": SKIP_NOTE }),
@@ -598,16 +629,35 @@ fn fetch_project(linear: &impl Posts, slug: &str) -> Result<Option<FetchedProjec
         return Ok(None);
     }
 
+    let id = node_id(project)?;
+    let notes = completed(
+        linear,
+        project.get("comments").ok_or_else(|| missing("comments"))?,
+        "query ProjectNotes($id: String!, $cut: String!, $skipped: String!, $after: String) {
+            project(id: $id) {
+                comments(filter: { or: [
+                    { body: { startsWith: $cut } }
+                    { body: { startsWith: $skipped } }
+                ] }, first: 250, after: $after) {
+                    pageInfo { hasNextPage endCursor }
+                    nodes { body }
+                }
+            }
+        }",
+        json!({ "id": id, "cut": CUT_NOTE, "skipped": SKIP_NOTE }),
+        &["project", "comments"],
+    )?
+    .iter()
+    .map(|comment| text(comment, "body"))
+    .collect::<Result<_, _>>()?;
+
     Ok(Some(FetchedProject {
-        id: node_id(project)?,
+        id,
         name: text(project, "name")?,
         content: nullable(project, "content", |_| text(project, "content"))?.unwrap_or_default(),
         url: text(project, "url")?,
         status: nullable(project, "status", |status| text(status, "name"))?,
-        notes: nodes(project, "comments")?
-            .iter()
-            .map(|comment| text(comment, "body"))
-            .collect::<Result<_, _>>()?,
+        notes,
     }))
 }
 
@@ -778,20 +828,34 @@ fn project_named(linear: &impl Posts, team: &str, name: &str) -> Result<Option<S
         .transpose()
 }
 
-/// Issues read in the one request a queue is allowed, which is a hundred rather
-/// than the 250 the other queries in this module ask for: every issue carries a
-/// page of relations under it, the two multiply into the size of one answer, and
-/// a scope with a hundred unfinished tickets on one person is past the point
-/// where reading further would change what to work on next.
+/// Issues read per page of a queue, which is a hundred rather than the 250 the
+/// other reads ask for: every issue carries a page of relations under it, and
+/// the two multiply into the size of one answer.
 const QUEUE_PAGE: usize = 100;
 
-/// Blocking relations read per issue, and its own cap for the reason above. Not
-/// left off: a nested connection with no `first` takes whatever default Linear
-/// has today, which is a number this side would neither have chosen nor notice
-/// changing.
+/// Blocking relations read per issue in the page that carries it. Not left off:
+/// a nested connection with no `first` takes whatever default Linear has today.
+/// An issue with more is read on through [`issue_blockers`].
 const BLOCKERS_PAGE: usize = 25;
 
-/// Every issue a scope's queue holds, in one request.
+/// The fields every issue a queue or a name reads is parsed from, and its first
+/// page of blocking relations. One spelling, so the two reads cannot drift.
+const QUEUED_FIELDS: &str = "
+    id
+    identifier
+    title
+    description
+    priority
+    state { name type }
+    inverseRelations(first: $blockers) {
+        pageInfo { hasNextPage endCursor }
+        nodes {
+            type
+            issue { identifier state { type } assignee { name } }
+        }
+    }";
+
+/// Every issue a scope's queue holds, every page of them.
 ///
 /// The three filters are the whole of what makes an issue this scope's work: the
 /// record's team, the record's label, and the user the key belongs to. The
@@ -807,51 +871,42 @@ const BLOCKERS_PAGE: usize = 25;
 ///
 /// Blockers are read unfiltered, and that asymmetry is the point: an issue is
 /// held up by whatever blocks it, whoever owns that and whatever label it
-/// carries, so the relations must not inherit the queue's own filters.
-///
-/// One page and one request, per this module's rule. A queue with more on it than
-/// came back answers [`Queue::capped`] with `true`, which is the caller's to
-/// print — nothing here loops.
+/// carries, so the relations must not inherit the queue's own filters. They are
+/// read to the end, because a blocker list cut off midway makes a held-up issue
+/// look ready.
 fn scope_queue(
     linear: &impl Posts,
     team: &str,
     label: &str,
     assignee: &str,
 ) -> Result<Queue, Error> {
-    let data = linear.post(
+    let document = format!(
         r#"query ScopeQueue(
             $team: String!
             $label: String!
             $assignee: ID!
             $first: Int!
             $blockers: Int!
-        ) {
+            $after: String
+        ) {{
             issues(
-                filter: {
-                    team: { key: { eq: $team } }
-                    labels: { name: { eq: $label } }
-                    assignee: { id: { eq: $assignee } }
-                    state: { type: { nin: ["completed", "canceled"] } }
-                }
+                filter: {{
+                    team: {{ key: {{ eq: $team }} }}
+                    labels: {{ name: {{ eq: $label }} }}
+                    assignee: {{ id: {{ eq: $assignee }} }}
+                    state: {{ type: {{ nin: ["completed", "canceled"] }} }}
+                }}
                 first: $first
-            ) {
-                pageInfo { hasNextPage }
-                nodes {
-                    id
-                    identifier
-                    title
-                    description
-                    priority
-                    state { name type }
-                    inverseRelations(first: $blockers) {
-                        nodes {
-                            type
-                            issue { identifier state { type } assignee { name } }
-                        }
-                    }
-                }
-            }
-        }"#,
+                after: $after
+            ) {{
+                pageInfo {{ hasNextPage endCursor }}
+                nodes {{ {QUEUED_FIELDS} }}
+            }}
+        }}"#
+    );
+    let found = paged(
+        linear,
+        &document,
         json!({
             "team": team,
             "label": label,
@@ -859,38 +914,47 @@ fn scope_queue(
             "first": QUEUE_PAGE,
             "blockers": BLOCKERS_PAGE,
         }),
+        &["issues"],
     )?;
 
-    let found = nodes(&data, "issues")?;
-    let mut issues = Vec::with_capacity(found.len());
-    // A blocker list cut off mid-way would make a held-up issue look ready, so a
-    // full relation page counts as a capped queue too: the flag answers "there is
-    // more of this on the board than came back", not "there are more issues".
-    let mut crowded = false;
+    let issues = found
+        .iter()
+        .map(|node| queued_issue(linear, node))
+        .collect::<Result<_, _>>()?;
 
-    for node in found {
-        let (issue, relations) = queued_issue(node)?;
-
-        crowded |= relations >= BLOCKERS_PAGE;
-        issues.push(issue);
-    }
-
-    Ok(Queue {
-        issues,
-        capped: has_next_page(&data, "issues")? || found.len() >= QUEUE_PAGE || crowded,
-    })
+    Ok(Queue { issues })
 }
 
-/// One issue and how many relations it answered with, blocking or not — which is
-/// the queue's business rather than the issue's, so it is returned beside it
-/// rather than kept on it.
-fn queued_issue(node: &Value) -> Result<(QueuedIssue, usize), Error> {
+/// The blocking relations of one issue past the page its read carried.
+fn issue_blockers(linear: &impl Posts, node: &Value) -> Result<Vec<Value>, Error> {
+    completed(
+        linear,
+        node.get("inverseRelations")
+            .ok_or_else(|| missing("inverseRelations"))?,
+        "query IssueBlockers($id: String!, $after: String) {
+            issue(id: $id) {
+                inverseRelations(first: 250, after: $after) {
+                    pageInfo { hasNextPage endCursor }
+                    nodes {
+                        type
+                        issue { identifier state { type } assignee { name } }
+                    }
+                }
+            }
+        }",
+        json!({ "id": node_id(node)? }),
+        &["issue", "inverseRelations"],
+    )
+}
+
+/// One issue, with every one of its blocking relations.
+fn queued_issue(linear: &impl Posts, node: &Value) -> Result<QueuedIssue, Error> {
     let state = node.get("state").ok_or_else(|| missing("state"))?;
-    let relations = nodes(node, "inverseRelations")?;
+    let relations = issue_blockers(linear, node)?;
 
     let mut blockers = Vec::new();
 
-    for relation in relations {
+    for relation in &relations {
         // A relation carrying no type at all is an unreadable answer rather than
         // one more relation to drop: skipping it quietly is how a held-up issue
         // comes to look ready.
@@ -916,7 +980,7 @@ fn queued_issue(node: &Value) -> Result<(QueuedIssue, usize), Error> {
         blockers,
     };
 
-    Ok((issue, relations.len()))
+    Ok(issue)
 }
 
 /// The far side of one `blocks` relation on an issue's `inverseRelations`, which
@@ -975,17 +1039,16 @@ fn priority(node: &Value) -> Result<Priority, Error> {
     })
 }
 
-/// A scope's queue as it came back, and whether that was all of it.
+/// A scope's queue, all of it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Queue {
     issues: Vec<QueuedIssue>,
-    capped: bool,
 }
 
 impl Queue {
     #[must_use]
-    pub fn new(issues: Vec<QueuedIssue>, capped: bool) -> Self {
-        Self { issues, capped }
+    pub fn new(issues: Vec<QueuedIssue>) -> Self {
+        Self { issues }
     }
 
     /// In Linear's own order, which is not the order the queue is worked:
@@ -994,17 +1057,6 @@ impl Queue {
     #[must_use]
     pub fn issues(&self) -> &[QueuedIssue] {
         &self.issues
-    }
-
-    /// There is more of this queue on the board than came back: either a full
-    /// page of issues, or an issue with more relations than one page of them.
-    ///
-    /// Worth a line in the output rather than a second request, because it means
-    /// the choice was made over part of the queue and the person is the only one
-    /// who can say whether that matters.
-    #[must_use]
-    pub const fn capped(&self) -> bool {
-        self.capped
     }
 }
 
@@ -1197,10 +1249,7 @@ pub enum Priority {
     None,
 }
 
-/// Labels read on a named ticket, and its own cap for [`QUEUE_PAGE`]'s reason.
-/// The only question asked of them is whether the record's label is among them,
-/// so the cap is generous rather than tight: fifty labels on one issue is past
-/// the point where a workspace is labelling anything.
+/// Labels read on a named ticket in the page that carries it; more are read on.
 const LABELS_PAGE: usize = 50;
 
 /// One ticket a person named, by the two facts an identifier is made of.
@@ -1226,31 +1275,26 @@ const LABELS_PAGE: usize = 50;
 /// `None` when the workspace has no such issue — a team key nobody uses, or a
 /// number that team has not reached. Not an error, for [`team_id`]'s reason.
 fn named_issue(linear: &impl Posts, team: &str, number: u64) -> Result<Option<NamedIssue>, Error> {
-    let data = linear.post(
-        r"query NamedIssue($team: String!, $number: Float!, $labels: Int!, $blockers: Int!) {
+    let document = format!(
+        r"query NamedIssue($team: String!, $number: Float!, $labels: Int!, $blockers: Int!) {{
             issues(
-                filter: { team: { key: { eq: $team } }, number: { eq: $number } }
+                filter: {{ team: {{ key: {{ eq: $team }} }}, number: {{ eq: $number }} }}
                 first: 1
-            ) {
-                nodes {
-                    id
-                    identifier
-                    title
-                    description
-                    priority
-                    state { name type }
-                    team { key }
-                    labels(first: $labels) { nodes { name } }
-                    assignee { id name }
-                    inverseRelations(first: $blockers) {
-                        nodes {
-                            type
-                            issue { identifier state { type } assignee { name } }
-                        }
-                    }
-                }
-            }
-        }",
+            ) {{
+                nodes {{
+                    {QUEUED_FIELDS}
+                    team {{ key }}
+                    labels(first: $labels) {{
+                        pageInfo {{ hasNextPage endCursor }}
+                        nodes {{ name }}
+                    }}
+                    assignee {{ id name }}
+                }}
+            }}
+        }}"
+    );
+    let data = linear.post(
+        &document,
         json!({
             // Upper cased because Linear's team keys are, and `WAR-133` is
             // something a person types: `war-133` names the same ticket to
@@ -1266,15 +1310,12 @@ fn named_issue(linear: &impl Posts, team: &str, number: u64) -> Result<Option<Na
         return Ok(None);
     };
     let team = node.get("team").ok_or_else(|| missing("team"))?;
-    // The relation count the queue reads to know it was capped is dropped here:
-    // one named ticket has no page to be at the end of, and `BLOCKERS_PAGE`
-    // relations on a single issue is past anything this reports on.
-    let (issue, _) = queued_issue(node)?;
+    let issue = queued_issue(linear, node)?;
 
     Ok(Some(NamedIssue {
         issue,
         team: text(team, "key")?,
-        labels: label_names(node)?,
+        labels: label_names(linear, node)?,
         assignee: nullable(node, "assignee", |assignee| {
             Ok(Assignee {
                 id: node_id(assignee)?,
@@ -1976,21 +2017,24 @@ fn nullable<T>(
 /// Every label on an issue, by name. An issue with none is an empty list and not
 /// an absence: no labels is a perfectly ordinary issue, and it is a refusal for
 /// the caller rather than a malformed answer.
-fn label_names(issue: &Value) -> Result<Vec<String>, Error> {
-    nodes(issue, "labels")?
-        .iter()
-        .map(|label| text(label, "name"))
-        .collect()
-}
-
-/// Linear saying there is another page behind the one asked for, which is the
-/// half of a capped queue this side cannot work out for itself.
-fn has_next_page(data: &Value, connection: &str) -> Result<bool, Error> {
-    data.get(connection)
-        .and_then(|connection| connection.get("pageInfo"))
-        .and_then(|info| info.get("hasNextPage"))
-        .and_then(Value::as_bool)
-        .ok_or_else(|| missing("hasNextPage"))
+fn label_names(linear: &impl Posts, issue: &Value) -> Result<Vec<String>, Error> {
+    completed(
+        linear,
+        issue.get("labels").ok_or_else(|| missing("labels"))?,
+        "query IssueLabels($id: String!, $after: String) {
+            issue(id: $id) {
+                labels(first: 250, after: $after) {
+                    pageInfo { hasNextPage endCursor }
+                    nodes { name }
+                }
+            }
+        }",
+        json!({ "id": node_id(issue)? }),
+        &["issue", "labels"],
+    )?
+    .iter()
+    .map(|label| text(label, "name"))
+    .collect()
 }
 
 fn unknown_entity(message: &str) -> bool {

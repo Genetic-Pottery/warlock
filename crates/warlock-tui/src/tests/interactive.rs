@@ -2974,7 +2974,7 @@ mod pulling {
     }
 
     fn queue(issues: impl IntoIterator<Item = QueuedIssue>) -> Queue {
-        Queue::new(issues.into_iter().collect(), false)
+        Queue::new(issues.into_iter().collect())
     }
 
     fn ready() -> QueuedIssue {

@@ -48,7 +48,7 @@ fn run(ticket: &str, status: RunStatus) -> PullRun {
 }
 
 fn queue_of(issues: Vec<QueuedIssue>) -> Queue {
-    Queue::new(issues, false)
+    Queue::new(issues)
 }
 
 fn taken(queue: &Queue, review_state: &str, runs: &[PullRun]) -> Option<String> {
@@ -521,9 +521,9 @@ mod named {
             "priority": 2,
             "state": { "name": "Todo", "type": "unstarted" },
             "team": { "key": "WAR" },
-            "labels": { "nodes": [{ "name": "warlock" }] },
+            "labels": { "pageInfo": { "hasNextPage": false }, "nodes": [{ "name": "warlock" }] },
             "assignee": { "id": ME, "name": "Cole" },
-            "inverseRelations": { "nodes": [] },
+            "inverseRelations": { "pageInfo": { "hasNextPage": false }, "nodes": [] },
         })
     }
 
@@ -637,7 +637,7 @@ mod named {
     #[test]
     fn a_ticket_without_the_records_label_is_refused_naming_the_label_it_wants() {
         let mut node = ticket();
-        node["labels"] = json!({ "nodes": [{ "name": "area/tui" }, { "name": "chore" }] });
+        node["labels"] = json!({ "pageInfo": { "hasNextPage": false }, "nodes": [{ "name": "area/tui" }, { "name": "chore" }] });
 
         // What it carries as well as what it is missing: the usual cause is a
         // near miss rather than an unlabelled ticket.
@@ -647,7 +647,7 @@ mod named {
         );
 
         let mut bare = ticket();
-        bare["labels"] = json!({ "nodes": [] });
+        bare["labels"] = json!({ "pageInfo": { "hasNextPage": false }, "nodes": [] });
 
         assert_eq!(
             refused(&bare, &[]),
@@ -690,7 +690,8 @@ mod named {
     fn the_team_key_and_the_label_are_matched_trimmed_and_case_insensitively() {
         let mut node = ticket();
         node["team"] = json!({ "key": " war " });
-        node["labels"] = json!({ "nodes": [{ "name": "WARLOCK" }] });
+        node["labels"] =
+            json!({ "pageInfo": { "hasNextPage": false }, "nodes": [{ "name": "WARLOCK" }] });
 
         assert_eq!(taken(&holding(&node), &[]).as_deref(), Some("WAR-133"));
     }
@@ -699,7 +700,7 @@ mod named {
     fn the_wrong_team_is_named_before_the_missing_label() {
         let mut node = ticket();
         node["team"] = json!({ "key": "ENG" });
-        node["labels"] = json!({ "nodes": [] });
+        node["labels"] = json!({ "pageInfo": { "hasNextPage": false }, "nodes": [] });
         node["assignee"] = Value::Null;
 
         // An issue label belongs to a team in Linear, so a ticket on another team
@@ -754,6 +755,7 @@ mod named {
     fn a_blocked_ticket_is_refused_naming_each_open_blocker_and_whose_it_is() {
         let mut node = ticket();
         node["inverseRelations"] = json!({
+            "pageInfo": { "hasNextPage": false },
             "nodes": [
                 blocking("WAR-1", Some("Ada"), "completed"),
                 blocking("WAR-2", Some("Someone Else"), "started"),
@@ -773,6 +775,7 @@ mod named {
     fn a_ticket_blocked_only_by_settled_issues_is_taken() {
         let mut node = ticket();
         node["inverseRelations"] = json!({
+            "pageInfo": { "hasNextPage": false },
             "nodes": [
                 blocking("WAR-1", Some("Ada"), "completed"),
                 blocking("WAR-2", None, "canceled"),

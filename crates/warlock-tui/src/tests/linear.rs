@@ -231,7 +231,7 @@ fn project_on_the_board() -> Value {
             "content": "# Push a brief to the board\n\n## Scope\n",
             "url": "https://linear.app/acme/project/a-brief-1a2b3c4d5e6f",
             "status": { "name": "Planned" },
-            "comments": { "nodes": [
+            "comments": { "pageInfo": { "hasNextPage": false }, "nodes": [
                 { "body": "Warlock cut slice `One` into `WAR-1`." },
                 { "body": "Warlock skipped slice `Two`." },
             ] },
@@ -517,8 +517,18 @@ const TEAM: &str = "team-1";
 const LABEL: &str = "warlock";
 const ME: &str = "user-viewer";
 
-fn a_queue_of(issues: &[Value], more: bool) -> Value {
-    json!({ "issues": { "pageInfo": { "hasNextPage": more }, "nodes": issues } })
+fn a_queue_of(issues: &[Value], after: Option<&str>) -> Value {
+    json!({
+        "issues": {
+            "pageInfo": { "hasNextPage": after.is_some(), "endCursor": after },
+            "nodes": issues,
+        },
+    })
+}
+
+// A connection's last page: its nodes, and nothing after them.
+fn last_page(nodes: &Value) -> Value {
+    json!({ "pageInfo": { "hasNextPage": false, "endCursor": null }, "nodes": nodes })
 }
 
 fn an_issue() -> Value {
@@ -528,7 +538,7 @@ fn an_issue() -> Value {
         "title": "Read a scope's ticket queue from Linear",
         "priority": 2,
         "state": { "name": "Todo", "type": "unstarted" },
-        "inverseRelations": { "nodes": [blocking("WAR-129", Some("Ada"), "started")] },
+        "inverseRelations": last_page(&json!([blocking("WAR-129", Some("Ada"), "started")])),
     })
 }
 
@@ -558,7 +568,7 @@ fn only_issue(queue: &Value) -> QueuedIssue {
 
 // The field at that JSON pointer taken out of the object holding it.
 fn without(pointer: &str) -> Value {
-    dropping(a_queue_of(&[an_issue()], false), pointer)
+    dropping(a_queue_of(&[an_issue()], None), pointer)
 }
 
 // The same, out of whichever answer is handed in.
@@ -579,7 +589,7 @@ fn dropping(mut answer: Value, pointer: &str) -> Value {
 
 #[test]
 fn a_scopes_whole_queue_is_read_in_one_request() {
-    let linear = Posting::answering([Ok(a_queue_of(&[an_issue()], false))]);
+    let linear = Posting::answering([Ok(a_queue_of(&[an_issue()], None))]);
 
     let queue = scope_queue(&linear, TEAM, LABEL, ME).expect("the stand-in answered");
 
@@ -601,13 +611,16 @@ fn a_scopes_whole_queue_is_read_in_one_request() {
             StateType::new("started")
         )]
     );
-    assert!(!queue.capped());
-    assert_eq!(linear.documents().len(), 1, "one request per operation");
+    assert_eq!(
+        linear.documents().len(),
+        1,
+        "one page, and no relation left to read"
+    );
 }
 
 #[test]
 fn the_queue_is_the_teams_labelled_work_assigned_to_the_key_holder_and_not_finished() {
-    let linear = Posting::answering([Ok(a_queue_of(&[an_issue()], false))]);
+    let linear = Posting::answering([Ok(a_queue_of(&[an_issue()], None))]);
 
     scope_queue(&linear, TEAM, LABEL, ME).expect("the stand-in answered");
 
@@ -647,7 +660,7 @@ fn the_queue_is_the_teams_labelled_work_assigned_to_the_key_holder_and_not_finis
 
 #[test]
 fn the_page_asked_for_is_the_cap_the_constant_holds() {
-    let linear = Posting::answering([Ok(a_queue_of(&[an_issue()], false))]);
+    let linear = Posting::answering([Ok(a_queue_of(&[an_issue()], None))]);
 
     scope_queue(&linear, TEAM, LABEL, ME).expect("the stand-in answered");
 
@@ -675,7 +688,7 @@ fn a_blocker_is_an_issue_blocking_this_one_and_never_one_it_blocks() {
         "nodes": [blocking("WAR-140", Some("Ada"), "unstarted")],
     });
 
-    let issue = only_issue(&a_queue_of(&[waiting], false));
+    let issue = only_issue(&a_queue_of(&[waiting], None));
 
     assert_eq!(
         issue
@@ -689,7 +702,7 @@ fn a_blocker_is_an_issue_blocking_this_one_and_never_one_it_blocks() {
 
 #[test]
 fn the_only_relations_read_are_the_inverse_ones() {
-    let linear = Posting::answering([Ok(a_queue_of(&[an_issue()], false))]);
+    let linear = Posting::answering([Ok(a_queue_of(&[an_issue()], None))]);
 
     scope_queue(&linear, TEAM, LABEL, ME).expect("the stand-in answered");
 
@@ -711,7 +724,7 @@ fn a_relation_that_blocks_nothing_is_read_and_dropped() {
         { "type": "duplicate", "issue": { "identifier": "WAR-2", "state": { "type": "started" }, "assignee": null } },
     ]);
 
-    let issue = only_issue(&a_queue_of(&[issue], false));
+    let issue = only_issue(&a_queue_of(&[issue], None));
 
     assert_eq!(issue.blockers().len(), 1, "only `blocks` holds work up");
     assert_eq!(issue.blockers()[0].identifier(), "WAR-129");
@@ -726,7 +739,7 @@ fn a_blocker_is_carried_whoever_owns_it_and_whatever_state_it_is_in() {
         blocking("WAR-11", Some("Ada"), "completed"),
     ]);
 
-    let issue = only_issue(&a_queue_of(&[issue], false));
+    let issue = only_issue(&a_queue_of(&[issue], None));
 
     // The queue's own filters are not the blockers': an issue is held up by
     // whatever blocks it, on anybody's plate and under any label, and an
@@ -746,7 +759,7 @@ fn a_blocker_is_carried_whoever_owns_it_and_whatever_state_it_is_in() {
 
 #[test]
 fn the_blockers_asked_for_carry_no_filter_of_their_own() {
-    let linear = Posting::answering([Ok(a_queue_of(&[an_issue()], false))]);
+    let linear = Posting::answering([Ok(a_queue_of(&[an_issue()], None))]);
 
     scope_queue(&linear, TEAM, LABEL, ME).expect("the stand-in answered");
 
@@ -787,7 +800,7 @@ fn linears_priority_numbers_are_read_as_the_order_work_is_taken() {
         issue["priority"] = json!(number);
 
         assert_eq!(
-            only_issue(&a_queue_of(&[issue], false)).priority(),
+            only_issue(&a_queue_of(&[issue], None)).priority(),
             rank,
             "priority {number}"
         );
@@ -816,7 +829,7 @@ fn a_priority_number_no_version_of_linear_sends_is_no_priority() {
         let mut issue = an_issue();
         issue["priority"] = number.clone();
 
-        let read = only_issue(&a_queue_of(&[issue], false)).priority();
+        let read = only_issue(&a_queue_of(&[issue], None)).priority();
 
         // `2.0` is the `Float!` the schema promises spelled the other way, and
         // still high; the two outside the five are not a reason to work
@@ -832,57 +845,54 @@ fn a_priority_number_no_version_of_linear_sends_is_no_priority() {
 }
 
 #[test]
-fn a_page_that_came_back_full_says_so_and_a_short_one_does_not() {
-    let short = Posting::answering([Ok(a_queue_of(&[an_issue()], false))]);
-    let more = Posting::answering([Ok(a_queue_of(&[an_issue()], true))]);
-
-    assert!(
-        !scope_queue(&short, TEAM, LABEL, ME)
-            .expect("the stand-in answered")
-            .capped()
-    );
-    // `hasNextPage`, which is Linear saying there is another page, is the plain
-    // case.
-    assert!(
-        scope_queue(&more, TEAM, LABEL, ME)
-            .expect("the stand-in answered")
-            .capped()
-    );
-
-    // And a page filled exactly to the cap, which an API that answers
-    // `hasNextPage: false` on the boundary would otherwise hide.
-    let full = Posting::answering([Ok(a_queue_of(&vec![an_issue(); QUEUE_PAGE], false))]);
-
-    let queue = scope_queue(&full, TEAM, LABEL, ME).expect("the stand-in answered");
-
-    assert_eq!(queue.issues().len(), QUEUE_PAGE);
-    assert!(queue.capped());
-}
-
-#[test]
-fn an_issue_whose_relations_filled_their_page_caps_the_queue_too() {
-    let mut issue = an_issue();
-    issue["inverseRelations"]["nodes"] =
-        Value::Array(vec![blocking("WAR-9", None, "started"); BLOCKERS_PAGE]);
-
-    let linear = Posting::answering([Ok(a_queue_of(&[issue], false))]);
+fn a_queue_follows_every_page_of_issues() {
+    let linear = Posting::answering([
+        Ok(a_queue_of(&[an_issue()], Some("cursor-1"))),
+        Ok(a_queue_of(&[an_issue()], None)),
+    ]);
 
     let queue = scope_queue(&linear, TEAM, LABEL, ME).expect("the stand-in answered");
 
-    // A blocker list cut off would make a held-up issue read as ready, so the
-    // flag covers it: what it says is that there is more of this queue on the
-    // board than came back.
-    assert!(queue.capped());
+    assert_eq!(queue.issues().len(), 2);
+    assert_eq!(linear.variables()[1]["after"], json!("cursor-1"));
+}
+
+#[test]
+fn an_issue_with_more_blockers_than_its_page_reads_the_rest() {
+    let mut issue = an_issue();
+    issue["inverseRelations"] = json!({
+        "pageInfo": { "hasNextPage": true, "endCursor": "relations-1" },
+        "nodes": [blocking("WAR-129", Some("Ada"), "started")],
+    });
+    let linear = Posting::answering([
+        Ok(a_queue_of(&[issue], None)),
+        Ok(json!({
+            "issue": { "inverseRelations": last_page(&json!([blocking("WAR-130", None, "unstarted")])) },
+        })),
+    ]);
+
+    let queue = scope_queue(&linear, TEAM, LABEL, ME).expect("the stand-in answered");
+
+    // A blocker list cut off would make a held-up issue read as ready.
+    let blockers: Vec<&str> = queue.issues()[0]
+        .blockers()
+        .iter()
+        .map(Blocker::identifier)
+        .collect();
+    assert_eq!(blockers, ["WAR-129", "WAR-130"]);
+    assert_eq!(
+        linear.variables()[1],
+        json!({ "id": "1b9a5d2e-6c47-4f0a-9d31-0e7b2c4a8f55", "after": "relations-1" })
+    );
 }
 
 #[test]
 fn a_queue_with_nothing_on_it_is_an_ordinary_answer() {
-    let linear = Posting::answering([Ok(a_queue_of(&[], false))]);
+    let linear = Posting::answering([Ok(a_queue_of(&[], None))]);
 
     let queue = scope_queue(&linear, TEAM, LABEL, ME).expect("an empty queue is an answer");
 
     assert_eq!(queue.issues(), []);
-    assert!(!queue.capped());
 }
 
 #[test]
@@ -893,7 +903,7 @@ fn a_queue_answer_that_is_not_the_one_asked_for_is_malformed() {
         // Asked for and not answered, so the page is not one this side can say
         // anything about.
         json!({ "issues": { "nodes": [] } }),
-        a_queue_of(&[json!({})], false),
+        a_queue_of(&[json!({})], None),
     ];
 
     for pointer in [
@@ -935,7 +945,7 @@ fn an_unassigned_issue_can_still_be_holding_one_up() {
     let mut issue = an_issue();
     issue["inverseRelations"]["nodes"] = json!([blocking("WAR-9", None, "started")]);
 
-    let issue = only_issue(&a_queue_of(&[issue], false));
+    let issue = only_issue(&a_queue_of(&[issue], None));
 
     assert_eq!(issue.blockers()[0].assignee(), None);
 }
@@ -944,7 +954,7 @@ fn an_unassigned_issue_can_still_be_holding_one_up() {
 fn the_board_hands_the_team_label_and_assignee_to_the_wire_in_that_order() {
     // Three `&str` in a row: a swap between the trait and the operation under it
     // compiles, and asks the board for somebody else's work.
-    let board = Linear::new(Posting::answering([Ok(a_queue_of(&[], false))]));
+    let board = Linear::new(Posting::answering([Ok(a_queue_of(&[], None))]));
 
     board
         .scope_queue(TEAM, LABEL, ME)
@@ -972,7 +982,7 @@ fn named_node() -> Value {
     let mut node = an_issue();
 
     node["team"] = json!({ "key": "WAR" });
-    node["labels"] = json!({ "nodes": [{ "name": "warlock" }, { "name": "area/tui" }] });
+    node["labels"] = json!({ "pageInfo": { "hasNextPage": false }, "nodes": [{ "name": "warlock" }, { "name": "area/tui" }] });
     node["assignee"] = json!({ "id": ME, "name": "Cole" });
     node
 }
@@ -1025,10 +1035,8 @@ fn the_named_read_carries_none_of_the_queues_filters() {
     assert!(!filter.contains("state: {"), "{filter}");
     // And the selection asks for all three.
     assert!(asked.contains("team { key }"), "{asked}");
-    assert!(
-        asked.contains("labels(first: $labels) { nodes { name } }"),
-        "{asked}"
-    );
+    assert!(asked.contains("labels(first: $labels)"), "{asked}");
+    assert!(asked.contains("nodes { name }"), "{asked}");
     assert!(asked.contains("assignee { id name }"), "{asked}");
 }
 
@@ -1057,10 +1065,7 @@ fn a_named_ticket_is_the_same_value_a_queue_would_have_given() {
     // one type and the rules over them cannot drift.
     let found = a_ticket(&named_node());
 
-    assert_eq!(
-        found.issue(),
-        &only_issue(&a_queue_of(&[an_issue()], false))
-    );
+    assert_eq!(found.issue(), &only_issue(&a_queue_of(&[an_issue()], None)));
 }
 
 #[test]
@@ -1081,7 +1086,7 @@ fn a_named_ticket_carries_the_team_labels_and_assignee_the_queue_filtered_on() {
 #[test]
 fn a_ticket_with_no_labels_and_nobody_on_it_is_an_ordinary_answer() {
     let mut node = named_node();
-    node["labels"] = json!({ "nodes": [] });
+    node["labels"] = json!({ "pageInfo": { "hasNextPage": false }, "nodes": [] });
     node["assignee"] = Value::Null;
 
     let found = a_ticket(&node);
@@ -1389,6 +1394,7 @@ fn a_team_node_with_no_id_is_malformed() {
 fn the_backlog_status_is_found_by_name_among_the_others() {
     let linear = Posting::answering([Ok(json!({
         "projectStatuses": {
+            "pageInfo": { "hasNextPage": false },
             "nodes": [
                 { "id": "status-planned", "name": "Planned" },
                 { "id": "status-backlog", "name": BACKLOG },
@@ -1406,7 +1412,7 @@ fn the_backlog_status_is_found_by_name_among_the_others() {
 #[test]
 fn a_workspace_with_no_backlog_status_is_a_none_rather_than_an_error() {
     let linear = Posting::answering([Ok(json!({
-        "projectStatuses": { "nodes": [{ "id": "status-now", "name": "In Progress" }] },
+        "projectStatuses": { "pageInfo": { "hasNextPage": false }, "nodes": [{ "id": "status-now", "name": "In Progress" }] },
     }))]);
 
     let status = backlog_status(&linear).expect("no `Backlog` is an ordinary answer");
@@ -1418,6 +1424,7 @@ fn a_workspace_with_no_backlog_status_is_a_none_rather_than_an_error() {
 fn a_project_status_is_found_by_name_ignoring_case_and_spaces() {
     let linear = Posting::answering([Ok(json!({
         "projectStatuses": {
+            "pageInfo": { "hasNextPage": false },
             "nodes": [
                 { "id": "status-planned", "name": "Planned" },
                 { "id": "status-doing", "name": " in progress " },
@@ -1434,7 +1441,7 @@ fn a_project_status_is_found_by_name_ignoring_case_and_spaces() {
 #[test]
 fn a_workspace_with_no_such_project_status_is_a_none_rather_than_an_error() {
     let linear = Posting::answering([Ok(json!({
-        "projectStatuses": { "nodes": [{ "id": "status-planned", "name": "Planned" }] },
+        "projectStatuses": { "pageInfo": { "hasNextPage": false }, "nodes": [{ "id": "status-planned", "name": "Planned" }] },
     }))]);
 
     let status = project_status(&linear, IN_PROGRESS).expect("an ordinary answer");
@@ -1517,6 +1524,7 @@ fn an_issue_in_no_project_is_a_none() {
 fn workflow_states() -> Value {
     json!({
         "workflowStates": {
+            "pageInfo": { "hasNextPage": false },
             "nodes": [
                 { "id": "state-todo", "name": "Todo" },
                 { "id": "state-backlog", "name": BACKLOG },
@@ -1554,7 +1562,7 @@ fn the_workflow_states_asked_for_are_the_resolved_teams_own() {
 #[test]
 fn a_team_with_no_backlog_workflow_state_is_a_none_rather_than_an_error() {
     let linear = Posting::answering([Ok(json!({
-        "workflowStates": { "nodes": [{ "id": "state-doing", "name": "In Progress" }] },
+        "workflowStates": { "pageInfo": { "hasNextPage": false }, "nodes": [{ "id": "state-doing", "name": "In Progress" }] },
     }))]);
 
     let state = backlog_state(&linear, "team-1").expect("no `Backlog` is an ordinary answer");
@@ -1566,7 +1574,7 @@ fn a_team_with_no_backlog_workflow_state_is_a_none_rather_than_an_error() {
 fn a_workflow_state_answer_that_is_not_the_one_asked_for_is_malformed() {
     for answer in [
         json!({ "workflowStates": {} }),
-        json!({ "workflowStates": { "nodes": [{ "name": BACKLOG }] } }),
+        json!({ "workflowStates": { "pageInfo": { "hasNextPage": false }, "nodes": [{ "name": BACKLOG }] } }),
     ] {
         let linear = Posting::answering([Ok(answer.clone())]);
 
@@ -1619,7 +1627,7 @@ fn a_team_with_no_state_by_that_name_is_a_none_rather_than_an_error() {
 fn a_named_state_answer_that_is_not_the_one_asked_for_is_malformed() {
     for answer in [
         json!({ "workflowStates": {} }),
-        json!({ "workflowStates": { "nodes": [{ "name": IN_PROGRESS }] } }),
+        json!({ "workflowStates": { "pageInfo": { "hasNextPage": false }, "nodes": [{ "name": IN_PROGRESS }] } }),
     ] {
         let linear = Posting::answering([Ok(answer.clone())]);
 
