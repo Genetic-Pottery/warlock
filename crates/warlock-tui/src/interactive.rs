@@ -1047,7 +1047,7 @@ impl<K: Seams> Session<K> {
         // and typing sends that instead. It is put here rather than in there
         // because the field is the conversation's — see [`Chat::offer`].
         if let Some(proposal) = self.cutter.keep_up(&mut self.app, now) {
-            self.chat.offer(&proposal);
+            self.chat.suggest(&proposal);
         }
         // And a ticket being chosen, asked about, or worked: the account's
         // sections and the thread's milestones, drained so the frames keep coming

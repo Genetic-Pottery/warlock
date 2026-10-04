@@ -912,6 +912,26 @@ fn draw_composer(frame: &mut Frame<'_>, area: Rect, composer: &Composer, live: b
     }
     frame.render_widget(block, area);
 
+    let ghost = composer.ghost_rows(inner.width, inner.height);
+    if !ghost.is_empty() {
+        let dim = Style::new().fg(GUIDE_COLOUR);
+        let mut lines: Vec<Line<'static>> = ghost
+            .iter()
+            .map(|row| Line::styled(row.clone(), dim))
+            .collect();
+        // The caret on the suggestion's first character, so the field still
+        // reads as the one the keys go to.
+        if live && let Some(first) = ghost.first() {
+            let (_, at, after) = split_at_column(first, 0);
+            lines[0] = Line::from(vec![
+                Span::styled(at.to_owned(), dim.add_modifier(Modifier::REVERSED)),
+                Span::styled(after.to_owned(), dim),
+            ]);
+        }
+        frame.render_widget(Paragraph::new(lines), inner);
+        return;
+    }
+
     let window = composer.window(inner.width, inner.height);
     let mut lines: Vec<Line<'static>> = window
         .rows

@@ -775,12 +775,12 @@ fn a_chord_or_a_control_character_is_not_text() {
         KeyModifiers::META,
         KeyModifiers::CONTROL | KeyModifiers::SHIFT,
     ] {
-        let key = KeyEvent::new(KeyCode::Char('u'), modifiers);
+        let key = KeyEvent::new(KeyCode::Char('x'), modifiers);
 
         assert_eq!(
             compose_for(key, &before),
             Composed::Typing(before.clone()),
-            "{modifiers:?} makes `u` a command, not a letter"
+            "{modifiers:?} makes `x` a command, not a letter"
         );
     }
 
@@ -1579,4 +1579,93 @@ fn no_row_and_no_column_at_any_width_lands_inside_a_character() {
             }
         }
     }
+}
+
+fn ctrl_u() -> KeyEvent {
+    KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL)
+}
+
+fn typed(composed: Composed) -> Composer {
+    match composed {
+        Composed::Typing(field) => field,
+        other => panic!("expected a draft, got {other:?}"),
+    }
+}
+
+#[test]
+fn ctrl_u_kills_to_the_start_of_the_line_and_then_the_break_before_it() {
+    let start = composer("first\nsecond line");
+
+    let once = typed(compose_for(ctrl_u(), &start));
+    assert_eq!((once.draft(), once.cursor()), ("first\n", 6));
+
+    let twice = typed(compose_for(ctrl_u(), &once));
+    assert_eq!((twice.draft(), twice.cursor()), ("first", 5));
+
+    let thrice = typed(compose_for(ctrl_u(), &twice));
+    assert_eq!((thrice.draft(), thrice.cursor()), ("", 0));
+}
+
+#[test]
+fn ctrl_u_keeps_what_is_after_the_cursor() {
+    let start = composer("delete keep").at(7);
+
+    let killed = typed(compose_for(ctrl_u(), &start));
+
+    assert_eq!((killed.draft(), killed.cursor()), ("keep", 0));
+}
+
+fn suggesting(draft: &str) -> Composer {
+    let mut composer = composer(draft);
+    composer.set_ghost(Some("a suggested answer".to_owned()));
+    composer
+}
+
+#[test]
+fn a_suggestion_is_sent_by_enter_on_an_empty_field_and_never_typed_into_it() {
+    let empty = suggesting("");
+
+    assert_eq!(empty.draft(), "");
+    assert!(empty.is_submittable());
+    assert_eq!(empty.submission(), "a suggested answer");
+    assert_eq!(compose_for(press(KeyCode::Enter), &empty), Composed::Submit);
+}
+
+#[test]
+fn what_is_typed_is_sent_instead_of_the_suggestion() {
+    let typed_over = typed(compose_for(press(KeyCode::Char('n')), &suggesting("")));
+
+    assert_eq!(typed_over.draft(), "n");
+    assert_eq!(typed_over.submission(), "n");
+    assert!(typed_over.ghost_rows(40, 6).is_empty(), "a draft hides it");
+}
+
+#[test]
+fn right_or_end_on_an_empty_field_takes_the_suggestion_in_to_edit() {
+    for key in [KeyCode::Right, KeyCode::End] {
+        let taken = typed(compose_for(press(key), &suggesting("")));
+
+        assert_eq!(taken.draft(), "a suggested answer", "{key:?}");
+        assert_eq!(taken.cursor(), taken.draft().len(), "{key:?}");
+    }
+}
+
+#[test]
+fn a_suggestion_goes_when_the_question_it_answers_is_over() {
+    let mut field = suggesting("");
+    field.set_answering(Some("answering slice 1".to_owned()));
+    assert_eq!(field.ghost(), Some("a suggested answer"));
+
+    field.set_answering(None);
+
+    assert_eq!(field.ghost(), None);
+    assert!(!field.is_submittable());
+}
+
+#[test]
+fn a_long_suggestion_is_given_the_rows_it_needs_up_to_the_cap() {
+    let mut field = composer("");
+    field.set_ghost(Some("word ".repeat(40)));
+
+    assert_eq!(field.height(20), COMPOSER_MAX_ROWS);
 }
