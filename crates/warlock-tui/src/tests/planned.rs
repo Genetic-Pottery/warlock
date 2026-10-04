@@ -6,11 +6,10 @@ use std::sync::{Arc, Mutex};
 use tempfile::TempDir;
 use warlock_engine::drafting::{Draft, stub_answer};
 use warlock_engine::{
-    CutRecord, Filed, FiledRecord, Manifest, PactEntry, ScopeRecord, agent, filed_path, save_key,
-    save_key_binding, save_sigils,
+    Destination, Manifest, PactEntry, ScopeRecord, agent, save_key, save_key_binding, save_sigils,
 };
 
-use super::{Planned, Settled, cut_with, prepare};
+use super::{Planned, Settled, cut_with, listing, listing_lines, prepare};
 
 // Two of Forman's review words, spelled out in full so a test reads as the
 // answer it gives.
@@ -22,9 +21,10 @@ use crate::brief::ScopeBlockError;
 use crate::claude::{
     Activities, Cancel, Converses, DRAFTING_CONTRACT, DRAFTING_ROUNDS, NOTHING_SETTLES_IT, Wired,
 };
+use crate::cut::noted;
 use crate::error::Error;
 use crate::error::status_for;
-use crate::linear::{FetchedProject, Opens};
+use crate::linear::{FetchedProject, Listing, Opens};
 use crate::standing::Standing;
 use crate::stubs::{Answering, Boarding, Call, Op, QueueAsked, Saying, Scripted, Typing, VIEWER};
 
@@ -41,9 +41,11 @@ const TEAM: &str = "WAR";
 
 const LABEL: &str = "warlock";
 
-const BRIEF_PATH: &str = "docs/brief.md";
+const SLUG: &str = "1a2b3c4d5e6f";
 
-const PROJECT_ID: &str = "b229262b-22aa-444a-a8af-0a2a3f4ef100";
+// The id `FetchedProject::new` gives the project it stands in for, which is what
+// issues are created in and notes are said on.
+const PROJECT_ID: &str = "project-1";
 
 const URL: &str = "https://linear.app/acme/project/draft-a-brief-1a2b3c";
 
@@ -231,15 +233,11 @@ fn a_dir() -> TempDir {
     tempfile::tempdir().expect("a temporary directory")
 }
 
-// A repository that has filed one brief, which is the finished state a cut
-// starts from.
 fn a_repository() -> TempDir {
-    let repo = a_dir();
-    recording(repo.path(), BRIEF_PATH);
-    repo
+    a_dir()
 }
 
-// The same, with a `[[scope]]` record for the board a cut reads back off:
+// A repository with a `[[scope]]` record for the board a cut reads back off:
 // everything `resolve_filing` needs on the repository's side.
 fn a_scoped_repository() -> TempDir {
     let repo = a_repository();
@@ -291,43 +289,25 @@ fn holding(home: &Path, root: &Path, sigils: &[&str]) {
     save_sigils(home, root, &sigils).expect("a config that writes");
 }
 
-fn recording(root: &Path, path: &str) {
-    Filed::with_records([a_filed_record(root, path)])
-        .save(root)
-        .expect("a record file that saves");
+// A note as a cut leaves it on the project, which is the whole of what makes a
+// slice cut for the next run.
+fn a_cut(title: &str, issues: &[&str]) -> String {
+    let issues: Vec<String> = issues.iter().map(|issue| format!("`{issue}`")).collect();
+    format!("Warlock cut slice `{title}` into {}.", issues.join(", "))
 }
 
-// The same record with a cut already on it, which is what a slice that has been
-// filed once looks like on disk.
-fn recording_cuts(root: &Path, cuts: impl IntoIterator<Item = CutRecord>) {
-    let mut record = a_filed_record(root, BRIEF_PATH);
-    for cut in cuts {
-        record.push_cut(cut);
-    }
-    Filed::with_records([record])
-        .save(root)
-        .expect("a record file that saves");
+fn a_skip(title: &str) -> String {
+    format!("Warlock skipped slice `{title}`.")
 }
 
-fn a_filed_record(root: &Path, path: &str) -> FiledRecord {
-    FiledRecord::new(
-        root,
-        root.join(path),
-        PROJECT_ID,
-        URL,
-        SCOPE,
-        TEAM,
-        "2026-09-21T09:14:00Z",
-    )
-    .expect("a path inside the repository")
+// A planned project whose comments already hold these notes.
+fn a_noted_project<const N: usize>(content: &str, notes: [String; N]) -> Boarding {
+    Boarding::filing("")
+        .reading(FetchedProject::new(NAME, content, URL, Some(PLANNED)).with_notes(notes))
 }
 
-fn a_cut(title: &str, issues: &[&str]) -> CutRecord {
-    CutRecord::new(title, issues.iter().copied(), "2026-09-21T10:00:00Z")
-}
-
-// A workspace holding the one project the record names, which answers
-// everything a run then asks for as well.
+// A workspace holding the one project the slug names, which answers everything
+// a run then asks for as well.
 fn a_project_of(content: &str, status: Option<&str>) -> Boarding {
     Boarding::filing("").reading(FetchedProject::new(NAME, content, URL, status))
 }
@@ -343,19 +323,17 @@ fn a_project(status: Option<&str>) -> Boarding {
     a_project_of(SLICED, status)
 }
 
-// Everything `prepare` sends, in order: the user the key belongs to, resolved
-// once for the run so every issue it files can be assigned, then the project the
-// record names. Two reads and no write.
-// What a refusal on the project's own state reads: the backlog is only asked
-// for once there is a draft to show it to.
+// What a refusal on the project's own state reads: the user the key belongs
+// to, then the project the slug names. The queue is only asked for once there is
+// a draft to show it to.
 fn read_before_refusing() -> [Call; 2] {
-    [Call::Viewer, Call::FetchProject(PROJECT_ID.to_owned())]
+    [Call::Viewer, Call::FetchProject(SLUG.to_owned())]
 }
 
 fn read_by_prepare() -> [Call; 3] {
     [
         Call::Viewer,
-        Call::FetchProject(PROJECT_ID.to_owned()),
+        Call::FetchProject(SLUG.to_owned()),
         Call::ScopeQueue(QueueAsked {
             team: TEAM.to_owned(),
             label: LABEL.to_owned(),
@@ -366,11 +344,11 @@ fn read_by_prepare() -> [Call; 3] {
 
 // The module's first step, less the environment: the repository root and the
 // home are this test's temporary directories, and the seam is whatever `open`
-// is.
+// is. `None` is the scope every other test files under.
 fn preparing<O: Opens>(
     repo: &Path,
     home: &Path,
-    path: &str,
+    slug: &str,
     scope: Option<&str>,
     open: &O,
 ) -> Result<Planned, Error> {
@@ -379,8 +357,8 @@ fn preparing<O: Opens>(
         &standing.manifest()?,
         repo,
         home,
-        &standing.target(path),
-        scope,
+        scope.unwrap_or(SCOPE),
+        slug,
         open,
     )
 }
@@ -388,7 +366,7 @@ fn preparing<O: Opens>(
 // A cut that has to come to something, over the scoped repository and home a
 // test has already built.
 fn prepared(repo: &Path, home: &Path, linear: &Boarding) -> Planned {
-    preparing(repo, home, BRIEF_PATH, None, linear).expect("a draft to walk")
+    preparing(repo, home, SLUG, None, linear).expect("a draft to walk")
 }
 
 // The drafting road's own stub pair for a slice — one blocking the other — as
@@ -476,7 +454,7 @@ fn cut_running<A: Converses>(
     cutting(
         repo,
         home,
-        BRIEF_PATH,
+        SLUG,
         None,
         false,
         linear,
@@ -498,7 +476,7 @@ fn cut_reviewing<A: Converses, K: Asks>(
     cutting(
         repo,
         home,
-        BRIEF_PATH,
+        SLUG,
         None,
         false,
         linear,
@@ -519,9 +497,7 @@ fn cut_answering<A: Converses, P: Converses, K: Asks>(
     proposer: &P,
     ask: &mut K,
 ) -> (Result<(), Error>, String) {
-    cutting(
-        repo, home, BRIEF_PATH, None, false, linear, agent, proposer, ask,
-    )
+    cutting(repo, home, SLUG, None, false, linear, agent, proposer, ask)
 }
 
 // The one call into the module, with everything the two drivers above differ
@@ -546,8 +522,8 @@ fn cutting<O: Opens, A: Converses, P: Converses, K: Asks>(
     let outcome = cut_with(
         &Standing::at(repo.to_path_buf(), repo.to_path_buf()),
         home,
-        Path::new(path),
-        scope,
+        scope.unwrap_or(SCOPE),
+        path,
         dry_run,
         open,
         agent,
@@ -572,18 +548,23 @@ fn cut_filing<A: Converses>(repo: &Path, home: &Path, linear: &Boarding, agent: 
     lines(&printed)
 }
 
-// The cuts `.warlock/filed.toml` holds for the brief, as they are on disk: the
-// record is the product of a cut, so it is read back off the file rather than
-// off anything the run handed over.
-fn recorded(root: &Path) -> Vec<(String, Vec<String>)> {
-    Filed::load(root)
-        .expect("a record file that reads")
-        .record(BRIEF_PATH)
-        .expect("the brief is recorded")
-        .cuts()
-        .iter()
-        .map(|cut| (cut.title().to_owned(), cut.issues().to_vec()))
-        .collect()
+// The slices the run noted on the project, as the folded title and the issues:
+// the note is the product of a cut, so it is read back off what was said to the
+// board rather than off anything the run handed over.
+fn recorded(linear: &Boarding) -> Vec<(String, Vec<String>)> {
+    let bodies: Vec<String> = linear
+        .comments()
+        .into_iter()
+        .map(|(project, body)| {
+            assert_eq!(project, PROJECT_ID, "a note went to another project");
+            body
+        })
+        .collect();
+    noted(&bodies)
+}
+
+fn folded(title: &str) -> String {
+    crate::cut::fold_title(title)
 }
 
 // What every refusal here promises, checked in one place: the ordinary exit
@@ -639,12 +620,12 @@ fn placed(lines: &[String], heading: &str) -> usize {
 }
 
 // The module's interface, driven the way both doors drive it: `prepare`, a walk,
-// a filing per slice, and the one comment.
+// and a filing per slice.
 mod preparing {
     use super::*;
 
     #[test]
-    fn a_recorded_brief_is_fetched_by_the_id_that_record_holds() {
+    fn a_project_is_fetched_by_the_slug_it_was_named_with() {
         let repo = a_scoped_repository();
         let home = a_home(repo.path());
         let linear = a_project(Some("Planned"));
@@ -656,8 +637,8 @@ mod preparing {
         assert_eq!(planned.total(), 3);
         assert_eq!(planned.left(), 3);
         assert_eq!(planned.destination().team_key(), TEAM);
-        // The id out of `.warlock/filed.toml` and no other selector, in one
-        // request, alongside the one that resolved who the run files for.
+        // The slug as typed and no other selector, in one request, alongside
+        // the one that resolved who the run files for.
         assert_eq!(linear.calls(), read_by_prepare());
         assert_eq!(linear.requests(), 3, "one call per operation");
         assert_eq!(linear.opened_with(), [NOT_A_KEY.to_owned()]);
@@ -668,88 +649,21 @@ mod preparing {
     }
 
     #[test]
-    fn a_brief_named_from_a_subdirectory_resolves_to_the_same_record() {
-        // The spelling a push records is `to_manifest_path`'s, so a path handed
-        // in with a `./` in front of it is the same record rather than a second
-        // one.
-        let repo = a_scoped_repository();
-        let home = a_home(repo.path());
-        let linear = a_project(Some("Planned"));
-
-        preparing(repo.path(), home.path(), "./docs/brief.md", None, &linear)
-            .expect("the same brief, spelled twice");
-
-        assert_eq!(linear.calls(), read_by_prepare());
-    }
-
-    #[test]
-    fn a_brief_no_record_names_is_refused_before_the_key_is_read() {
-        // `.warlock/filed.toml` is what turns a path into a project id, so a
-        // brief nothing filed is answered on this machine: no board is opened,
-        // which the seam asserts by panicking if one is.
+    fn a_slug_the_api_does_not_know_names_the_slug_and_the_command_that_lists_them() {
         let repo = a_scoped_repository();
         let home = a_home(repo.path());
 
-        let error = refused(
-            repo.path(),
-            home.path(),
-            "docs/other.md",
-            None,
-            &Boarding::unopened(),
-        );
+        let error = refused(repo.path(), home.path(), SLUG, None, &Boarding::filing(""));
 
         assert!(
-            matches!(&error, Error::NoRecord { path } if path == "docs/other.md"),
+            matches!(&error, Error::UnknownProject { slug, scope } if slug == SLUG && scope == SCOPE),
             "{error:?}"
         );
         let message = said(&error);
-        assert!(message.contains("docs/other.md"), "{message}");
-        assert!(message.contains("warlock push"), "{message}");
-    }
-
-    #[test]
-    fn a_repository_that_has_filed_nothing_at_all_is_that_same_refusal() {
-        // No `.warlock/filed.toml` on disk, which `records` reads as an empty
-        // one: a repository that has never pushed records no project, and that
-        // is an answer rather than a failure to reach one.
-        let repo = a_dir();
-        saving(repo.path(), &a_manifest([a_record(SCOPE, TEAM)]));
-        let home = a_home(repo.path());
-
-        let error = refused(
-            repo.path(),
-            home.path(),
-            BRIEF_PATH,
-            None,
-            &Boarding::unopened(),
-        );
-
-        assert!(matches!(error, Error::NoRecord { .. }), "{error:?}");
-        assert!(!filed_path(repo.path()).exists());
-    }
-
-    #[test]
-    fn a_project_id_the_api_does_not_know_names_the_id_and_the_file_it_is_written_in() {
-        let repo = a_scoped_repository();
-        let home = a_home(repo.path());
-
-        let error = refused(
-            repo.path(),
-            home.path(),
-            BRIEF_PATH,
-            None,
-            &Boarding::filing(""),
-        );
-
+        assert!(message.contains(SLUG), "{message}");
         assert!(
-            matches!(&error, Error::UnknownProject { id, .. } if id == PROJECT_ID),
-            "{error:?}"
-        );
-        let message = said(&error);
-        assert!(message.contains(PROJECT_ID), "{message}");
-        assert!(
-            message.contains(".warlock/filed.toml"),
-            "the file the id is written in is not named: {message}"
+            message.contains("warlock draft warlock-team"),
+            "the command that lists the slugs is not named: {message}"
         );
     }
 
@@ -759,7 +673,7 @@ mod preparing {
         let home = a_home(repo.path());
         let linear = a_project(Some("Backlog"));
 
-        let error = refused(repo.path(), home.path(), BRIEF_PATH, None, &linear);
+        let error = refused(repo.path(), home.path(), SLUG, None, &linear);
 
         assert!(
             matches!(&error, Error::NotPlanned { status, .. } if status.as_deref() == Some("Backlog")),
@@ -779,7 +693,7 @@ mod preparing {
         let repo = a_scoped_repository();
         let home = a_home(repo.path());
 
-        let error = refused(repo.path(), home.path(), BRIEF_PATH, None, &a_project(None));
+        let error = refused(repo.path(), home.path(), SLUG, None, &a_project(None));
 
         assert!(
             matches!(&error, Error::NotPlanned { status: None, .. }),
@@ -799,7 +713,7 @@ mod preparing {
             let planned = preparing(
                 repo.path(),
                 home.path(),
-                BRIEF_PATH,
+                SLUG,
                 None,
                 &a_project(Some(accepted)),
             )
@@ -819,7 +733,7 @@ mod preparing {
             let error = refused(
                 repo.path(),
                 home.path(),
-                BRIEF_PATH,
+                SLUG,
                 None,
                 &a_project(Some(refused_as)),
             );
@@ -832,10 +746,9 @@ mod preparing {
     }
 
     #[test]
-    fn nothing_on_this_path_writes_to_the_board_or_to_the_record_file() {
+    fn nothing_on_this_path_writes_to_the_board() {
         let repo = a_scoped_repository();
         let home = a_home(repo.path());
-        let before = fs::read_to_string(filed_path(repo.path())).expect("a record file");
         let linear = a_project(Some("Planned"));
 
         prepared(repo.path(), home.path(), &linear);
@@ -845,66 +758,70 @@ mod preparing {
             read_by_prepare(),
             "something other than the read was asked"
         );
-        assert_eq!(
-            fs::read_to_string(filed_path(repo.path())).expect("a record file"),
-            before,
-            "a read rewrote the record file"
-        );
     }
 
     #[test]
-    fn a_record_file_that_will_not_read_is_a_failure_rather_than_an_empty_one() {
-        // The reading half of `push.rs`'s rule: an unreadable record file is a
-        // repository whose filings are unknown, not one with none, and
-        // answering "nothing is filed" here would send somebody back to
-        // `warlock push` for a brief that already has a project.
+    fn a_project_whose_every_slice_is_noted_is_refused_naming_the_project() {
         let repo = a_scoped_repository();
         let home = a_home(repo.path());
-        fs::write(filed_path(repo.path()), "version = 2\nnot toml {{{")
-            .expect("a broken record file");
-
-        let error = refused(
-            repo.path(),
-            home.path(),
-            BRIEF_PATH,
-            None,
-            &Boarding::unopened(),
-        );
-
-        assert!(matches!(error, Error::Filed { .. }), "{error:?}");
-    }
-
-    #[test]
-    fn a_project_whose_every_slice_is_cut_is_refused_naming_the_brief_and_the_file() {
-        let repo = a_scoped_repository();
-        recording_cuts(
-            repo.path(),
+        let linear = a_noted_project(
+            SLICED,
             [
                 a_cut(FIRST, &["WAR-1"]),
-                a_cut(SECOND, &["WAR-2"]),
+                a_skip(SECOND),
                 a_cut(THIRD, &["WAR-3"]),
             ],
         );
-        let home = a_home(repo.path());
-        let linear = a_sliced_project(SLICED);
-        let before = fs::read_to_string(filed_path(repo.path())).expect("a record file");
 
-        let error = refused(repo.path(), home.path(), BRIEF_PATH, None, &linear);
+        let error = refused(repo.path(), home.path(), SLUG, None, &linear);
 
         assert!(
-            matches!(&error, Error::AllCut { path } if path == BRIEF_PATH),
+            matches!(&error, Error::AllCut { name } if name == NAME),
             "{error:?}"
         );
         let message = said(&error);
-        assert!(message.contains(BRIEF_PATH), "{message}");
-        assert!(message.contains(".warlock/filed.toml"), "{message}");
+        assert!(message.contains(NAME), "{message}");
+        assert!(message.contains("comments"), "{message}");
         // Refused where the answer that said so arrived: the fetch and nothing
-        // after it, and the record file as it was.
+        // after it.
         assert_eq!(linear.calls(), read_before_refusing());
-        assert_eq!(
-            fs::read_to_string(filed_path(repo.path())).expect("a record file"),
-            before
+    }
+
+    #[test]
+    fn a_note_is_matched_on_the_folded_title_and_a_cut_beats_a_skip() {
+        // A brief edited only in spacing or case still finds its notes, and a
+        // slice noted both ways counts as cut: its issues exist whatever was
+        // said about it afterwards.
+        let repo = a_scoped_repository();
+        let home = a_home(repo.path());
+        let linear = a_noted_project(
+            SLICED,
+            [
+                a_skip(FIRST),
+                a_cut("  READ the   project BACK ", &["WAR-7"]),
+                "A person's comment about the project.".to_owned(),
+            ],
         );
+
+        let mut planned = prepared(repo.path(), home.path(), &linear);
+
+        assert_eq!((planned.total(), planned.left()), (3, 2));
+        let first = planned.next().expect("a first slice");
+        assert_eq!(first.already(), Some(&["WAR-7".to_owned()][..]));
+    }
+
+    #[test]
+    fn a_skip_note_is_settled_with_no_issues() {
+        let repo = a_scoped_repository();
+        let home = a_home(repo.path());
+        let linear = a_noted_project(SLICED, [a_skip(SECOND)]);
+
+        let mut planned = prepared(repo.path(), home.path(), &linear);
+
+        assert_eq!(planned.left(), 2);
+        planned.next();
+        let second = planned.next().expect("a second slice");
+        assert_eq!(second.already(), Some(&[][..]));
     }
 
     #[test]
@@ -915,7 +832,7 @@ mod preparing {
         let error = refused(
             repo.path(),
             home.path(),
-            BRIEF_PATH,
+            SLUG,
             None,
             &a_sliced_project(NO_SCOPE),
         );
@@ -934,7 +851,7 @@ mod preparing {
         let error = refused(
             repo.path(),
             home.path(),
-            BRIEF_PATH,
+            SLUG,
             None,
             &a_sliced_project(CIRCLE),
         );
@@ -970,43 +887,11 @@ mod preparing {
             (&unmatched, &elsewhere, "billing"),
             (&unrecorded, &no_record, "[[scope]]"),
         ] {
-            let error = refused(
-                repo.path(),
-                home.path(),
-                BRIEF_PATH,
-                None,
-                &Boarding::unopened(),
-            );
+            let error = refused(repo.path(), home.path(), SLUG, None, &Boarding::unopened());
 
             assert!(matches!(error, Error::Filing { .. }), "{error:?}");
             assert!(said(&error).contains(expected), "{}", said(&error));
         }
-    }
-
-    #[test]
-    fn a_machine_that_can_cut_from_several_boards_names_them_all_and_asks_for_one() {
-        let repo = a_repository();
-        saving(
-            repo.path(),
-            &a_manifest([a_record(SCOPE, TEAM), a_record("web", "WEB")]),
-        );
-        let home = a_home_holding(repo.path(), &[SCOPE, "web"]);
-
-        let error = refused(
-            repo.path(),
-            home.path(),
-            BRIEF_PATH,
-            None,
-            &Boarding::unopened(),
-        );
-
-        let message = said(&error);
-        assert!(matches!(error, Error::Filing { .. }), "{error:?}");
-        assert!(
-            message.contains(SCOPE) && message.contains("web"),
-            "{message}"
-        );
-        assert!(message.contains("--scope"), "{message}");
     }
 
     #[test]
@@ -1021,7 +906,7 @@ mod preparing {
         let planned = preparing(
             repo.path(),
             home.path(),
-            BRIEF_PATH,
+            SLUG,
             Some("web"),
             &a_sliced_project(SLICED),
         )
@@ -1034,7 +919,7 @@ mod preparing {
         let error = refused(
             repo.path(),
             home.path(),
-            BRIEF_PATH,
+            SLUG,
             Some("billing"),
             &Boarding::unopened(),
         );
@@ -1049,19 +934,111 @@ mod preparing {
     }
 }
 
+mod listing {
+    use super::*;
+
+    fn destination() -> Destination {
+        Destination::new(SCOPE, TEAM, LABEL, KEY_NAME)
+    }
+
+    #[test]
+    fn the_planned_projects_are_asked_of_the_scope_s_team_and_label() {
+        let repo = a_scoped_repository();
+        let home = a_home(repo.path());
+        let linear = Boarding::filing("").listing(Listing::new(&[(SLUG, NAME)], false));
+        let standing = Standing::at(repo.path().to_path_buf(), repo.path().to_path_buf());
+
+        let (destination, listed) = listing(
+            &standing.manifest().expect("a manifest"),
+            repo.path(),
+            home.path(),
+            SCOPE,
+            &linear,
+        )
+        .expect("a listing");
+
+        assert_eq!(destination.team_key(), TEAM);
+        assert_eq!(listed, Listing::new(&[(SLUG, NAME)], false));
+        assert_eq!(
+            linear.calls(),
+            [Call::PlannedProjects {
+                team: TEAM.to_owned(),
+                label: LABEL.to_owned(),
+            }]
+        );
+    }
+
+    #[test]
+    fn a_scope_this_machine_cannot_file_to_is_refused_before_a_board_is_opened() {
+        let repo = a_scoped_repository();
+        let home = a_home(repo.path());
+        let standing = Standing::at(repo.path().to_path_buf(), repo.path().to_path_buf());
+
+        let error = listing(
+            &standing.manifest().expect("a manifest"),
+            repo.path(),
+            home.path(),
+            "billing",
+            &Boarding::unopened(),
+        )
+        .expect_err("a scope that is not a board");
+
+        assert!(matches!(error, Error::Filing { .. }), "{error:?}");
+    }
+
+    #[test]
+    fn each_project_is_its_slug_then_its_name_on_a_bare_line() {
+        let lines = listing_lines(
+            &destination(),
+            &Listing::new(&[(SLUG, NAME), ("9e41c07a2b13", "Another one")], false),
+        );
+
+        assert_eq!(
+            lines,
+            [
+                format!("{SLUG}  {NAME}"),
+                "9e41c07a2b13  Another one".to_owned()
+            ]
+        );
+    }
+
+    #[test]
+    fn a_capped_page_says_so_after_the_projects() {
+        let lines = listing_lines(&destination(), &Listing::new(&[(SLUG, NAME)], true));
+
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert_eq!(lines[0], format!("{SLUG}  {NAME}"));
+        assert!(lines[1].starts_with("warlock: "), "{}", lines[1]);
+        assert!(lines[1].contains("first 1"), "{}", lines[1]);
+    }
+
+    #[test]
+    fn nothing_to_list_is_one_line_naming_the_team_and_the_label() {
+        let lines = listing_lines(&destination(), &Listing::new(&[], false));
+
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(lines[0].contains(TEAM), "{}", lines[0]);
+        assert!(lines[0].contains(LABEL), "{}", lines[0]);
+        assert!(lines[0].contains("Planned"), "{}", lines[0]);
+    }
+}
+
 mod walking {
     use super::*;
 
     #[test]
-    fn every_slice_is_walked_in_the_cut_order_with_what_a_record_already_names() {
+    fn every_slice_is_walked_in_the_cut_order_with_what_a_note_already_names() {
         // The last slice is what the first two wait on, and the first is
         // already cut: the walk is the order tickets would be filed in, the
         // fraction is the place in that order, and the position still finds the
         // slice in the document.
         let repo = a_scoped_repository();
-        recording_cuts(repo.path(), [a_cut(FIRST, &["WAR-1", "WAR-2"])]);
         let home = a_home(repo.path());
-        let mut planned = prepared(repo.path(), home.path(), &a_sliced_project(OUT_OF_ORDER));
+        let mut planned = prepared(
+            repo.path(),
+            home.path(),
+            &a_noted_project(OUT_OF_ORDER, [a_cut(FIRST, &["WAR-1", "WAR-2"])]),
+        );
 
         let mut walked = Vec::new();
         while let Some(next) = planned.next() {
@@ -1084,9 +1061,12 @@ mod walking {
     #[test]
     fn the_uncut_walk_counts_only_what_is_left_and_skips_what_is_cut() {
         let repo = a_scoped_repository();
-        recording_cuts(repo.path(), [a_cut(FIRST, &["WAR-1"])]);
         let home = a_home(repo.path());
-        let mut planned = prepared(repo.path(), home.path(), &a_sliced_project(SLICED));
+        let mut planned = prepared(
+            repo.path(),
+            home.path(),
+            &a_noted_project(SLICED, [a_cut(FIRST, &["WAR-1"])]),
+        );
         assert_eq!((planned.total(), planned.left()), (3, 2));
 
         let mut walked = Vec::new();
@@ -1119,15 +1099,15 @@ mod filing {
         assert_eq!(
             settled,
             [
-                Settled::Filed {
+                Settled {
                     issues: vec!["WAR-1".to_owned(), "WAR-2".to_owned()],
                     reported: Vec::new(),
                 },
-                Settled::Filed {
+                Settled {
                     issues: vec!["WAR-3".to_owned(), "WAR-4".to_owned()],
                     reported: Vec::new(),
                 },
-                Settled::Filed {
+                Settled {
                     issues: vec!["WAR-5".to_owned(), "WAR-6".to_owned()],
                     reported: Vec::new(),
                 },
@@ -1159,14 +1139,13 @@ mod filing {
     }
 
     #[test]
-    fn a_slice_waiting_on_one_that_was_already_cut_is_blocked_by_the_issues_its_record_names() {
+    fn a_slice_waiting_on_one_that_was_already_cut_is_blocked_by_the_issues_its_note_names() {
         // The one thing a resumed cut does with a slice it cut last time: the
-        // identifiers off the record are what the relation names, because a cut
-        // record keeps nothing else of an issue.
+        // identifiers off the note are what the relation names, because a note
+        // keeps nothing else of an issue.
         let repo = a_scoped_repository();
-        recording_cuts(repo.path(), [a_cut(FIRST, &["WAR-1", "WAR-2"])]);
         let home = a_home(repo.path());
-        let linear = a_sliced_project(SLICED).numbering_from(3);
+        let linear = a_noted_project(SLICED, [a_cut(FIRST, &["WAR-1", "WAR-2"])]).numbering_from(3);
         let mut planned = prepared(repo.path(), home.path(), &linear);
 
         filing_each(&mut planned, &linear);
@@ -1191,9 +1170,7 @@ mod filing {
 
         let settled = filing_each(&mut planned, &linear);
 
-        let Settled::Filed { issues, reported } = &settled[0] else {
-            panic!("the first slice was not filed: {settled:?}");
-        };
+        let Settled { issues, reported } = &settled[0];
         assert_eq!(issues, &["WAR-1".to_owned(), "WAR-2".to_owned()]);
         assert_eq!(reported.len(), 1, "{reported:?}");
         assert!(
@@ -1202,11 +1179,49 @@ mod filing {
             "{:?}",
             reported[0]
         );
-        assert_eq!(recorded(repo.path()).len(), 3);
+        assert_eq!(recorded(&linear).len(), 3);
     }
 
     #[test]
-    fn no_key_value_is_in_a_filing_or_the_comment_it_leads_to() {
+    fn every_slice_filed_is_one_note_naming_its_issues() {
+        let repo = a_scoped_repository();
+        let home = a_home(repo.path());
+        let linear = a_sliced_project(SLICED);
+        let mut planned = prepared(repo.path(), home.path(), &linear);
+
+        filing_each(&mut planned, &linear);
+
+        assert_eq!(
+            linear
+                .comments()
+                .into_iter()
+                .map(|(_, body)| body)
+                .collect::<Vec<_>>(),
+            [
+                a_cut(FIRST, &["WAR-1", "WAR-2"]),
+                a_cut(SECOND, &["WAR-3", "WAR-4"]),
+                a_cut(THIRD, &["WAR-5", "WAR-6"]),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_skip_is_noted_on_the_project_by_its_own_title() {
+        let repo = a_scoped_repository();
+        let home = a_home(repo.path());
+        let linear = a_sliced_project(SLICED);
+        let mut planned = prepared(repo.path(), home.path(), &linear);
+        let next = planned.next_uncut().expect("a slice to skip");
+
+        let skipping = planned.skipping(&next);
+        assert!(!format!("{skipping:?}").contains(NOT_A_KEY), "{skipping:?}");
+        skipping.post(&linear).expect("a skip that is noted");
+
+        assert_eq!(linear.comments(), [(PROJECT_ID.to_owned(), a_skip(FIRST))]);
+    }
+
+    #[test]
+    fn no_key_value_is_in_a_filing() {
         let repo = a_scoped_repository();
         let home = a_home(repo.path());
         let linear = a_sliced_project(SLICED);
@@ -1220,79 +1235,12 @@ mod filing {
             .expect("a slice that files");
         planned.settle(&next, cut);
 
-        let announcement = planned.finish().expect("a comment is owed");
-        assert!(
-            !format!("{announcement:?}").contains(NOT_A_KEY),
-            "{announcement:?}"
-        );
         // The key reached the one place it is for: every board opened.
         assert!(
             linear.opened_with().iter().all(|key| key == NOT_A_KEY),
             "{:?}",
             linear.opened_with()
         );
-    }
-}
-
-mod finishing {
-    use super::*;
-
-    #[test]
-    fn a_cut_that_created_nothing_owes_no_comment() {
-        // Every slice but one already cut, and that one never filed: nothing was
-        // created, so there is nothing to say on the project.
-        let repo = a_scoped_repository();
-        recording_cuts(
-            repo.path(),
-            [a_cut(FIRST, &["WAR-1"]), a_cut(SECOND, &["WAR-2"])],
-        );
-        let home = a_home(repo.path());
-        let mut planned = prepared(repo.path(), home.path(), &a_sliced_project(SLICED));
-        while planned.next().is_some() {}
-
-        assert!(planned.finish().is_none(), "a comment was owed for nothing");
-    }
-
-    #[test]
-    fn the_comment_names_only_what_this_cut_created_and_is_said_on_the_project() {
-        // An earlier run's issues were named by an earlier run's comment.
-        let repo = a_scoped_repository();
-        recording_cuts(repo.path(), [a_cut(FIRST, &["WAR-1", "WAR-2"])]);
-        let home = a_home(repo.path());
-        let linear = a_sliced_project(SLICED).numbering_from(3);
-        let mut planned = prepared(repo.path(), home.path(), &linear);
-        filing_each(&mut planned, &linear);
-
-        let line = planned.finish().expect("a comment is owed").post(&linear);
-
-        assert_eq!(line, None, "a comment that was said reported a line");
-        let comments = linear.comments();
-        assert_eq!(comments.len(), 1, "{comments:?}");
-        let (project, body) = &comments[0];
-        assert_eq!(project, PROJECT_ID);
-        for issue in ["WAR-3", "WAR-4", "WAR-5", "WAR-6"] {
-            assert!(body.contains(issue), "{body}");
-        }
-        for issue in ["WAR-1`", "WAR-2`"] {
-            assert!(!body.contains(issue), "{body}");
-        }
-        assert!(body.contains("status was not moved"), "{body}");
-    }
-
-    #[test]
-    fn a_comment_the_api_turns_down_is_a_line_rather_than_a_failure() {
-        let repo = a_scoped_repository();
-        let home = a_home(repo.path());
-        let linear = a_sliced_project(SLICED).refuse(Op::Comment, "the workspace would not");
-        let mut planned = prepared(repo.path(), home.path(), &linear);
-        filing_each(&mut planned, &linear);
-
-        let line = planned.finish().expect("a comment is owed").post(&linear);
-
-        let line = line.expect("a refusal is a line");
-        assert!(line.contains("the project was not commented on"), "{line}");
-        assert!(line.contains("the workspace would not"), "{line}");
-        assert_eq!(recorded(repo.path()).len(), 3, "the cut did not stand");
     }
 }
 
@@ -1306,7 +1254,7 @@ mod headless {
         let home = a_home(repo.path());
         let linear = a_project(Some("Backlog"));
 
-        let (outcome, printed) = cut_to(repo.path(), home.path(), BRIEF_PATH, None, false, &linear);
+        let (outcome, printed) = cut_to(repo.path(), home.path(), SLUG, None, false, &linear);
 
         assert!(printed.is_empty(), "a refusal printed something: {printed}");
         let error = refusal(outcome);
@@ -1318,9 +1266,8 @@ mod headless {
         let repo = a_scoped_repository();
         let home = a_home(repo.path());
         let linear = a_sliced_project(SLICED);
-        let before = fs::read_to_string(filed_path(repo.path())).expect("a record file");
 
-        let (outcome, printed) = cut_to(repo.path(), home.path(), BRIEF_PATH, None, true, &linear);
+        let (outcome, printed) = cut_to(repo.path(), home.path(), SLUG, None, true, &linear);
 
         outcome.expect("a dry run answers");
         // The one request that got the project, and no second one: a dry run
@@ -1329,11 +1276,6 @@ mod headless {
             linear.calls(),
             read_by_prepare(),
             "a dry run sent more than the fetch"
-        );
-        assert_eq!(
-            fs::read_to_string(filed_path(repo.path())).expect("a record file"),
-            before,
-            "a dry run wrote a record of a cut nobody made"
         );
 
         let lines = lines(&printed);
@@ -1358,7 +1300,7 @@ mod headless {
         let home = a_home(repo.path());
         let linear = a_sliced_project(OUT_OF_ORDER);
 
-        let (outcome, printed) = cut_to(repo.path(), home.path(), BRIEF_PATH, None, true, &linear);
+        let (outcome, printed) = cut_to(repo.path(), home.path(), SLUG, None, true, &linear);
 
         outcome.expect("a dry run answers");
         let lines = lines(&printed);
@@ -1372,13 +1314,12 @@ mod headless {
     }
 
     #[test]
-    fn a_dry_run_reports_a_slice_a_record_already_names_with_the_issues_it_became() {
+    fn a_dry_run_reports_a_slice_a_note_already_names_with_the_issues_it_became() {
         let repo = a_scoped_repository();
-        recording_cuts(repo.path(), [a_cut(FIRST, &["WAR-1", "WAR-2"])]);
         let home = a_home(repo.path());
-        let linear = a_sliced_project(SLICED);
+        let linear = a_noted_project(SLICED, [a_cut(FIRST, &["WAR-1", "WAR-2"])]);
 
-        let (outcome, printed) = cut_to(repo.path(), home.path(), BRIEF_PATH, None, true, &linear);
+        let (outcome, printed) = cut_to(repo.path(), home.path(), SLUG, None, true, &linear);
 
         outcome.expect("two slices are left to cut");
         let lines = lines(&printed);
@@ -1402,14 +1343,7 @@ mod headless {
         let home = a_home_holding(repo.path(), &[SCOPE, "web"]);
         let linear = a_sliced_project(SLICED);
 
-        let (outcome, printed) = cut_to(
-            repo.path(),
-            home.path(),
-            BRIEF_PATH,
-            Some("web"),
-            true,
-            &linear,
-        );
+        let (outcome, printed) = cut_to(repo.path(), home.path(), SLUG, Some("web"), true, &linear);
 
         outcome.expect("a named candidate is a board");
         assert!(printed.contains("WEB"), "{printed}");
@@ -1492,7 +1426,7 @@ mod headless {
     }
 
     #[test]
-    fn a_cut_record_is_on_disk_for_every_slice_the_run_filed() {
+    fn a_note_is_on_the_project_for_every_slice_the_run_filed() {
         let repo = a_scoped_repository();
         let home = a_home(repo.path());
         let linear = a_sliced_project(SLICED);
@@ -1500,28 +1434,19 @@ mod headless {
         cut_filing(repo.path(), home.path(), &linear, &Sketching::drafting());
 
         assert_eq!(
-            recorded(repo.path()),
+            recorded(&linear),
             [
-                (
-                    FIRST.to_owned(),
-                    vec!["WAR-1".to_owned(), "WAR-2".to_owned()]
-                ),
-                (
-                    SECOND.to_owned(),
-                    vec!["WAR-3".to_owned(), "WAR-4".to_owned()]
-                ),
-                (
-                    THIRD.to_owned(),
-                    vec!["WAR-5".to_owned(), "WAR-6".to_owned()]
-                ),
+                (folded(FIRST), vec!["WAR-1".to_owned(), "WAR-2".to_owned()]),
+                (folded(SECOND), vec!["WAR-3".to_owned(), "WAR-4".to_owned()]),
+                (folded(THIRD), vec!["WAR-5".to_owned(), "WAR-6".to_owned()]),
             ]
         );
     }
 
     #[test]
-    fn a_run_that_dies_partway_keeps_the_record_of_every_slice_it_had_already_filed() {
-        // The record is saved after each slice and not at the end: two issues
-        // are created and the third is turned down, and what is on disk
+    fn a_run_that_dies_partway_keeps_the_note_of_every_slice_it_had_already_filed() {
+        // The note is said after each slice and not at the end: two issues are
+        // created and the third is turned down, and what is on the project
         // afterwards is the first slice — so the next run files the second and
         // third rather than all three again.
         let repo = a_scoped_repository();
@@ -1535,11 +1460,8 @@ mod headless {
         let error = refusal(outcome);
         assert!(matches!(error, Error::Linear { .. }), "{error:?}");
         assert_eq!(
-            recorded(repo.path()),
-            [(
-                FIRST.to_owned(),
-                vec!["WAR-1".to_owned(), "WAR-2".to_owned()]
-            )]
+            recorded(&linear),
+            [(folded(FIRST), vec!["WAR-1".to_owned(), "WAR-2".to_owned()])]
         );
         // And what it did file was said before it stopped: the identifiers are
         // the one thing that must not be lost.
@@ -1547,11 +1469,10 @@ mod headless {
     }
 
     #[test]
-    fn a_slice_the_record_already_names_is_said_and_nothing_at_all_is_sent_for_it() {
+    fn a_slice_a_note_already_names_is_said_and_nothing_at_all_is_sent_for_it() {
         let repo = a_scoped_repository();
-        recording_cuts(repo.path(), [a_cut(FIRST, &["WAR-1", "WAR-2"])]);
         let home = a_home(repo.path());
-        let linear = a_sliced_project(SLICED);
+        let linear = a_noted_project(SLICED, [a_cut(FIRST, &["WAR-1", "WAR-2"])]);
         let agent = Sketching::drafting();
 
         let lines = cut_filing(repo.path(), home.path(), &linear, &agent);
@@ -1572,15 +1493,12 @@ mod headless {
                 "the skipped slice was drafted: {said}"
             );
         }
-        // And its record is the one the earlier run wrote, unchanged and still
-        // first.
-        assert_eq!(
-            recorded(repo.path())[0],
-            (
-                FIRST.to_owned(),
-                vec!["WAR-1".to_owned(), "WAR-2".to_owned()]
-            )
-        );
+        // And no second note for it: the run noted only what it filed.
+        let noted: Vec<String> = recorded(&linear)
+            .into_iter()
+            .map(|(title, _)| title)
+            .collect();
+        assert_eq!(noted, [folded(SECOND), folded(THIRD)]);
     }
 
     #[test]
@@ -1588,7 +1506,6 @@ mod headless {
         let repo = a_scoped_repository();
         let home = a_home(repo.path());
         let linear = a_sliced_project(SLICED).without_backlog_state();
-        let before = fs::read_to_string(filed_path(repo.path())).expect("a record file");
 
         let (outcome, _printed) =
             cut_running(repo.path(), home.path(), &linear, &Sketching::drafting());
@@ -1599,17 +1516,14 @@ mod headless {
             "{error:?}"
         );
         assert!(said(&error).contains(TEAM), "{}", said(&error));
-        // Nothing on the board and nothing on disk: the refusal happens while
-        // the slice is still nothing rather than half filed.
+        // Nothing on the board: the refusal happens while the slice is still
+        // nothing rather than half filed.
         assert!(
             linear.issues_created().is_empty(),
             "{:?}",
             linear.issues_created()
         );
-        assert_eq!(
-            fs::read_to_string(filed_path(repo.path())).expect("a record file"),
-            before
-        );
+        assert!(linear.comments().is_empty(), "{:?}", linear.comments());
     }
 
     #[test]
@@ -1642,14 +1556,13 @@ mod headless {
                 "slice {place} `{heading}` was not reported: {lines:?}"
             );
         }
-        // Nothing was created, nothing was recorded, and the project was not
-        // commented on: a run that filed nothing has nothing to say about it.
+        // Nothing was created and nothing was noted: a run that filed nothing
+        // has nothing to say on the project.
         assert!(
             linear.issues_created().is_empty(),
             "{:?}",
             linear.issues_created()
         );
-        assert!(recorded(repo.path()).is_empty());
         assert!(linear.comments().is_empty(), "{:?}", linear.comments());
     }
 
@@ -1673,44 +1586,41 @@ mod headless {
     }
 
     #[test]
-    fn the_project_is_commented_on_once_after_the_last_slice_naming_every_issue_filed() {
+    fn each_slice_is_noted_after_its_own_issues_and_before_the_next_slice_s() {
         let repo = a_scoped_repository();
         let home = a_home(repo.path());
         let linear = a_sliced_project(SLICED);
 
         cut_filing(repo.path(), home.path(), &linear, &Sketching::drafting());
 
-        let comments = linear.comments();
-        assert_eq!(comments.len(), 1, "{comments:?}");
-        let (project, body) = &comments[0];
-        assert_eq!(project, PROJECT_ID);
-        for issue in ["WAR-1", "WAR-2", "WAR-3", "WAR-4", "WAR-5", "WAR-6"] {
-            assert!(body.contains(issue), "{body}");
+        let notes = linear.positions_of(Op::Comment);
+        let creates = linear.positions_of(Op::CreateIssue);
+        assert_eq!(notes.len(), 3, "{:?}", linear.ops());
+        for (slice, note) in notes.iter().enumerate() {
+            assert!(*note > creates[slice * 2 + 1], "{:?}", linear.ops());
+            if let Some(next) = creates.get(slice * 2 + 2) {
+                assert!(note < next, "{:?}", linear.ops());
+            }
         }
-        // After the last slice settled, which is after the last create.
-        let commented = linear.positions_of(Op::Comment)[0];
-        let last = *linear
-            .positions_of(Op::CreateIssue)
-            .last()
-            .expect("issues were created");
-        assert!(commented > last, "{commented} is not after {last}");
     }
 
     #[test]
-    fn a_comment_the_api_turns_down_is_the_last_line_printed() {
+    fn a_note_the_api_turns_down_stops_the_run_naming_the_issues_it_left_unnoted() {
         let repo = a_scoped_repository();
         let home = a_home(repo.path());
         let linear = a_sliced_project(SLICED).refuse(Op::Comment, "the workspace would not");
 
-        let lines = cut_filing(repo.path(), home.path(), &linear, &Sketching::drafting());
+        let (outcome, printed) =
+            cut_running(repo.path(), home.path(), &linear, &Sketching::drafting());
 
+        let error = refusal(outcome);
         assert!(
-            lines
-                .last()
-                .expect("something was printed")
-                .contains("the project was not commented on"),
-            "{lines:?}"
+            matches!(&error, Error::Uncut { issues, .. } if issues == &["WAR-1", "WAR-2"]),
+            "{error:?}"
         );
+        assert!(said(&error).contains("the workspace would not"), "{error}");
+        assert!(lines(&printed).contains(&format!("cut `{FIRST}` into `WAR-1`, `WAR-2`")));
+        assert_eq!(linear.issues_created().len(), 2, "the run went on");
     }
 
     #[test]
@@ -1727,7 +1637,7 @@ mod headless {
                 .any(|line| line.contains("was not written as blocking")),
             "{lines:?}"
         );
-        assert_eq!(recorded(repo.path()).len(), 3);
+        assert_eq!(recorded(&linear).len(), 3);
     }
 
     #[test]
@@ -1812,9 +1722,8 @@ mod headless {
         let repo = a_scoped_repository();
         let home = a_home(repo.path());
         let linear = a_sliced_project(SLICED).refuse(Op::Viewer, "the workspace would not");
-        let before = fs::read_to_string(filed_path(repo.path())).expect("a record file");
 
-        let (outcome, printed) = cut_to(repo.path(), home.path(), BRIEF_PATH, None, false, &linear);
+        let (outcome, printed) = cut_to(repo.path(), home.path(), SLUG, None, false, &linear);
 
         let error = refusal(outcome);
         assert!(matches!(error, Error::Linear { .. }), "{error:?}");
@@ -1828,13 +1737,7 @@ mod headless {
         // nothing was created.
         assert_eq!(linear.calls(), [Call::Viewer], "{:?}", linear.calls());
         assert!(printed.is_empty(), "a refusal printed something: {printed}");
-        // And the record file is the one that was there: a run that filed
-        // nothing writes no cut.
-        assert!(recorded(repo.path()).is_empty(), "a refusal recorded a cut");
-        assert_eq!(
-            fs::read_to_string(filed_path(repo.path())).expect("a record file"),
-            before
-        );
+        assert!(recorded(&linear).is_empty(), "a refusal noted a cut");
     }
 }
 
@@ -2134,10 +2037,10 @@ mod relaying {
         assert!(uncut.contains(&format!("slice 1 `{FIRST}`")), "{uncut}");
         assert!(uncut.contains("nothing was typed"), "{uncut}");
         // The slice is uncut and the two after it were cut: nothing was filed
-        // for it and no record names it, so the next run offers it again.
+        // for it and no note names it, so the next run offers it again.
         assert_eq!(linear.issues_created().len(), 4);
-        for (title, _) in recorded(repo.path()) {
-            assert_ne!(title, FIRST, "the uncut slice was recorded");
+        for (title, _) in recorded(&linear) {
+            assert_ne!(title, folded(FIRST), "the uncut slice was noted");
         }
     }
 
@@ -2184,7 +2087,7 @@ mod relaying {
             "{:?}",
             linear.issues_created()
         );
-        assert!(recorded(repo.path()).is_empty());
+        assert!(recorded(&linear).is_empty());
     }
 }
 
@@ -2332,14 +2235,11 @@ mod reviewing {
             "{printed}"
         );
         assert!(linear.issues_created().is_empty());
-        assert_eq!(
-            recorded(repo.path()),
-            [(FIRST.to_owned(), Vec::<String>::new())]
-        );
+        assert_eq!(recorded(&linear), [(folded(FIRST), Vec::<String>::new())]);
     }
 
     #[test]
-    fn a_skipped_slice_costs_no_request_at_all() {
+    fn a_skipped_slice_costs_nothing_but_its_note() {
         let repo = a_scoped_repository();
         let home = a_home(repo.path());
         let linear = a_sliced_project(SLICED);
@@ -2347,14 +2247,19 @@ mod reviewing {
 
         reviewing(repo.path(), home.path(), &linear, &mut typing);
 
-        // The two reads `prepare` makes and nothing else: the review is asked
+        // The reads `prepare` makes and one note per skip: the review is asked
         // before a filing is built at all, so a slice nobody accepted reaches no
-        // issue create, no edge and no comment.
-        assert_eq!(linear.calls(), read_by_prepare(), "{:?}", linear.calls());
+        // issue create and no edge.
+        let mut expected = read_by_prepare().to_vec();
+        expected.extend([FIRST, SECOND, THIRD].map(|title| Call::Comment {
+            project: PROJECT_ID.to_owned(),
+            body: a_skip(title),
+        }));
+        assert_eq!(linear.calls(), expected, "{:?}", linear.calls());
     }
 
     #[test]
-    fn a_skipped_slice_is_recorded_so_a_later_run_passes_it_over() {
+    fn a_skipped_slice_is_noted_so_a_later_run_passes_it_over() {
         // Red's rule: a skip is a human saying no at the gate, and is never
         // retried on its own.
         let repo = a_scoped_repository();
@@ -2364,32 +2269,34 @@ mod reviewing {
 
         reviewing(repo.path(), home.path(), &linear, &mut typing);
 
-        // A cut that filed nothing is how the record says so.
+        // A note that names no issue is how the project says so.
         assert_eq!(
-            recorded(repo.path()),
+            recorded(&linear),
             [
-                (FIRST.to_owned(), Vec::<String>::new()),
-                (
-                    SECOND.to_owned(),
-                    vec!["WAR-1".to_owned(), "WAR-2".to_owned()]
-                ),
-                (
-                    THIRD.to_owned(),
-                    vec!["WAR-3".to_owned(), "WAR-4".to_owned()]
-                ),
+                (folded(FIRST), Vec::<String>::new()),
+                (folded(SECOND), vec!["WAR-1".to_owned(), "WAR-2".to_owned()]),
+                (folded(THIRD), vec!["WAR-3".to_owned(), "WAR-4".to_owned()]),
             ]
         );
 
-        // And a second run over the same repository has nothing to offer: the
-        // skipped slice is settled like the filed ones.
-        let (outcome, _) = cut_running(repo.path(), home.path(), &linear, &Scripted::saying([]));
+        // And a second run over the project those notes are on has nothing to
+        // offer: the skipped slice is settled like the filed ones.
+        let notes: [String; 3] = linear
+            .comments()
+            .into_iter()
+            .map(|(_, body)| body)
+            .collect::<Vec<_>>()
+            .try_into()
+            .expect("three notes");
+        let again = a_noted_project(SLICED, notes);
+        let (outcome, _) = cut_running(repo.path(), home.path(), &again, &Scripted::saying([]));
 
         let error = outcome.expect_err("every slice is settled");
         assert!(
             error.to_string().contains("already cut or skipped"),
             "{error}"
         );
-        assert_eq!(linear.issues_created().len(), 4);
+        assert!(again.issues_created().is_empty());
     }
 
     #[test]
@@ -2473,7 +2380,7 @@ mod reviewing {
             "{:?}",
             linear.issues_created()
         );
-        assert!(recorded(repo.path()).is_empty());
+        assert!(recorded(&linear).is_empty());
         assert!(linear.comments().is_empty(), "{:?}", linear.comments());
     }
 }
@@ -2523,8 +2430,8 @@ mod watching {
         cut_with(
             &Standing::at(repo.path().to_path_buf(), repo.path().to_path_buf()),
             home.path(),
-            Path::new(BRIEF_PATH),
-            None,
+            SCOPE,
+            SLUG,
             false,
             &linear,
             &agent,

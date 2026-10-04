@@ -254,9 +254,9 @@ impl<'m> Target<'m> {
 // which borrows the manifest and carries the key, cannot. The key is here by
 // name only: nothing that holds a `Destination` can print a key value.
 //
-// The board's project is not here. It comes from a brief's filed record rather
-// than from the `[[scope]]` record, and the push that is about to make one has
-// none to carry.
+// The board's project is not here. A draft is handed one on its command line
+// rather than reading it from the `[[scope]]` record, and the push that is about
+// to make one has none to carry.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Destination {
     scope: String,

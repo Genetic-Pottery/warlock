@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use warlock_engine::{
-    Filed, Manifest, briefs, claude_md, manifest, manifest_path, resolve_filing, scope, sigils,
+    Manifest, briefs, claude_md, manifest, manifest_path, resolve_filing, scope, sigils,
 };
 
 use super::{Error, one_line, status_for};
@@ -235,7 +235,7 @@ fn every_message_warlock_words_itself_is_one_line_so_it_prints_as_one() {
             total: 1,
         },
         Error::AllCut {
-            path: "docs/brief.md".to_owned(),
+            name: "Push a brief".to_owned(),
         },
         Error::Cancelled,
     ]);
@@ -278,17 +278,95 @@ fn a_project_with_no_scope_to_cut_says_what_the_parser_said() {
 }
 
 #[test]
-fn a_project_with_every_slice_cut_names_the_brief_and_the_file_recording_them() {
+fn a_project_with_every_slice_cut_names_the_project_and_where_its_notes_are() {
     let error = Error::AllCut {
-        path: "docs/brief.md".to_owned(),
+        name: "Push a brief".to_owned(),
     };
 
     assert_eq!(
         error.to_string(),
-        "every slice of the project filed for `docs/brief.md` is already cut or skipped, so \
-         there is nothing to draft: `.warlock/filed.toml` holds a record for each of them, and \
-         warlock offers a slice once — retitle a skipped slice in the brief to have it offered \
-         again"
+        "every slice of `Push a brief` is already cut or skipped, so there is nothing to draft: \
+         the project's comments hold a note for each of them, and warlock offers a slice once — \
+         retitle a skipped slice in the brief to have it offered again"
+    );
+}
+
+#[test]
+fn a_slug_the_board_does_not_know_names_the_command_that_lists_them() {
+    let error = Error::UnknownProject {
+        slug: "9e41c07a2b13".to_owned(),
+        scope: "warlock-team".to_owned(),
+    };
+
+    assert_eq!(
+        error.to_string(),
+        "Linear knows no project with the slug `9e41c07a2b13`, so nothing was read: `warlock \
+         draft warlock-team` lists the planned ones"
+    );
+}
+
+#[test]
+fn a_project_that_is_not_planned_is_named_with_its_status_or_the_lack_of_one() {
+    let named = |status: Option<&str>| {
+        Error::NotPlanned {
+            name: "Push a brief".to_owned(),
+            status: status.map(ToOwned::to_owned),
+        }
+        .to_string()
+    };
+
+    assert_eq!(
+        named(Some("Backlog")),
+        "the project `Push a brief` is in `Backlog` rather than `Planned`, so nothing was read: \
+         warlock reads a project back once it is planned"
+    );
+    assert!(
+        named(None).contains("`Push a brief` has no status rather than `Planned`"),
+        "{}",
+        named(None)
+    );
+}
+
+#[test]
+fn issues_no_note_names_are_listed_and_the_reader_told_they_come_round_again() {
+    let error = Error::Uncut {
+        issues: vec!["WAR-1".to_owned(), "WAR-2".to_owned()],
+        source: Box::new(LinearError::Status { code: 500 }),
+    };
+
+    assert_eq!(
+        error.to_string(),
+        "the issues `WAR-1`, `WAR-2` were created, and warlock could not note them on the \
+         project, so the next draft offers this slice again: Linear answered 500"
+    );
+}
+
+#[test]
+fn a_skip_that_was_not_noted_says_it_will_be_offered_again() {
+    let error = Error::Unskipped {
+        title: "Read the file".to_owned(),
+        source: Box::new(LinearError::Status { code: 500 }),
+    };
+
+    assert_eq!(
+        error.to_string(),
+        "`Read the file` was skipped, and warlock could not note the skip on the project, so \
+         the next draft offers it again: Linear answered 500"
+    );
+}
+
+#[test]
+fn a_brief_the_board_already_holds_leads_with_its_address() {
+    let error = Error::AlreadyFiled {
+        name: "Push a brief".to_owned(),
+        url: "https://linear.app/acme/project/a-brief-1a2b3c".to_owned(),
+    };
+
+    assert_eq!(
+        error.to_string(),
+        "a project named `Push a brief` is already filed at \
+         https://linear.app/acme/project/a-brief-1a2b3c, so nothing was sent: a brief that changed \
+         after it was filed is edited on the project"
     );
 }
 
@@ -311,7 +389,7 @@ fn neither_new_cut_refusal_spends_the_boundarys_status() {
             },
         },
         Error::AllCut {
-            path: "docs/brief.md".to_owned(),
+            name: "Push a brief".to_owned(),
         },
     ] {
         let outcome = Err(error);
@@ -634,7 +712,7 @@ fn the_statuses_the_older_subcommands_leave_are_where_they_were() {
 #[test]
 fn every_refusal_a_push_has_is_the_ordinary_one_and_never_the_boundarys_three() {
     // The one subcommand that sends anything anywhere, and none of what it
-    // refuses is the boundary's **3**: the sigil picks a board rather than
+    // refuses is the boundary's **3**: the scope picks a board rather than
     // opening a directory, so a script reading a 3 as "ask for a sigil" must
     // never be sent there by a brief that would not parse or a team key Linear
     // does not know. Each of these is built by the thing that really produces
@@ -651,11 +729,8 @@ fn every_refusal_a_push_has_is_the_ordinary_one_and_never_the_boundarys_three() 
             source: brief_at(repo.path(), repo.path().join("docs/brief.md"))
                 .expect_err("there is no document at that path"),
         },
-        Error::Filed {
-            source: Filed::load(repo.path()).expect_err("this repository has filed nothing"),
-        },
         Error::AlreadyFiled {
-            path: "docs/brief.md".to_owned(),
+            name: "A brief".to_owned(),
             url: url.to_owned(),
         },
         Error::UnknownTeam {
@@ -664,12 +739,6 @@ fn every_refusal_a_push_has_is_the_ordinary_one_and_never_the_boundarys_three() 
         },
         Error::Linear {
             source: LinearError::Status { code: 401 },
-        },
-        Error::Unfiled {
-            url: url.to_owned(),
-            source: Box::new(
-                Filed::load(repo.path()).expect_err("this repository has filed nothing"),
-            ),
         },
     ];
 

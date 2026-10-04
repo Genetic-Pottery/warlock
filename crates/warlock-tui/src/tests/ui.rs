@@ -14,20 +14,19 @@ use super::{
     CARRY_LEFT, CARRY_QUESTION, COLLAPSE_KEY, COMPOSER_CURSOR, COMPOSER_MIN_HEIGHT,
     CONFIRM_ANSWER_GAP, CONFIRM_NO, CONFIRM_QUESTION, CONFIRM_YES, CUT_KEY, CUT_QUESTION,
     CUT_SLICES, CUT_STATUS, CUT_TEAM, Carry, DIALOG_MARGIN, DIALOG_MARGIN_ROWS, Dialog, ELLIPSIS,
-    FILES_KEY, FILING_HEADING, FILING_RULES, FOOTER_HEIGHT, GUIDE, GUIDE_BRANCH, GUIDE_LAST,
-    HEADER_GAP, HEADER_HEIGHT, Hit, INDENT, KEY_DROP_ORDER, KEY_GAP, KEYS, LIVE_KEY, MARK,
-    MARK_MARGIN, MARK_MARGIN_ROWS, MOVE_KEYS, NO_MARKER, NOTE_MARKER, PACTING_KEYS,
-    PACTING_QUIT_KEY, PACTING_RUN, PANEL_INDENT, PATH_HEADING, PATH_RULES, PERCENT_WIDTH,
-    PULL_BRANCH, PULL_FROM, PULL_QUESTION, PULL_RESUME_QUESTION, PULL_SCOPE, PULL_TEAM, PUSH_KEY,
-    PUSH_QUESTION, PUSH_TEAM, QUIT_KEY, RECORD_HEADING, RECORD_LABEL_GAP, RECORD_RULES,
-    REFRESHING_RUN, REVIEW_ANSWER_GAP, REVIEW_CREATE, REVIEW_EDIT, REVIEW_FEEDBACK,
-    REVIEW_QUESTION, REVIEW_READ, REVIEW_SKIP, ROW_KEY, RUN_HEADER_HEIGHT, Reach, Review,
-    SAID_MARKER, SCOPE_CURSOR, SCOPE_HEADING, SCROLLBACK_ARROW, SELECTED, SELECTION_MARKER,
-    THREAD_TITLE, TREE_MIN_WIDTH, TREE_PERCENT, areas, composer_height, composer_on_screen,
-    display_width, draw, footer_text_area, guide_prefixes, hit_test, keys_line, label_width,
-    mark_area, pacting_keys_line, pane_inner, panel_height, panel_reach, panel_row,
-    panel_rows_area, panel_width, run_header_height, run_header_line, tree_height, tree_rows_area,
-    tree_width, truncated,
+    FILES_KEY, FOOTER_HEIGHT, GUIDE, GUIDE_BRANCH, GUIDE_LAST, HEADER_GAP, HEADER_HEIGHT, Hit,
+    INDENT, KEY_DROP_ORDER, KEY_GAP, KEYS, LIVE_KEY, MARK, MARK_MARGIN, MARK_MARGIN_ROWS,
+    MOVE_KEYS, NO_MARKER, NOTE_MARKER, PACTING_KEYS, PACTING_QUIT_KEY, PACTING_RUN, PANEL_INDENT,
+    PATH_HEADING, PATH_RULES, PERCENT_WIDTH, PULL_BRANCH, PULL_FROM, PULL_QUESTION,
+    PULL_RESUME_QUESTION, PULL_SCOPE, PULL_TEAM, PUSH_KEY, PUSH_QUESTION, PUSH_TEAM, QUIT_KEY,
+    RECORD_HEADING, RECORD_LABEL_GAP, RECORD_RULES, REFRESHING_RUN, REVIEW_ANSWER_GAP,
+    REVIEW_CREATE, REVIEW_EDIT, REVIEW_FEEDBACK, REVIEW_QUESTION, REVIEW_READ, REVIEW_SKIP,
+    ROW_KEY, RUN_HEADER_HEIGHT, Reach, Review, SAID_MARKER, SCOPE_CURSOR, SCOPE_HEADING,
+    SCROLLBACK_ARROW, SELECTED, SELECTION_MARKER, THREAD_TITLE, TREE_MIN_WIDTH, TREE_PERCENT,
+    areas, composer_height, composer_on_screen, display_width, draw, footer_text_area,
+    guide_prefixes, hit_test, keys_line, label_width, mark_area, pacting_keys_line, pane_inner,
+    panel_height, panel_reach, panel_row, panel_rows_area, panel_width, run_header_height,
+    run_header_line, tree_height, tree_rows_area, tree_width, truncated,
 };
 use crate::account::{Line as Entry, Outcome};
 use crate::app::{App, Chrome, Focus, Row, Run, Sigils};
@@ -397,22 +396,6 @@ fn render_cut(app: &App, width: u16, height: u16, cut: &CutConfirm) -> Buffer {
 fn render_pull(app: &App, width: u16, height: u16, pull: &PullConfirm) -> Buffer {
     let modals = Modals {
         pull,
-        ..Modals::default()
-    };
-    render_every(
-        app,
-        &Chrome::default(),
-        width,
-        height,
-        Instant::now(),
-        modals,
-        None,
-    )
-}
-
-fn render_filing(app: &App, width: u16, height: u16, filing: &ScopePrompt) -> Buffer {
-    let modals = Modals {
-        filing,
         ..Modals::default()
     };
     render_every(
@@ -7464,45 +7447,6 @@ fn the_path_window_heads_itself_holds_the_proposal_and_takes_a_refusal_under_it(
             .trim(),
         ""
     );
-}
-
-const CANDIDATES: &str = "this machine can file to `data-plane`, `warlock-team`: type one";
-
-#[test]
-fn the_filing_field_heads_itself_takes_the_candidates_under_it_and_draws_no_dialog() {
-    let base = Instant::now();
-    let app = busy_app(base, WIDTH, FIXTURE_HEIGHT);
-    // Worded by whoever refused — `pushing`, in the loop — and printed here
-    // without being read, exactly as the path window prints a write's refusal.
-    let field = ScopeField::new(FILING_HEADING, "");
-    let refused = field.clone().refused(CANDIDATES);
-
-    let opened = render_filing(
-        &app,
-        WIDTH,
-        FIXTURE_HEIGHT,
-        &ScopePrompt::Open(refused.clone()),
-    );
-
-    let rows = window_rows(&opened, &refused, FILING_HEADING, FILING_RULES);
-    assert!(
-        rows[0].starts_with('┌') && rows[0].ends_with('┐'),
-        "{rows:?}"
-    );
-    let heading = usize::from(BORDER_THICKNESS + DIALOG_MARGIN_ROWS);
-    let line = heading + usize::from(FIELD_LINE);
-    // Nothing is typed yet, so the row the name goes on is empty and the
-    // candidates are the only thing the reader has to go on.
-    assert_eq!(inside_the_border(&rows[line]), "", "{rows:?}");
-    assert!(rows[line + 1].contains(CANDIDATES), "{rows:?}");
-    assert!(rows[line + 2].contains(FILING_RULES), "{rows:?}");
-    // The two halves of a `/push` are never on one frame: this is the window
-    // whose submit is what puts the dialog up. Asserted on the dialog's own
-    // question rather than on `PUSH_TEAM` and `PUSH_KEY`, which are `team ` and
-    // `key ` and would be found inside a candidate called `warlock-team`.
-    for (index, row) in rows.iter().enumerate() {
-        assert!(!row.contains(PUSH_QUESTION), "row {index}: {row:?}");
-    }
 }
 
 const RECORDED: &str = "control-plane";

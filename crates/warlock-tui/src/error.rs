@@ -7,8 +7,7 @@ use std::path::{Path, PathBuf};
 use std::{fmt, io};
 
 use warlock_engine::{
-    RunStatus, briefs, claude_md, filed, filing, keys, load, manifest, pact, pulls, route, scope,
-    sigils,
+    RunStatus, briefs, claude_md, filing, keys, load, manifest, pact, pulls, route, scope, sigils,
 };
 
 use crate::boundary::{blocking_scopes_message, closed_scope_message};
@@ -183,13 +182,10 @@ pub enum Error {
     Briefs {
         source: briefs::Error,
     },
-    Filed {
-        source: filed::Error,
-    },
     // The URL is the point of this refusal: a brief is filed once, so the
     // answer to pushing it again is the address of the project it already made.
     AlreadyFiled {
-        path: String,
+        name: String,
         url: String,
     },
     // The team key is the manifest's, so the file to fix is named with it. A
@@ -202,35 +198,19 @@ pub enum Error {
     Linear {
         source: LinearError,
     },
-    // A project that exists with no record of it, which is the one failure here
-    // that comes after something was spent. It carries the URL because that is
-    // the thing nothing else on the machine now knows.
-    Unfiled {
-        url: String,
-        // Boxed for the reason `filed::Record` boxes the parser's error: the
-        // variant is this enum's largest otherwise, and every `Result<_, Error>`
-        // in the workspace — which is most of them — would be widened by a
-        // failure only one command can reach.
-        source: Box<filed::Error>,
-    },
-    // The three refusals a cut has before it reads anything: a brief nothing
-    // filed, an id the workspace does not have, and a project that is not
-    // planned. Each names what it read and where that came from, because all
-    // three are a file on this machine and the board disagreeing rather than a
-    // failure underneath.
-    NoRecord {
-        path: String,
-    },
+    // The two refusals a cut has before it reads a slice: a slug the workspace
+    // does not have, and a project that is not planned. The scope rides along
+    // so the sentence can name the command that lists the right slugs.
     UnknownProject {
-        id: String,
-        path: PathBuf,
+        slug: String,
+        scope: String,
     },
     // `None` is a project with no status at all, which a workspace without the
     // status warlock files into leaves behind: it is not `Planned` either, so it
     // refuses with the rest, and the sentence has to be able to say that as well
     // as name a wrong one.
     NotPlanned {
-        path: String,
+        name: String,
         status: Option<String>,
     },
     // A project whose content is not a scope to cut: no `## Scope` heading, a
@@ -242,12 +222,11 @@ pub enum Error {
     ScopeBlock {
         source: ScopeBlockError,
     },
-    // Every slice of a project already carrying a cut record, refused before
-    // the repository is read: a run with nothing to draft is not a run that
-    // succeeded quietly. Named against the brief like `NoRecord` and
-    // `NotPlanned`, because the records it read are that path's.
+    // Every slice of a project already carrying a note, refused before the
+    // repository is read: a run with nothing to draft is not a run that
+    // succeeded quietly.
     AllCut {
-        path: String,
+        name: String,
     },
     // The team key again, because a workflow state belongs to a team rather
     // than to the workspace: a `Backlog` on one team says nothing about
@@ -341,19 +320,21 @@ pub enum Error {
     Git {
         source: GitError,
     },
-    // `Unfiled`'s shape for the same event one layer down: the issues exist,
-    // nothing on this machine records them, and the identifiers are what
-    // nothing else now knows. They are carried rather than only printed because
-    // the caller filing the next slice has no `out` to read them back off.
+    // The one failure a cut has after something was spent: the issues exist,
+    // no note on the project names them, and the identifiers are what nothing
+    // else now knows. They are carried rather than only printed because the
+    // caller filing the next slice has no `out` to read them back off.
     Uncut {
         issues: Vec<String>,
-        // Boxed for `Unfiled`'s reason.
-        source: Box<filed::Error>,
+        // Boxed because the variant is this enum's largest otherwise, and every
+        // `Result<_, Error>` in the workspace — which is most of them — would be
+        // widened by a failure only one command can reach.
+        source: Box<LinearError>,
     },
     Unskipped {
         title: String,
-        // Boxed for `Unfiled`'s reason.
-        source: Box<filed::Error>,
+        // Boxed for `Uncut`'s reason.
+        source: Box<LinearError>,
     },
     Terminal {
         source: io::Error,
@@ -395,10 +376,10 @@ pub(crate) fn one_line(message: &str) -> String {
 
 // The URL leads, because it is what the reader wants from this line: the brief
 // is filed, and the road from here is the project rather than a second push.
-fn already_filed_message(path: &str, url: &str) -> String {
+fn already_filed_message(name: &str, url: &str) -> String {
     format!(
-        "`{path}` is already filed at {url}, so nothing was sent: a brief that changed after it \
-         was filed is edited where it is"
+        "a project named `{name}` is already filed at {url}, so nothing was sent: a brief that \
+         changed after it was filed is edited on the project"
     )
 }
 
@@ -413,56 +394,34 @@ fn unknown_team_message(team: &str, path: &Path) -> String {
     )
 }
 
-// The URL leads again, and for more than the last one's reason: the project
-// exists, nothing on this machine records it, and this line is the last place
-// that address appears. Flattened like the manifest's — filed records are TOML,
-// and a file that will not parse carries the parser's diagnostic.
-fn unfiled_message(url: &str, source: &filed::Error) -> String {
+// The command that lists the slugs is the whole of the fix, so it is spelled out
+// with the scope already in it.
+fn unknown_project_message(slug: &str, scope: &str) -> String {
     format!(
-        "the project is at {url}, and warlock could not record it: {}",
-        one_line(&source.to_string())
+        "Linear knows no project with the slug `{slug}`, so nothing was read: `warlock draft \
+         {scope}` lists the planned ones"
     )
 }
 
-// The command that would make the record is the whole of the fix, so it is
-// spelled out with the path already in it rather than named in the abstract.
-fn no_record_message(path: &str) -> String {
-    format!(
-        "nothing in `.warlock/filed.toml` records `{path}`, so there is no project to read: \
-         `warlock push {path}` files it"
-    )
-}
-
-// Named against the file the id is written in, like the unknown team above: the
-// usual cause is a record for a project somebody deleted in Linear, and that
-// file is the only place this machine keeps the id.
-fn unknown_project_message(id: &str, path: &Path) -> String {
-    format!(
-        "Linear knows no project with the id `{id}`, so nothing was read: the record in `{}` is \
-         where that id is written",
-        path.display()
-    )
-}
-
-fn not_planned_message(path: &str, status: Option<&str>) -> String {
+fn not_planned_message(name: &str, status: Option<&str>) -> String {
     let found = match status {
         Some(status) => format!("is in `{status}`"),
         None => "has no status".to_owned(),
     };
     format!(
-        "the project filed for `{path}` {found} rather than `Planned`, so nothing was read: \
+        "the project `{name}` {found} rather than `Planned`, so nothing was read: \
          warlock reads a project back once it is planned"
     )
 }
 
-// The fact, then the file that holds it, then the rule underneath: a slice is
-// cut once, so a project every record already covers has nowhere left to go
-// here and the issues it made are where the work goes on.
-fn all_cut_message(path: &str) -> String {
+// The fact, then where it is written, then the rule underneath: a slice is cut
+// once, so a project every note already covers has nowhere left to go here and
+// the issues it made are where the work goes on.
+fn all_cut_message(name: &str) -> String {
     format!(
-        "every slice of the project filed for `{path}` is already cut or skipped, so there is \
-         nothing to draft: `.warlock/filed.toml` holds a record for each of them, and warlock \
-         offers a slice once — retitle a skipped slice in the brief to have it offered again"
+        "every slice of `{name}` is already cut or skipped, so there is nothing to draft: the \
+         project's comments hold a note for each of them, and warlock offers a slice once — \
+         retitle a skipped slice in the brief to have it offered again"
     )
 }
 
@@ -567,12 +526,13 @@ fn nothing_to_resume_message(ticket: &str, status: RunStatus, failed_only: bool)
     )
 }
 
-// The identifiers lead for the URL's reason in `unfiled_message`: the issues
-// exist, nothing on this machine records them, and this line is the last place
-// they are named. Flattened for that function's reason as well.
-fn uncut_message(issues: &[String], source: &filed::Error) -> String {
+// The identifiers lead: the issues exist, no note names them, and this line is
+// the last place they are named. The next draft offers the slice again, so the
+// reader has to know to skip it there or to delete these.
+fn uncut_message(issues: &[String], source: &LinearError) -> String {
     format!(
-        "the issues {} were created, and warlock could not record them: {}",
+        "the issues {} were created, and warlock could not note them on the project, so the next \
+         draft offers this slice again: {}",
         listed(issues),
         one_line(&source.to_string())
     )
@@ -763,26 +723,21 @@ impl fmt::Display for Error {
             // TOML parser's own multi-line diagnostic.
             Self::Template { source } => write!(f, "{}", one_line(&source.to_string())),
             Self::Briefs { source } => write!(f, "{}", one_line(&source.to_string())),
-            // Flattened like the manifest's: filed records are TOML and a file
-            // that will not parse carries the parser's diagnostic.
-            Self::Filed { source } => write!(f, "{}", one_line(&source.to_string())),
-            // The three push refusals with wording of their own, said below
-            // rather than here for the record refusals' reason.
-            Self::AlreadyFiled { path, url } => write!(f, "{}", already_filed_message(path, url)),
+            // The two push refusals with wording of their own, said as free
+            // functions above rather than here, as every long sentence is.
+            Self::AlreadyFiled { name, url } => write!(f, "{}", already_filed_message(name, url)),
             Self::UnknownTeam { team, path } => write!(f, "{}", unknown_team_message(team, path)),
             // Flattened for the transport's sake: Linear's own refusals are one
             // line, and what a socket failure carries is whatever the network
             // stack said.
             Self::Linear { source } => write!(f, "{}", one_line(&source.to_string())),
-            Self::Unfiled { url, source } => write!(f, "{}", unfiled_message(url, source)),
-            // The three cut refusals with wording of their own, said below for
+            // The two cut refusals with wording of their own, said below for
             // the push refusals' reason.
-            Self::NoRecord { path } => write!(f, "{}", no_record_message(path)),
-            Self::UnknownProject { id, path } => {
-                write!(f, "{}", unknown_project_message(id, path))
+            Self::UnknownProject { slug, scope } => {
+                write!(f, "{}", unknown_project_message(slug, scope))
             }
-            Self::NotPlanned { path, status } => {
-                write!(f, "{}", not_planned_message(path, status.as_deref()))
+            Self::NotPlanned { name, status } => {
+                write!(f, "{}", not_planned_message(name, status.as_deref()))
             }
             // The parser's own sentence and nothing around it, for `Brief`'s
             // reason: it names the heading the project is missing, or the
@@ -792,13 +747,13 @@ impl fmt::Display for Error {
             Self::ScopeBlock { source } => write!(f, "{source}"),
             // The three cut refusals with wording of their own, said above for
             // the reason the rest are.
-            Self::AllCut { path } => write!(f, "{}", all_cut_message(path)),
+            Self::AllCut { name } => write!(f, "{}", all_cut_message(name)),
             Self::NoBacklog { team } => write!(f, "{}", no_backlog_message(team)),
             Self::Uncut { issues, source } => write!(f, "{}", uncut_message(issues, source)),
             Self::Unskipped { title, source } => write!(
                 f,
-                "`{title}` was skipped, and warlock could not record the skip, so the next \
-                 draft offers it again: {}",
+                "`{title}` was skipped, and warlock could not note the skip on the project, so \
+                 the next draft offers it again: {}",
                 one_line(&source.to_string())
             ),
             // The pull's own refusals, worded above for the reason the push's and
@@ -872,10 +827,7 @@ impl std::error::Error for Error {
             Self::Template { source } => Some(source),
             Self::Briefs { source } => Some(source),
             Self::ScopeBlock { source } => Some(source),
-            Self::Filed { source } => Some(source),
-            Self::Unfiled { source, .. }
-            | Self::Uncut { source, .. }
-            | Self::Unskipped { source, .. } => Some(source.as_ref()),
+            Self::Uncut { source, .. } | Self::Unskipped { source, .. } => Some(source.as_ref()),
             Self::Linear { source } => Some(source),
             Self::Runs { source } => Some(source),
             Self::Git { source } => Some(source),
@@ -894,22 +846,19 @@ impl std::error::Error for Error {
             // stored a key under, are a person and not a failure underneath.
             | Self::NoKey { .. }
             | Self::UnknownKey { .. }
-            // Nor here: a brief this repository has already filed, and a team
-            // key Linear does not know, are two files disagreeing rather than
-            // a failure underneath. The Linear call that answered the second
-            // one worked.
+            // Nor here: a brief the board already holds, and a team key Linear
+            // does not know, are a disagreement rather than a failure
+            // underneath. The Linear calls that answered both worked.
             | Self::AlreadyFiled { .. }
             | Self::UnknownTeam { .. }
-            // Nor here, for that reason again: a brief no record names, an id
-            // the workspace does not have and a project that is not planned are
-            // this machine and the board disagreeing. The Linear call that
-            // answered the last two worked.
-            | Self::NoRecord { .. }
+            // Nor here, for that reason again: a slug the workspace does not
+            // have and a project that is not planned are a command and the
+            // board disagreeing. The Linear call that answered both worked.
             | Self::UnknownProject { .. }
             | Self::NotPlanned { .. }
             // Nor here: a team whose workflow has no `Backlog` is that same
-            // disagreement, and a project every cut record already covers is
-            // this machine's own file answering completely.
+            // disagreement, and a project every note already covers is the
+            // board answering completely.
             | Self::NoBacklog { .. }
             | Self::AllCut { .. }
             // Nor here, and for that reason once more: a scope no record holds, a

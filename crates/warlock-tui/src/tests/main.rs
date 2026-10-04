@@ -585,101 +585,45 @@ fn a_brief_is_the_bare_word_and_takes_nothing_else() {
     }
 }
 
-// `warlock push docs/brief.md` with whichever of the two flags a case is
-// about, so each assertion below reads as the flags and not as the positional
-// under them.
-fn pushed_brief(scope: Option<&str>, dry_run: bool) -> Command {
+fn pushed_brief(dry_run: bool) -> Command {
     Command::Push {
+        scope: "data-plane".to_owned(),
         path: PathBuf::from("docs/brief.md"),
-        scope: scope.map(str::to_owned),
         dry_run,
     }
 }
 
 #[test]
-fn a_push_takes_the_brief_it_files_and_the_two_flags_that_go_with_it() {
-    // The path is required, like the check's and the un-pact's: a push is
-    // about one document, and there is no whole-repository answer for an
-    // omitted path to mean.
+fn a_push_takes_the_scope_then_the_brief_and_a_dry_run_flag() {
     assert_eq!(
-        parse(&["push", "docs/brief.md"]).unwrap().command,
-        Some(pushed_brief(None, false))
-    );
-    assert_eq!(
-        parse(&["push", "docs/brief.md", "--dry-run"])
+        parse(&["push", "data-plane", "docs/brief.md"])
             .unwrap()
             .command,
-        Some(pushed_brief(None, true))
+        Some(pushed_brief(false))
     );
-    // `--scope` is optional to clap and needed only when this machine can file
-    // to more than one board, which clap has not read `.warlock/pacts.toml` to
-    // know — and the name reaches warlock exactly as it was typed, for the
-    // reason `scope add`'s positional does.
-    assert_eq!(
-        parse(&["push", "docs/brief.md", "--scope", "data-plane"])
-            .unwrap()
-            .command,
-        Some(pushed_brief(Some("data-plane"), false))
-    );
-    // Both flags, in either order and either side of the path, because a
-    // person retyping the command from the refusal that named `--scope` will
-    // put it wherever the cursor was.
     for args in [
-        [
-            "push",
-            "docs/brief.md",
-            "--scope",
-            "data-plane",
-            "--dry-run",
-        ],
-        [
-            "push",
-            "--dry-run",
-            "--scope",
-            "data-plane",
-            "docs/brief.md",
-        ],
+        ["push", "data-plane", "docs/brief.md", "--dry-run"],
+        ["push", "--dry-run", "data-plane", "docs/brief.md"],
     ] {
         assert_eq!(
             parse(&args).unwrap().command,
-            Some(pushed_brief(Some("data-plane"), true)),
+            Some(pushed_brief(true)),
             "{args:?}"
         );
     }
 }
 
 #[test]
-fn a_push_with_no_path_or_with_two_is_a_malformed_invocation() {
-    // Clap's 2, for the check's reason: a push is about one document, so an
-    // omitted path is a command line that was never a request rather than
-    // warlock filing something nobody named.
-    let malformed: [&[&str]; 4] = [
+fn a_push_short_of_its_scope_or_its_brief_is_a_malformed_invocation() {
+    // Clap's 2: a bare `push` files nothing, and a push that named only one of
+    // the two is never guessed into the other.
+    let malformed: [&[&str]; 6] = [
         &["push"],
         &["push", "--dry-run"],
-        &["push", "a.md", "b.md"],
-        &["push", "--scope", "data-plane"],
-    ];
-
-    for args in malformed {
-        let error = parse(args).unwrap_err();
-        assert!(error.use_stderr(), "{args:?}");
-        assert_eq!(error.exit_code(), 2, "{args:?}");
-    }
-}
-
-#[test]
-fn a_push_asks_for_no_object_and_takes_no_word_beside_its_two_flags() {
-    // No `--json`, matching the other writing subcommands: the answer worth
-    // parsing is the record in `.warlock/filed.toml`, which is a file rather
-    // than a stream to be caught. `--scope` takes a value, so the flag on its
-    // own is a name that went missing rather than a switch.
-    let malformed: [&[&str]; 6] = [
-        &["push", "docs/brief.md", "--json"],
-        &["push", "--json", "docs/brief.md"],
-        &["push", "docs/brief.md", "--scope"],
-        &["push", "docs/brief.md", "--dry-run=yes"],
-        &["push", "docs/brief.md", "--force"],
-        &["push", "docs/brief.md", "--team", "Data Plane"],
+        &["push", "docs/brief.md"],
+        &["push", "data-plane", "a.md", "b.md"],
+        &["push", "data-plane", "--scope", "web", "docs/brief.md"],
+        &["push", "data-plane", "docs/brief.md", "--json"],
     ];
 
     for args in malformed {
@@ -688,95 +632,53 @@ fn a_push_asks_for_no_object_and_takes_no_word_beside_its_two_flags() {
         assert_eq!(error.exit_code(), 2, "{args:?}");
     }
 
-    // And the absence stated over the parser itself rather than over the
-    // spellings above: `--scope` and `--dry-run` are the only words a push
-    // takes beside its path and clap's own help.
     let command = subcommand(&["push"]);
     for argument in command.get_arguments().filter(|a| !a.is_positional()) {
         let long = argument.get_long().unwrap_or_default();
         assert!(
-            ["help", "scope", "dry-run"].contains(&long),
-            "`push` takes `--{long}`, which is none of its two flags"
+            ["help", "dry-run"].contains(&long),
+            "`push` takes `--{long}`, which is not its one flag"
         );
     }
 }
 
-// `warlock draft docs/brief.md` with whichever of the two flags a case is
-// about, so each assertion below reads as the flags and not as the positional
-// under them — the push's helper above, one verb along.
-fn cut_brief(scope: Option<&str>, dry_run: bool) -> Command {
+fn drafted(project: Option<&str>, dry_run: bool) -> Command {
     Command::Cut {
-        path: PathBuf::from("docs/brief.md"),
-        scope: scope.map(str::to_owned),
+        scope: "data-plane".to_owned(),
+        project: project.map(str::to_owned),
         dry_run,
     }
 }
 
 #[test]
-fn a_cut_takes_the_brief_whose_project_it_cuts_and_the_two_flags_that_go_with_it() {
-    // The path is required, like the push's: a cut is about the one brief
-    // whose project a push recorded, and there is no whole-repository answer
-    // for an omitted path to mean.
+fn a_draft_takes_a_scope_and_optionally_a_project_s_slug() {
+    // The scope alone lists the planned projects; the slug names one.
     assert_eq!(
-        parse(&["draft", "docs/brief.md"]).unwrap().command,
-        Some(cut_brief(None, false))
+        parse(&["draft", "data-plane"]).unwrap().command,
+        Some(drafted(None, false))
     );
     assert_eq!(
-        parse(&["draft", "docs/brief.md", "--dry-run"])
+        parse(&["draft", "data-plane", "9e41c07a2b13"])
             .unwrap()
             .command,
-        Some(cut_brief(None, true))
+        Some(drafted(Some("9e41c07a2b13"), false))
     );
-    // `--scope` is optional to clap and needed only when this machine can file
-    // to more than one board, which clap has not read `.warlock/pacts.toml` to
-    // know — and the name reaches warlock exactly as it was typed, because the
-    // cut resolves its board through the very `resolve_filing` the push does.
     assert_eq!(
-        parse(&["draft", "docs/brief.md", "--scope", "data-plane"])
+        parse(&["draft", "--dry-run", "data-plane", "9e41c07a2b13"])
             .unwrap()
             .command,
-        Some(cut_brief(Some("data-plane"), false))
+        Some(drafted(Some("9e41c07a2b13"), true))
     );
-    // Both flags, in either order and either side of the path, for the reason
-    // the push's are pinned that way: a person retyping the command from the
-    // refusal that named `--scope` will put it wherever the cursor was.
-    for args in [
-        [
-            "draft",
-            "docs/brief.md",
-            "--scope",
-            "data-plane",
-            "--dry-run",
-        ],
-        [
-            "draft",
-            "--dry-run",
-            "--scope",
-            "data-plane",
-            "docs/brief.md",
-        ],
-    ] {
-        assert_eq!(
-            parse(&args).unwrap().command,
-            Some(cut_brief(Some("data-plane"), true)),
-            "{args:?}"
-        );
-    }
 }
 
 #[test]
-fn a_cut_asks_for_no_object_and_takes_no_word_beside_its_two_flags() {
-    // No `--json`, matching the push and the other subcommands that spend
-    // something: what a script parses afterwards is the cut record in
-    // `.warlock/filed.toml`, which is a file rather than a stream to be caught.
-    let malformed: [&[&str]; 7] = [
+fn a_draft_with_no_scope_or_a_third_word_is_a_malformed_invocation() {
+    let malformed: [&[&str]; 5] = [
         &["draft"],
         &["draft", "--dry-run"],
-        &["draft", "a.md", "b.md"],
-        &["draft", "docs/brief.md", "--json"],
-        &["draft", "docs/brief.md", "--scope"],
-        &["draft", "docs/brief.md", "--dry-run=yes"],
-        &["draft", "docs/brief.md", "--force"],
+        &["draft", "data-plane", "9e41c07a2b13", "extra"],
+        &["draft", "data-plane", "--scope", "web"],
+        &["draft", "data-plane", "--json"],
     ];
 
     for args in malformed {
@@ -785,53 +687,22 @@ fn a_cut_asks_for_no_object_and_takes_no_word_beside_its_two_flags() {
         assert_eq!(error.exit_code(), 2, "{args:?}");
     }
 
-    // And the absence stated over the parser itself rather than over the
-    // spellings above: `--scope` and `--dry-run` are the only words a cut
-    // takes beside its path and clap's own help.
     let command = subcommand(&["draft"]);
     for argument in command.get_arguments().filter(|a| !a.is_positional()) {
         let long = argument.get_long().unwrap_or_default();
         assert!(
-            ["help", "scope", "dry-run"].contains(&long),
-            "`draft` takes `--{long}`, which is none of its two flags"
+            ["help", "dry-run"].contains(&long),
+            "`draft` takes `--{long}`, which is not its one flag"
         );
     }
 }
 
 #[test]
-fn the_cut_help_names_both_of_its_flags_and_the_brief_it_wants() {
-    // What `warlock draft --help` prints, read off the parser rather than by
-    // spawning the binary: the positional is spelled `PATH` as the push's is,
-    // and the two flags are named with the values they take.
+fn the_draft_help_names_the_scope_the_slug_and_the_flag() {
     let help = subcommand(&["draft"]).render_long_help().to_string();
-    for said in ["PATH", "--scope <NAME>", "--dry-run"] {
+    for said in ["SCOPE", "SLUG", "--dry-run"] {
         assert!(help.contains(said), "{said}: {help}");
     }
-}
-
-#[test]
-fn the_cut_leaves_the_push_spelled_exactly_as_it_was() {
-    // The two verbs sit side by side and share a resolver, so this is the
-    // guard against the second one being wired by editing the first: the push
-    // still takes its path and its two flags, and still refuses a `--json`.
-    assert_eq!(
-        parse(&[
-            "push",
-            "docs/brief.md",
-            "--scope",
-            "data-plane",
-            "--dry-run"
-        ])
-        .unwrap()
-        .command,
-        Some(pushed_brief(Some("data-plane"), true))
-    );
-    assert_eq!(
-        parse(&["push", "docs/brief.md", "--json"])
-            .unwrap_err()
-            .exit_code(),
-        2
-    );
 }
 
 // `warlock pull warlock-team` with whichever of the two flags a case is about,
@@ -945,23 +816,22 @@ fn the_pull_help_names_both_of_its_flags_and_the_scope_it_wants() {
 #[test]
 fn the_pull_leaves_the_push_and_the_draft_spelled_exactly_as_they_were() {
     // The third verb sits beside the first two and shares their resolver, so this
-    // is the guard against it being wired by editing them: both still take their
-    // path and their two flags, and both still refuse a `--json`.
+    // is the guard against it being wired by editing them.
     assert_eq!(
-        parse(&["push", "docs/brief.md", "--scope", "data-plane"])
+        parse(&["push", "data-plane", "docs/brief.md"])
             .unwrap()
             .command,
-        Some(pushed_brief(Some("data-plane"), false))
+        Some(pushed_brief(false))
     );
     assert_eq!(
-        parse(&["draft", "docs/brief.md", "--dry-run"])
+        parse(&["draft", "data-plane", "--dry-run"])
             .unwrap()
             .command,
-        Some(cut_brief(None, true))
+        Some(drafted(None, true))
     );
     for args in [
-        ["push", "docs/brief.md", "--json"],
-        ["draft", "docs/brief.md", "--json"],
+        ["push", "data-plane", "docs/brief.md", "--json"],
+        ["draft", "data-plane", "9e41c07a2b13", "--json"],
     ] {
         assert_eq!(parse(&args).unwrap_err().exit_code(), 2, "{args:?}");
     }
@@ -1037,9 +907,9 @@ fn each_subcommands_help_says_what_that_subcommand_does() {
         ("key", "Linear"),
         // The two that reach a board say which direction they go in, because
         // that is the difference somebody typing one of them is choosing
-        // between: a brief filed as a project, a project cut into issues.
+        // between: a brief filed as a project, a project cut into tickets.
         ("push", "brief"),
-        ("draft", "issues"),
+        ("draft", "tickets"),
     ] {
         let mut command = Cli::command();
         let help = command

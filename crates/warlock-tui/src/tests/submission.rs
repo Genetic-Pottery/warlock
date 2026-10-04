@@ -1,12 +1,10 @@
-use super::{Submitted, Taking, submitted_for};
+use super::{Submitted, Taking, ToDraft, ToPush, submitted_for};
 
 #[test]
 fn each_command_word_is_its_own_command() {
     assert_eq!(submitted_for("/brief"), Submitted::Brief);
     assert_eq!(submitted_for("/write"), Submitted::Write);
     assert_eq!(submitted_for("/chat"), Submitted::Chat);
-    assert_eq!(submitted_for("/push"), Submitted::Push(None));
-    assert_eq!(submitted_for("/draft"), Submitted::Cut(None));
     // The one command word that is worth passing up without its argument: only
     // the panel knows which scopes this machine holds, so a bare `/pull` is
     // answered with them rather than with the list of commands.
@@ -15,46 +13,69 @@ fn each_command_word_is_its_own_command() {
 }
 
 #[test]
-fn push_takes_the_brief_to_file_after_it() {
-    // The command a colleague types about a document committed days ago, in a
-    // session that has written nothing of its own.
+fn push_takes_a_scope_and_then_the_brief_to_file() {
     assert_eq!(
-        submitted_for("/push docs/warlock-brief-22-push.md"),
-        Submitted::Push(Some("docs/warlock-brief-22-push.md"))
+        submitted_for("/push warlock-team docs/warlock-brief-22-push.md"),
+        Submitted::Push(ToPush {
+            scope: "warlock-team",
+            path: "docs/warlock-brief-22-push.md",
+        })
     );
-    // Trimmed at both ends and around the word, so the spacing a hand leaves
-    // is not part of the path.
     assert_eq!(
-        submitted_for("  /push   docs/a.md  "),
-        Submitted::Push(Some("docs/a.md"))
+        submitted_for("  /push   warlock-team   docs/a.md  "),
+        Submitted::Push(ToPush {
+            scope: "warlock-team",
+            path: "docs/a.md",
+        })
     );
-    // Whole rather than the next token: a path with a space in it is a path.
+    // The scope is a word and the path is the rest: a path with a space in it
+    // is a path.
     assert_eq!(
-        submitted_for("/push docs/a brief.md"),
-        Submitted::Push(Some("docs/a brief.md"))
+        submitted_for("/push warlock-team docs/a brief.md"),
+        Submitted::Push(ToPush {
+            scope: "warlock-team",
+            path: "docs/a brief.md",
+        })
     );
-    // And nothing after it is still the bare command, which files what this
-    // session wrote.
-    assert_eq!(submitted_for("/push "), Submitted::Push(None));
+    // Short of either is no push: nothing is inferred, least of all the last
+    // document this session wrote.
+    for draft in [
+        "/push",
+        "/push ",
+        "/push warlock-team",
+        "/push warlock-team  ",
+    ] {
+        assert_eq!(
+            submitted_for(draft),
+            Submitted::Refused,
+            "{draft:?} is a push short of its scope or its brief"
+        );
+    }
 }
 
 #[test]
-fn cut_takes_the_brief_to_cut_after_it() {
-    // The same argument, read the same way, because the two commands name the
-    // same kind of thing: a brief somebody committed.
+fn draft_takes_a_scope_and_then_an_optional_slug() {
     assert_eq!(
-        submitted_for("/draft docs/warlock-brief-23-cut.md"),
-        Submitted::Cut(Some("docs/warlock-brief-23-cut.md"))
+        submitted_for("/draft warlock-team"),
+        Submitted::Cut(ToDraft {
+            scope: "warlock-team",
+            project: None,
+        })
     );
     assert_eq!(
-        submitted_for("  /draft   docs/a.md  "),
-        Submitted::Cut(Some("docs/a.md"))
+        submitted_for("  /draft   warlock-team   9e41c07a2b13  "),
+        Submitted::Cut(ToDraft {
+            scope: "warlock-team",
+            project: Some("9e41c07a2b13"),
+        })
     );
-    assert_eq!(
-        submitted_for("/draft docs/a brief.md"),
-        Submitted::Cut(Some("docs/a brief.md"))
-    );
-    assert_eq!(submitted_for("/draft "), Submitted::Cut(None));
+    for draft in ["/draft", "/draft ", "/draft warlock-team 9e41c07a2b13 now"] {
+        assert_eq!(
+            submitted_for(draft),
+            Submitted::Refused,
+            "{draft:?} is not a scope and at most one slug"
+        );
+    }
 }
 
 #[test]
@@ -123,9 +144,10 @@ fn a_push_or_a_cut_with_a_second_line_is_refused() {
     // a command word and expecting it to be read.
     for draft in [
         "/push\nsome text",
-        "/push docs/a.md\nand a thought",
+        "/push warlock-team docs/a.md\nand a thought",
+        "/push warlock-team\ndocs/a.md",
         "/draft\nsome text",
-        "/draft docs/a.md\nand a thought",
+        "/draft warlock-team\nand a thought",
     ] {
         assert_eq!(
             submitted_for(draft),
@@ -279,9 +301,12 @@ fn every_refusal_is_the_same_one_line() {
         "/brief now",
         "/brief\nx",
         "/PUSH",
-        "/push docs/a.md\nand a thought",
+        "/push warlock-team docs/a.md\nand a thought",
+        "/push",
+        "/push warlock-team",
         "/CUT",
-        "/draft docs/a.md\nand a thought",
+        "/draft",
+        "/draft warlock-team 9e41c07a2b13 now",
         "/resume",
         "/pull warlock-team WAR-143 now",
         "/resume WAR-143 WAR-144",
@@ -305,7 +330,8 @@ fn every_refusal_is_the_same_one_line() {
         // The list on its own would leave four of the seven looking like `/brief`
         // and send somebody to a shell to find out what `/pull` wants.
         for said in [
-            "a brief for /push and /draft",
+            "a scope and a brief for /push",
+            "a scope and optionally a project's slug for /draft",
             "a scope and optionally a ticket for /pull",
             "a ticket for /resume",
         ] {
@@ -325,9 +351,9 @@ fn nothing_but_a_refusal_has_a_line_to_say() {
         "/brief",
         "/write",
         "/chat",
-        "/push",
-        "/draft",
-        "/draft docs/a.md",
+        "/push warlock-team docs/a.md",
+        "/draft warlock-team",
+        "/draft warlock-team 9e41c07a2b13",
         "/pull",
         "/pull warlock-team",
         "/pull warlock-team WAR-143",

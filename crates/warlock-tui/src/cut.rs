@@ -1,13 +1,15 @@
 //! One scope slice's validated drafts become issues on the board, and what was
-//! created becomes a cut record beside the brief's own.
+//! created becomes a note on the project.
 //!
 //! The order in [`cut`] is the promise rather than an arrangement, as it is in
-//! [`mod@crate::push`]: a slice the record already names sends nothing at all,
-//! a team with no `Backlog` state is refused while the slice is still nothing
-//! rather than half filed, and no relation is written until every issue it
-//! could name exists. The record is saved for this slice as soon as its issues
-//! exist and not once at the end, because an issue nothing records is exactly
-//! what the next run files a second time.
+//! [`mod@crate::push`]: a team with no `Backlog` state is refused while the
+//! slice is still nothing rather than half filed, and no relation is written
+//! until every issue it could name exists. The note is said for this slice as
+//! soon as its issues exist and not once at the end, because an issue no note
+//! names is exactly what the next run files a second time.
+//!
+//! The notes are the whole ledger. Nothing on this machine records a cut, so a
+//! fresh clone with a key and a scope drafts on from where the board says.
 //!
 //! Its own module rather than [`mod@crate::planned`]'s, which sequences the slices
 //! and issues no write of its own.
@@ -18,16 +20,14 @@ use std::collections::HashSet;
 use std::io::Write;
 use std::path::Path;
 
-use warlock_engine::drafting::Draft;
-use warlock_engine::{CutRecord, Destination, fold_title, manifest_path, now_rfc3339};
+use warlock_engine::drafting::{Draft, is_identifier};
+use warlock_engine::{Destination, manifest_path};
 
 use crate::error::Error;
-use crate::linear::{Board, Issue as LinearIssue, NewIssue};
-use crate::push::records;
+use crate::linear::{Board, CUT_NOTE, Issue as LinearIssue, NewIssue, SKIP_NOTE};
 
-/// Where one slice's issues go, which is what [`resolve_filing`] and the
-/// brief's own record between them answered: the board, the project a push
-/// made, and the brief as `.warlock/filed.toml` spells it.
+/// Where one slice's issues go: the board [`resolve_filing`] answered and the
+/// project the draft was named with, by Linear's own id.
 ///
 /// `assignee` is the user the key belongs to, resolved once for the run by
 /// [`prepare`] rather than here: this is one slice of several, and the answer is
@@ -37,7 +37,6 @@ use crate::push::records;
 /// [`prepare`]: crate::planned::prepare
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Filing<'a> {
-    pub(crate) brief: &'a str,
     pub(crate) project: &'a str,
     pub(crate) destination: &'a Destination,
     pub(crate) assignee: &'a str,
@@ -48,9 +47,8 @@ pub(crate) struct Filing<'a> {
 ///
 /// `needs` is one entry per slice this slice's `depends_on` names, holding the
 /// issues that slice became: the references are written as positions in a
-/// document this module never reads, and a cut record keeps identifiers rather
-/// than the ids a relation is written with — so the run that filed them hands
-/// the issues over itself rather than anything here reading the board back.
+/// document this module never reads, so the run hands the issues over itself
+/// rather than anything here reading the board back.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Slice<'a> {
     pub(crate) title: &'a str,
@@ -61,24 +59,17 @@ pub(crate) struct Slice<'a> {
     pub(crate) open: &'a [LinearIssue],
 }
 
-/// What filing one slice came to.
+/// What filing one slice came to: the issues created, whole rather than as
+/// identifiers, because the relations a later slice asks for are written by
+/// issue *id*, with one line per edge Linear turned down.
+///
+/// The lines are the caller's to say: an issue that exists with a missing edge
+/// is something a person can fix on the board, so a refused relation is
+/// reported beside the identifiers rather than taking them down with it.
 #[derive(Debug)]
-pub(crate) enum Cut {
-    /// The record already names this slice, so nothing was sent: the
-    /// identifiers are the ones that record holds, which is all a cut record
-    /// keeps of an issue.
-    Already(Vec<String>),
-    /// The issues created now, whole rather than as identifiers, because the
-    /// relations a later slice asks for are written by issue *id*, with one
-    /// line per edge Linear turned down.
-    ///
-    /// The lines are the caller's to say: an issue that exists with a missing
-    /// edge is something a person can fix on the board, so a refused relation
-    /// is reported beside the identifiers rather than taking them down with it.
-    Filed {
-        issues: Vec<LinearIssue>,
-        reported: Vec<String>,
-    },
+pub(crate) struct Cut {
+    pub(crate) issues: Vec<LinearIssue>,
+    pub(crate) reported: Vec<String>,
 }
 
 pub(crate) fn cut<W: Write>(
@@ -88,37 +79,6 @@ pub(crate) fn cut<W: Write>(
     slice: Slice<'_>,
     out: &mut W,
 ) -> Result<Cut, Error> {
-    let mut filed = records(root)?;
-    // Held across the requests below rather than looked up twice: the record
-    // this cut is appended to has to exist before anything is sent, and a
-    // second lookup afterwards would be a second answer to what happens when it
-    // does not — with the issues already created by then.
-    let record = filed
-        .record_mut(filing.brief)
-        .ok_or_else(|| Error::NoRecord {
-            path: filing.brief.to_owned(),
-        })?;
-
-    // Matched on the key the record spells rather than on its title, for the
-    // reason `Filed::cut_state` gives: the fold is stored, so a key somebody
-    // edited is a record that no longer matches rather than one silently
-    // re-matched from the title beside it.
-    let key = fold_title(slice.title);
-    if let Some(already) = record.cuts().iter().find(|cut| cut.key() == key) {
-        let issues = already.issues().to_vec();
-        let said = if issues.is_empty() {
-            "was skipped in an earlier run".to_owned()
-        } else {
-            format!("is already cut as {}", listed(&issues))
-        };
-        drop(writeln!(
-            out,
-            "warlock: `{}` {said}, so nothing was sent",
-            slice.title
-        ));
-        return Ok(Cut::Already(issues));
-    }
-
     let team = linear
         .team_id(filing.destination.team_key())?
         .ok_or_else(|| Error::UnknownTeam {
@@ -137,9 +97,9 @@ pub(crate) fn cut<W: Write>(
 
     let mut issues = Vec::with_capacity(slice.drafts.len());
     for draft in slice.drafts {
-        // A create that fails partway is a refusal and not a short cut record:
-        // a record says the slice is filed, so writing one for the drafts that
-        // landed would be warlock promising never to file the rest.
+        // A create that fails partway is a refusal and not a short note: a note
+        // says the slice is filed, so writing one for the drafts that landed
+        // would be warlock promising never to file the rest.
         let issue = linear.create_issue(&NewIssue::new(
             &draft.title,
             &draft.body,
@@ -163,9 +123,9 @@ pub(crate) fn cut<W: Write>(
         .map(|issue| issue.identifier().to_owned())
         .collect();
 
-    // Printed before the record is saved, not after, for the reason `push`'s
-    // URL is: the issues exist from here on and their identifiers are the one
-    // thing that must not be lost, so they go out whatever the save does next.
+    // Printed before the note is said, not after, for the reason `push`'s URL
+    // is: the issues exist from here on and their identifiers are the one thing
+    // that must not be lost, so they go out whatever the comment does next.
     drop(writeln!(
         out,
         "warlock: cut `{}` into {}",
@@ -173,48 +133,86 @@ pub(crate) fn cut<W: Write>(
         listed(&identifiers)
     ));
 
-    record.push_cut(CutRecord::new(
-        slice.title,
-        identifiers.iter().map(String::as_str),
-        now_rfc3339(),
-    ));
-    filed.save(root).map_err(|source| Error::Uncut {
-        issues: identifiers,
-        source: Box::new(source),
-    })?;
+    linear
+        .comment_on_project(filing.project, &cut_note(slice.title, &identifiers))
+        .map_err(|source| Error::Uncut {
+            issues: identifiers,
+            source: Box::new(source),
+        })?;
 
-    Ok(Cut::Filed { issues, reported })
+    Ok(Cut { issues, reported })
 }
 
-/// A slice somebody said no to at the review, recorded as a cut that filed
-/// nothing, so the next run passes it over as it passes over a filed one. Red's
-/// rule: a skip is a real answer and is never retried on its own; retitling the
-/// slice in the brief makes it a new slice, and that is how it comes back.
-///
-/// An empty `issues` is the whole of the record's saying so. A real cut always
-/// files at least one issue, because the drafting repairs always leave a draft.
-pub(crate) fn skip(root: &Path, brief: &str, title: &str) -> Result<(), Error> {
-    let mut filed = records(root)?;
-    let record = filed.record_mut(brief).ok_or_else(|| Error::NoRecord {
-        path: brief.to_owned(),
-    })?;
-    let key = fold_title(title);
-    if record.cuts().iter().any(|cut| cut.key() == key) {
-        return Ok(());
-    }
-    record.push_cut(CutRecord::new(
-        title,
-        std::iter::empty::<&str>(),
-        now_rfc3339(),
-    ));
-    filed.save(root).map_err(|source| Error::Unskipped {
-        title: title.to_owned(),
-        source: Box::new(source),
-    })
+/// A slice somebody said no to at the review, noted on the project as a cut that
+/// filed nothing, so the next run passes it over as it passes over a filed one.
+/// Red's rule: a skip is a real answer and is never retried on its own;
+/// retitling the slice in the brief makes it a new slice, and that is how it
+/// comes back.
+pub(crate) fn skip(linear: &impl Board, project: &str, title: &str) -> Result<(), Error> {
+    linear
+        .comment_on_project(project, &skip_note(title))
+        .map(drop)
+        .map_err(|source| Error::Unskipped {
+            title: title.to_owned(),
+            source: Box::new(source),
+        })
+}
+
+// The two note shapes and their reader sit together because they are one wire
+// format: a body [`noted`] cannot read back is a slice the next run files again.
+// The title goes in backticks so Linear's markdown keeps it literal, and the
+// identifiers too, so Linear does not turn them into issue mentions. The join
+// is its own rather than [`listed`]'s, which is a display string free to change.
+fn cut_note(title: &str, issues: &[String]) -> String {
+    let issues: Vec<String> = issues.iter().map(|issue| format!("`{issue}`")).collect();
+    format!("{CUT_NOTE}`{title}` into {}.", issues.join(", "))
+}
+
+fn skip_note(title: &str) -> String {
+    format!("{SKIP_NOTE}`{title}`.")
+}
+
+/// Every slice the project's notes settle, as its folded title and the issues it
+/// became — none for a skip. A body that is not one of the two shapes is left
+/// out rather than refused: it is a person's comment that happens to start the
+/// same way.
+pub(crate) fn noted(notes: &[String]) -> Vec<(String, Vec<String>)> {
+    notes
+        .iter()
+        .filter_map(|body| {
+            let body = body.trim();
+            if let Some(rest) = body.strip_prefix(CUT_NOTE) {
+                let (title, issues) = rest.strip_prefix('`')?.rsplit_once("` into ")?;
+                let issues: Vec<String> = issues
+                    .split(',')
+                    .map(|issue| issue.trim().trim_end_matches('.').trim_matches('`'))
+                    .filter(|issue| is_identifier(issue))
+                    .map(str::to_owned)
+                    .collect();
+                return (!issues.is_empty()).then(|| (fold_title(title), issues));
+            }
+            let title = body
+                .strip_prefix(SKIP_NOTE)?
+                .trim_end_matches('.')
+                .strip_prefix('`')?
+                .strip_suffix('`')?;
+            Some((fold_title(title), Vec::new()))
+        })
+        .collect()
+}
+
+/// A slice title as a note is matched by: case and runs of whitespace folded, so
+/// a brief edited only in its spacing or capitalisation still finds its notes.
+pub(crate) fn fold_title(title: &str) -> String {
+    title
+        .split_whitespace()
+        .map(str::to_lowercase)
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// How a settled slice is said after its heading and a dash: by the issues it
-/// became, or as skipped when the record names none. See [`skip`].
+/// became, or as skipped when its note names none. See [`skip`].
 pub(crate) fn settled_as(issues: &[String]) -> String {
     if issues.is_empty() {
         "skipped in an earlier run".to_owned()
@@ -314,24 +312,6 @@ fn relate(linear: &impl Board, edges: &[(&LinearIssue, &LinearIssue)]) -> Vec<St
                 })
         })
         .collect()
-}
-
-/// Say on the project what was filed out of it, answering with the one line to
-/// report when Linear turns the comment down.
-///
-/// Nothing here decides *when* to say it: the brief's one comment lands after
-/// the last slice settles and only when something was filed, which is the run's
-/// question and not this operation's.
-pub(crate) fn announce(linear: &impl Board, project: &str, issues: &[String]) -> Option<String> {
-    let body = format!(
-        "Warlock cut this project into {}.\n\nThe project's status was not moved.",
-        listed(issues)
-    );
-
-    linear
-        .comment_on_project(project, &body)
-        .err()
-        .map(|error| format!("the project was not commented on: {error}"))
 }
 
 // Shared with `error.rs`, which names the same identifiers in the refusal that

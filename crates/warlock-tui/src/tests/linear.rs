@@ -4,12 +4,12 @@ use std::io;
 use serde_json::{Value, json};
 
 use super::{
-    Assignee, BACKLOG, BLOCKERS_PAGE, Blocker, Board, Client, ENDPOINT, Error, LABELS_PAGE, Linear,
-    NamedIssue, NewIssue, NewProject, Posts, Priority, QUEUE_PAGE, QueuedIssue, REQUEST_TIMEOUT,
-    StateType, answer, authorization, backlog_state, backlog_status, comment_on_issue,
-    comment_on_project, create_issue, create_project, create_relation, fetch_project,
-    issue_label_id, label_id, move_issue, named_issue, scope_queue, team_id, viewer,
-    workflow_state,
+    Assignee, BACKLOG, BLOCKERS_PAGE, Blocker, Board, CUT_NOTE, Client, ENDPOINT, Error,
+    LABELS_PAGE, Linear, NamedIssue, NewIssue, NewProject, Posts, Priority, QUEUE_PAGE,
+    QueuedIssue, REQUEST_TIMEOUT, SKIP_NOTE, StateType, answer, authorization, backlog_state,
+    backlog_status, comment_on_issue, comment_on_project, create_issue, create_project,
+    create_relation, fetch_project, issue_label_id, label_id, move_issue, named_issue,
+    planned_projects, project_named, scope_queue, team_id, viewer, workflow_state,
 };
 
 use crate::queue::IN_PROGRESS;
@@ -220,27 +220,35 @@ fn the_seam_carries_a_refusal_as_well_as_an_answer() {
     assert!(matches!(error, Error::Status { code: 401 }), "{error:?}");
 }
 
-const PROJECT: &str = "65fcabef-373b-4c2e-82bc-3e98fe7accbe";
+const SLUG: &str = "1a2b3c4d5e6f";
 
 fn project_on_the_board() -> Value {
     json!({
         "project": {
+            "id": "65fcabef-373b-4c2e-82bc-3e98fe7accbe",
             "name": "Push a brief to the board",
             "content": "# Push a brief to the board\n\n## Scope\n",
-            "url": "https://linear.app/acme/project/a-brief-1a2b3c",
+            "url": "https://linear.app/acme/project/a-brief-1a2b3c4d5e6f",
             "status": { "name": "Planned" },
+            "comments": { "nodes": [
+                { "body": "Warlock cut slice `One` into `WAR-1`." },
+                { "body": "Warlock skipped slice `Two`." },
+            ] },
         },
     })
 }
 
 #[test]
-fn a_project_is_read_back_by_id_in_one_request() {
+fn a_project_is_read_back_by_slug_in_one_request_with_its_notes() {
     let linear = Posting::answering([Ok(project_on_the_board())]);
 
-    let project = fetch_project(&linear, PROJECT)
+    let project = fetch_project(&linear, SLUG)
         .expect("the stand-in answered")
         .expect("the stand-in knows the project");
 
+    // Linear's own id, and not the slug it was asked by: issues and comments
+    // are written against this.
+    assert_eq!(project.id(), "65fcabef-373b-4c2e-82bc-3e98fe7accbe");
     assert_eq!(project.name(), "Push a brief to the board");
     assert_eq!(
         project.content(),
@@ -248,32 +256,53 @@ fn a_project_is_read_back_by_id_in_one_request() {
     );
     assert_eq!(
         project.url(),
-        "https://linear.app/acme/project/a-brief-1a2b3c"
+        "https://linear.app/acme/project/a-brief-1a2b3c4d5e6f"
     );
     assert_eq!(project.status(), Some("Planned"));
-    assert_eq!(linear.variables(), [json!({ "id": PROJECT })]);
+    assert_eq!(
+        project.notes(),
+        [
+            "Warlock cut slice `One` into `WAR-1`.".to_owned(),
+            "Warlock skipped slice `Two`.".to_owned(),
+        ]
+    );
+    assert_eq!(
+        linear.variables(),
+        [json!({ "id": SLUG, "cut": CUT_NOTE, "skipped": SKIP_NOTE })]
+    );
     assert_eq!(linear.documents().len(), 1, "one request per operation");
 }
 
 #[test]
-fn the_id_is_the_only_selector_and_nothing_is_listed() {
+fn only_warlocks_notes_are_asked_for_and_no_project_is_listed() {
     let linear = Posting::answering([Ok(project_on_the_board())]);
 
-    fetch_project(&linear, PROJECT).expect("the stand-in answered");
+    fetch_project(&linear, SLUG).expect("the stand-in answered");
 
     let asked = linear.documents().pop().expect("one request was made");
 
     assert!(asked.contains("project(id: $id)"), "{asked}");
-    // A workspace walk and a name match are what this operation exists not to
-    // be: brief 22 is on this repository's board twice under one title.
+    assert!(asked.contains("startsWith: $cut"), "{asked}");
+    assert!(asked.contains("startsWith: $skipped"), "{asked}");
     assert!(!asked.contains("projects("), "{asked}");
-    assert!(!asked.contains("filter"), "{asked}");
-    assert!(!asked.contains("first:"), "{asked}");
 }
 
 #[test]
-fn a_project_id_the_api_does_not_know_is_a_none_rather_than_an_error() {
-    // Both shapes an unknown id can arrive as: Linear's own refusal, and the
+fn a_project_with_no_notes_comes_back_with_none() {
+    let mut answer = project_on_the_board();
+    answer["project"]["comments"]["nodes"] = json!([]);
+    let linear = Posting::answering([Ok(answer)]);
+
+    let project = fetch_project(&linear, SLUG)
+        .expect("a project nothing was cut from is an ordinary answer")
+        .expect("the stand-in knows the project");
+
+    assert!(project.notes().is_empty());
+}
+
+#[test]
+fn a_slug_the_api_does_not_know_is_a_none_rather_than_an_error() {
+    // Both shapes an unknown slug can arrive as: Linear's own refusal, and the
     // null node a nullable field would give.
     let answers = [
         Err(Error::Refused {
@@ -285,9 +314,9 @@ fn a_project_id_the_api_does_not_know_is_a_none_rather_than_an_error() {
     for answer in answers {
         let linear = Posting::answering([answer]);
 
-        let project = fetch_project(&linear, PROJECT).expect("an unknown id is an ordinary answer");
+        let project = fetch_project(&linear, SLUG).expect("an unknown slug is an ordinary answer");
 
-        assert_eq!(project, None, "the caller names the id and the file");
+        assert_eq!(project, None, "the caller names the slug");
     }
 }
 
@@ -297,7 +326,7 @@ fn any_other_refusal_is_still_linears_to_word() {
         message: "Access denied".to_owned(),
     })]);
 
-    let error = fetch_project(&linear, PROJECT).expect_err("the stand-in refused");
+    let error = fetch_project(&linear, SLUG).expect_err("the stand-in refused");
 
     assert!(matches!(error, Error::Refused { .. }), "{error:?}");
 }
@@ -308,7 +337,7 @@ fn a_project_with_no_status_comes_back_without_one() {
     answer["project"]["status"] = Value::Null;
     let linear = Posting::answering([Ok(answer)]);
 
-    let project = fetch_project(&linear, PROJECT)
+    let project = fetch_project(&linear, SLUG)
         .expect("a project with no status is an ordinary answer")
         .expect("the stand-in knows the project");
 
@@ -323,7 +352,7 @@ fn a_project_whose_description_was_emptied_comes_back_empty() {
     answer["project"]["content"] = Value::Null;
     let linear = Posting::answering([Ok(answer)]);
 
-    let project = fetch_project(&linear, PROJECT)
+    let project = fetch_project(&linear, SLUG)
         .expect("an emptied description is an ordinary answer")
         .expect("the stand-in knows the project");
 
@@ -332,7 +361,7 @@ fn a_project_whose_description_was_emptied_comes_back_empty() {
 
 #[test]
 fn a_project_answer_missing_a_field_is_malformed() {
-    for field in ["name", "content", "url", "status"] {
+    for field in ["id", "name", "content", "url", "status", "comments"] {
         let mut answer = project_on_the_board();
         answer["project"]
             .as_object_mut()
@@ -342,7 +371,7 @@ fn a_project_answer_missing_a_field_is_malformed() {
         let linear = Posting::answering([Ok(answer)]);
 
         let error =
-            fetch_project(&linear, PROJECT).expect_err("a field that was asked for is answered");
+            fetch_project(&linear, SLUG).expect_err("a field that was asked for is answered");
 
         assert!(
             matches!(error, Error::Malformed { .. }),
@@ -352,20 +381,124 @@ fn a_project_answer_missing_a_field_is_malformed() {
 }
 
 #[test]
-fn a_status_with_no_name_and_an_answer_with_no_project_are_malformed() {
-    for answer in [
-        json!({ "project": { "name": "A", "content": "", "url": "u", "status": {} } }),
-        json!({ "projects": { "nodes": [] } }),
-    ] {
+fn a_status_with_no_name_a_note_with_no_body_and_no_project_are_malformed() {
+    let mut nameless = project_on_the_board();
+    nameless["project"]["status"] = json!({});
+    let mut bodiless = project_on_the_board();
+    bodiless["project"]["comments"]["nodes"] = json!([{}]);
+
+    for answer in [nameless, bodiless, json!({ "projects": { "nodes": [] } })] {
         let linear = Posting::answering([Ok(answer.clone())]);
 
-        let error = fetch_project(&linear, PROJECT).expect_err("that is not the answer asked for");
+        let error = fetch_project(&linear, SLUG).expect_err("that is not the answer asked for");
 
         assert!(
             matches!(error, Error::Malformed { .. }),
             "{answer}: {error:?}"
         );
     }
+}
+
+fn planned(nodes: &Value, more: bool) -> Value {
+    json!({ "projects": { "pageInfo": { "hasNextPage": more }, "nodes": nodes } })
+}
+
+#[test]
+fn planned_projects_are_the_teams_planned_and_labelled_ones_by_slug_and_name() {
+    let linear = Posting::answering([Ok(planned(
+        &json!([
+            { "slugId": "9e41c07a2b13", "name": "Draft from the board" },
+            { "slugId": "d1cb3521be71", "name": "Give the CLI a voice" },
+        ]),
+        false,
+    ))]);
+
+    let listing = planned_projects(&linear, "WAR", "warlock").expect("the stand-in answered");
+
+    assert_eq!(
+        listing.projects(),
+        [
+            ("9e41c07a2b13".to_owned(), "Draft from the board".to_owned()),
+            ("d1cb3521be71".to_owned(), "Give the CLI a voice".to_owned()),
+        ]
+    );
+    assert!(!listing.capped());
+    assert_eq!(
+        linear.variables(),
+        [json!({ "team": "WAR", "label": "warlock" })]
+    );
+    let asked = linear.documents().pop().expect("one request was made");
+    assert!(asked.contains("key: { eq: $team }"), "{asked}");
+    assert!(asked.contains(r#"eqIgnoreCase: "Planned""#), "{asked}");
+    assert!(asked.contains("name: { eq: $label }"), "{asked}");
+    assert!(asked.contains("hasNextPage"), "{asked}");
+}
+
+#[test]
+fn a_planned_page_with_more_behind_it_is_capped_and_an_empty_one_is_ordinary() {
+    let linear = Posting::answering([
+        Ok(planned(
+            &json!([{ "slugId": "9e41c07a2b13", "name": "Draft" }]),
+            true,
+        )),
+        Ok(planned(&json!([]), false)),
+    ]);
+
+    assert!(
+        planned_projects(&linear, "WAR", "warlock")
+            .expect("the stand-in answered")
+            .capped()
+    );
+    let empty = planned_projects(&linear, "WAR", "warlock").expect("the stand-in answered");
+    assert!(empty.projects().is_empty());
+    assert!(!empty.capped());
+}
+
+#[test]
+fn a_planned_answer_missing_its_slug_or_its_page_is_malformed() {
+    for answer in [
+        planned(&json!([{ "name": "Draft" }]), false),
+        json!({ "projects": { "nodes": [] } }),
+    ] {
+        let linear = Posting::answering([Ok(answer.clone())]);
+
+        let error =
+            planned_projects(&linear, "WAR", "warlock").expect_err("not the answer asked for");
+
+        assert!(
+            matches!(error, Error::Malformed { .. }),
+            "{answer}: {error:?}"
+        );
+    }
+}
+
+#[test]
+fn a_project_of_the_same_name_is_answered_by_its_url_and_none_is_none() {
+    let linear = Posting::answering([
+        Ok(json!({ "projects": { "nodes": [
+            { "url": "https://linear.app/acme/project/a-brief-1a2b3c4d5e6f" },
+        ] } })),
+        Ok(json!({ "projects": { "nodes": [] } })),
+    ]);
+
+    assert_eq!(
+        project_named(&linear, "WAR", "A brief").expect("the stand-in answered"),
+        Some("https://linear.app/acme/project/a-brief-1a2b3c4d5e6f".to_owned())
+    );
+    assert_eq!(
+        project_named(&linear, "WAR", "A brief").expect("the stand-in answered"),
+        None
+    );
+    assert_eq!(
+        linear.variables(),
+        [
+            json!({ "team": "WAR", "name": "A brief" }),
+            json!({ "team": "WAR", "name": "A brief" }),
+        ]
+    );
+    let asked = linear.documents().pop().expect("a request was made");
+    assert!(asked.contains("eqIgnoreCase: $name"), "{asked}");
+    assert!(asked.contains("first: 1"), "{asked}");
 }
 
 // The three ids a scope's record and this machine's key resolve to, which is

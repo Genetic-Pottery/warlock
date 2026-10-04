@@ -34,6 +34,7 @@ use crate::scoping::{record_edit, scope_edit, scope_press};
 use crate::screen::Screen;
 use crate::selection::{Cell, Position, copied_text, position_at};
 use crate::session::{Scope, Watched, load_app, start_watching};
+use crate::submission::ToDraft;
 use crate::ui::{Reach, composer_on_screen, draw, panel_height, panel_width, tree_height};
 use crate::viewing::view_press;
 
@@ -160,10 +161,9 @@ where
     F: Forge + Clone + Send + 'static,
     M: Raises + Clone + Send + 'static,
 {
-    let pushing = pushes.window();
     Modals {
         quit,
-        push: &pushing.confirm,
+        push: &pushes.window().confirm,
         cut: cutter.confirm(),
         pull: puller.confirm(),
         // The two windows the run itself puts up, read off it rather than
@@ -171,7 +171,6 @@ where
         // copy of either would be a second answer to what a slice is waiting for.
         review: cutter.reviewing(),
         carry: cutter.carrying(),
-        filing: &pushing.field,
         scope,
         record,
         write: chat.write_prompt(),
@@ -853,24 +852,6 @@ impl<K: Seams> Session<K> {
             // up. Which of the two conversations that last one reaches is
             // [`Session::composed`]'s to say.
             Pressed::Compose(outcome) => self.composed(outcome, now),
-            // Somebody typing into the window a `/push` puts up when this
-            // machine can file to more than one board: a character more or
-            // less in the scope name, the window abandoned, or — on Enter —
-            // that name asked of the engine. A name it recognises takes this
-            // window down and puts the dialog up, and one it does not leaves
-            // the field where it was with the candidates under it; both come
-            // back in the one value, for the reason the scope key's two
-            // windows do. Nothing is sent by any of it. See
-            // [`Pushes::edit`].
-            Pressed::Filing(edited) => {
-                self.pushes.edit(
-                    &mut self.app,
-                    &self.manifest,
-                    &self.scope.repo_root,
-                    edited,
-                    now,
-                );
-            }
             // A key nothing is bound to, or one whose press has already been
             // answered where it was decided.
             Pressed::Nothing => {}
@@ -926,21 +907,25 @@ impl<K: Seams> Session<K> {
 
         let pulling = self.puller.in_flight();
         match self.chat.compose(&mut self.app, outcome, now) {
-            Some(Wanted::Filed(brief)) => {
+            Some(Wanted::Filed { scope, brief }) => {
                 self.pushes.press(
                     &mut self.app,
                     &self.manifest,
                     &self.scope.repo_root,
+                    &scope,
                     &brief,
                     now,
                 );
             }
-            Some(Wanted::Cut(brief)) => {
+            Some(Wanted::Cut { scope, project }) => {
                 self.cutter.press(
                     &mut self.app,
                     &self.manifest,
                     &self.scope.repo_root,
-                    &brief,
+                    ToDraft {
+                        scope: &scope,
+                        project: project.as_deref(),
+                    },
                     pulling.as_deref(),
                     now,
                 );

@@ -43,11 +43,14 @@
 //!
 //! Nothing a slice drafts becomes an issue on its own. The drafts land on the
 //! thread as titles and then wait behind a [`Review`], which is answered
-//! create, skip or feedback: create files that slice on a worker of its own,
-//! skip records nothing and asks whether to carry on, and feedback takes
-//! whatever is typed into the field and redrafts that one slice exactly once
-//! more. When the run ends, however it ends, the project's one comment is said
-//! on a worker too if the run created anything.
+//! create, skip or feedback: create files that slice on a worker of its own and
+//! notes it on the project, skip notes the skip on a worker and asks whether to
+//! carry on, and feedback takes whatever is typed into the field and redrafts
+//! that one slice.
+//!
+//! A `/draft` with a scope and no slug reads nothing but the list of planned
+//! projects, and notes it on the thread one line each: picking one is the
+//! reader's, and the next `/draft` names it by slug.
 
 use std::io;
 use std::mem;
@@ -56,7 +59,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use warlock_engine::drafting::Draft;
-use warlock_engine::{Manifest, agent, from_manifest_path};
+use warlock_engine::{Manifest, agent};
 
 use crate::app::{App, Focus};
 use crate::brief::Slice;
@@ -77,11 +80,12 @@ use crate::pacting::CancelGuard;
 // a person, and a second set of wordings would be the two doors naming one
 // conversation differently.
 use crate::planned::{
-    self, Announcement, Next, Planned, Reply, Settled, answer_line, counted, drafted_line,
-    drafts_document, feedback_line, named, not_drafted, prepare, replied, settled_line,
-    skipped_line, stopped_line, unedited_line, unproposed_line,
+    self, Next, Planned, Reply, Settled, Skipping, answer_line, counted, drafted_line,
+    drafts_document, feedback_line, listing, listing_lines, named, not_drafted, prepare, replied,
+    settled_line, skipped_line, stopped_line, unedited_line, unproposed_line,
 };
 use crate::standing::Standing;
+use crate::submission::ToDraft;
 
 // Said to a `/draft` typed with one already running, and it is the whole of that
 // refusal: no board is resolved, no record is read and no request is made. Two
@@ -103,19 +107,27 @@ const CUT_LOST: &str = "the draft stopped without saying how it went; nothing wa
 // less: the question is still up and the field is still somebody's to type into.
 const SLICE_LOST: &str = "it stopped without saying how it went";
 
-// And the comment's, which may or may not have reached the project before the
-// worker went down: the issues are recorded either way, so what is owed is a
-// look at the project rather than a second comment.
-const ANNOUNCE_LOST: &str =
-    "the project's comment stopped without saying how it went; look at the project to see";
+// And a skip note's, which may or may not have reached the project before the
+// worker went down: what is owed is a look at the project's comments, because
+// a skip that did not land is a slice the next draft offers again.
+const SKIP_LOST: &str =
+    "the skip's note stopped without saying how it went; look at the project to see";
 
-/// What a cut has to say for itself once the board has answered: the project
-/// read back and gated, or the line that says why not.
+/// What a cut has to say for itself once the board has answered: the planned
+/// projects listed, the project read back and gated, or the line that says why
+/// not.
 ///
 /// A `String` for the failure, because the failure is worded on the worker
 /// where it happens — out of `error.rs`, flattened — and a line is what the
 /// thread takes.
-type Landing = Result<Planned, String>;
+type Landing = Result<Fetched, String>;
+
+#[derive(Debug)]
+enum Fetched {
+    Listed(Vec<String>),
+    // Boxed because a listing is a few strings and a project is every slice.
+    Planned(Box<Planned>),
+}
 
 // The count it names first is how many slices the project has, because that is
 // what the reader is being asked about; how much of it is left is the line's
@@ -178,10 +190,11 @@ pub(crate) struct Cutter<O: Opens, A: Converses> {
     // lasts: a slice in flight is a session spending on this conversation's
     // behalf, and two sets of them would be two runs cutting one project.
     slicing: Option<Slicing<A>>,
-    // The project's one comment, in flight after the run that owed it. No
-    // cancel guard, for [`Filing`]'s reason: it is a mutation, and a receiver
-    // dropped by quitting leaves a worker that finishes into nowhere.
-    announcing: Option<Once<Option<String>>>,
+    // Skip notes in flight, one per skip: a reader can answer the carry-on
+    // question before the last skip's note has landed. No cancel guard, for
+    // [`Filing`]'s reason: each is a mutation, and a receiver dropped by
+    // quitting leaves a worker that finishes into nowhere.
+    skipping: Vec<Once<Option<String>>>,
     workers: Workers,
 }
 
@@ -359,7 +372,7 @@ impl<O: Opens, A: Converses> Cutter<O, A> {
             confirm: CutConfirm::Closed,
             ready: None,
             slicing: None,
-            announcing: None,
+            skipping: Vec::new(),
             workers: Workers::Threaded,
         }
     }
@@ -392,14 +405,15 @@ impl<O: Opens, A: Converses> Cutter<O, A> {
     }
 
     // What a second `/draft` is refused against: a project being read back, a
-    // project being cut and the comment on a project just cut are all this
-    // session's one cut.
+    // project being cut and a skip note still on its way are all this session's
+    // one cut. The note is in it because a project read back before the note
+    // lands is a project that offers the skipped slice again.
     const fn running(&self) -> bool {
-        self.fetching() || self.drafting() || self.announcing.is_some()
+        self.fetching() || self.drafting() || !self.skipping.is_empty()
     }
 
-    /// `/draft` typed into the composer, with the brief it is about already
-    /// spelled the manifest's way.
+    /// `/draft <SCOPE> [SLUG]` typed into the composer: the planned projects
+    /// listed without a slug, and that one project read back with one.
     ///
     /// The three refusals are asked in the order they have to be: a pull in
     /// flight is answered before anything else, because a run editing this
@@ -415,10 +429,11 @@ impl<O: Opens, A: Converses> Cutter<O, A> {
         app: &mut App,
         manifest: &Manifest,
         repo_root: &Path,
-        brief: &str,
+        drafting: ToDraft<'_>,
         pulling: Option<&str>,
         now: Instant,
     ) {
+        let ToDraft { scope, project } = drafting;
         if let Some(pulling) = pulling {
             app.panel_mut().note(refused(pulling), now);
             return;
@@ -440,12 +455,13 @@ impl<O: Opens, A: Converses> Cutter<O, A> {
             manifest: manifest.clone(),
             root: repo_root.to_path_buf(),
             home,
-            brief: brief.to_owned(),
+            scope: scope.to_owned(),
+            project: project.map(ToOwned::to_owned),
         };
-        // Before the worker starts, so the thread says which document is being
-        // read back from the instant it is: the answer is a request away and a
-        // reader who has just typed the command is looking at the conversation.
-        app.panel_mut().note(reading_line(brief), now);
+        // Before the worker starts, so the thread says what is being read back
+        // from the instant it is: the answer is a request away and a reader who
+        // has just typed the command is looking at the conversation.
+        app.panel_mut().note(reading_line(scope, project), now);
         let cancel = CancelGuard::new();
         self.fetching = Some(Fetching {
             events: spawn_fetch(self.workers, self.open.clone(), work, cancel.handle()),
@@ -470,7 +486,7 @@ impl<O: Opens, A: Converses> Cutter<O, A> {
     /// field is left empty and the question is still somebody's to answer.
     pub(crate) fn keep_up(&mut self, app: &mut App, now: Instant) -> Option<String> {
         self.landed(app, now);
-        self.announced(app, now);
+        self.noted(app, now);
         self.drafted(app, now)
     }
 
@@ -480,13 +496,18 @@ impl<O: Opens, A: Converses> Cutter<O, A> {
             return;
         };
         match landing.unwrap_or_else(|Lost| Err(CUT_LOST.to_owned())) {
+            Ok(Fetched::Listed(lines)) => {
+                for line in lines {
+                    app.panel_mut().note(line, now);
+                }
+            }
             // The question goes up on the round the answer landed, over the
             // line that reports it: what a reader is being asked to confirm is
             // what they have just read.
-            Ok(planned) => {
+            Ok(Fetched::Planned(planned)) => {
                 app.panel_mut().note(fetched_line(&planned), now);
                 self.confirm = asking(&planned);
-                self.ready = Some(planned);
+                self.ready = Some(*planned);
             }
             // The worker's own sentence, which is `error.rs`'s wording of
             // whatever stopped it, and nothing to ask about.
@@ -494,14 +515,18 @@ impl<O: Opens, A: Converses> Cutter<O, A> {
         }
     }
 
-    // The comment's one line, when there is one: a comment that was said is
-    // said on the project and not again here, and one Linear turned down is a
-    // line rather than a failure, because the issues it names exist either way.
-    fn announced(&mut self, app: &mut App, now: Instant) {
-        let Some((_, line)) = settled(&mut self.announcing, |once| once.landed()) else {
-            return;
-        };
-        if let Some(line) = line.unwrap_or_else(|Lost| Some(ANNOUNCE_LOST.to_owned())) {
+    // Every skip note that has landed, said only when Linear turned it down: a
+    // note that was said is on the project and not again here.
+    fn noted(&mut self, app: &mut App, now: Instant) {
+        let mut lines = Vec::new();
+        self.skipping.retain(|once| {
+            let Some(landed) = once.landed() else {
+                return true;
+            };
+            lines.extend(landed.unwrap_or_else(|Lost| Some(SKIP_LOST.to_owned())));
+            false
+        });
+        for line in lines {
             app.panel_mut().note(line, now);
         }
     }
@@ -625,10 +650,9 @@ impl<O: Opens, A: Converses> Cutter<O, A> {
     // The run is taken by value because the agent the next session is opened off
     // sits beside it on this value, and it is put back only when there is a next
     // slice: the last one leaves the run taken down, which is what makes the
-    // next `/draft` allowed once the project's comment has been said.
+    // next `/draft` allowed.
     fn onwards(&mut self, mut slicing: Slicing<A>, app: &mut App, now: Instant) {
         let Some(next) = slicing.planned.next_uncut() else {
-            self.finished(&slicing.planned);
             return;
         };
         slicing.stage = Stage::Drafting(started(
@@ -641,19 +665,6 @@ impl<O: Opens, A: Converses> Cutter<O, A> {
         ));
         slicing.next = next;
         self.slicing = Some(slicing);
-    }
-
-    // Every road out of a run comes through here — the last slice settled, the
-    // last slice skipped, a No to carrying on — so the comment is asked for once
-    // and the cut decides whether one is owed.
-    fn finished(&mut self, planned: &Planned) {
-        if let Some(announcement) = planned.finish() {
-            self.announcing = Some(spawn_announcement(
-                self.workers,
-                self.open.clone(),
-                announcement,
-            ));
-        }
     }
 
     // One slice's filing, when its worker has one to report: the identifiers on
@@ -674,17 +685,14 @@ impl<O: Opens, A: Converses> Cutter<O, A> {
             return;
         };
         // A lost filing cannot be reported on. Whatever it created is on the
-        // board with its record beside it, which is what the next `/draft` will
+        // board with its note beside it, which is what the next `/draft` will
         // read.
         let landing = landing.unwrap_or_else(|Lost| Err(SLICE_LOST.to_owned()));
 
         let settled = landing.map(|cut| slicing.planned.settle(&slicing.next, cut));
         let slice = slicing.next.slice();
         match settled {
-            Ok(Settled::Already(issues)) => {
-                app.panel_mut().note(already_line(slice, &issues), now);
-            }
-            Ok(Settled::Filed { issues, reported }) => {
+            Ok(Settled { issues, reported }) => {
                 app.panel_mut().note(filed_line(slice, &issues), now);
                 // One line each, and after the identifiers: an issue that
                 // exists with a missing edge is something a person can fix on
@@ -970,12 +978,8 @@ impl<O: Opens, A: Converses> Cutter<O, A> {
         self.slicing = Some(slicing);
     }
 
-    /// Skip: nothing is recorded for this slice, and the run asks whether to go
-    /// on to the ones after it.
-    ///
-    /// No record, no request and no note of the refusal anywhere but the
-    /// thread: a skipped slice is one the next `/draft` offers again, which is
-    /// the whole difference between skipping drafts and filing them.
+    /// Skip: the slice is noted on the project as skipped, on a worker, and the
+    /// run asks whether to go on to the ones after it.
     ///
     /// The last slice has nothing to ask about, so it ends the run instead: a
     /// question whose only answer is "there is nothing left" is one nobody
@@ -990,12 +994,13 @@ impl<O: Opens, A: Converses> Cutter<O, A> {
 
         app.panel_mut()
             .note(skipped_line(slicing.next.slice()), now);
-        if let Err(error) = slicing.planned.skip_slice(&slicing.next) {
-            app.panel_mut().note(error.to_string(), now);
-        }
+        self.skipping.push(spawn_skip(
+            self.workers,
+            self.open.clone(),
+            slicing.planned.skipping(&slicing.next),
+        ));
         let left = slicing.next.left();
         if left == 0 {
-            self.finished(&slicing.planned);
             return;
         }
 
@@ -1065,7 +1070,6 @@ impl<O: Opens, A: Converses> Cutter<O, A> {
         };
 
         app.panel_mut().note(stopped_line(slicing.next.left()), now);
-        self.finished(&slicing.planned);
     }
 
     /// The same question with the other answer lit. A closed dialog stays
@@ -1283,22 +1287,10 @@ fn filing_line(slice: &Slice) -> String {
 }
 
 // What a slice became, by identifier, which is the one thing about an issue that
-// must not be lost: a cut record keeps identifiers and nothing else, and this is
+// must not be lost: a cut note keeps identifiers and nothing else, and this is
 // the same list `warlock draft` prints.
 fn filed_line(slice: &Slice, issues: &[String]) -> String {
     format!("{} — cut into {}", named(slice), listed(issues))
-}
-
-// A slice the record already claims, which a run over the uncut slices cannot
-// reach — said rather than asserted, because a panic in a panel that is
-// otherwise running is a worse answer than a line saying what the file already
-// said.
-fn already_line(slice: &Slice, issues: &[String]) -> String {
-    format!(
-        "{} — {}, so nothing was sent",
-        named(slice),
-        crate::cut::settled_as(issues)
-    )
 }
 
 // One edge Linear turned down, in the filing path's own words: the issues exist
@@ -1309,8 +1301,8 @@ fn refused_line(slice: &Slice, refused: &str) -> String {
 }
 
 // A create that came to nothing: a team with nowhere to put an issue, a request
-// Linear turned down, a record that would not save. One line, and the run goes
-// on to the next slice.
+// Linear turned down, a note it would not take. One line, and the run goes on to
+// the next slice.
 fn unfiled_line(slice: &Slice, why: &str) -> String {
     format!("{} was not filed: {why}", named(slice))
 }
@@ -1323,22 +1315,20 @@ struct Work {
     manifest: Manifest,
     root: PathBuf,
     home: PathBuf,
-    // The manifest's own spelling, which is what a filed record is keyed by:
-    // the composer's `/draft docs/a-brief.md` and the path `/write` remembered
-    // are both spelled before they get here, so nothing below resolves a path
-    // against a working directory.
-    brief: String,
+    scope: String,
+    // `None` lists the planned projects rather than reading one.
+    project: Option<String>,
 }
 
 // One slice's drafts handed to a worker to be filed. No cancel handle, for
-// [`Filing`]'s reason: what this does cannot be taken back, and the record it
-// writes is what stops the next run filing the same drafts again.
+// [`Filing`]'s reason: what this does cannot be taken back, and the note it
+// says is what stops the next run filing the same drafts again.
 //
 // `io::sink` where [`cut::cut`](crate::cut::cut)'s progress would have gone,
 // exactly as `pushing.rs` gives `push::file` nowhere to print: the panel's lines
 // are the panel's own and worded beside the slice they are about. A send nobody
-// hears loses nothing: what this worker did is on the board and in the cut
-// record beside the brief, which is where the next `/draft` reads it from.
+// hears loses nothing: what this worker did is on the board with its note,
+// which is where the next `/draft` reads it from.
 fn spawn_filing<O: Opens>(
     workers: Workers,
     open: O,
@@ -1351,14 +1341,15 @@ fn spawn_filing<O: Opens>(
     })
 }
 
-// The project's one comment, on a worker for the reason a create is on one: it
-// is a request, and the panel keeps drawing while Linear answers it.
-fn spawn_announcement<O: Opens>(
-    workers: Workers,
-    open: O,
-    announcement: Announcement,
-) -> Once<Option<String>> {
-    workers.once(move || announcement.post(&open))
+// A skip note, on a worker for the reason a create is on one: it is a request,
+// and the panel keeps drawing while Linear answers it.
+fn spawn_skip<O: Opens>(workers: Workers, open: O, skipping: Skipping) -> Once<Option<String>> {
+    workers.once(move || {
+        skipping
+            .post(&open)
+            .err()
+            .map(|error| one_line(&error.to_string()))
+    })
 }
 
 fn spawn_fetch<O: Opens>(workers: Workers, open: O, work: Work, cancel: Cancel) -> Once<Landing> {
@@ -1370,25 +1361,32 @@ fn spawn_fetch<O: Opens>(workers: Workers, open: O, work: Work, cancel: Cancel) 
 // already waiting cannot be interrupted, so what the guard buys is a worker that
 // neither opens one after the session has gone nor hands back an answer nobody
 // will hear.
-fn fetched<O: Opens>(open: &O, work: &Work, cancel: &Cancel) -> Result<Planned, Error> {
+fn fetched<O: Opens>(open: &O, work: &Work, cancel: &Cancel) -> Result<Fetched, Error> {
     if cancel.is_cancelled() {
         return Err(Error::Cancelled);
     }
 
-    let planned = prepare(
-        &work.manifest,
-        &work.root,
-        &work.home,
-        &from_manifest_path(&work.root, &work.brief),
-        None,
-        open,
-    )?;
+    let fetched = match &work.project {
+        None => {
+            let (destination, listed) =
+                listing(&work.manifest, &work.root, &work.home, &work.scope, open)?;
+            Fetched::Listed(listing_lines(&destination, &listed))
+        }
+        Some(slug) => Fetched::Planned(Box::new(prepare(
+            &work.manifest,
+            &work.root,
+            &work.home,
+            &work.scope,
+            slug,
+            open,
+        )?)),
+    };
 
     if cancel.is_cancelled() {
         return Err(Error::Cancelled);
     }
 
-    Ok(planned)
+    Ok(fetched)
 }
 
 // The line the run opens with, over the first slice's own: the project named
@@ -1398,12 +1396,13 @@ fn cutting_line(project: &str) -> String {
     format!("cutting `{project}` into tickets")
 }
 
-// Named by the document rather than by the project, because the project has no
-// name on this side of the request: what the reader typed is a brief, and the
-// record that turns it into an id is the only thing warlock holds until the
-// board answers.
-fn reading_line(brief: &str) -> String {
-    format!("reading the project filed for `{brief}`")
+// Named by what was typed, because the project has no name on this side of the
+// request: the slug is the only thing warlock holds until the board answers.
+fn reading_line(scope: &str, project: Option<&str>) -> String {
+    match project {
+        Some(slug) => format!("reading the project `{slug}`"),
+        None => format!("listing the planned projects `{scope}` files to"),
+    }
 }
 
 // A `/draft` turned down for a pull, in the one sentence every keystroke that

@@ -12,7 +12,7 @@
 
 use std::collections::VecDeque;
 use std::fmt;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread;
 use std::time::Duration;
@@ -29,8 +29,8 @@ use crate::freshness::{Freshened, Freshening, Freshens};
 use crate::git::{Commit, Dirty, Error as GitError, Forge, Opened, PullRequest, Repository};
 use crate::inflight::Port;
 use crate::linear::{
-    Board, Error as LinearError, FetchedProject, Issue as LinearIssue, NamedIssue, NewIssue,
-    NewProject, Opens, Posts, Project as LinearProject, Queue,
+    Board, Error as LinearError, FetchedProject, Issue as LinearIssue, Listing, NamedIssue,
+    NewIssue, NewProject, Opens, Posts, Project as LinearProject, Queue,
 };
 use crate::puller::{Raised, Raises, Raising, Step, Stopping, activity_port};
 use crate::pulling::{Splits, Works};
@@ -411,6 +411,12 @@ pub(crate) struct Boarding {
     state: Option<String>,
     label: String,
     project: Option<FetchedProject>,
+    /// What [`Board::planned_projects`] answers with, empty until a test says
+    /// otherwise.
+    listing: Listing,
+    /// What [`Board::project_named`] answers with: `None` is a team holding no
+    /// project of that name, which is every push's default.
+    same_name: Option<String>,
     /// What [`Board::scope_queue`] answers with, empty until a test says
     /// otherwise: most flows here never read a queue.
     queue: Queue,
@@ -421,7 +427,6 @@ pub(crate) struct Boarding {
     first_issue: u32,
     refusals: Vec<Refusal>,
     refusing_everything: Option<String>,
-    watching: Option<PathBuf>,
     unopened: bool,
     unreachable: bool,
     held: Option<Arc<Gate>>,
@@ -430,7 +435,6 @@ pub(crate) struct Boarding {
 #[derive(Debug, Default)]
 struct Log {
     calls: Vec<Call>,
-    recorded: Vec<bool>,
     keys: Vec<String>,
     issued: u32,
 }
@@ -445,6 +449,8 @@ pub(crate) enum Call {
     MoveIssue { issue: String, state: String },
     IssueLabel { name: String, team: String },
     FetchProject(String),
+    PlannedProjects { team: String, label: String },
+    ProjectNamed { team: String, name: String },
     ScopeQueue(QueueAsked),
     NamedIssue { team: String, number: u64 },
     CreateProject(ProjectAsked),
@@ -465,6 +471,8 @@ impl Call {
             Self::MoveIssue { .. } => Op::MoveIssue,
             Self::IssueLabel { .. } => Op::IssueLabel,
             Self::FetchProject(_) => Op::FetchProject,
+            Self::PlannedProjects { .. } => Op::PlannedProjects,
+            Self::ProjectNamed { .. } => Op::ProjectNamed,
             Self::ScopeQueue(_) => Op::ScopeQueue,
             Self::NamedIssue { .. } => Op::NamedIssue,
             Self::CreateProject(_) => Op::CreateProject,
@@ -486,6 +494,8 @@ pub(crate) enum Op {
     MoveIssue,
     IssueLabel,
     FetchProject,
+    PlannedProjects,
+    ProjectNamed,
     ScopeQueue,
     NamedIssue,
     CreateProject,
@@ -549,13 +559,14 @@ impl Boarding {
             state: Some("state-backlog".to_owned()),
             label: "label-held".to_owned(),
             project: None,
+            listing: Listing::default(),
+            same_name: None,
             queue: Queue::new(Vec::new(), false),
             named: None,
             created: LinearProject::new("project-filed", url),
             first_issue: 1,
             refusals: Vec::new(),
             refusing_everything: None,
-            watching: None,
             unopened: false,
             unreachable: false,
             held: None,
@@ -625,6 +636,18 @@ impl Boarding {
         self
     }
 
+    pub(crate) fn listing(mut self, listing: Listing) -> Self {
+        self.listing = listing;
+        self
+    }
+
+    /// A team that already holds a project of whatever name a push asks about,
+    /// at `url`.
+    pub(crate) fn already_holding(mut self, url: &str) -> Self {
+        self.same_name = Some(url.to_owned());
+        self
+    }
+
     pub(crate) fn creating_project(mut self, id: &str, url: &str) -> Self {
         self.created = LinearProject::new(id, url);
         self
@@ -674,13 +697,6 @@ impl Boarding {
             until,
             message: message.to_owned(),
         });
-        self
-    }
-
-    /// Whether `path` exists is noted at every call, which is how a test says
-    /// that a record was written after the requests rather than before one.
-    pub(crate) fn watching(mut self, path: PathBuf) -> Self {
-        self.watching = Some(path);
         self
     }
 
@@ -763,11 +779,6 @@ impl Boarding {
             .collect()
     }
 
-    /// Whether the watched path existed at each call, in the order of the calls.
-    pub(crate) fn recorded_when_asked(&self) -> Vec<bool> {
-        self.log().recorded.clone()
-    }
-
     /// Every key this board was opened with, which is how a test says the value
     /// out of the key store reached the one line that reads it.
     pub(crate) fn opened_with(&self) -> Vec<String> {
@@ -784,8 +795,6 @@ impl Boarding {
         let index = {
             let mut log = self.log();
             let index = log.calls.iter().filter(|asked| asked.op() == op).count();
-            let recorded = self.watching.as_deref().is_some_and(Path::exists);
-            log.recorded.push(recorded);
             log.calls.push(call);
             index
         };
@@ -885,9 +894,25 @@ impl Board for Boarding {
         Ok(self.label.clone())
     }
 
-    fn fetch_project(&self, id: &str) -> Result<Option<FetchedProject>, LinearError> {
-        self.ask(Call::FetchProject(id.to_owned()))?;
+    fn fetch_project(&self, slug: &str) -> Result<Option<FetchedProject>, LinearError> {
+        self.ask(Call::FetchProject(slug.to_owned()))?;
         Ok(self.project.clone())
+    }
+
+    fn planned_projects(&self, team: &str, label: &str) -> Result<Listing, LinearError> {
+        self.ask(Call::PlannedProjects {
+            team: team.to_owned(),
+            label: label.to_owned(),
+        })?;
+        Ok(self.listing.clone())
+    }
+
+    fn project_named(&self, team: &str, name: &str) -> Result<Option<String>, LinearError> {
+        self.ask(Call::ProjectNamed {
+            team: team.to_owned(),
+            name: name.to_owned(),
+        })?;
+        Ok(self.same_name.clone())
     }
 
     /// Whatever queue the test wrote down, and the call recorded: the flows that

@@ -182,11 +182,10 @@ pub struct PullRun {
     scope: String,
     status: RunStatus,
     branch: String,
-    // Supplied by the caller and never read from a clock here, as
-    // `FiledRecord::filed_at` is and for the same reason: `clock::now_rfc3339`
-    // called inside this module would make every test of it depend on the wall
-    // clock, and the instant a ticket was pulled belongs to the caller that
-    // pulled it.
+    // Supplied by the caller and never read from a clock here:
+    // `clock::now_rfc3339` called inside this module would make every test of
+    // it depend on the wall clock, and the instant a ticket was pulled belongs
+    // to the caller that pulled it.
     pulled_at: String,
     // Written as `null` rather than skipped while there is no pull request, so
     // the object has one shape for its whole life: a record gaining a key
@@ -565,11 +564,11 @@ impl PullRun {
     /// ));
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
-    // Absent is `NotFound`, following `Manifest::load`, `load_sigils` and
-    // `Filed::load`. An empty record was rejected outright here, and more firmly
-    // than in those three: a default `PullRun` would have to invent a ticket, a
-    // scope, a branch and a start time, and a caller that took it for a run
-    // would resume a pull onto a branch nobody created. "This machine holds no
+    // Absent is `NotFound`, following `Manifest::load` and `load_sigils`. An
+    // empty record was rejected outright here, and more firmly than in those
+    // two: a default `PullRun` would have to invent a ticket, a scope, a
+    // branch and a start time, and a caller that took it for a run would
+    // resume a pull onto a branch nobody created. "This machine holds no
     // run for this ticket" is the answer, and only the caller — selection, or a
     // resume — knows what to do with it. Unreadable and unparseable stay named
     // for the same reason: a record broken by a hand edit must never be

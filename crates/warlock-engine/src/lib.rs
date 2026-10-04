@@ -11,7 +11,6 @@ pub mod clock;
 pub mod decide;
 pub mod document;
 pub mod drafting;
-pub mod filed;
 pub mod filing;
 pub mod fill;
 pub mod fitting;
@@ -43,12 +42,6 @@ pub use clock::now_rfc3339;
 pub use decide::decide_state;
 pub use document::Fill;
 pub use document::stub_answer;
-pub use filed::CutRecord;
-pub use filed::CutState;
-pub use filed::Filed;
-pub use filed::FiledRecord;
-pub use filed::filed_path;
-pub use filed::fold_title;
 // The crate's only unqualified `Error`, and it stays the filing one rather than
 // growing a `FilingError` alias: every other module's error is reached as
 // `route::Error`, `keys::Error` and so on, and a second spelling of one type is

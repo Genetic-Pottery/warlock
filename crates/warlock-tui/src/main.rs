@@ -194,46 +194,41 @@ enum Command {
     // because it is brief mode.
     Brief,
     #[command(
-        about = "File a brief as a project on the board this machine's sigil names.",
+        about = "File a brief as a project on the board a scope files to.",
         long_about = None
     )]
     Push {
-        // Required, like the check's: a push is about one document, and there
-        // is no whole-repository answer for an omitted path to mean.
+        // Both required, and the scope never inferred from the sigils held: a
+        // project filed to the wrong board is one nothing here can take back.
+        // A `String` and not a validated type, for the reason a scope is one on
+        // `scope add`.
+        /// Which scope's board to file to.
+        #[arg(value_name = "SCOPE")]
+        scope: String,
         /// Which brief to file.
         #[arg(value_name = "PATH")]
         path: PathBuf,
-        // Optional to clap and needed only when this machine holds sigils for
-        // more than one recorded scope, which clap has not read
-        // `.warlock/pacts.toml` to know. A `String` and not a validated type,
-        // for the reason a scope is one on `scope add`.
-        /// Which scope to file under, when this machine can file to several.
-        #[arg(long, value_name = "NAME")]
-        scope: Option<String>,
-        /// Print what would be sent, open no socket and write no record.
+        /// Print what would be sent and open no socket.
         #[arg(long)]
         dry_run: bool,
     },
     #[command(
         name = "draft",
-        about = "Draft tickets from a filed project's scope block onto the board that holds it.",
+        about = "List a scope's planned projects, or draft tickets from one project's scope block.",
         long_about = None
     )]
     Cut {
-        // Required, like the push's and for its reason: a cut is about the one
-        // brief whose project a push recorded, and there is no whole-repository
-        // answer for an omitted path to mean.
-        /// Which brief's project to cut into issues.
-        #[arg(value_name = "PATH")]
-        path: PathBuf,
-        // Optional to clap for the push's reason and settled the push's way: the
-        // board is picked through the same `resolve_filing`, and which scopes
-        // this machine can file under is in `.warlock/pacts.toml`, which clap
-        // has not read. A `String` and not a validated type, as the push's is.
-        /// Which scope to file under, when this machine can file to several.
-        #[arg(long, value_name = "NAME")]
-        scope: Option<String>,
-        /// Print the project, its status and its slices, draft nothing and write no record.
+        /// Which scope's board to read from.
+        #[arg(value_name = "SCOPE")]
+        scope: String,
+        // Optional, and the only way to name a project: without it the planned
+        // projects are listed, one slug and name a line, and whoever is at the
+        // shell picks one. Nothing here matches a name, so a slug is taken
+        // exactly or refused.
+        /// The project's slug, the hex at the end of its URL; omit it to list them.
+        #[arg(value_name = "SLUG")]
+        project: Option<String>,
+        /// Print the project, its status and its slices, and draft nothing.
         #[arg(long)]
         dry_run: bool,
     },
@@ -533,28 +528,29 @@ fn main() -> ExitCode {
         Some(Command::Brief) => brief(),
         // The one subcommand that sends anything anywhere, dispatched here for
         // every reason the writes are — it prints its lines on the ordinary
-        // screen and takes no terminal — and gated by nothing here: the sigil
+        // screen and takes no terminal — and gated by nothing here: the scope
         // picks the board rather than opening a directory, so none of what it
-        // refuses is the boundary's **3**. Every refusal it has is reached
-        // before the socket is opened; see [`mod@push`].
+        // refuses is the boundary's **3**. Every refusal but a project of the
+        // same name already on the board is reached before the socket is
+        // opened; see [`mod@push`].
         Some(Command::Push {
-            path,
             scope,
+            path,
             dry_run,
-        }) => push(&path, scope.as_deref(), dry_run),
+        }) => push(&scope, &path, dry_run),
         // The other half of that one, dispatched beside it and gated by nothing
         // here for the same reason: a cut picks its board by the sigil rather
-        // than by opening a directory, so not one of its refusals — an
-        // unrecorded path, a project the board does not know, a status that is
-        // not `Planned`, a scope block that will not parse, nothing left to cut
-        // — is the boundary's **3**. They are all ordinary **1**s through
-        // `status_for`'s catch-all. What it spends past the read is one drafting
-        // session per slice and the issues those file; see [`mod@planned`].
+        // than by opening a directory, so not one of its refusals — a slug the
+        // board does not know, a status that is not `Planned`, a scope block
+        // that will not parse, nothing left to cut — is the boundary's **3**.
+        // They are all ordinary **1**s through `status_for`'s catch-all. What it
+        // spends past the read is one drafting session per slice and the issues
+        // those file; see [`mod@planned`].
         Some(Command::Cut {
-            path,
             scope,
+            project,
             dry_run,
-        }) => planned::cut(&path, scope.as_deref(), dry_run),
+        }) => planned::cut(&scope, project.as_deref(), dry_run),
         // The third step of the workflow and the one that spends the most:
         // a splitting pass, one session per sub-task, a commit each, a push and a
         // pull request. Dispatched here with the rest and for the same reasons —

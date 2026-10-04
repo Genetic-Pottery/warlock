@@ -47,8 +47,6 @@ const TURN_LOST: &str = "it stopped without saying how it went";
 const BRIEF_COMMAND: &str = "/brief";
 const CHAT_COMMAND: &str = "/chat";
 const WRITE_COMMAND: &str = "/write";
-const PUSH_COMMAND: &str = "/push";
-const CUT_COMMAND: &str = "/draft";
 
 // Said on a *change* of register only, so a `/brief` typed in brief mode costs a
 // turn and no line. Each names the way out, because that is the one thing a
@@ -65,39 +63,6 @@ const ALREADY_CHATTING: &str = "already in chat mode — /brief is what changes 
 
 const NOT_BRIEFING: &str = "/write is only in brief mode — /brief enters it";
 
-/// The two commands that name a brief rather than the conversation, which is
-/// the whole of what this value distinguishes: they take the same argument,
-/// refuse the same way and hand the same spelling up, and only the word they
-/// are typed as and the verb they do to the document differ.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum About {
-    Push,
-    Cut,
-}
-
-impl About {
-    // The third refusal, and the same kind of line as the two above it: a bare
-    // `/push` or `/draft` is about the document this session wrote, so a session
-    // that has written none has nothing to act on — and is told the other road,
-    // because a brief committed yesterday is the ordinary thing to be filing or
-    // cutting and nothing on the screen says it can be named.
-    //
-    // Built from the command words rather than spelled around them, so the
-    // sentence cannot name a command by a spelling the card does not use, and
-    // worded once for the two of them so that the road out of one refusal
-    // cannot come to read differently from the road out of the other.
-    fn nothing_written(self) -> String {
-        let (command, does) = match self {
-            Self::Push => (PUSH_COMMAND, "files"),
-            Self::Cut => (CUT_COMMAND, "cuts"),
-        };
-        format!(
-            "{command} on its own {does} the brief {WRITE_COMMAND} wrote, and this session has \
-             written none — name one, as `{command} docs/a-brief.md`"
-        )
-    }
-}
-
 /// What a submitted draft hands the loop: a brief and what is to be done with
 /// it, or a ticket and which of the two things that read one.
 ///
@@ -106,8 +71,16 @@ impl About {
 /// had to match on a second time to find its own arm.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Wanted {
-    Filed(String),
-    Cut(String),
+    /// The scope, and the brief spelled the manifest's way.
+    Filed {
+        scope: String,
+        brief: String,
+    },
+    /// The scope, and the project's slug or `None` to list them.
+    Cut {
+        scope: String,
+        project: Option<String>,
+    },
     /// `None` is a bare `/pull`, which is answered with the scopes this machine
     /// holds — a file under the home, which this value has not got.
     Pull(Option<Takes>),
@@ -194,13 +167,6 @@ pub(crate) struct Chat<C> {
     // never fail for want of a file.
     directory: String,
     prompt: ScopePrompt,
-    // What `/write` last put on disk in this session, manifest-relative, and
-    // what `/push` would file. The most recent write and not the first: a
-    // reader who wrote the document twice meant the second one, and the file
-    // they are looking at is the one they just watched land. Nothing but a
-    // write that really happened sets this, so a refused path, a missing
-    // section and a disk that would not take the file all leave it as it was.
-    written: Option<String>,
 }
 
 impl Chat<ChatAgent> {
@@ -221,7 +187,6 @@ impl<C: Converses> Chat<C> {
             composer: Composer::default(),
             directory: DEFAULT_BRIEF_DIRECTORY.to_owned(),
             prompt: ScopePrompt::default(),
-            written: None,
         }
     }
 
@@ -406,20 +371,24 @@ impl<C: Converses> Chat<C> {
                     app.panel_mut().note(NOT_BRIEFING, now);
                 }
             }
-            // Two commands about a file rather than about the conversation, so
-            // neither asks anything of the model and neither says anything
-            // about the mode: each is about the brief it was handed, or the one
-            // `/write` wrote, whichever register the reader has since gone back
-            // to. The refusals are the whole of what this value decides about
-            // them; the brief goes up to the loop, which holds the manifest
-            // that says which board it reaches.
-            Submitted::Push(named) => {
+            // Two commands about the board rather than about the conversation,
+            // so neither asks anything of the model and neither says anything
+            // about the mode. A `/push` names its brief, never the one `/write`
+            // wrote: the file filed is the file typed. Both go up to the loop,
+            // which holds the manifest that says which board the scope reaches.
+            Submitted::Push(pushing) => {
                 return self
-                    .brief_for(app, named, About::Push, now)
-                    .map(Wanted::Filed);
+                    .brief_for(app, pushing.path, now)
+                    .map(|brief| Wanted::Filed {
+                        scope: pushing.scope.to_owned(),
+                        brief,
+                    });
             }
-            Submitted::Cut(named) => {
-                return self.brief_for(app, named, About::Cut, now).map(Wanted::Cut);
+            Submitted::Cut(drafting) => {
+                return Some(Wanted::Cut {
+                    scope: drafting.scope.to_owned(),
+                    project: drafting.project.map(ToOwned::to_owned),
+                });
             }
             // The two commands about a ticket, which are nothing to do with this
             // conversation: no turn is opened, no mode moves and nothing here is
@@ -444,30 +413,12 @@ impl<C: Converses> Chat<C> {
 
     // The one spelling of a brief's path, made here for the reason
     // `write_submit` makes it before it writes: what goes up to the loop is the
-    // manifest's own spelling, so a path somebody typed and a path remembered
-    // from `/write` cannot arrive as two different strings naming one file.
+    // manifest's own spelling.
     //
     // A typed path is read against the repository root rather than the working
     // directory, which is what the thread already names files by, and the
     // engine's own sentence is what refuses one that climbs out of it.
-    //
-    // One call for both commands, with `about` deciding nothing but the words
-    // of the refusal: a `/draft` that resolved its path a second way would be a
-    // cut of a document a `/push` would have filed somewhere else.
-    fn brief_for(
-        &self,
-        app: &mut App,
-        named: Option<&str>,
-        about: About,
-        now: Instant,
-    ) -> Option<String> {
-        let Some(named) = named else {
-            if self.written.is_none() {
-                app.panel_mut().note(about.nothing_written(), now);
-            }
-            return self.written.clone();
-        };
-
+    fn brief_for(&self, app: &mut App, named: &str, now: Instant) -> Option<String> {
         match to_manifest_path(&self.root, named) {
             Ok(stored) => Some(stored),
             Err(source) => {
@@ -493,15 +444,8 @@ impl<C: Converses> Chat<C> {
         self.settle_field();
     }
 
-    // Assigned rather than replaced: a keystroke that wrote nothing — which is
-    // every keystroke but the Enter that lands the file — leaves the session
-    // remembering the document written before it.
     pub(crate) fn write(&mut self, app: &mut App, edited: Edited, now: Instant) {
-        let wrote = write_edit(app, &self.root, &self.prompt, edited, now);
-        self.prompt = wrote.prompt;
-        if let Some(written) = wrote.written {
-            self.written = Some(written);
-        }
+        self.prompt = write_edit(app, &self.root, &self.prompt, edited, now).prompt;
     }
 }
 

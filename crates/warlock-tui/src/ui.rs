@@ -320,13 +320,6 @@ const PATH_HEADING: &str = "";
 
 const PATH_RULES: &str = "Enter writes the document, Esc writes nothing";
 
-/// Empty for [`PATH_HEADING`]'s reason: what this window is asking is one
-/// phrase, the caller already carries it as the field's own heading line, and
-/// a second one here would put two of them on the row.
-const FILING_HEADING: &str = "";
-
-const FILING_RULES: &str = "Enter files the brief to that scope, Esc files nothing";
-
 const SCOPE_CURSOR: &str = " ";
 
 const RECORD_HEADING: &str = "Record for ";
@@ -1290,7 +1283,6 @@ impl<'a> Dialog<'a> {
             Modal::Pull(undertaking) => Self::pull(undertaking),
             Modal::Review(review) => Self::review(review),
             Modal::Carry(carry) => Self::carry(carry),
-            Modal::Filing(field) => Self::scope(field, FILING_HEADING, FILING_RULES),
             Modal::Scope(field) => Self::scope(field, SCOPE_HEADING, scope::RULES),
             Modal::Record(form) => Self::record(form),
             Modal::Write(field) => Self::scope(field, PATH_HEADING, PATH_RULES),

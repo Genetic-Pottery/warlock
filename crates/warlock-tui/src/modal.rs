@@ -4,7 +4,7 @@ use crate::confirm::{
 };
 use crate::prompt::{RecordForm, RecordPrompt, ScopeField, ScopePrompt};
 
-// Three variants over `ScopeField` rather than one carrying a tag, so the field
+// Two variants over `ScopeField` rather than one carrying a tag, so the field
 // a key is typed into and the heading it is drawn under cannot come from two
 // different windows: the session answers a submit from each differently, and
 // the frame words each differently.
@@ -16,16 +16,15 @@ pub(crate) enum Modal<'a> {
     Pull(&'a Undertaking),
     Review(&'a Review),
     Carry(&'a Carry),
-    Filing(&'a ScopeField),
     Scope(&'a ScopeField),
     Record(&'a RecordForm),
     Write(&'a ScopeField),
 }
 
-// Named fields rather than positional arguments: four of these are prompts of
+// Named fields rather than positional arguments: three of these are prompts of
 // one type, and handed in by position they could be swapped with nothing to
 // catch it. Each window's state stays with the flow that owns it — the cut
-// owns its three, the push its two, the chat its write prompt — and more than
+// owns its three, the push its dialog, the chat its write prompt — and more than
 // one can be up at once, since a `/write` turn or a board's answer opens its
 // window with no keystroke. So this does not make two open impossible; it makes
 // [`Modals::current`] the one answer to which of them counts.
@@ -37,7 +36,6 @@ pub(crate) struct Modals<'a> {
     pub pull: &'a PullConfirm,
     pub review: Option<&'a Review>,
     pub carry: Option<&'a Carry>,
-    pub filing: &'a ScopePrompt,
     pub scope: &'a ScopePrompt,
     pub record: &'a RecordPrompt,
     pub write: &'a ScopePrompt,
@@ -52,7 +50,6 @@ impl Default for Modals<'_> {
             pull: &PullConfirm::Closed,
             review: None,
             carry: None,
-            filing: &ScopePrompt::Closed,
             scope: &ScopePrompt::Closed,
             record: &RecordPrompt::Closed,
             write: &ScopePrompt::Closed,
@@ -70,13 +67,12 @@ impl<'a> Modals<'a> {
     // it with nobody pressing anything — a board answering a `/draft`, a slice's
     // drafts arriving, a `/write` turn answering into its prompt.
     //
-    // The push, cut, pull, review and carry questions before the three fields,
-    // for the same reason one step down: a field can come up under one of them
-    // on no keystroke, and the question is the window somebody is looking at.
-    // Among those five and the filing field the order is a statement rather
-    // than a choice: a `/push`, `/draft` or `/pull` is typed into the composer,
-    // which takes no keys while any of them is up; the filing field's submit is
-    // what puts the push dialog up; and a slice is being reviewed, or asking
+    // The push, cut, pull, review and carry questions before the fields, for
+    // the same reason one step down: a field can come up under one of them on
+    // no keystroke, and the question is the window somebody is looking at.
+    // Among those five the order is a statement rather than a choice: a
+    // `/push`, `/draft` or `/pull` is typed into the composer, which takes no
+    // keys while any of them is up; and a slice is being reviewed, or asking
     // whether to carry on, or neither.
     //
     // The pull question sits with the other two the composer opens rather than
@@ -98,7 +94,6 @@ impl<'a> Modals<'a> {
             .or_else(|| self.pull.undertaking().map(Modal::Pull))
             .or_else(|| self.review.map(Modal::Review))
             .or_else(|| self.carry.map(Modal::Carry))
-            .or_else(|| self.filing.field().map(Modal::Filing))
             .or_else(|| self.scope.field().map(Modal::Scope))
             .or_else(|| self.record.form().map(Modal::Record))
             .or_else(|| self.write.field().map(Modal::Write))
