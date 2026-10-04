@@ -11,8 +11,10 @@
 //! cut — is asked by [`prepare`], which sends reads and no mutation, so a
 //! refusal costs nothing. Drafting is the door's own business: nothing here
 //! opens a session, and a door that drafts hands the drafts back to
-//! [`Planned::filing`]. The status is not moved on any road — an issue is
-//! created, an edge is written and a note is said, and nothing else.
+//! [`Planned::filing`]. A run creates issues, writes edges and says notes, and
+//! moves the project to `In Progress` once every slice is settled and at least
+//! one became issues: before that a project left in `Planned` is one the
+//! listing still offers, which is what a run stopped halfway needs.
 //!
 //! Nothing a slice drafts becomes an issue on its own. The drafts are printed
 //! and a line is read before [`Planned::filing`] is asked for at all, so a skip
@@ -257,8 +259,13 @@ fn cut_with<O: Opens, A: Converses, P: Converses, K: Asks, W: Write>(
             Ended::File(drafts) => drafts,
             Ended::Left => continue,
             Ended::Skipped => {
-                if let Err(error) = planned.skipping(&next).post(open) {
-                    say(out, &error.to_string());
+                match planned.skipping(&next).post(open) {
+                    Ok(moved) => {
+                        if let Some(line) = moved {
+                            say(out, &line);
+                        }
+                    }
+                    Err(error) => say(out, &error.to_string()),
                 }
                 if next.left() == 0 {
                     continue;
@@ -688,8 +695,13 @@ pub(crate) struct Planned {
     slices: Vec<Slice>,
     // Beside `slices`, one entry each: the identifiers a cut note names, which
     // is all such a note keeps of an issue, and `None` for a slice still to
-    // draft.
+    // draft. Fixed for the run, because the walk's counts are read off it.
     already: Vec<Option<Vec<String>>>,
+    // Beside `slices` too, and the one that moves: whether each slice is
+    // settled — `Some(true)` for issues, `Some(false)` for a skip — by an
+    // earlier run or this one. What decides that a slice's filing or skip is
+    // the one that finishes the project.
+    settled: Vec<Option<bool>>,
     // The open tickets the scope's queue held when the run started: Forman's
     // backlog digest, and what a draft's `waits_on` resolves against.
     open: Vec<QueuedIssue>,
@@ -718,6 +730,7 @@ impl fmt::Debug for Planned {
             .field("assignee", &self.assignee)
             .field("slices", &self.slices)
             .field("already", &self.already)
+            .field("settled", &self.settled)
             .field("became", &self.became)
             .field("at", &self.at)
             .finish_non_exhaustive()
@@ -814,6 +827,10 @@ pub(crate) fn prepare<O: Opens>(
         value: target.value().to_owned(),
         assignee,
         slices: ordered.into_iter().cloned().collect(),
+        settled: already
+            .iter()
+            .map(|issues| issues.as_ref().map(|issues| !issues.is_empty()))
+            .collect(),
         already,
         became,
         at: 0,
@@ -854,12 +871,31 @@ impl Planned {
     /// The note that records `next` as skipped, so no later run offers it,
     /// ready to be said on whichever thread the door says it on. See
     /// [`cut::skip`].
-    pub(crate) fn skipping(&self, next: &Next) -> Skipping {
+    ///
+    /// The slice counts as settled from here, before the note lands: a note
+    /// Linear turns down is said on its own line, and a later slice that then
+    /// finishes the project hides this one. That takes two failures in a row,
+    /// and holding the walk on a worker's answer was not worth it.
+    pub(crate) fn skipping(&mut self, next: &Next) -> Skipping {
+        let finishes = self.finishes(next) && self.settled.contains(&Some(true));
+        if let Some(entry) = self.settled.get_mut(next.index) {
+            *entry = Some(false);
+        }
         Skipping {
             project: self.project.clone(),
             title: next.slice.heading().to_owned(),
             value: self.value.clone(),
+            finishes,
         }
+    }
+
+    // Every slice but this one settled, so settling this one leaves nothing to
+    // draft.
+    fn finishes(&self, next: &Next) -> bool {
+        self.settled
+            .iter()
+            .enumerate()
+            .all(|(index, settled)| index == next.index || settled.is_some())
     }
 
     pub(crate) fn name(&self) -> &str {
@@ -892,6 +928,7 @@ impl Planned {
         let slice = self.slices.get(self.at)?.clone();
         let next = Next {
             slice,
+            index: self.at,
             place: self.at,
             total: self.slices.len(),
             already: self.already[self.at].clone(),
@@ -907,6 +944,7 @@ impl Planned {
             self.at += 1;
         }
         let slice = self.slices[self.at].clone();
+        let index = self.at;
         let place = self.already[..self.at]
             .iter()
             .filter(|issues| issues.is_none())
@@ -914,6 +952,7 @@ impl Planned {
         self.at += 1;
         Some(Next {
             slice,
+            index,
             place,
             total: self.left(),
             already: None,
@@ -945,6 +984,7 @@ impl Planned {
             drafts,
             needs,
             open: self.open.iter().map(LinearIssue::listed).collect(),
+            finishes: self.finishes(next),
         }
     }
 
@@ -958,6 +998,9 @@ impl Planned {
             .collect();
         if let Some(entry) = self.became.get_mut(at(&next.slice)) {
             *entry = cut.issues;
+        }
+        if let Some(entry) = self.settled.get_mut(next.index) {
+            *entry = Some(true);
         }
         Settled {
             issues,
@@ -981,6 +1024,9 @@ fn recorded(issues: &[String]) -> Vec<LinearIssue> {
 #[derive(Debug, Clone)]
 pub(crate) struct Next {
     slice: Slice,
+    // Where the slice sits in the walk, which `place` is not once the walk
+    // passes over what is already cut.
+    index: usize,
     place: usize,
     total: usize,
     already: Option<Vec<String>>,
@@ -1020,6 +1066,7 @@ pub(crate) struct Filing {
     drafts: Vec<Draft>,
     needs: Vec<Vec<LinearIssue>>,
     open: Vec<LinearIssue>,
+    finishes: bool,
 }
 
 impl fmt::Debug for Filing {
@@ -1034,6 +1081,7 @@ impl fmt::Debug for Filing {
             .field("drafts", &self.drafts)
             .field("needs", &self.needs)
             .field("open", &self.open)
+            .field("finishes", &self.finishes)
             .finish()
     }
 }
@@ -1044,9 +1092,10 @@ impl Filing {
     // about.
     pub(crate) fn file<O: Opens, W: Write>(&self, open: &O, out: &mut W) -> Result<Cut, Error> {
         let needs: Vec<&[LinearIssue]> = self.needs.iter().map(Vec::as_slice).collect();
+        let board = open.open(&self.value);
 
-        cut::cut(
-            &open.open(&self.value),
+        let mut cut = cut::cut(
+            &board,
             &self.root,
             cut::Filing {
                 project: &self.project,
@@ -1060,7 +1109,11 @@ impl Filing {
                 open: &self.open,
             },
             out,
-        )
+        )?;
+        if self.finishes {
+            cut.reported.push(cut::finish(&board, &self.project));
+        }
+        Ok(cut)
     }
 }
 
@@ -1077,6 +1130,7 @@ pub(crate) struct Skipping {
     project: String,
     title: String,
     value: String,
+    finishes: bool,
 }
 
 impl fmt::Debug for Skipping {
@@ -1085,13 +1139,18 @@ impl fmt::Debug for Skipping {
             .field("project", &self.project)
             .field("title", &self.title)
             .field("value", &"<redacted>")
+            .field("finishes", &self.finishes)
             .finish()
     }
 }
 
 impl Skipping {
-    pub(crate) fn post<O: Opens>(&self, open: &O) -> Result<(), Error> {
-        cut::skip(&open.open(&self.value), &self.project, &self.title)
+    /// The note said, and the line about the project's move when this skip is
+    /// the one that finishes it.
+    pub(crate) fn post<O: Opens>(&self, open: &O) -> Result<Option<String>, Error> {
+        let board = open.open(&self.value);
+        cut::skip(&board, &self.project, &self.title)?;
+        Ok(self.finishes.then(|| cut::finish(&board, &self.project)))
     }
 }
 

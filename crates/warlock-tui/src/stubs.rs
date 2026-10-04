@@ -408,6 +408,8 @@ pub(crate) struct Boarding {
     viewer: String,
     team: Option<String>,
     status: Option<String>,
+    /// What [`Board::project_status`] answers with, whatever name is asked.
+    moved_to: Option<String>,
     state: Option<String>,
     label: String,
     project: Option<FetchedProject>,
@@ -444,6 +446,8 @@ pub(crate) enum Call {
     Viewer,
     Team(String),
     BacklogStatus,
+    ProjectStatus(String),
+    MoveProject { project: String, status: String },
     BacklogState(String),
     WorkflowState { team: String, name: String },
     MoveIssue { issue: String, state: String },
@@ -466,6 +470,8 @@ impl Call {
             Self::Viewer => Op::Viewer,
             Self::Team(_) => Op::Team,
             Self::BacklogStatus => Op::BacklogStatus,
+            Self::ProjectStatus(_) => Op::ProjectStatus,
+            Self::MoveProject { .. } => Op::MoveProject,
             Self::BacklogState(_) => Op::BacklogState,
             Self::WorkflowState { .. } => Op::WorkflowState,
             Self::MoveIssue { .. } => Op::MoveIssue,
@@ -489,6 +495,8 @@ pub(crate) enum Op {
     Viewer,
     Team,
     BacklogStatus,
+    ProjectStatus,
+    MoveProject,
     BacklogState,
     WorkflowState,
     MoveIssue,
@@ -556,6 +564,7 @@ impl Boarding {
             viewer: VIEWER.to_owned(),
             team: Some("team-1".to_owned()),
             status: Some("status-backlog".to_owned()),
+            moved_to: Some("status-in-progress".to_owned()),
             state: Some("state-backlog".to_owned()),
             label: "label-held".to_owned(),
             project: None,
@@ -651,6 +660,23 @@ impl Boarding {
     pub(crate) fn creating_project(mut self, id: &str, url: &str) -> Self {
         self.created = LinearProject::new(id, url);
         self
+    }
+
+    pub(crate) fn without_project_status(mut self) -> Self {
+        self.moved_to = None;
+        self
+    }
+
+    /// Every project move asked for, as the project id and the status id.
+    pub(crate) fn moves(&self) -> Vec<(String, String)> {
+        self.log()
+            .calls
+            .iter()
+            .filter_map(|call| match call {
+                Call::MoveProject { project, status } => Some((project.clone(), status.clone())),
+                _ => None,
+            })
+            .collect()
     }
 
     pub(crate) fn without_team(mut self) -> Self {
@@ -854,6 +880,19 @@ impl Board for Boarding {
     fn backlog_status(&self) -> Result<Option<String>, LinearError> {
         self.ask(Call::BacklogStatus)?;
         Ok(self.status.clone())
+    }
+
+    fn project_status(&self, name: &str) -> Result<Option<String>, LinearError> {
+        self.ask(Call::ProjectStatus(name.to_owned()))?;
+        Ok(self.moved_to.clone())
+    }
+
+    fn move_project(&self, project: &str, status: &str) -> Result<String, LinearError> {
+        self.ask(Call::MoveProject {
+            project: project.to_owned(),
+            status: status.to_owned(),
+        })?;
+        Ok(project.to_owned())
     }
 
     fn backlog_state(&self, team: &str) -> Result<Option<String>, LinearError> {

@@ -928,6 +928,14 @@ impl<B: Board> Board for Quiet<B> {
         self.asked(Board::backlog_status)
     }
 
+    fn project_status(&self, name: &str) -> Result<Option<String>, LinearError> {
+        self.asked(|board| board.project_status(name))
+    }
+
+    fn move_project(&self, project: &str, status: &str) -> Result<String, LinearError> {
+        self.asked(|board| board.move_project(project, status))
+    }
+
     fn backlog_state(&self, team: &str) -> Result<Option<String>, LinearError> {
         self.asked(|board| board.backlog_state(team))
     }

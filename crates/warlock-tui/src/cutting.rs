@@ -515,8 +515,9 @@ impl<O: Opens, A: Converses> Cutter<O, A> {
         }
     }
 
-    // Every skip note that has landed, said only when Linear turned it down: a
-    // note that was said is on the project and not again here.
+    // Every skip note that has landed, said only when Linear turned it down or
+    // when the skip was the one that moved the project: a note that was said is
+    // on the project and not again here.
     fn noted(&mut self, app: &mut App, now: Instant) {
         let mut lines = Vec::new();
         self.skipping.retain(|once| {
@@ -1347,8 +1348,7 @@ fn spawn_skip<O: Opens>(workers: Workers, open: O, skipping: Skipping) -> Once<O
     workers.once(move || {
         skipping
             .post(&open)
-            .err()
-            .map(|error| one_line(&error.to_string()))
+            .unwrap_or_else(|error| Some(one_line(&error.to_string())))
     })
 }
 
