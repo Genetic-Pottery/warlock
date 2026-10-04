@@ -577,7 +577,7 @@ impl Boarding {
             project: None,
             listing: Listing::default(),
             same_name: None,
-            queue: Queue::new(Vec::new(), false),
+            queue: Queue::new(Vec::new()),
             named: None,
             created: LinearProject::new("project-filed", url),
             first_issue: 1,

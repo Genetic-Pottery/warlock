@@ -2576,13 +2576,10 @@ mod backlog {
     fn the_brief_a_session_is_given_lists_the_open_tickets_in_forman_s_words() {
         let repo = a_scoped_repository();
         let home = a_home(repo.path());
-        let linear = a_sliced_project(SLICED).queueing(Queue::new(
-            vec![
-                open("WAR-10", "The tenth ticket"),
-                open("WAR-9", "The ninth ticket"),
-            ],
-            false,
-        ));
+        let linear = a_sliced_project(SLICED).queueing(Queue::new(vec![
+            open("WAR-10", "The tenth ticket"),
+            open("WAR-9", "The ninth ticket"),
+        ]));
 
         let brief = prepared(repo.path(), home.path(), &linear).drafting_brief();
 

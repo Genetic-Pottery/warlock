@@ -161,7 +161,6 @@ impl fmt::Display for Reason {
 ///             StateType::new("started"), Priority::Urgent, vec![],
 ///         ),
 ///     ],
-///     false,
 /// );
 ///
 /// let choice = choose(&queue, "In Review", &[]);
@@ -400,18 +399,16 @@ impl fmt::Display for Refusal {
 
 /// The ticket a person named, if the scope's rules leave it workable.
 ///
-/// One request, and the design tension it settles is worth writing down. The
+/// One read, and the design tension it settles is worth writing down. The
 /// queue's three filters — team, label, assignee — run on Linear's side, so a
 /// ticket that is merely *absent* from the queue cannot say which of them it
 /// failed: "not in your queue" is equally true of a teammate's ticket, an
 /// unlabelled one, and one on another team. There were two honest ways out. Read
-/// the queue and then look the missing identifier up to diagnose it, which is two
-/// requests and still cannot work a ticket sitting past the queue's one page; or
-/// read the named ticket on its own with the queue's node selection and none of
-/// its filters, and check the three here — which is this. The diagnosis is then a
-/// pure check over facts the board stated, one request answers one question, and
-/// a ticket beyond the first page of a busy queue is still nameable. No retry, no
-/// second page.
+/// the queue and then look the missing identifier up to diagnose it; or read the
+/// named ticket on its own with the queue's node selection and none of its
+/// filters, and check the three here — which is this. The diagnosis is then a
+/// pure check over facts the board stated, and one read answers one question. No
+/// retry.
 ///
 /// What is checked after the three is [`unavailable`], the same function
 /// [`choose`] skips by, so a named ticket can only be refused for a reason the

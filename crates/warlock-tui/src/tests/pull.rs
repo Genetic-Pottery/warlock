@@ -159,7 +159,7 @@ fn blocked(identifier: &str, by: &str, holder: Option<&str>) -> QueuedIssue {
 }
 
 fn queue(issues: impl IntoIterator<Item = QueuedIssue>) -> Queue {
-    Queue::new(issues.into_iter().collect(), false)
+    Queue::new(issues.into_iter().collect())
 }
 
 /// A board that answers the queue, whose viewer every ticket below is assigned to.
