@@ -144,11 +144,6 @@ pub(crate) enum Pressed {
     // And the two-answer question a skipped slice leaves behind, which is the
     // quit dialog's shape said in the run's words.
     Carry(CarryAnswered),
-    // The field that comes up in front of that dialog when the machine can file
-    // to more than one board. A fourth variant over `Edited` for `Scope` and
-    // `Write`'s reason: the three are the same keystrokes and three different
-    // things to do with a submit.
-    Filing(Edited),
     Scope(Edited),
     Record(RecordEdited),
     Write(Edited),
@@ -247,7 +242,6 @@ pub(crate) fn press_for(
                 Pressed::Scroll,
             ),
             Modal::Carry(asked) => Pressed::Carry(carry_answer_for(key, asked.answer())),
-            Modal::Filing(field) => Pressed::Filing(edit_for(key, field)),
             Modal::Scope(field) => Pressed::Scope(edit_for(key, field)),
             Modal::Record(form) => Pressed::Record(record_edit_for(key, form)),
             Modal::Write(field) => Pressed::Write(edit_for(key, field)),

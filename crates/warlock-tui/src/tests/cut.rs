@@ -1,11 +1,10 @@
-use std::fs;
 use std::path::Path;
 
 use tempfile::TempDir;
+use warlock_engine::Destination;
 use warlock_engine::drafting::Draft;
-use warlock_engine::{CutRecord, Destination, Filed, FiledRecord, filed_path};
 
-use super::{Cut, Filing, Slice, announce, cut};
+use super::{Cut, Filing, Slice, cut, fold_title, noted, skip};
 use crate::error::Error;
 use crate::error::status_for;
 use crate::linear::{Board, Issue as LinearIssue};
@@ -17,54 +16,12 @@ const TEAM: &str = "WAR";
 
 const LABEL: &str = "warlock";
 
-const BRIEF_PATH: &str = "docs/brief.md";
-
 const PROJECT_ID: &str = "b229262b-22aa-444a-a8af-0a2a3f4ef100";
-
-const URL: &str = "https://linear.app/acme/project/cut-a-project-1a2b3c";
 
 const TITLE: &str = "Read the file";
 
-fn a_dir() -> TempDir {
-    tempfile::tempdir().expect("a temporary directory")
-}
-
-// A repository that has filed one brief and cut nothing out of it, which is the
-// state a first cut starts from.
 fn a_repository() -> TempDir {
-    let repo = a_dir();
-    saving(repo.path(), &Filed::with_records([a_record(repo.path())]));
-    repo
-}
-
-// The same repository, with this slice already cut into the issues named.
-fn cut_already(issues: &[&str]) -> TempDir {
-    let repo = a_dir();
-    let mut record = a_record(repo.path());
-    record.push_cut(CutRecord::new(
-        TITLE,
-        issues.iter().copied(),
-        "2026-09-21T09:00:00Z",
-    ));
-    saving(repo.path(), &Filed::with_records([record]));
-    repo
-}
-
-fn a_record(root: &Path) -> FiledRecord {
-    FiledRecord::new(
-        root,
-        root.join(BRIEF_PATH),
-        PROJECT_ID,
-        URL,
-        SCOPE,
-        TEAM,
-        "2026-09-21T09:14:00Z",
-    )
-    .expect("a path inside the repository")
-}
-
-fn saving(root: &Path, filed: &Filed) {
-    filed.save(root).expect("a record file that saves");
+    tempfile::tempdir().expect("a temporary directory")
 }
 
 fn a_draft(title: &str, body: &str) -> Draft {
@@ -83,7 +40,6 @@ fn destination() -> Destination {
 
 fn filing(destination: &Destination) -> Filing<'_> {
     Filing {
-        brief: BRIEF_PATH,
         project: PROJECT_ID,
         destination,
         // What `prepare` resolved for the run: `cut` is handed the id rather
@@ -205,18 +161,6 @@ fn said(error: &Error) -> String {
     error.to_string()
 }
 
-fn filed_now(root: &Path) -> Filed {
-    Filed::load(root).expect("a record file that loads")
-}
-
-fn cuts_of(root: &Path) -> Vec<CutRecord> {
-    filed_now(root)
-        .record(BRIEF_PATH)
-        .expect("the brief is filed")
-        .cuts()
-        .to_vec()
-}
-
 fn filed(outcome: Result<Cut, Error>) -> Vec<String> {
     issues_of(outcome)
         .iter()
@@ -225,23 +169,28 @@ fn filed(outcome: Result<Cut, Error>) -> Vec<String> {
 }
 
 fn issues_of(outcome: Result<Cut, Error>) -> Vec<LinearIssue> {
-    match outcome.expect("a slice that files") {
-        Cut::Filed { issues, .. } => issues,
-        Cut::Already(issues) => panic!("nothing was sent: {issues:?}"),
-    }
+    outcome.expect("a slice that files").issues
 }
 
 fn reported(outcome: Result<Cut, Error>) -> Vec<String> {
-    match outcome.expect("a slice that files") {
-        Cut::Filed { reported, .. } => reported,
-        Cut::Already(issues) => panic!("nothing was sent: {issues:?}"),
-    }
+    outcome.expect("a slice that files").reported
+}
+
+fn notes_of(linear: &Boarding) -> Vec<String> {
+    linear
+        .comments()
+        .into_iter()
+        .map(|(project, body)| {
+            assert_eq!(project, PROJECT_ID, "a note went to another project");
+            body
+        })
+        .collect()
 }
 
 // One earlier slice of this same run, filed against its own stand-in so the
 // conversation the slice under test has is only its own. This is the road the
 // issues of a `depends_on` arrive by: they are kept from the cut that made
-// them, because a cut record holds identifiers and a relation is written by id.
+// them, because a note holds identifiers and a relation is written by id.
 fn an_earlier_slice(repo: &Path) -> Vec<LinearIssue> {
     let linear = Boarding::filing("").numbering_from(100);
 
@@ -257,7 +206,7 @@ fn an_earlier_slice(repo: &Path) -> Vec<LinearIssue> {
 }
 
 #[test]
-fn a_slice_becomes_one_issue_per_draft_and_a_cut_record() {
+fn a_slice_becomes_one_issue_per_draft_and_one_note() {
     let repo = a_repository();
     let linear = a_whole_cut();
 
@@ -271,21 +220,16 @@ fn a_slice_becomes_one_issue_per_draft_and_a_cut_record() {
             Op::BacklogState,
             Op::IssueLabel,
             Op::CreateIssue,
-            Op::CreateIssue
+            Op::CreateIssue,
+            Op::Comment
         ],
-        "one call per operation, one create per draft, and no retry"
+        "one call per operation, one create per draft, one note, and no retry"
     );
     assert!(printed.contains(TITLE), "{printed}");
     assert!(printed.contains("`WAR-125`, `WAR-126`"), "{printed}");
-
-    let cuts = cuts_of(repo.path());
-    assert_eq!(cuts.len(), 1, "{cuts:?}");
-    assert_eq!(cuts[0].title(), TITLE);
-    assert_eq!(cuts[0].key(), "read the file");
-    assert_eq!(cuts[0].issues(), ["WAR-125", "WAR-126"]);
-    assert!(
-        !cuts[0].cut_at().is_empty(),
-        "a cut is recorded with a time"
+    assert_eq!(
+        notes_of(&linear),
+        ["Warlock cut slice `Read the file` into `WAR-125`, `WAR-126`."]
     );
 }
 
@@ -381,44 +325,6 @@ fn the_label_the_board_answers_is_the_one_every_issue_carries() {
 }
 
 #[test]
-fn a_slice_the_record_already_names_sends_nothing() {
-    let repo = cut_already(&["WAR-125", "WAR-126"]);
-    let before = fs::read(filed_path(repo.path())).expect("the record that was saved");
-
-    let (outcome, printed) = cut_into(repo.path(), &Boarding::unreachable(), TITLE, &two_drafts());
-
-    let Cut::Already(issues) = outcome.expect("an already cut slice is an answer") else {
-        panic!("a slice with a cut record was filed again");
-    };
-    assert_eq!(issues, ["WAR-125", "WAR-126"]);
-    assert!(printed.contains("already cut"), "{printed}");
-    assert!(printed.contains("`WAR-125`, `WAR-126`"), "{printed}");
-    assert_eq!(
-        fs::read(filed_path(repo.path())).expect("the record again"),
-        before,
-        "a slice that sent nothing rewrote its record"
-    );
-}
-
-#[test]
-fn an_already_cut_slice_is_matched_on_the_folded_key() {
-    let repo = cut_already(&["WAR-125"]);
-
-    let (outcome, printed) = cut_into(
-        repo.path(),
-        &Boarding::unreachable(),
-        "  READ   the File  ",
-        &two_drafts(),
-    );
-
-    let Cut::Already(issues) = outcome.expect("the same slice, spelled twice") else {
-        panic!("a retitled spelling of a cut slice was filed again");
-    };
-    assert_eq!(issues, ["WAR-125"]);
-    assert!(printed.contains("already cut"), "{printed}");
-}
-
-#[test]
 fn a_team_with_no_backlog_state_is_refused_naming_the_team() {
     let repo = a_repository();
     let linear = a_whole_cut().without_backlog_state();
@@ -437,7 +343,7 @@ fn a_team_with_no_backlog_state_is_refused_naming_the_team() {
     let message = said(&error);
     assert!(message.contains(TEAM), "{message}");
     assert!(message.contains("Backlog"), "{message}");
-    assert!(cuts_of(repo.path()).is_empty(), "a refusal recorded a cut");
+    assert!(linear.comments().is_empty(), "a refusal noted a cut");
 }
 
 #[test]
@@ -466,23 +372,10 @@ fn an_unknown_team_is_refused_before_anything_is_created() {
         [Op::Team],
         "anything after the team was asked"
     );
-    assert!(cuts_of(repo.path()).is_empty(), "a refusal recorded a cut");
 }
 
 #[test]
-fn a_brief_no_record_names_is_refused_with_nothing_sent() {
-    let repo = a_dir();
-
-    let error = refusal(cut_into(repo.path(), &Boarding::unreachable(), TITLE, &two_drafts()).0);
-
-    assert!(
-        matches!(&error, Error::NoRecord { path } if path == BRIEF_PATH),
-        "{error:?}"
-    );
-}
-
-#[test]
-fn a_create_that_fails_partway_records_nothing() {
+fn a_create_that_fails_partway_notes_nothing() {
     let repo = a_repository();
     let linear = a_whole_cut().refuse_from(Op::CreateIssue, 1, "Entity not found");
 
@@ -495,27 +388,17 @@ fn a_create_that_fails_partway_records_nothing() {
         said(&error)
     );
     assert!(
-        cuts_of(repo.path()).is_empty(),
-        "a half filed slice was recorded as cut"
+        linear.comments().is_empty(),
+        "a half filed slice was noted as cut"
     );
 }
 
-#[cfg(unix)]
 #[test]
-fn the_identifiers_come_back_when_the_record_cannot_be_written() {
-    use std::os::unix::fs::PermissionsExt as _;
-
+fn the_identifiers_come_back_when_the_note_is_refused() {
     let repo = a_repository();
-    let linear = a_whole_cut();
-    let records = repo.path().join(".warlock");
-    fs::set_permissions(&records, fs::Permissions::from_mode(0o555))
-        .expect("chmods the record directory read-only");
+    let linear = a_whole_cut().refuse(Op::Comment, "Comment is required");
 
     let (outcome, printed) = cut_into(repo.path(), &linear, TITLE, &two_drafts());
-
-    // Back to writable before anything can fail, so the temporary directory can
-    // still be removed.
-    fs::set_permissions(&records, fs::Permissions::from_mode(0o755)).expect("chmods it back");
 
     let error = refusal(outcome);
     assert!(
@@ -524,13 +407,15 @@ fn the_identifiers_come_back_when_the_record_cannot_be_written() {
     );
     let message = said(&error);
     assert!(message.contains("`WAR-125`, `WAR-126`"), "{message}");
+    assert!(message.contains("Comment is required"), "{message}");
     assert!(
         printed.contains("`WAR-125`, `WAR-126`"),
         "the issues exist and were not named: {printed}"
     );
-    assert!(
-        cuts_of(repo.path()).is_empty(),
-        "the record the save failed on was written anyway"
+    assert_eq!(
+        linear.positions_of(Op::Comment).len(),
+        1,
+        "the refused note was tried a second time"
     );
 }
 
@@ -590,7 +475,7 @@ fn a_slice_writes_its_own_edges_and_one_from_every_issue_it_waits_on() {
             edge("issue-100", "issue-127"),
         ],
     );
-    assert_eq!(linear.requests(), 11, "one call per operation and no retry");
+    assert_eq!(linear.requests(), 12, "one call per operation and no retry");
 }
 
 #[test]
@@ -629,7 +514,7 @@ fn a_refused_relation_is_a_reported_line_and_the_slice_still_files() {
 
     let outcome = cut_into(repo.path(), &linear, TITLE, &drafts).0;
 
-    let Ok(Cut::Filed { issues, reported }) = outcome else {
+    let Ok(Cut { issues, reported }) = outcome else {
         panic!("a refused edge failed the slice: {outcome:?}");
     };
     let identifiers: Vec<&str> = issues.iter().map(LinearIssue::identifier).collect();
@@ -640,13 +525,14 @@ fn a_refused_relation_is_a_reported_line_and_the_slice_still_files() {
     assert!(reported[0].contains("Entity not found"), "{}", reported[0]);
     assert_eq!(
         linear.requests(),
-        6,
+        7,
         "the refused edge was tried a second time"
     );
-
-    let cuts = cuts_of(repo.path());
-    assert_eq!(cuts.len(), 1, "a missing edge left the slice unrecorded");
-    assert_eq!(cuts[0].issues(), ["WAR-125", "WAR-126"]);
+    assert_eq!(
+        notes_of(&linear),
+        ["Warlock cut slice `Read the file` into `WAR-125`, `WAR-126`."],
+        "a missing edge left the slice unnoted"
+    );
 }
 
 #[test]
@@ -681,52 +567,85 @@ fn every_refused_edge_of_a_slice_is_reported_and_the_rest_are_still_written() {
 }
 
 #[test]
-fn the_project_comment_names_every_issue_and_says_the_status_was_not_moved() {
+fn the_note_is_said_after_every_issue_and_every_edge() {
+    let repo = a_repository();
     let linear = a_whole_cut();
 
-    let line = announce(
-        &linear,
-        PROJECT_ID,
-        &["WAR-125".to_owned(), "WAR-126".to_owned()],
-    );
+    cut_into(repo.path(), &linear, TITLE, &ordered_drafts())
+        .0
+        .expect("a slice that files");
 
-    assert!(line.is_none(), "{line:?}");
-    // The project and the text are the whole of what a comment carries: what
-    // `linear.rs` puts on the wire for one is held by its own tests.
-    let comments = linear.comments();
-    assert_eq!(comments.len(), 1, "{comments:?}");
-    let (project, body) = &comments[0];
-    assert_eq!(project, PROJECT_ID);
-    assert!(body.contains("`WAR-125`, `WAR-126`"), "{body}");
-    assert!(body.contains("status was not moved"), "{body}");
+    let notes = linear.positions_of(Op::Comment);
+    assert_eq!(notes.len(), 1, "{:?}", linear.ops());
+    assert_eq!(notes[0], linear.requests() - 1, "{:?}", linear.ops());
+}
+
+#[test]
+fn a_skip_is_one_note_naming_the_slice() {
+    let linear = a_whole_cut();
+
+    skip(&linear, PROJECT_ID, TITLE).expect("a skip that is noted");
+
     assert_eq!(
-        linear.ops(),
-        [Op::Comment],
-        "one call per operation and no retry"
+        notes_of(&linear),
+        ["Warlock skipped slice `Read the file`."]
+    );
+    assert_eq!(linear.ops(), [Op::Comment]);
+}
+
+#[test]
+fn a_refused_skip_is_unskipped_naming_the_slice() {
+    let linear = a_whole_cut().refuse(Op::Comment, "Comment is required");
+
+    let error = skip(&linear, PROJECT_ID, TITLE).expect_err("a refused note");
+
+    assert!(
+        matches!(&error, Error::Unskipped { title, .. } if title == TITLE),
+        "{error:?}"
+    );
+    assert!(said(&error).contains("Comment is required"), "{error}");
+}
+
+#[test]
+fn both_note_shapes_read_back_as_written() {
+    let linear = a_whole_cut();
+    let repo = a_repository();
+    cut_into(repo.path(), &linear, TITLE, &two_drafts())
+        .0
+        .expect("a slice that files");
+    skip(&linear, PROJECT_ID, "Fold the Title").expect("a skip that is noted");
+
+    let read = noted(&notes_of(&linear));
+
+    assert_eq!(
+        read,
+        [
+            (
+                "read the file".to_owned(),
+                vec!["WAR-125".to_owned(), "WAR-126".to_owned()]
+            ),
+            ("fold the title".to_owned(), Vec::new()),
+        ]
     );
 }
 
 #[test]
-fn a_refused_comment_is_a_reported_line_and_leaves_the_slice_filed() {
-    let repo = a_repository();
-    let linear = a_whole_cut().refuse(Op::Comment, "Comment is required");
+fn a_comment_that_is_not_a_note_is_left_out() {
+    let read = noted(&[
+        "Warlock cut slice without a title".to_owned(),
+        "Warlock skipped slice nothing in backticks.".to_owned(),
+        "Warlock cut slice `Named` into nothing at all.".to_owned(),
+        "Looks good to me".to_owned(),
+        "Warlock skipped slice `Kept`.\n".to_owned(),
+    ]);
 
-    let identifiers = filed(cut_into(repo.path(), &linear, TITLE, &two_drafts()).0);
-    let line = announce(&linear, PROJECT_ID, &identifiers).expect("a refused comment is a line");
+    assert_eq!(read, [("kept".to_owned(), Vec::new())]);
+}
 
-    assert_eq!(identifiers, ["WAR-125", "WAR-126"]);
-    assert!(line.contains("Comment is required"), "{line}");
-    assert!(!line.contains('\n'), "a reported line is one line: {line}");
-    assert_eq!(
-        linear.requests(),
-        6,
-        "the refused comment was tried a second time"
-    );
-    assert_eq!(
-        cuts_of(repo.path())[0].issues(),
-        ["WAR-125", "WAR-126"],
-        "a refused comment took the cut record with it"
-    );
+#[test]
+fn a_title_is_folded_for_case_and_whitespace_only() {
+    assert_eq!(fold_title("  READ   the\tFile "), "read the file");
+    assert_ne!(fold_title("Read the file"), fold_title("Read the files"));
 }
 
 // Forman's `blocked_by: ["TEAM-42"]`: a draft waiting on a ticket that already

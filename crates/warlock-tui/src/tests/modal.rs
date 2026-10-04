@@ -10,7 +10,7 @@ fn nothing_up_is_no_modal() {
 }
 
 #[test]
-fn the_precedence_is_quit_the_five_questions_then_the_four_fields() {
+fn the_precedence_is_quit_the_five_questions_then_the_three_fields() {
     let push = PushConfirm::open(
         "Push a brief to the board",
         Destination::new("warlock-team", "Warlock", "warlock", "work"),
@@ -25,7 +25,6 @@ fn the_precedence_is_quit_the_five_questions_then_the_four_fields() {
     );
     let review = Review::open("slice 1", vec!["A draft".to_owned()]);
     let carry = Carry::open("2 slices");
-    let filing = ScopePrompt::open("Which board", "work");
     let scope = ScopePrompt::open("crates/warlock-engine", "data-plane");
     let record = RecordPrompt::open("crates/warlock-engine", "data-plane");
     let write = ScopePrompt::open("Write the brief to", "docs/brief.md");
@@ -39,7 +38,6 @@ fn the_precedence_is_quit_the_five_questions_then_the_four_fields() {
         pull: &pull,
         review: Some(&review),
         carry: Some(&carry),
-        filing: &filing,
         scope: &scope,
         record: &record,
         write: &write,
@@ -54,7 +52,6 @@ fn the_precedence_is_quit_the_five_questions_then_the_four_fields() {
             Modal::Pull(_) => modals.pull = &PullConfirm::Closed,
             Modal::Review(_) => modals.review = None,
             Modal::Carry(_) => modals.carry = None,
-            Modal::Filing(_) => modals.filing = &ScopePrompt::Closed,
             Modal::Scope(_) => modals.scope = &ScopePrompt::Closed,
             Modal::Record(_) => modals.record = &RecordPrompt::Closed,
             Modal::Write(_) => modals.write = &ScopePrompt::Closed,
@@ -70,7 +67,6 @@ fn the_precedence_is_quit_the_five_questions_then_the_four_fields() {
             Modal::Pull(pull.undertaking().expect("open")),
             Modal::Review(&review),
             Modal::Carry(&carry),
-            Modal::Filing(filing.field().expect("open")),
             Modal::Scope(scope.field().expect("open")),
             Modal::Record(record.form().expect("open")),
             Modal::Write(write.field().expect("open")),

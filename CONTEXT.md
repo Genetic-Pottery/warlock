@@ -1,8 +1,11 @@
 ## Vocabulary
-- **Pact:** Any directory can be pacted. This means that it is parsed by the AI, a summary of the directory is written, and the contents are hashed so the TUI can visualize if the document is likely still true.
+- **Pact:** Any directory can be pacted. This means that it is parsed by the AI, a summary of the directory is written, and the contents are hashed so the TUI can visualize if the AI's ability to quickly understand the directory is still true.
 - **Fresh:** After pacting a directory it turns green in the TUI representing the AI has understood the directory and the WARLOCK.md produced from the pact is still true.
 - **Stale:** When files are changed in a pacted directory it turns yellow in the TUI from the hash breaking, this means the AI likely does not understand the directory given the WARLOCK.md can possibly not refelct reality anymore.
-- **Scope:** Any pacted directory can be given a scope, a scope says only a person who has a matching sigil can make changes to this directory.
+- **Scope:** Any pacted directory can be given a scope, a scope is associated with a team in Linear, and scope says only a person who has a matching sigil can make changes to this directory.
 - **Sigil:** Local strings in the warlock config which a user can freely change to ensure access to scoped directories. Scope and Sigil system is not a hard gate, it is a guardrail to prevent the AI from running away in a team setting, this can easily be side stepped because in real life there are many situations where you need to go around this. The final human gate is always a human reviewed PR so this method stays sane.
 - **/brief:** Starts a conversation with warlock where you ideate a large portion of work. Warlock pushes back on your assumptions and once an understanding is reached you can write a document.
 - **/write:** Writes a brief document to a chosen directory.
+- **/push:** Pushes the written .md brief file to Linear as a Linear Project.
+- **/draft:** Pulls a Linear Project and begins to cut it up into Linear Issues, if there are any open questions about the ticket the AI will prompt the user for more details.
+- **/pull:** Pull an individual ticket which must has a customizable label meaning warlock can pull it, it must be assigned to the user, it must not be blocked by other tickets, once work begins it can be recovered from failure states, also work must be scoped to directories the user has access to (sigils).

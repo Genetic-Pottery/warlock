@@ -133,7 +133,9 @@ pub(crate) trait Board {
     fn workflow_state(&self, team: &str, name: &str) -> Result<Option<String>, Error>;
     fn move_issue(&self, issue: &str, state: &str) -> Result<String, Error>;
     fn issue_label_id(&self, name: &str, team: &str) -> Result<String, Error>;
-    fn fetch_project(&self, id: &str) -> Result<Option<FetchedProject>, Error>;
+    fn fetch_project(&self, slug: &str) -> Result<Option<FetchedProject>, Error>;
+    fn planned_projects(&self, team: &str, label: &str) -> Result<Listing, Error>;
+    fn project_named(&self, team: &str, name: &str) -> Result<Option<String>, Error>;
     fn scope_queue(&self, team: &str, label: &str, assignee: &str) -> Result<Queue, Error>;
     fn named_issue(&self, team: &str, number: u64) -> Result<Option<NamedIssue>, Error>;
     fn create_project(&self, project: &NewProject<'_>) -> Result<Project, Error>;
@@ -185,8 +187,16 @@ impl<P: Posts> Board for Linear<P> {
         issue_label_id(&self.posts, name, team)
     }
 
-    fn fetch_project(&self, id: &str) -> Result<Option<FetchedProject>, Error> {
-        fetch_project(&self.posts, id)
+    fn fetch_project(&self, slug: &str) -> Result<Option<FetchedProject>, Error> {
+        fetch_project(&self.posts, slug)
+    }
+
+    fn planned_projects(&self, team: &str, label: &str) -> Result<Listing, Error> {
+        planned_projects(&self.posts, team, label)
+    }
+
+    fn project_named(&self, team: &str, name: &str) -> Result<Option<String>, Error> {
+        project_named(&self.posts, team, name)
     }
 
     fn scope_queue(&self, team: &str, label: &str, assignee: &str) -> Result<Queue, Error> {
@@ -354,18 +364,34 @@ fn workflow_state(linear: &impl Posts, team: &str, name: &str) -> Result<Option<
         .transpose()
 }
 
-/// A project already on the board, by the id `.warlock/filed.toml` recorded, or
-/// `None` when the workspace has no project with it.
+/// A project already on the board, by the slug at the end of its URL, or `None`
+/// when the workspace has no project with it.
 ///
-/// `None` rather than an error for [`team_id`]'s reason: an id the board no
-/// longer knows is worth words about the file that recorded it, and this module
+/// `None` rather than an error for [`team_id`]'s reason: a slug the board does
+/// not know is worth words about the command that typed it, and this module
 /// does not hold them.
-fn fetch_project(linear: &impl Posts, id: &str) -> Result<Option<FetchedProject>, Error> {
+///
+/// Only the comments that are warlock's cut and skip notes come back, filtered
+/// on the wire: they are the whole of what records which slices are cut, and a
+/// project's other talk would spend the page on nothing. One page and no
+/// `pageInfo`, rejected rather than forgotten: a note is written per slice
+/// settled, so a page of 250 is a brief of 250 slices, and a loop for that is a
+/// loop nobody will run.
+fn fetch_project(linear: &impl Posts, slug: &str) -> Result<Option<FetchedProject>, Error> {
     let data = match linear.post(
-        "query Project($id: String!) {
-            project(id: $id) { name content url status { name } }
+        "query Project($id: String!, $cut: String!, $skipped: String!) {
+            project(id: $id) {
+                id name content url status { name }
+                comments(
+                    filter: { or: [
+                        { body: { startsWith: $cut } }
+                        { body: { startsWith: $skipped } }
+                    ] }
+                    first: 250
+                ) { nodes { body } }
+            }
         }",
-        json!({ "id": id }),
+        json!({ "id": slug, "cut": CUT_NOTE, "skipped": SKIP_NOTE }),
     ) {
         Ok(data) => data,
         // `project(id:)` answers a `Project!` in Linear's schema, so an id the
@@ -382,35 +408,47 @@ fn fetch_project(linear: &impl Posts, id: &str) -> Result<Option<FetchedProject>
             detail: "the answer carried no `project`".to_owned(),
         });
     };
-
     if project.is_null() {
         return Ok(None);
     }
 
     Ok(Some(FetchedProject {
+        id: node_id(project)?,
         name: text(project, "name")?,
         content: nullable(project, "content", |_| text(project, "content"))?.unwrap_or_default(),
         url: text(project, "url")?,
         status: nullable(project, "status", |status| text(status, "name"))?,
+        notes: nodes(project, "comments")?
+            .iter()
+            .map(|comment| text(comment, "body"))
+            .collect::<Result<_, _>>()?,
     }))
 }
+
+/// How warlock's notes on a project start, which is what [`fetch_project`]
+/// filters on and `cut.rs` writes and reads. Changing either orphans every note
+/// already on a board: the slices they record are offered again.
+pub(crate) const CUT_NOTE: &str = "Warlock cut slice ";
+pub(crate) const SKIP_NOTE: &str = "Warlock skipped slice ";
 
 /// A project as [`Board::fetch_project`] reads it back, which is not the
 /// [`Project`] a create answers with: what matters about a project that already
 /// exists is what is written on it, and what matters about one that has just
 /// been made is where to find it.
 ///
-/// Two of the four are allowed to be empty and neither is a broken answer. A
+/// Two of these are allowed to be empty and neither is a broken answer. A
 /// project filed into a workspace with no `Backlog` has no status at all, so a
 /// gate on the status has to be able to say that as well as name a wrong one;
 /// and a description can be emptied in Linear after it was filed, which the
 /// caller that parses it will refuse in its own words.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct FetchedProject {
+    id: String,
     name: String,
     content: String,
     url: String,
     status: Option<String>,
+    notes: Vec<String>,
 }
 
 impl FetchedProject {
@@ -423,11 +461,28 @@ impl FetchedProject {
         status: Option<&str>,
     ) -> Self {
         Self {
+            id: "project-1".to_owned(),
             name: name.into(),
             content: content.into(),
             url: url.into(),
             status: status.map(ToOwned::to_owned),
+            notes: Vec::new(),
         }
+    }
+
+    #[must_use]
+    #[cfg(test)]
+    pub(crate) fn with_notes(mut self, notes: impl IntoIterator<Item = String>) -> Self {
+        self.notes = notes.into_iter().collect();
+        self
+    }
+
+    /// Linear's own id, which an issue create and a comment are written
+    /// against: the slug a draft was typed with reads a project back, and
+    /// nothing has said a mutation takes one.
+    #[must_use]
+    pub(crate) fn id(&self) -> &str {
+        &self.id
     }
 
     #[must_use]
@@ -450,6 +505,102 @@ impl FetchedProject {
     pub(crate) fn status(&self) -> Option<&str> {
         self.status.as_deref()
     }
+
+    /// The bodies of warlock's cut and skip notes, oldest first.
+    #[must_use]
+    pub(crate) fn notes(&self) -> &[String] {
+        &self.notes
+    }
+}
+
+/// The projects in the team that are `Planned` and carry warlock's label, by
+/// slug and name.
+///
+/// The label narrows it to what a push filed, which is what a draft can read:
+/// a project somebody made by hand has no `## Scope` warlock wrote the shape of.
+/// One page and one request, per this module's rule; a team with more than came
+/// back answers [`Listing::capped`] with `true`, which is the caller's to print.
+fn planned_projects(linear: &impl Posts, team: &str, label: &str) -> Result<Listing, Error> {
+    let data = linear.post(
+        r#"query PlannedProjects($team: String!, $label: String!) {
+            projects(
+                filter: {
+                    accessibleTeams: { some: { key: { eq: $team } } }
+                    status: { name: { eqIgnoreCase: "Planned" } }
+                    labels: { some: { name: { eq: $label } } }
+                }
+                first: 250
+            ) {
+                pageInfo { hasNextPage }
+                nodes { slugId name }
+            }
+        }"#,
+        json!({ "team": team, "label": label }),
+    )?;
+
+    let projects = nodes(&data, "projects")?
+        .iter()
+        .map(|project| Ok((text(project, "slugId")?, text(project, "name")?)))
+        .collect::<Result<_, Error>>()?;
+
+    Ok(Listing {
+        projects,
+        capped: has_next_page(&data, "projects")?,
+    })
+}
+
+/// What [`Board::planned_projects`] answers: slug and name, in Linear's order.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct Listing {
+    projects: Vec<(String, String)>,
+    capped: bool,
+}
+
+impl Listing {
+    #[must_use]
+    #[cfg(test)]
+    pub(crate) fn new(projects: &[(&str, &str)], capped: bool) -> Self {
+        Self {
+            projects: projects
+                .iter()
+                .map(|(slug, name)| ((*slug).to_owned(), (*name).to_owned()))
+                .collect(),
+            capped,
+        }
+    }
+
+    #[must_use]
+    pub(crate) fn projects(&self) -> &[(String, String)] {
+        &self.projects
+    }
+
+    #[must_use]
+    pub(crate) const fn capped(&self) -> bool {
+        self.capped
+    }
+}
+
+/// The URL of a project in the team with this name, compared ignoring case, or
+/// `None` when the team has none: the only thing a push can tell a second push
+/// of the same brief by, now that nothing on the machine remembers the first.
+fn project_named(linear: &impl Posts, team: &str, name: &str) -> Result<Option<String>, Error> {
+    let data = linear.post(
+        "query ProjectNamed($team: String!, $name: String!) {
+            projects(
+                filter: {
+                    accessibleTeams: { some: { key: { eq: $team } } }
+                    name: { eqIgnoreCase: $name }
+                }
+                first: 1
+            ) { nodes { url } }
+        }",
+        json!({ "team": team, "name": name }),
+    )?;
+
+    nodes(&data, "projects")?
+        .first()
+        .map(|project| text(project, "url"))
+        .transpose()
 }
 
 /// Issues read in the one request a queue is allowed, which is a hundred rather
@@ -1252,6 +1403,7 @@ impl Project {
     }
 
     #[must_use]
+    #[cfg(test)]
     pub(crate) fn id(&self) -> &str {
         &self.id
     }

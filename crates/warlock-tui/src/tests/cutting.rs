@@ -4,15 +4,11 @@
 //! binding or the key store of the machine the suite runs on, and the one key
 //! any of it stores is not one.
 
-use std::fs;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
 use tempfile::TempDir;
-use warlock_engine::{
-    CutRecord, Filed, FiledRecord, Manifest, PactEntry, ScopeRecord, save_key, save_key_binding,
-    save_sigils,
-};
+use warlock_engine::{Manifest, PactEntry, ScopeRecord, save_key, save_key_binding, save_sigils};
 
 use super::{ALREADY_CUTTING, Cutter};
 use crate::account::Line;
@@ -20,8 +16,9 @@ use crate::app::App;
 use crate::claude::Converses;
 use crate::error::{Error, one_line};
 use crate::inflight::Workers;
-use crate::linear::Opens;
+use crate::linear::{FetchedProject, Opens};
 use crate::stubs::{Answering, Boarding, Gate, Scripted};
+use crate::submission::ToDraft;
 
 // Not a key, and named so that nothing reading this file mistakes it for one:
 // it is stored only so that a bound name resolves and the worker has something
@@ -38,11 +35,12 @@ const TEAM: &str = "WAR";
 
 const LABEL: &str = "warlock";
 
-// The manifest's own spelling of the brief, which is what a filed record is
-// keyed by and so what a `/draft` carries.
-const BRIEF: &str = "docs/brief.md";
+// What a `/draft` names the project by: the tail of its URL.
+const SLUG: &str = "1a2b3c";
 
-const PROJECT_ID: &str = "b229262b-22aa-444a-a8af-0a2a3f4ef100";
+// The id every `Boarding` project reads back with, which is what issues are
+// created in and notes are said on.
+const PROJECT_ID: &str = "project-1";
 
 const URL: &str = "https://linear.app/acme/project/draft-a-brief-1a2b3c";
 
@@ -100,17 +98,13 @@ fn a_manifest() -> Manifest {
     .with_scopes([ScopeRecord::new(SCOPE, TEAM, "In Review", LABEL)])
 }
 
-// A repository with the manifest saved and the brief on disk. The document's
-// own text is beside the point here — what a cut reads is the project, and the
-// file is what the record is keyed by.
+// A repository with the manifest saved and nothing else: what a cut reads is
+// the project on the board.
 fn a_repository() -> TempDir {
     let repo = a_dir();
     a_manifest()
         .save(repo.path())
         .expect("a manifest that saves");
-    let path = repo.path().join(BRIEF);
-    fs::create_dir_all(path.parent().expect("a `docs` directory")).expect("a `docs` directory");
-    fs::write(&path, "# A brief\n").expect("a brief file");
     repo
 }
 
@@ -125,29 +119,16 @@ fn a_home(root: &Path) -> TempDir {
     home
 }
 
-// The record a `/push` of this brief left behind, with whichever slices have
-// already been cut written under it.
-fn filed(root: &Path, cuts: &[&str]) {
-    let mut record = FiledRecord::new(
-        root,
-        root.join(BRIEF),
-        PROJECT_ID,
-        URL,
-        SCOPE,
-        TEAM,
-        "2026-09-20T07:32:00Z",
+// The project with a cut note for each of `cuts`, numbered as an earlier run
+// would have filed them.
+fn noted(cuts: &[&str]) -> Boarding {
+    Boarding::filing("").reading(
+        FetchedProject::new(NAME, SLICED, URL, Some(STATUS)).with_notes(
+            cuts.iter().enumerate().map(|(place, title)| {
+                format!("Warlock cut slice `{title}` into `WAR-{}`.", place + 1)
+            }),
+        ),
     )
-    .expect("a path inside the repository");
-    for (place, title) in cuts.iter().enumerate() {
-        record.push_cut(CutRecord::new(
-            *title,
-            [format!("WAR-{}", place + 1)],
-            "2026-09-21T09:00:00Z",
-        ));
-    }
-    Filed::with_records([record])
-        .save(root)
-        .expect("a record file that saves");
 }
 
 // What the thread's turns answered with: for a `/draft`, what each slice's
@@ -182,7 +163,7 @@ fn notes(app: &App) -> Vec<String> {
 // handed to it when it was built, which is what keeps every test here off the
 // machine's.
 fn press<O: Opens, A: Converses>(app: &mut App, cutter: &mut Cutter<O, A>, repo: &Path) {
-    cutter.press(app, &a_manifest(), repo, BRIEF, None, now());
+    cutter.press(app, &a_manifest(), repo, drafting(), None, now());
 }
 
 // The rounds a helper may drive before it gives up: a count for inline workers,
@@ -282,7 +263,6 @@ fn asked_proposing<O: Opens>(
 ) -> (App, Cutter<O, Scripted>, TempDir, TempDir) {
     let repo = a_repository();
     let home = a_home(repo.path());
-    filed(repo.path(), &[]);
     let cutter = Cutter::with_client(linear, Some(home.path().to_path_buf()), agent, proposer);
     fetched(cutter.inline(), repo, home)
 }
@@ -296,7 +276,6 @@ fn asked_held<O: Opens>(
 ) -> (App, Cutter<O, Scripted>, TempDir, TempDir) {
     let repo = a_repository();
     let home = a_home(repo.path());
-    filed(repo.path(), &[]);
     let cutter = Cutter::with_client(linear, Some(home.path().to_path_buf()), agent, proposer);
     fetched(cutter, repo, home)
 }
@@ -320,7 +299,6 @@ fn a_cut_reports_the_project_its_status_and_how_many_slices_are_left() {
     // asked about.
     let repo = a_repository();
     let home = a_home(repo.path());
-    filed(repo.path(), &[]);
     let linear = Boarding::holding(NAME, Some(STATUS), SLICED);
     let mut cutter = Cutter::with_client(
         linear.clone(),
@@ -359,13 +337,12 @@ fn a_cut_reports_the_project_its_status_and_how_many_slices_are_left() {
 
 #[test]
 fn slices_already_cut_are_left_out_of_what_is_still_to_cut() {
-    // The count of what is left comes off `.warlock/filed.toml` rather than off
-    // the block, so a brief two slices into being cut says so.
+    // The count of what is left comes off the project's notes rather than off
+    // the block, so a project two slices into being cut says so.
     let repo = a_repository();
     let home = a_home(repo.path());
-    filed(repo.path(), &[FIRST, SECOND]);
     let mut cutter = Cutter::with_client(
-        Boarding::holding(NAME, Some(STATUS), SLICED),
+        noted(&[FIRST, SECOND]),
         Some(home.path().to_path_buf()),
         unasked(),
         unasked(),
@@ -391,7 +368,6 @@ fn a_project_that_is_not_planned_is_one_line_with_nothing_torn_down() {
     // there is no other way to know the status — and nothing else happened.
     let repo = a_repository();
     let home = a_home(repo.path());
-    filed(repo.path(), &[]);
     let linear = Boarding::holding(NAME, Some("Backlog"), SLICED);
     let mut cutter = Cutter::with_client(
         linear.clone(),
@@ -408,7 +384,7 @@ fn a_project_that_is_not_planned_is_one_line_with_nothing_torn_down() {
     assert_eq!(
         notes(&app).last(),
         Some(&refusal(&Error::NotPlanned {
-            path: BRIEF.to_owned(),
+            name: NAME.to_owned(),
             status: Some("Backlog".to_owned()),
         })),
         "the line is not the engine's own sentence",
@@ -429,11 +405,17 @@ fn a_machine_with_no_home_is_refused_before_anything_is_read() {
     // words: with no home there are no sigils, no binding and no key store, so
     // there is no board to resolve and nothing to read the record for.
     let repo = a_repository();
-    filed(repo.path(), &[]);
     let mut cutter = Cutter::with_client(Boarding::unopened(), None, unasked(), unasked());
     let mut app = App::default();
 
-    cutter.press(&mut app, &a_manifest(), repo.path(), BRIEF, None, now());
+    cutter.press(
+        &mut app,
+        &a_manifest(),
+        repo.path(),
+        drafting(),
+        None,
+        now(),
+    );
 
     assert_eq!(notes(&app), vec![refusal(&Error::NoHome)]);
     assert!(!cutter.fetching(), "a refusal started a draft");
@@ -446,7 +428,6 @@ fn a_second_cut_with_one_in_flight_is_one_line_and_reads_nothing() {
     // what it costs is a line.
     let repo = a_repository();
     let home = a_home(repo.path());
-    filed(repo.path(), &[]);
     let gate = Gate::shut();
     let linear = Boarding::holding(NAME, Some(STATUS), SLICED).held_at(&gate);
     let mut cutter = Cutter::with_client(
@@ -481,7 +462,6 @@ fn the_rounds_go_on_while_the_request_is_in_flight() {
     // request open, the rounds are counted, and the cut reports afterwards.
     let repo = a_repository();
     let home = a_home(repo.path());
-    filed(repo.path(), &[]);
     let gate = Gate::shut();
     let mut cutter = Cutter::with_client(
         Boarding::holding(NAME, Some(STATUS), SLICED).held_at(&gate),
@@ -510,13 +490,12 @@ fn the_rounds_go_on_while_the_request_is_in_flight() {
 }
 
 #[test]
-fn a_cut_says_which_document_it_is_reading_before_the_board_answers() {
+fn a_cut_says_which_project_it_is_reading_before_the_board_answers() {
     // The answer is a request away and the reader has just typed the command,
-    // so the thread names the document at once — by the document, because the
-    // project has no name on this side of the request.
+    // so the thread names the slug at once, because the project has no name on
+    // this side of the request.
     let repo = a_repository();
     let home = a_home(repo.path());
-    filed(repo.path(), &[]);
     let gate = Gate::shut();
     let mut cutter = Cutter::with_client(
         Boarding::holding(NAME, Some(STATUS), SLICED).held_at(&gate),
@@ -529,7 +508,7 @@ fn a_cut_says_which_document_it_is_reading_before_the_board_answers() {
     press(&mut app, &mut cutter, repo.path());
 
     let said = notes(&app).last().cloned().expect("the draft said nothing");
-    assert!(said.contains(BRIEF), "{said:?} does not name the document");
+    assert!(said.contains(SLUG), "{said:?} does not name the slug");
     assert!(cutter.fetching(), "the draft is not running");
     gate.open();
     landing(&mut app, &mut cutter);
@@ -543,7 +522,6 @@ fn dropping_the_session_ends_the_cut_without_waiting_for_it() {
     // answered.
     let repo = a_repository();
     let home = a_home(repo.path());
-    filed(repo.path(), &[]);
     let gate = Gate::shut();
     let mut cutter = Cutter::with_client(
         Boarding::holding(NAME, Some(STATUS), SLICED).held_at(&gate),
@@ -573,9 +551,9 @@ mod asking {
     use tempfile::TempDir;
 
     use super::{
-        Answering, App, BRIEF, Boarding, Cutter, FIRST, Instant, KEY_NAME, NAME, NOT_A_KEY, SLICED,
-        STATUS, Scripted, TEAM, a_home, a_project, a_repository, asked_over, filed, landing, notes,
-        now, press, refusal, unasked,
+        Answering, App, Boarding, Cutter, FIRST, Instant, KEY_NAME, NAME, NOT_A_KEY, SLICED,
+        STATUS, Scripted, TEAM, a_home, a_project, a_repository, asked_over, landing, notes, now,
+        press, refusal, unasked,
     };
     use crate::confirm::Answer;
     use crate::error::Error;
@@ -610,7 +588,6 @@ mod asking {
         // the refusal is the whole of what the round does.
         let repo = a_repository();
         let home = a_home(repo.path());
-        filed(repo.path(), &[]);
         let mut cutter = Cutter::with_client(
             Boarding::holding(NAME, Some("Backlog"), SLICED),
             Some(home.path().to_path_buf()),
@@ -630,7 +607,7 @@ mod asking {
         assert_eq!(
             notes(&app).last(),
             Some(&refusal(&Error::NotPlanned {
-                path: BRIEF.to_owned(),
+                name: NAME.to_owned(),
                 status: Some("Backlog".to_owned()),
             })),
         );
@@ -722,10 +699,9 @@ mod asking {
 }
 
 // The run a Yes starts, driven the way the loop drives it: rounds at the value
-// the session holds, over a model that answers out of memory and a board that
-// is only ever read. Nothing below files anything — that is the next slice of
-// this work — so what is asserted is what lands on the thread and what the
-// board was asked for.
+// the session holds, over a model that answers out of memory. Nothing below
+// files an issue — every slice is skipped — so what is asserted is what lands on
+// the thread and what the board was asked for.
 mod cutting {
     use serde_json::{Value, json};
     use tempfile::TempDir;
@@ -733,10 +709,11 @@ mod cutting {
 
     use super::{
         AT_MOST, Answering, App, Boarding, Cutter, FIRST, Gate, Instant, NAME, PREPARED, SECOND,
-        Scripted, THIRD, a_home, a_project, a_repository, asked_held, asked_over, filed, landing,
+        Scripted, THIRD, a_home, a_project, a_repository, asked_held, asked_over, landing, noted,
         notes, now, press, through, unasked,
     };
     use crate::claude::Activity;
+    use crate::stubs::Op;
 
     // The three `[n/total]` prefixes a run over this project says, in the order
     // it says them: the fraction is the place in the cut order and the position
@@ -789,10 +766,10 @@ mod cutting {
     }
 
     #[test]
-    fn every_uncut_slice_is_drafted_in_cut_order_and_the_board_is_only_read() {
+    fn every_uncut_slice_is_drafted_in_cut_order_and_only_skips_are_sent() {
         // One session per slice, one at a time, in the order the slices are to
-        // be cut — and the project is left exactly as it was found, because
-        // nothing on this path sends a mutation at all.
+        // be cut — and nothing is sent past the reads but the skip note each
+        // skipped slice leaves on the project.
         let linear = a_project();
         let agent = Scripted::saying([
             Answering::drafts(FIRST),
@@ -811,23 +788,22 @@ mod cutting {
         assert_eq!(running, RUNNING.iter().collect::<Vec<_>>());
         assert_eq!(agent.turns(), 3, "a slice was drafted twice or not at all");
         assert_eq!(
-            linear.requests(),
-            PREPARED,
-            "the run sent something to the board"
+            linear.ops()[PREPARED..],
+            [Op::Comment, Op::Comment, Op::Comment],
+            "the run sent something other than its skip notes"
         );
     }
 
     #[test]
-    fn a_slice_a_record_already_claims_is_not_drafted_again() {
+    fn a_slice_a_note_already_claims_is_not_drafted_again() {
         // The run is over what is left to cut, so the fraction counts those and
         // the position still finds the slice in the document — the two differ
         // exactly here, which is the whole reason both are on the line.
         let repo = a_repository();
         let home = a_home(repo.path());
-        filed(repo.path(), &[FIRST]);
         let agent = Scripted::saying([Answering::drafts(SECOND), Answering::drafts(THIRD)]);
         let mut cutter = Cutter::with_client(
-            a_project(),
+            noted(&[FIRST]),
             Some(home.path().to_path_buf()),
             agent.clone(),
             unasked(),
@@ -1553,11 +1529,10 @@ mod relaying {
 // a create sent and what a skip did not are both things these tests can say.
 mod reviewing {
     use tempfile::TempDir;
-    use warlock_engine::{CutRecord, Filed, filed_path};
 
     use super::{
-        Answering, App, BRIEF, Cutter, FIRST, NOT_A_KEY, PREPARED, PROJECT_ID, SECOND, Scripted,
-        THIRD, a_project, asked_over, fs, notes, now, rounds,
+        Answering, App, Cutter, FIRST, NOT_A_KEY, PREPARED, PROJECT_ID, SECOND, Scripted, THIRD,
+        a_project, asked_over, notes, now, rounds,
     };
     use crate::confirm::{Answer, Choice};
     use crate::stubs::{Boarding, Op, VIEWER};
@@ -1645,8 +1620,8 @@ mod reviewing {
             .to_vec()
     }
 
-    // Rounds until nothing of the cut is left in flight — the project's one
-    // comment included — for the reason every other helper here drains.
+    // Rounds until nothing of the cut is left in flight — skip notes included —
+    // for the reason every other helper here drains.
     fn over(app: &mut App, cutter: &mut Cutter<Boarding, Scripted>) {
         for () in rounds(cutter) {
             if !cutter.running() {
@@ -1661,15 +1636,17 @@ mod reviewing {
         );
     }
 
-    // What the record beside the brief claims, which is the one thing that stops
-    // the next run filing the same drafts again.
-    fn cuts(root: &std::path::Path) -> Vec<CutRecord> {
-        Filed::load(root)
-            .expect("a record file that loads")
-            .record(BRIEF)
-            .expect("the brief is filed")
-            .cuts()
-            .to_vec()
+    // The notes said on the project, which are the one thing that stops the
+    // next run filing the same drafts again.
+    fn notes_on(linear: &Boarding) -> Vec<String> {
+        linear
+            .comments()
+            .into_iter()
+            .map(|(project, body)| {
+                assert_eq!(project, PROJECT_ID, "a note went to another project");
+                body
+            })
+            .collect()
     }
 
     // Which of the run's lines is about a slice, by the prefix every line about
@@ -1751,10 +1728,10 @@ mod reviewing {
     #[test]
     fn create_files_the_slice_and_reports_what_it_became_by_identifier() {
         // The one thing about an issue that must not be lost, said in the words
-        // the cut record keeps it in — and the record itself is written by the
-        // filing path, which is what stops the next run filing these again.
+        // the cut note keeps it in — and the note itself is said by the filing
+        // path, which is what stops the next run filing these again.
         let linear = a_project();
-        let (mut app, mut cutter, repo, _home) = cut(linear.clone(), drafting_each());
+        let (mut app, mut cutter, _repo, _home) = cut(linear.clone(), drafting_each());
         offered(&mut app, &mut cutter);
 
         cutter.create(&mut app, now());
@@ -1770,9 +1747,13 @@ mod reviewing {
             vec![format!("slice 1 `{FIRST}` — cut into `WAR-1`, `WAR-2`")],
             "the identifiers are not on the thread: {said:?}"
         );
-        let cuts = cuts(repo.path());
-        assert_eq!(cuts.len(), 1, "the cut record was not written: {cuts:?}");
-        assert_eq!(cuts[0].issues(), ["WAR-1".to_owned(), "WAR-2".to_owned()]);
+        assert_eq!(
+            notes_on(&linear),
+            [format!(
+                "Warlock cut slice `{FIRST}` into `WAR-1`, `WAR-2`."
+            )],
+            "the cut note was not said"
+        );
         assert_eq!(
             linear.issues_created().len(),
             2,
@@ -1855,7 +1836,7 @@ mod reviewing {
         // still nothing on the board. One line, the session alive, the panel
         // usable, and the next slice offered.
         let linear = a_project().without_team();
-        let (mut app, mut cutter, repo, _home) = cut(linear, drafting_each());
+        let (mut app, mut cutter, _repo, _home) = cut(linear.clone(), drafting_each());
         offered(&mut app, &mut cutter);
 
         cutter.create(&mut app, now());
@@ -1872,8 +1853,8 @@ mod reviewing {
             "a refusal cost more than a line: {said:?}"
         );
         assert!(
-            cuts(repo.path()).is_empty(),
-            "a slice nothing was filed for was recorded as cut"
+            notes_on(&linear).is_empty(),
+            "a slice nothing was filed for was noted as cut"
         );
         assert!(cutter.drafting(), "a refused create took the run down");
         assert_eq!(
@@ -1884,11 +1865,12 @@ mod reviewing {
     }
 
     #[test]
-    fn a_skip_is_recorded_and_asks_whether_to_carry_on() {
-        // Red's rule: a skip is a human saying no at the gate, recorded as a
-        // cut that filed nothing so no later `/draft` offers the slice again.
+    fn a_skip_is_noted_on_the_project_and_asks_whether_to_carry_on() {
+        // Red's rule: a skip is a human saying no at the gate, noted on the
+        // project as a cut that filed nothing so no later `/draft` offers the
+        // slice again.
         let linear = a_project();
-        let (mut app, mut cutter, repo, _home) = cut(linear.clone(), drafting_each());
+        let (mut app, mut cutter, _repo, _home) = cut(linear.clone(), drafting_each());
         offered(&mut app, &mut cutter);
 
         cutter.skip(&mut app, now());
@@ -1901,13 +1883,14 @@ mod reviewing {
             "the skip is not on the thread: {said:?}"
         );
         assert_eq!(
-            linear.requests(),
-            PREPARED,
-            "a skip sent something to the board"
+            linear.ops()[PREPARED..],
+            [Op::Comment],
+            "a skip sent something other than its note"
         );
-        let recorded = cuts(repo.path());
-        assert_eq!(recorded.len(), 1, "{recorded:?}");
-        assert!(recorded[0].issues().is_empty(), "{recorded:?}");
+        assert_eq!(
+            notes_on(&linear),
+            [format!("Warlock skipped slice `{FIRST}`.")]
+        );
         let carry = cutter.carrying().expect("the carry-on question is up");
         assert_eq!(carry.left(), "2 slices");
         // No is lit, so the answer that is under the finger is the one that
@@ -1944,7 +1927,11 @@ mod reviewing {
             !said.iter().any(|line| line.contains(SECOND)),
             "a slice that was never offered was named: {said:?}"
         );
-        assert_eq!(linear.requests(), PREPARED, "a stopped run sent something");
+        assert_eq!(
+            linear.ops()[PREPARED..],
+            [Op::Comment],
+            "a stopped run sent something past its skip note"
+        );
     }
 
     #[test]
@@ -2072,7 +2059,7 @@ mod reviewing {
         // rule out: every answer here is a no-op with nothing waiting, so a
         // stale press cannot file drafts nobody was looking at.
         let linear = a_project();
-        let (mut app, mut cutter, repo, _home) = cut(linear.clone(), drafting_each());
+        let (mut app, mut cutter, _repo, _home) = cut(linear.clone(), drafting_each());
 
         cutter.create(&mut app, now());
         cutter.skip(&mut app, now());
@@ -2084,10 +2071,6 @@ mod reviewing {
 
         assert!(cutter.drafting(), "a stale answer took the run down");
         assert_eq!(linear.requests(), PREPARED, "a stale answer sent something");
-        assert!(
-            cuts(repo.path()).is_empty(),
-            "a stale answer wrote a record"
-        );
     }
 
     #[test]
@@ -2118,8 +2101,8 @@ mod reviewing {
     #[test]
     fn nothing_a_run_sends_is_a_mutation_of_the_project() {
         // The promise the whole command is written around: a cut reads the
-        // project, files issues out of it and edges between them, says one
-        // comment on it, and leaves it exactly as it found it — `Planned`, with
+        // project, files issues out of it and edges between them, notes each
+        // slice on it, and leaves it exactly as it found it — `Planned`, with
         // nobody assigned to anything.
         let linear = a_project();
         let (mut app, mut cutter, _repo, _home) = cut(linear.clone(), drafting_each());
@@ -2131,8 +2114,8 @@ mod reviewing {
         over(&mut app, &mut cutter);
 
         // A board has no operation that moves a status; what a run can still
-        // get wrong is writing something other than an issue, an edge or that
-        // one comment — a second project among them.
+        // get wrong is writing something other than an issue, an edge or a note
+        // — a second project among them.
         let sent: Vec<Op> = linear
             .ops()
             .into_iter()
@@ -2147,132 +2130,95 @@ mod reviewing {
         for op in &sent {
             assert!(
                 matches!(op, Op::CreateIssue | Op::Relation | Op::Comment),
-                "a run wrote something that is not an issue, an edge or the comment: {op:?}"
+                "a run wrote something that is not an issue, an edge or a note: {op:?}"
             );
         }
     }
 
     #[test]
-    fn a_run_that_created_issues_says_the_projects_one_comment_after_its_last_slice() {
-        // The comment `warlock draft` says, said from the panel too: once, after
-        // the last slice settles, naming what this run created. A comment that
-        // was said is on the project and nowhere on the thread.
-        let linear = a_project();
-        let (mut app, mut cutter, _repo, _home) = cut(linear.clone(), drafting_each());
-        for _ in 0..3 {
-            offered(&mut app, &mut cutter);
-            cutter.create(&mut app, now());
-            settled(&mut app, &mut cutter);
-        }
-        let said = notes(&app).len();
-
-        over(&mut app, &mut cutter);
-
-        let comments = linear.comments();
-        assert_eq!(comments.len(), 1, "{comments:?}");
-        let (project, body) = &comments[0];
-        assert_eq!(project, PROJECT_ID);
-        for issue in ["WAR-1", "WAR-2", "WAR-3", "WAR-4", "WAR-5", "WAR-6"] {
-            assert!(body.contains(issue), "{body}");
-        }
-        let commented = linear.positions_of(Op::Comment)[0];
-        let last = *linear
-            .positions_of(Op::CreateIssue)
-            .last()
-            .expect("issues were created");
-        assert!(commented > last, "{commented} is not after {last}");
-        assert_eq!(
-            notes(&app).len(),
-            said,
-            "a comment that was said was reported"
-        );
-    }
-
-    #[test]
-    fn a_run_stopped_partway_still_says_what_it_did_create() {
-        // A No to carrying on ends the run as surely as the last slice does, and
-        // the issues filed before it are this run's to name.
+    fn each_slice_filed_is_noted_on_the_project_as_soon_as_its_issues_exist() {
+        // A note per slice rather than one at the end of the run: an issue no
+        // note names is what the next run files a second time, so a run that
+        // dies between two slices must already have noted the first.
         let linear = a_project();
         let (mut app, mut cutter, _repo, _home) = cut(linear.clone(), drafting_each());
         offered(&mut app, &mut cutter);
         cutter.create(&mut app, now());
         settled(&mut app, &mut cutter);
-        cutter.skip(&mut app, now());
 
-        cutter.stop(&mut app, now());
-        over(&mut app, &mut cutter);
-
-        let comments = linear.comments();
-        assert_eq!(comments.len(), 1, "{comments:?}");
-        assert!(comments[0].1.contains("`WAR-1`, `WAR-2`"), "{comments:?}");
-        assert!(!comments[0].1.contains("WAR-3"), "{comments:?}");
-    }
-
-    #[test]
-    fn a_run_that_created_nothing_says_nothing_on_the_project() {
-        let linear = a_project();
-        let (mut app, mut cutter, _repo, _home) = cut(linear.clone(), drafting_each());
-        for _ in 0..2 {
-            offered(&mut app, &mut cutter);
-            cutter.skip(&mut app, now());
-            cutter.carry_on(&mut app, now());
-        }
-        offered(&mut app, &mut cutter);
-
-        cutter.skip(&mut app, now());
-
-        assert!(
-            !cutter.running(),
-            "a run that created nothing is still running"
-        );
-        assert!(linear.comments().is_empty(), "{:?}", linear.comments());
         assert_eq!(
-            linear.requests(),
-            PREPARED,
-            "a run that created nothing sent something"
+            notes_on(&linear),
+            [format!(
+                "Warlock cut slice `{FIRST}` into `WAR-1`, `WAR-2`."
+            )]
+        );
+        let creates = linear.positions_of(Op::CreateIssue);
+        let noted = linear.positions_of(Op::Comment)[0];
+        assert!(
+            creates.iter().all(|created| *created < noted),
+            "the note was said before every issue existed: {:?}",
+            linear.ops()
         );
     }
 
     #[test]
-    fn a_comment_linear_turned_down_is_a_line_on_the_thread() {
-        // The issues exist and are recorded by the time the comment is said, so
-        // its refusal is a line and nothing is undone.
+    fn a_note_linear_turned_down_names_the_issues_and_the_run_carries_on() {
+        // The issues exist and no note names them, so the line is the last
+        // place their identifiers appear, and the next slice is still offered.
         let linear = a_project().refuse(Op::Comment, "the workspace would not");
-        let (mut app, mut cutter, repo, _home) = cut(linear, drafting_each());
-        for _ in 0..3 {
-            offered(&mut app, &mut cutter);
-            cutter.create(&mut app, now());
-            settled(&mut app, &mut cutter);
-        }
+        let (mut app, mut cutter, _repo, _home) = cut(linear, drafting_each());
+        offered(&mut app, &mut cutter);
+        cutter.create(&mut app, now());
+        settled(&mut app, &mut cutter);
+
+        let said = notes(&app);
+        let unfiled: Vec<String> = about(&said, FIRST)
+            .into_iter()
+            .filter(|line| line.contains("was not filed"))
+            .collect();
+        assert_eq!(unfiled.len(), 1, "{said:?}");
+        assert!(unfiled[0].contains("`WAR-1`, `WAR-2`"), "{unfiled:?}");
+        assert!(
+            unfiled[0].contains("the workspace would not"),
+            "{unfiled:?}"
+        );
+        assert_eq!(
+            cutter.reviewing().map(|review| review.slice().to_owned()),
+            Some(format!("slice 2 `{SECOND}`"))
+        );
+    }
+
+    #[test]
+    fn a_skip_note_linear_turned_down_is_a_line_on_the_thread() {
+        let linear = a_project().refuse(Op::Comment, "the workspace would not");
+        let (mut app, mut cutter, _repo, _home) = cut(linear, drafting_each());
+        offered(&mut app, &mut cutter);
+        cutter.skip(&mut app, now());
+        cutter.stop(&mut app, now());
 
         over(&mut app, &mut cutter);
 
         let said = notes(&app);
-        let last = said.last().expect("the run said something");
         assert!(
-            last.contains("the project was not commented on"),
+            said.iter()
+                .any(|line| line.contains("could not note the skip")
+                    && line.contains("the workspace would not")),
             "{said:?}"
-        );
-        assert!(last.contains("the workspace would not"), "{said:?}");
-        assert_eq!(
-            cuts(repo.path()).len(),
-            3,
-            "a refused comment undid the cut"
         );
     }
 
     #[test]
-    fn no_key_value_reaches_the_thread_the_record_or_anything_the_run_holds() {
+    fn no_key_value_reaches_the_thread_or_anything_the_run_holds() {
         // The cut's half of the claim `tests/pushing.rs` makes for a push, and
         // it is made here because this is the only module that drives a run the
-        // whole way to a written record: the key store this home holds is what
-        // the filing worker built its client from, so the value has been through
+        // whole way to its notes: the key store this home holds is what the
+        // filing worker built its client from, so the value has been through
         // every step below. It is to be in none of them — not on a line
-        // somebody reads, not in the record beside the brief, and not in the
+        // somebody reads, not in a call made of the board, and not in the
         // `Debug` rendering that a failing assertion anywhere else in the suite
         // would print.
         let linear = a_project();
-        let (mut app, mut cutter, repo, _home) = cut(linear.clone(), drafting_each());
+        let (mut app, mut cutter, _repo, _home) = cut(linear.clone(), drafting_each());
         offered(&mut app, &mut cutter);
         // Read while the window is up, so what is asserted is the run in
         // flight as well as the run that is over.
@@ -2295,12 +2241,6 @@ mod reviewing {
         for line in &said {
             assert!(!line.contains(NOT_A_KEY), "{line} carries the key");
         }
-        assert!(
-            !fs::read_to_string(filed_path(repo.path()))
-                .expect("the record this run wrote")
-                .contains(NOT_A_KEY),
-            "the record carries the key"
-        );
         // And nothing the run sent carried it either: the key opens the board
         // and is in no call made of it.
         let calls = format!("{:?}", linear.calls());
@@ -2323,7 +2263,7 @@ fn a_pull_in_flight_turns_a_draft_down_before_anything_is_read() {
         &mut app,
         &a_manifest(),
         repo.path(),
-        BRIEF,
+        drafting(),
         Some("`WAR-140` is being pulled"),
         now(),
     );
@@ -2333,4 +2273,11 @@ fn a_pull_in_flight_turns_a_draft_down_before_anything_is_read() {
         ["`WAR-140` is being pulled; this `/draft` cut nothing"]
     );
     assert!(!cutter.fetching(), "a refused draft started a fetch");
+}
+
+const fn drafting() -> ToDraft<'static> {
+    ToDraft {
+        scope: SCOPE,
+        project: Some(SLUG),
+    }
 }

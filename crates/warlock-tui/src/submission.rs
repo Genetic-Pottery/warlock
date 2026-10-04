@@ -14,7 +14,7 @@
 // Stated once, here, because it is the only place warlock says which commands
 // exist: a second copy of this sentence in the loop or in a test fixture would
 // be a second list to keep true.
-const REFUSAL: &str = "warlock has seven commands — /brief, /write, /chat, /push, /draft, /pull and /resume — and four of them take an argument: a brief for /push and /draft, a scope and optionally a ticket for /pull, and a ticket for /resume.";
+const REFUSAL: &str = "warlock has seven commands — /brief, /write, /chat, /push, /draft, /pull and /resume — and four of them take arguments: a scope and a brief for /push, a scope and optionally a project's slug for /draft, a scope and optionally a ticket for /pull, and a ticket for /resume.";
 
 // Fields rather than the second half of a tuple, because one of the two is
 // optional and the other is not: `/pull <SCOPE>` takes the next ticket in the
@@ -25,6 +25,21 @@ const REFUSAL: &str = "warlock has seven commands — /brief, /write, /chat, /pu
 pub(crate) struct Taking<'a> {
     pub scope: &'a str,
     pub ticket: Option<&'a str>,
+}
+
+// The scope a `/push` files to and the brief it files, both required.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct ToPush<'a> {
+    pub scope: &'a str,
+    pub path: &'a str,
+}
+
+// The scope a `/draft` reads from and, where it named one, the project's slug:
+// without one, the planned projects are listed instead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct ToDraft<'a> {
+    pub scope: &'a str,
+    pub project: Option<&'a str>,
 }
 
 // Nine variants and no tenth for "empty", because an empty draft never gets
@@ -40,10 +55,8 @@ pub(crate) enum Submitted<'a> {
     Brief,
     Write,
     Chat,
-    // `None` is `/push` on its own, which files what this session wrote.
-    Push(Option<&'a str>),
-    // `None` is `/draft` on its own, which cuts what this session wrote.
-    Cut(Option<&'a str>),
+    Push(ToPush<'a>),
+    Cut(ToDraft<'a>),
     // `None` is `/pull` on its own, which is the one command word that is worth
     // more than a refusal without its argument: the scopes this machine holds
     // are the answer to it, this module cannot ask for them, so a bare `/pull`
@@ -54,8 +67,9 @@ pub(crate) enum Submitted<'a> {
     Resume(&'a str),
     Message,
     // An unknown word, a bare `/`, one of the three command words that take
-    // nothing with something after it, a `/resume` with no ticket, and an
-    // argument with more words in it than the command has places to put them. It
+    // nothing with something after it, a `/push` without both its scope and its
+    // brief, a `/draft` or `/resume` with nothing after it, and an argument with
+    // more words in it than the command has places to put them. It
     // never reaches the model: the point of refusing rather than sending is that
     // a typo costs a line and not a turn.
     Refused,
@@ -103,42 +117,34 @@ pub(crate) fn submitted_for(draft: &str) -> Submitted<'_> {
     // eat it.
     let after = &draft[word.len()..];
 
-    // The two commands whose argument is a path, because they are the commands
-    // about a file rather than about the conversation: a brief is committed,
-    // read for a day, and then filed and cut by whoever gets to it, quite
-    // possibly in a session that wrote nothing and by somebody who did not
-    // write it.
-    //
-    // One branch for the two of them, with only the variant chosen from the
-    // word, rather than a branch each: a second copy of the lines below would be
-    // a second place for "a path with a space in it" and "never across a
-    // newline" to stop agreeing, and the two commands take the same argument.
-    //
-    // Taken whole rather than as a second token, so a path with a space in it
-    // arrives as the path it is — but never across a line break, which is
-    // somebody typing a message under a command word rather than naming a file
-    // no path has a newline in.
-    if matches!(word, PUSH | CUT) && !after.contains('\n') {
-        let named = after.trim();
-        let named = (!named.is_empty()).then_some(named);
-        return if word == CUT {
-            Submitted::Cut(named)
-        } else {
-            Submitted::Push(named)
+    // The scope first and then the path, taken whole rather than as a second
+    // token, so a path with a space in it arrives as the path it is — but never
+    // across a line break, which is somebody typing a message under a command
+    // word rather than naming a file no path has a newline in. A `/push` short
+    // of either is refused rather than guessed at: a push files a project
+    // nothing here can take back.
+    if word == PUSH && !after.contains('\n') {
+        let after = after.trim();
+        let Some((scope, path)) = after.split_once(char::is_whitespace) else {
+            return Submitted::Refused;
         };
+        return Submitted::Push(ToPush {
+            scope,
+            path: path.trim(),
+        });
     }
 
-    // The two commands about a ticket, whose arguments are names rather than
-    // paths: a scope and a ticket identifier are single words, so they are read
-    // as words and a third word is a refusal rather than the tail of the second.
-    // Reading them the way a path is read would make `/pull warlock-team WAR-1`
-    // one scope called `warlock-team WAR-1`, which exists nowhere and would be
+    // The commands whose arguments are names rather than paths: a scope, a
+    // slug and a ticket identifier are single words, so they are read as words
+    // and a third word is a refusal rather than the tail of the second. Reading
+    // them the way a path is read would make `/pull warlock-team WAR-1` one
+    // scope called `warlock-team WAR-1`, which exists nowhere and would be
     // refused a screen later by whatever went looking for it.
     //
-    // The line break is disqualifying here for `PUSH | CUT`'s reason and not for
-    // a reason of its own: a command word with a paragraph under it is somebody
+    // The line break is disqualifying here for `PUSH`'s reason and not for a
+    // reason of its own: a command word with a paragraph under it is somebody
     // expecting the paragraph to be read.
-    if matches!(word, PULL | RESUME) && !after.contains('\n') {
+    if matches!(word, CUT | PULL | RESUME) && !after.contains('\n') {
         let mut words = after.split_whitespace();
         let (first, second) = (words.next(), words.next());
         if words.next().is_some() {
@@ -150,6 +156,14 @@ pub(crate) fn submitted_for(draft: &str) -> Submitted<'_> {
                 scope,
                 ticket: second,
             }));
+        }
+        if word == CUT {
+            return first.map_or(Submitted::Refused, |scope| {
+                Submitted::Cut(ToDraft {
+                    scope,
+                    project: second,
+                })
+            });
         }
         return match (first, second) {
             (Some(ticket), None) => Submitted::Resume(ticket),

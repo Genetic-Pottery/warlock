@@ -1,17 +1,14 @@
-//! A brief becomes a project on the board this machine's sigil names, and the
-//! address of that project is written into `.warlock/filed.toml`: `warlock push
-//! <PATH>` here, and the panel's `/push` in [`mod@crate::pushing`], both through
-//! [`prepare`] and [`file`].
+//! A brief becomes a project on the board a scope files to: `warlock push
+//! <SCOPE> <PATH>` here, and the panel's `/push` in [`mod@crate::pushing`], both
+//! through [`prepare`] and [`file`]. Nothing is written on this machine: the URL
+//! printed is the whole record, and the brief can be deleted once it is filed.
 //!
 //! The split is the promise rather than an arrangement: everything that can
-//! refuse — no board, several boards, an unbound checkout, a brief already
-//! filed, a document that is not a brief — is asked by [`prepare`], which opens
-//! no socket, so a refusal reaches nobody's workspace and costs nothing. A dry
-//! run and the panel's dialog are both answered from its [`Prepared`], and the
-//! socket is opened inside [`file`] and nowhere earlier.
-//!
-//! No `--json`, matching the other writing subcommands: the answer worth
-//! parsing is the record, which is a file rather than a stream to be caught.
+//! refuse without asking the board — a scope that is not a board, an unbound
+//! checkout, a document that is not a brief — is asked by [`prepare`], which
+//! opens no socket, so a refusal reaches nobody's workspace and costs nothing. A
+//! dry run and the panel's dialog are both answered from its [`Prepared`], and
+//! the socket is opened inside [`file`] and nowhere earlier.
 //!
 //! No key value is printed here and none can be. [`Prepared`] carries one with a
 //! redacting `Debug`, it is read on exactly one line — the opener's — and
@@ -22,9 +19,7 @@ use std::fmt;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
-use warlock_engine::{
-    Destination, Filed, FiledRecord, Manifest, filed, manifest_path, now_rfc3339, resolve_filing,
-};
+use warlock_engine::{Destination, Manifest, manifest_path, resolve_filing};
 
 use crate::account::size;
 use crate::brief::{Brief, brief_at};
@@ -32,7 +27,7 @@ use crate::error::Error;
 use crate::linear::{Board, NewProject, Opener as LinearOpener, Opens};
 use crate::standing::{FOR_PUSH, Standing};
 
-pub fn push(path: &Path, scope: Option<&str>, dry_run: bool) -> Result<(), Error> {
+pub fn push(scope: &str, path: &Path, dry_run: bool) -> Result<(), Error> {
     let standing = Standing::here(FOR_PUSH)?;
     // The error rather than `check`'s `.ok()`: the sigils under the home pick
     // the board and the key store beside them is what files to it, so a machine
@@ -43,8 +38,8 @@ pub fn push(path: &Path, scope: Option<&str>, dry_run: bool) -> Result<(), Error
     pushed(
         &standing,
         &home,
-        path,
         scope,
+        path,
         dry_run,
         &LinearOpener,
         &mut io::stdout(),
@@ -60,8 +55,8 @@ pub fn push(path: &Path, scope: Option<&str>, dry_run: bool) -> Result<(), Error
 fn pushed<O: Opens, W: Write>(
     standing: &Standing,
     home: &Path,
+    scope: &str,
     path: &Path,
-    scope: Option<&str>,
     dry_run: bool,
     open: &O,
     out: &mut W,
@@ -71,8 +66,8 @@ fn pushed<O: Opens, W: Write>(
         &manifest,
         standing.repo_root(),
         home,
-        &standing.target(path),
         scope,
+        &standing.target(path),
     )?;
 
     if dry_run {
@@ -85,13 +80,11 @@ fn pushed<O: Opens, W: Write>(
     file(&prepared, open, out).map(drop)
 }
 
-/// A push with every refusal already asked: the brief read, the board resolved,
-/// and the brief's manifest spelling checked against `.warlock/filed.toml`.
+/// A push with every refusal that costs nothing already asked: the brief read
+/// and the board resolved.
 #[derive(Clone, PartialEq, Eq)]
 pub(crate) struct Prepared {
     root: PathBuf,
-    path: PathBuf,
-    spelled: String,
     brief: Brief,
     destination: Destination,
     value: String,
@@ -114,8 +107,6 @@ impl fmt::Debug for Prepared {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Prepared")
             .field("root", &self.root)
-            .field("path", &self.path)
-            .field("spelled", &self.spelled)
             .field("brief", &self.brief)
             .field("destination", &self.destination)
             .field("value", &"<redacted>")
@@ -123,98 +114,67 @@ impl fmt::Debug for Prepared {
     }
 }
 
-// `path` is joined onto nothing here: the subcommand hands in its argument
-// joined onto the working directory and the panel its manifest spelling joined
-// onto the root, and both are spelled back against the root below, which is
-// what a record is keyed by.
-//
-// The board is resolved before the records are read and the records before the
-// brief, so a machine that cannot say where it would file is told that first,
-// and a brief already filed is answered with its address even if it has since
-// stopped being a brief.
+// The board is resolved before the brief is read, so a machine that cannot say
+// where it would file is told that first.
 pub(crate) fn prepare(
     manifest: &Manifest,
     root: &Path,
     home: &Path,
+    scope: &str,
     path: &Path,
-    scope: Option<&str>,
 ) -> Result<Prepared, Error> {
-    let target =
-        resolve_filing(manifest, root, home, scope).map_err(|source| Error::Filing { source })?;
-
-    let spelled = crate::query::spelled(root, path)?;
-    unfiled(&records(root)?, &spelled)?;
+    let target = resolve_filing(manifest, root, home, Some(scope))
+        .map_err(|source| Error::Filing { source })?;
 
     let brief = brief_at(root, path).map_err(|source| Error::Brief { source })?;
 
     Ok(Prepared {
         root: root.to_path_buf(),
-        path: path.to_path_buf(),
-        spelled,
         brief,
         destination: target.destination(),
         value: target.value().to_owned(),
     })
 }
 
-// The records are read again rather than carried from `prepare`: the panel's
-// dialog can sit open while another shell's push appends to the file, and
-// saving a copy read before that would drop that push's record — and file this
-// brief a second time if the record was its own.
 pub(crate) fn file<O: Opens, W: Write>(
     prepared: &Prepared,
     open: &O,
     out: &mut W,
 ) -> Result<String, Error> {
-    let filed = records(&prepared.root)?;
-    unfiled(&filed, &prepared.spelled)?;
-
     let linear = open.open(&prepared.value);
     sent(
         &linear,
         &prepared.root,
         &prepared.destination,
         &prepared.brief,
-        &prepared.path,
-        filed,
         out,
     )
 }
 
-fn unfiled(filed: &Filed, spelled: &str) -> Result<(), Error> {
-    match filed.record(spelled) {
-        Some(already) => Err(Error::AlreadyFiled {
-            path: spelled.to_owned(),
-            url: already.url().to_owned(),
-        }),
-        None => Ok(()),
-    }
-}
-
 // Split from [`file`] over the [`Board`] seam and past the opener, so the order
-// — team, status, project, record — is assertable against an in-memory stand-in,
-// and so a test can hand it a root whose record cannot be saved without having
-// to get a brief read from under one.
+// — team, name, status, project — is assertable against an in-memory stand-in.
 //
 // The address comes back for the panel, which has no `out` to read afterwards,
 // and the URL is the one thing a push must not lose.
+//
+// The name is asked of the board before anything is created: with nothing on
+// this machine remembering a push, a project of the same name in the team is
+// the only sign this brief was filed before. Asked and then created, so two
+// pushes racing each other can both pass it; that is two projects a person
+// deletes one of, and a lock on the board was not worth building for it.
 //
 // The label is resolved inside `create_project`, as its first request, and is
 // deliberately not resolved here as well. That ordering is `linear.rs`'s
 // decision: the label is the only mark saying warlock filed a project, nothing
 // here can take a project back, so the label exists before the project does.
-// Resolving it here too would ask for the same name a second time and would not
-// reach the case the ticket describes — a label that fails after a create that
-// landed — because with the label first there is no such create. So a label that
-// will not resolve is a failed `create_project`: a refusal with nothing created,
-// nothing recorded and no URL, and that is the honest report of what happened.
+// Resolving it here too would ask for the same name a second time, and a label
+// that will not resolve is already a failed `create_project` with nothing
+// created and no URL.
 pub(crate) fn sent<W: Write>(
     linear: &impl Board,
     root: &Path,
     destination: &Destination,
     brief: &Brief,
-    path: &Path,
-    mut filed: Filed,
     out: &mut W,
 ) -> Result<String, Error> {
     let team = linear
@@ -223,6 +183,12 @@ pub(crate) fn sent<W: Write>(
             team: destination.team_key().to_owned(),
             path: manifest_path(root),
         })?;
+    if let Some(url) = linear.project_named(destination.team_key(), brief.name())? {
+        return Err(Error::AlreadyFiled {
+            name: brief.name().to_owned(),
+            url,
+        });
+    }
     // `None` is a workspace with no status by that name, which is a project
     // filed with no status at all rather than a failure.
     let status = linear.backlog_status()?;
@@ -232,9 +198,6 @@ pub(crate) fn sent<W: Write>(
             .with_status(status.as_deref()),
     )?;
 
-    // Printed before the record is saved, not after: the project exists from
-    // here on and its address is the one thing that must not be lost, so it
-    // goes out whatever the save does next.
     drop(writeln!(
         out,
         "warlock: filed `{}` to `{}`, labelled `{}`: {}",
@@ -244,40 +207,7 @@ pub(crate) fn sent<W: Write>(
         project.url()
     ));
 
-    let unfiled = |source: filed::Error| Error::Unfiled {
-        url: project.url().to_owned(),
-        source: Box::new(source),
-    };
-    filed.push(
-        FiledRecord::new(
-            root,
-            path,
-            project.id(),
-            project.url(),
-            destination.scope(),
-            destination.team_key(),
-            now_rfc3339(),
-        )
-        .map_err(unfiled)?,
-    );
-    filed.save(root).map_err(unfiled)?;
-
-    // The address, for a caller with no `out` to read it off. Last, so that a
-    // push which hands one back is one whose record is on disk — and so that the
-    // two failures either side of the create keep carrying it themselves.
     Ok(project.url().to_owned())
-}
-
-// A missing file is an empty one, the reading `Standing::manifest` takes: a
-// repository that has never filed anything records no filing, and that is an
-// answer rather than the absence of one. A file that exists and will not read
-// stays a failure — pushing over records warlock could not read is how a brief
-// that already has a project gets a second one.
-pub(crate) fn records(root: &Path) -> Result<Filed, Error> {
-    match Filed::load(root) {
-        Err(filed::Error::NotFound { .. }) => Ok(Filed::new()),
-        other => other.map_err(|source| Error::Filed { source }),
-    }
 }
 
 // The key by name, as everywhere else in warlock. The size is the content's own

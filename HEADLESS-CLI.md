@@ -31,8 +31,8 @@ plain line and the terminal is never touched.
 | `warlock pact <path>` | Describe a directory and everything below it, a `WARLOCK.md` each | a model pass per directory |
 | `warlock refresh <path>` | The same over only the directories that are not fresh | a model pass per stale directory |
 | `warlock brief` | Argue a brief in one conversation at the shell, and write it where `briefs.toml` says | a turn per blank line, one more for `/write`, and the document it writes |
-| `warlock push <path>` | File the brief at `path` as a project on the board this machine's sigil names | one project on somebody's board and one record write |
-| `warlock draft <path>` | Cut the project filed for the brief at `path` into issues on the board that holds it | a drafting session per uncut slice with a turn for each answer or piece of feedback, a proposing pass per question, and for each accepted slice its issues and a record write |
+| `warlock push <SCOPE> <PATH>` | File the brief at `PATH` as a project on the board `SCOPE` files to | one project on somebody's board |
+| `warlock draft <SCOPE> [SLUG]` | Without `SLUG`, list the scope's planned projects. With it, cut that project into issues | a list costs one read; a cut costs a drafting session per uncut slice with a turn for each answer or piece of feedback, a proposing pass per question, and for each settled slice its issues and one comment on the project |
 | `warlock pull <SCOPE>` | Work the next ready ticket in that scope's queue to an open pull request | a splitting pass, a model pass per sub-task, a commit each, a pushed branch, a pull request, and two moves on somebody's board |
 | `warlock resume <TICKET>` | Put the sub-tasks a halted run stopped on back to `pending`, so the next pull of that ticket finds work | one run-record write |
 
@@ -471,7 +471,7 @@ other line is the brief, and a command word that is not it is refused on a line
 rather than sent, so a mistyped command costs a line here instead of a turn:
 
 ```sh
-> /push docs/brief.md
+> /push warlock-team docs/brief.md
 warlock: /write is the only command here and takes nothing after it — every other line is the brief; `warlock push` and `warlock draft` are commands of their own
 ```
 
@@ -546,102 +546,77 @@ from something else.
 
 ## Pushing
 
-`warlock push <PATH>` is the only subcommand that opens a socket of its own,
-and the only one that leaves something behind in a workspace that is not this
-repository. The brief at that path becomes a project on the board this
-machine's sigil names — the team, the label and the scope are the `[[scope]]`
-record `warlock check` prints — and the address of that project is appended to
-`.warlock/filed.toml`, which is how the repository knows a brief is filed.
+`warlock push <SCOPE> <PATH>` files the brief at `PATH` as a project on the
+board `SCOPE` files to. The team, the label and the key are the `[[scope]]`
+record and binding that `warlock check` prints. Nothing is written in the
+repository: the URL the push prints is the whole record, and you can delete the
+brief once it's filed.
 
-Two flags and no more. `--scope <NAME>` picks the board when this machine can
-file to several, and `--dry-run` says what would be sent without opening a
-socket. There is no `--json`, matching `unpact` and the two `scope` verbs: the
-answer worth parsing here is the record, and that is a file in the repository
-rather than a stream to catch.
+Both arguments are required. Warlock never infers the scope from the sigils
+you hold, because a project filed to the wrong board is one it can't take back.
+`--dry-run` says what would be sent without opening a socket.
 
-The order of the work is the promise rather than an arrangement. The
-repository, the home the sigils and the key store sit under, the board, the
-`.warlock/filed.toml` records and the document itself are all resolved first,
-and only then is the socket opened — so every refusal below costs nothing,
-reaches nobody's workspace and leaves no half-filed brief behind. Past that
-line the order is team key to team id, the `Backlog` project status (a
-workspace with no status by that name files the project with none rather than
-failing), the label, the project, and last the record. The label is resolved —
-and created when the workspace has not got one — *before* the project, because
-the label is the only mark on a project saying warlock filed it and nothing
-here can take a project back.
+Every refusal but one is decided before the socket opens: the board, the key
+and the document itself. Past that line, the order is the team key to a team
+id, a check for a project of the same name in that team, the `Backlog` project
+status, the label, and the project. A workspace with no `Backlog` status gets
+the project with no status rather than a failure. The label is resolved, and
+created when the workspace has none, before the project, because the label is
+the only mark saying warlock filed it.
 
-`--dry-run` prints the board, the key name, the project name and the size of
-what would be sent, and the size is the content's own bytes rather than the
-file's: the title line is sent as the project's name, not as part of its body.
+`--dry-run` prints the board, the key name, the project name, and the size of
+the content. The size is the content's own bytes, because the title line is
+sent as the project's name:
 
 ```sh
-$ warlock push docs/warlock-brief-22-push-a-brief-to-the-board-the-sigil-names.md --dry-run
+$ warlock push warlock-team docs/warlock-brief-22-push-a-brief-to-the-board-the-sigil-names.md --dry-run
 warlock: would file `Push a brief to the board the sigil names` to `WAR`, under the scope `warlock-team`, with the key `warlock` — 15 KB of content, and nothing was sent
 ```
 
-A push that lands says the same four things it is worth knowing afterwards —
-the name it filed, the team, the label and the URL — on one line, and exits 0:
+A push that lands prints the name, the team, the label and the URL on one line,
+and exits 0:
 
 ```sh
-$ warlock push docs/warlock-brief-22-push-a-brief-to-the-board-the-sigil-names.md
+$ warlock push warlock-team docs/warlock-brief-22-push-a-brief-to-the-board-the-sigil-names.md
 warlock: filed `Push a brief to the board the sigil names` to `WAR`, labelled `warlock`: https://linear.app/acme/project/push-a-brief-to-the-board-the-sigil-names-8f2c1d
 ```
 
-A brief is filed once. A path already in `.warlock/filed.toml` is refused
-before anything is sent, and the refusal leads with the address of the project
-it made the first time, because that is what the reader wants from the line:
+A brief is filed once. With nothing on the machine remembering a push, the
+board is asked instead: a project in the team with the same name, compared
+ignoring case, refuses the push before anything is created. The refusal leads
+with that project's address:
 
 ```sh
-$ warlock push docs/brief.md
-warlock: `docs/brief.md` is already filed at https://linear.app/acme/project/a-brief-8f2c1d, so nothing was sent: a brief that changed after it was filed is edited where it is
+$ warlock push warlock-team docs/brief.md
+warlock: a project named `A brief` is already filed at https://linear.app/acme/project/a-brief-8f2c1d, so nothing was sent: a brief that changed after it was filed is edited on the project
 ```
 
-Which board is the question with the most ways of having no single answer, and
-each of them is its own sentence because each is fixed in a different file by a
-different person. A brief is not about a directory, so there is nothing to walk
-up and no nearest scope to win: the sigils are the whole statement of which
-board this is, and anything other than exactly one candidate refuses rather
-than guesses. A repository that records no `[[scope]]` at all is the first of
-the four ways of having none, and it is answered before what this machine holds
-is read, because no sigil would make a board here and a sentence about holding
-one would be advice that cannot work; then nothing held, something held this
-repository has never heard of, and a scope held with no `[[scope]]` record:
+Two pushes of the same brief at the same moment can both pass that check. The
+result is two projects, and you delete one.
+
+The scope has to be one this repository records and this machine holds. Each
+way of failing that is its own sentence, because each is fixed in a different
+file:
 
 ```sh
 warlock: `/repo/.warlock/pacts.toml` records no `[[scope]]` record, so there is nowhere to file: add one
 warlock: this machine holds no sigil, so nothing says which board to file to: hold one with `warlock config`
 warlock: this machine holds `platform`, and `/repo/.warlock/pacts.toml` records no scope of any of those names
 warlock: this machine holds `platform`, and that scope has no `[[scope]]` record: add one to `/repo/.warlock/pacts.toml`
-```
-
-More than one candidate names them all and asks for the flag; a `--scope` that
-is not one of them names them all as well, so no answer is lost by giving a
-name that was never going to work:
-
-```sh
-$ warlock push docs/brief.md
-warlock: this machine can file to `data-plane`, `web`: pick one with `--scope <name>`
-
-$ warlock push docs/brief.md --scope billing
 warlock: `billing` is not a scope this machine can file to here: `data-plane`, `web`
 ```
 
-Both are decided before the key store is touched, so a checkout that is both
-ambiguous and unbound is told about the board first: `--scope` is the half that
-is about this push. The key half is the two refusals the engine already words
-for a route, carried here rather than rewritten — an unbound checkout, and a
-bound name this machine has never stored:
+The key half is the two refusals the engine already words for a route: an
+unbound checkout, and a bound name this machine has never stored:
 
 ```sh
 warlock: no key is bound to this checkout in `/home/you/.warlock/repo-f447b89a747182e2/config.toml`: bind one with `warlock key use <name>`
 warlock: this checkout is bound to `work`, which is not in `/home/you/.warlock/keys.toml`: store it with `warlock key add work`
 ```
 
-The document is the last thing read before the socket. A file that is not
-there, a file with no `# ` title line to take a project name from, and a file
-missing sections of the shape this repository's briefs take are three refusals
-with nothing sent:
+The document is the last thing read before the socket. A missing file, a file
+with no `# ` title line, and a file missing sections of this repository's brief
+shape are three refusals with nothing sent:
 
 ```sh
 warlock: there is no file at `/repo/docs/nope.md`, so there is nothing to push
@@ -652,90 +627,95 @@ warlock: `/repo/docs/thin.md` is missing ## Outcome, ## Success criteria, ## Con
 Past the socket, what Linear says is carried through as the line it said it
 in — `could not reach Linear: …`, `Linear answered 429` and
 `Linear refused the request: …` — one request per operation, with nothing
-retrying behind it. Two refusals out there are warlock's own. The first is a
-`team` Linear does not know, which names the value and the file it is written
-in, because a `team` in a `[[scope]]` record is a team *key* — `WAR` — and the
-usual cause of this is a record carrying a team's name instead:
+retrying. A `team` Linear doesn't know is warlock's own refusal, and names the
+file the key is written in, because the usual cause is a record carrying a
+team's name instead of its key:
 
 ```sh
 warlock: Linear knows no team with the key `Data Plane`, so nothing was filed: the `[[scope]]` record in `/repo/.warlock/pacts.toml` is where that key is written
 ```
 
-The second is the one failure in the whole family that happens after something
-was spent: the project exists and the record of it would not save. The URL is
-printed before the record is written, precisely so that it survives this — it
-goes to stdout as a push that worked, and the failure goes to stderr under it,
-non-zero:
+A label that won't resolve is refused with nothing created, because it's
+resolved before the project.
 
-```sh
-$ warlock push docs/brief.md
-warlock: filed `A brief` to `DAT`, labelled `area/data-plane`: https://linear.app/acme/project/a-brief-8f2c1d
-warlock: the project is at https://linear.app/acme/project/a-brief-8f2c1d, and warlock could not record it: could not read or write `/repo/.warlock/filed.toml`: Permission denied (os error 13)
-```
-
-A label is not a third. Because it is resolved before the create, there is no
-run in which a project lands and its label then fails — a label that will not
-resolve is refused with nothing created, no URL and no record, which is the
-honest report of what happened rather than a project nothing will ever find.
-
-Every one of these is an ordinary **1**. The boundary's **3** is never spent by
-a push and could not be: a sigil here picks which board to file to rather than
-opening a directory to be written, so there is no path being acted on for the
-boundary to refuse. A script reading a 3 from warlock is reading it from
-something else.
+Every one of these exits **1**. The boundary's **3** is never spent by a push:
+a scope here picks which board to file to rather than opening a directory to be
+written.
 
 No key value is printed by any of this — not on a line, not in an error, not in
-`--dry-run`, not in a `Debug`. Only key *names* are, here as everywhere else:
-the `warlock` in the dry-run line above is the name this checkout is bound to
-and never what is stored under it, and the value is read on exactly one line —
-the one that builds the client.
+`--dry-run`, not in a `Debug`. Only key *names* are. The value is read on exactly
+one line: the one that builds the client.
 
 ## Drafting
 
-`warlock draft <PATH>` is the other half of that one. The project a push
-recorded for the brief at `path` is read back, its `## Scope` section is parsed
-into slices, the slices `.warlock/filed.toml` already holds a cut record for
-are skipped, and every other one is drafted by a session of its own and filed
-as issues on the same board. The project's status is not moved in either
-direction, here or anywhere: a draft creates issues, writes the relations
-between them and says one comment, and nothing else.
+`warlock draft <SCOPE> [SLUG]` is the other half of that one. It reads
+nothing from the repository but the scope's record, so a fresh clone with a key
+and a sigil can draft a project somebody else pushed.
 
-Two flags and no more, spelled as the push's are. `--scope <NAME>` picks the
-board when this machine can file to several, and the three no-board refusals,
-the ambiguous one and an unknown `--scope` are push's word for word — a brief
-is not about a directory there and it is not about one here. `--dry-run` says
-what would be cut without drafting anything. There is no `--json`, for the
-push's reason: the answer worth parsing is the record, and that is a file in
-the repository.
+Without `SLUG`, it lists the projects in the scope's team that are `Planned`
+and carry the scope's label, one per line, slug first. The slug is the hex at
+the end of the project's URL. The lines carry no `warlock:` prefix, so the slug
+is the first word and can be copied as it is:
 
-The order of the work is the promise rather than an arrangement. The
-repository, the home, the board, the key and the brief's own record in
-`.warlock/filed.toml` are resolved first, so every refusal in that stretch
-costs nothing and sends nothing. Then one read fetches the project — the only
-request a dry run makes — and the status gate, the scope parse and the skips
-are all decided off what that answer carried, with no second request behind
-them. Past that, each remaining slice in turn: one session drafts it, every
-question it stops to ask is put to whoever started the run and answered with
-the line they type, the drafts it comes back with are printed and a line is
-read, and only `accept` goes any further — the team key becomes an id, the
-team's `Backlog` state and the label are resolved, the issues are created, the
-relations between them are written, and that slice's cut record is saved before
-the next slice begins. The reading comes before all of that rather than inside
-it, so a slice nobody accepted costs no request. Saving per slice rather than
-once at the end is what stops a run that fails halfway from filing its first
-slices a second time. After the last slice, and only when something was filed,
-one comment on the project names the issues this run made and says the status
-was not moved.
+```sh
+$ warlock draft warlock-team
+9e41c07a2b13  Draft from the board, not the repo
+d1cb3521be71  Give the headless CLI a voice
+```
+
+A team with none prints one line saying so. A team with more than one page of
+250 prints the first page and a line saying it was cut off. Nothing matches
+names: the slug is taken exactly or refused.
+
+With `SLUG`, the project is read back, its `## Scope` section is parsed into
+slices, the slices its comments already note as cut or skipped are passed over,
+and every other one is drafted by a session of its own and filed as issues on
+the same board. The project's status is not moved: a draft creates issues,
+writes the relations between them, and comments on the project once per
+settled slice, and nothing else.
+
+Those comments are the whole record of what was cut. Each starts with
+`Warlock cut slice` or `Warlock skipped slice`, names the slice in backticks,
+and, for a cut, the issues it became:
+
+```text
+Warlock cut slice `The scope parser` into `WAR-123`, `WAR-124`.
+Warlock skipped slice `The drafting session`.
+```
+
+A slice is matched to its comment by title, ignoring case and runs of
+whitespace. Deleting a comment, or retitling the slice in the brief, makes
+the next draft offer that slice again.
+
+`--dry-run` says what would be cut without drafting anything. The scope
+refusals are the push's, word for word.
+
+The order of the work is the promise rather than an arrangement. The board and
+the key are resolved first, so every refusal in that stretch costs nothing and
+sends nothing. Then one read fetches the project and its warlock comments — the
+only request a dry run makes past the viewer — and the status gate, the scope
+parse, and the passing over are all decided off what that answer carried.
+
+Past that, each remaining slice in turn: one session drafts it, every question
+it stops to ask is put to whoever started the run and answered with the line
+they type, the drafts it comes back with are printed whole, and a line is read.
+Only create goes any further — the team key becomes an id, the team's `Backlog`
+state and the label are resolved, the issues are created, the relations between
+them are written, and that slice's comment is said on the project before the
+next slice begins. The review comes before all of that, so a slice nobody
+created costs no create. A comment per slice rather than one at the end is what
+stops a run that fails halfway from filing its first slices a second time.
 
 Progress is one line per slice as it is drafted, whatever it asked and was
-answered with, its drafts by title, what can be said back about them, and one
+answered with, its drafts by title and then whole, the review prompt, and one
 line naming what was filed. The fraction is the place in the cut order and the
 position is where the slice sits in the document, so a reader can find it in
 the brief — the two differ exactly when a `depends_on` line moved something.
-The bare `> ` is where the run stops and waits for a line:
+The bare `> ` and the review prompt are where the run stops and waits for a
+line. In this example, `…` stands for the drafts printed whole:
 
 ```sh
-$ warlock draft docs/warlock-brief-23-cut-a-planned-project-into-tickets.md
+$ warlock draft warlock-team aacb761fc284
 warlock: [1/3] slice 1 `The project fetch` — already cut as `WAR-121`, `WAR-122`, so nothing was sent
 warlock: [2/3] slice 2 `The scope parser` — drafting
 warlock: slice 2 `The scope parser` asked: is a `## Scope` heading with no `### ` slices under it an empty scope or a refusal?
@@ -743,24 +723,25 @@ warlock: slice 2 `The scope parser` — warlock's answer: a refusal, which is wh
 > a refusal, and it names the heading
 warlock: slice 2 `The scope parser` was answered: a refusal, and it names the heading
 warlock: slice 2 `The scope parser` — drafted `Parse the scope block`, `Refuse a scope with no slices`
-warlock: slice 2 `The scope parser` — `accept` to file these, Enter or `skip` to leave it for another run, or say what these drafts should be instead
-> accept
+warlock: # slice 2 `The scope parser`
+warlock: ## 1. Parse the scope block
+warlock: …
+[c]reate 2 ticket(s), [e]dit, [q]uit, or type feedback to redraft: c
 warlock: cut `The scope parser` into `WAR-123`, `WAR-124`
 warlock: [3/3] slice 3 `The drafting session` — drafting
 warlock: slice 3 `The drafting session` — drafted `Open a session per slice`
-warlock: slice 3 `The drafting session` — `accept` to file these, Enter or `skip` to leave it for another run, or say what these drafts should be instead
-> accept
+warlock: …
+[c]reate 1 ticket(s), [e]dit, [q]uit, or type feedback to redraft:
 warlock: cut `The drafting session` into `WAR-125`
 ```
 
 `--dry-run` prints the project, the status it is in, the board, how many slices
 there are and how many are already cut, then the slices themselves in the order
 they would be cut in — and stops. No session is opened, no model pass is
-bought, nothing is sent past the read that fetched the project and no record is
-written:
+bought, and nothing is sent past the read that fetched the project:
 
 ```sh
-$ warlock draft docs/warlock-brief-23-cut-a-planned-project-into-tickets.md --dry-run
+$ warlock draft warlock-team aacb761fc284 --dry-run
 warlock: would cut `Cut a planned project into tickets`, which is `Planned`, into `WAR` under the scope `warlock-team` — 3 slices, 1 already cut, and nothing was drafted
 warlock: [1/3] slice 1 `The project fetch` — already cut as `WAR-121`, `WAR-122`
 warlock: [2/3] slice 2 `The scope parser`
@@ -819,56 +800,66 @@ warlock: slice 2 `The scope parser` was not drafted: the session asked a questio
 ```
 
 Nothing a slice drafts becomes an issue on its own. The drafts are printed by
-title, what can be said back about them is printed under that, and a line is
-read before anything is sent to the board: `accept` files them, case folded;
-Enter or `skip` leaves the slice uncut and recorded nowhere, so a later run
-reaches it again; and anything else is feedback the same session drafts again
-from. Feedback is not read for a command or weighed against the drafts — it
-goes back as that session's next turn, and what comes back comes up for review
-again:
+title and then whole — each `## N. title`, its body, and its `Blocked by` and
+`Blocks` lines — and the review prompt is read before anything is sent to the
+board. The answers are Forman's, case folded and trimmed:
+
+- `c`, `create`, `y`, `yes`, or an empty line files them.
+- `q`, `quit`, `n`, or `no` skips the slice.
+- `e` or `edit` opens the drafts in `$EDITOR`. What you save is read back,
+  repaired the way a model's answer is, printed, and reviewed again.
+- Anything else is feedback. It goes back as the same session's next turn, and
+  what comes back is reviewed again.
 
 ```sh
 warlock: [3/3] slice 3 `The drafting session` — drafted `Open a session per slice and relay its questions`
-warlock: slice 3 `The drafting session` — `accept` to file these, Enter or `skip` to leave it for another run, or say what these drafts should be instead
-> the relay is its own ticket, split it off
+warlock: …
+[c]reate 1 ticket(s), [e]dit, [q]uit, or type feedback to redraft: the relay is its own ticket, split it off
 warlock: slice 3 `The drafting session` is being redrafted: the relay is its own ticket, split it off
 warlock: slice 3 `The drafting session` — drafted `Open a session per slice`, `Relay one question to the shell`
-warlock: slice 3 `The drafting session` — `accept` to file these, Enter or `skip` to leave it for another run, or say what these drafts should be instead
-> accept
+warlock: …
+[c]reate 2 ticket(s), [e]dit, [q]uit, or type feedback to redraft: c
 warlock: cut `The drafting session` into `WAR-125`, `WAR-126`
 ```
 
-A skip says so, and a pipe that ended before the review says which of the two
-it was, because what a reader wants to know tomorrow is whether the next draft
-will offer this slice again — and it will:
+An edit that can't run, or saves something that isn't drafts, leaves the drafts
+as they were:
 
 ```sh
-warlock: slice 3 `The drafting session` was skipped; nothing was recorded for it
-warlock: slice 3 `The drafting session` was skipped: nobody said what to do with its drafts, so nothing was recorded for it
+warlock: slice 3 `The drafting session` was not edited: `$EDITOR` names no editor to run, so nothing was opened: set it (for example `EDITOR=nvim`) and press `e` again, so nothing changed
 ```
 
-The review runs before any request, which is the whole of what makes a skip
-free: a skipped slice sends nothing, creates no issue and writes no cut record,
-so `.warlock/filed.toml` is left holding nothing that names it.
+A skip says so, and asks whether to go on when slices are left. The default is
+no, and stopping counts what was never offered. A pipe that ended before the
+review is a different line, because what a reader wants to know tomorrow is
+whether the next draft offers the slice again:
+
+```sh
+warlock: slice 2 `The scope parser` was skipped: nothing was created for it, and the next draft passes it over
+carry on with the remaining slices? [y/N] 
+warlock: the run stopped; 1 slice left for another draft
+warlock: slice 3 `The drafting session` was left: nobody said what to do with its drafts, so nothing was recorded and the next draft offers it again
+```
+
+The review runs before any create, so a skipped slice creates no issue. A skip
+does send one request: the comment that notes it, so the next draft passes it
+over. A pipe that ended before the review sends nothing, and the next draft
+offers that slice again.
 
 A slice that comes back with something other than drafts is a reported line and
 the next slice rather than the end of the run — the slices left are other work,
 and they were ordered so that nothing is filed before what it waits on. The same
-goes for a relation Linear turned down and for the project's comment: the issues
-exist and are recorded by then, and an edge that is missing is something a
-person can fix on the board only if they are told it is missing.
+goes for a relation Linear turned down: the issues exist by then, and an edge
+that is missing is something a person can fix on the board only if they are
+told it is missing.
 
-The brief and its project are the first three refusals, all of them before the
-scope is read. A path `.warlock/filed.toml` does not record has no project to
-read and is sent to `warlock push`; an id the workspace does not know names the
-id and the file it is written in, because that file is the only place this
-machine keeps it; and a project that is not `Planned` names both statuses and
-stops where the answer that said so arrived:
+The project is the first two refusals, both before the scope block is read. A
+slug the workspace doesn't know names the command that lists the right ones,
+and a project that isn't `Planned` names the status it is in:
 
 ```sh
-warlock: nothing in `.warlock/filed.toml` records `docs/brief.md`, so there is no project to read: `warlock push docs/brief.md` files it
-warlock: Linear knows no project with the id `9f1c0a7e-1f2b-4c3d-8e5a-6b7c8d9e0f10`, so nothing was read: the record in `/repo/.warlock/filed.toml` is where that id is written
-warlock: the project filed for `docs/brief.md` is in `Backlog` rather than `Planned`, so nothing was read: warlock reads a project back once it is planned
+warlock: Linear knows no project with the slug `9e41c07a2b1`, so nothing was read: `warlock draft warlock-team` lists the planned ones
+warlock: the project `A brief` is in `Backlog` rather than `Planned`, so nothing was read: warlock reads a project back once it is planned
 ```
 
 A project with no status at all gets that same sentence with `has no status` in
@@ -887,12 +878,12 @@ warlock: this project's `## Scope` section has no `### ` slice headings, so ther
 warlock: these slices wait on each other, so there is no order to cut them in: slice 2 `The scope parser` and slice 3 `The drafting session`
 ```
 
-A project every cut record already covers is refused before a single session is
-opened, rather than being a run that succeeded quietly with nothing to do. A
-slice is cut once, and the issues it became are where that work goes on:
+A project whose comments already note every slice is refused before a single
+session is opened, rather than being a run that succeeded quietly with nothing
+to do:
 
 ```sh
-warlock: every slice of the project filed for `docs/brief.md` is already cut, so there is nothing to draft: `.warlock/filed.toml` holds a record for each of them, and warlock cuts a slice once
+warlock: every slice of `A brief` is already cut or skipped, so there is nothing to draft: the project's comments hold a note for each of them, and warlock offers a slice once — retitle a skipped slice in the brief to have it offered again
 ```
 
 Past the socket, what Linear says is carried through as the line it said it in,
@@ -908,18 +899,18 @@ warlock: the team `WAR` has no workflow state called `Backlog`, so no issue was 
 ```
 
 A team key Linear does not know is the push's refusal, worded there and named
-against `.warlock/pacts.toml` here too. And the record that would not save is
-the push's last failure one layer down: the issues exist, the line that named
+against `.warlock/pacts.toml` here too. The one failure after something was
+spent is a comment Linear would not take: the issues exist, the line that named
 them has already gone to stdout, and the failure goes to stderr under it with
-the identifiers in it, because that is the last place anything names them:
+the identifiers in it, because nothing on the project names them and the next
+draft offers that slice again:
 
 ```sh
 warlock: cut `The scope parser` into `WAR-123`, `WAR-124`
-warlock: the issues `WAR-123`, `WAR-124` were created, and warlock could not record them: could not read or write `/repo/.warlock/filed.toml`: Permission denied (os error 13)
+warlock: the issues `WAR-123`, `WAR-124` were created, and warlock could not note them on the project, so the next draft offers this slice again: Linear refused the request: …
 ```
 
-Every one of these is an ordinary **1** — the unrecorded path, the unknown
-project id, the wrong status, all three scope-block refusals, the cycle among
+Every one of these is an ordinary **1** — the unknown slug, the wrong status, all three scope-block refusals, the cycle among
 them, nothing left to cut, the team with no `Backlog`, and whatever Linear
 turned down. The boundary's **3** is never spent by a draft and could not be,
 for the push's reason: a sigil here picks which board the project is on rather
@@ -1270,7 +1261,7 @@ start the ticket over.
 | Status | What it means |
 | --- | --- |
 | `0` | Completed. The question was answered or the write happened, whatever the answer turned out to be — an empty listing, a queue with nothing ready to pull, and a scope closed to this machine included |
-| `1` | Warlock could not do it, or would not: the repository will not resolve, the manifest will not parse or will not save, the path has no repository-relative spelling, a scope name nothing records yet was given without all three record flags or with a blank one, a name that already has a record was given any of them, a brief's template or `briefs.toml` will not read, a push has no board or more than one, the brief is not one or is already filed, a draft's brief is not recorded in `.warlock/filed.toml`, its project is one Linear does not know or is not `Planned`, the scope block will not cut or has nothing left to cut, the team has no `Backlog` state, a pull's scope is one nothing records, the working tree is dirty, a named ticket is one the queue's rules turn down, a run halted, a resume was asked for a ticket this machine holds no run for or a run with nothing to put back, or Linear refused what was sent. The line on stderr is the thing to go and read |
+| `1` | Warlock could not do it, or would not: the repository will not resolve, the manifest will not parse or will not save, the path has no repository-relative spelling, a scope name nothing records yet was given without all three record flags or with a blank one, a name that already has a record was given any of them, a brief's template or `briefs.toml` will not read, a push or draft names a scope that is not a board here, the brief is not one or a project of its name is already filed, a draft's slug is one Linear does not know or its project is not `Planned`, the scope block will not cut or has nothing left to cut, the team has no `Backlog` state, a pull's scope is one nothing records, the working tree is dirty, a named ticket is one the queue's rules turn down, a run halted, a resume was asked for a ticket this machine holds no run for or a run with nothing to put back, or Linear refused what was sent. The line on stderr is the thing to go and read |
 | `2` | The command line was never a request. Clap's status and its wording, for a word warlock has no place for |
 | `3` | The sigil boundary, in the three places it is reached: this machine's sigils do not open the scope covering the path, they do not open the scope a pull was asked for — both refused at the start with nothing spent — or a pull's sub-task wrote under a scope they do not open, which stops the run with nothing committed and the tree as that session left it. Retrying changes nothing, and the road out is `warlock config` |
 | `4` | Completed with failures: a run wrote the documents it could and saved the manifest, and the lines above the count name the directories that did not come out of it |

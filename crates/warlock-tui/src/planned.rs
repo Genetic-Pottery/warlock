@@ -1,16 +1,18 @@
 //! A planned project is cut into issues, one scope slice at a time: `warlock
-//! draft <PATH>` here, and the panel's `/draft` in [`mod@crate::cutting`], both
-//! through [`prepare`], a walk over the [`Planned`] it answers with, [`Filing`] for
-//! each slice drafted, and [`Planned::finish`] once the last slice has settled.
+//! draft <SCOPE> <SLUG>` here, and the panel's `/draft` in [`mod@crate::cutting`],
+//! both through [`prepare`], a walk over the [`Planned`] it answers with, and
+//! [`Filing`] for each slice drafted. Without a slug, both doors print
+//! [`listing`]'s lines instead and stop: picking a project is whoever is at the
+//! door's job, and warlock takes only the exact slug.
 //!
 //! The split is the promise rather than an arrangement: everything that can
-//! refuse — no board, a brief no record names, a project the board has lost or
-//! that is not `Planned`, a description that is not a scope, a project with
-//! nothing left to cut — is asked by [`prepare`], which sends one read and no
-//! mutation, so a refusal costs nothing. Drafting is the door's own business:
-//! nothing here opens a session, and a door that drafts hands the drafts back to
-//! [`Planned::filing`]. The status is not moved on any road — an issue is created,
-//! an edge is written and a comment is said, and nothing else.
+//! refuse — no board, a slug the board does not know, a project that is not
+//! `Planned`, a description that is not a scope, a project with nothing left to
+//! cut — is asked by [`prepare`], which sends reads and no mutation, so a
+//! refusal costs nothing. Drafting is the door's own business: nothing here
+//! opens a session, and a door that drafts hands the drafts back to
+//! [`Planned::filing`]. The status is not moved on any road — an issue is
+//! created, an edge is written and a note is said, and nothing else.
 //!
 //! Nothing a slice drafts becomes an issue on its own. The drafts are printed
 //! and a line is read before [`Planned::filing`] is asked for at all, so a skip
@@ -23,14 +25,10 @@
 //! [`Planned::settle`], so the edges a later slice asks for are worked out in one
 //! place whichever door is driving.
 //!
-//! No `--json`, matching [`mod@crate::push`] and the other verbs that spend
-//! something: the answer worth parsing is the record, which is a file rather
-//! than a stream to be caught.
-//!
 //! No key value is printed here and none can be. [`Planned`], [`Filing`] and
-//! [`Announcement`] each carry one with a redacting `Debug`, it is read only on
-//! the lines that open a board, and everything that prints takes a
-//! [`Destination`], which names the key and never holds it.
+//! [`Skipping`] each carry one with a redacting `Debug`, it is read only on the
+//! lines that open a board, and everything that prints takes a [`Destination`],
+//! which names the key and never holds it.
 
 use std::fmt;
 use std::io::{self, Write};
@@ -38,7 +36,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use warlock_engine::drafting::{self, Draft};
-use warlock_engine::{Destination, Manifest, agent, filed_path, resolve_filing};
+use warlock_engine::{Destination, Manifest, agent, resolve_filing};
 
 use crate::asking::{self, Asks};
 use crate::brief::{Slice, scope_block_in};
@@ -46,15 +44,16 @@ use crate::claude::{
     Activities, Activity, ChatAgent, Converses, Drafted, Drafting, NOTHING_SETTLES_IT, Replied,
     propose_answer,
 };
-use crate::linear::{Board, Issue as LinearIssue, Opener as LinearOpener, Opens, QueuedIssue};
+use crate::linear::{
+    Board, Issue as LinearIssue, Listing, Opener as LinearOpener, Opens, QueuedIssue,
+};
 // The module rather than its `cut` and `Slice`, which would both be a second
 // name for something this file already has: the slices here are the document's,
 // and `cut::Slice` is one slice's drafts on their way to a board.
-use crate::cut::{self, Cut, listed};
+use crate::cut::{self, Cut, fold_title, listed};
 use crate::editing::{self, NO_EDITOR, run_editor};
 use crate::error::{Error, one_line};
 use crate::pull::activity_line;
-use crate::push::records;
 use crate::standing::{FOR_CUT, Standing};
 
 // The one status a project is read back from, and the only spelling accepted:
@@ -93,7 +92,7 @@ fn natural(identifier: &str) -> (String, u64) {
     }
 }
 
-pub fn cut(path: &Path, scope: Option<&str>, dry_run: bool) -> Result<(), Error> {
+pub fn cut(scope: &str, project: Option<&str>, dry_run: bool) -> Result<(), Error> {
     let standing = Standing::here(FOR_CUT)?;
     // The error rather than `check`'s `.ok()`, for [`mod@crate::push`]'s reason:
     // the sigils under the home pick the board and the key store beside them is
@@ -101,11 +100,19 @@ pub fn cut(path: &Path, scope: Option<&str>, dry_run: bool) -> Result<(), Error>
     // rather than an answer of "nothing held".
     let home = Standing::home()?;
 
+    let Some(project) = project else {
+        let manifest = standing.manifest()?;
+        let (destination, listing) =
+            listing(&manifest, standing.repo_root(), &home, scope, &LinearOpener)?;
+        print_listing(&mut io::stdout(), &destination, &listing);
+        return Ok(());
+    };
+
     cut_with(
         &standing,
         &home,
-        path,
         scope,
+        project,
         dry_run,
         &LinearOpener,
         // Its own conversation at the register the brief was written in, built
@@ -196,8 +203,8 @@ impl Watched {
 fn cut_with<O: Opens, A: Converses, P: Converses, K: Asks, W: Write>(
     standing: &Standing,
     home: &Path,
-    path: &Path,
-    scope: Option<&str>,
+    scope: &str,
+    project: &str,
     dry_run: bool,
     open: &O,
     agent: &A,
@@ -207,14 +214,7 @@ fn cut_with<O: Opens, A: Converses, P: Converses, K: Asks, W: Write>(
     watching: fn() -> Activities,
 ) -> Result<(), Error> {
     let manifest = standing.manifest()?;
-    let mut planned = prepare(
-        &manifest,
-        standing.repo_root(),
-        home,
-        &standing.target(path),
-        scope,
-        open,
-    )?;
+    let mut planned = prepare(&manifest, standing.repo_root(), home, scope, project, open)?;
 
     if dry_run {
         for line in would(planned) {
@@ -257,7 +257,7 @@ fn cut_with<O: Opens, A: Converses, P: Converses, K: Asks, W: Write>(
             Ended::File(drafts) => drafts,
             Ended::Left => continue,
             Ended::Skipped => {
-                if let Err(error) = planned.skip_slice(&next) {
+                if let Err(error) = planned.skipping(&next).post(open) {
                     say(out, &error.to_string());
                 }
                 if next.left() == 0 {
@@ -274,28 +274,73 @@ fn cut_with<O: Opens, A: Converses, P: Converses, K: Asks, W: Write>(
         };
 
         // `?`, and not a reported line: what reaches here is a team with no
-        // `Backlog` state, a create Linear turned down, or a record that would
-        // not save — and carrying on to the next slice after any of the three
-        // would be warlock filing a second slice into the same wall, or
-        // recording nothing about issues that now exist.
+        // `Backlog` state, a create Linear turned down, or a note it would not
+        // take — and carrying on to the next slice after any of the three would
+        // be warlock filing a second slice into the same wall, or noting
+        // nothing about issues that now exist.
         let cut = planned.filing(&next, drafts).file(open, out)?;
         // The edges Linear turned down: an issue that exists with a missing
         // edge is a thing a person can fix on the board, and it is only
         // fixable if they are told.
-        if let Settled::Filed { reported, .. } = planned.settle(&next, cut) {
-            for line in reported {
-                say(out, &line);
-            }
+        for line in planned.settle(&next, cut).reported {
+            say(out, &line);
         }
     }
 
-    if let Some(announcement) = planned.finish()
-        && let Some(line) = announcement.post(open)
-    {
-        say(out, &line);
+    Ok(())
+}
+
+/// The projects a bare `warlock draft <SCOPE>` names, read off the board the
+/// scope files to.
+pub(crate) fn listing<O: Opens>(
+    manifest: &Manifest,
+    root: &Path,
+    home: &Path,
+    scope: &str,
+    open: &O,
+) -> Result<(Destination, Listing), Error> {
+    let target = resolve_filing(manifest, root, home, Some(scope))
+        .map_err(|source| Error::Filing { source })?;
+    let destination = target.destination();
+    let listing = open
+        .open(target.value())
+        .planned_projects(destination.team_key(), destination.label())?;
+
+    Ok((destination, listing))
+}
+
+// The project lines bare rather than behind `warlock: `, so the slug is the
+// first word of its line and nothing has to be cut away before it is typed back.
+fn print_listing<W: Write>(out: &mut W, destination: &Destination, listing: &Listing) {
+    for line in listing_lines(destination, listing) {
+        drop(writeln!(out, "{line}"));
+    }
+}
+
+/// One line per project, `slug  name`, then a line when the page was capped;
+/// one line saying so when there is nothing to list. The panel notes the same
+/// lines, so the two doors list projects identically.
+pub(crate) fn listing_lines(destination: &Destination, listing: &Listing) -> Vec<String> {
+    if listing.projects().is_empty() {
+        return vec![format!(
+            "warlock: no project in `{}` is `Planned` and labelled `{}`",
+            destination.team_key(),
+            destination.label()
+        )];
     }
 
-    Ok(())
+    let mut lines: Vec<String> = listing
+        .projects()
+        .iter()
+        .map(|(slug, name)| format!("{slug}  {name}"))
+        .collect();
+    if listing.capped() {
+        lines.push(format!(
+            "warlock: more projects are planned than one page holds; these are the first {}",
+            listing.projects().len()
+        ));
+    }
+    lines
 }
 
 /// One slice drafted in one session and reviewed, or `None` with what went
@@ -422,7 +467,7 @@ fn drafted<A: Converses, P: Converses, K: Asks, W: Write>(
 enum Ended {
     /// Accepted, on their way to the board.
     File(Vec<Draft>),
-    /// Somebody said no at the review: recorded, and never offered again.
+    /// Somebody said no at the review: noted, and never offered again.
     Skipped,
     /// Nothing to file and nothing decided — a session that failed, a question
     /// nobody answered, a pipe that ended — so the next run offers it again.
@@ -623,9 +668,8 @@ fn would(mut planned: Planned) -> Vec<String> {
 /// cut, what earlier runs cut it into, and what this run has created so far.
 pub(crate) struct Planned {
     root: PathBuf,
-    // The brief as `.warlock/filed.toml` spells it, which is what a cut record
-    // is appended under.
-    spelled: String,
+    // Linear's id for the project, which issues are created in and notes are
+    // said on.
     project: String,
     name: String,
     // The board's own spelling and not `Planned`, because that is what somebody
@@ -642,23 +686,20 @@ pub(crate) struct Planned {
     // blocked in, so a slice is only reached once everything it waits on has
     // been.
     slices: Vec<Slice>,
-    // Beside `slices`, one entry each: the identifiers a cut record names, which
-    // is all such a record keeps of an issue, and `None` for a slice still to
+    // Beside `slices`, one entry each: the identifiers a cut note names, which
+    // is all such a note keeps of an issue, and `None` for a slice still to
     // draft.
     already: Vec<Option<Vec<String>>>,
     // The open tickets the scope's queue held when the run started: Forman's
     // backlog digest, and what a draft's `waits_on` resolves against.
     open: Vec<QueuedIssue>,
     // One entry per slice of the *document*, indexed by position: what a
-    // `depends_on` names is a position. Seeded from the cut records, so a slice
+    // `depends_on` names is a position. Seeded from the cut notes, so a slice
     // an earlier run filed can still be named as a blocker, and filled as this
     // run's slices settle. Empty is "nothing this run can name as a blocker",
     // and an empty entry is left out of a cut's `needs` rather than written as
     // an edge to nothing.
     became: Vec<Vec<LinearIssue>>,
-    // What this run created, for the project's one comment. An earlier run's
-    // issues are not in it: they were named by an earlier run's comment.
-    created: Vec<String>,
     at: usize,
 }
 
@@ -669,7 +710,6 @@ impl fmt::Debug for Planned {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Planned")
             .field("root", &self.root)
-            .field("spelled", &self.spelled)
             .field("project", &self.project)
             .field("name", &self.name)
             .field("status", &self.status)
@@ -679,41 +719,25 @@ impl fmt::Debug for Planned {
             .field("slices", &self.slices)
             .field("already", &self.already)
             .field("became", &self.became)
-            .field("created", &self.created)
             .field("at", &self.at)
             .finish_non_exhaustive()
     }
 }
 
-// `path` is joined onto nothing here: the subcommand hands in its argument
-// joined onto the working directory and the panel its manifest spelling joined
-// onto the root, and both are spelled back against the root below, which is
-// what a record is keyed by.
-//
-// The board and the brief's own record are resolved before the key is read, so
-// a machine that cannot say which board it is standing at, or a brief nothing
-// filed, refuses without a request. A project with no slice left to cut is
-// refused too, because a run with nothing to draft is not a run that succeeded
-// quietly.
+// The board is resolved before the key is read, so a machine that cannot say
+// which board it is standing at refuses without a request. A project with no
+// slice left to cut is refused too, because a run with nothing to draft is not a
+// run that succeeded quietly.
 pub(crate) fn prepare<O: Opens>(
     manifest: &Manifest,
     root: &Path,
     home: &Path,
-    path: &Path,
-    scope: Option<&str>,
+    scope: &str,
+    slug: &str,
     open: &O,
 ) -> Result<Planned, Error> {
-    let target =
-        resolve_filing(manifest, root, home, scope).map_err(|source| Error::Filing { source })?;
-
-    let spelled = crate::query::spelled(root, path)?;
-    // `records` rather than a second `Filed::load`: the file a push appends to
-    // and the file a cut resolves against are one file, and a second loader
-    // here would be a second reading of what a missing one means.
-    let filed = records(root)?;
-    let Some(record) = filed.record(&spelled) else {
-        return Err(Error::NoRecord { path: spelled });
-    };
+    let target = resolve_filing(manifest, root, home, Some(scope))
+        .map_err(|source| Error::Filing { source })?;
 
     let board = open.open(target.value());
     // Once for the run, here rather than in `cut::cut`, which is called per
@@ -725,42 +749,42 @@ pub(crate) fn prepare<O: Opens>(
     // exist.
     let assignee = board.viewer()?;
 
-    let project =
-        board
-            .fetch_project(record.project_id())?
-            .ok_or_else(|| Error::UnknownProject {
-                id: record.project_id().to_owned(),
-                path: filed_path(root),
-            })?;
+    let project = board
+        .fetch_project(slug)?
+        .ok_or_else(|| Error::UnknownProject {
+            slug: slug.to_owned(),
+            scope: scope.to_owned(),
+        })?;
 
     let Some(status) = project.status().filter(|status| is_planned(status)) else {
         return Err(Error::NotPlanned {
-            path: spelled,
+            name: project.name().to_owned(),
             status: project.status().map(ToOwned::to_owned),
         });
     };
 
     let block = scope_block_in(project.content()).map_err(|source| Error::ScopeBlock { source })?;
     let ordered = block.ordered();
-    // Asked of the file rather than worked out here: `cut_state` matches on the
-    // key a record spells and not on a fresh fold of the title beside it, which
-    // is the difference between a slice somebody renamed and one warlock quietly
-    // treats as already filed.
-    let state = filed.cut_state(&spelled, ordered.iter().map(|slice| slice.heading()));
-    if state.uncut().is_empty() {
-        return Err(Error::AllCut { path: spelled });
-    }
-
+    // A cut note beats a skip note for the same title: the issues exist whatever
+    // somebody said about the slice afterwards.
+    let notes = cut::noted(project.notes());
     let already: Vec<Option<Vec<String>>> = ordered
         .iter()
         .map(|slice| {
-            state
-                .cut()
+            let key = fold_title(slice.heading());
+            notes
                 .iter()
-                .find(|(title, _)| *title == slice.heading())
-                .map(|(_, cut)| cut.issues().to_vec())
+                .filter(|(noted, _)| *noted == key)
+                .max_by_key(|(_, issues)| !issues.is_empty())
+                .map(|(_, issues)| issues.clone())
         })
         .collect();
+    if already.iter().all(Option::is_some) {
+        return Err(Error::AllCut {
+            name: project.name().to_owned(),
+        });
+    }
+
     // Forman's backlog digest: the open tickets this scope's queue holds for
     // the assignee, so a draft can wait on one by identifier. A queue that
     // cannot be read is not worth failing a draft over.
@@ -782,8 +806,7 @@ pub(crate) fn prepare<O: Opens>(
 
     Ok(Planned {
         root: root.to_path_buf(),
-        spelled,
-        project: record.project_id().to_owned(),
+        project: project.id().to_owned(),
         name: project.name().to_owned(),
         status: status.to_owned(),
         brief: block.brief().to_owned(),
@@ -793,7 +816,6 @@ pub(crate) fn prepare<O: Opens>(
         slices: ordered.into_iter().cloned().collect(),
         already,
         became,
-        created: Vec::new(),
         at: 0,
         open,
     })
@@ -829,9 +851,15 @@ impl Planned {
         )
     }
 
-    /// Records `next` as skipped, so no later run offers it. See [`cut::skip`].
-    pub(crate) fn skip_slice(&self, next: &Next) -> Result<(), Error> {
-        cut::skip(&self.root, &self.spelled, next.slice.heading())
+    /// The note that records `next` as skipped, so no later run offers it,
+    /// ready to be said on whichever thread the door says it on. See
+    /// [`cut::skip`].
+    pub(crate) fn skipping(&self, next: &Next) -> Skipping {
+        Skipping {
+            project: self.project.clone(),
+            title: next.slice.heading().to_owned(),
+            value: self.value.clone(),
+        }
     }
 
     pub(crate) fn name(&self) -> &str {
@@ -851,7 +879,7 @@ impl Planned {
         self.slices.len()
     }
 
-    /// How many of them no cut record names.
+    /// How many of them no note names.
     pub(crate) fn left(&self) -> usize {
         self.already
             .iter()
@@ -872,7 +900,7 @@ impl Planned {
         Some(next)
     }
 
-    /// The next slice in the cut order that no cut record names, numbered among
+    /// The next slice in the cut order that no note names, numbered among
     /// those alone: a walk that only drafts counts what it is drafting.
     pub(crate) fn next_uncut(&mut self) -> Option<Next> {
         while self.already.get(self.at)?.is_some() {
@@ -909,7 +937,6 @@ impl Planned {
 
         Filing {
             root: self.root.clone(),
-            brief: self.spelled.clone(),
             project: self.project.clone(),
             destination: self.destination.clone(),
             value: self.value.clone(),
@@ -924,46 +951,18 @@ impl Planned {
     /// What a [`Filing`] came to, written down where a later slice's `needs`
     /// will look.
     pub(crate) fn settle(&mut self, next: &Next, cut: Cut) -> Settled {
-        let entry = self.became.get_mut(at(&next.slice));
-        match cut {
-            // Unreachable while the walk skips what the same file already
-            // names, and handled rather than asserted: a panic in the middle of
-            // a run that has filed issues is worth avoiding.
-            Cut::Already(issues) => {
-                if let Some(entry) = entry {
-                    *entry = recorded(&issues);
-                }
-                Settled::Already(issues)
-            }
-            Cut::Filed { issues, reported } => {
-                let identifiers: Vec<String> = issues
-                    .iter()
-                    .map(|issue| issue.identifier().to_owned())
-                    .collect();
-                self.created.extend(identifiers.iter().cloned());
-                if let Some(entry) = entry {
-                    *entry = issues;
-                }
-                Settled::Filed {
-                    issues: identifiers,
-                    reported,
-                }
-            }
+        let issues = cut
+            .issues
+            .iter()
+            .map(|issue| issue.identifier().to_owned())
+            .collect();
+        if let Some(entry) = self.became.get_mut(at(&next.slice)) {
+            *entry = cut.issues;
         }
-    }
-
-    /// The project's one comment, owed only when this run created something.
-    ///
-    /// Asked once, after the last slice settles — including a run somebody
-    /// stopped partway: a comment per slice would be a comment per cut rather
-    /// than per run, and a run that created nothing has nothing to say on the
-    /// project.
-    pub(crate) fn finish(&self) -> Option<Announcement> {
-        (!self.created.is_empty()).then(|| Announcement {
-            project: self.project.clone(),
-            issues: self.created.clone(),
-            value: self.value.clone(),
-        })
+        Settled {
+            issues,
+            reported: cut.reported,
+        }
     }
 }
 
@@ -1013,7 +1012,6 @@ impl Next {
 /// One slice's drafts on their way to the board.
 pub(crate) struct Filing {
     root: PathBuf,
-    brief: String,
     project: String,
     destination: Destination,
     value: String,
@@ -1028,7 +1026,6 @@ impl fmt::Debug for Filing {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Filing")
             .field("root", &self.root)
-            .field("brief", &self.brief)
             .field("project", &self.project)
             .field("destination", &self.destination)
             .field("value", &"<redacted>")
@@ -1052,7 +1049,6 @@ impl Filing {
             &open.open(&self.value),
             &self.root,
             cut::Filing {
-                brief: &self.brief,
                 project: &self.project,
                 destination: &self.destination,
                 assignee: &self.assignee,
@@ -1068,43 +1064,34 @@ impl Filing {
     }
 }
 
-/// What a filed slice came to, by identifier.
+/// What a filed slice came to, by identifier, with one line per edge Linear
+/// turned down.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum Settled {
-    Already(Vec<String>),
-    /// The issues created, with one line per edge Linear turned down.
-    Filed {
-        issues: Vec<String>,
-        reported: Vec<String>,
-    },
+pub(crate) struct Settled {
+    pub(crate) issues: Vec<String>,
+    pub(crate) reported: Vec<String>,
 }
 
-/// The project's one comment, naming what this run created.
-pub(crate) struct Announcement {
+/// A slice's skip note on its way to the project.
+pub(crate) struct Skipping {
     project: String,
-    issues: Vec<String>,
+    title: String,
     value: String,
 }
 
-impl fmt::Debug for Announcement {
+impl fmt::Debug for Skipping {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Announcement")
+        f.debug_struct("Skipping")
             .field("project", &self.project)
-            .field("issues", &self.issues)
+            .field("title", &self.title)
             .field("value", &"<redacted>")
             .finish()
     }
 }
 
-impl Announcement {
-    /// Said on the project, answering with the one line to report when Linear
-    /// turns it down.
-    ///
-    /// A refusal is a reported line and not a failure: the issues exist and are
-    /// recorded by the time it is said, and losing a run over a note on a
-    /// project would be the tail wagging the cut.
-    pub(crate) fn post<O: Opens>(&self, open: &O) -> Option<String> {
-        cut::announce(&open.open(&self.value), &self.project, &self.issues)
+impl Skipping {
+    pub(crate) fn post<O: Opens>(&self, open: &O) -> Result<(), Error> {
+        cut::skip(&open.open(&self.value), &self.project, &self.title)
     }
 }
 
@@ -1336,7 +1323,7 @@ pub(crate) fn drafts_document(slice: &Slice, drafts: &[Draft]) -> Vec<String> {
 }
 
 // A slice somebody said no to, in Red's words, and what that means for the
-// next run: it is recorded, so it is not offered again.
+// next run: it is noted, so it is not offered again.
 pub(crate) fn skipped_line(slice: &Slice) -> String {
     format!(
         "{} was skipped: nothing was created for it, and the next draft passes it over",
@@ -1352,8 +1339,9 @@ pub(crate) fn stopped_line(left: usize) -> String {
 }
 
 // The same slice left alone by a pipe that ended rather than by somebody saying
-// so. It is the skip either way — nothing was filed and nothing was recorded —
-// and which of the two it was is worth a reader's while tomorrow.
+// so. Nothing was filed and nothing was noted, so unlike a skip the next run
+// offers it again, and which of the two it was is worth a reader's while
+// tomorrow.
 fn unreviewed_line(slice: &Slice) -> String {
     format!(
         "{} was left: nobody said what to do with its drafts, so nothing was recorded and the \

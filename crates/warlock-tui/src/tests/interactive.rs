@@ -1703,10 +1703,10 @@ mod pasting {
     }
 }
 
-// A `/push` driven the whole way through a session — `/brief`, `/write`, the
-// path window, `/push`, Left, Enter — over a Linear that answers out of memory
-// and a home this module made. Nothing here opens a socket, reads a real
-// credential or looks at the machine's own sigils, binding or key store.
+// A `/push` driven the whole way through a session — `/push <scope> <path>`,
+// Left, Enter — over a Linear that answers out of memory and a home this module
+// made. Nothing here opens a socket, reads a real credential or looks at the
+// machine's own sigils, binding or key store.
 mod filing {
     use std::fs;
     use std::path::Path;
@@ -1715,17 +1715,15 @@ mod filing {
     use ratatui::crossterm::event::KeyCode;
     use tempfile::TempDir;
     use warlock_engine::{
-        Filed, Manifest, PactEntry, ScopeRecord, filed_path, save_key, save_key_binding,
-        save_sigils,
+        Manifest, PactEntry, ScopeRecord, save_key, save_key_binding, save_sigils,
     };
 
     use super::{AT_MOST, Driven, key, pressed, session_over};
     use crate::account::Line;
     use crate::app::Focus;
-    use crate::chatting::Chat;
     use crate::cutting::Cutter;
     use crate::pushing::{ALREADY_FILING, Pushes};
-    use crate::stubs::{Boarding, Gate, Saying, Scripted};
+    use crate::stubs::{Boarding, Gate, Op, Scripted};
 
     // Not a key, and named so that nothing reading this file mistakes it for
     // one. It is stored so that a bound name resolves and the client is built
@@ -1752,8 +1750,10 @@ mod filing {
     // asserted is a loop going round rather than a single frame.
     const ROUNDS: usize = 3;
 
-    // What the stand-in model answers with, and so what `/write` puts on disk:
-    // every section the built-in shape asks for, so the document the push files
+    // Where the brief sits, and so what a `/push` names.
+    const PATH: &str = "docs/a-brief.md";
+
+    // Every section the built-in shape asks for, so the document the push files
     // is one `brief_at` reads.
     const BRIEF: &str = "# Push a brief to the board\n\n\
                          Nothing turns a document on disk into a project.\n\n\
@@ -1770,15 +1770,18 @@ mod filing {
         .with_scopes([ScopeRecord::new(SCOPE, TEAM, "In Review", "warlock")])
     }
 
-    // Enough of a repository for the load the session is built over: the rest
-    // of it — the document, the manifest, the record — is what the drive below
-    // produces.
+    // Enough of a repository for the load the session is built over, and the
+    // brief a `/push` names.
     fn a_repository() -> TempDir {
         let repo = tempfile::tempdir().expect("a temporary directory");
         let head = repo.path().join(".git/HEAD");
         fs::create_dir_all(head.parent().expect("`.git` is a directory"))
             .expect("a scratch directory is writable");
         fs::write(&head, "ref: refs/heads/main\n").expect("a scratch file is writable");
+        let path = repo.path().join(PATH);
+        fs::create_dir_all(path.parent().expect("a `docs` directory"))
+            .expect("a scratch directory is writable");
+        fs::write(&path, BRIEF).expect("a scratch file is writable");
         repo
     }
 
@@ -1792,18 +1795,17 @@ mod filing {
         home
     }
 
-    // The session `run` builds, with its three impure things replaced: a model
-    // that answers a brief out of memory, the manifest that would have been
-    // loaded, and a Linear reached through a home of this test's own.
+    // The session `run` builds, with its impure things replaced: the manifest
+    // that would have been loaded, and a Linear reached through a home of this
+    // test's own.
     fn filing_session(repo: &Path, home: &Path, linear: &Boarding) -> Driven {
         let mut driven = session_over(repo);
         driven.manifest = a_manifest();
-        driven.chat = Chat::with_agent(repo, Saying::answering(BRIEF));
         driven.pushes = Pushes::with_client(linear.clone(), Some(home.to_path_buf()));
         // The same home for a `/draft`, so the command reaches the board through
         // this test's sigils rather than being refused for want of one. The
         // client is the same stand-in because the session opens both through
-        // one seam; the cut below is refused before it is built.
+        // one seam; the cut below is refused before a run starts.
         driven.cutter = Cutter::with_client(
             linear.clone(),
             Some(home.to_path_buf()),
@@ -1844,17 +1846,8 @@ mod filing {
         );
     }
 
-    // Rounds until the turn is in, drawn every time: the loop draws and then
+    // Rounds until the push is in, drawn every time: the loop draws and then
     // waits, and a test that only drained would be a test of half a round.
-    fn answering(driven: &mut Driven) {
-        let waited = Instant::now();
-        while driven.chat.answering() && waited.elapsed() < AT_MOST {
-            round(driven);
-        }
-        assert!(!driven.chat.answering(), "the turn never finished");
-    }
-
-    // The same rounds, for the push.
     fn landing(driven: &mut Driven) {
         let waited = Instant::now();
         while driven.pushes.sending() && waited.elapsed() < AT_MOST {
@@ -1871,24 +1864,10 @@ mod filing {
         driven.keep_up();
     }
 
-    // `/brief` to enter the register `/write` is only in, `/write` for the
-    // document, and the Enter that takes the path the window proposes: what the
-    // path window itself does is `tests/writing_writes.rs`'s business.
-    fn wrote_a_brief(driven: &mut Driven) {
-        typing(driven, "/brief");
-        answering(driven);
-        typing(driven, "/write");
-        answering(driven);
-        assert!(
-            pressed(driven, key(KeyCode::Enter)),
-            "the write window ended the session"
-        );
-    }
-
     // `/push` and the two keys that answer its dialog Yes: No is lit when it
     // opens, so Left is what moves onto Yes and Enter is what sends.
     fn confirmed(driven: &mut Driven) {
-        typing(driven, "/push");
+        typing(driven, &format!("/push {SCOPE} {PATH}"));
         assert!(
             driven.pushes.window().confirm.is_open(),
             "the dialog did not come up: {:?}",
@@ -1904,18 +1883,17 @@ mod filing {
 
     #[test]
     fn a_cut_typed_into_the_composer_reaches_the_board_and_reports_on_the_thread() {
-        // The routing rather than the fetch: a `/draft` naming a path is a
-        // different thing from a `/push` naming one, and the loop has to answer
-        // it somewhere else. This repository has filed nothing, so the cut is
-        // refused on the far side of a worker thread — which is the half being
-        // asserted, because the line only reaches the thread if the loop drains
-        // the cut every round. No dialog comes up and nothing is sent.
+        // The routing rather than the fetch: a `/draft` is a different thing
+        // from a `/push`, and the loop has to answer it somewhere else. This
+        // board holds no project, so the cut is refused on the far side of a
+        // worker thread — which is the half being asserted, because the line
+        // only reaches the thread if the loop drains the cut every round.
         let repo = a_repository();
         let home = a_home(repo.path());
         let linear = Boarding::filing(URL);
         let mut driven = filing_session(repo.path(), home.path(), &linear);
 
-        typing(&mut driven, "/draft docs/brief.md");
+        typing(&mut driven, &format!("/draft {SCOPE} 9e41c07a2b13"));
         let waited = Instant::now();
         while driven.cutter.fetching() && waited.elapsed() < AT_MOST {
             round(&mut driven);
@@ -1923,11 +1901,15 @@ mod filing {
 
         assert!(!driven.cutter.fetching(), "the draft never reported");
         assert!(
-            said(&driven, "docs/brief.md"),
-            "the thread does not name the document the draft read for: {:?}",
+            said(&driven, "no project with the slug `9e41c07a2b13`"),
+            "the thread does not carry the refusal: {:?}",
             notes(&driven)
         );
-        assert_eq!(linear.requests(), 0, "a draft of an unfiled brief was sent");
+        assert_eq!(
+            linear.ops(),
+            [Op::Viewer, Op::FetchProject],
+            "a draft of an unknown project sent more than the read"
+        );
         assert!(
             !driven.pushes.window().confirm.is_open(),
             "a draft put the push dialog up"
@@ -1935,36 +1917,31 @@ mod filing {
     }
 
     #[test]
-    fn a_bare_cut_in_a_session_that_wrote_nothing_is_one_line_and_reads_nothing() {
-        // The refusal as the loop reaches it rather than as `chatting.rs` words
-        // it: a `/draft` with no document behind it and none named never gets as
-        // far as a home, a key or a request. The sentence itself is asserted
-        // where it is built, so what is pinned here is that the loop stops —
-        // one line, no fetch and a board nobody opened.
-        let repo = a_repository();
-        let home = a_home(repo.path());
-        let linear = Boarding::filing(URL);
-        let mut driven = filing_session(repo.path(), home.path(), &linear);
+    fn a_bare_push_or_draft_is_the_refusal_and_reads_nothing() {
+        // Neither command guesses: a `/push` without a scope and a brief, or a
+        // `/draft` without a scope, is the one line naming what they take, and
+        // no home, key or request is touched.
+        for command in ["/push", &format!("/push {SCOPE}"), "/draft"] {
+            let repo = a_repository();
+            let home = a_home(repo.path());
+            let linear = Boarding::unreachable();
+            let mut driven = filing_session(repo.path(), home.path(), &linear);
 
-        typing(&mut driven, "/draft");
-        round(&mut driven);
+            typing(&mut driven, command);
+            round(&mut driven);
 
-        let said = notes(&driven);
-        assert_eq!(
-            said.len(),
-            1,
-            "a bare draft said more than one line: {said:?}"
-        );
-        assert!(
-            said[0].contains("/write") && said[0].contains("/draft"),
-            "the line does not name the command that would make a brief: {said:?}"
-        );
-        assert!(!driven.cutter.fetching(), "a bare draft started a fetch");
-        assert!(
-            !driven.cutter.confirm().is_open(),
-            "a bare draft put the dialog up"
-        );
-        assert_eq!(linear.requests(), 0, "a bare draft was sent");
+            let said = notes(&driven);
+            assert_eq!(said.len(), 1, "{command} said {said:?}");
+            assert!(
+                said[0].contains("a scope and a brief for /push"),
+                "{command} was not answered with the commands: {said:?}"
+            );
+            assert!(!driven.cutter.fetching(), "{command} started a fetch");
+            assert!(
+                !driven.pushes.window().confirm.is_open(),
+                "{command} put the dialog up"
+            );
+        }
     }
 
     #[test]
@@ -1974,7 +1951,6 @@ mod filing {
         let linear = Boarding::filing(URL);
         let mut driven = filing_session(repo.path(), home.path(), &linear);
 
-        wrote_a_brief(&mut driven);
         confirmed(&mut driven);
 
         // Said on the round the request started, before any of it came back:
@@ -1992,66 +1968,19 @@ mod filing {
             "the thread does not carry the project's address: {:?}",
             notes(&driven)
         );
-        assert_eq!(linear.requests(), 3, "one push is three calls");
-        let filed = Filed::load(repo.path()).expect("a record that saves and reads back");
-        let record = filed
-            .records()
-            .first()
-            .expect("the push recorded what it filed");
-        assert_eq!(filed.records().len(), 1, "{:?}", filed.records());
-        assert_eq!(record.url(), URL);
-        assert_eq!(record.team_key(), TEAM);
-        assert_eq!(record.scope(), SCOPE);
-        assert!(
-            said(&driven, record.path()),
-            "the document the record names is not the one the thread named: {:?}",
-            notes(&driven)
+        assert_eq!(
+            linear.ops(),
+            [
+                Op::Team,
+                Op::ProjectNamed,
+                Op::BacklogStatus,
+                Op::CreateProject
+            ]
         );
-    }
-
-    #[test]
-    fn a_named_brief_is_filed_by_a_session_that_wrote_nothing() {
-        // The asynchronous case, and the one a dialog answered Yes used to
-        // swallow: the brief was committed days ago, this session has written
-        // none of its own, and the answer went to a `Chat::written` holding
-        // nothing. What came of it was no request, no record and no line — a
-        // reader who said yes and was told nothing at all.
-        let repo = a_repository();
-        let home = a_home(repo.path());
-        let linear = Boarding::filing(URL);
-        let mut driven = filing_session(repo.path(), home.path(), &linear);
-
-        let named = "docs/a-committed-brief.md";
-        let path = repo.path().join(named);
-        fs::create_dir_all(path.parent().expect("a `docs` directory"))
-            .expect("a scratch directory is writable");
-        fs::write(&path, BRIEF).expect("a scratch file is writable");
-
-        typing(&mut driven, &format!("/push {named}"));
         assert!(
-            driven.pushes.window().confirm.is_open(),
-            "the dialog did not come up: {:?}",
-            notes(&driven)
+            !repo.path().join(".warlock/filed.toml").exists(),
+            "a push wrote something on this machine"
         );
-        assert!(pressed(&mut driven, key(KeyCode::Left)));
-        assert!(pressed(&mut driven, key(KeyCode::Enter)));
-        landing(&mut driven);
-
-        assert!(
-            said(&driven, URL),
-            "the thread does not carry the project's address: {:?}",
-            notes(&driven)
-        );
-        assert_eq!(linear.requests(), 3, "one push is three calls");
-        let filed = Filed::load(repo.path()).expect("a record that saves and reads back");
-        let record = filed
-            .records()
-            .first()
-            .expect("the push recorded what it filed");
-        // The document the command named. There is no other candidate: this
-        // test never calls `wrote_a_brief`, so the session remembers none, and
-        // before the window carried the brief that was the whole failure.
-        assert_eq!(record.path(), named);
     }
 
     #[test]
@@ -2065,7 +1994,6 @@ mod filing {
         let linear = Boarding::filing(URL).held_at(&gate);
         let mut driven = filing_session(repo.path(), home.path(), &linear);
 
-        wrote_a_brief(&mut driven);
         confirmed(&mut driven);
         for _ in 0..ROUNDS {
             round(&mut driven);
@@ -2109,7 +2037,6 @@ mod filing {
         let linear = Boarding::refusing(REFUSED);
         let mut driven = filing_session(repo.path(), home.path(), &linear);
 
-        wrote_a_brief(&mut driven);
         confirmed(&mut driven);
         let before = notes(&driven).len();
         landing(&mut driven);
@@ -2123,10 +2050,6 @@ mod filing {
         let line = notes.last().expect("a refusal said something");
         assert!(line.contains(REFUSED), "{line} is not Linear's own words");
         assert_eq!(line.lines().count(), 1, "{line} is more than one line");
-        assert!(
-            !filed_path(repo.path()).exists(),
-            "a push that sent nothing recorded something"
-        );
         // The session is where it was: the dialog is down, no push is in flight,
         // and the keyboard still works.
         assert!(!driven.pushes.window().confirm.is_open());
@@ -2144,12 +2067,11 @@ mod filing {
         let linear = Boarding::filing(URL);
         let mut driven = filing_session(repo.path(), home.path(), &linear);
 
-        wrote_a_brief(&mut driven);
         confirmed(&mut driven);
         // Not a round in between, so the run is still the session's however fast
         // the worker was: what ends one is the drain, and this is a `/push`
         // typed before it.
-        typing(&mut driven, "/push");
+        typing(&mut driven, &format!("/push {SCOPE} {PATH}"));
 
         assert!(
             said(&driven, ALREADY_FILING),
@@ -2162,86 +2084,39 @@ mod filing {
         );
         landing(&mut driven);
         assert_eq!(
-            linear.requests(),
-            3,
-            "the second `/push` sent something after all"
-        );
-        assert_eq!(
-            Filed::load(repo.path())
-                .expect("a record that saves and reads back")
-                .records()
-                .len(),
+            linear.projects_created().len(),
             1,
             "the brief was filed twice"
         );
     }
 
     #[test]
-    fn a_second_push_of_a_filed_brief_says_where_it_already_is_and_sends_nothing() {
-        // Not the in-flight case above: the first push has landed, the record
-        // is on disk, and this is the same brief offered again a moment later.
-        // What used to come of it was a second project on the board under one
-        // title, which nothing on this side can take back.
+    fn a_push_of_a_brief_the_team_already_holds_says_where_it_is_and_creates_nothing() {
+        // Nothing on this machine remembers a push, so a project of the same
+        // name in the team is the board's answer to a second one: its address
+        // on one line, and no second project under one title, which nothing on
+        // this side could take back.
         let repo = a_repository();
         let home = a_home(repo.path());
-        let linear = Boarding::filing(URL);
+        let linear = Boarding::filing(URL).already_holding(URL);
         let mut driven = filing_session(repo.path(), home.path(), &linear);
 
-        wrote_a_brief(&mut driven);
         confirmed(&mut driven);
-        landing(&mut driven);
-        let filed = Filed::load(repo.path()).expect("a record that saves and reads back");
-        let path = filed
-            .records()
-            .first()
-            .expect("the first push recorded what it filed")
-            .path()
-            .to_owned();
-
         let before = notes(&driven).len();
-        typing(&mut driven, "/push");
+        landing(&mut driven);
 
-        assert!(
-            !driven.pushes.window().confirm.is_open(),
-            "a push of a filed brief put the dialog up"
-        );
         let notes = notes(&driven);
-        // The line the `/push` is answered with, and the only one: nothing was
-        // started, so there is no "filing to" line in front of it.
-        assert_eq!(
-            notes.len(),
-            before + 1,
-            "an already-filed push is one line on the thread: {notes:?}"
-        );
-        // Not a hand-copied sentence: what the reader needs out of this line is
-        // the document it is about and the address of the project already
-        // holding it, and those are the two facts asserted.
+        assert_eq!(notes.len(), before + 1, "{notes:?}");
         let line = notes.last().expect("the refusal said something");
-        assert!(line.contains(&path), "{line} does not name `{path}`");
+        assert!(line.contains("already filed"), "{line}");
         assert!(line.contains(URL), "{line} does not carry the address");
         assert_eq!(line.lines().count(), 1, "{line} is more than one line");
-
-        // Nothing left this machine the second time: the stand-in counts every
-        // call it was asked, and these are the first push's three.
-        assert_eq!(
-            linear.requests(),
-            3,
-            "the second `/push` sent something after all"
+        assert!(
+            linear.projects_created().is_empty(),
+            "a second project was created"
         );
-        // And the session is where it was: no push in flight, one record, and
-        // the keyboard still answering.
         assert!(!driven.pushes.window().confirm.is_open());
         assert!(!driven.pushes.sending());
-        let filed = Filed::load(repo.path()).expect("a record that saves and reads back");
-        assert_eq!(filed.records().len(), 1, "{:?}", filed.records());
-        assert_eq!(
-            filed
-                .records()
-                .first()
-                .expect("the record the first push wrote")
-                .url(),
-            URL
-        );
         assert!(
             pressed(&mut driven, key(KeyCode::Esc)),
             "a refused push ended the session"
@@ -2258,7 +2133,6 @@ mod filing {
         let home = a_home(repo.path());
         let mut driven = filing_session(repo.path(), home.path(), &Boarding::filing(URL));
 
-        wrote_a_brief(&mut driven);
         confirmed(&mut driven);
         let in_flight = format!("{:?}", driven.pushes);
         landing(&mut driven);
@@ -2275,12 +2149,6 @@ mod filing {
         for note in notes(&driven) {
             assert!(!note.contains(NOT_A_KEY), "{note} carries the key");
         }
-        assert!(
-            !fs::read_to_string(filed_path(repo.path()))
-                .expect("the record this push wrote")
-                .contains(NOT_A_KEY),
-            "the record carries the key"
-        );
     }
 }
 
@@ -2302,16 +2170,16 @@ mod cutting {
     use ratatui::crossterm::event::KeyCode;
     use tempfile::TempDir;
     use warlock_engine::{
-        Filed, FiledRecord, Manifest, PactEntry, ScopeRecord, save_key, save_key_binding,
-        save_sigils,
+        Manifest, PactEntry, ScopeRecord, save_key, save_key_binding, save_sigils,
     };
 
     use super::{AT_MOST, Driven, key, session_reading};
     use crate::account::Line;
     use crate::app::Focus;
     use crate::cutting::Cutter;
+    use crate::linear::Listing;
     use crate::pushing::Pushes;
-    use crate::stubs::{Answering, Boarding, Scripted};
+    use crate::stubs::{Answering, Boarding, Call, Scripted};
 
     // Not a key, and named so that nothing reading this file mistakes it for
     // one: it is stored so that a bound name resolves and the client is built
@@ -2324,13 +2192,8 @@ mod cutting {
 
     const TEAM: &str = "WAR";
 
-    // The manifest's own spelling of the brief, which is what a record is keyed
-    // by and so what the command carries.
-    const BRIEF: &str = "docs/brief.md";
-
-    const PROJECT_ID: &str = "b229262b-22aa-444a-a8af-0a2a3f4ef100";
-
-    const URL: &str = "https://linear.app/acme/project/draft-a-brief-1a2b3c";
+    // What the command names the project by: the tail of its URL.
+    const SLUG: &str = "1a2b3c";
 
     const NAME: &str = "Cut a planned project into tickets";
 
@@ -2360,9 +2223,8 @@ mod cutting {
         .with_scopes([ScopeRecord::new(SCOPE, TEAM, "In Review", "warlock")])
     }
 
-    // A repository the session loads, with the brief on disk and the record a
-    // `/push` of it would have left behind: what a cut reads is the project,
-    // and the file is what the record is keyed by.
+    // A repository the session loads, and nothing about the brief: what a cut
+    // reads is the project on the board.
     fn a_repository() -> TempDir {
         let repo = tempfile::tempdir().expect("a temporary directory");
         let head = repo.path().join(".git/HEAD");
@@ -2372,23 +2234,6 @@ mod cutting {
         a_manifest()
             .save(repo.path())
             .expect("a manifest that saves");
-        let brief = repo.path().join(BRIEF);
-        fs::create_dir_all(brief.parent().expect("a `docs` directory"))
-            .expect("a scratch directory is writable");
-        fs::write(&brief, "# A brief\n").expect("a scratch file is writable");
-        let record = FiledRecord::new(
-            repo.path(),
-            brief,
-            PROJECT_ID,
-            URL,
-            SCOPE,
-            TEAM,
-            "2026-09-20T07:32:00Z",
-        )
-        .expect("a path inside the repository");
-        Filed::with_records([record])
-            .save(repo.path())
-            .expect("a record file that saves");
         repo
     }
 
@@ -2406,12 +2251,27 @@ mod cutting {
     // that would have been loaded, a board that answers one project out of
     // memory, and the two conversations a cut opens.
     fn cutting_session(repo: &Path, home: &Path, agent: Scripted, proposer: Scripted) -> Driven {
-        let linear = Boarding::holding(NAME, Some("Planned"), SLICED);
+        session_on(
+            repo,
+            home,
+            &Boarding::holding(NAME, Some("Planned"), SLICED),
+            agent,
+            proposer,
+        )
+    }
+
+    fn session_on(
+        repo: &Path,
+        home: &Path,
+        linear: &Boarding,
+        agent: Scripted,
+        proposer: Scripted,
+    ) -> Driven {
         let mut driven = session_reading(
             repo,
             Pushes::with_client(linear.clone(), Some(home.to_path_buf())),
             Cutter::with_client(linear.clone(), Some(home.to_path_buf()), agent, proposer),
-            super::no_pull(linear),
+            super::no_pull(linear.clone()),
         );
         driven.manifest = a_manifest();
         driven
@@ -2473,7 +2333,7 @@ mod cutting {
     // `/draft` and the rounds the fetch takes, up to the dialog it puts on the
     // screen and no further: which key is pressed at it is the caller's.
     fn fetched(driven: &mut Driven) {
-        typing(driven, &format!("/draft {BRIEF}"));
+        typing(driven, &format!("/draft {SCOPE} {SLUG}"));
         let waited = Instant::now();
         while driven.cutter.fetching() && waited.elapsed() < AT_MOST {
             round(driven);
@@ -2527,6 +2387,94 @@ mod cutting {
             }
         }
         assert!(!driven.cutter.drafting(), "the run never finished");
+    }
+
+    #[test]
+    fn a_draft_with_only_a_scope_lists_the_planned_projects_one_line_each() {
+        // No picker and no dialog: the slugs land on the thread as lines a
+        // reader can copy, and the next `/draft` names one.
+        let repo = a_repository();
+        let home = a_home(repo.path());
+        let linear = Boarding::filing("").listing(Listing::new(
+            &[
+                ("9e41c07a2b13", "Draft from the board"),
+                ("d1cb3521be71", "Give the headless CLI a voice"),
+            ],
+            false,
+        ));
+        let mut driven = session_on(
+            repo.path(),
+            home.path(),
+            &linear,
+            Scripted::saying([]),
+            Scripted::saying([]),
+        );
+
+        typing(&mut driven, &format!("/draft {SCOPE}"));
+        let waited = Instant::now();
+        while driven.cutter.fetching() && waited.elapsed() < AT_MOST {
+            round(&mut driven);
+        }
+
+        // Compared word by word: the thread lays a line out for the screen, and
+        // the run of spaces between slug and name is not what is under test.
+        let said = notes(&driven);
+        let listed: Vec<String> = said[said.len() - 2..]
+            .iter()
+            .map(|line| line.split_whitespace().collect::<Vec<_>>().join(" "))
+            .collect();
+        assert_eq!(
+            listed,
+            [
+                "9e41c07a2b13 Draft from the board",
+                "d1cb3521be71 Give the headless CLI a voice",
+            ],
+            "{said:?}"
+        );
+        assert!(
+            !driven.cutter.confirm().is_open(),
+            "a listing put the dialog up"
+        );
+        assert_eq!(
+            linear.calls(),
+            [Call::PlannedProjects {
+                team: TEAM.to_owned(),
+                label: "warlock".to_owned(),
+            }],
+            "a listing read more than the list"
+        );
+    }
+
+    #[test]
+    fn a_draft_naming_a_slug_reads_that_project_and_asks_about_it() {
+        let repo = a_repository();
+        let home = a_home(repo.path());
+        let linear = Boarding::holding(NAME, Some("Planned"), SLICED);
+        let mut driven = session_on(
+            repo.path(),
+            home.path(),
+            &linear,
+            Scripted::saying([]),
+            Scripted::saying([]),
+        );
+
+        fetched(&mut driven);
+
+        assert!(
+            linear
+                .calls()
+                .contains(&Call::FetchProject(SLUG.to_owned())),
+            "the slug typed is not the one read: {:?}",
+            linear.calls()
+        );
+        assert_eq!(
+            driven
+                .cutter
+                .confirm()
+                .cutting()
+                .map(crate::confirm::Cutting::project),
+            Some(NAME)
+        );
     }
 
     #[test]

@@ -20,7 +20,7 @@ AI is the star of the show and looking at code is not the primary concern.
 
 Text User Interface (TUI)
 - pacts: A directory under the control of warlock, it scans the directory and creates an artifact to help itself reason about the code.
-- scope: The ability to restrict work to specific directories, which helps guard against an AI overstepping.
+- scope: Pair a directory with a Linear team, this is what is checked when an AI does work to ensure changes are scoped.
 - sigil: A local per-user array of string which allow you and your AI to access a specific repos scope.
 
 Workflow
@@ -44,14 +44,14 @@ Workflow
 
 ### Pushing a brief
 ![pushing a brief demo](./assets/push.gif)
-> type /push [PATH_TO_BRIEF] to push a brief to Linear as a Project
+> type /push [SCOPE] [PATH_TO_BRIEF] to push a brief to Linear as a Project. Nothing is kept locally, so you can delete the brief once it's pushed
 
 ![pushed brief in Linear demo](./assets/push-linear.png)
 > the Project will land in Linear with a set format which future workflows can digest and turn into Issues
 
 ### Drafting into issues
 ![drafting into issues demo](./assets/draft.gif)
-> type /draft [PATH_TO_BRIEF] to draft a Linear Project into Linear Issues, if a model requires more information to make a well scoped Issue it will ask you to provide clarification
+> type /draft [SCOPE] to list the scope's planned Projects, then /draft [SCOPE] [SLUG] to draft one into Linear Issues. If a model requires more information to make a well scoped Issue it will ask you to provide clarification
 
 ![drafted issues in Linear demo](./assets/draft-linear.png)
 > Issues appear in backlog with a customizable label, Project association, and assigned to self
@@ -68,22 +68,18 @@ Workflow
 
 ## Why this exists
 
-Editors and AI-enabled IDEs bolt AI on the side. The file tree is still the
-interface, what they accelerate is how fast you type rather than how well the
-model understands, and the model itself is a helper you summon into the margin
-of a window built for typing.
+Editors and AI-enabled IDEs add AI features as an after thought and gear everything toward prompt engineering.
+The AI features are at best saved conversations and a chat window off to the side.
 
-Meanwhile most people are shipping AI-written code and sanding it down to look
-hand-written. Stripping the em dashes. Not letting the model commit. A whole
-industry using AI while performing restraint, which means using it poorly: no
-structure, no shared context, no record. The pretending is the waste.
+Meanwhile most people are shipping AI-written code and sanding it down to lookhand-written. 
+Stripping the em dashes. Not letting the model commit. 
+A whole industry using AI while performing restraint, which means using it poorly. 
+No structure, no shared context, no record. The pretending is the waste.
 
-Warlock admits what the game is. The interface is not your filesystem, it is
-your project rendered as the AI understands it: a tree of module documents,
-coloured by whether that understanding is still true. That document is a
-`WARLOCK.md`, one per directory, written by the AI and committed alongside the
-code it describes. You can still open files and read them. That is no longer the
-main event.
+Warlock admits what the game is. 
+The interface is your project rendered as the AI understands it.
+A tree of directories, coloured by whether that understanding is still true. 
+You can still open files and read them. That is no longer the main event.
 
 ## What it promises
 
@@ -94,7 +90,7 @@ main event.
 - **Process artifacts as a byproduct.** Most teams LARP process: the ticket
   exists, the doc exists, and both are one-sentence husks. Warlock's artifacts
   are real by construction, because the work runs through them rather than
-  around them. I order to use the tool you MUST talk to the AI to challenge your assumptions,
+  around them. In order to use the tool you MUST talk to the AI to challenge your assumptions,
   turn that resulting document into tickets visible to the team, and work on tickets and leave a PR for 
   human review.
 - **Your subscription, your leverage.** Warlock holds no credentials of its own
@@ -119,19 +115,8 @@ main event.
 
 **Why are my borders not even?**
 
-Your terminal is almost certainly falling back to a second font. Warlock draws
-its panes with Unicode box-drawing characters, one per cell, and a font with no
-glyphs for them hands the job to whichever font the terminal finds next — whose
-glyphs are rarely exactly one cell wide or aligned on the same baseline. The
-result is segments that sit slightly high, low or short, and corners that do not
-meet. Nothing is wrong with the layout: every border is a single character in a
-single cell, and it lines up the moment the font can draw it.
-
-Use a monospace font with box-drawing coverage — most programming fonts have it
-— or turn on your terminal's own line-drawing, which some emulators offer as a
-setting for exactly this reason. If it is only *some* rows that are off, check
-whether your terminal is configured to treat ambiguous-width characters as
-double width.
+Warlock draws its panes with Unicode box-drawing characters.
+Use a monospace font with box-drawing coverage — most programming fonts have it.
 
 ## Contributing
 

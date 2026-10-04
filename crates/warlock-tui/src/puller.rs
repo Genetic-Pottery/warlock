@@ -58,8 +58,8 @@ use crate::freshness::{Freshened, Freshening, Freshens, freshened};
 use crate::git::{Commit, Dirty, Error as GitError, Forge, Gh, Git, Repository, branch_name};
 use crate::inflight::{Lost, Once, Port, Stream, Workers, settled};
 use crate::linear::{
-    Board, Error as LinearError, FetchedProject, Issue as LinearIssue, NamedIssue, NewIssue,
-    NewProject, Opener as LinearOpener, Opens, Project as LinearProject, Queue,
+    Board, Error as LinearError, FetchedProject, Issue as LinearIssue, Listing, NamedIssue,
+    NewIssue, NewProject, Opener as LinearOpener, Opens, Project as LinearProject, Queue,
 };
 use crate::pacting::CancelGuard;
 use crate::pull::{
@@ -944,8 +944,16 @@ impl<B: Board> Board for Quiet<B> {
         self.asked(|board| board.issue_label_id(name, team))
     }
 
-    fn fetch_project(&self, id: &str) -> Result<Option<FetchedProject>, LinearError> {
-        self.asked(|board| board.fetch_project(id))
+    fn fetch_project(&self, slug: &str) -> Result<Option<FetchedProject>, LinearError> {
+        self.asked(|board| board.fetch_project(slug))
+    }
+
+    fn planned_projects(&self, team: &str, label: &str) -> Result<Listing, LinearError> {
+        self.asked(|board| board.planned_projects(team, label))
+    }
+
+    fn project_named(&self, team: &str, name: &str) -> Result<Option<String>, LinearError> {
+        self.asked(|board| board.project_named(team, name))
     }
 
     fn scope_queue(&self, team: &str, label: &str, assignee: &str) -> Result<Queue, LinearError> {
