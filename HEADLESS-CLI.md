@@ -663,9 +663,8 @@ $ warlock draft warlock-team
 d1cb3521be71  Give the headless CLI a voice
 ```
 
-A team with none prints one line saying so. A team with more than one page of
-250 prints the first page and a line saying it was cut off. Nothing matches
-names: the slug is taken exactly or refused.
+A team with none prints one line saying so. The list follows every page Linear
+has. Nothing matches names: the slug is taken exactly or refused.
 
 With `SLUG`, the project is read back, its `## Scope` section is parsed into
 slices, the slices its comments already note as cut or skipped are passed over,
@@ -1161,6 +1160,21 @@ ticket still moves and the run still exits 0.
 ```sh
 warlock: `WAR-140` is in review, and there is no `gh` on this machine — the branch is pushed and the pull request's body is a comment on the ticket
 ```
+
+Once the ticket is in review, the run reads the ticket's project and the state
+of every issue in it, all pages. When the project is `In Progress` — every slice
+drafted — and every issue is in the review state, done, or canceled, the project
+moves to the project status with the review state's name. A project still in
+`Planned` never moves, because slices nobody has drafted yet are work its issues
+don't show. The move only goes forward: a ticket sent back out of review leaves
+the project where it is.
+
+```sh
+warlock: every issue in `A brief` is in review or closed, so the project moved to `In Review`
+```
+
+A workspace with no project status of that name, a project that can't be read,
+or a move Linear turns down is a line, and the run still exits 0.
 
 A run record under `pulls/` that will not read is named the same way and the
 pass carries on without it; only a `pulls/` directory that cannot be listed at

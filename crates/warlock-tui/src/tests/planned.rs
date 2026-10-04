@@ -947,7 +947,7 @@ mod listing {
     fn the_planned_projects_are_asked_of_the_scope_s_team_and_label() {
         let repo = a_scoped_repository();
         let home = a_home(repo.path());
-        let linear = Boarding::filing("").listing(Listing::new(&[(SLUG, NAME)], false));
+        let linear = Boarding::filing("").listing(Listing::new(&[(SLUG, NAME)]));
         let standing = Standing::at(repo.path().to_path_buf(), repo.path().to_path_buf());
 
         let (destination, listed) = listing(
@@ -960,7 +960,7 @@ mod listing {
         .expect("a listing");
 
         assert_eq!(destination.team_key(), TEAM);
-        assert_eq!(listed, Listing::new(&[(SLUG, NAME)], false));
+        assert_eq!(listed, Listing::new(&[(SLUG, NAME)]));
         assert_eq!(
             linear.calls(),
             [Call::PlannedProjects {
@@ -992,7 +992,7 @@ mod listing {
     fn each_project_is_its_slug_then_its_name_on_a_bare_line() {
         let lines = listing_lines(
             &destination(),
-            &Listing::new(&[(SLUG, NAME), ("9e41c07a2b13", "Another one")], false),
+            &Listing::new(&[(SLUG, NAME), ("9e41c07a2b13", "Another one")]),
         );
 
         assert_eq!(
@@ -1005,18 +1005,8 @@ mod listing {
     }
 
     #[test]
-    fn a_capped_page_says_so_after_the_projects() {
-        let lines = listing_lines(&destination(), &Listing::new(&[(SLUG, NAME)], true));
-
-        assert_eq!(lines.len(), 2, "{lines:?}");
-        assert_eq!(lines[0], format!("{SLUG}  {NAME}"));
-        assert!(lines[1].starts_with("warlock: "), "{}", lines[1]);
-        assert!(lines[1].contains("first 1"), "{}", lines[1]);
-    }
-
-    #[test]
     fn nothing_to_list_is_one_line_naming_the_team_and_the_label() {
-        let lines = listing_lines(&destination(), &Listing::new(&[], false));
+        let lines = listing_lines(&destination(), &Listing::new(&[]));
 
         assert_eq!(lines.len(), 1, "{lines:?}");
         assert!(lines[0].contains(TEAM), "{}", lines[0]);

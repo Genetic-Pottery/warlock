@@ -15,6 +15,7 @@ use crate::git::{
     Dirty, Error as GitError, Finished, Freshness, HUMAN_GATE, LeftStale, Repository, Touched,
     commit_message, pull_request_body, pull_request_title,
 };
+use crate::linear::IssueProject;
 use crate::pulling::StaleDirectory;
 use crate::stubs::{
     Boarding, Call, Checkout, Forging, GitCall, Op, Refreshing, Sessions, Slicing, said,
@@ -1192,6 +1193,7 @@ fn a_finished_run_pushes_opens_the_pull_request_comments_and_moves_the_ticket() 
                 issue: ISSUE.to_owned(),
                 state: "state-backlog".to_owned(),
             },
+            Call::IssueProject(ISSUE.to_owned()),
         ]
     );
 
@@ -1652,4 +1654,97 @@ fn a_checkout_answers_a_scripted_diff_and_writes_down_a_documents_only_commit() 
         .commit_paths(&message, &[])
         .expect_err("a commit of no paths is not a commit");
     assert!(matches!(error, GitError::Empty { .. }), "{error:?}");
+}
+
+const REVIEWED: &str =
+    "every issue in `A brief` is in review or closed, so the project moved to `In Review`";
+
+fn reviewing(project: IssueProject) -> (Boarding, Vec<PullEvent>) {
+    let ground = Ground::new();
+    let board = Boarding::filing("").in_project(project);
+    let forge = Forging::opening(URL);
+    let (repo, split, sessions) = two_sub_tasks();
+
+    let (pulled, events) = pull(&ground, &board, &repo, &forge, &split, &sessions);
+
+    assert!(pulled.is_ok(), "{pulled:?}");
+    (board, events)
+}
+
+#[test]
+fn the_last_ticket_of_a_drafted_project_into_review_moves_the_project() {
+    let (board, events) = reviewing(IssueProject::new(
+        "In Progress",
+        &[
+            ("In Review", "started"),
+            ("Done", "completed"),
+            ("Won't do", "canceled"),
+        ],
+    ));
+
+    assert_eq!(
+        board.moves(),
+        [("project-1".to_owned(), "status-in-progress".to_owned())]
+    );
+    assert!(
+        board
+            .calls()
+            .contains(&Call::ProjectStatus(REVIEW.to_owned())),
+        "the project status is the scope record's review state"
+    );
+    assert_eq!(
+        events.last(),
+        Some(&PullEvent::Project {
+            line: REVIEWED.to_owned()
+        })
+    );
+}
+
+#[test]
+fn a_project_with_an_issue_still_open_stays_where_it_is() {
+    let (board, events) = reviewing(IssueProject::new(
+        "In Progress",
+        &[("In Review", "started"), ("In Progress", "started")],
+    ));
+
+    assert!(board.moves().is_empty());
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, PullEvent::Project { .. }))
+    );
+}
+
+#[test]
+fn a_project_still_being_drafted_stays_planned_whatever_its_issues_are() {
+    let (board, events) = reviewing(IssueProject::new("Planned", &[("In Review", "started")]));
+
+    assert!(board.moves().is_empty());
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, PullEvent::Project { .. }))
+    );
+}
+
+#[test]
+fn a_workspace_with_no_review_project_status_is_a_line_and_the_pull_still_finishes() {
+    let ground = Ground::new();
+    let board = Boarding::filing("")
+        .in_project(IssueProject::new(
+            "In Progress",
+            &[("In Review", "started")],
+        ))
+        .without_project_status();
+    let forge = Forging::opening(URL);
+    let (repo, split, sessions) = two_sub_tasks();
+
+    let (pulled, events) = pull(&ground, &board, &repo, &forge, &split, &sessions);
+
+    assert!(pulled.is_ok(), "{pulled:?}");
+    assert!(board.moves().is_empty());
+    assert!(
+        matches!(events.last(), Some(PullEvent::Project { line }) if line.contains("no project status called `In Review`")),
+        "{events:?}"
+    );
 }

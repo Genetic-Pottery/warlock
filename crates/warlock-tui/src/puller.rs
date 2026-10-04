@@ -58,8 +58,9 @@ use crate::freshness::{Freshened, Freshening, Freshens, freshened};
 use crate::git::{Commit, Dirty, Error as GitError, Forge, Gh, Git, Repository, branch_name};
 use crate::inflight::{Lost, Once, Port, Stream, Workers, settled};
 use crate::linear::{
-    Board, Error as LinearError, FetchedProject, Issue as LinearIssue, Listing, NamedIssue,
-    NewIssue, NewProject, Opener as LinearOpener, Opens, Project as LinearProject, Queue,
+    Board, Error as LinearError, FetchedProject, Issue as LinearIssue, IssueProject, Listing,
+    NamedIssue, NewIssue, NewProject, Opener as LinearOpener, Opens, Project as LinearProject,
+    Queue,
 };
 use crate::pacting::CancelGuard;
 use crate::pull::{
@@ -936,6 +937,10 @@ impl<B: Board> Board for Quiet<B> {
         self.asked(|board| board.move_project(project, status))
     }
 
+    fn issue_project(&self, issue: &str) -> Result<Option<IssueProject>, LinearError> {
+        self.asked(|board| board.issue_project(issue))
+    }
+
     fn backlog_state(&self, team: &str) -> Result<Option<String>, LinearError> {
         self.asked(|board| board.backlog_state(team))
     }
@@ -1228,6 +1233,7 @@ fn said(app: &mut App, event: PullEvent, now: Instant) {
         PullEvent::NoReviewState { team, state } => {
             app.panel_mut().note(no_review_state(&team, &state), now);
         }
+        PullEvent::Project { line } => app.panel_mut().note(line, now),
     }
 }
 

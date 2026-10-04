@@ -8,9 +8,9 @@ use super::{
     LABELS_PAGE, Linear, NamedIssue, NewIssue, NewProject, Posts, Priority, QUEUE_PAGE,
     QueuedIssue, REQUEST_TIMEOUT, SKIP_NOTE, StateType, answer, authorization, backlog_state,
     backlog_status, comment_on_issue, comment_on_project, create_issue, create_project,
-    create_relation, fetch_project, issue_label_id, label_id, move_issue, move_project,
-    named_issue, planned_projects, project_named, project_status, scope_queue, team_id, viewer,
-    workflow_state,
+    create_relation, fetch_project, issue_label_id, issue_project, label_id, move_issue,
+    move_project, named_issue, planned_projects, project_named, project_status, scope_queue,
+    team_id, viewer, workflow_state,
 };
 
 use crate::queue::IN_PROGRESS;
@@ -400,8 +400,13 @@ fn a_status_with_no_name_a_note_with_no_body_and_no_project_are_malformed() {
     }
 }
 
-fn planned(nodes: &Value, more: bool) -> Value {
-    json!({ "projects": { "pageInfo": { "hasNextPage": more }, "nodes": nodes } })
+fn planned(nodes: &Value, after: Option<&str>) -> Value {
+    json!({
+        "projects": {
+            "pageInfo": { "hasNextPage": after.is_some(), "endCursor": after },
+            "nodes": nodes,
+        },
+    })
 }
 
 #[test]
@@ -411,7 +416,7 @@ fn planned_projects_are_the_teams_planned_and_labelled_ones_by_slug_and_name() {
             { "slugId": "9e41c07a2b13", "name": "Draft from the board" },
             { "slugId": "d1cb3521be71", "name": "Give the CLI a voice" },
         ]),
-        false,
+        None,
     ))]);
 
     let listing = planned_projects(&linear, "WAR", "warlock").expect("the stand-in answered");
@@ -423,7 +428,6 @@ fn planned_projects_are_the_teams_planned_and_labelled_ones_by_slug_and_name() {
             ("d1cb3521be71".to_owned(), "Give the CLI a voice".to_owned()),
         ]
     );
-    assert!(!listing.capped());
     assert_eq!(
         linear.variables(),
         [json!({ "team": "WAR", "label": "warlock" })]
@@ -436,29 +440,34 @@ fn planned_projects_are_the_teams_planned_and_labelled_ones_by_slug_and_name() {
 }
 
 #[test]
-fn a_planned_page_with_more_behind_it_is_capped_and_an_empty_one_is_ordinary() {
+fn a_planned_listing_follows_every_page_and_an_empty_one_is_ordinary() {
     let linear = Posting::answering([
         Ok(planned(
             &json!([{ "slugId": "9e41c07a2b13", "name": "Draft" }]),
-            true,
+            Some("cursor-1"),
         )),
-        Ok(planned(&json!([]), false)),
+        Ok(planned(
+            &json!([{ "slugId": "d1cb3521be71", "name": "Voice" }]),
+            None,
+        )),
+        Ok(planned(&json!([]), None)),
     ]);
 
-    assert!(
-        planned_projects(&linear, "WAR", "warlock")
-            .expect("the stand-in answered")
-            .capped()
+    let listing = planned_projects(&linear, "WAR", "warlock").expect("the stand-in answered");
+    assert_eq!(listing.projects().len(), 2, "{:?}", listing.projects());
+    assert_eq!(
+        linear.variables()[1],
+        json!({ "team": "WAR", "label": "warlock", "after": "cursor-1" })
     );
+
     let empty = planned_projects(&linear, "WAR", "warlock").expect("the stand-in answered");
     assert!(empty.projects().is_empty());
-    assert!(!empty.capped());
 }
 
 #[test]
 fn a_planned_answer_missing_its_slug_or_its_page_is_malformed() {
     for answer in [
-        planned(&json!([{ "name": "Draft" }]), false),
+        planned(&json!([{ "name": "Draft" }]), None),
         json!({ "projects": { "nodes": [] } }),
     ] {
         let linear = Posting::answering([Ok(answer.clone())]);
@@ -1448,6 +1457,61 @@ fn a_project_move_writes_the_status_and_nothing_else() {
         linear.variables(),
         [json!({ "id": "project-1", "input": { "statusId": "status-doing" } })]
     );
+}
+
+#[test]
+fn an_issues_project_reads_every_page_of_its_issues_states() {
+    let page = |states: Value, after: Option<&str>| {
+        json!({
+            "project": {
+                "issues": {
+                    "pageInfo": { "hasNextPage": after.is_some(), "endCursor": after },
+                    "nodes": states,
+                },
+            },
+        })
+    };
+    let linear = Posting::answering([
+        Ok(json!({
+            "issue": {
+                "project": { "id": "project-1", "name": "A brief", "status": { "name": "In Progress" } },
+            },
+        })),
+        Ok(page(
+            json!([{ "state": { "name": "In Review", "type": "started" } }]),
+            Some("cursor-1"),
+        )),
+        Ok(page(
+            json!([{ "state": { "name": "Done", "type": "completed" } }]),
+            None,
+        )),
+    ]);
+
+    let project = issue_project(&linear, "issue-1")
+        .expect("the stand-in answered")
+        .expect("the issue is in a project");
+
+    assert_eq!(project.id(), "project-1");
+    assert_eq!(project.status(), Some("In Progress"));
+    assert_eq!(project.states().len(), 2);
+    assert_eq!(
+        linear.variables(),
+        [
+            json!({ "id": "issue-1" }),
+            json!({ "id": "project-1" }),
+            json!({ "id": "project-1", "after": "cursor-1" }),
+        ]
+    );
+}
+
+#[test]
+fn an_issue_in_no_project_is_a_none() {
+    let linear = Posting::answering([Ok(json!({ "issue": { "project": null } }))]);
+
+    let project = issue_project(&linear, "issue-1").expect("the stand-in answered");
+
+    assert_eq!(project, None);
+    assert_eq!(linear.documents().len(), 1);
 }
 
 fn workflow_states() -> Value {

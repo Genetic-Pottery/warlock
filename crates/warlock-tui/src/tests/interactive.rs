@@ -2395,13 +2395,10 @@ mod cutting {
         // reader can copy, and the next `/draft` names one.
         let repo = a_repository();
         let home = a_home(repo.path());
-        let linear = Boarding::filing("").listing(Listing::new(
-            &[
-                ("9e41c07a2b13", "Draft from the board"),
-                ("d1cb3521be71", "Give the headless CLI a voice"),
-            ],
-            false,
-        ));
+        let linear = Boarding::filing("").listing(Listing::new(&[
+            ("9e41c07a2b13", "Draft from the board"),
+            ("d1cb3521be71", "Give the headless CLI a voice"),
+        ]));
         let mut driven = session_on(
             repo.path(),
             home.path(),

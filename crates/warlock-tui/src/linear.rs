@@ -4,11 +4,12 @@
 //! executor it never asked for. No async runtime here either, for the reason
 //! `claude.rs` has none.
 //!
-//! One request per call, no retry and no backoff. A brief filed twice is two
-//! projects on the board, and nothing on this side can tell a timeout that
-//! arrived before the mutation ran from one that arrived after — so a failed
-//! call is reported and the person decides, which is the only honest answer
-//! available to a non-idempotent mutation.
+//! No retry and no backoff. A brief filed twice is two projects on the board,
+//! and nothing on this side can tell a timeout that arrived before the mutation
+//! ran from one that arrived after — so a failed call is reported and the person
+//! decides, which is the only honest answer available to a non-idempotent
+//! mutation. A mutation is one request; a read that [`paged`] walks is one
+//! request per page, and a failed page fails the read.
 
 use std::fmt;
 use std::time::Duration;
@@ -131,6 +132,7 @@ pub(crate) trait Board {
     fn backlog_status(&self) -> Result<Option<String>, Error>;
     fn project_status(&self, name: &str) -> Result<Option<String>, Error>;
     fn move_project(&self, project: &str, status: &str) -> Result<String, Error>;
+    fn issue_project(&self, issue: &str) -> Result<Option<IssueProject>, Error>;
     fn backlog_state(&self, team: &str) -> Result<Option<String>, Error>;
     fn workflow_state(&self, team: &str, name: &str) -> Result<Option<String>, Error>;
     fn move_issue(&self, issue: &str, state: &str) -> Result<String, Error>;
@@ -179,6 +181,10 @@ impl<P: Posts> Board for Linear<P> {
 
     fn move_project(&self, project: &str, status: &str) -> Result<String, Error> {
         move_project(&self.posts, project, status)
+    }
+
+    fn issue_project(&self, issue: &str) -> Result<Option<IssueProject>, Error> {
+        issue_project(&self.posts, issue)
     }
 
     fn backlog_state(&self, team: &str) -> Result<Option<String>, Error> {
@@ -353,6 +359,140 @@ fn move_project(linear: &impl Posts, project: &str, status: &str) -> Result<Stri
     )?;
 
     node_id(payload(&data, "projectUpdate", "project")?)
+}
+
+/// The project an issue belongs to, with its status and the state of every
+/// issue in it, or `None` for an issue in no project.
+fn issue_project(linear: &impl Posts, issue: &str) -> Result<Option<IssueProject>, Error> {
+    let data = linear.post(
+        "query IssueProject($id: String!) {
+            issue(id: $id) { project { id name status { name } } }
+        }",
+        json!({ "id": issue }),
+    )?;
+
+    let project = data
+        .get("issue")
+        .and_then(|issue| issue.get("project"))
+        .ok_or_else(|| missing("project"))?;
+    if project.is_null() {
+        return Ok(None);
+    }
+    let id = node_id(project)?;
+
+    let states = paged(
+        linear,
+        "query ProjectIssues($id: String!, $after: String) {
+            project(id: $id) {
+                issues(first: 250, after: $after) {
+                    pageInfo { hasNextPage endCursor }
+                    nodes { state { name type } }
+                }
+            }
+        }",
+        json!({ "id": id }),
+        &["project", "issues"],
+    )?
+    .iter()
+    .map(|issue| {
+        let state = issue.get("state").ok_or_else(|| missing("state"))?;
+        Ok((text(state, "name")?, StateType::new(text(state, "type")?)))
+    })
+    .collect::<Result<_, Error>>()?;
+
+    Ok(Some(IssueProject {
+        id,
+        name: text(project, "name")?,
+        status: nullable(project, "status", |status| text(status, "name"))?,
+        states,
+    }))
+}
+
+/// Every node of a connection, page after page, following `endCursor` while
+/// `hasNextPage` says there is more. `path` is the fields from the answer's root
+/// to the connection, and `document` takes the cursor as `$after`.
+fn paged(
+    linear: &impl Posts,
+    document: &str,
+    mut variables: Value,
+    path: &[&str],
+) -> Result<Vec<Value>, Error> {
+    let mut found = Vec::new();
+    loop {
+        let data = linear.post(document, variables.clone())?;
+        let connection = path
+            .iter()
+            .try_fold(&data, |node, field| node.get(*field))
+            .ok_or_else(|| missing(path.last().copied().unwrap_or("data")))?;
+        found.extend(
+            connection
+                .get("nodes")
+                .and_then(Value::as_array)
+                .ok_or_else(|| missing("nodes"))?
+                .iter()
+                .cloned(),
+        );
+        let info = connection
+            .get("pageInfo")
+            .ok_or_else(|| missing("pageInfo"))?;
+        if !info
+            .get("hasNextPage")
+            .and_then(Value::as_bool)
+            .ok_or_else(|| missing("hasNextPage"))?
+        {
+            return Ok(found);
+        }
+        let cursor = text(info, "endCursor")?;
+        if let Some(fields) = variables.as_object_mut() {
+            fields.insert("after".to_owned(), json!(cursor));
+        }
+    }
+}
+
+/// What [`Board::issue_project`] answers: the project, and each of its issues'
+/// workflow state by name and type.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct IssueProject {
+    id: String,
+    name: String,
+    status: Option<String>,
+    states: Vec<(String, StateType)>,
+}
+
+impl IssueProject {
+    #[must_use]
+    #[cfg(test)]
+    pub(crate) fn new(status: &str, issues: &[(&str, &str)]) -> Self {
+        Self {
+            id: "project-1".to_owned(),
+            name: "A brief".to_owned(),
+            status: Some(status.to_owned()),
+            states: issues
+                .iter()
+                .map(|(name, kind)| ((*name).to_owned(), StateType::new(*kind)))
+                .collect(),
+        }
+    }
+
+    #[must_use]
+    pub(crate) fn id(&self) -> &str {
+        &self.id
+    }
+
+    #[must_use]
+    pub(crate) fn name(&self) -> &str {
+        &self.name
+    }
+
+    #[must_use]
+    pub(crate) fn status(&self) -> Option<&str> {
+        self.status.as_deref()
+    }
+
+    #[must_use]
+    pub(crate) fn states(&self) -> &[(String, StateType)] {
+        &self.states
+    }
 }
 
 /// The id of the team's workflow state named [`BACKLOG`], or `None` when that
@@ -560,15 +700,14 @@ impl FetchedProject {
 }
 
 /// The projects in the team that are `Planned` and carry warlock's label, by
-/// slug and name.
+/// slug and name, every page of them.
 ///
 /// The label narrows it to what a push filed, which is what a draft can read:
 /// a project somebody made by hand has no `## Scope` warlock wrote the shape of.
-/// One page and one request, per this module's rule; a team with more than came
-/// back answers [`Listing::capped`] with `true`, which is the caller's to print.
 fn planned_projects(linear: &impl Posts, team: &str, label: &str) -> Result<Listing, Error> {
-    let data = linear.post(
-        r#"query PlannedProjects($team: String!, $label: String!) {
+    let projects = paged(
+        linear,
+        r#"query PlannedProjects($team: String!, $label: String!, $after: String) {
             projects(
                 filter: {
                     accessibleTeams: { some: { key: { eq: $team } } }
@@ -576,53 +715,43 @@ fn planned_projects(linear: &impl Posts, team: &str, label: &str) -> Result<List
                     labels: { some: { name: { eq: $label } } }
                 }
                 first: 250
+                after: $after
             ) {
-                pageInfo { hasNextPage }
+                pageInfo { hasNextPage endCursor }
                 nodes { slugId name }
             }
         }"#,
         json!({ "team": team, "label": label }),
-    )?;
+        &["projects"],
+    )?
+    .iter()
+    .map(|project| Ok((text(project, "slugId")?, text(project, "name")?)))
+    .collect::<Result<_, Error>>()?;
 
-    let projects = nodes(&data, "projects")?
-        .iter()
-        .map(|project| Ok((text(project, "slugId")?, text(project, "name")?)))
-        .collect::<Result<_, Error>>()?;
-
-    Ok(Listing {
-        projects,
-        capped: has_next_page(&data, "projects")?,
-    })
+    Ok(Listing { projects })
 }
 
 /// What [`Board::planned_projects`] answers: slug and name, in Linear's order.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct Listing {
     projects: Vec<(String, String)>,
-    capped: bool,
 }
 
 impl Listing {
     #[must_use]
     #[cfg(test)]
-    pub(crate) fn new(projects: &[(&str, &str)], capped: bool) -> Self {
+    pub(crate) fn new(projects: &[(&str, &str)]) -> Self {
         Self {
             projects: projects
                 .iter()
                 .map(|(slug, name)| ((*slug).to_owned(), (*name).to_owned()))
                 .collect(),
-            capped,
         }
     }
 
     #[must_use]
     pub(crate) fn projects(&self) -> &[(String, String)] {
         &self.projects
-    }
-
-    #[must_use]
-    pub(crate) const fn capped(&self) -> bool {
-        self.capped
     }
 }
 
