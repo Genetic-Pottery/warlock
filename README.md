@@ -113,22 +113,27 @@ You can still open files and read them. That is no longer the main event.
 
 ## Install
 
-On macOS or Linux, install with Homebrew:
+macOS or Linux (Homebrew):
 
 ```sh
 brew install genetic-pottery/tap/warlock
 ```
 
-Without Homebrew, run the install script from the latest release:
+Linux without Homebrew (Ubuntu, Fedora, and others):
 
 ```sh
-curl --proto '=https' --tlsv1.2 -LsSf https://github.com/Genetic-Pottery/warlock/releases/latest/download/warlock-tui-installer.sh | sh
+curl -LsSf https://github.com/Genetic-Pottery/warlock/releases/latest/download/warlock-tui-installer.sh | sh
+```
+
+From source (Rust 1.97.1 or later):
+
+```sh
+cargo install --git https://github.com/Genetic-Pottery/warlock warlock-tui
 ```
 
 ## Requirements
 
 - macOS or Linux. Windows is not supported.
-- Rust 1.97.1 or later, if you build from source.
 - `git`.
 - The `claude` CLI, on your `PATH` and logged in.
 - A Linear API key, for `push`, `draft`, and `pull`.
