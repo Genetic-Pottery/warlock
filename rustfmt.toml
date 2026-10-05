@@ -3,8 +3,7 @@
 # This file stays deliberately close to rustfmt's defaults: the default style is
 # what every Rust reader already expects, and every deviation is a thing new
 # contributors have to learn. Only options with a stated reason belong here, and
-# nothing nightly-only, because the local toolchain is nixpkgs stable rustc with
-# no rustup shims.
+# nothing nightly-only, because the workspace builds on stable.
 
 # Parse the sources as Rust 2024, matching `edition` in [workspace.package].
 # `cargo fmt` passes the manifest edition through, but a bare `rustfmt` (editors

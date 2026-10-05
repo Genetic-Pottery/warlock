@@ -107,8 +107,8 @@ That is the whole of what an artifact is in this brief.
   turn.
 - Three commands exist: `/brief` enters brief mode, `/write` converges and
   writes, `/chat` leaves brief mode without writing anything.
-- A leading `/` that is *not* a known command is text. `/home/cole/notes` sends
-  as a message, because `home/cole/notes` is not a command word.
+- A leading `/` that is *not* a known command is text. `/src/lib.rs` sends
+  as a message, because `src/lib.rs` is not a command word.
 - A `/word` that looks like a command and is not one — `/breif`, `/plan` — is
   refused with one line in the thread naming the three that exist. It does not
   reach the model: a typo should not cost a turn to discover.

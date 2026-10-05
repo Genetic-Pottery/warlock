@@ -6,17 +6,20 @@ on:
 
 jobs:
   check:
-    name: fmt, clippy, test
-    runs-on: ubuntu-latest
+    name: fmt, clippy, test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - name: Check out the repository
         uses: actions/checkout@v4
 
-      # Pinned to the workspace's `rust-version`, which is the toolchain this
-      # repository is built with locally (nixpkgs, not rustup). `stable` moved to
-      # a release whose new clippy lints and deprecations failed every branch
-      # while the same code passed locally, and the fix for one of them does not
-      # compile on the toolchain in use. Move this and `rust-version` together.
+      # Pinned to the workspace's `rust-version`. `stable` moved to a release
+      # whose new clippy lints and deprecations failed every branch while the
+      # same code passed locally, and the fix for one of them does not compile
+      # on the pinned toolchain. Move this and `rust-version` together.
       - name: Install the pinned Rust toolchain
         uses: dtolnay/rust-toolchain@master
         with:

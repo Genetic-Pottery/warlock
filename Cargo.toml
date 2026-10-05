@@ -142,8 +142,8 @@ ctrlc = { version = "3" }
 # nothing on an X11 session. It links no system library: arboard has no build
 # script, and on Linux it is x11rb and wl-clipboard-rs, which speak both
 # protocols over a socket in Rust rather than binding libX11 or
-# libwayland-client. That matters here because Rust comes from nixpkgs, and it
-# is why `cargo build` needed nothing added to this machine.
+# libwayland-client, so a Linux build needs no X11 or Wayland development
+# packages installed.
 arboard = { version = "3", default-features = false, features = [
     "wayland-data-control",
 ] }
@@ -160,10 +160,10 @@ arboard = { version = "3", default-features = false, features = [
 # there is no openssl-sys and no system TLS library to link. The provider under
 # rustls is ring rather than aws-lc-rs — also the default, by way of ureq's
 # `rustls` feature — and that is the part worth watching: aws-lc-rs compiles C
-# and assembly through cmake and nasm, neither of which is on this machine,
-# where Rust comes from nixpkgs. Ring builds with cargo alone, which is why
-# `cargo build` needed nothing added here. Turning `native-tls` on, or moving
-# the provider to aws-lc-rs, would each break that.
+# and assembly through cmake and nasm, which would make both a build
+# requirement for every contributor. Ring builds with cargo alone. Turning
+# `native-tls` on, or moving the provider to aws-lc-rs, would each add a system
+# dependency to the build.
 #
 # `json` is not on by default: it hands ureq the serde and serde_json already in
 # this tree, so a request body and its reply are typed values rather than

@@ -172,7 +172,7 @@ fn named(issue: QueuedIssue) -> NamedIssue {
         issue,
         TEAM,
         vec![LABEL.to_owned()],
-        Some(Assignee::new(VIEWER, "Cole")),
+        Some(Assignee::new(VIEWER, "Ada")),
     )
 }
 
@@ -408,7 +408,7 @@ fn a_dry_run_names_the_ticket_it_would_take_and_everything_it_passed_over() {
         ),
         issue("WAR-142", "Waiting on a human", REVIEW, "started"),
         issue("WAR-143", "Somebody else's run", "In Progress", "started"),
-        blocked("WAR-144", "WAR-12", Some("Cole")),
+        blocked("WAR-144", "WAR-12", Some("Ada")),
     ]));
     let repo = Checkout::clean(DEFAULT);
 
@@ -452,7 +452,7 @@ fn a_dry_run_names_the_ticket_it_would_take_and_everything_it_passed_over() {
         "{printed}"
     );
     assert!(
-        printed.contains("passed over `WAR-144` — blocked by WAR-12 (Cole)"),
+        printed.contains("passed over `WAR-144` — blocked by WAR-12 (Ada)"),
         "{printed}"
     );
 

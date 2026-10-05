@@ -494,7 +494,7 @@ fn split(ticket: &str) -> Option<(&str, u64)> {
     (!team.is_empty()).then_some((team, number.trim().parse().ok()?))
 }
 
-/// `WAR-12 (Cole)`, `WAR-13 (unassigned)`, joined — the blockers as a refusal
+/// `WAR-12 (Ada)`, `WAR-13 (unassigned)`, joined — the blockers as a refusal
 /// names them, with whose each one is.
 fn listed(blockers: &[Blocker]) -> String {
     blockers

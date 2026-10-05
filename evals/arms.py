@@ -33,7 +33,7 @@ def declares(rel: str, shown: int) -> str:
     No model pass: `declares` is rendered from what warlock measured, so this
     is what `DECLARED_SHOWN` would have produced.
     """
-    names_for = load("declared.json")[str(REPO / rel)]
+    names_for = load("declared.json")[rel]
     out = []
     for line in document(rel).splitlines():
         found = LINE.match(line)

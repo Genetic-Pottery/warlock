@@ -123,7 +123,7 @@ is about the code the documents were tuned on.
 
 ## Running it again
 
-The harness lives outside this repository, in `~/Projects/warlock-bench`:
+The harness lives outside this repository:
 `sample.py` (questions from git history), `pi_build.py` (the PageIndex index,
 with its model calls routed through `claude -p`), `pi_tool.py` (the PageIndex
 arm's tools), `run.py` (the arms, resumable, skipping pairs that already have a

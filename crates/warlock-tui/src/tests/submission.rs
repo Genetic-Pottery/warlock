@@ -216,11 +216,11 @@ fn a_draft_that_does_not_begin_with_a_slash_is_a_message() {
 
 #[test]
 fn a_second_slash_makes_it_a_path_and_so_a_message() {
-    // `home/cole/notes` is not a command word, and somebody naming a file
+    // `src/lib.rs` is not a command word, and somebody naming a file
     // is the common case rather than the odd one.
     for draft in [
-        "/home/cole/notes",
-        "/home/cole/notes is stale",
+        "/src/lib.rs",
+        "/src/lib.rs is stale",
         "/brief/notes",
         "/push/x",
         "/draft/x",
