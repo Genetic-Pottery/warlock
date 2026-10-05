@@ -44,3 +44,20 @@ jobs:
       - name: cargo test --workspace
         if: always()
         run: cargo test --workspace
+
+  nix:
+    name: nix build (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@v31
+
+      - name: nix build
+        run: nix build -L

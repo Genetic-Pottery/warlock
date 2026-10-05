@@ -3841,7 +3841,7 @@ mod unix {
         // rather than on a string literal.
         let (agent, received) = listening(
             ClaudeAgent::new()
-                .with_program("/bin/cat")
+                .with_program("cat")
                 .with_args(Vec::<&str>::new()),
         );
 
@@ -4301,7 +4301,7 @@ mod unix {
         // clear up. Nothing else can: the kill reaches the child, and this
         // one was never the child.
         if let Some(survivor) = pid(&survivor_file) {
-            let _ = process::Command::new("/bin/kill").arg(survivor).status();
+            let _ = process::Command::new("kill").arg(survivor).status();
         }
         clean_up(&directory);
     }
@@ -4456,7 +4456,7 @@ mod unix {
             // at all is a turn whose stdin was written *and closed* —
             // without the close, this call would hang until the timeout.
             let echoed = ChatAgent::new()
-                .with_program("/bin/cat")
+                .with_program("cat")
                 .with_args(Vec::<&str>::new())
                 .turn(&format!("{}\n", TURN[5]))
                 .expect("cat exits cleanly once its stdin is closed");
