@@ -144,11 +144,4 @@ Use a monospace font with box-drawing coverage — most programming fonts have i
 
 ## Contributing
 
-Run these three checks before pushing. CI runs the same three commands on Linux
-and macOS for every push and pull request:
-
-```sh
-cargo fmt --all --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
-```
+See [CONTRIBUTING.md](CONTRIBUTING.md).
