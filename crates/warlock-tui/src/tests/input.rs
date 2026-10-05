@@ -971,7 +971,7 @@ mod gate {
 
     fn app_on_screen() -> App {
         let mut rows = vec![
-            Row::new(0, "/repo", "/repo/WARLOCK.md", NodeState::PactedStale).with_child_count(12),
+            Row::new(0, "/repo", "/repo/.warlock.md", NodeState::PactedStale).with_child_count(12),
         ];
         for n in 0..12 {
             let directory = format!("/repo/d{n:02}");
@@ -3814,7 +3814,7 @@ mod pointer {
 
     fn rows() -> Vec<Row> {
         let mut rows = vec![
-            Row::new(0, "/repo", "/repo/WARLOCK.md", NodeState::PactedStale).with_child_count(24),
+            Row::new(0, "/repo", "/repo/.warlock.md", NodeState::PactedStale).with_child_count(24),
         ];
         for n in 0..24 {
             let directory = format!("/repo/d{n:02}");
@@ -4848,7 +4848,7 @@ mod pointer {
         let mut app = App::from_rows(vec![Row::new(
             0,
             "/repo",
-            "/repo/WARLOCK.md",
+            "/repo/.warlock.md",
             NodeState::PactedStale,
         )]);
         app.set_viewport_height(tree_height(SIZE));

@@ -88,7 +88,7 @@ fn the_manifest_on_disk_is_the_one_the_session_starts_from() {
     let scratch = Scratch::new("round-trip");
     let mut saved = Manifest::new();
     saved.push(
-        PactEntry::new(".", "crates/engine", "crates/engine/WARLOCK.md")
+        PactEntry::new(".", "crates/engine", "crates/engine/.warlock.md")
             .expect("a module spelled relative to the root"),
     );
     saved.save(&scratch.root).expect("a manifest that writes");
@@ -193,7 +193,7 @@ fn a_repository(name: &str) -> Scratch {
 // what the cleanup walks.
 fn pacted(modules: &[&str]) -> Manifest {
     Manifest::with_entries(modules.iter().map(|module| {
-        PactEntry::new(".", module, format!("{module}/WARLOCK.md"))
+        PactEntry::new(".", module, format!("{module}/.warlock.md"))
             .expect("a module spelled relative to the root")
     }))
 }

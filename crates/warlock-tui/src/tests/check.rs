@@ -52,7 +52,7 @@ fn the_composition_answers_about_a_path_the_manifest_has_never_heard_of() {
 #[test]
 fn the_composition_reads_the_scope_the_manifest_holds() {
     let (repo, home) = (a_dir(), a_dir());
-    Manifest::with_entries([PactEntry::new(".", "src", "src/WARLOCK.md")
+    Manifest::with_entries([PactEntry::new(".", "src", "src/.warlock.md")
         .expect("a relative module path is inside the root")
         .with_scope("data-plane")])
     .save(repo.path())
@@ -128,7 +128,7 @@ fn a_dir() -> tempfile::TempDir {
 }
 
 fn entry(module: &str) -> PactEntry {
-    PactEntry::new(".", module, format!("{module}/WARLOCK.md"))
+    PactEntry::new(".", module, format!("{module}/.warlock.md"))
         .expect("a relative module path is inside the root")
 }
 

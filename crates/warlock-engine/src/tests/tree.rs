@@ -5,17 +5,17 @@ use crate::NodeState;
 
 fn fixture() -> Tree {
     Tree::new(
-        Node::new("repo", "repo/WARLOCK.md", NodeState::PactedStale).with_children([
+        Node::new("repo", "repo/.warlock.md", NodeState::PactedStale).with_children([
             // A directory with no document of its own, and a node all
             // the same.
             Node::new("repo/crates", None, NodeState::Unpacted),
-            Node::new("repo/docs", "repo/docs/WARLOCK.md", NodeState::PactedFresh).with_children([
-                Node::new(
+            Node::new("repo/docs", "repo/docs/.warlock.md", NodeState::PactedFresh).with_children(
+                [Node::new(
                     "repo/docs/adr",
-                    "repo/docs/adr/WARLOCK.md",
+                    "repo/docs/adr/.warlock.md",
                     NodeState::PactedStale,
-                ),
-            ]),
+                )],
+            ),
         ]),
     )
 }
@@ -31,7 +31,7 @@ fn fixture_with_files() -> Tree {
 
 #[test]
 fn new_node_starts_childless() {
-    let node = Node::new("a", "a/WARLOCK.md", NodeState::Unpacted);
+    let node = Node::new("a", "a/.warlock.md", NodeState::Unpacted);
     assert!(node.children.is_empty());
     assert!(node.files.is_empty());
     assert!(node.is_leaf());
@@ -39,7 +39,7 @@ fn new_node_starts_childless() {
 
 #[test]
 fn a_node_is_covered_until_something_says_otherwise() {
-    let node = Node::new("a", "a/WARLOCK.md", NodeState::Unpacted);
+    let node = Node::new("a", "a/.warlock.md", NodeState::Unpacted);
     assert!(
         !node.is_ignored(),
         "only a loader that read the rules can say a directory is excluded",
@@ -63,7 +63,7 @@ fn a_node_is_covered_until_something_says_otherwise() {
 
 #[test]
 fn a_node_carries_its_own_scope_and_only_a_loader_can_put_one_there() {
-    let node = Node::new("a", "a/WARLOCK.md", NodeState::PactedFresh);
+    let node = Node::new("a", "a/.warlock.md", NodeState::PactedFresh);
     assert_eq!(
         node.scope, None,
         "a scope lives on a manifest entry, so only a loader that read one \
@@ -94,7 +94,7 @@ fn a_node_written_before_the_scope_existed_reads_back_unscoped() {
     // build that had no such field. It must still deserialise, and the
     // missing fact must read as "no scope" rather than fail.
     assert_de_tokens(
-        &Node::new("repo", "repo/WARLOCK.md", NodeState::PactedFresh),
+        &Node::new("repo", "repo/.warlock.md", NodeState::PactedFresh),
         &[
             Token::Struct {
                 name: "Node",
@@ -104,7 +104,7 @@ fn a_node_written_before_the_scope_existed_reads_back_unscoped() {
             Token::Str("repo"),
             Token::Str("document"),
             Token::Some,
-            Token::Str("repo/WARLOCK.md"),
+            Token::Str("repo/.warlock.md"),
             Token::Str("state"),
             Token::UnitVariant {
                 name: "NodeState",
@@ -131,7 +131,7 @@ fn a_node_written_before_the_flag_existed_reads_back_as_covered() {
     // a tree serialised by an older build. It must still deserialise, and
     // the missing fact must read as "not excluded" rather than fail.
     assert_de_tokens(
-        &Node::new("repo", "repo/WARLOCK.md", NodeState::PactedFresh),
+        &Node::new("repo", "repo/.warlock.md", NodeState::PactedFresh),
         &[
             Token::Struct {
                 name: "Node",
@@ -141,7 +141,7 @@ fn a_node_written_before_the_flag_existed_reads_back_as_covered() {
             Token::Str("repo"),
             Token::Str("document"),
             Token::Some,
-            Token::Str("repo/WARLOCK.md"),
+            Token::Str("repo/.warlock.md"),
             Token::Str("state"),
             Token::UnitVariant {
                 name: "NodeState",
@@ -162,12 +162,12 @@ fn a_node_written_before_the_flag_existed_reads_back_as_covered() {
 fn with_files_attaches_them_in_order_and_leaves_the_node_a_leaf() {
     // A plain `README.md` rides along as an ordinary file: it is a listing
     // entry like any other and documents nothing.
-    let node = Node::new("a", "a/WARLOCK.md", NodeState::Unpacted)
-        .with_files(["a/WARLOCK.md", "a/README.md", "a/Cargo.toml"].map(PathBuf::from));
+    let node = Node::new("a", "a/.warlock.md", NodeState::Unpacted)
+        .with_files(["a/.warlock.md", "a/README.md", "a/Cargo.toml"].map(PathBuf::from));
     assert_eq!(
         node.files,
         [
-            PathBuf::from("a/WARLOCK.md"),
+            PathBuf::from("a/.warlock.md"),
             PathBuf::from("a/README.md"),
             PathBuf::from("a/Cargo.toml"),
         ],
@@ -207,22 +207,22 @@ fn files_are_no_part_of_walking_or_counting() {
 
 #[test]
 fn a_document_is_stored_however_it_was_given() {
-    let from_str = Node::new("a", "a/WARLOCK.md", NodeState::Unpacted);
+    let from_str = Node::new("a", "a/.warlock.md", NodeState::Unpacted);
     let from_path_buf = Node::new(
         "a",
-        std::path::PathBuf::from("a/WARLOCK.md"),
+        std::path::PathBuf::from("a/.warlock.md"),
         NodeState::Unpacted,
     );
     let from_option = Node::new(
         "a",
-        Some(std::path::PathBuf::from("a/WARLOCK.md")),
+        Some(std::path::PathBuf::from("a/.warlock.md")),
         NodeState::Unpacted,
     );
     assert_eq!(from_str, from_path_buf);
     assert_eq!(from_str, from_option);
     assert_eq!(
         from_str.document,
-        Some(std::path::PathBuf::from("a/WARLOCK.md"))
+        Some(std::path::PathBuf::from("a/.warlock.md"))
     );
 }
 
@@ -256,7 +256,7 @@ fn tree_owns_its_root() {
     assert_eq!(tree.root.state, NodeState::PactedStale);
     assert_eq!(
         tree.root.document,
-        Some(std::path::PathBuf::from("repo/WARLOCK.md"))
+        Some(std::path::PathBuf::from("repo/.warlock.md"))
     );
 }
 
@@ -280,7 +280,7 @@ fn walk_is_depth_first_with_parents_before_children() {
 
 #[test]
 fn walk_of_a_lone_node_yields_only_the_root_at_depth_zero() {
-    let tree = Tree::new(Node::new("solo", "solo/WARLOCK.md", NodeState::Unpacted));
+    let tree = Tree::new(Node::new("solo", "solo/.warlock.md", NodeState::Unpacted));
     let visited: Vec<_> = tree
         .walk()
         .map(|(node, depth)| (&node.state, depth))
@@ -306,7 +306,7 @@ fn counts_tally_every_state() {
 
 #[test]
 fn counts_of_an_absent_state_are_zero() {
-    let tree = Tree::new(Node::new("solo", "solo/WARLOCK.md", NodeState::Unpacted));
+    let tree = Tree::new(Node::new("solo", "solo/.warlock.md", NodeState::Unpacted));
     let counts = tree.counts();
     assert_eq!(counts.unpacted, 1);
     assert_eq!(counts.pacted_stale, 0);
@@ -323,7 +323,7 @@ fn find_reaches_the_root_and_the_deepest_node() {
     assert_eq!(
         tree.find("repo/docs/adr")
             .map(|node| node.document.as_deref()),
-        Some(Some(std::path::Path::new("repo/docs/adr/WARLOCK.md")))
+        Some(Some(std::path::Path::new("repo/docs/adr/.warlock.md")))
     );
 }
 
@@ -355,14 +355,14 @@ fn a_tree_carrying_files_survives_a_serde_round_trip() {
     // silently. No format is involved, so nothing below fixes an on-disk
     // representation.
     let tree = Tree::new(
-        Node::new("repo", "repo/WARLOCK.md", NodeState::PactedStale)
+        Node::new("repo", "repo/.warlock.md", NodeState::PactedStale)
             .with_scope(Some("data-plane".to_owned()))
             .with_children([Node::new("repo/docs", None, NodeState::Unpacted)
                 .with_ignored(true)
                 .with_files([PathBuf::from("repo/docs/adr.md")])])
             .with_files([
                 PathBuf::from("repo/Cargo.toml"),
-                PathBuf::from("repo/WARLOCK.md"),
+                PathBuf::from("repo/.warlock.md"),
             ]),
     );
 
@@ -382,7 +382,7 @@ fn a_tree_carrying_files_survives_a_serde_round_trip() {
             Token::Str("repo"),
             Token::Str("document"),
             Token::Some,
-            Token::Str("repo/WARLOCK.md"),
+            Token::Str("repo/.warlock.md"),
             Token::Str("state"),
             Token::UnitVariant {
                 name: "NodeState",
@@ -424,7 +424,7 @@ fn a_tree_carrying_files_survives_a_serde_round_trip() {
             Token::Str("files"),
             Token::Seq { len: Some(2) },
             Token::Str("repo/Cargo.toml"),
-            Token::Str("repo/WARLOCK.md"),
+            Token::Str("repo/.warlock.md"),
             Token::SeqEnd,
             Token::StructEnd,
             Token::StructEnd,

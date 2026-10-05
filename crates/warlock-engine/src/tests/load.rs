@@ -13,7 +13,7 @@ fn documented_fixture(documents: &[&str]) -> tempfile::TempDir {
     for dir in documents {
         let path = repo.path().join(dir);
         fs::create_dir_all(&path).expect("creates a directory");
-        fs::write(path.join("WARLOCK.md"), "# module\n").expect("writes a document");
+        fs::write(path.join(".warlock.md"), "# module\n").expect("writes a document");
     }
     repo
 }
@@ -45,7 +45,7 @@ fn tree_of(dir: impl AsRef<Path>) -> Tree {
 fn pact(root: &Path, modules: &[&str]) {
     Manifest::with_entries(modules.iter().map(|module| {
         let module = root.join(module);
-        PactEntry::new(root, &module, module.join("WARLOCK.md")).expect("inside the root")
+        PactEntry::new(root, &module, module.join(".warlock.md")).expect("inside the root")
     }))
     .save(root)
     .expect("saves");
@@ -66,7 +66,7 @@ fn hand_write_manifest(root: &Path, pacts: &[(&str, Option<&str>)]) {
     for (module, granted) in pacts {
         write!(
             text,
-            "\n[[pact]]\nmodule = \"{module}\"\ndocument = \"{module}/WARLOCK.md\"\n"
+            "\n[[pact]]\nmodule = \"{module}\"\ndocument = \"{module}/.warlock.md\"\n"
         )
         .expect("a string never fails to be written to");
         if let Some(hash) = granted {
@@ -134,7 +134,7 @@ fn a_document_makes_a_module_and_an_undocumented_directory_is_still_a_node() {
         tree.find(repo.path().join("crates/engine"))
             .expect("the module is a node")
             .document,
-        Some(repo.path().join("crates/engine/WARLOCK.md")),
+        Some(repo.path().join("crates/engine/.warlock.md")),
     );
 }
 
@@ -151,8 +151,8 @@ fn a_plain_readme_documents_nothing_and_is_listed_like_any_other_file() {
         tree.find(repo.path().join("crates/engine"))
             .expect("the module is a node")
             .document,
-        Some(repo.path().join("crates/engine/WARLOCK.md")),
-        "a `WARLOCK.md` documents the directory holding it",
+        Some(repo.path().join("crates/engine/.warlock.md")),
+        "a `.warlock.md` documents the directory holding it",
     );
     assert_eq!(
         tree.find(repo.path().join("docs"))
@@ -305,7 +305,7 @@ fn the_first_pact_in_a_never_pacted_repository_creates_the_warlock_directory() {
 
     let manifest = Manifest::load(repo.path()).expect("loads what was just saved");
     let entry = manifest.entry("docs").expect("the entry just written");
-    assert_eq!(entry.document(), "docs/WARLOCK.md");
+    assert_eq!(entry.document(), "docs/.warlock.md");
     assert_eq!(
         tree_of(repo.path())
             .find(repo.path().join("docs"))
@@ -323,7 +323,7 @@ fn the_walk_skips_ignored_and_warlock_directories() {
         &["target/debug", ".git/hooks", "vendored", "src"],
     );
     fs::write(repo.path().join(".gitignore"), "/target\n/vendored\n").expect("writes a .gitignore");
-    fs::write(repo.path().join(".warlock/WARLOCK.md"), "# not a module\n")
+    fs::write(repo.path().join(".warlock/.warlock.md"), "# not a module\n")
         .expect("writes a document inside .warlock");
 
     assert_eq!(
@@ -543,7 +543,7 @@ fn a_node_lists_the_files_directly_inside_it_document_included() {
 
     assert_eq!(
         file_names(&tree, &module),
-        ["WARLOCK.md", "alpha.rs", "zeta.rs"],
+        [".warlock.md", "alpha.rs", "zeta.rs"],
         "sorted, and the module's own document is one of its files"
     );
     assert_eq!(
@@ -600,7 +600,7 @@ fn the_files_a_node_lists_obey_the_same_rules_as_its_directories() {
 
     assert_eq!(
         listed,
-        ["src/WARLOCK.md", "src/lib.rs"],
+        ["src/.warlock.md", "src/lib.rs"],
         "gitignored, hidden and `.warlock/` files come through the same \
              walk as directories, so they never arrive at all"
     );
@@ -830,7 +830,7 @@ fn a_symlinked_directory_cycle_loads_and_terminates() {
     );
     assert_eq!(
         file_names(&tree, repo.path().join("crates/engine")),
-        ["WARLOCK.md"],
+        [".warlock.md"],
         "and it is not listed as one of its parent's files either: a \
              symlink is neither walked nor listed"
     );
@@ -849,7 +849,7 @@ fn a_workspace_shaped_repository_loads_with_its_crates_and_nothing_ignored() {
     );
     fs::write(repo.path().join(".gitignore"), "/target\n").expect("writes a .gitignore");
     fs::write(
-        repo.path().join("target/debug/WARLOCK.md"),
+        repo.path().join("target/debug/.warlock.md"),
         "# not a module\n",
     )
     .expect("writes a document in build output");
@@ -934,7 +934,7 @@ fn hand_write_scoped_manifest(root: &Path, pacts: &[(&str, &str)]) {
     for (module, scope) in pacts {
         write!(
             text,
-            "\n[[pact]]\nmodule = \"{module}\"\ndocument = \"{module}/WARLOCK.md\"\n\
+            "\n[[pact]]\nmodule = \"{module}\"\ndocument = \"{module}/.warlock.md\"\n\
                  scope = \"{scope}\"\n"
         )
         .expect("a string never fails to be written to");
@@ -1023,12 +1023,12 @@ fn an_invalid_scope_is_reported_reads_as_unscoped_and_stops_nothing() {
         );
         assert_eq!(
             docs.document,
-            Some(module.join("WARLOCK.md")),
+            Some(module.join(".warlock.md")),
             "`{not_a_scope}`: and its document",
         );
         assert_eq!(
             file_names(&tree, &module),
-            ["WARLOCK.md", "adr.md"],
+            [".warlock.md", "adr.md"],
             "`{not_a_scope}`: and its files",
         );
         assert_eq!(

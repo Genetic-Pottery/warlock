@@ -428,7 +428,7 @@ Fill in the JSON object at the end of these instructions, describing the \
 directory whose file lines follow them, and output the filled object and \
 nothing else.
 
-You are writing the parts of a WARLOCK.md that are about the directory as a \
+You are writing the parts of a .warlock.md that are about the directory as a \
 whole. It is read by a model, not a person, before any source file is opened, \
 and its one job is routing: to say what is here and which file to open for a \
 given question. Warlock is the tool that lays the document out from your \
@@ -450,7 +450,7 @@ lines spell it. A structure entry names at least one. An empty list is fine.
 
 \"directories\": one line per key. What is under it and the kind of question \
 that should send a reader there. Write it from the subdirectory's own \
-WARLOCK.md, which follows below, and do not restate that document's contents.
+.warlock.md, which follows below, and do not restate that document's contents.
 
 Every value is one line. Write about the directory in its own voice: no first \
 person, and nothing about this request or about what you were or were not \
@@ -623,7 +623,7 @@ pub const FILE_PROMPT: &str = "\
 Describe the one file that follows these instructions, and output the filled \
 object and nothing else.
 
-The line you write becomes one row of the WARLOCK.md for the directory this \
+The line you write becomes one row of the .warlock.md for the directory this \
 file sits in. That document is read by a model, not a person, before any \
 source file is opened, and its one job is routing: to say what is here and \
 which file to open for a given question. Warlock is the tool that lays the \
@@ -756,7 +756,7 @@ fn check(fill: &Fill, expected: &Expected<'_>, described: &Described) -> Vec<Def
         }
     }
 
-    // Measured, not hypothetical: told it is filling in "the WARLOCK.md" and
+    // Measured, not hypothetical: told it is filling in "the .warlock.md" and
     // that "warlock lays the document out", a pass over a crate that never
     // mentions warlock called it "a toy freshness ledger belonging to
     // Warlock". The instructions say the name is the tool's; this is the check

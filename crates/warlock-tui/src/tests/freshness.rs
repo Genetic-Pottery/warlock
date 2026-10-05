@@ -64,12 +64,12 @@ impl Repo {
 
     fn pact(&self, module: &str) -> PactEntry {
         let directory = from_manifest_path(self.root(), module);
-        PactEntry::new(self.root(), &directory, directory.join("WARLOCK.md"))
+        PactEntry::new(self.root(), &directory, directory.join(".warlock.md"))
             .expect("a module inside the root")
     }
 }
 
-// Two crates and a docs directory, and not one `WARLOCK.md`: no document is
+// Two crates and a docs directory, and not one `.warlock.md`: no document is
 // read by the rule, only the directories' own bytes.
 fn repository() -> Repo {
     let repo = Repo::new();
@@ -479,8 +479,8 @@ fn a_stale_directory_is_refreshed_and_the_documents_are_one_commit() {
     let checkout = checkout(
         vec!["src/lib.rs"],
         modified([
-            "src/WARLOCK.md",
-            "WARLOCK.md",
+            "src/.warlock.md",
+            ".warlock.md",
             ".warlock/pacts.toml",
             "src/lib.rs",
         ]),
@@ -506,10 +506,10 @@ fn a_stale_directory_is_refreshed_and_the_documents_are_one_commit() {
     assert_eq!(
         commits(&checkout),
         [GitCall::CommitPaths {
-            message: format!("{TICKET}: refresh WARLOCK.md"),
+            message: format!("{TICKET}: refresh .warlock.md"),
             paths: vec![
-                "src/WARLOCK.md".to_owned(),
-                "WARLOCK.md".to_owned(),
+                "src/.warlock.md".to_owned(),
+                ".warlock.md".to_owned(),
                 ".warlock/pacts.toml".to_owned(),
             ],
         }],
@@ -524,7 +524,7 @@ fn the_passes_run_children_before_parents() {
     repo.write("docs/notes.md", "# Notes, revised\n");
     let checkout = checkout(
         vec!["src/lib.rs", "docs/notes.md"],
-        modified(["docs/WARLOCK.md", "src/WARLOCK.md", "WARLOCK.md"]),
+        modified(["docs/.warlock.md", "src/.warlock.md", ".warlock.md"]),
     );
 
     let mut events = Vec::new();
@@ -587,7 +587,7 @@ fn a_closed_scope_runs_no_pass_and_is_left_stale_with_the_boundarys_sentence() {
         .with_scope(SCOPE);
     let manifest = Manifest::with_entries([scoped]);
     repo.write("src/lib.rs", "//! a module, revised\n");
-    let before = document(&repo, "src/WARLOCK.md");
+    let before = document(&repo, "src/.warlock.md");
     let checkout = checkout(vec!["src/lib.rs"], Vec::new());
 
     let outcome = freshened(
@@ -609,7 +609,7 @@ fn a_closed_scope_runs_no_pass_and_is_left_stale_with_the_boundarys_sentence() {
         "the boundary's own sentence, said about the directory the manifest names"
     );
     assert_eq!(
-        document(&repo, "src/WARLOCK.md"),
+        document(&repo, "src/.warlock.md"),
         before,
         "a directory this machine's sigils do not open had its document rewritten"
     );
@@ -669,7 +669,7 @@ fn a_pacted_directory_that_is_gone_is_left_stale_and_the_run_carries_on() {
     repo.remove_directory("docs");
     let checkout = checkout(
         vec!["docs/notes.md"],
-        modified(["WARLOCK.md", ".warlock/pacts.toml"]),
+        modified([".warlock.md", ".warlock/pacts.toml"]),
     );
 
     let outcome = freshened(
@@ -701,8 +701,8 @@ fn a_pacted_directory_that_is_gone_is_left_stale_and_the_run_carries_on() {
     assert_eq!(
         commits(&checkout),
         [GitCall::CommitPaths {
-            message: format!("{TICKET}: refresh WARLOCK.md"),
-            paths: vec!["WARLOCK.md".to_owned(), ".warlock/pacts.toml".to_owned()],
+            message: format!("{TICKET}: refresh .warlock.md"),
+            paths: vec![".warlock.md".to_owned(), ".warlock/pacts.toml".to_owned()],
         }],
         "what the pass did put back is committed, and the failure does not stop it"
     );

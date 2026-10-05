@@ -65,8 +65,8 @@ fn the_fixture_lists_files_under_more_than_one_directory() {
                 vec![
                     // A plain README beside the document, ordinary in every
                     // way: the loader lists it and nothing else notices it.
+                    "warlock/.warlock.md".to_owned(),
                     "warlock/README.md".to_owned(),
-                    "warlock/WARLOCK.md".to_owned(),
                 ],
             ),
             // A directory of nothing but directories lists nothing.
@@ -74,18 +74,18 @@ fn the_fixture_lists_files_under_more_than_one_directory() {
             (
                 "warlock/crates/engine".to_owned(),
                 vec![
+                    "warlock/crates/engine/.warlock.md".to_owned(),
                     "warlock/crates/engine/Cargo.toml".to_owned(),
-                    "warlock/crates/engine/WARLOCK.md".to_owned(),
                 ],
             ),
             (
                 "warlock/crates/tui".to_owned(),
-                vec!["warlock/crates/tui/WARLOCK.md".to_owned()],
+                vec!["warlock/crates/tui/.warlock.md".to_owned()],
             ),
             (
                 "warlock/assets".to_owned(),
                 vec![
-                    "warlock/assets/WARLOCK.md".to_owned(),
+                    "warlock/assets/.warlock.md".to_owned(),
                     "warlock/assets/logo.svg".to_owned(),
                 ],
             ),

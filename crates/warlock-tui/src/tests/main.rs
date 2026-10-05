@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use clap::error::ErrorKind;
 use clap::{CommandFactory, Parser};
-use warlock_tui::{Error, FOR_CLAUDE_MD, status_for};
+use warlock_tui::{Error, status_for};
 
 use super::{Cli, Command, ScopeCommand};
 
@@ -49,8 +49,7 @@ fn no_arguments_opens_the_tree() {
 }
 
 #[test]
-fn init_and_config_are_the_subcommands() {
-    assert_eq!(parse(&["init"]).unwrap().command, Some(Command::Init));
+fn config_is_a_subcommand() {
     assert_eq!(parse(&["config"]).unwrap().command, Some(Command::Config));
 }
 
@@ -850,9 +849,22 @@ fn both_spellings_of_help_are_a_help_exit_that_succeeded() {
 }
 
 #[test]
+fn both_spellings_of_version_print_the_crate_version_and_succeed() {
+    for spelling in ["-V", "--version"] {
+        let error = parse(&[spelling]).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::DisplayVersion, "{spelling}");
+        assert_eq!(error.exit_code(), 0, "{spelling}");
+        assert_eq!(
+            error.to_string().trim(),
+            format!("warlock {}", env!("CARGO_PKG_VERSION")),
+            "{spelling}"
+        );
+    }
+}
+
+#[test]
 fn per_subcommand_help_is_a_help_exit_too() {
     for args in [
-        ["init", "--help"].as_slice(),
         ["config", "--help"].as_slice(),
         ["stale", "--help"].as_slice(),
         ["fresh", "--help"].as_slice(),
@@ -889,10 +901,9 @@ fn per_subcommand_help_is_a_help_exit_too() {
 fn each_subcommands_help_says_what_that_subcommand_does() {
     // The same `about` and `long_about = None` pair as on `Cli`, pinned one
     // subcommand at a time: without the `about` clap falls back to the doc
-    // comment, and `warlock init --help` answers "`warlock init`." — the
+    // comment, and `warlock config --help` answers "`warlock config`." — the
     // name back, which is not what a reader asked for.
     for (name, said) in [
-        ("init", "CLAUDE.md"),
         ("config", "sigils"),
         ("stale", "stale"),
         ("fresh", "fresh"),
@@ -901,7 +912,7 @@ fn each_subcommands_help_says_what_that_subcommand_does() {
         // The two runs say what they leave behind and which directories
         // they spend a pass on, because that is the difference somebody
         // typing one of them is choosing between.
-        ("pact", "WARLOCK.md"),
+        ("pact", ".warlock.md"),
         ("refresh", "stale"),
         ("scope", "scope"),
         ("key", "Linear"),
@@ -940,25 +951,12 @@ fn a_word_warlock_does_not_have_is_refused_rather_than_opening_the_tree() {
 }
 
 #[test]
-fn version_is_refused_because_warlock_does_not_have_one_yet() {
-    // Deliberate, and recorded on `Cli`: no version is declared, so the
-    // flag is an unrecognized argument like any other word warlock does not
-    // have rather than a half-truth about which warlock this is.
-    for spelling in ["--version", "-V"] {
-        let error = parse(&[spelling]).unwrap_err();
-        assert_ne!(error.kind(), ErrorKind::DisplayVersion, "{spelling}");
-        assert_eq!(error.exit_code(), 2, "{spelling}");
-    }
-}
-
-#[test]
 fn a_trailing_argument_is_refused_and_never_quietly_dropped() {
-    // `warlock init extra` typed by somebody who meant something by `extra`
-    // must not run an `init` that silently ignored it.
-    let refused: [&[&str]; 4] = [
-        &["init", "extra"],
-        &["init", "init", "init"],
+    // `warlock config extra` typed by somebody who meant something by `extra`
+    // must not run a `config` that silently ignored it.
+    let refused: [&[&str]; 3] = [
         &["config", "extra"],
+        &["config", "config", "config"],
         // The one somebody will try: the sigils are typed at `config`'s
         // prompt, where the answer that clears them can be explained before
         // it is given, and never as an argument.
@@ -985,8 +983,8 @@ fn help_prints_a_few_lines_rather_than_this_file() {
     // essays above; without it clap lifts the doc comments wholesale.
     let help = Cli::command().render_long_help().to_string();
     for subcommand in [
-        "init", "config", "stale", "fresh", "check", "unpact", "pact", "refresh", "scope", "key",
-        "brief", "push", "draft", "pull", "resume",
+        "config", "stale", "fresh", "check", "unpact", "pact", "refresh", "scope", "key", "brief",
+        "push", "draft", "pull", "resume",
     ] {
         assert!(help.contains(subcommand), "{subcommand}: {help}");
     }
@@ -994,7 +992,7 @@ fn help_prints_a_few_lines_rather_than_this_file() {
     // A row per subcommand plus the usage and options chrome: the ceiling is
     // what stops an `about` becoming a paragraph, so it moves by one when a
     // subcommand is added and never to make room for prose.
-    assert!(help.lines().count() < 26, "{help}");
+    assert!(help.lines().count() < 29, "{help}");
     // Every doc comment on `Cli` and its variants spells the command in
     // backticks, and no `about` above does, so a backtick reaching the help
     // is a doc comment that got lifted into it.
@@ -1014,7 +1012,7 @@ fn the_six_statuses_a_write_can_leave_are_all_different_numbers() {
     let completed = i32::from(status_for(&Ok(())));
     let could_not = i32::from(status_for(&Err(Error::NoRepository {
         start: PathBuf::from("/nowhere"),
-        wanted: FOR_CLAUDE_MD,
+        wanted: "hold sigils for",
     })));
     let refused = i32::from(status_for(&Err(Error::ClosedScope {
         path: "crates/engine".to_owned(),
@@ -1129,7 +1127,7 @@ fn a_malformed_invocation_is_clap_s_two_across_all_three_questions() {
             error.exit_code(),
             i32::from(status_for(&Err(Error::NoRepository {
                 start: PathBuf::from("/nowhere"),
-                wanted: FOR_CLAUDE_MD,
+                wanted: "hold sigils for",
             }))),
             "{args:?}"
         );

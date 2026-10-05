@@ -266,11 +266,11 @@ fn pressing_the_pact_key_descends_the_subtree_and_lands_its_documents() {
     rounds_until_settled(&mut driven);
 
     assert!(
-        repo.path().join("WARLOCK.md").is_file(),
+        repo.path().join(".warlock.md").is_file(),
         "the root was never documented"
     );
     assert!(
-        repo.path().join("crates/engine/src/WARLOCK.md").is_file(),
+        repo.path().join("crates/engine/src/.warlock.md").is_file(),
         "the descent stopped short of the deepest directory"
     );
     assert_eq!(
@@ -336,7 +336,7 @@ fn a_second_press_of_the_pact_key_takes_the_whole_subtree_back_out() {
         "un-pacting left entries behind"
     );
     assert!(
-        repo.path().join("WARLOCK.md").is_file(),
+        repo.path().join(".warlock.md").is_file(),
         "un-pacting deleted a document, which it has never done"
     );
 }
@@ -1764,7 +1764,7 @@ mod filing {
                          ## Scope\n\n### 1. Read the file\n\ndepends_on: []\n";
 
     fn a_manifest() -> Manifest {
-        Manifest::with_entries([PactEntry::new(".", "docs", "docs/WARLOCK.md")
+        Manifest::with_entries([PactEntry::new(".", "docs", "docs/.warlock.md")
             .expect("a relative module path is inside the root")
             .with_scope(SCOPE)])
         .with_scopes([ScopeRecord::new(SCOPE, TEAM, "In Review", "warlock")])
@@ -2217,7 +2217,7 @@ mod cutting {
     const PROPOSED: &str = "The cut record, and nothing else.";
 
     fn a_manifest() -> Manifest {
-        Manifest::with_entries([PactEntry::new(".", "docs", "docs/WARLOCK.md")
+        Manifest::with_entries([PactEntry::new(".", "docs", "docs/.warlock.md")
             .expect("a relative module path is inside the root")
             .with_scope(SCOPE)])
         .with_scopes([ScopeRecord::new(SCOPE, TEAM, "In Review", "warlock")])
@@ -2888,7 +2888,7 @@ mod pulling {
     }
 
     fn pacted(directory: &str, scope: &str) -> PactEntry {
-        PactEntry::new(".", directory, format!("{directory}/WARLOCK.md"))
+        PactEntry::new(".", directory, format!("{directory}/.warlock.md"))
             .expect("a relative module path is inside the root")
             .with_scope(scope)
     }

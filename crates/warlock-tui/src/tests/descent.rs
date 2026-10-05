@@ -84,7 +84,7 @@ fn an_un_pact_drops_the_entries_and_leaves_every_document_on_disk() {
         &mut |_| {},
     )
     .expect("a pact of a readable subtree");
-    let documents: Vec<_> = ["WARLOCK.md", "src/WARLOCK.md"]
+    let documents: Vec<_> = [".warlock.md", "src/.warlock.md"]
         .into_iter()
         .map(|name| fs::read(repo.path().join(name)).expect("a document the pact wrote"))
         .collect();
@@ -105,7 +105,10 @@ fn an_un_pact_drops_the_entries_and_leaves_every_document_on_disk() {
         stored(repo.path()).is_empty(),
         "an entry survived the un-pact"
     );
-    for (name, before) in ["WARLOCK.md", "src/WARLOCK.md"].into_iter().zip(documents) {
+    for (name, before) in [".warlock.md", "src/.warlock.md"]
+        .into_iter()
+        .zip(documents)
+    {
         assert_eq!(
             fs::read(repo.path().join(name)).expect("the document is still there"),
             before,

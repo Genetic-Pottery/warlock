@@ -5,7 +5,7 @@
 //! [`descended`] takes an [`Opened`], so the boundary is asked before the walk. Asked
 //! afterwards it would have listed somebody else's directories before refusing;
 //! asked after the first directory it would have spent a pass and overwritten a
-//! `WARLOCK.md` that no exit status puts back. Which directories a refresh
+//! `.warlock.md` that no exit status puts back. Which directories a refresh
 //! describes stays the engine's judgement, because a second opinion about
 //! staleness here would disagree with the colour the tree is drawn in.
 //!

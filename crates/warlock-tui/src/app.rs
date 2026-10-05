@@ -47,7 +47,7 @@ pub(crate) struct Row {
     pub state: NodeState,
     pub children: usize,
     pub file: bool,
-    /// Set on the one file row that is its directory's own `WARLOCK.md`. Kept
+    /// Set on the one file row that is its directory's own `.warlock.md`. Kept
     /// on the row because the comparison against the node's document cannot be
     /// made again once the tree is gone.
     // Named for what the row is rather than shortened to `document`, which is
@@ -1230,7 +1230,7 @@ impl App {
 
         // The drawn half, which is conditional: `rows` holds an ordinary file
         // row only while the toggle is on — but it holds a *document* row either
-        // way, because `node_rows` keeps each directory's own `WARLOCK.md` when
+        // way, because `node_rows` keeps each directory's own `.warlock.md` when
         // files are hidden, so the row spliced here is drawn then and there in
         // the view warlock opens on rather than waiting for `f`. It holds a file
         // under an unpacted directory not at all under the pacted-only filter,
@@ -1463,7 +1463,7 @@ fn scroll_offset_for(rows: usize, viewport: usize, selected: usize, offset: usiz
 
 fn left_on_disk_message(label: &str) -> String {
     format!(
-        "{label} is no longer pacted — every WARLOCK.md in it was left on disk, \
+        "{label} is no longer pacted — every .warlock.md in it was left on disk, \
          untouched"
     )
 }
@@ -1494,7 +1494,7 @@ fn directory_view_message(label: &str, document: &str) -> String {
 
 fn undocumented_view_message(label: &str) -> String {
     format!(
-        "{label} is a directory with no WARLOCK.md — press p to pact it, and there will be a document to read"
+        "{label} is a directory with no .warlock.md — press p to pact it, and there will be a document to read"
     )
 }
 

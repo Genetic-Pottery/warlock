@@ -42,7 +42,7 @@ impl Agent for Fails {
 }
 
 fn written(dir: &Path) -> Option<Vec<u8>> {
-    fs::read(dir.join("WARLOCK.md")).ok()
+    fs::read(dir.join(".warlock.md")).ok()
 }
 
 fn write(dir: &Path, name: &str, contents: impl AsRef<[u8]>) -> PathBuf {
@@ -104,7 +104,7 @@ fn a_pact_leaves_nothing_behind_but_the_document() {
     left.sort();
     assert_eq!(
         left,
-        ["WARLOCK.md", "lib.rs"],
+        [".warlock.md", "lib.rs"],
         "no temporary file leaks into the directory the pact just described",
     );
 }
@@ -566,7 +566,7 @@ fn a_hand_edited_line_survives_neither_a_refresh_nor_a_pact() {
             .collect();
         let edited = edited.join("\n") + "\n";
         assert!(edited.contains(LIE), "the planted line went in: {edited}");
-        fs::write(src.join("WARLOCK.md"), edited).expect("writes the edited document");
+        fs::write(src.join(".warlock.md"), edited).expect("writes the edited document");
     }
 
     let repo = project();
@@ -893,7 +893,7 @@ fn every_document_opens_by_saying_it_is_a_map_and_not_a_specification() {
 fn a_pass_is_sent_its_childrens_documents_and_none_of_their_source() {
     let dir = tempfile::tempdir().expect("a temporary directory");
     write(dir.path(), "Cargo.toml", "[package]\n");
-    write(dir.path(), "src/WARLOCK.md", "# src\n\nThe code.\n");
+    write(dir.path(), "src/.warlock.md", "# src\n\nThe code.\n");
     write(
         dir.path(),
         "src/lib.rs",
@@ -1501,8 +1501,8 @@ fn the_repository_root_is_a_module_like_any_other_and_stores_as_a_dot() {
     let root = manifest.entry(".").expect("the root is pacted too");
     assert_eq!(
         root.document(),
-        "WARLOCK.md",
-        "documented by the `WARLOCK.md` sitting in the root itself",
+        ".warlock.md",
+        "documented by the `.warlock.md` sitting in the root itself",
     );
     assert_eq!(root.module_path(repo.path()), repo.path());
     assert_eq!(
@@ -1919,7 +1919,11 @@ fn the_handover_counts_the_lines_and_the_documents_below_and_not_the_files() {
     // about to wait on a model is the panel's clock labelled with a lie.
     let dir = tempfile::tempdir().expect("a temporary directory");
     write(dir.path(), "src/lib.rs", "pub fn one() {}\n");
-    write(dir.path(), "src/WARLOCK.md", "# src\n\nA document below.\n");
+    write(
+        dir.path(),
+        "src/.warlock.md",
+        "# src\n\nA document below.\n",
+    );
     let agent = Lining::saying("prose where an object was asked for");
     let mut watched = Watching::patient();
 
@@ -1938,7 +1942,7 @@ fn the_handover_counts_the_lines_and_the_documents_below_and_not_the_files() {
 
 fn pacted(modules: &[&str]) -> Manifest {
     Manifest::with_entries(modules.iter().map(|module| {
-        PactEntry::new(".", module, format!("{module}/WARLOCK.md"))
+        PactEntry::new(".", module, format!("{module}/.warlock.md"))
             .expect("a relative path inside the root is storable")
             .with_grant(format!("hash-of-{module}"), "2026-08-21T09:00:00Z")
     }))
@@ -2989,7 +2993,7 @@ fn expected_manifest(repo: &Path, at: &Stamps<'_>) -> String {
              \n\
              [[pact]]\n\
              module = \"crates/engine/src\"\n\
-             document = \"crates/engine/src/WARLOCK.md\"\n\
+             document = \"crates/engine/src/.warlock.md\"\n\
              granted_hash = \"{src}\"\n\
              granted_at = \"{src_at}\"\n\
              carry_hash = \"{src_carry}\"\n\
@@ -2999,13 +3003,13 @@ fn expected_manifest(repo: &Path, at: &Stamps<'_>) -> String {
              \n\
              [[pact]]\n\
              module = \"crates/tui\"\n\
-             document = \"crates/tui/WARLOCK.md\"\n\
+             document = \"crates/tui/.warlock.md\"\n\
              granted_hash = \"othercrate\"\n\
              granted_at = \"2026-02-02T00:00:00Z\"\n\
              \n\
              [[pact]]\n\
              module = \"crates/engine\"\n\
-             document = \"crates/engine/WARLOCK.md\"\n\
+             document = \"crates/engine/.warlock.md\"\n\
              granted_hash = \"{root}\"\n\
              granted_at = \"{engine_at}\"\n\
              carry_hash = \"{root_carry}\"\n\
@@ -3015,7 +3019,7 @@ fn expected_manifest(repo: &Path, at: &Stamps<'_>) -> String {
              \n\
              [[pact]]\n\
              module = \"crates/engine/src/inner\"\n\
-             document = \"crates/engine/src/inner/WARLOCK.md\"\n\
+             document = \"crates/engine/src/inner/.warlock.md\"\n\
              granted_hash = \"{inner}\"\n\
              granted_at = \"{inner_at}\"\n\
              carry_hash = \"{inner_carry}\"\n\
@@ -3025,7 +3029,7 @@ fn expected_manifest(repo: &Path, at: &Stamps<'_>) -> String {
              \n\
              [[pact]]\n\
              module = \"crates/engine/tests\"\n\
-             document = \"crates/engine/tests/WARLOCK.md\"\n\
+             document = \"crates/engine/tests/.warlock.md\"\n\
              granted_hash = \"{tests}\"\n\
              granted_at = \"{tests_at}\"\n\
              carry_hash = \"{tests_carry}\"\n\

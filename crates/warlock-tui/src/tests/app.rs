@@ -43,17 +43,17 @@ const KEYSTROKES: [(&str, Movement); 9] = [
 
 fn three_rows() -> Vec<Row> {
     vec![
-        Row::new(0, "repo", "repo/WARLOCK.md", NodeState::PactedStale),
+        Row::new(0, "repo", "repo/.warlock.md", NodeState::PactedStale),
         Row::new(
             1,
             "repo/crates",
-            "repo/crates/WARLOCK.md",
+            "repo/crates/.warlock.md",
             NodeState::PactedFresh,
         ),
         Row::new(
             1,
             "repo/assets",
-            "repo/assets/WARLOCK.md",
+            "repo/assets/.warlock.md",
             NodeState::Unpacted,
         ),
     ]
@@ -61,18 +61,18 @@ fn three_rows() -> Vec<Row> {
 
 fn rooted_rows() -> Vec<Row> {
     vec![
-        Row::new(0, "/repo", "/repo/WARLOCK.md", NodeState::PactedStale).with_child_count(1),
+        Row::new(0, "/repo", "/repo/.warlock.md", NodeState::PactedStale).with_child_count(1),
         Row::new(
             1,
             "/repo/crates",
-            "/repo/crates/WARLOCK.md",
+            "/repo/crates/.warlock.md",
             NodeState::PactedStale,
         )
         .with_child_count(1),
         Row::new(
             2,
             "/repo/crates/warlock-engine",
-            "/repo/crates/warlock-engine/WARLOCK.md",
+            "/repo/crates/warlock-engine/.warlock.md",
             NodeState::PactedFresh,
         ),
     ]
@@ -108,7 +108,7 @@ fn many_rows(count: usize) -> Vec<Row> {
             Row::new(
                 1,
                 format!("repo/module{index}"),
-                format!("repo/module{index}/WARLOCK.md"),
+                format!("repo/module{index}/.warlock.md"),
                 NodeState::Unpacted,
             )
         })
@@ -155,67 +155,67 @@ fn states(app: &App) -> Vec<(&str, NodeState)> {
 fn whole_fixture() -> Vec<String> {
     vec![
         "warlock".to_owned(),
-        "warlock/WARLOCK.md".to_owned(),
+        "warlock/.warlock.md".to_owned(),
         "warlock/crates".to_owned(),
         "warlock/crates/engine".to_owned(),
-        "warlock/crates/engine/WARLOCK.md".to_owned(),
+        "warlock/crates/engine/.warlock.md".to_owned(),
         "warlock/crates/tui".to_owned(),
-        "warlock/crates/tui/WARLOCK.md".to_owned(),
+        "warlock/crates/tui/.warlock.md".to_owned(),
         "warlock/assets".to_owned(),
-        "warlock/assets/WARLOCK.md".to_owned(),
+        "warlock/assets/.warlock.md".to_owned(),
     ]
 }
 
 fn pacted_fixture() -> Vec<String> {
     vec![
         "warlock".to_owned(),
-        "warlock/WARLOCK.md".to_owned(),
+        "warlock/.warlock.md".to_owned(),
         "warlock/crates".to_owned(),
         "warlock/crates/engine".to_owned(),
-        "warlock/crates/engine/WARLOCK.md".to_owned(),
+        "warlock/crates/engine/.warlock.md".to_owned(),
         "warlock/crates/tui".to_owned(),
-        "warlock/crates/tui/WARLOCK.md".to_owned(),
+        "warlock/crates/tui/.warlock.md".to_owned(),
     ]
 }
 
 fn whole_fixture_after_a_run() -> Vec<String> {
     vec![
         "warlock".to_owned(),
-        "warlock/WARLOCK.md".to_owned(),
+        "warlock/.warlock.md".to_owned(),
         "warlock/crates".to_owned(),
-        "warlock/crates/WARLOCK.md".to_owned(),
+        "warlock/crates/.warlock.md".to_owned(),
         "warlock/crates/engine".to_owned(),
-        "warlock/crates/engine/WARLOCK.md".to_owned(),
+        "warlock/crates/engine/.warlock.md".to_owned(),
         "warlock/crates/tui".to_owned(),
-        "warlock/crates/tui/WARLOCK.md".to_owned(),
+        "warlock/crates/tui/.warlock.md".to_owned(),
         "warlock/assets".to_owned(),
-        "warlock/assets/WARLOCK.md".to_owned(),
+        "warlock/assets/.warlock.md".to_owned(),
     ]
 }
 
 fn collapsed_over_crates() -> Vec<String> {
     vec![
         "warlock".to_owned(),
-        "warlock/WARLOCK.md".to_owned(),
+        "warlock/.warlock.md".to_owned(),
         "warlock/crates".to_owned(),
         "warlock/assets".to_owned(),
-        "warlock/assets/WARLOCK.md".to_owned(),
+        "warlock/assets/.warlock.md".to_owned(),
     ]
 }
 
 fn whole_fixture_with_files() -> Vec<String> {
     vec![
         "warlock".to_owned(),
+        "warlock/.warlock.md".to_owned(),
         "warlock/README.md".to_owned(),
-        "warlock/WARLOCK.md".to_owned(),
         "warlock/crates".to_owned(),
         "warlock/crates/engine".to_owned(),
+        "warlock/crates/engine/.warlock.md".to_owned(),
         "warlock/crates/engine/Cargo.toml".to_owned(),
-        "warlock/crates/engine/WARLOCK.md".to_owned(),
         "warlock/crates/tui".to_owned(),
-        "warlock/crates/tui/WARLOCK.md".to_owned(),
+        "warlock/crates/tui/.warlock.md".to_owned(),
         "warlock/assets".to_owned(),
-        "warlock/assets/WARLOCK.md".to_owned(),
+        "warlock/assets/.warlock.md".to_owned(),
         "warlock/assets/logo.svg".to_owned(),
     ]
 }
@@ -242,18 +242,22 @@ fn select(mut app: App, path: &str) -> App {
 #[test]
 fn flattening_a_tree_keeps_depth_first_order_and_depth() {
     let tree = Tree::new(
-        Node::new("repo", "repo/WARLOCK.md", NodeState::PactedStale).with_children([
+        Node::new("repo", "repo/.warlock.md", NodeState::PactedStale).with_children([
             Node::new(
                 "repo/crates",
-                "repo/crates/WARLOCK.md",
+                "repo/crates/.warlock.md",
                 NodeState::PactedFresh,
             )
             .with_children([Node::new(
                 "repo/crates/engine",
-                "repo/crates/engine/WARLOCK.md",
+                "repo/crates/engine/.warlock.md",
                 NodeState::PactedFresh,
             )]),
-            Node::new("repo/assets", "repo/assets/WARLOCK.md", NodeState::Unpacted),
+            Node::new(
+                "repo/assets",
+                "repo/assets/.warlock.md",
+                NodeState::Unpacted,
+            ),
         ]),
     );
 
@@ -798,16 +802,16 @@ fn showing_files_draws_every_file_once_under_its_directory_at_one_more_depth() {
         shape(&app),
         [
             ("warlock".to_owned(), 0, false),
+            ("warlock/.warlock.md".to_owned(), 1, true),
             ("warlock/README.md".to_owned(), 1, true),
-            ("warlock/WARLOCK.md".to_owned(), 1, true),
             ("warlock/crates".to_owned(), 1, false),
             ("warlock/crates/engine".to_owned(), 2, false),
+            ("warlock/crates/engine/.warlock.md".to_owned(), 3, true),
             ("warlock/crates/engine/Cargo.toml".to_owned(), 3, true),
-            ("warlock/crates/engine/WARLOCK.md".to_owned(), 3, true),
             ("warlock/crates/tui".to_owned(), 2, false),
-            ("warlock/crates/tui/WARLOCK.md".to_owned(), 3, true),
+            ("warlock/crates/tui/.warlock.md".to_owned(), 3, true),
             ("warlock/assets".to_owned(), 1, false),
-            ("warlock/assets/WARLOCK.md".to_owned(), 2, true),
+            ("warlock/assets/.warlock.md".to_owned(), 2, true),
             ("warlock/assets/logo.svg".to_owned(), 2, true),
         ]
     );
@@ -836,19 +840,19 @@ fn only_a_directorys_own_document_is_flagged_as_one() {
         [
             ("warlock".to_owned(), false),
             // A README documents nothing as far as the tree is concerned.
+            ("warlock/.warlock.md".to_owned(), true),
             ("warlock/README.md".to_owned(), false),
-            ("warlock/WARLOCK.md".to_owned(), true),
             // No document loaded, so nothing under it could be one.
             ("warlock/crates".to_owned(), false),
             ("warlock/crates/engine".to_owned(), false),
+            ("warlock/crates/engine/.warlock.md".to_owned(), true),
             ("warlock/crates/engine/Cargo.toml".to_owned(), false),
-            ("warlock/crates/engine/WARLOCK.md".to_owned(), true),
             ("warlock/crates/tui".to_owned(), false),
-            ("warlock/crates/tui/WARLOCK.md".to_owned(), true),
+            ("warlock/crates/tui/.warlock.md".to_owned(), true),
             ("warlock/assets".to_owned(), false),
             // Unpacted and documented: presence on disk, not pactedness, is
             // what the flag follows.
-            ("warlock/assets/WARLOCK.md".to_owned(), true),
+            ("warlock/assets/.warlock.md".to_owned(), true),
             ("warlock/assets/logo.svg".to_owned(), false),
         ]
     );
@@ -873,13 +877,13 @@ fn only_a_directorys_own_document_is_flagged_as_one() {
 fn a_row_handed_over_without_a_tree_is_no_document() {
     // The safe default: `from_rows` tests hand rows over with no node
     // behind them, and a row nobody told about a document has none.
-    assert!(!Row::file(1, "repo/WARLOCK.md", NodeState::PactedFresh).is_document());
+    assert!(!Row::file(1, "repo/.warlock.md", NodeState::PactedFresh).is_document());
     assert!(
-        Row::file(1, "repo/WARLOCK.md", NodeState::PactedFresh)
+        Row::file(1, "repo/.warlock.md", NodeState::PactedFresh)
             .with_document_row(true)
             .is_document()
     );
-    assert!(!Row::new(0, "repo", "repo/WARLOCK.md", NodeState::PactedFresh).is_document());
+    assert!(!Row::new(0, "repo", "repo/.warlock.md", NodeState::PactedFresh).is_document());
 }
 
 #[test]
@@ -933,7 +937,7 @@ fn unpacting_a_fresh_node_drops_it_all_the_way_out() {
 
 #[test]
 fn a_directory_with_no_document_is_pacted_like_any_other() {
-    // `crates/` has no `WARLOCK.md` in the fixture, which is exactly the
+    // `crates/` has no `.warlock.md` in the fixture, which is exactly the
     // case the pact operation exists to fix: it writes one.
     let mut app = app_selecting("warlock/crates");
     assert_eq!(
@@ -971,14 +975,14 @@ fn pacting_a_directory_pacts_everything_below_it() {
         states(&app),
         [
             ("warlock", NodeState::PactedStale),
-            ("warlock/WARLOCK.md", NodeState::PactedStale),
+            ("warlock/.warlock.md", NodeState::PactedStale),
             ("warlock/crates", NodeState::PactedStale),
             ("warlock/crates/engine", NodeState::PactedStale),
-            ("warlock/crates/engine/WARLOCK.md", NodeState::PactedStale),
+            ("warlock/crates/engine/.warlock.md", NodeState::PactedStale),
             ("warlock/crates/tui", NodeState::PactedStale),
-            ("warlock/crates/tui/WARLOCK.md", NodeState::PactedStale),
+            ("warlock/crates/tui/.warlock.md", NodeState::PactedStale),
             ("warlock/assets", NodeState::Unpacted),
-            ("warlock/assets/WARLOCK.md", NodeState::Unpacted),
+            ("warlock/assets/.warlock.md", NodeState::Unpacted),
         ]
     );
     assert_eq!(app.counts(), tally(&app));
@@ -1030,14 +1034,14 @@ fn a_subtree_can_be_put_into_a_state_the_toggle_never_reaches() {
         states(&app),
         [
             ("warlock", NodeState::PactedStale),
-            ("warlock/WARLOCK.md", NodeState::PactedStale),
+            ("warlock/.warlock.md", NodeState::PactedStale),
             ("warlock/crates", NodeState::PactedFresh),
             ("warlock/crates/engine", NodeState::PactedFresh),
-            ("warlock/crates/engine/WARLOCK.md", NodeState::PactedFresh),
+            ("warlock/crates/engine/.warlock.md", NodeState::PactedFresh),
             ("warlock/crates/tui", NodeState::PactedFresh),
-            ("warlock/crates/tui/WARLOCK.md", NodeState::PactedFresh),
+            ("warlock/crates/tui/.warlock.md", NodeState::PactedFresh),
             ("warlock/assets", NodeState::Unpacted),
-            ("warlock/assets/WARLOCK.md", NodeState::Unpacted),
+            ("warlock/assets/.warlock.md", NodeState::Unpacted),
         ]
     );
     assert_eq!(app.counts(), tally(&app));
@@ -1211,14 +1215,14 @@ fn a_file_row_is_refused_in_the_pact_keys_own_words() {
 
 fn rows_with_one_kept_out() -> Vec<Row> {
     vec![
-        Row::new(0, "repo", "repo/WARLOCK.md", NodeState::PactedStale).with_child_count(2),
+        Row::new(0, "repo", "repo/.warlock.md", NodeState::PactedStale).with_child_count(2),
         // Kept out by the rules: unpacted like any other unpacted directory,
         // and carrying no state of its own for being excluded.
         Row::new(1, "repo/notes", None, NodeState::Unpacted).with_ignored(true),
         Row::new(
             1,
             "repo/crates",
-            "repo/crates/WARLOCK.md",
+            "repo/crates/.warlock.md",
             NodeState::Unpacted,
         ),
     ]
@@ -1306,7 +1310,7 @@ fn the_reach_of_a_press_answers_for_a_row_its_meaning_refuses() {
 
     // A file row is no module either way: there is no subtree to reach.
     let mut app = App::from_rows(vec![
-        Row::new(0, "repo", "repo/WARLOCK.md", NodeState::PactedFresh),
+        Row::new(0, "repo", "repo/.warlock.md", NodeState::PactedFresh),
         Row::file(1, "repo/lib.rs", NodeState::PactedFresh),
     ]);
     // File rows are detail asked for, so they have to be on screen before
@@ -1418,8 +1422,8 @@ fn a_file_inside_excluded_content_is_held_back_with_its_directory() {
     // A file row carries its directory's ignore flag precisely so that it
     // is not left drawn in a colour its module never took.
     let tree = Tree::new(
-        Node::new("repo", "repo/WARLOCK.md", NodeState::Unpacted)
-            .with_files([PathBuf::from("repo/WARLOCK.md")])
+        Node::new("repo", "repo/.warlock.md", NodeState::Unpacted)
+            .with_files([PathBuf::from("repo/.warlock.md")])
             .with_children([Node::new("repo/notes", None, NodeState::Unpacted)
                 .with_files([PathBuf::from("repo/notes/plan.md")])
                 .with_ignored(true)]),
@@ -1433,7 +1437,7 @@ fn a_file_inside_excluded_content_is_held_back_with_its_directory() {
         states(&app),
         [
             ("repo", NodeState::PactedStale),
-            ("repo/WARLOCK.md", NodeState::PactedStale),
+            ("repo/.warlock.md", NodeState::PactedStale),
             ("repo/notes", NodeState::Unpacted),
             ("repo/notes/plan.md", NodeState::Unpacted),
         ]
@@ -1461,7 +1465,7 @@ fn an_excluded_row_is_drawn_in_no_colour_of_its_own() {
 #[test]
 fn flattening_a_tree_carries_the_ignore_flag_onto_the_rows() {
     let tree = Tree::new(
-        Node::new("repo", "repo/WARLOCK.md", NodeState::PactedStale).with_children([
+        Node::new("repo", "repo/.warlock.md", NodeState::PactedStale).with_children([
             Node::new("repo/notes", None, NodeState::Unpacted)
                 .with_files([PathBuf::from("repo/notes/plan.md")])
                 .with_ignored(true),
@@ -1501,7 +1505,7 @@ fn flattening_a_tree_carries_the_ignore_flag_onto_the_rows() {
 
 fn tree_with_one_scoped_directory() -> Tree {
     Tree::new(
-        Node::new("repo", "repo/WARLOCK.md", NodeState::PactedStale)
+        Node::new("repo", "repo/.warlock.md", NodeState::PactedStale)
             .with_scope(Some("tui-team".to_owned()))
             .with_files([PathBuf::from("repo/README.md")])
             .with_children([
@@ -1509,7 +1513,7 @@ fn tree_with_one_scoped_directory() -> Tree {
                 // not the same as carrying one.
                 Node::new(
                     "repo/crates",
-                    "repo/crates/WARLOCK.md",
+                    "repo/crates/.warlock.md",
                     NodeState::PactedFresh,
                 ),
                 // Nobody pacted it, so there is no entry a scope could be
@@ -1555,7 +1559,7 @@ fn flattening_a_tree_carries_each_nodes_own_scope_onto_its_row() {
 
 #[test]
 fn a_scope_on_a_row_moves_no_state_and_needs_no_tree() {
-    let plain = Row::new(0, "repo", "repo/WARLOCK.md", NodeState::PactedStale);
+    let plain = Row::new(0, "repo", "repo/.warlock.md", NodeState::PactedStale);
     let scoped = plain.clone().with_scope(Some("tui-team".to_owned()));
 
     // A row nobody told about a scope has none: the fact comes from a pact
@@ -2412,7 +2416,7 @@ fn toggling_a_node_with_nothing_under_it_changes_nothing_at_all() {
     // a leaf there is a row with something under it now.
     let mut app = select(
         App::from_rows(vec![
-            Row::new(0, "repo", "repo/WARLOCK.md", NodeState::PactedStale).with_child_count(1),
+            Row::new(0, "repo", "repo/.warlock.md", NodeState::PactedStale).with_child_count(1),
             Row::new(1, "repo/crates", None, NodeState::Unpacted),
         ]),
         "repo/crates",
@@ -2523,10 +2527,10 @@ fn a_collapse_clears_the_last_keystrokes_message() {
 #[test]
 fn collapsing_a_directory_leaves_a_sibling_whose_name_it_prefixes_alone() {
     let tree = Tree::new(
-        Node::new("repo", "repo/WARLOCK.md", NodeState::PactedStale).with_children([
+        Node::new("repo", "repo/.warlock.md", NodeState::PactedStale).with_children([
             Node::new("repo/crates", None, NodeState::Unpacted).with_children([Node::new(
                 "repo/crates/engine",
-                "repo/crates/engine/WARLOCK.md",
+                "repo/crates/engine/.warlock.md",
                 NodeState::PactedFresh,
             )]),
             Node::new("repo/crates-old", None, NodeState::Unpacted),
@@ -2544,7 +2548,7 @@ fn collapsing_a_directory_leaves_a_sibling_whose_name_it_prefixes_alone() {
 #[test]
 fn rows_from_a_bare_list_collapse_only_where_they_claim_children() {
     let mut app = App::from_rows(vec![
-        Row::new(0, "repo", "repo/WARLOCK.md", NodeState::PactedStale).with_child_count(1),
+        Row::new(0, "repo", "repo/.warlock.md", NodeState::PactedStale).with_child_count(1),
         Row::new(1, "repo/crates", None, NodeState::Unpacted),
     ]);
 
@@ -2638,12 +2642,12 @@ fn the_filter_keeps_the_depths_and_the_order_the_walk_gave() {
         seen,
         [
             (0, "warlock"),
-            (1, "warlock/WARLOCK.md"),
+            (1, "warlock/.warlock.md"),
             (1, "warlock/crates"),
             (2, "warlock/crates/engine"),
-            (3, "warlock/crates/engine/WARLOCK.md"),
+            (3, "warlock/crates/engine/.warlock.md"),
             (2, "warlock/crates/tui"),
-            (3, "warlock/crates/tui/WARLOCK.md"),
+            (3, "warlock/crates/tui/.warlock.md"),
         ]
     );
 }
@@ -2675,7 +2679,7 @@ fn widening_the_view_keeps_the_selection_on_the_node_it_was_on() {
     app.select_last();
     assert_eq!(
         app.selected_row().map(|row| row.path.clone()),
-        Some(PathBuf::from("warlock/crates/tui/WARLOCK.md"))
+        Some(PathBuf::from("warlock/crates/tui/.warlock.md"))
     );
     app.select_previous();
     assert_eq!(
@@ -2728,7 +2732,7 @@ fn a_directory_collapsed_before_the_filter_is_still_collapsed_after_it() {
     // off the whole walk, not off what collapsing left drawn.
     assert_eq!(
         drawn(&app),
-        ["warlock", "warlock/WARLOCK.md", "warlock/crates"]
+        ["warlock", "warlock/.warlock.md", "warlock/crates"]
     );
     assert!(app.is_collapsed("warlock/crates"));
 
@@ -2761,7 +2765,7 @@ fn collapsing_under_the_filter_hides_descendants_as_it_always_did() {
 #[test]
 fn nothing_pacted_narrows_to_nothing_at_all() {
     let mut app = App::from_rows(vec![
-        Row::new(0, "repo", "repo/WARLOCK.md", NodeState::Unpacted).with_child_count(1),
+        Row::new(0, "repo", "repo/.warlock.md", NodeState::Unpacted).with_child_count(1),
         Row::new(1, "repo/crates", None, NodeState::Unpacted),
     ]);
 
@@ -2792,14 +2796,14 @@ fn pacting_a_node_under_the_filter_brings_its_row_into_the_view_to_stay() {
         drawn(&app),
         [
             "warlock",
-            "warlock/WARLOCK.md",
+            "warlock/.warlock.md",
             "warlock/crates",
             "warlock/crates/engine",
-            "warlock/crates/engine/WARLOCK.md",
+            "warlock/crates/engine/.warlock.md",
             "warlock/crates/tui",
-            "warlock/crates/tui/WARLOCK.md",
+            "warlock/crates/tui/.warlock.md",
             "warlock/assets",
-            "warlock/assets/WARLOCK.md",
+            "warlock/assets/.warlock.md",
         ]
     );
 }
@@ -2809,12 +2813,12 @@ fn an_unpacted_subtree_goes_whole_while_its_unpacted_siblings_way_in_stays() {
     let tree = Tree::new(Node::new("repo", None, NodeState::Unpacted).with_children([
         Node::new("repo/kept", None, NodeState::Unpacted).with_children([Node::new(
             "repo/kept/deep",
-            "repo/kept/deep/WARLOCK.md",
+            "repo/kept/deep/.warlock.md",
             NodeState::PactedFresh,
         )]),
         Node::new("repo/gone", None, NodeState::Unpacted).with_children([Node::new(
             "repo/gone/deep",
-            "repo/gone/deep/WARLOCK.md",
+            "repo/gone/deep/.warlock.md",
             NodeState::Unpacted,
         )]),
     ]));
@@ -2873,16 +2877,20 @@ fn a_documented_directory_draws_its_document_beneath_it_and_an_undocumented_one_
     // A documented root, an undocumented directory under it, and a
     // documented one a `.warlockignore` excludes.
     let tree = Tree::new(
-        Node::new("repo", "repo/WARLOCK.md", NodeState::PactedFresh)
+        Node::new("repo", "repo/.warlock.md", NodeState::PactedFresh)
             .with_files([
                 PathBuf::from("repo/README.md"),
-                PathBuf::from("repo/WARLOCK.md"),
+                PathBuf::from("repo/.warlock.md"),
             ])
             .with_children([
                 Node::new("repo/crates", None, NodeState::Unpacted),
-                Node::new("repo/vendor", "repo/vendor/WARLOCK.md", NodeState::Unpacted)
-                    .with_files([PathBuf::from("repo/vendor/WARLOCK.md")])
-                    .with_ignored(true),
+                Node::new(
+                    "repo/vendor",
+                    "repo/vendor/.warlock.md",
+                    NodeState::Unpacted,
+                )
+                .with_files([PathBuf::from("repo/vendor/.warlock.md")])
+                .with_ignored(true),
             ]),
     );
 
@@ -2893,11 +2901,11 @@ fn a_documented_directory_draws_its_document_beneath_it_and_an_undocumented_one_
         drawn(&app),
         [
             "repo",
-            "repo/WARLOCK.md",
+            "repo/.warlock.md",
             // Nothing under `crates`, which has no document to draw.
             "repo/crates",
             "repo/vendor",
-            "repo/vendor/WARLOCK.md",
+            "repo/vendor/.warlock.md",
         ]
     );
     // Exactly the row `f` draws for the same file: a file row, one level
@@ -2906,7 +2914,7 @@ fn a_documented_directory_draws_its_document_beneath_it_and_an_undocumented_one_
     for (directory, document) in [(0, 1), (3, 4)] {
         let directory = app.rows()[directory].clone();
         let document = &app.rows()[document];
-        assert_eq!(document.path, directory.path.join("WARLOCK.md"));
+        assert_eq!(document.path, directory.path.join(".warlock.md"));
         assert_eq!(
             Some(document.path.as_path()),
             directory.document.as_deref(),
@@ -2937,21 +2945,21 @@ fn a_documented_directory_draws_its_document_beneath_it_and_an_undocumented_one_
 
 #[test]
 fn the_filter_keeps_a_pacted_directorys_document_and_drops_a_leftover_one() {
-    // `repo/left` is gray with a `WARLOCK.md` an un-pact left on disk, and
+    // `repo/left` is gray with a `.warlock.md` an un-pact left on disk, and
     // is drawn only as the way down to the pacted node below it.
     let tree = Tree::new(
         Node::new("repo", None, NodeState::Unpacted).with_children([Node::new(
             "repo/left",
-            "repo/left/WARLOCK.md",
+            "repo/left/.warlock.md",
             NodeState::Unpacted,
         )
-        .with_files([PathBuf::from("repo/left/WARLOCK.md")])
+        .with_files([PathBuf::from("repo/left/.warlock.md")])
         .with_children([Node::new(
             "repo/left/deep",
-            "repo/left/deep/WARLOCK.md",
+            "repo/left/deep/.warlock.md",
             NodeState::PactedFresh,
         )
-        .with_files([PathBuf::from("repo/left/deep/WARLOCK.md")])])]),
+        .with_files([PathBuf::from("repo/left/deep/.warlock.md")])])]),
     );
     let mut app = App::from_tree(&tree);
     assert_eq!(
@@ -2959,9 +2967,9 @@ fn the_filter_keeps_a_pacted_directorys_document_and_drops_a_leftover_one() {
         [
             "repo",
             "repo/left",
-            "repo/left/WARLOCK.md",
+            "repo/left/.warlock.md",
             "repo/left/deep",
-            "repo/left/deep/WARLOCK.md",
+            "repo/left/deep/.warlock.md",
         ]
     );
 
@@ -2977,7 +2985,7 @@ fn the_filter_keeps_a_pacted_directorys_document_and_drops_a_leftover_one() {
             "repo",
             "repo/left",
             "repo/left/deep",
-            "repo/left/deep/WARLOCK.md"
+            "repo/left/deep/.warlock.md"
         ]
     );
 }
@@ -2994,13 +3002,13 @@ fn collapsing_a_documented_directory_takes_its_document_row_with_it() {
         drawn(&app),
         [
             "warlock",
-            "warlock/WARLOCK.md",
+            "warlock/.warlock.md",
             "warlock/crates",
             "warlock/crates/engine",
             "warlock/crates/tui",
-            "warlock/crates/tui/WARLOCK.md",
+            "warlock/crates/tui/.warlock.md",
             "warlock/assets",
-            "warlock/assets/WARLOCK.md",
+            "warlock/assets/.warlock.md",
         ]
     );
 
@@ -3054,16 +3062,16 @@ fn showing_files_puts_each_one_under_its_directory_one_level_deeper() {
         seen,
         [
             (0, "warlock", false),
+            (1, "warlock/.warlock.md", true),
             (1, "warlock/README.md", true),
-            (1, "warlock/WARLOCK.md", true),
             (1, "warlock/crates", false),
             (2, "warlock/crates/engine", false),
+            (3, "warlock/crates/engine/.warlock.md", true),
             (3, "warlock/crates/engine/Cargo.toml", true),
-            (3, "warlock/crates/engine/WARLOCK.md", true),
             (2, "warlock/crates/tui", false),
-            (3, "warlock/crates/tui/WARLOCK.md", true),
+            (3, "warlock/crates/tui/.warlock.md", true),
             (1, "warlock/assets", false),
-            (2, "warlock/assets/WARLOCK.md", true),
+            (2, "warlock/assets/.warlock.md", true),
             (2, "warlock/assets/logo.svg", true),
         ]
     );
@@ -3153,7 +3161,7 @@ fn pacting_a_directory_recolours_the_files_in_it() {
         Some(NodeState::PactedStale)
     );
     assert_eq!(
-        state_of(&app, "warlock/assets/WARLOCK.md"),
+        state_of(&app, "warlock/assets/.warlock.md"),
         Some(NodeState::PactedStale)
     );
     assert_eq!(
@@ -3161,11 +3169,11 @@ fn pacting_a_directory_recolours_the_files_in_it() {
         Some(NodeState::PactedStale)
     );
     assert_eq!(
-        state_of(&app, "warlock/crates/tui/WARLOCK.md"),
+        state_of(&app, "warlock/crates/tui/.warlock.md"),
         Some(NodeState::PactedStale),
     );
     assert_eq!(
-        state_of(&app, "warlock/crates/engine/WARLOCK.md"),
+        state_of(&app, "warlock/crates/engine/.warlock.md"),
         Some(NodeState::PactedFresh)
     );
 
@@ -3198,7 +3206,7 @@ fn a_file_cannot_be_pacted_and_the_refusal_says_why() {
     );
     // Its own wording, not the missing-document one, though a file has no
     // document either.
-    assert!(!message.contains("no WARLOCK.md"), "{message}");
+    assert!(!message.contains("no .warlock.md"), "{message}");
     assert!(message.contains("directory"), "{message}");
 }
 
@@ -3206,7 +3214,7 @@ fn a_file_cannot_be_pacted_and_the_refusal_says_why() {
 fn a_file_under_a_documented_directory_is_refused_all_the_same() {
     // The document of a documented module, which is the row most likely
     // to be mistaken for the module itself.
-    let mut app = app_with_files_selecting("warlock/crates/tui/WARLOCK.md");
+    let mut app = app_with_files_selecting("warlock/crates/tui/.warlock.md");
     let before = app.clone();
 
     assert_eq!(app.toggle_pact(), None);
@@ -3262,14 +3270,14 @@ fn collapsing_a_directory_hides_its_files_with_it_and_expanding_puts_them_back()
         drawn(&leaf),
         [
             "warlock",
+            "warlock/.warlock.md",
             "warlock/README.md",
-            "warlock/WARLOCK.md",
             "warlock/crates",
             "warlock/crates/engine",
+            "warlock/crates/engine/.warlock.md",
             "warlock/crates/engine/Cargo.toml",
-            "warlock/crates/engine/WARLOCK.md",
             "warlock/crates/tui",
-            "warlock/crates/tui/WARLOCK.md",
+            "warlock/crates/tui/.warlock.md",
             "warlock/assets",
         ]
     );
@@ -3289,11 +3297,11 @@ fn collapsing_a_directory_hides_its_files_with_it_and_expanding_puts_them_back()
         drawn(&app),
         [
             "warlock",
+            "warlock/.warlock.md",
             "warlock/README.md",
-            "warlock/WARLOCK.md",
             "warlock/crates",
             "warlock/assets",
-            "warlock/assets/WARLOCK.md",
+            "warlock/assets/.warlock.md",
             "warlock/assets/logo.svg",
         ]
     );
@@ -3313,7 +3321,7 @@ fn a_directory_holding_only_files_collapses_exactly_when_the_files_are_shown() {
     // is what used to leave the key doing nothing at all on such a row.
     let tree =
         Tree::new(
-            Node::new("repo", "repo/WARLOCK.md", NodeState::PactedStale)
+            Node::new("repo", "repo/.warlock.md", NodeState::PactedStale)
                 .with_children([Node::new("repo/assets", None, NodeState::Unpacted)
                     .with_files([PathBuf::from("repo/assets/logo.svg")])]),
         );
@@ -3344,7 +3352,7 @@ fn a_directory_the_filter_has_emptied_does_not_collapse() {
     // and the pacted-only view takes it away. A row with nothing under it is
     // a row with nothing to hide, whichever filter emptied it.
     let mut app = App::from_rows(vec![
-        Row::new(0, "repo", "repo/WARLOCK.md", NodeState::PactedStale).with_child_count(1),
+        Row::new(0, "repo", "repo/.warlock.md", NodeState::PactedStale).with_child_count(1),
         Row::new(1, "repo/crates", None, NodeState::Unpacted).with_child_count(1),
         Row::new(2, "repo/crates/tui", None, NodeState::Unpacted),
     ]);
@@ -3407,14 +3415,14 @@ fn the_filter_keeps_the_files_of_pacted_directories_and_no_others() {
         drawn(&app),
         [
             "warlock",
+            "warlock/.warlock.md",
             "warlock/README.md",
-            "warlock/WARLOCK.md",
             "warlock/crates",
             "warlock/crates/engine",
+            "warlock/crates/engine/.warlock.md",
             "warlock/crates/engine/Cargo.toml",
-            "warlock/crates/engine/WARLOCK.md",
             "warlock/crates/tui",
-            "warlock/crates/tui/WARLOCK.md",
+            "warlock/crates/tui/.warlock.md",
         ]
     );
 
@@ -3455,8 +3463,8 @@ fn showing_files_leaves_the_window_in_range_with_the_selection_in_it() {
 #[test]
 fn a_bare_list_of_rows_can_hold_files_too_and_starts_with_them_hidden() {
     let app = App::from_rows(vec![
-        Row::new(0, "repo", "repo/WARLOCK.md", NodeState::PactedStale).with_child_count(1),
-        Row::file(1, "repo/WARLOCK.md", NodeState::PactedStale),
+        Row::new(0, "repo", "repo/.warlock.md", NodeState::PactedStale).with_child_count(1),
+        Row::file(1, "repo/.warlock.md", NodeState::PactedStale),
         Row::new(1, "repo/crates", None, NodeState::Unpacted),
     ]);
 
@@ -3465,7 +3473,7 @@ fn a_bare_list_of_rows_can_hold_files_too_and_starts_with_them_hidden() {
 
     let mut app = app;
     app.toggle_files();
-    assert_eq!(drawn(&app), ["repo", "repo/WARLOCK.md", "repo/crates"]);
+    assert_eq!(drawn(&app), ["repo", "repo/.warlock.md", "repo/crates"]);
 }
 
 #[test]
@@ -5503,7 +5511,7 @@ fn run_a_pact(app: &mut App, base: Instant, from: u64) {
     app.panel_mut().write_run(|account| {
         account.close_section(
             &Outcome::Wrote {
-                document: PathBuf::from("crates/tui").join("WARLOCK.md"),
+                document: PathBuf::from("crates/tui").join(".warlock.md"),
                 bytes: 120,
             },
             at(base, from + 4),
@@ -5771,8 +5779,8 @@ fn a_line_written_after_a_run_is_over_reaches_nothing_at_all() {
 
 #[test]
 fn a_file_row_hands_its_own_path_to_the_view_key_and_changes_nothing() {
-    // A `WARLOCK.md` is an ordinary file row, so both kinds are the yes.
-    for path in ["warlock/assets/logo.svg", "warlock/crates/tui/WARLOCK.md"] {
+    // A `.warlock.md` is an ordinary file row, so both kinds are the yes.
+    for path in ["warlock/assets/logo.svg", "warlock/crates/tui/.warlock.md"] {
         let mut app = app_with_files_selecting(path);
         app.set_message("something the last keystroke said");
         let before = app.clone();
@@ -5792,8 +5800,8 @@ fn a_documented_directory_is_refused_by_the_view_key_naming_its_document() {
     // Pacted or not: what decides the wording is whether there is a document
     // to read, and `warlock/assets` has one without a manifest entry.
     for (path, document) in [
-        ("warlock/crates/tui", "warlock/crates/tui/WARLOCK.md"),
-        ("warlock/assets", "warlock/assets/WARLOCK.md"),
+        ("warlock/crates/tui", "warlock/crates/tui/.warlock.md"),
+        ("warlock/assets", "warlock/assets/.warlock.md"),
     ] {
         let mut app = app_selecting(path);
         let mut before = app.clone();
@@ -6199,15 +6207,15 @@ fn a_re_seat_under_a_document_leaves_it_showing_with_the_account_behind_it() {
 
 fn tree_without_the_tui_crate() -> Tree {
     Tree::new(
-        Node::new("warlock", "warlock/WARLOCK.md", NodeState::PactedStale).with_children([
+        Node::new("warlock", "warlock/.warlock.md", NodeState::PactedStale).with_children([
             Node::new("warlock/crates", None, NodeState::Unpacted).with_children([Node::new(
                 "warlock/crates/engine",
-                "warlock/crates/engine/WARLOCK.md",
+                "warlock/crates/engine/.warlock.md",
                 NodeState::PactedFresh,
             )]),
             Node::new(
                 "warlock/assets",
-                "warlock/assets/WARLOCK.md",
+                "warlock/assets/.warlock.md",
                 NodeState::Unpacted,
             ),
         ]),
@@ -6232,7 +6240,7 @@ fn a_re_seat_takes_its_rows_its_states_and_its_tally_from_the_new_tree() {
     assert_eq!(crates.path, PathBuf::from("warlock/crates"));
     assert_eq!(
         crates.document,
-        Some(PathBuf::from("warlock/crates/WARLOCK.md")),
+        Some(PathBuf::from("warlock/crates/.warlock.md")),
         "the document the run wrote never reached the row"
     );
     assert_eq!(crates.state, NodeState::PactedFresh);
@@ -6250,7 +6258,7 @@ fn a_re_seat_takes_its_rows_its_states_and_its_tally_from_the_new_tree() {
 fn a_file_the_new_tree_lists_and_the_old_one_did_not_gets_a_row() {
     let mut app = App::from_tree(&fixture::tree());
     app.toggle_files();
-    let written = "warlock/crates/WARLOCK.md".to_owned();
+    let written = "warlock/crates/.warlock.md".to_owned();
     assert!(!drawn(&app).contains(&written));
 
     let reseated = reseat_on(&app, &fixture::tree_after_a_run());
@@ -6258,7 +6266,7 @@ fn a_file_the_new_tree_lists_and_the_old_one_did_not_gets_a_row() {
     assert!(reseated.show_files(), "the file toggle did not carry");
     assert!(
         drawn(&reseated).contains(&written),
-        "the WARLOCK.md the run wrote is on disk and nowhere on screen"
+        "the .warlock.md the run wrote is on disk and nowhere on screen"
     );
 }
 
@@ -6289,7 +6297,7 @@ fn a_selection_the_new_tree_lost_lands_on_its_nearest_surviving_ancestor() {
     // all, which is the honest answer rather than a shortcut to it.
     let elsewhere = Tree::new(Node::new(
         "elsewhere",
-        "elsewhere/WARLOCK.md",
+        "elsewhere/.warlock.md",
         NodeState::Unpacted,
     ));
     let reseated = reseat_on(&app, &elsewhere);
@@ -6415,7 +6423,7 @@ fn as_the_document(mut app: App, path: &str) -> App {
 
 #[test]
 fn inserting_a_file_row_lands_it_where_a_fresh_load_would_have_put_it() {
-    // Sorts between `WARLOCK.md` and `logo.svg`, so neither appending nor
+    // Sorts between `.warlock.md` and `logo.svg`, so neither appending nor
     // prepending would pass this.
     let mut app = app_with_files();
 
@@ -6446,8 +6454,8 @@ fn an_inserted_file_row_goes_before_the_rows_for_its_directorys_children() {
         &drawn(&app)[..4],
         [
             "warlock".to_owned(),
+            "warlock/.warlock.md".to_owned(),
             "warlock/README.md".to_owned(),
-            "warlock/WARLOCK.md".to_owned(),
             "warlock/zzz.md".to_owned(),
         ]
     );
@@ -6461,12 +6469,12 @@ fn an_inserted_file_row_is_a_file_row_in_its_directorys_colour_now() {
     // state comes off the directory row as it stands, not off any tree.
     app.set_subtree_state("warlock/assets", NodeState::PactedFresh);
 
-    app.insert_file_row("warlock/assets/WARLOCK.md");
+    app.insert_file_row("warlock/assets/.warlock.md");
 
     let row = app
         .rows()
         .iter()
-        .find(|row| row.path == Path::new("warlock/assets/WARLOCK.md"))
+        .find(|row| row.path == Path::new("warlock/assets/.warlock.md"))
         .expect("the inserted row is drawn");
     assert!(row.is_file());
     assert_eq!(row.depth, 2);
@@ -6480,15 +6488,15 @@ fn an_inserted_file_row_is_a_file_row_in_its_directorys_colour_now() {
 fn an_inserted_file_row_carries_the_directorys_ignored_flag() {
     let tree =
         Tree::new(
-            Node::new("repo", "repo/WARLOCK.md", NodeState::PactedStale).with_children([
+            Node::new("repo", "repo/.warlock.md", NodeState::PactedStale).with_children([
                 Node::new("repo/vendor", None, NodeState::Unpacted).with_ignored(true),
             ]),
         );
     let mut app = App::from_tree(&tree);
     app.toggle_files();
 
-    app.insert_file_row("repo/vendor/WARLOCK.md");
-    app.insert_file_row("repo/WARLOCK.md");
+    app.insert_file_row("repo/vendor/.warlock.md");
+    app.insert_file_row("repo/.warlock.md");
 
     let ignored = |app: &App, path: &str| {
         app.rows()
@@ -6496,8 +6504,8 @@ fn an_inserted_file_row_carries_the_directorys_ignored_flag() {
             .find(|row| row.path == Path::new(path))
             .map(Row::is_ignored)
     };
-    assert_eq!(ignored(&app, "repo/vendor/WARLOCK.md"), Some(true));
-    assert_eq!(ignored(&app, "repo/WARLOCK.md"), Some(false));
+    assert_eq!(ignored(&app, "repo/vendor/.warlock.md"), Some(true));
+    assert_eq!(ignored(&app, "repo/.warlock.md"), Some(false));
 }
 
 #[test]
@@ -6532,13 +6540,13 @@ fn inserting_under_a_directory_with_no_row_changes_nothing_at_all() {
 
     for path in [
         // No node for the directory.
-        "warlock/nowhere/WARLOCK.md",
+        "warlock/nowhere/.warlock.md",
         // Nor for a file's own path read as one.
-        "warlock/assets/logo.svg/WARLOCK.md",
+        "warlock/assets/logo.svg/.warlock.md",
         // Nor above the root of the tree on screen.
-        "elsewhere/WARLOCK.md",
+        "elsewhere/.warlock.md",
         // And a path with no directory to be in.
-        "WARLOCK.md",
+        ".warlock.md",
     ] {
         let mut after = app.clone();
         after.insert_file_row(path);
@@ -6553,7 +6561,7 @@ fn inserting_a_file_row_leaves_the_tally_alone() {
     assert_eq!(before, fixture::tree().counts());
 
     app.insert_file_row("warlock/assets/index.html");
-    app.insert_file_row("warlock/crates/WARLOCK.md");
+    app.insert_file_row("warlock/crates/.warlock.md");
 
     // Files are counted nowhere, so not one field of the footer's tally
     // moves — not even the total.
@@ -6592,7 +6600,7 @@ fn with_files_hidden_a_document_written_mid_run_is_drawn_at_once() {
     let mut app = App::from_tree(&fixture::tree());
     app.set_subtree_state("warlock/crates", NodeState::PactedFresh);
 
-    app.insert_file_row("warlock/crates/WARLOCK.md");
+    app.insert_file_row("warlock/crates/.warlock.md");
 
     // What the reload at the end of that run draws, reached the way the
     // front end reaches it: the view carried onto the tree a second load
@@ -6620,7 +6628,7 @@ fn with_files_hidden_a_document_written_mid_run_is_drawn_at_once() {
 #[test]
 fn an_insertion_is_the_documents_row_whatever_the_file_is_called() {
     // `insert_file_row` is not "the loader listed one more file". Its caller
-    // is the pact observer, which passes the `WARLOCK.md` a pass has just
+    // is the pact observer, which passes the `.warlock.md` a pass has just
     // written, so the row is a document row by construction — no name is
     // compared, here or anywhere in this crate — and it is drawn with files
     // hidden like every other document row.

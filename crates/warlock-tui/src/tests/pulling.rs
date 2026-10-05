@@ -348,7 +348,7 @@ impl Ground {
 
 fn pacted(root: &Path, directory: &str, scope: &str) -> PactEntry {
     let at = root.join(directory);
-    PactEntry::new(root, &at, at.join("WARLOCK.md"))
+    PactEntry::new(root, &at, at.join(".warlock.md"))
         .expect("the directory is under the root")
         .with_scope(scope)
 }
@@ -1243,7 +1243,7 @@ fn a_branch_that_left_nothing_stale_refreshes_nothing_and_gets_no_freshness_head
     // One split, one session per sub-task, and no third of either.
     assert_eq!(split.asked().len(), 1);
     assert_eq!(sessions.openings().len(), 2);
-    // One commit per sub-task: no `<TICKET>: refresh WARLOCK.md` beside them, because
+    // One commit per sub-task: no `<TICKET>: refresh .warlock.md` beside them, because
     // the pass found nothing to write.
     assert_eq!(
         repo.commits(),
@@ -1266,7 +1266,7 @@ fn a_refresh_names_its_directories_in_the_body_and_commits_between_the_work_and_
     let board = Boarding::filing("");
     let forge = Forging::opening(URL);
     let (repo, split, sessions) = two_sub_tasks();
-    let message = format!("{TICKET}: refresh WARLOCK.md");
+    let message = format!("{TICKET}: refresh .warlock.md");
     // Children before parents, as the pass hands them back, and the one commit it
     // makes through the checkout it was given.
     let freshen = Refreshing::answering(Freshened {
@@ -1275,7 +1275,7 @@ fn a_refresh_names_its_directories_in_the_body_and_commits_between_the_work_and_
     })
     .committing(
         &message,
-        &["crates/engine/WARLOCK.md", ".warlock/pacts.toml"],
+        &["crates/engine/.warlock.md", ".warlock/pacts.toml"],
     );
 
     let (pulled, events) =
@@ -1315,7 +1315,7 @@ fn a_refresh_names_its_directories_in_the_body_and_commits_between_the_work_and_
             GitCall::CommitPaths {
                 message: message.clone(),
                 paths: vec![
-                    "crates/engine/WARLOCK.md".to_owned(),
+                    "crates/engine/.warlock.md".to_owned(),
                     ".warlock/pacts.toml".to_owned(),
                 ],
             },
@@ -1625,10 +1625,10 @@ fn a_checkout_answers_a_scripted_diff_and_writes_down_a_documents_only_commit() 
     }
 
     let paths = vec![
-        "crates/engine/WARLOCK.md".to_owned(),
+        "crates/engine/.warlock.md".to_owned(),
         ".warlock/pacts.toml".to_owned(),
     ];
-    let message = format!("{TICKET}: refresh WARLOCK.md");
+    let message = format!("{TICKET}: refresh .warlock.md");
     repo.commit_paths(&message, &paths)
         .expect("the commit is made");
 

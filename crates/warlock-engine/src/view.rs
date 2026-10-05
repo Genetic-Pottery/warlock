@@ -11,7 +11,7 @@ use crate::fitting::{PER_FILE_BYTE_CAP, byte_count};
 /// use warlock_engine::{Viewed, view_file};
 ///
 /// let dir = tempfile::tempdir()?;
-/// let path = dir.path().join("WARLOCK.md");
+/// let path = dir.path().join(".warlock.md");
 /// fs::write(&path, "# engine\n\nThe core.\n")?;
 ///
 /// let Viewed { text, cut } = view_file(&path)?;

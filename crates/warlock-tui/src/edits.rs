@@ -117,7 +117,7 @@ impl Opened {
     }
 
     // Three engine calls and nothing else: no walk, no hash, no pass, and not a
-    // single `WARLOCK.md` touched. Un-pacting is warlock forgetting it ever
+    // single `.warlock.md` touched. Un-pacting is warlock forgetting it ever
     // promised to keep a document current; the documents are the repository's,
     // and deleting somebody's prose because they stopped tracking its freshness
     // is not a thing warlock gets to do.

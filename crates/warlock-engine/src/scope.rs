@@ -115,9 +115,9 @@ pub fn validate_sigil(sigil: &str) -> Result<(), Rule> {
 /// use warlock_engine::{Manifest, PactEntry, scope_covering};
 ///
 /// let manifest = Manifest::with_entries([
-///     PactEntry::new(".", "crates", "crates/WARLOCK.md")?.with_scope("platform"),
-///     PactEntry::new(".", "crates/engine", "crates/engine/WARLOCK.md")?.with_scope("data-plane"),
-///     PactEntry::new(".", "crates/engine-tools", "crates/engine-tools/WARLOCK.md")?,
+///     PactEntry::new(".", "crates", "crates/.warlock.md")?.with_scope("platform"),
+///     PactEntry::new(".", "crates/engine", "crates/engine/.warlock.md")?.with_scope("data-plane"),
+///     PactEntry::new(".", "crates/engine-tools", "crates/engine-tools/.warlock.md")?,
 /// ]);
 ///
 /// // The nearest scoped ancestor wins, and a directory answers with its own.
@@ -233,7 +233,7 @@ pub(crate) fn at_or_below(module: &str, selected: &str) -> bool {
 /// ```
 /// use warlock_engine::{Manifest, PactEntry, closed_scopes_at_or_below};
 ///
-/// let entry = |module: &str| PactEntry::new(".", module, format!("{module}/WARLOCK.md"));
+/// let entry = |module: &str| PactEntry::new(".", module, format!("{module}/.warlock.md"));
 /// let manifest = Manifest::with_entries([
 ///     entry("crates")?,
 ///     entry("crates/engine")?.with_scope("data-plane"),

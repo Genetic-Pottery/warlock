@@ -21,14 +21,14 @@ type Event = (u64, &'static str);
 // and their absence is the whole of the filter.
 fn walked() -> Tree {
     Tree::new(
-        Node::new("repo", "repo/WARLOCK.md", NodeState::PactedStale).with_children([Node::new(
+        Node::new("repo", "repo/.warlock.md", NodeState::PactedStale).with_children([Node::new(
             "repo/crates",
             None,
             NodeState::Unpacted,
         )
         .with_children([Node::new(
             "repo/crates/engine",
-            "repo/crates/engine/WARLOCK.md",
+            "repo/crates/engine/.warlock.md",
             NodeState::PactedFresh,
         )])]),
     )
@@ -86,7 +86,7 @@ fn a_path_under_a_walked_directory_is_accepted() {
     let watched = NodeSet::from_tree(&walked());
 
     assert!(watched.accepts("repo/README.md"));
-    assert!(watched.accepts("repo/crates/engine/WARLOCK.md"));
+    assert!(watched.accepts("repo/crates/engine/.warlock.md"));
     assert!(
         watched.accepts("repo/crates/engine/src"),
         "a path is a path: the filter never asks whether it is a file",
@@ -126,14 +126,14 @@ fn a_brand_new_directory_whose_parent_is_walked_is_accepted() {
     // Nothing in the set is called this — that is the point. A directory
     // created inside a walked one is accepted, so the tree is read again
     // and the new directory becomes a node with a row of its own.
-    assert!(!watched.accepts("repo/crates/tui/WARLOCK.md"));
+    assert!(!watched.accepts("repo/crates/tui/.warlock.md"));
     assert!(watched.accepts("repo/crates/tui"));
 }
 
 #[test]
 fn the_filter_is_replaced_by_the_tree_a_reload_produced() {
     let mut policy = WatchPolicy::new(&walked());
-    assert!(!policy.watched().accepts("repo/crates/tui/WARLOCK.md"));
+    assert!(!policy.watched().accepts("repo/crates/tui/.warlock.md"));
 
     // The reload the new directory triggered found it, and from now on its
     // contents count too.
@@ -143,7 +143,7 @@ fn the_filter_is_replaced_by_the_tree_a_reload_produced() {
         .push(Node::new("repo/crates/tui", None, NodeState::Unpacted));
     policy.follow(&Tree::new(root));
 
-    assert!(policy.watched().accepts("repo/crates/tui/WARLOCK.md"));
+    assert!(policy.watched().accepts("repo/crates/tui/.warlock.md"));
     assert_eq!(policy.watched().len(), 4);
 }
 
@@ -155,9 +155,9 @@ fn one_editor_save_is_one_reload() {
     // temporary, a rename over the original, a chmod behind it, all inside
     // a few milliseconds of each other.
     let save = [
-        (0, "repo/crates/engine/.WARLOCK.md.swp"),
-        (4, "repo/crates/engine/WARLOCK.md"),
-        (11, "repo/crates/engine/WARLOCK.md"),
+        (0, "repo/crates/engine/..warlock.md.swp"),
+        (4, "repo/crates/engine/.warlock.md"),
+        (11, "repo/crates/engine/.warlock.md"),
     ];
     let reloads = drive(&mut policy, &save, 3_000, 0);
 
@@ -193,7 +193,7 @@ fn a_continuous_stream_reloads_at_the_ceiling_rather_than_every_quarter_second()
     // or a formatter run over the repository. The disk is never quiet for a
     // quarter second, so the debounce alone would never fire at all.
     let stream: Vec<Event> = (0..200)
-        .map(|n| (n * 50, "repo/crates/engine/WARLOCK.md"))
+        .map(|n| (n * 50, "repo/crates/engine/.warlock.md"))
         .collect();
     let reloads = drive(&mut policy, &stream, 10_000, 0);
 
@@ -236,7 +236,7 @@ fn events_during_a_reload_cause_exactly_one_further_reload() {
     // and a dozen more events land while it runs — the documents a pact
     // wrote, say. However many they are, they are worth one more reload.
     let mut events = vec![(0, "repo/README.md")];
-    events.extend((0..12).map(|n| (300 + n * 20, "repo/crates/engine/WARLOCK.md")));
+    events.extend((0..12).map(|n| (300 + n * 20, "repo/crates/engine/.warlock.md")));
     let reloads = drive(&mut policy, &events, 5_000, 500);
 
     assert_eq!(
@@ -267,7 +267,7 @@ fn a_thousand_events_during_one_reload_are_still_worth_one() {
 
     for n in 0..1_000u64 {
         policy.saw(
-            "repo/crates/engine/WARLOCK.md",
+            "repo/crates/engine/.warlock.md",
             base + Duration::from_millis(n),
         );
     }

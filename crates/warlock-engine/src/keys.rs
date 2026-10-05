@@ -186,9 +186,9 @@ fn write(home: &Path, config: &Config) -> Result<(), Error> {
 }
 
 // The mode is arranged here rather than in `write_and_sync`, which sets none:
-// that function also writes the manifest and `CLAUDE.md`, two files that are
-// committed and meant to be readable by everyone, and this module is not the
-// place to quietly change their modes.
+// that function also writes the manifest and every document, which are committed
+// and meant to be readable by everyone, and this module is not the place to
+// quietly change their modes.
 //
 // The file is created empty and owner-only *before* the key is written into it,
 // and `File::create` inside `write_and_sync` then truncates it without touching

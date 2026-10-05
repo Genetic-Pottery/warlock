@@ -157,7 +157,6 @@ pub use resume::resume;
 pub use running::pact;
 pub use running::refresh;
 pub use screen::Screen;
-pub use standing::FOR_CLAUDE_MD;
 pub use standing::Standing;
 pub use template::DEFAULT_TEMPLATE;
 pub use template::brief_template;

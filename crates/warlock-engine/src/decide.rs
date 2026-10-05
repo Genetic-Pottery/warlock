@@ -12,7 +12,7 @@ use crate::{NodeState, PactEntry};
 /// ```
 /// use warlock_engine::{NodeState, PactEntry, decide_state};
 ///
-/// let entry = PactEntry::new(".", "crates/engine", "crates/engine/WARLOCK.md")?;
+/// let entry = PactEntry::new(".", "crates/engine", "crates/engine/.warlock.md")?;
 ///
 /// // No entry: outside Warlock's management, whatever the content hashes to.
 /// assert_eq!(decide_state(None, "abc123"), NodeState::Unpacted);

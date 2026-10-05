@@ -1133,12 +1133,12 @@ mod operations {
     fn a_documents_only_commit_names_its_paths_on_the_add_and_on_the_commit() {
         let fake = Fake::new();
         let paths = [
-            "crates/engine/WARLOCK.md".to_owned(),
+            "crates/engine/.warlock.md".to_owned(),
             ".warlock/pacts.toml".to_owned(),
         ];
 
         fake.checkout()
-            .commit_paths("WAR-141: refresh WARLOCK.md", &paths)
+            .commit_paths("WAR-141: refresh .warlock.md", &paths)
             .expect("both calls succeed");
 
         let vectors = fake.vectors();
@@ -1147,7 +1147,7 @@ mod operations {
             [
                 "add",
                 "--",
-                "crates/engine/WARLOCK.md",
+                "crates/engine/.warlock.md",
                 ".warlock/pacts.toml"
             ]
         );
@@ -1158,9 +1158,9 @@ mod operations {
             [
                 "commit",
                 "-m",
-                "WAR-141: refresh WARLOCK.md",
+                "WAR-141: refresh .warlock.md",
                 "--",
-                "crates/engine/WARLOCK.md",
+                "crates/engine/.warlock.md",
                 ".warlock/pacts.toml",
             ]
         );
@@ -1171,7 +1171,10 @@ mod operations {
         let fake = Fake::new();
 
         fake.checkout()
-            .commit_paths("WAR-141: refresh WARLOCK.md", &["a/WARLOCK.md".to_owned()])
+            .commit_paths(
+                "WAR-141: refresh .warlock.md",
+                &["a/.warlock.md".to_owned()],
+            )
             .expect("both calls succeed");
 
         for vector in fake.vectors() {
@@ -1190,7 +1193,7 @@ mod operations {
 
         let error = fake
             .checkout()
-            .commit_paths("WAR-141: refresh WARLOCK.md", &[])
+            .commit_paths("WAR-141: refresh .warlock.md", &[])
             .expect_err("a commit of nothing is not a commit");
 
         assert!(matches!(error, Error::Empty { .. }), "{error:?}");
@@ -1208,7 +1211,7 @@ mod operations {
         let error = fake
             .checkout()
             .commit_paths(
-                "WAR-141: refresh WARLOCK.md",
+                "WAR-141: refresh .warlock.md",
                 &[".warlock/pacts.toml".to_owned()],
             )
             .expect_err("git refused");

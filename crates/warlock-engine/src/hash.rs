@@ -88,12 +88,12 @@ pub(crate) fn line_hash(file: &str, line: &str) -> String {
 /// use warlock_engine::subtree_hash;
 ///
 /// let dir = tempfile::tempdir()?;
-/// fs::write(dir.path().join("WARLOCK.md"), "# module\n")?;
+/// fs::write(dir.path().join(".warlock.md"), "# module\n")?;
 ///
 /// let before = subtree_hash(dir.path())?;
 /// assert_eq!(before, subtree_hash(dir.path())?, "the same bytes hash the same");
 ///
-/// fs::write(dir.path().join("WARLOCK.md"), "# module, revised\n")?;
+/// fs::write(dir.path().join(".warlock.md"), "# module, revised\n")?;
 /// assert_ne!(before, subtree_hash(dir.path())?);
 /// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```

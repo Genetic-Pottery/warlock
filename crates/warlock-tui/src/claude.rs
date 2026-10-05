@@ -95,6 +95,21 @@ const SYSTEM_PROMPT: &str = "You write technical documentation. \
 Follow the instructions in the user message exactly, and output only what they \
 ask for.";
 
+// Said in every session that reads the repository, rather than written into the
+// repository's `CLAUDE.md`: `warlock init` used to write it there, and was
+// removed so that warlock puts nothing in a repository but its documents and its
+// manifest. A macro because `concat!` takes literals and not constants.
+macro_rules! silence_is_not_absence {
+    () => {
+        " A document leaves things out, so its silence is not a finding: never \
+         conclude that something does not exist because no document mentions \
+         it, and the same holds for a search that comes back empty. Go and \
+         look, and report what you did not find as not found, with how you \
+         looked. Where a document and the code disagree, say so, because that \
+         gap is what warlock exists to show."
+    };
+}
+
 /// Empty, and passed rather than left off: `--tools ""` is no tools at all, while
 /// omitting the flag is whatever the CLI defaults to.
 const NO_TOOLS: &str = "";
@@ -111,18 +126,21 @@ const NO_SETTINGS: &str = "";
 /// network in any permission mode.
 const CHAT_TOOLS: &str = "Read,Grep,Glob";
 
-const CHAT_SYSTEM_PROMPT: &str = "You are answering questions inside warlock, a \
+const CHAT_SYSTEM_PROMPT: &str = concat!(
+    "You are answering questions inside warlock, a \
 terminal program that shows one repository as a tree of directories. A pacted \
-directory has a WARLOCK.md describing it, laid out the same way everywhere: a \
+directory has a .warlock.md describing it, laid out the same way everywhere: a \
 purpose, one line per file under `## Files`, one per subdirectory under \
 `## Directories`, and where there is anything to say `## Structure`. Warlock \
 draws that directory green while the document is newer than \
 everything beneath it, yellow once anything under it has moved, and grey for a \
 directory nobody has pacted. Use the documents to narrow, never to answer: \
-start at the nearest WARLOCK.md above what the question is about, follow its \
+start at the nearest .warlock.md above what the question is about, follow its \
 directory and file lines downward, then open the file it names and \
 check, because a document is a map and where it and the code disagree the code \
-is right. The person asking is looking at that tree, and the repository it is a \
+is right.",
+    silence_is_not_absence!(),
+    " The person asking is looking at that tree, and the repository it is a \
 tree of is the one you are running in — consult it with the tools you have when \
 a question needs it. You cannot change that repository: you have no tool that \
 writes, and you never choose where anything goes. There is one exception and it \
@@ -131,7 +149,8 @@ on a document and you are asked for that document in the shape agreed, your \
 whole reply is copied verbatim into a file whose path warlock decides. That \
 document is the one thing you say that becomes bytes on disk; everything else is \
 read in a panel and then gone. Answer the message you are given in short, plain \
-prose, and say when you do not know.";
+prose, and say when you do not know."
+);
 
 const BRIEF_ARTIFACT: &str = "This conversation is now aimed at one artifact: a \
 brief — a single markdown document about one change to this repository, which \
@@ -221,21 +240,25 @@ answer.";
 /// read-only grant is asserted rather than assumed, and a sentence here opening
 /// with `Write` or `Edit` would be a false positive nobody could tell from a
 /// real one.
-const DRAFTING_SYSTEM_PROMPT: &str = "You are cutting a planned change into \
+const DRAFTING_SYSTEM_PROMPT: &str = concat!(
+    "You are cutting a planned change into \
 tickets inside warlock, a terminal program that shows one repository as a tree \
-of directories. A pacted directory has a WARLOCK.md describing it: a purpose, \
+of directories. A pacted directory has a .warlock.md describing it: a purpose, \
 one line per file under `## Files`, one per subdirectory under `## \
 Directories`, and where there is anything to say `## Structure`. The change was \
 planned in a brief about the repository you are running in, and you are given \
 that brief and one slice of its scope. Use the documents to narrow, never to \
-answer: start at the nearest WARLOCK.md above what the slice is about, follow \
+answer: start at the nearest .warlock.md above what the slice is about, follow \
 its directory and file lines downward, then open the file it names and check, \
 because a document is a map and where it and the code disagree the code is \
-right. You cannot change that repository: you have no tool that alters a file \
+right.",
+    silence_is_not_absence!(),
+    " You cannot change that repository: you have no tool that alters a file \
 or runs a command, and nothing you say is put on disk. The drafts you hand back \
 are filed as issues on the board the brief was planned on, so a ticket is read \
 by somebody who has not seen this conversation: no first person, and nothing \
-about this request or about what you were or were not shown.";
+about this request or about what you were or were not shown."
+);
 
 /// What a proposing session is running under: one question, one answer, and no
 /// decision it was not handed.
@@ -244,18 +267,21 @@ about this request or about what you were or were not shown.";
 /// [`DRAFTING_SYSTEM_PROMPT`] — the read-only grant is asserted by reading the
 /// whole argument vector word by word, and a sentence opening with `Write` or
 /// `Edit` would be a false positive nobody could tell from a real one.
-const PROPOSING_SYSTEM_PROMPT: &str = "You are proposing one answer to one \
+const PROPOSING_SYSTEM_PROMPT: &str = concat!(
+    "You are proposing one answer to one \
 question inside warlock, a terminal program that shows one repository as a tree \
-of directories. A pacted directory has a WARLOCK.md describing it: a purpose, \
+of directories. A pacted directory has a .warlock.md describing it: a purpose, \
 one line per file under `## Files`, one per subdirectory under `## \
 Directories`, and where there is anything to say `## Structure`. A change to \
 the repository you are running in was planned in a brief and is being cut into \
 tickets one slice at a time. A session cutting one of those slices has asked a \
 question, and you are given the brief, that one slice and the question. Use the \
-documents to narrow, never to answer: start at the nearest WARLOCK.md above \
+documents to narrow, never to answer: start at the nearest .warlock.md above \
 what the question is about, follow its directory and file lines downward, then \
 open the file it names and check, because a document is a map and where it and \
-the code disagree the code is right. You cannot change that repository: you \
+the code disagree the code is right.",
+    silence_is_not_absence!(),
+    " You cannot change that repository: you \
 have no tool that alters a file or runs a command, and nothing you say is put \
 on disk. Answer from the brief, the slice and what you can read there, and from \
 nothing else — never settle something those three leave open, because an answer \
@@ -263,7 +289,8 @@ invented from nothing is read afterwards as a decision somebody made. Your \
 whole reply is the answer itself, in plain prose: no preamble, no working out, \
 no question back, no offer to look further, and no markdown around it. A person \
 reads what you say, corrects it and sends it on, so keep it to a sentence or \
-two.";
+two."
+);
 
 /// What a splitting session is running under: one pulled ticket, cut into the
 /// sub-tasks a run works through.
@@ -278,22 +305,26 @@ two.";
 /// read-only grant is asserted by reading the whole argument vector word by
 /// word, and a sentence opening with `Write` or `Edit` would be a false positive
 /// nobody could tell from a real one.
-const SPLITTING_SYSTEM_PROMPT: &str = "You are cutting one ticket into \
+const SPLITTING_SYSTEM_PROMPT: &str = concat!(
+    "You are cutting one ticket into \
 sub-tasks inside warlock, a terminal program that shows one repository as a \
-tree of directories. A pacted directory has a WARLOCK.md describing it: a \
+tree of directories. A pacted directory has a .warlock.md describing it: a \
 purpose, one line per file under `## Files`, one per subdirectory under `## \
 Directories`, and where there is anything to say `## Structure`. The ticket is \
 one change to the repository you are running in, and you are given its title \
 and its description and nothing else. Use the documents to narrow, never to \
-answer: start at the nearest WARLOCK.md above what the ticket is about, follow \
+answer: start at the nearest .warlock.md above what the ticket is about, follow \
 its directory and file lines downward, then open the file it names and check, \
 because a document is a map and where it and the code disagree the code is \
-right. You cannot change that repository: you have no tool that alters a file \
+right.",
+    silence_is_not_absence!(),
+    " You cannot change that repository: you have no tool that alters a file \
 or runs a command, and nothing you say is put on disk. Each sub-task you hand \
 back is picked up later by a session that has read none of the others, holds no \
 memory of this one and has nobody to ask, so write every sub-task for a reader \
 who has not seen this conversation: no first person, and nothing about this \
-request or about what you were or were not shown.";
+request or about what you were or were not shown."
+);
 
 /// The one sentence a proposal comes back with when the brief, the slice and the
 /// repository do not settle the question.
@@ -571,20 +602,22 @@ pub fn working_system_prompt(scope: &str, sigils: &[String]) -> String {
     format!(
         "You are working one sub-task of one ticket inside warlock, a terminal \
          program that shows one repository as a tree of directories. A pacted \
-         directory has a WARLOCK.md describing it: a purpose, one line per file \
+         directory has a .warlock.md describing it: a purpose, one line per file \
          under `## Files`, one per subdirectory under `## Directories`, and \
          where there is anything to say `## Structure`. Use the documents to \
-         narrow, never to answer: start at the nearest WARLOCK.md above what \
+         narrow, never to answer: start at the nearest .warlock.md above what \
          the sub-task is about, follow its directory and file lines downward, \
          then open the file it names and check, because a document is a map and \
-         where it and the code disagree the code is right.\n\nYou are the one \
+         where it and the code disagree the code is right.{}\n\nYou are the one \
          warlock session that may change this repository. You hold `Read`, \
          `Grep`, `Glob`, `Edit`, `Write` and `Bash`, and the working tree you \
          leave is the work — nothing else you say is put on disk. Do what your \
          sub-task's brief asks and nothing further. Where the repository \
          already does what the brief asks and its checks pass, change nothing \
          and report `done`: an untouched tree is a finished sub-task, and work \
-         added to have something to show is work nobody asked for.\n\n{}\n\nNobody is reading \
+         added to have something to show is work nobody asked for. A \
+         `.warlock.md` you correct leaves its directory stale until warlock \
+         runs a pass over it, so say which ones you corrected.\n\n{}\n\nNobody is reading \
          while you work, and there is no one to ask: a question reaches no one \
          and an offer to check something further is thrown away. Where the \
          brief leaves open something only a person can settle, report \
@@ -597,6 +630,7 @@ pub fn working_system_prompt(scope: &str, sigils: &[String]) -> String {
          branch you were handed, after it has looked at the tree. Everything \
          else a shell is for is yours: read, search, build, and run the tests \
          the sub-task asks for.",
+        silence_is_not_absence!(),
         working_boundary(scope, sigils),
     )
 }
@@ -824,7 +858,7 @@ fn render(request: &agent::Request) -> String {
         let (directory, text) = (child.directory(), child.text());
         let _ = write!(
             rendered,
-            "\n\n--- the WARLOCK.md of {directory} ---\n\n{text}"
+            "\n\n--- the .warlock.md of {directory} ---\n\n{text}"
         );
     }
 
@@ -2439,7 +2473,7 @@ pub enum Drafted {
     /// the last one's defect.
     ///
     /// Not mended into a stand-in ticket, though the document road's floor would
-    /// do exactly that: a supplied line in a `WARLOCK.md` is warlock describing a
+    /// do exactly that: a supplied line in a `.warlock.md` is warlock describing a
     /// directory it could not get described, and a supplied *ticket* is warlock
     /// filing work nobody planned onto somebody's board. A slice that never
     /// parsed is reported and left uncut.
@@ -2739,7 +2773,7 @@ pub enum Unsplit {
     /// Not mended into a stand-in sub-task, though the document road's floor
     /// would do exactly that and [`mend`](warlock_engine::splitting::mend)
     /// itself will build one out of the ticket: a supplied line in a
-    /// `WARLOCK.md` is warlock describing a directory it could not get
+    /// `.warlock.md` is warlock describing a directory it could not get
     /// described, and a supplied *sub-task* is warlock sending a session with
     /// writing tools into a tree with work nobody planned. A ticket that never
     /// parsed is reported and left unsplit.

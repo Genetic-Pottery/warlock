@@ -2,7 +2,7 @@
 //! and the screen taken back afterwards. Not one byte of the file passes
 //! through warlock — the child opens it and the child saves it.
 //!
-//! Editing a `WARLOCK.md` restales the directory it describes, because the
+//! Editing a `.warlock.md` restales the directory it describes, because the
 //! document is an ordinary file in the walk
 //! [`subtree_hash`](warlock_engine::subtree_hash) makes; [`came_back`] reloads
 //! the tree so the row says so at once rather than at the next keystroke.

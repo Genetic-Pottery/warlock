@@ -213,7 +213,7 @@ pub(crate) trait Freshens {
 /// [`made_stale`]'s and is taken once, before any pass, so a document a pass
 /// writes cannot enlarge the list it is being written from. The gate is asked per
 /// directory and before its pass, because asked afterwards it would have
-/// overwritten a `WARLOCK.md` that no report puts back. Each descent's manifest is
+/// overwritten a `.warlock.md` that no report puts back. Each descent's manifest is
 /// threaded into the next, so the fresh grants a child earned are what its parent
 /// is judged against rather than a stale copy. The commit is last and is one.
 ///
@@ -370,7 +370,7 @@ fn written(
         .collect())
 }
 
-/// The spellings of every `WARLOCK.md` the manifest records and of the manifest
+/// The spellings of every `.warlock.md` the manifest records and of the manifest
 /// file itself.
 ///
 /// Taken from the manifest rather than by matching file names: the document of a
@@ -389,13 +389,13 @@ fn documents_and_manifest(root: &Path, manifest: &Manifest) -> BTreeSet<String> 
     allowed
 }
 
-/// `WAR-141: refresh WARLOCK.md`.
+/// `WAR-141: refresh .warlock.md`.
 ///
 /// One message for every refresh commit, naming the ticket and nothing else about
 /// the run: the directories are in the pull request body, and a commit subject
 /// listing them would be a paragraph in `git log`.
 fn refresh_message(ticket: &str) -> String {
-    format!("{}: refresh WARLOCK.md", ticket.trim())
+    format!("{}: refresh .warlock.md", ticket.trim())
 }
 
 // A directory in the manifest's spelling, which is how the report, the boundary

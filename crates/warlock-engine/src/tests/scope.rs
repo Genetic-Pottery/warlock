@@ -5,7 +5,7 @@ use super::{
 use crate::{Manifest, PactEntry, manifest, unpact_subtree};
 
 fn entry(module: &str) -> PactEntry {
-    PactEntry::new(".", module, format!("{module}/WARLOCK.md"))
+    PactEntry::new(".", module, format!("{module}/.warlock.md"))
         .expect("a relative module path is inside the root")
 }
 
@@ -482,7 +482,7 @@ fn coverage_and_opening_compose_into_the_whole_question() {
 
 fn scoped(modules: &[(&str, Option<&str>)]) -> Manifest {
     Manifest::with_entries(modules.iter().map(|(module, scope)| {
-        let entry = PactEntry::new(".", module, format!("{module}/WARLOCK.md"))
+        let entry = PactEntry::new(".", module, format!("{module}/.warlock.md"))
             .expect("a relative path inside the root is storable");
         match scope {
             Some(scope) => entry.with_scope(*scope),

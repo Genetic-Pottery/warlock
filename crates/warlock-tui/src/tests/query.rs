@@ -43,8 +43,8 @@ fn an_omitted_path_means_the_root_and_a_given_one_means_that_directory() {
     // Pacted but never granted, which is what stale means: unpacted is a
     // state of its own and is in neither listing.
     Manifest::with_entries([
-        PactEntry::new(".", ".", "WARLOCK.md").expect("the root is inside itself"),
-        PactEntry::new(".", "src", "src/WARLOCK.md").expect("`src` is inside the root"),
+        PactEntry::new(".", ".", ".warlock.md").expect("the root is inside itself"),
+        PactEntry::new(".", "src", "src/.warlock.md").expect("`src` is inside the root"),
     ])
     .save(repo.path())
     .expect("a manifest that saves");
@@ -79,23 +79,23 @@ const REPO: &str = "/repo";
 // filtering and the spelling, and the colouring is the engine's own.
 fn a_repository() -> Tree {
     Tree::new(
-        Node::new(REPO, "/repo/WARLOCK.md", NodeState::PactedStale).with_children([
+        Node::new(REPO, "/repo/.warlock.md", NodeState::PactedStale).with_children([
             Node::new(
                 "/repo/crates",
-                "/repo/crates/WARLOCK.md",
+                "/repo/crates/.warlock.md",
                 NodeState::PactedFresh,
             )
             .with_children([
                 Node::new(
                     "/repo/crates/engine",
-                    "/repo/crates/engine/WARLOCK.md",
+                    "/repo/crates/engine/.warlock.md",
                     NodeState::PactedStale,
                 ),
                 Node::new("/repo/crates/scratch", None, NodeState::Unpacted),
             ]),
             Node::new(
                 "/repo/docs",
-                "/repo/docs/WARLOCK.md",
+                "/repo/docs/.warlock.md",
                 NodeState::PactedFresh,
             ),
         ]),
@@ -147,12 +147,12 @@ fn a_path_lists_what_is_at_or_below_it_spelled_against_the_repository() {
     let subtree = Tree::new(
         Node::new(
             "/repo/crates",
-            "/repo/crates/WARLOCK.md",
+            "/repo/crates/.warlock.md",
             NodeState::PactedFresh,
         )
         .with_children([Node::new(
             "/repo/crates/engine",
-            "/repo/crates/engine/WARLOCK.md",
+            "/repo/crates/engine/.warlock.md",
             NodeState::PactedStale,
         )]),
     );
@@ -166,9 +166,9 @@ fn nothing_in_the_state_asked_about_is_an_empty_answer_rather_than_a_failure() {
     // Every directory is fresh, so `warlock stale` has nothing to say —
     // which is the answer, and the caller prints no lines at all for it.
     let tree = Tree::new(
-        Node::new(REPO, "/repo/WARLOCK.md", NodeState::PactedFresh).with_children([Node::new(
+        Node::new(REPO, "/repo/.warlock.md", NodeState::PactedFresh).with_children([Node::new(
             "/repo/docs",
-            "/repo/docs/WARLOCK.md",
+            "/repo/docs/.warlock.md",
             NodeState::PactedFresh,
         )]),
     );
@@ -191,7 +191,7 @@ fn a_directory_with_no_repository_relative_spelling_is_a_refusal() {
     // there is stale, which is not something warlock knows.
     let elsewhere = Tree::new(Node::new(
         "/elsewhere",
-        "/elsewhere/WARLOCK.md",
+        "/elsewhere/.warlock.md",
         NodeState::PactedStale,
     ));
 
@@ -212,7 +212,7 @@ fn a_directory_with_no_repository_relative_spelling_is_a_refusal() {
 fn the_object_is_the_shape_a_consumer_was_promised() {
     let tree = Tree::new(Node::new(
         "/repo/crates/engine",
-        "/repo/crates/engine/WARLOCK.md",
+        "/repo/crates/engine/.warlock.md",
         NodeState::PactedStale,
     ));
 
@@ -226,7 +226,7 @@ fn the_object_is_the_shape_a_consumer_was_promised() {
 fn the_fresh_object_names_itself_fresh_all_the_way_down() {
     let tree = Tree::new(Node::new(
         "/repo/crates/engine",
-        "/repo/crates/engine/WARLOCK.md",
+        "/repo/crates/engine/.warlock.md",
         NodeState::PactedFresh,
     ));
 

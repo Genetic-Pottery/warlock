@@ -17,7 +17,7 @@ const GIT_DIR: &str = ".git";
 /// let repo = tempfile::tempdir()?;
 /// fs::create_dir(repo.path().join(".git"))?;
 /// fs::create_dir_all(repo.path().join("crates/engine/src"))?;
-/// fs::write(repo.path().join("crates/engine/WARLOCK.md"), "# engine\n")?;
+/// fs::write(repo.path().join("crates/engine/.warlock.md"), "# engine\n")?;
 ///
 /// let Loaded { tree, problems, .. } = load_tree(repo.path())?;
 /// let paths: Vec<_> = tree.walk().map(|(node, _)| node.path.clone()).collect();
@@ -34,7 +34,7 @@ const GIT_DIR: &str = ".git";
 /// assert_eq!(src.document, None);
 /// // Files ride along on the directory holding them, that document included.
 /// let engine = tree.find(repo.path().join("crates/engine")).unwrap();
-/// assert_eq!(engine.files, [repo.path().join("crates/engine/WARLOCK.md")]);
+/// assert_eq!(engine.files, [repo.path().join("crates/engine/.warlock.md")]);
 /// assert!(src.files.is_empty(), "an empty directory lists nothing");
 /// // Nothing is pacted, so nothing was hashed and nothing could go wrong.
 /// assert_eq!(tree.root.state, NodeState::Unpacted);

@@ -5,7 +5,7 @@
 //! asking the environment a second time could answer differently.
 //!
 //! A question stands here and nothing more, because none of `stale`, `fresh`,
-//! `check`, `config` or `init` writes a pact. A write stands and is let
+//! `check` or `config` writes a pact. A write stands and is let
 //! through: `edits::Opened` is built on top of this one and cannot be
 //! constructed without `boundary::permits` having said the operation it names
 //! is open to this machine, so the gate is not a step a write can forget.
@@ -25,8 +25,6 @@ const USERPROFILE: &str = "USERPROFILE";
 // a repository to *…*" — together because they are one vocabulary. They used to
 // sit beside their own subcommands, and two were re-typed as literals inside
 // `error.rs`'s tests, where rewording the original failed nothing.
-pub const FOR_CLAUDE_MD: &str = "write `CLAUDE.md` at";
-
 pub(crate) const FOR_SIGILS: &str = "hold sigils for";
 
 // One tail for `key use` and `key forget` rather than one each. Both stand here

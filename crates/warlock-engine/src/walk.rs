@@ -6,7 +6,7 @@ use ignore::WalkBuilder;
 
 use crate::{ignores, manifest, to_manifest_path};
 
-pub const DOCUMENT_FILE: &str = "WARLOCK.md";
+pub const DOCUMENT_FILE: &str = ".warlock.md";
 
 pub(crate) const MANIFEST_DIR: &str = ".warlock";
 
@@ -18,16 +18,27 @@ const PROSE_EXTENSIONS: &[&str] = &["md", "markdown", "mdx"];
 // content only while every walk agrees on these, which is why no caller builds
 // a walker of its own. A symlinked directory walked as a symlink is never
 // descended into, so a cycle of them terminates. A fixture with a `.gitignore`
-// and no `.git` still has to be ignored. `.warlock/` is left out by name rather
-// than by the hidden-file rule, so it stays out even if it holds a document and
-// even if hidden directories are ever let back in.
+// and no `.git` still has to be ignored.
+//
+// Hidden entries are skipped here rather than by the walker's own hidden-file
+// rule, because that rule runs before any filter and would also skip the
+// document, which is hidden by name. The document has to stay in the walk: its
+// bytes are part of its directory's digest, which is what makes a hand edit
+// stale the directory, and a parent finds its children's documents through
+// `own`. `.warlock/` is hidden as well, so the manifest stays out by the same
+// test.
 pub(crate) fn listing(root: &Path) -> WalkBuilder {
     let mut builder = WalkBuilder::new(root);
     builder
         .follow_links(false)
         .require_git(false)
-        .filter_entry(|entry| entry.file_name() != OsStr::new(MANIFEST_DIR));
+        .hidden(false)
+        .filter_entry(|entry| entry.depth() == 0 || !is_hidden(entry.file_name()));
     builder
+}
+
+fn is_hidden(name: &OsStr) -> bool {
+    name != OsStr::new(DOCUMENT_FILE) && name.as_encoded_bytes().starts_with(b".")
 }
 
 // `listing` with `.warlockignore` honoured. The loader is the one caller that
@@ -95,7 +106,7 @@ pub(crate) struct Own {
 
 // The files a directory's document holds a line for, and the documents of the
 // directories immediately below it. Prose is left out of `files`, and that takes
-// the directory's own `WARLOCK.md` with it: a previous pass's claim about this
+// the directory's own `.warlock.md` with it: a previous pass's claim about this
 // directory is not evidence about it.
 pub(crate) fn own(dir: &Path) -> Result<Own, Error> {
     let mut found = Own::default();

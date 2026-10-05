@@ -11,64 +11,67 @@ use warlock_engine::{Node, NodeState, Tree};
 
 /// ```text
 /// warlock                          document, pacted, stale
-/// │   README.md, WARLOCK.md
+/// │   README.md, .warlock.md
 /// ├── warlock/crates               no document yet, unpacted, no files of its own
 /// │   ├── warlock/crates/engine    document, pacted, fresh
-/// │   │       Cargo.toml, WARLOCK.md
+/// │   │       Cargo.toml, .warlock.md
 /// │   └── warlock/crates/tui       document, pacted, stale
-/// │           WARLOCK.md
+/// │           .warlock.md
 /// └── warlock/assets               document, unpacted
-///             WARLOCK.md, logo.svg
+///             .warlock.md, logo.svg
 /// ```
 ///
 /// The listings follow the loader's own rules, so a view tested against this is
 /// tested against something a real load could produce: path order, no
-/// subdirectory — those are children — and a directory's own `WARLOCK.md` among
+/// subdirectory — those are children — and a directory's own `.warlock.md` among
 /// them, since the loader lists what the walk saw rather than what the walk saw
 /// minus one special name. The paths are literals, related to this repository's
 /// layout only so a failing assertion reads like something recognisable.
 pub(crate) fn tree() -> Tree {
     Tree::new(
-        Node::new("warlock", "warlock/WARLOCK.md", NodeState::PactedStale)
-            .with_files(files("warlock", ["README.md", "WARLOCK.md"]))
+        Node::new("warlock", "warlock/.warlock.md", NodeState::PactedStale)
+            .with_files(files("warlock", [".warlock.md", "README.md"]))
             .with_children([
                 // No document of its own yet, so `None` and unpacted, which is
                 // what the loader makes of such a directory.
                 Node::new("warlock/crates", None, NodeState::Unpacted).with_children([
                     Node::new(
                         "warlock/crates/engine",
-                        "warlock/crates/engine/WARLOCK.md",
+                        "warlock/crates/engine/.warlock.md",
                         NodeState::PactedFresh,
                     )
-                    .with_files(files("warlock/crates/engine", ["Cargo.toml", "WARLOCK.md"])),
+                    .with_files(files(
+                        "warlock/crates/engine",
+                        [".warlock.md", "Cargo.toml"],
+                    )),
                     Node::new(
                         "warlock/crates/tui",
-                        "warlock/crates/tui/WARLOCK.md",
+                        "warlock/crates/tui/.warlock.md",
                         NodeState::PactedStale,
                     )
-                    .with_files(files("warlock/crates/tui", ["WARLOCK.md"])),
+                    .with_files(files("warlock/crates/tui", [".warlock.md"])),
                 ]),
                 Node::new(
                     "warlock/assets",
-                    "warlock/assets/WARLOCK.md",
+                    "warlock/assets/.warlock.md",
                     NodeState::Unpacted,
                 )
-                .with_files(files("warlock/assets", ["WARLOCK.md", "logo.svg"])),
+                .with_files(files("warlock/assets", [".warlock.md", "logo.svg"])),
             ]),
     )
 }
 
 /// ```text
 /// warlock                          document, pacted, stale
-/// │   README.md, WARLOCK.md
+/// │   README.md, .warlock.md
 /// ├── warlock/crates               document now, pacted, fresh
-/// │   │   WARLOCK.md               <- what the run wrote
+/// │   │   .warlock.md               <- what the run wrote
 /// │   ├── warlock/crates/engine    document, pacted, fresh
-/// │   │       Cargo.toml, WARLOCK.md
+/// │   │       Cargo.toml, .warlock.md
 /// │   └── warlock/crates/tui       document, pacted, stale
-/// │           WARLOCK.md
+/// │           .warlock.md
 /// └── warlock/assets               document, unpacted
-///             WARLOCK.md, logo.svg
+///             .warlock.md, logo.svg
 /// ```
 ///
 /// One directory differs, and only in the way a finished run makes one differ:
@@ -79,37 +82,40 @@ pub(crate) fn tree() -> Tree {
 /// read beside.
 pub(crate) fn tree_after_a_run() -> Tree {
     Tree::new(
-        Node::new("warlock", "warlock/WARLOCK.md", NodeState::PactedStale)
-            .with_files(files("warlock", ["README.md", "WARLOCK.md"]))
+        Node::new("warlock", "warlock/.warlock.md", NodeState::PactedStale)
+            .with_files(files("warlock", [".warlock.md", "README.md"]))
             .with_children([
                 // The run wrote this document and granted its hash, so the
                 // directory that was undocumented and unpacted is neither now.
                 Node::new(
                     "warlock/crates",
-                    "warlock/crates/WARLOCK.md",
+                    "warlock/crates/.warlock.md",
                     NodeState::PactedFresh,
                 )
-                .with_files(files("warlock/crates", ["WARLOCK.md"]))
+                .with_files(files("warlock/crates", [".warlock.md"]))
                 .with_children([
                     Node::new(
                         "warlock/crates/engine",
-                        "warlock/crates/engine/WARLOCK.md",
+                        "warlock/crates/engine/.warlock.md",
                         NodeState::PactedFresh,
                     )
-                    .with_files(files("warlock/crates/engine", ["Cargo.toml", "WARLOCK.md"])),
+                    .with_files(files(
+                        "warlock/crates/engine",
+                        [".warlock.md", "Cargo.toml"],
+                    )),
                     Node::new(
                         "warlock/crates/tui",
-                        "warlock/crates/tui/WARLOCK.md",
+                        "warlock/crates/tui/.warlock.md",
                         NodeState::PactedStale,
                     )
-                    .with_files(files("warlock/crates/tui", ["WARLOCK.md"])),
+                    .with_files(files("warlock/crates/tui", [".warlock.md"])),
                 ]),
                 Node::new(
                     "warlock/assets",
-                    "warlock/assets/WARLOCK.md",
+                    "warlock/assets/.warlock.md",
                     NodeState::Unpacted,
                 )
-                .with_files(files("warlock/assets", ["WARLOCK.md", "logo.svg"])),
+                .with_files(files("warlock/assets", [".warlock.md", "logo.svg"])),
             ]),
     )
 }

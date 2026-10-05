@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::{fmt, io};
 
 use warlock_engine::{
-    RunStatus, briefs, claude_md, filing, keys, load, manifest, pact, pulls, route, scope, sigils,
+    RunStatus, briefs, filing, keys, load, manifest, pact, pulls, route, scope, sigils,
 };
 
 use crate::boundary::{blocking_scopes_message, closed_scope_message};
@@ -95,9 +95,6 @@ pub enum Error {
     NoRepository {
         start: PathBuf,
         wanted: &'static str,
-    },
-    ClaudeMd {
-        source: claude_md::Error,
     },
     NoHome,
     Prompt {
@@ -653,9 +650,6 @@ impl fmt::Display for Error {
                  repository root to {wanted}",
                 start.display()
             ),
-            // Flattened like the two above it: what the filesystem says can run
-            // to more than one line, and this prints as one.
-            Self::ClaudeMd { source } => write!(f, "{}", one_line(&source.to_string())),
             // Says which variables were looked at and what to do about it: a
             // reader whose `HOME` is unset is in an unusual shell and needs the
             // name of the thing to set rather than a fact about warlock.
@@ -812,7 +806,6 @@ impl std::error::Error for Error {
             Self::Load { source } => Some(source),
             Self::Manifest { source } | Self::Unspellable { source } => Some(source),
             Self::Pact { source } => Some(source),
-            Self::ClaudeMd { source } => Some(source),
             Self::Sigil { rule, .. } | Self::KeyName { rule, .. } => Some(rule),
             // The refusal's own cause rather than the refusal, which is the
             // rule for a scope the engine refuses and nothing for the others:

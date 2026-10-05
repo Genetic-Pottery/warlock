@@ -43,7 +43,7 @@ use crate::{
 /// assert!(failures.is_empty());
 /// assert_eq!(manifest.entries().len(), 2, "the directory, and the one below it");
 /// let entry = manifest.entry("crates/engine").expect("the selected directory is pacted");
-/// assert_eq!(entry.document(), "crates/engine/WARLOCK.md");
+/// assert_eq!(entry.document(), "crates/engine/.warlock.md");
 /// assert_eq!(decide_state(Some(entry), &subtree_hash(&engine)?), NodeState::PactedFresh);
 ///
 /// // Saving is the caller's, once, at the end.
@@ -333,7 +333,7 @@ fn failure_below<'missing>(
 }
 
 // The two phases must not be folded into one loop. A directory's subtree hash
-// covers its children's `WARLOCK.md`, so a per-directory write-hash-grant loop
+// covers its children's `.warlock.md`, so a per-directory write-hash-grant loop
 // grants a parent a hash the very next child write invalidates, and ends with a
 // subtree yellow everywhere but its deepest leaves. Phase two therefore starts
 // only once every document phase one was going to write is on disk.
@@ -424,7 +424,7 @@ fn describe_and_grant(
                 repairs.extend(mended);
                 // Taken again: the document is part of this digest, so the
                 // pre-pass reading describes the directory as it no longer is.
-                // Only this directory's own `WARLOCK.md` moved in between, and
+                // Only this directory's own `.warlock.md` moved in between, and
                 // it is prose in no request, which is what makes the two
                 // readings comparable at all.
                 carries.insert(pacted.clone(), carry_hash(pacted));
@@ -581,7 +581,7 @@ fn rewrite(
 }
 
 // Deliberately not the symmetric reverse of a pact: this opens no file for
-// writing, so it cannot delete a `WARLOCK.md`. The document belongs to the
+// writing, so it cannot delete a `.warlock.md`. The document belongs to the
 // project and is reviewed in the git diff like any other file.
 //
 // It does take the scopes off the entries it drops, because an entry is the
@@ -593,7 +593,7 @@ fn rewrite(
 /// ```
 /// use warlock_engine::{Manifest, PactEntry, unpact_subtree};
 ///
-/// let entry = |module: &str| PactEntry::new(".", module, format!("{module}/WARLOCK.md"));
+/// let entry = |module: &str| PactEntry::new(".", module, format!("{module}/.warlock.md"));
 /// let manifest = Manifest::with_entries([
 ///     entry("crates/engine")?,
 ///     entry("crates/engine/src")?,
@@ -639,7 +639,7 @@ pub fn unpact_subtree(
 /// fs::create_dir_all(repo.path().join("crates"))?;
 /// fs::write(repo.path().join(".warlockignore"), "vendor/\n")?;
 ///
-/// let entry = |module: &str| PactEntry::new(".", module, format!("{module}/WARLOCK.md"));
+/// let entry = |module: &str| PactEntry::new(".", module, format!("{module}/.warlock.md"));
 /// let manifest = Manifest::with_entries([
 ///     entry("crates")?,
 ///     entry("vendor")?.with_scope("third-party"),
@@ -763,7 +763,7 @@ fn ancestry<'module>(module: &'module str, loaded: &str) -> Vec<&'module str> {
 ///
 /// let Pacted { document, problems, repairs, .. } = pact_directory(dir.path(), &Canned)?;
 ///
-/// assert_eq!(document, dir.path().join("WARLOCK.md"));
+/// assert_eq!(document, dir.path().join(".warlock.md"));
 ///
 /// // Warlock's layout, behind the one constant it puts in front of every
 /// // document saying what kind of thing it is: a map of the directory to be
@@ -856,7 +856,7 @@ fn write_document(directory: &Path, text: &str) -> Result<PathBuf, Error> {
     if let Err((_, source)) = write_atomically(directory, DOCUMENT_FILE, text.as_bytes()) {
         return Err(Error::Write {
             // The document, not the temporary: the caller asked for
-            // `WARLOCK.md`, and how it got written is not theirs to hear about.
+            // `.warlock.md`, and how it got written is not theirs to hear about.
             directory: directory.to_path_buf(),
             path: document,
             source,

@@ -735,7 +735,7 @@ impl<R: Runs> Repository for Git<R> {
     /// The `add` is not redundant beside it. A `git commit` with a pathspec
     /// takes the working tree's version of paths `git` already knows, and
     /// refuses outright on one it does not: a directory pacted for the first
-    /// time has a `WARLOCK.md` that is untracked, and without the `add` the
+    /// time has a `.warlock.md` that is untracked, and without the `add` the
     /// whole commit would fail on it.
     ///
     /// `--` on both, so a document path is never read as a revision.

@@ -312,14 +312,14 @@ fn a_carried_section_says_unchanged_and_names_no_write_and_no_cost() {
     account.open_section("crates/engine", base);
     account.close_section(
         &Outcome::Unchanged {
-            document: "crates/engine/WARLOCK.md".into(),
+            document: "crates/engine/.warlock.md".into(),
         },
         at(base, 0),
     );
 
     let line = said(&account, at(base, 5))
         .into_iter()
-        .find(|line| line.contains("crates/engine/WARLOCK.md"))
+        .find(|line| line.contains("crates/engine/.warlock.md"))
         .expect("the section closed with a line naming its document");
     assert!(
         line.contains("unchanged"),
@@ -375,7 +375,7 @@ fn a_section_that_ran_no_pass_is_no_part_of_the_incomplete_count() {
     account.record(&Activity::Cost { usd: 0.25 }, at(base, 1));
     account.close_section(
         &Outcome::Wrote {
-            document: "crates/alpha/WARLOCK.md".into(),
+            document: "crates/alpha/.warlock.md".into(),
             bytes: 1_200,
         },
         at(base, 10),
@@ -383,7 +383,7 @@ fn a_section_that_ran_no_pass_is_no_part_of_the_incomplete_count() {
     account.open_section("crates/beta", at(base, 10));
     account.close_section(
         &Outcome::Unchanged {
-            document: "crates/beta/WARLOCK.md".into(),
+            document: "crates/beta/.warlock.md".into(),
         },
         at(base, 10),
     );
@@ -413,7 +413,7 @@ fn a_closed_section_stops_ticking_for_good() {
     account.record(&Activity::Thinking, at(base, 2));
     account.close_section(
         &Outcome::Wrote {
-            document: "crates/engine/WARLOCK.md".into(),
+            document: "crates/engine/.warlock.md".into(),
             bytes: 2_341,
         },
         at(base, 30),
@@ -821,7 +821,7 @@ fn a_written_document_says_what_it_wrote_how_big_and_what_it_cost() {
     account.record(&Activity::Cost { usd: 0.2149 }, at(base, 1));
     account.close_section(
         &Outcome::Wrote {
-            document: "crates/engine/WARLOCK.md".into(),
+            document: "crates/engine/.warlock.md".into(),
             bytes: 2_341,
         },
         at(base, 42),
@@ -829,7 +829,7 @@ fn a_written_document_says_what_it_wrote_how_big_and_what_it_cost() {
 
     assert_eq!(
         said(&account, at(base, 42))[1],
-        "0:42 wrote crates/engine/WARLOCK.md — 2341 bytes, $0.21",
+        "0:42 wrote crates/engine/.warlock.md — 2341 bytes, $0.21",
     );
 }
 
@@ -841,7 +841,7 @@ fn a_written_document_whose_pass_never_priced_itself_says_so() {
     account.open_section("crates/engine", base);
     account.close_section(
         &Outcome::Wrote {
-            document: "crates/engine/WARLOCK.md".into(),
+            document: "crates/engine/.warlock.md".into(),
             bytes: 12,
         },
         at(base, 5),
@@ -849,7 +849,7 @@ fn a_written_document_whose_pass_never_priced_itself_says_so() {
 
     assert_eq!(
         said(&account, at(base, 5))[1],
-        "0:05 wrote crates/engine/WARLOCK.md — 12 bytes, no cost reported",
+        "0:05 wrote crates/engine/.warlock.md — 12 bytes, no cost reported",
     );
 }
 
@@ -898,7 +898,7 @@ fn the_summary_counts_directories_wall_clock_and_money() {
         account.record(&Activity::Cost { usd: 0.935 }, opened);
         account.close_section(
             &Outcome::Wrote {
-                document: "WARLOCK.md".into(),
+                document: ".warlock.md".into(),
                 bytes: 10,
             },
             opened + Duration::from_secs(30),
@@ -975,7 +975,7 @@ fn every_section_is_closed_at_the_end_with_what_is_said_about_it() {
     account.close_open_sections(at(base, 90), |section| {
         if section.directory() == Path::new("crates/engine") {
             Outcome::Wrote {
-                document: "crates/engine/WARLOCK.md".into(),
+                document: "crates/engine/.warlock.md".into(),
                 bytes: 2_341,
             }
         } else {
@@ -993,7 +993,7 @@ fn every_section_is_closed_at_the_end_with_what_is_said_about_it() {
         vec![
             "crates/engine".to_owned(),
             "0:30 thinking".to_owned(),
-            "0:30 wrote crates/engine/WARLOCK.md — 2341 bytes, no cost reported".to_owned(),
+            "0:30 wrote crates/engine/.warlock.md — 2341 bytes, no cost reported".to_owned(),
             "crates/tui".to_owned(),
             "1:00 thinking".to_owned(),
             "1:00 refused — the model returned an empty document".to_owned(),
@@ -1020,7 +1020,7 @@ fn a_section_that_has_an_ending_already_is_not_asked_for_a_second_one() {
     account.close_open_sections(at(base, 20), |section| {
         asked.push(section.directory().display().to_string());
         Outcome::Wrote {
-            document: "WARLOCK.md".into(),
+            document: ".warlock.md".into(),
             bytes: 12,
         }
     });
@@ -1030,7 +1030,7 @@ fn a_section_that_has_an_ending_already_is_not_asked_for_a_second_one() {
         said(&account, at(base, 20)),
         vec![
             "crates/engine".to_owned(),
-            "0:10 wrote WARLOCK.md — 12 bytes, $0.21".to_owned(),
+            "0:10 wrote .warlock.md — 12 bytes, $0.21".to_owned(),
             "crates/tui".to_owned(),
             "0:10 cancelled — $0.03 spent".to_owned(),
         ],

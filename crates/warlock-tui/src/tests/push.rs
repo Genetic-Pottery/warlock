@@ -55,7 +55,7 @@ fn a_dir() -> TempDir {
 }
 
 fn a_manifest(scopes: impl IntoIterator<Item = ScopeRecord>) -> Manifest {
-    Manifest::with_entries([PactEntry::new(".", "docs", "docs/WARLOCK.md")
+    Manifest::with_entries([PactEntry::new(".", "docs", "docs/.warlock.md")
         .expect("a relative module path is inside the root")
         .with_scope(SCOPE)])
     .with_scopes(scopes)

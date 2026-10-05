@@ -61,14 +61,14 @@ const FIXTURE_HEIGHT: u16 = 16;
 
 const WHOLE_FIXTURE: [&str; 9] = [
     "> - warlock",
-    "  ├   WARLOCK.md",
+    "  ├   .warlock.md",
     "  ├ - crates",
     "  │ ├ - engine",
-    "  │ │ └   WARLOCK.md",
+    "  │ │ └   .warlock.md",
     "  │ └ - tui",
-    "  │   └   WARLOCK.md",
+    "  │   └   .warlock.md",
     "  └ - assets",
-    "    └   WARLOCK.md",
+    "    └   .warlock.md",
 ];
 
 const MARK_WIDTH: u16 = 151;
@@ -98,7 +98,7 @@ fn many_rows(count: usize) -> Vec<Row> {
             Row::new(
                 1,
                 format!("repo/module{index}"),
-                format!("repo/module{index}/WARLOCK.md"),
+                format!("repo/module{index}/.warlock.md"),
                 NodeState::Unpacted,
             )
         })
@@ -113,11 +113,11 @@ const SCOPE_ROOM_WIDTH: u16 = 160;
 
 fn labelled_rows(scope: Option<&str>, state: NodeState) -> Vec<Row> {
     vec![
-        Row::new(0, "warlock", "warlock/WARLOCK.md", NodeState::Unpacted).with_child_count(1),
+        Row::new(0, "warlock", "warlock/.warlock.md", NodeState::Unpacted).with_child_count(1),
         Row::new(
             1,
             format!("warlock/{SCOPED_NAME}"),
-            format!("warlock/{SCOPED_NAME}/WARLOCK.md"),
+            format!("warlock/{SCOPED_NAME}/.warlock.md"),
             state,
         )
         .with_scope(scope.map(str::to_owned))
@@ -125,7 +125,7 @@ fn labelled_rows(scope: Option<&str>, state: NodeState) -> Vec<Row> {
         Row::new(
             2,
             format!("warlock/{SCOPED_NAME}/widgets"),
-            format!("warlock/{SCOPED_NAME}/widgets/WARLOCK.md"),
+            format!("warlock/{SCOPED_NAME}/widgets/.warlock.md"),
             state,
         ),
         Row::file(2, format!("warlock/{SCOPED_NAME}/ui.rs"), state),
@@ -681,7 +681,7 @@ fn a_documented_directorys_document_is_drawn_under_it_like_any_other_file_row() 
 
     let buffer = render(&app, WIDTH, FIXTURE_HEIGHT);
 
-    // The whole default view, line by line: four `WARLOCK.md` rows drawn
+    // The whole default view, line by line: four `.warlock.md` rows drawn
     // by the same rule as any file row, and nothing under `crates/`, which
     // has no document to draw.
     let drawn: Vec<String> = tree_rows(&buffer)
@@ -697,7 +697,7 @@ fn a_documented_directorys_document_is_drawn_under_it_like_any_other_file_row() 
         "warlock/assets",
     ] {
         let above = row_index(&app, directory);
-        let index = row_index(&app, &format!("{directory}/WARLOCK.md"));
+        let index = row_index(&app, &format!("{directory}/.warlock.md"));
         // Directly beneath its directory, one indent deeper, with the
         // name in the column a childless sibling's would start in: the
         // marker's two blanks and no marker, because nothing is under a
@@ -706,7 +706,7 @@ fn a_documented_directorys_document_is_drawn_under_it_like_any_other_file_row() 
         let line = tree_row(&buffer, index);
         let level = u16::try_from(INDENT.chars().count()).expect("a two-column indent");
         assert_eq!(
-            column_of(&line, "WARLOCK.md"),
+            column_of(&line, ".warlock.md"),
             column_of(&tree_row(&buffer, above), directory_name(directory)) + usize::from(level),
             "{directory}"
         );
@@ -724,11 +724,11 @@ fn a_documented_directorys_document_is_drawn_under_it_like_any_other_file_row() 
             "{directory}"
         );
         assert_eq!(
-            styles_of(&buffer, index, "WARLOCK.md"),
-            vec![(colour_for(node.state), Modifier::empty()); "WARLOCK.md".len()],
+            styles_of(&buffer, index, ".warlock.md"),
+            vec![(colour_for(node.state), Modifier::empty()); ".warlock.md".len()],
             "{directory}"
         );
-        assert!(line.trim_end().ends_with("WARLOCK.md"), "{line:?}");
+        assert!(line.trim_end().ends_with(".warlock.md"), "{line:?}");
     }
 }
 
@@ -910,10 +910,10 @@ fn a_collapsed_directory_is_marked_differently_from_an_expanded_one() {
         drawn,
         [
             "> - warlock",
-            "  ├   WARLOCK.md",
+            "  ├   .warlock.md",
             "  ├ + crates",
             "  └ - assets",
-            "    └   WARLOCK.md",
+            "    └   .warlock.md",
         ]
     );
 }
@@ -925,12 +925,12 @@ fn a_directory_with_nothing_under_it_carries_neither_marker() {
     // no fixture directory is a row with nothing under it any more.
     let rows = || {
         vec![
-            Row::new(0, "repo", "repo/WARLOCK.md", NodeState::PactedStale).with_child_count(2),
+            Row::new(0, "repo", "repo/.warlock.md", NodeState::PactedStale).with_child_count(2),
             Row::new(1, "repo/crates", None, NodeState::Unpacted).with_child_count(1),
             Row::new(
                 2,
                 "repo/crates/engine",
-                "repo/crates/engine/WARLOCK.md",
+                "repo/crates/engine/.warlock.md",
                 NodeState::PactedFresh,
             ),
             Row::new(1, "repo/assets", None, NodeState::Unpacted),
@@ -1201,8 +1201,8 @@ fn the_row_in_flight_alternates_between_the_stale_and_the_fresh_colour() {
     // what the pass is reading, so their rows flash in step with their
     // directory's on every frame.
     for path in [
+        "warlock/crates/engine/.warlock.md",
         "warlock/crates/engine/Cargo.toml",
-        "warlock/crates/engine/WARLOCK.md",
     ] {
         let index = row_index(&app, path);
         for (when, buffer) in [("0 ms", &first), ("500 ms", &half), ("1 s", &whole)] {
@@ -1374,21 +1374,21 @@ fn a_file_is_drawn_under_its_directory_one_indent_deeper_and_with_no_marker() {
         drawn,
         [
             "> - warlock",
+            "  ├   .warlock.md",
             "  ├   README.md",
-            "  ├   WARLOCK.md",
             "  ├ - crates",
             "  │ ├ - engine",
-            "  │ │ ├   Cargo.toml",
-            "  │ │ └   WARLOCK.md",
+            "  │ │ ├   .warlock.md",
+            "  │ │ └   Cargo.toml",
             "  │ └ - tui",
-            "  │   └   WARLOCK.md",
+            "  │   └   .warlock.md",
             "  └ - assets",
-            "    ├   WARLOCK.md",
+            "    ├   .warlock.md",
             "    └   logo.svg",
         ]
     );
     assert!(
-        column_of(&drawn[1], "README.md") > column_of(&drawn[0], "warlock"),
+        column_of(&drawn[2], "README.md") > column_of(&drawn[0], "warlock"),
         "a file should indent past its directory's name: {drawn:?}"
     );
     // And pressing the key again draws what was on screen before it, to
@@ -3030,7 +3030,7 @@ fn every_line_of_the_account_gets_one_row_under_the_directory_it_happened_in() {
     );
     account.close_section(
         &Outcome::Wrote {
-            document: "crates/engine/WARLOCK.md".into(),
+            document: "crates/engine/.warlock.md".into(),
             bytes: 2_341,
         },
         at(base, 30),
@@ -3055,7 +3055,7 @@ fn every_line_of_the_account_gets_one_row_under_the_directory_it_happened_in() {
             format!("{PANEL_INDENT}0:09 thinking"),
             format!("{PANEL_INDENT}0:30 Read src/lib.rs"),
             format!(
-                "{PANEL_INDENT}0:30 wrote crates/engine/WARLOCK.md — 2341 bytes, no cost reported"
+                "{PANEL_INDENT}0:30 wrote crates/engine/.warlock.md — 2341 bytes, no cost reported"
             ),
             "crates/tui".to_owned(),
             format!("{PANEL_INDENT}0:09 thinking"),

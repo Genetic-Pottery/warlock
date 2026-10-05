@@ -11,7 +11,7 @@ const HASH: &str = "d0f5a1";
 const AT: &str = "2026-08-19T07:32:00Z";
 
 fn entry(module: &str) -> PactEntry {
-    PactEntry::new(".", module, format!("{module}/WARLOCK.md"))
+    PactEntry::new(".", module, format!("{module}/.warlock.md"))
         .expect("a relative module path is inside the root")
         .with_grant(HASH, AT)
 }
@@ -296,7 +296,7 @@ fn a_new_record_is_stored_as_given_after_the_ones_already_there() {
         .entry("crates/tui")
         .expect("the entry is still there");
     assert_eq!(tui.scope(), Some(record.name()));
-    assert_eq!(tui.document(), "crates/tui/WARLOCK.md");
+    assert_eq!(tui.document(), "crates/tui/.warlock.md");
     assert_eq!(tui.granted_hash(), Some(HASH));
     assert_eq!(tui.granted_at(), Some(AT));
     assert_eq!(

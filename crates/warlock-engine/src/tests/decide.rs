@@ -16,7 +16,7 @@ fn unjudged() -> PactEntry {
     PactEntry::new(
         ".",
         "crates/warlock-engine",
-        "crates/warlock-engine/WARLOCK.md",
+        "crates/warlock-engine/.warlock.md",
     )
     .expect("a relative path inside the root is storable")
 }
@@ -94,12 +94,12 @@ fn a_hand_written_grant_in_a_real_manifest_is_the_only_way_to_fresh() {
                 "version = 1\n\n",
                 "[[pact]]\n",
                 "module = \"crates/warlock-engine\"\n",
-                "document = \"crates/warlock-engine/WARLOCK.md\"\n",
+                "document = \"crates/warlock-engine/.warlock.md\"\n",
                 "granted_hash = \"{granted}\"\n",
                 "granted_at = \"2026-08-19T07:32:00Z\"\n\n",
                 "[[pact]]\n",
                 "module = \"crates/warlock-tui\"\n",
-                "document = \"crates/warlock-tui/WARLOCK.md\"\n",
+                "document = \"crates/warlock-tui/.warlock.md\"\n",
             ),
             granted = COMPUTED,
         ),

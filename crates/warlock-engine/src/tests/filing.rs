@@ -16,7 +16,7 @@ fn a_dir() -> tempfile::TempDir {
 }
 
 fn entry(module: &str) -> PactEntry {
-    PactEntry::new(".", module, format!("{module}/WARLOCK.md"))
+    PactEntry::new(".", module, format!("{module}/.warlock.md"))
         .expect("a relative module path is inside the root")
 }
 

@@ -41,7 +41,7 @@ for it (`load_tree`, on the working directory the binary was launched in) and
 renders what it gets back. Which directories are modules and what colour each
 one is are the engine's answers, arrived at before a frame is drawn.
 
-**A directory is a module when it directly contains a `WARLOCK.md`.** That is
+**A directory is a module when it directly contains a `.warlock.md`.** That is
 the whole test — no document is parsed, not its headings and not a word of it.
 A directory with no document of its own is an ordinary directory that has no
 documentation yet: it is drawn like any other node, and pacting it is exactly
@@ -126,7 +126,7 @@ There is no dialog and no confirmation prompt.
 - On a gray (unpacted) directory it starts a pact over the whole subtree, and
   every row in it is yellow on the very next frame. The engine works the
   directories **children before parents** — a parent is passed the documents
-  its children have just written — and writes a `WARLOCK.md` for each one.
+  its children have just written — and writes a `.warlock.md` for each one.
   Every document is written first and only then is anything hashed and
   granted, so no directory is granted a hash that the next write invalidates.
 - **The tree stays usable while the run goes on.** A pact is minutes of model
@@ -156,7 +156,7 @@ There is no dialog and no confirmation prompt.
 - On a file row it refuses, and that is the only refusal left: no state moves,
   no count moves, nothing is written, and the footer's message line says that a
   pact is made with the directory holding a file rather than with the file. A
-  directory with no `WARLOCK.md` yet is not refused — writing that document is
+  directory with no `.warlock.md` yet is not refused — writing that document is
   the point of pressing the key.
 
 Yellow is all the keystroke itself can claim: a pact with no grant behind it has
@@ -174,7 +174,7 @@ which writes a temporary file in `.warlock/` and renames it over `pacts.toml`,
 so a reader sees the whole old manifest or the whole new one and never half of
 either; a save per directory would record a pact that was still running. The
 documents are written the same way, to a hidden temporary and renamed over the
-`WARLOCK.md`, so a cancel leaves no half-written file behind. A run that
+`.warlock.md`, so a cancel leaves no half-written file behind. A run that
 recorded nothing — a subtree that could not be walked, a manifest that would not
 save on a read-only `.warlock/` or a full disk — puts the rows back exactly as
 they were before the key was pressed and puts the reason on the footer's message
@@ -256,7 +256,7 @@ for the schema.
 
 ## The view is never written down
 
-`p` is the only key that writes anything — the `WARLOCK.md` files a pact
+`p` is the only key that writes anything — the `.warlock.md` files a pact
 produces and the manifest that records them — and everything the other keys
 change is **view state owned by `App` and held nowhere else**:
 

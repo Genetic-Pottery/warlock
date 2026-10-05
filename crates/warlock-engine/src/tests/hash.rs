@@ -7,14 +7,18 @@ use super::{Error, subtree_hash};
 /// warlock repository itself.
 fn fixture() -> tempfile::TempDir {
     let repo = tempfile::tempdir().expect("a temporary directory");
-    write(repo.path(), "WARLOCK.md", "# repo\n");
+    write(repo.path(), ".warlock.md", "# repo\n");
     write(repo.path(), ".gitignore", "/target\n");
     write(repo.path(), ".warlockignore", "notes/\n");
     write(repo.path(), "notes/scratch.md", "thinking out loud\n");
-    write(repo.path(), "crates/engine/WARLOCK.md", "# engine\n");
+    write(repo.path(), "crates/engine/.warlock.md", "# engine\n");
     write(repo.path(), "crates/engine/src/lib.rs", "pub fn one() {}\n");
-    write(repo.path(), "crates/engine/src/deep/WARLOCK.md", "# deep\n");
-    write(repo.path(), "crates/tui/WARLOCK.md", "# tui\n");
+    write(
+        repo.path(),
+        "crates/engine/src/deep/.warlock.md",
+        "# deep\n",
+    );
+    write(repo.path(), "crates/tui/.warlock.md", "# tui\n");
     write(repo.path(), "crates/tui/README.md", "# for people\n");
     write(repo.path(), "target/debug/junk.bin", "build output\n");
     write(repo.path(), ".warlock/pacts.toml", "version = 1\n");
@@ -120,7 +124,7 @@ fn editing_inside_an_ignored_or_warlock_directory_changes_nothing() {
         ".warlock/pacts.toml",
         "version = 1\n\n[[pact]]\n",
     );
-    write(repo.path(), ".warlock/WARLOCK.md", "# not a module\n");
+    write(repo.path(), ".warlock/.warlock.md", "# not a module\n");
     // The third exclusion, the repository's own `.warlockignore`.
     write(repo.path(), "notes/scratch.md", "thought better of it\n");
     write(repo.path(), "notes/plan.md", "a whole new note\n");
@@ -348,12 +352,23 @@ fn editing_the_nodes_own_document_changes_its_hash() {
 
     write(
         repo.path(),
-        "crates/engine/WARLOCK.md",
+        "crates/engine/.warlock.md",
         "# engine\n\nHand-edited, which is exactly what section 9 expects.\n",
     );
 
     assert_ne!(hash(repo.path(), "crates/engine"), before);
     assert_ne!(hash(repo.path(), ""), root_before);
+}
+
+#[test]
+fn the_document_is_the_one_hidden_file_in_the_digest() {
+    let repo = fixture();
+    let before = hash(repo.path(), "crates/engine");
+
+    write(repo.path(), "crates/engine/.warlock.md.swp", "swap\n");
+    write(repo.path(), "crates/engine/.env", "KEY=value\n");
+
+    assert_eq!(hash(repo.path(), "crates/engine"), before);
 }
 
 #[test]

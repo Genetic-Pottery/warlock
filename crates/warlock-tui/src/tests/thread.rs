@@ -304,7 +304,7 @@ fn no_money_reaches_this_card_however_much_a_turn_reports() {
     account.record(&Activity::Cost { usd: 0.21 }, at(base, 1));
     account.close_section(
         &Outcome::Wrote {
-            document: "crates/engine/WARLOCK.md".into(),
+            document: "crates/engine/.warlock.md".into(),
             bytes: 2341,
         },
         at(base, 2),
@@ -329,7 +329,7 @@ fn no_money_reaches_this_card_however_much_a_turn_reports() {
     assert_eq!(
         pact_money,
         vec![
-            "wrote crates/engine/WARLOCK.md — 2341 bytes, $0.21".to_owned(),
+            "wrote crates/engine/.warlock.md — 2341 bytes, $0.21".to_owned(),
             "pact finished — 1 directory, 0:03, $0.21".to_owned(),
         ],
     );
@@ -625,7 +625,7 @@ fn a_run_is_no_part_of_this_card_however_it_is_driven() {
     account.record(&Activity::Thinking, at(base, 2));
     account.close_section(
         &Outcome::Wrote {
-            document: "crates/engine/WARLOCK.md".into(),
+            document: "crates/engine/.warlock.md".into(),
             bytes: 2341,
         },
         at(base, 3),
@@ -661,7 +661,7 @@ fn a_note_lands_between_the_turns_exactly_where_it_was_said() {
     thread.record(&Activity::Thinking, at(base, 5));
     thread.answer("It walks the tree.", at(base, 8));
     thread.note(
-        "crates/engine/WARLOCK.md is older than that answer",
+        "crates/engine/.warlock.md is older than that answer",
         at(base, 9),
     );
 
@@ -684,7 +684,7 @@ fn a_note_lands_between_the_turns_exactly_where_it_was_said() {
                 text: "It walks the tree.".to_owned(),
             },
             Line::Note {
-                text: "crates/engine/WARLOCK.md is older than that answer".to_owned(),
+                text: "crates/engine/.warlock.md is older than that answer".to_owned(),
             },
         ],
     );
@@ -700,7 +700,7 @@ fn a_note_lands_between_the_turns_exactly_where_it_was_said() {
                 text: "It walks the tree.".to_owned(),
             },
             Line::Note {
-                text: "crates/engine/WARLOCK.md is older than that answer".to_owned(),
+                text: "crates/engine/.warlock.md is older than that answer".to_owned(),
             },
         ],
     );
@@ -754,7 +754,7 @@ fn a_note_neither_opens_closes_nor_freezes_a_turn() {
 
     thread.ask("read the tree", base);
     thread.record(&Activity::Thinking, at(base, 1));
-    thread.note("crates/engine/WARLOCK.md changed under you", at(base, 4));
+    thread.note("crates/engine/.warlock.md changed under you", at(base, 4));
 
     // The turn is still the live one, and its clock is still moving: the
     // note happened beside the turn, not to it.
@@ -766,7 +766,7 @@ fn a_note_neither_opens_closes_nor_freezes_a_turn() {
         vec![
             "read the tree".to_owned(),
             "0:20 thinking".to_owned(),
-            "crates/engine/WARLOCK.md changed under you".to_owned(),
+            "crates/engine/.warlock.md changed under you".to_owned(),
         ],
         "the work line ticks on under a note that came after it",
     );
@@ -781,7 +781,7 @@ fn a_note_neither_opens_closes_nor_freezes_a_turn() {
             "read the tree".to_owned(),
             "0:30 thinking".to_owned(),
             "It is a tree.".to_owned(),
-            "crates/engine/WARLOCK.md changed under you".to_owned(),
+            "crates/engine/.warlock.md changed under you".to_owned(),
         ],
         "the note stays where it was said, under the turn it interrupted",
     );

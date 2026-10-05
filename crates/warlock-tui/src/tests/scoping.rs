@@ -67,16 +67,16 @@ fn a_repo() -> TempDir {
 /// ```
 fn tree(root: &Path) -> Tree {
     Tree::new(
-        Node::new(root, root.join("WARLOCK.md"), NodeState::PactedStale).with_children([
+        Node::new(root, root.join(".warlock.md"), NodeState::PactedStale).with_children([
             Node::new(root.join("crates"), None::<PathBuf>, NodeState::Unpacted).with_children([
                 Node::new(
                     root.join("crates/engine"),
-                    root.join("crates/engine/WARLOCK.md"),
+                    root.join("crates/engine/.warlock.md"),
                     NodeState::PactedFresh,
                 ),
                 Node::new(
                     root.join("crates/tui"),
-                    root.join("crates/tui/WARLOCK.md"),
+                    root.join("crates/tui/.warlock.md"),
                     NodeState::PactedStale,
                 ),
             ]),
@@ -103,7 +103,7 @@ fn app_on(root: &Path, row: usize) -> App {
 
 /// A granted entry for `module`, documented the way a pact documents it.
 fn entry(module: &str) -> PactEntry {
-    PactEntry::new(".", module, format!("{module}/WARLOCK.md"))
+    PactEntry::new(".", module, format!("{module}/.warlock.md"))
         .expect("a relative module path is inside the root")
         .with_grant(HASH, AT)
 }
@@ -514,7 +514,7 @@ fn a_directory_with_no_manifest_spelling_opens_nothing_and_says_why() {
     // whether a path can be spelled relative to a root is arithmetic.
     let mut app = App::from_tree(&Tree::new(Node::new(
         "/outside/thing",
-        "/outside/thing/WARLOCK.md",
+        "/outside/thing/.warlock.md",
         NodeState::PactedFresh,
     )));
 
@@ -553,7 +553,7 @@ fn enter_sets_the_scope_and_leaves_the_document_and_the_grant_alone() {
     let engine = written
         .entry("crates/engine")
         .expect("the entry is still there");
-    assert_eq!(engine.document(), "crates/engine/WARLOCK.md");
+    assert_eq!(engine.document(), "crates/engine/.warlock.md");
     assert_eq!(engine.granted_hash(), Some(HASH));
     assert_eq!(engine.granted_at(), Some(AT));
     assert_eq!(written.entry("crates/tui"), pacts().entry("crates/tui"));

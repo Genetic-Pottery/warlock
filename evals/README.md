@@ -1,6 +1,6 @@
 # evals
 
-Measurements of whether a `WARLOCK.md` is any good, which the Rust test suite
+Measurements of whether a `.warlock.md` is any good, which the Rust test suite
 cannot answer. Those tests check the machinery — that `check` rejects a claim
 naming something absent, that `mend` converges, that `render` writes these exact
 bytes. Nothing in them says whether the document that comes out helps anybody

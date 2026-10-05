@@ -505,7 +505,7 @@ impl Panel {
     /// the view key does. `v` is a reader asking to look at a file, so it brings
     /// the file to the front; this is the file somebody has just edited being
     /// read again underneath them, and a panel that flipped to the document
-    /// because a `WARLOCK.md` was saved would take the account of a run out of
+    /// because a `.warlock.md` was saved would take the account of a run out of
     /// the reader's hands without their having pressed anything.
     ///
     /// The window goes back to the top and follows nothing. The reader's line is

@@ -97,7 +97,7 @@ fn a_rendered_request_carries_the_files_it_was_given() {
     // things; stdin is one stream; and for a long time only the first of
     // the three reached it. The pass then read a prompt telling it that it
     // had been given this directory's files, found none, and wrote a
-    // WARLOCK.md saying so — which passed the length floor and was granted.
+    // .warlock.md saying so — which passed the length floor and was granted.
     let request =
         agent::Request::new("describe this directory", "/repo/crates/engine").with_files(vec![
             agent::File::present("src/lib.rs", &b"//! Core engine.\n"[..]),
@@ -171,7 +171,7 @@ fn a_childs_document_is_carried_under_the_directory_it_belongs_to() {
 
     let rendered = render(&request);
 
-    assert!(rendered.contains("the WARLOCK.md of src"), "{rendered}");
+    assert!(rendered.contains("the .warlock.md of src"), "{rendered}");
     assert!(rendered.contains("The engine's modules."), "{rendered}");
 }
 
@@ -544,7 +544,7 @@ fn a_turn_runs_under_warlocks_own_prompt_rather_than_a_passs() {
     // message arrives with none of that, so this one says what a message
     // cannot.
     assert_ne!(prompt, SYSTEM_PROMPT, "a turn is not a documentation pass");
-    for said in ["warlock", "tree", "WARLOCK.md", "green", "yellow"] {
+    for said in ["warlock", "tree", ".warlock.md", "green", "yellow"] {
         assert!(
             prompt.contains(said),
             "{said:?} is missing from the prompt a turn runs under: {prompt}",
@@ -942,7 +942,7 @@ fn a_drafting_session_is_its_own_conversation_at_the_brief_register() {
     let prompt = value_of(&vector, "--system-prompt").expect("a drafting turn brings its own");
     assert_ne!(prompt, CHAT_SYSTEM_PROMPT);
     assert_ne!(prompt, SYSTEM_PROMPT);
-    assert!(prompt.contains("tickets") && prompt.contains("WARLOCK.md"));
+    assert!(prompt.contains("tickets") && prompt.contains(".warlock.md"));
 
     // And the panel's own session is exactly where it was.
     assert_eq!(value_of(&chat, "--system-prompt"), Some(CHAT_SYSTEM_PROMPT));
@@ -1066,7 +1066,7 @@ fn a_splitting_session_may_read_the_repository_and_do_nothing_whatever_else() {
         value_of(&turn_args(&ChatAgent::drafting()), "--system-prompt"),
         Some(prompt),
     );
-    assert!(prompt.contains("sub-tasks") && prompt.contains("WARLOCK.md"));
+    assert!(prompt.contains("sub-tasks") && prompt.contains(".warlock.md"));
     assert_eq!(ChatAgent::splitting().timeout(), UNTIMED);
 }
 
@@ -1572,7 +1572,7 @@ fn proposing_opens_a_conversation_of_its_own_at_the_briefs_register() {
         Some(prompt),
         value_of(&turn_args(&ChatAgent::drafting()), "--system-prompt"),
     );
-    assert!(prompt.contains("WARLOCK.md"));
+    assert!(prompt.contains(".warlock.md"));
     for said in ["one question", "plain prose"] {
         assert!(
             prompt.contains(said),
@@ -5146,4 +5146,24 @@ mod against_the_real_cli {
             text
         })
     }
+}
+
+#[test]
+fn every_session_that_reads_the_repository_is_told_silence_is_not_absence() {
+    let said = "its silence is not a finding";
+    let sessions = [
+        ("a panel turn", turn_args(&ChatAgent::new())),
+        ("a drafting turn", turn_args(&ChatAgent::drafting())),
+        ("a proposing turn", turn_args(&ChatAgent::proposing())),
+        ("a splitting turn", turn_args(&ChatAgent::splitting())),
+    ];
+    for (what, vector) in sessions {
+        let prompt = value_of(&vector, "--system-prompt").expect("a turn brings its own");
+        assert!(prompt.contains(said), "{what}: {prompt}");
+    }
+    let working = working_system_prompt("data-plane", &["data-plane".to_owned()]);
+    assert!(working.contains(said), "{working}");
+
+    // A pass reads only what its request carries, so the habit is nothing to it.
+    assert!(!SYSTEM_PROMPT.contains(said));
 }

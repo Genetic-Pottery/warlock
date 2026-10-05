@@ -59,7 +59,7 @@ fn refresh_press(app: &mut App, in_flight: bool, at: Instant) -> Option<PathBuf>
     )
 }
 
-const DOCUMENT_FILE: &str = "WARLOCK.md";
+const DOCUMENT_FILE: &str = ".warlock.md";
 
 struct Canned {
     root: PathBuf,
@@ -1314,7 +1314,7 @@ fn scoped() -> Manifest {
     Manifest::with_entries([PactEntry::new(
         ROOT,
         format!("{ROOT}/crates"),
-        format!("{ROOT}/crates/WARLOCK.md"),
+        format!("{ROOT}/crates/.warlock.md"),
     )
     .expect("a module under the root")
     .with_scope("data-plane")])
@@ -1387,7 +1387,7 @@ fn scoped_below() -> Manifest {
         PactEntry::new(
             ROOT,
             format!("{ROOT}/{module}"),
-            format!("{module}/WARLOCK.md"),
+            format!("{module}/.warlock.md"),
         )
         .expect("a module under the root")
     };
@@ -2759,7 +2759,7 @@ fn drawn(app: &App) -> Vec<(PathBuf, NodeState)> {
 #[test]
 fn the_document_a_pass_wrote_appears_under_its_directory_as_the_run_goes() {
     // The engine's word that a directory delivered is also the news that
-    // there is a `WARLOCK.md` beside it now. The row for it goes in there
+    // there is a `.warlock.md` beside it now. The row for it goes in there
     // and then, in the colour the same event just gave the directory,
     // where a fresh load would have put it.
     let stale = NodeState::PactedStale;
@@ -2781,14 +2781,14 @@ fn the_document_a_pass_wrote_appears_under_its_directory_as_the_run_goes() {
     assert!(pact.running(), "the run is still going");
     // Files are hidden — this is the view warlock opens on — and the
     // document is drawn all the same, because the default view keeps each
-    // directory's own `WARLOCK.md`. The one row is the whole of the change:
+    // directory's own `.warlock.md`. The one row is the whole of the change:
     // the files `engine/` merely holds are still hidden.
     assert_eq!(
         drawn(&app),
         [
             ("/repo/crates", stale),
             ("/repo/crates/engine", NodeState::PactedFresh),
-            ("/repo/crates/engine/WARLOCK.md", NodeState::PactedFresh),
+            ("/repo/crates/engine/.warlock.md", NodeState::PactedFresh),
             ("/repo/crates/engine/src", NodeState::PactedFresh),
             ("/repo/crates/tui", stale),
         ]
@@ -2812,8 +2812,8 @@ fn the_document_a_pass_wrote_appears_under_its_directory_as_the_run_goes() {
         [
             ("/repo/crates", stale),
             ("/repo/crates/engine", NodeState::PactedFresh),
+            ("/repo/crates/engine/.warlock.md", NodeState::PactedFresh),
             ("/repo/crates/engine/Cargo.toml", NodeState::PactedFresh),
-            ("/repo/crates/engine/WARLOCK.md", NodeState::PactedFresh),
             ("/repo/crates/engine/build.rs", NodeState::PactedFresh),
             ("/repo/crates/engine/src", NodeState::PactedFresh),
             ("/repo/crates/tui", stale),
@@ -2827,7 +2827,7 @@ fn the_document_a_pass_wrote_appears_under_its_directory_as_the_run_goes() {
 #[test]
 fn a_second_document_for_the_same_directory_inserts_nothing() {
     // A re-pact of an already documented directory says `Documented`
-    // about a `WARLOCK.md` that is already a row. One row per path, so
+    // about a `.warlock.md` that is already a row. One row per path, so
     // the second announcement changes nothing at all.
     let mut app = App::from_tree(&one_directory_with_files(NodeState::PactedStale));
     app.toggle_files();
@@ -2847,7 +2847,7 @@ fn a_second_document_for_the_same_directory_inserts_nothing() {
     assert_eq!(
         app.rows()
             .iter()
-            .filter(|row| row.path == Path::new("/repo/crates/engine/WARLOCK.md"))
+            .filter(|row| row.path == Path::new("/repo/crates/engine/.warlock.md"))
             .count(),
         1,
         "the document has exactly one row however often it is announced"
@@ -2917,11 +2917,14 @@ fn the_document_rows_a_run_writes_cost_no_reload() {
         [
             ("/repo/crates", stale),
             ("/repo/crates/engine", NodeState::PactedFresh),
+            ("/repo/crates/engine/.warlock.md", NodeState::PactedFresh),
             ("/repo/crates/engine/Cargo.toml", NodeState::PactedFresh),
-            ("/repo/crates/engine/WARLOCK.md", NodeState::PactedFresh),
             ("/repo/crates/engine/build.rs", NodeState::PactedFresh),
             ("/repo/crates/engine/src", NodeState::PactedFresh),
-            ("/repo/crates/engine/src/WARLOCK.md", NodeState::PactedFresh),
+            (
+                "/repo/crates/engine/src/.warlock.md",
+                NodeState::PactedFresh
+            ),
             ("/repo/crates/tui", stale),
         ]
         .map(|(path, state)| (PathBuf::from(path), state)),
@@ -3172,7 +3175,7 @@ fn each_section_ends_with_the_document_that_pass_wrote_and_what_it_cost() {
     // A whole run, from the worker's body to the panel: two directories,
     // each with a pass that reads something, thinks, and says what it
     // spent. What closes each section is a fact about disk — the
-    // document at `<directory>/WARLOCK.md` and its size — and a fact
+    // document at `<directory>/.warlock.md` and its size — and a fact
     // about the pass, which is the cost the activity port carried.
     let scratch = one_crate_to_load("outcomes");
     let (mut app, scope) = load(&scratch);
@@ -3215,7 +3218,7 @@ fn each_section_ends_with_the_document_that_pass_wrote_and_what_it_cost() {
             "1:10 Read crates/engine/src".to_owned(),
             "1:40 thinking".to_owned(),
             format!(
-                "1:40 wrote crates/engine/src/WARLOCK.md — {} bytes, $0.50",
+                "1:40 wrote crates/engine/src/.warlock.md — {} bytes, $0.50",
                 document_bytes(&scratch, "crates/engine/src")
             ),
             "crates/engine".to_owned(),
@@ -3229,7 +3232,7 @@ fn each_section_ends_with_the_document_that_pass_wrote_and_what_it_cost() {
             "0:30 Read crates/engine".to_owned(),
             "1:00 thinking".to_owned(),
             format!(
-                "1:00 wrote crates/engine/WARLOCK.md — {} bytes, $0.25",
+                "1:00 wrote crates/engine/.warlock.md — {} bytes, $0.25",
                 document_bytes(&scratch, "crates/engine")
             ),
             // The total is the three passes added up — two for the
@@ -3348,7 +3351,7 @@ fn a_directory_the_run_refused_ends_with_the_reason_it_was_refused() {
     assert_eq!(
         wrote,
         &format!(
-            "0:50 wrote crates/engine/WARLOCK.md — {} bytes, $0.25",
+            "0:50 wrote crates/engine/.warlock.md — {} bytes, $0.25",
             document_bytes(&scratch, "crates/engine")
         )
     );
@@ -3488,7 +3491,7 @@ fn a_repaired_directory_says_what_was_mended_and_still_closes_on_its_document() 
     assert_eq!(
         said_in(&lines[repaired + 6]),
         format!(
-            "wrote crates/engine/src/WARLOCK.md — {} bytes, ${}.{:02}",
+            "wrote crates/engine/src/.warlock.md — {} bytes, ${}.{:02}",
             document_bytes(&scratch, "crates/engine/src"),
             cents / 100,
             cents % 100
@@ -3503,7 +3506,7 @@ fn a_repaired_directory_says_what_was_mended_and_still_closes_on_its_document() 
     assert_eq!(
         said_in(wrote_parent),
         format!(
-            "wrote crates/engine/WARLOCK.md — {} bytes, $0.25",
+            "wrote crates/engine/.warlock.md — {} bytes, $0.25",
             document_bytes(&scratch, "crates/engine")
         )
     );
@@ -3637,7 +3640,7 @@ fn a_directory_a_refresh_skipped_says_which_failure_below_it_cost_it_the_pass() 
     assert!(
         !lines
             .iter()
-            .any(|line| line.contains("wrote crates/engine/WARLOCK.md")),
+            .any(|line| line.contains("wrote crates/engine/.warlock.md")),
         "and no write is claimed for a directory no pass ran for: {lines:?}"
     );
 }
@@ -3700,14 +3703,14 @@ fn a_cancelled_run_says_so_in_the_section_it_was_stopped_in() {
             0,
             7,
             "crates/beta/src",
-            "1:40 wrote crates/beta/src/WARLOCK.md",
+            "1:40 wrote crates/beta/src/.warlock.md",
         ),
-        (8, 12, "crates/beta", "1:00 wrote crates/beta/WARLOCK.md"),
+        (8, 12, "crates/beta", "1:00 wrote crates/beta/.warlock.md"),
         (
             13,
             20,
             "crates/alpha/src",
-            "1:40 wrote crates/alpha/src/WARLOCK.md",
+            "1:40 wrote crates/alpha/src/.warlock.md",
         ),
     ] {
         assert_eq!(&lines[heading], directory);
@@ -4126,7 +4129,7 @@ fn a_run_started_while_the_thread_shows_fills_its_own_card_and_only_that() {
             "1:10 Read crates/engine/src".to_owned(),
             "1:40 thinking".to_owned(),
             format!(
-                "1:40 wrote crates/engine/src/WARLOCK.md — {} bytes, $0.50",
+                "1:40 wrote crates/engine/src/.warlock.md — {} bytes, $0.50",
                 document_bytes(&scratch, "crates/engine/src")
             ),
             "crates/engine".to_owned(),
@@ -4137,7 +4140,7 @@ fn a_run_started_while_the_thread_shows_fills_its_own_card_and_only_that() {
             "0:30 Read crates/engine".to_owned(),
             "1:00 thinking".to_owned(),
             format!(
-                "1:00 wrote crates/engine/WARLOCK.md — {} bytes, $0.25",
+                "1:00 wrote crates/engine/.warlock.md — {} bytes, $0.25",
                 document_bytes(&scratch, "crates/engine")
             ),
             "pact finished — 2 directories, 2:40, $0.75".to_owned(),
@@ -4681,7 +4684,7 @@ fn a_pass_that_never_said_what_it_cost_leaves_the_total_incomplete() {
             "1:00 Read crates/engine/src".to_owned(),
             "1:20 thinking".to_owned(),
             format!(
-                "1:20 wrote crates/engine/src/WARLOCK.md — {} bytes, no cost reported",
+                "1:20 wrote crates/engine/src/.warlock.md — {} bytes, no cost reported",
                 document_bytes(&scratch, "crates/engine/src")
             ),
             "crates/engine".to_owned(),
@@ -4692,7 +4695,7 @@ fn a_pass_that_never_said_what_it_cost_leaves_the_total_incomplete() {
             "0:30 Read crates/engine".to_owned(),
             "1:00 thinking".to_owned(),
             format!(
-                "1:00 wrote crates/engine/WARLOCK.md — {} bytes, $0.25",
+                "1:00 wrote crates/engine/.warlock.md — {} bytes, $0.25",
                 document_bytes(&scratch, "crates/engine")
             ),
             "pact finished — 2 directories, 2:20, \
@@ -4766,7 +4769,7 @@ fn a_worker_that_says_nothing_more_ends_the_run_rather_than_hanging() {
 #[test]
 fn a_finished_pact_puts_the_documents_it_wrote_on_screen() {
     // The whole point of the reload, in one test: a run writes
-    // `WARLOCK.md` into every directory of the subtree, and the app has
+    // `.warlock.md` into every directory of the subtree, and the app has
     // no way to know that except by reading the tree again. No key is
     // pressed here and nothing is relaunched — the frame after the
     // outcome shows them.
@@ -4799,8 +4802,8 @@ fn a_finished_pact_puts_the_documents_it_wrote_on_screen() {
     assert_eq!(
         documents(&app, &scratch),
         [
-            PathBuf::from("crates/engine/WARLOCK.md"),
-            PathBuf::from("crates/engine/src/WARLOCK.md"),
+            PathBuf::from("crates/engine/.warlock.md"),
+            PathBuf::from("crates/engine/src/.warlock.md"),
         ],
         "the documents the run wrote are rows in the tree"
     );
@@ -5142,7 +5145,7 @@ mod watching {
         scratch.write(".warlockignore", "vendor/\n");
         scratch.write("vendor/acme/src/lib.rs", "//! Acme.\n");
         Manifest::with_entries(["crates", "vendor"].map(|module| {
-            PactEntry::new(".", module, format!("{module}/WARLOCK.md"))
+            PactEntry::new(".", module, format!("{module}/.warlock.md"))
                 .expect("a module spelled relative to the root")
         }))
         .save(&scratch.root)

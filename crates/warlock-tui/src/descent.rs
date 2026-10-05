@@ -12,7 +12,7 @@
 //! than a default method that quietly says nothing.
 //!
 //! `Descent::Unpact` is here and is not a run: no walk, no pass, no hash, and
-//! every `WARLOCK.md` left where it is. It is in this module anyway so that the
+//! every `.warlock.md` left where it is. It is in this module anyway so that the
 //! save below it is the same line rather than a special case. Only the panel's
 //! `p` reaches it — the shell's `warlock unpact` is `edits`' road on purpose,
 //! since it spends no model pass and needs neither an agent nor a sink.
@@ -52,7 +52,7 @@ impl Descent {
 }
 
 // The manifest is saved exactly once, here, after the descent and never during
-// it. The engine writes every `WARLOCK.md` and hands back a manifest as a
+// it. The engine writes every `.warlock.md` and hands back a manifest as a
 // *value*, so nothing under `.warlock/` moves until the line at the bottom of
 // this function — which is what makes a partly-failed run still worth recording
 // and a cancelled run keep what it finished, and a rule that would stop being

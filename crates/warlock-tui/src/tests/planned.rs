@@ -255,7 +255,7 @@ fn a_manifest(scopes: impl IntoIterator<Item = ScopeRecord>) -> Manifest {
 // which is the third way there is no board: the manifest is one line short
 // rather than the machine being wrong.
 fn a_pacted_manifest() -> Manifest {
-    Manifest::with_entries([PactEntry::new(".", "docs", "docs/WARLOCK.md")
+    Manifest::with_entries([PactEntry::new(".", "docs", "docs/.warlock.md")
         .expect("a relative module path is inside the root")
         .with_scope(SCOPE)])
 }

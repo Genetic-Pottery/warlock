@@ -69,8 +69,8 @@ impl Crossings<'_> {
 /// use warlock_engine::{Manifest, PactEntry};
 ///
 /// let manifest = Manifest::with_entries([
-///     PactEntry::new(".", "crates/engine", "crates/engine/WARLOCK.md")?.with_scope("data-plane"),
-///     PactEntry::new(".", "crates/web", "crates/web/WARLOCK.md")?.with_scope("web"),
+///     PactEntry::new(".", "crates/engine", "crates/engine/.warlock.md")?.with_scope("data-plane"),
+///     PactEntry::new(".", "crates/web", "crates/web/.warlock.md")?.with_scope("web"),
 /// ]);
 /// let held = ["web".to_owned()];
 /// let dirty = [Dirty {
@@ -182,7 +182,7 @@ pub fn crossings_in<'a>(
 /// // A stand-in `Runs` answering with the bytes a real `git status` printed.
 /// let checkout = Git::new(Scripted, ".");
 /// let manifest = Manifest::with_entries([
-///     PactEntry::new(".", "crates/engine", "crates/engine/WARLOCK.md")?
+///     PactEntry::new(".", "crates/engine", "crates/engine/.warlock.md")?
 ///         .with_scope("data-plane"),
 /// ]);
 /// let mut changed = Vec::new();

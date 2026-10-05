@@ -17,8 +17,7 @@
 
 // `Error` belongs to the library, and the lint measures an enum from another
 // crate whole where it measures a local one by its largest variant: it fires on
-// `init` and `run` here and on none of the library's functions returning the
-// same type.
+// `run` here and on none of the library's functions returning the same type.
 #![allow(clippy::result_large_err)]
 
 use std::path::PathBuf;
@@ -27,25 +26,17 @@ use std::time::Instant;
 
 use clap::{Parser, Subcommand};
 use ratatui::crossterm::event::{self, Event};
-use warlock_engine::{Written, write_claude_md};
 use warlock_tui::check::{self, check};
 use warlock_tui::planned;
 use warlock_tui::{
-    Error, FOR_CLAUDE_MD, Interactive, Listing, POLL_INTERVAL, RecordFields, Standing, brief,
-    configure, key_add, key_forget, key_list, key_use, list, pact, pull, push, refresh, resume,
-    scope_add, scope_remove, status_for, unpact,
+    Error, Interactive, Listing, POLL_INTERVAL, RecordFields, brief, configure, key_add,
+    key_forget, key_list, key_use, list, pact, pull, push, refresh, resume, scope_add,
+    scope_remove, status_for, unpact,
 };
 
 mod terminal;
 
 use terminal::{TerminalGuard, install_panic_hook};
-
-/// The two words [`init`] reports with. Everything the engine can return that
-/// is not a brand-new file is an update, which is why this is a `matches!` on
-/// one variant rather than a match over an `#[non_exhaustive]` enum.
-const CREATED: &str = "created";
-
-const UPDATED: &str = "updated";
 
 /// `about` is spelled out on every command below, with `long_about = None`, so
 /// that the doc comments in this file are free to say why rather than being
@@ -53,6 +44,7 @@ const UPDATED: &str = "updated";
 #[derive(Debug, Clone, PartialEq, Eq, Parser)]
 #[command(
     name = "warlock",
+    version,
     about = "A freshness ledger for a repository's documentation.",
     long_about = None
 )]
@@ -69,11 +61,6 @@ struct Cli {
 /// word they typed. What they *do* is one function taking a [`Listing`].
 #[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
 enum Command {
-    #[command(
-        about = "Write warlock's section of CLAUDE.md at the repository root.",
-        long_about = None
-    )]
-    Init,
     #[command(
         about = "Set the sigils this machine holds for this repository.",
         long_about = None
@@ -146,7 +133,7 @@ enum Command {
         path: PathBuf,
     },
     #[command(
-        about = "Describe a directory and everything below it, writing a WARLOCK.md for each.",
+        about = "Describe a directory and everything below it, writing a .warlock.md for each.",
         long_about = None
     )]
     Pact {
@@ -393,7 +380,7 @@ enum KeyCommand {
 
 fn main() -> ExitCode {
     // Read before anything else happens and, deliberately, before anything
-    // touches the terminal: `init`, help and a refusal all print on the ordinary
+    // touches the terminal: help and a refusal all print on the ordinary
     // screen, and a program that entered the alternate screen to write one line
     // would tear it down around a message nobody saw. `parse` exits the process
     // itself on a parse error or on `--help`, which is only safe because of that
@@ -423,7 +410,6 @@ fn main() -> ExitCode {
             install_panic_hook();
             run()
         }
-        Some(Command::Init) => init(),
         // The second subcommand, dispatched here for the first one's reasons:
         // it prints on the ordinary screen and reads a line from stdin in cooked
         // mode, so nothing about it may touch the terminal — including the panic
@@ -467,7 +453,7 @@ fn main() -> ExitCode {
         // boundary, asked before anything else it does; see [`mod@edits`].
         Some(Command::Unpact { path }) => unpact(&path),
         // The two runs, and the first subcommands that spend anything: minutes
-        // of model passes, one `claude --print` per directory, a `WARLOCK.md`
+        // of model passes, one `claude --print` per directory, a `.warlock.md`
         // beside each of them and one manifest save at the end. Dispatched here
         // with every other subcommand and for the same reasons — their progress
         // is lines on the ordinary screen that a script reads through a pipe, so
@@ -580,33 +566,13 @@ fn main() -> ExitCode {
 
     // `run` has returned, so the guard inside it has already dropped and the
     // terminal is back to normal; only now is it worth printing anything,
-    // because on the alternate screen nobody would ever see it. `init` and the
-    // three questions never went near the terminal, and print through the same
+    // because on the alternate screen nobody would ever see it. The
+    // subcommands never went near the terminal, and print through the same
     // line so that a failure looks the same however warlock was invoked.
     if let Err(error) = &outcome {
         eprintln!("warlock: {error}");
     }
     ExitCode::from(status_for(&outcome))
-}
-
-/// `warlock init`: write warlock's section of `CLAUDE.md` at the repository
-/// root and say which file changed. Touches no terminal and spends nothing.
-fn init() -> Result<(), Error> {
-    let standing = Standing::here(FOR_CLAUDE_MD)?;
-
-    let written =
-        write_claude_md(standing.repo_root()).map_err(|source| Error::ClaudeMd { source })?;
-    // Asked as a question rather than matched arm by arm, because the engine's
-    // enum is `#[non_exhaustive]`: there is one thing to distinguish here — a
-    // file that did not exist before — and anything it gains later is a file
-    // that did.
-    let what = if matches!(written, Written::Created { .. }) {
-        CREATED
-    } else {
-        UPDATED
-    };
-    println!("warlock: {what} `{}`", written.path().display());
-    Ok(())
 }
 
 /// The interactive session: load, take the terminal, then loop. The first two

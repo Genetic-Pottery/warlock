@@ -1,8 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use warlock_engine::{
-    Manifest, briefs, claude_md, manifest, manifest_path, resolve_filing, scope, sigils,
-};
+use warlock_engine::{Manifest, briefs, manifest, manifest_path, resolve_filing, scope, sigils};
 
 use super::{Error, one_line, status_for};
 use crate::brief::{ScopeBlockError, brief_at};
@@ -13,7 +11,7 @@ use crate::template::Error as TemplateError;
 // The tails themselves, not copies of them: these used to be re-typed here
 // as literals, so rewording either original left this suite passing on a
 // sentence nothing said any more.
-use crate::standing::{FOR_CLAUDE_MD, FOR_CUT, FOR_SIGILS};
+use crate::standing::{FOR_CUT, FOR_SIGILS};
 
 const PROBLEM: &str = "`/repo/crates/engine` could not be hashed and is stale: \
                            could not read `/repo/crates/engine/src/lib.rs`, so the \
@@ -107,17 +105,6 @@ fn every_message_quoting_another_error_is_one_line_so_it_prints_as_one() {
                 path: PathBuf::from("/repo/odd"),
             },
         },
-        Error::ClaudeMd {
-            source: claude_md::Error::Write {
-                path: PathBuf::from("/repo/CLAUDE.md"),
-                source: std::io::Error::other("boom"),
-            },
-        },
-        Error::ClaudeMd {
-            source: claude_md::Error::NotText {
-                path: PathBuf::from("/repo/CLAUDE.md"),
-            },
-        },
         // The two files `warlock brief` reads before it sends anything. Both
         // quote the filesystem, and the brief config can quote the TOML parser
         // as well, which is what the flattening is for.
@@ -200,10 +187,6 @@ fn every_message_warlock_words_itself_is_one_line_so_it_prints_as_one() {
         Error::Problems {
             first: PROBLEM.to_owned(),
             rest: 2,
-        },
-        Error::NoRepository {
-            start: PathBuf::from("/elsewhere"),
-            wanted: FOR_CLAUDE_MD,
         },
         Error::NoRepository {
             start: PathBuf::from("/elsewhere"),
@@ -450,20 +433,6 @@ fn a_path_with_no_repository_relative_form_says_which_root_it_is_not_inside() {
 }
 
 #[test]
-fn init_outside_a_repository_says_what_was_looked_for_and_where() {
-    let error = Error::NoRepository {
-        start: PathBuf::from("/elsewhere"),
-        wanted: FOR_CLAUDE_MD,
-    };
-
-    assert_eq!(
-        error.to_string(),
-        "no `.git` directory in `/elsewhere` or any of its parents, so there is \
-             no repository root to write `CLAUDE.md` at"
-    );
-}
-
-#[test]
 fn config_outside_a_repository_says_the_same_thing_about_sigils() {
     // One fact about `.git`, worded once, with what the reader asked for on
     // the end of it.
@@ -552,21 +521,6 @@ fn a_sigil_config_that_cannot_be_read_says_so_in_the_engines_words() {
 }
 
 #[test]
-fn a_claude_md_that_cannot_be_written_says_so_in_the_engines_words() {
-    let error = Error::ClaudeMd {
-        source: claude_md::Error::Write {
-            path: PathBuf::from("/repo/CLAUDE.md"),
-            source: std::io::Error::other("permission denied"),
-        },
-    };
-
-    assert_eq!(
-        error.to_string(),
-        "could not write `/repo/CLAUDE.md`: permission denied"
-    );
-}
-
-#[test]
 fn an_answered_question_is_a_zero_whatever_the_answer_was() {
     // The half of the exit contract that carries the verdicts: warlock ran
     // the query and the answer is in the output, so the status says the
@@ -587,10 +541,10 @@ fn a_question_warlock_could_not_answer_is_a_one_and_never_a_two() {
     let refusals = [
         Error::NoRepository {
             start: PathBuf::from("/nowhere"),
-            wanted: FOR_CLAUDE_MD,
+            wanted: FOR_SIGILS,
         },
         Error::Problems {
-            first: "`/repo/docs`: `WARLOCK.md` could not be read".to_owned(),
+            first: "`/repo/docs`: `.warlock.md` could not be read".to_owned(),
             rest: 2,
         },
         spelled(Path::new("/repo"), Path::new("/elsewhere"))
@@ -632,7 +586,7 @@ fn a_boundary_this_machine_does_not_hold_is_a_three_and_nothing_else_is() {
     assert_eq!(
         status_for(&Err(Error::NoRepository {
             start: PathBuf::from("/nowhere"),
-            wanted: FOR_CLAUDE_MD,
+            wanted: FOR_SIGILS,
         })),
         1
     );
@@ -650,13 +604,13 @@ fn the_statuses_the_older_subcommands_leave_are_where_they_were() {
         (
             Err(Error::NoRepository {
                 start: PathBuf::from("/nowhere"),
-                wanted: FOR_CLAUDE_MD,
+                wanted: FOR_SIGILS,
             }),
             1,
         ),
         (
             Err(Error::Problems {
-                first: "`/repo/docs`: `WARLOCK.md` could not be read".to_owned(),
+                first: "`/repo/docs`: `.warlock.md` could not be read".to_owned(),
                 rest: 2,
             }),
             1,

@@ -22,7 +22,7 @@ use crate::sigils::{self, held_sigils};
 ///
 /// let (home, root) = (tempfile::tempdir()?, tempfile::tempdir()?);
 /// let manifest = Manifest::with_entries([
-///     PactEntry::new(root.path(), "crates", "crates/WARLOCK.md")?.with_scope("data-plane"),
+///     PactEntry::new(root.path(), "crates", "crates/.warlock.md")?.with_scope("data-plane"),
 /// ])
 /// .with_scopes([
 ///     ScopeRecord::new("data-plane", "WAR", "In Review", "warlock"),

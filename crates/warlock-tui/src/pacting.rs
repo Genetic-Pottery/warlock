@@ -756,7 +756,7 @@ fn section_outcome(
     }
 
     // Asked before the filesystem for the reason the carry below is: this
-    // directory has a `WARLOCK.md` and did not write it, so metadata would read
+    // directory has a `.warlock.md` and did not write it, so metadata would read
     // as a write that never happened.
     if let Some((_, below)) = skipped
         .iter()

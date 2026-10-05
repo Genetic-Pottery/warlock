@@ -67,7 +67,7 @@ fn a_record(name: &str, team: &str) -> ScopeRecord {
 // Both records, in every repository below: which of them is a candidate is the
 // machine's sigils' to say, which is the rule these tests are about.
 fn a_manifest() -> Manifest {
-    Manifest::with_entries([PactEntry::new(".", "docs", "docs/WARLOCK.md")
+    Manifest::with_entries([PactEntry::new(".", "docs", "docs/.warlock.md")
         .expect("a relative module path is inside the root")
         .with_scope(SCOPE)])
     .with_scopes([a_record(SCOPE, TEAM), a_record(OTHER_SCOPE, OTHER_TEAM)])

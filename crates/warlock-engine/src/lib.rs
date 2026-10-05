@@ -6,7 +6,6 @@
 
 pub mod agent;
 pub mod briefs;
-pub mod claude_md;
 pub mod clock;
 pub mod decide;
 pub mod document;
@@ -36,8 +35,6 @@ pub use agent::Agent;
 pub use briefs::DEFAULT_BRIEF_DIRECTORY;
 pub use briefs::briefs_path;
 pub use briefs::load_briefs;
-pub use claude_md::Written;
-pub use claude_md::write_claude_md;
 pub use clock::now_rfc3339;
 pub use decide::decide_state;
 pub use document::Fill;

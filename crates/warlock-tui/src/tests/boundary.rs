@@ -9,7 +9,7 @@ use crate::error::Error;
 const ROOT: &str = "/repo";
 
 fn pact(module: &str, scope: Option<&str>) -> PactEntry {
-    let entry = PactEntry::new(ROOT, module, format!("{module}/WARLOCK.md"))
+    let entry = PactEntry::new(ROOT, module, format!("{module}/.warlock.md"))
         .expect("a relative module path is inside the root");
     match scope {
         Some(scope) => entry.with_scope(scope),

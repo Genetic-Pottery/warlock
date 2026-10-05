@@ -16,7 +16,6 @@ plain line and the terminal is never touched.
 
 | Command | What it does | What it spends |
 | --- | --- | --- |
-| `warlock init` | Write warlock's section of `CLAUDE.md` at the repository root | nothing |
 | `warlock config` | Print the sigils this machine holds here, and read a line replacing them | nothing |
 | `warlock key add <name>` | Read a Linear key on stdin and store it under a name | one key-store write |
 | `warlock key list` | Print the names this machine holds keys for, and never a key | nothing |
@@ -28,7 +27,7 @@ plain line and the terminal is never touched.
 | `warlock unpact <path>` | Drop the pact on a directory and every pact below it | one manifest write |
 | `warlock scope add <path> <scope>` | Write a scope onto a pacted directory, and — `--team-key`, `--review-state`, `--label` — the `[[scope]]` record routing it, when nothing records the name yet | one manifest write |
 | `warlock scope remove <path>` | Clear the scope on a pacted directory | one manifest write |
-| `warlock pact <path>` | Describe a directory and everything below it, a `WARLOCK.md` each | a model pass per directory |
+| `warlock pact <path>` | Describe a directory and everything below it, a `.warlock.md` each | a model pass per directory |
 | `warlock refresh <path>` | The same over only the directories that are not fresh | a model pass per stale directory |
 | `warlock brief` | Argue a brief in one conversation at the shell, and write it where `briefs.toml` says | a turn per blank line, one more for `/write`, and the document it writes |
 | `warlock push <SCOPE> <PATH>` | File the brief at `PATH` as a project on the board `SCOPE` files to | one project on somebody's board |
@@ -42,10 +41,8 @@ omission: the largest thing warlock can do to a repository must not also be the
 thing an absent argument does by itself. `warlock pact .` is somebody having
 said so.
 
-`init` and `config` are the two that are about the checkout rather than the
-ledger. `warlock init` writes warlock's section of the `CLAUDE.md` at the
-repository root and says which file it wrote, and whether it was created or
-updated. `warlock config` prints the repository, the file this machine keeps
+`config` is the one that is about the checkout rather than the ledger.
+`warlock config` prints the repository, the file this machine keeps
 sigils in and what is held now, then reads one line: the sigils on it replace
 everything held for this repository, a blank line clears it, and Ctrl-C or EOF
 changes nothing. It is the only road to a sigil, and a sigil is the only thing
@@ -299,7 +296,7 @@ a path.
 ## Writing
 
 `unpact`, `scope add` and `scope remove` are `.warlock/pacts.toml` rewritten and
-nothing else. No terminal, no process, no model pass, and every `WARLOCK.md`
+nothing else. No terminal, no process, no model pass, and every `.warlock.md`
 left exactly where it was — un-pacting drops the record, not the documents.
 
 All three ask the boundary first, before they look at whether the path has an
@@ -373,7 +370,7 @@ A scope name already in use with no record stays legal and stays unrouted —
 ## Running
 
 `pact` and `refresh` are the two subcommands that spend anything: minutes, one
-`claude --print` per directory, a `WARLOCK.md` written beside each of them, and
+`claude --print` per directory, a `.warlock.md` written beside each of them, and
 one manifest save at the end. They pass the same gate the cheap writes do, asked
 before a single directory is walked — a boundary asked any later would be asked
 after somebody's tokens were spent and somebody else's prose overwritten, and no

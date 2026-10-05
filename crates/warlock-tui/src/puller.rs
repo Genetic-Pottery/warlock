@@ -524,7 +524,7 @@ where
                     Step::Refreshing(directory) => {
                         phase(
                             app,
-                            &format!("{directory} — refreshing its WARLOCK.md"),
+                            &format!("{directory} — refreshing its .warlock.md"),
                             now,
                         );
                     }

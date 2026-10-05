@@ -92,7 +92,7 @@ fn a_dir() -> TempDir {
 }
 
 fn a_manifest() -> Manifest {
-    Manifest::with_entries([PactEntry::new(".", "docs", "docs/WARLOCK.md")
+    Manifest::with_entries([PactEntry::new(".", "docs", "docs/.warlock.md")
         .expect("a relative module path is inside the root")
         .with_scope(SCOPE)])
     .with_scopes([ScopeRecord::new(SCOPE, TEAM, "In Review", LABEL)])

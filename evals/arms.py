@@ -24,7 +24,7 @@ LINE = re.compile(r"^- `([^`]+)` \(([^)]+)\)(?: — (.*?))?(?: · declares .*)?$
 
 
 def document(rel: str) -> str:
-    return (REPO / rel / "WARLOCK.md").read_text()
+    return (REPO / rel / ".warlock.md").read_text()
 
 
 def declares(rel: str, shown: int) -> str:
@@ -69,7 +69,7 @@ def listing(rel: str) -> str:
     return "\n".join(
         f"{p.name} ({p.stat().st_size // 1024} KB)"
         for p in sorted(directory.iterdir())
-        if p.is_file() and p.name != "WARLOCK.md"
+        if p.is_file() and p.name != ".warlock.md"
     )
 
 
@@ -88,7 +88,7 @@ def repomap(rel: str, budget: int) -> str:
 
     directory = (REPO / rel).resolve()
     files = sorted(
-        str(p) for p in directory.iterdir() if p.is_file() and p.name != "WARLOCK.md"
+        str(p) for p in directory.iterdir() if p.is_file() and p.name != ".warlock.md"
     )
     mapper = RepoMap(
         map_tokens=budget,

@@ -37,7 +37,7 @@ fn a_dir() -> tempfile::TempDir {
 // own fields where it found them and a promise about a hash needs a hash to be
 // about. An un-pact drops whole entries, so it neither knows nor cares.
 fn entry(module: &str) -> PactEntry {
-    PactEntry::new(".", module, format!("{module}/WARLOCK.md"))
+    PactEntry::new(".", module, format!("{module}/.warlock.md"))
         .expect("a relative module path is inside the root")
         .with_grant(HASH, AT)
 }
@@ -51,7 +51,7 @@ fn a_manifest() -> Manifest {
     ])
 }
 
-// The documents are on disk rather than assumed, because "every `WARLOCK.md`
+// The documents are on disk rather than assumed, because "every `.warlock.md`
 // stays where it was" is one of the things an un-pact promises and a promise
 // about files needs files to be about.
 fn a_repository() -> tempfile::TempDir {
@@ -157,7 +157,7 @@ fn an_open_boundary_drops_the_subtree_and_leaves_every_document_on_disk() {
     // The promise the whole command is shaped around: warlock forgot the
     // pact, and the prose is still the repository's.
     for module in ["crates", "crates/engine", "crates/engine/src", "docs"] {
-        let document = repo.path().join(module).join("WARLOCK.md");
+        let document = repo.path().join(module).join(".warlock.md");
         assert!(document.is_file(), "{} was removed", document.display());
     }
 }
@@ -402,7 +402,7 @@ fn an_open_boundary_writes_the_scope_and_moves_nothing_else_in_the_file() {
     let docs = stored(repo.path(), "docs");
     assert_eq!(docs.scope(), Some("billing"));
     // The one field a person owns, and nothing else on the entry.
-    assert_eq!(docs.document(), "docs/WARLOCK.md");
+    assert_eq!(docs.document(), "docs/.warlock.md");
     assert_eq!(docs.granted_hash(), Some(HASH));
     assert_eq!(docs.granted_at(), Some(AT));
 
@@ -486,7 +486,7 @@ fn removing_a_scope_clears_it_and_leaves_the_document_and_the_grant() {
     assert_eq!(status_for(&Ok(())), 0);
     let engine = stored(repo.path(), "crates/engine");
     assert_eq!(engine.scope(), None);
-    assert_eq!(engine.document(), "crates/engine/WARLOCK.md");
+    assert_eq!(engine.document(), "crates/engine/.warlock.md");
     assert_eq!(engine.granted_hash(), Some(HASH));
     assert_eq!(engine.granted_at(), Some(AT));
     // The entry above it kept its own boundary: this is one entry's field.
@@ -730,7 +730,7 @@ fn a_name_nothing_records_gets_its_scope_and_its_record_from_one_write() {
         assert_eq!(after.entry(module), untouched.entry(module), "{module}");
     }
     let docs = stored(repo.path(), "docs");
-    assert_eq!(docs.document(), "docs/WARLOCK.md");
+    assert_eq!(docs.document(), "docs/.warlock.md");
     assert_eq!(docs.granted_hash(), Some(HASH));
     assert_eq!(docs.granted_at(), Some(AT));
 }
@@ -1052,8 +1052,8 @@ const CLOSED: &str = "data-plane";
 fn a_manifest_of_boundaries_both_ways() -> Manifest {
     Manifest::with_entries([
         // Spelled out rather than through `entry`, which would document the
-        // root as `./WARLOCK.md`.
-        PactEntry::new(".", ".", "WARLOCK.md")
+        // root as `./.warlock.md`.
+        PactEntry::new(".", ".", ".warlock.md")
             .expect("the repository root is inside itself")
             .with_grant(HASH, AT),
         entry("crates").with_scope(HELD),
@@ -1065,7 +1065,7 @@ fn a_manifest_of_boundaries_both_ways() -> Manifest {
 }
 
 // No documents on disk: these tests are about which un-pacts are allowed, and
-// neither door reads a `WARLOCK.md` to decide that. That an un-pact leaves
+// neither door reads a `.warlock.md` to decide that. That an un-pact leaves
 // every document where it was is pinned above, over a repository that has
 // them.
 fn a_repository_of_boundaries() -> (tempfile::TempDir, tempfile::TempDir) {

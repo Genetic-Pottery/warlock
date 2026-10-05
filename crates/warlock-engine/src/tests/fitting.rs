@@ -150,10 +150,10 @@ fn a_directory_sends_its_own_files_and_its_children_summarise_themselves() {
     let dir = tempfile::tempdir().expect("a temporary directory");
     write(dir.path(), "Cargo.toml", "[package]\n");
     write(dir.path(), "build.rs", "fn main() {}\n");
-    write(dir.path(), "src/WARLOCK.md", "# src\n\nThe code.\n");
+    write(dir.path(), "src/.warlock.md", "# src\n\nThe code.\n");
     write(dir.path(), "src/lib.rs", "//! Core engine.\n");
     write(dir.path(), "src/inner/lib.rs", "//! Deeper still.\n");
-    write(dir.path(), "src/inner/WARLOCK.md", "# inner\n");
+    write(dir.path(), "src/inner/.warlock.md", "# inner\n");
     write(dir.path(), "tests/it.rs", "#[test] fn works() {}\n");
 
     let files = own_files(dir.path()).expect("walks");
@@ -195,8 +195,8 @@ fn two_gathers_of_an_unchanged_directory_are_the_same_value() {
     // simply kept what the filesystem offered would have to be lucky.
     write(dir.path(), "zeta.rs", "//! z\n");
     write(dir.path(), "alpha.rs", "//! a\n");
-    write(dir.path(), "zeta/WARLOCK.md", "# zeta\n");
-    write(dir.path(), "alpha/WARLOCK.md", "# alpha\n");
+    write(dir.path(), "zeta/.warlock.md", "# zeta\n");
+    write(dir.path(), "alpha/.warlock.md", "# alpha\n");
 
     let files = own_files(dir.path()).expect("walks");
     let children = child_documents(dir.path()).expect("walks");

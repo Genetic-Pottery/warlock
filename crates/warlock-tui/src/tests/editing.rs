@@ -20,14 +20,14 @@ const NOT_A_PROGRAM: &str = "warlock-test-no-such-editor-4c19be";
 //     <root>                          pacted, stale, documented
 //     └── crates                      unpacted, no document
 //         └── crates/engine           pacted, fresh, documented
-//             WARLOCK.md
+//             .warlock.md
 fn tree(root: &Path) -> Tree {
     let engine = root.join("crates/engine");
     Tree::new(
-        Node::new(root, root.join("WARLOCK.md"), NodeState::PactedStale).with_children([
+        Node::new(root, root.join(".warlock.md"), NodeState::PactedStale).with_children([
             Node::new(root.join("crates"), None::<PathBuf>, NodeState::Unpacted).with_children([
-                Node::new(&engine, engine.join("WARLOCK.md"), NodeState::PactedFresh)
-                    .with_files([engine.join("WARLOCK.md")]),
+                Node::new(&engine, engine.join(".warlock.md"), NodeState::PactedFresh)
+                    .with_files([engine.join(".warlock.md")]),
             ]),
         ]),
     )
@@ -130,7 +130,7 @@ fn the_refusal_names_the_variable_and_says_how_to_set_it() {
 
 #[test]
 fn a_file_row_hands_back_that_file_and_says_nothing() {
-    let path = root().join("crates/engine/WARLOCK.md");
+    let path = root().join("crates/engine/.warlock.md");
     let mut app = app_on(&path);
     let before = app.clone();
 
@@ -141,7 +141,7 @@ fn a_file_row_hands_back_that_file_and_says_nothing() {
 
 #[test]
 fn a_press_while_a_run_is_in_flight_suspends_nothing_and_says_so_on_the_progress_line() {
-    let mut app = app_on(&root().join("crates/engine/WARLOCK.md"));
+    let mut app = app_on(&root().join("crates/engine/.warlock.md"));
     // The run the press is going to bounce off, as the event loop would have
     // told the app about it.
     app.set_pact_in_flight(root().join("crates/tui"), 3, 12);
@@ -172,7 +172,7 @@ fn a_press_while_a_run_is_in_flight_suspends_nothing_and_says_so_on_the_progress
 
 #[test]
 fn leaning_on_the_edit_key_during_a_run_changes_nothing_further() {
-    let mut app = app_on(&root().join("crates/engine/WARLOCK.md"));
+    let mut app = app_on(&root().join("crates/engine/.warlock.md"));
     app.set_pact_in_flight(root().join("crates/tui"), 3, 12);
 
     assert_eq!(edit_target(&mut app, true), None);
@@ -221,7 +221,7 @@ fn a_documented_directory_is_refused_in_the_words_v_uses() {
     assert!(message.contains("is a directory"), "{message}");
     // One keystroke away from what the reader wanted, so the refusal names
     // the document row beneath the directory.
-    assert!(message.contains("WARLOCK.md"), "{message}");
+    assert!(message.contains(".warlock.md"), "{message}");
 }
 
 #[test]
@@ -253,7 +253,7 @@ mod outcomes {
     use super::{Editor, NOT_A_PROGRAM, editor, run_editor};
 
     fn file() -> &'static Path {
-        Path::new("/repo/crates/engine/WARLOCK.md")
+        Path::new("/repo/crates/engine/.warlock.md")
     }
 
     // A `/bin/sh` that does `script` and nothing else.
@@ -332,7 +332,7 @@ mod back {
         let repo = tempfile::tempdir().expect("a temporary directory");
         let engine = repo.path().join("crates/engine");
         fs::create_dir_all(&engine).expect("the fixture's directories");
-        fs::write(engine.join("WARLOCK.md"), DOCUMENT).expect("the document");
+        fs::write(engine.join(".warlock.md"), DOCUMENT).expect("the document");
         fs::write(engine.join("notes.txt"), NOTES).expect("a plain file");
         // A load walks up looking for a `.git/` and refuses without one.
         // Nothing inside it is ever read: the walk skips hidden
@@ -342,7 +342,7 @@ mod back {
 
         let hash = subtree_hash(&engine).expect("a directory just written hashes");
         Manifest::with_entries([
-            PactEntry::new(repo.path(), &engine, engine.join("WARLOCK.md"))
+            PactEntry::new(repo.path(), &engine, engine.join(".warlock.md"))
                 .expect("a module inside the root")
                 .with_grant(hash, GRANTED_AT),
         ])
@@ -411,7 +411,7 @@ mod back {
         let repo = a_repo();
         let (mut app, scope) = loaded(&repo);
         let engine = repo.path().join("crates/engine");
-        let edited = engine.join("WARLOCK.md");
+        let edited = engine.join(".warlock.md");
         assert_eq!(
             state_of(&app, &engine),
             Some(NodeState::PactedFresh),
@@ -433,7 +433,7 @@ mod back {
         let repo = a_repo();
         let (mut app, scope) = loaded(&repo);
         let now = Instant::now();
-        let edited = repo.path().join("crates/engine/WARLOCK.md");
+        let edited = repo.path().join("crates/engine/.warlock.md");
         // A run behind the document, so that "the document is still
         // showing" is a claim about two cards rather than about the only
         // one there is.
@@ -466,7 +466,7 @@ mod back {
         let repo = a_repo();
         let (mut app, scope) = loaded(&repo);
         let now = Instant::now();
-        let edited = repo.path().join("crates/engine/WARLOCK.md");
+        let edited = repo.path().join("crates/engine/.warlock.md");
         with_an_account(&mut app, now);
         app.show_document(lines_of(DOCUMENT), false);
         // Round to the run, past the conversation the field is drawn under.
@@ -500,7 +500,7 @@ mod back {
         let repo = a_repo();
         let (mut app, scope) = loaded(&repo);
         let now = Instant::now();
-        let edited = repo.path().join("crates/engine/WARLOCK.md");
+        let edited = repo.path().join("crates/engine/.warlock.md");
         let notes = repo.path().join("crates/engine/notes.txt");
         // A panel small enough to have a window to park, and a reader who
         // has parked it: a card read again for no reason would put them
@@ -541,7 +541,7 @@ mod back {
         let repo = a_repo();
         let (mut app, scope) = loaded(&repo);
         let now = Instant::now();
-        let edited = repo.path().join("crates/engine/WARLOCK.md");
+        let edited = repo.path().join("crates/engine/.warlock.md");
 
         fs::write(&edited, REWRITTEN).expect("the document rewrites");
         came_back(&mut app, &scope, &mut Manifest::new(), &edited, None);
@@ -559,7 +559,7 @@ mod back {
         let repo = a_repo();
         let (mut app, scope) = loaded(&repo);
         let now = Instant::now();
-        let edited = repo.path().join("crates/engine/WARLOCK.md");
+        let edited = repo.path().join("crates/engine/.warlock.md");
         app.show_document(lines_of(DOCUMENT), false);
 
         // An editor that took the file with it, which is the same failure
@@ -579,7 +579,7 @@ mod back {
             "the card that could not be read was emptied"
         );
         let message = app.message().expect("a read that failed says so");
-        assert!(message.contains("WARLOCK.md"), "{message}");
+        assert!(message.contains(".warlock.md"), "{message}");
         assert!(!message.contains('\n'), "the footer is one line: {message}");
     }
 }

@@ -77,7 +77,7 @@ fn a_manifest() -> Manifest {
 }
 
 fn pacted(directory: &str, scope: &str) -> PactEntry {
-    PactEntry::new(".", directory, format!("{directory}/WARLOCK.md"))
+    PactEntry::new(".", directory, format!("{directory}/.warlock.md"))
         .expect("a relative module path is inside the root")
         .with_scope(scope)
 }

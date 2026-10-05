@@ -23,7 +23,7 @@ fn untouched(path: &Path, contents: &[u8]) {
 fn a_view_of_an_ordinary_file_is_the_whole_of_it() {
     let dir = tempfile::tempdir().expect("a temporary directory");
     let contents = "# engine\n\nThe core.\n";
-    let path = write(dir.path(), "WARLOCK.md", contents);
+    let path = write(dir.path(), ".warlock.md", contents);
 
     let Viewed { text, cut } = view_file(&path).expect("an ordinary file reads");
 
@@ -66,7 +66,7 @@ fn a_file_that_may_not_be_read_is_a_read_failure_naming_it() {
 
     let dir = tempfile::tempdir().expect("a temporary directory");
     let contents = "# engine\n\nThe core.\n";
-    let path = write(dir.path(), "WARLOCK.md", contents);
+    let path = write(dir.path(), ".warlock.md", contents);
     fs::set_permissions(&path, fs::Permissions::from_mode(0o000)).expect("chmods");
     if fs::read(&path).is_ok() {
         // Running as root: no file is unreadable, so there is nothing here
@@ -110,7 +110,7 @@ fn a_directory_is_a_read_failure_naming_it() {
 #[test]
 fn a_second_view_reads_the_file_as_it_is_now() {
     let dir = tempfile::tempdir().expect("a temporary directory");
-    let path = write(dir.path(), "WARLOCK.md", "# engine\n");
+    let path = write(dir.path(), ".warlock.md", "# engine\n");
 
     let first = view_file(&path).expect("reads").text;
     fs::write(&path, "# engine\n\nRewritten.\n").expect("rewrites the file");

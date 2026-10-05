@@ -66,7 +66,7 @@ impl NodeSet {
     /// use warlock_tui::NodeSet;
     ///
     /// let tree = Tree::new(
-    ///     Node::new("repo", "repo/WARLOCK.md", NodeState::PactedStale)
+    ///     Node::new("repo", "repo/.warlock.md", NodeState::PactedStale)
     ///         .with_children([Node::new("repo/docs", None, NodeState::Unpacted)]),
     /// );
     /// let watched = NodeSet::from_tree(&tree);
@@ -120,11 +120,11 @@ impl NodeSet {
 /// use warlock_engine::{Node, NodeState, Tree};
 /// use warlock_tui::WatchPolicy;
 ///
-/// let tree = Tree::new(Node::new("repo", "repo/WARLOCK.md", NodeState::PactedStale));
+/// let tree = Tree::new(Node::new("repo", "repo/.warlock.md", NodeState::PactedStale));
 /// let mut policy = WatchPolicy::new(&tree);
 ///
 /// let saved_at = Instant::now();
-/// assert!(policy.saw("repo/WARLOCK.md", saved_at), "a file in a walked directory");
+/// assert!(policy.saw("repo/.warlock.md", saved_at), "a file in a walked directory");
 /// assert!(!policy.due(saved_at), "not yet: the disk has only just moved");
 ///
 /// let settled = saved_at + warlock_tui::QUIET_PERIOD;

@@ -10,7 +10,7 @@ const ROOT: &str = "/repo";
 
 fn pacts(entries: &[(&str, Option<&str>)]) -> Manifest {
     Manifest::with_entries(entries.iter().map(|(module, scope)| {
-        let entry = PactEntry::new(ROOT, module, format!("{module}/WARLOCK.md"))
+        let entry = PactEntry::new(ROOT, module, format!("{module}/.warlock.md"))
             .expect("a relative module path is inside the root");
         match scope {
             Some(scope) => entry.with_scope(*scope),

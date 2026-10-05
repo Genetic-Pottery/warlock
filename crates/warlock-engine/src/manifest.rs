@@ -60,7 +60,7 @@ impl Manifest {
     /// ```
     /// use warlock_engine::{Manifest, PactEntry, ScopeRecord};
     ///
-    /// let manifest = Manifest::with_entries([PactEntry::new(".", "crates/engine", "crates/engine/WARLOCK.md")?])
+    /// let manifest = Manifest::with_entries([PactEntry::new(".", "crates/engine", "crates/engine/.warlock.md")?])
     ///     .with_scopes([ScopeRecord::new("data-plane", "WAR", "In Review", "area/data-plane")]);
     ///
     /// // Every pact gone, and the record that no pact now names is still there.
@@ -117,7 +117,7 @@ impl Manifest {
     /// ```
     /// use warlock_engine::{Manifest, PactEntry};
     ///
-    /// let entry = PactEntry::new(".", "crates/engine", "crates/engine/WARLOCK.md")?;
+    /// let entry = PactEntry::new(".", "crates/engine", "crates/engine/.warlock.md")?;
     /// let toml = Manifest::with_entries([entry]).to_toml_string()?;
     ///
     /// assert!(toml.starts_with("version = 1\n"));
@@ -214,7 +214,7 @@ impl Manifest {
     /// use warlock_engine::{Manifest, PactEntry};
     ///
     /// let root = tempfile::tempdir()?;
-    /// let entry = PactEntry::new(root.path(), "crates/engine", "crates/engine/WARLOCK.md")?;
+    /// let entry = PactEntry::new(root.path(), "crates/engine", "crates/engine/.warlock.md")?;
     /// let manifest = Manifest::with_entries([entry]);
     ///
     /// manifest.save(root.path())?;
@@ -317,8 +317,8 @@ impl PactEntry {
     /// ```
     /// use warlock_engine::PactEntry;
     ///
-    /// let under_a = PactEntry::new("/tmp/a", "/tmp/a/crates/engine", "/tmp/a/crates/engine/WARLOCK.md")?;
-    /// let under_b = PactEntry::new("/tmp/b", "/tmp/b/crates/engine", "/tmp/b/crates/engine/WARLOCK.md")?;
+    /// let under_a = PactEntry::new("/tmp/a", "/tmp/a/crates/engine", "/tmp/a/crates/engine/.warlock.md")?;
+    /// let under_b = PactEntry::new("/tmp/b", "/tmp/b/crates/engine", "/tmp/b/crates/engine/.warlock.md")?;
     ///
     /// assert_eq!(under_a.module(), "crates/engine");
     /// assert_eq!(under_a, under_b);
@@ -375,7 +375,7 @@ impl PactEntry {
     /// ```
     /// use warlock_engine::PactEntry;
     ///
-    /// let entry = PactEntry::new(".", "crates/engine", "crates/engine/WARLOCK.md")?
+    /// let entry = PactEntry::new(".", "crates/engine", "crates/engine/.warlock.md")?
     ///     .with_grant("d0f5a1", "2026-08-19T07:32:00Z")
     ///     .with_scope("data-plane");
     ///

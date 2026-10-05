@@ -21,7 +21,7 @@ impl Node {
     /// ```
     /// use warlock_engine::{Node, NodeState};
     ///
-    /// let module = Node::new("repo/docs", "repo/docs/WARLOCK.md", NodeState::Unpacted);
+    /// let module = Node::new("repo/docs", "repo/docs/.warlock.md", NodeState::Unpacted);
     /// assert!(module.document.is_some());
     /// assert!(module.files.is_empty());
     ///
@@ -50,8 +50,8 @@ impl Node {
     /// ```
     /// use warlock_engine::{Node, NodeState};
     ///
-    /// let module = Node::new("repo/docs", "repo/docs/WARLOCK.md", NodeState::Unpacted)
-    ///     .with_files(["repo/docs/WARLOCK.md", "repo/docs/adr.md"].map(std::path::PathBuf::from));
+    /// let module = Node::new("repo/docs", "repo/docs/.warlock.md", NodeState::Unpacted)
+    ///     .with_files(["repo/docs/.warlock.md", "repo/docs/adr.md"].map(std::path::PathBuf::from));
     /// assert_eq!(module.files.len(), 2);
     /// // Files are a listing, not children: a node with files is still a leaf.
     /// assert!(module.is_leaf());
@@ -84,7 +84,7 @@ impl Node {
     /// ```
     /// use warlock_engine::{Node, NodeState};
     ///
-    /// let engine = Node::new("repo/engine", "repo/engine/WARLOCK.md", NodeState::PactedFresh)
+    /// let engine = Node::new("repo/engine", "repo/engine/.warlock.md", NodeState::PactedFresh)
     ///     .with_scope(Some("data-plane".to_owned()));
     /// assert_eq!(engine.scope.as_deref(), Some("data-plane"));
     /// // Still an ordinary fresh node: a scope gates nothing and colours nothing.
@@ -157,10 +157,10 @@ impl Tree {
     /// use warlock_engine::{Node, NodeState, Tree};
     ///
     /// let tree = Tree::new(
-    ///     Node::new("repo", "repo/WARLOCK.md", NodeState::PactedStale)
+    ///     Node::new("repo", "repo/.warlock.md", NodeState::PactedStale)
     ///         .with_children([Node::new(
     ///             "repo/docs",
-    ///             "repo/docs/WARLOCK.md",
+    ///             "repo/docs/.warlock.md",
     ///             NodeState::PactedFresh,
     ///         )]),
     /// );
@@ -180,10 +180,10 @@ impl Tree {
     /// use warlock_engine::{Node, NodeState, Tree};
     ///
     /// let tree = Tree::new(
-    ///     Node::new("repo", "repo/WARLOCK.md", NodeState::PactedStale)
+    ///     Node::new("repo", "repo/.warlock.md", NodeState::PactedStale)
     ///         .with_children([Node::new(
     ///             "repo/docs",
-    ///             "repo/docs/WARLOCK.md",
+    ///             "repo/docs/.warlock.md",
     ///             NodeState::PactedFresh,
     ///         )]),
     /// );
@@ -207,10 +207,10 @@ impl Tree {
     /// use warlock_engine::{Node, NodeState, Tree};
     ///
     /// let tree = Tree::new(
-    ///     Node::new("repo", "repo/WARLOCK.md", NodeState::PactedStale)
+    ///     Node::new("repo", "repo/.warlock.md", NodeState::PactedStale)
     ///         .with_children([Node::new(
     ///             "repo/docs",
-    ///             "repo/docs/WARLOCK.md",
+    ///             "repo/docs/.warlock.md",
     ///             NodeState::PactedFresh,
     ///         )]),
     /// );

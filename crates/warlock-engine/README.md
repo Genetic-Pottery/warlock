@@ -14,7 +14,7 @@ and grants the hashes that make it green:
 - `Node`, one node of the project tree: its `path`, the path of its document
   when it has one (`document: Option<PathBuf>`), its `state`, its `children`,
   and `files: Vec<PathBuf>` — the files sitting directly in that directory, its
-  own `WARLOCK.md` among them, sorted by path. See [files are a listing, not
+  own `.warlock.md` among them, sorted by path. See [files are a listing, not
   children](#files-are-a-listing-not-children) below.
 - `Tree`, which owns the root node and can be walked, tallied and searched:
   - `Tree::walk` — a depth-first iterator (`DepthFirst`) yielding every node
@@ -45,7 +45,7 @@ and grants the hashes that make it green:
   `AgentResponse` and `AgentError` — which this crate defines and never
   implements: running a model means running the `claude` CLI, and that
   subprocess belongs to the binary on the far side of the seam.
-- `pact_subtree`, the operation a keystroke runs: write a `WARLOCK.md` for every
+- `pact_subtree`, the operation a keystroke runs: write a `.warlock.md` for every
   directory at and below the selected one, children first, then hash each of
   them and grant it the hash just computed — with `pact_directory` for one
   directory, `gather_request` for the context one pass is scoped to,
@@ -63,7 +63,7 @@ directory by `load_tree` — and what `load_tree` loads is decided by three rule
 
 - **Every directory the walk reaches is a node**, the working directory
   included. Nothing is pruned for being undocumented.
-- **A directory that directly contains a `WARLOCK.md` is a module node**, and
+- **A directory that directly contains a `.warlock.md` is a module node**, and
   that path becomes its `document`. That is the whole test — no document is
   parsed. A directory with no document of its own is a node with
   `document: None`: an ordinary directory that has no documentation yet.
@@ -103,7 +103,7 @@ writes that manifest and the cache beside it; it *walks* directories — via the
 skipped and a `target/` the repository ignores never appears, all without a
 hand-maintained list and never following a symlink; it *reads the bytes* of
 the files under a pacted directory, in order to hash them or to put them in a
-request; and it *writes a `WARLOCK.md`* for a directory a pact covered, verbatim
+request; and it *writes a `.warlock.md`* for a directory a pact covered, verbatim
 from what came back, through the same write-beside-and-rename its manifest goes
 through. It reads those bytes and does not interpret them: no document is
 parsed, and the only thing a hash ever gives back is a digest. That is the whole
@@ -132,7 +132,7 @@ listing and nothing more, and every consequence of that is deliberate:
   The listing is a view's input, never the trigger's.
 
 A loaded node lists what the walk saw directly inside the directory, its own
-`WARLOCK.md` included: a faithful listing rather than a listing minus one
+`.warlock.md` included: a faithful listing rather than a listing minus one
 special name, and a front end that would rather not draw the document twice
 leaves it out on the way to the screen. Subdirectories are not in the list;
 they are `children`. The order is the loader's doing, not the type's:
@@ -160,13 +160,13 @@ version = 1
 
 [[pact]]
 module = "crates/warlock-engine"
-document = "crates/warlock-engine/WARLOCK.md"
+document = "crates/warlock-engine/.warlock.md"
 granted_hash = "9f2b1c…"
 granted_at = "2026-08-19T14:03:11Z"
 
 [[pact]]
 module = "crates/warlock-tui"
-document = "crates/warlock-tui/WARLOCK.md"
+document = "crates/warlock-tui/.warlock.md"
 ```
 
 ### The keys
@@ -286,7 +286,7 @@ deliberate rather than an oversight:
 | **Directories themselves** | Only files contribute, so an empty directory is invisible to the hash — there is nothing in it to be out of date about. |
 | **Symlinks** | Never followed and never hashed as their target: a link inside the subtree already has its target hashed, and a link out of it is not the subtree's content. |
 
-The hash covers the node's own `WARLOCK.md` and every file in every descendant
+The hash covers the node's own `.warlock.md` and every file in every descendant
 directory. So editing any file at or below the node — the document included, by
 hand, which section 9 says is correct behaviour to be reconciled rather than
 fought — changes that node's hash and every ancestor's. Adding a file, deleting
@@ -386,11 +386,11 @@ rooted at included. The loader drops nothing for being undocumented, so the
 tree is the shape of the working directory rather than an opinion about which
 parts of it are worth seeing.
 
-**A directory is a module node when it directly contains a `WARLOCK.md`**, and
+**A directory is a module node when it directly contains a `.warlock.md`**, and
 that path becomes its `document: Some(...)`. That is the whole test. Warlock
 never parses a document — not its headings, not its length, not a word of it. It
 cares only that one exists, because the design doc makes the tree of module
-documents the interface, and a `WARLOCK.md` is a module's claim to be one. No
+documents the interface, and a `.warlock.md` is a module's claim to be one. No
 other name is special: a `README.md` beside it is the project's file, written
 for people, and Warlock treats it as an ordinary file — it documents nothing
 here, though its bytes go into the subtree hash like any other file's.
@@ -439,7 +439,7 @@ Traversal is the `ignore` crate, so `.gitignore` at every level, hidden
 directories (`.git/` among them) and global excludes are honoured as git
 honours them — there is no hand-maintained skip list to drift out of date, and
 `target/` disappears because the repository already ignores it. `.warlock/` is
-pruned unconditionally on top of that, even if someone puts a `WARLOCK.md` in
+pruned unconditionally on top of that, even if someone puts a `.warlock.md` in
 it. Symlinks are never followed, so a symlinked directory cycle terminates
 instead of hanging. Siblings come out ordered by directory name, so loading an
 unchanged tree twice gives two `Tree` values that compare equal.
@@ -451,7 +451,7 @@ rules a directory does — a gitignored, hidden or `.warlock/` file is absent fo
 the same reason a gitignored, hidden or `.warlock/` directory is — and is
 ordered the same way, by name, with each node's list sorted before the tree is
 built. (The one asymmetry: a node's `document` is a direct filesystem check for
-`WARLOCK.md`, so an ignore rule covering a document still leaves it documenting
+`.warlock.md`, so an ignore rule covering a document still leaves it documenting
 its node while keeping it out of the listing.)
 
 ### Colouring goes through the hash

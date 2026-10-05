@@ -51,9 +51,11 @@ fn holding(home: &Path, repo_root: &Path, sigils: &[&str]) {
 }
 
 fn scoped(repo_root: &Path, module: &str, scope: &str) {
-    Manifest::with_entries([PactEntry::new(".", module, format!("{module}/WARLOCK.md"))
-        .expect("a relative module path is inside the root")
-        .with_scope(scope)])
+    Manifest::with_entries(
+        [PactEntry::new(".", module, format!("{module}/.warlock.md"))
+            .expect("a relative module path is inside the root")
+            .with_scope(scope)],
+    )
     .save(repo_root)
     .expect("a manifest that saves");
 }
@@ -331,7 +333,7 @@ fn an_open_boundary_documents_every_directory_and_saves_the_manifest_once() {
         run.subtree.failures
     );
     for module in [".", "alpha", "beta"] {
-        let document = repo.path().join(module).join("WARLOCK.md");
+        let document = repo.path().join(module).join(".warlock.md");
         assert!(document.is_file(), "{} is missing", document.display());
     }
     // Saved, and saved once: no manifest existed while the passes were
@@ -420,7 +422,7 @@ fn a_repaired_directory_says_what_was_mended_between_entering_it_and_documenting
     );
     // A mended directory is documented and granted like any other: the
     // repair cost the run passes, not its manifest.
-    assert!(repo.path().join("alpha").join("WARLOCK.md").is_file());
+    assert!(repo.path().join("alpha").join(".warlock.md").is_file());
     assert_eq!(stored_modules(repo.path()), [".", "alpha", "beta"]);
 }
 
@@ -542,7 +544,7 @@ fn a_closed_boundary_refuses_before_a_pass_is_spent_and_leaves_the_manifest_alon
     assert_eq!(status_for(&Err(error)), 3);
     // And nothing was spent: no document beside the directory, and the
     // manifest is the bytes that were read.
-    assert!(!repo.path().join("alpha").join("WARLOCK.md").exists());
+    assert!(!repo.path().join("alpha").join(".warlock.md").exists());
     assert_eq!(manifest_bytes(repo.path()).as_deref(), Some(&before[..]));
 }
 
@@ -560,7 +562,7 @@ fn a_scope_this_machine_holds_lets_the_run_through() {
         .expect("this machine holds the boundary over `alpha`");
 
     assert_eq!(run.agent.directories(), ["alpha", "alpha"]);
-    assert!(repo.path().join("alpha").join("WARLOCK.md").is_file());
+    assert!(repo.path().join("alpha").join(".warlock.md").is_file());
     // And the boundary the run passed through is still on the entry it was
     // written on: a run describes a directory, it does not re-decide whose
     // it is.
@@ -628,8 +630,8 @@ fn one_directory_failing_names_it_counts_it_and_leaves_the_rest_of_the_run_grant
     // twice — its file pass is the one that refuses, and a refusal ends the
     // directory before there is anything to synthesise.
     assert_eq!(run.agent.directories(), ["beta", "beta", "alpha", "."]);
-    assert!(repo.path().join("beta").join("WARLOCK.md").is_file());
-    assert!(!repo.path().join("alpha").join("WARLOCK.md").exists());
+    assert!(repo.path().join("beta").join(".warlock.md").is_file());
+    assert!(!repo.path().join("alpha").join(".warlock.md").exists());
     // And the manifest was saved anyway, holding what the rest of the
     // subtree earned: `beta` is granted, `alpha` has no entry at all, and
     // the root sits above a directory with no document so it is pacted
@@ -806,12 +808,12 @@ fn a_cancel_stops_the_descent_between_directories_and_saves_what_finished() {
         "the directory the run stopped before was announced: {:?}",
         run.lines
     );
-    assert!(!repo.path().join("WARLOCK.md").exists());
+    assert!(!repo.path().join(".warlock.md").exists());
     // What did finish is on disk and in the manifest, hashed and granted:
     // the whole point of stopping between directories rather than dying
     // where the key was pressed.
     for module in ["alpha", "beta"] {
-        assert!(repo.path().join(module).join("WARLOCK.md").is_file());
+        assert!(repo.path().join(module).join(".warlock.md").is_file());
     }
     let manifest = load_manifest(repo.path()).expect("a manifest that reads");
     assert_eq!(stored_modules(repo.path()), ["alpha", "beta"]);

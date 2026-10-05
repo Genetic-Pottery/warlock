@@ -10,7 +10,7 @@ fn unjudged() -> PactEntry {
     PactEntry::new(
         ".",
         "crates/warlock-engine",
-        "crates/warlock-engine/WARLOCK.md",
+        "crates/warlock-engine/.warlock.md",
     )
     .expect("a relative path inside the root is storable")
 }
@@ -101,10 +101,10 @@ fn an_unscoped_entry_omits_the_scope_key() {
             "version = 1\n\n",
             "[[pact]]\n",
             "module = \"crates/warlock-engine\"\n",
-            "document = \"crates/warlock-engine/WARLOCK.md\"\n\n",
+            "document = \"crates/warlock-engine/.warlock.md\"\n\n",
             "[[pact]]\n",
             "module = \"crates/warlock-engine\"\n",
-            "document = \"crates/warlock-engine/WARLOCK.md\"\n",
+            "document = \"crates/warlock-engine/.warlock.md\"\n",
             "granted_hash = \"d0f5a1\"\n",
             "granted_at = \"2026-08-19T07:32:00Z\"\n",
         ),
@@ -127,12 +127,12 @@ fn a_manifest_written_before_scopes_existed_loads_unscoped() {
         "version = 1\n\n",
         "[[pact]]\n",
         "module = \"crates/warlock-engine\"\n",
-        "document = \"crates/warlock-engine/WARLOCK.md\"\n",
+        "document = \"crates/warlock-engine/.warlock.md\"\n",
         "granted_hash = \"d0f5a1\"\n",
         "granted_at = \"2026-08-19T07:32:00Z\"\n\n",
         "[[pact]]\n",
         "module = \"crates/warlock-tui\"\n",
-        "document = \"crates/warlock-tui/WARLOCK.md\"\n",
+        "document = \"crates/warlock-tui/.warlock.md\"\n",
     );
     hand_write(root.path(), original);
 
@@ -160,7 +160,7 @@ fn a_scoped_entry_round_trips_byte_for_byte() {
         "version = 1\n\n",
         "[[pact]]\n",
         "module = \"crates/warlock-engine\"\n",
-        "document = \"crates/warlock-engine/WARLOCK.md\"\n",
+        "document = \"crates/warlock-engine/.warlock.md\"\n",
         "scope = \"data-plane\"\n",
         "granted_hash = \"d0f5a1\"\n",
         "granted_at = \"2026-08-19T07:32:00Z\"\n",
@@ -206,7 +206,7 @@ fn an_invalid_scope_loads_untouched_and_is_written_back_unchanged() {
                 "version = 1\n\n",
                 "[[pact]]\n",
                 "module = \"crates/warlock-engine\"\n",
-                "document = \"crates/warlock-engine/WARLOCK.md\"\n",
+                "document = \"crates/warlock-engine/.warlock.md\"\n",
                 "scope = \"{}\"\n",
                 "granted_hash = \"d0f5a1\"\n",
                 "granted_at = \"2026-08-19T07:32:00Z\"\n",
@@ -221,7 +221,7 @@ fn an_invalid_scope_loads_untouched_and_is_written_back_unchanged() {
         assert_eq!(entry.module(), "crates/warlock-engine", "for `{scope}`");
         assert_eq!(
             entry.document(),
-            "crates/warlock-engine/WARLOCK.md",
+            "crates/warlock-engine/.warlock.md",
             "for `{scope}`"
         );
         assert_eq!(entry.granted_hash(), Some("d0f5a1"), "for `{scope}`");
@@ -288,7 +288,7 @@ fn a_scope_record_round_trips_byte_for_byte() {
         "version = 1\n\n",
         "[[pact]]\n",
         "module = \"crates/warlock-engine\"\n",
-        "document = \"crates/warlock-engine/WARLOCK.md\"\n",
+        "document = \"crates/warlock-engine/.warlock.md\"\n",
         "scope = \"data-plane\"\n\n",
         "[[scope]]\n",
         "name = \"data-plane\"\n",
@@ -331,11 +331,11 @@ fn a_scope_a_pact_names_and_no_record_declares_loads() {
         "version = 1\n\n",
         "[[pact]]\n",
         "module = \"crates/warlock-engine\"\n",
-        "document = \"crates/warlock-engine/WARLOCK.md\"\n",
+        "document = \"crates/warlock-engine/.warlock.md\"\n",
         "scope = \"data-plane\"\n\n",
         "[[pact]]\n",
         "module = \"crates/warlock-tui\"\n",
-        "document = \"crates/warlock-tui/WARLOCK.md\"\n",
+        "document = \"crates/warlock-tui/.warlock.md\"\n",
         "scope = \"billing\"\n",
     );
     hand_write(root.path(), original);
@@ -374,7 +374,7 @@ fn a_record_no_pact_names_is_loaded_and_written_back_unchanged() {
         "version = 1\n\n",
         "[[pact]]\n",
         "module = \"crates/warlock-engine\"\n",
-        "document = \"crates/warlock-engine/WARLOCK.md\"\n\n",
+        "document = \"crates/warlock-engine/.warlock.md\"\n\n",
         "[[scope]]\n",
         "name = \"third-party\"\n",
         "team = \"Vendor\"\n",
@@ -432,10 +432,10 @@ fn a_manifest_with_no_records_writes_the_bytes_it_always_did() {
                 "version = 1\n\n",
                 "[[pact]]\n",
                 "module = \"crates/warlock-engine\"\n",
-                "document = \"crates/warlock-engine/WARLOCK.md\"\n\n",
+                "document = \"crates/warlock-engine/.warlock.md\"\n\n",
                 "[[pact]]\n",
                 "module = \"crates/warlock-engine\"\n",
-                "document = \"crates/warlock-engine/WARLOCK.md\"\n",
+                "document = \"crates/warlock-engine/.warlock.md\"\n",
                 "granted_hash = \"d0f5a1\"\n",
                 "granted_at = \"2026-08-19T07:32:00Z\"\n",
             ),
@@ -578,11 +578,11 @@ fn push_and_entry_lookup_use_stored_form() {
 fn paths_are_stored_with_forward_slashes() {
     // Built with the platform separator, stored with slashes.
     let module = Path::new("crates").join("warlock-engine");
-    let document = module.join("WARLOCK.md");
+    let document = module.join(".warlock.md");
     let entry = PactEntry::new(".", &module, &document).expect("inside the root");
 
     assert_eq!(entry.module(), "crates/warlock-engine");
-    assert_eq!(entry.document(), "crates/warlock-engine/WARLOCK.md");
+    assert_eq!(entry.document(), "crates/warlock-engine/.warlock.md");
 
     let text = Manifest::with_entries([entry])
         .to_toml_string()
@@ -598,12 +598,12 @@ fn the_same_content_under_two_roots_serialises_identically() {
     let under = |root: &str| {
         let root = PathBuf::from(root);
         let module = root.join("crates").join("warlock-engine");
-        let document = module.join("WARLOCK.md");
+        let document = module.join(".warlock.md");
         Manifest::with_entries([
             PactEntry::new(&root, &module, &document)
                 .expect("inside the root")
                 .with_grant("d0f5a1", "2026-08-19T07:32:00Z"),
-            PactEntry::new(&root, &root, root.join("WARLOCK.md")).expect("inside the root"),
+            PactEntry::new(&root, &root, root.join(".warlock.md")).expect("inside the root"),
         ])
         .to_toml_string()
         .expect("serialises")
@@ -650,7 +650,7 @@ fn stored_paths_convert_back_to_paths_under_a_root() {
         Path::new("/repo")
             .join("crates")
             .join("warlock-engine")
-            .join("WARLOCK.md")
+            .join(".warlock.md")
     );
     // And back again, unchanged.
     assert_eq!(
@@ -670,7 +670,7 @@ fn a_path_outside_the_root_is_rejected() {
         Err(Error::PathOutsideRoot { .. })
     ));
     assert!(matches!(
-        PactEntry::new("/repo", "/elsewhere", "/elsewhere/WARLOCK.md"),
+        PactEntry::new("/repo", "/elsewhere", "/elsewhere/.warlock.md"),
         Err(Error::PathOutsideRoot { .. })
     ));
 }
@@ -690,7 +690,7 @@ fn a_non_utf8_path_is_rejected() {
 
 #[test]
 fn an_unrecognised_version_is_rejected_before_the_entries_are_read() {
-    let text = "version = 999\n\n[[pact]]\nmodule = \"x\"\ndocument = \"x/WARLOCK.md\"\n";
+    let text = "version = 999\n\n[[pact]]\nmodule = \"x\"\ndocument = \"x/.warlock.md\"\n";
     match Manifest::from_toml_str(text) {
         Err(Error::UnsupportedVersion { found, supported }) => {
             assert_eq!(found, 999);
@@ -706,7 +706,7 @@ fn an_unrecognised_version_is_rejected_before_the_entries_are_read() {
 fn a_malformed_entry_names_itself() {
     let text = concat!(
         "version = 1\n\n",
-        "[[pact]]\nmodule = \"crates/warlock-engine\"\ndocument = \"crates/warlock-engine/WARLOCK.md\"\n\n",
+        "[[pact]]\nmodule = \"crates/warlock-engine\"\ndocument = \"crates/warlock-engine/.warlock.md\"\n\n",
         "[[pact]]\nmodule = \"crates/warlock-tui\"\ndocument = 7\n",
     );
     match Manifest::from_toml_str(text) {
@@ -720,7 +720,7 @@ fn a_malformed_entry_names_itself() {
 #[test]
 fn an_entry_with_an_unknown_key_is_an_error_too() {
     let text =
-        "version = 1\n\n[[pact]]\nmodule = \"x\"\ndocument = \"x/WARLOCK.md\"\nfresh = true\n";
+        "version = 1\n\n[[pact]]\nmodule = \"x\"\ndocument = \"x/.warlock.md\"\nfresh = true\n";
     assert!(matches!(
         Manifest::from_toml_str(text),
         Err(Error::Entry { .. })
@@ -733,7 +733,7 @@ fn the_old_readme_key_is_an_error_rather_than_an_alias() {
     // named. There are no manifests in the wild carrying it, so it is an
     // unknown key like any other — no alias, no migration, no quiet
     // acceptance that would let two spellings of one field coexist.
-    let text = "version = 1\n\n[[pact]]\nmodule = \"x\"\nreadme = \"x/WARLOCK.md\"\n";
+    let text = "version = 1\n\n[[pact]]\nmodule = \"x\"\nreadme = \"x/.warlock.md\"\n";
     assert!(matches!(
         Manifest::from_toml_str(text),
         Err(Error::Entry { .. })
@@ -744,7 +744,7 @@ fn the_old_readme_key_is_an_error_rather_than_an_alias() {
         .to_toml_string()
         .expect("serialises");
     assert!(
-        written.contains("document = \"crates/warlock-engine/WARLOCK.md\""),
+        written.contains("document = \"crates/warlock-engine/.warlock.md\""),
         "{written}"
     );
     assert!(!written.contains("readme"), "{written}");
@@ -959,10 +959,10 @@ fn the_same_manifest_saved_under_two_roots_gives_byte_identical_files() {
     let saved_under = |root: &Path| {
         let module = root.join("crates").join("warlock-engine");
         let manifest = Manifest::with_entries([
-            PactEntry::new(root, &module, module.join("WARLOCK.md"))
+            PactEntry::new(root, &module, module.join(".warlock.md"))
                 .expect("inside the root")
                 .with_grant("d0f5a1", "2026-08-19T07:32:00Z"),
-            PactEntry::new(root, root, root.join("WARLOCK.md")).expect("inside the root"),
+            PactEntry::new(root, root, root.join(".warlock.md")).expect("inside the root"),
         ]);
         manifest.save(root).expect("saves");
         fs::read(manifest_path(root)).expect("reads the file back")
@@ -995,12 +995,12 @@ fn saving_what_was_loaded_gives_the_file_back_byte_for_byte() {
         "version = 1\n\n",
         "[[pact]]\n",
         "module = \"crates/warlock-engine\"\n",
-        "document = \"crates/warlock-engine/WARLOCK.md\"\n",
+        "document = \"crates/warlock-engine/.warlock.md\"\n",
         "granted_hash = \"d0f5a1\"\n",
         "granted_at = \"2026-08-19T07:32:00Z\"\n\n",
         "[[pact]]\n",
         "module = \"crates/warlock-tui\"\n",
-        "document = \"crates/warlock-tui/WARLOCK.md\"\n",
+        "document = \"crates/warlock-tui/.warlock.md\"\n",
     );
     hand_write(root.path(), original);
 
@@ -1020,7 +1020,7 @@ fn loading_a_manifest_from_a_future_schema_is_a_version_error() {
     let root = a_root();
     hand_write(
         root.path(),
-        "version = 999\n\n[[pact]]\nmodule = \"x\"\ndocument = \"x/WARLOCK.md\"\n",
+        "version = 999\n\n[[pact]]\nmodule = \"x\"\ndocument = \"x/.warlock.md\"\n",
     );
 
     match Manifest::load(root.path()) {
@@ -1039,7 +1039,7 @@ fn loading_a_manifest_with_a_bad_entry_names_that_entry() {
         root.path(),
         concat!(
             "version = 1\n\n",
-            "[[pact]]\nmodule = \"crates/warlock-engine\"\ndocument = \"crates/warlock-engine/WARLOCK.md\"\n\n",
+            "[[pact]]\nmodule = \"crates/warlock-engine\"\ndocument = \"crates/warlock-engine/.warlock.md\"\n\n",
             "[[pact]]\nmodule = \"crates/warlock-tui\"\ndocument = 7\n",
         ),
     );

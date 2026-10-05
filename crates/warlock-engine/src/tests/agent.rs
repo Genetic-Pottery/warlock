@@ -254,7 +254,7 @@ fn a_request_has_no_slot_for_the_directorys_own_previous_document() {
         request
             .child_documents()
             .iter()
-            .all(|child| child.directory() != "." && child.directory() != "WARLOCK.md"),
+            .all(|child| child.directory() != "." && child.directory() != ".warlock.md"),
         "a directory's own document is not one of its children's"
     );
 }
