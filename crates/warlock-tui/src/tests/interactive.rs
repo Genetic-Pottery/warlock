@@ -3009,7 +3009,7 @@ mod pulling {
             ready(),
             TEAM,
             vec![LABEL.to_owned()],
-            Some(Assignee::new(VIEWER, "Cole")),
+            Some(Assignee::new(VIEWER, "Ada")),
         ))
     }
 

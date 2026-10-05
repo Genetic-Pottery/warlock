@@ -387,13 +387,13 @@ fn ready_issues_are_ordered_by_priority_then_by_how_much_they_block_then_by_numb
             "WAR-41",
             "Todo",
             Priority::Low,
-            vec![open("WAR-40", Some("Cole"))],
+            vec![open("WAR-40", Some("Ada"))],
         ),
         issue(
             "WAR-42",
             "Todo",
             Priority::Low,
-            vec![open("WAR-40", Some("Cole"))],
+            vec![open("WAR-40", Some("Ada"))],
         ),
         todo("WAR-2", Priority::Urgent),
         todo("WAR-3", Priority::Medium),
@@ -522,7 +522,7 @@ mod named {
             "state": { "name": "Todo", "type": "unstarted" },
             "team": { "key": "WAR" },
             "labels": { "pageInfo": { "hasNextPage": false }, "nodes": [{ "name": "warlock" }] },
-            "assignee": { "id": ME, "name": "Cole" },
+            "assignee": { "id": ME, "name": "Ada" },
             "inverseRelations": { "pageInfo": { "hasNextPage": false }, "nodes": [] },
         })
     }
@@ -676,12 +676,12 @@ mod named {
         // Two people in a workspace can share a display name, and the id is what
         // the key itself answered.
         let mut twin = ticket();
-        twin["assignee"] = json!({ "id": "user-other", "name": "Cole" });
+        twin["assignee"] = json!({ "id": "user-other", "name": "Ada" });
 
-        assert_eq!(refused(&twin, &[]), "assigned to Cole and not to you");
+        assert_eq!(refused(&twin, &[]), "assigned to Ada and not to you");
 
         let mut renamed = ticket();
-        renamed["assignee"] = json!({ "id": ME, "name": "Cole Michaels" });
+        renamed["assignee"] = json!({ "id": ME, "name": "Ada Lovelace" });
 
         assert_eq!(taken(&holding(&renamed), &[]).as_deref(), Some("WAR-133"));
     }

@@ -111,6 +111,16 @@ You can still open files and read them. That is no longer the main event.
   notice and reconcile. But the tool is not optimised for code editing, and
   anyone who wants to is not the customer.
 
+## Requirements
+
+- macOS or Linux. Windows is not supported.
+- Rust 1.97.1 or later, to build from source.
+- `git`.
+- The `claude` CLI, on your `PATH` and logged in.
+- A Linear API key, for `push`, `draft`, and `pull`.
+- `gh`, logged in, if you want `pull` to open pull requests. Without it, `pull`
+  pushes the branch and leaves the pull request text on the ticket.
+
 ## Troubleshooting
 
 **Why are my borders not even?**
@@ -120,8 +130,8 @@ Use a monospace font with box-drawing coverage — most programming fonts have i
 
 ## Contributing
 
-Run these three checks before pushing. CI runs exactly the same three commands on
-every push and pull request, so if they pass locally they pass there too:
+Run these three checks before pushing. CI runs the same three commands on Linux
+and macOS for every push and pull request:
 
 ```sh
 cargo fmt --all --check

@@ -983,7 +983,7 @@ fn named_node() -> Value {
 
     node["team"] = json!({ "key": "WAR" });
     node["labels"] = json!({ "pageInfo": { "hasNextPage": false }, "nodes": [{ "name": "warlock" }, { "name": "area/tui" }] });
-    node["assignee"] = json!({ "id": ME, "name": "Cole" });
+    node["assignee"] = json!({ "id": ME, "name": "Ada" });
     node
 }
 
@@ -1076,11 +1076,11 @@ fn a_named_ticket_carries_the_team_labels_and_assignee_the_queue_filtered_on() {
     // comparable without resolving either.
     assert_eq!(found.team(), "WAR");
     assert_eq!(found.labels(), ["warlock", "area/tui"]);
-    assert_eq!(found.assignee(), Some(&Assignee::new(ME, "Cole")));
+    assert_eq!(found.assignee(), Some(&Assignee::new(ME, "Ada")));
     // The id is what says whether a ticket is yours, and the name is what a
     // refusal prints: two people in a workspace can share a display name.
     assert_eq!(found.assignee().map(Assignee::id), Some(ME));
-    assert_eq!(found.assignee().map(Assignee::name), Some("Cole"));
+    assert_eq!(found.assignee().map(Assignee::name), Some("Ada"));
 }
 
 #[test]

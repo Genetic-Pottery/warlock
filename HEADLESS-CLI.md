@@ -1022,7 +1022,7 @@ $ warlock pull warlock-team
 warlock: passed over `WAR-141` — halted — `warlock resume WAR-141` releases it
 warlock: passed over `WAR-142` — in `In Review`, which is waiting on a human
 warlock: passed over `WAR-143` — in progress elsewhere — this machine holds no run record for it
-warlock: passed over `WAR-144` — blocked by WAR-12 (Cole)
+warlock: passed over `WAR-144` — blocked by WAR-12 (Ada)
 warlock: nothing in the queue for `warlock-team` is ready to work
 $ echo $?
 0
@@ -1038,7 +1038,7 @@ pass-over lines carry:
 ```sh
 warlock: `WAR-9` was not pulled: on team `DAT`, and this scope routes to `WAR`
 warlock: `WAR-9` was not pulled: not labelled `warlock` — it carries area/docs
-warlock: `WAR-9` was not pulled: assigned to Cole and not to you
+warlock: `WAR-9` was not pulled: assigned to Ada and not to you
 warlock: `WAR-9` was not pulled: halted — `warlock resume WAR-9` releases it
 ```
 

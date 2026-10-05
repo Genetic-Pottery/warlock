@@ -2163,15 +2163,11 @@ mod submitting {
         // The behaviour the classifier must not have changed: the words go
         // on the card as the reader's own, one turn is opened, the question
         // is out, and the field is empty behind it. A path is here too,
-        // because `/home/cole/notes` is a message and the reader who typed
+        // because `/src/lib.rs` is a message and the reader who typed
         // it is talking about a file.
         let now = Instant::now();
 
-        for draft in [
-            "why nine passes?",
-            "/home/cole/notes",
-            "tell me about /brief",
-        ] {
+        for draft in ["why nine passes?", "/src/lib.rs", "tell me about /brief"] {
             let (app, chat) = submit(draft, now);
 
             assert_eq!(turns(&app), 1, "{draft:?} did not open one turn");

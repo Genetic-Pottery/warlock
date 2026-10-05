@@ -173,7 +173,7 @@ fn named(issue: QueuedIssue) -> NamedIssue {
         issue,
         TEAM,
         vec![LABEL.to_owned()],
-        Some(Assignee::new(VIEWER, "Cole")),
+        Some(Assignee::new(VIEWER, "Ada")),
     )
 }
 

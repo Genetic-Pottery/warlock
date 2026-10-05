@@ -47,12 +47,14 @@ code as it was. Available arms:
 - `repomap`: aider's map at a matched token budget.
 
 `repomap` is aider's tree-sitter and PageRank map, the free bar a written line
-has to beat. It needs its own virtualenv in `evals/av/`, because aider won't
-build on Python 3.14 and scipy's wheel can't find libstdc++ on NixOS:
+has to beat. It needs its own virtualenv in `evals/av/` on Python 3.12, because aider
+won't build on Python 3.14:
 
-    nix-shell -p python312 --run 'python3.12 -m venv evals/av && evals/av/bin/pip install aider-chat'
-    nix-shell -p gcc --run 'LD_LIBRARY_PATH=$(dirname $(gcc -print-file-name=libstdc++.so.6)) \
-        evals/av/bin/python evals/run.py baseline document repomap listing'
+    python3.12 -m venv evals/av && evals/av/bin/pip install aider-chat
+    evals/av/bin/python evals/run.py baseline document repomap listing
+
+If scipy fails to import because it can't find `libstdc++.so.6`, put the
+directory that holds it on `LD_LIBRARY_PATH` for the second command.
 
 ## The files
 
@@ -104,7 +106,7 @@ fn dump_declared_names() {
 
     WARLOCK_DUMP_DIRS="$PWD/crates/warlock-engine/src:$PWD/crates/warlock-tui/src" \
         cargo test -p warlock-engine --lib dump_declared_names -- --ignored --nocapture \
-        | grep '^DUMP' | sed 's/^DUMP//' > evals/declared.json
+        | grep '^DUMP' | sed "s/^DUMP//; s|$PWD/||g" > evals/declared.json
 
 The dump goes stale as the source changes. To check that it's current, compare
 `declares(rel, 16)` from `arms.py` against the committed document; they must
