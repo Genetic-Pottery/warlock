@@ -4380,7 +4380,7 @@ mod unix {
         use warlock_engine::agent;
 
         use super::super::NOT_A_PROGRAM;
-        use super::{cancel_once_running, clean_up, drained, is_cancelled, pid, printing, scratch};
+        use super::{cancel_once_running, clean_up, drained, is_cancelled, printing, scratch};
         use crate::{Activities, Activity, Cancel, ChatAgent};
 
         // [`PASS`](super::PASS)'s counterpart, deliberately not the same canned stream: a
@@ -4597,7 +4597,7 @@ mod unix {
                 .expect_err("this stand-in sleeps far past its timeout");
 
             assert!(matches!(error, agent::Error::TimedOut { .. }), "{error:?}");
-            let pid = pid(&pid_file).expect("the child wrote its pid");
+            let pid = super::pid(&pid_file).expect("the child wrote its pid");
             assert!(
                 !std::path::Path::new(&format!("/proc/{pid}")).exists(),
                 "process {pid} is still in the table: killed but never reaped"
@@ -4649,7 +4649,7 @@ mod unix {
             stopper.join().expect("the cancelling thread ran");
 
             assert!(is_cancelled(&error), "{error:?}");
-            let pid = pid(&pid_file).expect("the child wrote its pid before it was stopped");
+            let pid = super::pid(&pid_file).expect("the child wrote its pid before it was stopped");
             assert!(
                 !std::path::Path::new(&format!("/proc/{pid}")).exists(),
                 "process {pid} survived the cancel, or was killed and never reaped"
