@@ -1,6 +1,8 @@
 [package]
 name = "warlock-tui"
 version.workspace = true
+description = "A terminal UI that keeps AI-readable documentation of a codebase current"
+homepage.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true

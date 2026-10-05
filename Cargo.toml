@@ -8,6 +8,7 @@ edition = "2024"
 rust-version = "1.97.1"
 license = "Apache-2.0"
 repository = "https://github.com/Genetic-Pottery/warlock"
+homepage = "https://github.com/Genetic-Pottery/warlock"
 
 # One lint configuration for the whole workspace; every crate opts in with
 # `[lints] workspace = true` rather than repeating attributes in its root
@@ -176,3 +177,9 @@ serde_test = { version = "1" }
 # directory keeps them off the developer's repository and off each other's toes
 # without hand-rolling unique paths and cleanup in every test.
 tempfile = { version = "3" }
+
+# `dist` builds release artifacts with this profile; `dist-workspace.toml` and
+# `.github/workflows/release.yml` depend on the name.
+[profile.dist]
+inherits = "release"
+lto = "thin"
