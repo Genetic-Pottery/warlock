@@ -12,4 +12,3 @@ install-updater = false
 tap = "Genetic-Pottery/homebrew-tap"
 publish-jobs = ["homebrew"]
 formula = "warlock"
-publish-prereleases = true

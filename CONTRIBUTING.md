@@ -51,14 +51,17 @@ against the current code.
 
 ## Release
 
-The version in `Cargo.toml` carries a pre-release suffix, such as
-`0.2.0-alpha.1`. To release, push a tag that matches it:
+To release, set the version in `Cargo.toml` and push a tag that matches it:
 
 ```sh
-git tag v0.2.0-alpha.1
-git push origin v0.2.0-alpha.1
+git tag v0.2.0
+git push origin v0.2.0
 ```
 
 The tag runs `.github/workflows/release.yml`, which builds the binaries,
-publishes a GitHub pre-release, and updates the Homebrew formula. That workflow
-is generated: to change it, edit `dist-workspace.toml` and run `dist generate`.
+publishes a GitHub Release, and updates the Homebrew formula. That workflow is
+generated: to change it, edit `dist-workspace.toml` and run `dist generate`.
+
+Don't add a pre-release suffix such as `-alpha.1`. GitHub never marks a
+pre-release as latest, so the README's `curl` installer, which downloads from
+`releases/latest`, would keep installing the previous release.
