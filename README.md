@@ -113,13 +113,13 @@ You can still open files and read them. That is no longer the main event.
 
 ## Install
 
-macOS or Linux (Homebrew):
+macOS (Homebrew):
 
 ```sh
 brew install genetic-pottery/tap/warlock
 ```
 
-Linux without Homebrew (Ubuntu, Fedora, and others):
+Linux (Ubuntu, Fedora, Arch, and others):
 
 ```sh
 curl -LsSf https://github.com/Genetic-Pottery/warlock/releases/latest/download/warlock-tui-installer.sh | sh
