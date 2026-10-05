@@ -136,7 +136,13 @@ cargo install --git https://github.com/Genetic-Pottery/warlock warlock-tui
 - macOS or Linux. Windows is not supported.
 - `git`.
 - The `claude` CLI, on your `PATH` and logged in.
-- A Linear API key, for `push`, `draft`, and `pull`.
+- A Linear personal API key, for `push`, `draft`, and `pull`. Keys are stored
+  once per machine under a name, and each repository binds one of them:
+
+  ```sh
+  warlock key add work   # paste the key; it isn't echoed
+  warlock key use work   # run inside the repository
+  ```
 - `gh`, logged in, if you want `pull` to open pull requests. Without it, `pull`
   pushes the branch and leaves the pull request text on the ticket.
 
