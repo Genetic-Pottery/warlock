@@ -140,8 +140,8 @@ cargo install --git https://github.com/Genetic-Pottery/warlock warlock-tui
   once per machine under a name, and each repository binds one of them:
 
   ```sh
-  warlock key add work   # paste the key; it isn't echoed
-  warlock key use work   # run inside the repository
+  warlock key add <api-key-name>   # paste the key; it isn't echoed
+  warlock key use <api-key-name>   # run inside the repository
   ```
 - `gh`, logged in, if you want `pull` to open pull requests. Without it, `pull`
   pushes the branch and leaves the pull request text on the ticket.
