@@ -51,11 +51,12 @@ against the current code.
 
 ## Release
 
-To release, set the version in `Cargo.toml` and push a tag that matches it:
+To release, bump the version in `Cargo.toml` and push a tag that matches it,
+with a leading `v`:
 
 ```sh
-git tag v0.2.0
-git push origin v0.2.0
+git tag v<version>
+git push origin v<version>
 ```
 
 The tag runs `.github/workflows/release.yml`, which builds the binaries,
