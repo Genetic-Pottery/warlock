@@ -125,7 +125,7 @@ Linux (Ubuntu, Fedora, Arch, and others):
 curl -LsSf https://github.com/Genetic-Pottery/warlock/releases/latest/download/warlock-tui-installer.sh | sh
 ```
 
-Nix (macOS or Linux):
+Nix (Linux):
 
 ```sh
 nix profile install github:Genetic-Pottery/warlock
