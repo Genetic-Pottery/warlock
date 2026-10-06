@@ -51,13 +51,17 @@ against the current code.
 
 ## Release
 
-To release, bump the version in `Cargo.toml` and push a tag that matches it,
-with a leading `v`:
+To release, bump the version in `Cargo.toml`, merge it into `main`, and tag the
+`main` commit with the version and a leading `v`:
 
 ```sh
+git switch main && git pull
 git tag v<version>
 git push origin v<version>
 ```
+
+Tag only commits on `main`. The release workflow runs for any matching tag and
+doesn't check the branch, so a tag on a `dev` commit ships that code.
 
 The tag runs `.github/workflows/release.yml`, which builds the binaries,
 publishes a GitHub Release, and updates the Homebrew formula. That workflow is
