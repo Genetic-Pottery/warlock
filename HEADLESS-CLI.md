@@ -1123,13 +1123,13 @@ A run that stops short of a pull request halts, and a halt is not the loop
 failing: the branch holds one commit per finished sub-task, `state.json` holds
 the rest, and the ticket keeps one comment listing what finished, then each
 sub-task that stopped with its status and reason, then the ones never started.
-The ticket is left where it is. One `blocked` or `failed` sub-task is not on its
+The ticket stays in progress and is not moved to review. One `blocked` or `failed` sub-task is not on its
 own the end — the run carries on to any sibling that does not wait on it, and
 halts when nothing is runnable.
 
 ```sh
 $ warlock pull warlock-team
-warlock: the run for `WAR-140` halted, so the ticket has not moved: its comment lists what finished and what did not, and `warlock resume WAR-140` releases it
+warlock: the run for `WAR-140` halted, so the ticket stays in progress and was not moved to review: its comment lists what finished and what did not, and `warlock resume WAR-140` releases it
 $ echo $?
 1
 ```

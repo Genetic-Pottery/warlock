@@ -671,7 +671,8 @@ pub(crate) enum Reached {
         touched: Vec<TouchedScope>,
     },
     /// The run stopped. The record is `halted`, the ticket carries one comment
-    /// saying what finished and what did not, and the ticket has not moved.
+    /// saying what finished and what did not, and the ticket stays in progress
+    /// rather than moving to review.
     Stopped(Pulled),
 }
 
@@ -1258,8 +1259,8 @@ fn without_gh(branch: &str, body: &str) -> String {
 /// so is the bulk of the comment.
 pub(crate) fn halt_comment(run: &PullRun) -> String {
     let mut comment = format!(
-        "This pull halted, so the ticket has not moved. The branch `{}` holds one \
-         commit per finished sub-task and nothing else was committed.",
+        "This pull halted, so the ticket stays in progress and was not moved to review. The \
+         branch `{}` holds one commit per finished sub-task and nothing else was committed.",
         run.branch()
     );
 

@@ -185,9 +185,9 @@ fn the_halt_comment_lists_the_three_groups_and_ends_with_both_commands() {
 
     assert_eq!(
         comment,
-        "This pull halted, so the ticket has not moved. The branch \
-         `war-140/add-warlock-pull-scope` holds one commit per finished sub-task and nothing else \
-         was committed.\n\n\
+        "This pull halted, so the ticket stays in progress and was not moved to review. The \
+         branch `war-140/add-warlock-pull-scope` holds one commit per finished sub-task and \
+         nothing else was committed.\n\n\
          ## Finished\n\n\
          - `WAR-140.01` Goal of WAR-140.01\n\n\
          ## Stopped\n\n\

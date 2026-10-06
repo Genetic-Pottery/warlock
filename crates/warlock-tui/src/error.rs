@@ -480,8 +480,9 @@ fn dirty_tree_message(dirty: &[Dirty]) -> String {
 // account of the whole run.
 fn halted_message(ticket: &str) -> String {
     format!(
-        "the run for `{ticket}` halted, so the ticket has not moved: its comment lists what \
-         finished and what did not, and `warlock resume {ticket}` releases it"
+        "the run for `{ticket}` halted, so the ticket stays in progress and was not moved to \
+         review: its comment lists what finished and what did not, and `warlock resume {ticket}` \
+         releases it"
     )
 }
 
