@@ -97,6 +97,9 @@ pub(crate) struct Pulling<'a, B: Board, R: Repository, F: Forge, S: Splits, W: W
     /// [`permits`](crate::boundary::permits) take them — a config that would not
     /// parse is the door's to say and not a third answer to give in here.
     pub(crate) held: &'a [String],
+    /// The branch this checkout set with `warlock branch use`. `None` is the
+    /// remote's default, detected at each point it is needed.
+    pub(crate) base: Option<&'a str>,
     pub(crate) root: &'a Path,
     /// Where the run record goes, never under [`root`](Self::root).
     pub(crate) home: &'a Path,
@@ -104,6 +107,15 @@ pub(crate) struct Pulling<'a, B: Board, R: Repository, F: Forge, S: Splits, W: W
 }
 
 impl<B: Board, R: Repository, F: Forge, S: Splits, W: Works> Pulling<'_, B, R, F, S, W> {
+    // The one place the base is decided, so `start` cutting from one branch and
+    // `finish` opening the pull request against another cannot happen.
+    fn base(&self) -> Result<String, Error> {
+        match self.base {
+            Some(branch) => Ok(branch.to_owned()),
+            None => self.repo.default_branch().map_err(Error::git),
+        }
+    }
+
     pub(crate) fn report(&mut self, event: PullEvent) {
         (self.progress)(event);
     }
@@ -390,10 +402,10 @@ impl<B: Board, R: Repository, F: Forge, S: Splits, W: Works> Pulling<'_, B, R, F
         mut run: PullRun,
         touched: &[TouchedScope],
     ) -> Result<Pulled, Error> {
-        // Detected again rather than carried from `start`: a resumed run never
+        // Asked again rather than carried from `start`: a resumed run never
         // called it, and the branch a pull request merges into is not a thing to
         // guess at from a record written on another day.
-        let base = self.repo.default_branch().map_err(Error::git)?;
+        let base = self.base()?;
 
         // Asked of the branch rather than of this invocation's sessions, so a
         // resumed run whose commits were made on an earlier day still counts
@@ -408,7 +420,7 @@ impl<B: Board, R: Repository, F: Forge, S: Splits, W: Works> Pulling<'_, B, R, F
             return self.unchanged(ticket, run, &base);
         }
 
-        let freshened = self.refresh_stale(ticket)?;
+        let freshened = self.refresh_stale(ticket, &base)?;
 
         self.report(PullEvent::Heading(Heading::PullRequest {
             branch: run.branch().to_owned(),
@@ -501,13 +513,15 @@ impl<B: Board, R: Repository, F: Forge, S: Splits, W: Works> Pulling<'_, B, R, F
     /// branch changed, or cannot make the commit, which is how every other step of
     /// this loop fails.
     ///
-    /// The whole of what the loop hands the pass is its own fields: the run
-    /// contributes only the ticket, which is the first word of the refresh commit's
-    /// message.
-    fn refresh_stale(&mut self, ticket: &Ticket<'_>) -> Result<Freshened, Error> {
+    /// The loop hands the pass its own fields and two more: the ticket, which is
+    /// the first word of the refresh commit's message, and the base `finish`
+    /// resolved, so the paths judged stale are the ones changed against the branch
+    /// the pull request merges into.
+    fn refresh_stale(&mut self, ticket: &Ticket<'_>, base: &str) -> Result<Freshened, Error> {
         self.freshen
             .freshen(&Freshening {
                 ticket: ticket.identifier,
+                base,
                 repo: self.repo,
                 root: self.root,
                 manifest: self.manifest,
@@ -537,22 +551,20 @@ impl<B: Board, R: Repository, F: Forge, S: Splits, W: Works> Pulling<'_, B, R, F
         }
     }
 
-    /// A ticket with no run on this machine: the branch cut from the detected
-    /// default branch, and the record that will hold everything after it.
+    /// A ticket with no run on this machine: the branch cut from the base, and
+    /// the record that will hold everything after it.
     ///
-    /// The default branch is switched to before it is caught up, and that order
-    /// is not incidental: [`Repository::catch_up`] runs a `git pull --ff-only`,
-    /// which merges into whatever is checked out, so pulling the default branch
-    /// from somewhere else would fast-forward the wrong ref.
+    /// The base is switched to before it is caught up, and that order is not
+    /// incidental: [`Repository::catch_up`] runs a `git pull --ff-only`, which
+    /// merges into whatever is checked out, so pulling the base from somewhere
+    /// else would fast-forward the wrong ref.
     fn start(&mut self, ticket: &Ticket<'_>) -> Result<PullRun, Error> {
-        let default = self.repo.default_branch().map_err(Error::git)?;
-        self.repo.switch_to(&default).map_err(Error::git)?;
-        self.repo.catch_up(&default).map_err(Error::git)?;
+        let base = self.base()?;
+        self.repo.switch_to(&base).map_err(Error::git)?;
+        self.repo.catch_up(&base).map_err(Error::git)?;
 
         let branch = branch_name(self.scope.team_key(), ticket.number, ticket.title);
-        self.repo
-            .cut_branch(&branch, &default)
-            .map_err(Error::git)?;
+        self.repo.cut_branch(&branch, &base).map_err(Error::git)?;
 
         Ok(PullRun::new(
             ticket.identifier,

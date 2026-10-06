@@ -173,6 +173,63 @@ pub fn save_key_binding(
 }
 
 /// ```
+/// use warlock_engine::{held_base_branch, save_base_branch};
+///
+/// let (home, root) = (tempfile::tempdir()?, tempfile::tempdir()?);
+/// // A checkout nobody has configured takes the remote's default.
+/// assert_eq!(held_base_branch(home.path(), root.path())?, None);
+///
+/// save_base_branch(home.path(), root.path(), Some("develop"))?;
+/// assert_eq!(held_base_branch(home.path(), root.path())?.as_deref(), Some("develop"));
+///
+/// save_base_branch(home.path(), root.path(), None)?;
+/// assert_eq!(held_base_branch(home.path(), root.path())?, None);
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
+// Absent and unconfigured are one answer here, unlike the key binding: both mean
+// "use the remote's default", and no caller sends a person anywhere different
+// for one than for the other. A config that is there and will not read stays an
+// error, for `load_sigils`'s reason.
+pub fn held_base_branch(
+    home: impl AsRef<Path>,
+    root: impl AsRef<Path>,
+) -> Result<Option<String>, Error> {
+    match read(home.as_ref(), root.as_ref()) {
+        Ok(config) => Ok(config.branch),
+        Err(Error::NotFound { .. }) => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+/// ```
+/// use warlock_engine::save_base_branch;
+///
+/// let (home, root) = (tempfile::tempdir()?, tempfile::tempdir()?);
+/// assert!(save_base_branch(home.path(), root.path(), Some(" ")).is_err());
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
+// Judged only for being one word. Whether it is a branch `git` will accept, and
+// whether the remote has it, is `git`'s answer at the next pull: a second set of
+// ref-name rules written here would drift from the real one.
+pub fn save_base_branch(
+    home: impl AsRef<Path>,
+    root: impl AsRef<Path>,
+    branch: Option<&str>,
+) -> Result<(), Error> {
+    if let Some(name) = branch
+        && (name.is_empty() || name.chars().any(char::is_whitespace))
+    {
+        return Err(Error::BranchName {
+            name: name.to_owned(),
+        });
+    }
+
+    let mut config = held(home.as_ref(), root.as_ref());
+    config.branch = branch.map(ToOwned::to_owned);
+    write(home.as_ref(), root.as_ref(), &config)
+}
+
+/// ```
 /// use warlock_engine::{load_sigils, save_sigils};
 ///
 /// let (home, root) = (tempfile::tempdir()?, tempfile::tempdir()?);
@@ -261,6 +318,9 @@ struct Config {
     // field existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     key: Option<String>,
+    // Skipped when unset for `key`'s reason above.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    branch: Option<String>,
 }
 
 #[derive(Debug)]
@@ -284,6 +344,9 @@ pub enum Error {
         name: String,
         rule: Rule,
     },
+    BranchName {
+        name: String,
+    },
 }
 
 impl fmt::Display for Error {
@@ -306,6 +369,12 @@ impl fmt::Display for Error {
             Self::Name { name, rule } => {
                 write!(f, "`{name}` is not a key name: {rule}")
             }
+            Self::BranchName { name } => {
+                write!(
+                    f,
+                    "`{name}` is not a branch name: it is empty or holds a space"
+                )
+            }
         }
     }
 }
@@ -317,7 +386,7 @@ impl std::error::Error for Error {
             Self::Syntax { source, .. } => Some(source),
             Self::Serialize { source } => Some(source),
             Self::Name { rule, .. } => Some(rule),
-            Self::NotFound { .. } => None,
+            Self::NotFound { .. } | Self::BranchName { .. } => None,
         }
     }
 }

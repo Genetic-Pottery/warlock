@@ -168,6 +168,9 @@ pub(crate) struct Freshening<'a> {
     /// `WAR-141`: the first word of the refresh commit's message, and the only
     /// thing the pass knows about the ticket.
     pub(crate) ticket: &'a str,
+    /// The branch the changed paths are taken against: the one the pull cut from
+    /// and opens its pull request against.
+    pub(crate) base: &'a str,
     pub(crate) repo: &'a dyn Repository,
     pub(crate) root: &'a Path,
     /// The manifest in hand rather than one loaded here, as
@@ -227,8 +230,7 @@ pub(crate) fn freshened(
     cancel: &Cancel,
     sink: &mut dyn FnMut(Event),
 ) -> Result<Freshened, GitError> {
-    let base = asked.repo.default_branch()?;
-    let changed = asked.repo.changed_against(&base)?;
+    let changed = asked.repo.changed_against(asked.base)?;
     let selected = made_stale(asked.root, asked.manifest, &changed);
     // Nothing stale is the ordinary ending of a branch that touched no pacted
     // directory, and it asks the checkout nothing further: no status is read, and

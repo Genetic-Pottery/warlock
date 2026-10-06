@@ -21,6 +21,8 @@ plain line and the terminal is never touched.
 | `warlock key list` | Print the names this machine holds keys for, and never a key | nothing |
 | `warlock key use <name>` | Bind one of the stored names to this checkout | one config write |
 | `warlock key forget <name>` | Remove a stored key from this machine by name | one key-store write |
+| `warlock branch use <BRANCH>` | Make this checkout's pulls start from `BRANCH` and open pull requests against it | one config write |
+| `warlock branch clear` | Go back to the remote's default branch | one config write |
 | `warlock stale [path]` | List the pacted directories at or below `path` that are stale | nothing |
 | `warlock fresh [path]` | The same for the fresh ones | nothing |
 | `warlock check <path>` | Say which scope covers `path`, where work under it is filed, what this machine holds, and whether the two meet — or, with `--gate`, refuse a closed scope instead of describing it | nothing |
@@ -141,6 +143,22 @@ sigils do not open and which no name in a key store has anything to do with.
 `use` and `forget` also want a repository, because a binding belongs to a
 checkout; `add` and `list` want none and answer for the same store from
 anywhere.
+
+### Base branch
+
+A pull starts from the remote's default branch and opens its pull request
+against it. `warlock branch use <BRANCH>` replaces that for this checkout, and
+`warlock branch clear` puts it back:
+
+```sh
+$ warlock branch use develop
+warlock: pulls in `/repo` start from and open pull requests against `develop`, written to `/home/you/.warlock/repo-f447b89a747182e2/config.toml`
+```
+
+The setting is per person and per checkout, in the same `config.toml` as the
+sigils and the key binding, and it is never committed. warlock doesn't check
+that the remote has the branch when you set it; the next pull's `git pull
+--ff-only` does, and refuses with `git`'s own message if it doesn't.
 
 ### Asking
 

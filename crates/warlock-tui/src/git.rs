@@ -645,10 +645,9 @@ impl<R: Runs> Repository for Git<R> {
     }
 
     fn catch_up(&self, branch: &str) -> Result<(), Error> {
-        // `--ff-only` and not a plain pull: a default branch that has diverged
-        // from the remote is a checkout somebody is in the middle of something
-        // in, and the answer to that is to stop, not to make a merge commit on
-        // it. The remote and the branch are named rather than left to the
+        // `--ff-only` and not a plain pull: a base branch that has diverged from
+        // the remote is a checkout somebody is in the middle of something in,
+        // and the answer to that is to stop, not to make a merge commit on it. The remote and the branch are named rather than left to the
         // upstream configuration, so what this pulls does not depend on how the
         // checkout was set up.
         self.done(&["pull", "--ff-only", REMOTE, branch])?;
@@ -681,8 +680,8 @@ impl<R: Runs> Repository for Git<R> {
     /// Three decisions, and the third is the one to read twice.
     ///
     /// The three dots and not two: `base..HEAD` would be the difference between
-    /// the two tips, so every commit somebody else landed on the default branch
-    /// after this one was cut would arrive as a path this branch changed. The
+    /// the two tips, so every commit somebody else landed on `base` after this
+    /// one was cut would arrive as a path this branch changed. The
     /// three-dot form diffs the merge base against `HEAD`, which is the
     /// branch's own work whatever has happened on `base` since.
     ///
@@ -693,14 +692,14 @@ impl<R: Runs> Repository for Git<R> {
     /// the document that still names the file there would never be refreshed.
     /// Told apart as a delete and an add, both directories are named.
     ///
-    /// `base` is the *local* default branch, because that is where the branch
-    /// was cut from: a pull fast-forwards the local default and cuts from it,
-    /// so it is the one ref that is certainly present and certainly the parent.
-    /// `origin/<default>` would be a different question — the merge base
-    /// against a remote-tracking ref that only a fetch keeps current — and a
-    /// stale one of those would name paths this branch never touched. A local
-    /// default that has since moved on costs nothing here: the merge base is
-    /// still the commit the branch was cut at.
+    /// `base` is the *local* base branch, because that is where the branch was
+    /// cut from: a pull fast-forwards the local base and cuts from it, so it is
+    /// the one ref that is certainly present and certainly the parent.
+    /// `origin/<base>` would be a different question — the merge base against a
+    /// remote-tracking ref that only a fetch keeps current — and a stale one of
+    /// those would name paths this branch never touched. A local base that has
+    /// since moved on costs nothing here: the merge base is still the commit
+    /// the branch was cut at.
     fn changed_against(&self, base: &str) -> Result<Vec<String>, Error> {
         let range = format!("{}...HEAD", base.trim());
         // `--` closes the revision list, so a branch whose name is also a path
@@ -1162,11 +1161,11 @@ const GH: &str = "gh";
 ///
 /// Four strings of the same type, so they are named rather than positional: the
 /// two branches are the pair that a call swapping them would still compile and
-/// still run, and the pull request would be the default branch merged into the
-/// work.
+/// still run, and the pull request would be the base merged into the work.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PullRequest<'a> {
-    /// The branch it merges into — the detected default branch, never a guess.
+    /// The branch it merges into: the one set with `warlock branch use`, or else
+    /// the detected default branch, never a guess.
     pub base: &'a str,
     /// The branch it merges: the one this run's commits are on.
     pub head: &'a str,
@@ -1284,9 +1283,10 @@ impl<R: Runs> Gh<R> {
 impl<R: Runs> Forge for Gh<R> {
     fn open_pull_request(&self, request: PullRequest<'_>) -> Result<Opened, Error> {
         // The base named rather than left to `gh`'s own default: `gh` would ask
-        // the forge for the repository's default branch, which is the question
-        // `Repository::default_branch` already answered against this checkout's
-        // remote.
+        // the forge for the repository's default branch, which is wrong for a
+        // checkout that set its own with `warlock branch use`, and otherwise a
+        // question `Repository::default_branch` already answered against this
+        // checkout's remote.
         //
         // Every value its own argument. A body is markdown with blank lines,
         // backticks and whatever a summary contained in it, and nothing here

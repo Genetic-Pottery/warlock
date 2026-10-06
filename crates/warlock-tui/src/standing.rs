@@ -35,6 +35,8 @@ pub(crate) const FOR_SIGILS: &str = "hold sigils for";
 // resolve no repository at all: a key store is a fact about the machine.
 pub(crate) const FOR_KEY: &str = "settle which key is bound in";
 
+pub(crate) const FOR_BRANCH: &str = "set the base branch of";
+
 pub(crate) const FOR_CHECK: &str = "answer about the boundary over";
 
 pub(crate) const FOR_LISTING: &str = "list the directories under";

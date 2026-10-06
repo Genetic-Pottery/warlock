@@ -1282,7 +1282,7 @@ impl Repository for Checkout {
 ///
 /// The request is kept whole rather than as a flag, because the two branches on it
 /// are the pair a call swapping them would still compile: what a test asserts is
-/// that the base is the detected default branch and the head is the run's own.
+/// that the base is the one the run resolved and the head is the run's own.
 #[derive(Debug, Clone)]
 pub(crate) struct Forging {
     log: Arc<Mutex<Vec<PullRequestAsked>>>,

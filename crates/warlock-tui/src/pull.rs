@@ -35,8 +35,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use warlock_engine::{
-    Manifest, PullRun, ScopeRecord, brief_path, held_runs, held_sigils, resolve_filing,
-    scope_opens_to,
+    Manifest, PullRun, ScopeRecord, brief_path, held_base_branch, held_runs, held_sigils,
+    resolve_filing, scope_opens_to,
 };
 
 use crate::claude::{
@@ -210,6 +210,7 @@ pub(crate) fn pulled<O: Opens, R: Repository, F: Forge, S: Splits, W: Works, P: 
             scope: record,
             manifest,
             held: prepared.held(),
+            base: prepared.base(),
             root,
             home,
             progress: &mut sink,
@@ -250,6 +251,9 @@ pub(crate) struct Prepared<'m> {
     /// The flattened sigils this machine holds, which the crossing check after
     /// every session is judged against and the session's own system prompt names.
     held: Vec<String>,
+    /// The branch this checkout set with `warlock branch use`, or `None` for the
+    /// remote's default.
+    base: Option<String>,
     value: String,
 }
 
@@ -270,6 +274,10 @@ impl<'m> Prepared<'m> {
         &self.held
     }
 
+    pub(crate) fn base(&self) -> Option<&str> {
+        self.base.as_deref()
+    }
+
     /// The key the board is opened with, read on exactly one line per door — the
     /// opener's. `pub(crate)` for the panel's sake: its run opens the board on a
     /// worker of its own, so the value has to cross out of here, and the type it
@@ -288,6 +296,7 @@ impl fmt::Debug for Prepared<'_> {
             .field("home", &self.home)
             .field("record", self.record)
             .field("held", &self.held)
+            .field("base", &self.base)
             .field("value", &"<redacted>")
             .finish()
     }
@@ -339,12 +348,14 @@ pub(crate) fn prepare<'m>(
     // What is left of it is the key half, which is why it is asked at all.
     let target = resolve_filing(manifest, root, home, Some(scope))
         .map_err(|source| Error::Filing { source })?;
+    let base = held_base_branch(home, root).map_err(|source| Error::Sigils { source })?;
 
     Ok(Prepared {
         root: root.to_path_buf(),
         home: home.to_path_buf(),
         record,
         held,
+        base,
         value: target.value().to_owned(),
     })
 }
