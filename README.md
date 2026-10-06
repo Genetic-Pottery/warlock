@@ -66,6 +66,27 @@ Workflow
 ![pulled issue finished in Github demo](./assets/pull-github.png)
 > once work is complete the Linear ticket and dialog will display the Github URL where the PR is awaiting a human review
 
+## Suggested workflow
+
+Build a feature with the warlock workflow, then test it end to end before you
+clean it up. Fix small problems by hand, and send large ones back through the
+workflow as new tickets.
+
+```mermaid
+flowchart TD
+    W["1. Warlock workflow<br/>brief → draft → pull"]
+    W -- "more tickets" --> W
+    W -- "feature complete" --> E["2. End-to-end test"]
+    E --> C["3. Catalog undesired behaviors"]
+    C --> D{"4. Anything to fix?"}
+    D -- "small" --> M["Fix by hand"]
+    M --> E
+    D -- "large" --> W
+    D -- "no" --> R["5. Refactor"]
+    R --> S["6. Simplify"]
+    S -. "next feature" .-> W
+```
+
 ## Why this exists
 
 Editors and AI-enabled IDEs add AI features as an after thought and gear everything toward prompt engineering.
