@@ -320,6 +320,7 @@ struct Ground {
     scope: ScopeRecord,
     manifest: Manifest,
     held: Vec<String>,
+    base: Option<String>,
 }
 
 impl Ground {
@@ -336,6 +337,7 @@ impl Ground {
             scope: ScopeRecord::new(SCOPE, TEAM, "In Review", "warlock"),
             manifest,
             held: vec![SCOPE.to_owned(), OTHER.to_owned()],
+            base: None,
         }
     }
 
@@ -419,6 +421,7 @@ fn work(
             scope: &ground.scope,
             manifest: &ground.manifest,
             held: &ground.held,
+            base: ground.base.as_deref(),
             root: ground.root.path(),
             home: ground.home.path(),
             progress: &mut sink,
@@ -484,6 +487,7 @@ fn pull_freshening(
             scope: &ground.scope,
             manifest: &ground.manifest,
             held: &ground.held,
+            base: ground.base.as_deref(),
             root: ground.root.path(),
             home: ground.home.path(),
             progress: &mut sink,
@@ -1747,4 +1751,35 @@ fn a_workspace_with_no_review_project_status_is_a_line_and_the_pull_still_finish
         matches!(events.last(), Some(PullEvent::Project { line }) if line.contains("no project status called `In Review`")),
         "{events:?}"
     );
+}
+
+#[test]
+fn a_base_set_for_the_checkout_replaces_the_remotes_default_throughout() {
+    const BASE: &str = "develop";
+    let ground = Ground {
+        base: Some(BASE.to_owned()),
+        ..Ground::new()
+    };
+    let board = Boarding::filing("");
+    let forge = Forging::opening(URL);
+    let (repo, split, sessions) = two_sub_tasks();
+
+    let (pulled, _) = pull(&ground, &board, &repo, &forge, &split, &sessions);
+
+    assert!(matches!(pulled, Ok(Pulled::Opened { .. })), "{pulled:?}");
+    let calls = repo.calls();
+    assert!(!calls.contains(&GitCall::DefaultBranch), "{calls:?}");
+    assert_eq!(
+        calls[..3],
+        [
+            GitCall::SwitchTo(BASE.to_owned()),
+            GitCall::CatchUp(BASE.to_owned()),
+            GitCall::CutBranch {
+                branch: branch(),
+                from: BASE.to_owned(),
+            },
+        ]
+    );
+    assert!(calls.contains(&GitCall::ChangedAgainst(BASE.to_owned())));
+    assert_eq!(forge.asked()[0].base, BASE);
 }

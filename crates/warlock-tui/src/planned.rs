@@ -1281,9 +1281,15 @@ pub(crate) fn edited_drafts(
     drafts: &[Draft],
     run: impl FnOnce(&Path) -> Option<String>,
 ) -> Result<Vec<Draft>, String> {
+    // The counter is what makes the name unique within a process. The clock
+    // alone is not: macOS reports it in microseconds, and two calls in the same
+    // microsecond — parallel tests did it — shared a file and read each other's
+    // edits.
+    static EDITS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let path = std::env::temp_dir().join(format!(
-        "warlock-drafts-{}-{}.md",
+        "warlock-drafts-{}-{}-{}.md",
         std::process::id(),
+        EDITS.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |since| since.as_nanos())

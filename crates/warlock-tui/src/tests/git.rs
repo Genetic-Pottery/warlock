@@ -131,7 +131,7 @@ mod unix {
         // what a `git` waiting for a passphrase or a merge message would do.
         let ran = Spawner::new()
             .with_timeout(Duration::from_secs(5))
-            .run("/bin/cat".as_ref(), &[], Path::new("."))
+            .run("cat".as_ref(), &[], Path::new("."))
             .expect("cat sees EOF on a closed stdin and exits");
 
         assert!(ran.success());

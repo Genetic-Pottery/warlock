@@ -379,7 +379,7 @@ mod live {
     }
 
     #[test]
-    fn a_watcher_over_a_real_directory_starts_and_has_nothing_to_say_yet() {
+    fn a_watcher_over_a_real_directory_starts_and_a_drain_leaves_it_live() {
         // No `.warlock/` in it either, which is the ordinary case before the
         // first pact: the manifest cannot be watched, and that is not
         // allowed to cost the tree its watch.
@@ -390,11 +390,13 @@ mod live {
         };
 
         assert!(watch.live());
-        // Nothing has written anything, so this is a fact about a quiet
-        // disk and not a race with one: the drain never blocks, and there
-        // is nothing for it to have picked up.
-        assert!(watch.drain().is_empty());
-        assert!(watch.live(), "an empty drain is not a dead watcher");
+        // What the drain holds is not asserted: on macOS, FSEvents can report
+        // the creation of the scratch directory made just before the watch
+        // started, so expecting it empty is a race with this test's own setup.
+        // Either way the drain reads until the channel is empty, and that must
+        // not mark the watcher dead.
+        let _ = watch.drain();
+        assert!(watch.live(), "an empty channel is not a dead watcher");
 
         // Best effort: a leftover under `/tmp` is untidy, not a failure.
         let _ = fs::remove_dir_all(&root);

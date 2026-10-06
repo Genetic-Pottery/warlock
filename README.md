@@ -113,25 +113,42 @@ You can still open files and read them. That is no longer the main event.
 
 ## Install
 
-On macOS or Linux, install with Homebrew:
+macOS (Homebrew):
 
 ```sh
 brew install genetic-pottery/tap/warlock
 ```
 
-Without Homebrew, run the install script from the latest release:
+Linux (Ubuntu, Fedora, Arch, and others):
 
 ```sh
-curl --proto '=https' --tlsv1.2 -LsSf https://github.com/Genetic-Pottery/warlock/releases/latest/download/warlock-tui-installer.sh | sh
+curl -LsSf https://github.com/Genetic-Pottery/warlock/releases/latest/download/warlock-tui-installer.sh | sh
+```
+
+Nix (Linux):
+
+```sh
+nix profile install github:Genetic-Pottery/warlock
+```
+
+From source (Rust 1.97.1 or later):
+
+```sh
+cargo install --git https://github.com/Genetic-Pottery/warlock warlock-tui
 ```
 
 ## Requirements
 
 - macOS or Linux. Windows is not supported.
-- Rust 1.97.1 or later, if you build from source.
 - `git`.
 - The `claude` CLI, on your `PATH` and logged in.
-- A Linear API key, for `push`, `draft`, and `pull`.
+- A Linear personal API key, for `push`, `draft`, and `pull`. Keys are stored
+  once per machine under a name, and each repository binds one of them:
+
+  ```sh
+  warlock key add <api-key-name>   # paste the key; it isn't echoed
+  warlock key use <api-key-name>   # run inside the repository
+  ```
 - `gh`, logged in, if you want `pull` to open pull requests. Without it, `pull`
   pushes the branch and leaves the pull request text on the ticket.
 
@@ -144,11 +161,4 @@ Use a monospace font with box-drawing coverage — most programming fonts have i
 
 ## Contributing
 
-Run these three checks before pushing. CI runs the same three commands on Linux
-and macOS for every push and pull request:
-
-```sh
-cargo fmt --all --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
-```
+See [CONTRIBUTING.md](CONTRIBUTING.md).

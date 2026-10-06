@@ -44,3 +44,16 @@ jobs:
       - name: cargo test --workspace
         if: always()
         run: cargo test --workspace
+
+  nix:
+    name: nix build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@v31
+
+      - name: nix build
+        run: nix build -L

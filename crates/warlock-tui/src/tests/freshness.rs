@@ -379,6 +379,7 @@ fn asked<'a>(
 ) -> Freshening<'a> {
     Freshening {
         ticket: TICKET,
+        base: DEFAULT,
         repo: checkout,
         root: repo.root(),
         manifest,
@@ -462,10 +463,7 @@ fn a_branch_that_left_nothing_stale_runs_no_pass_and_asks_the_checkout_nothing_m
     );
     assert_eq!(
         checkout.calls(),
-        [
-            GitCall::DefaultBranch,
-            GitCall::ChangedAgainst(DEFAULT.to_owned())
-        ],
+        [GitCall::ChangedAgainst(DEFAULT.to_owned())],
         "with nothing selected there is no status to read and no commit to make"
     );
 }

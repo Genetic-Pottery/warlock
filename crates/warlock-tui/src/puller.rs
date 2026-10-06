@@ -183,6 +183,9 @@ struct Work {
     /// The flattened sigils this machine holds, as the crossing check after every
     /// session and the sessions' own system prompt take them.
     held: Vec<String>,
+    /// The branch this checkout set with `warlock branch use`, or `None` for the
+    /// remote's default.
+    base: Option<String>,
     /// The key the board is opened with, read on exactly one line — the opener's.
     /// Nothing that prints is given this value, and the type it sits on has no
     /// `Debug` at all.
@@ -427,6 +430,7 @@ where
             home,
             record: prepared.record().clone(),
             held: prepared.held().to_vec(),
+            base: prepared.base().map(ToOwned::to_owned),
             value: prepared.value().to_owned(),
             named: taking.ticket.map(ToOwned::to_owned),
         };
@@ -1177,6 +1181,7 @@ where
                 scope: &work.record,
                 manifest: &work.manifest,
                 held: &work.held,
+                base: work.base.as_deref(),
                 root: &work.root,
                 home: &work.home,
                 progress: &mut progress,
