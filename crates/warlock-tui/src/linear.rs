@@ -654,11 +654,58 @@ fn fetch_project(linear: &impl Posts, slug: &str) -> Result<Option<FetchedProjec
     Ok(Some(FetchedProject {
         id,
         name: text(project, "name")?,
-        content: nullable(project, "content", |_| text(project, "content"))?.unwrap_or_default(),
+        content: unlinked(
+            &nullable(project, "content", |_| text(project, "content"))?.unwrap_or_default(),
+        ),
         url: text(project, "url")?,
         status: nullable(project, "status", |status| text(status, "name"))?,
         notes,
     }))
+}
+
+/// Linear rewrites a bare name that ends like a domain, such as `run.sh`, into
+/// `[run.sh](<http://run.sh>)` when a project is created, and hands that back
+/// as the content. Left in, it becomes a slice's title, the title of every
+/// issue cut from it, and the key its cut note is matched on. Only a link whose
+/// text is its own target is undone: a link somebody wrote on purpose names
+/// somewhere else.
+fn unlinked(content: &str) -> String {
+    let mut out = String::with_capacity(content.len());
+    let mut rest = content;
+    while let Some(open) = rest.find('[') {
+        out.push_str(&rest[..open]);
+        rest = &rest[open..];
+        if let Some((name, used)) = autolink(rest) {
+            out.push_str(name);
+            rest = &rest[used..];
+        } else {
+            out.push('[');
+            rest = &rest[1..];
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+fn autolink(at: &str) -> Option<(&str, usize)> {
+    let close = at.find("](")?;
+    let name = &at[1..close];
+    if name.is_empty() || name.contains(['[', ']', '\n']) {
+        return None;
+    }
+    let after = &at[close + 2..];
+    let (target, used) = if let Some(inner) = after.strip_prefix('<') {
+        let end = inner.find(">)")?;
+        (&inner[..end], end + 3)
+    } else {
+        let end = after.find(')')?;
+        (&after[..end], end + 1)
+    };
+    let bare = target
+        .strip_prefix("http://")
+        .or_else(|| target.strip_prefix("https://"))
+        .unwrap_or(target);
+    (target == name || bare == name).then_some((name, close + 2 + used))
 }
 
 /// How warlock's notes on a project start, which is what [`fetch_project`]

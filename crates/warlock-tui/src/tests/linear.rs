@@ -10,7 +10,7 @@ use super::{
     backlog_status, comment_on_issue, comment_on_project, create_issue, create_project,
     create_relation, fetch_project, issue_label_id, issue_project, label_id, move_issue,
     move_project, named_issue, planned_projects, project_named, project_status, scope_queue,
-    team_id, viewer, workflow_state,
+    team_id, unlinked, viewer, workflow_state,
 };
 
 use crate::queue::IN_PROGRESS;
@@ -272,6 +272,51 @@ fn a_project_is_read_back_by_slug_in_one_request_with_its_notes() {
         [json!({ "id": SLUG, "cut": CUT_NOTE, "skipped": SKIP_NOTE })]
     );
     assert_eq!(linear.documents().len(), 1, "one request per operation");
+}
+
+#[test]
+fn a_name_linear_linked_comes_back_as_the_name_the_brief_wrote() {
+    let mut answer = project_on_the_board();
+    answer["project"]["content"] = json!(
+        "## Scope\n\n### 1. [surfaces.sh](<http://surfaces.sh>)\n\n\
+         ### 2. [check.sh](<http://check.sh>) keeps the scopes, and [run.sh](<http://run.sh>) fronts them\n"
+    );
+    let linear = Posting::answering([Ok(answer)]);
+
+    let project = fetch_project(&linear, SLUG)
+        .expect("the stand-in answered")
+        .expect("the stand-in knows the project");
+
+    assert_eq!(
+        project.content(),
+        "## Scope\n\n### 1. surfaces.sh\n\n### 2. check.sh keeps the scopes, and run.sh fronts them\n"
+    );
+}
+
+#[test]
+fn only_a_link_to_its_own_text_is_undone() {
+    for (written, read) in [
+        ("[run.sh](<http://run.sh>)", "run.sh"),
+        ("[run.sh](http://run.sh)", "run.sh"),
+        ("[example.com](https://example.com)", "example.com"),
+        (
+            "[https://example.com](<https://example.com>)",
+            "https://example.com",
+        ),
+        (
+            "[the docs](https://example.com)",
+            "[the docs](https://example.com)",
+        ),
+        (
+            "[run.sh](<http://run.sh/elsewhere>)",
+            "[run.sh](<http://run.sh/elsewhere>)",
+        ),
+        ("`xs[i]` and [a] [b](", "`xs[i]` and [a] [b]("),
+        ("[[run.sh](<http://run.sh>)]", "[run.sh]"),
+        ("", ""),
+    ] {
+        assert_eq!(unlinked(written), read, "{written}");
+    }
 }
 
 #[test]
