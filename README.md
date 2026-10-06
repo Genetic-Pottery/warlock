@@ -67,16 +67,17 @@ Workflow
 > once work is complete the Linear ticket and dialog will display the Github URL where the PR is awaiting a human review
 
 ## Suggested workflow
-Build a feature with the warlock workflow, then test it end to end before you clean it up. 
+Build a feature with the warlock workflow, then test it end to end before you clean it up.
 Fix small problems by hand, and send large ones back through the workflow as new tickets.
-For refactoring I recommend Matt Pocock's ![skill](https://github.com/mattpocock/skills) improve-codebase-architecture.
-For simplifing code I recommend Claude's inbuilt /simplify and direct it to pass over all code not just recent changes.
+For refactoring I recommend Matt Pocock's [skill](https://github.com/mattpocock/skills) improve-codebase-architecture.
+For simplifying code I recommend Claude's inbuilt /simplify and direct it to pass over all code not just recent changes.
 
-This is still inline with  what people really do pre-AI every warlock workflow cycle are steps to a desired end point and when get to good resting place you evaluate:
+This is still in line with what people really did before AI: every warlock workflow cycle is a step toward a desired end point, and when you get to a good resting place you evaluate:
 - Am I going the right direction, should I change course?
 - Does this feel good to use, is it hacky?
 - Are there bugs?
-This isnt a magically finished product you are approaching an abstract state and adjust your mental model as you go.
+
+This isn't a magically finished product you are approaching an abstract state and adjust your mental model as you go.
 
 ```mermaid
 flowchart TD
