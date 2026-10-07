@@ -9,6 +9,7 @@
       systems = [
         "x86_64-linux"
         "aarch64-linux"
+        "aarch64-darwin"
       ];
       forAllSystems = f: nixpkgs.lib.genAttrs systems (system: f nixpkgs.legacyPackages.${system});
       workspace = (builtins.fromTOML (builtins.readFile ./Cargo.toml)).workspace.package;
