@@ -394,6 +394,14 @@ fn describe_and_grant(
         let carry = carry_hash(pacted);
 
         if let Some(carried) = carried_document(pacted, carry.as_deref(), recorded) {
+            // The save clears `[pact.lines]` and writes back only what this map
+            // holds, so a carried directory that is left out of it loses every
+            // line hash, and the next refresh describes all of its files again.
+            // Matching the carry means no file and no line has moved, so the
+            // recorded hashes still hold.
+            if let Some(kept) = line_hashes.get(pacted) {
+                lines.insert(pacted.clone(), kept.clone());
+            }
             carries.insert(pacted.clone(), carry);
             documents.insert(pacted.clone(), carried);
             if failure_below(&undocumented, pacted).is_none() {

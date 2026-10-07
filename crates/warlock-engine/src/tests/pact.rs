@@ -2442,6 +2442,56 @@ fn a_refresh_describes_every_stale_directory_and_none_it_calls_fresh() {
 }
 
 #[test]
+fn a_directory_carried_through_a_refresh_keeps_the_lines_it_had() {
+    let repo = project();
+    let engine = repo.path().join("crates/engine");
+    let before = refreshable(repo.path());
+
+    // Same size and same names, so `inner`'s document comes out byte for byte
+    // what it was, and the two directories above it are carried rather than
+    // described.
+    write(
+        repo.path(),
+        "crates/engine/src/inner/deep.rs",
+        "fn deep(){ }\n",
+    );
+    let agent = Canned::filling();
+    let mut probe = Watching::patient();
+
+    let PactedSubtree {
+        manifest, failures, ..
+    } = refresh_subtree(&engine, repo.path(), &before, &agent, &mut probe.sink())
+        .expect("refreshes");
+
+    assert!(failures.is_empty(), "{failures:?}");
+    assert_eq!(
+        described_by(&agent, repo.path()),
+        ["crates/engine/src/inner"]
+    );
+    for module in ["crates/engine/src", "crates/engine"] {
+        assert!(
+            probe.events.contains(&Event::Unchanged {
+                directory: repo.path().join(module),
+            }),
+            "`{module}` is carried, or this asserts nothing: {:?}",
+            probe.events,
+        );
+        let had = before.entry(module).and_then(PactEntry::lines);
+        assert!(
+            had.is_some_and(|lines| !lines.is_empty()),
+            "`{module}` had lines"
+        );
+        assert_eq!(
+            manifest.entry(module).and_then(PactEntry::lines),
+            had,
+            "a carried document is the same page over the same files, so every \
+             line on it is still reusable; dropping the hashes makes the next \
+             refresh describe every file in `{module}` again",
+        );
+    }
+}
+
+#[test]
 fn a_refresh_leaves_the_entry_of_every_directory_it_skipped_as_it_found_it() {
     let repo = project();
     let engine = repo.path().join("crates/engine");
