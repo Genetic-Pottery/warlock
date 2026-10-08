@@ -190,3 +190,7 @@ Use a monospace font with box-drawing coverage — most programming fonts have i
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md).
+
+## License
+
+Apache License 2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
