@@ -1,10 +1,17 @@
-![Warlock](assets/warlock-logo.png)
+<p align="center">
+  <img src="./assets/warlock-logo.png" alt="Warlock" width="200">
+</p>
 
-# warlock
+<h1 align="center">warlock</h1>
 
-(Currently under development, internal release phase)
+<p align="center"><strong>See your codebase the way your AI does. A TUI where documentation is the interface.</strong></p>
 
-See your codebase the way your AI does. A TUI where documentation is the interface.
+<p align="center">
+  <a href="https://github.com/Genetic-Pottery/warlock/blob/main/LICENSE"><img src="https://img.shields.io/github/license/Genetic-Pottery/warlock" alt="License"></a>
+  <a href="https://github.com/Genetic-Pottery/warlock/releases/latest"><img src="https://img.shields.io/github/v/release/Genetic-Pottery/warlock" alt="Release"></a>
+</p>
+
+---
 
 > **warlock** *(n.)* one who draws power from a pact with an entity greater than
 > themselves. The patron is the model. The pact is the boundary. Invocations are
