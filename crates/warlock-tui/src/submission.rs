@@ -4,17 +4,17 @@
 //! the model, money, and a wait — to discover that warlock guessed. Where the
 //! costs are that lopsided the cheap failure is the right one.
 //!
-//! `Submitted::refusal` is the entire discovery mechanism, which is why there
-//! is no `/help`: a command whose job was to print the list would be a thing to
-//! discover before you could discover anything. Nothing here *copies* the
-//! draft's text: the four argument-taking variants borrow the argument out of
-//! it, so there is still one owner and no second string free to disagree with
-//! the first. And nothing here enters a mode, writes a file or opens a turn.
+//! There is no `/help`: a command whose job was to print the list would be a
+//! thing to discover before you could discover anything, so the list is on the
+//! `?` sheet and in `Submitted::refusal`. Nothing here *copies* the draft's
+//! text: the argument-taking variants borrow the argument out of it, so there is
+//! still one owner and no second string free to disagree with the first. And
+//! nothing here enters a mode, writes a file or opens a turn.
 
 // Stated once, here, because it is the only place warlock says which commands
 // exist: a second copy of this sentence in the loop or in a test fixture would
 // be a second list to keep true.
-const REFUSAL: &str = "warlock has seven commands — /brief, /write, /chat, /push, /draft, /pull and /resume — and four of them take arguments: a scope and a brief for /push, a scope and optionally a project's slug for /draft, a scope and optionally a ticket for /pull, and a ticket for /resume.";
+const REFUSAL: &str = "warlock has eight commands — /brief, /write, /chat, /push, /draft, /pull, /resume and /branch — and five of them take arguments: a scope and a brief for /push, a scope and optionally a project's slug for /draft, a scope and optionally a ticket for /pull, a ticket for /resume, and `use <BRANCH>` or `clear` for /branch, which on its own names the branch pulls start from.";
 
 // Fields rather than the second half of a tuple, because one of the two is
 // optional and the other is not: `/pull <SCOPE>` takes the next ticket in the
@@ -34,6 +34,15 @@ pub(crate) struct ToPush<'a> {
     pub path: &'a str,
 }
 
+// `use` and `clear` are `warlock branch`'s own words, so the chat bar and the
+// shell spell the one setting the same way.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum Branching<'a> {
+    Show,
+    Use(&'a str),
+    Clear,
+}
+
 // The scope a `/draft` reads from and, where it named one, the project's slug:
 // without one, the planned projects are listed instead.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -42,11 +51,11 @@ pub(crate) struct ToDraft<'a> {
     pub project: Option<&'a str>,
 }
 
-// Nine variants and no tenth for "empty", because an empty draft never gets
-// here — `Composer::is_submittable` declines to offer one up — and a function
-// that is total anyway is worth more than a variant every caller must match on.
+// No variant for "empty", because an empty draft never gets here —
+// `Composer::is_submittable` declines to offer one up — and a function that is
+// total anyway is worth more than a variant every caller must match on.
 //
-// The borrows in `Push`, `Cut`, `Pull` and `Resume` are what keep the module's
+// The borrows in `Push`, `Cut`, `Pull`, `Resume` and `Branch` are what keep the module's
 // promise that nothing here copies the draft: each argument is a slice of the
 // draft the caller still owns, and `&str` is `Copy`, so the value stays as cheap
 // to pass around as it was when no variant carried anything.
@@ -65,6 +74,7 @@ pub(crate) enum Submitted<'a> {
     // Not optional, because a `/resume` with no ticket names nothing warlock
     // could offer back — the refusal already says a ticket goes after the word.
     Resume(&'a str),
+    Branch(Branching<'a>),
     Message,
     // An unknown word, a bare `/`, one of the three command words that take
     // nothing with something after it, a `/push` without both its scope and its
@@ -144,6 +154,16 @@ pub(crate) fn submitted_for(draft: &str) -> Submitted<'_> {
     // The line break is disqualifying here for `PUSH`'s reason and not for a
     // reason of its own: a command word with a paragraph under it is somebody
     // expecting the paragraph to be read.
+    if word == BRANCH && !after.contains('\n') {
+        let words: Vec<&str> = after.split_whitespace().collect();
+        return match words.as_slice() {
+            [] => Submitted::Branch(Branching::Show),
+            ["use", name] => Submitted::Branch(Branching::Use(name)),
+            ["clear"] => Submitted::Branch(Branching::Clear),
+            _ => Submitted::Refused,
+        };
+    }
+
     if matches!(word, CUT | PULL | RESUME) && !after.contains('\n') {
         let mut words = after.split_whitespace();
         let (first, second) = (words.next(), words.next());
@@ -193,6 +213,7 @@ const PUSH: &str = "/push";
 const CUT: &str = "/draft";
 const PULL: &str = "/pull";
 const RESUME: &str = "/resume";
+const BRANCH: &str = "/branch";
 
 #[cfg(test)]
 #[path = "tests/submission.rs"]

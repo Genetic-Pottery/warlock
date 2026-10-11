@@ -18,12 +18,14 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use warlock_engine::{
-    Loaded, Manifest, Tree, held_sigils, load_tree, manifest_path, repository_root, unpact_ignored,
+    Loaded, Manifest, Tree, held_base_branch, held_sigils, load_tree, manifest_path,
+    repository_root, unpact_ignored,
 };
 
 use crate::app::{App, Chrome, Sigils, reseat_on};
 use crate::boundary::{Operation, permits};
 use crate::error::{Error, one_line};
+use crate::git::Git;
 use crate::standing::Standing;
 use crate::watch::{Watch, WatchPolicy, Watching};
 
@@ -405,14 +407,15 @@ fn load_app_in(
     if let Some(line) = uncleaned {
         note(&mut app, line);
     }
-    // Resolved here and nowhere else. Neither half of the header line can
-    // change under a running warlock — the roots are fixed for the session and a
-    // sigil is written with warlock not running — so it is built once, kept
-    // beside the roots it was built from, and handed to the renderer every
-    // frame. A reload does not touch it, which is why `reseat_on` no longer
-    // carries it and `reload` no longer puts it back afterwards.
-    let chrome =
-        Chrome::of(&repo_root, tree.root_path()).with_sigils(sigils_held(home, &repo_root));
+    // Resolved here, kept beside the roots it was built from, and handed to the
+    // renderer every frame. A reload does not touch it, which is why
+    // `reseat_on` does not carry it: the roots are fixed for the session and a
+    // sigil is written with warlock not running. The base is the one part that
+    // moves, and only through `/branch`, which sets it here as it saves it.
+    let base = home.and_then(|home| held_base_branch(home, &repo_root).ok().flatten());
+    let chrome = Chrome::of(&repo_root, tree.root_path())
+        .with_sigils(sigils_held(home, &repo_root))
+        .with_target(base, Git::at(&repo_root).remote_head());
     let scope = Scope {
         root: tree.root_path().to_path_buf(),
         repo_root,

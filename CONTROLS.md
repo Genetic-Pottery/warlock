@@ -117,6 +117,9 @@ running, it is the only stage lit.
 | `/pull <SCOPE>` | Work the next ready ticket in the scope's queue to a pull request |
 | `/pull <SCOPE> <TICKET>` | Work the named ticket, for example `WAR-123`, instead of the next one |
 | `/resume <TICKET>` | Mark the sub-tasks a halted pull stopped on as pending again, and put `/pull <SCOPE> <TICKET>` in the chat bar to send |
+| `/branch` | Name the branch pulls start from and open pull requests against |
+| `/branch use <BRANCH>` | Make pulls start from and open pull requests against `BRANCH`, the same as `warlock branch use` |
+| `/branch clear` | Go back to the remote's default branch, the same as `warlock branch clear` |
 
 Commands are case-sensitive and take their arguments on the same line. A
 mistyped command is refused with a line listing every command, and nothing is
@@ -190,6 +193,10 @@ When a pull halts, the ticket stays in progress and its Linear comment lists
 what finished and what didn't. To pick it up again, send `/resume <TICKET>`,
 then send the `/pull` it leaves in the chat bar. The question that opens asks
 whether to resume and names the sub-task it starts from.
+
+The title on the file tree's top border names the branch a pull starts from
+and opens its pull request against, for example `pulls into main`. It ends in
+`(default)` when no branch is set and warlock is using the remote's default.
 
 One draft and one pull run at a time. A second `/draft` or `/pull` sent while
 one is running is refused, and nothing is read or changed.

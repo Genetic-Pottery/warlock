@@ -25,7 +25,8 @@ use super::{
     composer_height, composer_on_screen, display_width, draw, footer_text_area, guide_prefixes,
     help_most_scroll, hit_test, keys_line, label_width, mark_area, pacting_keys_line, pane_inner,
     panel_height, panel_reach, panel_row, panel_rows_area, panel_width, run_header_height,
-    run_header_line, tree_height, tree_rows_area, tree_width, truncated, workflow_line,
+    run_header_line, target_title, tree_height, tree_rows_area, tree_width, truncated,
+    workflow_line,
 };
 use crate::account::{Line as Entry, Outcome};
 use crate::app::{App, Chrome, Focus, Row, Run, Sigils, Working};
@@ -7887,4 +7888,23 @@ mod help {
         assert!(!bottom.contains("Moving"), "{bottom}");
         assert!(bottom.contains("Esc or ? closes"), "{bottom}");
     }
+}
+
+#[test]
+fn the_target_title_names_the_base_and_cuts_a_long_one_with_an_ellipsis() {
+    use crate::app::Target;
+    assert_eq!(target_title(Target::Set("main"), 40), " pulls into main ");
+    assert_eq!(
+        target_title(Target::Default("main"), 40),
+        " pulls into main (default) "
+    );
+    assert_eq!(
+        target_title(Target::Unknown, 40),
+        " pulls into the default branch "
+    );
+
+    let long = target_title(Target::Set("release/2026-q4-the-long-hotfix-branch"), 28);
+    assert!(display_width(&long) <= 28, "{long:?}");
+    assert!(long.starts_with(" pulls into release/"), "{long:?}");
+    assert!(long.trim_end().ends_with('…'), "{long:?}");
 }

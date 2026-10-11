@@ -31,7 +31,7 @@ use crate::inflight::{Lost, Port, Stream, Workers, settled};
 use crate::pacting::CancelGuard;
 use crate::panel::Mode;
 use crate::prompt::{Edited, ScopePrompt};
-use crate::submission::{Submitted, Taking, submitted_for};
+use crate::submission::{Branching, Submitted, Taking, submitted_for};
 use crate::template::{Error as TemplateError, brief_template};
 use crate::thread::{Ending, ending_for};
 use crate::writing::{write_edit, write_opened};
@@ -86,6 +86,15 @@ pub(crate) enum Wanted {
     /// holds — a file under the home, which this value has not got.
     Pull(Option<Takes>),
     Resume(String),
+    Branch(Branched),
+}
+
+/// The owned twin of [`Branching`], for [`Takes`]'s reason.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Branched {
+    Show,
+    Use(String),
+    Clear,
 }
 
 /// The scope a `/pull` named and, where it named one, the ticket.
@@ -399,6 +408,15 @@ impl<C: Converses> Chat<C> {
             // here: the answer to it is the scopes this machine holds.
             Submitted::Pull(taking) => return Some(Wanted::Pull(taking.map(Takes::of))),
             Submitted::Resume(ticket) => return Some(Wanted::Resume(ticket.to_owned())),
+            // The base lives under the home and is drawn off the chrome, and
+            // neither is this value's.
+            Submitted::Branch(branching) => {
+                return Some(Wanted::Branch(match branching {
+                    Branching::Show => Branched::Show,
+                    Branching::Use(name) => Branched::Use(name.to_owned()),
+                    Branching::Clear => Branched::Clear,
+                }));
+            }
             // The line is asked of the value rather than restated here, so the
             // list of commands that exist is written down in one place.
             said @ Submitted::Refused => {

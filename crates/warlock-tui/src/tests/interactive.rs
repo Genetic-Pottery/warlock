@@ -3422,6 +3422,61 @@ mod pulling {
     }
 
     #[test]
+    fn branch_use_saves_the_base_moves_the_title_and_clear_puts_it_back() {
+        let repo = a_repository();
+        let home = a_home(repo.path());
+        let mut driven = pulling_session(repo.path(), home.path(), board(), checkout(), working());
+
+        typing(&mut driven, "/branch use release/next");
+        assert_eq!(
+            warlock_engine::held_base_branch(home.path(), repo.path())
+                .expect("the config reads")
+                .as_deref(),
+            Some("release/next")
+        );
+        assert_eq!(
+            driven.scope.chrome.target(),
+            crate::app::Target::Set("release/next")
+        );
+        let said = notes(&driven);
+        assert!(
+            said.last()
+                .is_some_and(|line| line.contains("`release/next`")),
+            "{said:?}"
+        );
+
+        typing(&mut driven, "/branch clear");
+        assert_eq!(
+            warlock_engine::held_base_branch(home.path(), repo.path()).expect("the config reads"),
+            None
+        );
+        assert!(!matches!(
+            driven.scope.chrome.target(),
+            crate::app::Target::Set(_)
+        ));
+        assert!(!driven.chat.answering(), "a `/branch` opened a turn");
+    }
+
+    #[test]
+    fn a_bare_branch_names_the_base_and_writes_nothing() {
+        let repo = a_repository();
+        let home = a_home(repo.path());
+        let mut driven = pulling_session(repo.path(), home.path(), board(), checkout(), working());
+        driven.scope.chrome.set_base(Some("dev".to_owned()));
+
+        typing(&mut driven, "/branch");
+        let said = notes(&driven);
+        assert!(
+            said.last().is_some_and(|line| line.contains("`dev`")),
+            "{said:?}"
+        );
+        assert_eq!(
+            warlock_engine::held_base_branch(home.path(), repo.path()).expect("the config reads"),
+            None
+        );
+    }
+
+    #[test]
     fn every_key_and_command_that_races_a_pull_is_refused_with_the_line_naming_it() {
         let repo = a_repository();
         let home = a_home(repo.path());

@@ -352,6 +352,10 @@ impl Sigils {
 pub(crate) struct Chrome {
     header: String,
     sigils: Sigils,
+    // Kept apart rather than resolved into one name, so `/branch clear` has
+    // the remote's default to fall back to without asking `git` again.
+    base: Option<String>,
+    remote_head: Option<String>,
 }
 
 impl Chrome {
@@ -369,6 +373,8 @@ impl Chrome {
         Self {
             header,
             sigils: Sigils::Nothing,
+            base: None,
+            remote_head: None,
         }
     }
 
@@ -386,6 +392,45 @@ impl Chrome {
     #[must_use]
     pub(crate) const fn sigils(&self) -> &Sigils {
         &self.sigils
+    }
+
+    #[must_use]
+    pub(crate) fn with_target(mut self, base: Option<String>, remote_head: Option<String>) -> Self {
+        self.base = base;
+        self.remote_head = remote_head;
+        self
+    }
+
+    pub(crate) fn set_base(&mut self, base: Option<String>) {
+        self.base = base;
+    }
+
+    #[must_use]
+    pub(crate) fn target(&self) -> Target<'_> {
+        match (&self.base, &self.remote_head) {
+            (Some(base), _) => Target::Set(base),
+            (None, Some(head)) => Target::Default(head),
+            (None, None) => Target::Unknown,
+        }
+    }
+}
+
+/// The branch a pull starts from and opens its pull request against.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Target<'a> {
+    Set(&'a str),
+    Default(&'a str),
+    Unknown,
+}
+
+impl Target<'_> {
+    #[must_use]
+    pub(crate) fn sentence(self) -> String {
+        match self {
+            Self::Set(base) => format!("`{base}`"),
+            Self::Default(head) => format!("the remote's default branch, `{head}`"),
+            Self::Unknown => "the remote's default branch".to_owned(),
+        }
     }
 }
 

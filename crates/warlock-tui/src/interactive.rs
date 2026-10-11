@@ -6,10 +6,10 @@ use std::time::{Duration, Instant};
 
 use ratatui::crossterm::event::{KeyEvent, MouseEvent};
 use ratatui::layout::Size;
-use warlock_engine::{Agent, Manifest};
+use warlock_engine::{Agent, Manifest, save_base_branch};
 
 use crate::app::{App, Focus, Run, Working};
-use crate::chatting::{Chat, Takes, Wanted};
+use crate::chatting::{Branched, Chat, Takes, Wanted};
 use crate::claude::{ChatAgent, ClaudeAgent, Converses, Wired};
 use crate::clipboard::{self, Clip, Clipboard};
 use crate::composer::{Composed, paste_for};
@@ -17,7 +17,7 @@ use crate::confirm::QuitConfirm;
 use crate::confirm::Reviewed;
 use crate::cutting::Cutter;
 use crate::editing::{NO_EDITOR, edit_press, editor, run_editor};
-use crate::error::Error;
+use crate::error::{Error, one_line};
 use crate::git::{Forge, Gh, Git, Repository};
 use crate::help::HelpSheet;
 use crate::input::{
@@ -963,6 +963,7 @@ impl<K: Seams> Session<K> {
                     now,
                 );
             }
+            Some(Wanted::Branch(branched)) => self.branch(branched, now),
             Some(Wanted::Resume(ticket)) => {
                 resume_press(
                     &mut self.app,
@@ -976,6 +977,41 @@ impl<K: Seams> Session<K> {
             }
             None => {}
         }
+    }
+
+    // Saved before the chrome moves, so the title never names a base the next
+    // pull would not use. A pull underway has already been refused above with
+    // every other submit, which matters: its base was read when it started.
+    fn branch(&mut self, branched: Branched, now: Instant) {
+        let base = match branched {
+            Branched::Show => {
+                let line = format!(
+                    "pulls start from and open pull requests against {}",
+                    self.scope.chrome.target().sentence()
+                );
+                self.app.panel_mut().note(line, now);
+                return;
+            }
+            Branched::Use(name) => Some(name),
+            Branched::Clear => None,
+        };
+        let Some(home) = self.puller.home() else {
+            self.app
+                .panel_mut()
+                .note(one_line(&Error::NoHome.to_string()), now);
+            return;
+        };
+        if let Err(source) = save_base_branch(home, &self.scope.repo_root, base.as_deref()) {
+            let line = one_line(&Error::Sigils { source }.to_string());
+            self.app.panel_mut().note(line, now);
+            return;
+        }
+        self.scope.chrome.set_base(base);
+        let line = format!(
+            "pulls now start from and open pull requests against {}",
+            self.scope.chrome.target().sentence()
+        );
+        self.app.panel_mut().note(line, now);
     }
 
     /// A block the terminal handed over whole. Nothing is returned and nothing

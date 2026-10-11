@@ -563,6 +563,21 @@ impl Git<Spawner> {
 }
 
 impl<R: Runs> Git<R> {
+    // Only the local half of `default_branch`, because this is asked as the
+    // screen opens: the other half is a round trip to the remote, and one over
+    // SSH can stop to ask for a passphrase the alternate screen hides.
+    #[must_use]
+    pub fn remote_head(&self) -> Option<String> {
+        let local = self
+            .ran(&["symbolic-ref", "--quiet", "--short", &origin_head()])
+            .ok()?;
+        if local.success() {
+            branch_named(&local.stdout_text())
+        } else {
+            None
+        }
+    }
+
     #[must_use]
     pub fn new(runs: R, directory: impl Into<PathBuf>) -> Self {
         Self {

@@ -24,7 +24,7 @@ use warlock_engine::{NodeState, scope};
 // and the account's `Line` is what a row says. Both names are right where they
 // live, and this module is the one place both are in scope.
 use crate::account::{Account, Line as Entry, Voice};
-use crate::app::{App, Chrome, Focus, Row, Run, RunHeader, Working};
+use crate::app::{App, Chrome, Focus, Row, Run, RunHeader, Target, Working};
 use crate::colour::{CONVERSATION_COLOUR, FOCUS_COLOUR, GUIDE_COLOUR, SYSTEM_COLOUR, colour_for};
 use crate::composer::Composer;
 use crate::confirm::{Answer, Carry, Choice, Cutting, Filing, Review, Undertaking};
@@ -246,6 +246,9 @@ const HELP_SECTIONS: &[(&str, &[(&str, &str)])] = &[
             ("/draft SCOPE SLUG", "cut a project into issues"),
             ("/pull SCOPE [TICKET]", "work a ticket to a pull request"),
             ("/resume TICKET", "pick up a halted pull"),
+            ("/branch", "name the branch pulls go into"),
+            ("/branch use BRANCH", "pull into BRANCH instead"),
+            ("/branch clear", "pull into the remote's default"),
         ],
     ),
     (
@@ -1101,11 +1104,31 @@ pub(crate) fn display_width(text: &str) -> usize {
 }
 
 fn draw_tree_pane(frame: &mut Frame<'_>, area: Rect, app: &App, chrome: &Chrome, now: Instant) {
-    frame.render_widget(pane_block(app.focus() == Focus::Tree), area);
+    let room = usize::from(area.width.saturating_sub(2 * BORDER_THICKNESS));
+    let title = target_title(chrome.target(), room);
+    frame.render_widget(
+        pane_block(app.focus() == Focus::Tree).title_top(Line::from(title).bold()),
+        area,
+    );
 
     let [header_area, rows_area] = tree_split(area);
     draw_header(frame, header_area, chrome);
     draw_tree(frame, rows_area, app, now);
+}
+
+const TARGET_LABEL: &str = " pulls into ";
+
+// The branch is cut with an ellipsis rather than left to the border, because
+// ratatui clips a title without saying so and a clipped branch name reads as a
+// whole one: the one mistake this title is here to prevent.
+pub(crate) fn target_title(target: Target<'_>, width: usize) -> String {
+    let name = match target {
+        Target::Set(base) => base.to_owned(),
+        Target::Default(head) => format!("{head} (default)"),
+        Target::Unknown => "the default branch".to_owned(),
+    };
+    let room = width.saturating_sub(display_width(TARGET_LABEL) + 1);
+    format!("{TARGET_LABEL}{} ", truncated(&name, room))
 }
 
 fn draw_header(frame: &mut Frame<'_>, area: Rect, chrome: &Chrome) {

@@ -376,3 +376,26 @@ fn a_draft_of_nothing_is_a_message() {
         assert_eq!(submitted_for(draft), Submitted::Message);
     }
 }
+
+#[test]
+fn branch_reads_its_three_spellings_and_refuses_the_rest() {
+    use super::Branching;
+    assert_eq!(submitted_for("/branch"), Submitted::Branch(Branching::Show));
+    assert_eq!(
+        submitted_for("/branch use release/next "),
+        Submitted::Branch(Branching::Use("release/next"))
+    );
+    assert_eq!(
+        submitted_for("/branch clear"),
+        Submitted::Branch(Branching::Clear)
+    );
+    for draft in [
+        "/branch dev",
+        "/branch use",
+        "/branch use a b",
+        "/branch clear now",
+        "/branch use dev\nand a thought",
+    ] {
+        assert_eq!(submitted_for(draft), Submitted::Refused, "{draft:?}");
+    }
+}
