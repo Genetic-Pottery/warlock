@@ -23,7 +23,7 @@ use warlock_engine::{DEFAULT_BRIEF_DIRECTORY, briefs, load_briefs, to_manifest_p
 use crate::app::{App, Focus};
 use crate::claude::{
     Activities, Activity, BRIEF_EFFORT, BRIEF_MODEL, CHAT_INSTRUCTION, Cancel, ChatAgent,
-    Converses, WRITE_INSTRUCTION, brief_instruction,
+    Converses, READY_MARKER, WRITE_INSTRUCTION, brief_instruction,
 };
 use crate::composer::{Composed, Composer, Pasted};
 use crate::error::one_line;
@@ -54,7 +54,8 @@ const WRITE_COMMAND: &str = "/write";
 const BRIEF_NOTE: &str =
     "brief mode — this conversation is now converging on a document. /chat leaves it.";
 
-const CHAT_NOTE: &str = "chat mode — the brief is over and nothing is being converged on.";
+pub(crate) const CHAT_NOTE: &str =
+    "chat mode — the brief is over and nothing is being converged on.";
 
 // The two refusals. Both are a line and no turn: telling the model it is where
 // it already is, or asking it to brief a conversation that was never aimed at a
@@ -349,22 +350,20 @@ impl<C: Converses> Chat<C> {
                     if app.panel_mut().set_mode(Mode::Brief) {
                         app.panel_mut().note(BRIEF_NOTE, now);
                     }
+                    app.panel_mut().set_ready(false);
                     self.say(app, BRIEF_COMMAND, &instruction, Asked::Answer, now);
                 }
                 Err(line) => app.panel_mut().note(line, now),
             },
             Submitted::Chat => {
-                if app.panel_mut().set_mode(Mode::Chat) {
-                    app.panel_mut().note(CHAT_NOTE, now);
-                    self.say(app, CHAT_COMMAND, CHAT_INSTRUCTION, Asked::Answer, now);
-                } else {
+                if !self.leave_brief(app, now) {
                     app.panel_mut().note(ALREADY_CHATTING, now);
                 }
             }
             // Asked of the app rather than of anything this value remembers,
-            // because that is the state the border title is drawn from: two
+            // because that is the state the workflow strip is drawn from: two
             // readings of the register would eventually be two answers, and the
-            // refusal would contradict the header.
+            // refusal would contradict the strip.
             Submitted::Write => {
                 if app.panel().mode() == Mode::Brief {
                     self.say(app, WRITE_COMMAND, WRITE_INSTRUCTION, Asked::Document, now);
@@ -445,8 +444,25 @@ impl<C: Converses> Chat<C> {
         self.settle_field();
     }
 
+    // A brief that is on disk is over, so a write that landed leaves brief
+    // mode the way `/chat` does, instruction and all: a mode changed without
+    // telling the model would have the next question answered as a brief.
     pub(crate) fn write(&mut self, app: &mut App, edited: Edited, now: Instant) {
-        self.prompt = write_edit(app, &self.root, &self.prompt, edited, now).prompt;
+        let wrote = write_edit(app, &self.root, &self.prompt, edited, now);
+        self.prompt = wrote.prompt;
+        if wrote.written.is_some() {
+            self.leave_brief(app, now);
+        }
+    }
+
+    fn leave_brief(&mut self, app: &mut App, now: Instant) -> bool {
+        if !app.panel_mut().set_mode(Mode::Chat) {
+            return false;
+        }
+        app.panel_mut().set_ready(false);
+        app.panel_mut().note(CHAT_NOTE, now);
+        self.say(app, CHAT_COMMAND, CHAT_INSTRUCTION, Asked::Answer, now);
+        true
     }
 }
 
@@ -605,6 +621,13 @@ pub(crate) fn apply_turn(
             // and a `/write` whose answer went to the loop instead of the thread
             // would be a document nobody could read.
             let document = (asked == Asked::Document).then(|| answer.clone());
+            let answer = if asked == Asked::Answer && app.panel().mode() == Mode::Brief {
+                let (answer, ready) = without_marker(answer);
+                app.panel_mut().set_ready(ready);
+                answer
+            } else {
+                answer
+            };
             app.panel_mut().answer_turn(answer, now);
             document
         }
@@ -612,6 +635,18 @@ pub(crate) fn apply_turn(
             end(app, &ending, now);
             None
         }
+    }
+}
+
+// Only a last line that is the marker and nothing else counts, so a reply
+// that quotes it mid-sentence — talking about the strip, say — neither lights
+// it nor loses words.
+fn without_marker(answer: String) -> (String, bool) {
+    let kept = answer.trim_end();
+    match kept.rsplit_once('\n') {
+        Some((before, last)) if last.trim() == READY_MARKER => (before.trim_end().to_owned(), true),
+        None if kept.trim() == READY_MARKER => (String::new(), true),
+        _ => (answer, false),
     }
 }
 

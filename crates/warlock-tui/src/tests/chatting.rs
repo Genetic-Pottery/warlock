@@ -2229,3 +2229,76 @@ mod submitting {
         );
     }
 }
+
+mod marker {
+    use super::super::without_marker;
+
+    #[test]
+    fn a_last_line_that_is_the_marker_is_taken_off_and_counts() {
+        assert_eq!(
+            without_marker("We have every section.\n\n[ready to write]\n".to_owned()),
+            ("We have every section.".to_owned(), true)
+        );
+    }
+
+    #[test]
+    fn the_marker_anywhere_but_alone_on_the_last_line_is_left_and_does_not_count() {
+        for answer in [
+            "The strip lights when I say [ready to write] last.",
+            "[ready to write]\nOne more question.",
+            "Nothing to report.",
+        ] {
+            assert_eq!(
+                without_marker(answer.to_owned()),
+                (answer.to_owned(), false),
+                "{answer:?}"
+            );
+        }
+    }
+}
+
+mod readiness {
+    use super::*;
+
+    fn answered(mode: Mode, answer: &str) -> App {
+        let base = Instant::now();
+        let (mut app, events, mut chat) = asking(base);
+        app.panel_mut().set_mode(mode);
+        events
+            .send(TurnEvent::Finished(Ok(answer.to_owned())))
+            .expect("the loop is still listening");
+        drain(&mut chat, &mut app, at(base, 2));
+        app
+    }
+
+    fn said(app: &App) -> String {
+        format!("{:?}", rows(app, Instant::now()))
+    }
+
+    #[test]
+    fn a_brief_answer_ending_in_the_marker_is_ready_and_the_card_never_shows_it() {
+        let app = answered(Mode::Brief, "Every section is settled.\n[ready to write]");
+        assert!(app.panel().ready());
+        assert!(!said(&app).contains("[ready to write]"), "{}", said(&app));
+    }
+
+    #[test]
+    fn a_brief_answer_without_it_takes_readiness_back() {
+        let base = Instant::now();
+        let (mut app, events, mut chat) = asking(base);
+        app.panel_mut().set_mode(Mode::Brief);
+        app.panel_mut().set_ready(true);
+        events
+            .send(TurnEvent::Finished(Ok("One more question.".to_owned())))
+            .expect("the loop is still listening");
+        drain(&mut chat, &mut app, at(base, 2));
+        assert!(!app.panel().ready());
+    }
+
+    #[test]
+    fn a_chat_answer_is_left_as_it_came() {
+        let app = answered(Mode::Chat, "Quoting it:\n[ready to write]");
+        assert!(!app.panel().ready());
+        assert!(said(&app).contains("[ready to write]"), "{}", said(&app));
+    }
+}

@@ -408,7 +408,7 @@ impl<O: Opens, A: Converses> Cutter<O, A> {
     // project being cut and a skip note still on its way are all this session's
     // one cut. The note is in it because a project read back before the note
     // lands is a project that offers the skipped slice again.
-    const fn running(&self) -> bool {
+    pub(crate) const fn running(&self) -> bool {
         self.fetching() || self.drafting() || !self.skipping.is_empty()
     }
 

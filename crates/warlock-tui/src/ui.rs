@@ -24,7 +24,7 @@ use warlock_engine::{NodeState, scope};
 // and the account's `Line` is what a row says. Both names are right where they
 // live, and this module is the one place both are in scope.
 use crate::account::{Account, Line as Entry, Voice};
-use crate::app::{App, Chrome, Focus, Row, Run, RunHeader};
+use crate::app::{App, Chrome, Focus, Row, Run, RunHeader, Working};
 use crate::colour::{CONVERSATION_COLOUR, FOCUS_COLOUR, GUIDE_COLOUR, SYSTEM_COLOUR, colour_for};
 use crate::composer::Composer;
 use crate::confirm::{Answer, Carry, Choice, Cutting, Filing, Review, Undertaking};
@@ -95,15 +95,6 @@ const HEADER_GAP: &str = " — ";
 pub(crate) const PANEL_INDENT: &str = "  ";
 
 const THREAD_TITLE: &str = " thread ";
-
-const BRIEF_THREAD_TITLE: &str = " thread · brief ";
-
-const fn thread_title(mode: Mode) -> &'static str {
-    match mode {
-        Mode::Chat => THREAD_TITLE,
-        Mode::Brief => BRIEF_THREAD_TITLE,
-    }
-}
 
 pub(crate) const SAID_MARKER: &str = "› ";
 
@@ -402,7 +393,8 @@ pub(crate) fn draw(
         // showing — it is drawn under the conversation and under neither of the
         // other two — which is [`on_screen`]'s question and not this one.
         let live = app.focus() == Focus::Composer && !composer.is_muted();
-        draw_composer(frame, area, composer, live);
+        let strip = workflow_line(app.panel().mode(), app.panel().ready(), app.working());
+        draw_composer(frame, area, composer, live, strip);
     }
     draw_tree_pane(frame, tree, app, chrome, now);
     draw_footer(frame, footer, app);
@@ -715,7 +707,7 @@ fn draw_panel(frame: &mut Frame<'_>, area: Rect, app: &App, now: Instant) {
     let conversation = panel.showing_thread();
     let mut block = pane_block(app.focus() == Focus::Panel);
     if conversation {
-        block = block.title_top(Line::from(thread_title(panel.mode())).bold());
+        block = block.title_top(Line::from(THREAD_TITLE).bold());
     }
     if below > 0 {
         block = block.title_bottom(Line::from(scrollback(below)).right_aligned().dim());
@@ -931,9 +923,15 @@ fn mark_area(inner: Rect) -> Option<Rect> {
     })
 }
 
-fn draw_composer(frame: &mut Frame<'_>, area: Rect, composer: &Composer, live: bool) {
+fn draw_composer(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    composer: &Composer,
+    live: bool,
+    strip: Line<'static>,
+) {
     let inner = pane_inner(area);
-    let mut block = pane_block(live);
+    let mut block = pane_block(live).title_top(strip.right_aligned());
     // The one thing about the field that is not on the field: while something
     // other than the conversation is waiting on a draft, what it is waiting for
     // is written on the border, because a draft that answers somewhere else is
@@ -1000,6 +998,39 @@ fn draw_composer(frame: &mut Frame<'_>, area: Rect, composer: &Composer, live: b
     }
 
     frame.render_widget(Paragraph::new(lines), inner);
+}
+
+const WORKFLOW_LIT: Style = Style::new()
+    .fg(Color::Black)
+    .bg(FOCUS_COLOUR)
+    .add_modifier(Modifier::BOLD);
+
+const WORKFLOW_DIM: Style = Style::new().fg(Color::Indexed(245)).bg(Color::Indexed(236));
+
+// Every stage is drawn whatever is lit, so a reader new to warlock sees the
+// whole road and where they are on it. Brief and write light together when the
+// model thinks the brief is ready. A push, draft or pull running lights alone:
+// the conversation's mode beside it read as a second thing going on.
+fn workflow_line(mode: Mode, ready: bool, working: Option<Working>) -> Line<'static> {
+    let talking = working.is_none();
+    let stages = [
+        ("chat", talking && mode == Mode::Chat),
+        ("brief", talking && mode == Mode::Brief),
+        ("write", talking && mode == Mode::Brief && ready),
+        ("push", working == Some(Working::Push)),
+        ("draft", working == Some(Working::Draft)),
+        ("pull", working == Some(Working::Pull)),
+    ];
+    let mut spans = Vec::new();
+    for (stage, lit) in stages {
+        if !spans.is_empty() {
+            spans.push(Span::raw(" "));
+        }
+        let style = if lit { WORKFLOW_LIT } else { WORKFLOW_DIM };
+        spans.push(Span::styled(format!(" {stage} "), style));
+    }
+    spans.push(Span::raw(" "));
+    Line::from(spans)
 }
 
 fn split_at_column(row: &str, column: usize) -> (&str, &str, &str) {

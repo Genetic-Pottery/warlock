@@ -882,8 +882,9 @@ mod dragging {
     }
 
     // Typed into the composer so there is a field on screen to press in, and
-    // a word to find it by.
-    const DRAFT: &str = "draft";
+    // a word to find it by — one the workflow strip on the field's border does
+    // not also draw, or the search finds the border first.
+    const DRAFT: &str = "unsent";
 
     // A conversation several screens tall, so there is somewhere for the
     // card to scroll, drawn once at the size the drags below land on.

@@ -10,26 +10,25 @@ use ratatui::widgets::{Paragraph, Widget};
 use warlock_engine::{Destination, NodeState, scope};
 
 use super::{
-    Areas, BAR_EMPTY, BAR_FILLED, BAR_MIN_WIDTH, BORDER_THICKNESS, BRIEF_THREAD_TITLE, CANCEL_KEY,
-    CARRY_LEFT, CARRY_QUESTION, COMPOSER_CURSOR, COMPOSER_MIN_HEIGHT, CONFIRM_ANSWER_GAP,
-    CONFIRM_NO, CONFIRM_QUESTION, CONFIRM_YES, CUT_KEY, CUT_QUESTION, CUT_SLICES, CUT_STATUS,
-    CUT_TEAM, Carry, DIALOG_MARGIN, DIALOG_MARGIN_ROWS, Dialog, ELLIPSIS, FOOTER_HEIGHT, GUIDE,
-    GUIDE_BRANCH, GUIDE_LAST, HEADER_GAP, HEADER_HEIGHT, HELP_KEY, Hit, INDENT, KEY_DROP_ORDER,
-    KEY_GAP, KEYS, LIVE_KEY, MARK, MARK_MARGIN, MARK_MARGIN_ROWS, NO_MARKER, NOTE_MARKER,
-    PACTING_KEYS, PACTING_RUN, PANEL_INDENT, PATH_HEADING, PATH_RULES, PERCENT_WIDTH, PULL_BRANCH,
-    PULL_FROM, PULL_QUESTION, PULL_RESUME_QUESTION, PULL_SCOPE, PULL_TEAM, PUSH_KEY, PUSH_QUESTION,
-    PUSH_TEAM, QUIT_KEY, RECORD_HEADING, RECORD_LABEL_GAP, RECORD_RULES, REFRESHING_RUN,
-    REVIEW_ANSWER_GAP, REVIEW_CREATE, REVIEW_EDIT, REVIEW_FEEDBACK, REVIEW_QUESTION, REVIEW_READ,
-    REVIEW_SKIP, RUN_HEADER_HEIGHT, Reach, Review, SAID_MARKER, SCOPE_CURSOR, SCOPE_HEADING,
-    SCROLLBACK_ARROW, SELECTED, SELECTION_MARKER, THREAD_TITLE, TREE_MIN_WIDTH, TREE_PERCENT,
-    areas, composer_height, composer_on_screen, display_width, draw, footer_text_area,
-    guide_prefixes, help_most_scroll, hit_test, keys_line, label_width, mark_area,
-    pacting_keys_line, pane_inner, panel_height, panel_reach, panel_row, panel_rows_area,
-    panel_width, run_header_height, run_header_line, tree_height, tree_rows_area, tree_width,
-    truncated,
+    Areas, BAR_EMPTY, BAR_FILLED, BAR_MIN_WIDTH, BORDER_THICKNESS, CANCEL_KEY, CARRY_LEFT,
+    CARRY_QUESTION, COMPOSER_CURSOR, COMPOSER_MIN_HEIGHT, CONFIRM_ANSWER_GAP, CONFIRM_NO,
+    CONFIRM_QUESTION, CONFIRM_YES, CUT_KEY, CUT_QUESTION, CUT_SLICES, CUT_STATUS, CUT_TEAM, Carry,
+    DIALOG_MARGIN, DIALOG_MARGIN_ROWS, Dialog, ELLIPSIS, FOOTER_HEIGHT, GUIDE, GUIDE_BRANCH,
+    GUIDE_LAST, HEADER_GAP, HEADER_HEIGHT, HELP_KEY, Hit, INDENT, KEY_DROP_ORDER, KEY_GAP, KEYS,
+    LIVE_KEY, MARK, MARK_MARGIN, MARK_MARGIN_ROWS, NO_MARKER, NOTE_MARKER, PACTING_KEYS,
+    PACTING_RUN, PANEL_INDENT, PATH_HEADING, PATH_RULES, PERCENT_WIDTH, PULL_BRANCH, PULL_FROM,
+    PULL_QUESTION, PULL_RESUME_QUESTION, PULL_SCOPE, PULL_TEAM, PUSH_KEY, PUSH_QUESTION, PUSH_TEAM,
+    QUIT_KEY, RECORD_HEADING, RECORD_LABEL_GAP, RECORD_RULES, REFRESHING_RUN, REVIEW_ANSWER_GAP,
+    REVIEW_CREATE, REVIEW_EDIT, REVIEW_FEEDBACK, REVIEW_QUESTION, REVIEW_READ, REVIEW_SKIP,
+    RUN_HEADER_HEIGHT, Reach, Review, SAID_MARKER, SCOPE_CURSOR, SCOPE_HEADING, SCROLLBACK_ARROW,
+    SELECTED, SELECTION_MARKER, THREAD_TITLE, TREE_MIN_WIDTH, TREE_PERCENT, WORKFLOW_LIT, areas,
+    composer_height, composer_on_screen, display_width, draw, footer_text_area, guide_prefixes,
+    help_most_scroll, hit_test, keys_line, label_width, mark_area, pacting_keys_line, pane_inner,
+    panel_height, panel_reach, panel_row, panel_rows_area, panel_width, run_header_height,
+    run_header_line, tree_height, tree_rows_area, tree_width, truncated, workflow_line,
 };
 use crate::account::{Line as Entry, Outcome};
-use crate::app::{App, Chrome, Focus, Row, Run, Sigils};
+use crate::app::{App, Chrome, Focus, Row, Run, Sigils, Working};
 use crate::claude::Activity;
 use crate::colour::{CONVERSATION_COLOUR, FOCUS_COLOUR, GUIDE_COLOUR, SYSTEM_COLOUR, colour_for};
 use crate::composer::COMPOSER_MAX_ROWS;
@@ -3314,68 +3313,24 @@ fn the_thread_says_which_card_it_is_with_the_question_scrolled_off_the_top() {
 }
 
 #[test]
-fn the_thread_title_says_which_register_the_conversation_is_in() {
+fn the_thread_title_is_the_same_in_either_mode() {
     let base = Instant::now();
     let mut app = pacting_app(base, WIDTH, FIXTURE_HEIGHT);
     app.panel_mut().start_turn(QUESTION, base);
     app.panel_mut().answer_turn(ANSWER, at(base, 1));
 
-    // Chat is where a conversation starts, and the edge says only the card.
-    assert_eq!(app.panel().mode(), Mode::Chat);
     let chat = render_at(&app, WIDTH, FIXTURE_HEIGHT, at(base, 2));
-    let chat_edge = panel_top_edge(&chat);
-    assert!(chat_edge.contains(THREAD_TITLE.trim()), "{chat_edge:?}");
-    assert!(!chat_edge.contains("brief"), "{chat_edge:?}");
-
-    // The mode changed, so the same card at the same width says so.
     assert!(
         app.panel_mut().set_mode(Mode::Brief),
         "chat to brief is a change"
     );
     let brief = render_at(&app, WIDTH, FIXTURE_HEIGHT, at(base, 2));
-    let brief_edge = panel_top_edge(&brief);
-    assert!(
-        brief_edge.contains(BRIEF_THREAD_TITLE.trim()),
-        "{brief_edge:?}"
-    );
 
-    // And says so on the border and nowhere else: not on a row of the card,
-    // which has exactly the rows it had, and nowhere on the frame — no
-    // artifact, no path, no "nothing written yet".
+    // The mode is the workflow strip's to say, on the chat bar.
+    assert_eq!(panel_top_edge(&chat), panel_top_edge(&brief));
+    assert!(!panel_top_edge(&brief).contains("brief"));
     assert_eq!(panel_rows(&chat), panel_rows(&brief));
-    assert!(
-        !panel_rows(&brief).iter().any(|row| row.contains("brief")),
-        "the mode took a row of the thread: {:?}",
-        panel_rows(&brief)
-    );
-    assert_eq!(
-        rows_text(&brief)
-            .iter()
-            .filter(|row| row.contains("brief"))
-            .count(),
-        1,
-        "the mode is said somewhere other than the border: {:?}",
-        rows_text(&brief)
-    );
 
-    // A mode is a fact about the conversation, so the card the reader
-    // swapped to still names nothing on its edge.
-    assert!(
-        app.panel().showing_thread(),
-        "the mode moved the card showing"
-    );
-    app.swap_card();
-    let account = panel_top_edge(&render_at(&app, WIDTH, FIXTURE_HEIGHT, at(base, 2)));
-    assert!(!account.contains(THREAD_TITLE.trim()), "{account:?}");
-    assert!(!account.contains("brief"), "{account:?}");
-    assert_eq!(
-        app.panel().mode(),
-        Mode::Brief,
-        "the swap changed the register"
-    );
-
-    // Setting the mode it is already in changes nothing, and is said to
-    // change nothing: that is what a re-sent instruction is told by.
     assert!(
         !app.panel_mut().set_mode(Mode::Brief),
         "brief to brief is no change"
@@ -3384,6 +3339,70 @@ fn the_thread_title_says_which_register_the_conversation_is_in() {
         app.panel_mut().set_mode(Mode::Chat),
         "brief to chat is a change"
     );
+}
+
+fn lit_stages(line: &ratatui::text::Line<'_>) -> Vec<String> {
+    line.spans
+        .iter()
+        .filter(|span| span.style == WORKFLOW_LIT)
+        .map(|span| span.content.trim().to_owned())
+        .collect()
+}
+
+#[test]
+fn the_workflow_strip_draws_every_stage_and_lights_the_mode() {
+    let chat = workflow_line(Mode::Chat, false, None);
+    let text: String = chat
+        .spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect();
+    for stage in ["chat", "brief", "write", "push", "draft", "pull"] {
+        assert!(text.contains(stage), "{stage} in {text:?}");
+    }
+    assert_eq!(lit_stages(&chat), ["chat"]);
+    assert_eq!(
+        lit_stages(&workflow_line(Mode::Brief, false, None)),
+        ["brief"]
+    );
+}
+
+#[test]
+fn write_lights_beside_brief_only_while_the_brief_is_ready() {
+    assert_eq!(
+        lit_stages(&workflow_line(Mode::Brief, true, None)),
+        ["brief", "write"]
+    );
+    // A ready flag left over in chat mode lights nothing: write is brief's.
+    assert_eq!(lit_stages(&workflow_line(Mode::Chat, true, None)), ["chat"]);
+}
+
+#[test]
+fn board_work_lights_alone() {
+    for (working, stage) in [
+        (Working::Push, "push"),
+        (Working::Draft, "draft"),
+        (Working::Pull, "pull"),
+    ] {
+        for (mode, ready) in [(Mode::Chat, false), (Mode::Brief, true)] {
+            assert_eq!(
+                lit_stages(&workflow_line(mode, ready, Some(working))),
+                [stage]
+            );
+        }
+    }
+}
+
+#[test]
+fn the_strip_is_drawn_on_the_chat_bars_top_border() {
+    let mut app = App::from_tree(&fixture::tree());
+    app.set_working(Some(Working::Draft));
+    let buffer = render_composer(&app, &Composer::new("hello"), WIDTH, 20);
+    let border = rows_text(&buffer)
+        .into_iter()
+        .find(|row| row.contains(" chat ") && row.contains(" pull "))
+        .expect("the strip is on screen");
+    assert!(border.contains("draft"), "{border:?}");
 }
 
 #[test]

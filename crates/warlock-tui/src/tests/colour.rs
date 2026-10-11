@@ -30,6 +30,11 @@ fn the_focus_colour_is_no_states_colour() {
 }
 
 #[test]
+fn the_focus_colour_is_a_flat_indexed_green() {
+    assert_eq!(FOCUS_COLOUR, Color::Indexed(42));
+}
+
+#[test]
 fn the_guide_colour_is_a_flat_indexed_gray() {
     assert_eq!(GUIDE_COLOUR, Color::Indexed(240));
 }

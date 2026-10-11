@@ -29,16 +29,15 @@ pub const fn colour_for(state: NodeState) -> Color {
     }
 }
 
-// Cyan because it is none of the three above: colour on this screen means node
-// state, and which pane the keys are driving is not something a node can be. A
-// theme's cyan could drift towards any of the three, so this is pinned for the
-// same reason they are.
+// Colour on this screen means node state, and which pane the keys are driving
+// is not something a node can be, so this has to stay apart from the three
+// states above and from `CONVERSATION_COLOUR` below — the tests below hold it
+// there. Pinned and indexed for the reason the header gives: a theme's own
+// value could drift onto any of the four.
 //
-// It is no longer worn by the focused border alone — `SYSTEM_COLOUR` below is
-// the same value — so focus is told apart by weight and position rather than by
-// hue: the border is the only cyan thing that is a border, and it is the only
-// cyan thing drawn bold.
-pub(crate) const FOCUS_COLOUR: Color = Color::Indexed(45);
+// `SYSTEM_COLOUR` below is the same value, so focus is told apart by weight and
+// position — a bold border, at the edge of the pane — rather than by hue.
+pub(crate) const FOCUS_COLOUR: Color = Color::Indexed(42);
 
 // Deliberately the focus colour and not a near neighbour. Everything warlock
 // says about its own work — the pacting card's directories and work lines, its

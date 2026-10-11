@@ -8,7 +8,7 @@ use ratatui::crossterm::event::{KeyEvent, MouseEvent};
 use ratatui::layout::Size;
 use warlock_engine::{Agent, Manifest};
 
-use crate::app::{App, Focus, Run};
+use crate::app::{App, Focus, Run, Working};
 use crate::chatting::{Chat, Takes, Wanted};
 use crate::claude::{ChatAgent, ClaudeAgent, Converses, Wired};
 use crate::clipboard::{self, Clip, Clipboard};
@@ -354,6 +354,15 @@ impl<K: Seams> Session<K> {
     /// a width nothing has measured yet at startup.
     fn draw(&mut self, size: Size) -> io::Result<()> {
         self.app.set_mouse_captured(self.mouse_captured);
+        self.app.set_working(if self.puller.in_flight().is_some() {
+            Some(Working::Pull)
+        } else if self.cutter.running() || self.cutter.confirm().cutting().is_some() {
+            Some(Working::Draft)
+        } else if self.pushes.sending() || self.pushes.window().confirm.filing().is_some() {
+            Some(Working::Push)
+        } else {
+            None
+        });
         // One reading of the panel's inside width, told to both the things that
         // are about to use it: the app wraps the document it holds at it, and
         // the composer is drawn in the same column, so it is the width the
