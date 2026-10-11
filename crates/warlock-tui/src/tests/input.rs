@@ -1259,10 +1259,10 @@ mod gate {
 
     #[test]
     fn answering_yes_leaves_by_the_road_a_quit_already_takes() {
-        // Both spellings of Yes, and the same value Ctrl-C comes to: one
-        // road out of the loop means one `return Ok(())`, so the terminal
-        // guard restores the screen and a running `claude` is taken down by
-        // the run's own drop, exactly as before this gate existed.
+        // Both spellings of Yes, and one road out of the loop: one
+        // `return Ok(())`, so the terminal guard restores the screen and a
+        // running `claude` is taken down by the run's own drop, exactly as
+        // before this gate existed.
         for key in [press(KeyCode::Char('y')), press(KeyCode::Enter)] {
             let mut app = app_in_use();
             let mut confirm = QuitConfirm::Open(Answer::Yes);
@@ -1280,30 +1280,6 @@ mod gate {
                     false
                 ),
                 Pressed::Leave
-            );
-            assert_eq!(
-                press_for(
-                    key,
-                    Modals {
-                        quit: confirm,
-                        ..Modals::default()
-                    }
-                    .current(),
-                    None,
-                    false,
-                    false
-                ),
-                press_for(
-                    ctrl_c(),
-                    Modals {
-                        quit: confirm,
-                        ..Modals::default()
-                    }
-                    .current(),
-                    None,
-                    false,
-                    false
-                )
             );
             assert_eq!(round(&mut app, &mut confirm, key), Round::Left);
         }
@@ -1363,22 +1339,29 @@ mod gate {
     }
 
     #[test]
-    fn ctrl_c_leaves_at_once_with_the_question_up_or_down() {
+    fn ctrl_c_asks_with_the_question_down_and_keeps_it_as_it_was_up() {
         // Answered before the mode is consulted, which is what keeps it out
         // of `answer_for`'s "every other key" arm: through there it would be
-        // an ordinary `c` with a modifier riding along, and the one
-        // keystroke every reader trusts would be the one the dialog ate.
+        // an ordinary `c` with a modifier riding along, and the chord would
+        // move nothing while the reader went on pressing it.
         //
         // Pinned with the composer holding the keyboard as well as without
         // it, because the field is the third thing that could have eaten the
         // key: through `compose_for` it is a chord rather than text, i.e.
         // one of the keys that change nothing, so a gate that consulted the
         // draft first would swallow it in silence.
+        //
+        // Never `Leave`: Ctrl-C is the copy chord everywhere else, and a
+        // second press at the question is a reader still reaching for copy,
+        // not one answering Yes.
         let draft = Composer::new("web");
-        for confirm in [
-            QuitConfirm::Closed,
-            QuitConfirm::Open(Answer::No),
-            QuitConfirm::Open(Answer::Yes),
+        for (confirm, expected) in [
+            (QuitConfirm::Closed, QuitConfirm::open()),
+            (QuitConfirm::Open(Answer::No), QuitConfirm::Open(Answer::No)),
+            (
+                QuitConfirm::Open(Answer::Yes),
+                QuitConfirm::Open(Answer::Yes),
+            ),
         ] {
             for composer in [None, Some(&draft)] {
                 for in_flight in [false, true] {
@@ -1394,8 +1377,8 @@ mod gate {
                             in_flight,
                             false
                         ),
-                        Pressed::Leave,
-                        "Ctrl-C should leave with {confirm:?}, {composer:?} and a run in \
+                        Pressed::Confirm(expected),
+                        "Ctrl-C should ask with {confirm:?}, {composer:?} and a run in \
                              flight = {in_flight}"
                     );
                 }
@@ -1403,25 +1386,28 @@ mod gate {
         }
 
         let mut app = app_in_use();
-        let mut confirm = QuitConfirm::open();
-        assert_eq!(round(&mut app, &mut confirm, ctrl_c()), Round::Left);
+        let before = app.clone();
+        let mut confirm = QuitConfirm::Closed;
+        for _ in 0..3 {
+            assert_eq!(round(&mut app, &mut confirm, ctrl_c()), Round::Stayed);
+            assert_eq!(confirm, QuitConfirm::open());
+        }
+        assert_eq!(app, before);
     }
 
     #[test]
     fn ctrl_c_stops_the_turn_rather_than_the_session_while_one_is_answered() {
-        // The one situation the key does not end the session in, and the
-        // whole of what decides it: a question is out. A turn is one
-        // `claude` and seconds of waiting, so the reader who wants it back
-        // presses this; a turn escapable only by leaving warlock would be a
-        // question nobody can take back.
+        // The one situation the key does not ask to quit in, and the whole
+        // of what decides it: a question is out. A turn is one `claude` and
+        // seconds of waiting, so the reader who wants it back presses this;
+        // a turn escapable only by leaving warlock would be a question nobody
+        // can take back.
         //
         // The same matrix the answer above is pinned across, because the
         // reading must not depend on any of it: the question up or down, the
-        // keyboard in the field or not, a run in flight or not. It is
-        // answered before the confirmation for the reason it is answered
-        // first at all — a Ctrl-C that meant one thing with a window up and
-        // another with it down would be the keystroke of last resort
-        // behaving differently depending on what is on screen.
+        // keyboard in the field or not, a run in flight or not. A Ctrl-C that
+        // stopped the turn with one window up and not with another would be
+        // the cancel behaving differently depending on what is on screen.
         let draft = Composer::new("web");
         for confirm in [
             QuitConfirm::Closed,
@@ -1466,12 +1452,12 @@ mod gate {
             Pressed::CancelTurn
         );
 
-        // The press after it leaves, because by then nothing is being
-        // answered: one key, one meaning — stop what I asked for — and the
-        // reader who presses it twice gets the cancel and then the way out.
+        // The press after it asks, because by then nothing is being
+        // answered: the reader who presses it twice gets the cancel and then
+        // the quit question, never the way out unasked.
         assert_eq!(
             press_for(ctrl_c(), None, None, false, false),
-            Pressed::Leave
+            Pressed::Confirm(QuitConfirm::open())
         );
     }
 
@@ -1707,12 +1693,11 @@ mod gate {
     }
 
     #[test]
-    fn ctrl_c_leaves_at_once_with_the_scope_prompt_up() {
+    fn ctrl_c_asks_with_the_scope_prompt_up() {
         // Answered before either window is consulted, and for the reason it
         // is answered before the question: through `edit_for` it is a `c`
         // wearing a modifier, i.e. one of the keys that change nothing, and
-        // the last resort of a reader who wants out would be the one
-        // keystroke the field swallowed. Pinned with an empty field, with
+        // the field would swallow it. Pinned with an empty field, with
         // something typed, and at both settings of the run flag.
         for prompt in [
             ScopePrompt::open(DIRECTORY, ""),
@@ -1731,8 +1716,8 @@ mod gate {
                         in_flight,
                         false
                     ),
-                    Pressed::Leave,
-                    "Ctrl-C should leave with {prompt:?} up and a run in flight = {in_flight}"
+                    Pressed::Confirm(QuitConfirm::open()),
+                    "Ctrl-C should ask with {prompt:?} up and a run in flight = {in_flight}"
                 );
             }
         }
@@ -1740,9 +1725,15 @@ mod gate {
         let mut app = app_in_use();
         let mut confirm = QuitConfirm::Closed;
         let mut prompt = ScopePrompt::open(DIRECTORY, "billing");
+        let held = prompt.clone();
         assert_eq!(
             round_under(&mut app, &mut confirm, &mut prompt, ctrl_c()),
-            Round::Left
+            Round::Stayed
+        );
+        assert_eq!(confirm, QuitConfirm::open());
+        assert_eq!(
+            prompt, held,
+            "the field under the question kept what was typed"
         );
     }
 
@@ -1759,7 +1750,9 @@ mod gate {
         let question = QuitConfirm::open();
 
         // Ctrl-C, over all three at once. It is a key event and not a
-        // signal, so if the gate does not answer it here nothing does.
+        // signal, so if the gate does not answer it here nothing does. Over
+        // the question it keeps the question; over the prompt and the field
+        // alone it opens it, where `j` would have been typed.
         assert_eq!(
             press_for(
                 ctrl_c(),
@@ -1773,7 +1766,21 @@ mod gate {
                 false,
                 false
             ),
-            Pressed::Leave
+            Pressed::Confirm(question)
+        );
+        assert_eq!(
+            press_for(
+                ctrl_c(),
+                Modals {
+                    scope: &prompt,
+                    ..Modals::default()
+                }
+                .current(),
+                Some(&draft),
+                false,
+                false
+            ),
+            Pressed::Confirm(QuitConfirm::open())
         );
         // Then the question, which is drawn over everything else on the
         // frame: a key cannot be both typed into a field and answered by the
@@ -1896,13 +1903,16 @@ mod gate {
 
         #[test]
         fn ctrl_c_is_still_answered_before_the_field() {
-            // The keystroke of last resort, with this window up as with
-            // every other: it leaves with nothing out, and stops the turn
+            // Answered before this window as before every other: with
+            // nothing out it asks the quit question, and it stops the turn
             // when one is being answered. Typed into the field it would be
             // a `c` on the end of a path.
             let write = open();
 
-            assert_eq!(asked(ctrl_c(), &write), Pressed::Leave);
+            assert_eq!(
+                asked(ctrl_c(), &write),
+                Pressed::Confirm(QuitConfirm::open())
+            );
             assert_eq!(
                 press_for(
                     ctrl_c(),
@@ -2106,13 +2116,16 @@ mod gate {
 
         #[test]
         fn ctrl_c_is_still_answered_before_the_fields() {
-            // The keystroke of last resort, with this window up as with every
-            // other: it leaves with nothing out, and stops the turn when one is
+            // Answered before this window as before every other: with nothing
+            // out it asks the quit question, and it stops the turn when one is
             // being answered. Typed into a field it would be a `c` in a team
             // name.
             let record = open();
 
-            assert_eq!(asked(ctrl_c(), &record), Pressed::Leave);
+            assert_eq!(
+                asked(ctrl_c(), &record),
+                Pressed::Confirm(QuitConfirm::open())
+            );
             assert_eq!(
                 press_for(
                     ctrl_c(),
@@ -2266,12 +2279,15 @@ mod gate {
 
         #[test]
         fn ctrl_c_is_still_answered_before_the_dialog() {
-            // The keystroke of last resort, with this window up as with every
-            // other: it leaves with nothing sent, and stops the turn when one
-            // is being answered. Through the dialog it would be an inert `c`.
+            // Answered before this window as before every other: with nothing
+            // out it asks the quit question, and it stops the turn when one is
+            // being answered. Through the dialog it would be an inert `c`.
             let push = open();
 
-            assert_eq!(asked(ctrl_c(), &push), Pressed::Leave);
+            assert_eq!(
+                asked(ctrl_c(), &push),
+                Pressed::Confirm(QuitConfirm::open())
+            );
             assert_eq!(asking(ctrl_c(), &push, None, true), Pressed::CancelTurn);
         }
 
@@ -2454,12 +2470,12 @@ mod gate {
 
         #[test]
         fn ctrl_c_is_still_answered_before_the_dialog() {
-            // The keystroke of last resort, with this window up as with every
-            // other: it leaves with no run started, and stops the turn when one
-            // is being answered.
+            // Answered before this window as before every other: with nothing
+            // out it asks the quit question, and it stops the turn when one is
+            // being answered.
             let cut = open();
 
-            assert_eq!(asked(ctrl_c(), &cut), Pressed::Leave);
+            assert_eq!(asked(ctrl_c(), &cut), Pressed::Confirm(QuitConfirm::open()));
             assert_eq!(asking(ctrl_c(), &cut, None, true), Pressed::CancelTurn);
         }
 
@@ -2670,12 +2686,15 @@ mod gate {
 
         #[test]
         fn ctrl_c_is_still_answered_before_the_dialog() {
-            // The keystroke of last resort, with this window up as with every
-            // other: it leaves with no run started, and stops the turn when one
-            // is being answered.
+            // Answered before this window as before every other: with nothing
+            // out it asks the quit question, and it stops the turn when one is
+            // being answered.
             let pull = open();
 
-            assert_eq!(asked(ctrl_c(), &pull), Pressed::Leave);
+            assert_eq!(
+                asked(ctrl_c(), &pull),
+                Pressed::Confirm(QuitConfirm::open())
+            );
             assert_eq!(asking(ctrl_c(), &pull, None, true), Pressed::CancelTurn);
         }
 
@@ -2923,11 +2942,10 @@ mod gate {
 
         #[test]
         fn ctrl_c_is_still_answered_before_either_of_them() {
-            // The keystroke of last resort, with these windows up as with every
-            // other.
+            // Answered before these windows as before every other.
             assert_eq!(
                 asking(ctrl_c(), Some(&review()), None, None, false),
-                Pressed::Leave
+                Pressed::Confirm(QuitConfirm::open())
             );
             assert_eq!(
                 asking(ctrl_c(), None, Some(&carry()), None, true),
@@ -3592,20 +3610,19 @@ mod gate {
         }
 
         #[test]
-        fn ctrl_c_leaves_at_once_and_types_no_c_while_the_composer_has_it() {
+        fn ctrl_c_asks_and_types_no_c_while_the_composer_has_it() {
             // The order the gate decides in, where it matters most: through
             // `compose_for` Ctrl-C is a chord rather than text, so a gate
-            // that consulted the field first would answer the one keystroke
-            // every reader trusts with nothing at all — and would not even
-            // leave a `c` behind to show for it.
+            // that consulted the field first would answer it with nothing at
+            // all — and would not even leave a `c` behind to show for it.
             for draft in ["", TYPED] {
                 let composer = Composer::new(draft);
 
                 for in_flight in [false, true] {
                     assert_eq!(
                         press_for(ctrl_c(), None, Some(&composer), in_flight, false),
-                        Pressed::Leave,
-                        "Ctrl-C should leave from {draft:?} with a run in flight = {in_flight}"
+                        Pressed::Confirm(QuitConfirm::open()),
+                        "Ctrl-C should ask from {draft:?} with a run in flight = {in_flight}"
                     );
                 }
             }
@@ -3617,9 +3634,10 @@ mod gate {
 
             assert_eq!(
                 round_composing(&mut app, &mut confirm, &mut prompt, &mut composer, ctrl_c()),
-                Round::Left
+                Round::Stayed
             );
-            assert_eq!(composer.draft(), TYPED, "and typed no c on the way out");
+            assert_eq!(confirm, QuitConfirm::open());
+            assert_eq!(composer.draft(), TYPED, "and typed no c under the question");
         }
 
         #[test]

@@ -66,18 +66,19 @@ to put back and does not restore the boundary when it returns.
 
 | Key | What it does |
 | --- | --- |
-| `q` / `Esc` | Ask whether to quit |
-| `Ctrl-C` | Quit outright, with no question |
+| `q` / `Esc` / `Ctrl-C` | Ask whether to quit |
 
-Ctrl-C is a keystroke here rather than a signal: the terminal is in raw mode, so
-warlock answers it itself, including taking a running `claude` with it.
+Ctrl-C asks rather than quits because it's the copy key in most other programs.
+To copy text, select it with the mouse instead. Ctrl-C asks over any other
+window, and pressing it again at the quit question leaves the question up.
 
 ## While a run is going
 
 | Key | What it does |
 | --- | --- |
 | `Esc` | Cancel the run — *not* quit, for as long as there is a run to stop |
-| `q` / `Ctrl-C` | Quit outright, with no confirmation |
+| `q` | Quit outright, with no confirmation |
+| `Ctrl-C` | Ask whether to quit |
 
 Every other key means exactly what it means the rest of the time. The tree stays
 usable while a pact or a refresh works.
@@ -96,15 +97,93 @@ draft.
 | `→` / `End` | With the draft empty and a suggestion showing, take the suggestion into the draft to edit |
 | `Esc` | Hand the keyboard back and keep the draft exactly as it was |
 | `Tab` | Move the focus on — the one key the composer does not take |
-| `Ctrl-C` | Cancel the turn if one is being answered; otherwise quit |
+| `Ctrl-C` | Cancel the turn if one is being answered; otherwise ask whether to quit |
 | `/brief` | Enter brief mode: the same conversation is now converging on a document, sent the instruction the brief template describes |
 | `/write` | Only in brief mode: ask for the document, then open an editable path prompt already holding a proposal like `docs/warlock-brief-13-scopes-and-sigils.md` |
 | `/chat` | Leave brief mode, writing nothing — back to answering questions as they come |
+| `/push <SCOPE> <PATH>` | File the brief at `PATH` to the scope's Linear team as a project, after a Yes/No question |
+| `/draft <SCOPE>` | List the scope's planned projects, one per line, slug first |
+| `/draft <SCOPE> <SLUG>` | Cut that project into Linear issues, one slice at a time |
+| `/pull` | Name the scopes this machine holds a sigil for |
+| `/pull <SCOPE>` | Work the next ready ticket in the scope's queue to a pull request |
+| `/pull <SCOPE> <TICKET>` | Work the named ticket, for example `WAR-123`, instead of the next one |
+| `/resume <TICKET>` | Mark the sub-tasks a halted pull stopped on as pending again, and put `/pull <SCOPE> <TICKET>` in the chat bar to send |
 
-While a `/draft` slice is asking a question, warlock's suggested answer shows
-dimmed in the empty chat bar. It's never part of the draft: type your own
-answer over it, press `Enter` on the empty bar to send the suggestion, or press
-`→` to take it in and edit it.
+Commands are case-sensitive and take their arguments on the same line. A
+mistyped command is refused with a line listing every command, and nothing is
+sent to the model.
+
+## Drafting a project
+
+A draft turns a project pushed with `/push` into issues. To draft one, do the
+following:
+
+1. Send `/draft <SCOPE>`. The panel lists the scope's projects that are
+   `Planned` and carry the scope's label, as `slug  name`. The slug is the hex
+   at the end of the project's Linear URL.
+2. Send `/draft <SCOPE> <SLUG>` with the slug of the project you want. The slug
+   must match exactly.
+3. Answer the question that opens, which names the project, its status, how
+   many slices it has, and the team. Its keys are the
+   [quit question's](#at-the-quit-question), and it opens with No lit.
+4. Answer any questions the slices ask, and review each slice's drafts, as
+   described in the next two sections.
+
+Slices already cut or skipped by an earlier draft are passed over, so you can
+run `/draft <SCOPE> <SLUG>` again to finish a project.
+
+Esc doesn't cancel a running draft. To stop one, skip a slice and answer No
+when asked whether to carry on, or quit warlock.
+
+### When a slice asks a question
+
+The chat bar takes the keyboard, and its border names the slice being answered.
+Warlock's suggested answer shows dimmed in the empty chat bar. It's never part
+of the draft:
+
+- To send the suggestion, press `Enter` on the empty bar.
+- To edit the suggestion, press `→` to take it into the draft.
+- To answer in your own words, type over it.
+
+### At the review window
+
+Each slice's drafts print whole on the panel, and the review window opens with
+Create lit. Scroll the panel with `↑`, `↓`, `PgUp`, and `PgDn` to read them.
+
+| Key | What it does |
+| --- | --- |
+| `←` / `→` | Light the answer to the left or right |
+| `Enter` | Take whichever answer is lit |
+| `c` | Create: file the drafts as issues and go to the next slice |
+| `e` | Edit: open the drafts in `$EDITOR`, then review what you saved |
+| `f` | Feedback: type in the chat bar what the drafts should be instead, and review the redraft |
+| `s` / `Esc` | Skip: file nothing for this slice; the next draft passes it over |
+
+The window has no cancel. After a skip with slices still left, a question asks
+whether to carry on to the next slice. It opens with No lit, and No stops the
+run with the remaining slices left for another draft.
+
+## Pulling a ticket
+
+A pull takes a ticket that is assigned to you, carries the scope's label, and
+has nothing blocking it. Warlock splits it into sub-tasks, commits each one on
+the ticket's branch, pushes the branch, and opens a pull request.
+
+To start a pull, send `/pull <SCOPE>` for the next ready ticket, or
+`/pull <SCOPE> <TICKET>` for a specific one. A question names the ticket, scope,
+team, and branch, with the quit question's keys and No lit. If you don't
+remember your scopes, send `/pull` on its own to list them.
+
+A pull asks nothing once it starts and has no cancel key. The chat bar refuses
+input until it finishes. To stop a pull, quit warlock.
+
+When a pull halts, the ticket stays in progress and its Linear comment lists
+what finished and what didn't. To pick it up again, send `/resume <TICKET>`,
+then send the `/pull` it leaves in the chat bar. The question that opens asks
+whether to resume and names the sub-task it starts from.
+
+One draft and one pull run at a time. A second `/draft` or `/pull` sent while
+one is running is refused, and nothing is read or changed.
 
 ## At the quit question
 

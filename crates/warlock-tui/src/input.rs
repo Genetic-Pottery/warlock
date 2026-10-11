@@ -197,11 +197,13 @@ fn is_tab(key: KeyEvent) -> bool {
 // Ctrl-C before the window: raw mode is exactly the mode in which the terminal
 // stops turning it into `SIGINT`, so if nothing here answers it nothing does,
 // and routed through the window it would arrive at `answer_for` as an ordinary
-// `c` with a modifier riding along — the last resort of a reader who wants out,
-// swallowed by the dialog. `answered` is the one thing that changes what it
-// means: with a turn out it stops that turn, with none it leaves. Esc is
-// deliberately not this key, because a turn and a run are two things and the
-// key that stops one must not stop the other.
+// `c` with a modifier riding along. With a turn out it stops that turn; with
+// none it asks the quit question, over any other window and in every mode, and
+// a Ctrl-C at the question leaves it as it was. It never leaves outright: it is
+// the copy chord everywhere else, and readers — the author among them — quit
+// mid-session reaching for copy. Esc is deliberately not this key, because a
+// turn and a run are two things and the key that stops one must not stop the
+// other.
 //
 // Then the window, and on that road `action_for` is not called at all, which
 // is the plain statement of "nothing leaks through to the tree underneath".
@@ -218,10 +220,10 @@ pub(crate) fn press_for(
     answered: bool,
 ) -> Pressed {
     if is_ctrl_c(key) {
-        return if answered {
-            Pressed::CancelTurn
-        } else {
-            Pressed::Leave
+        return match modal {
+            _ if answered => Pressed::CancelTurn,
+            Some(Modal::Quit(highlighted)) => Pressed::Confirm(QuitConfirm::Open(highlighted)),
+            _ => Pressed::Confirm(QuitConfirm::open()),
         };
     }
 

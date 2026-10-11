@@ -357,16 +357,18 @@ fn the_quit_key_opens_the_question_rather_than_leaving() {
 }
 
 #[test]
-fn ctrl_c_leaves_without_asking() {
+fn ctrl_c_asks_before_leaving() {
     let mut driven = session(vec![directory("/repo/crates")]);
 
     let key = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
-    assert!(!pressed(&mut driven, key), "the session is over");
-    assert_eq!(
-        driven.confirm,
-        QuitConfirm::Closed,
-        "and no question was ever asked"
-    );
+    for _ in 0..2 {
+        assert!(pressed(&mut driven, key), "the session goes on");
+        assert_eq!(
+            driven.confirm,
+            QuitConfirm::open(),
+            "and the question is up with No lit"
+        );
+    }
 }
 
 #[test]

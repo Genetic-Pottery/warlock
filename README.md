@@ -194,6 +194,14 @@ cargo install --git https://github.com/Genetic-Pottery/warlock warlock-tui
 Warlock draws its panes with Unicode box-drawing characters.
 Use a monospace font with box-drawing coverage — most programming fonts have it.
 
+**What commands exist for the TUI?**
+
+See [CONTROLS.md](CONTROLS.md)
+
+**What commands exist for the CLI?**
+
+See [HEADLESS-CLI.md](HEADLESS-CLI.md)
+
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md).
