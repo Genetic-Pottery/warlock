@@ -4,9 +4,9 @@ version = 1
 module = "."
 document = ".warlock.md"
 scope = "warlock-team"
-granted_hash = "01e7919c80ffc8d56ece0db360a60c834ebdc4ef6b17c7ed79c2f74611c5cf88"
-granted_at = "2026-10-11T13:17:28Z"
-carry_hash = "63e33cedf0d620b8ae134eaf6d5ee52c54936f14e6b4bb6a873686aba2219742"
+granted_hash = "662df0a1037126bab13f61a4c05adc4e7b51ce372d04ba356221b4bf4da06d72"
+granted_at = "2026-10-11T13:25:36Z"
+carry_hash = "e4b32e15f0a53fa81a9c188bbc9b4e6427f4b668f91830b434ca94fa25e90e66"
 
 [pact.lines]
 "Cargo.lock" = "14b9d1fc76307f651318cf37c7dcbb7826ae81d69d6c72ebaafeed195e1a0144"
@@ -21,9 +21,9 @@ NOTICE = "14d13f3d16e450b2ae4c69f9b567906c79163b85f34a18e51f41d48a2af9d65f"
 [[pact]]
 module = "crates"
 document = "crates/.warlock.md"
-granted_hash = "b5698b281b36ca6cdde88f8ca0931a5ae1686960e1792b8c77bccb86d9291a2c"
-granted_at = "2026-10-11T13:17:28Z"
-carry_hash = "959bc5b1633e2b5208cabc877035214853d984ec6161d9160d993bdcac1b6dad"
+granted_hash = "3238f0a6aa8455f20c04fe2835bb43db49ba3e53d2958edd3360ab82bfa0e102"
+granted_at = "2026-10-11T13:25:29Z"
+carry_hash = "5210249dd750dc359d03aae429c120c90afdfdb6d3cf0e615d2325172cbe0558"
 
 [[pact]]
 module = "crates/warlock-engine"
@@ -74,9 +74,9 @@ carry_hash = "a018ddabc522311848aa2e9ef7946a04e9770e15689ef3f2884b7aaf10efbf76"
 [[pact]]
 module = "crates/warlock-tui"
 document = "crates/warlock-tui/.warlock.md"
-granted_hash = "bca343721ab5ff9b57a8fbf559ee3d9d6b8a7d5b2fff8ca9507ef218d5687245"
-granted_at = "2026-10-11T13:17:28Z"
-carry_hash = "9befc51152d3a3631d2e76e4fd9a0adff786a98ae504f6154c22801e03d6de51"
+granted_hash = "971580a364e1cd2b8c7db17737d138e7077851e4defaab246599acc10631a837"
+granted_at = "2026-10-11T13:25:23Z"
+carry_hash = "54a592b6545cc1a40814ab0ea96b3ac90bcdcfa1e68dbc7b70d58ed523ebee2a"
 
 [pact.lines]
 "Cargo.toml" = "ecdf5810033f8c51fe8b42914cc7d3ce7aaf076426425d39af7dbfe4198a2006"
@@ -84,9 +84,9 @@ carry_hash = "9befc51152d3a3631d2e76e4fd9a0adff786a98ae504f6154c22801e03d6de51"
 [[pact]]
 module = "crates/warlock-tui/src"
 document = "crates/warlock-tui/src/.warlock.md"
-granted_hash = "2810a456df22b5d4866e2cd1ad87862aea77c7bc839cf3fc2756677b596f2be8"
-granted_at = "2026-10-11T13:17:28Z"
-carry_hash = "4dbe19f5d0d152f1772ab813baf1b23ecb04c00e958e7a0c0b88b162a383a45c"
+granted_hash = "4ab492dbccbfefefe03c3b1ae562c5c7b61e32658357f9a873dbdacfa7d240ab"
+granted_at = "2026-10-11T13:25:17Z"
+carry_hash = "5bde63090bcbbc82d5db3f282f73e784bec1e9fa2f4827cc40d7687e8f907fb6"
 
 [pact.lines]
 "account.rs" = "1c27f5d3cb2d4e9e67940ef9d9f8bb794d0981d1ca8178662d988b17ee743597"
@@ -100,7 +100,7 @@ carry_hash = "4dbe19f5d0d152f1772ab813baf1b23ecb04c00e958e7a0c0b88b162a383a45c"
 "check.rs" = "33bf1d3ebb57027a41d92ff8259a2608a08093148068888a667ec21c599c45ba"
 "claude.rs" = "abf2323df32d6e23336a84d83585b80fc51cdde3fa4c2296ceb3d0ef06415824"
 "clipboard.rs" = "c764665c23ae30af77ac27d6ce258c1529967ca92db6d18234f4ef267d667596"
-"colour.rs" = "d13004658eec5ebd212bf1e644aa175003a6f96623dacb582cf459c2c21ada31"
+"colour.rs" = "b34ac309ba5f263635a4caf8280f9e7f6d488c56d63de66f1940fa9d33cd3c09"
 "composer.rs" = "ead77d981c9711810225ff68a4ad2f036fdd34047b6c51ced2adc2381764b511"
 "config.rs" = "8d4d915f092bdfdc4d996300332205473da7d51f3ab4d38a2b035760b0f068ef"
 "confirm.rs" = "cd3ad6e206b69a5521fb00389807847352ba269159b3c08ee37fd24fbf8f2c3d"
