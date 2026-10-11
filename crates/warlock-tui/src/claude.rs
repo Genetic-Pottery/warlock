@@ -162,8 +162,17 @@ ways the change could be made, say what each one costs — in work, in what it \
 forecloses, in what somebody has to maintain afterwards — recommend one and say \
 why, and push back when what I am describing is bigger, vaguer or more \
 expensive than I am saying it is. Agreement is not the product; a decision I \
-can defend is. Keep your replies short and ask one question at a time. Start \
-now by asking what the change is and what it is for.";
+can defend is. Keep your replies short and ask one question at a time.\n\n\
+Once we have settled everything the document needs, end your reply \
+with the line [ready to write] on its own, and end every reply after it the same \
+way for as long as that stays true. Leave the line off any reply where it is not \
+true. Never say it any other way. Start now by asking what the change is and \
+what it is for.";
+
+/// The line [`BRIEF_ARGUMENT`] asks for, spelled out in it by hand because a
+/// `const` string cannot be formatted. Change both or neither: a marker the
+/// model was never told about is a strip that never lights.
+pub(crate) const READY_MARKER: &str = "[ready to write]";
 
 /// The instruction that aims the session at a brief, shaped by `template`.
 ///

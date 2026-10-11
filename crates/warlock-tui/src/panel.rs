@@ -64,6 +64,9 @@ pub(crate) struct Panel {
     document: Card<Vec<Line>>,
     showing: Showing,
     mode: Mode,
+    // Whether the latest brief-mode answer ended in the model's ready marker.
+    // Beside `mode` for `mode`'s reason: a pact rolling back must not take it.
+    ready: bool,
     height: usize,
     width: usize,
 }
@@ -108,10 +111,10 @@ impl Showing {
 /// reordered, the session is the same session, and the tool grant is
 /// byte-identical.
 ///
-/// Drawn in exactly one place, the panel's border title. Not on the run header's
-/// row, which a pact takes over and which a brief started mid-run would collide
-/// with, and not on a row of the card, which would spend a row of the
-/// conversation saying what the border says for nothing.
+/// Drawn in exactly one place, the workflow strip on the chat bar's top border.
+/// Not on the run header's row, which a pact takes over and which a brief
+/// started mid-run would collide with, and not on a row of the card, which would
+/// spend a row of the conversation saying what the border says for nothing.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub(crate) enum Mode {
     #[default]
@@ -622,6 +625,15 @@ impl Panel {
     #[must_use]
     pub(crate) const fn mode(&self) -> Mode {
         self.mode
+    }
+
+    #[must_use]
+    pub(crate) const fn ready(&self) -> bool {
+        self.ready
+    }
+
+    pub(crate) const fn set_ready(&mut self, ready: bool) {
+        self.ready = ready;
     }
 
     /// The answer is what a caller needs and cannot easily get back afterwards: a

@@ -157,6 +157,16 @@ pub(crate) enum Run {
     Refresh,
 }
 
+// The board work the workflow strip lights. Not a second `Run`: a pact is the
+// tree's, and these three are the board's, each on a value of its own in the
+// loop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum Working {
+    Push,
+    Draft,
+    Pull,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct InFlight {
     path: PathBuf,
@@ -443,6 +453,7 @@ struct Status {
     in_flight: Option<InFlight>,
     pact_refused: bool,
     mouse_captured: bool,
+    working: Option<Working>,
 }
 
 impl App {
@@ -482,6 +493,7 @@ impl App {
                 in_flight: None,
                 pact_refused: false,
                 mouse_captured: false,
+                working: None,
             },
             panel: Panel::default(),
             highlight: None,
@@ -855,6 +867,18 @@ impl App {
 
     pub(crate) const fn set_mouse_captured(&mut self, captured: bool) {
         self.status.mouse_captured = captured;
+    }
+
+    // Told once a round by the loop, which holds the three values that know,
+    // rather than at each edge: a strip that had to be told when work stopped
+    // is one a missed edge leaves lit.
+    pub(crate) const fn set_working(&mut self, working: Option<Working>) {
+        self.status.working = working;
+    }
+
+    #[must_use]
+    pub(crate) const fn working(&self) -> Option<Working> {
+        self.status.working
     }
 
     #[must_use]

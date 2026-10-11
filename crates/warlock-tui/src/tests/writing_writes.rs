@@ -903,6 +903,7 @@ mod whole {
         App, Instant, Node, NodeState, PathBuf, Tree, a_repo, everything_under, fs, notes, now,
     };
     use crate::account::Line;
+    use crate::chatting::CHAT_NOTE;
     use crate::chatting::Chat;
     use crate::claude::Converses;
     use crate::composer::{Composed, Composer};
@@ -1016,10 +1017,18 @@ mod whole {
         let written =
             fs::read_to_string(repo.path().join(PROPOSED)).expect("the artifact reads back");
         assert_eq!(written, DOCUMENT, "the bytes are not the document answered");
+        // The brief is on disk, so the conversation leaves brief mode the way
+        // `/chat` does: the note, the mode, and a turn telling the model.
         assert_eq!(
             notes(&app),
-            [format!("wrote {PROPOSED} — {} bytes", written.len())]
+            [
+                format!("wrote {PROPOSED} — {} bytes", written.len()),
+                CHAT_NOTE.to_owned()
+            ]
         );
+        assert_eq!(app.panel().mode(), Mode::Chat);
+        assert!(!app.panel().ready());
+        assert!(chat.answering(), "the model was not told the brief is over");
         // The whole repository, after the whole path: the output directory
         // and the one file in it. No transcript, no draft of the brief, and
         // nothing warlock authored under `.warlock/` — the turn wrote
