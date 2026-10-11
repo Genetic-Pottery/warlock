@@ -41,6 +41,7 @@ mod error;
 mod fixture;
 mod freshness;
 mod git;
+mod help;
 mod inflight;
 mod input;
 mod interactive;

@@ -3,6 +3,10 @@
 Warlock has three places the keyboard can be — the tree, the panel beside it,
 and the chat bar under the panel — and `Tab` moves between them.
 
+To see a short version of this page inside warlock, press `?` from the tree or
+the panel. The help sheet scrolls with `j`, `k`, `PgUp`, and `PgDn`, and `Esc`
+or `?` closes it. In the chat bar, `?` is typed as text.
+
 ## Moving around
 
 | Key | What it does |

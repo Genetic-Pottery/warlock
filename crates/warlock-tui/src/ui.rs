@@ -115,49 +115,19 @@ const SCROLLBACK_ARROW: &str = "↓";
 
 const LIVE_KEY: &str = "G";
 
-const ROW_KEY: &str = "k/j: row";
-
-const FOLD_KEY: &str = "space: fold";
-
-const PACTS_KEY: &str = "o: pacts";
-
-const FILES_KEY: &str = "f: files";
-
-const PACT_KEY: &str = "p: pact";
-
-const REFRESH_KEY: &str = "r: refresh";
-
-const SCOPE_KEY: &str = "s: scope";
-
-const KEYS: &[&str] = &[
-    ROW_KEY,
-    FOLD_KEY,
-    PACTS_KEY,
-    FILES_KEY,
-    PACT_KEY,
-    REFRESH_KEY,
-    SCOPE_KEY,
-];
-
-const KEY_GAP: &str = "    ";
+const HELP_KEY: &str = "?: help";
 
 const QUIT_KEY: &str = "q/Esc/Ctrl-C: quit";
 
-// The order the footer gives keys up in as the terminal narrows, first named
-// first dropped. `QUIT_KEY` is deliberately absent, so it is the one piece that
-// survives every width: a reader who cannot see how to leave has no way to find
-// out. Every other name on the footer is here: walking the tree first, because
-// a reader looking at a tree can guess at how to move through one, and the keys
-// that start a pass last, because nothing else on screen says they exist.
-const KEY_DROP_ORDER: &[&str] = &[
-    ROW_KEY,
-    FILES_KEY,
-    PACTS_KEY,
-    FOLD_KEY,
-    SCOPE_KEY,
-    REFRESH_KEY,
-    PACT_KEY,
-];
+const KEYS: &[&str] = &[HELP_KEY];
+
+const KEY_GAP: &str = "    ";
+
+// The order the footer gives keys up in as the terminal narrows. The quit key
+// is deliberately absent from both, so it is the one piece that survives every
+// width: a reader who cannot see how to leave has no way to find out. Everything
+// else is on the help sheet.
+const KEY_DROP_ORDER: &[&str] = &[HELP_KEY];
 
 fn laid_out_keys(width: usize, pieces: &[&str], drop_order: &[&str]) -> String {
     let mut kept: Vec<&str> = pieces.to_vec();
@@ -207,17 +177,16 @@ fn keys_line(width: usize) -> String {
     laid_out_keys(width, &pieces, KEY_DROP_ORDER)
 }
 
-const PACTING_KEYS: &[&str] = &[MOVE_KEYS, COLLAPSE_KEY, CANCEL_KEY, PACTING_QUIT_KEY];
-
-const MOVE_KEYS: &str = "up/down k/j: move";
-
-const COLLAPSE_KEY: &str = "space: collapse";
+// Esc is on the footer during a run because it stops meaning quit for as long as
+// the run lasts, and `q` drops the question, so neither can be left to the help
+// sheet to say.
+const PACTING_KEYS: &[&str] = &[HELP_KEY, CANCEL_KEY, PACTING_QUIT_KEY];
 
 const CANCEL_KEY: &str = "Esc: cancel";
 
 const PACTING_QUIT_KEY: &str = "q/Ctrl-C: quit";
 
-const PACTING_KEY_DROP_ORDER: &[&str] = &[MOVE_KEYS, COLLAPSE_KEY];
+const PACTING_KEY_DROP_ORDER: &[&str] = &[HELP_KEY];
 
 fn pacting_keys_line(width: usize) -> String {
     laid_out_keys(width, PACTING_KEYS, PACTING_KEY_DROP_ORDER)
@@ -234,6 +203,69 @@ const BORDER_THICKNESS: u16 = 1;
 const PULSE_PHASE: Duration = Duration::from_millis(500);
 
 const CONFIRM_QUESTION: &str = "Leave warlock?";
+
+const HELP_TITLE: &str = " keys · Esc or ? closes · j/k scrolls ";
+
+const HELP_KEY_WIDTH: usize = 24;
+
+// A short copy of `CONTROLS.md`, which has the reasons. A key added or changed
+// in `input.rs`, `composer.rs` or `submission.rs` needs its line here too.
+const HELP_SECTIONS: &[(&str, &[(&str, &str)])] = &[
+    (
+        "Moving",
+        &[
+            ("j / k   ↓ / ↑", "down or up one row"),
+            ("PgDn / PgUp", "down or up one screen"),
+            ("g / G", "first or last row"),
+            ("space", "fold or unfold a directory"),
+            ("Tab", "next pane: tree, panel, chat bar"),
+            ("Shift-Tab", "switch the panel's card"),
+        ],
+    ),
+    (
+        "The tree",
+        &[
+            ("o", "show only pacted directories"),
+            ("f", "show files too"),
+            ("p", "pact or un-pact the directory"),
+            ("r", "refresh its stale documents"),
+            ("s", "set its scope"),
+            ("v", "read the file in the panel"),
+            ("e", "open the file in $EDITOR"),
+            ("m", "mouse capture off or on"),
+            ("drag", "select panel text to copy it"),
+        ],
+    ),
+    (
+        "The chat bar",
+        &[
+            ("Enter", "send"),
+            ("Alt-Enter", "new line"),
+            ("Ctrl-U", "delete to the start of the line"),
+            ("→", "take the dimmed suggestion"),
+            ("Esc", "leave the chat bar, keep the text"),
+        ],
+    ),
+    (
+        "Commands",
+        &[
+            ("/brief  /write  /chat", "talk a brief into a document"),
+            ("/push SCOPE PATH", "file a brief as a project"),
+            ("/draft SCOPE", "list planned projects"),
+            ("/draft SCOPE SLUG", "cut a project into issues"),
+            ("/pull SCOPE [TICKET]", "work a ticket to a pull request"),
+            ("/resume TICKET", "pick up a halted pull"),
+        ],
+    ),
+    (
+        "Stopping",
+        &[
+            ("Esc", "cancel a pact or refresh"),
+            ("Ctrl-C", "cancel a chat turn"),
+            ("q / Esc / Ctrl-C", "ask whether to quit"),
+        ],
+    ),
+];
 
 const CONFIRM_YES: &str = " Yes ";
 
@@ -1292,12 +1324,15 @@ struct Dialog<'a> {
     lines: Vec<Line<'a>>,
     floor: usize,
     bottom: bool,
+    title: Option<&'static str>,
+    scroll: u16,
 }
 
 impl<'a> Dialog<'a> {
     fn of(modal: Modal<'a>) -> Self {
         match modal {
             Modal::Quit(highlighted) => Self::quit(highlighted),
+            Modal::Help(scroll) => Self::help().scrolled(scroll),
             Modal::Push(filing) => Self::push(filing),
             Modal::Cut(cutting) => Self::cut(cutting),
             Modal::Pull(undertaking) => Self::pull(undertaking),
@@ -1314,6 +1349,8 @@ impl<'a> Dialog<'a> {
             lines,
             floor: 0,
             bottom: false,
+            title: None,
+            scroll: 0,
         }
     }
 
@@ -1331,6 +1368,34 @@ impl<'a> Dialog<'a> {
     // windows hold a column for the caret whether or not it is drawn there.
     fn at_least(self, floor: usize) -> Self {
         Self { floor, ..self }
+    }
+
+    // The one window taller than some terminals, so the one that scrolls. The
+    // title carries how to close it rather than a last line, which would scroll
+    // away with the rest.
+    fn scrolled(self, scroll: u16) -> Self {
+        Self { scroll, ..self }
+    }
+
+    fn help() -> Self {
+        let mut lines = Vec::new();
+        for (index, (heading, keys)) in HELP_SECTIONS.iter().enumerate() {
+            if index > 0 {
+                lines.push(Line::default());
+            }
+            lines.push(Line::from(*heading).bold());
+            for (key, does) in *keys {
+                lines.push(Line::from(vec![
+                    Span::raw(format!("{key:<HELP_KEY_WIDTH$}")),
+                    Span::raw(*does).dim(),
+                ]));
+            }
+        }
+
+        Self {
+            title: Some(HELP_TITLE),
+            ..Self::new(lines)
+        }
     }
 
     fn quit(highlighted: Answer) -> Self {
@@ -1501,14 +1566,31 @@ impl<'a> Dialog<'a> {
 
     fn draw(self, frame: &mut Frame<'_>, screen: Rect) {
         let area = self.area(screen);
-        let block =
+        let mut block =
             Block::bordered().padding(Padding::symmetric(DIALOG_MARGIN, DIALOG_MARGIN_ROWS));
+        if let Some(title) = self.title {
+            block = block.title_top(Line::from(title).centered());
+        }
         let inner = block.inner(area);
 
         frame.render_widget(Clear, area);
         frame.render_widget(block, area);
-        frame.render_widget(Paragraph::new(self.lines), inner);
+        frame.render_widget(Paragraph::new(self.lines).scroll((self.scroll, 0)), inner);
     }
+}
+
+/// How far down the help sheet can scroll on a screen this size: far enough to
+/// bring its last line to the bottom of the window, and no further.
+pub(crate) fn help_most_scroll(size: Size) -> u16 {
+    let sheet = Dialog::help();
+    let area = sheet.area(Rect::new(0, 0, size.width, size.height));
+    let shown = area
+        .height
+        .saturating_sub(2 * DIALOG_MARGIN_ROWS)
+        .saturating_sub(2 * BORDER_THICKNESS);
+    u16::try_from(sheet.lines.len())
+        .unwrap_or(u16::MAX)
+        .saturating_sub(shown)
 }
 
 fn team_line(filing: &Filing) -> String {

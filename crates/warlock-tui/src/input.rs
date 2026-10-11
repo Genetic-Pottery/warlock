@@ -19,6 +19,7 @@ use crate::confirm::{
     answer_for, carry_answer_for, cut_answer_for, pull_answer_for, push_answer_for,
     review_answer_for,
 };
+use crate::help::{HelpSheet, help_for};
 use crate::modal::Modal;
 use crate::prompt::{Edited, RecordEdited, edit_for, record_edit_for};
 use crate::selection::Cell;
@@ -45,6 +46,7 @@ pub(crate) enum Action {
     EditFile,
     SwapCard,
     ToggleMouseCapture,
+    Help,
 }
 
 pub(crate) fn action_for(key: KeyEvent, in_flight: bool) -> Option<Action> {
@@ -100,6 +102,7 @@ pub(crate) fn action_for(key: KeyEvent, in_flight: bool) -> Option<Action> {
         KeyCode::Char('v') => Some(Action::ViewFile),
         KeyCode::Char('e') => Some(Action::EditFile),
         KeyCode::Char('m') => Some(Action::ToggleMouseCapture),
+        KeyCode::Char('?') => Some(Action::Help),
         _ => None,
     }
 }
@@ -121,6 +124,7 @@ pub(crate) enum Pressed {
     Leave,
     CancelTurn,
     Confirm(QuitConfirm),
+    Help(HelpSheet),
     // The push dialog's answer rather than its next state, because one of the
     // three is not a state at all: `Send` is a request going out and the window
     // coming down, and a `PushConfirm::Closed` here could not tell it from the
@@ -234,6 +238,7 @@ pub(crate) fn press_for(
                 Answered::Close => Pressed::Confirm(QuitConfirm::Closed),
                 Answered::Leave => Pressed::Leave,
             },
+            Modal::Help(scroll) => Pressed::Help(help_for(key, scroll)),
             Modal::Push(asked) => Pressed::Push(push_answer_for(key, asked.answer())),
             Modal::Cut(asked) => Pressed::Cut(cut_answer_for(key, asked.answer())),
             Modal::Pull(asked) => Pressed::Pull(pull_answer_for(key, asked.answer())),
@@ -276,6 +281,7 @@ pub(crate) fn press_for(
         // of this function, where `answered` decides what it means.
         Some(Action::Quit) if !in_flight => Pressed::Confirm(QuitConfirm::open()),
         Some(Action::Quit) => Pressed::Leave,
+        Some(Action::Help) => Pressed::Help(HelpSheet::open()),
         Some(action) => Pressed::Act(action),
         None => Pressed::Nothing,
     }

@@ -1112,6 +1112,7 @@ mod gate {
             Pressed::Carry(answered) => {
                 panic!("{answered:?} came from a carry-on question that is not up")
             }
+            Pressed::Help(sheet) => panic!("{sheet:?} came from a help key no round presses"),
             // The loop's three composer arms, and the reason the draft is a
             // local here exactly as it is there: nothing about it is ever
             // handed to the app.
@@ -1159,7 +1160,8 @@ mod gate {
                 | Action::OpenScope
                 | Action::ViewFile
                 | Action::EditFile
-                | Action::ToggleMouseCapture),
+                | Action::ToggleMouseCapture
+                | Action::Help),
             ) => panic!("{action:?} reached the app"),
             Pressed::Nothing => {}
         }
@@ -5237,6 +5239,84 @@ mod holding {
         assert_eq!(
             drag_after(held, WHEEL, Some(MouseAction::ScrollPanelDown(3))),
             held
+        );
+    }
+}
+
+mod help {
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    use super::super::{Pressed, press_for};
+    use crate::composer::{Composed, Composer};
+    use crate::confirm::QuitConfirm;
+    use crate::help::HelpSheet;
+    use crate::modal::Modals;
+
+    fn press(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn up(scroll: u16) -> Modals<'static> {
+        Modals {
+            help: HelpSheet::Open(scroll),
+            ..Modals::default()
+        }
+    }
+
+    #[test]
+    fn a_question_mark_opens_the_sheet_with_a_run_in_flight_or_not() {
+        for in_flight in [false, true] {
+            assert_eq!(
+                press_for(press(KeyCode::Char('?')), None, None, in_flight, false),
+                Pressed::Help(HelpSheet::open()),
+                "in flight = {in_flight}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_question_mark_in_the_chat_bar_is_text() {
+        let draft = Composer::new("web");
+        assert!(matches!(
+            press_for(press(KeyCode::Char('?')), None, Some(&draft), false, false),
+            Pressed::Compose(Composed::Typing(_))
+        ));
+    }
+
+    #[test]
+    fn the_sheet_takes_the_keys_and_lets_none_through_to_the_tree() {
+        assert_eq!(
+            press_for(
+                press(KeyCode::Char('p')),
+                up(2).current(),
+                None,
+                false,
+                false
+            ),
+            Pressed::Help(HelpSheet::Open(2))
+        );
+        assert_eq!(
+            press_for(
+                press(KeyCode::Char('j')),
+                up(2).current(),
+                None,
+                false,
+                false
+            ),
+            Pressed::Help(HelpSheet::Open(3))
+        );
+        assert_eq!(
+            press_for(press(KeyCode::Esc), up(2).current(), None, false, false),
+            Pressed::Help(HelpSheet::Closed)
+        );
+    }
+
+    #[test]
+    fn ctrl_c_asks_to_quit_over_the_sheet() {
+        let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        assert_eq!(
+            press_for(ctrl_c, up(2).current(), None, false, false),
+            Pressed::Confirm(QuitConfirm::open())
         );
     }
 }

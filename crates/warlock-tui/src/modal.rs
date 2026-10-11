@@ -2,6 +2,7 @@ use crate::confirm::{
     Answer, Carry, CutConfirm, Cutting, Filing, PullConfirm, PushConfirm, QuitConfirm, Review,
     Undertaking,
 };
+use crate::help::HelpSheet;
 use crate::prompt::{RecordForm, RecordPrompt, ScopeField, ScopePrompt};
 
 // Two variants over `ScopeField` rather than one carrying a tag, so the field
@@ -11,6 +12,7 @@ use crate::prompt::{RecordForm, RecordPrompt, ScopeField, ScopePrompt};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Modal<'a> {
     Quit(Answer),
+    Help(u16),
     Push(&'a Filing),
     Cut(&'a Cutting),
     Pull(&'a Undertaking),
@@ -31,6 +33,7 @@ pub(crate) enum Modal<'a> {
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Modals<'a> {
     pub quit: QuitConfirm,
+    pub help: HelpSheet,
     pub push: &'a PushConfirm,
     pub cut: &'a CutConfirm,
     pub pull: &'a PullConfirm,
@@ -45,6 +48,7 @@ impl Default for Modals<'_> {
     fn default() -> Self {
         Self {
             quit: QuitConfirm::Closed,
+            help: HelpSheet::Closed,
             push: &PushConfirm::Closed,
             cut: &CutConfirm::Closed,
             pull: &PullConfirm::Closed,
@@ -66,6 +70,10 @@ impl<'a> Modals<'a> {
     // Quit first: it is the gate on the way out, and a window can come up under
     // it with nobody pressing anything — a board answering a `/draft`, a slice's
     // drafts arriving, a `/write` turn answering into its prompt.
+    //
+    // Help second: under quit, so Ctrl-C asks over it, and over everything
+    // else, so a window that comes up on no keystroke does not take the keys
+    // from a sheet somebody opened and is reading.
     //
     // The push, cut, pull, review and carry questions before the fields, for
     // the same reason one step down: a field can come up under one of them on
@@ -89,6 +97,7 @@ impl<'a> Modals<'a> {
         self.quit
             .highlighted()
             .map(Modal::Quit)
+            .or_else(|| self.help.scroll().map(Modal::Help))
             .or_else(|| self.push.filing().map(Modal::Push))
             .or_else(|| self.cut.cutting().map(Modal::Cut))
             .or_else(|| self.pull.undertaking().map(Modal::Pull))

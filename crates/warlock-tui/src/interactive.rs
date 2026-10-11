@@ -19,6 +19,7 @@ use crate::cutting::Cutter;
 use crate::editing::{NO_EDITOR, edit_press, editor, run_editor};
 use crate::error::Error;
 use crate::git::{Forge, Gh, Git, Repository};
+use crate::help::HelpSheet;
 use crate::input::{
     Action, Drag, MouseAction, Pressed, Scroll, drag_after, mouse_action, press_for,
 };
@@ -35,7 +36,9 @@ use crate::screen::Screen;
 use crate::selection::{Cell, Position, copied_text, position_at};
 use crate::session::{Scope, Watched, load_app, start_watching};
 use crate::submission::ToDraft;
-use crate::ui::{Reach, composer_on_screen, draw, panel_height, panel_width, tree_height};
+use crate::ui::{
+    Reach, composer_on_screen, draw, help_most_scroll, panel_height, panel_width, tree_height,
+};
 use crate::viewing::view_press;
 
 /// How long the loop waits for a keystroke before going round anyway.
@@ -143,9 +146,13 @@ impl<S: Screen> Interactive<S> {
 // Every window the session can have up, gathered in one place so that the keys,
 // the pointer and the frame are all asked about the same `Modals` and take the
 // one `current` picks. A free function rather than a method for `draw`'s sake:
-// it borrows these fields while the screen is borrowed mutably.
+// it borrows these fields while the screen is borrowed mutably. One argument
+// per owner of a window, which is past clippy's count; bundling two of them into
+// a pair would be a type that exists only for the lint.
+#[allow(clippy::too_many_arguments)]
 fn modals<'a, C, O, A, R, F, M>(
     quit: QuitConfirm,
+    help: HelpSheet,
     scope: &'a ScopePrompt,
     record: &'a RecordPrompt,
     pushes: &'a Pushes<O>,
@@ -163,6 +170,7 @@ where
 {
     Modals {
         quit,
+        help,
         push: &pushes.window().confirm,
         cut: cutter.confirm(),
         pull: puller.confirm(),
@@ -243,6 +251,7 @@ struct Session<K: Seams> {
     /// handle that made it.
     clipboard: K::Clip,
     confirm: QuitConfirm,
+    help: HelpSheet,
     /// Where a `/push` gets its client from, the home it resolves the board
     /// under, the window asking about it and the one request it may have in
     /// flight — which is its own say-no to a second. See [`Pushes`].
@@ -305,6 +314,7 @@ impl<K: Seams> Session<K> {
             chat,
             clipboard,
             confirm: QuitConfirm::default(),
+            help: HelpSheet::default(),
             pushes,
             cutter,
             puller,
@@ -327,6 +337,7 @@ impl<K: Seams> Session<K> {
     fn modal(&self) -> Option<Modal<'_>> {
         modals(
             self.confirm,
+            self.help,
             &self.prompt,
             &self.record,
             &self.pushes,
@@ -351,6 +362,7 @@ impl<K: Seams> Session<K> {
         // loop draws and then waits.
         let width = panel_width(size);
         self.chat.set_composer_width(width);
+        self.help = self.help.clamped(help_most_scroll(size));
         // And the other thing the field is told once a round: which slice of a
         // cut, if any, the next submission answers for. Told here rather than
         // at the two edges of a question, so a field cannot be left labelled for
@@ -365,6 +377,7 @@ impl<K: Seams> Session<K> {
 
         let modal = modals(
             self.confirm,
+            self.help,
             &self.prompt,
             &self.record,
             &self.pushes,
@@ -518,8 +531,8 @@ impl<K: Seams> Session<K> {
             // having written whole documents or none, and the manifest it never got
             // to rewrite still says what it said before.
             //
-            // Every way out arrives here: a Yes to the question, Ctrl-C, and `q`
-            // during a run. The second spelling is the app's old quit, which
+            // Every way out arrives here: a Yes to the question, and `q` during a
+            // run. The second spelling is the app's old quit, which
             // [`press_for`] no longer produces — naming it beside the first keeps
             // one road out of this loop rather than two that have to be kept doing
             // the same thing.
@@ -529,6 +542,8 @@ impl<K: Seams> Session<K> {
             // No has nothing to put back, and the top of this loop draws whatever
             // the question now is.
             Pressed::Confirm(next) => self.confirm = next,
+            Pressed::Help(next) => self.help = next,
+            Pressed::Act(Action::Help) => self.help = HelpSheet::open(),
             // The push dialog, moved or answered: see [`Pushes::answer`].
             Pressed::Push(answered) => self.pushes.answer(&mut self.app, answered, now),
             // And the question a `/draft` puts up once the board has answered,

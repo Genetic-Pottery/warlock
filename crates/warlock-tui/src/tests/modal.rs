@@ -2,6 +2,7 @@ use warlock_engine::Destination;
 
 use super::{Modal, Modals};
 use crate::confirm::{Carry, CutConfirm, PullConfirm, PushConfirm, QuitConfirm, Review};
+use crate::help::HelpSheet;
 use crate::prompt::{RecordPrompt, ScopePrompt};
 
 #[test]
@@ -10,7 +11,7 @@ fn nothing_up_is_no_modal() {
 }
 
 #[test]
-fn the_precedence_is_quit_the_five_questions_then_the_three_fields() {
+fn the_precedence_is_quit_help_the_five_questions_then_the_three_fields() {
     let push = PushConfirm::open(
         "Push a brief to the board",
         Destination::new("warlock-team", "Warlock", "warlock", "work"),
@@ -33,6 +34,7 @@ fn the_precedence_is_quit_the_five_questions_then_the_three_fields() {
     // in turn: what is left on top at each step is the whole order.
     let mut modals = Modals {
         quit: QuitConfirm::open(),
+        help: HelpSheet::Open(3),
         push: &push,
         cut: &cut,
         pull: &pull,
@@ -47,6 +49,7 @@ fn the_precedence_is_quit_the_five_questions_then_the_three_fields() {
         seen.push(modal);
         match modal {
             Modal::Quit(_) => modals.quit = QuitConfirm::Closed,
+            Modal::Help(_) => modals.help = HelpSheet::Closed,
             Modal::Push(_) => modals.push = &PushConfirm::Closed,
             Modal::Cut(_) => modals.cut = &CutConfirm::Closed,
             Modal::Pull(_) => modals.pull = &PullConfirm::Closed,
@@ -62,6 +65,7 @@ fn the_precedence_is_quit_the_five_questions_then_the_three_fields() {
         seen,
         [
             Modal::Quit(QuitConfirm::open().highlighted().expect("open")),
+            Modal::Help(3),
             Modal::Push(push.filing().expect("open")),
             Modal::Cut(cut.cutting().expect("open")),
             Modal::Pull(pull.undertaking().expect("open")),

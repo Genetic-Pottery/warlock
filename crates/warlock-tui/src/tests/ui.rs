@@ -11,22 +11,22 @@ use warlock_engine::{Destination, NodeState, scope};
 
 use super::{
     Areas, BAR_EMPTY, BAR_FILLED, BAR_MIN_WIDTH, BORDER_THICKNESS, BRIEF_THREAD_TITLE, CANCEL_KEY,
-    CARRY_LEFT, CARRY_QUESTION, COLLAPSE_KEY, COMPOSER_CURSOR, COMPOSER_MIN_HEIGHT,
-    CONFIRM_ANSWER_GAP, CONFIRM_NO, CONFIRM_QUESTION, CONFIRM_YES, CUT_KEY, CUT_QUESTION,
-    CUT_SLICES, CUT_STATUS, CUT_TEAM, Carry, DIALOG_MARGIN, DIALOG_MARGIN_ROWS, Dialog, ELLIPSIS,
-    FILES_KEY, FOOTER_HEIGHT, GUIDE, GUIDE_BRANCH, GUIDE_LAST, HEADER_GAP, HEADER_HEIGHT, Hit,
-    INDENT, KEY_DROP_ORDER, KEY_GAP, KEYS, LIVE_KEY, MARK, MARK_MARGIN, MARK_MARGIN_ROWS,
-    MOVE_KEYS, NO_MARKER, NOTE_MARKER, PACTING_KEYS, PACTING_QUIT_KEY, PACTING_RUN, PANEL_INDENT,
-    PATH_HEADING, PATH_RULES, PERCENT_WIDTH, PULL_BRANCH, PULL_FROM, PULL_QUESTION,
-    PULL_RESUME_QUESTION, PULL_SCOPE, PULL_TEAM, PUSH_KEY, PUSH_QUESTION, PUSH_TEAM, QUIT_KEY,
-    RECORD_HEADING, RECORD_LABEL_GAP, RECORD_RULES, REFRESHING_RUN, REVIEW_ANSWER_GAP,
-    REVIEW_CREATE, REVIEW_EDIT, REVIEW_FEEDBACK, REVIEW_QUESTION, REVIEW_READ, REVIEW_SKIP,
-    ROW_KEY, RUN_HEADER_HEIGHT, Reach, Review, SAID_MARKER, SCOPE_CURSOR, SCOPE_HEADING,
+    CARRY_LEFT, CARRY_QUESTION, COMPOSER_CURSOR, COMPOSER_MIN_HEIGHT, CONFIRM_ANSWER_GAP,
+    CONFIRM_NO, CONFIRM_QUESTION, CONFIRM_YES, CUT_KEY, CUT_QUESTION, CUT_SLICES, CUT_STATUS,
+    CUT_TEAM, Carry, DIALOG_MARGIN, DIALOG_MARGIN_ROWS, Dialog, ELLIPSIS, FOOTER_HEIGHT, GUIDE,
+    GUIDE_BRANCH, GUIDE_LAST, HEADER_GAP, HEADER_HEIGHT, HELP_KEY, Hit, INDENT, KEY_DROP_ORDER,
+    KEY_GAP, KEYS, LIVE_KEY, MARK, MARK_MARGIN, MARK_MARGIN_ROWS, NO_MARKER, NOTE_MARKER,
+    PACTING_KEYS, PACTING_RUN, PANEL_INDENT, PATH_HEADING, PATH_RULES, PERCENT_WIDTH, PULL_BRANCH,
+    PULL_FROM, PULL_QUESTION, PULL_RESUME_QUESTION, PULL_SCOPE, PULL_TEAM, PUSH_KEY, PUSH_QUESTION,
+    PUSH_TEAM, QUIT_KEY, RECORD_HEADING, RECORD_LABEL_GAP, RECORD_RULES, REFRESHING_RUN,
+    REVIEW_ANSWER_GAP, REVIEW_CREATE, REVIEW_EDIT, REVIEW_FEEDBACK, REVIEW_QUESTION, REVIEW_READ,
+    REVIEW_SKIP, RUN_HEADER_HEIGHT, Reach, Review, SAID_MARKER, SCOPE_CURSOR, SCOPE_HEADING,
     SCROLLBACK_ARROW, SELECTED, SELECTION_MARKER, THREAD_TITLE, TREE_MIN_WIDTH, TREE_PERCENT,
     areas, composer_height, composer_on_screen, display_width, draw, footer_text_area,
-    guide_prefixes, hit_test, keys_line, label_width, mark_area, pacting_keys_line, pane_inner,
-    panel_height, panel_reach, panel_row, panel_rows_area, panel_width, run_header_height,
-    run_header_line, tree_height, tree_rows_area, tree_width, truncated,
+    guide_prefixes, help_most_scroll, hit_test, keys_line, label_width, mark_area,
+    pacting_keys_line, pane_inner, panel_height, panel_reach, panel_row, panel_rows_area,
+    panel_width, run_header_height, run_header_line, tree_height, tree_rows_area, tree_width,
+    truncated,
 };
 use crate::account::{Line as Entry, Outcome};
 use crate::app::{App, Chrome, Focus, Row, Run, Sigils};
@@ -1574,13 +1574,8 @@ fn the_footer_shows_the_engines_counts_and_the_keys() {
     // of quietly losing whatever sat on the right-hand end of it.
     assert_eq!(keys, keys_line(usize::from(KEYS_WIDTH)));
     // And spelled out, so a key added to the footer has to be added here
-    // too: the seven keys the tree is walked and worked with, and the way
-    // out.
-    assert_eq!(
-        keys,
-        "k/j: row    space: fold    o: pacts    f: files    p: pact    \
-             r: refresh    s: scope    q/Esc/Ctrl-C: quit"
-    );
+    // too.
+    assert_eq!(keys, "?: help    q/Esc/Ctrl-C: quit");
     // And the lines either side of it are the footer's own, untouched by
     // the new key: the tally still counts the whole tree, and the message
     // line is blank because nothing has been said.
@@ -1632,7 +1627,7 @@ fn a_refused_toggle_shows_its_message_on_the_footers_last_line_until_the_next_ke
     // And it took nothing else's line: the tally and the keys are still on
     // the two lines above it.
     assert!(footer_line(&buffer, 0).contains("unpacted"));
-    assert!(footer_line(&buffer, 1).contains("p: pact"));
+    assert!(footer_line(&buffer, 1).contains(HELP_KEY));
 
     // The next keystroke moves on, and the line goes blank again.
     app.select_next();
@@ -1810,7 +1805,7 @@ fn the_keys_line_advertises_esc_as_cancel_while_a_pact_runs_and_says_quit_otherw
     let narrow = render(&app, 120, height);
     assert_eq!(
         footer_line(&narrow, 1),
-        "up/down k/j: move    space: collapse    Esc: cancel    q/Ctrl-C: quit"
+        "?: help    Esc: cancel    q/Ctrl-C: quit"
     );
 
     // And the run ending puts today's line back, exactly.
@@ -1822,132 +1817,52 @@ fn the_keys_line_advertises_esc_as_cancel_while_a_pact_runs_and_says_quit_otherw
 }
 
 #[test]
-fn the_pacting_keys_line_gives_movement_up_before_either_way_out() {
-    // What the line reads on a terminal with room for all of it, spelled
-    // out here rather than assembled, so a name that changed has to be
+fn the_pacting_keys_line_gives_help_up_before_either_way_out() {
+    // Spelled out rather than assembled, so a name that changed has to be
     // changed here too.
-    let whole = "up/down k/j: move    space: collapse    Esc: cancel    q/Ctrl-C: quit";
+    let whole = "?: help    Esc: cancel    q/Ctrl-C: quit";
     assert_eq!(PACTING_KEYS.join(KEY_GAP), whole);
     let fits = display_width(whole);
 
-    // Exactly today's line at any width that can hold it, down to the
-    // column.
     assert_eq!(pacting_keys_line(usize::from(KEYS_WIDTH)), whole);
     assert_eq!(pacting_keys_line(fits), whole);
 
-    // A column short of it and movement is what goes: the arrows and j/k
-    // are the guesses a reader already has.
-    assert_eq!(
-        pacting_keys_line(fits - 1),
-        "space: collapse    Esc: cancel    q/Ctrl-C: quit"
-    );
-    // Narrower still and the fold goes too, leaving both answers to "how do
-    // I stop this?" — the run's own stop and the way out of warlock.
-    assert_eq!(
-        pacting_keys_line(display_width("space: collapse    Esc: cancel    q/Ctrl-C: quit") - 1),
-        "Esc: cancel    q/Ctrl-C: quit"
-    );
-    // And below even those two, they are cut rather than dropped: half a
-    // name is still the start of the answer.
+    // A column short and help goes, leaving both answers to "how do I stop
+    // this?" — the run's own stop and the way out of warlock.
+    assert_eq!(pacting_keys_line(fits - 1), "Esc: cancel    q/Ctrl-C: quit");
+    // Below even those two, they are cut rather than dropped: half a name is
+    // still the start of the answer.
     assert_eq!(
         pacting_keys_line(display_width("Esc: cancel    q/Ctrl-C: quit") - 1),
         "Esc: cancel    q/Ctrl-C: qui"
     );
 
-    // At every width from wider than the line down to nothing: what is
-    // drawn fits, and no name outlives one that is kept after it.
     for width in 0..=fits + 8 {
         let line = pacting_keys_line(width);
         assert!(display_width(&line) <= width, "{width} columns: {line:?}");
         assert!(
-            !line.contains(MOVE_KEYS) || line.contains(COLLAPSE_KEY),
-            "{width} columns kept movement over the fold: {line:?}"
-        );
-        assert!(
-            !line.contains(COLLAPSE_KEY) || line.contains(CANCEL_KEY),
-            "{width} columns kept the fold over cancel: {line:?}"
+            !line.contains(HELP_KEY) || line.contains(CANCEL_KEY),
+            "{width} columns kept help over cancel: {line:?}"
         );
     }
 }
 
 #[test]
-fn the_footer_keeps_the_whole_way_out_on_an_eighty_column_terminal() {
+fn the_footer_keeps_every_key_on_an_eighty_column_terminal() {
     let mut app = App::from_tree(&fixture::tree());
     let height = 10;
     let columns = footer_width(EIGHTY_COLUMNS);
 
-    // Eighty columns is narrower than the whole keys line, so this is a line
-    // that has given names up — and the name it keeps is the one a stuck
-    // reader is looking for.
     let keys = footer_line(&render(&app, EIGHTY_COLUMNS, height), 1);
 
-    // Whole, not the first few characters of it: `contains` of the entire
-    // name, with nothing after it on the line.
-    assert!(keys.contains(QUIT_KEY), "{keys:?}");
-    assert!(keys.ends_with(QUIT_KEY), "{keys:?}");
+    assert_eq!(keys, [HELP_KEY, QUIT_KEY].join(KEY_GAP));
     assert!(display_width(&keys) <= columns, "{keys:?}");
-    // And it really did have to give something up to keep it: this is not a
-    // width the whole line fits in, and movement is the first name gone.
-    assert!(!keys.contains(ROW_KEY), "{keys:?}");
 
-    // While a pact runs the way out is `PACTING_QUIT_KEY` — Esc is spoken
-    // for by `CANCEL_KEY` — and both of the line's answers to "how do I stop
-    // this?" are on eighty columns whole.
     app.set_pact_in_flight("warlock/crates/engine", 3, 12);
 
     let keys = footer_line(&render(&app, EIGHTY_COLUMNS, height), 1);
 
-    assert!(keys.contains(PACTING_QUIT_KEY), "{keys:?}");
-    assert!(keys.ends_with(PACTING_QUIT_KEY), "{keys:?}");
-    assert!(keys.contains(CANCEL_KEY), "{keys:?}");
-    assert!(display_width(&keys) <= columns, "{keys:?}");
-}
-
-#[test]
-fn the_row_key_is_the_first_the_eighty_column_footer_gives_up() {
-    let app = App::from_tree(&fixture::tree());
-    let height = 10;
-    let columns = footer_width(EIGHTY_COLUMNS);
-    let pieces: Vec<&str> = KEYS.iter().copied().chain([QUIT_KEY]).collect();
-
-    let keys = footer_line(&render(&app, EIGHTY_COLUMNS, height), 1);
-
-    // The names this width could not afford, in the order the line is
-    // documented to give them up in.
-    let dropped: Vec<&str> = KEY_DROP_ORDER
-        .iter()
-        .copied()
-        .filter(|name| pieces.contains(name) && !keys.contains(name))
-        .collect();
-    // Walking the tree goes first, because a reader looking at a tree can
-    // guess at how to move through one — and nothing else went before it:
-    // the names given up are a prefix of the order, so no name that
-    // outranks them was spent instead.
-    assert!(!dropped.is_empty(), "{keys:?} gave nothing up");
-    assert_eq!(
-        dropped,
-        KEY_DROP_ORDER[..dropped.len()].to_vec(),
-        "{keys:?} skipped a name in the drop order"
-    );
-    assert_eq!(dropped.first().copied(), Some(ROW_KEY), "{keys:?}");
-    assert!(!keys.contains(ROW_KEY), "{keys:?}");
-
-    // What is left is whole names joined by `KEY_GAP` and nothing else — no
-    // half-drawn name, no leftover gap where one used to be.
-    let survivors: Vec<&str> = pieces
-        .iter()
-        .copied()
-        .filter(|name| !dropped.contains(name))
-        .collect();
-    assert_eq!(keys, survivors.join(KEY_GAP));
-    for name in &survivors {
-        assert!(keys.contains(name), "{keys:?}");
-    }
-
-    // And the way out is on it, whole and at the end of it, inside the
-    // eighty columns the footer was given.
-    assert!(keys.contains(QUIT_KEY), "{keys:?}");
-    assert!(keys.ends_with(QUIT_KEY), "{keys:?}");
+    assert_eq!(keys, PACTING_KEYS.join(KEY_GAP));
     assert!(display_width(&keys) <= columns, "{keys:?}");
 }
 
@@ -2008,11 +1923,7 @@ fn the_keys_line_gives_its_names_up_in_order_rather_than_losing_its_tail() {
     // The order this line's names are expected to go in: the documented
     // one, which names every key on the footer but the way out.
     let expected: Vec<&str> = KEY_DROP_ORDER.to_vec();
-    assert_eq!(
-        expected.iter().take(2).copied().collect::<Vec<&str>>(),
-        vec![ROW_KEY, FILES_KEY],
-        "walking the tree goes first: {expected:?}"
-    );
+    assert_eq!(expected, vec![HELP_KEY]);
 
     // Column by column down from the whole line, noting each name as it
     // disappears. What comes out is the order they went in.
@@ -2038,9 +1949,9 @@ fn the_keys_line_gives_its_names_up_in_order_rather_than_losing_its_tail() {
 
     // Which is a different line from the one a terminal that cut at its
     // right-hand edge would draw: that line is a prefix of the whole, and
-    // this one is not — it kept its tail and lost its middle.
-    let narrow = keys_line(usize::from(EIGHTY_COLUMNS));
-    assert!(narrow.ends_with(QUIT_KEY), "{narrow:?}");
+    // this one is not — it kept its tail and lost its head.
+    let narrow = keys_line(full - 1);
+    assert_eq!(narrow, QUIT_KEY);
     assert!(
         !whole.starts_with(&narrow),
         "{narrow:?} is the whole line cut at the edge"
@@ -7906,5 +7817,55 @@ fn a_terminal_too_small_for_the_record_window_clamps_it_and_still_shows_it() {
             rows_text(&closed),
             "the window changed nothing on screen at {size}"
         );
+    }
+}
+
+mod help {
+    use super::*;
+    use crate::help::HelpSheet;
+
+    fn render_help(width: u16, height: u16, scroll: u16) -> Buffer {
+        let modals = Modals {
+            help: HelpSheet::Open(scroll),
+            ..Modals::default()
+        };
+        render_every(
+            &App::from_tree(&fixture::tree()),
+            &Chrome::default(),
+            width,
+            height,
+            Instant::now(),
+            modals,
+            None,
+        )
+    }
+
+    #[test]
+    fn a_tall_terminal_shows_the_whole_sheet_with_nothing_to_scroll() {
+        let size = Size::new(WIDTH, 60);
+        assert_eq!(help_most_scroll(size), 0);
+
+        let text = rows_text(&render_help(size.width, size.height, 0)).join("\n");
+        for heading in ["Moving", "The tree", "The chat bar", "Commands", "Stopping"] {
+            assert!(text.contains(heading), "{heading}:\n{text}");
+        }
+        assert!(text.contains("Esc or ? closes"), "{text}");
+        assert!(text.contains("ask whether to quit"), "{text}");
+    }
+
+    #[test]
+    fn a_short_terminal_scrolls_the_sheet_to_its_last_line_and_no_further() {
+        let size = Size::new(WIDTH, 16);
+        let most = help_most_scroll(size);
+        assert!(most > 0);
+
+        let top = rows_text(&render_help(size.width, size.height, 0)).join("\n");
+        assert!(top.contains("Moving"), "{top}");
+        assert!(!top.contains("ask whether to quit"), "{top}");
+
+        let bottom = rows_text(&render_help(size.width, size.height, most)).join("\n");
+        assert!(bottom.contains("ask whether to quit"), "{bottom}");
+        assert!(!bottom.contains("Moving"), "{bottom}");
+        assert!(bottom.contains("Esc or ? closes"), "{bottom}");
     }
 }
