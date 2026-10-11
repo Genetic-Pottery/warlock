@@ -1,8 +1,8 @@
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
 
 use super::{
-    Edited, RecordEdited, RecordField, RecordForm, RecordPrompt, ScopeField, ScopePrompt, edit_for,
-    record_edit_for,
+    Edited, FIELD_CHARS, RecordEdited, RecordField, RecordForm, RecordPrompt, ScopeField,
+    ScopePrompt, edit_for, record_edit_for,
 };
 
 // Every field below is opened over this, so a test that meant to change the
@@ -61,9 +61,10 @@ fn a_fresh_prompt_is_up_over_the_directory_and_the_scope_it_carries() {
     // there rather than clearing it.
     let prompt = ScopePrompt::open(DIRECTORY, "data-plane");
 
-    assert_eq!(prompt, ScopePrompt::Open(field("data-plane")));
+    let opened = field("data-plane").capped(warlock_engine::scope::MAXIMUM_CHARACTERS);
+    assert_eq!(prompt, ScopePrompt::Open(opened.clone()));
     assert!(prompt.is_open());
-    assert_eq!(prompt.field(), Some(&field("data-plane")));
+    assert_eq!(prompt.field(), Some(&opened));
     assert_eq!(prompt.field().map(ScopeField::directory), Some(DIRECTORY));
     assert_eq!(prompt.field().map(ScopeField::text), Some("data-plane"));
     assert_eq!(prompt.field().and_then(ScopeField::rule), None);
@@ -749,4 +750,47 @@ fn no_key_ever_changes_the_path_or_the_scope_being_recorded() {
         assert_eq!(next.path(), DIRECTORY);
         assert_eq!(next.scope(), SCOPE);
     }
+}
+
+#[test]
+fn typing_stops_at_the_cap() {
+    let full = field(&"é".repeat(FIELD_CHARS));
+    assert_eq!(after(press(KeyCode::Char('x')), &full), full);
+
+    let short = after(press(KeyCode::Backspace), &full);
+    let typed = after(press(KeyCode::Char('x')), &short);
+    assert_eq!(typed.text().chars().count(), FIELD_CHARS);
+    assert!(typed.text().ends_with('x'));
+}
+
+#[test]
+fn a_field_opened_past_the_cap_keeps_its_text_and_still_edits() {
+    let long = field(&"a".repeat(FIELD_CHARS + 20));
+    assert_eq!(long.text().chars().count(), FIELD_CHARS + 20);
+    assert_eq!(after(press(KeyCode::Char('x')), &long), long);
+    let trimmed = after(press(KeyCode::Backspace), &long);
+    assert_eq!(trimmed.text().chars().count(), FIELD_CHARS + 19);
+}
+
+#[test]
+fn the_scope_prompt_stops_at_the_engines_ceiling_and_the_path_window_does_not() {
+    let scope = "a".repeat(warlock_engine::scope::MAXIMUM_CHARACTERS);
+    let full = ScopePrompt::open(DIRECTORY, scope.as_str())
+        .field()
+        .expect("open")
+        .clone();
+    assert_eq!(after(press(KeyCode::Char('x')), &full), full);
+
+    let path = ScopePrompt::open_path(DIRECTORY, scope.as_str())
+        .field()
+        .expect("open")
+        .clone();
+    let typed = after(press(KeyCode::Char('x')), &path);
+    assert_eq!(typed.text().chars().count(), scope.len() + 1);
+}
+
+#[test]
+fn a_field_taken_out_of_a_form_still_takes_typing() {
+    let taken = ScopeField::default();
+    assert_eq!(after(press(KeyCode::Char('x')), &taken).text(), "x");
 }

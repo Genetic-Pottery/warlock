@@ -738,7 +738,7 @@ mod rounds {
 
         assert_eq!(
             write_opened(repo.path(), DIRECTORY, REPLY),
-            ScopePrompt::open(WRITE_HEADING, PROPOSED)
+            ScopePrompt::open_path(WRITE_HEADING, PROPOSED)
         );
         assert_eq!(
             everything_under(repo.path()),

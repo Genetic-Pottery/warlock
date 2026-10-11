@@ -65,7 +65,7 @@ pub(crate) fn proposed_path(repo_root: &Path, directory: &str, reply: &str) -> S
 // way, off the loop, so nothing is read here to find it and a window that opens
 // over a finished document cannot fail to open.
 pub(crate) fn write_opened(repo_root: &Path, directory: &str, reply: &str) -> ScopePrompt {
-    ScopePrompt::open(WRITE_HEADING, proposed_path(repo_root, directory, reply))
+    ScopePrompt::open_path(WRITE_HEADING, proposed_path(repo_root, directory, reply))
 }
 
 // What this window hands back: the prompt the loop holds next, and — on the one

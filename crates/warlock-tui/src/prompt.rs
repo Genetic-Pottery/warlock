@@ -20,6 +20,7 @@
 //! field.
 
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use warlock_engine::scope::MAXIMUM_CHARACTERS;
 
 // Shift is deliberately absent: an upper-case letter arrives with it on some
 // terminals and without it on others, and either way it is text. Everything here
@@ -30,10 +31,17 @@ const CHORD: KeyModifiers = KeyModifiers::CONTROL
     .union(KeyModifiers::HYPER)
     .union(KeyModifiers::META);
 
+// Every window this field is drawn in is sized off its text, so an uncapped one
+// grows past the screen's edge. Only typing is refused at the cap: a path
+// `/write` proposes opens whole whatever its length, and its slug is held to
+// `SLUG_MAX` in `writing.rs`, so a default directory leaves it well under this.
+// The scope prompt caps lower, at the engine's own ceiling.
+pub(crate) const FIELD_CHARS: usize = 100;
+
 // One value rather than three parallel variables in the event loop: the three
 // are only ever meaningful together — there is no directory being scoped without
 // a field to type in, and no rule line without a submit that broke one.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct ScopeField {
     // A manifest path in every real use, held as a plain `String` because this
     // module only ever prints it.
@@ -45,6 +53,15 @@ pub(crate) struct ScopeField {
     // One line, put here by the caller after the engine refused, and worded by
     // the engine.
     rule: Option<String>,
+    cap: usize,
+}
+
+// By hand rather than derived, because a derived cap would be zero and a field
+// taken out of a form with `mem::take` would refuse every character typed into it.
+impl Default for ScopeField {
+    fn default() -> Self {
+        Self::new("", "")
+    }
 }
 
 impl ScopeField {
@@ -63,7 +80,13 @@ impl ScopeField {
             cursor: text.len(),
             text,
             rule: None,
+            cap: FIELD_CHARS,
         }
+    }
+
+    #[must_use]
+    pub(crate) fn capped(self, cap: usize) -> Self {
+        Self { cap, ..self }
     }
 
     // The text is untouched, which is the point: a refusal leaves whoever typed
@@ -111,12 +134,17 @@ pub(crate) enum ScopePrompt {
 }
 
 impl ScopePrompt {
-    // A named constructor rather than `Open(ScopeField::new(..))` at the call
-    // site: what a fresh prompt starts on is decided here rather than wherever
-    // the `s` key happens to be handled.
+    // Named constructors rather than `Open(ScopeField::new(..))` at the call
+    // site: what a fresh prompt starts on, its cap included, is decided here
+    // rather than wherever the `s` key or `/write` happens to be handled.
     #[must_use]
     pub(crate) fn open(directory: impl Into<String>, text: impl Into<String>) -> Self {
-        Self::Open(ScopeField::new(directory, text))
+        Self::Open(ScopeField::new(directory, text).capped(MAXIMUM_CHARACTERS))
+    }
+
+    #[must_use]
+    pub(crate) fn open_path(heading: impl Into<String>, path: impl Into<String>) -> Self {
+        Self::Open(ScopeField::new(heading, path))
     }
 
     #[must_use]
@@ -185,6 +213,7 @@ pub(crate) fn edit_for(key: KeyEvent, field: &ScopeField) -> Edited {
             text,
             cursor,
             rule: None,
+            cap: field.cap,
         })
     };
     // A move is not an edit: the rule line names something wrong with the text,
@@ -234,6 +263,7 @@ pub(crate) fn edit_for(key: KeyEvent, field: &ScopeField) -> Edited {
         // A chord is a command somebody sent, not a character somebody typed,
         // and control characters are not text however they arrived — Ctrl-C
         // among them, which the loop above has already had its chance at.
+        KeyCode::Char(_) if field.text.chars().count() >= field.cap => unchanged(),
         KeyCode::Char(character) if !key.modifiers.intersects(CHORD) && !character.is_control() => {
             let mut text = field.text.clone();
             text.insert(field.cursor, character);

@@ -3,7 +3,7 @@ use std::path::Path;
 
 use crate::manifest::{self, Manifest, PactEntry, ROOT_MODULE, to_manifest_path};
 
-const MAXIMUM_CHARACTERS: usize = 24;
+pub const MAXIMUM_CHARACTERS: usize = 24;
 
 // The one line every caller that asks a person for a scope shows, so a prompt
 // cannot spell out a second copy of the rules and drift from the one that
