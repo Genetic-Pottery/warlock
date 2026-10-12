@@ -298,8 +298,7 @@ impl Response {
 // Not one `Io` bucket, because each of these is a different thing for a caller
 // to say or do: a missing `claude` is the ordinary state of a fresh machine, a
 // non-zero exit means the model was reached and refused and its stderr is the
-// only clue, empty output means there is nothing to write, and a timeout is
-// answered by asking for less rather than by reading an error.
+// only clue, and empty output means there is nothing to write.
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum Error {
@@ -353,7 +352,7 @@ impl std::error::Error for Error {
 }
 
 fn one_line(text: &str) -> String {
-    let flattened = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let flattened = crate::fill::flattened(text);
     // Cut on a character boundary rather than at byte `STDERR_EXCERPT`: a stack
     // trace full of arrows and box drawing would otherwise panic the formatter.
     match flattened.char_indices().nth(STDERR_EXCERPT) {

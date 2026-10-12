@@ -1,39 +1,20 @@
-//! The result contract of a sub-task session: the one thing warlock reads back
-//! out of a session that was given writing tools.
-//!
-//! A sub-task session ends with one JSON object as its last message —
-//! `{"status": ..., "summary": ..., "blocked_reason": ...}` — and [`accept`]
-//! turns whatever actually came back into a [`Reported`] warlock can act on.
-//! Nothing here runs a session or decides what to do with the answer: the
-//! engine opens no sockets and spawns no subprocesses, and the orchestration
-//! that spends an outcome lives above it.
-//!
-//! [`RESULT_PROMPT`] is the shape written down in prose, so the object the
-//! session is asked for and the object this module reads are one statement and
-//! not two. The rest of a sub-task prompt — the brief, the ticket's context,
-//! the scope and the sigils, the refusals — belongs to the caller that raises
-//! the session.
-//!
-//! # Why this is not `pulls::SubtaskStatus`
-//!
-//! [`crate::SubtaskStatus`] names six statuses a sub-task record on disk can
-//! hold; a session may report exactly three of them. Reusing it here would
-//! make `pending`, `in_progress` and above all `crossed` constructible out of a
-//! session's own answer, and `crossed` is warlock's verdict from the
-//! post-session check of the tree — a session that wrote outside its scopes
-//! must not be able to claim it did not, and one that behaved must not be able
-//! to claim the verdict either. So the wire contract is its own enum, and the
-//! conversion runs one way, from this module into the record
-//! (`impl From<Reported> for SubtaskStatus`). The `blocked_reason` key is
-//! spelt the same in both on purpose: the answer and the record it lands in
-//! read against each other.
-
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
 use crate::pulls::SubtaskStatus;
 
+// Not `pulls::SubtaskStatus`. That names six statuses a sub-task record on
+// disk can hold; a session may report exactly three of them. Reusing it here
+// would make `pending`, `in_progress` and above all `crossed` constructible
+// out of a session's own answer, and `crossed` is warlock's verdict from the
+// post-session check of the tree — a session that wrote outside its scopes
+// must not be able to claim it did not, and one that behaved must not be able
+// to claim the verdict either. So the wire contract is its own enum, and the
+// conversion runs one way, from this module into the record
+// (`impl From<Reported> for SubtaskStatus`). The `blocked_reason` key is
+// spelt the same in both on purpose: the answer and the record it lands in
+// read against each other.
 /// What a sub-task session said it did. Every variant carries its reason in the
 /// variant rather than in a field beside it, for the reason
 /// [`crate::SubtaskStatus`] does: a `blocked` with nothing to say cannot be
