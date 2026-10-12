@@ -51,7 +51,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-use warlock_engine::fill::{self, Defect, Settled};
+use warlock_engine::fill::{self, Settled};
 use warlock_engine::{Agent, agent, drafting, splitting, working};
 
 /// The clock one invocation runs under. A child that outlives it is killed *and*
@@ -2486,7 +2486,7 @@ pub enum Drafted {
     /// directory it could not get described, and a supplied *ticket* is warlock
     /// filing work nobody planned onto somebody's board. A slice that never
     /// parsed is reported and left uncut.
-    Unusable(Defect),
+    Unusable(drafting::Defect),
 }
 
 /// The one agent a session talks to, and the cancel handle that reaches it.
@@ -2821,7 +2821,7 @@ pub enum Unsplit {
     /// described, and a supplied *sub-task* is warlock sending a session with
     /// writing tools into a tree with work nobody planned. A ticket that never
     /// parsed is reported and left unsplit.
-    Unusable(Defect),
+    Unusable(splitting::Defect),
     /// The sub-tasks wait on one another, so no order puts every dependency
     /// before its dependant. The one split defect with no repair.
     Circle(splitting::Cycle),
@@ -2962,7 +2962,10 @@ impl<C: Converses> Splitting<C> {
         }
     }
 
-    fn attempt(&mut self, rejected: &[Defect]) -> Result<splitting::Accepted, agent::Error> {
+    fn attempt(
+        &mut self,
+        rejected: &[splitting::Defect],
+    ) -> Result<splitting::Accepted, agent::Error> {
         self.attempts += 1;
         let asked = splitting::split_instructions(&self.title, &self.description, rejected);
         Ok(splitting::accept(&self.conversation.turn(&asked)?))

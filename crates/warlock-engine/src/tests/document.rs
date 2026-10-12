@@ -1,8 +1,8 @@
 use super::{
     Accepted, Defect, Described, ENTRY_CHARS, ENTRY_MINIMUM, Entry, Evidence, Expected,
     FILE_PROMPT, Fill, LIST_CAP, MEND_PASSES, Mend, Mended, PURPOSE_CHARS, STAMP, SYNTHESIS_PROMPT,
-    accept_file, accept_synthesis, check, fallback, human, lines_of, mend, mended, names_tool,
-    render, stub_answer, synthesis_instructions,
+    Slot, accept_file, accept_synthesis, check, fallback, human, lines_of, mend, mended,
+    names_tool, render, stub_answer, synthesis_instructions,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -183,7 +183,7 @@ fn a_bare_word_is_a_skipped_slot_and_not_an_entry() {
         Accepted::Defective {
             fill: "duplicate".to_owned(),
             defects: vec![Defect::TooShort {
-                field: "files[\"lib.rs\"]".to_owned(),
+                field: Slot::FileLine("lib.rs".to_owned()),
                 chars: 9,
                 minimum: ENTRY_MINIMUM
             }]
@@ -202,13 +202,13 @@ fn every_value_is_one_line_under_its_cap() {
     fill.structure = vec![Entry::naming("x".repeat(ENTRY_CHARS + 1), "lib.rs")];
     let found = defects(&fill);
     assert!(found.contains(&Defect::Empty {
-        field: "purpose".to_owned()
+        field: Slot::Purpose
     }));
     assert!(found.contains(&Defect::Multiline {
-        field: "directories[\"src\"]".to_owned()
+        field: Slot::Directory("src".to_owned())
     }));
     assert!(found.contains(&Defect::TooLong {
-        field: "structure[0]".to_owned(),
+        field: Slot::Entry(0),
         chars: ENTRY_CHARS + 1,
         cap: ENTRY_CHARS
     }));
@@ -225,7 +225,7 @@ fn every_value_is_one_line_under_its_cap() {
         Accepted::Defective {
             fill: "x".repeat(ENTRY_CHARS + 1),
             defects: vec![Defect::TooLong {
-                field: "files[\"lib.rs\"]".to_owned(),
+                field: Slot::FileLine("lib.rs".to_owned()),
                 chars: ENTRY_CHARS + 1,
                 cap: ENTRY_CHARS
             }]
@@ -252,12 +252,12 @@ fn a_list_over_the_cap_is_a_defect_and_so_is_each_bad_entry_in_it() {
         defects(&fill),
         [
             Defect::TooMany {
-                field: "structure".to_owned(),
+                field: Slot::Structure,
                 count: LIST_CAP + 1,
                 cap: LIST_CAP
             },
             Defect::Empty {
-                field: "structure[3]".to_owned()
+                field: Slot::Entry(3)
             }
         ]
     );
@@ -319,7 +319,7 @@ fn a_claim_naming_something_that_is_not_here_is_a_defect() {
     assert_eq!(
         defects(&fill),
         [Defect::UnknownTarget {
-            field: "structure[0].names[0]".to_owned(),
+            field: Slot::Names(0, Some(0)),
             name: "load_tree".to_owned(),
         }],
         "no file in the request holds that name, so the claim is not checkable",
@@ -356,7 +356,7 @@ fn a_name_the_request_cannot_vouch_for_is_taken_from_what_warlock_measured() {
     assert_eq!(
         check(&fill, &expected, &Described::default()),
         [Defect::UnknownTarget {
-            field: "structure[0].names[0]".to_owned(),
+            field: Slot::Names(0, Some(0)),
             name: "walk_one_deep".to_owned(),
         }],
         "nothing witnesses the name: not the request, and nothing measured",
@@ -395,7 +395,7 @@ fn a_name_neither_witness_has_ever_seen_is_still_refused() {
     assert_eq!(
         check(&fill, &expected, &measured),
         [Defect::UnknownTarget {
-            field: "structure[0].names[0]".to_owned(),
+            field: Slot::Names(0, Some(0)),
             name: "load_tree".to_owned(),
         }],
         "a second witness widens the evidence and does not retire the check",
@@ -409,7 +409,7 @@ fn a_structure_entry_must_name_something() {
     assert_eq!(
         defects(&fill),
         [Defect::Empty {
-            field: "structure[0].names".to_owned(),
+            field: Slot::Names(0, None),
         }],
         "a statement about how files fit together that names no file is not that statement",
     );
@@ -438,7 +438,7 @@ fn an_entry_answered_as_a_bare_string_is_read_rather_than_refused() {
                 ..fill
             },
             defects: vec![Defect::Empty {
-                field: "structure[0].names".to_owned(),
+                field: Slot::Names(0, None),
             }],
         },
     );
@@ -479,10 +479,10 @@ fn naming_the_tool_is_a_defect_unless_the_files_name_it() {
         defects(&fill),
         [
             Defect::ToolNamed {
-                field: "purpose".to_owned()
+                field: Slot::Purpose
             },
             Defect::ToolNamed {
-                field: "structure[0]".to_owned()
+                field: Slot::Entry(0)
             },
         ]
     );
@@ -688,7 +688,7 @@ fn the_road_without_the_text_checks_no_more_weakly_than_the_road_with_it() {
         ..directory_wide
     };
     let refused = [Defect::UnknownTarget {
-        field: "structure[0].names[0]".to_owned(),
+        field: Slot::Names(0, Some(0)),
         name: "load_tree".to_owned(),
     }];
     assert_eq!(
@@ -744,7 +744,7 @@ fn a_leaf_that_writes_the_tools_name_may_say_so() {
     assert_eq!(
         check(&fill, &expected, &Described::default()),
         [Defect::ToolNamed {
-            field: "purpose".to_owned(),
+            field: Slot::Purpose,
         }],
         "and one whose files never mention it still may not",
     );
@@ -786,7 +786,7 @@ fn a_name_a_file_writes_witnesses_a_claim_the_table_cannot_read() {
     assert_eq!(
         check(&fill, &expected, &Described::default()),
         [Defect::UnknownTarget {
-            field: "structure[0].names[0]".to_owned(),
+            field: Slot::Names(0, Some(0)),
             name: "total".to_owned(),
         }],
         "and without the measurement there is nothing to witness it",
@@ -814,7 +814,7 @@ fn a_name_merely_contained_in_a_longer_one_is_not_witnessed() {
     assert_eq!(
         check(&fill, &Expected::of(&request), &described),
         [Defect::UnknownTarget {
-            field: "structure[0].names[0]".to_owned(),
+            field: Slot::Names(0, Some(0)),
             name: "Apply".to_owned(),
         }]
     );
@@ -895,7 +895,7 @@ fn a_refused_name_is_told_that_a_declared_name_would_have_done() {
     // pass looking for the wrong thing.
     assert_eq!(
         Defect::UnknownTarget {
-            field: "structure[0].names[8]".to_owned(),
+            field: Slot::Names(0, Some(8)),
             name: "areas".to_owned(),
         }
         .to_string(),
@@ -1034,35 +1034,35 @@ fn every_defect_reads_as_one_line_naming_its_slot() {
             detail: "expected value at line 1".to_owned(),
         },
         Defect::Missing {
-            field: "files[\"a\"]".to_owned(),
+            field: Slot::FileLine("a".to_owned()),
         },
         Defect::Empty {
-            field: "purpose".to_owned(),
+            field: Slot::Purpose,
         },
         Defect::Multiline {
-            field: "structure[0]".to_owned(),
+            field: Slot::Entry(0),
         },
         Defect::TooShort {
-            field: "files[\"c\"]".to_owned(),
+            field: Slot::FileLine("c".to_owned()),
             chars: 3,
             minimum: ENTRY_MINIMUM,
         },
         Defect::TooLong {
-            field: "structure[1]".to_owned(),
+            field: Slot::Entry(1),
             chars: 300,
             cap: ENTRY_CHARS,
         },
         Defect::TooMany {
-            field: "structure".to_owned(),
+            field: Slot::Structure,
             count: 20,
             cap: LIST_CAP,
         },
         Defect::UnknownTarget {
-            field: "structure[0].names[0]".to_owned(),
+            field: Slot::Names(0, Some(0)),
             name: "x".to_owned(),
         },
         Defect::ToolNamed {
-            field: "purpose".to_owned(),
+            field: Slot::Purpose,
         },
     ];
     for defect in all {
@@ -1333,11 +1333,11 @@ fn an_empty_value_falls_back_to_what_warlock_measured() {
         mends,
         [
             Mend {
-                field: "purpose".to_owned(),
+                field: Slot::Purpose,
                 done: Mended::Supplied
             },
             Mend {
-                field: "directories[\"src\"]".to_owned(),
+                field: Slot::Directory("src".to_owned()),
                 done: Mended::Supplied
             },
         ]
@@ -1371,7 +1371,7 @@ fn a_value_over_more_than_one_line_keeps_the_first() {
     assert_eq!(
         mends,
         [Mend {
-            field: "directories[\"src\"]".to_owned(),
+            field: Slot::Directory("src".to_owned()),
             done: Mended::FirstLine
         }]
     );
@@ -1397,14 +1397,14 @@ fn a_value_over_its_cap_is_cut_to_it_counting_characters() {
         mends,
         [
             Mend {
-                field: "purpose".to_owned(),
+                field: Slot::Purpose,
                 done: Mended::Cut {
                     from: PURPOSE_CHARS + 1,
                     to: PURPOSE_CHARS
                 }
             },
             Mend {
-                field: "directories[\"src\"]".to_owned(),
+                field: Slot::Directory("src".to_owned()),
                 done: Mended::Cut {
                     from: ENTRY_CHARS + 20,
                     to: ENTRY_CHARS
@@ -1436,7 +1436,7 @@ fn a_list_over_its_cap_keeps_its_first_entries() {
     assert_eq!(
         mends,
         [Mend {
-            field: "structure".to_owned(),
+            field: Slot::Structure,
             done: Mended::Shortened {
                 from: LIST_CAP + 2,
                 to: LIST_CAP
@@ -1478,19 +1478,19 @@ fn a_value_naming_the_tool_is_dropped_and_falls_to_the_next_rule() {
         mends,
         [
             Mend {
-                field: "purpose".to_owned(),
+                field: Slot::Purpose,
                 done: Mended::Supplied
             },
             Mend {
-                field: "directories[\"src\"]".to_owned(),
+                field: Slot::Directory("src".to_owned()),
                 done: Mended::Dropped
             },
             Mend {
-                field: "structure[0]".to_owned(),
+                field: Slot::Entry(0),
                 done: Mended::Dropped
             },
             Mend {
-                field: "directories[\"src\"]".to_owned(),
+                field: Slot::Directory("src".to_owned()),
                 done: Mended::Supplied
             },
         ],
@@ -1775,7 +1775,7 @@ fn a_files_line_may_not_assert_a_mechanism_only_a_comment_claims() {
     assert!(
         mends
             .iter()
-            .any(|mend| mend.field == "files[\"balance.rs\"]"),
+            .any(|mend| mend.field == Slot::FileLine("balance.rs".to_owned())),
         "the mend says which line it replaced: {mends:?}"
     );
 
@@ -1883,5 +1883,33 @@ fn a_claim_resting_on_a_comment_is_refused_even_where_one_reached_a_pass() {
             Defect::UnknownTarget { name, .. } if name == "reconcile"
         )),
         "a call that only the comment supports is refused: {defects:?}"
+    );
+}
+
+#[test]
+fn a_slot_is_shown_to_the_model_as_its_path() {
+    let shown: Vec<String> = [
+        Slot::Purpose,
+        Slot::Directory("src".to_owned()),
+        Slot::FileLine("lib.rs".to_owned()),
+        Slot::Structure,
+        Slot::Entry(3),
+        Slot::Names(3, None),
+        Slot::Names(3, Some(1)),
+    ]
+    .iter()
+    .map(ToString::to_string)
+    .collect();
+    assert_eq!(
+        shown,
+        [
+            "purpose",
+            "directories[\"src\"]",
+            "files[\"lib.rs\"]",
+            "structure",
+            "structure[3]",
+            "structure[3].names",
+            "structure[3].names[1]",
+        ]
     );
 }

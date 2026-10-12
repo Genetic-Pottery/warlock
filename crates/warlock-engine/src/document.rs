@@ -9,7 +9,31 @@ use crate::agent::{File, Request};
 use crate::fill::{self, Asking, Reask, Rewrite, fit, line, turned_down};
 use crate::languages;
 
-pub use crate::fill::Defect;
+pub type Defect = fill::Defect<Slot>;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Slot {
+    Purpose,
+    Directory(String),
+    FileLine(String),
+    Structure,
+    Entry(usize),
+    Names(usize, Option<usize>),
+}
+
+impl fmt::Display for Slot {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Purpose => f.write_str("purpose"),
+            Self::Directory(key) => write!(f, "directories[{key:?}]"),
+            Self::FileLine(path) => write!(f, "files[{path:?}]"),
+            Self::Structure => f.write_str("structure"),
+            Self::Entry(index) => write!(f, "structure[{index}]"),
+            Self::Names(index, None) => write!(f, "structure[{index}].names"),
+            Self::Names(index, Some(which)) => write!(f, "structure[{index}].names[{which}]"),
+        }
+    }
+}
 
 pub const ENTRY_CHARS: usize = 280;
 
@@ -413,7 +437,7 @@ fn shown(file: &File) -> Shown<'_> {
     }
 }
 
-pub type Accepted<F = Fill> = fill::Accepted<F>;
+pub type Accepted<F = Fill> = fill::Accepted<F, Slot>;
 
 // The synthesis pass: the slots that are about a directory rather than about
 // one file in it, written from the lines and not from the source.
@@ -517,7 +541,7 @@ pub fn accept_synthesis(
     expected: &Expected<'_>,
     described: &Described,
 ) -> Accepted {
-    let mut parsed = match fill::parse::<Fill>(answer) {
+    let mut parsed = match fill::parse::<Fill, Slot>(answer) {
         Ok(parsed) => parsed,
         Err(defect) => return Accepted::Unparsed(defect),
     };
@@ -662,7 +686,7 @@ pub fn accept_file(
     expected: &Expected<'_>,
     described: &Described,
 ) -> Accepted<String> {
-    let field = format!("files[{path:?}]");
+    let field = Slot::FileLine(path.to_owned());
     let parsed: serde_json::Value = match serde_json::from_str(answer) {
         Ok(parsed) => parsed,
         Err(error) => {
@@ -735,7 +759,7 @@ fn check(fill: &Fill, expected: &Expected<'_>, described: &Described) -> Vec<Def
     let evidence = Evidence::new(expected, described);
 
     line(
-        "purpose",
+        &Slot::Purpose,
         &fill.purpose,
         ENTRY_MINIMUM,
         PURPOSE_CHARS,
@@ -743,16 +767,16 @@ fn check(fill: &Fill, expected: &Expected<'_>, described: &Described) -> Vec<Def
     );
 
     let children: Vec<&str> = expected.directories.keys().copied().collect();
-    keyed("directories", &fill.directories, &children, &mut defects);
+    keyed(&fill.directories, &children, &mut defects);
 
-    stated("structure", &fill.structure, evidence, &mut defects);
+    stated(&fill.structure, evidence, &mut defects);
 
     // The per-file lines went unchecked entirely until this: not their names,
     // and not even the tool-naming guard below, which `values` still does not
     // reach. `Decoder::decode()` arrived in one of them.
     for (path, line) in &fill.files {
         if expected.files.contains_key(path.as_str()) {
-            unwitnessed(&format!("files[{path:?}]"), line, evidence, &mut defects);
+            unwitnessed(&Slot::FileLine(path.clone()), line, evidence, &mut defects);
         }
     }
 
@@ -802,11 +826,11 @@ fn referenced(line: &str) -> BTreeSet<String> {
     found
 }
 
-fn unwitnessed(field: &str, line: &str, evidence: Evidence<'_>, defects: &mut Vec<Defect>) {
+fn unwitnessed(field: &Slot, line: &str, evidence: Evidence<'_>, defects: &mut Vec<Defect>) {
     for name in referenced(line) {
         if !evidence.knows(&name) {
             defects.push(Defect::UnknownTarget {
-                field: field.to_owned(),
+                field: field.clone(),
                 name,
             });
         }
@@ -837,26 +861,26 @@ fn qualified(name: &str) -> bool {
             .is_some_and(|(_, tail)| tail.chars().next().is_some_and(char::is_uppercase))
 }
 
-fn values(fill: &Fill) -> impl Iterator<Item = (String, &str)> {
-    std::iter::once(("purpose".to_owned(), fill.purpose.as_str()))
+fn values(fill: &Fill) -> impl Iterator<Item = (Slot, &str)> {
+    std::iter::once((Slot::Purpose, fill.purpose.as_str()))
         .chain(
             fill.directories
                 .iter()
-                .map(|(key, line)| (format!("directories[{key:?}]"), line.as_str())),
+                .map(|(key, line)| (Slot::Directory(key.clone()), line.as_str())),
         )
         .chain(
             fill.structure
                 .iter()
                 .enumerate()
-                .map(|(index, entry)| (format!("structure[{index}]"), entry.line.as_str())),
+                .map(|(index, entry)| (Slot::Entry(index), entry.line.as_str())),
         )
 }
 
-fn keyed(name: &str, given: &BTreeMap<String, String>, wanted: &[&str], defects: &mut Vec<Defect>) {
+fn keyed(given: &BTreeMap<String, String>, wanted: &[&str], defects: &mut Vec<Defect>) {
     for key in wanted {
         if !given.contains_key(*key) {
             defects.push(Defect::Missing {
-                field: format!("{name}[{key:?}]"),
+                field: Slot::Directory((*key).to_owned()),
             });
         }
     }
@@ -866,10 +890,15 @@ fn keyed(name: &str, given: &BTreeMap<String, String>, wanted: &[&str], defects:
         // no answer could make it right.
         debug_assert!(
             wanted.contains(&key.as_str()),
-            "{name}[{key:?}] was never asked for"
+            "directories[{key:?}] was never asked for"
         );
-        let field = format!("{name}[{key:?}]");
-        line(&field, value, ENTRY_MINIMUM, ENTRY_CHARS, defects);
+        line(
+            &Slot::Directory(key.clone()),
+            value,
+            ENTRY_MINIMUM,
+            ENTRY_CHARS,
+            defects,
+        );
     }
 }
 
@@ -892,17 +921,17 @@ fn keyed(name: &str, given: &BTreeMap<String, String>, wanted: &[&str], defects:
 //
 // An entry must name something — it is a statement about how the files here
 // fit together, and one that names no file is not that statement.
-fn stated(name: &str, given: &[Entry], evidence: Evidence<'_>, defects: &mut Vec<Defect>) {
+fn stated(given: &[Entry], evidence: Evidence<'_>, defects: &mut Vec<Defect>) {
     if given.len() > LIST_CAP {
         defects.push(Defect::TooMany {
-            field: name.to_owned(),
+            field: Slot::Structure,
             count: given.len(),
             cap: LIST_CAP,
         });
     }
     for (index, entry) in given.iter().enumerate() {
         line(
-            &format!("{name}[{index}]"),
+            &Slot::Entry(index),
             &entry.line,
             ENTRY_MINIMUM,
             ENTRY_CHARS,
@@ -910,13 +939,13 @@ fn stated(name: &str, given: &[Entry], evidence: Evidence<'_>, defects: &mut Vec
         );
         if entry.names.is_empty() {
             defects.push(Defect::Empty {
-                field: format!("{name}[{index}].names"),
+                field: Slot::Names(index, None),
             });
             continue;
         }
         for (which, named) in entry.names.iter().enumerate() {
             let named = named.trim();
-            let field = format!("{name}[{index}].names[{which}]");
+            let field = Slot::Names(index, Some(which));
             if named.is_empty() {
                 defects.push(Defect::Empty { field });
             } else if !evidence.knows(named) {
@@ -1142,7 +1171,7 @@ mod fallback {
 // spin between two rules instead of writing a document.
 pub const MEND_PASSES: usize = 4;
 
-pub type Mend = fill::Mend<Mended>;
+pub type Mend = fill::Mend<Mended, Slot>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mended {
@@ -1231,6 +1260,7 @@ struct Mending<'a, 'r> {
 
 impl fill::Schema for Mending<'_, '_> {
     type Fill = Fill;
+    type Slot = Slot;
     type Mended = Mended;
     type Plan = Plan;
 
@@ -1254,16 +1284,16 @@ impl fill::Schema for Mending<'_, '_> {
         plan
     }
 
-    fn rewritable<'f>(plan: &Plan, fill: &'f mut Fill, field: &str) -> Option<&'f mut String> {
-        if plan.covers(field) {
+    fn rewritable<'f>(plan: &Plan, fill: &'f mut Fill, slot: &Slot) -> Option<&'f mut String> {
+        if plan.covers(slot) {
             return None;
         }
-        match slot(field) {
+        match slot {
             Slot::Purpose => Some(&mut fill.purpose),
-            Slot::Directory(key) => fill.directories.get_mut(&key),
-            Slot::Entry(index) => fill.structure.get_mut(index).map(|e| &mut e.line),
-            Slot::FileLine(path) => fill.files.get_mut(&path),
-            Slot::List(_) | Slot::Unknown => None,
+            Slot::Directory(key) => fill.directories.get_mut(key),
+            Slot::Entry(index) => fill.structure.get_mut(*index).map(|e| &mut e.line),
+            Slot::FileLine(path) => fill.files.get_mut(path),
+            Slot::Structure | Slot::Names(..) => None,
         }
     }
 
@@ -1279,9 +1309,7 @@ struct Plan {
     dropped_directories: BTreeSet<String>,
     filled_files: BTreeSet<String>,
     dropped_structure: BTreeSet<usize>,
-    // The lists to cut back to `LIST_CAP`, by the names `check` and `Slot`
-    // spell them.
-    cut: BTreeSet<&'static str>,
+    cut_structure: bool,
 }
 
 impl Plan {
@@ -1294,10 +1322,10 @@ impl Plan {
         let field = match defect {
             Defect::UnknownTarget { field, .. } | Defect::ToolNamed { field } => field,
             Defect::TooMany { field, count, cap } => {
-                let Slot::List(list) = slot(field) else {
+                if *field != Slot::Structure {
                     return;
-                };
-                self.cut.insert(list);
+                }
+                self.cut_structure = true;
                 mends.push(Mend {
                     field: field.clone(),
                     done: Mended::Shortened {
@@ -1309,7 +1337,7 @@ impl Plan {
             }
             _ => return,
         };
-        let (recorded, done) = match slot(field) {
+        let (recorded, done) = match field.clone() {
             // The purpose is the one slot a drop cannot answer: a document
             // with no purpose is not a document, and there is no next rule
             // under it. So it falls to the fallback line here too, which is
@@ -1329,8 +1357,10 @@ impl Plan {
             // A list entry has no name, size or symbols behind it, and the
             // prompt says an empty list is fine, so there is nothing to fall
             // back to and nothing lost by the gap.
-            Slot::Entry(index) => (self.dropped_structure.insert(index), Mended::Dropped),
-            Slot::List(_) | Slot::Unknown => (false, Mended::Dropped),
+            Slot::Entry(index) | Slot::Names(index, _) => {
+                (self.dropped_structure.insert(index), Mended::Dropped)
+            }
+            Slot::Structure => (false, Mended::Dropped),
         };
         if recorded {
             mends.push(Mend {
@@ -1348,7 +1378,7 @@ impl Plan {
         else {
             return;
         };
-        let (recorded, done) = match slot(field) {
+        let (recorded, done) = match field.clone() {
             Slot::Purpose => (
                 !std::mem::replace(&mut self.purpose, true),
                 Mended::Supplied,
@@ -1358,9 +1388,11 @@ impl Plan {
                 Mended::Supplied,
             ),
             // A list entry is dropped rather than filled, and says so.
-            Slot::Entry(index) => (self.dropped_structure.insert(index), Mended::Dropped),
+            Slot::Entry(index) | Slot::Names(index, _) => {
+                (self.dropped_structure.insert(index), Mended::Dropped)
+            }
             Slot::FileLine(path) => (self.filled_files.insert(path), Mended::Supplied),
-            Slot::List(_) | Slot::Unknown => (false, Mended::Dropped),
+            Slot::Structure => (false, Mended::Dropped),
         };
         if recorded {
             mends.push(Mend {
@@ -1372,24 +1404,24 @@ impl Plan {
 
     // Whether the slot a value rewrite names is already being dropped, filled
     // in whole, or cut off the end of its list this pass.
-    fn covers(&self, field: &str) -> bool {
-        match slot(field) {
+    fn covers(&self, slot: &Slot) -> bool {
+        match slot {
             Slot::Purpose => self.purpose,
             Slot::Directory(key) => {
-                self.dropped_directories.contains(&key) || self.filled_directories.contains(&key)
+                self.dropped_directories.contains(key) || self.filled_directories.contains(key)
             }
-            Slot::Entry(index) => {
-                self.dropped_structure.contains(&index) || self.cut_off("structure", index)
+            Slot::Entry(index) | Slot::Names(index, _) => {
+                self.dropped_structure.contains(index) || self.cut_off(*index)
             }
-            Slot::FileLine(path) => self.filled_files.contains(&path),
-            Slot::List(_) | Slot::Unknown => false,
+            Slot::FileLine(path) => self.filled_files.contains(path),
+            Slot::Structure => false,
         }
     }
 
     // Whether an entry is past the cap of a list this pass cuts back, and so
     // about to go anyway.
-    fn cut_off(&self, list: &'static str, index: usize) -> bool {
-        index >= LIST_CAP && self.cut.contains(list)
+    fn cut_off(&self, index: usize) -> bool {
+        index >= LIST_CAP && self.cut_structure
     }
 
     fn carry_out(self, fill: &mut Fill, expected: &Expected<'_>, described: &Described) {
@@ -1411,7 +1443,7 @@ impl Plan {
         // read the same pre-pass list, so they are applied in that order and
         // an index is never used after the list has moved under it.
         drop_indexes(&mut fill.structure, &self.dropped_structure);
-        if self.cut.contains("structure") {
+        if self.cut_structure {
             fill.structure.truncate(LIST_CAP);
         }
     }
@@ -1427,38 +1459,6 @@ fn drop_indexes<T>(list: &mut Vec<T>, dropped: &BTreeSet<usize>) {
         index += 1;
         keep
     });
-}
-
-// The slot a defect's `field` names, read back out of the spelling `check`
-// wrote it in.
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum Slot {
-    Purpose,
-    Directory(String),
-    FileLine(String),
-    List(&'static str),
-    Entry(usize),
-    Unknown,
-}
-
-fn slot(field: &str) -> Slot {
-    match field {
-        "purpose" => return Slot::Purpose,
-        "structure" => return Slot::List("structure"),
-        _ => {}
-    }
-    let Some((head, rest)) = field.split_once('[') else {
-        return Slot::Unknown;
-    };
-    let inside = rest.split_once(']').map_or(rest, |(inside, _)| inside);
-    match head {
-        // `check` writes a key with `{key:?}`, which is JSON's own escaping of
-        // a string, so serde reads it back.
-        "directories" => serde_json::from_str(inside).map_or(Slot::Unknown, Slot::Directory),
-        "files" => serde_json::from_str(inside).map_or(Slot::Unknown, Slot::FileLine),
-        "structure" => inside.parse().map_or(Slot::Unknown, Slot::Entry),
-        _ => Slot::Unknown,
-    }
 }
 
 #[cfg(test)]

@@ -4,7 +4,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::document::{self, Defect, Described};
-use crate::fill::{self, Accepted, Settled};
+use crate::fill::{self, Settled};
 use crate::pact::{Error, Event, Pacting, Refusal};
 use crate::{Agent, agent, hash, languages, walk};
 
@@ -327,8 +327,8 @@ fn ask<F>(
     agent: &dyn Agent,
     sink: &mut dyn FnMut(Event) -> Pacting,
     request: impl Fn(&[Defect]) -> agent::Request,
-    accept: impl Fn(&str) -> Accepted<F>,
-) -> Result<Settled<F>, Error> {
+    accept: impl Fn(&str) -> document::Accepted<F>,
+) -> Result<Settled<F, document::Slot>, Error> {
     fill::settle(
         document::ASKING,
         |rejected| {

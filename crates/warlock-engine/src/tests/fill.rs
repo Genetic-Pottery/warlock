@@ -1,20 +1,23 @@
 use std::cell::RefCell;
 use std::collections::VecDeque;
 
-use super::{Accepted, Asking, Defect, Mend, Reask, Rewrite, Schema, Settled, mend, settle};
+use super::{Asking, Reask, Rewrite, Schema, mend, settle};
+
+type Defect = super::Defect<usize>;
+type Accepted<F> = super::Accepted<F, usize>;
+type Settled<F> = super::Settled<F, usize>;
+type Mend<M> = super::Mend<M, usize>;
 
 fn too_long() -> Defect {
     Defect::TooLong {
-        field: "body".to_owned(),
+        field: 1,
         chars: 9,
         cap: 4,
     }
 }
 
 fn empty() -> Defect {
-    Defect::Empty {
-        field: "title".to_owned(),
-    }
+    Defect::Empty { field: 0 }
 }
 
 fn not_json() -> Defect {
@@ -152,7 +155,7 @@ fn spent_attempts_with_nothing_parsed_carry_the_last_defect() {
 #[test]
 fn a_turn_that_fails_ends_the_loop_at_once() {
     let mut turns = 0;
-    let settled = settle::<(), _>(
+    let settled = settle::<(), usize, _>(
         Asking {
             attempts: 4,
             reask: Reask::Any,
@@ -190,12 +193,9 @@ impl From<Rewrite> for Mended {
     }
 }
 
-fn index(field: &str) -> usize {
-    field.parse().expect("a field here is an index")
-}
-
 impl Schema for Lines {
     type Fill = Vec<String>;
+    type Slot = usize;
     type Mended = Mended;
     type Plan = Vec<usize>;
 
@@ -204,7 +204,7 @@ impl Schema for Lines {
     fn check(&self, fill: &Vec<String>) -> Vec<Defect> {
         let mut defects = Vec::new();
         for (at, value) in fill.iter().enumerate() {
-            super::line(&at.to_string(), value, 4, 4, &mut defects);
+            super::line(&at, value, 4, 4, &mut defects);
         }
         defects
     }
@@ -213,9 +213,9 @@ impl Schema for Lines {
         let mut padded = Vec::new();
         for defect in defects {
             if let Defect::Empty { field } | Defect::TooShort { field, .. } = defect {
-                padded.push(index(field));
+                padded.push(*field);
                 mends.push(Mend {
-                    field: field.clone(),
+                    field: *field,
                     done: Mended::Padded,
                 });
             }
@@ -226,13 +226,12 @@ impl Schema for Lines {
     fn rewritable<'f>(
         plan: &Vec<usize>,
         fill: &'f mut Vec<String>,
-        field: &str,
+        slot: &usize,
     ) -> Option<&'f mut String> {
-        let at = index(field);
-        if plan.contains(&at) {
+        if plan.contains(slot) {
             return None;
         }
-        fill.get_mut(at)
+        fill.get_mut(*slot)
     }
 
     fn carry_out(&self, plan: Vec<usize>, fill: &mut Vec<String>) {
@@ -242,7 +241,7 @@ impl Schema for Lines {
     }
 }
 
-fn mends(fill: &[&str], pad: &'static str) -> (Vec<String>, Vec<(String, Mended)>, usize) {
+fn mends(fill: &[&str], pad: &'static str) -> (Vec<String>, Vec<(usize, Mended)>, usize) {
     let fill = fill.iter().map(|value| (*value).to_owned()).collect();
     let (fill, mends, passes) = mend(&Lines { pad }, fill);
     let mends = mends
@@ -264,13 +263,7 @@ fn a_clean_fill_takes_no_pass() {
 fn a_value_is_rewritten_in_place_to_its_first_line_and_then_cut_to_its_cap() {
     let (fill, done, passes) = mends(&["\nfirst line\nsecond", "fine"], "pads");
     assert_eq!(fill, ["firs", "fine"]);
-    assert_eq!(
-        done,
-        [
-            ("0".to_owned(), Mended::FirstLine),
-            ("0".to_owned(), Mended::Cut)
-        ]
-    );
+    assert_eq!(done, [(0, Mended::FirstLine), (0, Mended::Cut)]);
     assert_eq!(passes, 1);
 }
 
@@ -280,7 +273,7 @@ fn a_slot_the_plan_covers_is_not_rewritten_first() {
     // first line would be a repair the same pass undoes.
     let (fill, done, passes) = mends(&["a\nb"], "pads");
     assert_eq!(fill, ["pads"]);
-    assert_eq!(done, [("0".to_owned(), Mended::Padded)]);
+    assert_eq!(done, [(0, Mended::Padded)]);
     assert_eq!(passes, 1);
 }
 
@@ -289,13 +282,7 @@ fn a_repair_the_check_still_refuses_is_repaired_again_on_the_next_pass() {
     // Cut to its first line, and that line is too short to keep.
     let (fill, done, passes) = mends(&["ab\nc"], "pads");
     assert_eq!(fill, ["pads"]);
-    assert_eq!(
-        done,
-        [
-            ("0".to_owned(), Mended::FirstLine),
-            ("0".to_owned(), Mended::Padded)
-        ]
-    );
+    assert_eq!(done, [(0, Mended::FirstLine), (0, Mended::Padded)]);
     assert_eq!(passes, 2);
 }
 

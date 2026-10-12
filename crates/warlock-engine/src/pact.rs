@@ -815,7 +815,7 @@ fn pact_directory_watched(
         .iter()
         .map(|name| {
             let mend = document::Mend {
-                field: format!("files[{name:?}]"),
+                field: document::Slot::FileLine(name.clone()),
                 done: document::Mended::Supplied,
             };
             announce_repair(directory, mend, sink)

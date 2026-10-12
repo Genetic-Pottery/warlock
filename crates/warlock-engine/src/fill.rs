@@ -5,46 +5,46 @@ use serde::de::DeserializeOwned;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
-pub enum Defect {
+pub enum Defect<S> {
     NotJson {
         detail: String,
     },
     Missing {
-        field: String,
+        field: S,
     },
     Empty {
-        field: String,
+        field: S,
     },
     Multiline {
-        field: String,
+        field: S,
     },
     TooShort {
-        field: String,
+        field: S,
         chars: usize,
         minimum: usize,
     },
     TooLong {
-        field: String,
+        field: S,
         chars: usize,
         cap: usize,
     },
     TooMany {
-        field: String,
+        field: S,
         count: usize,
         cap: usize,
     },
     UnknownTarget {
-        field: String,
+        field: S,
         name: String,
     },
     ToolNamed {
-        field: String,
+        field: S,
     },
 }
 
 // Sent back to the model word for word by `turned_down`, so a change here is a
 // change to every prompt that asks again.
-impl fmt::Display for Defect {
+impl<S: fmt::Display> fmt::Display for Defect<S> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::NotJson { detail } => write!(f, "the answer is not a JSON object: {detail}"),
@@ -79,18 +79,18 @@ impl fmt::Display for Defect {
     }
 }
 
-impl std::error::Error for Defect {}
+impl<S: fmt::Debug + fmt::Display> std::error::Error for Defect<S> {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Accepted<F> {
+pub enum Accepted<F, S> {
     Filled(F),
-    Defective { fill: F, defects: Vec<Defect> },
-    Unparsed(Defect),
+    Defective { fill: F, defects: Vec<Defect<S>> },
+    Unparsed(Defect<S>),
 }
 
-impl<F> Accepted<F> {
+impl<F, S> Accepted<F, S> {
     #[must_use]
-    pub fn judged(fill: F, defects: Vec<Defect>) -> Self {
+    pub fn judged(fill: F, defects: Vec<Defect<S>>) -> Self {
         if defects.is_empty() {
             Self::Filled(fill)
         } else {
@@ -100,10 +100,10 @@ impl<F> Accepted<F> {
 }
 
 #[must_use]
-pub fn accept<F: DeserializeOwned>(
+pub fn accept<F: DeserializeOwned, S>(
     answer: &str,
-    check: impl FnOnce(&F) -> Vec<Defect>,
-) -> Accepted<F> {
+    check: impl FnOnce(&F) -> Vec<Defect<S>>,
+) -> Accepted<F, S> {
     match parse(answer) {
         Ok(fill) => {
             let defects = check(&fill);
@@ -128,7 +128,7 @@ pub enum Reask {
 }
 
 impl Reask {
-    fn rejected(self, defects: &[Defect]) -> Vec<Defect> {
+    fn rejected<S: Clone>(self, defects: &[Defect<S>]) -> Vec<Defect<S>> {
         match self {
             Self::Any => defects.to_vec(),
             Self::Cut => defects
@@ -149,14 +149,14 @@ pub struct Asking {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Settled<F> {
+pub enum Settled<F, S> {
     /// An answer with nothing left to ask about: clean, or defective only in
     /// ways [`Reask`] lets the mend have.
     Taken(F),
     /// The attempts ran out, and this is the last answer that parsed.
     Spent(F),
     /// The attempts ran out and no answer parsed; the last one's defect.
-    Unusable(Defect),
+    Unusable(Defect<S>),
 }
 
 /// The attempt loop. `turn` is one model turn, handed the defects the last
@@ -171,11 +171,11 @@ pub enum Settled<F> {
 /// # Errors
 ///
 /// Whatever `turn` failed with.
-pub fn settle<F, E>(
+pub fn settle<F, S: Clone, E>(
     asking: Asking,
-    mut turn: impl FnMut(&[Defect]) -> Result<Accepted<F>, E>,
-    mut refused: impl FnMut(&[Defect], usize),
-) -> Result<Settled<F>, E> {
+    mut turn: impl FnMut(&[Defect<S>]) -> Result<Accepted<F, S>, E>,
+    mut refused: impl FnMut(&[Defect<S>], usize),
+) -> Result<Settled<F, S>, E> {
     let mut rejected = Vec::new();
     let mut held = None;
     let mut attempt = 0;
@@ -206,12 +206,12 @@ pub fn settle<F, E>(
     }
 }
 
-/// One repair the mend made, `field` in [`Defect`]'s own spelling of the slot,
-/// so a caller can line a mend up against the defect it answers without
-/// parsing prose. Each road says what `done` means in its own words.
+/// One repair the mend made, `field` the same slot a [`Defect`] names, so a
+/// caller can line a mend up against the defect it answers. Each road says what
+/// `done` means in its own words.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Mend<M> {
-    pub field: String,
+pub struct Mend<M, S> {
+    pub field: S,
     pub done: M,
 }
 
@@ -226,28 +226,38 @@ pub enum Rewrite {
 /// One fill schema's side of the mend: its check and its repairs by slot.
 pub trait Schema {
     type Fill;
+    /// Where in the fill a defect is. Its `Display` is the path the model is
+    /// shown in a turned-down answer, such as `drafts[2].title`, so a change to
+    /// it is a change to every prompt that asks again.
+    type Slot: Clone;
     type Mended: From<Rewrite>;
     type Plan;
 
     const MEND_PASSES: usize;
 
-    fn check(&self, fill: &Self::Fill) -> Vec<Defect>;
+    fn check(&self, fill: &Self::Fill) -> Vec<Defect<Self::Slot>>;
 
     /// What this pass drops, fills in whole and cuts back, decided from the
     /// defects alone and recorded as it is decided.
-    fn plan(&self, defects: &[Defect], mends: &mut Vec<Mend<Self::Mended>>) -> Self::Plan;
+    fn plan(
+        &self,
+        defects: &[Defect<Self::Slot>],
+        mends: &mut Vec<Mend<Self::Mended, Self::Slot>>,
+    ) -> Self::Plan;
 
-    /// The value a [`Rewrite`] of `field` writes over, or `None` for a slot the
+    /// The value a [`Rewrite`] of `slot` writes over, or `None` for a slot the
     /// plan is already dropping, filling in whole or cutting off the end of its
     /// list: the record would name work the same pass undoes.
     fn rewritable<'f>(
         plan: &Self::Plan,
         fill: &'f mut Self::Fill,
-        field: &str,
+        slot: &Self::Slot,
     ) -> Option<&'f mut String>;
 
     fn carry_out(&self, plan: Self::Plan, fill: &mut Self::Fill);
 }
+
+type Mends<S> = Vec<Mend<<S as Schema>::Mended, <S as Schema>::Slot>>;
 
 /// The mechanical mend, and how many passes it took: repair, check again,
 /// repair what the repair left, until the check is empty or
@@ -259,7 +269,7 @@ pub trait Schema {
 /// defects say they mean: the plan is made first, then the values that survive
 /// it are rewritten in place, and only then does anything move — so a defect
 /// naming `structure[3]` is never applied to whatever slid into position 3.
-pub fn mend<S: Schema>(schema: &S, mut fill: S::Fill) -> (S::Fill, Vec<Mend<S::Mended>>, usize) {
+pub fn mend<S: Schema>(schema: &S, mut fill: S::Fill) -> (S::Fill, Mends<S>, usize) {
     let mut mends = Vec::new();
     let mut passes = 0;
     for _ in 0..S::MEND_PASSES {
@@ -305,7 +315,7 @@ pub fn mend<S: Schema>(schema: &S, mut fill: S::Fill) -> (S::Fill, Vec<Mend<S::M
     (fill, mends, passes)
 }
 
-pub(crate) fn turned_down(text: &mut String, rejected: &[Defect]) {
+pub(crate) fn turned_down<S: fmt::Display>(text: &mut String, rejected: &[Defect<S>]) {
     if rejected.is_empty() {
         return;
     }
@@ -318,7 +328,7 @@ pub(crate) fn turned_down(text: &mut String, rejected: &[Defect]) {
     }
 }
 
-pub(crate) fn parse<T: DeserializeOwned>(answer: &str) -> Result<T, Defect> {
+pub(crate) fn parse<T: DeserializeOwned, S>(answer: &str) -> Result<T, Defect<S>> {
     let object = match (answer.find('{'), answer.rfind('}')) {
         (Some(start), Some(end)) if start <= end => &answer[start..=end],
         _ => {
@@ -332,36 +342,36 @@ pub(crate) fn parse<T: DeserializeOwned>(answer: &str) -> Result<T, Defect> {
     })
 }
 
-pub(crate) fn line(
-    field: &str,
+pub(crate) fn line<S: Clone>(
+    field: &S,
     value: &str,
     minimum: usize,
     cap: usize,
-    defects: &mut Vec<Defect>,
+    defects: &mut Vec<Defect<S>>,
 ) {
     let trimmed = value.trim();
     if trimmed.is_empty() {
         defects.push(Defect::Empty {
-            field: field.to_owned(),
+            field: field.clone(),
         });
         return;
     }
     if trimmed.contains(['\n', '\r']) {
         defects.push(Defect::Multiline {
-            field: field.to_owned(),
+            field: field.clone(),
         });
     }
     let chars = trimmed.chars().count();
     if chars < minimum {
         defects.push(Defect::TooShort {
-            field: field.to_owned(),
+            field: field.clone(),
             chars,
             minimum,
         });
     }
     if chars > cap {
         defects.push(Defect::TooLong {
-            field: field.to_owned(),
+            field: field.clone(),
             chars,
             cap,
         });

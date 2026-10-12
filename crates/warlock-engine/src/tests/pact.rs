@@ -440,9 +440,9 @@ fn synthesis_that_cannot_be_got_right_is_mended_rather_than_lost() {
         synthesised
             .mends
             .iter()
-            .map(|mend| mend.field.as_str())
+            .map(|mend| mend.field.clone())
             .collect::<Vec<_>>(),
-        ["purpose"],
+        [document::Slot::Purpose],
         "{:?}",
         synthesised.mends,
     );
@@ -839,7 +839,7 @@ fn every_mend_is_carried_out_of_the_run_and_announced_as_it_is_made() {
         "the loop ran out first, and said so each time",
     );
 
-    let carried: Vec<(String, String, document::Mended)> = repairs
+    let carried: Vec<(String, document::Slot, document::Mended)> = repairs
         .iter()
         .map(|repaired| {
             (
@@ -853,10 +853,10 @@ fn every_mend_is_carried_out_of_the_run_and_announced_as_it_is_made() {
         carried,
         [(
             "crates/tui/src".to_owned(),
-            "purpose".to_owned(),
+            document::Slot::Purpose,
             document::Mended::Supplied,
         )],
-        "one value per slot, naming the directory and the slot in `Defect`'s own spelling",
+        "one value per slot, naming the directory and the slot",
     );
 }
 

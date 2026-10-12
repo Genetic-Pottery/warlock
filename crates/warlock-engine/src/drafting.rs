@@ -4,7 +4,7 @@ use std::fmt::Write as _;
 
 use serde::{Deserialize, Serialize};
 
-use crate::fill::{self, Asking, Defect, Reask, Rewrite, fit, flattened, line, turned_down};
+use crate::fill::{self, Asking, Reask, Rewrite, fit, flattened, line, turned_down};
 
 // The drafting road asks again exactly as often as the document road does, and
 // a second bound would be a number to keep in step with this one for no gain.
@@ -239,16 +239,37 @@ impl Draft {
     }
 }
 
-pub type Accepted = fill::Accepted<Fill>;
+pub type Accepted = fill::Accepted<Fill, Slot>;
+
+pub type Defect = fill::Defect<Slot>;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Slot {
+    Drafts,
+    Title(usize),
+    Body(usize),
+    BlockedBy(usize),
+    Blocks(usize),
+}
+
+impl fmt::Display for Slot {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Drafts => f.write_str("drafts"),
+            Self::Title(index) => write!(f, "drafts[{index}].title"),
+            Self::Body(index) => write!(f, "drafts[{index}].body"),
+            Self::BlockedBy(index) => write!(f, "drafts[{index}].blocked_by"),
+            Self::Blocks(index) => write!(f, "drafts[{index}].blocks"),
+        }
+    }
+}
 
 #[must_use]
 pub fn accept(answer: &str) -> Accepted {
     fill::accept(answer, check)
 }
 
-/// Every slot of a filled drafting answer, in [`Defect`]'s own vocabulary, with
-/// `field` spelt as the path to the slot: `drafts`, `drafts[2].title`,
-/// `drafts[2].blocked_by`.
+/// Every slot of a filled drafting answer, in [`Defect`]'s own vocabulary.
 #[must_use]
 pub fn check(fill: &Fill) -> Vec<Defect> {
     let mut defects = Vec::new();
@@ -260,12 +281,12 @@ pub fn check(fill: &Fill) -> Vec<Defect> {
     // it to work from is called on the document road.
     if fill.drafts.is_empty() {
         defects.push(Defect::Missing {
-            field: "drafts".to_owned(),
+            field: Slot::Drafts,
         });
     }
     if fill.drafts.len() > DRAFTS_PER_SLICE {
         defects.push(Defect::TooMany {
-            field: "drafts".to_owned(),
+            field: Slot::Drafts,
             count: fill.drafts.len(),
             cap: DRAFTS_PER_SLICE,
         });
@@ -273,23 +294,15 @@ pub fn check(fill: &Fill) -> Vec<Defect> {
 
     for (index, draft) in fill.drafts.iter().enumerate() {
         line(
-            &format!("drafts[{index}].title"),
+            &Slot::Title(index),
             &draft.title,
             TITLE_MINIMUM,
             TITLE_CHARS,
             &mut defects,
         );
-        prose(&format!("drafts[{index}].body"), &draft.body, &mut defects);
-        references(
-            &format!("drafts[{index}].blocked_by"),
-            &draft.blocked_by,
-            &mut defects,
-        );
-        references(
-            &format!("drafts[{index}].blocks"),
-            &draft.blocks,
-            &mut defects,
-        );
+        prose(Slot::Body(index), &draft.body, &mut defects);
+        references(Slot::BlockedBy(index), &draft.blocked_by, &mut defects);
+        references(Slot::Blocks(index), &draft.blocks, &mut defects);
     }
 
     defects
@@ -300,11 +313,9 @@ pub fn check(fill: &Fill) -> Vec<Defect> {
 // Forman files a body of any length, and a cap here re-asked whole slices over
 // a few hundred characters of acceptance criteria and then cut the ticket
 // mid-sentence.
-fn prose(field: &str, value: &str, defects: &mut Vec<Defect>) {
+fn prose(field: Slot, value: &str, defects: &mut Vec<Defect>) {
     if value.trim().is_empty() {
-        defects.push(Defect::Empty {
-            field: field.to_owned(),
-        });
+        defects.push(Defect::Empty { field });
     }
 }
 
@@ -317,10 +328,10 @@ fn prose(field: &str, value: &str, defects: &mut Vec<Defect>) {
 // the repair and a re-ask cannot make a reference to a ticket that does not
 // exist right. Whichever way that is decided, `check` over a mended fill is
 // empty, because nothing here reports it.
-fn references(field: &str, given: &[usize], defects: &mut Vec<Defect>) {
+fn references(field: Slot, given: &[usize], defects: &mut Vec<Defect>) {
     if given.len() > REFERENCES_PER_LIST {
         defects.push(Defect::TooMany {
-            field: field.to_owned(),
+            field,
             count: given.len(),
             cap: REFERENCES_PER_LIST,
         });
@@ -383,7 +394,7 @@ mod fallback {
 // version would spin between two rules instead of drafting tickets.
 pub const MEND_PASSES: usize = 3;
 
-pub type Mend = fill::Mend<Mended>;
+pub type Mend = fill::Mend<Mended, Slot>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mended {
@@ -470,16 +481,16 @@ fn mended(fill: &Fill, title: &str, prose: &str) -> (Fill, Vec<Mend>, usize) {
 fn prune(fill: &mut Fill, mends: &mut Vec<Mend>) {
     let held = fill.drafts.len();
     for (index, draft) in fill.drafts.iter_mut().enumerate() {
-        for (name, list) in [
-            ("blocked_by", &mut draft.blocked_by),
-            ("blocks", &mut draft.blocks),
+        for (field, list) in [
+            (Slot::BlockedBy(index), &mut draft.blocked_by),
+            (Slot::Blocks(index), &mut draft.blocks),
         ] {
             let before = list.len();
             list.retain(|target| *target < held && *target != index);
             let dropped = before - list.len();
             if dropped > 0 {
                 mends.push(Mend {
-                    field: format!("drafts[{index}].{name}"),
+                    field,
                     done: Mended::Dropped { count: dropped },
                 });
             }
@@ -494,6 +505,7 @@ struct Mending<'a> {
 
 impl fill::Schema for Mending<'_> {
     type Fill = Fill;
+    type Slot = Slot;
     type Mended = Mended;
     type Plan = Plan;
 
@@ -514,14 +526,14 @@ impl fill::Schema for Mending<'_> {
         plan
     }
 
-    fn rewritable<'f>(plan: &Plan, fill: &'f mut Fill, field: &str) -> Option<&'f mut String> {
-        if plan.covers(field) {
+    fn rewritable<'f>(plan: &Plan, fill: &'f mut Fill, slot: &Slot) -> Option<&'f mut String> {
+        if plan.covers(*slot) {
             return None;
         }
-        match slot(field) {
+        match *slot {
             Slot::Title(index) => fill.drafts.get_mut(index).map(|draft| &mut draft.title),
             Slot::Body(index) => fill.drafts.get_mut(index).map(|draft| &mut draft.body),
-            Slot::Drafts | Slot::BlockedBy(_) | Slot::Blocks(_) | Slot::Unknown => None,
+            Slot::Drafts | Slot::BlockedBy(_) | Slot::Blocks(_) => None,
         }
     }
 
@@ -545,15 +557,15 @@ impl Plan {
         let Defect::TooMany { field, count, cap } = defect else {
             return;
         };
-        let recorded = match slot(field) {
+        let recorded = match *field {
             Slot::Drafts => !std::mem::replace(&mut self.cut_drafts, true),
             Slot::BlockedBy(index) => self.cut_blocked_by.insert(index),
             Slot::Blocks(index) => self.cut_blocks.insert(index),
-            Slot::Title(_) | Slot::Body(_) | Slot::Unknown => false,
+            Slot::Title(_) | Slot::Body(_) => false,
         };
         if recorded {
             mends.push(Mend {
-                field: field.clone(),
+                field: *field,
                 done: Mended::Shortened {
                     from: *count,
                     to: *cap,
@@ -571,26 +583,26 @@ impl Plan {
         else {
             return;
         };
-        let recorded = match slot(field) {
+        let recorded = match *field {
             Slot::Drafts => !std::mem::replace(&mut self.drafts, true),
             Slot::Title(index) => !self.cut_off(index) && self.filled_titles.insert(index),
             Slot::Body(index) => !self.cut_off(index) && self.filled_bodies.insert(index),
-            Slot::BlockedBy(_) | Slot::Blocks(_) | Slot::Unknown => false,
+            Slot::BlockedBy(_) | Slot::Blocks(_) => false,
         };
         if recorded {
             mends.push(Mend {
-                field: field.clone(),
+                field: *field,
                 done: Mended::Supplied,
             });
         }
     }
 
-    fn covers(&self, field: &str) -> bool {
-        match slot(field) {
+    fn covers(&self, slot: Slot) -> bool {
+        match slot {
             Slot::Drafts => self.drafts,
             Slot::Title(index) => self.filled_titles.contains(&index) || self.cut_off(index),
             Slot::Body(index) => self.filled_bodies.contains(&index) || self.cut_off(index),
-            Slot::BlockedBy(_) | Slot::Blocks(_) | Slot::Unknown => false,
+            Slot::BlockedBy(_) | Slot::Blocks(_) => false,
         }
     }
 
@@ -637,40 +649,6 @@ impl Plan {
         if self.cut_drafts {
             fill.drafts.truncate(DRAFTS_PER_SLICE);
         }
-    }
-}
-
-// The slot a defect's `field` names, read back out of the spelling `check`
-// wrote it in.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Slot {
-    Drafts,
-    Title(usize),
-    Body(usize),
-    BlockedBy(usize),
-    Blocks(usize),
-    Unknown,
-}
-
-fn slot(field: &str) -> Slot {
-    if field == "drafts" {
-        return Slot::Drafts;
-    }
-    let Some(rest) = field.strip_prefix("drafts[") else {
-        return Slot::Unknown;
-    };
-    let Some((inside, tail)) = rest.split_once(']') else {
-        return Slot::Unknown;
-    };
-    let Ok(index) = inside.parse::<usize>() else {
-        return Slot::Unknown;
-    };
-    match tail {
-        ".title" => Slot::Title(index),
-        ".body" => Slot::Body(index),
-        ".blocked_by" => Slot::BlockedBy(index),
-        ".blocks" => Slot::Blocks(index),
-        _ => Slot::Unknown,
     }
 }
 

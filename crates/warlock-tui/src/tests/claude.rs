@@ -19,7 +19,6 @@ use crate::brief::scope_block_in;
 use crate::panel::Mode;
 use crate::stubs::{Answering, Scripted};
 use crate::template::DEFAULT_TEMPLATE;
-use warlock_engine::document::Defect;
 use warlock_engine::{Agent, agent, drafting, splitting, working};
 
 // A name no directory on `PATH` can hold, so the lookup fails the way it does on
@@ -3654,7 +3653,7 @@ fn a_ticket_that_never_parses_is_reported_rather_than_split_by_warlock() {
     assert_eq!(session.attempts(), splitting::ATTEMPTS);
     assert_eq!(agent.said().len(), splitting::ATTEMPTS);
     assert!(
-        matches!(halted, Unsplit::Unusable(Defect::NotJson { .. })),
+        matches!(halted, Unsplit::Unusable(splitting::Defect::NotJson { .. })),
         "{halted:?}",
     );
 
