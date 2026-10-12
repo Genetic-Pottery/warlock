@@ -5423,7 +5423,7 @@ fn a_reload_carries_the_thread_over_with_the_rest_of_the_panel() {
     ask_and_answer(&mut app, base);
     let thread = panel_text(&app, at(base, 9));
 
-    let reseated = reseat_on(&app, &fixture::tree_after_a_run());
+    let reseated = reseat_on(app.clone(), &fixture::tree_after_a_run());
 
     // The tree is read again *because* something happened, and a
     // conversation is not a claim about the tree: the card, the turn on it
@@ -6125,7 +6125,7 @@ fn a_re_seat_carries_the_account_and_the_panels_window() {
     app.select_first();
     let before = panel_text(&app, at(base, 9));
 
-    let reseated = reseat_on(&app, &fixture::tree());
+    let reseated = reseat_on(app.clone(), &fixture::tree());
 
     assert_eq!(reseated.panel().account(), app.panel().account());
     assert_eq!(reseated.panel().height(), usize::from(PANEL));
@@ -6147,7 +6147,7 @@ fn a_re_seat_under_a_document_leaves_it_showing_with_the_account_behind_it() {
 
     // What the watcher does when something on disk changed: a new tree,
     // everything else carried.
-    let reseated = reseat_on(&app, &fixture::tree_after_a_run());
+    let reseated = reseat_on(app.clone(), &fixture::tree_after_a_run());
 
     // The same card is on screen, on the same line of it. A reload that put
     // the account back would take a document out of the reader's hands at
@@ -6197,7 +6197,7 @@ fn selected_path(app: &App) -> Option<&Path> {
 fn a_re_seat_takes_its_rows_its_states_and_its_tally_from_the_new_tree() {
     let app = App::from_tree(&fixture::tree());
 
-    let reseated = reseat_on(&app, &fixture::tree_after_a_run());
+    let reseated = reseat_on(app.clone(), &fixture::tree_after_a_run());
 
     // The same five nodes, and the one the run worked on carrying the
     // document it wrote, in the state the new tree gives it — and drawing
@@ -6228,7 +6228,7 @@ fn a_file_the_new_tree_lists_and_the_old_one_did_not_gets_a_row() {
     let written = "warlock/crates/.warlock.md".to_owned();
     assert!(!drawn(&app).contains(&written));
 
-    let reseated = reseat_on(&app, &fixture::tree_after_a_run());
+    let reseated = reseat_on(app.clone(), &fixture::tree_after_a_run());
 
     assert!(reseated.show_files(), "the file toggle did not carry");
     assert!(
@@ -6241,7 +6241,7 @@ fn a_file_the_new_tree_lists_and_the_old_one_did_not_gets_a_row() {
 fn a_re_seat_keeps_the_selection_on_the_node_it_was_on() {
     let app = app_selecting("warlock/crates/tui");
 
-    let reseated = reseat_on(&app, &fixture::tree_after_a_run());
+    let reseated = reseat_on(app.clone(), &fixture::tree_after_a_run());
 
     assert_eq!(
         selected_path(&reseated),
@@ -6253,7 +6253,7 @@ fn a_re_seat_keeps_the_selection_on_the_node_it_was_on() {
 fn a_selection_the_new_tree_lost_lands_on_its_nearest_surviving_ancestor() {
     let app = app_selecting("warlock/crates/tui");
 
-    let reseated = reseat_on(&app, &tree_without_the_tui_crate());
+    let reseated = reseat_on(app.clone(), &tree_without_the_tui_crate());
 
     // The directory the node was in, which is where it went — not the first
     // row, which is a different part of the tree entirely.
@@ -6267,7 +6267,7 @@ fn a_selection_the_new_tree_lost_lands_on_its_nearest_surviving_ancestor() {
         "elsewhere/.warlock.md",
         NodeState::Unpacted,
     ));
-    let reseated = reseat_on(&app, &elsewhere);
+    let reseated = reseat_on(app.clone(), &elsewhere);
 
     assert_eq!(reseated.selected(), 0);
     assert_eq!(selected_path(&reseated), Some(Path::new("elsewhere")));
@@ -6277,7 +6277,7 @@ fn a_selection_the_new_tree_lost_lands_on_its_nearest_surviving_ancestor() {
 fn a_re_seat_carries_the_collapsed_set_including_paths_the_new_tree_lacks() {
     let app = App::from_tree(&fixture::tree()).with_collapsed(["warlock/crates", "warlock/gone"]);
 
-    let reseated = reseat_on(&app, &tree_without_the_tui_crate());
+    let reseated = reseat_on(app.clone(), &tree_without_the_tui_crate());
 
     // Both paths carried, the one the tree has no node for included: a
     // directory that comes back should come back shut.
@@ -6302,7 +6302,7 @@ fn the_view_flags_and_the_window_survive_a_re_seat() {
     app.set_pact_in_flight("warlock/crates", 2, 5);
     app.toggle_focus();
 
-    let reseated = reseat_on(&app, &fixture::tree_after_a_run());
+    let reseated = reseat_on(app.clone(), &fixture::tree_after_a_run());
 
     assert!(reseated.show_files());
     assert!(reseated.pacted_only());
@@ -6346,7 +6346,7 @@ fn re_seating_on_a_tree_that_has_not_changed_leaves_the_view_exactly_as_it_was()
     // What the binary does when a load turns up a tree nothing has happened
     // to: every field of the re-seated app is the field it carried, down to
     // the header, the scroll offset and the pact still in flight.
-    let reseated = reseat_on(&app, &fixture::tree());
+    let reseated = reseat_on(app.clone(), &fixture::tree());
 
     assert_eq!(reseated, app);
 }
@@ -6573,7 +6573,7 @@ fn with_files_hidden_a_document_written_mid_run_is_drawn_at_once() {
     // finds. Path and depth, because the two apps are two accounts of the
     // same screen and not the same value — the reload knows `crates/` has a
     // document and the mid-run tree does not.
-    let reloaded = reseat_on(&app, &fixture::tree_after_a_run());
+    let reloaded = reseat_on(app.clone(), &fixture::tree_after_a_run());
     assert_eq!(
         paths_and_depths(app.rows()),
         paths_and_depths(reloaded.rows())

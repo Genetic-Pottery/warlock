@@ -13,6 +13,7 @@
 //! on the same grounds in the same words.
 
 use std::env;
+use std::mem;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -85,7 +86,7 @@ pub(crate) fn reload(app: &mut App, scope: &Scope, manifest: &mut Manifest) -> O
             manifest: loaded,
             problems,
         }) => {
-            *app = reseat_on(app, &tree);
+            *app = reseat_on(mem::take(app), &tree);
             *manifest = loaded;
             // The same count, in the same words, as the startup load that
             // refuses to draw a tree with problems in it: one problem quoted

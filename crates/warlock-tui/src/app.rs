@@ -1349,7 +1349,7 @@ fn file_row_position(rows: &[Row], directory: usize, depth: usize, path: &Path) 
 }
 
 #[must_use]
-pub(crate) fn reseat_on(view: &App, tree: &Tree) -> App {
+pub(crate) fn reseat_on(view: App, tree: &Tree) -> App {
     // Taken before anything is rebuilt, because it is the one fact about the
     // old view that the new rows cannot be asked for.
     let selected = view.selected_row().map(|row| row.path.clone());
@@ -1358,9 +1358,6 @@ pub(crate) fn reseat_on(view: &App, tree: &Tree) -> App {
     // `..`: this function is the one place that decides what survives a reload,
     // and a pattern that names every field is what makes adding a tenth one a
     // compile error here rather than a fact that quietly stops being carried.
-    // That used to be twenty assignments nobody could check, and the proof it
-    // could not be checked is that the header was among them — carried here and
-    // then immediately recomputed by the only caller.
     let App {
         // From the tree, every time. Whatever the old view held for these is a
         // description of a tree that has just been replaced.
@@ -1394,10 +1391,10 @@ pub(crate) fn reseat_on(view: &App, tree: &Tree) -> App {
         counts: tree.counts(),
         selected: 0,
         scroll_offset: 0,
-        viewpoint: viewpoint.clone(),
-        status: status.clone(),
-        panel: panel.clone(),
-        highlight: *highlight,
+        viewpoint,
+        status,
+        panel,
+        highlight,
     };
 
     // Re-filter first, so the selection is looked up in the rows that will
@@ -1411,7 +1408,7 @@ pub(crate) fn reseat_on(view: &App, tree: &Tree) -> App {
     // selection; the offset the reader left is the one the window rule is owed,
     // so it goes back before that rule is applied to where the selection really
     // landed. A window that still holds the selection does not move at all.
-    reseated.scroll_offset = *scroll_offset;
+    reseated.scroll_offset = scroll_offset;
     reseated.rescroll();
 
     reseated
