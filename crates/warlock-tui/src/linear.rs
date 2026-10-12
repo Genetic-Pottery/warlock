@@ -583,6 +583,27 @@ fn workflow_state(linear: &impl Posts, team: &str, name: &str) -> Result<Option<
     .transpose()
 }
 
+// Macros rather than consts because `concat!` takes literals, and a query is
+// one literal so that the first page and the pages after it cannot ask for
+// different shapes.
+macro_rules! notes_filter {
+    () => {
+        "filter: { or: [
+                    { body: { startsWith: $cut } }
+                    { body: { startsWith: $skipped } }
+                ] }"
+    };
+}
+
+macro_rules! blocker_nodes {
+    () => {
+        "nodes {
+            type
+            issue { identifier state { type } assignee { name } }
+        }"
+    };
+}
+
 /// A project already on the board, by the slug at the end of its URL, or `None`
 /// when the workspace has no project with it.
 ///
@@ -596,18 +617,19 @@ fn workflow_state(linear: &impl Posts, team: &str, name: &str) -> Result<Option<
 /// because a note missed is a slice filed twice.
 fn fetch_project(linear: &impl Posts, slug: &str) -> Result<Option<FetchedProject>, Error> {
     let data = match linear.post(
-        "query Project($id: String!, $cut: String!, $skipped: String!) {
+        concat!(
+            "query Project($id: String!, $cut: String!, $skipped: String!) {
             project(id: $id) {
                 id name content url status { name }
-                comments(filter: { or: [
-                    { body: { startsWith: $cut } }
-                    { body: { startsWith: $skipped } }
-                ] }, first: 250) {
+                comments(",
+            notes_filter!(),
+            ", first: 250) {
                     pageInfo { hasNextPage endCursor }
                     nodes { body }
                 }
             }
-        }",
+        }"
+        ),
         json!({ "id": slug, "cut": CUT_NOTE, "skipped": SKIP_NOTE }),
     ) {
         Ok(data) => data,
@@ -620,11 +642,7 @@ fn fetch_project(linear: &impl Posts, slug: &str) -> Result<Option<FetchedProjec
         Err(error) => return Err(error),
     };
 
-    let Some(project) = data.get("project") else {
-        return Err(Error::Malformed {
-            detail: "the answer carried no `project`".to_owned(),
-        });
-    };
+    let project = data.get("project").ok_or_else(|| missing("project"))?;
     if project.is_null() {
         return Ok(None);
     }
@@ -633,17 +651,18 @@ fn fetch_project(linear: &impl Posts, slug: &str) -> Result<Option<FetchedProjec
     let notes = completed(
         linear,
         project.get("comments").ok_or_else(|| missing("comments"))?,
-        "query ProjectNotes($id: String!, $cut: String!, $skipped: String!, $after: String) {
+        concat!(
+            "query ProjectNotes($id: String!, $cut: String!, $skipped: String!, $after: String) {
             project(id: $id) {
-                comments(filter: { or: [
-                    { body: { startsWith: $cut } }
-                    { body: { startsWith: $skipped } }
-                ] }, first: 250, after: $after) {
+                comments(",
+            notes_filter!(),
+            ", first: 250, after: $after) {
                     pageInfo { hasNextPage endCursor }
                     nodes { body }
                 }
             }
-        }",
+        }"
+        ),
         json!({ "id": id, "cut": CUT_NOTE, "skipped": SKIP_NOTE }),
         &["project", "comments"],
     )?
@@ -655,7 +674,13 @@ fn fetch_project(linear: &impl Posts, slug: &str) -> Result<Option<FetchedProjec
         id,
         name: text(project, "name")?,
         content: unlinked(
-            &nullable(project, "content", |_| text(project, "content"))?.unwrap_or_default(),
+            &nullable(project, "content", |content| {
+                content
+                    .as_str()
+                    .map(str::to_owned)
+                    .ok_or_else(|| missing("content"))
+            })?
+            .unwrap_or_default(),
         ),
         url: text(project, "url")?,
         status: nullable(project, "status", |status| text(status, "name"))?,
@@ -887,7 +912,8 @@ const BLOCKERS_PAGE: usize = 25;
 
 /// The fields every issue a queue or a name reads is parsed from, and its first
 /// page of blocking relations. One spelling, so the two reads cannot drift.
-const QUEUED_FIELDS: &str = "
+const QUEUED_FIELDS: &str = concat!(
+    "
     id
     identifier
     title
@@ -896,11 +922,11 @@ const QUEUED_FIELDS: &str = "
     state { name type }
     inverseRelations(first: $blockers) {
         pageInfo { hasNextPage endCursor }
-        nodes {
-            type
-            issue { identifier state { type } assignee { name } }
-        }
-    }";
+        ",
+    blocker_nodes!(),
+    "
+    }"
+);
 
 /// Every issue a scope's queue holds, every page of them.
 ///
@@ -978,17 +1004,18 @@ fn issue_blockers(linear: &impl Posts, node: &Value) -> Result<Vec<Value>, Error
         linear,
         node.get("inverseRelations")
             .ok_or_else(|| missing("inverseRelations"))?,
-        "query IssueBlockers($id: String!, $after: String) {
+        concat!(
+            "query IssueBlockers($id: String!, $after: String) {
             issue(id: $id) {
                 inverseRelations(first: 250, after: $after) {
                     pageInfo { hasNextPage endCursor }
-                    nodes {
-                        type
-                        issue { identifier state { type } assignee { name } }
-                    }
+                    ",
+            blocker_nodes!(),
+            "
                 }
             }
-        }",
+        }"
+        ),
         json!({ "id": node_id(node)? }),
         &["issue", "inverseRelations"],
     )
@@ -1158,7 +1185,7 @@ impl QueuedIssue {
         }
     }
 
-    /// What the ticket says, which `forman pull` hands every sub-task as the
+    /// What the ticket says, which `warlock pull` hands every sub-task as the
     /// parent ticket.
     #[must_use]
     pub fn description(&self) -> &str {
@@ -1272,11 +1299,6 @@ impl StateType {
     #[must_use]
     pub fn settled(&self) -> bool {
         self.0 == "completed" || self.0 == "canceled"
-    }
-
-    #[must_use]
-    pub fn as_str(&self) -> &str {
-        &self.0
     }
 }
 
@@ -1826,6 +1848,17 @@ impl Issue {
         }
     }
 
+    /// An open ticket the queue listed, with the id a relation is written
+    /// with: what a draft that waits on `WAR-142` is blocked by.
+    #[must_use]
+    pub(crate) fn listed(open: &QueuedIssue) -> Self {
+        Self {
+            id: open.id().to_owned(),
+            identifier: open.identifier().to_owned(),
+            url: String::new(),
+        }
+    }
+
     /// An issue a cut record names, which is the one an earlier run filed: the
     /// identifier is everything such a record keeps, so it stands as the id as
     /// well and there is no URL.
@@ -1840,17 +1873,6 @@ impl Issue {
     /// Linear's to say, and this promises nothing about it: an edge the API
     /// turns down is one reported line and leaves every issue filed, so the
     /// worst this can come to is the ordering a person adds on the board.
-    /// An open ticket the queue listed, with the id a relation is written
-    /// with: what a draft that waits on `WAR-142` is blocked by.
-    #[must_use]
-    pub(crate) fn listed(open: &QueuedIssue) -> Self {
-        Self {
-            id: open.id().to_owned(),
-            identifier: open.identifier().to_owned(),
-            url: String::new(),
-        }
-    }
-
     #[must_use]
     pub(crate) fn recorded(identifier: &str) -> Self {
         Self {
