@@ -407,8 +407,10 @@ fn sub_tasks_are_reached_by_identifier_and_ignore_a_name_no_sub_task_has() {
     assert!(run.subtask("WAR-140.03").is_none());
     assert!(run.subtask_mut("WAR-140.03").is_none());
 
-    for subtask in run.subtasks_mut() {
-        subtask.set_status(SubtaskStatus::Done);
+    for id in ["WAR-140.01", "WAR-140.02"] {
+        run.subtask_mut(id)
+            .expect("the sub-task is in the run")
+            .set_status(SubtaskStatus::Done);
     }
     assert!(
         run.subtasks()

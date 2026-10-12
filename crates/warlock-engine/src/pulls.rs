@@ -298,10 +298,6 @@ impl PullRun {
         self.subtasks.iter_mut().find(|subtask| subtask.id == id)
     }
 
-    pub fn subtasks_mut(&mut self) -> &mut [PullSubtask] {
-        &mut self.subtasks
-    }
-
     /// The operator saying they have looked at a halt: every `failed`, `blocked`
     /// and `crossed` sub-task goes back to `pending` and the run becomes
     /// [`RunStatus::Resumed`], so the pull that picks it up finds work it can
@@ -344,53 +340,25 @@ impl PullRun {
     // `state.json` is the caller's decision, and a run with nothing to release
     // is refused by `warlock resume` with the file left byte-identical to what
     // was read.
-    /// The sub-tasks a stopped process left `in_progress`, put back to
-    /// `pending`: what picking up a run that ended without a halt does before
-    /// it carries on. Nothing else moves, and the run's own status is the
-    /// pull's to set.
-    pub fn release_interrupted(&mut self) -> Vec<Reset> {
-        let mut changed = Vec::new();
-        for subtask in &mut self.subtasks {
-            if subtask.status == SubtaskStatus::InProgress {
-                let was = std::mem::replace(&mut subtask.status, SubtaskStatus::Pending);
-                changed.push(Reset {
-                    id: subtask.id.clone(),
-                    was,
-                });
-            }
-        }
-        changed
-    }
-
     pub fn resume(&mut self, mode: ResetMode) -> Vec<Reset> {
-        let mut changed = Vec::new();
-
-        for subtask in &mut self.subtasks {
+        // The reason goes with the status, so `blocked_reason` is back to
+        // `null` at the next save. It is the operator's own account of the
+        // halt that is being dropped, and dropping it is the point: they
+        // have read it, the sub-task is being run again, and a `pending`
+        // sub-task carrying the reason it stopped last time would read as a
+        // sub-task that is stopped.
+        let changed = self.release(|status| {
             // Matched status by status rather than through a catch-all, so a
             // seventh sub-task status cannot be added without this deciding
             // whether a resume releases it.
-            let release = match &subtask.status {
+            match status {
                 SubtaskStatus::Failed(_) => true,
                 SubtaskStatus::Blocked(_) | SubtaskStatus::Crossed(_) => {
                     mode == ResetMode::Everything
                 }
                 SubtaskStatus::Pending | SubtaskStatus::InProgress | SubtaskStatus::Done => false,
-            };
-            if !release {
-                continue;
             }
-            // The reason goes with the status, so `blocked_reason` is back to
-            // `null` at the next save. It is the operator's own account of the
-            // halt that is being dropped, and dropping it is the point: they
-            // have read it, the sub-task is being run again, and a `pending`
-            // sub-task carrying the reason it stopped last time would read as a
-            // sub-task that is stopped.
-            let was = std::mem::replace(&mut subtask.status, SubtaskStatus::Pending);
-            changed.push(Reset {
-                id: subtask.id.clone(),
-                was,
-            });
-        }
+        });
 
         // Left alone when nothing changed, rather than set to `Resumed`
         // regardless: a resume that released nothing is refused, and a record it
@@ -400,6 +368,28 @@ impl PullRun {
             self.status = RunStatus::Resumed;
         }
 
+        changed
+    }
+
+    /// The sub-tasks a stopped process left `in_progress`, put back to
+    /// `pending`: what picking up a run that ended without a halt does before
+    /// it carries on. Nothing else moves, and the run's own status is the
+    /// pull's to set.
+    pub fn release_interrupted(&mut self) -> Vec<Reset> {
+        self.release(|status| *status == SubtaskStatus::InProgress)
+    }
+
+    fn release(&mut self, pick: impl Fn(&SubtaskStatus) -> bool) -> Vec<Reset> {
+        let mut changed = Vec::new();
+        for subtask in &mut self.subtasks {
+            if pick(&subtask.status) {
+                let was = std::mem::replace(&mut subtask.status, SubtaskStatus::Pending);
+                changed.push(Reset {
+                    id: subtask.id.clone(),
+                    was,
+                });
+            }
+        }
         changed
     }
 
@@ -579,14 +569,7 @@ impl PullRun {
         root: impl AsRef<Path>,
         ticket: &str,
     ) -> Result<Self, Error> {
-        let path = state_path(home, root, ticket);
-        match fs::read_to_string(&path) {
-            Ok(text) => serde_json::from_str(&text).map_err(|source| Error::Parse { path, source }),
-            Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
-                Err(Error::NotFound { path })
-            }
-            Err(source) => Err(Error::Io { path, source }),
-        }
+        read_record(state_path(home, root, ticket))
     }
 
     /// Whether this checkout holds a run for `ticket`, and the run when it does.
@@ -805,21 +788,7 @@ pub fn held_runs(
         if !run_directory.is_dir() {
             continue;
         }
-        let path = run_directory.join(STATE_FILE);
-        let text = match fs::read_to_string(&path) {
-            Ok(text) => text,
-            Err(source) if source.kind() == std::io::ErrorKind::NotFound => continue,
-            // Anything else — a permission, a directory where the file should be
-            // — is a record that exists and cannot be read. Named, not skipped:
-            // the run behind it may be `halted` with uncommitted work on its
-            // branch, and a scan that silently drops it tells selection this
-            // scope is clear.
-            Err(source) => {
-                found.unreadable.push(Error::Io { path, source });
-                continue;
-            }
-        };
-        match serde_json::from_str::<PullRun>(&text) {
+        match read_record(run_directory.join(STATE_FILE)) {
             // The scope is read from the record rather than from the directory
             // name, because the directory name is the ticket and a ticket says
             // nothing about which scope pulled it.
@@ -833,16 +802,31 @@ pub fn held_runs(
                     found.runs.push(run);
                 }
             }
-            // A record too malformed to parse has no readable scope, so it is
+            Err(Error::NotFound { .. }) => {}
+            // A record that exists and cannot be read — a permission, a
+            // directory where the file should be — is named, not skipped: the
+            // run behind it may be `halted` with uncommitted work on its branch,
+            // and a scan that silently drops it tells selection this scope is
+            // clear. One too malformed to parse has no readable scope, so it is
             // named whatever scope was asked for. One broken record turning up
             // in every scope's answer is the lesser fault: the alternative is a
             // halted run in *this* scope going unmentioned because the field
             // that says so is the field that will not parse.
-            Err(source) => found.unreadable.push(Error::Parse { path, source }),
+            Err(error) => found.unreadable.push(error),
         }
     }
 
     Ok(found)
+}
+
+fn read_record(path: PathBuf) -> Result<PullRun, Error> {
+    match fs::read_to_string(&path) {
+        Ok(text) => serde_json::from_str(&text).map_err(|source| Error::Parse { path, source }),
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
+            Err(Error::NotFound { path })
+        }
+        Err(source) => Err(Error::Io { path, source }),
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
