@@ -409,7 +409,7 @@ impl<'a> Shape<'a> {
         Self {
             size,
             composer: composer.and_then(|field| composer_on_screen(app, field)),
-            run_header: app.run_header().is_some(),
+            run_header: app.has_run(),
             sigils,
         }
     }
@@ -433,11 +433,8 @@ impl<'a> Shape<'a> {
 
     #[must_use]
     #[cfg(test)]
-    pub(crate) fn header(self, header: Option<&RunHeader>) -> Self {
-        Self {
-            run_header: header.is_some(),
-            ..self
-        }
+    pub(crate) fn header(self, run_header: bool) -> Self {
+        Self { run_header, ..self }
     }
 
     #[must_use]

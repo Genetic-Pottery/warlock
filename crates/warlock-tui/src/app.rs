@@ -696,6 +696,11 @@ impl App {
     }
 
     #[must_use]
+    pub(crate) const fn has_run(&self) -> bool {
+        self.status.in_flight.is_some()
+    }
+
+    #[must_use]
     pub(crate) fn run_header(&self) -> Option<RunHeader> {
         self.status.in_flight.as_ref().map(|in_flight| RunHeader {
             run: in_flight.run,

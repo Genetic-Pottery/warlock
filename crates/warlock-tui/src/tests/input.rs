@@ -3887,14 +3887,14 @@ mod pointer {
 
     fn asks_under(mouse: MouseEvent, app: &App, modal: Option<Modal<'_>>) -> Option<MouseAction> {
         let header = app.run_header();
-        mouse_action(mouse, Shape::new(SIZE).header(header.as_ref()), app, modal)
+        mouse_action(mouse, Shape::new(SIZE).header(header.is_some()), app, modal)
     }
 
     fn asks_composing(mouse: MouseEvent, app: &App, composer: &Composer) -> Option<MouseAction> {
         let header = app.run_header();
         let shape = Shape::new(SIZE)
             .composer(Some(composer))
-            .header(header.as_ref());
+            .header(header.is_some());
         mouse_action(mouse, shape, app, None)
     }
 
@@ -4612,7 +4612,7 @@ mod pointer {
         let header = app.run_header();
         app.panel_mut().set_height(
             Shape::new(SIZE)
-                .header(header.as_ref())
+                .header(header.is_some())
                 .cut()
                 .panel_height(),
         );

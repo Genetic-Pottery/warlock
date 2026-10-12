@@ -2649,11 +2649,11 @@ fn a_point_in_the_panel_answers_with_the_column_of_the_rows_area_it_landed_on() 
     // does.
     let mut app = App::from_tree(&fixture::tree());
     app.set_run_in_flight(Run::Pact, RUNNING_ON, 2, 5);
-    let header = app.run_header().expect("a run in flight has a header");
+    assert!(app.has_run(), "a run in flight has a header");
     let composer = Composer::new("a draft");
     let field = Some(&composer);
     let size = Size::new(WIDTH, FIXTURE_HEIGHT);
-    let cut = Shape::new(size).composer(field).header(Some(&header)).cut();
+    let cut = Shape::new(size).composer(field).header(true).cut();
     let rows = cut.panel_rows;
     assert!(rows.height > 0, "the panel should have rows to point at");
 
@@ -2734,14 +2734,14 @@ fn the_edges_move_with_the_field_and_the_header_the_frame_was_drawn_with() {
     // without a field is past the bottom of the same card drawn with one.
     let mut app = App::from_tree(&fixture::tree());
     app.set_run_in_flight(Run::Pact, RUNNING_ON, 2, 5);
-    let header = app.run_header().expect("a run in flight has a header");
+    assert!(app.has_run(), "a run in flight has a header");
     let composer = Composer::new("a draft");
     let field = Some(&composer);
     let size = Size::new(WIDTH, FIXTURE_HEIGHT);
     let bare = Shape::new(size).cut().panel_rows;
     let rows = Shape::new(size)
         .composer(field)
-        .header(Some(&header))
+        .header(true)
         .cut()
         .panel_rows;
     assert!(rows.y > bare.y, "the header takes the top of the panel");
@@ -2753,7 +2753,7 @@ fn the_edges_move_with_the_field_and_the_header_the_frame_was_drawn_with() {
     let reach = |y| {
         Shape::new(size)
             .composer(field)
-            .header(Some(&header))
+            .header(true)
             .cut()
             .reach(rows.x, y)
     };
@@ -4327,7 +4327,7 @@ fn the_scrollback_and_the_run_header_reach_the_thread_as_they_reach_the_account(
         rows.len() - taken,
         usize::from(
             Shape::new(Size::new(WIDTH, HEIGHT))
-                .header(app.run_header().as_ref())
+                .header(app.has_run())
                 .cut()
                 .panel_height()
         ),
@@ -4558,7 +4558,7 @@ fn measure_panel(app: &mut App, width: u16, height: u16) {
     let header = app.run_header();
     app.panel_mut().set_height(
         Shape::new(Size::new(width, height))
-            .header(header.as_ref())
+            .header(header.is_some())
             .cut()
             .panel_height(),
     );
@@ -4619,17 +4619,17 @@ fn the_run_header_takes_the_panels_top_row_and_the_account_keeps_the_rest() {
         assert_eq!(without.len(), usize::from(window));
 
         app.set_run_in_flight(run, RUNNING_ON, 2, 5);
-        let header = app.run_header().expect("a run in flight has a header");
+        assert!(app.has_run(), "a run in flight has a header");
         assert_eq!(
             Shape::new(size)
-                .header(Some(&header))
+                .header(true)
                 .cut()
                 .run_header
                 .map_or(0, |area| area.height),
             RUN_HEADER_HEIGHT
         );
         assert_eq!(
-            Shape::new(size).header(Some(&header)).cut().panel_height() + RUN_HEADER_HEIGHT,
+            Shape::new(size).header(true).cut().panel_height() + RUN_HEADER_HEIGHT,
             window,
             "the account should lose exactly the rows the header takes"
         );
@@ -4660,7 +4660,7 @@ fn the_run_header_takes_the_panels_top_row_and_the_account_keeps_the_rest() {
         assert_eq!(with.len(), without.len());
         assert_eq!(
             with.len() - taken,
-            usize::from(Shape::new(size).header(Some(&header)).cut().panel_height()),
+            usize::from(Shape::new(size).header(true).cut().panel_height()),
             "the window drew a different number of lines than it was measured at"
         );
         assert_eq!(with[taken..], without[taken..]);
@@ -4866,7 +4866,7 @@ fn the_run_header_stays_where_it_is_while_the_account_is_scrolled_back() {
     let mut app = running_app(base, WIDTH, HEIGHT, Run::Pact, 2, 5);
     let window = usize::from(
         Shape::new(Size::new(WIDTH, HEIGHT))
-            .header(app.run_header().as_ref())
+            .header(app.has_run())
             .cut()
             .panel_height(),
     );
@@ -4899,16 +4899,16 @@ fn the_run_header_stays_where_it_is_while_the_account_is_scrolled_back() {
 fn a_point_on_the_run_header_is_not_a_line_of_the_account() {
     let mut app = App::from_tree(&fixture::tree());
     app.set_run_in_flight(Run::Pact, RUNNING_ON, 2, 5);
-    let header = app.run_header().expect("a run in flight has a header");
+    assert!(app.has_run(), "a run in flight has a header");
     let size = Size::new(WIDTH, FIXTURE_HEIGHT);
     let panel = pane_inner(Shape::new(size).cut().panel);
-    let window = Shape::new(size).header(Some(&header)).cut().panel_height();
+    let window = Shape::new(size).header(true).cut().panel_height();
 
     // The top row inside the border is the header's, and answers as itself
     // rather than as the account's first line.
     for x in panel.x..panel.x + panel.width {
         assert_eq!(
-            Shape::new(size).header(Some(&header)).cut().hit(x, panel.y),
+            Shape::new(size).header(true).cut().hit(x, panel.y),
             Hit::PanelHeader,
             "at {x},{}",
             panel.y
@@ -4920,7 +4920,7 @@ fn a_point_on_the_run_header_is_not_a_line_of_the_account() {
     // line drawn on that row and stay inside the window the app was told
     // about.
     for y in panel.y + RUN_HEADER_HEIGHT..panel.y + panel.height {
-        let hit = Shape::new(size).header(Some(&header)).cut().hit(panel.x, y);
+        let hit = Shape::new(size).header(true).cut().hit(panel.x, y);
 
         assert_eq!(
             hit,
@@ -4950,7 +4950,7 @@ fn a_panel_with_no_room_for_a_header_and_an_account_both_draws_the_account() {
     let chrome = FOOTER_HEIGHT + 2 * BORDER_THICKNESS;
     let mut app = App::from_tree(&fixture::tree());
     app.set_run_in_flight(Run::Pact, RUNNING_ON, 2, 5);
-    let header = app.run_header().expect("a run in flight has a header");
+    assert!(app.has_run(), "a run in flight has a header");
 
     // A panel with no more rows inside its border than the header itself
     // takes: a header there would be a run reporting its progress into a
@@ -4961,7 +4961,7 @@ fn a_panel_with_no_room_for_a_header_and_an_account_both_draws_the_account() {
 
         assert_eq!(
             Shape::new(size)
-                .header(Some(&header))
+                .header(true)
                 .cut()
                 .run_header
                 .map_or(0, |area| area.height),
@@ -4969,7 +4969,7 @@ fn a_panel_with_no_room_for_a_header_and_an_account_both_draws_the_account() {
             "in {height} rows"
         );
         assert_eq!(
-            Shape::new(size).header(Some(&header)).cut().panel_height(),
+            Shape::new(size).header(true).cut().panel_height(),
             Shape::new(size).cut().panel_height(),
             "in {height} rows"
         );
@@ -5010,13 +5010,13 @@ fn the_scrollback_counts_the_window_the_run_header_left_and_nothing_else() {
         let header = app.run_header();
         let window = usize::from(
             Shape::new(size)
-                .header(header.as_ref())
+                .header(header.is_some())
                 .cut()
                 .panel_height(),
         );
         let taken = usize::from(
             Shape::new(size)
-                .header(header.as_ref())
+                .header(header.is_some())
                 .cut()
                 .run_header
                 .map_or(0, |area| area.height),
@@ -5249,12 +5249,12 @@ fn the_panel_the_header_and_the_composer_come_to_the_column_the_panel_had() {
                     assert_eq!(
                         Shape::new(size)
                             .composer(field)
-                            .header(run)
+                            .header(run.is_some())
                             .cut()
                             .panel_height()
                             + Shape::new(size)
                                 .composer(field)
-                                .header(run)
+                                .header(run.is_some())
                                 .cut()
                                 .run_header
                                 .map_or(0, |area| area.height)
