@@ -239,7 +239,7 @@ impl Composer {
         // this never truncates and never comes back zero. A suggestion on show
         // is given the rows it needs, so it can be read before it is sent.
         let rows = self
-            .rows(width)
+            .placed_rows(width)
             .len()
             .max(self.ghost_rows(width, COMPOSER_MAX_ROWS).len());
         u16::try_from(rows)
@@ -248,7 +248,7 @@ impl Composer {
     }
 
     /// The rows and the caret come back together as one [`ComposerWindow`], so
-    /// `Composer::place` is applied once and a set of rows that disagrees with
+    /// `place` is applied once and a set of rows that disagrees with
     /// the caret drawn on them cannot be built. `height` is the rows the border
     /// actually left, which can be fewer than [`Composer::height`] asked for.
     ///
@@ -265,7 +265,8 @@ impl Composer {
     /// its own rows.
     #[must_use]
     pub(crate) fn window(&self, width: u16, height: u16) -> ComposerWindow {
-        let (row, column) = self.place(self.cursor, width);
+        let placed = self.placed_rows(width);
+        let (row, column) = place(&placed, self.cursor);
         let height = usize::from(height);
         if height == 0 {
             return ComposerWindow {
@@ -275,7 +276,7 @@ impl Composer {
             };
         }
 
-        let rows = self.rows(width);
+        let rows: Vec<String> = placed.into_iter().map(|(_, row)| row).collect();
         let first = row
             .saturating_sub(MARGIN)
             // Never past the last window there is rows for...
@@ -344,53 +345,71 @@ impl Composer {
         placed
     }
 
-    // Where a byte offset is drawn: its row, and the column of that row in cells
-    // rather than characters, so a wide character is two columns along.
-    //
-    // An offset at a soft wrap has two cells it could be drawn in — past the end
-    // of the row above, and column zero of the row below — and `rfind` takes the
-    // lower one. `offset_at` keeps the same choice, which is what makes the pair
-    // round-trip and stops End on a wrapped row parking the cursor in a cell the
-    // next character typed would not appear in. A newline is not a wrap in this
-    // sense: its own byte lies between the two rows and belongs to the upper one.
+    // The rows beside the cursor's place in them, so a row-wise key folds the
+    // draft once. Only those four keys ask: every other key leaves the draft
+    // unfolded.
+    fn caret(&self) -> (Vec<(usize, String)>, (usize, usize)) {
+        let rows = self.placed_rows(self.width);
+        let at = place(&rows, self.cursor);
+        (rows, at)
+    }
+
+    #[cfg(test)]
     fn place(&self, offset: usize, width: u16) -> (usize, usize) {
-        let placed = self.placed_rows(width);
-        let (row, (start, text)) = placed
-            .iter()
-            .enumerate()
-            .rfind(|(_, (start, _))| *start <= offset)
-            .expect("the first row starts at zero, so a row starts at or before every offset");
-
-        (row, display_width(&text[..offset - start]))
+        place(&self.placed_rows(width), offset)
     }
 
-    // The inverse of `place`, and total on purpose: a `row` past the last is
-    // answered by the last row and a `column` past the end of a row by the
-    // offset at its end. That is what lets End hand in `usize::MAX` and lets the
-    // row-wise keys hand in a row they have not range-checked.
+    #[cfg(test)]
     fn offset_at(&self, row: usize, column: usize, width: u16) -> usize {
-        let placed = self.placed_rows(width);
-        let row = row.min(placed.len().saturating_sub(1));
-        let (start, text) = placed
-            .get(row)
-            .expect("a draft always has at least one row to sit a cursor on");
-
-        let mut offset = *start;
-        let mut taken = 0;
-        for (index, character) in text.char_indices() {
-            let next = index + character.len_utf8();
-            let cells = display_width(&text[index..next]);
-            if taken + cells > column {
-                // The target column is one of this character's own cells, so
-                // the offset is the one in front of it.
-                break;
-            }
-            taken += cells;
-            offset = start + next;
-        }
-
-        offset
+        offset_at(&self.placed_rows(width), row, column)
     }
+}
+
+// Where a byte offset is drawn among `placed`, which is what
+// `Composer::placed_rows` gives: its row, and the column of that row in cells
+// rather than characters, so a wide character is two columns along.
+//
+// An offset at a soft wrap has two cells it could be drawn in — past the end of
+// the row above, and column zero of the row below — and `rfind` takes the lower
+// one. `offset_at` keeps the same choice, which is what makes the pair
+// round-trip and stops End on a wrapped row parking the cursor in a cell the
+// next character typed would not appear in. A newline is not a wrap in this
+// sense: its own byte lies between the two rows and belongs to the upper one.
+fn place(placed: &[(usize, String)], offset: usize) -> (usize, usize) {
+    let (row, (start, text)) = placed
+        .iter()
+        .enumerate()
+        .rfind(|(_, (start, _))| *start <= offset)
+        .expect("the first row starts at zero, so a row starts at or before every offset");
+
+    (row, display_width(&text[..offset - start]))
+}
+
+// The inverse of `place`, and total on purpose: a `row` past the last is
+// answered by the last row and a `column` past the end of a row by the offset at
+// its end. That is what lets End hand in `usize::MAX` and lets the row-wise keys
+// hand in a row they have not range-checked.
+fn offset_at(placed: &[(usize, String)], row: usize, column: usize) -> usize {
+    let row = row.min(placed.len().saturating_sub(1));
+    let (start, text) = placed
+        .get(row)
+        .expect("a draft always has at least one row to sit a cursor on");
+
+    let mut offset = *start;
+    let mut taken = 0;
+    for (index, character) in text.char_indices() {
+        let next = index + character.len_utf8();
+        let cells = display_width(&text[index..next]);
+        if taken + cells > column {
+            // The target column is one of this character's own cells, so the
+            // offset is the one in front of it.
+            break;
+        }
+        taken += cells;
+        offset = start + next;
+    }
+
+    offset
 }
 
 /// The rows and the caret come back together because they are answers to the
@@ -403,7 +422,7 @@ pub(crate) struct ComposerWindow {
     /// An index into *these* rows and not into the draft's, so the drawing adds
     /// nothing to it and cannot add the scroll twice.
     pub row: usize,
-    /// In cells rather than characters, and straight from `Composer::place`,
+    /// In cells rather than characters, and straight from `place`,
     /// so it keeps that map's row-break rule. It can be one cell past the end of
     /// its row, which is where a cursor at the end of the draft sits.
     pub column: usize,
@@ -466,10 +485,6 @@ pub(crate) fn compose_for(key: KeyEvent, composer: &Composer) -> Composed {
     // Every offset handed to this comes off `char_indices`, `place` or
     // `offset_at`, all three of which answer with boundaries of this draft.
     let moved = |cursor: usize| typing(composer.draft.clone(), cursor);
-    // A closure rather than a value because working it out folds the whole draft
-    // into rows, and every key but the four row-wise ones never asks.
-    let placed = || composer.place(composer.cursor, composer.width);
-
     match key.code {
         // Before the plain Enter below it, which is the point of the pair: the
         // modifier is what tells a new line from a submission.
@@ -538,24 +553,30 @@ pub(crate) fn compose_for(key: KeyEvent, composer: &Composer) -> Composed {
         // break offset, which `place` draws at column zero of the row below, so
         // End there looks like a move down and Home straight after comes back to
         // the same offset. That is the row-break rule holding, not failing.
-        KeyCode::Home => moved(composer.offset_at(placed().0, 0, composer.width)),
-        KeyCode::End => moved(composer.offset_at(placed().0, usize::MAX, composer.width)),
+        KeyCode::Home => {
+            let (rows, (row, _)) = composer.caret();
+            moved(offset_at(&rows, row, 0))
+        }
+        KeyCode::End => {
+            let (rows, (row, _)) = composer.caret();
+            moved(offset_at(&rows, row, usize::MAX))
+        }
         // One display row, holding the column where the destination row is long
         // enough for it. There is no row past either end to sit on, so Up on the
         // first row and Down on the last leave the cursor where it is rather
         // than clamping it to the row it is already on.
         KeyCode::Up => {
-            let (row, column) = placed();
+            let (rows, (row, column)) = composer.caret();
             match row.checked_sub(1) {
-                Some(above) => moved(composer.offset_at(above, column, composer.width)),
+                Some(above) => moved(offset_at(&rows, above, column)),
                 None => unchanged(),
             }
         }
         KeyCode::Down => {
-            let (row, column) = placed();
+            let (rows, (row, column)) = composer.caret();
             let below = row + 1;
-            if below < composer.placed_rows(composer.width).len() {
-                moved(composer.offset_at(below, column, composer.width))
+            if below < rows.len() {
+                moved(offset_at(&rows, below, column))
             } else {
                 unchanged()
             }
