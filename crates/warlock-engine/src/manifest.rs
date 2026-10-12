@@ -895,9 +895,9 @@ struct RawManifest {
     scope: Vec<toml::Value>,
 }
 
-// Looks redundant beside the check in `from_toml_str` and is not: this is the
+// Looks redundant beside the check in `Manifest::read` and is not: this is the
 // derived path, and without it `toml::from_str::<Manifest>` would quietly accept
-// a version `from_toml_str` refuses.
+// a version `Manifest::read` refuses.
 fn deserialize_version<'de, D: Deserializer<'de>>(deserializer: D) -> Result<u32, D::Error> {
     let version = u32::deserialize(deserializer)?;
     if version == SCHEMA_VERSION {

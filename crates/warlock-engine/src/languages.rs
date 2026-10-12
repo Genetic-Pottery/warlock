@@ -20,15 +20,16 @@ pub(crate) struct Block {
 }
 
 // Where a language writes prose instead of code. Only [`without_comments`] reads
-// these, and only to decide what counts as evidence for a claim — never to
-// change a byte that reaches a document, a request or a hash.
+// these, to decide what counts as evidence for a claim and what text a pass is
+// sent — never to change a byte that reaches a document or a hash.
 //
-// The module docs above refuse to lex for `elide`, because over-stripping there
-// silently deletes real code. The direction of harm reverses here: a comment
-// left standing is evidence for a claim the code does not support, which is the
-// defect this exists to close, while a string literal mistaken for a comment
-// costs one true claim its witness and `mend` drops the line. So this strips
-// bluntly and on purpose, and `//` inside a URL is a cost already paid for.
+// The comment on [`Block`] refuses to lex for `elide`, because over-stripping
+// there silently deletes real code. The direction of harm reverses here: a
+// comment left standing is evidence for a claim the code does not support, which
+// is the defect this exists to close, while a string literal mistaken for a
+// comment costs the pass the rest of that line, and one true claim its witness
+// so that `mend` drops it. So this strips bluntly and on purpose, and `//`
+// inside a URL is a cost already paid for.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Comments {
     line: &'static [&'static str],
@@ -158,10 +159,9 @@ static TABLE: &[Language] = &[
     // Known limitation, deliberately not fixed here: a test file recognised
     // only by the directory holding it (`__tests__/thing.ts`, the Jest
     // convention) is not matched, because the table asks about names and this
-    // is a question about paths. Adding a directory rule with no repository
-    // here to check it against would be exactly the untested mechanism the
-    // module docs argue against; the cost of missing it is a file sent whole,
-    // which is the safe direction.
+    // is a question about paths. A directory rule with no repository here to
+    // check it against would be an untested mechanism; the cost of missing it
+    // is a file sent whole, which is the safe direction.
     Language {
         extensions: &["ts", "tsx", "js", "jsx", "mts", "cts", "mjs", "cjs"],
         test_suffixes: &[
@@ -593,7 +593,7 @@ pub(crate) fn without_comments(path: &Path, text: &str) -> Option<String> {
     let mut closing: Option<&'static str> = None;
 
     for line in text.lines() {
-        let emptied = !line.trim().is_empty();
+        let had_content = !line.trim().is_empty();
         let before = kept.len();
         let mut rest = line;
         while !rest.is_empty() {
@@ -639,7 +639,7 @@ pub(crate) fn without_comments(path: &Path, text: &str) -> Option<String> {
                 }
             }
         }
-        if emptied && kept[before..].trim().is_empty() {
+        if had_content && kept[before..].trim().is_empty() {
             kept.truncate(before);
             continue;
         }

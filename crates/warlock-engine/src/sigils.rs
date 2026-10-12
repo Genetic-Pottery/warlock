@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use crate::manifest::write_atomically;
 use crate::scope::{Rule, validate_scope};
 
-const SIGIL_DIR: &str = ".warlock";
+pub(crate) const HOME_DIR: &str = ".warlock";
 
 const SIGIL_FILE: &str = "config.toml";
 
@@ -79,7 +79,7 @@ pub fn sigils_path(home: impl AsRef<Path>, root: impl AsRef<Path>) -> PathBuf {
 // disagree, and the day they did every run record on the machine would appear to
 // vanish while the sigils beside them still read.
 pub(crate) fn project_dir(home: &Path, root: &Path) -> PathBuf {
-    home.join(SIGIL_DIR).join(project_directory(root))
+    home.join(HOME_DIR).join(project_directory(root))
 }
 
 /// ```
