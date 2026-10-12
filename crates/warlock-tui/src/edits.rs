@@ -6,9 +6,7 @@
 //! the existence check, before any look at what the manifest holds. A closed
 //! boundary must not be able to answer "there is no entry for that directory",
 //! because that is a fact about the inside of a manifest a reader has just been
-//! told they may not work in. [`closed_scope`](crate::session::closed_scope) is
-//! the same rule's other door and is not written in terms of this one, since it
-//! is about a selected row on an `App` and there is no app here.
+//! told they may not work in.
 //!
 //! A boundary this machine does not open is one line on stderr and exit status
 //! **3** rather than 1, because the two want opposite things done about them: a
@@ -50,9 +48,8 @@ impl Opened {
     // and a temporary repository. The environment becomes those parameters in
     // exactly one place, `opened`.
     //
-    // A path the manifest cannot spell is passed through as open, which is
-    // `closed_scope`'s own reading of that case: coverage has nothing to say
-    // about a path that is not in this repository, and the command's own refusal
+    // A path the manifest cannot spell is passed through as open: coverage has
+    // nothing to say about a path that is not in this repository, and the command's own refusal
     // — one line, naming the root it is not inside — is the better sentence than
     // a boundary refusal on a technicality. It is refused a moment later, in the
     // write, so nothing is written either way.

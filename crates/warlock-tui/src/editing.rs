@@ -75,7 +75,7 @@ pub(crate) fn edit_press(
         return Ok(());
     };
     // Read once, and only once the press is known to be worth reading it for.
-    let Some(editor) = editor_command(env::var_os(EDITOR_VAR).as_deref()) else {
+    let Some(editor) = editor() else {
         app.set_message(NO_EDITOR);
         return Ok(());
     };
@@ -145,6 +145,11 @@ fn edit_target(app: &mut App, in_flight: bool) -> Option<PathBuf> {
     app.view_target()
 }
 
+/// `$EDITOR`, read and split, or `None` for [`NO_EDITOR`]'s four cases.
+pub(crate) fn editor() -> Option<Editor> {
+    editor_command(env::var_os(EDITOR_VAR).as_deref())
+}
+
 // `split_whitespace` is the whole of the parsing, which answers the awkward
 // spellings by construction: a shell that exported `EDITOR=" code -w "` meant
 // `code -w`.
@@ -154,15 +159,9 @@ fn edit_target(app: &mut App, in_flight: bool) -> Option<PathBuf> {
 // running the whole thing unsplit would make `EDITOR="code -w"` behave
 // differently depending on the encoding of the bytes around it.
 //
-// Takes the value rather than reading the variable, for the reason
-// `claude::or_default` is written that way: setting a real environment variable
-// is process-wide, racy against every other test on the runner and unsafe
-// besides.
-/// `$EDITOR`, read and split, or `None` for [`NO_EDITOR`]'s four cases.
-pub(crate) fn editor() -> Option<Editor> {
-    editor_command(env::var_os(EDITOR_VAR).as_deref())
-}
-
+// Takes the value rather than reading the variable: setting a real environment
+// variable is process-wide, racy against every other test on the runner and
+// unsafe besides.
 fn editor_command(value: Option<&OsStr>) -> Option<Editor> {
     let mut words = value?.to_str()?.split_whitespace();
     let program = words.next()?.to_owned();

@@ -176,8 +176,7 @@ fn added<W: Write>(
     Ok(())
 }
 
-// Three answers rather than two, for `config::Held`'s reason: a store that is
-// there and cannot be read has to stay apart from one that simply holds no key
+// Three answers rather than two: a store that is there and cannot be read has to stay apart from one that simply holds no key
 // under this name, because that is the case where what this prints is not what
 // is on disk. The save refuses it a moment later — the engine replaces a store
 // it could not read for nobody — so the preamble saying "unknown" is the whole

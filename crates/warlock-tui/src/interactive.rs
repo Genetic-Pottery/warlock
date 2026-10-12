@@ -1104,11 +1104,9 @@ impl<K: Seams> Session<K> {
         // slice being drafted has come to. Nothing here writes, so a cut that
         // never reports has left the board exactly as it was.
         //
-        // The one thing it hands back is warlock's attempt at a question a slice
-        // asked, offered into the field as an ordinary draft: every editing key
-        // works on it, Enter sends whatever the field then holds, and clearing it
-        // and typing sends that instead. It is put here rather than in there
-        // because the field is the conversation's — see [`Chat::offer`].
+        // What it hands back is warlock's attempt at a question a slice asked,
+        // shown as a ghost and not written into the field as a draft — see
+        // [`Chat::suggest`].
         if let Some(proposal) = self.cutter.keep_up(&mut self.app, now) {
             self.chat.suggest(&proposal);
         }
