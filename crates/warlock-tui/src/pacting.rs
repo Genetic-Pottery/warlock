@@ -23,15 +23,16 @@ use std::{fs, io};
 
 use warlock_engine::pact::Event;
 use warlock_engine::{
-    Agent, DOCUMENT_FILE, Manifest, NodeState, PactedSubtree, Tree, fitting, pact, to_manifest_path,
+    Agent, DOCUMENT_FILE, Manifest, NodeState, PactedSubtree, Tree, fitting, pact,
 };
 
 use crate::account::{Outcome, Section};
 use crate::app::{App, PactIntent, PactToggle, Run, Sigils};
 use crate::boundary::Operation;
-use crate::claude::{Activities, Activity, Cancel, ClaudeAgent, Wired};
+use crate::claude::{Activities, Activity, Cancel, CancelGuard, ClaudeAgent, Wired};
 use crate::descent::{Descent, descend};
 use crate::error::one_line;
+use crate::freshness::label;
 use crate::inflight::{Lost, Port, Stream, Workers, settled};
 use crate::session::{Scope, closed_scope, reload};
 
@@ -101,7 +102,6 @@ impl<P: Wired + Agent> Pact<P> {
         pulling: Option<&str>,
         now: Instant,
     ) {
-        let before = app.clone();
         // Read here, off the one run this type keeps, rather than handed in by a
         // caller who would have had to look at the same field to know it.
         let running = self.running();
@@ -111,12 +111,12 @@ impl<P: Wired + Agent> Pact<P> {
             pulling,
         };
         let work = match kind {
-            Run::Refresh => {
-                refresh_press(app, manifest, repo_root, sigils, turn, now).map(Work::Refresh)
-            }
-            Run::Pact => pact_press(app, manifest, repo_root, sigils, turn, now).map(Work::Pact),
+            Run::Refresh => refresh_press(app, manifest, repo_root, sigils, turn, now)
+                .map(|(directory, before)| (Work::Refresh(directory), before)),
+            Run::Pact => pact_press(app, manifest, repo_root, sigils, turn, now)
+                .map(|(toggle, before)| (Work::Pact(toggle), before)),
         };
-        if let Some(work) = work {
+        if let Some((work, before)) = work {
             // The worker, the channel and the say-when, in the one value this
             // type keeps about a run it is not doing — see [`start_run`], which
             // is where both keys start theirs.
@@ -185,63 +185,6 @@ impl Work {
         match self {
             Self::Pact(toggle) => toggle.pacted,
             Self::Refresh(_) => true,
-        }
-    }
-}
-
-#[derive(Debug)]
-pub(crate) struct CancelGuard {
-    cancel: Cancel,
-    armed: bool,
-}
-
-impl CancelGuard {
-    pub(crate) fn new() -> Self {
-        Self {
-            cancel: Cancel::new(),
-            armed: true,
-        }
-    }
-
-    // A handle minted somewhere else, guarded here. A drafting session mints its
-    // own, wires its agent to it and runs every turn under it, so a guard built
-    // with `new` beside one would latch a flag no child is listening to.
-    pub(crate) const fn over(cancel: Cancel) -> Self {
-        Self {
-            cancel,
-            armed: true,
-        }
-    }
-
-    // The work it guards is over, so dropping it stops nothing. Needed by a
-    // guard built with `over`: the handle outlives the turn, a cancel is final,
-    // and a drafting session's next turn would start already cancelled if the
-    // guard of the turn before it latched the session's handle on its way out.
-    pub(crate) const fn disarm(&mut self) {
-        self.armed = false;
-    }
-
-    pub(crate) fn handle(&self) -> Cancel {
-        self.cancel.clone()
-    }
-
-    pub(crate) fn cancel(&self) {
-        self.cancel.cancel();
-    }
-
-    fn is_cancelled(&self) -> bool {
-        self.cancel.is_cancelled()
-    }
-}
-
-// Dropping the guard is what makes quitting kill the `claude` in flight: no
-// exit path has to remember to stop the run, because losing the `Pact` loses
-// the `Running` and losing the `Running` cancels. Esc is the other spelling and
-// goes through `cancel()` directly, leaving the run alive to save what it has.
-impl Drop for CancelGuard {
-    fn drop(&mut self) {
-        if self.armed {
-            self.cancel();
         }
     }
 }
@@ -331,7 +274,7 @@ fn cancelled(toggled: Toggled) -> Toggled {
 /// own run, and a pull of a ticket.
 ///
 /// One value rather than two booleans threaded side by side, because they are
-/// asked together at every one of the three call sites and a pair of bare `bool`s
+/// asked together at both call sites and a pair of bare `bool`s
 /// in that order is a pair somebody swaps.
 #[derive(Debug, Clone, Copy)]
 struct TurnedDown<'a> {
@@ -381,7 +324,7 @@ fn pact_press(
     sigils: &Sigils,
     turn: TurnedDown<'_>,
     at: Instant,
-) -> Option<PactToggle> {
+) -> Option<(PactToggle, App)> {
     // Which way the press goes decides what the boundary is asked about: an
     // un-pact drops every pact below the row, so it is asked about them too.
     let operation = match app.pact_reach() {
@@ -402,11 +345,12 @@ fn pact_press(
         }
         PactIntent::NoRow => return None,
     };
+    let before = app.clone();
     app.apply_toggle(&toggle);
     if toggle.pacted {
         app.start_account(at);
     }
-    Some(toggle)
+    Some((toggle, before))
 }
 
 // `edits.rs` drives the real `p` rather than a copy of its rules; the things it
@@ -430,6 +374,7 @@ pub(crate) fn pressed_p(
         },
         Instant::now(),
     )
+    .map(|(toggle, _)| toggle)
 }
 
 fn refresh_press(
@@ -439,7 +384,7 @@ fn refresh_press(
     sigils: &Sigils,
     turn: TurnedDown<'_>,
     at: Instant,
-) -> Option<PathBuf> {
+) -> Option<(PathBuf, App)> {
     if turned_down(
         app,
         Operation::Refresh,
@@ -451,9 +396,10 @@ fn refresh_press(
     ) {
         return None;
     }
+    let before = app.clone();
     let directory = app.refresh()?;
     app.start_account(at);
-    Some(directory)
+    Some((directory, before))
 }
 
 // Over the pedantic line count because it is one exhaustive match over the
@@ -477,20 +423,10 @@ fn drain(
                     position,
                     total,
                 }) => {
-                    // Two places, one fact, and they are two because they are read
-                    // at two different speeds: the footer says which directory of
-                    // how many is being worked *now* and replaces itself every time,
-                    // while the panel keeps a section per directory for as long as
-                    // the run lasts. The section is opened first so that the
-                    // activities drained after it — which may be in this same batch
-                    // — land under the directory they belong to.
-                    //
-                    // The panel goes through `App::write_run`, here and for every
-                    // other event below: one way in, so a line of a run cannot be
-                    // put on the panel by two different routes. The label is
-                    // computed once, outside the closure — one spelling of a
-                    // directory, handed to the account holding this run.
-                    let heading = section_label(&scope.root, &directory);
+                    // The section is opened first so that the activities drained
+                    // after it — which may be in this same batch — land under the
+                    // directory they belong to.
+                    let heading = label(&scope.root, &directory);
                     app.panel_mut()
                         .write_run(|account| account.open_section(&heading, now));
                     // The fraction is the engine's own, whichever run is
@@ -500,30 +436,10 @@ fn drain(
                     // rather than pacting — see `Work::kind`.
                     app.set_run_in_flight(running.work.kind(), directory, position, total);
                 }
-                // Filed under whichever directory is open, which is the one the
-                // `Starting` before it named: an activity carries no directory
-                // because it needs none, and the account's live section is the
-                // answer. An account is
-                // always there during a run — the press that started it made one —
-                // so a run with neither is one nobody started this way, which is a
-                // test driving the events directly; dropping the line is the honest
-                // thing to do with it either way. See `App::write_run`.
-                //
-                // What each activity comes to is the account's business and not this
-                // file's: a tool is its name and its one detail, thinking is the
-                // word `thinking`, and a cost is added to the section's spend rather
-                // than drawn as a line of its own. See `Account::record`.
                 PactEvent::Doing(activity) => {
                     app.panel_mut()
                         .write_run(|account| account.record(&activity, now));
                 }
-                // The panel only, and one line: the request this directory's pass
-                // was handed, filed under whichever section the `Starting` before
-                // it opened, exactly as an activity is.
-                // The footer is left alone — it is already saying which directory
-                // of how many is being worked, which is the question it answers,
-                // and a byte total is not that.
-                //
                 // Filed at the handover rather than drawn on the placeholder
                 // above, because the clock is the point: this line counts the
                 // silence of *this* directory's own pass, from the moment its
@@ -534,11 +450,6 @@ fn drain(
                     app.panel_mut()
                         .write_run(|account| account.record_waiting(files, bytes, now));
                 }
-                // Both places again, and for the same reason `Starting` is both: the
-                // panel keeps the stretch of file passes as one reworded line, and
-                // the footer's bar fills by it. The bar is the only reason this
-                // reaches the footer at all — the line there still names the
-                // directory of how many, because that is the question it answers.
                 PactEvent::Run(Event::Describing {
                     position,
                     total,
@@ -550,9 +461,6 @@ fn drain(
                     });
                     app.set_files_in_flight(position, total);
                 }
-                // The panel only, and one line, filed like the request line above
-                // it: why this directory is about to cost a second pass, or why it
-                // is about to fail, in the engine's own words.
                 PactEvent::Run(Event::Rejected {
                     defects,
                     attempt,
@@ -563,17 +471,6 @@ fn drain(
                         account.record_rejected(&defects, attempt, attempts, now);
                     });
                 }
-                // The panel only, and one line per mend, filed under the same
-                // section as the rejections above it: the asking ran out and the
-                // document was written anyway, so this is the one place a reader
-                // learns that a slot of it is warlock's own words rather than the
-                // model's.
-                //
-                // The engine names the directory and the event carries it, because
-                // a repair is a fact about one directory and nothing reading these
-                // events should have to infer which. Nothing is done with it here:
-                // the line lands where every line of a pass lands, in the section
-                // the `Starting` before it opened, which is that same directory's.
                 PactEvent::Run(Event::Repaired { mend, .. }) => {
                     app.panel_mut()
                         .write_run(|account| account.record_repaired(&mend.to_string(), now));
@@ -589,23 +486,11 @@ fn drain(
                 // fails in phase two.
                 PactEvent::Run(Event::Documented { directory }) => {
                     app.set_subtree_state(&directory, NodeState::PactedFresh);
-                    // The document the pass just wrote, put on screen where it was
-                    // written: beside the directory, in the colour the paint above
-                    // has this moment given it. The paint comes first so the row is
-                    // born green rather than repainted into it, though the order is
-                    // not load-bearing — `set_subtree_state` paints a directory's
-                    // files along with the directory, so an insertion above it
-                    // would end up the same colour by the other road.
-                    //
-                    // And no reload, here or anywhere else mid-run. The manifest on
-                    // disk is still the pre-pact one until the single save at the
-                    // end of the run, so re-reading the tree now would re-derive
-                    // every row's state from that stale record and wipe the green
-                    // the run has been painting a directory at a time. That is why
-                    // the one reload stays at the bottom of this function, after the
-                    // outcome has landed and the manifest is written: by then disk
-                    // is the honest account, and this preview is the thing it
-                    // corrects rather than the thing it contradicts.
+                    // The paint comes first so the row is born green rather than
+                    // repainted into it, though the order is not load-bearing —
+                    // `set_subtree_state` paints a directory's files along with the
+                    // directory, so an insertion above it would end up the same
+                    // colour by the other road.
                     app.insert_file_row(directory.join(DOCUMENT_FILE));
                 }
                 // The same two paints as `Documented` — the tree cannot tell the
@@ -710,9 +595,6 @@ fn drain(
         now,
     );
 
-    // The run is over and everything it recorded is on disk, so the rows on
-    // screen are one load out of date whichever arm above ran. Saying so is the
-    // whole of what is left owed outside this module.
     Some(Reloaded(reload(app, scope, manifest)))
 }
 
@@ -744,7 +626,7 @@ fn section_outcome(
     root: &Path,
 ) -> Outcome {
     let is_this_section =
-        |directory: &Path| Path::new(&section_label(root, directory)) == section.directory();
+        |directory: &Path| Path::new(&label(root, directory)) == section.directory();
 
     if let Some(refusal) = refusals
         .iter()
@@ -763,7 +645,7 @@ fn section_outcome(
         .find(|(directory, _)| is_this_section(directory))
     {
         return Outcome::Skipped {
-            below: PathBuf::from(section_label(root, below)),
+            below: PathBuf::from(label(root, below)),
         };
     }
 
@@ -796,13 +678,6 @@ fn section_outcome(
 fn restore(app: &mut App, before: App, message: impl Into<String>) {
     app.restore_from(before);
     app.set_message(message);
-}
-
-fn section_label(root: &Path, directory: &Path) -> String {
-    match to_manifest_path(root, directory) {
-        Ok(relative) if relative != "." => relative,
-        _ => directory.display().to_string(),
-    }
 }
 
 #[derive(Debug)]

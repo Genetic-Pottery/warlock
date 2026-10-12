@@ -264,9 +264,9 @@ pub enum Error {
     // Every way the loop itself stopped that is a failure rather than a halt: a
     // `git` that refused, a board that would not answer, a run record that would
     // not write, and the one refusal the loop makes itself — a resumed run whose
-    // tree is not clean. Boxed for `Unfiled`'s reason: the variant is this enum's
-    // largest otherwise, and every `Result<_, Error>` in the workspace would be
-    // widened by a failure only one command can reach.
+    // tree is not clean. Boxed because the variant is this enum's largest
+    // otherwise, and every `Result<_, Error>` in the workspace would be widened
+    // by a failure only one command can reach.
     Pull {
         source: Box<pulling::Error>,
     },
@@ -385,8 +385,9 @@ pub(crate) fn one_line(message: impl fmt::Display) -> String {
 
 // The URL leads, because it is what the reader wants from this line: the brief
 // is filed, and the road from here is the project rather than a second push.
-fn already_filed_message(name: &str, url: &str) -> String {
-    format!(
+fn already_filed_message(f: &mut fmt::Formatter<'_>, name: &str, url: &str) -> fmt::Result {
+    write!(
+        f,
         "a project named `{name}` is already filed at {url}, so nothing was sent: a brief that \
          changed after it was filed is edited on the project"
     )
@@ -395,8 +396,9 @@ fn already_filed_message(name: &str, url: &str) -> String {
 // Names the file the key is written in rather than only the key: a `team` in a
 // `[[scope]]` record is a Linear team key — `WAR` — and the usual cause of this
 // is a record carrying a team's *name*.
-fn unknown_team_message(team: &str, path: &Path) -> String {
-    format!(
+fn unknown_team_message(f: &mut fmt::Formatter<'_>, team: &str, path: &Path) -> fmt::Result {
+    write!(
+        f,
         "Linear knows no team with the key `{team}`, so nothing was filed: the `[[scope]]` \
          record in `{}` is where that key is written",
         path.display()
@@ -405,19 +407,25 @@ fn unknown_team_message(team: &str, path: &Path) -> String {
 
 // The command that lists the slugs is the whole of the fix, so it is spelled out
 // with the scope already in it.
-fn unknown_project_message(slug: &str, scope: &str) -> String {
-    format!(
+fn unknown_project_message(f: &mut fmt::Formatter<'_>, slug: &str, scope: &str) -> fmt::Result {
+    write!(
+        f,
         "Linear knows no project with the slug `{slug}`, so nothing was read: `warlock draft \
          {scope}` lists the planned ones"
     )
 }
 
-fn not_planned_message(name: &str, status: Option<&str>) -> String {
+fn not_planned_message(
+    f: &mut fmt::Formatter<'_>,
+    name: &str,
+    status: Option<&str>,
+) -> fmt::Result {
     let found = match status {
         Some(status) => format!("is in `{status}`"),
         None => "has no status".to_owned(),
     };
-    format!(
+    write!(
+        f,
         "the project `{name}` {found} rather than `Planned`, so nothing was read: \
          warlock reads a project back once it is planned"
     )
@@ -426,8 +434,9 @@ fn not_planned_message(name: &str, status: Option<&str>) -> String {
 // The fact, then where it is written, then the rule underneath: a slice is cut
 // once, so a project every note already covers has nowhere left to go here and
 // the issues it made are where the work goes on.
-fn all_cut_message(name: &str) -> String {
-    format!(
+fn all_cut_message(f: &mut fmt::Formatter<'_>, name: &str) -> fmt::Result {
+    write!(
+        f,
         "every slice of `{name}` is already cut or skipped, so there is nothing to draft: the \
          project's comments hold a note for each of them, and warlock offers a slice once — \
          retitle a skipped slice in the brief to have it offered again"
@@ -438,8 +447,9 @@ fn all_cut_message(name: &str) -> String {
 // team above: the state is the team's, so a workspace that files its issues
 // into a column spelled something else is a workflow to edit rather than a
 // warlock to configure.
-fn no_backlog_message(team: &str) -> String {
-    format!(
+fn no_backlog_message(f: &mut fmt::Formatter<'_>, team: &str) -> fmt::Result {
+    write!(
+        f,
         "the team `{team}` has no workflow state called `Backlog`, so no issue was created: a cut \
          slice is filed into that state, and the team's workflow in Linear is where it is named"
     )
@@ -448,13 +458,18 @@ fn no_backlog_message(team: &str) -> String {
 // The names lead, because they are the answer: the scope that was typed is not one
 // of them, and one of them is almost certainly what was meant. A repository that
 // records none is told that in words rather than handed an empty list.
-fn unrecorded_scope_message(scope: &str, recorded: &[String]) -> String {
+fn unrecorded_scope_message(
+    f: &mut fmt::Formatter<'_>,
+    scope: &str,
+    recorded: &[String],
+) -> fmt::Result {
     let named = if recorded.is_empty() {
         "no `[[scope]]` record at all".to_owned()
     } else {
         format!("records {}", listed(recorded))
     };
-    format!(
+    write!(
+        f,
         "nothing in `.warlock/pacts.toml` records the scope `{scope}`, so there is no queue to \
          read: this repository {named}"
     )
@@ -463,13 +478,14 @@ fn unrecorded_scope_message(scope: &str, recorded: &[String]) -> String {
 // Names the scope wanted and the sigils held, and ends where
 // `closed_scope_message` ends — at `warlock sigil add` — because the fix is the
 // same one: the boundary is a sigil, and holding it is what opens the work.
-fn unheld_scope_message(scope: &str, held: &[String]) -> String {
+fn unheld_scope_message(f: &mut fmt::Formatter<'_>, scope: &str, held: &[String]) -> fmt::Result {
     let holding = if held.is_empty() {
         "this machine holds no sigil at all".to_owned()
     } else {
         format!("this machine holds {}", listed(held))
     };
-    format!(
+    write!(
+        f,
         "the scope `{scope}` is not one this machine's sigils open, so nothing was pulled: \
          {holding} — hold that sigil with `warlock sigil add {scope}`"
     )
@@ -478,8 +494,9 @@ fn unheld_scope_message(scope: &str, held: &[String]) -> String {
 // Every entry, on one line, in `git status`'s own two-letter codes: the reader is
 // about to run `git status` themselves, and a refusal that renamed the codes would
 // make them translate back before they could look.
-fn dirty_tree_message(dirty: &[Dirty]) -> String {
-    format!(
+fn dirty_tree_message(f: &mut fmt::Formatter<'_>, dirty: &[Dirty]) -> fmt::Result {
+    write!(
+        f,
         "the working tree is not clean, so no ticket was pulled: {} — warlock commits what a \
          session writes, and what is already there is yours",
         listed(dirty)
@@ -489,8 +506,9 @@ fn dirty_tree_message(dirty: &[Dirty]) -> String {
 // Names the branch nothing, because the ticket's comment names it: this line says
 // what happened and which of the two commands comes first, and the comment is the
 // account of the whole run.
-fn halted_message(ticket: &str) -> String {
-    format!(
+fn halted_message(f: &mut fmt::Formatter<'_>, ticket: &str) -> fmt::Result {
+    write!(
+        f,
         "the run for `{ticket}` halted, so the ticket stays in progress and was not moved to \
          review: its comment lists what finished and what did not, and `warlock resume {ticket}` \
          releases it"
@@ -499,8 +517,9 @@ fn halted_message(ticket: &str) -> String {
 
 // The tree is the half a reader needs first: it still holds the work, warlock did
 // not commit it and will not, and what happens to it is theirs to decide.
-fn crossed_message(ticket: &str, subtask: &str) -> String {
-    format!(
+fn crossed_message(f: &mut fmt::Formatter<'_>, ticket: &str, subtask: &str) -> fmt::Result {
+    write!(
+        f,
         "`{subtask}` wrote under a scope this machine does not hold, so the run for `{ticket}` \
          stopped with nothing committed: the working tree is exactly as that session left it, and \
          the ticket's comment names the paths"
@@ -510,8 +529,9 @@ fn crossed_message(ticket: &str, subtask: &str) -> String {
 // Names the directory rather than the `state.json` inside it: the whole run lives
 // there — the record, the manifest and a brief per sub-task — and a reader told
 // there is no run wants to know where warlock went looking for one.
-fn no_run_message(ticket: &str, directory: &Path) -> String {
-    format!(
+fn no_run_message(f: &mut fmt::Formatter<'_>, ticket: &str, directory: &Path) -> fmt::Result {
+    write!(
+        f,
         "this machine holds no run for `{ticket}`, so there is nothing to resume: warlock looked \
          in `{}`, and a record is written there by the `warlock pull` that starts the ticket",
         directory.display()
@@ -522,14 +542,20 @@ fn no_run_message(ticket: &str, directory: &Path) -> String {
 // and one in `pulled` has not stopped. Which mode was asked is on the end for the
 // variant's reason — the flag a reader typed is half of why the run had nothing to
 // put back.
-fn nothing_to_resume_message(ticket: &str, status: RunStatus, failed_only: bool) -> String {
+fn nothing_to_resume_message(
+    f: &mut fmt::Formatter<'_>,
+    ticket: &str,
+    status: RunStatus,
+    failed_only: bool,
+) -> fmt::Result {
     let releases = if failed_only {
         "`--failed-only` puts a `failed` sub-task back and leaves a `blocked` or `crossed` one as \
          it is"
     } else {
         "a resume puts the `failed`, `blocked` and `crossed` sub-tasks back"
     };
-    format!(
+    write!(
+        f,
         "the run for `{ticket}` is `{status}` and has no sub-task to put back, so nothing was \
          written: {releases}"
     )
@@ -538,8 +564,13 @@ fn nothing_to_resume_message(ticket: &str, status: RunStatus, failed_only: bool)
 // The identifiers lead: the issues exist, no note names them, and this line is
 // the last place they are named. The next draft offers the slice again, so the
 // reader has to know to skip it there or to delete these.
-fn uncut_message(issues: &[String], source: &LinearError) -> String {
-    format!(
+fn uncut_message(
+    f: &mut fmt::Formatter<'_>,
+    issues: &[String],
+    source: &LinearError,
+) -> fmt::Result {
+    write!(
+        f,
         "the issues {} were created, and warlock could not note them on the project, so the next \
          draft offers this slice again: {}",
         listed(issues),
@@ -551,8 +582,8 @@ impl fmt::Display for Error {
     // Over the pedantic line count because it is one arm per variant and the
     // enum is the whole vocabulary: the split the lint asks for would put half
     // the sentences behind a name, and a reader asking what warlock says about
-    // one failure would have two places to look. The wordings themselves are
-    // already free functions above.
+    // one failure would have two places to look. The longest wordings are free
+    // functions above.
     #[expect(
         clippy::too_many_lines,
         reason = "one arm per variant, and every variant of this enum prints"
@@ -726,58 +757,41 @@ impl fmt::Display for Error {
             // The reader's own sentence about the document, which already ends
             // in what it cost — nothing was pushed.
             Self::Brief { source } => write!(f, "{source}"),
-            // Both flattened like the `CLAUDE.md` write above: what the
-            // filesystem says about a file it would not read can run to more
-            // than one line, and a `briefs.toml` that will not parse carries the
-            // TOML parser's own multi-line diagnostic.
+            // Both flattened: what the filesystem says about a file it would not
+            // read can run to more than one line, and a `briefs.toml` that will
+            // not parse carries the TOML parser's own multi-line diagnostic.
             Self::Template { source } => write!(f, "{}", one_line(source)),
             Self::Briefs { source } => write!(f, "{}", one_line(source)),
-            // The two push refusals with wording of their own, said as free
-            // functions above rather than here, as every long sentence is.
-            Self::AlreadyFiled { name, url } => write!(f, "{}", already_filed_message(name, url)),
-            Self::UnknownTeam { team, path } => write!(f, "{}", unknown_team_message(team, path)),
+            Self::AlreadyFiled { name, url } => already_filed_message(f, name, url),
+            Self::UnknownTeam { team, path } => unknown_team_message(f, team, path),
             // Flattened for the transport's sake: Linear's own refusals are one
             // line, and what a socket failure carries is whatever the network
             // stack said.
             Self::Linear { source } => write!(f, "{}", one_line(source)),
-            // The two cut refusals with wording of their own, said below for
-            // the push refusals' reason.
-            Self::UnknownProject { slug, scope } => {
-                write!(f, "{}", unknown_project_message(slug, scope))
-            }
-            Self::NotPlanned { name, status } => {
-                write!(f, "{}", not_planned_message(name, status.as_deref()))
-            }
+            Self::UnknownProject { slug, scope } => unknown_project_message(f, slug, scope),
+            Self::NotPlanned { name, status } => not_planned_message(f, name, status.as_deref()),
             // The parser's own sentence and nothing around it, for `Brief`'s
             // reason: it names the heading the project is missing, or the
             // slices that wait on each other, and ends in there being nothing
             // to cut. Unflattened because it can only be one line — this is the
             // one wrapped error here that wraps nothing itself.
             Self::ScopeBlock { source } => write!(f, "{source}"),
-            // The three cut refusals with wording of their own, said above for
-            // the reason the rest are.
-            Self::AllCut { name } => write!(f, "{}", all_cut_message(name)),
-            Self::NoBacklog { team } => write!(f, "{}", no_backlog_message(team)),
-            Self::Uncut { issues, source } => write!(f, "{}", uncut_message(issues, source)),
+            Self::AllCut { name } => all_cut_message(f, name),
+            Self::NoBacklog { team } => no_backlog_message(f, team),
+            Self::Uncut { issues, source } => uncut_message(f, issues, source),
             Self::Unskipped { title, source } => write!(
                 f,
                 "`{title}` was skipped, and warlock could not note the skip on the project, so \
                  the next draft offers it again: {}",
                 one_line(source)
             ),
-            // The pull's own refusals, worded above for the reason the push's and
-            // the cut's are: the sentences are the interesting part of them.
             Self::UnrecordedScope { scope, recorded } => {
-                write!(f, "{}", unrecorded_scope_message(scope, recorded))
+                unrecorded_scope_message(f, scope, recorded)
             }
-            Self::UnheldScope { scope, held } => {
-                write!(f, "{}", unheld_scope_message(scope, held))
-            }
-            Self::DirtyTree { dirty } => write!(f, "{}", dirty_tree_message(dirty)),
-            Self::Halted { ticket } => write!(f, "{}", halted_message(ticket)),
-            Self::Crossed { ticket, subtask } => {
-                write!(f, "{}", crossed_message(ticket, subtask))
-            }
+            Self::UnheldScope { scope, held } => unheld_scope_message(f, scope, held),
+            Self::DirtyTree { dirty } => dirty_tree_message(f, dirty),
+            Self::Halted { ticket } => halted_message(f, ticket),
+            Self::Crossed { ticket, subtask } => crossed_message(f, ticket, subtask),
             // The queue's own sentence about the ticket, which already says what is
             // in the way and names the command that frees a halted run.
             Self::NotPulled { ticket, refusal } => {
@@ -788,20 +802,12 @@ impl fmt::Display for Error {
             // each carry their own multi-line news.
             Self::Pull { source } => write!(f, "{}", one_line(source)),
             Self::Runs { source } => write!(f, "{}", one_line(source)),
-            // The resume's two refusals, worded above for the reason the pull's
-            // are: the sentences are the interesting part of them.
-            Self::NoRun { ticket, directory } => {
-                write!(f, "{}", no_run_message(ticket, directory))
-            }
+            Self::NoRun { ticket, directory } => no_run_message(f, ticket, directory),
             Self::NothingToResume {
                 ticket,
                 status,
                 failed_only,
-            } => write!(
-                f,
-                "{}",
-                nothing_to_resume_message(ticket, *status, *failed_only)
-            ),
+            } => nothing_to_resume_message(f, ticket, *status, *failed_only),
             Self::Git { source } => write!(f, "{}", one_line(source)),
             Self::Problems { first, rest: 0 } => write!(f, "{first}"),
             Self::Problems { first, rest } => {
@@ -930,8 +936,6 @@ impl From<io::Error> for Error {
 pub const fn status_for(outcome: &Result<(), Error>) -> u8 {
     match outcome {
         Ok(()) => 0,
-        // The boundary, and only the upward one: see the decision above.
-        //
         // A pull's two boundary refusals spend the same register and nothing else
         // does: a scope this machine's sigils do not open, refused before a request
         // with nothing spent, and a session that wrote under one, which is a run

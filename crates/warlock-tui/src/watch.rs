@@ -99,13 +99,13 @@ impl NodeSet {
             .is_some_and(|parent| self.directories.contains(parent))
     }
 
-    #[must_use]
-    pub fn len(&self) -> usize {
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> usize {
         self.directories.len()
     }
 
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
+    #[cfg(test)]
+    pub(crate) fn is_empty(&self) -> bool {
         self.directories.is_empty()
     }
 }
@@ -168,8 +168,8 @@ impl WatchPolicy {
         self.watched = NodeSet::from_tree(tree);
     }
 
-    #[must_use]
-    pub fn watched(&self) -> &NodeSet {
+    #[cfg(test)]
+    pub(crate) const fn watched(&self) -> &NodeSet {
         &self.watched
     }
 
@@ -238,12 +238,8 @@ impl WatchPolicy {
         }
     }
 
-    /// Unlike [`due`](WatchPolicy::due) this ignores the clock and the
-    /// in-progress flag: it is for a caller with its own reason to hold a
-    /// reload back — a pact in flight — asking whether it is sitting on
-    /// anything.
-    #[must_use]
-    pub fn owes_reload(&self) -> bool {
+    #[cfg(test)]
+    pub(crate) const fn owes_reload(&self) -> bool {
         self.burst_began.is_some() || self.moved_during_reload
     }
 }

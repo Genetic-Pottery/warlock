@@ -408,6 +408,13 @@ pub(crate) fn named(root: &Path, directory: &Path) -> String {
     to_manifest_path(root, directory).unwrap_or_else(|_| directory.display().to_string())
 }
 
+pub(crate) fn label(root: &Path, directory: &Path) -> String {
+    match to_manifest_path(root, directory) {
+        Ok(relative) if relative != "." => relative,
+        _ => directory.display().to_string(),
+    }
+}
+
 #[cfg(test)]
 #[path = "tests/freshness.rs"]
 mod tests;

@@ -48,8 +48,8 @@ use warlock_engine::{Manifest, PullRun, ScopeRecord};
 
 use crate::app::App;
 use crate::claude::{
-    Activities, Activity, Cancel, ChatAgent, ClaudeAgent, Split, Splitting, Worked, Working,
-    working_system_prompt,
+    Activities, Activity, Cancel, CancelGuard, ChatAgent, ClaudeAgent, Split, Splitting, Worked,
+    Working, working_system_prompt,
 };
 use crate::confirm::{PullAnswered, PullConfirm, Undertaking};
 use crate::error::{Error, one_line};
@@ -61,7 +61,6 @@ use crate::linear::{
     NamedIssue, NewIssue, NewProject, Opener as LinearOpener, Opens, Project as LinearProject,
     Queue,
 };
-use crate::pacting::CancelGuard;
 use crate::pull::{
     Prepared, clean, nothing_ready, number_in, opened, passed_over, prepare, selection, unchanged,
 };

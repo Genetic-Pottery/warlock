@@ -47,6 +47,7 @@ fn pact_press(app: &mut App, in_flight: bool, at: Instant) -> Option<PactToggle>
         turn(in_flight),
         at,
     )
+    .map(|(pressed, _)| pressed)
 }
 
 fn refresh_press(app: &mut App, in_flight: bool, at: Instant) -> Option<PathBuf> {
@@ -58,6 +59,7 @@ fn refresh_press(app: &mut App, in_flight: bool, at: Instant) -> Option<PathBuf>
         turn(in_flight),
         at,
     )
+    .map(|(pressed, _)| pressed)
 }
 
 const DOCUMENT_FILE: &str = ".warlock.md";
@@ -1345,7 +1347,8 @@ fn p_is_refused_on_a_directory_whose_scope_this_machine_does_not_hold() {
         &Sigils::held(["web"]),
         turn(false),
         Instant::now(),
-    );
+    )
+    .map(|(pressed, _)| pressed);
 
     assert_eq!(toggle, None, "the press must not paint or start a run");
     assert_eq!(app.message(), Some(CLOSED));
@@ -1375,7 +1378,8 @@ fn the_un_pact_direction_is_refused_too_and_is_what_this_is_for() {
             &Sigils::held(["web"]),
             turn(false),
             Instant::now(),
-        );
+        )
+        .map(|(pressed, _)| pressed);
 
         assert_eq!(toggle, None, "{state:?} was un-pacted across a boundary");
         assert_eq!(app.message(), Some(CLOSED));
@@ -1421,7 +1425,8 @@ fn p_un_pacting_ward_is_refused_by_a_boundary_below_the_row() {
             &Sigils::held(["web"]),
             turn(false),
             Instant::now(),
-        );
+        )
+        .map(|(pressed, _)| pressed);
 
         assert_eq!(toggle, None, "{state:?} un-pacted a boundary below it");
         assert_eq!(app.message(), Some(CLOSED_BELOW));
@@ -1445,6 +1450,7 @@ fn the_boundary_below_binds_the_un_pact_direction_and_no_other_key() {
         turn(false),
         Instant::now(),
     )
+    .map(|(pressed, _)| pressed)
     .expect("a pact leaves every scope below exactly as it found it");
     assert!(toggle.pacted);
     assert_eq!(app.message(), None, "the pact direction was told something");
@@ -1458,7 +1464,8 @@ fn the_boundary_below_binds_the_un_pact_direction_and_no_other_key() {
             &Sigils::held(["web"]),
             turn(false),
             Instant::now()
-        ),
+        )
+        .map(|(pressed, _)| pressed),
         Some(PathBuf::from(format!("{ROOT}/crates"))),
         "a refresh was gated on a boundary it cannot destroy"
     );
@@ -1470,7 +1477,7 @@ fn holding_the_boundary_below_lets_the_un_pact_through() {
     for sigils in [Sigils::held(["data-plane"]), Sigils::held(["*"])] {
         let mut app = app_over(NodeState::PactedFresh);
 
-        let toggle = super::pact_press(
+        let (toggle, _) = super::pact_press(
             &mut app,
             &scoped_below(),
             Path::new(ROOT),
@@ -1499,7 +1506,8 @@ fn r_is_refused_on_a_directory_whose_scope_this_machine_does_not_hold() {
         &Sigils::held(["web"]),
         turn(false),
         Instant::now(),
-    );
+    )
+    .map(|(pressed, _)| pressed);
 
     // What a refresh spends is model time inside somebody else's boundary,
     // on documents that are theirs to have an opinion about.
@@ -1521,7 +1529,7 @@ fn holding_the_scope_lets_both_keys_through() {
         Sigils::held(["*"]),
     ] {
         let mut app = app_over(NodeState::Unpacted);
-        let toggle = super::pact_press(
+        let (toggle, _) = super::pact_press(
             &mut app,
             &scoped(),
             Path::new(ROOT),
@@ -1542,7 +1550,8 @@ fn holding_the_scope_lets_both_keys_through() {
                 &sigils,
                 turn(false),
                 Instant::now()
-            ),
+            )
+            .map(|(pressed, _)| pressed),
             Some(PathBuf::from(format!("{ROOT}/crates"))),
             "{sigils:?} opens `data-plane` for a refresh"
         );
@@ -1566,7 +1575,8 @@ fn a_machine_that_holds_no_sigil_is_refused_by_both_keys() {
                 &sigils,
                 turn(false),
                 Instant::now()
-            ),
+            )
+            .map(|(pressed, _)| pressed),
             None,
             "{sigils:?} pacted across a boundary"
         );
@@ -1581,7 +1591,8 @@ fn a_machine_that_holds_no_sigil_is_refused_by_both_keys() {
                 &sigils,
                 turn(false),
                 Instant::now()
-            ),
+            )
+            .map(|(pressed, _)| pressed),
             None,
             "{sigils:?} refreshed across a boundary"
         );
@@ -1603,6 +1614,7 @@ fn an_unscoped_directory_stays_open_to_a_machine_holding_nothing() {
         turn(false),
         Instant::now(),
     )
+    .map(|(pressed, _)| pressed)
     .expect("nothing scopes this directory");
 
     assert!(toggle.pacted);
@@ -1625,7 +1637,8 @@ fn a_run_in_flight_is_answered_before_the_boundary_is() {
             &Sigils::held(["web"]),
             turn(true),
             Instant::now()
-        ),
+        )
+        .map(|(pressed, _)| pressed),
         None
     );
     assert_eq!(
@@ -5609,7 +5622,8 @@ fn a_pull_in_flight_turns_down_both_keys_on_the_thread_before_anything_else() {
             &Sigils::held(["web"]),
             pulled,
             Instant::now(),
-        ),
+        )
+        .map(|(pressed, _)| pressed),
         None
     );
     assert_eq!(
@@ -5620,7 +5634,8 @@ fn a_pull_in_flight_turns_down_both_keys_on_the_thread_before_anything_else() {
             &Sigils::held(["web"]),
             pulled,
             Instant::now(),
-        ),
+        )
+        .map(|(pressed, _)| pressed),
         None
     );
 

@@ -63,8 +63,8 @@ pub(crate) const NOT_CLEANED: &str = "entries under an ignored directory are sti
 // the stale one it would replace.
 //
 // The header is neither carried nor re-derived — it is the `Chrome` on the
-// `Scope` handed in. It used to be carried by `reseat_on` and then immediately
-// overwritten here, which is two ways of moving a fact that never moves.
+// `Scope` handed in, and carrying it here as well would be two ways of moving a
+// fact that never moves.
 //
 // The tree that was read comes back because this function is the only thing that
 // has it, and the watcher's filter has to be rebuilt from the walk that produced

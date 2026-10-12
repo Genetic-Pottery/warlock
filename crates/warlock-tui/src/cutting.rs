@@ -64,8 +64,8 @@ use warlock_engine::{Manifest, agent};
 use crate::app::{App, Focus};
 use crate::brief::Slice;
 use crate::claude::{
-    Activities, Activity, Cancel, ChatAgent, Converses, Drafting, NOTHING_SETTLES_IT, Replied,
-    propose_answer,
+    Activities, Activity, Cancel, CancelGuard, ChatAgent, Converses, Drafting, NOTHING_SETTLES_IT,
+    Replied, propose_answer,
 };
 use crate::confirm::{
     Answer, Carry, CarryAnswered, Choice, CutAnswered, CutConfirm, Review, Reviewed,
@@ -74,7 +74,6 @@ use crate::cut::{Cut, listed};
 use crate::error::{Error, one_line};
 use crate::inflight::{Lost, Once, Stream, Workers, settled};
 use crate::linear::{Opener as LinearOpener, Opens};
-use crate::pacting::CancelGuard;
 // The lines about a relayed question come from there rather than from here, as
 // `named` and `not_drafted` do: the shell and the panel put the same question to
 // a person, and a second set of wordings would be the two doors naming one

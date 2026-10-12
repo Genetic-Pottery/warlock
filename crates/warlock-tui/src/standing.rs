@@ -4,8 +4,8 @@
 //! not only for tests — `session::load_app` has already walked to a root and
 //! asking the environment a second time could answer differently.
 //!
-//! A question stands here and nothing more, because none of `stale`, `fresh`,
-//! `check` or `config` writes a pact. A write stands and is let
+//! A question stands here and nothing more, because none of `stale`, `fresh` or
+//! `check` writes a pact. A write stands and is let
 //! through: `edits::Opened` is built on top of this one and cannot be
 //! constructed without `boundary::permits` having said the operation it names
 //! is open to this machine, so the gate is not a step a write can forget.
@@ -83,7 +83,7 @@ pub(crate) const FOR_BRIEF: &str = "argue a brief about";
 // that used only the root would resolve `warlock check src` against the wrong
 // place from a subdirectory.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Standing {
+pub(crate) struct Standing {
     working_dir: PathBuf,
     repo_root: PathBuf,
 }
@@ -97,7 +97,7 @@ impl Standing {
     // caller here edits or answers about one path, and walking the tree to find
     // its root would read every directory in the repository to answer a question
     // about ancestors.
-    pub fn here(wanted: &'static str) -> Result<Self, Error> {
+    pub(crate) fn here(wanted: &'static str) -> Result<Self, Error> {
         let working_dir =
             env::current_dir().map_err(|source| Error::WorkingDirectory { source })?;
         let repo_root = repository_root(&working_dir).ok_or(Error::NoRepository {
@@ -122,7 +122,7 @@ impl Standing {
     }
 
     #[must_use]
-    pub fn repo_root(&self) -> &Path {
+    pub(crate) fn repo_root(&self) -> &Path {
         &self.repo_root
     }
 

@@ -4,9 +4,9 @@ use std::time::{Duration, Instant};
 use super::{Asked, Chat, Chatting, TurnEvent, apply_turn};
 use crate::account::Line;
 use crate::app::App;
+use crate::claude::CancelGuard;
 use crate::claude::{Activity, ChatAgent, INVOCATION_TIMEOUT};
 use crate::inflight::Stream;
-use crate::pacting::CancelGuard;
 use crate::panel::Mode;
 use crate::thread::Ending;
 

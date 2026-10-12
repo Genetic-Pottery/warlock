@@ -1209,6 +1209,63 @@ impl Cancel {
     }
 }
 
+#[derive(Debug)]
+pub(crate) struct CancelGuard {
+    cancel: Cancel,
+    armed: bool,
+}
+
+impl CancelGuard {
+    pub(crate) fn new() -> Self {
+        Self {
+            cancel: Cancel::new(),
+            armed: true,
+        }
+    }
+
+    // A handle minted somewhere else, guarded here. A drafting session mints its
+    // own, wires its agent to it and runs every turn under it, so a guard built
+    // with `new` beside one would latch a flag no child is listening to.
+    pub(crate) const fn over(cancel: Cancel) -> Self {
+        Self {
+            cancel,
+            armed: true,
+        }
+    }
+
+    // The work it guards is over, so dropping it stops nothing. Needed by a
+    // guard built with `over`: the handle outlives the turn, a cancel is final,
+    // and a drafting session's next turn would start already cancelled if the
+    // guard of the turn before it latched the session's handle on its way out.
+    pub(crate) const fn disarm(&mut self) {
+        self.armed = false;
+    }
+
+    pub(crate) fn handle(&self) -> Cancel {
+        self.cancel.clone()
+    }
+
+    pub(crate) fn cancel(&self) {
+        self.cancel.cancel();
+    }
+
+    pub(crate) fn is_cancelled(&self) -> bool {
+        self.cancel.is_cancelled()
+    }
+}
+
+// Dropping the guard is what makes quitting kill the `claude` in flight: no exit
+// path of a pact, a chat turn, a cut or a pull has to remember to stop its work,
+// because losing the value that holds the guard cancels. A stop key is the other
+// spelling and goes through `cancel()` directly.
+impl Drop for CancelGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            self.cancel();
+        }
+    }
+}
+
 /// One thing a run was seen doing, in the fewest words it can be said in.
 ///
 /// What is absent is as deliberate as what is here: no tool result, no assistant

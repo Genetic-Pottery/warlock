@@ -137,7 +137,7 @@ struct Checked {
 // the spelling below rather than resolved into something inside it.
 pub fn check(path: PathBuf, json: bool) -> Result<(), Error> {
     // A home that cannot be resolved is `None` and reads as nothing held — see
-    // the module docs for why it is not `Unknown`.
+    // `Settings::sigils_or_unknown` for why it is not `Unknown`.
     checked_onto(
         &Standing::here(FOR_CHECK)?,
         Standing::home().ok().as_deref(),

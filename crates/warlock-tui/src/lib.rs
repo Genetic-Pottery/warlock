@@ -162,7 +162,6 @@ pub use running::pact;
 pub use running::refresh;
 pub use screen::Screen;
 pub use sigil::{sigil_add, sigil_clear, sigil_list, sigil_remove};
-pub use standing::Standing;
 pub use template::DEFAULT_TEMPLATE;
 pub use template::brief_template;
 pub use template::missing_sections;

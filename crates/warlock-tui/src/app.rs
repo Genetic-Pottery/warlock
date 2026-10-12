@@ -24,6 +24,7 @@ use std::time::Instant;
 
 use warlock_engine::{IntoDocument, NodeState, StateCounts, Tree, to_manifest_path};
 
+use crate::freshness::label;
 use crate::panel::{Panel, Showing};
 use crate::selection::{Position, Selection};
 
@@ -1098,14 +1099,10 @@ impl App {
 
     #[must_use]
     pub(crate) fn label_for(&self, path: &Path) -> String {
-        match self
-            .rows
-            .first()
-            .map(|root| to_manifest_path(&root.path, path))
-        {
-            Some(Ok(relative)) if relative != "." => relative,
-            _ => path.display().to_string(),
-        }
+        self.rows.first().map_or_else(
+            || path.display().to_string(),
+            |root| label(&root.path, path),
+        )
     }
 
     pub(crate) fn toggle_collapsed(&mut self) {

@@ -22,13 +22,12 @@ use warlock_engine::{DEFAULT_BRIEF_DIRECTORY, briefs, load_briefs};
 
 use crate::app::{App, Focus};
 use crate::claude::{
-    Activities, Activity, BRIEF_EFFORT, BRIEF_MODEL, CHAT_INSTRUCTION, Cancel, ChatAgent,
-    Converses, READY_MARKER, WRITE_INSTRUCTION, brief_instruction,
+    Activities, Activity, BRIEF_EFFORT, BRIEF_MODEL, CHAT_INSTRUCTION, Cancel, CancelGuard,
+    ChatAgent, Converses, READY_MARKER, WRITE_INSTRUCTION, brief_instruction,
 };
 use crate::composer::{Composed, Composer, Pasted};
 use crate::error::one_line;
 use crate::inflight::{Lost, Port, Stream, Workers, settled};
-use crate::pacting::CancelGuard;
 use crate::panel::Mode;
 use crate::prompt::{Edited, ScopePrompt};
 use crate::submission::{BRIEF, CHAT, Submitted, WRITE, Wanted, submitted_for};
