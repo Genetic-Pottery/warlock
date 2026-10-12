@@ -48,8 +48,8 @@ use warlock_engine::{Manifest, PullRun, ScopeRecord, held_runs};
 
 use crate::app::App;
 use crate::claude::{
-    Activities, Activity, Cancel, ChatAgent, ClaudeAgent, Split, Splitting, UNTIMED, Worked,
-    Working, working_system_prompt,
+    Activities, Activity, Cancel, ChatAgent, ClaudeAgent, Split, Splitting, Worked, Working,
+    working_system_prompt,
 };
 use crate::confirm::{PullAnswered, PullConfirm, Undertaking};
 use crate::error::{Error, one_line};
@@ -653,10 +653,7 @@ impl Raises for Claudes {
                 stopping: asked.stopping,
             },
             freshen: Freshener {
-                agent: ClaudeAgent::new()
-                    .with_timeout(UNTIMED)
-                    .with_cancel(asked.cancel.clone())
-                    .with_activities(activities),
+                agent: ClaudeAgent::freshening(asked.cancel.clone(), activities),
                 cancel: asked.cancel,
                 events: asked.events,
             },

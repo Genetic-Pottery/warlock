@@ -39,8 +39,8 @@ use warlock_engine::{
 };
 
 use crate::claude::{
-    Activities, Activity, Cancel, ChatAgent, ClaudeAgent, Split, Splitting, UNTIMED, Worked,
-    Working, working_system_prompt,
+    Activities, Activity, Cancel, ChatAgent, ClaudeAgent, Split, Splitting, Worked, Working,
+    working_system_prompt,
 };
 use crate::error::Error;
 use crate::freshness::{Freshened, Freshening, Freshens, freshened};
@@ -764,10 +764,7 @@ impl Freshener {
     fn new(activities: Activities) -> Self {
         let cancel = Cancel::new();
         Self {
-            agent: ClaudeAgent::new()
-                .with_timeout(UNTIMED)
-                .with_cancel(cancel.clone())
-                .with_activities(activities),
+            agent: ClaudeAgent::freshening(cancel.clone(), activities),
             cancel,
         }
     }
