@@ -7,13 +7,13 @@ use std::time::{Duration, Instant};
 use super::stream;
 use super::{
     Activities, Activity, BRIEF_EFFORT, BRIEF_MODEL, Bounded, CHAT_INSTRUCTION, CHAT_SYSTEM_PROMPT,
-    Cancel, ChatAgent, ClaudeAgent, Converses, DRAFT_NOW_INSTRUCTION, DRAFTING_CONTRACT,
-    DRAFTING_ONE_SHOT_CONTRACT, DRAFTING_ROUNDS, Drafted, Drafting, EFFORT, EFFORT_VAR,
-    INVOCATION_TIMEOUT, MODEL, MODEL_VAR, NOTHING_SETTLES_IT, OsString, PROPOSING_SYSTEM_PROMPT,
-    Replied, SYSTEM_PROMPT, Split, Splitting, Stopped, UNTIMED, Unsplit, WORKING_ATTEMPTS,
-    WORKING_TURNS, WRITE_INSTRUCTION, Wired, Worked, Working, brief_instruction, drafting_opening,
-    or_default, overridden, propose_answer, proposing_instruction, render, session_id,
-    working_opening, working_retry, working_system_prompt,
+    Cancel, ChatAgent, ClaudeAgent, Conversation, Converses, DRAFT_NOW_INSTRUCTION,
+    DRAFTING_CONTRACT, DRAFTING_ONE_SHOT_CONTRACT, DRAFTING_ROUNDS, Drafted, Drafting, EFFORT,
+    EFFORT_VAR, INVOCATION_TIMEOUT, MODEL, MODEL_VAR, NOTHING_SETTLES_IT, OsString,
+    PROPOSING_SYSTEM_PROMPT, Replied, SYSTEM_PROMPT, Split, Splitting, Stopped, UNTIMED, Unsplit,
+    WORKING_ATTEMPTS, WORKING_TURNS, WRITE_INSTRUCTION, Wired, Worked, Working, brief_instruction,
+    drafting_opening, or_default, overridden, propose_answer, proposing_instruction, render,
+    session_id, working_opening, working_retry, working_system_prompt,
 };
 use crate::brief::scope_block_in;
 use crate::panel::Mode;
@@ -502,13 +502,13 @@ fn every_slice_drafted_off_one_agent_is_a_conversation_of_its_own() {
 
     let mut first = Drafting::for_slice(&agent, "the brief", "one", "the first slice");
     let _ = first.open();
-    let opened = turn_args(&first.agent);
+    let opened = turn_args(&first.conversation.agent);
     let first_id = value_of(&opened, "--resume")
         .expect("the first slice's next turn resumes its own conversation")
         .to_owned();
 
     let second = Drafting::for_slice(&agent, "the brief", "two", "the second slice");
-    let second_args = turn_args(&second.agent);
+    let second_args = turn_args(&second.conversation.agent);
     let second_id = value_of(&second_args, "--session-id")
         .expect("the second slice opens a conversation rather than resuming one");
 
@@ -3421,6 +3421,29 @@ fn a_cancelled_attempt_is_not_taken_again_and_is_not_blamed_on_the_session() {
     assert_eq!(stopping(&worked), &Stopped::Cancelled);
     assert_eq!(agent.turns(), 1);
     assert!(agent.cancelled());
+}
+
+#[test]
+fn a_conversations_handle_reaches_the_agent_through_every_rewiring() {
+    // `reporting` and `at_turns` are the two things that hand the conversation
+    // a different copy of the agent after the handle was minted; either one
+    // replacing the agent rather than re-wiring it would leave the handle
+    // reaching a copy nothing is running.
+    let agent = Attempting::default();
+    let mut conversation = Conversation::fresh(&agent).reporting(Activities::none());
+    conversation.at_turns(WORKING_TURNS * 2);
+    let cancel = conversation.cancel();
+
+    thread::spawn(move || cancel.cancel())
+        .join()
+        .expect("the cancelling thread ran");
+
+    let wirings = agent.cancels.lock().expect("the script is not poisoned");
+    assert_eq!(wirings.len(), 2, "fresh, then reporting");
+    assert!(
+        wirings.iter().all(Cancel::is_cancelled),
+        "a wiring the handle does not reach",
+    );
 }
 
 #[test]

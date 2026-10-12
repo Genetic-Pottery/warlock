@@ -2489,6 +2489,51 @@ pub enum Drafted {
     Unusable(Defect),
 }
 
+/// The one agent a session talks to, and the cancel handle that reaches it.
+#[derive(Debug)]
+struct Conversation<C> {
+    agent: C,
+    cancel: Cancel,
+}
+
+impl<C: Converses> Conversation<C> {
+    /// A conversation of its own, as every `forman pull` spawn is: a run holds
+    /// one agent for every piece of work, and a wired copy of it would resume
+    /// the conversation of the piece before this one. Wired to a cancel minted
+    /// here, so cancelling reaches the child this conversation is running rather
+    /// than some other copy of the same agent.
+    fn fresh(agent: &C) -> Self {
+        let cancel = Cancel::new();
+        Self {
+            agent: agent.fresh().wired(cancel.clone(), Activities::none()),
+            cancel,
+        }
+    }
+
+    /// Re-wires rather than replaces the agent, so a cancel handle already
+    /// handed out still reaches the run.
+    fn reporting(self, activities: Activities) -> Self {
+        Self {
+            agent: self.agent.wired(self.cancel.clone(), activities),
+            cancel: self.cancel,
+        }
+    }
+
+    fn cancel(&self) -> Cancel {
+        self.cancel.clone()
+    }
+
+    fn turn(&self, message: &str) -> Result<String, agent::Error> {
+        self.agent.turn(message)
+    }
+}
+
+impl<C: Bounded> Conversation<C> {
+    fn at_turns(&mut self, turns: u32) {
+        self.agent = self.agent.at_turns(turns);
+    }
+}
+
 /// One slice's drafting conversation, driven a turn at a time by whoever owns
 /// it.
 ///
@@ -2536,8 +2581,7 @@ pub enum Drafted {
 /// ```
 #[derive(Debug)]
 pub struct Drafting<C> {
-    agent: C,
-    cancel: Cancel,
+    conversation: Conversation<C>,
     /// Taken by [`Drafting::open`], so the terms are said once: a second copy of
     /// them mid-conversation reads as a new set of rules rather than the old
     /// ones.
@@ -2560,11 +2604,8 @@ pub struct Drafting<C> {
 }
 
 impl<C: Converses> Drafting<C> {
-    /// A session aimed at one slice of one brief's scope.
-    ///
-    /// The agent is wired to a cancel handle minted here, so cancelling reaches
-    /// the child this session is actually running rather than some other copy of
-    /// the same agent. Nothing is spawned until [`open`](Drafting::open).
+    /// A session aimed at one slice of one brief's scope. Nothing is spawned
+    /// until [`open`](Drafting::open).
     #[must_use]
     pub fn for_slice(agent: &C, brief: &str, title: &str, prose: &str) -> Self {
         Self::under(
@@ -2601,10 +2642,8 @@ impl<C: Converses> Drafting<C> {
         contract: &str,
         rounds: usize,
     ) -> Self {
-        let cancel = Cancel::new();
         Self {
-            agent: agent.fresh().wired(cancel.clone(), Activities::none()),
-            cancel,
+            conversation: Conversation::fresh(agent),
             opening: Some(drafting_opening(brief, title, prose, contract)),
             brief: brief.to_owned(),
             title: title.to_owned(),
@@ -2615,21 +2654,17 @@ impl<C: Converses> Drafting<C> {
         }
     }
 
-    /// The same session reporting what it is seen doing.
-    ///
-    /// Re-wires rather than replaces the agent, so the cancel handle a caller may
-    /// already be holding still reaches the run.
     #[must_use]
-    pub fn reporting(mut self, activities: Activities) -> Self {
-        self.agent = self.agent.wired(self.cancel.clone(), activities);
-        self
+    pub fn reporting(self, activities: Activities) -> Self {
+        Self {
+            conversation: self.conversation.reporting(activities),
+            ..self
+        }
     }
 
-    /// The handle this session's turns run under. A clone, because the point of
-    /// it is to be pressed from a thread that is not the one waiting.
     #[must_use]
     pub fn cancel(&self) -> Cancel {
-        self.cancel.clone()
+        self.conversation.cancel()
     }
 
     /// How many more questions would be relayed rather than refused. Zero for
@@ -2674,7 +2709,7 @@ impl<C: Converses> Drafting<C> {
     }
 
     fn said(&mut self, message: &str) -> Result<Replied, agent::Error> {
-        let reply = self.agent.turn(message)?;
+        let reply = self.conversation.turn(message)?;
         match drafting::accept(&reply) {
             // Not JSON at all, and there is still a round to spend on it: the
             // one shape a question can arrive in. The two readings of prose meet
@@ -2713,7 +2748,7 @@ impl<C: Converses> Drafting<C> {
                     &self.prose,
                     rejected,
                 );
-                Ok(drafting::accept(&self.agent.turn(&asked)?))
+                Ok(drafting::accept(&self.conversation.turn(&asked)?))
             },
             |_, _| {},
         )?;
@@ -2852,8 +2887,7 @@ impl fmt::Display for Unsplit {
 /// ```
 #[derive(Debug)]
 pub struct Splitting<C> {
-    agent: C,
-    cancel: Cancel,
+    conversation: Conversation<C>,
     /// What the numbering spells each sub-task's identifier from, and the only
     /// thing here the engine's instructions never see: a pass told which board
     /// this ticket is on would write about the board.
@@ -2869,18 +2903,12 @@ pub struct Splitting<C> {
 }
 
 impl<C: Converses> Splitting<C> {
-    /// A session aimed at one pulled ticket.
-    ///
-    /// The agent is wired to a cancel handle minted here, so cancelling reaches
-    /// the child this session is actually running rather than some other copy of
-    /// the same agent. Nothing is spawned until [`run`](Splitting::run).
+    /// A session aimed at one pulled ticket. Nothing is spawned until
+    /// [`run`](Splitting::run).
     #[must_use]
     pub fn for_ticket(agent: &C, ticket: &str, title: &str, description: &str) -> Self {
-        let cancel = Cancel::new();
         Self {
-            // Its own conversation, for `Working::on`'s reason.
-            agent: agent.fresh().wired(cancel.clone(), Activities::none()),
-            cancel,
+            conversation: Conversation::fresh(agent),
             ticket: ticket.to_owned(),
             title: title.to_owned(),
             description: description.to_owned(),
@@ -2888,21 +2916,17 @@ impl<C: Converses> Splitting<C> {
         }
     }
 
-    /// The same session reporting what it is seen doing.
-    ///
-    /// Re-wires rather than replaces the agent, so the cancel handle a caller
-    /// may already be holding still reaches the run.
     #[must_use]
-    pub fn reporting(mut self, activities: Activities) -> Self {
-        self.agent = self.agent.wired(self.cancel.clone(), activities);
-        self
+    pub fn reporting(self, activities: Activities) -> Self {
+        Self {
+            conversation: self.conversation.reporting(activities),
+            ..self
+        }
     }
 
-    /// The handle this session's turns run under. A clone, because the point of
-    /// it is to be pressed from a thread that is not the one waiting.
     #[must_use]
     pub fn cancel(&self) -> Cancel {
-        self.cancel.clone()
+        self.conversation.cancel()
     }
 
     /// How many turns have been spent. Zero until [`run`](Splitting::run), and
@@ -2941,7 +2965,7 @@ impl<C: Converses> Splitting<C> {
     fn attempt(&mut self, rejected: &[Defect]) -> Result<splitting::Accepted, agent::Error> {
         self.attempts += 1;
         let asked = splitting::split_instructions(&self.title, &self.description, rejected);
-        Ok(splitting::accept(&self.agent.turn(&asked)?))
+        Ok(splitting::accept(&self.conversation.turn(&asked)?))
     }
 
     /// A fill that parsed, put through the engine's repair, ordered and named.
@@ -3165,8 +3189,7 @@ pub enum Worked {
 /// ```
 #[derive(Debug)]
 pub struct Working<C> {
-    agent: C,
-    cancel: Cancel,
+    conversation: Conversation<C>,
     /// The first attempt's prompt, kept whole: every retry is
     /// [`working_retry`] over this same text, so the brief, the ticket and the
     /// finished siblings cannot drift between one attempt and the next.
@@ -3181,41 +3204,30 @@ pub struct Working<C> {
 
 impl<C: Bounded> Working<C> {
     /// A session for one sub-task, opened with the prompt
-    /// [`working_opening`] built.
-    ///
-    /// The agent is wired to a cancel minted here, as a drafting session's is,
-    /// so stopping this session reaches the child it is actually running rather
-    /// than some other copy of the same agent. Nothing is spawned until
+    /// [`working_opening`] built. Nothing is spawned until
     /// [`run`](Working::run).
     #[must_use]
     pub fn on(agent: &C, opening: &str) -> Self {
-        let cancel = Cancel::new();
         Self {
-            // A conversation of its own, as every `forman pull` spawn is: the
-            // run holds one agent for every sub-task, and a wired copy of it
-            // would resume the sub-task before this one. A retry of this
-            // sub-task stays in this conversation; see `again`.
-            agent: agent.fresh().wired(cancel.clone(), Activities::none()),
-            cancel,
+            // A retry of this sub-task stays in this conversation; see `again`.
+            conversation: Conversation::fresh(agent),
             opening: opening.to_owned(),
             turns: WORKING_TURNS,
             attempts: 0,
         }
     }
 
-    /// The same session reporting what it is seen doing. Re-wires rather than
-    /// replaces, so a cancel handle already handed out still reaches the run.
     #[must_use]
-    pub fn reporting(mut self, activities: Activities) -> Self {
-        self.agent = self.agent.wired(self.cancel.clone(), activities);
-        self
+    pub fn reporting(self, activities: Activities) -> Self {
+        Self {
+            conversation: self.conversation.reporting(activities),
+            ..self
+        }
     }
 
-    /// The handle this session's attempts run under. A clone, because the point
-    /// of it is to be pressed from a thread that is not the one waiting.
     #[must_use]
     pub fn cancel(&self) -> Cancel {
-        self.cancel.clone()
+        self.conversation.cancel()
     }
 
     /// How many attempts have been spent. Zero until [`run`](Working::run), and
@@ -3236,7 +3248,7 @@ impl<C: Bounded> Working<C> {
         let mut message = self.opening.clone();
         loop {
             self.attempts += 1;
-            let worked = match self.agent.turn(&message) {
+            let worked = match self.conversation.turn(&message) {
                 Ok(reply) => Worked::Answered(working::accept(&reply)),
                 Err(error) => Worked::Halted(stopped_by(&error)),
             };
@@ -3273,7 +3285,7 @@ impl<C: Bounded> Working<C> {
             Worked::Halted(stopped) if stopped.retryable() => {
                 if *stopped == Stopped::TurnLimit {
                     self.turns = self.turns.saturating_mul(2);
-                    self.agent = self.agent.at_turns(self.turns);
+                    self.conversation.at_turns(self.turns);
                 }
                 Some(stopped.to_string())
             }
