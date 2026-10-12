@@ -114,13 +114,6 @@ pub(crate) struct Windows {
 }
 
 impl Windows {
-    pub(crate) const fn closed() -> Self {
-        Self {
-            scope: ScopePrompt::Closed,
-            record: RecordPrompt::Closed,
-        }
-    }
-
     fn asking(field: ScopeField) -> Self {
         Self {
             scope: ScopePrompt::Open(field),
@@ -151,10 +144,10 @@ pub(crate) fn scope_edit(
 ) -> Windows {
     match edited {
         Edited::Open(field) => Windows::asking(field),
-        Edited::Close => Windows::closed(),
+        Edited::Close => Windows::default(),
         Edited::Submit => match prompt.field() {
             Some(field) => scope_submit(app, manifest, repo_root, field),
-            None => Windows::closed(),
+            None => Windows::default(),
         },
     }
 }
@@ -188,7 +181,7 @@ pub(crate) fn scope_submit(
     match rescope(manifest, module, scope, RecordFields::default()) {
         Ok(rescoped) => {
             save(app, manifest, repo_root, rescoped.manifest);
-            Windows::closed()
+            Windows::default()
         }
         // The engine's sentence about the one rule that was broken, under the
         // field that broke it.
@@ -198,7 +191,7 @@ pub(crate) fn scope_submit(
         Err(ScopeRefusal::NeedsRecord { scope, .. }) => Windows::recording(module, &scope),
         Err(refusal) => {
             app.set_message(refusal.to_string());
-            Windows::closed()
+            Windows::default()
         }
     }
 }

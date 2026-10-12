@@ -504,7 +504,7 @@ fn a_run_that_failed_and_repaired_reports_the_failure_and_not_the_repair() {
         "{:?}",
         report.lines[0]
     );
-    assert_eq!((report.failed, report.total), (1, 3));
+    assert_eq!((report.lines.len(), report.total), (1, 3));
     assert_eq!(status_for(&Err(report.status())), 4);
     // And the repair is on stdout with the progress, where it belongs:
     // stderr is the list of directories to go and look at.
@@ -666,7 +666,7 @@ fn one_directory_failing_names_it_counts_it_and_leaves_the_rest_of_the_run_grant
         report.lines[0]
     );
     // The pair of counts: one directory of the three the run offered.
-    assert_eq!((report.failed, report.total), (1, 3));
+    assert_eq!((report.lines.len(), report.total), (1, 3));
     assert_eq!(
         report.status().to_string(),
         "1 of 3 directories failed — the manifest holds what the rest earned"
@@ -770,7 +770,7 @@ fn a_machine_with_no_model_names_every_directory_once_and_says_how_many_of_how_m
     }
     // And one line of arithmetic under them, which is the whole of what
     // stops a hundred identical sentences being illegible.
-    assert_eq!((report.failed, report.total), (3, 3));
+    assert_eq!((report.lines.len(), report.total), (3, 3));
     assert_eq!(
         report.status().to_string(),
         "3 of 3 directories failed — the manifest holds what the rest earned"

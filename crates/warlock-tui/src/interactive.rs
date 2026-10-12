@@ -360,7 +360,7 @@ impl<K: Seams> Session<K> {
     fn draw(&mut self, size: Size) -> io::Result<()> {
         self.reread_config();
         self.app.set_mouse_captured(self.mouse_captured);
-        self.app.set_working(if self.puller.in_flight().is_some() {
+        self.app.set_working(if self.puller.busy() {
             Some(Working::Pull)
         } else if self.cutter.running() || self.cutter.confirm().cutting().is_some() {
             Some(Working::Draft)

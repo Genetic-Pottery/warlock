@@ -221,9 +221,10 @@ fn naming(fields: &[RecordField]) -> String {
 
 // The shell's wording, because the shell is the door that prints every one of
 // these: the panel puts `NeedsRecord` and `BlankRecord` into the record window
-// instead of saying them. `Recorded` is the exception, worded for both doors. "nothing was written" ends the three record
-// sentences, because a refusal about a record is the one place a reader might
-// assume the scope went in and only the record did not.
+// instead of saying them, and `Recorded` is worded for both doors. Both record
+// refusals say "nothing was written", because a refusal about a record is the
+// one place a reader might assume the scope went in and only the record did
+// not.
 impl fmt::Display for ScopeRefusal {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {

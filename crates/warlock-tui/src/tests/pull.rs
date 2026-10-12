@@ -104,7 +104,7 @@ impl Ground {
         }
     }
 
-    fn prepared(&self) -> Prepared<'_> {
+    fn prepared(&self) -> Prepared {
         prepare(&self.manifest, self.root.path(), self.home.path(), SCOPE)
             .expect("the scope is recorded, held, and has a key bound")
     }
@@ -204,7 +204,7 @@ fn wrote(path: &str) -> Vec<Dirty> {
 /// `pull` spends once it has resolved a repository, a home and a scope.
 fn pull_with(
     ground: &Ground,
-    prepared: &Prepared<'_>,
+    prepared: &Prepared,
     ports: &Ports<'_, Boarding, Checkout, Forging, Slicing, Sessions>,
     ticket: Option<&str>,
     dry_run: bool,

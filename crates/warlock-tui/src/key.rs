@@ -110,9 +110,8 @@ pub fn key_forget(name: &str) -> Result<(), Error> {
 // seen. `masked` is passed rather than asked for here because a test has no
 // terminal, and the preamble's wording is the thing under test.
 //
-// That order is the part worth pinning, and it is `config::prompted`'s. The
-// preamble is flushed before the question is asked, because a person is about to
-// read it and answer; EOF is answered before anything is looked at; and the
+// That order is the part worth pinning. The preamble is flushed before the
+// question is asked, because a person is about to read it and answer; EOF is answered before anything is looked at; and the
 // confirmation names the file only after the engine has written it. The prompt
 // itself is the ask's, whichever of the two reads is underneath it.
 fn added<W: Write>(

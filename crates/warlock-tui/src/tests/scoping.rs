@@ -539,7 +539,7 @@ fn enter_sets_the_scope_and_leaves_the_document_and_the_grant_alone() {
         &field("crates/engine", "billing"),
     );
 
-    assert_eq!(windows, Windows::closed(), "the window is answered");
+    assert_eq!(windows, Windows::default(), "the window is answered");
     let written = saved(repo.path()).expect("the submit wrote the manifest");
     assert_eq!(
         written, manifest,
@@ -605,7 +605,7 @@ fn a_set_and_a_clear_both_leave_the_records_in_the_file() {
             &field("crates/engine", text),
         );
 
-        assert_eq!(windows, Windows::closed());
+        assert_eq!(windows, Windows::default());
         let written = saved(repo.path()).expect("the submit wrote the manifest");
         assert_eq!(
             written.scopes(),
@@ -639,7 +639,7 @@ fn enter_on_an_empty_field_clears_the_scope_and_keeps_the_grant() {
     );
 
     // Neither window: clearing is an answer, and there is no name to record.
-    assert_eq!(windows, Windows::closed());
+    assert_eq!(windows, Windows::default());
     let written = saved(repo.path()).expect("the submit wrote the manifest");
     assert_eq!(written, manifest);
     assert_eq!(
@@ -673,7 +673,7 @@ fn a_set_and_a_clear_leave_the_run_state_and_the_message_line_untouched() {
             &field("crates/engine", text),
         );
 
-        assert_eq!(windows, Windows::closed());
+        assert_eq!(windows, Windows::default());
         assert!(!app.is_pacting(), "writing {text:?} started a run");
         assert_eq!(app.pact_line(), None, "and put a progress line up");
         assert!(app.panel().account().is_none(), "and opened an account");
@@ -749,7 +749,7 @@ fn what_was_typed_is_folded_before_it_is_judged_and_stored() {
     // `Data-Plane` is not.
     assert_eq!(
         windows,
-        Windows::closed(),
+        Windows::default(),
         "the fold happened before the judge"
     );
     assert!(validate_scope("Data-Plane").is_err());
@@ -781,7 +781,7 @@ fn a_manifest_that_will_not_save_puts_its_reason_on_the_message_line() {
     // The reason goes on the footer and the window comes down off it; the
     // manifest this thread holds still says what is on disk, which is that
     // the scope was not changed.
-    assert_eq!(windows, Windows::closed());
+    assert_eq!(windows, Windows::default());
     assert!(
         app.message().is_some_and(|line| !line.is_empty()),
         "a save that failed said nothing"
@@ -808,7 +808,7 @@ fn a_directory_the_manifest_has_no_entry_for_writes_nothing_and_says_so() {
 
     // And no record window either: a name with nowhere to be written is
     // turned down before the three fields are asked for.
-    assert_eq!(windows, Windows::closed());
+    assert_eq!(windows, Windows::default());
     assert_eq!(saved(repo.path()), None, "something was written anyway");
     assert_eq!(manifest, pacts());
     let message = app.message().expect("the refusal said nothing");
@@ -879,7 +879,7 @@ fn typing_and_abandoning_move_the_prompt_and_nothing_else() {
             &ScopePrompt::open("crates/engine", "web"),
             Edited::Close,
         ),
-        Windows::closed(),
+        Windows::default(),
     );
     assert_eq!(saved(repo.path()), None, "typing wrote to disk");
     assert_eq!(manifest, pacts(), "typing edited the manifest");
@@ -902,7 +902,7 @@ fn a_submit_with_no_window_up_writes_nothing() {
         Edited::Submit,
     );
 
-    assert_eq!(windows, Windows::closed());
+    assert_eq!(windows, Windows::default());
     assert_eq!(saved(repo.path()), None);
     assert_eq!(manifest, pacts());
 }
@@ -1099,7 +1099,7 @@ fn a_name_that_already_has_a_record_is_written_with_no_second_window() {
 
     assert_eq!(
         windows,
-        Windows::closed(),
+        Windows::default(),
         "a recorded name was asked about"
     );
     assert_eq!(
@@ -1129,7 +1129,7 @@ fn an_empty_field_clears_the_scope_and_asks_for_no_record() {
         &field("crates/engine", ""),
     );
 
-    assert_eq!(windows, Windows::closed());
+    assert_eq!(windows, Windows::default());
     assert_eq!(scope_on(&manifest, "crates/engine"), None);
     assert_eq!(
         scope_on(

@@ -155,7 +155,6 @@ impl<W: Write> Progress<W> {
 #[derive(Debug)]
 struct Report {
     lines: Vec<String>,
-    failed: usize,
     total: usize,
 }
 
@@ -168,7 +167,7 @@ impl Report {
 
     fn status(&self) -> Error {
         Error::Failures {
-            failed: self.failed,
+            failed: self.lines.len(),
             total: self.total,
         }
     }
@@ -200,11 +199,7 @@ fn report(root: &Path, failures: &[pact::Failure], total: usize) -> Option<Repor
     if lines.is_empty() {
         return None;
     }
-    Some(Report {
-        failed: lines.len(),
-        lines,
-        total,
-    })
+    Some(Report { lines, total })
 }
 
 // The whole of the signal handling, and it is a flag and two lines. Two presses

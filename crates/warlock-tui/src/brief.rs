@@ -25,6 +25,7 @@ use std::path::{Path, PathBuf};
 use std::{fmt, fs, io};
 
 use crate::template::{self, brief_template, missing_sections};
+use crate::writing::{listing, sections};
 
 /// The name and content of the project a brief would become.
 ///
@@ -724,27 +725,6 @@ impl fmt::Display for ScopeBlockError {
 
 impl std::error::Error for ScopeBlockError {}
 
-// `## Outcome and ## Scope`, in `writing::missing_line`'s shape: a refusal
-// naming more than one section is read as a sentence, and a comma before the
-// last of them would be read as a third section.
-fn naming(missing: &[String]) -> String {
-    let named: Vec<String> = missing
-        .iter()
-        .map(|section| format!("## {section}"))
-        .collect();
-    listing(&named)
-}
-
-fn listing(named: &[String]) -> String {
-    let Some((last, rest)) = named.split_last() else {
-        return String::new();
-    };
-    if rest.is_empty() {
-        return last.clone();
-    }
-    format!("{} and {last}", rest.join(", "))
-}
-
 /// Every way a file is not a brief that can be known without asking the board.
 /// A failure to *send* one belongs to the side that opens the socket.
 #[derive(Debug)]
@@ -826,7 +806,7 @@ impl fmt::Display for Error {
                 f,
                 "`{}` is missing {}, so nothing was pushed",
                 path.display(),
-                naming(missing)
+                sections(missing)
             ),
         }
     }

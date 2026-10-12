@@ -63,7 +63,7 @@ use crate::linear::{
 };
 use crate::pacting::CancelGuard;
 use crate::pull::{
-    clean, nothing_ready, number_in, opened, passed_over, prepare, selection, unchanged,
+    Prepared, clean, nothing_ready, number_in, opened, passed_over, prepare, selection, unchanged,
 };
 use crate::pulling::{PullEvent, Pulled, Pulling, Splits, Ticket, Works, next_runnable};
 use crate::standing::Standing;
@@ -73,10 +73,11 @@ use crate::submission::Taking;
 // sequence that reads a tree and a queue and writes neither.
 const CHOICE_LOST: &str = "the pull stopped while choosing a ticket; nothing was read or changed";
 
-// Said of a lost run, and it promises far less: a run that died half-way through has a branch with commits on it and a record under the home
-// saying how far it got, which is what `/resume` and the next `/pull` read.
-const PULL_LOST: &str = "the pull stopped without saying how it went; the run record under your home says how far it \
-     got";
+// Said of a lost run, and it promises far less: a run that died half-way
+// through has a branch with commits on it and a record under the home saying
+// how far it got, which is what `/resume` and the next `/pull` read.
+const PULL_LOST: &str = "the pull stopped without saying how it went; the run record under \
+                         your home says how far it got";
 
 /// The pull a session is doing, if it is doing one, and every seam it spends.
 ///
@@ -167,27 +168,13 @@ struct Underway {
 /// Everything one pull is allowed to know, owned, because all of it crosses onto
 /// a worker.
 ///
-/// The manifest is cloned as a pact's is. The scope record is cloned rather than
-/// borrowed out of the manifest the loop holds: the run outlives the round that
-/// prepared it, and asking the manifest again on the worker could disagree with
-/// the boundary the reader was shown.
+/// The manifest is cloned as a pact's is. The scope record is the one
+/// [`Prepared`] cloned rather than one asked of the manifest again on the
+/// worker, which could disagree with the boundary the reader was shown.
 #[derive(Clone)]
 struct Work {
+    prepared: Prepared,
     manifest: Manifest,
-    root: PathBuf,
-    /// Where the run record goes, never under [`root`](Self::root).
-    home: PathBuf,
-    record: ScopeRecord,
-    /// The flattened sigils this machine holds, as the crossing check after every
-    /// session and the sessions' own system prompt take them.
-    held: Vec<String>,
-    /// The branch this checkout set with `warlock branch use`, or `None` for the
-    /// remote's default.
-    base: Option<String>,
-    /// The key the board is opened with, read on exactly one line — the opener's.
-    /// Nothing that prints is given this value, and the type it sits on has no
-    /// `Debug` at all.
-    value: String,
     /// The ticket somebody named, or `None` for the queue's own choice.
     named: Option<String>,
 }
@@ -348,6 +335,12 @@ where
         self.choosing.is_some()
     }
 
+    // `in_flight().is_some()` without wording a line on every draw; the two must
+    // answer alike.
+    pub(crate) fn busy(&self) -> bool {
+        self.underway.is_some() || self.confirm.undertaking().is_some() || self.choosing.is_some()
+    }
+
     /// The line a keystroke that races a pull is refused with, and `None` when
     /// nothing is in flight.
     ///
@@ -373,7 +366,7 @@ where
         let choosing = self.choosing.as_ref()?;
         Some(format!(
             "a pull of `{}` is choosing a ticket",
-            choosing.work.record.name()
+            choosing.work.prepared.record().name()
         ))
     }
 
@@ -416,13 +409,8 @@ where
         };
 
         let work = Work {
+            prepared,
             manifest: manifest.clone(),
-            root: repo_root.to_path_buf(),
-            home,
-            record: prepared.record().clone(),
-            held: prepared.held().to_vec(),
-            base: prepared.base().map(ToOwned::to_owned),
-            value: prepared.value().to_owned(),
             named: taking.ticket.clone(),
         };
         // Before the worker starts, so the thread says which queue is being read
@@ -478,7 +466,7 @@ where
         // The question goes up over the lines that report the reading: what a
         // reader is being asked to confirm is what they have just read.
         if let Some(undertook) = chose.undertook {
-            self.confirm = asking(&undertook, &choosing.work.record);
+            self.confirm = asking(&undertook, choosing.work.prepared.record());
             self.ready = Some(Ready {
                 work: choosing.work,
                 undertook,
@@ -1032,13 +1020,13 @@ fn chose<O: Opens, R: Repository>(
     }
     clean(repo)?;
 
-    let board = open.open(&work.value);
+    let board = open.open(work.prepared.value());
     let mut lines = Vec::new();
     let selected = selection(
         &board,
-        &work.record,
-        &work.home,
-        &work.root,
+        work.prepared.record(),
+        work.prepared.home(),
+        work.prepared.root(),
         work.named.as_deref(),
         &mut |line| lines.push(line),
     )?;
@@ -1047,7 +1035,7 @@ fn chose<O: Opens, R: Repository>(
     }
 
     let Some(issue) = selected.issue(work.named.as_deref())? else {
-        lines.push(nothing_ready(work.record.name()));
+        lines.push(nothing_ready(work.prepared.record().name()));
         return Ok(Chose {
             lines,
             undertook: None,
@@ -1067,19 +1055,26 @@ fn chose<O: Opens, R: Repository>(
     // What the dialog names, and the one thing here that is not the queue's: a run
     // this checkout already holds keeps the branch its record names and carries on
     // from the sub-task the loop would run next, and a ticket with no record is
-    // told the branch it will be given.
-    // `Runs` because it is the same failure the scan above has: a record under
-    // this home that cannot be read. The loop words its own with the same
-    // `pulls::Error` underneath, so the two say the same sentence.
-    let held = PullRun::find(&work.home, &work.root, &ticket.identifier)
-        .map_err(|source| Error::Runs { source })?;
+    // told the branch it will be given. A record that cannot be read is `Runs`,
+    // the failure the scan above has, and the loop words its own over the same
+    // `pulls::Error`, so the two say the same sentence.
+    let held = PullRun::find(
+        work.prepared.home(),
+        work.prepared.root(),
+        &ticket.identifier,
+    )
+    .map_err(|source| Error::Runs { source })?;
     let (branch, resuming) = match held.as_ref() {
         Some(run) => (
             run.branch().to_owned(),
             next_runnable(run).map(|next| next.id().to_owned()),
         ),
         None => (
-            branch_name(work.record.team_key(), ticket.number, &ticket.title),
+            branch_name(
+                work.prepared.record().team_key(),
+                ticket.number,
+                &ticket.title,
+            ),
             None,
         ),
     };
@@ -1113,8 +1108,8 @@ where
         move || {
             let Ready { work, undertook } = ready;
             let raised = spending.raises.raise(Raising {
-                scope: work.record.name(),
-                held: &work.held,
+                scope: work.prepared.record().name(),
+                held: work.prepared.held(),
                 events: events.clone(),
                 cancel: cancel.clone(),
                 stopping,
@@ -1124,7 +1119,7 @@ where
             // one line. Wrapped in the run's own say-when, so a run stopped by the
             // panel quitting tells the board nothing on its way out — see [`Quiet`].
             let board = Quiet {
-                inner: spending.open.open(&work.value),
+                inner: spending.open.open(work.prepared.value()),
                 cancel,
             };
             let repo = Committing {
@@ -1140,12 +1135,12 @@ where
                 split: &raised.split,
                 sessions: &raised.sessions,
                 freshen: &raised.freshen,
-                scope: &work.record,
+                scope: work.prepared.record(),
                 manifest: &work.manifest,
-                held: &work.held,
-                base: work.base.as_deref(),
-                root: &work.root,
-                home: &work.home,
+                held: work.prepared.held(),
+                base: work.prepared.base(),
+                root: work.prepared.root(),
+                home: work.prepared.home(),
                 progress: &mut progress,
             }
             .pull(&undertook.ticket.ticket());

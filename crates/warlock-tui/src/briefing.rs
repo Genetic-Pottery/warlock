@@ -93,9 +93,8 @@ pub fn brief() -> Result<(), Error> {
     )
 }
 
-// Split from `brief` for `config::prompted`'s reason: the environment is a
-// parameter, the line is a script and `out` collects what a reader would have
-// seen, so the whole conversation — the order the two files are read in, the
+// Split from `brief` so the environment is a parameter, the line is a script
+// and `out` collects what a reader would have seen: the whole conversation — the order the two files are read in, the
 // instruction that opens it, the blank line that sends a turn and the EOF that
 // ends it — runs against a temporary repository with nothing attached to stdin.
 fn briefing<C: Converses, K: Asks, W: Write>(

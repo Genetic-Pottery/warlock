@@ -221,10 +221,9 @@ impl<O: Opens> Pushes<O> {
     }
 
     fn send(&mut self, app: &mut App, ready: Prepared, now: Instant) {
-        if self.sending() {
-            saying(app, ALREADY_FILING, now);
-            return;
-        }
+        // `push` refused before the dialog that leads here was opened, and the
+        // dialog holds every key until it is answered.
+        debug_assert!(!self.sending(), "a second push reached send");
 
         let team = ready.destination().team_key().to_owned();
         // Before the worker starts, so the thread says which board is being

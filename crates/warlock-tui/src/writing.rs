@@ -276,14 +276,18 @@ fn taken_rule(stored: &str) -> String {
 }
 
 fn missing_line(missing: &[&str]) -> String {
-    let named: Vec<String> = missing
-        .iter()
-        .map(|section| format!("## {section}"))
-        .collect();
     format!(
         "the document is missing {}, so nothing was written",
-        listing(&named)
+        sections(missing)
     )
+}
+
+pub(crate) fn sections(missing: &[impl AsRef<str>]) -> String {
+    let named: Vec<String> = missing
+        .iter()
+        .map(|section| format!("## {}", section.as_ref()))
+        .collect();
+    listing(&named)
 }
 
 // `a, b and c`: a refusal that names more than one thing is read as a sentence,

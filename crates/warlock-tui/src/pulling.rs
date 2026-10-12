@@ -873,10 +873,7 @@ impl Pulled {
     /// two agree is an assertion in `tests/pull.rs` — this is the statement of
     /// what the loop thinks each ending is worth, held against what the shell
     /// actually returns.
-    #[allow(
-        dead_code,
-        reason = "read by the tests that hold `status_for` to these numbers"
-    )]
+    #[cfg(test)]
     pub(crate) const fn status(&self) -> u8 {
         match self {
             Self::Opened { .. } | Self::Unchanged { .. } => 0,
@@ -893,10 +890,7 @@ impl Pulled {
         }
     }
 
-    #[allow(
-        dead_code,
-        reason = "read by the tests; the door destructures the ending it words"
-    )]
+    #[cfg(test)]
     pub(crate) fn ticket(&self) -> &str {
         match self {
             Self::Opened { ticket, .. }

@@ -136,7 +136,7 @@ pub(crate) struct Ports<'a, O: Opens, R: Repository, F: Forge, S: Splits, W: Wor
 /// promised not to run.
 pub(crate) fn pulled<O: Opens, R: Repository, F: Forge, S: Splits, W: Works, P: Write>(
     manifest: &Manifest,
-    prepared: &Prepared<'_>,
+    prepared: &Prepared,
     named: Option<&str>,
     dry_run: bool,
     ports: &Ports<'_, O, R, F, S, W>,
@@ -184,7 +184,7 @@ pub(crate) fn pulled<O: Opens, R: Repository, F: Forge, S: Splits, W: Works, P: 
     held(progress).about(ticket.identifier);
 
     let pulled = {
-        let mut sink = |event: PullEvent| held(progress).on(event);
+        let mut sink = |event: PullEvent| held(progress).on(&event);
         Pulling {
             board: &board,
             repo: ports.repo,
@@ -226,13 +226,13 @@ pub(crate) fn pulled<O: Opens, R: Repository, F: Forge, S: Splits, W: Works, P: 
 /// A pull with every refusal that costs nothing already asked: the scope found in
 /// a `[[scope]]` record, the sigil for it held, and a key bound to this checkout.
 #[derive(Clone)]
-pub(crate) struct Prepared<'m> {
+pub(crate) struct Prepared {
     /// The repository the run commits in, and what the run record's directory is
     /// keyed by.
     root: PathBuf,
     /// Where that record goes, never under [`root`](Self::root).
     home: PathBuf,
-    record: &'m ScopeRecord,
+    record: ScopeRecord,
     /// The flattened sigils this machine holds, which the crossing check after
     /// every session is judged against and the session's own system prompt names.
     held: Vec<String>,
@@ -242,7 +242,7 @@ pub(crate) struct Prepared<'m> {
     value: String,
 }
 
-impl<'m> Prepared<'m> {
+impl Prepared {
     pub(crate) fn root(&self) -> &Path {
         &self.root
     }
@@ -251,8 +251,8 @@ impl<'m> Prepared<'m> {
         &self.home
     }
 
-    pub(crate) const fn record(&self) -> &'m ScopeRecord {
-        self.record
+    pub(crate) const fn record(&self) -> &ScopeRecord {
+        &self.record
     }
 
     pub(crate) fn held(&self) -> &[String] {
@@ -274,12 +274,12 @@ impl<'m> Prepared<'m> {
 
 // Hand-written for `Target`'s reason: this holds the key value, and a failing
 // assertion anywhere in the suite may print whatever is in scope.
-impl fmt::Debug for Prepared<'_> {
+impl fmt::Debug for Prepared {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Prepared")
             .field("root", &self.root)
             .field("home", &self.home)
-            .field("record", self.record)
+            .field("record", &self.record)
             .field("held", &self.held)
             .field("base", &self.base)
             .field("value", &"<redacted>")
@@ -295,12 +295,12 @@ impl fmt::Debug for Prepared<'_> {
 /// recorded scope this machine does not hold is a boundary and its own status.
 /// The key last, through the very [`resolve_filing`] a push and a draft go
 /// through, so an unbound checkout is told the same sentence by all three verbs.
-pub(crate) fn prepare<'m>(
-    manifest: &'m Manifest,
+pub(crate) fn prepare(
+    manifest: &Manifest,
     root: &Path,
     home: &Path,
     scope: &str,
-) -> Result<Prepared<'m>, Error> {
+) -> Result<Prepared, Error> {
     let Some(record) = manifest
         .scopes()
         .iter()
@@ -339,7 +339,7 @@ pub(crate) fn prepare<'m>(
     Ok(Prepared {
         root: root.to_path_buf(),
         home: home.to_path_buf(),
-        record,
+        record: record.clone(),
         held,
         base,
         value: target.value().to_owned(),
@@ -602,7 +602,7 @@ impl<W: Write> Progress<W> {
 
     /// What a test reads the run's output off. Nothing on the real road reads it
     /// again — the writer there is stdout, and the lines have already gone.
-    #[allow(dead_code, reason = "read by the tests that drive this door")]
+    #[cfg(test)]
     pub(crate) const fn written(&self) -> &W {
         &self.out
     }
@@ -611,8 +611,8 @@ impl<W: Write> Progress<W> {
         self.ticket = Some(ticket.to_owned());
     }
 
-    pub(crate) fn on(&mut self, event: PullEvent) {
-        if let PullEvent::Activity(activity) = &event {
+    pub(crate) fn on(&mut self, event: &PullEvent) {
+        if let PullEvent::Activity(activity) = event {
             let Some(line) = activity_line(activity) else {
                 return;
             };
@@ -627,7 +627,7 @@ impl<W: Write> Progress<W> {
             self.said = Some(line);
             return;
         }
-        if let PullEvent::Heading(heading) = &event {
+        if let PullEvent::Heading(heading) = event {
             self.subtask = match heading {
                 Heading::Subtask { id, .. } => Some(id.clone()),
                 Heading::Split { .. } | Heading::PullRequest { .. } => None,
@@ -724,7 +724,7 @@ impl Freshens for Freshener {
 /// wherever the session reports.
 fn watching<W: Write + Send + 'static>(progress: &Shared<W>) -> Activities {
     let progress = Arc::clone(progress);
-    Activities::new(move |activity| held(&progress).on(PullEvent::Activity(activity)))
+    Activities::new(move |activity| held(&progress).on(&PullEvent::Activity(activity)))
 }
 
 // Every refusal above is asked over values against a temporary repository and a

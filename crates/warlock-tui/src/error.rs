@@ -640,8 +640,7 @@ impl fmt::Display for Error {
             // the same engine answer, names the same scopes in the same order,
             // and offers the same two roads out.
             Self::ClosedScopeBelow { path, scopes } => {
-                let scopes: Vec<&str> = scopes.iter().map(String::as_str).collect();
-                write!(f, "{}", blocking_scopes_message(path, &scopes))
+                write!(f, "{}", blocking_scopes_message(path, scopes))
             }
             // The shell's road out of a record it will not rewrite, which the
             // panel has no flags to take.
