@@ -8,6 +8,7 @@
 //! [`Cut`], made from a [`Shape`]. A second copy of the layout arithmetic here
 //! would answer for a screen that was never drawn.
 
+use std::fmt::Display;
 use std::time::{Duration, Instant};
 
 use ratatui::Frame;
@@ -21,7 +22,7 @@ use warlock_engine::{NodeState, scope};
 // and the account's `Line` is what a row says. Both names are right where they
 // live, and this module is the one place both are in scope.
 use crate::account::{Account, Line as Entry, Voice};
-use crate::app::{App, Chrome, Focus, Row, Run, RunHeader, Sigils, Target, Working};
+use crate::app::{App, Chrome, Focus, Row, RunHeader, Sigils, Target, Working};
 use crate::colour::{CONVERSATION_COLOUR, FOCUS_COLOUR, GUIDE_COLOUR, SYSTEM_COLOUR, colour_for};
 use crate::composer::Composer;
 use crate::confirm::{Answer, Carry, Choice, Cutting, Filing, Review, Undertaking};
@@ -69,9 +70,9 @@ const MARK_MARGIN_ROWS: u16 = 1;
 
 const RUN_HEADER_HEIGHT: u16 = 2;
 
-const PACTING_RUN: &str = "pacting";
+pub(crate) const PACTING_RUN: &str = "pacting";
 
-const REFRESHING_RUN: &str = "refreshing";
+pub(crate) const REFRESHING_RUN: &str = "refreshing";
 
 const BAR_FILLED: &str = "█";
 
@@ -104,19 +105,19 @@ const HELP_KEY: &str = "?: help";
 
 const QUIT_KEY: &str = "q/Esc/Ctrl-C: quit";
 
-const KEYS: &[&str] = &[HELP_KEY];
+const KEYS: &[&str] = &[HELP_KEY, QUIT_KEY];
 
 const KEY_GAP: &str = "    ";
 
-// The order the footer gives keys up in as the terminal narrows. The quit key
-// is deliberately absent from both, so it is the one piece that survives every
-// width: a reader who cannot see how to leave has no way to find out. Everything
-// else is on the help sheet.
-const KEY_DROP_ORDER: &[&str] = &[HELP_KEY];
+// The order either footer gives keys up in as the terminal narrows. A key not
+// named here survives every width: the way out, because a reader who cannot see
+// how to leave has no way to find out, and during a run the cancel key, for
+// `PACTING_KEYS`' reason. Everything else is on the help sheet.
+const DROP_ORDER: &[&str] = &[HELP_KEY];
 
-fn laid_out_keys(width: usize, pieces: &[&str], drop_order: &[&str]) -> String {
+fn laid_out_keys(width: usize, pieces: &[&str]) -> String {
     let mut kept: Vec<&str> = pieces.to_vec();
-    for name in drop_order {
+    for name in DROP_ORDER {
         if display_width(&kept.join(KEY_GAP)) <= width {
             break;
         }
@@ -133,10 +134,6 @@ fn laid_out_keys(width: usize, pieces: &[&str], drop_order: &[&str]) -> String {
 // already dropped whole keys to reach this width, so an ellipsis there would
 // mark the one loss that is already visible and cost a column to do it.
 fn clipped(text: &str, width: usize) -> String {
-    if display_width(text) <= width {
-        return text.to_owned();
-    }
-
     fitted(text, width).to_owned()
 }
 
@@ -157,9 +154,7 @@ pub(crate) fn fitted(text: &str, columns: usize) -> &str {
 }
 
 fn keys_line(width: usize) -> String {
-    let mut pieces = KEYS.to_vec();
-    pieces.push(QUIT_KEY);
-    laid_out_keys(width, &pieces, KEY_DROP_ORDER)
+    laid_out_keys(width, KEYS)
 }
 
 // Esc is on the footer during a run because it stops meaning quit for as long as
@@ -171,10 +166,8 @@ const CANCEL_KEY: &str = "Esc: cancel";
 
 const PACTING_QUIT_KEY: &str = "q/Ctrl-C: quit";
 
-const PACTING_KEY_DROP_ORDER: &[&str] = &[HELP_KEY];
-
 fn pacting_keys_line(width: usize) -> String {
-    laid_out_keys(width, PACTING_KEYS, PACTING_KEY_DROP_ORDER)
+    laid_out_keys(width, PACTING_KEYS)
 }
 
 const FOOTER_HEIGHT: u16 = 3;
@@ -260,6 +253,9 @@ const DIALOG_MARGIN_ROWS: u16 = 1;
 
 const PUSH_QUESTION: &str = "File this brief to the board?";
 
+/// Also the cut and pull dialogs' team label, as [`PUSH_KEY`] is the cut
+/// dialog's key label: they label the same facts, and two spellings for one fact
+/// would read as two facts.
 const PUSH_TEAM: &str = "team ";
 
 /// The key is named and never shown, here as everywhere else warlock mentions
@@ -276,13 +272,6 @@ const CUT_STATUS: &str = "status ";
 
 const CUT_SLICES: &str = "slices ";
 
-/// The same two labels the push dialog uses, because they label the same two
-/// facts: the board a run would file to, and the name the key that signs it is
-/// held under. Two spellings for one fact would read as two facts.
-const CUT_TEAM: &str = PUSH_TEAM;
-
-const CUT_KEY: &str = PUSH_KEY;
-
 const PULL_QUESTION: &str = "Work this ticket to a pull request?";
 
 /// A question of its own rather than the one above with a word added, because
@@ -291,10 +280,6 @@ const PULL_QUESTION: &str = "Work this ticket to a pull request?";
 const PULL_RESUME_QUESTION: &str = "Resume this ticket and carry on working it?";
 
 const PULL_SCOPE: &str = "scope ";
-
-/// The same label the other two dialogs use, for [`CUT_TEAM`]'s reason: one
-/// spelling for one fact.
-const PULL_TEAM: &str = PUSH_TEAM;
 
 const PULL_BRANCH: &str = "branch ";
 
@@ -841,7 +826,7 @@ fn draw_run_header(frame: &mut Frame<'_>, area: Rect, header: &RunHeader) {
 fn run_header_line(header: &RunHeader, width: usize) -> String {
     let words = format!(
         "{} {} ({}/{})",
-        run_word(header.run()),
+        header.run().word(),
         header.directory(),
         header.completed(),
         header.total(),
@@ -864,13 +849,6 @@ fn run_header_line(header: &RunHeader, width: usize) -> String {
         ),
         width,
     )
-}
-
-const fn run_word(run: Run) -> &'static str {
-    match run {
-        Run::Pact => PACTING_RUN,
-        Run::Refresh => REFRESHING_RUN,
-    }
 }
 
 /// How far through the run the bar and the percentage both are, in whatever
@@ -1562,8 +1540,8 @@ impl<'a> Dialog<'a> {
             Line::from(PUSH_QUESTION).centered(),
             Line::default(),
             Line::from(filing.project()).bold().centered(),
-            Line::from(team_line(filing)).dim().centered(),
-            Line::from(key_line(filing)).dim().centered(),
+            labelled(PUSH_TEAM, filing.destination().team_key()),
+            labelled(PUSH_KEY, filing.destination().key()),
             Line::default(),
             answers_line(filing.answer()),
         ])
@@ -1574,10 +1552,10 @@ impl<'a> Dialog<'a> {
             Line::from(CUT_QUESTION).centered(),
             Line::default(),
             Line::from(cutting.project()).bold().centered(),
-            Line::from(status_line(cutting)).dim().centered(),
-            Line::from(slices_line(cutting)).dim().centered(),
-            Line::from(cut_team_line(cutting)).dim().centered(),
-            Line::from(cut_key_line(cutting)).dim().centered(),
+            labelled(CUT_STATUS, cutting.status()),
+            labelled(CUT_SLICES, cutting.slices()),
+            labelled(PUSH_TEAM, cutting.team()),
+            labelled(PUSH_KEY, cutting.key()),
             Line::default(),
             answers_line(cutting.answer()),
         ])
@@ -1589,9 +1567,9 @@ impl<'a> Dialog<'a> {
             Line::default(),
             Line::from(undertaking.ticket()).bold().centered(),
             Line::from(undertaking.title()).centered(),
-            Line::from(pull_scope_line(undertaking)).dim().centered(),
-            Line::from(pull_team_line(undertaking)).dim().centered(),
-            Line::from(pull_branch_line(undertaking)).dim().centered(),
+            labelled(PULL_SCOPE, undertaking.scope()),
+            labelled(PUSH_TEAM, undertaking.team()),
+            labelled(PULL_BRANCH, undertaking.branch()),
         ];
         // The one row a fresh pull does not draw, said where the branch is said
         // because it is the same kind of fact: where the next session picks the
@@ -1744,30 +1722,6 @@ pub(crate) fn help_most_scroll(size: Size) -> u16 {
         .saturating_sub(shown)
 }
 
-fn team_line(filing: &Filing) -> String {
-    format!("{PUSH_TEAM}{}", filing.destination().team_key())
-}
-
-fn key_line(filing: &Filing) -> String {
-    format!("{PUSH_KEY}{}", filing.destination().key())
-}
-
-fn status_line(cutting: &Cutting) -> String {
-    format!("{CUT_STATUS}{}", cutting.status())
-}
-
-fn slices_line(cutting: &Cutting) -> String {
-    format!("{CUT_SLICES}{}", cutting.slices())
-}
-
-fn cut_team_line(cutting: &Cutting) -> String {
-    format!("{CUT_TEAM}{}", cutting.team())
-}
-
-fn cut_key_line(cutting: &Cutting) -> String {
-    format!("{CUT_KEY}{}", cutting.key())
-}
-
 // Which question is being asked, off the one fact that tells the two runs
 // apart: see [`PULL_RESUME_QUESTION`].
 fn pull_question(undertaking: &Undertaking) -> &'static str {
@@ -1776,18 +1730,6 @@ fn pull_question(undertaking: &Undertaking) -> &'static str {
     } else {
         PULL_QUESTION
     }
-}
-
-fn pull_scope_line(undertaking: &Undertaking) -> String {
-    format!("{PULL_SCOPE}{}", undertaking.scope())
-}
-
-fn pull_team_line(undertaking: &Undertaking) -> String {
-    format!("{PULL_TEAM}{}", undertaking.team())
-}
-
-fn pull_branch_line(undertaking: &Undertaking) -> String {
-    format!("{PULL_BRANCH}{}", undertaking.branch())
 }
 
 fn pull_from_line(undertaking: &Undertaking) -> Option<String> {
@@ -1811,6 +1753,10 @@ fn review_answers_line(review: &Review) -> Line<'static> {
         Span::styled(REVIEW_FEEDBACK, style(Choice::Feedback)),
     ])
     .centered()
+}
+
+fn labelled(label: &str, value: impl Display) -> Line<'static> {
+    Line::from(format!("{label}{value}")).dim().centered()
 }
 
 fn review_read_line(review: &Review) -> String {

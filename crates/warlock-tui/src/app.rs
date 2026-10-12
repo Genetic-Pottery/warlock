@@ -46,7 +46,6 @@ pub(crate) struct Row {
     /// A file row carries the state of the directory holding it, which is what
     /// makes a file take its module's colour.
     pub state: NodeState,
-    pub children: usize,
     pub file: bool,
     /// Set on the one file row that is its directory's own `.warlock.md`. Kept
     /// on the row because the comparison against the node's document cannot be
@@ -72,7 +71,6 @@ impl Row {
             path: path.into(),
             document: document.into_document(),
             state,
-            children: 0,
             file: false,
             document_row: false,
             ignored: false,
@@ -86,12 +84,6 @@ impl Row {
             file: true,
             ..Self::new(depth, path, None, state)
         }
-    }
-
-    #[must_use]
-    pub(crate) const fn with_child_count(mut self, children: usize) -> Self {
-        self.children = children;
-        self
     }
 
     #[must_use]
@@ -110,12 +102,6 @@ impl Row {
     pub(crate) fn with_scope(mut self, scope: Option<String>) -> Self {
         self.scope = scope;
         self
-    }
-
-    #[must_use]
-    #[cfg(test)]
-    pub(crate) const fn has_children(&self) -> bool {
-        self.children > 0
     }
 
     #[must_use]
@@ -156,6 +142,15 @@ pub(crate) enum PactIntent {
 pub(crate) enum Run {
     Pact,
     Refresh,
+}
+
+impl Run {
+    pub(crate) const fn word(self) -> &'static str {
+        match self {
+            Self::Pact => crate::ui::PACTING_RUN,
+            Self::Refresh => crate::ui::REFRESHING_RUN,
+        }
+    }
 }
 
 // The board work the workflow strip lights. Not a second `Run`: a pact is the
@@ -684,12 +679,14 @@ impl App {
     pub(crate) fn pact_line(&self) -> Option<String> {
         self.status.in_flight.as_ref().map(|in_flight| {
             let label = self.label_for(&in_flight.path);
-            let line = match in_flight.run {
-                // Finished, not started, the same as the bar and the header:
-                // see `RunHeader::completed`.
-                Run::Pact => pacting_message(&label, in_flight.done(), in_flight.total),
-                Run::Refresh => refreshing_message(&label, in_flight.done(), in_flight.total),
-            };
+            // Finished, not started, the same as the bar and the header: see
+            // `RunHeader::completed`.
+            let line = format!(
+                "{} {label} ({}/{})",
+                in_flight.run.word(),
+                in_flight.done(),
+                in_flight.total
+            );
             if self.status.pact_refused {
                 already_running_message(&line)
             } else {
@@ -1254,10 +1251,10 @@ impl App {
             // zeroes that never described those rows, and nudging one field up
             // while the other cannot come down would turn a tally that is
             // merely absent into one that counts a node that is not there.
-            let old = count_mut(&mut self.counts, row.state);
+            let old = self.counts.get_mut(row.state);
             if let Some(fewer) = old.checked_sub(1) {
                 *old = fewer;
-                *count_mut(&mut self.counts, state) += 1;
+                *self.counts.get_mut(state) += 1;
             }
         }
 
@@ -1425,7 +1422,6 @@ fn walk_of(tree: &Tree) -> Vec<Row> {
     for (node, depth) in tree.walk() {
         rows.push(
             Row::new(depth, node.path.clone(), node.document.clone(), node.state)
-                .with_child_count(node.children.len())
                 .with_ignored(node.is_ignored())
                 .with_scope(node.scope.clone()),
         );
@@ -1533,14 +1529,6 @@ fn left_on_disk_message(label: &str) -> String {
     )
 }
 
-fn pacting_message(label: &str, done: usize, total: usize) -> String {
-    format!("pacting {label} ({done}/{total})")
-}
-
-fn refreshing_message(label: &str, done: usize, total: usize) -> String {
-    format!("refreshing {label} ({done}/{total})")
-}
-
 fn already_fresh_message(label: &str) -> String {
     format!("{label} is already fresh — there is nothing under it to describe again")
 }
@@ -1583,14 +1571,6 @@ fn ignored_row_message(label: &str) -> String {
     format!(
         "{label} is kept out by .warlockignore — Warlock covers nothing in there, so there is nothing to pact"
     )
-}
-
-fn count_mut(counts: &mut StateCounts, state: NodeState) -> &mut usize {
-    match state {
-        NodeState::Unpacted => &mut counts.unpacted,
-        NodeState::PactedStale => &mut counts.pacted_stale,
-        NodeState::PactedFresh => &mut counts.pacted_fresh,
-    }
 }
 
 #[cfg(test)]

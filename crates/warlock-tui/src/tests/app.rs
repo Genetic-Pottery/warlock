@@ -61,14 +61,13 @@ fn three_rows() -> Vec<Row> {
 
 fn rooted_rows() -> Vec<Row> {
     vec![
-        Row::new(0, "/repo", "/repo/.warlock.md", NodeState::PactedStale).with_child_count(1),
+        Row::new(0, "/repo", "/repo/.warlock.md", NodeState::PactedStale),
         Row::new(
             1,
             "/repo/crates",
             "/repo/crates/.warlock.md",
             NodeState::PactedStale,
-        )
-        .with_child_count(1),
+        ),
         Row::new(
             2,
             "/repo/crates/warlock-engine",
@@ -1213,7 +1212,7 @@ fn a_file_row_is_refused_in_the_pact_keys_own_words() {
 
 fn rows_with_one_kept_out() -> Vec<Row> {
     vec![
-        Row::new(0, "repo", "repo/.warlock.md", NodeState::PactedStale).with_child_count(2),
+        Row::new(0, "repo", "repo/.warlock.md", NodeState::PactedStale),
         // Kept out by the rules: unpacted like any other unpacted directory,
         // and carrying no state of its own for being excluded.
         Row::new(1, "repo/notes", None, NodeState::Unpacted).with_ignored(true),
@@ -2263,26 +2262,6 @@ fn a_fresh_app_has_nothing_collapsed_and_draws_the_whole_walk() {
 
     assert!(app.collapsed().is_empty());
     assert_eq!(drawn(&app), whole_fixture());
-    // And it knows which of those rows could be collapsed at all. The
-    // document rows drawn beside them stand for files, which the tree knows
-    // nothing about and which hold nothing.
-    for row in app.rows().iter().filter(|row| !row.is_file()) {
-        assert_eq!(
-            row.children,
-            children_in_fixture(&row.path),
-            "child count for {}",
-            row.path.display()
-        );
-        assert_eq!(row.has_children(), row.children > 0);
-    }
-}
-
-fn children_in_fixture(path: &Path) -> usize {
-    fixture::tree()
-        .find(path)
-        .expect("the row came from the fixture")
-        .children
-        .len()
 }
 
 #[test]
@@ -2414,7 +2393,7 @@ fn toggling_a_node_with_nothing_under_it_changes_nothing_at_all() {
     // a leaf there is a row with something under it now.
     let mut app = select(
         App::from_rows(vec![
-            Row::new(0, "repo", "repo/.warlock.md", NodeState::PactedStale).with_child_count(1),
+            Row::new(0, "repo", "repo/.warlock.md", NodeState::PactedStale),
             Row::new(1, "repo/crates", None, NodeState::Unpacted),
         ]),
         "repo/crates",
@@ -2544,9 +2523,9 @@ fn collapsing_a_directory_leaves_a_sibling_whose_name_it_prefixes_alone() {
 }
 
 #[test]
-fn rows_from_a_bare_list_collapse_only_where_they_claim_children() {
+fn rows_from_a_bare_list_collapse_only_where_a_deeper_row_follows() {
     let mut app = App::from_rows(vec![
-        Row::new(0, "repo", "repo/.warlock.md", NodeState::PactedStale).with_child_count(1),
+        Row::new(0, "repo", "repo/.warlock.md", NodeState::PactedStale),
         Row::new(1, "repo/crates", None, NodeState::Unpacted),
     ]);
 
@@ -2555,7 +2534,7 @@ fn rows_from_a_bare_list_collapse_only_where_they_claim_children() {
 
     app.toggle_collapsed();
     assert_eq!(drawn(&app), ["repo", "repo/crates"]);
-    // The child, which claims none of its own, is not collapsible.
+    // The child, with nothing deeper after it, is not collapsible.
     app.select_next();
     app.toggle_collapsed();
     assert!(app.collapsed().is_empty());
@@ -2763,7 +2742,7 @@ fn collapsing_under_the_filter_hides_descendants_as_it_always_did() {
 #[test]
 fn nothing_pacted_narrows_to_nothing_at_all() {
     let mut app = App::from_rows(vec![
-        Row::new(0, "repo", "repo/.warlock.md", NodeState::Unpacted).with_child_count(1),
+        Row::new(0, "repo", "repo/.warlock.md", NodeState::Unpacted),
         Row::new(1, "repo/crates", None, NodeState::Unpacted),
     ]);
 
@@ -2924,7 +2903,6 @@ fn a_documented_directory_draws_its_document_beneath_it_and_an_undocumented_one_
         assert_eq!(document.state, directory.state);
         assert_eq!(document.is_ignored(), directory.is_ignored());
         assert_eq!(document.document, None);
-        assert!(!document.has_children());
     }
     assert!(app.rows()[4].is_ignored(), "the excluded one is excluded");
 
@@ -3022,7 +3000,6 @@ fn a_documented_childless_directory_collapses_with_the_files_hidden() {
     // with something under it is a row the collapse key has work to do on.
     let mut app = app_selecting("warlock/assets");
 
-    assert!(app.selected_row().is_some_and(|row| !row.has_children()));
     assert!(app.can_collapse(app.selected()));
 
     app.toggle_collapsed();
@@ -3115,8 +3092,6 @@ fn a_file_row_documents_nothing_contains_nothing_and_takes_its_modules_state() {
             "{} claims a document",
             row.path.display()
         );
-        assert_eq!(row.children, 0);
-        assert!(!row.has_children());
         let directory = row.path.parent().expect("a file sits in a directory");
         let node = tree.find(directory).expect("the file came from that node");
         assert_eq!(
@@ -3315,8 +3290,7 @@ fn collapsing_a_directory_hides_its_files_with_it_and_expanding_puts_them_back()
 fn a_directory_holding_only_files_collapses_exactly_when_the_files_are_shown() {
     // `repo/assets` has no child directories, no document and lists one
     // file, so whether anything is under it is the file toggle's answer and
-    // not the tree's. Asking the tree — `Row::children`, which is 0 here —
-    // is what used to leave the key doing nothing at all on such a row.
+    // not the tree's.
     let tree =
         Tree::new(
             Node::new("repo", "repo/.warlock.md", NodeState::PactedStale)
@@ -3327,7 +3301,6 @@ fn a_directory_holding_only_files_collapses_exactly_when_the_files_are_shown() {
     let selected = app.selected();
 
     assert!(!app.can_collapse(selected), "nothing is drawn under it");
-    assert!(app.selected_row().is_some_and(|row| !row.has_children()));
 
     app.toggle_collapsed();
     assert!(app.collapsed().is_empty(), "and the key refuses it");
@@ -3350,8 +3323,8 @@ fn a_directory_the_filter_has_emptied_does_not_collapse() {
     // and the pacted-only view takes it away. A row with nothing under it is
     // a row with nothing to hide, whichever filter emptied it.
     let mut app = App::from_rows(vec![
-        Row::new(0, "repo", "repo/.warlock.md", NodeState::PactedStale).with_child_count(1),
-        Row::new(1, "repo/crates", None, NodeState::Unpacted).with_child_count(1),
+        Row::new(0, "repo", "repo/.warlock.md", NodeState::PactedStale),
+        Row::new(1, "repo/crates", None, NodeState::Unpacted),
         Row::new(2, "repo/crates/tui", None, NodeState::Unpacted),
     ]);
 
@@ -3361,10 +3334,6 @@ fn a_directory_the_filter_has_emptied_does_not_collapse() {
 
     assert_eq!(drawn(&app), ["repo"], "the unpacted pair is filtered out");
     assert!(!app.can_collapse(0), "so the root holds nothing");
-    assert!(
-        app.selected_row().is_some_and(Row::has_children),
-        "though the tree still says it has a child"
-    );
 
     app.toggle_collapsed();
     assert!(app.collapsed().is_empty());
@@ -3461,7 +3430,7 @@ fn showing_files_leaves_the_window_in_range_with_the_selection_in_it() {
 #[test]
 fn a_bare_list_of_rows_can_hold_files_too_and_starts_with_them_hidden() {
     let app = App::from_rows(vec![
-        Row::new(0, "repo", "repo/.warlock.md", NodeState::PactedStale).with_child_count(1),
+        Row::new(0, "repo", "repo/.warlock.md", NodeState::PactedStale),
         Row::file(1, "repo/.warlock.md", NodeState::PactedStale),
         Row::new(1, "repo/crates", None, NodeState::Unpacted),
     ]);
@@ -6478,7 +6447,6 @@ fn an_inserted_file_row_is_a_file_row_in_its_directorys_colour_now() {
     assert_eq!(row.depth, 2);
     assert_eq!(row.state, NodeState::PactedFresh);
     assert_eq!(row.document, None);
-    assert_eq!(row.children, 0);
     assert!(!row.is_ignored());
 }
 

@@ -12,21 +12,20 @@ use warlock_engine::{Destination, NodeState, scope};
 use super::{
     BAR_EMPTY, BAR_FILLED, BAR_MIN_WIDTH, BORDER_THICKNESS, CANCEL_KEY, CARRY_LEFT, CARRY_QUESTION,
     COMPOSER_CURSOR, COMPOSER_MIN_HEIGHT, CONFIRM_ANSWER_GAP, CONFIRM_NO, CONFIRM_QUESTION,
-    CONFIRM_YES, CUT_KEY, CUT_QUESTION, CUT_SLICES, CUT_STATUS, CUT_TEAM, Carry, Cut,
-    DIALOG_MARGIN, DIALOG_MARGIN_ROWS, Dialog, ELLIPSIS, FOOTER_HEIGHT, GUIDE, GUIDE_BRANCH,
-    GUIDE_LAST, HELP_KEY, Hit, IDENTITY_MIN_WIDTH, INDENT, KEY_DROP_ORDER, KEY_GAP, KEYS, LIVE_KEY,
-    MARK, MARK_MARGIN, MARK_MARGIN_ROWS, NO_MARKER, NOTE_MARKER, PACTING_KEYS, PACTING_RUN,
-    PANEL_INDENT, PATH_HEADING, PATH_RULES, PERCENT_WIDTH, PULL_BRANCH, PULL_FROM, PULL_QUESTION,
-    PULL_RESUME_QUESTION, PULL_SCOPE, PULL_TEAM, PUSH_KEY, PUSH_QUESTION, PUSH_TEAM, QUIT_KEY,
-    RECORD_HEADING, RECORD_LABEL_GAP, RECORD_RULES, REFRESHING_RUN, REVIEW_ANSWER_GAP,
-    REVIEW_CREATE, REVIEW_EDIT, REVIEW_FEEDBACK, REVIEW_QUESTION, REVIEW_READ, REVIEW_SKIP,
-    RUN_HEADER_HEIGHT, Reach, Review, SAID_MARKER, SCOPE_CURSOR, SCOPE_HEADING, SCROLLBACK_ARROW,
-    SELECTED, SELECTION_MARKER, SIGILS_MOST_LINES, SIGILS_TITLE, Shape, THREAD_TITLE,
-    TREE_MIN_ROWS, TREE_MIN_WIDTH, TREE_PERCENT, WILDCARD, WORKFLOW_LIT, composer_on_screen,
-    display_width, draw, footer_text_area, guide_prefixes, help_most_scroll, identity_title,
-    keys_line, label_width, mark_area, pacting_keys_line, pane_inner, panel_row, panel_width,
-    run_header_line, sigil_line_count, sigil_lines, target_title, tree_column, tree_width,
-    truncated, workflow_line,
+    CONFIRM_YES, CUT_QUESTION, CUT_SLICES, CUT_STATUS, Carry, Cut, DIALOG_MARGIN,
+    DIALOG_MARGIN_ROWS, DROP_ORDER, Dialog, ELLIPSIS, FOOTER_HEIGHT, GUIDE, GUIDE_BRANCH,
+    GUIDE_LAST, HELP_KEY, Hit, IDENTITY_MIN_WIDTH, INDENT, KEY_GAP, KEYS, LIVE_KEY, MARK,
+    MARK_MARGIN, MARK_MARGIN_ROWS, NO_MARKER, NOTE_MARKER, PACTING_KEYS, PACTING_RUN, PANEL_INDENT,
+    PATH_HEADING, PATH_RULES, PERCENT_WIDTH, PULL_BRANCH, PULL_FROM, PULL_QUESTION,
+    PULL_RESUME_QUESTION, PULL_SCOPE, PUSH_KEY, PUSH_QUESTION, PUSH_TEAM, QUIT_KEY, RECORD_HEADING,
+    RECORD_LABEL_GAP, RECORD_RULES, REFRESHING_RUN, REVIEW_ANSWER_GAP, REVIEW_CREATE, REVIEW_EDIT,
+    REVIEW_FEEDBACK, REVIEW_QUESTION, REVIEW_READ, REVIEW_SKIP, RUN_HEADER_HEIGHT, Reach, Review,
+    SAID_MARKER, SCOPE_CURSOR, SCOPE_HEADING, SCROLLBACK_ARROW, SELECTED, SELECTION_MARKER,
+    SIGILS_MOST_LINES, SIGILS_TITLE, Shape, THREAD_TITLE, TREE_MIN_ROWS, TREE_MIN_WIDTH,
+    TREE_PERCENT, WILDCARD, WORKFLOW_LIT, composer_on_screen, display_width, draw,
+    footer_text_area, guide_prefixes, help_most_scroll, identity_title, keys_line, label_width,
+    mark_area, pacting_keys_line, pane_inner, panel_row, panel_width, run_header_line,
+    sigil_line_count, sigil_lines, target_title, tree_column, tree_width, truncated, workflow_line,
 };
 use crate::account::{Line as Entry, Outcome};
 use crate::app::{App, Chrome, Focus, Held, Row, Run, Sigils, Working};
@@ -113,15 +112,14 @@ const SCOPE_ROOM_WIDTH: u16 = 160;
 
 fn labelled_rows(scope: Option<&str>, state: NodeState) -> Vec<Row> {
     vec![
-        Row::new(0, "warlock", "warlock/.warlock.md", NodeState::Unpacted).with_child_count(1),
+        Row::new(0, "warlock", "warlock/.warlock.md", NodeState::Unpacted),
         Row::new(
             1,
             format!("warlock/{SCOPED_NAME}"),
             format!("warlock/{SCOPED_NAME}/.warlock.md"),
             state,
         )
-        .with_scope(scope.map(str::to_owned))
-        .with_child_count(2),
+        .with_scope(scope.map(str::to_owned)),
         Row::new(
             2,
             format!("warlock/{SCOPED_NAME}/widgets"),
@@ -813,7 +811,7 @@ fn the_guides_of_a_scrolled_window_are_the_ones_the_rows_above_it_earned() {
     // from `a` — a row above the window — and whose corner says it is the
     // last of `a`'s. Neither fact is on the row itself.
     let rows = vec![
-        Row::new(0, "repo", None, NodeState::Unpacted).with_child_count(2),
+        Row::new(0, "repo", None, NodeState::Unpacted),
         Row::new(1, "repo/a", None, NodeState::Unpacted),
         Row::file(2, "repo/a/one", NodeState::Unpacted),
         Row::file(2, "repo/a/two", NodeState::Unpacted),
@@ -963,8 +961,8 @@ fn a_directory_with_nothing_under_it_carries_neither_marker() {
     // no fixture directory is a row with nothing under it any more.
     let rows = || {
         vec![
-            Row::new(0, "repo", "repo/.warlock.md", NodeState::PactedStale).with_child_count(2),
-            Row::new(1, "repo/crates", None, NodeState::Unpacted).with_child_count(1),
+            Row::new(0, "repo", "repo/.warlock.md", NodeState::PactedStale),
+            Row::new(1, "repo/crates", None, NodeState::Unpacted),
             Row::new(
                 2,
                 "repo/crates/engine",
@@ -1523,7 +1521,7 @@ fn the_header_and_footer_stay_put_while_the_tree_scrolls_under_them() {
         // nothing to say, which is the whole of this walk.
         //
         // The way out is the name looked for because it is the one name no
-        // width gives up — see `KEY_DROP_ORDER`.
+        // width gives up — see `DROP_ORDER`.
         assert!(
             footer.iter().any(|line| line.contains("unpacted"))
                 && footer.iter().any(|line| line.contains(QUIT_KEY)),
@@ -1959,7 +1957,7 @@ fn the_drawn_keys_line_never_outgrows_the_terminal_it_is_drawn_on() {
 
 #[test]
 fn the_keys_line_gives_its_names_up_in_order_rather_than_losing_its_tail() {
-    let pieces: Vec<&str> = KEYS.iter().copied().chain([QUIT_KEY]).collect();
+    let pieces: Vec<&str> = KEYS.to_vec();
     let whole = pieces.join(KEY_GAP);
     let full = display_width(&whole);
     // A terminal with room for all of it gets all of it.
@@ -1967,7 +1965,7 @@ fn the_keys_line_gives_its_names_up_in_order_rather_than_losing_its_tail() {
 
     // The order this line's names are expected to go in: the documented
     // one, which names every key on the footer but the way out.
-    let expected: Vec<&str> = KEY_DROP_ORDER.to_vec();
+    let expected: Vec<&str> = DROP_ORDER.to_vec();
     assert_eq!(expected, vec![HELP_KEY]);
 
     // Column by column down from the whole line, noting each name as it
@@ -2084,14 +2082,7 @@ fn a_footer_with_room_for_every_key_draws_three_dim_lines_and_gives_nothing_up()
         .map(|state| format!("{} {}", tree.counts().get(*state), super::noun(*state)))
         .collect();
     assert_eq!(footer_line(&buffer, 0), tally.join("  "));
-    assert_eq!(
-        footer_line(&buffer, 1),
-        KEYS.iter()
-            .copied()
-            .chain([QUIT_KEY])
-            .collect::<Vec<&str>>()
-            .join(KEY_GAP)
-    );
+    assert_eq!(footer_line(&buffer, 1), KEYS.join(KEY_GAP));
     assert_eq!(footer_line(&buffer, 2), "nothing to refresh");
 
     // The keys and the message are dim, every column of them, and the tally
@@ -6620,8 +6611,8 @@ fn the_cut_dialog_names_the_project_the_status_the_slices_the_team_and_the_key_b
     let project = on(CUT_PROJECT);
     let status = on(&format!("{CUT_STATUS}{CUT_STATUS_NAME}"));
     let slices = on(&format!("{CUT_SLICES}{CUT_SLICE_COUNT}"));
-    let team = on(&format!("{CUT_TEAM}{PUSH_TEAM_NAME}"));
-    let key = on(&format!("{CUT_KEY}{PUSH_KEY_NAME}"));
+    let team = on(&format!("{PUSH_TEAM}{PUSH_TEAM_NAME}"));
+    let key = on(&format!("{PUSH_KEY}{PUSH_KEY_NAME}"));
     let answers = on(CONFIRM_YES.trim());
 
     assert!(question < project, "{rows:?}");
@@ -6798,7 +6789,7 @@ fn the_pull_dialog_names_the_ticket_the_title_the_scope_the_team_and_the_branch(
     let ticket = on(PULL_TICKET);
     let title = on(PULL_TITLE);
     let scope = on(&format!("{PULL_SCOPE}{PULL_SCOPE_NAME}"));
-    let team = on(&format!("{PULL_TEAM}{PUSH_TEAM_NAME}"));
+    let team = on(&format!("{PUSH_TEAM}{PUSH_TEAM_NAME}"));
     let branch = on(&format!("{PULL_BRANCH}{PULL_BRANCH_NAME}"));
     let answers = on(CONFIRM_YES.trim());
 

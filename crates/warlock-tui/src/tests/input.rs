@@ -970,9 +970,12 @@ mod gate {
     }
 
     fn app_on_screen() -> App {
-        let mut rows = vec![
-            Row::new(0, "/repo", "/repo/.warlock.md", NodeState::PactedStale).with_child_count(12),
-        ];
+        let mut rows = vec![Row::new(
+            0,
+            "/repo",
+            "/repo/.warlock.md",
+            NodeState::PactedStale,
+        )];
         for n in 0..12 {
             let directory = format!("/repo/d{n:02}");
             let state = if n % 2 == 0 {
@@ -3834,15 +3837,17 @@ mod pointer {
     }
 
     fn rows() -> Vec<Row> {
-        let mut rows = vec![
-            Row::new(0, "/repo", "/repo/.warlock.md", NodeState::PactedStale).with_child_count(24),
-        ];
+        let mut rows = vec![Row::new(
+            0,
+            "/repo",
+            "/repo/.warlock.md",
+            NodeState::PactedStale,
+        )];
         for n in 0..24 {
             let directory = format!("/repo/d{n:02}");
-            // No child count: the row under each of these is the file below,
-            // and a file is not a child. What makes them collapsible is the
-            // file toggle being on, which is `App::can_collapse`'s answer
-            // and not the tree's.
+            // The row under each of these is the file below. What makes them
+            // collapsible is the file toggle being on, which is
+            // `App::can_collapse`'s answer and not the tree's.
             rows.push(Row::new(1, directory.clone(), None, NodeState::Unpacted));
             rows.push(Row::file(
                 2,

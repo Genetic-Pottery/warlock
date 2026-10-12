@@ -377,7 +377,9 @@ impl<K: Seams> Session<K> {
         // loop draws and then waits.
         let width = panel_width(size);
         self.chat.set_composer_width(width);
-        self.help = self.help.clamped(help_most_scroll(size));
+        if self.help.scroll().is_some() {
+            self.help = self.help.clamped(help_most_scroll(size));
+        }
         // And the other thing the field is told once a round: which slice of a
         // cut, if any, the next submission answers for. Told here rather than
         // at the two edges of a question, so a field cannot be left labelled for

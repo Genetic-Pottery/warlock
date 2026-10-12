@@ -273,7 +273,7 @@ impl StateCounts {
         self.unpacted + self.pacted_stale + self.pacted_fresh
     }
 
-    fn get_mut(&mut self, state: NodeState) -> &mut usize {
+    pub const fn get_mut(&mut self, state: NodeState) -> &mut usize {
         match state {
             NodeState::Unpacted => &mut self.unpacted,
             NodeState::PactedStale => &mut self.pacted_stale,
