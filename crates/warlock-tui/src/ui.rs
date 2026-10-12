@@ -727,7 +727,8 @@ fn draw_panel(
 ) {
     let (area, inner) = (cut.panel, cut.panel_rows);
     let panel = app.panel();
-    let below = panel.lines_below();
+    let view = panel.frame(now);
+    let below = view.below;
     let conversation = panel.showing_thread();
     let mut block = pane_block(app.focus() == Focus::Panel);
     if conversation {
@@ -748,8 +749,8 @@ fn draw_panel(
         return;
     }
 
-    let rows: Vec<Line<'static>> = panel
-        .window(now)
+    let rows: Vec<Line<'static>> = view
+        .lines
         .iter()
         .map(|line| panel_row(line, inner.width, conversation))
         .collect();
@@ -760,7 +761,7 @@ fn draw_panel(
     // out of, and a highlight measured against the thread would sit over
     // whatever text took its place.
     if conversation {
-        draw_highlight(frame, inner, app, now);
+        draw_highlight(frame, inner, app, view.offset, now);
     }
 }
 
@@ -770,7 +771,7 @@ fn draw_panel(
 /// one; here the cut is [`Rect::intersection`], and a span reaching past the
 /// panel stops at its last column instead of on the border or the tree beside
 /// it.
-fn draw_highlight(frame: &mut Frame<'_>, rows: Rect, app: &App, now: Instant) {
+fn draw_highlight(frame: &mut Frame<'_>, rows: Rect, app: &App, scroll: usize, now: Instant) {
     let panel = app.panel();
     let (Some(selection), Some(thread)) = (app.selection(), panel.thread()) else {
         return;
@@ -782,7 +783,7 @@ fn draw_highlight(frame: &mut Frame<'_>, rows: Rect, app: &App, now: Instant) {
     // measured against a second window is a highlight over text that is not
     // under it.
     let window = Viewport {
-        scroll: panel.scroll_offset(),
+        scroll,
         width: panel.width(),
         height: panel.height(),
     };

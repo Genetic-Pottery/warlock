@@ -4,7 +4,7 @@ use crate::account::{Account, Line};
 use crate::app::cut_at_cap_message;
 use crate::claude::Activity;
 use crate::thread::{Ending, Thread};
-use crate::wrap::rows as wrap_rows;
+use crate::wrap;
 
 /// The group that survives everything. A reload carries it, because the tree is
 /// read again *because* a run finished and dropping it would wipe the record at
@@ -104,6 +104,15 @@ pub(crate) enum Mode {
     #[default]
     Chat,
     Brief,
+}
+
+/// The showing card as one frame draws it: the card row its window starts at,
+/// how many rows are below that window, and the rows in it.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct View {
+    pub offset: usize,
+    pub below: usize,
+    pub lines: Vec<Line>,
 }
 
 /// Generic over what is on the card because the window rule is not: an offset, a
@@ -209,12 +218,20 @@ impl<T: Shown> Card<T> {
         )
     }
 
-    fn window(&self, height: usize, width: usize, now: Instant) -> Vec<Line> {
-        self.held.as_ref().map_or_else(Vec::new, |held| {
-            held.window(self.scroll_offset(height, width), height, width, now)
-        })
+    fn view(&self, height: usize, width: usize, now: Instant) -> View {
+        let count = self.line_count(width);
+        let offset = panel_offset_for(count, height, self.offset, self.following());
+        View {
+            offset,
+            below: count.saturating_sub(offset + height),
+            lines: self
+                .held
+                .as_ref()
+                .map_or_else(Vec::new, |held| held.window(offset, height, width, now)),
+        }
     }
 
+    #[cfg(test)]
     fn lines_below(&self, height: usize, width: usize) -> usize {
         self.line_count(width)
             .saturating_sub(self.scroll_offset(height, width) + height)
@@ -293,13 +310,13 @@ impl Shown for Vec<Line> {
 /// drawn cannot come apart. That module also decides the shape of a
 /// continuation row.
 fn row_count(lines: &[Line], width: usize) -> usize {
-    lines.iter().map(|line| wrap_rows(line, width).len()).sum()
+    lines.iter().map(|line| wrap::row_count(line, width)).sum()
 }
 
 fn row_window(lines: &[Line], offset: usize, height: usize, width: usize) -> Vec<Line> {
     lines
         .iter()
-        .flat_map(|line| wrap_rows(line, width))
+        .flat_map(|line| wrap::rows(line, width))
         .skip(offset)
         .take(height)
         .collect()
@@ -315,15 +332,25 @@ impl Panel {
         }
     }
 
+    /// Everything a frame draws from the showing card, counted and wrapped once
+    /// rather than once per question the renderer asks of it.
     #[must_use]
-    pub(crate) fn window(&self, now: Instant) -> Vec<Line> {
+    pub(crate) fn frame(&self, now: Instant) -> View {
+        let (height, width) = (self.height, self.width);
         match self.showing {
-            Showing::Account => self.account.window(self.height, self.width, now),
-            Showing::Thread => self.thread.window(self.height, self.width, now),
-            Showing::Document => self.document.window(self.height, self.width, now),
+            Showing::Account => self.account.view(height, width, now),
+            Showing::Thread => self.thread.view(height, width, now),
+            Showing::Document => self.document.view(height, width, now),
         }
     }
 
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn window(&self, now: Instant) -> Vec<Line> {
+        self.frame(now).lines
+    }
+
+    #[cfg(test)]
     #[must_use]
     pub(crate) fn lines_below(&self) -> usize {
         match self.showing {

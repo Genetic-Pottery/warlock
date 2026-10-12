@@ -15,7 +15,7 @@ use std::time::Instant;
 use crate::account::Line;
 use crate::thread::{Sourced, Thread};
 use crate::ui::display_width;
-use crate::wrap::{Shape, rows, shape, wrapped_at};
+use crate::wrap::{Shape, shape, wrapped_at};
 
 /// A byte offset, so the arithmetic is the string's own; [`Selection::new`] is
 /// what keeps one on a char boundary.
@@ -125,8 +125,8 @@ pub(crate) struct Cell {
 
 /// The character under `cell`, as a position in the thread's own text.
 ///
-/// It goes back through `wrap::rows`, which is what the panel is drawn with,
-/// rather than counting rows for itself: the character under the pointer has to
+/// It breaks lines with `wrap::wrapped_at`, the breaker `wrap::rows` draws the
+/// panel with, rather than counting rows for itself: the character under the pointer has to
 /// be the character the reader sees, and a second idea of where a line breaks
 /// would put the two a word apart on a narrow panel. `now` is the frame's,
 /// because a clock is a row's prefix and a clock that has ticked into another
@@ -141,28 +141,33 @@ pub(crate) fn position_at(thread: &Thread, cell: Cell, now: Instant) -> Option<P
     let pieces = thread.pieces();
 
     for sourced in thread.sourced(now) {
-        let height = rows(&sourced.line, cell.width).len();
-        if wanted >= height {
-            wanted -= height;
+        let laid = Laid::new(&sourced.line, cell.width);
+        let broken = laid.rows();
+        if wanted >= broken.len() {
+            wanted -= broken.len();
             continue;
         }
-        return Some(snapped(&pieces, at_row(&sourced, wanted, cell)));
+        return Some(snapped(
+            &pieces,
+            at_row(&sourced, &laid, &broken, wanted, cell),
+        ));
     }
 
     None
 }
 
-fn at_row(sourced: &Sourced, row: usize, cell: Cell) -> Position {
+fn at_row(
+    sourced: &Sourced,
+    laid: &Laid,
+    broken: &[(usize, &str)],
+    row: usize,
+    cell: Cell,
+) -> Position {
     if sourced.work {
         return Position::new(sourced.piece, sourced.offset);
     }
 
-    let laid = Laid::new(&sourced.line, cell.width);
-    let broken = laid.rows();
     let Some(&(start, text)) = broken.get(row) else {
-        // `rows` and `wrapped_at` break a line into the same rows, so a row
-        // `wrapped_at` has not got is a row nothing drew. The end of the line is
-        // the answer that stays inside the text either way.
         return Position::new(sourced.piece, sourced.offset + laid.shape.text.len());
     };
 
@@ -223,8 +228,10 @@ pub(crate) fn spans_at(
     let mut next = 0_usize;
 
     for sourced in thread.sourced(now) {
+        let laid = Laid::new(&sourced.line, window.width);
+        let broken = laid.rows();
         let top = next;
-        next = top.saturating_add(rows(&sourced.line, window.width).len());
+        next = top.saturating_add(broken.len());
         if next <= window.scroll {
             continue;
         }
@@ -240,8 +247,7 @@ pub(crate) fn spans_at(
             continue;
         }
 
-        let laid = Laid::new(&sourced.line, window.width);
-        for (index, (start, text)) in laid.rows().into_iter().enumerate() {
+        for (index, &(start, text)) in broken.iter().enumerate() {
             let card = top.saturating_add(index);
             if card < window.scroll {
                 continue;

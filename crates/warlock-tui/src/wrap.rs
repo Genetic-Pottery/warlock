@@ -91,6 +91,16 @@ pub(crate) fn rows(line: &Line, width: usize) -> Vec<Line> {
     rows
 }
 
+/// How many rows [`rows`] breaks `line` into, without building them.
+#[must_use]
+pub(crate) fn row_count(line: &Line, width: usize) -> usize {
+    let shape = shape(line);
+    let indent = display_width(&shape.prefix);
+    wrapped_at(&shape.text, width.saturating_sub(indent))
+        .len()
+        .max(1)
+}
+
 fn continued(line: &Line, first: &str, shape: &Shape) -> Line {
     match line {
         Line::Clocked { clock, .. } => Line::Clocked {
@@ -146,8 +156,11 @@ pub(crate) fn wrapped_at(text: &str, width: usize) -> Vec<(usize, &str)> {
     let mut rows = Vec::new();
     let mut start = 0;
     let mut rest = text;
-    while display_width(rest) > width {
-        let end = break_at(rest, width);
+    loop {
+        let (end, whole) = break_at(rest, width);
+        if whole && display_width(rest) <= width {
+            break;
+        }
         rows.push((start, rest[..end].trim_end()));
         // The space the break was made at goes with the row above it. A break
         // made mid-word has no space to eat, so this takes nothing off the text.
@@ -181,8 +194,16 @@ pub(crate) fn folded(text: &str, width: usize) -> Vec<String> {
 
     let mut rows = Vec::new();
     let mut rest = text;
-    while display_width(rest) > width {
-        let end = filled(rest, width);
+    loop {
+        let fit = fitted(rest, width);
+        if fit.len() == rest.len() && display_width(rest) <= width {
+            break;
+        }
+        // Never zero for a text with anything in it, which is this loop's only
+        // promise of making progress: it has no `trim_start` to fall back on.
+        // A character wider than the whole field overhangs its row rather than
+        // stopping the fold.
+        let end = fit.len().max(first_character(rest));
         rows.push(rest[..end].to_owned());
         rest = &rest[end..];
     }
@@ -195,14 +216,6 @@ pub(crate) fn folded(text: &str, width: usize) -> Vec<String> {
     rows
 }
 
-// Never zero for a text with anything in it, which is where `folded`'s loop gets
-// its promise of making progress: it has no `trim_start` to fall back on, so the
-// cut alone has to advance it. A character wider than the whole field overhangs
-// its row rather than stopping the fold.
-fn filled(text: &str, width: usize) -> usize {
-    fitted(text, width).len().max(first_character(text))
-}
-
 // A space is only a candidate once a word has been seen, so a line's own
 // indentation is never what it breaks at: an indented line breaking at its
 // indent would put an empty row above itself and say nothing.
@@ -210,7 +223,10 @@ fn filled(text: &str, width: usize) -> usize {
 // Always past the first character, whatever the width. A cut at zero would be a
 // row with nothing on it and a loop that never reached the end of the line, so a
 // character wider than the whole panel overhangs rather than stopping the wrap.
-fn break_at(text: &str, width: usize) -> usize {
+//
+// The flag says every character fit, which is what lets `wrapped_at` skip
+// measuring the rest of a long line once per row.
+fn break_at(text: &str, width: usize) -> (usize, bool) {
     let mut taken = 0;
     let mut fits = 0;
     let mut word = false;
@@ -236,11 +252,15 @@ fn break_at(text: &str, width: usize) -> usize {
     // The prefix that fits is whole words when what follows it is a space, and
     // backing up to the space before that would give a row up a word for
     // nothing.
+    let whole = fits == text.len();
     if fits > 0 && text[fits..].starts_with(char::is_whitespace) {
-        return fits;
+        return (fits, whole);
     }
 
-    space.unwrap_or_else(|| fits.max(first_character(text)))
+    (
+        space.unwrap_or_else(|| fits.max(first_character(text))),
+        whole,
+    )
 }
 
 fn first_character(text: &str) -> usize {
