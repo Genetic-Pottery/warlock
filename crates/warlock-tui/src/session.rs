@@ -309,10 +309,10 @@ pub(crate) fn closed_scope(
     true
 }
 
-// Read once, from `load_app`, before the loop starts. A sigil is written by
-// `warlock config` with warlock not running, so there is nothing for a reload to
-// find that this did not, and re-reading it every round would be a file opened
-// ten times a second to answer a question that cannot have changed.
+// Read from `load_app` before the loop starts, and again by the loop whenever
+// the config file's modification time moves: `/sigil` writes it from inside
+// warlock and `warlock sigil` from another shell, and the boundary checks read
+// whatever the chrome holds.
 //
 // No home reads as nothing held rather than as a config that would not read:
 // there is no file in that case and no path to name one by, so `Sigils::Unknown`
@@ -323,7 +323,7 @@ pub(crate) fn closed_scope(
 // resolved here, a test that loads a scratch repository would open a file under
 // the sigil store of the machine it runs on, and the one place that resolves one
 // is the caller no test has.
-fn sigils_held(home: Option<&Path>, repo_root: &Path) -> Sigils {
+pub(crate) fn sigils_held(home: Option<&Path>, repo_root: &Path) -> Sigils {
     home.map_or(Sigils::Nothing, |home| sigils_under(home, repo_root))
 }
 

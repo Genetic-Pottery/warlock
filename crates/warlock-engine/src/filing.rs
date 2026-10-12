@@ -353,7 +353,7 @@ pub enum Error {
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            // No sigil named and no `warlock config`: the fix is a line in the
+            // No sigil named and no `warlock sigil add`: the fix is a line in the
             // file this names, and a sentence about what the machine holds would
             // send the person to the other one of the two.
             Self::Boardless { path } => write!(
@@ -363,7 +363,7 @@ impl fmt::Display for Error {
             ),
             Self::Unsigiled => write!(
                 f,
-                "this machine holds no sigil, so nothing says which board to file to: hold one with `warlock config`"
+                "this machine holds no sigil, so nothing says which board to file to: hold one with `warlock sigil add`"
             ),
             Self::Unmatched { held, path } => write!(
                 f,

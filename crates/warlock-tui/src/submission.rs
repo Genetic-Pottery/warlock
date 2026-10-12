@@ -14,7 +14,7 @@
 // Stated once, here, because it is the only place warlock says which commands
 // exist: a second copy of this sentence in the loop or in a test fixture would
 // be a second list to keep true.
-const REFUSAL: &str = "warlock has eight commands — /brief, /write, /chat, /push, /draft, /pull, /resume and /branch — and five of them take arguments: a scope and a brief for /push, a scope and optionally a project's slug for /draft, a scope and optionally a ticket for /pull, a ticket for /resume, and `use <BRANCH>` or `clear` for /branch, which on its own names the branch pulls start from.";
+const REFUSAL: &str = "warlock has nine commands — /brief, /write, /chat, /push, /draft, /pull, /resume, /branch and /sigil — and six of them take arguments: a scope and a brief for /push, a scope and optionally a project's slug for /draft, a scope and optionally a ticket for /pull, a ticket for /resume, `use <BRANCH>` or `clear` for /branch, which on its own names the branch pulls start from, and `add <NAME>...`, `remove <NAME>...` or `clear` for /sigil, which on its own names the sigils held.";
 
 // Fields rather than the second half of a tuple, because one of the two is
 // optional and the other is not: `/pull <SCOPE>` takes the next ticket in the
@@ -43,6 +43,16 @@ pub(crate) enum Branching<'a> {
     Clear,
 }
 
+// `add` and `remove` carry every name after the verb as one slice of the
+// draft, split by whoever writes them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum Sigiling<'a> {
+    Show,
+    Add(&'a str),
+    Remove(&'a str),
+    Clear,
+}
+
 // The scope a `/draft` reads from and, where it named one, the project's slug:
 // without one, the planned projects are listed instead.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -55,7 +65,7 @@ pub(crate) struct ToDraft<'a> {
 // `Composer::is_submittable` declines to offer one up — and a function that is
 // total anyway is worth more than a variant every caller must match on.
 //
-// The borrows in `Push`, `Cut`, `Pull`, `Resume` and `Branch` are what keep the module's
+// The borrows in `Push`, `Cut`, `Pull`, `Resume`, `Branch` and `Sigil` are what keep the module's
 // promise that nothing here copies the draft: each argument is a slice of the
 // draft the caller still owns, and `&str` is `Copy`, so the value stays as cheap
 // to pass around as it was when no variant carried anything.
@@ -75,6 +85,7 @@ pub(crate) enum Submitted<'a> {
     // could offer back — the refusal already says a ticket goes after the word.
     Resume(&'a str),
     Branch(Branching<'a>),
+    Sigil(Sigiling<'a>),
     Message,
     // An unknown word, a bare `/`, one of the three command words that take
     // nothing with something after it, a `/push` without both its scope and its
@@ -164,6 +175,20 @@ pub(crate) fn submitted_for(draft: &str) -> Submitted<'_> {
         };
     }
 
+    if word == SIGIL && !after.contains('\n') {
+        let after = after.trim();
+        let (verb, names) = after
+            .split_once(char::is_whitespace)
+            .map_or((after, ""), |(verb, names)| (verb, names.trim()));
+        return match (verb, names.is_empty()) {
+            ("", _) => Submitted::Sigil(Sigiling::Show),
+            ("add", false) => Submitted::Sigil(Sigiling::Add(names)),
+            ("remove", false) => Submitted::Sigil(Sigiling::Remove(names)),
+            ("clear", true) => Submitted::Sigil(Sigiling::Clear),
+            _ => Submitted::Refused,
+        };
+    }
+
     if matches!(word, CUT | PULL | RESUME) && !after.contains('\n') {
         let mut words = after.split_whitespace();
         let (first, second) = (words.next(), words.next());
@@ -214,6 +239,7 @@ const CUT: &str = "/draft";
 const PULL: &str = "/pull";
 const RESUME: &str = "/resume";
 const BRANCH: &str = "/branch";
+const SIGIL: &str = "/sigil";
 
 #[cfg(test)]
 #[path = "tests/submission.rs"]

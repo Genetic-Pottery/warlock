@@ -403,7 +403,7 @@ fn denial(path: &str, scope: &str) -> Value {
 
 // The boundary's own sentence, and deliberately not a wording of its own: the
 // same fact refused at a keystroke, at a shell prompt and at a hook says the same
-// thing, names the same scope and points at the same `warlock config`. A sigil
+// thing, names the same scope and points at the same `warlock sigil add`. A sigil
 // and the scope it opens share a name, so naming the scope is naming the sigil
 // this write wants — which is why "hold that sigil" needs nothing added to it.
 //
@@ -501,10 +501,9 @@ fn route_line(
     }
 }
 
-// The wording is `warlock config`'s and the header's to the letter — one fact
-// should not have two wordings. What is added here is the file: `Sigils::line`
-// says only "holding unknown", and a reader running a subcommand about a config
-// that will not parse is owed the path to go and fix.
+// `Sigils::line`'s wording, so one fact has one wording. What is added here is
+// the file: `Sigils::line` says only "holding unknown", and a reader running a
+// subcommand about a config that will not parse is owed the path to go and fix.
 fn holding_line(sigils: &Sigils, config: Option<&Path>) -> String {
     match (sigils, config) {
         (Sigils::Unknown, Some(path)) => {
@@ -518,15 +517,15 @@ fn holding_line(sigils: &Sigils, config: Option<&Path>) -> String {
 
 // The unscoped case is stated as the permissive default it comes from rather
 // than as a bare "open": a reader just told nothing scopes the path should not
-// be left wondering which sigil did it. The closed line ends by naming `warlock
-// config`, which is the one place a sigil is recorded.
+// be left wondering which sigil did it. The closed line ends with the command
+// that holds the sigil it wants.
 fn verdict_line(scope: Option<&str>, opens: bool) -> String {
     match scope {
         None => "an unscoped path is open to anyone, so this machine may work here".to_owned(),
         Some(scope) if opens => format!("`{scope}` is open to this machine"),
         Some(scope) => format!(
             "`{scope}` is closed to this machine — hold that sigil to work here, \
-             with `warlock config`"
+             with `warlock sigil add {scope}`"
         ),
     }
 }

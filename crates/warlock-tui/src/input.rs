@@ -12,7 +12,7 @@ use ratatui::crossterm::event::{
 };
 use ratatui::layout::Size;
 
-use crate::app::{App, Focus, RunHeader};
+use crate::app::{App, Focus, RunHeader, Sigils};
 use crate::composer::{Composed, Composer, compose_for};
 use crate::confirm::{
     Answered, CarryAnswered, CutAnswered, PullAnswered, PushAnswered, QuitConfirm, Reviewed,
@@ -357,13 +357,21 @@ pub(crate) fn mouse_action(
     app: &App,
     modal: Option<Modal<'_>>,
     composer: Option<&Composer>,
+    sigils: &Sigils,
 ) -> Option<MouseAction> {
     if modal.is_some() {
         return None;
     }
 
     let header = app.run_header();
-    let hit = hit_test(mouse.column, mouse.row, size, composer, header.as_ref());
+    let hit = hit_test(
+        mouse.column,
+        mouse.row,
+        size,
+        composer,
+        header.as_ref(),
+        sigils,
+    );
     match mouse.kind {
         // Down the tree and down the account are the same direction, so one
         // notch reads the same way over either pane.
@@ -447,14 +455,14 @@ pub(crate) fn drag_after(
 }
 
 // The wheel drives whichever pane the pointer is over, focus notwithstanding,
-// and every part of a pane's inside answers for it — headers included, because
-// a notch that did nothing on the one line naming the tree reads as a wheel
-// that sticks. The composer answers nothing: it scrolls itself as somebody
+// and every part of a pane's inside answers for it — the run header included,
+// because a notch that did nothing on one line of a pane reads as a wheel that
+// sticks. The composer answers nothing: it scrolls itself as somebody
 // types, and scrolling the account because the pointer was resting on the field
 // would move the half of the screen the reader is not pointing at.
 fn wheel(hit: Hit, tree: MouseAction, panel: MouseAction) -> Option<MouseAction> {
     match hit {
-        Hit::TreeHeader | Hit::TreeRow { .. } | Hit::TreeBelowRows => Some(tree),
+        Hit::TreeRow { .. } | Hit::TreeBelowRows => Some(tree),
         Hit::PanelHeader | Hit::PanelLine { .. } => Some(panel),
         Hit::Composer | Hit::Footer | Hit::Border | Hit::Offscreen => None,
     }
@@ -481,7 +489,7 @@ fn click(hit: Hit, app: &App) -> Option<MouseAction> {
                 Some(MouseAction::SelectRow(index))
             }
         }
-        Hit::TreeHeader | Hit::TreeBelowRows => Some(MouseAction::Focus(Focus::Tree)),
+        Hit::TreeBelowRows => Some(MouseAction::Focus(Focus::Tree)),
         // Over a conversation the press anchors a selection, and that action
         // takes the keys too: everywhere else in the panel — its header, either
         // of the other two cards, a thread card with nothing on it yet — there is

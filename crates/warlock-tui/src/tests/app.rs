@@ -427,9 +427,8 @@ fn a_config_that_would_not_read_is_said_out_loud_rather_than_looking_absent() {
 
 #[test]
 fn holding_nothing_leaves_the_header_byte_for_byte_what_it_was() {
-    // The promise the three states are arranged around: a reader who never
-    // runs `warlock config` sees the header they have always seen, in both
-    // spellings of nothing and whether or not anything was ever set.
+    // Holding nothing, in either spelling of nothing, leaves the header
+    // exactly as it was and gives no holding line.
     let told = Chrome::of("/repo", "/repo/crates/engine");
     let before = told.header().to_owned();
 

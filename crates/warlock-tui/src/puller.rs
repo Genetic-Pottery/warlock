@@ -1332,8 +1332,8 @@ fn ended_line(pulled: &Pulled) -> String {
 // home directory.
 fn holding_line(held: &[String]) -> String {
     if held.is_empty() {
-        return "`/pull` takes a scope, and this machine holds no sigil at all — `warlock config` \
-                is where one is held"
+        return "`/pull` takes a scope, and this machine holds no sigil at all — `/sigil add` \
+                holds one"
             .to_owned();
     }
     format!("`/pull` takes a scope: this machine holds {}", listed(held))

@@ -31,7 +31,7 @@ use crate::inflight::{Lost, Port, Stream, Workers, settled};
 use crate::pacting::CancelGuard;
 use crate::panel::Mode;
 use crate::prompt::{Edited, ScopePrompt};
-use crate::submission::{Branching, Submitted, Taking, submitted_for};
+use crate::submission::{Branching, Sigiling, Submitted, Taking, submitted_for};
 use crate::template::{Error as TemplateError, brief_template};
 use crate::thread::{Ending, ending_for};
 use crate::writing::{write_edit, write_opened};
@@ -87,6 +87,16 @@ pub(crate) enum Wanted {
     Pull(Option<Takes>),
     Resume(String),
     Branch(Branched),
+    Sigil(Sigiled),
+}
+
+/// The owned twin of [`Sigiling`], with the names split.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Sigiled {
+    Show,
+    Add(Vec<String>),
+    Remove(Vec<String>),
+    Clear,
 }
 
 /// The owned twin of [`Branching`], for [`Takes`]'s reason.
@@ -408,13 +418,22 @@ impl<C: Converses> Chat<C> {
             // here: the answer to it is the scopes this machine holds.
             Submitted::Pull(taking) => return Some(Wanted::Pull(taking.map(Takes::of))),
             Submitted::Resume(ticket) => return Some(Wanted::Resume(ticket.to_owned())),
-            // The base lives under the home and is drawn off the chrome, and
-            // neither is this value's.
+            // The base and the sigils live under the home and are drawn off the
+            // chrome, and neither is this value's.
             Submitted::Branch(branching) => {
                 return Some(Wanted::Branch(match branching {
                     Branching::Show => Branched::Show,
                     Branching::Use(name) => Branched::Use(name.to_owned()),
                     Branching::Clear => Branched::Clear,
+                }));
+            }
+            Submitted::Sigil(sigiling) => {
+                let split = |names: &str| names.split_whitespace().map(str::to_owned).collect();
+                return Some(Wanted::Sigil(match sigiling {
+                    Sigiling::Show => Sigiled::Show,
+                    Sigiling::Add(names) => Sigiled::Add(split(names)),
+                    Sigiling::Remove(names) => Sigiled::Remove(split(names)),
+                    Sigiling::Clear => Sigiled::Clear,
                 }));
             }
             // The line is asked of the value rather than restated here, so the

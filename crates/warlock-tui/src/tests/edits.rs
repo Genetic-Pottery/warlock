@@ -195,7 +195,7 @@ fn a_closed_boundary_refuses_and_leaves_the_manifest_byte_identical() {
 #[test]
 fn a_machine_holding_nothing_is_refused_by_every_scope_it_meets() {
     // No config at all: the ordinary state of a machine nobody has run
-    // `warlock config` on, and the one an agent in a fresh checkout is in.
+    // `warlock sigil add` on, and the one an agent in a fresh checkout is in.
     let repo = a_repository();
     let home = a_dir();
     let before = manifest_bytes(repo.path()).expect("a manifest on disk");
@@ -258,7 +258,7 @@ fn a_boundary_below_the_path_refuses_the_unpact_and_names_every_scope_in_the_way
     assert_eq!(
         error.to_string(),
         "un-pacting crates would drop pacts scoped `data-plane` — hold that sigil with \
-             `warlock config`, or un-pact the parts you hold"
+             `warlock sigil add`, or un-pact the parts you hold"
     );
     assert!(!error.to_string().contains('\n'), "`main` prints one line");
     // A 1 and deliberately not the boundary's 3: this machine may work at
@@ -275,7 +275,7 @@ fn a_boundary_below_the_path_refuses_the_unpact_and_names_every_scope_in_the_way
     assert_eq!(
         error.to_string(),
         "un-pacting . would drop pacts scoped `data-plane` — hold that sigil with \
-             `warlock config`, or un-pact the parts you hold"
+             `warlock sigil add`, or un-pact the parts you hold"
     );
 
     // And nothing was written on the way to either refusal.
@@ -302,7 +302,7 @@ fn a_machine_holding_nothing_is_told_about_every_boundary_at_once() {
     assert_eq!(
         error.to_string(),
         "un-pacting . would drop pacts scoped `platform`, `data-plane` — hold those sigils \
-             with `warlock config`, or un-pact the parts you hold"
+             with `warlock sigil add`, or un-pact the parts you hold"
     );
     // The descendant refusal's 1 again, and holding nothing does not change
     // it: what decides the status is which question was refused, not how
@@ -393,7 +393,7 @@ fn an_open_boundary_writes_the_scope_and_moves_nothing_else_in_the_file() {
     let home = a_dir();
 
     // `docs` carries no scope and nothing above it does, so it is open to a
-    // machine that has never run `warlock config`.
+    // machine that has never run `warlock sigil add`.
     let said = scope_add(repo.path(), home.path(), "docs", "billing", a_record())
         .expect("nothing scopes `docs`");
 
@@ -1126,8 +1126,8 @@ fn as_the_shell_says_it(sentence: &str, repo_root: &Path) -> String {
 
 fn panel_answer(repo_root: &Path, home: &Path, path: &str) -> Answer {
     let manifest = load_manifest(repo_root).expect("a manifest that reads");
-    // The header's own reading of the config `warlock config` wrote, which
-    // is what the running app holds and what the shell reads for itself.
+    // The session's own reading of the sigils config, which is what the
+    // running app holds and what the shell reads for itself.
     let sigils = sigils_under(home, repo_root);
     let mut app = a_panel_over(repo_root);
     let target = if path == "." {
@@ -1173,12 +1173,12 @@ fn a_key_press_and_a_shell_prompt_answer_the_same_un_pact_alike() {
     // The rule is `docs/warlock-decision-un-pacting-across-a-descendant-scope.md`.
     let refused_here = format!(
         "crates/engine is scoped `{CLOSED}` — hold that sigil to work here, \
-             with `warlock config`"
+             with `warlock sigil add {CLOSED}`"
     );
     let refused_below = |label: &str| {
         format!(
             "un-pacting {label} would drop pacts scoped `{CLOSED}` — hold that sigil with \
-                 `warlock config`, or un-pact the parts you hold"
+                 `warlock sigil add`, or un-pact the parts you hold"
         )
     };
 

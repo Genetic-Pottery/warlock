@@ -916,7 +916,7 @@ mod gate {
     use warlock_engine::NodeState;
 
     use super::super::{Action, Pressed, action_for, press_for};
-    use crate::app::{App, Focus, Row};
+    use crate::app::{App, Focus, Row, Sigils};
     use crate::composer::{Composed, Composer};
     use crate::confirm::{
         Answer, CutConfirm, PullConfirm, PushConfirm, QuitConfirm, cut_answer_for, pull_answer_for,
@@ -984,7 +984,7 @@ mod gate {
             rows.push(Row::file(2, format!("{directory}/lib.rs"), state));
         }
         let mut app = App::from_rows(rows);
-        app.set_viewport_height(tree_height(SIZE));
+        app.set_viewport_height(tree_height(SIZE, &Sigils::Nothing));
         app.panel_mut().set_height(panel_height(SIZE, None, None));
         app
     }
@@ -3732,7 +3732,7 @@ mod pointer {
     use warlock_engine::NodeState;
 
     use super::super::{MouseAction, WHEEL_NOTCH, mouse_action};
-    use crate::app::{App, Focus, Row};
+    use crate::app::{App, Focus, Row, Sigils};
     use crate::composer::Composer;
     use crate::confirm::{Carry, CutConfirm, PushConfirm, QuitConfirm, Review};
     use crate::modal::{Modal, Modals};
@@ -3747,11 +3747,13 @@ mod pointer {
     // constant below moves:
     //
     //   columns  0        panel        49 50       tree        79
-    //   row  0   ┌───────────────────────┐┌───────────────────────┐
-    //   row  1   │ panel line 0          ││ tree header           │
-    //   row  2   │ panel line 1          ││ tree row 0            │
+    //   row  0   ┌───────────────────────┐┌ pulls into … ─────────┐
+    //   row  1   │ panel line 0          ││ tree row 0            │
     //    ...     │  ...                  ││  ...                  │
-    //   row 19   │ panel line 18         ││ tree row 17           │
+    //   row 16   │ panel line 15         ││ tree row 15           │
+    //   row 17   │ panel line 16         │└───────────────────────┘
+    //   row 18   │ panel line 17         │┌ sigils ───────────────┐
+    //   row 19   │ panel line 18         ││                       │
     //   row 20   └───────────────────────┘└───────────────────────┘
     //   rows 21-23                     the footer
     const SIZE: Size = Size {
@@ -3763,11 +3765,9 @@ mod pointer {
 
     const IN_PANEL: u16 = 10;
 
-    const FIRST_TREE_ROW: u16 = 2;
+    const FIRST_TREE_ROW: u16 = 1;
 
     const FIRST_PANEL_LINE: u16 = 1;
-
-    const TREE_HEADER: u16 = 1;
 
     const FOOTER: u16 = 22;
 
@@ -3787,7 +3787,7 @@ mod pointer {
     ];
 
     fn viewport() -> usize {
-        usize::from(tree_height(SIZE))
+        usize::from(tree_height(SIZE, &Sigils::Nothing))
     }
 
     fn wheel_down(column: u16, row: u16) -> MouseEvent {
@@ -3827,7 +3827,7 @@ mod pointer {
             wheel_up(IN_PANEL, FIRST_PANEL_LINE),
             left_click(IN_TREE, FIRST_TREE_ROW),
             left_click(IN_TREE, FIRST_TREE_ROW + 9),
-            left_click(IN_TREE, TREE_HEADER),
+            left_click(IN_TREE, FIRST_TREE_ROW + 3),
             left_click(IN_PANEL, FIRST_PANEL_LINE + 3),
         ]
     }
@@ -3854,7 +3854,7 @@ mod pointer {
 
     fn app_on_screen() -> App {
         let mut app = App::from_rows(rows());
-        app.set_viewport_height(tree_height(SIZE));
+        app.set_viewport_height(tree_height(SIZE, &Sigils::Nothing));
         app.panel_mut().set_height(panel_height(SIZE, None, None));
         app.panel_mut().set_width(panel_width(SIZE));
         app
@@ -3886,11 +3886,11 @@ mod pointer {
     }
 
     fn asks_under(mouse: MouseEvent, app: &App, modal: Option<Modal<'_>>) -> Option<MouseAction> {
-        mouse_action(mouse, SIZE, app, modal, None)
+        mouse_action(mouse, SIZE, app, modal, None, &Sigils::Nothing)
     }
 
     fn asks_composing(mouse: MouseEvent, app: &App, composer: &Composer) -> Option<MouseAction> {
-        mouse_action(mouse, SIZE, app, None, Some(composer))
+        mouse_action(mouse, SIZE, app, None, Some(composer), &Sigils::Nothing)
     }
 
     fn round(app: &mut App, confirm: QuitConfirm, mouse: MouseEvent) {
@@ -3939,7 +3939,7 @@ mod pointer {
         // The table above is load-bearing: every point below is a literal
         // read off it, so a layout that moved would otherwise turn these
         // tests into assertions about somewhere else.
-        assert_eq!(viewport(), 18, "eighteen rows of tree at 80x24");
+        assert_eq!(viewport(), 16, "sixteen rows of tree at 80x24");
         assert_eq!(
             usize::from(panel_height(SIZE, None, None)),
             19,
@@ -3958,14 +3958,6 @@ mod pointer {
         assert_eq!(
             asks(wheel_up(IN_TREE, FIRST_TREE_ROW + 4), &app),
             Some(MouseAction::SelectPreviousBy(3)),
-        );
-        // Every part of the pane's inside answers for the pane, the header
-        // included: a wheel is aimed at a column, and a notch that did
-        // nothing because the pointer sat on the naming line would read as a
-        // wheel that sticks.
-        assert_eq!(
-            asks(wheel_down(IN_TREE, TREE_HEADER), &app),
-            Some(MouseAction::SelectNextBy(3)),
         );
     }
 
@@ -4361,12 +4353,6 @@ mod pointer {
         for (column, row, pressed, past) in [
             (
                 IN_TREE,
-                TREE_HEADER,
-                Some(MouseAction::Focus(Focus::Tree)),
-                None,
-            ),
-            (
-                IN_TREE,
                 FIRST_TREE_ROW,
                 Some(MouseAction::ToggleCollapsed),
                 None,
@@ -4756,7 +4742,8 @@ mod pointer {
                         ..Modals::default()
                     }
                     .current(),
-                    None
+                    None,
+                    &Sigils::Nothing
                 ),
                 None,
                 "{mouse:?} should mean nothing while the push dialog is up"
@@ -4793,7 +4780,8 @@ mod pointer {
                         ..Modals::default()
                     }
                     .current(),
-                    None
+                    None,
+                    &Sigils::Nothing
                 ),
                 None,
                 "{mouse:?} should mean nothing while the draft dialog is up"
@@ -4830,33 +4818,14 @@ mod pointer {
                             ..Modals::default()
                         }
                         .current(),
-                        None
+                        None,
+                        &Sigils::Nothing
                     ),
                     None,
                     "{mouse:?} should mean nothing while a run's window is up"
                 );
             }
         }
-    }
-
-    #[test]
-    fn a_click_on_the_tree_header_takes_the_keys_and_no_more() {
-        let mut app = app_on_screen();
-        app.set_focus(Focus::Panel);
-        let selected = app.selected();
-
-        assert_eq!(
-            asks(left_click(IN_TREE, TREE_HEADER), &app),
-            Some(MouseAction::Focus(Focus::Tree)),
-        );
-
-        round(
-            &mut app,
-            QuitConfirm::Closed,
-            left_click(IN_TREE, TREE_HEADER),
-        );
-        assert_eq!(app.focus(), Focus::Tree);
-        assert_eq!(app.selected(), selected, "the selection did not move");
     }
 
     #[test]
@@ -4871,7 +4840,7 @@ mod pointer {
             "/repo/.warlock.md",
             NodeState::PactedStale,
         )]);
-        app.set_viewport_height(tree_height(SIZE));
+        app.set_viewport_height(tree_height(SIZE, &Sigils::Nothing));
         app.set_focus(Focus::Panel);
 
         assert_eq!(
@@ -4928,7 +4897,7 @@ mod pointer {
         ] {
             for (column, row) in [
                 (IN_TREE, FIRST_TREE_ROW),
-                (IN_TREE, TREE_HEADER),
+                (IN_TREE, FIRST_TREE_ROW + 1),
                 (IN_PANEL, FIRST_PANEL_LINE),
                 (IN_PANEL, FOOTER),
                 (50, FIRST_TREE_ROW),

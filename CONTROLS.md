@@ -46,9 +46,10 @@ drawing on it. `v` and `Shift-Tab` are never refused — they race nothing.
 the nearest pacted directory at or above it — nearest wins outright, so an outer
 scope is a default for whatever said nothing below it rather than a second gate
 to also satisfy — and a key marked *yes* is refused there unless this machine
-holds a sigil matching it. The footer names the scope wanted.
-[`warlock config`](#the-headless-cli) prints and sets what this machine holds;
-a sigil of `*` opens everything.
+holds a sigil matching it. The footer names the scope wanted. The sigils box
+under the tree lists what this machine holds. To change it, use `/sigil` in the
+chat bar or [`warlock sigil`](#the-headless-cli); a sigil of `*` opens
+everything.
 
 The permissive default is on the **directory** and only there: a directory nobody
 scoped is open to anyone, which is why a repository that has never drawn a
@@ -120,6 +121,10 @@ running, it is the only stage lit.
 | `/branch` | Name the branch pulls start from and open pull requests against |
 | `/branch use <BRANCH>` | Make pulls start from and open pull requests against `BRANCH`, the same as `warlock branch use` |
 | `/branch clear` | Go back to the remote's default branch, the same as `warlock branch clear` |
+| `/sigil` | Name the sigils this machine holds for this repository |
+| `/sigil add <NAME>...` | Hold these sigils as well, the same as `warlock sigil add` |
+| `/sigil remove <NAME>...` | Stop holding these sigils, the same as `warlock sigil remove` |
+| `/sigil clear` | Stop holding every sigil, the same as `warlock sigil clear` |
 
 Commands are case-sensitive and take their arguments on the same line. A
 mistyped command is refused with a line listing every command, and nothing is

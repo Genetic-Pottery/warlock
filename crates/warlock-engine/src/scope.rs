@@ -59,8 +59,8 @@ impl std::error::Error for Rule {}
 // no repaired scope anywhere in this crate to be confused with the one somebody
 // wrote. Folding case here — the obvious kindness — would put the manifest
 // reader in the business of correcting committed bytes. It belongs instead at
-// the two places a person supplies the string, the scope prompt and
-// `warlock config`, which lower-case and *then* ask.
+// the places a person supplies the string, the scope prompt and the sigil
+// commands, which lower-case and *then* ask.
 pub fn validate_scope(scope: &str) -> Result<(), Rule> {
     // Taking the two end characters here is also the emptiness check: a string
     // with no first character is the empty one.

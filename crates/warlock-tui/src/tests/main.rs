@@ -4,7 +4,7 @@ use clap::error::ErrorKind;
 use clap::{CommandFactory, Parser};
 use warlock_tui::{Error, status_for};
 
-use super::{Cli, Command, ScopeCommand};
+use super::{Cli, Command, ScopeCommand, SigilCommand};
 
 // `try_parse_from` wants argv as the process gets it, program name and all,
 // so the name is put back here and every test below reads as the words a
@@ -49,8 +49,40 @@ fn no_arguments_opens_the_tree() {
 }
 
 #[test]
-fn config_is_a_subcommand() {
-    assert_eq!(parse(&["config"]).unwrap().command, Some(Command::Config));
+fn sigil_is_a_noun_with_a_bare_listing_and_three_verbs() {
+    let names = |names: &[&str]| names.iter().map(|name| (*name).to_owned()).collect();
+    assert_eq!(
+        parse(&["sigil"]).unwrap().command,
+        Some(Command::Sigil { command: None })
+    );
+    assert_eq!(
+        parse(&["sigil", "add", "a", "b"]).unwrap().command,
+        Some(Command::Sigil {
+            command: Some(SigilCommand::Add {
+                names: names(&["a", "b"])
+            })
+        })
+    );
+    assert_eq!(
+        parse(&["sigil", "remove", "a"]).unwrap().command,
+        Some(Command::Sigil {
+            command: Some(SigilCommand::Remove {
+                names: names(&["a"])
+            })
+        })
+    );
+    assert_eq!(
+        parse(&["sigil", "clear"]).unwrap().command,
+        Some(Command::Sigil {
+            command: Some(SigilCommand::Clear)
+        })
+    );
+}
+
+#[test]
+fn config_is_gone() {
+    let error = parse(&["config"]).unwrap_err();
+    assert_eq!(error.exit_code(), 2);
 }
 
 #[test]
@@ -285,7 +317,7 @@ fn a_run_with_no_path_or_with_two_is_a_malformed_invocation() {
 fn no_flag_on_a_write_or_a_run_gets_past_the_boundary_or_asks_for_an_object() {
     // Two absences, pinned where they are decided. There is no `--force`,
     // `--yes` or any other word that skips the scope check — `warlock
-    // config` is the one road past a boundary, and a flag that existed
+    // sigil add` is the one road past a boundary, and a flag that existed
     // would be a second. And there is no `--json`: the three questions
     // answer in objects because something reads their answers, while these
     // five say what they did as they do it and spend the status on whether
@@ -865,7 +897,8 @@ fn both_spellings_of_version_print_the_crate_version_and_succeed() {
 #[test]
 fn per_subcommand_help_is_a_help_exit_too() {
     for args in [
-        ["config", "--help"].as_slice(),
+        ["sigil", "--help"].as_slice(),
+        ["sigil", "add", "--help"].as_slice(),
         ["stale", "--help"].as_slice(),
         ["fresh", "--help"].as_slice(),
         ["check", "--help"].as_slice(),
@@ -901,10 +934,10 @@ fn per_subcommand_help_is_a_help_exit_too() {
 fn each_subcommands_help_says_what_that_subcommand_does() {
     // The same `about` and `long_about = None` pair as on `Cli`, pinned one
     // subcommand at a time: without the `about` clap falls back to the doc
-    // comment, and `warlock config --help` answers "`warlock config`." — the
-    // name back, which is not what a reader asked for.
+    // comment, and `warlock sigil --help` would answer with the doc comment —
+    // the name back, which is not what a reader asked for.
     for (name, said) in [
-        ("config", "sigils"),
+        ("sigil", "sigils"),
         ("stale", "stale"),
         ("fresh", "fresh"),
         ("check", "scope"),
@@ -952,15 +985,15 @@ fn a_word_warlock_does_not_have_is_refused_rather_than_opening_the_tree() {
 
 #[test]
 fn a_trailing_argument_is_refused_and_never_quietly_dropped() {
-    // `warlock config extra` typed by somebody who meant something by `extra`
-    // must not run a `config` that silently ignored it.
-    let refused: [&[&str]; 3] = [
-        &["config", "extra"],
-        &["config", "config", "config"],
-        // The one somebody will try: the sigils are typed at `config`'s
-        // prompt, where the answer that clears them can be explained before
-        // it is given, and never as an argument.
-        &["config", "data-plane"],
+    // `warlock sigil clear extra` typed by somebody who meant something by
+    // `extra` must not run a `clear` that silently ignored it. A bare name
+    // after `sigil` is refused too: adding takes `add`, so a name alone is not
+    // read as one.
+    let refused: [&[&str]; 4] = [
+        &["sigil", "clear", "extra"],
+        &["sigil", "data-plane"],
+        &["sigil", "add"],
+        &["sigil", "remove"],
     ];
     for args in refused {
         let error = parse(args).unwrap_err();
@@ -983,7 +1016,7 @@ fn help_prints_a_few_lines_rather_than_this_file() {
     // essays above; without it clap lifts the doc comments wholesale.
     let help = Cli::command().render_long_help().to_string();
     for subcommand in [
-        "config", "stale", "fresh", "check", "unpact", "pact", "refresh", "scope", "key", "brief",
+        "sigil", "stale", "fresh", "check", "unpact", "pact", "refresh", "scope", "key", "brief",
         "push", "draft", "pull", "resume",
     ] {
         assert!(help.contains(subcommand), "{subcommand}: {help}");
@@ -1064,7 +1097,7 @@ fn no_argument_the_parser_accepts_gets_a_write_past_the_boundary() {
     // `add` writes a `[[scope]]` record from. Those three say where a new
     // scope's issues go; none of them reaches the boundary, which is asked
     // and answered before any of them is read. The one road past it is
-    // `warlock config`, and an option here would be a second one.
+    // `warlock sigil add`, and an option here would be a second one.
     for names in [
         vec!["unpact"],
         vec!["scope"],

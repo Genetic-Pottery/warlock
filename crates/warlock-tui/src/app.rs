@@ -405,6 +405,10 @@ impl Chrome {
         self.base = base;
     }
 
+    pub(crate) fn set_sigils(&mut self, sigils: Sigils) {
+        self.sigils = sigils;
+    }
+
     #[must_use]
     pub(crate) fn target(&self) -> Target<'_> {
         match (&self.base, &self.remote_head) {

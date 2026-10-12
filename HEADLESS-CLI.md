@@ -16,7 +16,10 @@ plain line and the terminal is never touched.
 
 | Command | What it does | What it spends |
 | --- | --- | --- |
-| `warlock config` | Print the sigils this machine holds here, and read a line replacing them | nothing |
+| `warlock sigil` | Print the sigils this machine holds here | nothing |
+| `warlock sigil add <NAME>...` | Hold these sigils as well as the ones already held | one config write |
+| `warlock sigil remove <NAME>...` | Stop holding these sigils | one config write |
+| `warlock sigil clear` | Stop holding every sigil | one config write |
 | `warlock key add <name>` | Read a Linear key on stdin and store it under a name | one key-store write |
 | `warlock key list` | Print the names this machine holds keys for, and never a key | nothing |
 | `warlock key use <name>` | Bind one of the stored names to this checkout | one config write |
@@ -43,12 +46,12 @@ omission: the largest thing warlock can do to a repository must not also be the
 thing an absent argument does by itself. `warlock pact .` is somebody having
 said so.
 
-`config` is the one that is about the checkout rather than the ledger.
-`warlock config` prints the repository, the file this machine keeps
-sigils in and what is held now, then reads one line: the sigils on it replace
-everything held for this repository, a blank line clears it, and Ctrl-C or EOF
-changes nothing. It is the only road to a sigil, and a sigil is the only thing
-that opens a scope.
+`warlock sigil` is about the checkout rather than the ledger. `add` and
+`remove` take one or more names, folded to lowercase, and `*` opens every
+scope. Every name is checked before anything is written, so one bad name writes
+nothing. Removing a sigil this machine doesn't hold is refused. A sigil is the
+only thing that opens a scope, and `warlock sigil` and `/sigil` in the TUI are
+the only roads to one.
 
 ### Keys
 
@@ -266,7 +269,7 @@ and **exit 0** when it does:
 
 ```sh
 $ warlock check --gate crates/engine/src/lib.rs
-warlock: crates/engine/src/lib.rs is scoped `data-plane` — hold that sigil to work here, with `warlock config`
+warlock: crates/engine/src/lib.rs is scoped `data-plane` — hold that sigil to work here, with `warlock sigil add data-plane`
 $ echo $?
 3
 
@@ -288,7 +291,7 @@ envelope:
 
 ```sh
 $ warlock check --gate < payload.json
-{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"warlock: `crates/engine/src/lib.rs` is scoped `data-plane` — hold that sigil to work here, with `warlock config`"}}
+{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"warlock: `crates/engine/src/lib.rs` is scoped `data-plane` — hold that sigil to work here, with `warlock sigil add data-plane`"}}
 $ echo $?
 0
 ```
@@ -322,7 +325,7 @@ entry at all, so a command aimed inside a scope this machine does not hold
 answers with the refusal and never with what the manifest holds. A refusal is
 one line on stderr and **exit 3**, with the file byte-identical to what was
 read. There is no `--force` and no environment variable past it:
-`warlock config` is the one road, here exactly as it is in the panel.
+`warlock sigil add` is the one road, here exactly as `/sigil add` is in the panel.
 
 An un-pact has a second refusal that is not that one. When the boundary over the
 path itself is open but something *below* it carries a scope this machine does
@@ -337,7 +340,7 @@ they are required is a fact about the manifest rather than about the command
 line: a scope name nothing records yet is written with all three or not at all,
 and a name that already has a record takes none of them. Both refusals are an
 ordinary **1** and both leave the file byte-identical — not the 3, which is the
-sigil boundary's alone and would send a script to `warlock config` over a
+sigil boundary's alone and would send a script to `warlock sigil add` over a
 missing `--team-key`.
 
 A new name with a record is one manifest write and not two. The scope on the
@@ -615,7 +618,7 @@ file:
 
 ```sh
 warlock: `/repo/.warlock/pacts.toml` records no `[[scope]]` record, so there is nowhere to file: add one
-warlock: this machine holds no sigil, so nothing says which board to file to: hold one with `warlock config`
+warlock: this machine holds no sigil, so nothing says which board to file to: hold one with `warlock sigil add`
 warlock: this machine holds `platform`, and `/repo/.warlock/pacts.toml` records no scope of any of those names
 warlock: this machine holds `platform`, and that scope has no `[[scope]]` record: add one to `/repo/.warlock/pacts.toml`
 warlock: `billing` is not a scope this machine can file to here: `data-plane`, `web`
@@ -1006,7 +1009,7 @@ can file to", which would send somebody to fix a record that is right.
 
 ```sh
 $ warlock pull control-plane
-warlock: the scope `control-plane` is not one this machine's sigils open, so nothing was pulled: this machine holds `warlock-team` — hold that sigil with `warlock config`
+warlock: the scope `control-plane` is not one this machine's sigils open, so nothing was pulled: this machine holds `warlock-team` — hold that sigil with `warlock sigil add control-plane`
 $ echo $?
 3
 ```
@@ -1305,7 +1308,7 @@ start the ticket over.
 | `0` | Completed. The question was answered or the write happened, whatever the answer turned out to be — an empty listing, a queue with nothing ready to pull, and a scope closed to this machine included |
 | `1` | Warlock could not do it, or would not: the repository will not resolve, the manifest will not parse or will not save, the path has no repository-relative spelling, a scope name nothing records yet was given without all three record flags or with a blank one, a name that already has a record was given any of them, a brief's template or `briefs.toml` will not read, a push or draft names a scope that is not a board here, the brief is not one or a project of its name is already filed, a draft's slug is one Linear does not know or its project is not `Planned`, the scope block will not cut or has nothing left to cut, the team has no `Backlog` state, a pull's scope is one nothing records, the working tree is dirty, a named ticket is one the queue's rules turn down, a run halted, a resume was asked for a ticket this machine holds no run for or a run with nothing to put back, or Linear refused what was sent. The line on stderr is the thing to go and read |
 | `2` | The command line was never a request. Clap's status and its wording, for a word warlock has no place for |
-| `3` | The sigil boundary, in the three places it is reached: this machine's sigils do not open the scope covering the path, they do not open the scope a pull was asked for — both refused at the start with nothing spent — or a pull's sub-task wrote under a scope they do not open, which stops the run with nothing committed and the tree as that session left it. Retrying changes nothing, and the road out is `warlock config` |
+| `3` | The sigil boundary, in the three places it is reached: this machine's sigils do not open the scope covering the path, they do not open the scope a pull was asked for — both refused at the start with nothing spent — or a pull's sub-task wrote under a scope they do not open, which stops the run with nothing committed and the tree as that session left it. Retrying changes nothing, and the road out is `warlock sigil add` |
 | `4` | Completed with failures: a run wrote the documents it could and saved the manifest, and the lines above the count name the directories that did not come out of it |
 | `130` | Cancelled: somebody pressed Ctrl-C during a run, and what had finished by then is saved and granted. 128 plus SIGINT, so a shell, `make` and CI read it as interrupted without being told anything about warlock |
 

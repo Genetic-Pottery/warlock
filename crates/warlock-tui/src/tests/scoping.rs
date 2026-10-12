@@ -159,8 +159,7 @@ fn press(code: KeyCode) -> KeyEvent {
 
 /// What the footer says when the boundary turns `s` down over
 /// `crates/engine`, which the fixture scopes `data-plane`.
-const CLOSED: &str =
-    "crates/engine is scoped `data-plane` — hold that sigil to work here, with `warlock config`";
+const CLOSED: &str = "crates/engine is scoped `data-plane` — hold that sigil to work here, with `warlock sigil add data-plane`";
 
 #[test]
 fn s_is_refused_on_a_directory_whose_scope_this_machine_does_not_hold() {
@@ -232,7 +231,7 @@ fn a_machine_that_holds_no_sigil_is_refused_by_a_scoped_directory() {
     let repo = a_repo();
 
     for sigils in [
-        // Nobody has run `warlock config` here. A sigil is what opens a
+        // Nobody has run `warlock sigil add` here. A sigil is what opens a
         // scope, so holding none opens none — the empty set is not a
         // universal bypass, or the boundary would hold for exactly those
         // people who had already opted into being bound by it.

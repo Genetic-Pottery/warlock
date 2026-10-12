@@ -123,9 +123,11 @@ pub(crate) fn permits(
 }
 
 // Names the scope wanted rather than the sigils held: what is missing is the
-// thing to say, and what is held is `warlock config`'s to print.
+// thing to say, and what is held is the sigils box's to show.
 pub(crate) fn closed_scope_message(label: &str, scope: &str) -> String {
-    format!("{label} is scoped `{scope}` — hold that sigil to work here, with `warlock config`")
+    format!(
+        "{label} is scoped `{scope}` — hold that sigil to work here, with `warlock sigil add {scope}`"
+    )
 }
 
 // A different sentence from `closed_scope_message` because it is a different
@@ -143,7 +145,7 @@ pub(crate) fn blocking_scopes_message(label: &str, scopes: &[&str]) -> String {
     };
 
     format!(
-        "un-pacting {label} would drop pacts scoped {} — hold {sigils} with `warlock config`, \
+        "un-pacting {label} would drop pacts scoped {} — hold {sigils} with `warlock sigil add`, \
          or un-pact the parts you hold",
         named.join(", ")
     )

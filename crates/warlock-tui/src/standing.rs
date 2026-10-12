@@ -152,7 +152,7 @@ impl Standing {
     //
     // Callers that can do without one say `.ok()`: a home that will not resolve
     // means nothing is held, which is a state of the answer rather than a
-    // failure to reach one. `warlock config` takes the error, because a home is
+    // failure to reach one. `warlock sigil` takes the error, because a home is
     // the thing it was asked to write under.
     pub(crate) fn home() -> Result<PathBuf, Error> {
         [HOME, USERPROFILE]

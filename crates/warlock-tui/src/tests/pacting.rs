@@ -1320,8 +1320,7 @@ fn scoped() -> Manifest {
     .with_scope("data-plane")])
 }
 
-const CLOSED: &str =
-    "/repo/crates is scoped `data-plane` — hold that sigil to work here, with `warlock config`";
+const CLOSED: &str = "/repo/crates is scoped `data-plane` — hold that sigil to work here, with `warlock sigil add data-plane`";
 
 fn app_over(state: NodeState) -> App {
     App::from_tree(&Tree::new(Node::new(
@@ -1398,7 +1397,7 @@ fn scoped_below() -> Manifest {
 }
 
 const CLOSED_BELOW: &str = "un-pacting /repo/crates would drop pacts scoped `data-plane` — \
-                                hold that sigil with `warlock config`, or un-pact the parts you \
+                                hold that sigil with `warlock sigil add`, or un-pact the parts you \
                                 hold";
 
 #[test]
@@ -1549,7 +1548,7 @@ fn holding_the_scope_lets_both_keys_through() {
 
 #[test]
 fn a_machine_that_holds_no_sigil_is_refused_by_both_keys() {
-    // The state every machine is in before anybody runs `warlock config`,
+    // The state every machine is in before anybody runs `warlock sigil add`,
     // and the one this was originally built the wrong way round: an empty
     // set opens nothing that is scoped, because a sigil is what opens a
     // scope. Reading it as unrestricted would make the default state of

@@ -311,7 +311,7 @@ fn a_scope_this_machine_does_not_hold_is_the_boundary_s_status() {
     // typo against a sigil this machine already has.
     assert!(said.contains("`control-plane`"), "{said}");
     assert!(said.contains("`warlock-team`"), "{said}");
-    assert!(said.contains("warlock config"), "{said}");
+    assert!(said.contains("warlock sigil add control-plane"), "{said}");
     // The register the writes already refuse in, and the reason the record
     // question is asked separately from this one: `resolve_filing` would have
     // answered "no such candidate" and spent a 1 on a boundary.

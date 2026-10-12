@@ -264,14 +264,14 @@ fn a_held_sigil_opens_the_scope_it_matches_and_nothing_else() {
     );
     assert!(prose(&closed).contains(
         "`data-plane` is closed to this machine — hold that sigil to work here, \
-         with `warlock config`"
+         with `warlock sigil add data-plane`"
     ));
 }
 
 #[test]
 fn a_machine_that_holds_nothing_is_closed_by_every_scope_and_still_answers() {
     // No config at all: the ordinary state of a machine nobody has run
-    // `warlock config` on. It is an answer, not a failure.
+    // `warlock sigil add` on. It is an answer, not a failure.
     let home = a_dir();
     let closed = answer(home.path(), "crates/engine");
 
@@ -547,7 +547,7 @@ fn a_closed_scope_keeps_its_whole_route_in_the_prose_beside_the_closed_line() {
          moves the ticket to `In Review`\n\
          holding `platform`\n\
          `data-plane` is closed to this machine — hold that sigil to work here, \
-         with `warlock config`\n\
+         with `warlock sigil add data-plane`\n\
          filing to `Data Plane` would use the key `work`, which this machine stores"
     );
 }
@@ -584,7 +584,7 @@ fn a_covering_scope_nobody_recorded_says_which_scope_is_missing_a_record() {
          in `.warlock/pacts.toml` is what would fix it\n\
          holding nothing\n\
          `platform` is closed to this machine — hold that sigil to work here, \
-         with `warlock config`\n\
+         with `warlock sigil add platform`\n\
          the key `work` is bound here and stored on this machine"
     );
 }
@@ -669,7 +669,7 @@ fn a_gate_over_a_closed_scope_is_the_boundarys_three_and_names_the_scope() {
     );
 
     // And a machine that holds nothing at all, which is every machine nobody
-    // has run `warlock config` on.
+    // has run `warlock sigil add` on.
     let nothing = a_dir();
     assert_eq!(
         status_for(&gating(repo.path(), nothing.path(), "crates/engine")),
@@ -795,7 +795,7 @@ fn a_hook_over_a_closed_scope_writes_the_deny_object_and_still_exits_zero() {
         "{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\
          \"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"warlock: \
          `crates/engine/src/lib.rs` is scoped `data-plane` — hold that sigil to work here, \
-         with `warlock config`\"}}\n"
+         with `warlock sigil add data-plane`\"}}\n"
     );
     // The reason names the path the repository's way and not the machine's: it
     // is shown to somebody, and the absolute one names their home back at them.

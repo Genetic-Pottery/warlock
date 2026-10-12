@@ -311,6 +311,9 @@ fn every_refusal_is_the_same_one_line() {
         "/pull warlock-team WAR-143 now",
         "/resume WAR-143 WAR-144",
         "/pull warlock-team\nand a thought",
+        "/branch dev",
+        "/sigil docs",
+        "/sigil add",
     ];
 
     for draft in refusals {
@@ -320,20 +323,22 @@ fn every_refusal_is_the_same_one_line() {
 
         assert!(!line.contains('\n'), "{draft:?} gave more than one line");
         for command in [
-            "/brief", "/write", "/chat", "/push", "/draft", "/pull", "/resume",
+            "/brief", "/write", "/chat", "/push", "/draft", "/pull", "/resume", "/branch", "/sigil",
         ] {
             assert!(
                 line.contains(command),
-                "{draft:?} did not name {command}, one of warlock's seven commands"
+                "{draft:?} did not name {command}, one of warlock's nine commands"
             );
         }
-        // The list on its own would leave four of the seven looking like `/brief`
+        // The list on its own would leave six of the nine looking like `/brief`
         // and send somebody to a shell to find out what `/pull` wants.
         for said in [
             "a scope and a brief for /push",
             "a scope and optionally a project's slug for /draft",
             "a scope and optionally a ticket for /pull",
             "a ticket for /resume",
+            "`use <BRANCH>` or `clear` for /branch",
+            "`add <NAME>...`, `remove <NAME>...` or `clear` for /sigil",
         ] {
             assert!(
                 line.contains(said),
@@ -395,6 +400,34 @@ fn branch_reads_its_three_spellings_and_refuses_the_rest() {
         "/branch use a b",
         "/branch clear now",
         "/branch use dev\nand a thought",
+    ] {
+        assert_eq!(submitted_for(draft), Submitted::Refused, "{draft:?}");
+    }
+}
+
+#[test]
+fn sigil_reads_its_four_spellings_and_refuses_the_rest() {
+    use super::Sigiling;
+    assert_eq!(submitted_for("/sigil"), Submitted::Sigil(Sigiling::Show));
+    assert_eq!(
+        submitted_for("/sigil add a  b "),
+        Submitted::Sigil(Sigiling::Add("a  b"))
+    );
+    assert_eq!(
+        submitted_for("/sigil remove a"),
+        Submitted::Sigil(Sigiling::Remove("a"))
+    );
+    assert_eq!(
+        submitted_for("/sigil clear"),
+        Submitted::Sigil(Sigiling::Clear)
+    );
+    for draft in [
+        "/sigil add",
+        "/sigil remove ",
+        "/sigil clear x",
+        "/sigil hold a",
+        "/sigil a",
+        "/sigil add a\nand a thought",
     ] {
         assert_eq!(submitted_for(draft), Submitted::Refused, "{draft:?}");
     }

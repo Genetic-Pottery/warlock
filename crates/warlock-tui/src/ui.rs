@@ -24,7 +24,7 @@ use warlock_engine::{NodeState, scope};
 // and the account's `Line` is what a row says. Both names are right where they
 // live, and this module is the one place both are in scope.
 use crate::account::{Account, Line as Entry, Voice};
-use crate::app::{App, Chrome, Focus, Row, Run, RunHeader, Target, Working};
+use crate::app::{App, Chrome, Focus, Row, Run, RunHeader, Sigils, Target, Working};
 use crate::colour::{CONVERSATION_COLOUR, FOCUS_COLOUR, GUIDE_COLOUR, SYSTEM_COLOUR, colour_for};
 use crate::composer::Composer;
 use crate::confirm::{Answer, Carry, Choice, Cutting, Filing, Review, Undertaking};
@@ -69,8 +69,6 @@ const MARK_MARGIN: u16 = 2;
 
 const MARK_MARGIN_ROWS: u16 = 1;
 
-const HEADER_HEIGHT: u16 = 1;
-
 const RUN_HEADER_HEIGHT: u16 = 2;
 
 const PACTING_RUN: &str = "pacting";
@@ -89,8 +87,6 @@ const BAR_MIN_WIDTH: usize = 4;
 /// bar is the same width at 7% as at 100% instead of shrinking by a column
 /// twice on the way up.
 const PERCENT_WIDTH: usize = 4;
-
-const HEADER_GAP: &str = " — ";
 
 pub(crate) const PANEL_INDENT: &str = "  ";
 
@@ -249,6 +245,10 @@ const HELP_SECTIONS: &[(&str, &[(&str, &str)])] = &[
             ("/branch", "name the branch pulls go into"),
             ("/branch use BRANCH", "pull into BRANCH instead"),
             ("/branch clear", "pull into the remote's default"),
+            ("/sigil", "name the sigils held"),
+            ("/sigil add NAME...", "hold these sigils too"),
+            ("/sigil remove NAME...", "stop holding these"),
+            ("/sigil clear", "hold no sigils"),
         ],
     ),
     (
@@ -399,7 +399,11 @@ pub(crate) fn draw(
         let strip = workflow_line(app.panel().mode(), app.panel().ready(), app.working());
         draw_composer(frame, area, composer, live, strip);
     }
+    let (tree, sigils) = tree_column(tree, chrome.sigils());
     draw_tree_pane(frame, tree, app, chrome, now);
+    if let Some(area) = sigils {
+        draw_sigils(frame, area, chrome.sigils());
+    }
     draw_footer(frame, footer, app);
 
     // Over the finished frame rather than instead of it, clearing only the cells
@@ -494,13 +498,8 @@ fn pane_inner(area: Rect) -> Rect {
     inner
 }
 
-fn tree_split(tree: Rect) -> [Rect; 2] {
-    Layout::vertical([Constraint::Length(HEADER_HEIGHT), Constraint::Min(0)])
-        .areas(pane_inner(tree))
-}
-
 fn tree_rows_area(tree: Rect) -> Rect {
-    tree_split(tree)[1]
+    pane_inner(tree)
 }
 
 fn panel_split(panel: Rect, header: Option<&RunHeader>) -> (Option<Rect>, Rect) {
@@ -523,8 +522,8 @@ fn panel_rows_area(panel: Rect, header: Option<&RunHeader>) -> Rect {
 }
 
 #[must_use]
-pub(crate) fn tree_height(size: Size) -> u16 {
-    tree_rows_area(areas(Rect::from(size), None).tree).height
+pub(crate) fn tree_height(size: Size, sigils: &Sigils) -> u16 {
+    tree_rows_area(tree_column(areas(Rect::from(size), None).tree, sigils).0).height
 }
 
 #[must_use]
@@ -566,7 +565,6 @@ pub(crate) enum Hit {
     Offscreen,
     Footer,
     Border,
-    TreeHeader,
     TreeRow { offset: u16 },
     TreeBelowRows,
     PanelHeader,
@@ -581,6 +579,7 @@ pub(crate) fn hit_test(
     size: Size,
     composer: Option<&Composer>,
     header: Option<&RunHeader>,
+    sigils: &Sigils,
 ) -> Hit {
     // Answered by measuring the same `areas` cut the frame was drawn by, not by
     // anything remembered from drawing it, so a click lands on what the reader
@@ -624,12 +623,10 @@ pub(crate) fn hit_test(
         return Hit::Composer;
     }
 
+    let (tree, _) = tree_column(tree, sigils);
     let inside = pane_inner(tree);
     if inside.contains(point) {
         let rows = tree_rows_area(tree);
-        if row < rows.y {
-            return Hit::TreeHeader;
-        }
         return if rows.contains(point) {
             Hit::TreeRow {
                 offset: row.saturating_sub(rows.y),
@@ -1106,14 +1103,28 @@ pub(crate) fn display_width(text: &str) -> usize {
 fn draw_tree_pane(frame: &mut Frame<'_>, area: Rect, app: &App, chrome: &Chrome, now: Instant) {
     let room = usize::from(area.width.saturating_sub(2 * BORDER_THICKNESS));
     let title = target_title(chrome.target(), room);
-    frame.render_widget(
-        pane_block(app.focus() == Focus::Tree).title_top(Line::from(title).bold()),
-        area,
-    );
+    let mut block = pane_block(app.focus() == Focus::Tree).title_top(Line::from(title).bold());
+    if let Some(identity) = identity_title(chrome.header(), room) {
+        block = block.title_bottom(Line::from(identity).bold());
+    }
+    frame.render_widget(block, area);
 
-    let [header_area, rows_area] = tree_split(area);
-    draw_header(frame, header_area, chrome);
-    draw_tree(frame, rows_area, app, now);
+    draw_tree(frame, tree_rows_area(area), app, now);
+}
+
+// Fewer columns than this and the tree's own path is not drawn at all: a path
+// cut to two characters names nothing.
+const IDENTITY_MIN_WIDTH: usize = 6;
+
+// On the bottom border rather than beside the target on the top one, because
+// ` pulls into the default branch ` alone fills most of a 30-column tree and
+// would leave the path no room at ordinary widths. Empty when warlock opened
+// at the repository root, which is the usual case and needs no name.
+pub(crate) fn identity_title(identity: &str, width: usize) -> Option<String> {
+    if identity.is_empty() || width < IDENTITY_MIN_WIDTH {
+        return None;
+    }
+    Some(format!(" {} ", truncated(identity, width - 2)))
 }
 
 const TARGET_LABEL: &str = " pulls into ";
@@ -1131,33 +1142,69 @@ pub(crate) fn target_title(target: Target<'_>, width: usize) -> String {
     format!("{TARGET_LABEL}{} ", truncated(&name, room))
 }
 
-fn draw_header(frame: &mut Frame<'_>, area: Rect, chrome: &Chrome) {
-    frame.render_widget(
-        Paragraph::new(Line::from(header_line(chrome, usize::from(area.width))).bold()),
-        area,
-    );
+const SIGILS_TITLE: &str = " sigils ";
+
+const SIGILS_MOST_LINES: usize = 5;
+
+// Rows the tree keeps before the sigils box gives way to it: below this the box
+// is not drawn at all, because a tree of one or two rows is no tree to read.
+const TREE_MIN_ROWS: u16 = 3;
+
+const WILDCARD: &str = "*";
+
+const UNREADABLE: &str = "can't read the config";
+
+// A name is never cut: a sigil is at most 24 characters and the column is at
+// least `TREE_MIN_WIDTH`, so the box only ever has to drop whole lines, and it
+// says how many it dropped. Holding nothing is a blank line rather than a word,
+// because any one word could be a sigil somebody holds. The unreadable line has
+// spaces in it for the same reason: no sigil can, so it never reads as one.
+pub(crate) fn sigil_lines(sigils: &Sigils) -> Vec<String> {
+    let named = |sigil: &String| {
+        if sigil == WILDCARD {
+            format!("{WILDCARD}  (every scope)")
+        } else {
+            sigil.clone()
+        }
+    };
+    match sigils {
+        Sigils::Nothing => vec![String::new()],
+        Sigils::Unknown => vec![UNREADABLE.to_owned()],
+        Sigils::Held(held) if held.len() <= SIGILS_MOST_LINES => held.iter().map(named).collect(),
+        Sigils::Held(held) => {
+            let shown = SIGILS_MOST_LINES - 1;
+            let mut lines: Vec<String> = held[..shown].iter().map(named).collect();
+            lines.push(format!("+{} more", held.len() - shown));
+            lines
+        }
+    }
 }
 
-fn header_line(chrome: &Chrome, width: usize) -> String {
-    let identity = chrome.header();
-    let Some(holding) = chrome.sigils().line() else {
-        return identity.to_owned();
-    };
-
-    let both = if identity.is_empty() {
-        holding
-    } else {
-        format!("{identity}{HEADER_GAP}{holding}")
-    };
-    // Both or neither, and never a cut one: the sigils are the answer to what
-    // this machine is allowed to do, and half of that list read as the whole of
-    // it would be worse than not saying. So a header too narrow for both drops
-    // the sigils and keeps the identity, rather than truncating the pair.
-    if display_width(&both) <= width {
-        both
-    } else {
-        identity.to_owned()
+// The one cut of the tree column, asked by the frame, the hit test and the
+// viewport height alike, so a click and a scroll land on the rows drawn.
+fn tree_column(tree: Rect, sigils: &Sigils) -> (Rect, Option<Rect>) {
+    let lines = u16::try_from(sigil_lines(sigils).len()).unwrap_or(u16::MAX);
+    let rows = lines.saturating_add(2 * BORDER_THICKNESS);
+    let floor = 2 * BORDER_THICKNESS + TREE_MIN_ROWS;
+    if tree.height < rows.saturating_add(floor) {
+        return (tree, None);
     }
+    let [tree, sigils] =
+        Layout::vertical([Constraint::Min(0), Constraint::Length(rows)]).areas(tree);
+    (tree, Some(sigils))
+}
+
+fn draw_sigils(frame: &mut Frame<'_>, area: Rect, sigils: &Sigils) {
+    let block = pane_block(false).title_top(Line::from(SIGILS_TITLE).bold());
+    let style = match sigils {
+        Sigils::Held(_) => Style::new(),
+        Sigils::Nothing | Sigils::Unknown => Style::new().dim(),
+    };
+    let lines: Vec<Line<'_>> = sigil_lines(sigils)
+        .into_iter()
+        .map(|line| Line::styled(line, style))
+        .collect();
+    frame.render_widget(Paragraph::new(lines).block(block), area);
 }
 
 fn draw_tree(frame: &mut Frame<'_>, area: Rect, app: &App, now: Instant) {

@@ -30,8 +30,8 @@ use warlock_tui::check::{self, check};
 use warlock_tui::planned;
 use warlock_tui::{
     Error, Interactive, Listing, POLL_INTERVAL, RecordFields, branch_clear, branch_use, brief,
-    configure, key_add, key_forget, key_list, key_use, list, pact, pull, push, refresh, resume,
-    scope_add, scope_remove, status_for, unpact,
+    key_add, key_forget, key_list, key_use, list, pact, pull, push, refresh, resume, scope_add,
+    scope_remove, sigil_add, sigil_clear, sigil_list, sigil_remove, status_for, unpact,
 };
 
 mod terminal;
@@ -62,10 +62,15 @@ struct Cli {
 #[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
 enum Command {
     #[command(
-        about = "Set the sigils this machine holds for this repository.",
+        about = "List, add and remove the sigils this machine holds for this repository.",
         long_about = None
     )]
-    Config,
+    Sigil {
+        // Optional, so a bare `warlock sigil` lists what is held, the way a
+        // bare `/sigil` does in the chat bar.
+        #[command(subcommand)]
+        command: Option<SigilCommand>,
+    },
     #[command(
         about = "List the pacted directories that are stale.",
         long_about = None
@@ -387,6 +392,24 @@ enum KeyCommand {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
+enum SigilCommand {
+    #[command(about = "Hold these sigils as well as the ones already held.", long_about = None)]
+    Add {
+        /// Scope names, or `*` for every scope.
+        #[arg(value_name = "NAME", required = true)]
+        names: Vec<String>,
+    },
+    #[command(about = "Stop holding these sigils.", long_about = None)]
+    Remove {
+        /// Sigils this machine holds.
+        #[arg(value_name = "NAME", required = true)]
+        names: Vec<String>,
+    },
+    #[command(about = "Stop holding every sigil.", long_about = None)]
+    Clear,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
 enum BranchCommand {
     #[command(
         about = "Pull from and open pull requests against this branch.",
@@ -436,11 +459,15 @@ fn main() -> ExitCode {
             install_panic_hook();
             run()
         }
-        // The second subcommand, dispatched here for the first one's reasons:
-        // it prints on the ordinary screen and reads a line from stdin in cooked
-        // mode, so nothing about it may touch the terminal — including the panic
-        // hook, which exists to restore a terminal this path never takes.
-        Some(Command::Config) => configure(),
+        // It prints on the ordinary screen, so nothing about it may touch the
+        // terminal — including the panic hook, which exists to restore a
+        // terminal this path never takes.
+        Some(Command::Sigil { command }) => match command {
+            None => sigil_list(),
+            Some(SigilCommand::Add { names }) => sigil_add(&names),
+            Some(SigilCommand::Remove { names }) => sigil_remove(&names),
+            Some(SigilCommand::Clear) => sigil_clear(),
+        },
         // The two questions, dispatched here for the same reason and with one
         // more of their own: they print their answer on the ordinary screen and
         // a script reads it, so a program that had entered the alternate screen

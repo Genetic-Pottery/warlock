@@ -250,7 +250,7 @@ fn a_round_tells_the_app_the_size_the_frame_is_being_cut_at() {
 
     assert_eq!(
         driven.app.viewport_height(),
-        usize::from(tree_height(size)),
+        usize::from(tree_height(size, driven.scope.chrome.sigils())),
         "the app was told the height this frame gives the tree"
     );
 }
@@ -3419,6 +3419,84 @@ mod pulling {
             driven.app.panel().thread().is_some(),
             "the thread card went"
         );
+    }
+
+    #[test]
+    fn sigil_add_writes_the_config_and_moves_the_box() {
+        let repo = a_repository();
+        let home = a_home(repo.path());
+        let mut driven = pulling_session(repo.path(), home.path(), board(), checkout(), working());
+
+        typing(&mut driven, "/sigil add Docs");
+
+        let wanted = vec![SCOPE.to_owned(), "docs".to_owned()];
+        assert_eq!(
+            warlock_engine::held_sigils(home.path(), repo.path()).expect("the config reads"),
+            wanted
+        );
+        assert_eq!(
+            driven.scope.chrome.sigils(),
+            &crate::app::Sigils::held(wanted)
+        );
+        let said = notes(&driven);
+        assert!(
+            said.last().is_some_and(|line| line.contains("`docs`")),
+            "{said:?}"
+        );
+        assert!(!driven.chat.answering(), "a `/sigil` opened a turn");
+    }
+
+    #[test]
+    fn removing_a_sigil_not_held_says_so_and_writes_nothing() {
+        let repo = a_repository();
+        let home = a_home(repo.path());
+        let mut driven = pulling_session(repo.path(), home.path(), board(), checkout(), working());
+        let before = driven.scope.chrome.sigils().clone();
+
+        typing(&mut driven, "/sigil remove elsewhere");
+
+        assert_eq!(
+            warlock_engine::held_sigils(home.path(), repo.path()).expect("the config reads"),
+            vec![SCOPE.to_owned()]
+        );
+        assert_eq!(driven.scope.chrome.sigils(), &before);
+        let said = notes(&driven);
+        assert!(
+            said.last()
+                .is_some_and(|line| line.contains("does not hold `elsewhere`")),
+            "{said:?}"
+        );
+    }
+
+    #[test]
+    fn a_config_written_behind_the_sessions_back_is_read_on_the_next_round() {
+        let repo = a_repository();
+        let home = a_home(repo.path());
+        let mut driven = pulling_session(repo.path(), home.path(), board(), checkout(), working());
+        round(&mut driven);
+        assert_eq!(
+            driven.scope.chrome.sigils(),
+            &crate::app::Sigils::held([SCOPE])
+        );
+
+        save_sigils(home.path(), repo.path(), &["other".to_owned()]).expect("a config that writes");
+        warlock_engine::save_base_branch(home.path(), repo.path(), Some("dev"))
+            .expect("a config that writes");
+        // Pushed forward so a filesystem with a coarse clock still sees the
+        // write as a change.
+        fs::File::options()
+            .write(true)
+            .open(warlock_engine::sigils_path(home.path(), repo.path()))
+            .expect("the config is there")
+            .set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(10))
+            .expect("the mtime sets");
+        round(&mut driven);
+
+        assert_eq!(
+            driven.scope.chrome.sigils(),
+            &crate::app::Sigils::held(["other"])
+        );
+        assert_eq!(driven.scope.chrome.target(), crate::app::Target::Set("dev"));
     }
 
     #[test]

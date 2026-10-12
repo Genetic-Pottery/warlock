@@ -14,19 +14,20 @@ use super::{
     CARRY_QUESTION, COMPOSER_CURSOR, COMPOSER_MIN_HEIGHT, CONFIRM_ANSWER_GAP, CONFIRM_NO,
     CONFIRM_QUESTION, CONFIRM_YES, CUT_KEY, CUT_QUESTION, CUT_SLICES, CUT_STATUS, CUT_TEAM, Carry,
     DIALOG_MARGIN, DIALOG_MARGIN_ROWS, Dialog, ELLIPSIS, FOOTER_HEIGHT, GUIDE, GUIDE_BRANCH,
-    GUIDE_LAST, HEADER_GAP, HEADER_HEIGHT, HELP_KEY, Hit, INDENT, KEY_DROP_ORDER, KEY_GAP, KEYS,
-    LIVE_KEY, MARK, MARK_MARGIN, MARK_MARGIN_ROWS, NO_MARKER, NOTE_MARKER, PACTING_KEYS,
-    PACTING_RUN, PANEL_INDENT, PATH_HEADING, PATH_RULES, PERCENT_WIDTH, PULL_BRANCH, PULL_FROM,
-    PULL_QUESTION, PULL_RESUME_QUESTION, PULL_SCOPE, PULL_TEAM, PUSH_KEY, PUSH_QUESTION, PUSH_TEAM,
-    QUIT_KEY, RECORD_HEADING, RECORD_LABEL_GAP, RECORD_RULES, REFRESHING_RUN, REVIEW_ANSWER_GAP,
+    GUIDE_LAST, HELP_KEY, Hit, IDENTITY_MIN_WIDTH, INDENT, KEY_DROP_ORDER, KEY_GAP, KEYS, LIVE_KEY,
+    MARK, MARK_MARGIN, MARK_MARGIN_ROWS, NO_MARKER, NOTE_MARKER, PACTING_KEYS, PACTING_RUN,
+    PANEL_INDENT, PATH_HEADING, PATH_RULES, PERCENT_WIDTH, PULL_BRANCH, PULL_FROM, PULL_QUESTION,
+    PULL_RESUME_QUESTION, PULL_SCOPE, PULL_TEAM, PUSH_KEY, PUSH_QUESTION, PUSH_TEAM, QUIT_KEY,
+    RECORD_HEADING, RECORD_LABEL_GAP, RECORD_RULES, REFRESHING_RUN, REVIEW_ANSWER_GAP,
     REVIEW_CREATE, REVIEW_EDIT, REVIEW_FEEDBACK, REVIEW_QUESTION, REVIEW_READ, REVIEW_SKIP,
     RUN_HEADER_HEIGHT, Reach, Review, SAID_MARKER, SCOPE_CURSOR, SCOPE_HEADING, SCROLLBACK_ARROW,
-    SELECTED, SELECTION_MARKER, THREAD_TITLE, TREE_MIN_WIDTH, TREE_PERCENT, WORKFLOW_LIT, areas,
-    composer_height, composer_on_screen, display_width, draw, footer_text_area, guide_prefixes,
-    help_most_scroll, hit_test, keys_line, label_width, mark_area, pacting_keys_line, pane_inner,
+    SELECTED, SELECTION_MARKER, SIGILS_MOST_LINES, SIGILS_TITLE, THREAD_TITLE, TREE_MIN_ROWS,
+    TREE_MIN_WIDTH, TREE_PERCENT, WILDCARD, WORKFLOW_LIT, areas, composer_height,
+    composer_on_screen, display_width, draw, footer_text_area, guide_prefixes, help_most_scroll,
+    hit_test, identity_title, keys_line, label_width, mark_area, pacting_keys_line, pane_inner,
     panel_height, panel_reach, panel_row, panel_rows_area, panel_width, run_header_height,
-    run_header_line, target_title, tree_height, tree_rows_area, tree_width, truncated,
-    workflow_line,
+    run_header_line, sigil_lines, target_title, tree_column, tree_height, tree_rows_area,
+    tree_width, truncated, workflow_line,
 };
 use crate::account::{Line as Entry, Outcome};
 use crate::app::{App, Chrome, Focus, Row, Run, Sigils, Working};
@@ -49,15 +50,15 @@ const MANY: usize = 20;
 const WIDTH: u16 = 120;
 const HEIGHT: u16 = 10;
 
-const CHROME_HEIGHT: u16 = FOOTER_HEIGHT + 2 * BORDER_THICKNESS + HEADER_HEIGHT;
+const CHROME_HEIGHT: u16 = FOOTER_HEIGHT + 2 * BORDER_THICKNESS;
 
 const KEYS_WIDTH: u16 = 240;
 
 const EIGHTY_COLUMNS: u16 = 80;
 
-const FILES_HEIGHT: u16 = 20;
+const FILES_HEIGHT: u16 = 23;
 
-const FIXTURE_HEIGHT: u16 = 16;
+const FIXTURE_HEIGHT: u16 = 19;
 
 const WHOLE_FIXTURE: [&str; 9] = [
     "> - warlock",
@@ -155,7 +156,7 @@ fn terminal_width_for(rows_width: u16) -> u16 {
 
 fn tall_app(selected: usize) -> App {
     let mut app = App::from_rows(many_rows(MANY));
-    app.set_viewport_height(tree_height(Size::new(WIDTH, HEIGHT)));
+    app.set_viewport_height(tree_height(Size::new(WIDTH, HEIGHT), &Sigils::Nothing));
     while app.selected() < selected {
         app.select_next();
     }
@@ -175,7 +176,7 @@ fn numbered(line: usize) -> Activity {
 
 fn pacting_app(base: Instant, width: u16, height: u16) -> App {
     let mut app = App::from_tree(&fixture::tree());
-    app.set_viewport_height(tree_height(Size::new(width, height)));
+    app.set_viewport_height(tree_height(Size::new(width, height), &Sigils::Nothing));
     app.panel_mut()
         .set_height(panel_height(Size::new(width, height), None, None));
     app.panel_mut()
@@ -225,16 +226,11 @@ fn panel_top_edge(buffer: &Buffer) -> String {
 }
 
 fn rows_area(buffer: &Buffer) -> Rect {
-    tree_rows_area(areas(buffer.area, None).tree)
+    tree_rows_area(tree_column(areas(buffer.area, None).tree, &Sigils::Nothing).0)
 }
 
-fn header_area(buffer: &Buffer) -> Rect {
-    let inner = pane_inner(areas(buffer.area, None).tree);
-
-    Rect {
-        height: HEADER_HEIGHT.min(inner.height),
-        ..inner
-    }
+fn sigils_box(buffer: &Buffer, sigils: &Sigils) -> Option<Rect> {
+    tree_column(areas(buffer.area, None).tree, sigils).1
 }
 
 fn tree_rows(buffer: &Buffer) -> Vec<String> {
@@ -247,18 +243,41 @@ fn tree_row(buffer: &Buffer, index: u16) -> String {
     text_in(buffer, area, area.y + index)
 }
 
+// A short base, so the target title leaves the tree's path room on the border.
 fn held_chrome(sigils: Sigils) -> Chrome {
-    Chrome::of("/repo", "/repo/crates").with_sigils(sigils)
+    Chrome::of("/repo", "/repo/crates")
+        .with_sigils(sigils)
+        .with_target(Some("dev".to_owned()), None)
 }
 
 fn header_app() -> App {
     App::from_tree(&fixture::tree())
 }
 
-fn header_text(buffer: &Buffer) -> String {
-    let area = header_area(buffer);
+fn border_titles(buffer: &Buffer, area: Rect, y: u16) -> Vec<String> {
+    text_in(buffer, area, y)
+        .split(|character: char| {
+            !character.is_alphanumeric() && " /()-_.…`'".find(character).is_none()
+        })
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
 
-    text_in(buffer, area, area.y)
+fn tree_border_titles(buffer: &Buffer) -> Vec<String> {
+    let tree = areas(buffer.area, None).tree;
+    border_titles(buffer, tree, tree.y)
+}
+
+// The tree pane's bottom border is the first row under its top one that opens
+// with a bottom corner; the sigils box under it opens with a top corner.
+fn header_text(buffer: &Buffer) -> String {
+    let tree = areas(buffer.area, None).tree;
+    let bottom = (tree.y + 1..tree.bottom())
+        .find(|&y| buffer[(tree.x, y)].symbol() == "└")
+        .expect("the tree pane has a bottom border");
+    border_titles(buffer, tree, bottom).concat()
 }
 
 fn header_and_footer(buffer: &Buffer) -> (Vec<String>, Vec<String>) {
@@ -1428,7 +1447,7 @@ fn the_selection_marker_moves_with_the_selection() {
 
 #[test]
 fn a_tree_taller_than_the_screen_draws_one_windowful_with_the_selection_in_it() {
-    let window = usize::from(tree_height(Size::new(WIDTH, HEIGHT)));
+    let window = usize::from(tree_height(Size::new(WIDTH, HEIGHT), &Sigils::Nothing));
     assert!(window < MANY, "the tree must not fit on screen");
 
     // The first row, a row in the middle, and the last one: the three
@@ -1462,10 +1481,10 @@ fn a_tree_taller_than_the_screen_draws_one_windowful_with_the_selection_in_it() 
 
 #[test]
 fn the_header_and_footer_stay_put_while_the_tree_scrolls_under_them() {
-    let window = usize::from(tree_height(Size::new(WIDTH, HEIGHT)));
-    // The header line these frames are drawn under, built once: it is not
-    // app state, so it does not change as the selection walks the tree.
-    let chrome = Chrome::of("/repo", "/repo/crates");
+    let window = usize::from(tree_height(Size::new(WIDTH, HEIGHT), &Sigils::Nothing));
+    // The border these frames are drawn under, built once: it is not app
+    // state, so it does not change as the selection walks the tree.
+    let chrome = Chrome::of("/repo", "/repo/crates").with_target(Some("dev".to_owned()), None);
     let mut fixed = None;
     let mut offsets = Vec::new();
 
@@ -1512,16 +1531,23 @@ fn the_height_the_app_is_told_is_the_height_the_frame_gives_the_tree() {
     // tests use, and three more on the way up: the measurement has to hold
     // at every height, not just at the one the other tests draw at.
     for height in [CHROME_HEIGHT + 1, CHROME_HEIGHT + 2, HEIGHT, 15, 24] {
-        let measured = tree_height(Size::new(WIDTH, height));
+        let measured = tree_height(Size::new(WIDTH, height), &Sigils::Nothing);
         let mut app = App::from_rows(many_rows(MANY));
         app.set_viewport_height(measured);
 
         let buffer = render(&app, WIDTH, height);
 
-        // The footer, the pane's border top and bottom, and the header,
-        // taken off the terminal's height — and what is left is what the
-        // frame draws, counted row by row off the buffer.
-        assert_eq!(measured, height - CHROME_HEIGHT);
+        // The footer and the pane's border top and bottom come off the
+        // terminal's height, and the sigils box's three rows come off too
+        // wherever the tree keeps its floor without them.
+        let bare = height - CHROME_HEIGHT;
+        let boxed = 1 + 2 * BORDER_THICKNESS;
+        let expected = if bare >= TREE_MIN_ROWS + boxed {
+            bare - boxed
+        } else {
+            bare
+        };
+        assert_eq!(measured, expected, "in {height} rows");
         let drawn = tree_rows(&buffer);
         assert_eq!(drawn.len(), usize::from(measured), "in {height} rows");
         assert!(
@@ -1534,7 +1560,7 @@ fn the_height_the_app_is_told_is_the_height_the_frame_gives_the_tree() {
 #[test]
 fn a_terminal_with_no_room_for_a_tree_row_is_measured_at_none_rather_than_underflowing() {
     for height in 0..=CHROME_HEIGHT {
-        let measured = tree_height(Size::new(WIDTH, height));
+        let measured = tree_height(Size::new(WIDTH, height), &Sigils::Nothing);
 
         let buffer = render(&App::from_rows(many_rows(MANY)), WIDTH, height.max(1));
 
@@ -2136,75 +2162,144 @@ fn the_header_names_the_root_relative_to_the_repository_root() {
     let chrome = Chrome::of(
         Path::new("/repo"),
         Path::new("/repo").join("crates").join("warlock-engine"),
-    );
+    )
+    .with_target(Some("dev".to_owned()), None);
 
-    let buffer = render_chrome(&header_app(), &chrome, WIDTH, HEIGHT);
+    let wide = render_chrome(&header_app(), &chrome, HELD_WIDTH, HEIGHT);
 
     // Forward slashes whatever the platform's separator is, because this
     // is the engine's manifest spelling of a module.
-    assert_eq!(header_text(&buffer), "crates/warlock-engine");
+    assert_eq!(header_text(&wide), "crates/warlock-engine");
 }
 
 #[test]
-fn a_tree_rooted_at_the_repository_root_draws_a_blank_header_and_keeps_its_row() {
-    let buffer = render_chrome(&header_app(), &Chrome::of("/repo", "/repo"), WIDTH, HEIGHT);
+fn a_tree_rooted_at_the_repository_root_names_no_path_on_the_border() {
+    let chrome = Chrome::of("/repo", "/repo").with_target(Some("dev".to_owned()), None);
+    let buffer = render_chrome(&header_app(), &chrome, WIDTH, HEIGHT);
 
-    // Nothing to say — the whole repository is not a part of itself — and
-    // the root row below already names the directory.
-    assert_eq!(header_text(&buffer), "");
-    // The row is still the header's, though, so the tree starts where it
-    // starts whether or not there is a name on the line above it.
-    assert_eq!(header_area(&buffer).height, HEADER_HEIGHT);
-    assert_eq!(rows_area(&buffer).y, header_area(&buffer).y + HEADER_HEIGHT);
+    assert_eq!(tree_border_titles(&buffer), ["pulls into dev"]);
     assert!(tree_row(&buffer, 0).contains("warlock"));
 }
 
 #[test]
-fn the_header_states_what_this_machine_holds_after_the_tree_it_names() {
-    let chrome = held_chrome(Sigils::held(["billing", "web"]));
-
-    let buffer = render_chrome(&header_app(), &chrome, HELD_WIDTH, HEIGHT);
-
-    // One line, both facts, the identity first: what am I looking at, and
-    // then what do I hold for it.
-    assert_eq!(
-        header_text(&buffer),
-        format!("crates{HEADER_GAP}holding `billing`, `web`")
+fn the_header_names_only_the_tree_and_the_box_under_it_lists_what_is_held() {
+    let sigils = Sigils::held(["billing", "web"]);
+    let buffer = render_chrome(
+        &header_app(),
+        &held_chrome(sigils.clone()),
+        HELD_WIDTH,
+        FILES_HEIGHT,
     );
-    assert_eq!(header_area(&buffer).height, HEADER_HEIGHT);
+
+    assert_eq!(header_text(&buffer), "crates");
+    let area = sigils_box(&buffer, &sigils).expect("the box has room");
+    assert!(text_in(&buffer, area, area.y).contains(SIGILS_TITLE.trim()));
+    assert_eq!(rows_in(&buffer, pane_inner(area)), ["billing", "web"]);
+    assert_eq!(area.y + area.height, areas(buffer.area, None).tree.bottom());
 }
 
 #[test]
-fn a_config_that_would_not_read_says_so_on_the_header_rather_than_going_quiet() {
+fn sigil_lines_name_each_sigil_leave_nothing_blank_and_say_unreadable_out_loud() {
+    assert_eq!(sigil_lines(&Sigils::Nothing), [""]);
+    assert_eq!(sigil_lines(&Sigils::Unknown), ["can't read the config"]);
+    assert_eq!(
+        sigil_lines(&Sigils::held(["billing", WILDCARD])),
+        ["billing".to_owned(), format!("{WILDCARD}  (every scope)")]
+    );
+}
+
+#[test]
+fn past_the_most_lines_the_box_names_four_and_counts_the_rest() {
+    let held: Vec<String> = (0..8).map(|index| format!("scope-{index}")).collect();
+    let lines = sigil_lines(&Sigils::held(held.clone()));
+
+    assert_eq!(lines.len(), SIGILS_MOST_LINES);
+    assert_eq!(
+        lines[..SIGILS_MOST_LINES - 1],
+        held[..SIGILS_MOST_LINES - 1]
+    );
+    assert_eq!(lines[SIGILS_MOST_LINES - 1], "+4 more");
+
+    let exactly: Vec<String> = held[..SIGILS_MOST_LINES].to_vec();
+    assert_eq!(sigil_lines(&Sigils::held(exactly.clone())), exactly);
+}
+
+#[test]
+fn a_config_that_would_not_read_says_so_in_the_box_rather_than_going_quiet() {
     let buffer = render_chrome(
         &header_app(),
         &held_chrome(Sigils::Unknown),
         HELD_WIDTH,
-        HEIGHT,
+        FILES_HEIGHT,
     );
 
-    // Broken is never drawn as absent: a reader whose config will not parse
-    // is told, on the same line and in the same row.
+    let area = sigils_box(&buffer, &Sigils::Unknown).expect("the box has room");
     assert_eq!(
-        header_text(&buffer),
-        format!("crates{HEADER_GAP}holding unknown")
+        rows_in(&buffer, pane_inner(area)),
+        ["can't read the config"]
     );
-    assert_eq!(header_area(&buffer).height, HEADER_HEIGHT);
+    assert_eq!(header_text(&buffer), "crates");
 }
 
 #[test]
-fn a_machine_holding_nothing_draws_the_frame_it_always_drew() {
-    // Byte for byte, at both widths, in both spellings of nothing: the
-    // reader who never runs `warlock config` must not be able to tell that
-    // any of this arrived.
+fn the_box_takes_its_rows_off_the_tree() {
+    let size = Size::new(WIDTH, FILES_HEIGHT);
+    let bare = tree_rows_area(areas(Rect::from(size), None).tree).height;
+
+    for sigils in [
+        Sigils::Nothing,
+        Sigils::held(["billing", "web", "docs"]),
+        Sigils::held((0..9).map(|index| format!("scope-{index}"))),
+    ] {
+        let lines = u16::try_from(sigil_lines(&sigils).len()).expect("a few lines");
+        assert_eq!(
+            tree_height(size, &sigils),
+            bare - lines - 2 * BORDER_THICKNESS,
+            "{sigils:?}"
+        );
+    }
+}
+
+#[test]
+fn a_column_too_short_to_keep_the_trees_rows_drops_the_box_whole() {
+    let sigils = Sigils::held(["billing", "web"]);
+    let floor = 2 * BORDER_THICKNESS + TREE_MIN_ROWS;
+    let rows = 2 + 2 * BORDER_THICKNESS;
+
+    let fits = Rect::new(0, 0, 30, floor + rows);
+    assert!(tree_column(fits, &sigils).1.is_some());
+    let short = Rect::new(0, 0, 30, floor + rows - 1);
+    assert_eq!(tree_column(short, &sigils), (short, None));
+}
+
+#[test]
+fn a_click_on_the_box_is_not_a_tree_row() {
+    let size = Size::new(WIDTH, FILES_HEIGHT);
+    let sigils = Sigils::held(["billing"]);
+    let area = tree_column(areas(Rect::from(size), None).tree, &sigils)
+        .1
+        .expect("the box has room");
+    let inside = pane_inner(area);
+
+    assert!(!matches!(
+        hit_test(inside.x, inside.y, size, None, None, &sigils),
+        Hit::TreeRow { .. }
+    ));
+}
+
+#[test]
+fn every_spelling_of_holding_nothing_draws_the_same_frame() {
     let app = header_app();
-    let before = held_chrome(Sigils::Nothing);
-    let never_told = Chrome::of("/repo", "/repo/crates");
+    let never_told = Chrome::of("/repo", "/repo/crates").with_target(Some("dev".to_owned()), None);
 
     for width in [HELD_WIDTH, NARROW_WIDTH] {
-        let drawn = render_chrome(&app, &before, width, HEIGHT);
+        let drawn = render_chrome(&app, &held_chrome(Sigils::Nothing), width, HEIGHT);
 
-        assert_eq!(header_text(&drawn), "crates", "at {width} columns");
+        assert_eq!(
+            header_text(&drawn),
+            header_text(&render_chrome(&app, &never_told, width, HEIGHT)),
+            "at {width} columns"
+        );
         assert_eq!(
             rows_text(&drawn),
             rows_text(&render_chrome(&app, &never_told, width, HEIGHT)),
@@ -2224,51 +2319,36 @@ fn a_machine_holding_nothing_draws_the_frame_it_always_drew() {
 }
 
 #[test]
-fn a_header_with_no_room_for_both_drops_the_holding_and_keeps_the_tree_it_names() {
-    let chrome = held_chrome(Sigils::held(["billing", "web"]));
-    // Twenty columns of tree pane, eighteen inside it: room for the
-    // identity several times over, and nowhere near room for both.
-    let narrow = pane_inner(areas(Rect::new(0, 0, NARROW_WIDTH, HEIGHT), None).tree);
-    assert!(
-        display_width(&format!("crates{HEADER_GAP}holding `billing`, `web`"))
-            > usize::from(narrow.width)
+fn the_target_is_on_the_top_border_the_path_on_the_bottom_and_the_first_row_right_under_the_top() {
+    let chrome = Chrome::of("/repo", "/repo/crates").with_target(None, None);
+    let buffer = render_chrome(&header_app(), &chrome, WIDTH, HEIGHT);
+
+    assert_eq!(
+        tree_border_titles(&buffer),
+        ["pulls into the default branch"]
     );
-
-    let buffer = render_chrome(&header_app(), &chrome, NARROW_WIDTH, HEIGHT);
-
-    // The whole holding is gone rather than half of it: the identity is the
-    // answer to "what am I looking at", so it is never spent on sigils, and
-    // half a set of sigils would be a claim about what is held that is not
-    // true.
-    let header = header_text(&buffer);
-    assert_eq!(header, "crates");
-    assert!(!header.contains(ELLIPSIS), "{header}");
-    assert!(!header.contains("holding"), "{header}");
-    // And the line still keeps its row, so the tree starts where it started.
-    assert_eq!(header_area(&buffer).height, HEADER_HEIGHT);
-    assert_eq!(rows_area(&buffer).y, header_area(&buffer).y + HEADER_HEIGHT);
+    assert_eq!(header_text(&buffer), "crates");
+    let pane = areas(buffer.area, None).tree;
+    let rows = rows_area(&buffer);
+    assert_eq!(rows.y, pane.y + BORDER_THICKNESS);
+    assert_eq!(tree_row(&buffer, 0), "> - warlock");
 }
 
 #[test]
-fn the_header_sits_above_the_first_tree_row_inside_the_panes_border() {
-    let buffer = render_chrome(
-        &header_app(),
-        &Chrome::of("/repo", "/repo/crates"),
-        WIDTH,
-        HEIGHT,
-    );
+fn the_path_title_fits_the_border_and_names_nothing_when_it_cannot() {
+    assert_eq!(identity_title("", 34), None);
+    assert_eq!(identity_title("crates", 34), Some(" crates ".to_owned()));
 
-    let header = header_area(&buffer);
-    let rows = rows_area(&buffer);
-    assert_eq!(header_text(&buffer), "crates");
-    assert_eq!(tree_row(&buffer, 0), "> - warlock");
-    // Immediately above the rows, and both of them inside the border rather
-    // than on it: the pane's top row is the border's, not the header's.
-    assert_eq!(header.y + HEADER_HEIGHT, rows.y);
-    assert_eq!(header.x, rows.x);
-    let pane = areas(buffer.area, None).tree;
-    assert_eq!(header.y, pane.y + BORDER_THICKNESS);
-    assert_eq!(header.x, pane.x + BORDER_THICKNESS);
+    let tight = identity_title("crates/warlock-engine", 18).expect("room for some of it");
+    assert!(display_width(&tight) <= 18, "{tight:?}");
+    assert!(tight.trim_end().ends_with('…'), "{tight:?}");
+    assert!(tight.starts_with(" crates"), "{tight:?}");
+
+    assert_eq!(identity_title("crates", IDENTITY_MIN_WIDTH - 1), None);
+    assert_eq!(
+        identity_title("crates", IDENTITY_MIN_WIDTH),
+        Some(" cra… ".to_owned())
+    );
 }
 
 #[test]
@@ -2345,7 +2425,7 @@ fn the_width_rule_never_loses_a_column_or_lets_the_tree_column_take_the_majority
 fn a_point_is_answered_with_whatever_the_frame_draws_at_it() {
     let size = Size::new(WIDTH, HEIGHT);
     let panes = areas(Rect::from(size), None);
-    let hit = |x, y| hit_test(x, y, size, None, None);
+    let hit = |x, y| hit_test(x, y, size, None, None, &Sigils::Nothing);
 
     // The footer runs the full width, all three of its lines, and belongs
     // to neither pane.
@@ -2370,15 +2450,10 @@ fn a_point_is_answered_with_whatever_the_frame_draws_at_it() {
         }
     }
 
-    // Inside the tree pane: one header line, and a row of the window per
-    // row under it, counted from the top of the window rather than of the
-    // screen.
-    let inside = pane_inner(panes.tree);
+    // Inside the tree pane: a row of the window per row, counted from the
+    // top of the window rather than of the screen.
     let rows = tree_rows_area(panes.tree);
-    assert_eq!(rows.height, tree_height(size));
-    for x in inside.x..inside.x + inside.width {
-        assert_eq!(hit(x, inside.y), Hit::TreeHeader, "at column {x}");
-    }
+    assert_eq!(rows.height, tree_height(size, &Sigils::Nothing));
     for offset in 0..rows.height {
         for x in [rows.x, rows.x + rows.width - 1] {
             assert_eq!(hit(x, rows.y + offset), Hit::TreeRow { offset });
@@ -2415,7 +2490,7 @@ fn the_row_a_point_lands_on_is_the_row_the_frame_drew_there() {
     assert!(rows.height > 1, "the window should hold more than one row");
     for offset in 0..rows.height {
         assert_eq!(
-            hit_test(rows.x, rows.y + offset, size, None, None),
+            hit_test(rows.x, rows.y + offset, size, None, None, &Sigils::Nothing),
             Hit::TreeRow { offset }
         );
         assert_eq!(
@@ -2424,14 +2499,8 @@ fn the_row_a_point_lands_on_is_the_row_the_frame_drew_there() {
             "row {offset} of the window"
         );
     }
-    // The header is the line the frame drew the tree's name on, not a row.
-    let header = header_area(&buffer);
-    assert_eq!(
-        hit_test(header.x, header.y, size, None, None),
-        Hit::TreeHeader
-    );
-    // Blank, because this frame was drawn through `render`, which passes
-    // the default `Chrome`: the line is not the app's to fill any more.
+    // No path on the border, because this frame was drawn through
+    // `render`, which passes the default `Chrome`.
     assert_eq!(header_text(&buffer), "");
 }
 
@@ -2439,11 +2508,11 @@ fn the_row_a_point_lands_on_is_the_row_the_frame_drew_there() {
 fn a_terminal_too_short_for_a_tree_row_answers_no_row_rather_than_underflowing() {
     for height in 0..=CHROME_HEIGHT {
         let size = Size::new(WIDTH, height);
-        assert_eq!(tree_height(size), 0, "in {height} rows");
+        assert_eq!(tree_height(size, &Sigils::Nothing), 0, "in {height} rows");
 
         for y in 0..height {
             for x in 0..WIDTH {
-                let hit = hit_test(x, y, size, None, None);
+                let hit = hit_test(x, y, size, None, None, &Sigils::Nothing);
                 assert!(
                     !matches!(hit, Hit::TreeRow { .. }),
                     "({x}, {y}) of {height} rows answered {hit:?}"
@@ -2452,21 +2521,12 @@ fn a_terminal_too_short_for_a_tree_row_answers_no_row_rather_than_underflowing()
         }
     }
 
-    // The tallest of those has room for the header and nothing under it,
-    // and says so; a screen with no room even for that is all footer and
-    // border.
-    let header = Size::new(WIDTH, CHROME_HEIGHT);
-    let inside = pane_inner(areas(Rect::from(header), None).tree);
-    assert_eq!(inside.height, HEADER_HEIGHT);
-    assert_eq!(
-        hit_test(inside.x, inside.y, header, None, None),
-        Hit::TreeHeader
-    );
-    for height in 0..CHROME_HEIGHT - HEADER_HEIGHT {
+    // None of those has room for anything but the footer and the borders.
+    for height in 0..CHROME_HEIGHT {
         let size = Size::new(WIDTH, height);
         for y in 0..height {
             for x in 0..WIDTH {
-                let hit = hit_test(x, y, size, None, None);
+                let hit = hit_test(x, y, size, None, None, &Sigils::Nothing);
                 assert!(
                     matches!(hit, Hit::Footer | Hit::Border),
                     "({x}, {y}) of {height} rows answered {hit:?}"
@@ -2494,7 +2554,7 @@ fn a_terminal_narrow_enough_to_halve_still_tells_the_two_panes_apart() {
         let inside = pane_inner(panes.panel);
         let rows = tree_rows_area(panes.tree);
         assert_eq!(
-            hit_test(inside.x, inside.y, size, None, None),
+            hit_test(inside.x, inside.y, size, None, None, &Sigils::Nothing),
             Hit::PanelLine {
                 offset: 0,
                 column: 0
@@ -2507,7 +2567,8 @@ fn a_terminal_narrow_enough_to_halve_still_tells_the_two_panes_apart() {
                 inside.y + inside.height - 1,
                 size,
                 None,
-                None
+                None,
+                &Sigils::Nothing
             ),
             Hit::PanelLine {
                 offset: inside.height - 1,
@@ -2516,7 +2577,7 @@ fn a_terminal_narrow_enough_to_halve_still_tells_the_two_panes_apart() {
             "at {width} columns"
         );
         assert_eq!(
-            hit_test(rows.x, rows.y, size, None, None),
+            hit_test(rows.x, rows.y, size, None, None, &Sigils::Nothing),
             Hit::TreeRow { offset: 0 },
             "at {width} columns"
         );
@@ -2524,7 +2585,7 @@ fn a_terminal_narrow_enough_to_halve_still_tells_the_two_panes_apart() {
         // sides of the join, whichever pane owns which.
         for x in [inside.x + inside.width, rows.x - 1] {
             assert_eq!(
-                hit_test(x, rows.y, size, None, None),
+                hit_test(x, rows.y, size, None, None, &Sigils::Nothing),
                 Hit::Border,
                 "at {width} columns"
             );
@@ -2558,7 +2619,7 @@ fn a_point_in_the_panel_answers_with_the_column_of_the_rows_area_it_landed_on() 
         (rows.x + rows.width - 1, rows.width - 1),
     ] {
         assert_eq!(
-            hit_test(x, rows.y, size, field, Some(&header)),
+            hit_test(x, rows.y, size, field, Some(&header), &Sigils::Nothing),
             Hit::PanelLine { offset: 0, column },
             "at screen column {x}"
         );
@@ -2569,14 +2630,21 @@ fn a_point_in_the_panel_answers_with_the_column_of_the_rows_area_it_landed_on() 
     // for itself rather than for a column of the panel.
     for x in [rows.x - 1, rows.x + rows.width] {
         assert_eq!(
-            hit_test(x, rows.y, size, field, Some(&header)),
+            hit_test(x, rows.y, size, field, Some(&header), &Sigils::Nothing),
             Hit::Border,
             "at screen column {x}"
         );
     }
     let inside = pane_inner(cut.composer.expect("this frame has a field"));
     assert_eq!(
-        hit_test(inside.x, inside.y, size, field, Some(&header)),
+        hit_test(
+            inside.x,
+            inside.y,
+            size,
+            field,
+            Some(&header),
+            &Sigils::Nothing
+        ),
         Hit::Composer
     );
 }
@@ -2728,11 +2796,11 @@ fn no_point_is_answered_with_an_offset_its_window_has_no_room_for() {
         let size = Size::new(width, height);
         for y in 0..height {
             for x in 0..width {
-                match hit_test(x, y, size, None, None) {
+                match hit_test(x, y, size, None, None, &Sigils::Nothing) {
                     Hit::TreeRow { offset } => assert!(
-                        offset < tree_height(size),
+                        offset < tree_height(size, &Sigils::Nothing),
                         "({x}, {y}) of {width}x{height} is row {offset} of a window {} tall",
-                        tree_height(size)
+                        tree_height(size, &Sigils::Nothing)
                     ),
                     Hit::PanelLine { offset, column } => {
                         assert!(
@@ -2753,10 +2821,16 @@ fn no_point_is_answered_with_an_offset_its_window_has_no_room_for() {
 
         // And a point off the end of the frame is nothing warlock drew,
         // rather than the nearest thing it did draw.
-        assert_eq!(hit_test(width, 0, size, None, None), Hit::Offscreen);
-        assert_eq!(hit_test(0, height, size, None, None), Hit::Offscreen);
         assert_eq!(
-            hit_test(u16::MAX, u16::MAX, size, None, None),
+            hit_test(width, 0, size, None, None, &Sigils::Nothing),
+            Hit::Offscreen
+        );
+        assert_eq!(
+            hit_test(0, height, size, None, None, &Sigils::Nothing),
+            Hit::Offscreen
+        );
+        assert_eq!(
+            hit_test(u16::MAX, u16::MAX, size, None, None, &Sigils::Nothing),
             Hit::Offscreen
         );
     }
@@ -3055,7 +3129,7 @@ fn a_line_too_long_for_the_panel_is_broken_under_itself_rather_than_cut() {
 
 fn viewing_app(width: u16, height: u16, cut: bool) -> App {
     let mut app = App::from_tree(&fixture::tree());
-    app.set_viewport_height(tree_height(Size::new(width, height)));
+    app.set_viewport_height(tree_height(Size::new(width, height), &Sigils::Nothing));
     app.panel_mut()
         .set_height(panel_height(Size::new(width, height), None, None));
     app.panel_mut()
@@ -4105,7 +4179,7 @@ fn the_mark_is_drawn_while_the_card_on_screen_is_unfilled_thread_or_not() {
     let base = Instant::now();
     let size = Size::new(MARK_ROOM_WIDTH, MARK_ROOM_HEIGHT);
     let mut app = App::from_tree(&fixture::tree());
-    app.set_viewport_height(tree_height(size));
+    app.set_viewport_height(tree_height(size, &Sigils::Nothing));
     app.panel_mut().set_height(panel_height(size, None, None));
     app.panel_mut().set_width(panel_width(size));
 
@@ -4783,7 +4857,7 @@ fn a_point_on_the_run_header_is_not_a_line_of_the_account() {
     // rather than as the account's first line.
     for x in panel.x..panel.x + panel.width {
         assert_eq!(
-            hit_test(x, panel.y, size, None, Some(&header)),
+            hit_test(x, panel.y, size, None, Some(&header), &Sigils::Nothing),
             Hit::PanelHeader,
             "at {x},{}",
             panel.y
@@ -4795,7 +4869,7 @@ fn a_point_on_the_run_header_is_not_a_line_of_the_account() {
     // line drawn on that row and stay inside the window the app was told
     // about.
     for y in panel.y + RUN_HEADER_HEIGHT..panel.y + panel.height {
-        let hit = hit_test(panel.x, y, size, None, Some(&header));
+        let hit = hit_test(panel.x, y, size, None, Some(&header), &Sigils::Nothing);
 
         assert_eq!(
             hit,
@@ -4811,7 +4885,7 @@ fn a_point_on_the_run_header_is_not_a_line_of_the_account() {
     // test knows it: the same point answers differently on a frame with no
     // run in flight.
     assert_eq!(
-        hit_test(panel.x, panel.y, size, None, None),
+        hit_test(panel.x, panel.y, size, None, None, &Sigils::Nothing),
         Hit::PanelLine {
             offset: 0,
             column: 0
@@ -5662,21 +5736,24 @@ fn a_point_on_the_composer_is_not_a_line_the_panel_no_longer_has() {
     for y in inside.y..inside.y + inside.height {
         for x in inside.x..inside.x + inside.width {
             assert_eq!(
-                hit_test(x, y, size, field, None),
+                hit_test(x, y, size, field, None, &Sigils::Nothing),
                 Hit::Composer,
                 "at {x},{y}"
             );
         }
     }
     // Its border is a border, like either pane's.
-    assert_eq!(hit_test(area.x, area.y, size, field, None), Hit::Border);
+    assert_eq!(
+        hit_test(area.x, area.y, size, field, None, &Sigils::Nothing),
+        Hit::Border
+    );
 
     // And the panel's lines are the lines the panel has: every offset the
     // hit test hands out is inside the window the app was told about.
     let panel = pane_inner(cut.panel);
     let height = panel_height(size, field, None);
     for y in panel.y..panel.y + panel.height {
-        let hit = hit_test(panel.x, y, size, field, None);
+        let hit = hit_test(panel.x, y, size, field, None, &Sigils::Nothing);
         assert_eq!(
             hit,
             Hit::PanelLine {
@@ -5689,7 +5766,7 @@ fn a_point_on_the_composer_is_not_a_line_the_panel_no_longer_has() {
     // The rows the field took would have been the panel's, and the hit test
     // knows it: the same points answer differently on a frame with no field.
     assert_eq!(
-        hit_test(inside.x, inside.y, size, None, None),
+        hit_test(inside.x, inside.y, size, None, None, &Sigils::Nothing),
         Hit::PanelLine {
             offset: inside.y - panel.y,
             column: inside.x - panel.x

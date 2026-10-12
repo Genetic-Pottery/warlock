@@ -1,15 +1,16 @@
 use std::fmt;
+use std::fs;
 use std::io;
 use std::marker::PhantomData;
 use std::path::PathBuf;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use ratatui::crossterm::event::{KeyEvent, MouseEvent};
 use ratatui::layout::Size;
-use warlock_engine::{Agent, Manifest, save_base_branch};
+use warlock_engine::{Agent, Manifest, held_base_branch, save_base_branch, sigils_path};
 
-use crate::app::{App, Focus, Run, Working};
-use crate::chatting::{Branched, Chat, Takes, Wanted};
+use crate::app::{App, Focus, Run, Sigils, Working};
+use crate::chatting::{Branched, Chat, Sigiled, Takes, Wanted};
 use crate::claude::{ChatAgent, ClaudeAgent, Converses, Wired};
 use crate::clipboard::{self, Clip, Clipboard};
 use crate::composer::{Composed, paste_for};
@@ -34,7 +35,8 @@ use crate::resume::resume_press;
 use crate::scoping::{record_edit, scope_edit, scope_press};
 use crate::screen::Screen;
 use crate::selection::{Cell, Position, copied_text, position_at};
-use crate::session::{Scope, Watched, load_app, start_watching};
+use crate::session::{Scope, Watched, load_app, sigils_held, start_watching};
+use crate::sigil::{Change, change_sigils, holding};
 use crate::submission::ToDraft;
 use crate::ui::{
     Reach, composer_on_screen, draw, help_most_scroll, panel_height, panel_width, tree_height,
@@ -292,6 +294,9 @@ struct Session<K: Seams> {
     said: Option<(u64, Instant)>,
     mouse_captured: bool,
     watched: Watched,
+    /// The sigils config's modification time when the chrome was last read
+    /// from it. See [`Session::reread_config`].
+    config_read: Option<SystemTime>,
 }
 
 impl<K: Seams> Session<K> {
@@ -327,6 +332,7 @@ impl<K: Seams> Session<K> {
             // the one thing that changes the answer.
             mouse_captured: true,
             watched,
+            config_read: None,
         }
     }
 
@@ -352,7 +358,28 @@ impl<K: Seams> Session<K> {
     /// reads them. The loop draws and *then* waits for a key, which is what
     /// lets the composer's row-wise keys and the panel's wrapping both work off
     /// a width nothing has measured yet at startup.
+    // A stat each round rather than a read: the file is opened only when its
+    // modification time has moved since the last read. The file holds the base
+    // branch as well, so both are read again together.
+    fn reread_config(&mut self) {
+        let Some(home) = self.puller.home() else {
+            return;
+        };
+        let root = &self.scope.repo_root;
+        let modified = fs::metadata(sigils_path(home, root))
+            .and_then(|metadata| metadata.modified())
+            .ok();
+        if modified == self.config_read {
+            return;
+        }
+        self.config_read = modified;
+        let base = held_base_branch(home, root).ok().flatten();
+        self.scope.chrome.set_sigils(sigils_held(Some(home), root));
+        self.scope.chrome.set_base(base);
+    }
+
     fn draw(&mut self, size: Size) -> io::Result<()> {
+        self.reread_config();
         self.app.set_mouse_captured(self.mouse_captured);
         self.app.set_working(if self.puller.in_flight().is_some() {
             Some(Working::Pull)
@@ -379,7 +406,8 @@ impl<K: Seams> Session<K> {
         self.chat.set_composer_answering(self.cutter.answering());
         let field = composer_on_screen(&self.app, self.chat.composer());
         let header = self.app.run_header();
-        self.app.set_viewport_height(tree_height(size));
+        self.app
+            .set_viewport_height(tree_height(size, self.scope.chrome.sigils()));
         let panel = self.app.panel_mut();
         panel.set_height(panel_height(size, field, header.as_ref()));
         panel.set_width(width);
@@ -415,7 +443,14 @@ impl<K: Seams> Session<K> {
         // means is decided against them, and what it then does is the app's
         // alone.
         let field = composer_on_screen(&self.app, self.chat.composer());
-        let action = mouse_action(mouse, size, &self.app, self.modal(), field);
+        let action = mouse_action(
+            mouse,
+            size,
+            &self.app,
+            self.modal(),
+            field,
+            self.scope.chrome.sigils(),
+        );
         // Before the action is acted on, because this is bookkeeping about the
         // gesture rather than part of it: what the app does with a press or a
         // drag is the same whether or not the button stays down afterwards.
@@ -964,6 +999,7 @@ impl<K: Seams> Session<K> {
                 );
             }
             Some(Wanted::Branch(branched)) => self.branch(branched, now),
+            Some(Wanted::Sigil(sigiled)) => self.sigil(&sigiled, now),
             Some(Wanted::Resume(ticket)) => {
                 resume_press(
                     &mut self.app,
@@ -1011,6 +1047,44 @@ impl<K: Seams> Session<K> {
             "pulls now start from and open pull requests against {}",
             self.scope.chrome.target().sentence()
         );
+        self.app.panel_mut().note(line, now);
+    }
+
+    // The chrome is set from what was written rather than left to the next
+    // round's re-read, so the box and the boundary checks move with the line.
+    fn sigil(&mut self, sigiled: &Sigiled, now: Instant) {
+        let Some(home) = self.puller.home() else {
+            self.app
+                .panel_mut()
+                .note(one_line(&Error::NoHome.to_string()), now);
+            return;
+        };
+        let root = &self.scope.repo_root;
+        let change = match sigiled {
+            Sigiled::Show => {
+                let line = match self.scope.chrome.sigils() {
+                    Sigils::Held(held) => format!("this machine holds {}", holding(held)),
+                    Sigils::Nothing => "this machine holds no sigil".to_owned(),
+                    Sigils::Unknown => format!(
+                        "the sigils config at `{}` could not be read",
+                        sigils_path(home, root).display()
+                    ),
+                };
+                self.app.panel_mut().note(line, now);
+                return;
+            }
+            Sigiled::Add(names) => Change::Add(names),
+            Sigiled::Remove(names) => Change::Remove(names),
+            Sigiled::Clear => Change::Clear,
+        };
+        let line = match change_sigils(home, root, change) {
+            Ok(held) => {
+                let line = format!("this machine now holds {}", holding(&held));
+                self.scope.chrome.set_sigils(Sigils::held(held));
+                line
+            }
+            Err(error) => one_line(&error.to_string()),
+        };
         self.app.panel_mut().note(line, now);
     }
 

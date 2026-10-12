@@ -107,6 +107,9 @@ pub enum Error {
     Sigils {
         source: sigils::Error,
     },
+    UnheldSigil {
+        sigil: String,
+    },
     // The name a key is stored under, judged before anything is read — so this
     // is the one key failure raised with no line typed. It carries the name and
     // the rule and could not carry a value if it wanted to.
@@ -449,8 +452,8 @@ fn unrecorded_scope_message(scope: &str, recorded: &[String]) -> String {
 }
 
 // Names the scope wanted and the sigils held, and ends where
-// `closed_scope_message` ends — at `warlock config` — because the fix is the same
-// one: the boundary is a sigil, and holding it is what opens the work.
+// `closed_scope_message` ends — at `warlock sigil add` — because the fix is the
+// same one: the boundary is a sigil, and holding it is what opens the work.
 fn unheld_scope_message(scope: &str, held: &[String]) -> String {
     let holding = if held.is_empty() {
         "this machine holds no sigil at all".to_owned()
@@ -459,7 +462,7 @@ fn unheld_scope_message(scope: &str, held: &[String]) -> String {
     };
     format!(
         "the scope `{scope}` is not one this machine's sigils open, so nothing was pulled: \
-         {holding} — hold that sigil with `warlock config`"
+         {holding} — hold that sigil with `warlock sigil add {scope}`"
     )
 }
 
@@ -620,7 +623,7 @@ impl fmt::Display for Error {
             }
             // The footer's own sentence, to the letter: the same fact refused
             // at a keystroke and at a shell prompt says the same thing, names
-            // the same scope and points at the same `warlock config`.
+            // the same scope and points at the same `warlock sigil add`.
             Self::ClosedScope { path, scope } => {
                 write!(f, "{}", closed_scope_message(path, scope))
             }
@@ -658,7 +661,7 @@ impl fmt::Display for Error {
                 f,
                 "neither `HOME` nor `USERPROFILE` is set, so there is no home \
                  directory to keep the sigils for this repository under: set \
-                 `HOME` and run `warlock config` again"
+                 `HOME` and run the command again"
             ),
             Self::Prompt { source } => {
                 write!(f, "could not read the line that was typed: {source}")
@@ -673,6 +676,10 @@ impl fmt::Display for Error {
             // Flattened like the manifest's, and for the same reason: a config
             // that will not parse carries the TOML parser's diagnostic.
             Self::Sigils { source } => write!(f, "{}", one_line(&source.to_string())),
+            Self::UnheldSigil { sigil } => write!(
+                f,
+                "this machine does not hold `{sigil}`, so nothing was written"
+            ),
             // `Sigil`'s shape, with the other half of what a reader needs on the
             // end: the rule is a sentence of its own, and what is worth adding
             // to it is that the prompt never happened, so no key is anywhere.
@@ -840,6 +847,7 @@ impl std::error::Error for Error {
             // stored a key under, are a person and not a failure underneath.
             | Self::NoKey { .. }
             | Self::UnknownKey { .. }
+            | Self::UnheldSigil { .. }
             // Nor here: a brief the board already holds, and a team key Linear
             // does not know, are a disagreement rather than a failure
             // underneath. The Linear calls that answered both worked.
@@ -943,7 +951,7 @@ pub const fn status_for(outcome: &Result<(), Error>) -> u8 {
         // have parsed, and a scope name the engine refuses already spends this
         // register. Not a **3** either — that one is the sigil boundary's
         // alone, and a script reading it as "ask for a sigil" would be sent to
-        // `warlock config` over a missing `--team-key`.
+        // `warlock sigil add` over a missing `--team-key`.
         Err(_) => 1,
     }
 }
