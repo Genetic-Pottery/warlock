@@ -23,7 +23,7 @@ use crate::boundary::{Operation, Verdict, permits};
 use crate::error::Error;
 use crate::query::spelled;
 use crate::rescope::{RecordFields, rescope};
-use crate::session::sigils_under;
+use crate::settings::sigils_under;
 use crate::standing::{FOR_SCOPE_ADD, FOR_SCOPE_REMOVE, FOR_UNPACT, Standing};
 
 // The type is the gate: the fields are private to this module and the only
@@ -70,9 +70,7 @@ impl Opened {
         // Flattened here, at the door: what the shell needs is the two-valued
         // fact the gate takes, and the third state is a line only the header
         // and `warlock check` ever print. See `boundary::permits`.
-        let held: Vec<String> = home.map_or_else(Vec::new, |home| {
-            sigils_under(home, &repo_root).as_slice().to_vec()
-        });
+        let held: Vec<String> = sigils_under(home, &repo_root).as_slice().to_vec();
         let verdict = permits(operation, &target, &repo_root, &manifest, &held);
         // Refused paths are spellable by construction: a path with no manifest
         // form has no coverage and nothing below it, so it did not reach here.

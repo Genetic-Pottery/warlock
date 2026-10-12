@@ -305,6 +305,7 @@ mod back {
     use crate::account::Line;
     use crate::app::{App, Chrome};
     use crate::session::Scope;
+    use crate::settings::Settings;
 
     // Room for more lines than any file here has, so what a test reads off the panel
     // is the whole card. One test narrows it, because parking a window needs one to
@@ -362,6 +363,7 @@ mod back {
         let scope = Scope {
             chrome: Chrome::of(&repo_root, tree.root_path()),
             root: tree.root_path().to_path_buf(),
+            settings: Settings::at(None, &repo_root),
             repo_root,
         };
         (app, scope)

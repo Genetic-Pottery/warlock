@@ -299,12 +299,13 @@ impl Focus {
     }
 }
 
-/// Which sigils the machine holds, for the one line the chrome draws about it.
+/// Which sigils the machine holds.
 ///
 /// `Nothing` and `Unknown` are not the same answer and must not be merged:
-/// holding no sigil draws no line at all, while failing to find out draws
-/// "holding unknown". [`Sigils::held`] folds an empty list into `Nothing`, so
-/// `Held` is never empty and the line is never a dangling "holding".
+/// one is a config that holds nothing, the other a config that would not read,
+/// and drawing broken as absent tells a reader they hold nothing when warlock
+/// could not find out. [`Sigils::held`] folds an empty list into `Nothing`, so
+/// `Held` is never empty.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
 pub(crate) enum Sigils {
     #[default]
@@ -330,31 +331,23 @@ impl Sigils {
             Self::Held(sigils) => sigils,
         }
     }
+}
 
-    #[must_use]
-    pub(crate) fn line(&self) -> Option<String> {
-        match self {
-            Self::Nothing => None,
-            Self::Held(sigils) => Some(format!(
-                "holding {}",
-                sigils
-                    .iter()
-                    .map(|sigil| format!("`{sigil}`"))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            )),
-            Self::Unknown => Some("holding unknown".to_owned()),
-        }
-    }
+/// What the chrome draws of this checkout's settings, as last read by
+/// [`Settings`](crate::settings::Settings).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
+pub(crate) struct Held {
+    pub(crate) sigils: Sigils,
+    pub(crate) base: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct Chrome {
     header: String,
-    sigils: Sigils,
-    // Kept apart rather than resolved into one name, so `/branch clear` has
-    // the remote's default to fall back to without asking `git` again.
-    base: Option<String>,
+    held: Held,
+    // Kept apart from the base rather than resolved into one name, so
+    // `/branch clear` has the remote's default to fall back to without asking
+    // `git` again.
     remote_head: Option<String>,
 }
 
@@ -372,15 +365,14 @@ impl Chrome {
         };
         Self {
             header,
-            sigils: Sigils::Nothing,
-            base: None,
+            held: Held::default(),
             remote_head: None,
         }
     }
 
     #[must_use]
-    pub(crate) fn with_sigils(mut self, sigils: Sigils) -> Self {
-        self.sigils = sigils;
+    pub(crate) fn with_held(mut self, held: Held) -> Self {
+        self.held = held;
         self
     }
 
@@ -391,31 +383,27 @@ impl Chrome {
 
     #[must_use]
     pub(crate) const fn sigils(&self) -> &Sigils {
-        &self.sigils
+        &self.held.sigils
     }
 
     #[must_use]
-    pub(crate) fn with_target(mut self, base: Option<String>, remote_head: Option<String>) -> Self {
-        self.base = base;
+    pub(crate) fn with_remote_head(mut self, remote_head: Option<String>) -> Self {
         self.remote_head = remote_head;
         self
     }
 
-    pub(crate) fn set_base(&mut self, base: Option<String>) {
-        self.base = base;
+    pub(crate) fn set_held(&mut self, held: Held) {
+        self.held = held;
     }
 
-    pub(crate) fn set_sigils(&mut self, sigils: Sigils) {
-        self.sigils = sigils;
+    #[must_use]
+    pub(crate) fn remote_head(&self) -> Option<&str> {
+        self.remote_head.as_deref()
     }
 
     #[must_use]
     pub(crate) fn target(&self) -> Target<'_> {
-        match (&self.base, &self.remote_head) {
-            (Some(base), _) => Target::Set(base),
-            (None, Some(head)) => Target::Default(head),
-            (None, None) => Target::Unknown,
-        }
+        Target::of(self.held.base.as_deref(), self.remote_head())
     }
 }
 
@@ -427,7 +415,16 @@ pub(crate) enum Target<'a> {
     Unknown,
 }
 
-impl Target<'_> {
+impl<'a> Target<'a> {
+    #[must_use]
+    pub(crate) const fn of(base: Option<&'a str>, remote_head: Option<&'a str>) -> Self {
+        match (base, remote_head) {
+            (Some(base), _) => Self::Set(base),
+            (None, Some(head)) => Self::Default(head),
+            (None, None) => Self::Unknown,
+        }
+    }
+
     #[must_use]
     pub(crate) fn sentence(self) -> String {
         match self {

@@ -1,41 +1,43 @@
 use std::io::{self, Write};
-use std::path::Path;
-
-use warlock_engine::{save_base_branch, sigils_path};
 
 use crate::error::Error;
+use crate::git::Git;
+use crate::settings::Settings;
 use crate::standing::{FOR_BRANCH, Standing};
+use crate::submission::Branching;
+
+pub fn branch_show() -> Result<(), Error> {
+    let (settings, remote_head) = here()?;
+    let line = settings.branch(&Branching::Show, remote_head.as_deref())?;
+    drop(writeln!(io::stdout(), "warlock: {line}"));
+    Ok(())
+}
 
 pub fn branch_use(name: &str) -> Result<(), Error> {
-    let standing = Standing::here(FOR_BRANCH)?;
-    let home = Standing::home()?;
-
-    set(&home, standing.repo_root(), Some(name), &mut io::stdout())
+    changed_here(&Branching::Use(name.to_owned()))
 }
 
 pub fn branch_clear() -> Result<(), Error> {
-    let standing = Standing::here(FOR_BRANCH)?;
-    let home = Standing::home()?;
-
-    set(&home, standing.repo_root(), None, &mut io::stdout())
+    changed_here(&Branching::Clear)
 }
 
-fn set<W: Write>(home: &Path, root: &Path, branch: Option<&str>, out: &mut W) -> Result<(), Error> {
-    save_base_branch(home, root, branch).map_err(|source| Error::Sigils { source })?;
-
-    let target = branch.map_or_else(
-        || "the remote's default branch".to_owned(),
-        |name| format!("`{name}`"),
-    );
+fn changed_here(change: &Branching) -> Result<(), Error> {
+    let (settings, remote_head) = here()?;
+    let line = settings.branch(change, remote_head.as_deref())?;
     drop(writeln!(
-        out,
-        "warlock: pulls in `{}` start from and open pull requests against {target}, written to `{}`",
-        root.display(),
-        sigils_path(home, root).display()
+        io::stdout(),
+        "warlock: {}",
+        settings.written(&line)
     ));
     Ok(())
 }
 
-#[cfg(test)]
-#[path = "tests/branch.rs"]
-mod tests;
+// `remote_head` and not `default_branch`, for the panel's reason: this names the
+// remote's default the way the panel's title does, and asking the remote itself
+// is a round trip a one-line answer should not wait on.
+fn here() -> Result<(Settings, Option<String>), Error> {
+    let standing = Standing::here(FOR_BRANCH)?;
+    let home = Standing::home()?;
+    let root = standing.repo_root();
+    Ok((Settings::at(Some(home), root), Git::at(root).remote_head()))
+}

@@ -2,12 +2,11 @@
 //!
 //! [`Scope`] is the two paths everything else is resolved against, settled once
 //! by [`load_app`] and kept for as long as warlock runs, and it carries the
-//! [`Chrome`] for the same reason: neither the roots nor what this machine
-//! holds can change under a running warlock, so an app rebuilt on every reload
-//! has no business carrying them. That is also why the sigil config is read on
-//! the way in and why that read cannot fail — a home that will not resolve or a
-//! config that will not parse is a state on the header rather than a reason not
-//! to draw a tree.
+//! [`Chrome`] and this checkout's [`Settings`] for the same reason: a reload
+//! reads the tree again and nothing about the machine, so an app rebuilt on
+//! every reload has no business carrying them. The settings read on the way in
+//! cannot fail — a home that will not resolve or a config that will not parse is
+//! a state on the header rather than a reason not to draw a tree.
 //!
 //! [`closed_scope`] is where every key that can be refused over a boundary
 //! asks it, so a pact, an un-pact, a refresh and a scope write are turned down
@@ -18,14 +17,14 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use warlock_engine::{
-    Loaded, Manifest, Tree, held_base_branch, held_sigils, load_tree, manifest_path,
-    repository_root, unpact_ignored,
+    Loaded, Manifest, Tree, load_tree, manifest_path, repository_root, unpact_ignored,
 };
 
 use crate::app::{App, Chrome, Sigils, reseat_on};
 use crate::boundary::{Operation, permits};
 use crate::error::{Error, one_line};
 use crate::git::Git;
+use crate::settings::Settings;
 use crate::standing::Standing;
 use crate::watch::{Watch, WatchPolicy, Watching};
 
@@ -169,6 +168,7 @@ pub(crate) struct Scope {
     pub(crate) root: PathBuf,
     pub(crate) repo_root: PathBuf,
     pub(crate) chrome: Chrome,
+    pub(crate) settings: Settings,
 }
 
 // Nothing here decides *which* paths matter or *when* to act on them; both are
@@ -309,40 +309,6 @@ pub(crate) fn closed_scope(
     true
 }
 
-// Read from `load_app` before the loop starts, and again by the loop whenever
-// the config file's modification time moves: `/sigil` writes it from inside
-// warlock and `warlock sigil` from another shell, and the boundary checks read
-// whatever the chrome holds.
-//
-// No home reads as nothing held rather than as a config that would not read:
-// there is no file in that case and no path to name one by, so `Sigils::Unknown`
-// would be claiming something on disk is broken when nothing on disk was ever
-// looked at.
-//
-// The home is a parameter for the same reason the working directory is: with it
-// resolved here, a test that loads a scratch repository would open a file under
-// the sigil store of the machine it runs on, and the one place that resolves one
-// is the caller no test has.
-pub(crate) fn sigils_held(home: Option<&Path>, repo_root: &Path) -> Sigils {
-    home.map_or(Sigils::Nothing, |home| sigils_under(home, repo_root))
-}
-
-// Never an error, and that is the whole reason it is a function of its own: what
-// a machine holds is a line on a header, and warlock is a way of reading a tree.
-// A config that will not parse becomes `Sigils::Unknown` — said out loud, so that
-// broken is never drawn as absent — and nothing here can return upwards to end
-// the event loop. Filing and routing read the same file through the same
-// `held_sigils` and refuse instead; the difference is theirs to keep.
-//
-// Shared with `warlock check` and the headless writes, which ask the same
-// question with nothing on screen: a second reading of these cases elsewhere
-// would be a second answer waiting to disagree with the header. It takes `home`
-// rather than looking one up, which is what keeps every test off the
-// developer's own.
-pub(crate) fn sigils_under(home: &Path, repo_root: &Path) -> Sigils {
-    held_sigils(home, repo_root).map_or(Sigils::Unknown, Sigils::held)
-}
-
 // The loop holds two paths rather than a `Standing`, so this is the one line
 // that stands the front end where the subcommands already stand.
 pub(crate) fn load_manifest(repo_root: &Path) -> Result<Manifest, Error> {
@@ -407,19 +373,18 @@ fn load_app_in(
     if let Some(line) = uncleaned {
         note(&mut app, line);
     }
-    // Resolved here, kept beside the roots it was built from, and handed to the
-    // renderer every frame. A reload does not touch it, which is why
-    // `reseat_on` does not carry it: the roots are fixed for the session and a
-    // sigil is written with warlock not running. The base is the one part that
-    // moves, and only through `/branch`, which sets it here as it saves it.
-    let base = home.and_then(|home| held_base_branch(home, &repo_root).ok().flatten());
+    // Kept beside the roots it was built from and handed to the renderer every
+    // frame. A reload does not touch it, which is why `reseat_on` does not carry
+    // it: what moves it is the settings file, which the loop watches.
+    let mut settings = Settings::at(home.map(Path::to_path_buf), &repo_root);
     let chrome = Chrome::of(&repo_root, tree.root_path())
-        .with_sigils(sigils_held(home, &repo_root))
-        .with_target(base, Git::at(&repo_root).remote_head());
+        .with_held(settings.snapshot())
+        .with_remote_head(Git::at(&repo_root).remote_head());
     let scope = Scope {
         root: tree.root_path().to_path_buf(),
         repo_root,
         chrome,
+        settings,
     };
     Ok((app, scope, tree, manifest))
 }

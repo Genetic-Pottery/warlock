@@ -4,8 +4,8 @@ use std::time::{Duration, Instant};
 use warlock_engine::{Node, NodeState, StateCounts, Tree};
 
 use super::{
-    App, Chrome, Focus, PactIntent, PactToggle, Row, Run, Showing, Sigils, cut_at_cap_message,
-    ignored_row_message, no_document_message, reseat_on, scroll_offset_for,
+    App, Chrome, Focus, Held, PactIntent, PactToggle, Row, Run, Showing, Sigils,
+    cut_at_cap_message, ignored_row_message, no_document_message, reseat_on, scroll_offset_for,
 };
 use crate::account::{Account, Line, Outcome};
 use crate::claude::Activity;
@@ -355,6 +355,10 @@ fn a_root_outside_the_repository_falls_back_to_printing_itself() {
     );
 }
 
+fn held(sigils: Sigils) -> Held {
+    Held { sigils, base: None }
+}
+
 #[test]
 fn a_chrome_nobody_built_states_nothing_at_all() {
     let chrome = Chrome::default();
@@ -371,7 +375,7 @@ fn the_header_is_not_app_state_and_no_app_carries_one() {
     // on every reload has no business holding either. What is left to check
     // is that building one costs an app nothing — a `Chrome` is a function
     // of two paths and a config, and there is no `App` anywhere in it.
-    let chrome = Chrome::of("/repo", "/repo/crates").with_sigils(Sigils::held(["billing"]));
+    let chrome = Chrome::of("/repo", "/repo/crates").with_held(held(Sigils::held(["billing"])));
 
     assert_eq!(chrome.header(), "crates");
     assert_eq!(chrome.sigils(), &Sigils::Held(vec!["billing".to_owned()]));
@@ -385,20 +389,15 @@ fn a_chrome_that_was_never_told_what_is_held_states_nothing() {
     let chrome = Chrome::of("/repo", "/repo/crates");
 
     assert_eq!(chrome.sigils(), &Sigils::Nothing);
-    assert_eq!(chrome.sigils().line(), None);
 }
 
 #[test]
 fn the_sigils_held_are_listed_in_the_order_the_config_has_them() {
-    let chrome = Chrome::default().with_sigils(Sigils::held(["billing", "web"]));
+    let chrome = Chrome::default().with_held(held(Sigils::held(["billing", "web"])));
 
     assert_eq!(
         chrome.sigils(),
         &Sigils::Held(vec!["billing".to_owned(), "web".to_owned()])
-    );
-    assert_eq!(
-        chrome.sigils().line(),
-        Some("holding `billing`, `web`".into())
     );
 }
 
@@ -410,7 +409,7 @@ fn a_missing_config_and_an_empty_set_are_the_same_nothing() {
     let empty: [String; 0] = [];
 
     assert_eq!(Sigils::held(empty), Sigils::Nothing);
-    assert_eq!(Sigils::held(Vec::<String>::new()).line(), None);
+    assert_eq!(Sigils::held(Vec::<String>::new()), Sigils::Nothing);
 }
 
 #[test]
@@ -420,9 +419,9 @@ fn a_config_that_would_not_read_is_said_out_loud_rather_than_looking_absent() {
     // draw the same line.
     let unknown = Sigils::Unknown;
 
-    assert_eq!(unknown.line(), Some("holding unknown".into()));
-    assert_ne!(unknown.line(), Sigils::Nothing.line());
-    assert_ne!(unknown.line(), Sigils::held(["billing"]).line());
+    assert_ne!(unknown, Sigils::Nothing);
+    assert_ne!(unknown, Sigils::held(["billing"]));
+    assert!(unknown.as_slice().is_empty());
 }
 
 #[test]
@@ -433,10 +432,10 @@ fn holding_nothing_leaves_the_header_byte_for_byte_what_it_was() {
     let before = told.header().to_owned();
 
     for nothing in [Sigils::Nothing, Sigils::held(Vec::<String>::new())] {
-        let chrome = told.clone().with_sigils(nothing);
+        let chrome = told.clone().with_held(held(nothing));
 
         assert_eq!(chrome.header(), before);
-        assert_eq!(chrome.sigils().line(), None);
+        assert_eq!(chrome.sigils(), &Sigils::Nothing);
     }
 }
 
@@ -448,7 +447,7 @@ fn what_is_held_changes_nothing_but_what_the_header_states() {
     // because a `Chrome` has no rows to reach.
     let chrome = Chrome::of("/repo", "/repo/crates");
 
-    let holding = chrome.clone().with_sigils(Sigils::held(["billing"]));
+    let holding = chrome.clone().with_held(held(Sigils::held(["billing"])));
 
     assert_eq!(holding.header(), chrome.header());
 }

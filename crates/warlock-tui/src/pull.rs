@@ -35,8 +35,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use warlock_engine::{
-    Manifest, PullRun, ScopeRecord, brief_path, held_base_branch, held_runs, held_sigils,
-    resolve_filing, scope_opens_to,
+    Manifest, PullRun, ScopeRecord, brief_path, held_runs, resolve_filing, scope_opens_to,
 };
 
 use crate::claude::{
@@ -49,6 +48,7 @@ use crate::git::{Error as GitError, Forge, Gh, Git, Repository};
 use crate::linear::{Board, Opener as LinearOpener, Opens, QueuedIssue};
 use crate::pulling::{Heading, PullEvent, Pulled, Pulling, Splits, Ticket, Works};
 use crate::queue::{Chosen, Named, Refusal, Skipped, choose, take_named};
+use crate::settings::Settings;
 use crate::standing::{FOR_PULL, Standing};
 
 /// The subcommand, and the only function here that reads the environment.
@@ -331,7 +331,8 @@ pub(crate) fn prepare<'m>(
         });
     };
 
-    let held = held_sigils(home, root).map_err(|source| Error::Sigils { source })?;
+    let settings = Settings::at(Some(home.to_path_buf()), root);
+    let held = settings.sigils()?;
     // `scope_opens_to` and nothing written here, so the wildcard is honoured by
     // the one function that knows about it: a comparison of this module's own
     // would be a second copy of the boundary rule, and it is the copy that would
@@ -348,7 +349,7 @@ pub(crate) fn prepare<'m>(
     // What is left of it is the key half, which is why it is asked at all.
     let target = resolve_filing(manifest, root, home, Some(scope))
         .map_err(|source| Error::Filing { source })?;
-    let base = held_base_branch(home, root).map_err(|source| Error::Sigils { source })?;
+    let base = settings.base()?;
 
     Ok(Prepared {
         root: root.to_path_buf(),

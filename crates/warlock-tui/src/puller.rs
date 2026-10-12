@@ -44,7 +44,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use warlock_engine::pact::Event;
-use warlock_engine::{Manifest, PullRun, ScopeRecord, held_runs, held_sigils};
+use warlock_engine::{Manifest, PullRun, ScopeRecord, held_runs};
 
 use crate::app::App;
 use crate::claude::{
@@ -52,7 +52,6 @@ use crate::claude::{
     Working, working_system_prompt,
 };
 use crate::confirm::{PullAnswered, PullConfirm, Undertaking};
-use crate::cut::listed;
 use crate::error::{Error, one_line};
 use crate::freshness::{Freshened, Freshening, Freshens, freshened};
 use crate::git::{Commit, Dirty, Error as GitError, Forge, Gh, Git, Repository, branch_name};
@@ -379,13 +378,10 @@ where
         ))
     }
 
-    /// `/pull` typed into the composer, with or without its scope.
+    /// `/pull <SCOPE>` typed into the composer. A bare `/pull` never reaches
+    /// here: the loop answers it from this checkout's settings.
     ///
-    /// A bare `/pull` is answered with the scopes this machine holds and nothing
-    /// else: no board is opened, no `git` runs and no session is raised, because
-    /// the answer is a file under the home directory.
-    ///
-    /// The refusals past it are asked in the order they have to be. A pull already
+    /// The refusals are asked in the order they have to be. A pull already
     /// in flight is answered before anything is read; a machine with no home is a
     /// fact about a request that is not going to be made anyway; and the three
     /// [`prepare`] asks are the ones `warlock pull` asks, in its order and its
@@ -395,13 +391,9 @@ where
         app: &mut App,
         manifest: &Manifest,
         repo_root: &Path,
-        taking: Option<&Taking>,
+        taking: &Taking,
         now: Instant,
     ) {
-        let Some(taking) = taking else {
-            self.holding(app, repo_root, now);
-            return;
-        };
         if let Some(line) = self.in_flight() {
             app.panel_mut().note(refused(&line), now);
             return;
@@ -451,27 +443,6 @@ where
             work,
             cancel,
         });
-    }
-
-    /// A bare `/pull`, answered with what this machine holds.
-    ///
-    /// One file read under the home and nothing else. The sigils are asked for
-    /// here rather than taken off the manifest the loop is holding, because the
-    /// question is about this machine and not about this repository.
-    fn holding(&self, app: &mut App, repo_root: &Path, now: Instant) {
-        let Some(home) = self.home.as_deref() else {
-            app.panel_mut()
-                .note(one_line(&Error::NoHome.to_string()), now);
-            return;
-        };
-        let line = match held_sigils(home, repo_root) {
-            Ok(held) => holding_line(&held),
-            // A config that would not parse, in the engine's own words: the
-            // answer to "what does this machine hold" is that file, so a failure
-            // to read it is the answer.
-            Err(source) => one_line(&Error::Sigils { source }.to_string()),
-        };
-        app.panel_mut().note(line, now);
     }
 
     /// What the pull has said since the last round: what selection chose, and
@@ -1325,18 +1296,6 @@ fn ended_line(pulled: &Pulled) -> String {
             .to_string(),
         ),
     }
-}
-
-// What a bare `/pull` is answered with. The scopes and not the tickets: reading a
-// queue is a request, and the answer to "which of these do I type" is under the
-// home directory.
-fn holding_line(held: &[String]) -> String {
-    if held.is_empty() {
-        return "`/pull` takes a scope, and this machine holds no sigil at all — `/sigil add` \
-                holds one"
-            .to_owned();
-    }
-    format!("`/pull` takes a scope: this machine holds {}", listed(held))
 }
 
 // The queue being read, named before the request goes out. The named ticket is

@@ -22,6 +22,7 @@ use crate::puller::{Claudes, Puller, Raises};
 use crate::pushing::Pushes;
 use crate::screen::Screen;
 use crate::session::{Scope, Watched};
+use crate::settings::Settings;
 use crate::stubs::{Boarding, Checkout, Copying, Forging, Passing, Saying, Scripted};
 use crate::ui::tree_height;
 
@@ -160,6 +161,7 @@ fn session(rows: Vec<Row>) -> Driven {
         chrome: Chrome::of(&root, &root),
         root: root.clone(),
         repo_root: root.clone(),
+        settings: Settings::at(None, &root),
     };
     // A one-node tree for the watcher to be started over. Nothing is there,
     // so no watcher is granted and `Watching` says why — which is exactly
@@ -226,6 +228,7 @@ fn loading(root: &Path) -> (App, Scope, Tree) {
     let scope = Scope {
         chrome: Chrome::of(&repo_root, tree.root_path()),
         root: tree.root_path().to_path_buf(),
+        settings: Settings::at(None, &repo_root),
         repo_root,
     };
     (App::from_tree(&tree), scope, tree)
@@ -2847,6 +2850,7 @@ mod pulling {
     use crate::prompt::ScopePrompt;
     use crate::puller::Puller;
     use crate::pushing::Pushes;
+    use crate::settings::Settings;
     use crate::stubs::{
         Boarding, Checkout, Forging, Op, Refreshing, Scripted, Sessions, Slicing, VIEWER, Written,
         said,
@@ -2983,6 +2987,7 @@ mod pulling {
             ),
         );
         driven.manifest = a_manifest();
+        driven.scope.settings = Settings::at(Some(home.to_path_buf()), repo);
         driven
     }
 
@@ -3472,6 +3477,7 @@ mod pulling {
         let repo = a_repository();
         let home = a_home(repo.path());
         let mut driven = pulling_session(repo.path(), home.path(), board(), checkout(), working());
+        round(&mut driven);
         let before = driven.scope.chrome.sigils().clone();
 
         typing(&mut driven, "/sigil remove elsewhere");
@@ -3560,8 +3566,11 @@ mod pulling {
     fn a_bare_branch_names_the_base_and_writes_nothing() {
         let repo = a_repository();
         let home = a_home(repo.path());
+        warlock_engine::save_base_branch(home.path(), repo.path(), Some("dev"))
+            .expect("a config that writes");
         let mut driven = pulling_session(repo.path(), home.path(), board(), checkout(), working());
-        driven.scope.chrome.set_base(Some("dev".to_owned()));
+        let before = fs::read(warlock_engine::sigils_path(home.path(), repo.path()))
+            .expect("the config is there");
 
         typing(&mut driven, "/branch");
         let said = notes(&driven);
@@ -3570,9 +3579,38 @@ mod pulling {
             "{said:?}"
         );
         assert_eq!(
-            warlock_engine::held_base_branch(home.path(), repo.path()).expect("the config reads"),
-            None
+            fs::read(warlock_engine::sigils_path(home.path(), repo.path()))
+                .expect("the config is there"),
+            before
         );
+    }
+
+    #[test]
+    fn a_bare_pull_names_the_scopes_held_and_reads_nothing_else() {
+        let repo = a_repository();
+        let home = a_home(repo.path());
+        let linear = board();
+        let mut driven = pulling_session(
+            repo.path(),
+            home.path(),
+            linear.clone(),
+            checkout(),
+            working(),
+        );
+
+        typing(&mut driven, "/pull");
+
+        let said = notes(&driven);
+        assert!(
+            said.last().is_some_and(|line| line.contains(SCOPE)),
+            "{said:?}"
+        );
+        assert!(!driven.puller.choosing(), "a bare `/pull` read a queue");
+        assert!(
+            !driven.puller.confirm().is_open(),
+            "a bare `/pull` opened the dialog"
+        );
+        assert_eq!(linear.requests(), 0, "a bare `/pull` reached the board");
     }
 
     #[test]

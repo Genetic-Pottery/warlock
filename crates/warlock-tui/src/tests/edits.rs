@@ -19,7 +19,8 @@ use crate::pacting::pressed_p;
 // passing while the two doors drifted apart.
 use crate::boundary::{Operation, closed_scope_message};
 use crate::error::status_for;
-use crate::session::{load_manifest, sigils_under};
+use crate::session::load_manifest;
+use crate::settings::sigils_under;
 
 // A grant on every entry, so that "the scope write left the run's own fields
 // alone" is an assertion about two values that are really there.
@@ -1128,7 +1129,7 @@ fn panel_answer(repo_root: &Path, home: &Path, path: &str) -> Answer {
     let manifest = load_manifest(repo_root).expect("a manifest that reads");
     // The session's own reading of the sigils config, which is what the
     // running app holds and what the shell reads for itself.
-    let sigils = sigils_under(home, repo_root);
+    let sigils = sigils_under(Some(home), repo_root);
     let mut app = a_panel_over(repo_root);
     let target = if path == "." {
         repo_root.to_path_buf()

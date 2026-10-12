@@ -30,7 +30,7 @@ use super::{
     tree_width, truncated, workflow_line,
 };
 use crate::account::{Line as Entry, Outcome};
-use crate::app::{App, Chrome, Focus, Row, Run, Sigils, Working};
+use crate::app::{App, Chrome, Focus, Held, Row, Run, Sigils, Working};
 use crate::claude::Activity;
 use crate::colour::{CONVERSATION_COLOUR, FOCUS_COLOUR, GUIDE_COLOUR, SYSTEM_COLOUR, colour_for};
 use crate::composer::COMPOSER_MAX_ROWS;
@@ -243,11 +243,19 @@ fn tree_row(buffer: &Buffer, index: u16) -> String {
     text_in(buffer, area, area.y + index)
 }
 
+fn dev() -> Held {
+    Held {
+        sigils: Sigils::Nothing,
+        base: Some("dev".to_owned()),
+    }
+}
+
 // A short base, so the target title leaves the tree's path room on the border.
 fn held_chrome(sigils: Sigils) -> Chrome {
-    Chrome::of("/repo", "/repo/crates")
-        .with_sigils(sigils)
-        .with_target(Some("dev".to_owned()), None)
+    Chrome::of("/repo", "/repo/crates").with_held(Held {
+        sigils,
+        base: Some("dev".to_owned()),
+    })
 }
 
 fn header_app() -> App {
@@ -1484,7 +1492,7 @@ fn the_header_and_footer_stay_put_while_the_tree_scrolls_under_them() {
     let window = usize::from(tree_height(Size::new(WIDTH, HEIGHT), &Sigils::Nothing));
     // The border these frames are drawn under, built once: it is not app
     // state, so it does not change as the selection walks the tree.
-    let chrome = Chrome::of("/repo", "/repo/crates").with_target(Some("dev".to_owned()), None);
+    let chrome = Chrome::of("/repo", "/repo/crates").with_held(dev());
     let mut fixed = None;
     let mut offsets = Vec::new();
 
@@ -2163,7 +2171,7 @@ fn the_header_names_the_root_relative_to_the_repository_root() {
         Path::new("/repo"),
         Path::new("/repo").join("crates").join("warlock-engine"),
     )
-    .with_target(Some("dev".to_owned()), None);
+    .with_held(dev());
 
     let wide = render_chrome(&header_app(), &chrome, HELD_WIDTH, HEIGHT);
 
@@ -2174,7 +2182,7 @@ fn the_header_names_the_root_relative_to_the_repository_root() {
 
 #[test]
 fn a_tree_rooted_at_the_repository_root_names_no_path_on_the_border() {
-    let chrome = Chrome::of("/repo", "/repo").with_target(Some("dev".to_owned()), None);
+    let chrome = Chrome::of("/repo", "/repo").with_held(dev());
     let buffer = render_chrome(&header_app(), &chrome, WIDTH, HEIGHT);
 
     assert_eq!(tree_border_titles(&buffer), ["pulls into dev"]);
@@ -2290,7 +2298,7 @@ fn a_click_on_the_box_is_not_a_tree_row() {
 #[test]
 fn every_spelling_of_holding_nothing_draws_the_same_frame() {
     let app = header_app();
-    let never_told = Chrome::of("/repo", "/repo/crates").with_target(Some("dev".to_owned()), None);
+    let never_told = Chrome::of("/repo", "/repo/crates").with_held(dev());
 
     for width in [HELD_WIDTH, NARROW_WIDTH] {
         let drawn = render_chrome(&app, &held_chrome(Sigils::Nothing), width, HEIGHT);
@@ -2320,7 +2328,7 @@ fn every_spelling_of_holding_nothing_draws_the_same_frame() {
 
 #[test]
 fn the_target_is_on_the_top_border_the_path_on_the_bottom_and_the_first_row_right_under_the_top() {
-    let chrome = Chrome::of("/repo", "/repo/crates").with_target(None, None);
+    let chrome = Chrome::of("/repo", "/repo/crates");
     let buffer = render_chrome(&header_app(), &chrome, WIDTH, HEIGHT);
 
     assert_eq!(

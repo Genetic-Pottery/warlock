@@ -29,9 +29,10 @@ use ratatui::crossterm::event::{self, Event};
 use warlock_tui::check::{self, check};
 use warlock_tui::planned;
 use warlock_tui::{
-    Error, Interactive, Listing, POLL_INTERVAL, RecordFields, branch_clear, branch_use, brief,
-    key_add, key_forget, key_list, key_use, list, pact, pull, push, refresh, resume, scope_add,
-    scope_remove, sigil_add, sigil_clear, sigil_list, sigil_remove, status_for, unpact,
+    Error, Interactive, Listing, POLL_INTERVAL, RecordFields, branch_clear, branch_show,
+    branch_use, brief, key_add, key_forget, key_list, key_use, list, pact, pull, push, refresh,
+    resume, scope_add, scope_remove, sigil_add, sigil_clear, sigil_list, sigil_remove, status_for,
+    unpact,
 };
 
 mod terminal;
@@ -177,12 +178,14 @@ enum Command {
         command: KeyCommand,
     },
     #[command(
-        about = "Set the branch this checkout's pulls start from and open pull requests against.",
+        about = "Show or set the branch this checkout's pulls start from and open pull requests against.",
         long_about = None
     )]
     Branch {
+        // Optional, so a bare `warlock branch` names the base, the way a bare
+        // `/branch` does in the chat bar.
         #[command(subcommand)]
-        command: BranchCommand,
+        command: Option<BranchCommand>,
     },
     #[command(
         about = "Argue a brief at the shell, sending a turn on a blank line.",
@@ -556,8 +559,9 @@ fn main() -> ExitCode {
             KeyCommand::Forget { name } => key_forget(&name),
         },
         Some(Command::Branch { command }) => match command {
-            BranchCommand::Use { name } => branch_use(&name),
-            BranchCommand::Clear => branch_clear(),
+            None => branch_show(),
+            Some(BranchCommand::Use { name }) => branch_use(&name),
+            Some(BranchCommand::Clear) => branch_clear(),
         },
         // The first step of the workflow, dispatched here for `config`'s reasons:
         // it prints on the ordinary screen and reads cooked lines off stdin for

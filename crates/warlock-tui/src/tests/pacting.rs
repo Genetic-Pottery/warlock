@@ -18,6 +18,7 @@ use crate::app::{App, Chrome, PactToggle, Run, Sigils};
 use crate::claude::Cancel;
 use crate::claude::{Activities, Activity, ClaudeAgent};
 use crate::panel::Mode;
+use crate::settings::Settings;
 
 use super::{
     CancelGuard, PACT_CANCELLED, PACT_LOST, Pact, PactEvent, Reloaded, Running, Toggled,
@@ -299,6 +300,7 @@ fn load(scratch: &Scratch) -> (App, Scope) {
     let scope = Scope {
         chrome: Chrome::of(&repo_root, tree.root_path()),
         root: tree.root_path().to_path_buf(),
+        settings: Settings::at(None, &repo_root),
         repo_root,
     };
     (app, scope)
@@ -357,6 +359,7 @@ fn nowhere() -> Scope {
         root: PathBuf::from("/repo/crates"),
         repo_root: PathBuf::from("/repo"),
         chrome: Chrome::of("/repo", "/repo/crates"),
+        settings: Settings::at(None, "/repo"),
     }
 }
 

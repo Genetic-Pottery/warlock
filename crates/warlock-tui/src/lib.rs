@@ -65,6 +65,7 @@ mod scoping;
 mod screen;
 mod selection;
 mod session;
+mod settings;
 mod sigil;
 mod standing;
 #[cfg(test)]
@@ -81,8 +82,8 @@ mod writing;
 pub use account::Account;
 pub use account::Line;
 pub use account::Voice;
-pub use branch::branch_clear;
 pub use branch::branch_use;
+pub use branch::{branch_clear, branch_show};
 pub use brief::Error as BriefError;
 pub use brief::ScopeBlockError;
 pub use brief::brief_at;

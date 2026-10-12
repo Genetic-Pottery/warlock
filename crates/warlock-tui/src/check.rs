@@ -47,7 +47,7 @@ use crate::app::Sigils;
 use crate::boundary::closed_scope_message;
 use crate::error::Error;
 use crate::query::{envelope, spelled, write_object};
-use crate::session::sigils_under;
+use crate::settings::{sigils_line, sigils_under};
 use crate::standing::{FOR_CHECK, Standing};
 
 const CHECK: &str = "check";
@@ -215,7 +215,7 @@ fn checked(
     let facts =
         route_facts(target, repo_root, manifest, home).map_err(|source| Error::Route { source })?;
     let scope = facts.scope().map(str::to_owned);
-    let sigils = home.map_or(Sigils::Nothing, |home| sigils_under(home, repo_root));
+    let sigils = sigils_under(home, repo_root);
     // `Nothing` and `Unknown` are both the empty slice on the way in
     // (`Sigils::as_slice`), which is what makes `opens` false for both over a
     // scoped path and true for both over an unscoped one.
@@ -444,7 +444,7 @@ fn prose(checked: &Checked) -> String {
             checked.review_state.as_deref(),
             checked.label.as_deref(),
         ),
-        holding_line(&checked.sigils, checked.config.as_deref()),
+        sigils_line(&checked.sigils, checked.config.as_deref()),
         verdict_line(checked.scope.as_deref(), checked.opens),
         key_line(
             checked.key.as_deref(),
@@ -498,20 +498,6 @@ fn route_line(
         (None, ..) => "there is nothing to route to: a scope covering this path is what would \
              fix it, with `warlock scope add`"
             .to_owned(),
-    }
-}
-
-// `Sigils::line`'s wording, so one fact has one wording. What is added here is
-// the file: `Sigils::line` says only "holding unknown", and a reader running a
-// subcommand about a config that will not parse is owed the path to go and fix.
-fn holding_line(sigils: &Sigils, config: Option<&Path>) -> String {
-    match (sigils, config) {
-        (Sigils::Unknown, Some(path)) => {
-            format!("holding unknown: `{}` could not be read", path.display())
-        }
-        _ => sigils
-            .line()
-            .unwrap_or_else(|| "holding nothing".to_owned()),
     }
 }
 

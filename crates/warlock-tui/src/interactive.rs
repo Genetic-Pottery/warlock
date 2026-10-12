@@ -1,17 +1,14 @@
 use std::fmt;
-use std::fs;
 use std::io;
 use std::marker::PhantomData;
 use std::path::PathBuf;
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant};
 
 use ratatui::crossterm::event::{KeyEvent, MouseEvent};
 use ratatui::layout::Size;
-use warlock_engine::{
-    Agent, Manifest, held_base_branch, save_base_branch, sigils_path, to_manifest_path,
-};
+use warlock_engine::{Agent, Manifest, to_manifest_path};
 
-use crate::app::{App, Focus, Run, Sigils, Working};
+use crate::app::{App, Focus, Run, Working};
 use crate::chatting::Chat;
 use crate::claude::{ChatAgent, ClaudeAgent, Converses, Wired};
 use crate::clipboard::{self, Clip, Clipboard};
@@ -37,9 +34,8 @@ use crate::resume::resume_press;
 use crate::scoping::{record_edit, scope_edit, scope_press};
 use crate::screen::Screen;
 use crate::selection::{Cell, Position, copied_text, position_at};
-use crate::session::{Scope, Watched, load_app, sigils_held, start_watching};
-use crate::sigil::{Change, change_sigils, holding};
-use crate::submission::{Branching, Sigiling, ToPush, Wanted};
+use crate::session::{Scope, Watched, load_app, start_watching};
+use crate::submission::{ToPush, Wanted};
 use crate::ui::{
     Reach, composer_on_screen, draw, help_most_scroll, panel_height, panel_width, tree_height,
 };
@@ -296,9 +292,6 @@ struct Session<K: Seams> {
     said: Option<(u64, Instant)>,
     mouse_captured: bool,
     watched: Watched,
-    /// The sigils config's modification time when the chrome was last read
-    /// from it. See [`Session::reread_config`].
-    config_read: Option<SystemTime>,
 }
 
 impl<K: Seams> Session<K> {
@@ -334,7 +327,6 @@ impl<K: Seams> Session<K> {
             // the one thing that changes the answer.
             mouse_captured: true,
             watched,
-            config_read: None,
         }
     }
 
@@ -356,30 +348,16 @@ impl<K: Seams> Session<K> {
         .current()
     }
 
+    fn reread_config(&mut self) {
+        if let Some(held) = self.scope.settings.changed() {
+            self.scope.chrome.set_held(held);
+        }
+    }
+
     /// Everything that has to be told the frame's dimensions before anything
     /// reads them. The loop draws and *then* waits for a key, which is what
     /// lets the composer's row-wise keys and the panel's wrapping both work off
     /// a width nothing has measured yet at startup.
-    // A stat each round rather than a read: the file is opened only when its
-    // modification time has moved since the last read. The file holds the base
-    // branch as well, so both are read again together.
-    fn reread_config(&mut self) {
-        let Some(home) = self.puller.home() else {
-            return;
-        };
-        let root = &self.scope.repo_root;
-        let modified = fs::metadata(sigils_path(home, root))
-            .and_then(|metadata| metadata.modified())
-            .ok();
-        if modified == self.config_read {
-            return;
-        }
-        self.config_read = modified;
-        let base = held_base_branch(home, root).ok().flatten();
-        self.scope.chrome.set_sigils(sigils_held(Some(home), root));
-        self.scope.chrome.set_base(base);
-    }
-
     fn draw(&mut self, size: Size) -> io::Result<()> {
         self.reread_config();
         self.app.set_mouse_captured(self.mouse_captured);
@@ -994,12 +972,27 @@ impl<K: Seams> Session<K> {
                     now,
                 );
             }
-            Wanted::Pull(taking) => {
+            Wanted::Pull(Some(taking)) => {
                 self.puller
-                    .press(&mut self.app, &self.manifest, root, taking.as_ref(), now);
+                    .press(&mut self.app, &self.manifest, root, &taking, now);
             }
-            Wanted::Branch(branching) => self.branch(branching, now),
-            Wanted::Sigil(sigiling) => self.sigil(&sigiling, now),
+            // Answered from a file under the home and nothing else: no board is
+            // opened, no `git` runs and no session is raised.
+            Wanted::Pull(None) => {
+                let said = self.scope.settings.pull_line();
+                self.say(said, now);
+            }
+            Wanted::Branch(branching) => {
+                let said = self
+                    .scope
+                    .settings
+                    .branch(&branching, self.scope.chrome.remote_head());
+                self.settled(said, now);
+            }
+            Wanted::Sigil(sigiling) => {
+                let said = self.scope.settings.sigil(&sigiling);
+                self.settled(said, now);
+            }
             Wanted::Resume(ticket) => {
                 resume_press(
                     &mut self.app,
@@ -1014,76 +1007,18 @@ impl<K: Seams> Session<K> {
         }
     }
 
-    // Saved before the chrome moves, so the title never names a base the next
-    // pull would not use. A pull underway has already been refused above with
-    // every other submit, which matters: its base was read when it started.
-    fn branch(&mut self, branching: Branching, now: Instant) {
-        let base = match branching {
-            Branching::Show => {
-                let line = format!(
-                    "pulls start from and open pull requests against {}",
-                    self.scope.chrome.target().sentence()
-                );
-                self.app.panel_mut().note(line, now);
-                return;
-            }
-            Branching::Use(name) => Some(name),
-            Branching::Clear => None,
-        };
-        let Some(home) = self.puller.home() else {
-            self.app
-                .panel_mut()
-                .note(one_line(&Error::NoHome.to_string()), now);
-            return;
-        };
-        if let Err(source) = save_base_branch(home, &self.scope.repo_root, base.as_deref()) {
-            let line = one_line(&Error::Sigils { source }.to_string());
-            self.app.panel_mut().note(line, now);
-            return;
-        }
-        self.scope.chrome.set_base(base);
-        let line = format!(
-            "pulls now start from and open pull requests against {}",
-            self.scope.chrome.target().sentence()
-        );
-        self.app.panel_mut().note(line, now);
+    // The chrome is read again from the file rather than left to the next
+    // round's stat, so the box and the boundary checks move with the line even
+    // where the file's clock is too coarse to see the write. A pull underway has
+    // already been refused above with every other submit, which matters: its
+    // base was read when it started.
+    fn settled(&mut self, said: Result<String, Error>, now: Instant) {
+        self.scope.chrome.set_held(self.scope.settings.snapshot());
+        self.say(said, now);
     }
 
-    // The chrome is set from what was written rather than left to the next
-    // round's re-read, so the box and the boundary checks move with the line.
-    fn sigil(&mut self, sigiling: &Sigiling, now: Instant) {
-        let Some(home) = self.puller.home() else {
-            self.app
-                .panel_mut()
-                .note(one_line(&Error::NoHome.to_string()), now);
-            return;
-        };
-        let root = &self.scope.repo_root;
-        let change = match sigiling {
-            Sigiling::Show => {
-                let line = match self.scope.chrome.sigils() {
-                    Sigils::Held(held) => format!("this machine holds {}", holding(held)),
-                    Sigils::Nothing => "this machine holds no sigil".to_owned(),
-                    Sigils::Unknown => format!(
-                        "the sigils config at `{}` could not be read",
-                        sigils_path(home, root).display()
-                    ),
-                };
-                self.app.panel_mut().note(line, now);
-                return;
-            }
-            Sigiling::Add(names) => Change::Add(names),
-            Sigiling::Remove(names) => Change::Remove(names),
-            Sigiling::Clear => Change::Clear,
-        };
-        let line = match change_sigils(home, root, change) {
-            Ok(held) => {
-                let line = format!("this machine now holds {}", holding(&held));
-                self.scope.chrome.set_sigils(Sigils::held(held));
-                line
-            }
-            Err(error) => one_line(&error.to_string()),
-        };
+    fn say(&mut self, said: Result<String, Error>, now: Instant) {
+        let line = said.unwrap_or_else(|error| one_line(&error.to_string()));
         self.app.panel_mut().note(line, now);
     }
 
