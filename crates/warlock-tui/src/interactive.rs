@@ -7,10 +7,12 @@ use std::time::{Duration, Instant, SystemTime};
 
 use ratatui::crossterm::event::{KeyEvent, MouseEvent};
 use ratatui::layout::Size;
-use warlock_engine::{Agent, Manifest, held_base_branch, save_base_branch, sigils_path};
+use warlock_engine::{
+    Agent, Manifest, held_base_branch, save_base_branch, sigils_path, to_manifest_path,
+};
 
 use crate::app::{App, Focus, Run, Sigils, Working};
-use crate::chatting::{Branched, Chat, Sigiled, Takes, Wanted};
+use crate::chatting::Chat;
 use crate::claude::{ChatAgent, ClaudeAgent, Converses, Wired};
 use crate::clipboard::{self, Clip, Clipboard};
 use crate::composer::{Composed, paste_for};
@@ -37,7 +39,7 @@ use crate::screen::Screen;
 use crate::selection::{Cell, Position, copied_text, position_at};
 use crate::session::{Scope, Watched, load_app, sigils_held, start_watching};
 use crate::sigil::{Change, change_sigils, holding};
-use crate::submission::ToDraft;
+use crate::submission::{Branching, Sigiling, ToPush, Wanted};
 use crate::ui::{
     Reach, composer_on_screen, draw, help_most_scroll, panel_height, panel_width, tree_height,
 };
@@ -934,11 +936,9 @@ impl<K: Seams> Session<K> {
     /// more thing to clear on every way a question can end, and the cut already
     /// knows (see [`Cutter::relaying`]).
     ///
-    /// What a chat submission can hand back is a brief and what is wanted of
-    /// it: the document this session wrote or the one the command named, which
-    /// the conversation knows and can do neither thing with, because which board
-    /// it reaches is the manifest's, the machine's sigils' and the key store's.
-    /// A `/push` is answered on this thread — no socket is opened by any of it —
+    /// What a chat submission can hand back is a [`Wanted`]: a command about a
+    /// board, a queue or this machine's settings, none of which the conversation
+    /// holds. A `/push` is answered on this thread — no socket is opened by any of it —
     /// and what comes back is the window the reader is now looking at. A `/draft`
     /// has nothing to put up until a project has been read back, so it goes
     /// straight onto a worker and what comes back arrives at the bottom of a
@@ -965,62 +965,61 @@ impl<K: Seams> Session<K> {
         }
 
         let pulling = self.puller.in_flight();
-        match self.chat.compose(&mut self.app, outcome, now) {
-            Some(Wanted::Filed { scope, brief }) => {
-                self.pushes.press(
-                    &mut self.app,
-                    &self.manifest,
-                    &self.scope.repo_root,
-                    &scope,
-                    &brief,
-                    now,
-                );
-            }
-            Some(Wanted::Cut { scope, project }) => {
+        let Some(wanted) = self.chat.compose(&mut self.app, outcome, now) else {
+            return;
+        };
+        let root = &self.scope.repo_root;
+        match wanted {
+            // The manifest's spelling of the typed path, made before anything
+            // else is asked so a path that climbs out of the repository is
+            // refused in the engine's own words. The thread names files against
+            // the repository root, so a typed path is read against it too.
+            Wanted::Push(ToPush { scope, path }) => match to_manifest_path(root, &path) {
+                Ok(brief) => {
+                    self.pushes
+                        .press(&mut self.app, &self.manifest, root, &scope, &brief, now);
+                }
+                Err(source) => self
+                    .app
+                    .panel_mut()
+                    .note(one_line(&source.to_string()), now),
+            },
+            Wanted::Draft(drafting) => {
                 self.cutter.press(
                     &mut self.app,
                     &self.manifest,
-                    &self.scope.repo_root,
-                    ToDraft {
-                        scope: &scope,
-                        project: project.as_deref(),
-                    },
+                    root,
+                    &drafting,
                     pulling.as_deref(),
                     now,
                 );
             }
-            Some(Wanted::Pull(takes)) => {
-                self.puller.press(
-                    &mut self.app,
-                    &self.manifest,
-                    &self.scope.repo_root,
-                    takes.as_ref().map(Takes::taking),
-                    now,
-                );
+            Wanted::Pull(taking) => {
+                self.puller
+                    .press(&mut self.app, &self.manifest, root, taking.as_ref(), now);
             }
-            Some(Wanted::Branch(branched)) => self.branch(branched, now),
-            Some(Wanted::Sigil(sigiled)) => self.sigil(&sigiled, now),
-            Some(Wanted::Resume(ticket)) => {
+            Wanted::Branch(branching) => self.branch(branching, now),
+            Wanted::Sigil(sigiling) => self.sigil(&sigiling, now),
+            Wanted::Resume(ticket) => {
                 resume_press(
                     &mut self.app,
                     &mut self.chat,
                     self.puller.home(),
-                    &self.scope.repo_root,
+                    root,
                     &ticket,
                     pulling.as_deref(),
                     now,
                 );
             }
-            None => {}
         }
     }
 
     // Saved before the chrome moves, so the title never names a base the next
     // pull would not use. A pull underway has already been refused above with
     // every other submit, which matters: its base was read when it started.
-    fn branch(&mut self, branched: Branched, now: Instant) {
-        let base = match branched {
-            Branched::Show => {
+    fn branch(&mut self, branching: Branching, now: Instant) {
+        let base = match branching {
+            Branching::Show => {
                 let line = format!(
                     "pulls start from and open pull requests against {}",
                     self.scope.chrome.target().sentence()
@@ -1028,8 +1027,8 @@ impl<K: Seams> Session<K> {
                 self.app.panel_mut().note(line, now);
                 return;
             }
-            Branched::Use(name) => Some(name),
-            Branched::Clear => None,
+            Branching::Use(name) => Some(name),
+            Branching::Clear => None,
         };
         let Some(home) = self.puller.home() else {
             self.app
@@ -1052,7 +1051,7 @@ impl<K: Seams> Session<K> {
 
     // The chrome is set from what was written rather than left to the next
     // round's re-read, so the box and the boundary checks move with the line.
-    fn sigil(&mut self, sigiled: &Sigiled, now: Instant) {
+    fn sigil(&mut self, sigiling: &Sigiling, now: Instant) {
         let Some(home) = self.puller.home() else {
             self.app
                 .panel_mut()
@@ -1060,8 +1059,8 @@ impl<K: Seams> Session<K> {
             return;
         };
         let root = &self.scope.repo_root;
-        let change = match sigiled {
-            Sigiled::Show => {
+        let change = match sigiling {
+            Sigiling::Show => {
                 let line = match self.scope.chrome.sigils() {
                     Sigils::Held(held) => format!("this machine holds {}", holding(held)),
                     Sigils::Nothing => "this machine holds no sigil".to_owned(),
@@ -1073,9 +1072,9 @@ impl<K: Seams> Session<K> {
                 self.app.panel_mut().note(line, now);
                 return;
             }
-            Sigiled::Add(names) => Change::Add(names),
-            Sigiled::Remove(names) => Change::Remove(names),
-            Sigiled::Clear => Change::Clear,
+            Sigiling::Add(names) => Change::Add(names),
+            Sigiling::Remove(names) => Change::Remove(names),
+            Sigiling::Clear => Change::Clear,
         };
         let line = match change_sigils(home, root, change) {
             Ok(held) => {

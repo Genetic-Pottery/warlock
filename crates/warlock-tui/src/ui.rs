@@ -36,6 +36,7 @@ use crate::prompt::{RecordField, RecordForm, ScopeField};
 // its `Window` is the panel's view of the card, which is neither of the
 // terminal windows this module knows about.
 use crate::selection::{Span as Selected, Window as Viewport, spans_at};
+use crate::submission::help_rows;
 use crate::wrap::shape;
 
 const INDENT: &str = "  ";
@@ -195,23 +196,29 @@ const HELP_TITLE: &str = " keys · Esc or ? closes · j/k scrolls ";
 
 const HELP_KEY_WIDTH: usize = 24;
 
+enum Rows {
+    Keys(&'static [(&'static str, &'static str)]),
+    Commands,
+}
+
 // A short copy of `CONTROLS.md`, which has the reasons. A key added or changed
-// in `input.rs`, `composer.rs` or `submission.rs` needs its line here too.
-const HELP_SECTIONS: &[(&str, &[(&str, &str)])] = &[
+// in `input.rs` or `composer.rs` needs its line here too; a command's rows are
+// written with the command, in `submission.rs`.
+const HELP_SECTIONS: &[(&str, Rows)] = &[
     (
         "Moving",
-        &[
+        Rows::Keys(&[
             ("j / k   ↓ / ↑", "down or up one row"),
             ("PgDn / PgUp", "down or up one screen"),
             ("g / G", "first or last row"),
             ("space", "fold or unfold a directory"),
             ("Tab", "next pane: tree, panel, chat bar"),
             ("Shift-Tab", "switch the panel's card"),
-        ],
+        ]),
     ),
     (
         "The tree",
-        &[
+        Rows::Keys(&[
             ("o", "show only pacted directories"),
             ("f", "show files too"),
             ("p", "pact or un-pact the directory"),
@@ -221,43 +228,26 @@ const HELP_SECTIONS: &[(&str, &[(&str, &str)])] = &[
             ("e", "open the file in $EDITOR"),
             ("m", "mouse capture off or on"),
             ("drag", "select panel text to copy it"),
-        ],
+        ]),
     ),
     (
         "The chat bar",
-        &[
+        Rows::Keys(&[
             ("Enter", "send"),
             ("Alt-Enter", "new line"),
             ("Ctrl-U", "delete to the start of the line"),
             ("→", "take the dimmed suggestion"),
             ("Esc", "leave the chat bar, keep the text"),
-        ],
+        ]),
     ),
-    (
-        "Commands",
-        &[
-            ("/brief  /write  /chat", "talk a brief into a document"),
-            ("/push SCOPE PATH", "file a brief as a project"),
-            ("/draft SCOPE", "list planned projects"),
-            ("/draft SCOPE SLUG", "cut a project into issues"),
-            ("/pull SCOPE [TICKET]", "work a ticket to a pull request"),
-            ("/resume TICKET", "pick up a halted pull"),
-            ("/branch", "name the branch pulls go into"),
-            ("/branch use BRANCH", "pull into BRANCH instead"),
-            ("/branch clear", "pull into the remote's default"),
-            ("/sigil", "name the sigils held"),
-            ("/sigil add NAME...", "hold these sigils too"),
-            ("/sigil remove NAME...", "stop holding these"),
-            ("/sigil clear", "hold no sigils"),
-        ],
-    ),
+    ("Commands", Rows::Commands),
     (
         "Stopping",
-        &[
+        Rows::Keys(&[
             ("Esc", "cancel a pact or refresh"),
             ("Ctrl-C", "cancel a chat turn"),
             ("q / Esc / Ctrl-C", "ask whether to quit"),
-        ],
+        ]),
     ),
 ];
 
@@ -1480,12 +1470,16 @@ impl<'a> Dialog<'a> {
 
     fn help() -> Self {
         let mut lines = Vec::new();
-        for (index, (heading, keys)) in HELP_SECTIONS.iter().enumerate() {
+        for (index, (heading, rows)) in HELP_SECTIONS.iter().enumerate() {
             if index > 0 {
                 lines.push(Line::default());
             }
             lines.push(Line::from(*heading).bold());
-            for (key, does) in *keys {
+            let rows: Box<dyn Iterator<Item = &(&str, &str)>> = match rows {
+                Rows::Keys(keys) => Box::new(keys.iter()),
+                Rows::Commands => Box::new(help_rows()),
+            };
+            for (key, does) in rows {
                 lines.push(Line::from(vec![
                     Span::raw(format!("{key:<HELP_KEY_WIDTH$}")),
                     Span::raw(*does).dim(),

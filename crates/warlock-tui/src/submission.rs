@@ -6,103 +6,213 @@
 //!
 //! There is no `/help`: a command whose job was to print the list would be a
 //! thing to discover before you could discover anything, so the list is on the
-//! `?` sheet and in `Submitted::refusal`. Nothing here *copies* the draft's
-//! text: the argument-taking variants borrow the argument out of it, so there is
-//! still one owner and no second string free to disagree with the first. And
-//! nothing here enters a mode, writes a file or opens a turn.
+//! `?` sheet and in `Submitted::refusal`, and both are drawn from [`COMMANDS`].
+//! A command is added there and nowhere else in this file. Nothing here enters a
+//! mode, writes a file or opens a turn.
 
-// Stated once, here, because it is the only place warlock says which commands
-// exist: a second copy of this sentence in the loop or in a test fixture would
-// be a second list to keep true.
-const REFUSAL: &str = "warlock has nine commands — /brief, /write, /chat, /push, /draft, /pull, /resume, /branch and /sigil — and six of them take arguments: a scope and a brief for /push, a scope and optionally a project's slug for /draft, a scope and optionally a ticket for /pull, a ticket for /resume, `use <BRANCH>` or `clear` for /branch, which on its own names the branch pulls start from, and `add <NAME>...`, `remove <NAME>...` or `clear` for /sigil, which on its own names the sigils held.";
+// One row per command word, and the only place warlock says which commands
+// exist: the parse, the refusal sentence and the `?` sheet's rows are all read
+// off it, so none of the three can name a command the others do not.
+struct Command {
+    word: &'static str,
+    // Handed everything after the word, trimmed; `None` is a refusal.
+    read: fn(&str) -> Option<Submitted>,
+    // What the refusal says the word takes, or `None` for a word that takes
+    // nothing.
+    takes: Option<&'static str>,
+    // A word can leave this empty when another word's row already names it.
+    help: &'static [(&'static str, &'static str)],
+}
+
+const COMMANDS: &[Command] = &[
+    Command {
+        word: "/brief",
+        read: |after| after.is_empty().then_some(Submitted::Brief),
+        takes: None,
+        help: &[("/brief  /write  /chat", "talk a brief into a document")],
+    },
+    Command {
+        word: "/write",
+        read: |after| after.is_empty().then_some(Submitted::Write),
+        takes: None,
+        help: &[],
+    },
+    Command {
+        word: "/chat",
+        read: |after| after.is_empty().then_some(Submitted::Chat),
+        takes: None,
+        help: &[],
+    },
+    Command {
+        word: "/push",
+        read: read_push,
+        takes: Some("a scope and a brief for /push"),
+        help: &[("/push SCOPE PATH", "file a brief as a project")],
+    },
+    Command {
+        word: "/draft",
+        read: read_draft,
+        takes: Some("a scope and optionally a project's slug for /draft"),
+        help: &[
+            ("/draft SCOPE", "list planned projects"),
+            ("/draft SCOPE SLUG", "cut a project into issues"),
+        ],
+    },
+    Command {
+        word: "/pull",
+        read: read_pull,
+        takes: Some("a scope and optionally a ticket for /pull"),
+        help: &[("/pull SCOPE [TICKET]", "work a ticket to a pull request")],
+    },
+    Command {
+        word: "/resume",
+        read: read_resume,
+        takes: Some("a ticket for /resume"),
+        help: &[("/resume TICKET", "pick up a halted pull")],
+    },
+    Command {
+        word: "/branch",
+        read: read_branch,
+        takes: Some(
+            "`use <BRANCH>` or `clear` for /branch, which on its own names the branch pulls start from",
+        ),
+        help: &[
+            ("/branch", "name the branch pulls go into"),
+            ("/branch use BRANCH", "pull into BRANCH instead"),
+            ("/branch clear", "pull into the remote's default"),
+        ],
+    },
+    Command {
+        word: "/sigil",
+        read: read_sigil,
+        takes: Some(
+            "`add <NAME>...`, `remove <NAME>...` or `clear` for /sigil, which on its own names the sigils held",
+        ),
+        help: &[
+            ("/sigil", "name the sigils held"),
+            ("/sigil add NAME...", "hold these sigils too"),
+            ("/sigil remove NAME...", "stop holding these"),
+            ("/sigil clear", "hold no sigils"),
+        ],
+    },
+];
+
+/// The `?` sheet's rows for the commands, in [`COMMANDS`]'s order.
+pub(crate) fn help_rows() -> impl Iterator<Item = &'static (&'static str, &'static str)> {
+    COMMANDS.iter().flat_map(|command| command.help)
+}
+
+fn refusal() -> String {
+    let words: Vec<&str> = COMMANDS.iter().map(|command| command.word).collect();
+    let takes: Vec<&str> = COMMANDS
+        .iter()
+        .filter_map(|command| command.takes)
+        .collect();
+    format!(
+        "warlock's commands are {}, and the ones that take arguments take {}.",
+        listed(&words, " and "),
+        listed(&takes, ", and "),
+    )
+}
+
+fn listed(items: &[&str], last: &str) -> String {
+    match items {
+        [] => String::new(),
+        [only] => (*only).to_owned(),
+        [init @ .., tail] => format!("{}{last}{tail}", init.join(", ")),
+    }
+}
 
 // Fields rather than the second half of a tuple, because one of the two is
 // optional and the other is not: `/pull <SCOPE>` takes the next ticket in the
 // scope and `/pull <SCOPE> <TICKET>` takes the one named, and a caller reading
 // `Some(("warlock-team", None))` has nothing but the order to tell it which
 // position is the scope.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) struct Taking<'a> {
-    pub scope: &'a str,
-    pub ticket: Option<&'a str>,
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct Taking {
+    pub scope: String,
+    pub ticket: Option<String>,
 }
 
-// The scope a `/push` files to and the brief it files, both required.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) struct ToPush<'a> {
-    pub scope: &'a str,
-    pub path: &'a str,
+// The path is as typed: the manifest's spelling of it is made by whoever holds
+// the repository root.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct ToPush {
+    pub scope: String,
+    pub path: String,
 }
 
 // `use` and `clear` are `warlock branch`'s own words, so the chat bar and the
 // shell spell the one setting the same way.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) enum Branching<'a> {
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) enum Branching {
     Show,
-    Use(&'a str),
+    Use(String),
     Clear,
 }
 
-// `add` and `remove` carry every name after the verb as one slice of the
-// draft, split by whoever writes them.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) enum Sigiling<'a> {
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) enum Sigiling {
     Show,
-    Add(&'a str),
-    Remove(&'a str),
+    Add(Vec<String>),
+    Remove(Vec<String>),
     Clear,
 }
 
-// The scope a `/draft` reads from and, where it named one, the project's slug:
-// without one, the planned projects are listed instead.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) struct ToDraft<'a> {
-    pub scope: &'a str,
-    pub project: Option<&'a str>,
+// Without a slug, the planned projects are listed instead.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct ToDraft {
+    pub scope: String,
+    pub project: Option<String>,
+}
+
+/// The commands that are not about the conversation, handed up whole for the
+/// loop to answer: every rule any of them has is about a manifest, a queue, a
+/// working tree or a file under the home, and none of those is the chat's.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) enum Wanted {
+    Push(ToPush),
+    Draft(ToDraft),
+    // `None` is `/pull` on its own, which is the one command word that is worth
+    // more than a refusal without its argument: the scopes this machine holds
+    // are the answer to it, this module cannot ask for them, so a bare `/pull`
+    // goes up to be answered with them named rather than with the list of
+    // commands.
+    Pull(Option<Taking>),
+    // Not optional, because a `/resume` with no ticket names nothing warlock
+    // could offer back — the refusal already says a ticket goes after the word.
+    Resume(String),
+    Branch(Branching),
+    Sigil(Sigiling),
 }
 
 // No variant for "empty", because an empty draft never gets here —
 // `Composer::is_submittable` declines to offer one up — and a function that is
 // total anyway is worth more than a variant every caller must match on.
 //
-// The borrows in `Push`, `Cut`, `Pull`, `Resume`, `Branch` and `Sigil` are what keep the module's
-// promise that nothing here copies the draft: each argument is a slice of the
-// draft the caller still owns, and `&str` is `Copy`, so the value stays as cheap
-// to pass around as it was when no variant carried anything.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) enum Submitted<'a> {
+// Owned rather than borrowed from the draft: the submit that reads a draft
+// empties the field, and what goes up to the loop outlives that.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) enum Submitted {
     Brief,
     Write,
     Chat,
-    Push(ToPush<'a>),
-    Cut(ToDraft<'a>),
-    // `None` is `/pull` on its own, which is the one command word that is worth
-    // more than a refusal without its argument: the scopes this machine holds
-    // are the answer to it, this module cannot ask for them, so a bare `/pull`
-    // goes up to be answered with them named rather than with the list below.
-    Pull(Option<Taking<'a>>),
-    // Not optional, because a `/resume` with no ticket names nothing warlock
-    // could offer back — the refusal already says a ticket goes after the word.
-    Resume(&'a str),
-    Branch(Branching<'a>),
-    Sigil(Sigiling<'a>),
+    Wanted(Wanted),
     Message,
-    // An unknown word, a bare `/`, one of the three command words that take
-    // nothing with something after it, a `/push` without both its scope and its
-    // brief, a `/draft` or `/resume` with nothing after it, and an argument with
-    // more words in it than the command has places to put them. It
-    // never reaches the model: the point of refusing rather than sending is that
-    // a typo costs a line and not a turn.
+    // An unknown word, a bare `/`, a command word with a second line under it,
+    // and any argument [`COMMANDS`] does not read. It never reaches the model:
+    // the point of refusing rather than sending is that a typo costs a line and
+    // not a turn.
     Refused,
 }
 
-impl Submitted<'_> {
-    // A method rather than a bare constant, so the caller asks the value what
+impl Submitted {
+    // A method rather than a bare function, so the caller asks the value what
     // it has to say instead of asking itself which variant deserves a line.
     #[must_use]
-    pub(crate) const fn refusal(self) -> Option<&'static str> {
+    pub(crate) fn refusal(&self) -> Option<String> {
         match self {
-            Self::Refused => Some(REFUSAL),
+            Self::Refused => Some(refusal()),
             _ => None,
         }
     }
@@ -119,7 +229,7 @@ impl Submitted<'_> {
 // refused would be one invisible character deciding between a mode change and a
 // complaint.
 #[must_use]
-pub(crate) fn submitted_for(draft: &str) -> Submitted<'_> {
+pub(crate) fn submitted_for(draft: &str) -> Submitted {
     let draft = draft.trim();
     let Some(word) = draft.split_whitespace().next() else {
         return Submitted::Message;
@@ -133,113 +243,103 @@ pub(crate) fn submitted_for(draft: &str) -> Submitted<'_> {
         return Submitted::Message;
     }
 
-    // Untrimmed, because the line break that disqualifies a `/push` is as often
-    // the one *before* the argument as one inside it, and trimming first would
-    // eat it.
+    // Case-sensitively, so `/BRIEF` is refused: see the module docs.
+    let Some(command) = COMMANDS.iter().find(|command| command.word == word) else {
+        return Submitted::Refused;
+    };
+
+    // Asked of the whole of what follows the word, before any reader trims it:
+    // the line break is as often the one *before* the argument as one inside
+    // it. A command word with a paragraph under it is somebody expecting the
+    // paragraph to be read, and no path, scope or ticket has a newline in it.
     let after = &draft[word.len()..];
-
-    // The scope first and then the path, taken whole rather than as a second
-    // token, so a path with a space in it arrives as the path it is — but never
-    // across a line break, which is somebody typing a message under a command
-    // word rather than naming a file no path has a newline in. A `/push` short
-    // of either is refused rather than guessed at: a push files a project
-    // nothing here can take back.
-    if word == PUSH && !after.contains('\n') {
-        let after = after.trim();
-        let Some((scope, path)) = after.split_once(char::is_whitespace) else {
-            return Submitted::Refused;
-        };
-        return Submitted::Push(ToPush {
-            scope,
-            path: path.trim(),
-        });
-    }
-
-    // The commands whose arguments are names rather than paths: a scope, a
-    // slug and a ticket identifier are single words, so they are read as words
-    // and a third word is a refusal rather than the tail of the second. Reading
-    // them the way a path is read would make `/pull warlock-team WAR-1` one
-    // scope called `warlock-team WAR-1`, which exists nowhere and would be
-    // refused a screen later by whatever went looking for it.
-    //
-    // The line break is disqualifying here for `PUSH`'s reason and not for a
-    // reason of its own: a command word with a paragraph under it is somebody
-    // expecting the paragraph to be read.
-    if word == BRANCH && !after.contains('\n') {
-        let words: Vec<&str> = after.split_whitespace().collect();
-        return match words.as_slice() {
-            [] => Submitted::Branch(Branching::Show),
-            ["use", name] => Submitted::Branch(Branching::Use(name)),
-            ["clear"] => Submitted::Branch(Branching::Clear),
-            _ => Submitted::Refused,
-        };
-    }
-
-    if word == SIGIL && !after.contains('\n') {
-        let after = after.trim();
-        let (verb, names) = after
-            .split_once(char::is_whitespace)
-            .map_or((after, ""), |(verb, names)| (verb, names.trim()));
-        return match (verb, names.is_empty()) {
-            ("", _) => Submitted::Sigil(Sigiling::Show),
-            ("add", false) => Submitted::Sigil(Sigiling::Add(names)),
-            ("remove", false) => Submitted::Sigil(Sigiling::Remove(names)),
-            ("clear", true) => Submitted::Sigil(Sigiling::Clear),
-            _ => Submitted::Refused,
-        };
-    }
-
-    if matches!(word, CUT | PULL | RESUME) && !after.contains('\n') {
-        let mut words = after.split_whitespace();
-        let (first, second) = (words.next(), words.next());
-        if words.next().is_some() {
-            return Submitted::Refused;
-        }
-
-        if word == PULL {
-            return Submitted::Pull(first.map(|scope| Taking {
-                scope,
-                ticket: second,
-            }));
-        }
-        if word == CUT {
-            return first.map_or(Submitted::Refused, |scope| {
-                Submitted::Cut(ToDraft {
-                    scope,
-                    project: second,
-                })
-            });
-        }
-        return match (first, second) {
-            (Some(ticket), None) => Submitted::Resume(ticket),
-            _ => Submitted::Refused,
-        };
-    }
-
-    // The trimmed draft *is* the word when nothing follows it — which covers a
-    // second token and a second line in the one comparison, since both leave
-    // characters the first token does not have.
-    if draft != word {
+    if after.contains('\n') {
         return Submitted::Refused;
     }
 
-    match word {
-        "/brief" => Submitted::Brief,
-        "/write" => Submitted::Write,
-        "/chat" => Submitted::Chat,
-        // Case-sensitively, so `/BRIEF` lands here: see the module docs.
-        _ => Submitted::Refused,
+    (command.read)(after.trim()).unwrap_or(Submitted::Refused)
+}
+
+// The scope first and then the path, taken whole rather than as a second token,
+// so a path with a space in it arrives as the path it is. A `/push` short of
+// either is refused rather than guessed at: a push files a project nothing here
+// can take back.
+fn read_push(after: &str) -> Option<Submitted> {
+    let (scope, path) = after.split_once(char::is_whitespace)?;
+    Some(Submitted::Wanted(Wanted::Push(ToPush {
+        scope: scope.to_owned(),
+        path: path.trim().to_owned(),
+    })))
+}
+
+// The commands whose arguments are names rather than paths: a scope, a slug, a
+// ticket identifier, a branch and a sigil are single words, so they are read as
+// words and a word too many is a refusal rather than the tail of the one before.
+// Reading them the way a path is read would make `/pull warlock-team WAR-1` one
+// scope called `warlock-team WAR-1`, which exists nowhere and would be refused a
+// screen later by whatever went looking for it.
+fn words(after: &str) -> Vec<&str> {
+    after.split_whitespace().collect()
+}
+
+fn owned(names: &[&str]) -> Vec<String> {
+    names.iter().map(|&name| name.to_owned()).collect()
+}
+
+fn read_draft(after: &str) -> Option<Submitted> {
+    let (scope, project) = match words(after).as_slice() {
+        [scope] => (*scope, None),
+        [scope, project] => (*scope, Some(*project)),
+        _ => return None,
+    };
+    Some(Submitted::Wanted(Wanted::Draft(ToDraft {
+        scope: scope.to_owned(),
+        project: project.map(str::to_owned),
+    })))
+}
+
+fn read_pull(after: &str) -> Option<Submitted> {
+    let taking = match words(after).as_slice() {
+        [] => None,
+        [scope] => Some((*scope, None)),
+        [scope, ticket] => Some((*scope, Some(*ticket))),
+        _ => return None,
+    };
+    Some(Submitted::Wanted(Wanted::Pull(taking.map(
+        |(scope, ticket)| Taking {
+            scope: scope.to_owned(),
+            ticket: ticket.map(str::to_owned),
+        },
+    ))))
+}
+
+fn read_resume(after: &str) -> Option<Submitted> {
+    match words(after).as_slice() {
+        [ticket] => Some(Submitted::Wanted(Wanted::Resume((*ticket).to_owned()))),
+        _ => None,
     }
 }
 
-// Named because they are matched on before the match below rather than inside
-// it, and a literal in two places is two places to change.
-const PUSH: &str = "/push";
-const CUT: &str = "/draft";
-const PULL: &str = "/pull";
-const RESUME: &str = "/resume";
-const BRANCH: &str = "/branch";
-const SIGIL: &str = "/sigil";
+fn read_branch(after: &str) -> Option<Submitted> {
+    let branching = match words(after).as_slice() {
+        [] => Branching::Show,
+        ["use", name] => Branching::Use((*name).to_owned()),
+        ["clear"] => Branching::Clear,
+        _ => return None,
+    };
+    Some(Submitted::Wanted(Wanted::Branch(branching)))
+}
+
+fn read_sigil(after: &str) -> Option<Submitted> {
+    let sigiling = match words(after).as_slice() {
+        [] => Sigiling::Show,
+        ["add", names @ ..] if !names.is_empty() => Sigiling::Add(owned(names)),
+        ["remove", names @ ..] if !names.is_empty() => Sigiling::Remove(owned(names)),
+        ["clear"] => Sigiling::Clear,
+        _ => return None,
+    };
+    Some(Submitted::Wanted(Wanted::Sigil(sigiling)))
+}
 
 #[cfg(test)]
 #[path = "tests/submission.rs"]

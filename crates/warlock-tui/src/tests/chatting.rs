@@ -1170,7 +1170,7 @@ mod submitting {
 
     use super::super::{
         ALREADY_CHATTING, BRIEF_COMMAND, BRIEF_NOTE, CHAT_COMMAND, CHAT_NOTE, Chat, NOT_BRIEFING,
-        WRITE_COMMAND, Wanted, brief_asking,
+        WRITE_COMMAND, brief_asking,
     };
     use crate::account::Line;
     use crate::app::App;
@@ -1179,7 +1179,7 @@ mod submitting {
     use crate::composer::{Composed, Composer};
     use crate::error::one_line;
     use crate::panel::Mode;
-    use crate::submission::Submitted;
+    use crate::submission::{Submitted, ToDraft, ToPush, Wanted};
     use crate::template::DEFAULT_TEMPLATE;
     use crate::thread::Ending;
     use crate::writing::write_opened;
@@ -1376,7 +1376,7 @@ mod submitting {
             );
             assert_eq!(
                 rows(&app, now),
-                vec![note(refusal)],
+                vec![note(&refusal)],
                 "{draft:?} did not leave exactly the refusal"
             );
             assert_eq!(turns(&app), 0, "{draft:?} opened a turn");
@@ -1389,18 +1389,17 @@ mod submitting {
             submit_into(&mut app, &mut chat, draft, now);
 
             assert_eq!(turns(&app), before, "{draft:?} in brief mode cost a turn");
-            assert_eq!(rows(&app, now).last(), Some(&note(refusal)));
+            assert_eq!(rows(&app, now).last(), Some(&note(&refusal)));
         }
     }
 
     #[test]
-    fn push_hands_up_the_scope_and_the_brief_it_names() {
-        // The brief goes up in the manifest's own spelling, says nothing on the
-        // card and leaves the register alone.
+    fn push_hands_up_the_scope_and_the_path_as_typed() {
+        // Says nothing on the card and leaves the register alone: the
+        // manifest's spelling of the path is the loop's to make.
         let now = Instant::now();
-        let root = a_root();
         let mut app = App::default();
-        let mut chat = conversation_in(root.path());
+        let mut chat = conversation();
 
         chat.compose(
             &mut app,
@@ -1411,25 +1410,13 @@ mod submitting {
 
         assert_eq!(
             filed,
-            Some(Wanted::Filed {
+            Some(Wanted::Push(ToPush {
                 scope: "warlock-team".to_owned(),
-                brief: "docs/a-brief.md".to_owned(),
-            })
+                path: "./docs/a-brief.md".to_owned(),
+            }))
         );
         assert!(rows(&app, now).is_empty(), "a named brief left a line");
         assert_eq!(turns(&app), 0, "a named brief opened a turn");
-
-        // A path that climbs out of the repository is refused in the engine's
-        // own words, with nothing handed up for the loop to file.
-        chat.compose(
-            &mut app,
-            Composed::Typing(Composer::new("/push warlock-team ../elsewhere/a-brief.md")),
-            now,
-        );
-        let refused = chat.compose(&mut app, Composed::Submit, now);
-
-        assert_eq!(refused, None, "a path outside the repository was filed");
-        assert_eq!(rows(&app, now).len(), 1, "the refusal was not one line");
     }
 
     #[test]
@@ -1449,10 +1436,10 @@ mod submitting {
 
             assert_eq!(
                 cut,
-                Some(Wanted::Cut {
+                Some(Wanted::Draft(ToDraft {
                     scope: "warlock-team".to_owned(),
                     project: project.map(ToOwned::to_owned),
-                }),
+                })),
                 "{draft:?}"
             );
             assert!(rows(&app, now).is_empty(), "{draft:?} left a line");
@@ -2145,7 +2132,7 @@ mod submitting {
             assert_eq!(
                 rows(&app, now),
                 vec![Line::Note {
-                    text: refusal.to_owned()
+                    text: refusal.clone()
                 }],
                 "{draft:?} did not leave exactly one note"
             );

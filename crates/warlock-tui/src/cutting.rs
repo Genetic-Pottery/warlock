@@ -429,11 +429,12 @@ impl<O: Opens, A: Converses> Cutter<O, A> {
         app: &mut App,
         manifest: &Manifest,
         repo_root: &Path,
-        drafting: ToDraft<'_>,
+        drafting: &ToDraft,
         pulling: Option<&str>,
         now: Instant,
     ) {
         let ToDraft { scope, project } = drafting;
+        let project = project.as_deref();
         if let Some(pulling) = pulling {
             app.panel_mut().note(refused(pulling), now);
             return;

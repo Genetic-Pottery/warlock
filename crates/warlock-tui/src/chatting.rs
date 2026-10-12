@@ -18,7 +18,7 @@ use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use warlock_engine::{DEFAULT_BRIEF_DIRECTORY, briefs, load_briefs, to_manifest_path};
+use warlock_engine::{DEFAULT_BRIEF_DIRECTORY, briefs, load_briefs};
 
 use crate::app::{App, Focus};
 use crate::claude::{
@@ -31,7 +31,7 @@ use crate::inflight::{Lost, Port, Stream, Workers, settled};
 use crate::pacting::CancelGuard;
 use crate::panel::Mode;
 use crate::prompt::{Edited, ScopePrompt};
-use crate::submission::{Branching, Sigiling, Submitted, Taking, submitted_for};
+use crate::submission::{Submitted, Wanted, submitted_for};
 use crate::template::{Error as TemplateError, brief_template};
 use crate::thread::{Ending, ending_for};
 use crate::writing::{write_edit, write_opened};
@@ -63,78 +63,6 @@ pub(crate) const CHAT_NOTE: &str =
 const ALREADY_CHATTING: &str = "already in chat mode — /brief is what changes that.";
 
 const NOT_BRIEFING: &str = "/write is only in brief mode — /brief enters it";
-
-/// What a submitted draft hands the loop: a brief and what is to be done with
-/// it, or a ticket and which of the two things that read one.
-///
-/// A variant each rather than one value carrying a verb: the loop answers them
-/// in four different places, and a single variant would be a value every caller
-/// had to match on a second time to find its own arm.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum Wanted {
-    /// The scope, and the brief spelled the manifest's way.
-    Filed {
-        scope: String,
-        brief: String,
-    },
-    /// The scope, and the project's slug or `None` to list them.
-    Cut {
-        scope: String,
-        project: Option<String>,
-    },
-    /// `None` is a bare `/pull`, which is answered with the scopes this machine
-    /// holds — a file under the home, which this value has not got.
-    Pull(Option<Takes>),
-    Resume(String),
-    Branch(Branched),
-    Sigil(Sigiled),
-}
-
-/// The owned twin of [`Sigiling`], with the names split.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum Sigiled {
-    Show,
-    Add(Vec<String>),
-    Remove(Vec<String>),
-    Clear,
-}
-
-/// The owned twin of [`Branching`], for [`Takes`]'s reason.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum Branched {
-    Show,
-    Use(String),
-    Clear,
-}
-
-/// The scope a `/pull` named and, where it named one, the ticket.
-///
-/// The owned twin of [`Taking`], which borrows the draft: the draft is dropped by
-/// the submit that reads it, and what goes up to the loop outlives that.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Takes {
-    scope: String,
-    ticket: Option<String>,
-}
-
-impl Takes {
-    fn of(taking: Taking<'_>) -> Self {
-        Self {
-            scope: taking.scope.to_owned(),
-            ticket: taking.ticket.map(ToOwned::to_owned),
-        }
-    }
-
-    /// Borrowed back out as the parser's own value, which is what the pull takes:
-    /// there is one shape for "a scope and maybe a ticket" and this is not a
-    /// second one.
-    pub(crate) fn taking(&self) -> Taking<'_> {
-        Taking {
-            scope: &self.scope,
-            ticket: self.ticket.as_deref(),
-        }
-    }
-}
 
 fn unreadable_template(error: &TemplateError) -> String {
     format!("{error} — /brief did nothing, so fix or remove the file and type it again")
@@ -333,10 +261,8 @@ impl<C: Converses> Chat<C> {
         }
     }
 
-    // The one thing a draft can hand back to the loop: the brief a `/push`
-    // asks to file or a `/draft` asks to cut. Which board either of them reaches
-    // is a manifest, a home and a key store away, and none of the three is this
-    // value's — so the commands are recognised here and answered there.
+    // The one thing a draft can hand back to the loop: a command that is not
+    // about this conversation, recognised here and answered there.
     pub(crate) fn compose(
         &mut self,
         app: &mut App,
@@ -390,52 +316,10 @@ impl<C: Converses> Chat<C> {
                     app.panel_mut().note(NOT_BRIEFING, now);
                 }
             }
-            // Two commands about the board rather than about the conversation,
-            // so neither asks anything of the model and neither says anything
-            // about the mode. A `/push` names its brief, never the one `/write`
-            // wrote: the file filed is the file typed. Both go up to the loop,
-            // which holds the manifest that says which board the scope reaches.
-            Submitted::Push(pushing) => {
-                return self
-                    .brief_for(app, pushing.path, now)
-                    .map(|brief| Wanted::Filed {
-                        scope: pushing.scope.to_owned(),
-                        brief,
-                    });
-            }
-            Submitted::Cut(drafting) => {
-                return Some(Wanted::Cut {
-                    scope: drafting.scope.to_owned(),
-                    project: drafting.project.map(ToOwned::to_owned),
-                });
-            }
-            // The two commands about a ticket, which are nothing to do with this
-            // conversation: no turn is opened, no mode moves and nothing here is
-            // refused, because every rule either of them has is about a queue, a
-            // working tree and the run records under the home — and not one of
-            // those is this value's. Both go straight up to the loop, which holds
-            // them. A bare `/pull` goes up as well rather than being refused
-            // here: the answer to it is the scopes this machine holds.
-            Submitted::Pull(taking) => return Some(Wanted::Pull(taking.map(Takes::of))),
-            Submitted::Resume(ticket) => return Some(Wanted::Resume(ticket.to_owned())),
-            // The base and the sigils live under the home and are drawn off the
-            // chrome, and neither is this value's.
-            Submitted::Branch(branching) => {
-                return Some(Wanted::Branch(match branching {
-                    Branching::Show => Branched::Show,
-                    Branching::Use(name) => Branched::Use(name.to_owned()),
-                    Branching::Clear => Branched::Clear,
-                }));
-            }
-            Submitted::Sigil(sigiling) => {
-                let split = |names: &str| names.split_whitespace().map(str::to_owned).collect();
-                return Some(Wanted::Sigil(match sigiling {
-                    Sigiling::Show => Sigiled::Show,
-                    Sigiling::Add(names) => Sigiled::Add(split(names)),
-                    Sigiling::Remove(names) => Sigiled::Remove(split(names)),
-                    Sigiling::Clear => Sigiled::Clear,
-                }));
-            }
+            // Everything else is about a board, a queue, a working tree or a file
+            // under the home, and none of those is this value's: no turn is
+            // opened, no mode moves and nothing is refused here.
+            Submitted::Wanted(wanted) => return Some(wanted),
             // The line is asked of the value rather than restated here, so the
             // list of commands that exist is written down in one place.
             said @ Submitted::Refused => {
@@ -446,23 +330,6 @@ impl<C: Converses> Chat<C> {
         }
 
         None
-    }
-
-    // The one spelling of a brief's path, made here for the reason
-    // `write_submit` makes it before it writes: what goes up to the loop is the
-    // manifest's own spelling.
-    //
-    // A typed path is read against the repository root rather than the working
-    // directory, which is what the thread already names files by, and the
-    // engine's own sentence is what refuses one that climbs out of it.
-    fn brief_for(&self, app: &mut App, named: &str, now: Instant) -> Option<String> {
-        match to_manifest_path(&self.root, named) {
-            Ok(stored) => Some(stored),
-            Err(source) => {
-                app.panel_mut().note(one_line(&source.to_string()), now);
-                None
-            }
-        }
     }
 
     pub(crate) fn paste(&mut self, outcome: Pasted) {

@@ -1,4 +1,40 @@
-use super::{Submitted, Taking, ToDraft, ToPush, submitted_for};
+use super::{
+    Branching, COMMANDS, Sigiling, Submitted, Taking, ToDraft, ToPush, Wanted, help_rows,
+    submitted_for,
+};
+
+fn push(scope: &str, path: &str) -> Submitted {
+    Submitted::Wanted(Wanted::Push(ToPush {
+        scope: scope.to_owned(),
+        path: path.to_owned(),
+    }))
+}
+
+fn draft(scope: &str, project: Option<&str>) -> Submitted {
+    Submitted::Wanted(Wanted::Draft(ToDraft {
+        scope: scope.to_owned(),
+        project: project.map(str::to_owned),
+    }))
+}
+
+fn pull(taking: Option<(&str, Option<&str>)>) -> Submitted {
+    Submitted::Wanted(Wanted::Pull(taking.map(|(scope, ticket)| Taking {
+        scope: scope.to_owned(),
+        ticket: ticket.map(str::to_owned),
+    })))
+}
+
+fn branch(branching: Branching) -> Submitted {
+    Submitted::Wanted(Wanted::Branch(branching))
+}
+
+fn sigil(sigiling: Sigiling) -> Submitted {
+    Submitted::Wanted(Wanted::Sigil(sigiling))
+}
+
+fn names(names: &[&str]) -> Vec<String> {
+    names.iter().map(|&name| name.to_owned()).collect()
+}
 
 #[test]
 fn each_command_word_is_its_own_command() {
@@ -8,34 +44,25 @@ fn each_command_word_is_its_own_command() {
     // The one command word that is worth passing up without its argument: only
     // the panel knows which scopes this machine holds, so a bare `/pull` is
     // answered with them rather than with the list of commands.
-    assert_eq!(submitted_for("/pull"), Submitted::Pull(None));
-    assert_eq!(submitted_for("  /pull  "), Submitted::Pull(None));
+    assert_eq!(submitted_for("/pull"), pull(None));
+    assert_eq!(submitted_for("  /pull  "), pull(None));
 }
 
 #[test]
 fn push_takes_a_scope_and_then_the_brief_to_file() {
     assert_eq!(
         submitted_for("/push warlock-team docs/warlock-brief-22-push.md"),
-        Submitted::Push(ToPush {
-            scope: "warlock-team",
-            path: "docs/warlock-brief-22-push.md",
-        })
+        push("warlock-team", "docs/warlock-brief-22-push.md")
     );
     assert_eq!(
         submitted_for("  /push   warlock-team   docs/a.md  "),
-        Submitted::Push(ToPush {
-            scope: "warlock-team",
-            path: "docs/a.md",
-        })
+        push("warlock-team", "docs/a.md")
     );
     // The scope is a word and the path is the rest: a path with a space in it
     // is a path.
     assert_eq!(
         submitted_for("/push warlock-team docs/a brief.md"),
-        Submitted::Push(ToPush {
-            scope: "warlock-team",
-            path: "docs/a brief.md",
-        })
+        push("warlock-team", "docs/a brief.md")
     );
     // Short of either is no push: nothing is inferred, least of all the last
     // document this session wrote.
@@ -57,17 +84,11 @@ fn push_takes_a_scope_and_then_the_brief_to_file() {
 fn draft_takes_a_scope_and_then_an_optional_slug() {
     assert_eq!(
         submitted_for("/draft warlock-team"),
-        Submitted::Cut(ToDraft {
-            scope: "warlock-team",
-            project: None,
-        })
+        draft("warlock-team", None)
     );
     assert_eq!(
         submitted_for("  /draft   warlock-team   9e41c07a2b13  "),
-        Submitted::Cut(ToDraft {
-            scope: "warlock-team",
-            project: Some("9e41c07a2b13"),
-        })
+        draft("warlock-team", Some("9e41c07a2b13"))
     );
     for draft in ["/draft", "/draft ", "/draft warlock-team 9e41c07a2b13 now"] {
         assert_eq!(
@@ -82,26 +103,17 @@ fn draft_takes_a_scope_and_then_an_optional_slug() {
 fn pull_takes_a_scope_and_then_an_optional_ticket() {
     assert_eq!(
         submitted_for("/pull warlock-team"),
-        Submitted::Pull(Some(Taking {
-            scope: "warlock-team",
-            ticket: None,
-        }))
+        pull(Some(("warlock-team", None)))
     );
     // The second word names the ticket to take instead of the next one in the
     // scope, which is the spelling `/resume` leaves in the composer.
     assert_eq!(
         submitted_for("/pull warlock-team WAR-143"),
-        Submitted::Pull(Some(Taking {
-            scope: "warlock-team",
-            ticket: Some("WAR-143"),
-        }))
+        pull(Some(("warlock-team", Some("WAR-143"))))
     );
     assert_eq!(
         submitted_for("  /pull   warlock-team   WAR-143  "),
-        Submitted::Pull(Some(Taking {
-            scope: "warlock-team",
-            ticket: Some("WAR-143"),
-        }))
+        pull(Some(("warlock-team", Some("WAR-143"))))
     );
     // A scope and a ticket are words, not paths, so a third word is a refusal
     // rather than the tail of the second: `warlock-team WAR-143` is not a scope
@@ -120,11 +132,11 @@ fn pull_takes_a_scope_and_then_an_optional_ticket() {
 fn resume_takes_the_ticket_to_release_after_it() {
     assert_eq!(
         submitted_for("/resume WAR-143"),
-        Submitted::Resume("WAR-143")
+        Submitted::Wanted(Wanted::Resume("WAR-143".to_owned()))
     );
     assert_eq!(
         submitted_for("  /resume   WAR-143  "),
-        Submitted::Resume("WAR-143")
+        Submitted::Wanted(Wanted::Resume("WAR-143".to_owned()))
     );
     // Unlike `/pull`, a bare `/resume` is refused here: the ticket it is missing
     // is not something warlock could offer back, and the refusal says a ticket
@@ -384,16 +396,12 @@ fn a_draft_of_nothing_is_a_message() {
 
 #[test]
 fn branch_reads_its_three_spellings_and_refuses_the_rest() {
-    use super::Branching;
-    assert_eq!(submitted_for("/branch"), Submitted::Branch(Branching::Show));
+    assert_eq!(submitted_for("/branch"), branch(Branching::Show));
     assert_eq!(
         submitted_for("/branch use release/next "),
-        Submitted::Branch(Branching::Use("release/next"))
+        branch(Branching::Use("release/next".to_owned()))
     );
-    assert_eq!(
-        submitted_for("/branch clear"),
-        Submitted::Branch(Branching::Clear)
-    );
+    assert_eq!(submitted_for("/branch clear"), branch(Branching::Clear));
     for draft in [
         "/branch dev",
         "/branch use",
@@ -407,20 +415,16 @@ fn branch_reads_its_three_spellings_and_refuses_the_rest() {
 
 #[test]
 fn sigil_reads_its_four_spellings_and_refuses_the_rest() {
-    use super::Sigiling;
-    assert_eq!(submitted_for("/sigil"), Submitted::Sigil(Sigiling::Show));
+    assert_eq!(submitted_for("/sigil"), sigil(Sigiling::Show));
     assert_eq!(
         submitted_for("/sigil add a  b "),
-        Submitted::Sigil(Sigiling::Add("a  b"))
+        sigil(Sigiling::Add(names(&["a", "b"])))
     );
     assert_eq!(
         submitted_for("/sigil remove a"),
-        Submitted::Sigil(Sigiling::Remove("a"))
+        sigil(Sigiling::Remove(names(&["a"])))
     );
-    assert_eq!(
-        submitted_for("/sigil clear"),
-        Submitted::Sigil(Sigiling::Clear)
-    );
+    assert_eq!(submitted_for("/sigil clear"), sigil(Sigiling::Clear));
     for draft in [
         "/sigil add",
         "/sigil remove ",
@@ -430,5 +434,43 @@ fn sigil_reads_its_four_spellings_and_refuses_the_rest() {
         "/sigil add a\nand a thought",
     ] {
         assert_eq!(submitted_for(draft), Submitted::Refused, "{draft:?}");
+    }
+}
+
+#[test]
+fn every_command_is_on_the_help_sheet_and_in_the_refusal() {
+    let refusal = Submitted::Refused.refusal().expect("a refusal has a line");
+    for command in COMMANDS {
+        assert!(
+            help_rows().any(|(keys, _)| keys.split_whitespace().any(|key| key == command.word)),
+            "{} has no row on the help sheet",
+            command.word
+        );
+        assert!(
+            refusal.contains(command.word),
+            "the refusal does not name {}",
+            command.word
+        );
+        if let Some(takes) = command.takes {
+            assert!(
+                refusal.contains(takes),
+                "the refusal does not say {takes:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn every_command_has_a_row_in_controls() {
+    let controls = include_str!("../../../../CONTROLS.md");
+    for command in COMMANDS {
+        let row = format!("| `{}", command.word);
+        assert!(
+            controls
+                .lines()
+                .any(|line| line.starts_with(&row) && line[row.len()..].starts_with(['`', ' '])),
+            "CONTROLS.md has no row for {}",
+            command.word
+        );
     }
 }

@@ -1948,6 +1948,27 @@ mod filing {
     }
 
     #[test]
+    fn a_push_of_a_path_outside_the_repository_is_refused_before_anything_is_read() {
+        let repo = a_repository();
+        let home = a_home(repo.path());
+        let linear = Boarding::unreachable();
+        let mut driven = filing_session(repo.path(), home.path(), &linear);
+
+        typing(
+            &mut driven,
+            &format!("/push {SCOPE} ../elsewhere/a-brief.md"),
+        );
+        round(&mut driven);
+
+        let said = notes(&driven);
+        assert_eq!(said.len(), 1, "the refusal was not one line: {said:?}");
+        assert!(
+            !driven.pushes.window().confirm.is_open(),
+            "a path outside the repository put the dialog up"
+        );
+    }
+
+    #[test]
     fn a_confirmed_push_files_the_brief_on_a_worker_and_says_where_it_landed() {
         let repo = a_repository();
         let home = a_home(repo.path());
@@ -3184,7 +3205,7 @@ mod pulling {
         let refusal = submitted_for("/pullll")
             .refusal()
             .expect("a word nobody made a command is refused");
-        assert_eq!(notes(&driven), vec![refusal.to_owned()]);
+        assert_eq!(notes(&driven), vec![refusal.clone()]);
         for command in [
             "/brief", "/write", "/chat", "/push", "/draft", "/pull", "/resume",
         ] {

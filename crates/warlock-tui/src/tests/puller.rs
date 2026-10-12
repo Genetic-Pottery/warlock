@@ -218,9 +218,9 @@ fn press(app: &mut App, puller: &mut Panel, ground: &Ground, ticket: Option<&str
         app,
         &ground.manifest,
         ground.root.path(),
-        Some(Taking {
-            scope: SCOPE,
-            ticket,
+        Some(&Taking {
+            scope: SCOPE.to_owned(),
+            ticket: ticket.map(str::to_owned),
         }),
         now(),
     );
@@ -390,8 +390,8 @@ fn a_scope_no_record_holds_and_one_this_machine_does_not_hold_are_prepare_s_refu
         &mut app,
         &ground.manifest,
         ground.root.path(),
-        Some(Taking {
-            scope: "billing",
+        Some(&Taking {
+            scope: "billing".to_owned(),
             ticket: None,
         }),
         now(),
@@ -400,8 +400,8 @@ fn a_scope_no_record_holds_and_one_this_machine_does_not_hold_are_prepare_s_refu
         &mut app,
         &ground.manifest,
         ground.root.path(),
-        Some(Taking {
-            scope: CLOSED,
+        Some(&Taking {
+            scope: CLOSED.to_owned(),
             ticket: None,
         }),
         now(),

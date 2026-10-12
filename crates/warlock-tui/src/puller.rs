@@ -395,7 +395,7 @@ where
         app: &mut App,
         manifest: &Manifest,
         repo_root: &Path,
-        taking: Option<Taking<'_>>,
+        taking: Option<&Taking>,
         now: Instant,
     ) {
         let Some(taking) = taking else {
@@ -413,7 +413,7 @@ where
                 .note(one_line(&Error::NoHome.to_string()), now);
             return;
         };
-        let prepared = match prepare(manifest, repo_root, &home, taking.scope) {
+        let prepared = match prepare(manifest, repo_root, &home, &taking.scope) {
             Ok(prepared) => prepared,
             // The scope no `[[scope]]` record holds, the scope this machine's
             // sigils do not open, and the checkout with no key bound, each in
@@ -432,13 +432,13 @@ where
             held: prepared.held().to_vec(),
             base: prepared.base().map(ToOwned::to_owned),
             value: prepared.value().to_owned(),
-            named: taking.ticket.map(ToOwned::to_owned),
+            named: taking.ticket.clone(),
         };
         // Before the worker starts, so the thread says which queue is being read
         // from the instant it is: the answer is a request away and a reader who
         // has just typed the command is looking at the conversation.
         app.panel_mut()
-            .note(reading_line(taking.scope, taking.ticket), now);
+            .note(reading_line(&taking.scope, taking.ticket.as_deref()), now);
         let cancel = CancelGuard::new();
         self.choosing = Some(Choosing {
             landings: spawn_choice(
