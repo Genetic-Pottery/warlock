@@ -10,9 +10,9 @@ use ratatui::widgets::{Paragraph, Widget};
 use warlock_engine::{Destination, NodeState, scope};
 
 use super::{
-    Areas, BAR_EMPTY, BAR_FILLED, BAR_MIN_WIDTH, BORDER_THICKNESS, CANCEL_KEY, CARRY_LEFT,
-    CARRY_QUESTION, COMPOSER_CURSOR, COMPOSER_MIN_HEIGHT, CONFIRM_ANSWER_GAP, CONFIRM_NO,
-    CONFIRM_QUESTION, CONFIRM_YES, CUT_KEY, CUT_QUESTION, CUT_SLICES, CUT_STATUS, CUT_TEAM, Carry,
+    BAR_EMPTY, BAR_FILLED, BAR_MIN_WIDTH, BORDER_THICKNESS, CANCEL_KEY, CARRY_LEFT, CARRY_QUESTION,
+    COMPOSER_CURSOR, COMPOSER_MIN_HEIGHT, CONFIRM_ANSWER_GAP, CONFIRM_NO, CONFIRM_QUESTION,
+    CONFIRM_YES, CUT_KEY, CUT_QUESTION, CUT_SLICES, CUT_STATUS, CUT_TEAM, Carry, Cut,
     DIALOG_MARGIN, DIALOG_MARGIN_ROWS, Dialog, ELLIPSIS, FOOTER_HEIGHT, GUIDE, GUIDE_BRANCH,
     GUIDE_LAST, HELP_KEY, Hit, IDENTITY_MIN_WIDTH, INDENT, KEY_DROP_ORDER, KEY_GAP, KEYS, LIVE_KEY,
     MARK, MARK_MARGIN, MARK_MARGIN_ROWS, NO_MARKER, NOTE_MARKER, PACTING_KEYS, PACTING_RUN,
@@ -21,13 +21,11 @@ use super::{
     RECORD_HEADING, RECORD_LABEL_GAP, RECORD_RULES, REFRESHING_RUN, REVIEW_ANSWER_GAP,
     REVIEW_CREATE, REVIEW_EDIT, REVIEW_FEEDBACK, REVIEW_QUESTION, REVIEW_READ, REVIEW_SKIP,
     RUN_HEADER_HEIGHT, Reach, Review, SAID_MARKER, SCOPE_CURSOR, SCOPE_HEADING, SCROLLBACK_ARROW,
-    SELECTED, SELECTION_MARKER, SIGILS_MOST_LINES, SIGILS_TITLE, THREAD_TITLE, TREE_MIN_ROWS,
-    TREE_MIN_WIDTH, TREE_PERCENT, WILDCARD, WORKFLOW_LIT, areas, composer_height,
-    composer_on_screen, display_width, draw, footer_text_area, guide_prefixes, help_most_scroll,
-    hit_test, identity_title, keys_line, label_width, mark_area, pacting_keys_line, pane_inner,
-    panel_height, panel_reach, panel_row, panel_rows_area, panel_width, run_header_height,
-    run_header_line, sigil_lines, target_title, tree_column, tree_height, tree_rows_area,
-    tree_width, truncated, workflow_line,
+    SELECTED, SELECTION_MARKER, SIGILS_MOST_LINES, SIGILS_TITLE, Shape, THREAD_TITLE,
+    TREE_MIN_ROWS, TREE_MIN_WIDTH, TREE_PERCENT, WILDCARD, WORKFLOW_LIT, composer_on_screen,
+    display_width, draw, footer_text_area, guide_prefixes, help_most_scroll, identity_title,
+    keys_line, label_width, mark_area, pacting_keys_line, pane_inner, panel_row, run_header_line,
+    sigil_lines, target_title, tree_column, tree_width, truncated, workflow_line,
 };
 use crate::account::{Line as Entry, Outcome};
 use crate::app::{App, Chrome, Focus, Held, Row, Run, Sigils, Working};
@@ -149,14 +147,14 @@ fn styles_of(buffer: &Buffer, index: u16, needle: &str) -> Vec<(Color, Modifier)
 fn terminal_width_for(rows_width: u16) -> u16 {
     (2 * TREE_MIN_WIDTH..=400)
         .find(|width| {
-            tree_rows_area(areas(Rect::new(0, 0, *width, HEIGHT), None).tree).width == rows_width
+            pane_inner(Shape::new(Size::new(*width, HEIGHT)).cut().tree_column).width == rows_width
         })
         .unwrap_or_else(|| panic!("no terminal gives the tree's rows {rows_width} columns"))
 }
 
 fn tall_app(selected: usize) -> App {
     let mut app = App::from_rows(many_rows(MANY));
-    app.set_viewport_height(tree_height(Size::new(WIDTH, HEIGHT), &Sigils::Nothing));
+    app.set_viewport_height(Shape::new(Size::new(WIDTH, HEIGHT)).cut().tree_height());
     while app.selected() < selected {
         app.select_next();
     }
@@ -176,17 +174,16 @@ fn numbered(line: usize) -> Activity {
 
 fn pacting_app(base: Instant, width: u16, height: u16) -> App {
     let mut app = App::from_tree(&fixture::tree());
-    app.set_viewport_height(tree_height(Size::new(width, height), &Sigils::Nothing));
-    app.panel_mut()
-        .set_height(panel_height(Size::new(width, height), None, None));
-    app.panel_mut()
-        .set_width(panel_width(Size::new(width, height)));
+    let cut = Shape::new(Size::new(width, height)).cut();
+    app.set_viewport_height(cut.tree_height());
+    app.panel_mut().set_height(cut.panel_height());
+    app.panel_mut().set_width(cut.panel_width());
     app.start_account(base);
     app
 }
 
 fn panel_area(buffer: &Buffer) -> Rect {
-    pane_inner(areas(buffer.area, None).panel)
+    pane_inner(Shape::new(buffer.area.as_size()).cut().panel)
 }
 
 fn panel_rows(buffer: &Buffer) -> Vec<String> {
@@ -214,23 +211,26 @@ fn panel_row_colours(buffer: &Buffer, index: usize) -> Vec<Color> {
 }
 
 fn panel_bottom_edge(buffer: &Buffer) -> String {
-    let panel = areas(buffer.area, None).panel;
+    let panel = Shape::new(buffer.area.as_size()).cut().panel;
 
     text_in(buffer, panel, panel.y + panel.height - 1)
 }
 
 fn panel_top_edge(buffer: &Buffer) -> String {
-    let panel = areas(buffer.area, None).panel;
+    let panel = Shape::new(buffer.area.as_size()).cut().panel;
 
     text_in(buffer, panel, panel.y)
 }
 
 fn rows_area(buffer: &Buffer) -> Rect {
-    tree_rows_area(tree_column(areas(buffer.area, None).tree, &Sigils::Nothing).0)
+    Shape::new(buffer.area.as_size()).cut().tree_rows
 }
 
 fn sigils_box(buffer: &Buffer, sigils: &Sigils) -> Option<Rect> {
-    tree_column(areas(buffer.area, None).tree, sigils).1
+    Shape::new(buffer.area.as_size())
+        .sigils(sigils)
+        .cut()
+        .sigils
 }
 
 fn tree_rows(buffer: &Buffer) -> Vec<String> {
@@ -274,14 +274,14 @@ fn border_titles(buffer: &Buffer, area: Rect, y: u16) -> Vec<String> {
 }
 
 fn tree_border_titles(buffer: &Buffer) -> Vec<String> {
-    let tree = areas(buffer.area, None).tree;
+    let tree = Shape::new(buffer.area.as_size()).cut().tree_column;
     border_titles(buffer, tree, tree.y)
 }
 
 // The tree pane's bottom border is the first row under its top one that opens
 // with a bottom corner; the sigils box under it opens with a top corner.
 fn header_text(buffer: &Buffer) -> String {
-    let tree = areas(buffer.area, None).tree;
+    let tree = Shape::new(buffer.area.as_size()).cut().tree_column;
     let bottom = (tree.y + 1..tree.bottom())
         .find(|&y| buffer[(tree.x, y)].symbol() == "└")
         .expect("the tree pane has a bottom border");
@@ -630,7 +630,7 @@ fn assert_mark_drawn(buffer: &Buffer) {
 }
 
 fn assert_bare_panel(buffer: &Buffer) {
-    let panel = areas(buffer.area, None).panel;
+    let panel = Shape::new(buffer.area.as_size()).cut().panel;
     let inner = pane_inner(panel);
     assert!(inner.width > 0 && inner.height > 0, "{inner:?}");
 
@@ -1455,7 +1455,7 @@ fn the_selection_marker_moves_with_the_selection() {
 
 #[test]
 fn a_tree_taller_than_the_screen_draws_one_windowful_with_the_selection_in_it() {
-    let window = usize::from(tree_height(Size::new(WIDTH, HEIGHT), &Sigils::Nothing));
+    let window = usize::from(Shape::new(Size::new(WIDTH, HEIGHT)).cut().tree_height());
     assert!(window < MANY, "the tree must not fit on screen");
 
     // The first row, a row in the middle, and the last one: the three
@@ -1489,7 +1489,7 @@ fn a_tree_taller_than_the_screen_draws_one_windowful_with_the_selection_in_it() 
 
 #[test]
 fn the_header_and_footer_stay_put_while_the_tree_scrolls_under_them() {
-    let window = usize::from(tree_height(Size::new(WIDTH, HEIGHT), &Sigils::Nothing));
+    let window = usize::from(Shape::new(Size::new(WIDTH, HEIGHT)).cut().tree_height());
     // The border these frames are drawn under, built once: it is not app
     // state, so it does not change as the selection walks the tree.
     let chrome = Chrome::of("/repo", "/repo/crates").with_held(dev());
@@ -1539,7 +1539,7 @@ fn the_height_the_app_is_told_is_the_height_the_frame_gives_the_tree() {
     // tests use, and three more on the way up: the measurement has to hold
     // at every height, not just at the one the other tests draw at.
     for height in [CHROME_HEIGHT + 1, CHROME_HEIGHT + 2, HEIGHT, 15, 24] {
-        let measured = tree_height(Size::new(WIDTH, height), &Sigils::Nothing);
+        let measured = Shape::new(Size::new(WIDTH, height)).cut().tree_height();
         let mut app = App::from_rows(many_rows(MANY));
         app.set_viewport_height(measured);
 
@@ -1568,7 +1568,7 @@ fn the_height_the_app_is_told_is_the_height_the_frame_gives_the_tree() {
 #[test]
 fn a_terminal_with_no_room_for_a_tree_row_is_measured_at_none_rather_than_underflowing() {
     for height in 0..=CHROME_HEIGHT {
-        let measured = tree_height(Size::new(WIDTH, height), &Sigils::Nothing);
+        let measured = Shape::new(Size::new(WIDTH, height)).cut().tree_height();
 
         let buffer = render(&App::from_rows(many_rows(MANY)), WIDTH, height.max(1));
 
@@ -2063,7 +2063,7 @@ fn a_footer_with_room_for_every_key_draws_three_dim_lines_and_gives_nothing_up()
     let buffer = render(&app, KEYS_WIDTH, height);
 
     // Three lines and no more, where they have always been.
-    let footer = areas(buffer.area, None).footer;
+    let footer = Shape::new(buffer.area.as_size()).cut().footer;
     assert_eq!(footer.height, FOOTER_HEIGHT);
     assert_eq!(footer.y, height - FOOTER_HEIGHT);
 
@@ -2203,7 +2203,10 @@ fn the_header_names_only_the_tree_and_the_box_under_it_lists_what_is_held() {
     let area = sigils_box(&buffer, &sigils).expect("the box has room");
     assert!(text_in(&buffer, area, area.y).contains(SIGILS_TITLE.trim()));
     assert_eq!(rows_in(&buffer, pane_inner(area)), ["billing", "web"]);
-    assert_eq!(area.y + area.height, areas(buffer.area, None).tree.bottom());
+    assert_eq!(
+        area.y + area.height,
+        Shape::new(buffer.area.as_size()).cut().tree_column.bottom()
+    );
 }
 
 #[test]
@@ -2252,7 +2255,7 @@ fn a_config_that_would_not_read_says_so_in_the_box_rather_than_going_quiet() {
 #[test]
 fn the_box_takes_its_rows_off_the_tree() {
     let size = Size::new(WIDTH, FILES_HEIGHT);
-    let bare = tree_rows_area(areas(Rect::from(size), None).tree).height;
+    let bare = pane_inner(Shape::new(size).cut().tree_column).height;
 
     for sigils in [
         Sigils::Nothing,
@@ -2261,7 +2264,7 @@ fn the_box_takes_its_rows_off_the_tree() {
     ] {
         let lines = u16::try_from(sigil_lines(&sigils).len()).expect("a few lines");
         assert_eq!(
-            tree_height(size, &sigils),
+            Shape::new(size).sigils(&sigils).cut().tree_height(),
             bare - lines - 2 * BORDER_THICKNESS,
             "{sigils:?}"
         );
@@ -2284,15 +2287,10 @@ fn a_column_too_short_to_keep_the_trees_rows_drops_the_box_whole() {
 fn a_click_on_the_box_is_not_a_tree_row() {
     let size = Size::new(WIDTH, FILES_HEIGHT);
     let sigils = Sigils::held(["billing"]);
-    let area = tree_column(areas(Rect::from(size), None).tree, &sigils)
-        .1
-        .expect("the box has room");
-    let inside = pane_inner(area);
+    let cut = Shape::new(size).sigils(&sigils).cut();
+    let inside = pane_inner(cut.sigils.expect("the box has room"));
 
-    assert!(!matches!(
-        hit_test(inside.x, inside.y, size, None, None, &sigils),
-        Hit::TreeRow { .. }
-    ));
+    assert!(!matches!(cut.hit(inside.x, inside.y), Hit::TreeRow { .. }));
 }
 
 #[test]
@@ -2336,7 +2334,7 @@ fn the_target_is_on_the_top_border_the_path_on_the_bottom_and_the_first_row_righ
         ["pulls into the default branch"]
     );
     assert_eq!(header_text(&buffer), "crates");
-    let pane = areas(buffer.area, None).tree;
+    let pane = Shape::new(buffer.area.as_size()).cut().tree_column;
     let rows = rows_area(&buffer);
     assert_eq!(rows.y, pane.y + BORDER_THICKNESS);
     assert_eq!(tree_row(&buffer, 0), "> - warlock");
@@ -2363,20 +2361,20 @@ fn the_path_title_fits_the_border_and_names_nothing_when_it_cannot() {
 fn the_panel_is_the_majority_of_the_width_and_the_tree_column_takes_its_share_of_the_rest() {
     // Wide enough that the proportion, not the floor, decides: 30% of 160 is
     // 48, comfortably past the floor of 30.
-    let panes = areas(Rect::new(0, 0, KEYS_WIDTH, 24), None);
+    let panes = Shape::new(Size::new(KEYS_WIDTH, 24)).cut();
 
-    assert_eq!(panes.tree.width, KEYS_WIDTH * TREE_PERCENT / 100);
-    assert_eq!(panes.panel.width, KEYS_WIDTH - panes.tree.width);
+    assert_eq!(panes.tree_column.width, KEYS_WIDTH * TREE_PERCENT / 100);
+    assert_eq!(panes.panel.width, KEYS_WIDTH - panes.tree_column.width);
     assert!(
-        panes.panel.width > panes.tree.width,
+        panes.panel.width > panes.tree_column.width,
         "the panel should take the majority: {panes:?}",
-        panes = (panes.panel, panes.tree)
+        panes = (panes.panel, panes.tree_column)
     );
     // Side by side, no gap and no overlap, and both above the footer.
     assert_eq!(panes.panel.x, 0);
-    assert_eq!(panes.panel.x + panes.panel.width, panes.tree.x);
-    assert_eq!(panes.tree.x + panes.tree.width, KEYS_WIDTH);
-    assert_eq!(panes.panel.height, panes.tree.height);
+    assert_eq!(panes.panel.x + panes.panel.width, panes.tree_column.x);
+    assert_eq!(panes.tree_column.x + panes.tree_column.width, KEYS_WIDTH);
+    assert_eq!(panes.panel.height, panes.tree_column.height);
     assert_eq!(panes.panel.y + panes.panel.height, panes.footer.y);
 }
 
@@ -2386,30 +2384,39 @@ fn a_narrow_terminal_holds_the_tree_columns_floor_until_it_cannot() {
     // floor, so the floor bites and the panel takes the rest — still the
     // majority.
     for width in [TREE_MIN_WIDTH * 2, 80, 99] {
-        let panes = areas(Rect::new(0, 0, width, 24), None);
+        let panes = Shape::new(Size::new(width, 24)).cut();
 
         assert!(
             width * TREE_PERCENT / 100 < TREE_MIN_WIDTH,
             "{width} is wide enough for the proportion, so the floor is not what is under test"
         );
-        assert_eq!(panes.tree.width, TREE_MIN_WIDTH, "at {width} columns");
+        assert_eq!(
+            panes.tree_column.width, TREE_MIN_WIDTH,
+            "at {width} columns"
+        );
         assert_eq!(
             panes.panel.width,
             width - TREE_MIN_WIDTH,
             "at {width} columns"
         );
-        assert!(panes.panel.width >= panes.tree.width, "at {width} columns");
+        assert!(
+            panes.panel.width >= panes.tree_column.width,
+            "at {width} columns"
+        );
     }
 
     // Below twice the floor there is no way to give the tree column its
     // floor and leave the panel the majority, so the floor is what gives:
     // the two panes halve the width, and the odd column goes to the panel.
     for width in [0, 1, 20, 40, 41, TREE_MIN_WIDTH * 2 - 1] {
-        let panes = areas(Rect::new(0, 0, width, 24), None);
+        let panes = Shape::new(Size::new(width, 24)).cut();
 
-        assert_eq!(panes.tree.width, width / 2, "at {width} columns");
+        assert_eq!(panes.tree_column.width, width / 2, "at {width} columns");
         assert_eq!(panes.panel.width, width - width / 2, "at {width} columns");
-        assert!(panes.panel.width >= panes.tree.width, "at {width} columns");
+        assert!(
+            panes.panel.width >= panes.tree_column.width,
+            "at {width} columns"
+        );
     }
 }
 
@@ -2432,8 +2439,8 @@ fn the_width_rule_never_loses_a_column_or_lets_the_tree_column_take_the_majority
 #[test]
 fn a_point_is_answered_with_whatever_the_frame_draws_at_it() {
     let size = Size::new(WIDTH, HEIGHT);
-    let panes = areas(Rect::from(size), None);
-    let hit = |x, y| hit_test(x, y, size, None, None, &Sigils::Nothing);
+    let panes = Shape::new(size).cut();
+    let hit = |x, y| Shape::new(size).cut().hit(x, y);
 
     // The footer runs the full width, all three of its lines, and belongs
     // to neither pane.
@@ -2445,7 +2452,7 @@ fn a_point_is_answered_with_whatever_the_frame_draws_at_it() {
 
     // Every edge of both panes is border, corners included — the column
     // between the two panes is two borders and no pane's inside.
-    for pane in [panes.panel, panes.tree] {
+    for pane in [panes.panel, panes.tree_column] {
         for y in pane.y..pane.y + pane.height {
             for x in [pane.x, pane.x + pane.width - 1] {
                 assert_eq!(hit(x, y), Hit::Border, "at ({x}, {y})");
@@ -2460,8 +2467,8 @@ fn a_point_is_answered_with_whatever_the_frame_draws_at_it() {
 
     // Inside the tree pane: a row of the window per row, counted from the
     // top of the window rather than of the screen.
-    let rows = tree_rows_area(panes.tree);
-    assert_eq!(rows.height, tree_height(size, &Sigils::Nothing));
+    let rows = pane_inner(panes.tree_column);
+    assert_eq!(rows.height, Shape::new(size).cut().tree_height());
     for offset in 0..rows.height {
         for x in [rows.x, rows.x + rows.width - 1] {
             assert_eq!(hit(x, rows.y + offset), Hit::TreeRow { offset });
@@ -2472,7 +2479,7 @@ fn a_point_is_answered_with_whatever_the_frame_draws_at_it() {
     // or not: the panel has no selection for a point to land on. The column
     // comes back with the row, counted from the pane's first cell.
     let inside = pane_inner(panes.panel);
-    assert_eq!(inside.height, panel_height(size, None, None));
+    assert_eq!(inside.height, Shape::new(size).cut().panel_height());
     for offset in 0..inside.height {
         for x in inside.x..inside.x + inside.width {
             assert_eq!(
@@ -2498,7 +2505,7 @@ fn the_row_a_point_lands_on_is_the_row_the_frame_drew_there() {
     assert!(rows.height > 1, "the window should hold more than one row");
     for offset in 0..rows.height {
         assert_eq!(
-            hit_test(rows.x, rows.y + offset, size, None, None, &Sigils::Nothing),
+            Shape::new(size).cut().hit(rows.x, rows.y + offset),
             Hit::TreeRow { offset }
         );
         assert_eq!(
@@ -2516,11 +2523,11 @@ fn the_row_a_point_lands_on_is_the_row_the_frame_drew_there() {
 fn a_terminal_too_short_for_a_tree_row_answers_no_row_rather_than_underflowing() {
     for height in 0..=CHROME_HEIGHT {
         let size = Size::new(WIDTH, height);
-        assert_eq!(tree_height(size, &Sigils::Nothing), 0, "in {height} rows");
+        assert_eq!(Shape::new(size).cut().tree_height(), 0, "in {height} rows");
 
         for y in 0..height {
             for x in 0..WIDTH {
-                let hit = hit_test(x, y, size, None, None, &Sigils::Nothing);
+                let hit = Shape::new(size).cut().hit(x, y);
                 assert!(
                     !matches!(hit, Hit::TreeRow { .. }),
                     "({x}, {y}) of {height} rows answered {hit:?}"
@@ -2534,7 +2541,7 @@ fn a_terminal_too_short_for_a_tree_row_answers_no_row_rather_than_underflowing()
         let size = Size::new(WIDTH, height);
         for y in 0..height {
             for x in 0..WIDTH {
-                let hit = hit_test(x, y, size, None, None, &Sigils::Nothing);
+                let hit = Shape::new(size).cut().hit(x, y);
                 assert!(
                     matches!(hit, Hit::Footer | Hit::Border),
                     "({x}, {y}) of {height} rows answered {hit:?}"
@@ -2546,23 +2553,23 @@ fn a_terminal_too_short_for_a_tree_row_answers_no_row_rather_than_underflowing()
 
 #[test]
 fn a_terminal_narrow_enough_to_halve_still_tells_the_two_panes_apart() {
-    // The branch of `areas` where the tree column's floor is given up and
+    // The branch of `Shape::cut` where the tree column's floor is given up and
     // the two panes split what there is: the point is that hit-testing asks
     // the layout where the panes are rather than working it out from the
     // rule.
     for width in [40, 41, TREE_MIN_WIDTH * 2 - 1] {
         let size = Size::new(width, FIXTURE_HEIGHT);
-        let panes = areas(Rect::from(size), None);
+        let panes = Shape::new(size).cut();
         assert_eq!(
-            panes.tree.width,
+            panes.tree_column.width,
             width / 2,
             "at {width} columns the floor should have given way"
         );
 
         let inside = pane_inner(panes.panel);
-        let rows = tree_rows_area(panes.tree);
+        let rows = pane_inner(panes.tree_column);
         assert_eq!(
-            hit_test(inside.x, inside.y, size, None, None, &Sigils::Nothing),
+            Shape::new(size).cut().hit(inside.x, inside.y),
             Hit::PanelLine {
                 offset: 0,
                 column: 0
@@ -2570,14 +2577,9 @@ fn a_terminal_narrow_enough_to_halve_still_tells_the_two_panes_apart() {
             "at {width} columns"
         );
         assert_eq!(
-            hit_test(
-                inside.x + inside.width - 1,
-                inside.y + inside.height - 1,
-                size,
-                None,
-                None,
-                &Sigils::Nothing
-            ),
+            Shape::new(size)
+                .cut()
+                .hit(inside.x + inside.width - 1, inside.y + inside.height - 1),
             Hit::PanelLine {
                 offset: inside.height - 1,
                 column: inside.width - 1
@@ -2585,7 +2587,7 @@ fn a_terminal_narrow_enough_to_halve_still_tells_the_two_panes_apart() {
             "at {width} columns"
         );
         assert_eq!(
-            hit_test(rows.x, rows.y, size, None, None, &Sigils::Nothing),
+            Shape::new(size).cut().hit(rows.x, rows.y),
             Hit::TreeRow { offset: 0 },
             "at {width} columns"
         );
@@ -2593,7 +2595,7 @@ fn a_terminal_narrow_enough_to_halve_still_tells_the_two_panes_apart() {
         // sides of the join, whichever pane owns which.
         for x in [inside.x + inside.width, rows.x - 1] {
             assert_eq!(
-                hit_test(x, rows.y, size, None, None, &Sigils::Nothing),
+                Shape::new(size).cut().hit(x, rows.y),
                 Hit::Border,
                 "at {width} columns"
             );
@@ -2614,8 +2616,8 @@ fn a_point_in_the_panel_answers_with_the_column_of_the_rows_area_it_landed_on() 
     let composer = Composer::new("a draft");
     let field = Some(&composer);
     let size = Size::new(WIDTH, FIXTURE_HEIGHT);
-    let cut = areas(Rect::from(size), field);
-    let rows = panel_rows_area(cut.panel, Some(&header));
+    let cut = Shape::new(size).composer(field).header(Some(&header)).cut();
+    let rows = cut.panel_rows;
     assert!(rows.height > 0, "the panel should have rows to point at");
 
     let marker = u16::try_from(display_width(SAID_MARKER)).expect("a marker is a few columns");
@@ -2627,7 +2629,7 @@ fn a_point_in_the_panel_answers_with_the_column_of_the_rows_area_it_landed_on() 
         (rows.x + rows.width - 1, rows.width - 1),
     ] {
         assert_eq!(
-            hit_test(x, rows.y, size, field, Some(&header), &Sigils::Nothing),
+            cut.hit(x, rows.y),
             Hit::PanelLine { offset: 0, column },
             "at screen column {x}"
         );
@@ -2637,32 +2639,18 @@ fn a_point_in_the_panel_answers_with_the_column_of_the_rows_area_it_landed_on() 
     // the column came back with the row, and the field below still answers
     // for itself rather than for a column of the panel.
     for x in [rows.x - 1, rows.x + rows.width] {
-        assert_eq!(
-            hit_test(x, rows.y, size, field, Some(&header), &Sigils::Nothing),
-            Hit::Border,
-            "at screen column {x}"
-        );
+        assert_eq!(cut.hit(x, rows.y), Hit::Border, "at screen column {x}");
     }
     let inside = pane_inner(cut.composer.expect("this frame has a field"));
-    assert_eq!(
-        hit_test(
-            inside.x,
-            inside.y,
-            size,
-            field,
-            Some(&header),
-            &Sigils::Nothing
-        ),
-        Hit::Composer
-    );
+    assert_eq!(cut.hit(inside.x, inside.y), Hit::Composer);
 }
 
 #[test]
 fn a_point_says_which_edge_of_the_panels_rows_it_is_past_and_by_how_many() {
     let size = Size::new(WIDTH, FIXTURE_HEIGHT);
-    let rows = panel_rows_area(areas(Rect::from(size), None).panel, None);
+    let rows = Shape::new(size).cut().panel_rows;
     assert!(rows.height > 2, "the panel should have rows to be past");
-    let reach = |y| panel_reach(rows.x, y, size, None, None);
+    let reach = |y| Shape::new(size).cut().reach(rows.x, y);
 
     for offset in 0..rows.height {
         assert_eq!(
@@ -2703,7 +2691,7 @@ fn a_point_says_which_edge_of_the_panels_rows_it_is_past_and_by_how_many() {
 
 #[test]
 fn the_edges_move_with_the_field_and_the_header_the_frame_was_drawn_with() {
-    // The point of measuring this from `areas` rather than from the pane:
+    // The point of measuring this from the whole `Cut` rather than from the pane:
     // the run header is above the rows and the field below them, so both
     // move an edge, and a pointer level with the last row of a card drawn
     // without a field is past the bottom of the same card drawn with one.
@@ -2713,15 +2701,25 @@ fn the_edges_move_with_the_field_and_the_header_the_frame_was_drawn_with() {
     let composer = Composer::new("a draft");
     let field = Some(&composer);
     let size = Size::new(WIDTH, FIXTURE_HEIGHT);
-    let bare = panel_rows_area(areas(Rect::from(size), None).panel, None);
-    let rows = panel_rows_area(areas(Rect::from(size), field).panel, Some(&header));
+    let bare = Shape::new(size).cut().panel_rows;
+    let rows = Shape::new(size)
+        .composer(field)
+        .header(Some(&header))
+        .cut()
+        .panel_rows;
     assert!(rows.y > bare.y, "the header takes the top of the panel");
     assert!(
         rows.bottom() < bare.bottom(),
         "the field takes the bottom of the column"
     );
 
-    let reach = |y| panel_reach(rows.x, y, size, field, Some(&header));
+    let reach = |y| {
+        Shape::new(size)
+            .composer(field)
+            .header(Some(&header))
+            .cut()
+            .reach(rows.x, y)
+    };
     assert_eq!(reach(rows.y), Reach::Inside { column: 0 });
     assert_eq!(reach(rows.bottom() - 1), Reach::Inside { column: 0 });
     assert_eq!(
@@ -2750,7 +2748,7 @@ fn the_edges_move_with_the_field_and_the_header_the_frame_was_drawn_with() {
 #[test]
 fn a_point_past_the_side_of_the_rows_is_clamped_to_the_column_nearest_it() {
     let size = Size::new(WIDTH, FIXTURE_HEIGHT);
-    let rows = panel_rows_area(areas(Rect::from(size), None).panel, None);
+    let rows = Shape::new(size).cut().panel_rows;
     let last = rows.width - 1;
 
     for (x, column) in [
@@ -2763,12 +2761,12 @@ fn a_point_past_the_side_of_the_rows_is_clamped_to_the_column_nearest_it() {
         (u16::MAX, last),
     ] {
         assert_eq!(
-            panel_reach(x, rows.y, size, None, None),
+            Shape::new(size).cut().reach(x, rows.y),
             Reach::Inside { column },
             "at screen column {x}"
         );
         assert_eq!(
-            panel_reach(x, rows.bottom(), size, None, None),
+            Shape::new(size).cut().reach(x, rows.bottom()),
             Reach::Below { rows: 1, column },
             "at screen column {x}"
         );
@@ -2779,10 +2777,10 @@ fn a_point_past_the_side_of_the_rows_is_clamped_to_the_column_nearest_it() {
 fn a_screen_too_short_for_a_line_of_panel_is_all_edge_and_no_inside() {
     for height in 0..=FOOTER_HEIGHT + 2 * BORDER_THICKNESS {
         let size = Size::new(WIDTH, height);
-        assert_eq!(panel_height(size, None, None), 0, "in {height} rows");
+        assert_eq!(Shape::new(size).cut().panel_height(), 0, "in {height} rows");
 
         for y in 0..=height {
-            let reach = panel_reach(0, y, size, None, None);
+            let reach = Shape::new(size).cut().reach(0, y);
             assert!(
                 !matches!(reach, Reach::Inside { .. }),
                 "row {y} of {height} answered {reach:?}"
@@ -2804,22 +2802,22 @@ fn no_point_is_answered_with_an_offset_its_window_has_no_room_for() {
         let size = Size::new(width, height);
         for y in 0..height {
             for x in 0..width {
-                match hit_test(x, y, size, None, None, &Sigils::Nothing) {
+                match Shape::new(size).cut().hit(x, y) {
                     Hit::TreeRow { offset } => assert!(
-                        offset < tree_height(size, &Sigils::Nothing),
+                        offset < Shape::new(size).cut().tree_height(),
                         "({x}, {y}) of {width}x{height} is row {offset} of a window {} tall",
-                        tree_height(size, &Sigils::Nothing)
+                        Shape::new(size).cut().tree_height()
                     ),
                     Hit::PanelLine { offset, column } => {
                         assert!(
-                            offset < panel_height(size, None, None),
+                            offset < Shape::new(size).cut().panel_height(),
                             "({x}, {y}) of {width}x{height} is line {offset} of a window {} tall",
-                            panel_height(size, None, None)
+                            Shape::new(size).cut().panel_height()
                         );
                         assert!(
-                            column < panel_width(size),
+                            column < Shape::new(size).cut().panel_width(),
                             "({x}, {y}) of {width}x{height} is column {column} of a window {} wide",
-                            panel_width(size)
+                            Shape::new(size).cut().panel_width()
                         );
                     }
                     _ => {}
@@ -2829,16 +2827,10 @@ fn no_point_is_answered_with_an_offset_its_window_has_no_room_for() {
 
         // And a point off the end of the frame is nothing warlock drew,
         // rather than the nearest thing it did draw.
+        assert_eq!(Shape::new(size).cut().hit(width, 0), Hit::Offscreen);
+        assert_eq!(Shape::new(size).cut().hit(0, height), Hit::Offscreen);
         assert_eq!(
-            hit_test(width, 0, size, None, None, &Sigils::Nothing),
-            Hit::Offscreen
-        );
-        assert_eq!(
-            hit_test(0, height, size, None, None, &Sigils::Nothing),
-            Hit::Offscreen
-        );
-        assert_eq!(
-            hit_test(u16::MAX, u16::MAX, size, None, None, &Sigils::Nothing),
+            Shape::new(size).cut().hit(u16::MAX, u16::MAX),
             Hit::Offscreen
         );
     }
@@ -2862,7 +2854,7 @@ fn the_panel_draws_the_mark_and_not_one_word_inside_it_before_the_first_pact() {
         // And its border really is there, on all four sides, carrying
         // nothing of its own: no title, and no scrollback indicator on a
         // panel with nothing to scroll.
-        let panel = areas(buffer.area, None).panel;
+        let panel = Shape::new(buffer.area.as_size()).cut().panel;
         assert_ne!(buffer[(panel.x, panel.y)].symbol(), " ");
         assert_ne!(
             buffer[(panel.x + panel.width - 1, panel.y + panel.height - 1)].symbol(),
@@ -2931,7 +2923,7 @@ fn a_forty_column_terminal_draws_the_empty_panel_border_and_no_mark() {
 
     let buffer = render(&app, NARROW_WIDTH, FILES_HEIGHT);
 
-    assert_eq!(areas(buffer.area, None).panel.width, 20);
+    assert_eq!(Shape::new(buffer.area.as_size()).cut().panel.width, 20);
     assert_bare_panel(&buffer);
 }
 
@@ -2946,7 +2938,7 @@ fn an_eighty_column_terminal_is_too_narrow_for_the_mark_and_draws_the_bare_borde
 
     let buffer = render(&app, STANDARD_WIDTH, MARK_HEIGHT);
 
-    assert_eq!(areas(buffer.area, None).panel.width, 50);
+    assert_eq!(Shape::new(buffer.area.as_size()).cut().panel.width, 50);
     assert_bare_panel(&buffer);
 }
 
@@ -3137,11 +3129,10 @@ fn a_line_too_long_for_the_panel_is_broken_under_itself_rather_than_cut() {
 
 fn viewing_app(width: u16, height: u16, cut: bool) -> App {
     let mut app = App::from_tree(&fixture::tree());
-    app.set_viewport_height(tree_height(Size::new(width, height), &Sigils::Nothing));
-    app.panel_mut()
-        .set_height(panel_height(Size::new(width, height), None, None));
-    app.panel_mut()
-        .set_width(panel_width(Size::new(width, height)));
+    let screen = Shape::new(Size::new(width, height)).cut();
+    app.set_viewport_height(screen.tree_height());
+    app.panel_mut().set_height(screen.panel_height());
+    app.panel_mut().set_width(screen.panel_width());
     app.show_document(
         [
             "# The engine",
@@ -3370,7 +3361,7 @@ fn the_thread_and_the_account_do_not_draw_alike_with_the_same_words_on_them() {
 #[test]
 fn the_thread_says_which_card_it_is_with_the_question_scrolled_off_the_top() {
     let base = Instant::now();
-    let height = usize::from(panel_height(Size::new(WIDTH, HEIGHT), None, None));
+    let height = usize::from(Shape::new(Size::new(WIDTH, HEIGHT)).cut().panel_height());
     let mut app = pacting_app(base, WIDTH, HEIGHT);
     app.panel_mut().start_turn(QUESTION, base);
     for line in 0..height * 3 {
@@ -3760,7 +3751,7 @@ fn the_conversations_colour_is_on_neither_the_account_nor_the_document() {
     // colour anywhere — border, titles and the scrollback edge included,
     // which is why this counts the whole pane rather than its rows.
     for (card, buffer) in [("account", showing_account), ("document", showing_document)] {
-        let panel = areas(buffer.area, None).panel;
+        let panel = Shape::new(buffer.area.as_size()).cut().panel;
         for y in panel.y..panel.y + panel.height {
             for x in panel.x..panel.x + panel.width {
                 assert_ne!(
@@ -4187,9 +4178,10 @@ fn the_mark_is_drawn_while_the_card_on_screen_is_unfilled_thread_or_not() {
     let base = Instant::now();
     let size = Size::new(MARK_ROOM_WIDTH, MARK_ROOM_HEIGHT);
     let mut app = App::from_tree(&fixture::tree());
-    app.set_viewport_height(tree_height(size, &Sigils::Nothing));
-    app.panel_mut().set_height(panel_height(size, None, None));
-    app.panel_mut().set_width(panel_width(size));
+    let cut = Shape::new(size).cut();
+    app.set_viewport_height(cut.tree_height());
+    app.panel_mut().set_height(cut.panel_height());
+    app.panel_mut().set_width(cut.panel_width());
 
     // Nothing has happened at all: no pact, no question, no read. The panel
     // is warlock's mark on the conversation's own border — the card a
@@ -4246,7 +4238,7 @@ fn the_mark_is_drawn_while_the_card_on_screen_is_unfilled_thread_or_not() {
 #[test]
 fn the_scrollback_and_the_run_header_reach_the_thread_as_they_reach_the_account() {
     let base = Instant::now();
-    let height = usize::from(panel_height(Size::new(WIDTH, HEIGHT), None, None));
+    let height = usize::from(Shape::new(Size::new(WIDTH, HEIGHT)).cut().panel_height());
     let mut app = pacting_app(base, WIDTH, HEIGHT);
     app.panel_mut().start_turn(QUESTION, base);
     for line in 0..height * 3 {
@@ -4295,11 +4287,12 @@ fn the_scrollback_and_the_run_header_reach_the_thread_as_they_reach_the_account(
     assert_eq!(rows.len(), height);
     assert_eq!(
         rows.len() - taken,
-        usize::from(panel_height(
-            Size::new(WIDTH, HEIGHT),
-            None,
-            app.run_header().as_ref()
-        )),
+        usize::from(
+            Shape::new(Size::new(WIDTH, HEIGHT))
+                .header(app.run_header().as_ref())
+                .cut()
+                .panel_height()
+        ),
     );
     // The rows under it are the thread's own, past the gap, and the edge
     // still says so.
@@ -4311,7 +4304,7 @@ fn the_scrollback_and_the_run_header_reach_the_thread_as_they_reach_the_account(
 #[test]
 fn the_scrollback_indicator_reports_the_card_that_is_showing() {
     let base = Instant::now();
-    let height = usize::from(panel_height(Size::new(WIDTH, HEIGHT), None, None));
+    let height = usize::from(Shape::new(Size::new(WIDTH, HEIGHT)).cut().panel_height());
 
     // An account longer than the panel, parked at its first line by the
     // ordinary movement keys, with a document shorter than the panel over
@@ -4407,7 +4400,7 @@ fn truncation_counts_columns_rather_than_bytes_or_characters() {
 fn a_scrolled_back_panel_says_what_is_below_it_and_the_key_back_to_live() {
     let base = Instant::now();
     let mut app = pacting_app(base, WIDTH, HEIGHT);
-    let height = usize::from(panel_height(Size::new(WIDTH, HEIGHT), None, None));
+    let height = usize::from(Shape::new(Size::new(WIDTH, HEIGHT)).cut().panel_height());
     let account = app.panel_mut().account_mut().expect("a pact has started");
     account.open_section("crates/engine", base);
     for line in 0..height * 3 {
@@ -4461,7 +4454,9 @@ fn the_panel_width_the_app_is_told_is_the_width_the_frame_gives_the_panel() {
     // The wide terminal, the narrow one the truncation tests are pinned at,
     // and the widths either side of the point the tree gives up its floor.
     for width in [MARK_ROOM_WIDTH, WIDTH, 80, 41, 40, 20, 4, 0] {
-        let measured = panel_width(Size::new(width, FIXTURE_HEIGHT));
+        let measured = Shape::new(Size::new(width, FIXTURE_HEIGHT))
+            .cut()
+            .panel_width();
         let app = viewing_app(width, FIXTURE_HEIGHT, false);
 
         let buffer = render_at(&app, width, FIXTURE_HEIGHT, Instant::now());
@@ -4488,7 +4483,7 @@ fn the_panel_height_the_app_is_told_is_the_height_the_frame_gives_the_panel() {
     // the way up, and the two the other tests draw at.
     let chrome = FOOTER_HEIGHT + 2 * BORDER_THICKNESS;
     for height in [chrome + 1, chrome + 2, HEIGHT, FIXTURE_HEIGHT, 24] {
-        let measured = panel_height(Size::new(WIDTH, height), None, None);
+        let measured = Shape::new(Size::new(WIDTH, height)).cut().panel_height();
         let base = Instant::now();
         let mut app = pacting_app(base, WIDTH, height);
         let account = app.panel_mut().account_mut().expect("a pact has started");
@@ -4512,7 +4507,7 @@ fn the_panel_height_the_app_is_told_is_the_height_the_frame_gives_the_panel() {
     // rather than underflowing.
     for height in 0..=chrome {
         assert_eq!(
-            panel_height(Size::new(WIDTH, height), None, None),
+            Shape::new(Size::new(WIDTH, height)).cut().panel_height(),
             0,
             "in {height} rows"
         );
@@ -4525,11 +4520,12 @@ const RUNNING_LABEL: &str = RUNNING_ON;
 
 fn measure_panel(app: &mut App, width: u16, height: u16) {
     let header = app.run_header();
-    app.panel_mut().set_height(panel_height(
-        Size::new(width, height),
-        None,
-        header.as_ref(),
-    ));
+    app.panel_mut().set_height(
+        Shape::new(Size::new(width, height))
+            .header(header.as_ref())
+            .cut()
+            .panel_height(),
+    );
 }
 
 fn running_app(
@@ -4565,7 +4561,7 @@ fn run_header_row(app: &App, width: u16, height: u16, now: Instant) -> String {
 fn the_run_header_takes_the_panels_top_row_and_the_account_keeps_the_rest() {
     let base = Instant::now();
     let size = Size::new(WIDTH, HEIGHT);
-    let window = panel_height(size, None, None);
+    let window = Shape::new(size).cut().panel_height();
 
     for (run, word) in [(Run::Pact, PACTING_RUN), (Run::Refresh, REFRESHING_RUN)] {
         // The same account either way, longer than the window and following
@@ -4577,17 +4573,20 @@ fn the_run_header_takes_the_panels_top_row_and_the_account_keeps_the_rest() {
         // With no run in flight there is no header and the window is the
         // whole inside of the border.
         let without = panel_rows(&render_at(&app, WIDTH, HEIGHT, at(base, 99)));
-        assert_eq!(run_header_height(size, None, None), 0);
+        assert_eq!(Shape::new(size).cut().run_header_height(), 0);
         assert_eq!(without.len(), usize::from(window));
 
         app.set_run_in_flight(run, RUNNING_ON, 2, 5);
         let header = app.run_header().expect("a run in flight has a header");
         assert_eq!(
-            run_header_height(size, None, Some(&header)),
+            Shape::new(size)
+                .header(Some(&header))
+                .cut()
+                .run_header_height(),
             RUN_HEADER_HEIGHT
         );
         assert_eq!(
-            panel_height(size, None, Some(&header)) + RUN_HEADER_HEIGHT,
+            Shape::new(size).header(Some(&header)).cut().panel_height() + RUN_HEADER_HEIGHT,
             window,
             "the account should lose exactly the rows the header takes"
         );
@@ -4618,7 +4617,7 @@ fn the_run_header_takes_the_panels_top_row_and_the_account_keeps_the_rest() {
         assert_eq!(with.len(), without.len());
         assert_eq!(
             with.len() - taken,
-            usize::from(panel_height(size, None, Some(&header))),
+            usize::from(Shape::new(size).header(Some(&header)).cut().panel_height()),
             "the window drew a different number of lines than it was measured at"
         );
         assert_eq!(with[taken..], without[taken..]);
@@ -4822,11 +4821,12 @@ fn a_run_over_one_directory_draws_an_empty_bar_until_it_is_over() {
 fn the_run_header_stays_where_it_is_while_the_account_is_scrolled_back() {
     let base = Instant::now();
     let mut app = running_app(base, WIDTH, HEIGHT, Run::Pact, 2, 5);
-    let window = usize::from(panel_height(
-        Size::new(WIDTH, HEIGHT),
-        None,
-        app.run_header().as_ref(),
-    ));
+    let window = usize::from(
+        Shape::new(Size::new(WIDTH, HEIGHT))
+            .header(app.run_header().as_ref())
+            .cut()
+            .panel_height(),
+    );
     fill_account(&mut app, base, window * 3);
 
     let live = panel_rows(&render_at(&app, WIDTH, HEIGHT, at(base, 99)));
@@ -4858,14 +4858,14 @@ fn a_point_on_the_run_header_is_not_a_line_of_the_account() {
     app.set_run_in_flight(Run::Pact, RUNNING_ON, 2, 5);
     let header = app.run_header().expect("a run in flight has a header");
     let size = Size::new(WIDTH, FIXTURE_HEIGHT);
-    let panel = pane_inner(areas(Rect::from(size), None).panel);
-    let window = panel_height(size, None, Some(&header));
+    let panel = pane_inner(Shape::new(size).cut().panel);
+    let window = Shape::new(size).header(Some(&header)).cut().panel_height();
 
     // The top row inside the border is the header's, and answers as itself
     // rather than as the account's first line.
     for x in panel.x..panel.x + panel.width {
         assert_eq!(
-            hit_test(x, panel.y, size, None, Some(&header), &Sigils::Nothing),
+            Shape::new(size).header(Some(&header)).cut().hit(x, panel.y),
             Hit::PanelHeader,
             "at {x},{}",
             panel.y
@@ -4877,7 +4877,7 @@ fn a_point_on_the_run_header_is_not_a_line_of_the_account() {
     // line drawn on that row and stay inside the window the app was told
     // about.
     for y in panel.y + RUN_HEADER_HEIGHT..panel.y + panel.height {
-        let hit = hit_test(panel.x, y, size, None, Some(&header), &Sigils::Nothing);
+        let hit = Shape::new(size).header(Some(&header)).cut().hit(panel.x, y);
 
         assert_eq!(
             hit,
@@ -4893,7 +4893,7 @@ fn a_point_on_the_run_header_is_not_a_line_of_the_account() {
     // test knows it: the same point answers differently on a frame with no
     // run in flight.
     assert_eq!(
-        hit_test(panel.x, panel.y, size, None, None, &Sigils::Nothing),
+        Shape::new(size).cut().hit(panel.x, panel.y),
         Hit::PanelLine {
             offset: 0,
             column: 0
@@ -4917,13 +4917,16 @@ fn a_panel_with_no_room_for_a_header_and_an_account_both_draws_the_account() {
         let size = Size::new(WIDTH, height);
 
         assert_eq!(
-            run_header_height(size, None, Some(&header)),
+            Shape::new(size)
+                .header(Some(&header))
+                .cut()
+                .run_header_height(),
             0,
             "in {height} rows"
         );
         assert_eq!(
-            panel_height(size, None, Some(&header)),
-            panel_height(size, None, None),
+            Shape::new(size).header(Some(&header)).cut().panel_height(),
+            Shape::new(size).cut().panel_height(),
             "in {height} rows"
         );
     }
@@ -4948,7 +4951,7 @@ fn the_scrollback_counts_the_window_the_run_header_left_and_nothing_else() {
     let size = Size::new(WIDTH, HEIGHT);
     // What the panel has inside its border at this one fixed terminal size,
     // before there is a header to pay for.
-    let whole = usize::from(panel_height(size, None, None));
+    let whole = usize::from(Shape::new(size).cut().panel_height());
     let mut counted = Vec::new();
 
     for (name, in_flight) in [
@@ -4961,8 +4964,18 @@ fn the_scrollback_counts_the_window_the_run_header_left_and_nothing_else() {
         }
         measure_panel(&mut app, WIDTH, HEIGHT);
         let header = app.run_header();
-        let window = usize::from(panel_height(size, None, header.as_ref()));
-        let taken = usize::from(run_header_height(size, None, header.as_ref()));
+        let window = usize::from(
+            Shape::new(size)
+                .header(header.as_ref())
+                .cut()
+                .panel_height(),
+        );
+        let taken = usize::from(
+            Shape::new(size)
+                .header(header.as_ref())
+                .cut()
+                .run_header_height(),
+        );
 
         assert_eq!(
             taken,
@@ -5034,7 +5047,7 @@ fn the_scrollback_counts_the_window_the_run_header_left_and_nothing_else() {
 fn the_account_has_the_headers_row_back_the_moment_the_run_is_over() {
     let base = Instant::now();
     let size = Size::new(WIDTH, HEIGHT);
-    let whole = panel_height(size, None, None);
+    let whole = Shape::new(size).cut().panel_height();
     let mut app = pacting_app(base, WIDTH, HEIGHT);
     fill_account(&mut app, base, usize::from(whole) * 2);
 
@@ -5076,7 +5089,7 @@ fn the_account_has_the_headers_row_back_the_moment_the_run_is_over() {
     let after = panel_rows(&render_at(&app, WIDTH, HEIGHT, at(base, 99)));
 
     assert!(app.run_header().is_none());
-    assert_eq!(run_header_height(size, None, None), 0);
+    assert_eq!(Shape::new(size).cut().run_header_height(), 0);
     assert_eq!(after, before);
 }
 
@@ -5105,7 +5118,9 @@ fn composer_rows(buffer: &Buffer, composer: &Composer) -> Vec<String> {
 
 fn composer_field(buffer: &Buffer, composer: &Composer) -> Rect {
     pane_inner(
-        areas(buffer.area, Some(composer))
+        Shape::new(buffer.area.as_size())
+            .composer(Some(composer))
+            .cut()
             .composer
             .expect("a field on this frame"),
     )
@@ -5156,9 +5171,17 @@ fn the_panel_the_header_and_the_composer_come_to_the_column_the_panel_had() {
         for width in [WIDTH, 80, 40, 20, 4, 0] {
             let size = Size::new(width, height);
             // What the panel had before there was a composer to pay for.
-            let before = panel_height(size, None, None);
-            assert_eq!(composer_height(size, None), 0, "{width}x{height}");
-            assert_eq!(run_header_height(size, None, None), 0, "{width}x{height}");
+            let before = Shape::new(size).cut().panel_height();
+            assert_eq!(
+                Shape::new(size).cut().composer_height(),
+                0,
+                "{width}x{height}"
+            );
+            assert_eq!(
+                Shape::new(size).cut().run_header_height(),
+                0,
+                "{width}x{height}"
+            );
 
             for composer in &drafts() {
                 let field = Some(composer);
@@ -5167,9 +5190,17 @@ fn the_panel_the_header_and_the_composer_come_to_the_column_the_panel_had() {
                 // of the three.
                 for run in [None, Some(&header)] {
                     assert_eq!(
-                        panel_height(size, field, run)
-                            + run_header_height(size, field, run)
-                            + composer_height(size, field),
+                        Shape::new(size)
+                            .composer(field)
+                            .header(run)
+                            .cut()
+                            .panel_height()
+                            + Shape::new(size)
+                                .composer(field)
+                                .header(run)
+                                .cut()
+                                .run_header_height()
+                            + Shape::new(size).composer(field).cut().composer_height(),
                         before,
                         "{width}x{height} does not add up with {:?} in the field",
                         composer.draft()
@@ -5179,8 +5210,8 @@ fn the_panel_the_header_and_the_composer_come_to_the_column_the_panel_had() {
                 // panel and never a column, which is why a document wrapped
                 // at `panel_width` is wrapped at the width it is drawn at.
                 assert_eq!(
-                    pane_inner(areas(Rect::from(size), field).panel).width,
-                    panel_width(size),
+                    pane_inner(Shape::new(size).composer(field).cut().panel).width,
+                    Shape::new(size).cut().panel_width(),
                     "{width}x{height} moved the panel's edge"
                 );
             }
@@ -5193,7 +5224,10 @@ fn the_composer_is_one_row_empty_and_grows_a_row_at_a_time_to_its_cap() {
     let border = 2 * BORDER_THICKNESS;
     let size = Size::new(WIDTH, 60);
     assert_eq!(
-        composer_height(size, Some(&Composer::default())),
+        Shape::new(size)
+            .composer(Some(&Composer::default()))
+            .cut()
+            .composer_height(),
         1 + border,
         "an empty field is a row to type on and its border"
     );
@@ -5205,7 +5239,10 @@ fn the_composer_is_one_row_empty_and_grows_a_row_at_a_time_to_its_cap() {
             .expect("a short draft")
             .min(COMPOSER_MAX_ROWS);
         assert_eq!(
-            composer_height(size, Some(&composer)),
+            Shape::new(size)
+                .composer(Some(&composer))
+                .cut()
+                .composer_height(),
             rows + border,
             "{lines} lines"
         );
@@ -5213,9 +5250,15 @@ fn the_composer_is_one_row_empty_and_grows_a_row_at_a_time_to_its_cap() {
 
     // And a wrap costs exactly what a newline does: one line of text, one
     // column wider than the field, is two rows.
-    let inner = panel_width(size);
+    let inner = Shape::new(size).cut().panel_width();
     let over = Composer::new("x".repeat(usize::from(inner) + 1));
-    assert_eq!(composer_height(size, Some(&over)), 2 + border);
+    assert_eq!(
+        Shape::new(size)
+            .composer(Some(&over))
+            .cut()
+            .composer_height(),
+        2 + border
+    );
 }
 
 #[test]
@@ -5431,13 +5474,15 @@ fn the_composers_border_is_lit_only_while_the_keys_are_in_it() {
     for expected in [Focus::Tree, Focus::Panel, Focus::Composer] {
         assert_eq!(app.focus(), expected, "the cycle moved somewhere else");
         let buffer = render_composer(&app, &composer, WIDTH, FIXTURE_HEIGHT);
-        let panes = areas(buffer.area, Some(&composer));
+        let panes = Shape::new(buffer.area.as_size())
+            .composer(Some(&composer))
+            .cut();
         let field = panes.composer.expect("a field on this frame");
         seen.push((
             expected,
             style(&buffer, field),
             style(&buffer, panes.panel),
-            style(&buffer, panes.tree),
+            style(&buffer, panes.tree_column),
         ));
         app.toggle_focus();
     }
@@ -5479,7 +5524,9 @@ fn a_muted_field_is_drawn_dim_and_with_no_caret_while_a_turn_is_answered() {
     // the last character of the draft, on the draft's own row.
     let drawn = |composer: &Composer| {
         let buffer = render_composer(&app, composer, WIDTH, FIXTURE_HEIGHT);
-        let field = areas(buffer.area, Some(composer))
+        let field = Shape::new(buffer.area.as_size())
+            .composer(Some(composer))
+            .cut()
             .composer
             .expect("a field on this frame");
         let inner = pane_inner(field);
@@ -5578,7 +5625,9 @@ fn a_field_under_a_conversation_is_drawn_the_same_whatever_a_run_is_doing() {
             Modals::default(),
             Some(composer),
         );
-        let field = areas(buffer.area, Some(composer))
+        let field = Shape::new(buffer.area.as_size())
+            .composer(Some(composer))
+            .cut()
             .composer
             .expect("a field on this frame");
         let inner = pane_inner(field);
@@ -5628,8 +5677,14 @@ fn a_field_under_a_conversation_is_drawn_the_same_whatever_a_run_is_doing() {
         "a run behind the conversation took the field off the frame"
     );
     assert_eq!(
-        panel_height(Size::new(WIDTH, FIXTURE_HEIGHT), Some(&muted), None),
-        panel_height(Size::new(WIDTH, FIXTURE_HEIGHT), Some(&live), None),
+        Shape::new(Size::new(WIDTH, FIXTURE_HEIGHT))
+            .composer(Some(&muted))
+            .cut()
+            .panel_height(),
+        Shape::new(Size::new(WIDTH, FIXTURE_HEIGHT))
+            .composer(Some(&live))
+            .cut()
+            .panel_height(),
         "a muted field costs the panel a different number of rows"
     );
 }
@@ -5664,8 +5719,11 @@ fn a_document_read_during_a_run_hides_the_muted_field_and_gives_the_rows_back() 
         "a document card left a muted field on screen"
     );
     assert_eq!(
-        panel_height(size, None, None),
-        panel_height(size, composer_on_screen(&app, &muted), None),
+        Shape::new(size).cut().panel_height(),
+        Shape::new(size)
+            .composer(composer_on_screen(&app, &muted))
+            .cut()
+            .panel_height(),
         "the panel should have the rows the muted field was taking"
     );
     assert_eq!(
@@ -5717,11 +5775,11 @@ fn the_document_card_takes_the_composers_rows_back() {
 
     assert_eq!(field, None, "a document takes the whole column");
     assert_eq!(
-        panel_height(size, field, None),
-        panel_height(size, None, None),
+        Shape::new(size).composer(field).cut().panel_height(),
+        Shape::new(size).cut().panel_height(),
         "the panel should have the rows the field was taking"
     );
-    assert_eq!(composer_height(size, field), 0);
+    assert_eq!(Shape::new(size).composer(field).cut().composer_height(), 0);
 
     // And nothing of the field reaches the frame: a draft handed to `draw`
     // while the card is up is drawn exactly as no draft at all.
@@ -5735,7 +5793,7 @@ fn a_point_on_the_composer_is_not_a_line_the_panel_no_longer_has() {
     let composer = Composer::new("one\ntwo");
     let size = Size::new(WIDTH, FIXTURE_HEIGHT);
     let field = Some(&composer);
-    let cut = areas(Rect::from(size), field);
+    let cut = Shape::new(size).composer(field).cut();
     let area = cut.composer.expect("a field on this frame");
 
     // Every point inside the field says so, and says nothing about a row of
@@ -5744,7 +5802,7 @@ fn a_point_on_the_composer_is_not_a_line_the_panel_no_longer_has() {
     for y in inside.y..inside.y + inside.height {
         for x in inside.x..inside.x + inside.width {
             assert_eq!(
-                hit_test(x, y, size, field, None, &Sigils::Nothing),
+                Shape::new(size).composer(field).cut().hit(x, y),
                 Hit::Composer,
                 "at {x},{y}"
             );
@@ -5752,16 +5810,16 @@ fn a_point_on_the_composer_is_not_a_line_the_panel_no_longer_has() {
     }
     // Its border is a border, like either pane's.
     assert_eq!(
-        hit_test(area.x, area.y, size, field, None, &Sigils::Nothing),
+        Shape::new(size).composer(field).cut().hit(area.x, area.y),
         Hit::Border
     );
 
     // And the panel's lines are the lines the panel has: every offset the
     // hit test hands out is inside the window the app was told about.
     let panel = pane_inner(cut.panel);
-    let height = panel_height(size, field, None);
+    let height = Shape::new(size).composer(field).cut().panel_height();
     for y in panel.y..panel.y + panel.height {
-        let hit = hit_test(panel.x, y, size, field, None, &Sigils::Nothing);
+        let hit = Shape::new(size).composer(field).cut().hit(panel.x, y);
         assert_eq!(
             hit,
             Hit::PanelLine {
@@ -5774,7 +5832,7 @@ fn a_point_on_the_composer_is_not_a_line_the_panel_no_longer_has() {
     // The rows the field took would have been the panel's, and the hit test
     // knows it: the same points answer differently on a frame with no field.
     assert_eq!(
-        hit_test(inside.x, inside.y, size, None, None, &Sigils::Nothing),
+        Shape::new(size).cut().hit(inside.x, inside.y),
         Hit::PanelLine {
             offset: inside.y - panel.y,
             column: inside.x - panel.x
@@ -5793,18 +5851,25 @@ fn a_terminal_with_no_room_for_a_field_draws_none_and_the_panel_keeps_the_column
     // can least afford it would be paying for.
     for height in 0..chrome + COMPOSER_MIN_HEIGHT {
         let size = Size::new(WIDTH, height);
-        assert_eq!(composer_height(size, field), 0, "in {height} rows");
         assert_eq!(
-            panel_height(size, field, None),
-            panel_height(size, None, None),
+            Shape::new(size).composer(field).cut().composer_height(),
+            0,
+            "in {height} rows"
+        );
+        assert_eq!(
+            Shape::new(size).composer(field).cut().panel_height(),
+            Shape::new(size).cut().panel_height(),
             "in {height} rows"
         );
     }
 
     // And the first height it does fit in, it fits in whole.
     let size = Size::new(WIDTH, chrome + COMPOSER_MIN_HEIGHT);
-    assert_eq!(composer_height(size, field), COMPOSER_MIN_HEIGHT);
-    assert_eq!(panel_height(size, field, None), 0);
+    assert_eq!(
+        Shape::new(size).composer(field).cut().composer_height(),
+        COMPOSER_MIN_HEIGHT
+    );
+    assert_eq!(Shape::new(size).composer(field).cut().panel_height(), 0);
 }
 
 #[test]
@@ -5816,7 +5881,7 @@ fn the_focused_panes_border_is_lit_and_the_other_is_not() {
     app.toggle_focus();
     let panel_focused = render(&app, WIDTH, FIXTURE_HEIGHT);
 
-    let areas = areas(tree_focused.area, None);
+    let cut = Shape::new(tree_focused.area.as_size()).cut();
     let top_left = |buffer: &Buffer, pane: Rect| {
         let cell = &buffer[(pane.x, pane.y)];
         (cell.fg, cell.modifier)
@@ -5824,26 +5889,26 @@ fn the_focused_panes_border_is_lit_and_the_other_is_not() {
     // The same border glyphs either way — nothing moves — drawn in two
     // visibly different styles, and each pane's style follows the focus.
     assert_eq!(
-        top_left(&tree_focused, areas.tree),
-        top_left(&panel_focused, areas.panel),
+        top_left(&tree_focused, cut.tree_column),
+        top_left(&panel_focused, cut.panel),
         "the lit border should look the same whichever pane wears it"
     );
     assert_eq!(
-        top_left(&tree_focused, areas.panel),
-        top_left(&panel_focused, areas.tree),
+        top_left(&tree_focused, cut.panel),
+        top_left(&panel_focused, cut.tree_column),
         "the dim border should look the same whichever pane wears it"
     );
     assert_ne!(
-        top_left(&tree_focused, areas.tree),
-        top_left(&tree_focused, areas.panel),
+        top_left(&tree_focused, cut.tree_column),
+        top_left(&tree_focused, cut.panel),
         "the two borders are drawn alike, so nothing on screen says which pane the keys drive"
     );
     // Lit means this and dim means that, spelled out: a colour no node state
     // uses, plus a modifier for the terminals that show no colour.
-    let (fg, modifier) = top_left(&tree_focused, areas.tree);
+    let (fg, modifier) = top_left(&tree_focused, cut.tree_column);
     assert_eq!(fg, FOCUS_COLOUR);
     assert!(modifier.contains(Modifier::BOLD));
-    let (fg, modifier) = top_left(&tree_focused, areas.panel);
+    let (fg, modifier) = top_left(&tree_focused, cut.panel);
     assert_ne!(fg, FOCUS_COLOUR);
     assert!(modifier.contains(Modifier::DIM));
     for state in NodeState::ALL {
@@ -6085,7 +6150,11 @@ fn nothing_from_the_frame_underneath_shows_through_the_window() {
     // over the top of the footer, and every row behind it has something on
     // it — without which the assertions below would pass on a blank screen.
     let area = confirm_rect(&open);
-    let Areas { panel, tree, .. } = areas(open.area, None);
+    let Cut {
+        panel,
+        tree_column: tree,
+        ..
+    } = Shape::new(open.area.as_size()).cut();
     assert!(
         area.x < panel.x + panel.width,
         "the window misses the panel"
@@ -6256,7 +6325,7 @@ fn the_footer_keeps_its_three_lines_and_its_wording_while_the_question_is_up() {
     // Three lines, in their places, saying what they said: the gate on the
     // way out is a window over the frame and not a fourth footer line, and
     // the keys line still names the way out it always named.
-    let footer = areas(open.area, None).footer;
+    let footer = Shape::new(open.area.as_size()).cut().footer;
     assert_eq!(footer.height, FOOTER_HEIGHT);
     assert_eq!(open.area.height, MARK_ROOM_HEIGHT);
     for y in footer.y..footer.y + footer.height {
@@ -7285,7 +7354,11 @@ fn nothing_from_the_frame_underneath_shows_through_the_scope_window() {
     // At this size the window is over the panel, over the tree pane and over
     // the top of the footer.
     let over = scope_rect(&open, &field);
-    let Areas { panel, tree, .. } = areas(open.area, None);
+    let Cut {
+        panel,
+        tree_column: tree,
+        ..
+    } = Shape::new(open.area.as_size()).cut();
     assert!(
         over.x < panel.x + panel.width,
         "the window misses the panel"

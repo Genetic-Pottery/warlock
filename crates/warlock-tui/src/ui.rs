@@ -4,12 +4,9 @@
 //! measured against arrives as a parameter, so a frame can be asserted against
 //! an in-memory buffer with no tty attached.
 //!
-//! The measuring entry points — [`tree_height`], [`panel_height`],
-//! [`run_header_height`], [`composer_height`], [`panel_width`] and
-//! [`hit_test`] — all go back through [`areas`], the same cut [`draw`] uses.
-//! That is the point of them: they are how the app asks what fits, and a
-//! second copy of the layout arithmetic here would answer for a screen that
-//! was never drawn. Sizes it needs are therefore derived, never remembered.
+//! Every size the app asks for, every hit test and [`draw`] itself read one
+//! [`Cut`], made from a [`Shape`]. A second copy of the layout arithmetic here
+//! would answer for a screen that was never drawn.
 
 use std::time::{Duration, Instant};
 
@@ -366,15 +363,15 @@ pub(crate) fn draw(
 ) {
     let screen = frame.area();
     let composer = on_screen(app, composer);
-    let Areas {
-        panel,
-        composer: field,
-        tree,
-        footer,
-    } = areas(screen, composer);
+    let header = app.run_header();
+    let cut = Shape::new(screen.as_size())
+        .composer(composer)
+        .header(header.as_ref())
+        .sigils(chrome.sigils())
+        .cut();
 
-    draw_panel(frame, panel, app, now);
-    if let (Some(area), Some(composer)) = (field, composer) {
+    draw_panel(frame, &cut, app, header.as_ref(), now);
+    if let (Some(area), Some(composer)) = (cut.composer, composer) {
         // Two things have to be true for the field to be drawn as the place the
         // next character lands: the keys have to be pointed at it, and it has to
         // be taking them. A muted field is one a turn is being answered over
@@ -389,12 +386,11 @@ pub(crate) fn draw(
         let strip = workflow_line(app.panel().mode(), app.panel().ready(), app.working());
         draw_composer(frame, area, composer, live, strip);
     }
-    let (tree, sigils) = tree_column(tree, chrome.sigils());
-    draw_tree_pane(frame, tree, app, chrome, now);
-    if let Some(area) = sigils {
+    draw_tree_pane(frame, &cut, app, chrome, now);
+    if let Some(area) = cut.sigils {
         draw_sigils(frame, area, chrome.sigils());
     }
-    draw_footer(frame, footer, app);
+    draw_footer(frame, cut.footer, app);
 
     // Over the finished frame rather than instead of it, clearing only the cells
     // behind it, so what a window is answered against is still on screen around
@@ -404,30 +400,96 @@ pub(crate) fn draw(
     }
 }
 
-struct Areas {
-    panel: Rect,
-    composer: Option<Rect>,
-    tree: Rect,
-    footer: Rect,
+static NO_SIGILS: Sigils = Sigils::Nothing;
+
+/// Everything the layout depends on, and nothing else. A field added here is
+/// read by the frame and by every measurement at once; an input passed to one
+/// of them beside a `Shape` would let the two cut different screens.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Shape<'a> {
+    size: Size,
+    composer: Option<&'a Composer>,
+    run_header: bool,
+    sigils: &'a Sigils,
 }
 
-fn areas(area: Rect, composer: Option<&Composer>) -> Areas {
-    let [above, footer] =
-        Layout::vertical([Constraint::Min(0), Constraint::Length(FOOTER_HEIGHT)]).areas(area);
-    let column = tree_width(above.width);
-    let [panel, tree] = Layout::horizontal([
-        Constraint::Length(above.width - column),
-        Constraint::Length(column),
-    ])
-    .areas(above);
-    let (panel, composer) = split_column(panel, composer);
-
-    Areas {
-        panel,
-        composer,
-        tree,
-        footer,
+impl<'a> Shape<'a> {
+    #[must_use]
+    pub(crate) fn new(size: Size) -> Self {
+        Self {
+            size,
+            composer: None,
+            run_header: false,
+            sigils: &NO_SIGILS,
+        }
     }
+
+    #[must_use]
+    pub(crate) fn composer(self, composer: Option<&'a Composer>) -> Self {
+        Self { composer, ..self }
+    }
+
+    #[must_use]
+    pub(crate) fn header(self, header: Option<&RunHeader>) -> Self {
+        Self {
+            run_header: header.is_some(),
+            ..self
+        }
+    }
+
+    #[must_use]
+    pub(crate) fn sigils(self, sigils: &'a Sigils) -> Self {
+        Self { sigils, ..self }
+    }
+
+    #[must_use]
+    pub(crate) fn cut(self) -> Cut {
+        let screen = Rect::from(self.size);
+        let [above, footer] =
+            Layout::vertical([Constraint::Min(0), Constraint::Length(FOOTER_HEIGHT)]).areas(screen);
+        let width = tree_width(above.width);
+        let [panel, column] = Layout::horizontal([
+            Constraint::Length(above.width - width),
+            Constraint::Length(width),
+        ])
+        .areas(above);
+        let (panel, composer) = split_column(panel, self.composer);
+        let (run_header, panel_rows) = panel_split(panel, self.run_header);
+        let (tree, sigils) = tree_column(column, self.sigils);
+
+        Cut {
+            screen,
+            panel,
+            run_header,
+            panel_rows,
+            composer,
+            tree_column: column,
+            tree,
+            tree_rows: pane_inner(tree),
+            sigils,
+            footer,
+        }
+    }
+}
+
+/// The screen as one [`Shape`] divides it.
+///
+/// Made again from the current inputs every time it is asked for, and never
+/// kept from the frame before: a click is answered against the screen the
+/// reader is looking at, and a cut remembered from drawing goes stale the
+/// moment the terminal, the draft or the run header changes under it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct Cut {
+    screen: Rect,
+    panel: Rect,
+    run_header: Option<Rect>,
+    panel_rows: Rect,
+    composer: Option<Rect>,
+    tree_column: Rect,
+    tree: Rect,
+    tree_rows: Rect,
+    sigils: Option<Rect>,
+    footer: Rect,
 }
 
 fn split_column(column: Rect, composer: Option<&Composer>) -> (Rect, Option<Rect>) {
@@ -455,8 +517,8 @@ fn split_column(column: Rect, composer: Option<&Composer>) -> (Rect, Option<Rect
 
 // Called from `interactive.rs` too, so a keystroke is routed by the same
 // question the frame was cut by. `on_screen` below is this one over an
-// `Option`, and `draw` and `areas` both go through it: if the two answers ever
-// came from two rules, keys would go to a field the reader cannot see.
+// `Option`, and `draw` goes through it: if the two answers ever came from two
+// rules, keys would go to a field the reader cannot see.
 #[must_use]
 pub(crate) fn composer_on_screen<'a>(app: &App, composer: &'a Composer) -> Option<&'a Composer> {
     app.panel().composer_showable().then_some(composer)
@@ -488,16 +550,12 @@ fn pane_inner(area: Rect) -> Rect {
     inner
 }
 
-fn tree_rows_area(tree: Rect) -> Rect {
-    pane_inner(tree)
-}
-
-fn panel_split(panel: Rect, header: Option<&RunHeader>) -> (Option<Rect>, Rect) {
+fn panel_split(panel: Rect, header: bool) -> (Option<Rect>, Rect) {
     let inner = pane_inner(panel);
     // A panel with no room to spare loses the run header whole rather than
     // sharing: `Length` would take its rows anyway and leave the account with
     // none, so the reader would watch a progress bar over an empty pane.
-    if header.is_none() || inner.height <= RUN_HEADER_HEIGHT {
+    if !header || inner.height <= RUN_HEADER_HEIGHT {
         return (None, inner);
     }
 
@@ -505,49 +563,6 @@ fn panel_split(panel: Rect, header: Option<&RunHeader>) -> (Option<Rect>, Rect) 
         Layout::vertical([Constraint::Length(RUN_HEADER_HEIGHT), Constraint::Min(0)]).areas(inner);
 
     (Some(header), rows)
-}
-
-fn panel_rows_area(panel: Rect, header: Option<&RunHeader>) -> Rect {
-    panel_split(panel, header).1
-}
-
-#[must_use]
-pub(crate) fn tree_height(size: Size, sigils: &Sigils) -> u16 {
-    tree_rows_area(tree_column(areas(Rect::from(size), None).tree, sigils).0).height
-}
-
-#[must_use]
-pub(crate) fn panel_height(
-    size: Size,
-    composer: Option<&Composer>,
-    header: Option<&RunHeader>,
-) -> u16 {
-    panel_rows_area(areas(Rect::from(size), composer).panel, header).height
-}
-
-#[must_use]
-#[cfg(test)]
-pub(crate) fn run_header_height(
-    size: Size,
-    composer: Option<&Composer>,
-    header: Option<&RunHeader>,
-) -> u16 {
-    panel_split(areas(Rect::from(size), composer).panel, header)
-        .0
-        .map_or(0, |area| area.height)
-}
-
-#[must_use]
-#[cfg(test)]
-pub(crate) fn composer_height(size: Size, composer: Option<&Composer>) -> u16 {
-    areas(Rect::from(size), composer)
-        .composer
-        .map_or(0, |area| area.height)
-}
-
-#[must_use]
-pub(crate) fn panel_width(size: Size) -> u16 {
-    pane_inner(areas(Rect::from(size), None).panel).width
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -562,73 +577,6 @@ pub(crate) enum Hit {
     Composer,
 }
 
-#[must_use]
-pub(crate) fn hit_test(
-    column: u16,
-    row: u16,
-    size: Size,
-    composer: Option<&Composer>,
-    header: Option<&RunHeader>,
-    sigils: &Sigils,
-) -> Hit {
-    // Answered by measuring the same `areas` cut the frame was drawn by, not by
-    // anything remembered from drawing it, so a click lands on what the reader
-    // is looking at. Every test below is against a `pane_inner`, which is why a
-    // border belongs to no pane and falls through to `Border` without being
-    // asked about. This knows where the panes are and nothing else: what a row
-    // offset stands for is the app's to say, and there is no hover.
-    //
-    // `PanelLine` reports the column beside the row, both counted from the first
-    // cell of the rows area the panel drew into, so a pointer event becomes a
-    // `selection::Cell` without measuring the layout a second time — a second
-    // measurement is what would drift from the frame under the pointer.
-    let point = Position::new(column, row);
-    let screen = Rect::from(size);
-    if !screen.contains(point) {
-        return Hit::Offscreen;
-    }
-
-    let Areas {
-        panel,
-        composer,
-        tree,
-        footer,
-    } = areas(screen, composer);
-    if footer.contains(point) {
-        return Hit::Footer;
-    }
-
-    if pane_inner(panel).contains(point) {
-        let rows = panel_rows_area(panel, header);
-        if row < rows.y {
-            return Hit::PanelHeader;
-        }
-        return Hit::PanelLine {
-            offset: row.saturating_sub(rows.y),
-            column: column.saturating_sub(rows.x),
-        };
-    }
-
-    if composer.is_some_and(|field| pane_inner(field).contains(point)) {
-        return Hit::Composer;
-    }
-
-    let (tree, _) = tree_column(tree, sigils);
-    let inside = pane_inner(tree);
-    if inside.contains(point) {
-        let rows = tree_rows_area(tree);
-        return if rows.contains(point) {
-            Hit::TreeRow {
-                offset: row.saturating_sub(rows.y),
-            }
-        } else {
-            Hit::TreeBelowRows
-        };
-    }
-
-    Hit::Border
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Reach {
     Above { rows: u16, column: u16 },
@@ -636,47 +584,118 @@ pub(crate) enum Reach {
     Below { rows: u16, column: u16 },
 }
 
-/// How far past the panel's rows a point is, measured by the same [`areas`] cut
-/// [`hit_test`] and [`draw`] go through.
-///
-/// A pointer held past the card arrives as [`Hit::Footer`], [`Hit::Border`],
-/// [`Hit::Composer`] or [`Hit::Offscreen`], none of which says which way it left
-/// or by how much, so this answers the question [`Hit`] cannot. The row is
-/// counted against the rows area alone: the run header and the composer are not
-/// in it, so a point on either is past an edge here even though it is inside the
-/// panel's column.
-///
-/// `column` is clamped into the rows area rather than refused, so a pointer that
-/// wandered sideways — onto the border, the tree, past the right edge of the
-/// screen — still names the cell of the card nearest it.
-#[must_use]
-pub(crate) fn panel_reach(
-    column: u16,
-    row: u16,
-    size: Size,
-    composer: Option<&Composer>,
-    header: Option<&RunHeader>,
-) -> Reach {
-    let rows = panel_rows_area(areas(Rect::from(size), composer).panel, header);
-    let column = column
-        .saturating_sub(rows.x)
-        .min(rows.width.saturating_sub(1));
+impl Cut {
+    #[must_use]
+    pub(crate) fn tree_height(&self) -> u16 {
+        self.tree_rows.height
+    }
 
-    // Tested against the rows area's own bounds rather than against its height,
-    // so an area with no rows in it — a terminal too short for the panel to hold
-    // a line — is all edge and no inside, and no point is answered as a row that
-    // was never drawn.
-    if row < rows.y {
-        Reach::Above {
-            rows: rows.y - row,
-            column,
+    #[must_use]
+    pub(crate) fn panel_height(&self) -> u16 {
+        self.panel_rows.height
+    }
+
+    #[must_use]
+    pub(crate) fn panel_width(&self) -> u16 {
+        pane_inner(self.panel).width
+    }
+
+    #[must_use]
+    #[cfg(test)]
+    pub(crate) fn run_header_height(&self) -> u16 {
+        self.run_header.map_or(0, |area| area.height)
+    }
+
+    #[must_use]
+    #[cfg(test)]
+    pub(crate) fn composer_height(&self) -> u16 {
+        self.composer.map_or(0, |area| area.height)
+    }
+
+    /// Where the panes are and nothing else: what a row offset stands for is
+    /// the app's to say, and there is no hover.
+    ///
+    /// `PanelLine` reports the column beside the row, both counted from the
+    /// first cell of the panel's rows, so a pointer event becomes a
+    /// `selection::Cell` without measuring the layout a second time.
+    #[must_use]
+    pub(crate) fn hit(&self, column: u16, row: u16) -> Hit {
+        let point = Position::new(column, row);
+        if !self.screen.contains(point) {
+            return Hit::Offscreen;
         }
-    } else if row < rows.bottom() {
-        Reach::Inside { column }
-    } else {
-        Reach::Below {
-            rows: (row - rows.bottom()).saturating_add(1),
-            column,
+
+        if self.footer.contains(point) {
+            return Hit::Footer;
+        }
+
+        if pane_inner(self.panel).contains(point) {
+            let rows = self.panel_rows;
+            if row < rows.y {
+                return Hit::PanelHeader;
+            }
+            return Hit::PanelLine {
+                offset: row.saturating_sub(rows.y),
+                column: column.saturating_sub(rows.x),
+            };
+        }
+
+        if self
+            .composer
+            .is_some_and(|field| pane_inner(field).contains(point))
+        {
+            return Hit::Composer;
+        }
+
+        if pane_inner(self.tree).contains(point) {
+            let rows = self.tree_rows;
+            return if rows.contains(point) {
+                Hit::TreeRow {
+                    offset: row.saturating_sub(rows.y),
+                }
+            } else {
+                Hit::TreeBelowRows
+            };
+        }
+
+        Hit::Border
+    }
+
+    /// How far past the panel's rows a point is.
+    ///
+    /// A pointer held past the card arrives as [`Hit::Footer`],
+    /// [`Hit::Border`], [`Hit::Composer`] or [`Hit::Offscreen`], none of which
+    /// says which way it left or by how much, so this answers the question
+    /// [`Hit`] cannot. The row is counted against the rows area alone: the run
+    /// header and the composer are not in it, so a point on either is past an
+    /// edge here even though it is inside the panel's column.
+    ///
+    /// `column` is clamped into the rows area rather than refused, so a pointer
+    /// that wandered sideways — onto the border, the tree, past the right edge
+    /// of the screen — still names the cell of the card nearest it.
+    #[must_use]
+    pub(crate) fn reach(&self, column: u16, row: u16) -> Reach {
+        let rows = self.panel_rows;
+        let column = column
+            .saturating_sub(rows.x)
+            .min(rows.width.saturating_sub(1));
+
+        // Tested against the rows area's own bounds rather than against its
+        // height, so an area with no rows in it — a terminal too short for the
+        // panel to hold a line — is all edge and no inside, and no point is
+        // answered as a row that was never drawn.
+        if row < rows.y {
+            Reach::Above {
+                rows: rows.y - row,
+                column,
+            }
+        } else if row < rows.bottom() {
+            Reach::Inside { column }
+        } else {
+            Reach::Below {
+                rows: (row - rows.bottom()).saturating_add(1),
+                column,
+            }
         }
     }
 }
@@ -691,7 +710,14 @@ fn pane_block(focused: bool) -> Block<'static> {
     Block::bordered().border_style(style)
 }
 
-fn draw_panel(frame: &mut Frame<'_>, area: Rect, app: &App, now: Instant) {
+fn draw_panel(
+    frame: &mut Frame<'_>,
+    cut: &Cut,
+    app: &App,
+    header: Option<&RunHeader>,
+    now: Instant,
+) {
+    let (area, inner) = (cut.panel, cut.panel_rows);
     let panel = app.panel();
     let below = panel.lines_below();
     let conversation = panel.showing_thread();
@@ -703,11 +729,9 @@ fn draw_panel(frame: &mut Frame<'_>, area: Rect, app: &App, now: Instant) {
         block = block.title_bottom(Line::from(scrollback(below)).right_aligned().dim());
     }
 
-    let header = app.run_header();
-    let (header_area, inner) = panel_split(area, header.as_ref());
     frame.render_widget(block, area);
 
-    if let (Some(area), Some(header)) = (header_area, header.as_ref()) {
+    if let (Some(area), Some(header)) = (cut.run_header, header) {
         draw_run_header(frame, area, header);
     }
 
@@ -1090,7 +1114,8 @@ pub(crate) fn display_width(text: &str) -> usize {
     Span::raw(text).width()
 }
 
-fn draw_tree_pane(frame: &mut Frame<'_>, area: Rect, app: &App, chrome: &Chrome, now: Instant) {
+fn draw_tree_pane(frame: &mut Frame<'_>, cut: &Cut, app: &App, chrome: &Chrome, now: Instant) {
+    let area = cut.tree;
     let room = usize::from(area.width.saturating_sub(2 * BORDER_THICKNESS));
     let title = target_title(chrome.target(), room);
     let mut block = pane_block(app.focus() == Focus::Tree).title_top(Line::from(title).bold());
@@ -1099,7 +1124,7 @@ fn draw_tree_pane(frame: &mut Frame<'_>, area: Rect, app: &App, chrome: &Chrome,
     }
     frame.render_widget(block, area);
 
-    draw_tree(frame, tree_rows_area(area), app, now);
+    draw_tree(frame, cut.tree_rows, app, now);
 }
 
 // Fewer columns than this and the tree's own path is not drawn at all: a path
@@ -1170,8 +1195,6 @@ pub(crate) fn sigil_lines(sigils: &Sigils) -> Vec<String> {
     }
 }
 
-// The one cut of the tree column, asked by the frame, the hit test and the
-// viewport height alike, so a click and a scroll land on the rows drawn.
 fn tree_column(tree: Rect, sigils: &Sigils) -> (Rect, Option<Rect>) {
     let lines = u16::try_from(sigil_lines(sigils).len()).unwrap_or(u16::MAX);
     let rows = lines.saturating_add(2 * BORDER_THICKNESS);

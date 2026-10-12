@@ -36,9 +36,7 @@ use crate::screen::Screen;
 use crate::selection::{Cell, Position, copied_text, position_at};
 use crate::session::{Scope, Watched, load_app, start_watching};
 use crate::submission::{ToPush, Wanted};
-use crate::ui::{
-    Reach, composer_on_screen, draw, help_most_scroll, panel_height, panel_width, tree_height,
-};
+use crate::ui::{Reach, Shape, composer_on_screen, draw, help_most_scroll};
 use crate::viewing::view_press;
 
 /// How long the loop waits for a keystroke before going round anyway.
@@ -376,7 +374,7 @@ impl<K: Seams> Session<K> {
         // field's own rows are folded at and therefore the width its row-wise
         // keys move over. Told here, before the key that reads it, because the
         // loop draws and then waits.
-        let width = panel_width(size);
+        let width = Shape::new(size).cut().panel_width();
         self.chat.set_composer_width(width);
         self.help = self.help.clamped(help_most_scroll(size));
         // And the other thing the field is told once a round: which slice of a
@@ -386,10 +384,14 @@ impl<K: Seams> Session<K> {
         self.chat.set_composer_answering(self.cutter.answering());
         let field = composer_on_screen(&self.app, self.chat.composer());
         let header = self.app.run_header();
-        self.app
-            .set_viewport_height(tree_height(size, self.scope.chrome.sigils()));
+        let cut = Shape::new(size)
+            .composer(field)
+            .header(header.as_ref())
+            .sigils(self.scope.chrome.sigils())
+            .cut();
+        self.app.set_viewport_height(cut.tree_height());
         let panel = self.app.panel_mut();
-        panel.set_height(panel_height(size, field, header.as_ref()));
+        panel.set_height(cut.panel_height());
         panel.set_width(width);
 
         let modal = modals(
@@ -423,14 +425,12 @@ impl<K: Seams> Session<K> {
         // means is decided against them, and what it then does is the app's
         // alone.
         let field = composer_on_screen(&self.app, self.chat.composer());
-        let action = mouse_action(
-            mouse,
-            size,
-            &self.app,
-            self.modal(),
-            field,
-            self.scope.chrome.sigils(),
-        );
+        let header = self.app.run_header();
+        let shape = Shape::new(size)
+            .composer(field)
+            .header(header.as_ref())
+            .sigils(self.scope.chrome.sigils());
+        let action = mouse_action(mouse, shape, &self.app, self.modal());
         // Before the action is acted on, because this is bookkeeping about the
         // gesture rather than part of it: what the app does with a press or a
         // drag is the same whether or not the button stays down afterwards.

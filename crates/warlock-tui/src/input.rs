@@ -10,9 +10,8 @@
 use ratatui::crossterm::event::{
     KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
-use ratatui::layout::Size;
 
-use crate::app::{App, Focus, RunHeader, Sigils};
+use crate::app::{App, Focus};
 use crate::composer::{Composed, Composer, compose_for};
 use crate::confirm::{
     Answered, CarryAnswered, CutAnswered, PullAnswered, PushAnswered, QuitConfirm, Reviewed,
@@ -23,7 +22,7 @@ use crate::help::{HelpSheet, help_for};
 use crate::modal::Modal;
 use crate::prompt::{Edited, RecordEdited, edit_for, record_edit_for};
 use crate::selection::Cell;
-use crate::ui::{Hit, Reach, hit_test, panel_reach};
+use crate::ui::{Cut, Hit, Reach, Shape};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Action {
@@ -341,37 +340,26 @@ pub(crate) struct Drag {
     pub(crate) past: Option<Reach>,
 }
 
-// `size` is the size the round measured before it drew, and `composer` the
-// draft that frame was drawn with, because the hit test has to agree with the
-// frame the reader is pointing at: a second opinion about the layout — or one
-// that had not been told the field took rows from the panel — answers
-// `PanelLine` for a point on the composer and scrolls a window the pointer is
-// not over.
+// `shape` is the one the round measured with before it drew, because the hit
+// test has to agree with the frame the reader is pointing at: a shape that had
+// not been told the field took rows from the panel answers `PanelLine` for a
+// point on the composer and scrolls a window the pointer is not over.
 //
 // No window has anything clickable in it, so while one is up every event is
 // dropped, wheel and click alike: a click that reached the tree behind one
 // would select a row the reader cannot see.
 pub(crate) fn mouse_action(
     mouse: MouseEvent,
-    size: Size,
+    shape: Shape<'_>,
     app: &App,
     modal: Option<Modal<'_>>,
-    composer: Option<&Composer>,
-    sigils: &Sigils,
 ) -> Option<MouseAction> {
     if modal.is_some() {
         return None;
     }
 
-    let header = app.run_header();
-    let hit = hit_test(
-        mouse.column,
-        mouse.row,
-        size,
-        composer,
-        header.as_ref(),
-        sigils,
-    );
+    let cut = shape.cut();
+    let hit = cut.hit(mouse.column, mouse.row);
     match mouse.kind {
         // Down the tree and down the account are the same direction, so one
         // notch reads the same way over either pane.
@@ -396,15 +384,10 @@ pub(crate) fn mouse_action(
         // to come back with this event or not at all.
         MouseEventKind::Drag(MouseButton::Left) => cell_under(hit, app)
             .map(MouseAction::ExtendSelection)
-            .or_else(|| {
-                past_rows(mouse, size, app, composer, header.as_ref())
-                    .map(MouseAction::ExtendPastEdge)
-            }),
+            .or_else(|| past_rows(mouse, &cut, app).map(MouseAction::ExtendPastEdge)),
         MouseEventKind::Up(MouseButton::Left) => cell_under(hit, app)
             .map(MouseAction::EndSelection)
-            .or_else(|| {
-                past_rows(mouse, size, app, composer, header.as_ref()).map(MouseAction::EndPastEdge)
-            }),
+            .or_else(|| past_rows(mouse, &cut, app).map(MouseAction::EndPastEdge)),
         _ => None,
     }
 }
@@ -540,18 +523,12 @@ fn cell_under(hit: Hit, app: &App) -> Option<Cell> {
 // refusal: the account and the document are read past, not copied out of, and a
 // pointer dragged off the bottom of either has to go on meaning what it meant
 // before a drag off the thread card meant anything.
-fn past_rows(
-    mouse: MouseEvent,
-    size: Size,
-    app: &App,
-    composer: Option<&Composer>,
-    header: Option<&RunHeader>,
-) -> Option<Reach> {
+fn past_rows(mouse: MouseEvent, cut: &Cut, app: &App) -> Option<Reach> {
     if !selectable(app) {
         return None;
     }
 
-    match panel_reach(mouse.column, mouse.row, size, composer, header) {
+    match cut.reach(mouse.column, mouse.row) {
         Reach::Inside { .. } => None,
         past => Some(past),
     }

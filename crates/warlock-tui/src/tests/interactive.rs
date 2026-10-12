@@ -24,7 +24,7 @@ use crate::screen::Screen;
 use crate::session::{Scope, Watched};
 use crate::settings::Settings;
 use crate::stubs::{Boarding, Checkout, Copying, Forging, Passing, Saying, Scripted};
-use crate::ui::tree_height;
+use crate::ui::Shape;
 
 #[derive(Debug)]
 struct FakeScreen {
@@ -253,7 +253,12 @@ fn a_round_tells_the_app_the_size_the_frame_is_being_cut_at() {
 
     assert_eq!(
         driven.app.viewport_height(),
-        usize::from(tree_height(size, driven.scope.chrome.sigils())),
+        usize::from(
+            Shape::new(size)
+                .sigils(driven.scope.chrome.sigils())
+                .cut()
+                .tree_height()
+        ),
         "the app was told the height this frame gives the tree"
     );
 }

@@ -916,7 +916,7 @@ mod gate {
     use warlock_engine::NodeState;
 
     use super::super::{Action, Pressed, action_for, press_for};
-    use crate::app::{App, Focus, Row, Sigils};
+    use crate::app::{App, Focus, Row};
     use crate::composer::{Composed, Composer};
     use crate::confirm::{
         Answer, CutConfirm, PullConfirm, PushConfirm, QuitConfirm, cut_answer_for, pull_answer_for,
@@ -924,7 +924,7 @@ mod gate {
     };
     use crate::modal::Modals;
     use crate::prompt::{Edited, RecordPrompt, ScopeField, ScopePrompt, edit_for};
-    use crate::ui::{panel_height, tree_height};
+    use crate::ui::Shape;
 
     const SIZE: Size = Size {
         width: 80,
@@ -984,8 +984,9 @@ mod gate {
             rows.push(Row::file(2, format!("{directory}/lib.rs"), state));
         }
         let mut app = App::from_rows(rows);
-        app.set_viewport_height(tree_height(SIZE, &Sigils::Nothing));
-        app.panel_mut().set_height(panel_height(SIZE, None, None));
+        let cut = Shape::new(SIZE).cut();
+        app.set_viewport_height(cut.tree_height());
+        app.panel_mut().set_height(cut.panel_height());
         app
     }
 
@@ -3732,13 +3733,13 @@ mod pointer {
     use warlock_engine::NodeState;
 
     use super::super::{MouseAction, WHEEL_NOTCH, mouse_action};
-    use crate::app::{App, Focus, Row, Sigils};
+    use crate::app::{App, Focus, Row};
     use crate::composer::Composer;
     use crate::confirm::{Carry, CutConfirm, PushConfirm, QuitConfirm, Review};
     use crate::modal::{Modal, Modals};
     use crate::prompt::{RecordPrompt, ScopePrompt};
     use crate::selection::Cell;
-    use crate::ui::{Reach, panel_height, panel_width, tree_height};
+    use crate::ui::{Reach, Shape};
 
     // The one terminal every test below points at, and the layout it comes
     // to. Eighty columns is wide enough that the tree takes its floor of
@@ -3787,7 +3788,7 @@ mod pointer {
     ];
 
     fn viewport() -> usize {
-        usize::from(tree_height(SIZE, &Sigils::Nothing))
+        usize::from(Shape::new(SIZE).cut().tree_height())
     }
 
     fn wheel_down(column: u16, row: u16) -> MouseEvent {
@@ -3854,9 +3855,10 @@ mod pointer {
 
     fn app_on_screen() -> App {
         let mut app = App::from_rows(rows());
-        app.set_viewport_height(tree_height(SIZE, &Sigils::Nothing));
-        app.panel_mut().set_height(panel_height(SIZE, None, None));
-        app.panel_mut().set_width(panel_width(SIZE));
+        let cut = Shape::new(SIZE).cut();
+        app.set_viewport_height(cut.tree_height());
+        app.panel_mut().set_height(cut.panel_height());
+        app.panel_mut().set_width(cut.panel_width());
         app
     }
 
@@ -3878,7 +3880,7 @@ mod pointer {
     }
 
     fn panel_cells() -> usize {
-        usize::from(panel_width(SIZE))
+        usize::from(Shape::new(SIZE).cut().panel_width())
     }
 
     fn asks(mouse: MouseEvent, app: &App) -> Option<MouseAction> {
@@ -3886,11 +3888,16 @@ mod pointer {
     }
 
     fn asks_under(mouse: MouseEvent, app: &App, modal: Option<Modal<'_>>) -> Option<MouseAction> {
-        mouse_action(mouse, SIZE, app, modal, None, &Sigils::Nothing)
+        let header = app.run_header();
+        mouse_action(mouse, Shape::new(SIZE).header(header.as_ref()), app, modal)
     }
 
     fn asks_composing(mouse: MouseEvent, app: &App, composer: &Composer) -> Option<MouseAction> {
-        mouse_action(mouse, SIZE, app, None, Some(composer), &Sigils::Nothing)
+        let header = app.run_header();
+        let shape = Shape::new(SIZE)
+            .composer(Some(composer))
+            .header(header.as_ref());
+        mouse_action(mouse, shape, app, None)
     }
 
     fn round(app: &mut App, confirm: QuitConfirm, mouse: MouseEvent) {
@@ -3941,7 +3948,7 @@ mod pointer {
         // tests into assertions about somewhere else.
         assert_eq!(viewport(), 16, "sixteen rows of tree at 80x24");
         assert_eq!(
-            usize::from(panel_height(SIZE, None, None)),
+            usize::from(Shape::new(SIZE).cut().panel_height()),
             19,
             "nineteen lines of panel: no header of its own"
         );
@@ -4429,7 +4436,7 @@ mod pointer {
         // is one below.
         let app = app_talking();
         let first = FIRST_PANEL_LINE;
-        let last = FIRST_PANEL_LINE + panel_height(SIZE, None, None) - 1;
+        let last = FIRST_PANEL_LINE + Shape::new(SIZE).cut().panel_height() - 1;
         assert_eq!(last, 19, "nineteen lines of card, ending at row 19");
 
         for (row, past) in [
@@ -4549,7 +4556,10 @@ mod pointer {
         // at the first row the reader drags onto.
         let mut app = app_talking();
         let composer = Composer::default();
-        let rows = panel_height(SIZE, Some(&composer), None);
+        let rows = Shape::new(SIZE)
+            .composer(Some(&composer))
+            .cut()
+            .panel_height();
         app.panel_mut().set_height(rows);
         // The panel's rows start at `FIRST_PANEL_LINE`, so its bottom border
         // is the row after the last of them and the field's own top border
@@ -4602,8 +4612,12 @@ mod pointer {
         let mut app = app_talking();
         app.set_pact_in_flight("/repo/d00", 0, 24);
         let header = app.run_header();
-        app.panel_mut()
-            .set_height(panel_height(SIZE, None, header.as_ref()));
+        app.panel_mut().set_height(
+            Shape::new(SIZE)
+                .header(header.as_ref())
+                .cut()
+                .panel_height(),
+        );
         let past = Reach::Above {
             rows: 2,
             column: IN_PANEL - 1,
@@ -4735,15 +4749,13 @@ mod pointer {
             assert_eq!(
                 mouse_action(
                     mouse,
-                    SIZE,
+                    Shape::new(SIZE),
                     &app,
                     Modals {
                         push: &push,
                         ..Modals::default()
                     }
                     .current(),
-                    None,
-                    &Sigils::Nothing
                 ),
                 None,
                 "{mouse:?} should mean nothing while the push dialog is up"
@@ -4773,15 +4785,13 @@ mod pointer {
             assert_eq!(
                 mouse_action(
                     mouse,
-                    SIZE,
+                    Shape::new(SIZE),
                     &app,
                     Modals {
                         cut: &cut,
                         ..Modals::default()
                     }
                     .current(),
-                    None,
-                    &Sigils::Nothing
                 ),
                 None,
                 "{mouse:?} should mean nothing while the draft dialog is up"
@@ -4810,7 +4820,7 @@ mod pointer {
                 assert_eq!(
                     mouse_action(
                         mouse,
-                        SIZE,
+                        Shape::new(SIZE),
                         &app,
                         Modals {
                             review: drafts,
@@ -4818,8 +4828,6 @@ mod pointer {
                             ..Modals::default()
                         }
                         .current(),
-                        None,
-                        &Sigils::Nothing
                     ),
                     None,
                     "{mouse:?} should mean nothing while a run's window is up"
@@ -4840,7 +4848,7 @@ mod pointer {
             "/repo/.warlock.md",
             NodeState::PactedStale,
         )]);
-        app.set_viewport_height(tree_height(SIZE, &Sigils::Nothing));
+        app.set_viewport_height(Shape::new(SIZE).cut().tree_height());
         app.set_focus(Focus::Panel);
 
         assert_eq!(
