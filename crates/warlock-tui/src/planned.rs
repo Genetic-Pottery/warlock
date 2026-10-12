@@ -54,7 +54,7 @@ use crate::linear::{
 // and `cut::Slice` is one slice's drafts on their way to a board.
 use crate::cut::{self, Cut, fold_title, listed};
 use crate::editing::{self, NO_EDITOR, run_editor};
-use crate::error::{Error, one_line};
+use crate::error::{Error, one_line, say};
 use crate::pull::activity_line;
 use crate::standing::{FOR_CUT, Standing};
 
@@ -634,10 +634,6 @@ fn proposed<P: Converses, W: Write>(
 // and for its reason: `warlock draft docs/brief.md | head -1` is a closed stdout,
 // and failing a run of drafting sessions over the state of a pipe would spend
 // somebody's tokens and then throw away what they bought.
-fn say<W: Write>(out: &mut W, fact: &str) {
-    drop(writeln!(out, "warlock: {fact}"));
-}
-
 // One line for the run and one per slice, rather than push's single sentence:
 // what a cut is about to do is an order, and an order is not a thing one line
 // can say.

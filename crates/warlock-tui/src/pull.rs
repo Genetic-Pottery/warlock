@@ -42,7 +42,7 @@ use crate::claude::{
     Activities, Activity, Cancel, ChatAgent, ClaudeAgent, Split, Splitting, Worked, Working,
     working_system_prompt,
 };
-use crate::error::Error;
+use crate::error::{Error, say};
 use crate::freshness::{Freshened, Freshening, Freshens, freshened};
 use crate::git::{Error as GitError, Forge, Gh, Git, Repository};
 use crate::linear::{Board, Opener as LinearOpener, Opens, QueuedIssue};
@@ -156,20 +156,20 @@ pub(crate) fn pulled<O: Opens, R: Repository, F: Forge, S: Splits, W: Works, P: 
     // be holding uncommitted work on a branch.
     let runs = held_runs(home, root, scope).map_err(|source| Error::Runs { source })?;
     for unreadable in runs.unreadable() {
-        say(progress, &format!("{unreadable}"));
+        tell(progress, &format!("{unreadable}"));
     }
 
     let selected = select(&board, record, &assignee, named, runs.runs())?;
 
     if dry_run {
         for line in would(scope, named, &selected) {
-            say(progress, &line);
+            tell(progress, &line);
         }
         return Ok(());
     }
 
     for skipped in selected.skipped() {
-        say(progress, &passed_over(skipped));
+        tell(progress, &passed_over(skipped));
     }
 
     let issue = match selected.taken() {
@@ -178,7 +178,7 @@ pub(crate) fn pulled<O: Opens, R: Repository, F: Forge, S: Splits, W: Works, P: 
         // asked: a queue with nothing available is an answer and a **0**, and a
         // ticket somebody named that cannot be worked is a refusal.
         Taken::Nothing => {
-            say(progress, &nothing_ready(scope));
+            tell(progress, &nothing_ready(scope));
             return Ok(());
         }
         Taken::Refused(refusal) => {
@@ -223,11 +223,11 @@ pub(crate) fn pulled<O: Opens, R: Repository, F: Forge, S: Splits, W: Works, P: 
 
     match pulled {
         Pulled::Opened { ticket, url } => {
-            say(progress, &opened(&ticket, url.as_deref()));
+            tell(progress, &opened(&ticket, url.as_deref()));
             Ok(())
         }
         Pulled::Unchanged { ticket } => {
-            say(progress, &unchanged(&ticket));
+            tell(progress, &unchanged(&ticket));
             Ok(())
         }
         // Both carry what the ticket's own comment already says at length, because
@@ -538,8 +538,8 @@ pub(crate) fn held<W: Write>(progress: &Shared<W>) -> MutexGuard<'_, Progress<W>
         .expect("nothing panics holding the progress")
 }
 
-fn say<W: Write>(progress: &Shared<W>, fact: &str) {
-    held(progress).say(fact);
+fn tell<W: Write>(progress: &Shared<W>, fact: &str) {
+    say(&mut held(progress).out, fact);
 }
 
 /// What a pull is seen doing, on stdout in `running.rs`'s shape: `warlock: ` a
@@ -597,17 +597,12 @@ impl<W: Write> Progress<W> {
         self.ticket = Some(ticket.to_owned());
     }
 
-    fn say(&mut self, fact: &str) {
-        // Ignored on purpose; see the type's doc.
-        drop(writeln!(self.out, "warlock: {fact}"));
-    }
-
     pub(crate) fn on(&mut self, event: PullEvent) {
         match event {
             PullEvent::Heading(Heading::Split { ticket, title }) => {
                 self.subtask = None;
                 self.said = None;
-                self.say(&format!("splitting `{ticket}` — {title}"));
+                say(&mut self.out, &format!("splitting `{ticket}` — {title}"));
             }
             // The fraction is the loop's own, one-based, and its denominator is the
             // split's answer rather than a running total, as `running.rs`'s is.
@@ -617,14 +612,20 @@ impl<W: Write> Progress<W> {
                 position,
                 total,
             }) => {
-                self.say(&format!("[{position}/{total}] `{id}` {goal}"));
+                say(
+                    &mut self.out,
+                    &format!("[{position}/{total}] `{id}` {goal}"),
+                );
                 self.subtask = Some(id);
                 self.said = None;
             }
             PullEvent::Heading(Heading::PullRequest { branch }) => {
                 self.subtask = None;
                 self.said = None;
-                self.say(&format!("`{branch}` is pushed, opening a pull request"));
+                say(
+                    &mut self.out,
+                    &format!("`{branch}` is pushed, opening a pull request"),
+                );
             }
             PullEvent::Activity(activity) => {
                 let Some(line) = activity_line(&activity) else {
@@ -636,16 +637,18 @@ impl<W: Write> Progress<W> {
                 if running && self.said.as_deref() == Some(line.as_str()) {
                     return;
                 }
-                self.say(&line);
+                say(&mut self.out, &line);
                 self.append(&line);
                 self.said = Some(line);
             }
-            PullEvent::Repair { note } => self.say(&note),
+            PullEvent::Repair { note } => say(&mut self.out, &note),
             // Both board lines are facts about a workflow nobody has finished
             // setting up, said where the run they happened in is being read.
-            PullEvent::NoStartState { team } => self.say(&no_start_state(&team)),
-            PullEvent::NoReviewState { team, state } => self.say(&no_review_state(&team, &state)),
-            PullEvent::Project { line } => self.say(&line),
+            PullEvent::NoStartState { team } => say(&mut self.out, &no_start_state(&team)),
+            PullEvent::NoReviewState { team, state } => {
+                say(&mut self.out, &no_review_state(&team, &state))
+            }
+            PullEvent::Project { line } => say(&mut self.out, &line),
         }
     }
 

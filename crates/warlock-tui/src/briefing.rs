@@ -37,7 +37,7 @@ use crate::asking::{self, Asks};
 use crate::claude::{
     BRIEF_EFFORT, BRIEF_MODEL, ChatAgent, Converses, WRITE_INSTRUCTION, brief_instruction,
 };
-use crate::error::Error;
+use crate::error::{Error, say};
 use crate::standing::{FOR_BRIEF, Standing};
 use crate::submission::{Submitted, submitted_for};
 use crate::template::brief_template;
@@ -328,10 +328,6 @@ fn turned<C: Converses, W: Write>(agent: &C, message: &str, out: &mut W) -> Opti
 // A failed write is ignored, for `planned::say`'s reason: `warlock brief | head`
 // is a closed stdout, and there is nothing useful to say to somebody whose
 // screen has gone away.
-fn say<W: Write>(out: &mut W, fact: &str) {
-    drop(writeln!(out, "warlock: {fact}"));
-}
-
 // Every test drives a temporary repository, a scripted line and a stand-in
 // model, so none of them reads the terminal the developer is sitting at or
 // spawns a `claude`.

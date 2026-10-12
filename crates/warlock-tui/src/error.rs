@@ -3,6 +3,7 @@
 //! restored shell looks like a crash. `one_line` is the flattening that rule
 //! leans on, and other modules borrow it because the footer is one line too.
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::{fmt, io};
 
@@ -352,6 +353,13 @@ impl Error {
             rest: problems.len() - 1,
         })
     }
+}
+
+// A failed write is dropped on purpose: `warlock pull … | head -1` is a closed
+// stdout, and a run of sessions lost over the state of a pipe spends somebody's
+// tokens for nothing.
+pub(crate) fn say<W: Write>(out: &mut W, fact: &str) {
+    drop(writeln!(out, "warlock: {fact}"));
 }
 
 // First line and last, rejoined rather than truncated. A parser's diagnostic is

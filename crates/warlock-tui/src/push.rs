@@ -23,7 +23,7 @@ use warlock_engine::{Destination, Manifest, manifest_path, resolve_filing};
 
 use crate::account::size;
 use crate::brief::{Brief, brief_at};
-use crate::error::Error;
+use crate::error::{Error, say};
 use crate::linear::{Board, NewProject, Opener as LinearOpener, Opens};
 use crate::standing::{FOR_PUSH, Standing};
 
@@ -198,14 +198,16 @@ pub(crate) fn sent<W: Write>(
             .with_status(status.as_deref()),
     )?;
 
-    drop(writeln!(
+    say(
         out,
-        "warlock: filed `{}` to `{}`, labelled `{}`: {}",
-        brief.name(),
-        destination.team_key(),
-        destination.label(),
-        project.url()
-    ));
+        &format!(
+            "filed `{}` to `{}`, labelled `{}`: {}",
+            brief.name(),
+            destination.team_key(),
+            destination.label(),
+            project.url()
+        ),
+    );
 
     Ok(project.url().to_owned())
 }

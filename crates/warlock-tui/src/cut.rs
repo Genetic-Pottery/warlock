@@ -23,7 +23,7 @@ use std::path::Path;
 use warlock_engine::drafting::{Draft, is_identifier};
 use warlock_engine::{Destination, manifest_path};
 
-use crate::error::Error;
+use crate::error::{Error, say};
 use crate::linear::{Board, CUT_NOTE, Issue as LinearIssue, NewIssue, SKIP_NOTE};
 use crate::queue::IN_PROGRESS;
 
@@ -127,12 +127,10 @@ pub(crate) fn cut<W: Write>(
     // Printed before the note is said, not after, for the reason `push`'s URL
     // is: the issues exist from here on and their identifiers are the one thing
     // that must not be lost, so they go out whatever the comment does next.
-    drop(writeln!(
+    say(
         out,
-        "warlock: cut `{}` into {}",
-        slice.title,
-        listed(&identifiers)
-    ));
+        &format!("cut `{}` into {}", slice.title, listed(&identifiers)),
+    );
 
     linear
         .comment_on_project(filing.project, &cut_note(slice.title, &identifiers))

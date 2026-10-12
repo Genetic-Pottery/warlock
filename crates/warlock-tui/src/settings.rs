@@ -1,5 +1,5 @@
 use std::fs;
-use std::io::{self, Write};
+use std::io;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -9,7 +9,7 @@ use warlock_engine::{
 
 use crate::app::{Held, Sigils, Target};
 use crate::cut::listed;
-use crate::error::Error;
+use crate::error::{Error, say};
 use crate::standing::Standing;
 use crate::submission::{Branching, Sigiling};
 
@@ -167,7 +167,7 @@ impl Settings {
             Said::Shown(line) => line.clone(),
             Said::Wrote(line) => self.written(line),
         };
-        drop(writeln!(io::stdout(), "warlock: {line}"));
+        say(&mut io::stdout(), &line);
     }
 
     fn written(&self, line: &str) -> String {

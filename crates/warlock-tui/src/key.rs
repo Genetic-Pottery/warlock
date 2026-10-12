@@ -34,7 +34,7 @@ use warlock_engine::{
 };
 
 use crate::asking::{self, Asks, Cooked};
-use crate::error::{Error, one_line};
+use crate::error::{Error, one_line, say};
 use crate::query::{envelope, write_object};
 use crate::standing::{FOR_KEY, Standing};
 
@@ -170,11 +170,10 @@ fn added<W: Write>(
     }
 
     save_key(home, name, key).map_err(|source| Error::Keys { source })?;
-    drop(writeln!(
+    say(
         out,
-        "warlock: stored a key for `{name}` in `{}`",
-        path.display()
-    ));
+        &format!("stored a key for `{name}` in `{}`", path.display()),
+    );
     Ok(())
 }
 
@@ -314,12 +313,14 @@ fn bound<W: Write>(home: &Path, root: &Path, name: &str, out: &mut W) -> Result<
     }
 
     save_key_binding(home, root, name).map_err(|source| Error::Sigils { source })?;
-    drop(writeln!(
+    say(
         out,
-        "warlock: `{}` is bound to the key `{name}`, written to `{}`",
-        root.display(),
-        sigils_path(home, root).display()
-    ));
+        &format!(
+            "`{}` is bound to the key `{name}`, written to `{}`",
+            root.display(),
+            sigils_path(home, root).display()
+        ),
+    );
     Ok(())
 }
 
@@ -364,11 +365,13 @@ fn forgotten<W: Write>(home: &Path, root: &Path, name: &str, out: &mut W) -> Res
     } else {
         String::new()
     };
-    drop(writeln!(
+    say(
         out,
-        "warlock: forgot the key `{name}`, removed from `{}`{unbound}",
-        keys_path(home).display()
-    ));
+        &format!(
+            "forgot the key `{name}`, removed from `{}`{unbound}",
+            keys_path(home).display()
+        ),
+    );
     Ok(())
 }
 

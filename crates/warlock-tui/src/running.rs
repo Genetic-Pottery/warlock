@@ -29,7 +29,7 @@ use crate::claude::{Cancel, ClaudeAgent};
 use crate::descent::{Descent, descend};
 use crate::edits::{Opened, opened};
 use crate::error::CANCELLED;
-use crate::error::{Error, one_line};
+use crate::error::{Error, one_line, say};
 use crate::freshness::named;
 
 // The headless counterpart of the panel's channel, and much smaller: no thread
@@ -76,11 +76,6 @@ impl<W: Write> Progress<W> {
         self.total
     }
 
-    fn say(&mut self, fact: &str) {
-        // Ignored on purpose; see the type's doc.
-        let _ = writeln!(self.out, "warlock: {fact}");
-    }
-
     fn on(&mut self, event: Event) {
         match event {
             // The fraction is the engine's own, unaltered and one-based, and its
@@ -95,10 +90,13 @@ impl<W: Write> Progress<W> {
                 total,
             } => {
                 self.total = total;
-                self.say(&format!(
-                    "[{position}/{total}] documenting {}",
-                    named(&self.root, &directory)
-                ));
+                say(
+                    &mut self.out,
+                    &format!(
+                        "[{position}/{total}] documenting {}",
+                        named(&self.root, &directory)
+                    ),
+                );
             }
             // On stdout with the progress and not on stderr with the report,
             // because a mended slot is a document that was written, not a
@@ -108,24 +106,36 @@ impl<W: Write> Progress<W> {
             // entry from a written one, so it says which slot and what was done
             // to it.
             Event::Repaired { directory, mend } => {
-                self.say(&format!("{} — {mend}", named(&self.root, &directory)));
+                say(
+                    &mut self.out,
+                    &format!("{} — {mend}", named(&self.root, &directory)),
+                );
             }
             Event::Documented { directory } => {
-                self.say(&format!("documented {}", named(&self.root, &directory)));
+                say(
+                    &mut self.out,
+                    &format!("documented {}", named(&self.root, &directory)),
+                );
             }
             Event::Unchanged { directory } => {
-                self.say(&format!("unchanged {}", named(&self.root, &directory)));
+                say(
+                    &mut self.out,
+                    &format!("unchanged {}", named(&self.root, &directory)),
+                );
             }
             // Both names on the line. A headless run is read in a log after the
             // fact, often by whoever has to explain why a directory is still
             // yellow, and `skipped crates/tui` on its own is the half of the
             // answer that does not help.
             Event::Skipped { directory, below } => {
-                self.say(&format!(
-                    "skipped {} — {} below it was not documented",
-                    named(&self.root, &directory),
-                    named(&self.root, &below)
-                ));
+                say(
+                    &mut self.out,
+                    &format!(
+                        "skipped {} — {} below it was not documented",
+                        named(&self.root, &directory),
+                        named(&self.root, &below)
+                    ),
+                );
             }
             // A pipe is read a line per directory; the panel's per-file
             // fractions and retries would bury those lines.
@@ -152,8 +162,7 @@ struct Report {
 impl Report {
     fn onto<W: Write>(&self, err: &mut W) {
         for line in &self.lines {
-            // Ignored on purpose; see above.
-            let _ = writeln!(err, "warlock: {line}");
+            say(err, line);
         }
     }
 

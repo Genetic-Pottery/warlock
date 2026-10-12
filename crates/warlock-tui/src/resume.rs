@@ -25,7 +25,7 @@ use warlock_engine::{PullRun, Reset, ResetMode, pulls, run_dir};
 use crate::app::App;
 use crate::chatting::Chat;
 use crate::claude::Converses;
-use crate::error::{Error, one_line};
+use crate::error::{Error, one_line, say};
 use crate::standing::{FOR_RESUME, Standing};
 use crate::submission::PULL;
 
@@ -220,10 +220,6 @@ fn released(reset: &Reset) -> String {
         Some(reason) => format!("{line} — {}", one_line(reason)),
         None => line,
     }
-}
-
-fn say<W: Write>(out: &mut W, fact: &str) {
-    drop(writeln!(out, "warlock: {fact}"));
 }
 
 // Every test drives the whole subcommand against a temporary home, so none of
