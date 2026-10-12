@@ -1,7 +1,7 @@
 use super::{
     Accepted, Defect, Described, Dropped, ENTRY_CHARS, ENTRY_MINIMUM, Entry, Evidence, Expected,
     FILE_PROMPT, Fill, LIST_CAP, MEND_PASSES, Mend, Mended, PURPOSE_CHARS, STAMP, SYNTHESIS_PROMPT,
-    Slot, accept_file, accept_synthesis, check, fallback, human, lines_of, mend, mended,
+    Slot, accept_file, accept_synthesis, check, fallback, guarded, human, lines_of, mend, mended,
     names_tool, render, stub_answer, synthesis_instructions,
 };
 use std::collections::{BTreeMap, BTreeSet};
@@ -1129,29 +1129,44 @@ fn a_fallback_line_is_the_name_the_size_and_the_symbols() {
     let described = declared();
 
     assert_eq!(
-        fallback::file("lib.rs", &expected, &described),
+        fallback::file(
+            "lib.rs",
+            &expected,
+            &described,
+            guarded(&expected, &described)
+        ),
         "A 39 B file named `lib.rs`, declaring `pact`, `subtree_hash`."
     );
     // A file warlock extracted nothing from still gets its name and size,
     // and says only that and that it found no names.
     assert_eq!(
-        fallback::file("Cargo.toml", &expected, &described),
+        fallback::file(
+            "Cargo.toml",
+            &expected,
+            &described,
+            guarded(&expected, &described)
+        ),
         "A 26 B file named `Cargo.toml`, with no symbols extracted from it."
     );
     // The purpose is the directory's name and what is in it: five files,
     // one child. No sentence about what any of it is for.
     assert_eq!(
-        fallback::purpose("engine", &expected, &Described::default()),
+        fallback::purpose(
+            "engine",
+            &expected,
+            guarded(&expected, &Described::default())
+        ),
         "`engine` holds 5 files and 1 subdirectory."
     );
     assert_eq!(
-        fallback::directory("src", &expected, &Described::default()),
+        fallback::directory("src", guarded(&expected, &Described::default())),
         "A subdirectory named `src`."
     );
 
     let bare = Request::new("describe", "/repo/empty");
+    let bare = Expected::of(&bare);
     assert_eq!(
-        fallback::purpose("empty", &Expected::of(&bare), &Described::default()),
+        fallback::purpose("empty", &bare, guarded(&bare, &Described::default())),
         "`empty` holds no files and no subdirectories."
     );
 }
@@ -1174,11 +1189,23 @@ fn every_fallback_line_holds_one_line_and_both_caps() {
         "a",
         "",
     ] {
-        holds_the_shape(&fallback::file(path, &expected, &described));
+        holds_the_shape(&fallback::file(
+            path,
+            &expected,
+            &described,
+            guarded(&expected, &described),
+        ));
     }
     for name in ["engine", "a", ""] {
-        holds_the_shape(&fallback::purpose(name, &expected, &Described::default()));
-        holds_the_shape(&fallback::directory(name, &expected, &Described::default()));
+        holds_the_shape(&fallback::purpose(
+            name,
+            &expected,
+            guarded(&expected, &Described::default()),
+        ));
+        holds_the_shape(&fallback::directory(
+            name,
+            guarded(&expected, &Described::default()),
+        ));
     }
 
     // The symbol list stops at the cap rather than being cut through a
@@ -1192,7 +1219,7 @@ fn every_fallback_line_holds_one_line_and_both_caps() {
         .collect(),
         ..Described::default()
     };
-    let line = fallback::file("lib.rs", &expected, &long);
+    let line = fallback::file("lib.rs", &expected, &long, guarded(&expected, &long));
     holds_the_shape(&line);
     assert!(line.ends_with("`."), "cut between names: {line:?}");
 }
@@ -1237,13 +1264,22 @@ fn a_name_warlock_shares_does_not_trip_the_tool_rule() {
         ..Described::default()
     };
 
-    let line = fallback::file("warlock.rs", &expected, &described);
+    let line = fallback::file(
+        "warlock.rs",
+        &expected,
+        &described,
+        guarded(&expected, &described),
+    );
     assert!(!names_tool(&line), "{line}");
     assert!(line.contains("`draw`"), "the other symbols stay: {line}");
     holds_the_shape(&line);
     for named in [
-        fallback::purpose("warlock", &expected, &Described::default()),
-        fallback::directory("warlock-tui", &expected, &Described::default()),
+        fallback::purpose(
+            "warlock",
+            &expected,
+            guarded(&expected, &Described::default()),
+        ),
+        fallback::directory("warlock-tui", guarded(&expected, &Described::default())),
     ] {
         assert!(!names_tool(&named), "{named}");
         holds_the_shape(&named);
@@ -1251,10 +1287,19 @@ fn a_name_warlock_shares_does_not_trip_the_tool_rule() {
 
     // And the rule the caller applies cannot fire on a fill built of them.
     let fill = Fill {
-        purpose: fallback::purpose("crates", &expected, &Described::default()),
+        purpose: fallback::purpose(
+            "crates",
+            &expected,
+            guarded(&expected, &Described::default()),
+        ),
         files: [(
             "warlock.rs".to_owned(),
-            fallback::file("warlock.rs", &expected, &described),
+            fallback::file(
+                "warlock.rs",
+                &expected,
+                &described,
+                guarded(&expected, &described),
+            ),
         )]
         .into_iter()
         .collect(),
@@ -1268,11 +1313,12 @@ fn a_name_warlock_shares_does_not_trip_the_tool_rule() {
         .with_files([File::present("warlock.rs", *b"//! The warlock engine.\n")]);
     let own = Expected::of(&own);
     assert!(Evidence::new(&own, &Described::default()).mentions_tool());
-    let line = fallback::file("warlock.rs", &own, &described);
+    let line = fallback::file("warlock.rs", &own, &described, guarded(&own, &described));
     assert!(line.contains("`warlock.rs`"), "{line}");
     assert!(line.contains("`warlock_run`"), "{line}");
     assert!(
-        fallback::purpose("warlock", &own, &Described::default()).contains("`warlock`"),
+        fallback::purpose("warlock", &own, guarded(&own, &Described::default()))
+            .contains("`warlock`"),
         "the directory names itself too"
     );
 }
@@ -1283,10 +1329,24 @@ fn no_fallback_line_speaks_in_the_stubs_words() {
     let expected = Expected::of(&request);
     let described = declared();
     let lines = [
-        fallback::file("lib.rs", &expected, &described),
-        fallback::file("logo.png", &expected, &described),
-        fallback::purpose("engine", &expected, &Described::default()),
-        fallback::directory("src", &expected, &Described::default()),
+        fallback::file(
+            "lib.rs",
+            &expected,
+            &described,
+            guarded(&expected, &described),
+        ),
+        fallback::file(
+            "logo.png",
+            &expected,
+            &described,
+            guarded(&expected, &described),
+        ),
+        fallback::purpose(
+            "engine",
+            &expected,
+            guarded(&expected, &Described::default()),
+        ),
+        fallback::directory("src", guarded(&expected, &Described::default())),
     ];
     // `Fill::stub` is a test double's wording; a repaired document says
     // what warlock measured, and never that.
@@ -1323,11 +1383,15 @@ fn an_empty_value_falls_back_to_what_warlock_measured() {
     let (repaired, mends) = mend_of(&fill);
     assert_eq!(
         repaired.purpose,
-        fallback::purpose("engine", &expected, &Described::default())
+        fallback::purpose(
+            "engine",
+            &expected,
+            guarded(&expected, &Described::default())
+        )
     );
     assert_eq!(
         repaired.directories["src"],
-        fallback::directory("src", &expected, &Described::default())
+        fallback::directory("src", guarded(&expected, &Described::default()))
     );
     assert_eq!(
         mends,
@@ -1353,7 +1417,10 @@ fn a_value_under_the_floor_falls_back_to_what_warlock_measured() {
     let (repaired, mends) = mend_of(&fill);
     assert_eq!(
         repaired.directories["src"],
-        fallback::directory("src", &Expected::of(&request), &Described::default())
+        fallback::directory(
+            "src",
+            guarded(&Expected::of(&request), &Described::default())
+        )
     );
     assert_eq!(mends.first().map(|mend| mend.done), Some(Mended::Supplied));
     assert_eq!(mends.len(), 1, "{mends:?}");
@@ -1464,11 +1531,15 @@ fn a_value_naming_the_tool_is_dropped_and_falls_to_the_next_rule() {
     let (repaired, mends) = mend_of(&fill);
     assert_eq!(
         repaired.directories["src"],
-        fallback::directory("src", &expected, &Described::default())
+        fallback::directory("src", guarded(&expected, &Described::default()))
     );
     assert_eq!(
         repaired.purpose,
-        fallback::purpose("engine", &expected, &Described::default())
+        fallback::purpose(
+            "engine",
+            &expected,
+            guarded(&expected, &Described::default())
+        )
     );
     assert!(
         repaired.structure.is_empty(),
@@ -1704,16 +1775,19 @@ fn a_multibyte_name_is_cut_on_a_character_boundary() {
     };
 
     // No panic, and the count is characters rather than bytes.
-    let line = fallback::file(&name, &expected, &described);
+    let line = fallback::file(&name, &expected, &described, guarded(&expected, &described));
     holds_the_shape(&line);
     assert_eq!(line.chars().count(), ENTRY_CHARS);
     assert!(line.len() > ENTRY_CHARS, "multibyte: {} bytes", line.len());
 
-    holds_the_shape(&fallback::purpose(&name, &expected, &Described::default()));
-    holds_the_shape(&fallback::directory(
+    holds_the_shape(&fallback::purpose(
         &name,
         &expected,
-        &Described::default(),
+        guarded(&expected, &Described::default()),
+    ));
+    holds_the_shape(&fallback::directory(
+        &name,
+        guarded(&expected, &Described::default()),
     ));
 }
 

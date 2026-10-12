@@ -1,3 +1,4 @@
+use std::cell::OnceCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fmt::Write as _;
@@ -332,10 +333,11 @@ impl<'a> Expected<'a> {
 /// compile, rather than passing its tests and thinning every document.
 /// `the_road_without_the_text_checks_no_more_weakly_than_the_road_with_it` is
 /// the same invariant asserted from the outside.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct Evidence<'a> {
     expected: &'a Expected<'a>,
     described: &'a Described,
+    code: OnceCell<Vec<String>>,
 }
 
 impl<'a> Evidence<'a> {
@@ -344,12 +346,8 @@ impl<'a> Evidence<'a> {
         Self {
             expected,
             described,
+            code: OnceCell::new(),
         }
-    }
-
-    #[must_use]
-    pub const fn expected(&self) -> &'a Expected<'a> {
-        self.expected
     }
 
     fn sent(&self) -> impl Iterator<Item = &'a str> + '_ {
@@ -366,15 +364,21 @@ impl<'a> Evidence<'a> {
     // names are held against. `sent` itself is unchanged and still answers the
     // tool-naming guard below, where a comment naming warlock is a directory
     // naming warlock and the guard should stand down for it.
-    fn sent_code(&self) -> impl Iterator<Item = String> + '_ {
-        self.expected.files.iter().filter_map(|(path, (_, shown))| {
-            let Shown::Text(text) = shown else {
-                return None;
-            };
-            Some(
-                languages::without_comments(Path::new(path), text)
-                    .unwrap_or_else(|| (*text).to_owned()),
-            )
+    fn sent_code(&self) -> &[String] {
+        self.code.get_or_init(|| {
+            self.expected
+                .files
+                .iter()
+                .filter_map(|(path, (_, shown))| {
+                    let Shown::Text(text) = shown else {
+                        return None;
+                    };
+                    Some(
+                        languages::without_comments(Path::new(path), text)
+                            .unwrap_or_else(|| (*text).to_owned()),
+                    )
+                })
+                .collect()
         })
     }
 
@@ -403,7 +407,7 @@ impl<'a> Evidence<'a> {
                 .flatten()
                 .any(|declared| declared == name)
             || self.described.written_anywhere(name)
-            || self.sent_code().any(|code| code.contains(name))
+            || self.sent_code().iter().any(|code| code.contains(name))
     }
 
     // Whether the directory itself uses the tool's name, which is what stands
@@ -423,7 +427,13 @@ impl<'a> Evidence<'a> {
 }
 
 fn names_tool(text: &str) -> bool {
-    text.to_ascii_lowercase().contains("warlock")
+    text.as_bytes()
+        .windows(b"warlock".len())
+        .any(|window| window.eq_ignore_ascii_case(b"warlock"))
+}
+
+fn guarded(expected: &Expected<'_>, described: &Described) -> bool {
+    !Evidence::new(expected, described).mentions_tool()
 }
 
 fn shown(file: &File) -> Shown<'_> {
@@ -709,15 +719,9 @@ pub fn accept_file(
     }
 
     // The names are checked here, against this one file, because this is the
-    // only place a per-file line is ever looked at. `check` grew a loop over
-    // `fill.files` for this and never ran it: `accept_synthesis` clears that map
-    // before checking and merges the lines back in afterwards, so the loop sees
-    // an empty map on every real pass and fires only from `mend`, which runs
-    // only once an answer has already failed for something else. The comment
-    // above `check` claimed this function did the job; it did not, and
-    // `Decoder::decode()` reached engine/core's document while every test of the
-    // check passed, because those tests build a `Fill` by hand and call `check`
-    // directly.
+    // only place a fresh per-file line is looked at: `accept_synthesis` clears
+    // `fill.files` before calling `check` and merges the lines back in
+    // afterwards, so `check`'s loop over them never sees a fresh line.
     //
     // One file's evidence and not the directory's, which is the narrower rule
     // and the right one. A line naming a symbol some neighbour declares is
@@ -727,7 +731,7 @@ pub fn accept_file(
     // name is witnessed and stands. What it refuses is a name with nothing
     // behind it here — which, once comments stop counting, means a name with
     // nothing behind it at all.
-    unwitnessed(&field, line, evidence, &mut defects);
+    unwitnessed(&field, line, &evidence, &mut defects);
 
     Accepted::judged(line.trim().to_owned(), defects)
 }
@@ -739,17 +743,14 @@ pub fn accept_file(
 /// sounds like it read the file.
 #[must_use]
 pub fn file_fallback(path: &str, expected: &Expected<'_>, described: &Described) -> String {
-    fallback::file(path, expected, described)
+    fallback::file(path, expected, described, guarded(expected, described))
 }
 
 // The `files` loop below is reached from `mend` and never from
 // `accept_synthesis`, which clears that map before calling this and merges the
-// lines in afterwards. That is not a hole any more — `accept_file` checks each
-// line's names as it accepts it, against the one file the line is about — but it
-// was one for as long as this comment claimed otherwise, so do not read the loop
-// as the guard on a fresh line. It guards a fill being repaired: lines carried
-// forward off the page, and lines already standing when something else about the
-// answer failed.
+// lines in afterwards. `accept_file` is the guard on a fresh line; this loop
+// guards a fill being repaired: lines carried forward off the page, and lines
+// already standing when something else about the answer failed.
 //
 // Keying the lines is a separate matter and still not done here: a synthesis
 // request sends no text, so `Expected::asked` is empty and keying against it
@@ -769,14 +770,11 @@ fn check(fill: &Fill, expected: &Expected<'_>, described: &Described) -> Vec<Def
     let children: Vec<&str> = expected.directories.keys().copied().collect();
     keyed(&fill.directories, &children, &mut defects);
 
-    stated(&fill.structure, evidence, &mut defects);
+    stated(&fill.structure, &evidence, &mut defects);
 
-    // The per-file lines went unchecked entirely until this: not their names,
-    // and not even the tool-naming guard below, which `values` still does not
-    // reach. `Decoder::decode()` arrived in one of them.
     for (path, line) in &fill.files {
         if expected.files.contains_key(path.as_str()) {
-            unwitnessed(&Slot::FileLine(path.clone()), line, evidence, &mut defects);
+            unwitnessed(&Slot::FileLine(path.clone()), line, &evidence, &mut defects);
         }
     }
 
@@ -826,7 +824,7 @@ fn referenced(line: &str) -> BTreeSet<String> {
     found
 }
 
-fn unwitnessed(field: &Slot, line: &str, evidence: Evidence<'_>, defects: &mut Vec<Defect>) {
+fn unwitnessed(field: &Slot, line: &str, evidence: &Evidence<'_>, defects: &mut Vec<Defect>) {
     for name in referenced(line) {
         if !evidence.knows(&name) {
             defects.push(Defect::UnknownTarget {
@@ -913,7 +911,7 @@ fn keyed(given: &BTreeMap<String, String>, wanted: &[&str], defects: &mut Vec<De
 //
 // An entry must name something — it is a statement about how the files here
 // fit together, and one that names no file is not that statement.
-fn stated(given: &[Entry], evidence: Evidence<'_>, defects: &mut Vec<Defect>) {
+fn stated(given: &[Entry], evidence: &Evidence<'_>, defects: &mut Vec<Defect>) {
     if given.len() > LIST_CAP {
         defects.push(Defect::TooMany {
             field: Slot::Structure,
@@ -1034,16 +1032,18 @@ fn human(bytes: u64) -> String {
 // for, and nothing here comes from a model.
 //
 // On the tool name. `names_tool` fires on any text holding "warlock" in any
-// case, and `check` applies it to every value whenever `Expected::mentions_tool`
-// is false, so a file called `warlock.rs` or a directory called `warlock` would
-// otherwise make its own fallback line defective — and, under the mend, a line
-// that is dropped and rebuilt for ever. Quoting cannot help: the rule is a
-// substring test, not a parse. So while the rule is live a fact that names the
-// tool is left out of the line rather than reworded — the name is dropped and a
-// declared symbol naming the tool is dropped from the list. The document loses
-// nothing by it, because `render` prints the path and the declared names itself
-// either way. Once the files themselves use the word the rule has stood down
-// and every fact goes in whole.
+// case. While `Evidence::mentions_tool` is false, `check` applies it to the
+// purpose, the `directories` lines and the structure lines, and `accept_file`
+// to a files line, so a directory called `warlock` would otherwise make its own
+// fallback line defective — and, under the mend, a line that is dropped and
+// rebuilt for ever. Quoting cannot help: the rule is a substring test, not a
+// parse. So while the rule is live a fact that names the tool is left out of
+// the line rather than reworded — the name is dropped and a declared symbol
+// naming the tool is dropped from the list. A files line is held to the same
+// rule, so it reads like one `accept_file` would have let stand. The document
+// loses nothing by it, because `render` prints the path and the declared names
+// itself either way. Once the files themselves use the word the rule has stood
+// down and every fact goes in whole.
 mod fallback {
     use super::{
         DECLARED_SHOWN, Described, ENTRY_CHARS, ENTRY_MINIMUM, Expected, human, names_tool,
@@ -1069,8 +1069,12 @@ mod fallback {
     // line — and the alternative, leaving the entry empty and letting `check`
     // pass it, was rejected on the two grounds above. Do not dress this line up
     // into something that sounds like it read the file.
-    pub(super) fn file(path: &str, expected: &Expected<'_>, described: &Described) -> String {
-        let guarded = !super::Evidence::new(expected, described).mentions_tool();
+    pub(super) fn file(
+        path: &str,
+        expected: &Expected<'_>,
+        described: &Described,
+        guarded: bool,
+    ) -> String {
         let size = expected.files.get(path).map(|(size, _)| human(*size));
         let named = !(path.is_empty() || guarded && names_tool(path));
         let mut line = match (size, named) {
@@ -1111,8 +1115,7 @@ mod fallback {
 
     // A purpose: the directory's own name and how much is under it. What it is
     // for is exactly what a pass that did not answer never said.
-    pub(super) fn purpose(name: &str, expected: &Expected<'_>, described: &Described) -> String {
-        let guarded = !super::Evidence::new(expected, described).mentions_tool();
+    pub(super) fn purpose(name: &str, expected: &Expected<'_>, guarded: bool) -> String {
         let subject = if name.is_empty() || (guarded && names_tool(name)) {
             "This directory".to_owned()
         } else {
@@ -1129,8 +1132,7 @@ mod fallback {
     // A `directories` entry: the child's name and nothing else. Its own
     // document says what is under it, and restating that here would be a
     // second-hand claim.
-    pub(super) fn directory(child: &str, expected: &Expected<'_>, described: &Described) -> String {
-        let guarded = !super::Evidence::new(expected, described).mentions_tool();
+    pub(super) fn directory(child: &str, guarded: bool) -> String {
         let line = if child.is_empty() || (guarded && names_tool(child)) {
             "A subdirectory of this directory.".to_owned()
         } else {
@@ -1384,18 +1386,21 @@ impl Plan {
     }
 
     fn carry_out(self, fill: &mut Fill, expected: &Expected<'_>, described: &Described) {
+        let guarded = guarded(expected, described);
         if self.purpose {
-            fill.purpose = fallback::purpose(&expected.name, expected, described);
+            fill.purpose = fallback::purpose(&expected.name, expected, guarded);
         }
         for key in &self.filled_directories {
             fill.directories
-                .insert(key.clone(), fallback::directory(key, expected, described));
+                .insert(key.clone(), fallback::directory(key, guarded));
         }
         fill.directories
             .retain(|key, _| !self.dropped_directories.contains(key));
         for path in &self.filled_files {
-            fill.files
-                .insert(path.clone(), fallback::file(path, expected, described));
+            fill.files.insert(
+                path.clone(),
+                fallback::file(path, expected, described, guarded),
+            );
         }
 
         // Dropped by the index the defects named, then cut to the cap: both
