@@ -227,7 +227,7 @@ fn checked(
         path,
         scope,
         sigils,
-        config: settings.config(),
+        config: settings.config().map(Path::to_path_buf),
         opens,
         team: record.map(|record| record.team_key().to_owned()),
         review_state: record.map(|record| record.review_state().to_owned()),

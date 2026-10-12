@@ -22,6 +22,9 @@ use crate::submission::{Branching, Sigiling};
 pub(crate) struct Settings {
     home: Option<PathBuf>,
     root: PathBuf,
+    // Derived once: the derivation canonicalizes and hashes the root, and
+    // `changed` stats this path every frame.
+    config: Option<PathBuf>,
     stamp: Stamp,
 }
 
@@ -38,9 +41,12 @@ impl Settings {
     // No home is nothing held rather than a failure: a reader of the tree has no
     // use for one, and the writes refuse with `Error::NoHome` when asked for.
     pub(crate) fn at(home: Option<PathBuf>, root: impl Into<PathBuf>) -> Self {
+        let root = root.into();
+        let config = home.as_deref().map(|home| sigils_path(home, &root));
         Self {
             home,
-            root: root.into(),
+            root,
+            config,
             stamp: Stamp::Unread,
         }
     }
@@ -58,8 +64,8 @@ impl Settings {
         self.home.as_deref()
     }
 
-    pub(crate) fn config(&self) -> Option<PathBuf> {
-        self.home().map(|home| sigils_path(home, &self.root))
+    pub(crate) fn config(&self) -> Option<&Path> {
+        self.config.as_deref()
     }
 
     /// Read whole, and never an error: what the chrome draws and what the
