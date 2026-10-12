@@ -656,7 +656,7 @@ fn a_whole_pull_prints_a_header_per_section_with_the_session_s_lines_under_it() 
     assert!(outcome.is_ok(), "{outcome:?}: {printed}");
     // A header per section, the fraction one-based over the split's own answer.
     assert!(
-        printed.contains(&format!("warlock: splitting `{TICKET}` — {TITLE}")),
+        printed.contains(&format!("warlock: {TICKET} — splitting {TITLE}")),
         "{printed}"
     );
     assert!(

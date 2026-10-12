@@ -949,6 +949,29 @@ pub(crate) enum PullEvent {
     },
 }
 
+fn no_start_state(team: &str) -> String {
+    format!("the team `{team}` has no `In Progress` state, so the ticket was not moved")
+}
+
+fn no_review_state(team: &str, state: &str) -> String {
+    format!("the team `{team}` has no `{state}` state, so the ticket was not moved into review")
+}
+
+impl PullEvent {
+    /// The line both doors say, or `None` for an activity, which each words for
+    /// itself.
+    pub(crate) fn line(&self) -> Option<String> {
+        match self {
+            Self::Heading(heading) => Some(heading.line()),
+            Self::Activity(_) => None,
+            Self::Repair { note } => Some(note.clone()),
+            Self::NoStartState { team } => Some(no_start_state(team)),
+            Self::NoReviewState { team, state } => Some(no_review_state(team, state)),
+            Self::Project { line } => Some(line.clone()),
+        }
+    }
+}
+
 /// The ticket's project moved to the review state when it is `In Progress` —
 /// every slice drafted — and each of its issues is in review or closed. `None`
 /// when there is nothing to say: no project, a project still being drafted, or
@@ -1025,6 +1048,21 @@ pub(crate) enum Heading {
     PullRequest {
         branch: String,
     },
+}
+
+impl Heading {
+    pub(crate) fn line(&self) -> String {
+        match self {
+            Self::Split { ticket, title } => format!("{ticket} — splitting {title}"),
+            Self::Subtask {
+                id,
+                goal,
+                position,
+                total,
+            } => format!("[{position}/{total}] `{id}` {goal}"),
+            Self::PullRequest { branch } => format!("`{branch}` is pushed, opening a pull request"),
+        }
+    }
 }
 
 /// The sub-task to work next: the first [`Pending`](SubtaskStatus::Pending) one

@@ -44,7 +44,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use warlock_engine::pact::Event;
-use warlock_engine::{Manifest, PullRun, ScopeRecord, held_runs};
+use warlock_engine::{Manifest, PullRun, ScopeRecord};
 
 use crate::app::App;
 use crate::claude::{
@@ -63,10 +63,9 @@ use crate::linear::{
 };
 use crate::pacting::CancelGuard;
 use crate::pull::{
-    Taken, clean, no_review_state, no_start_state, nothing_ready, number_in, opened, passed_over,
-    prepare, select, unchanged,
+    clean, nothing_ready, number_in, opened, passed_over, prepare, selection, unchanged,
 };
-use crate::pulling::{Heading, PullEvent, Pulled, Pulling, Splits, Ticket, Works, next_runnable};
+use crate::pulling::{PullEvent, Pulled, Pulling, Splits, Ticket, Works, next_runnable};
 use crate::standing::Standing;
 use crate::submission::Taking;
 
@@ -639,19 +638,8 @@ impl Raises for Claudes {
     fn raise(&self, asked: Raising<'_>) -> Raised<Splitter, Worker, Freshener> {
         let activities = activity_port(&asked.events);
         Raised {
-            split: Splitter {
-                agent: ChatAgent::splitting(),
-                activities: activities.clone(),
-                stopping: asked.stopping.clone(),
-            },
-            // The prompt is built once, because it says which scope the work is
-            // under and which sigils this machine holds, and neither moves for
-            // the length of a run.
-            sessions: Worker {
-                agent: ChatAgent::working(&working_system_prompt(asked.scope, asked.held)),
-                activities: activities.clone(),
-                stopping: asked.stopping,
-            },
+            split: Splitter::new(activities.clone(), asked.stopping.clone()),
+            sessions: Worker::new(asked.scope, asked.held, activities.clone(), asked.stopping),
             freshen: Freshener {
                 agent: ClaudeAgent::freshening(asked.cancel.clone(), activities),
                 cancel: asked.cancel,
@@ -663,13 +651,22 @@ impl Raises for Claudes {
 
 /// The splitting session, and the ports it reports and answers through.
 ///
-/// Not `pull.rs`'s [`Splitter`](crate::pull) even though it raises the same
-/// session, and the difference is the one line that is not there: a shell has no
-/// stop button, so the CLI's never publishes the handle the session minted.
+/// One agent for the run rather than one per attempt: an agent is a command line
+/// and a timeout, so nothing is spawned until a split is asked for.
 pub(crate) struct Splitter {
     agent: ChatAgent,
     activities: Activities,
     stopping: Stopping,
+}
+
+impl Splitter {
+    pub(crate) fn new(activities: Activities, stopping: Stopping) -> Self {
+        Self {
+            agent: ChatAgent::splitting(),
+            activities,
+            stopping,
+        }
+    }
 }
 
 impl Splits for Splitter {
@@ -682,11 +679,29 @@ impl Splits for Splitter {
 }
 
 /// One sub-task session per call, at the system prompt the scope and the sigils
-/// make, and the same difference from `pull.rs`'s.
+/// make.
+///
+/// The prompt is built once, because it says which scope the work is under and
+/// which sigils this machine holds, and neither moves for the length of a run.
 pub(crate) struct Worker {
     agent: ChatAgent,
     activities: Activities,
     stopping: Stopping,
+}
+
+impl Worker {
+    pub(crate) fn new(
+        scope: &str,
+        held: &[String],
+        activities: Activities,
+        stopping: Stopping,
+    ) -> Self {
+        Self {
+            agent: ChatAgent::working(&working_system_prompt(scope, held)),
+            activities,
+            stopping,
+        }
+    }
 }
 
 impl Works for Worker {
@@ -1018,46 +1033,25 @@ fn chose<O: Opens, R: Repository>(
     clean(repo)?;
 
     let board = open.open(&work.value);
-    let assignee = board.viewer()?;
-    let runs = held_runs(&work.home, &work.root, work.record.name())
-        .map_err(|source| Error::Runs { source })?;
-    // An unreadable record is a line and not a failure: the scan names it, and the
-    // run it describes may be holding uncommitted work on a branch.
-    let mut lines: Vec<String> = runs
-        .unreadable()
-        .iter()
-        .map(|unreadable| one_line(&unreadable.to_string()))
-        .collect();
-
-    let selected = select(
+    let mut lines = Vec::new();
+    let selected = selection(
         &board,
         &work.record,
-        &assignee,
+        &work.home,
+        &work.root,
         work.named.as_deref(),
-        runs.runs(),
+        &mut |line| lines.push(line),
     )?;
     for skipped in selected.skipped() {
         lines.push(passed_over(skipped));
     }
 
-    let issue = match selected.taken() {
-        Taken::Issue(issue) => issue,
-        // A queue with nothing available is an answer and no question at all; a
-        // ticket somebody named that cannot be worked is a refusal in the
-        // chooser's own words.
-        Taken::Nothing => {
-            lines.push(nothing_ready(work.record.name()));
-            return Ok(Chose {
-                lines,
-                undertook: None,
-            });
-        }
-        Taken::Refused(refusal) => {
-            return Err(Error::NotPulled {
-                ticket: work.named.clone().unwrap_or_default(),
-                refusal: refusal.clone(),
-            });
-        }
+    let Some(issue) = selected.issue(work.named.as_deref())? else {
+        lines.push(nothing_ready(work.record.name()));
+        return Ok(Chose {
+            lines,
+            undertook: None,
+        });
     };
     if cancel.is_cancelled() {
         return Err(Error::Cancelled);
@@ -1173,40 +1167,17 @@ fn said(app: &mut App, event: PullEvent, now: Instant) {
     match event {
         // The three headings, each a phase on the thread. Opening one stops the
         // clock of the one above it, so two never run at once.
-        PullEvent::Heading(Heading::Split { ticket, title }) => {
-            phase(app, &format!("{ticket} — splitting {title}"), now);
-        }
-        PullEvent::Heading(Heading::Subtask {
-            id,
-            goal,
-            position,
-            total,
-        }) => {
-            phase(app, &format!("[{position}/{total}] `{id}` {goal}"), now);
-        }
-        PullEvent::Heading(Heading::PullRequest { branch }) => {
-            phase(
-                app,
-                &format!("`{branch}` is pushed, opening a pull request"),
-                now,
-            );
-        }
+        PullEvent::Heading(heading) => phase(app, &heading.line(), now),
         // Filed under the live phase, which is the one the heading before it
         // opened. What each activity comes to is the thread's business — a tool is
         // its name and its one detail, thinking and writing are the words for
         // them, and a cost is dropped. See `Thread::record`.
         PullEvent::Activity(activity) => app.panel_mut().record_turn(&activity, now),
-        // A milestone: the sub-tasks a run works are not quite the ones the split
-        // wrote, and a manifest nobody was told had been mended reads as one the
-        // model produced.
-        PullEvent::Repair { note } => app.panel_mut().note(note, now),
-        // Both board lines are facts about a workflow nobody has finished setting
-        // up, said where the run they happened in is being read.
-        PullEvent::NoStartState { team } => app.panel_mut().note(no_start_state(&team), now),
-        PullEvent::NoReviewState { team, state } => {
-            app.panel_mut().note(no_review_state(&team, &state), now);
+        event => {
+            if let Some(line) = event.line() {
+                app.panel_mut().note(line, now);
+            }
         }
-        PullEvent::Project { line } => app.panel_mut().note(line, now),
     }
 }
 

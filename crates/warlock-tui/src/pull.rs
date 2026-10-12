@@ -38,14 +38,12 @@ use warlock_engine::{
     Manifest, PullRun, ScopeRecord, brief_path, held_runs, resolve_filing, scope_opens_to,
 };
 
-use crate::claude::{
-    Activities, Activity, Cancel, ChatAgent, ClaudeAgent, Split, Splitting, Worked, Working,
-    working_system_prompt,
-};
-use crate::error::{Error, say};
+use crate::claude::{Activities, Activity, Cancel, ClaudeAgent};
+use crate::error::{Error, one_line, say};
 use crate::freshness::{Freshened, Freshening, Freshens, freshened};
 use crate::git::{Error as GitError, Forge, Gh, Git, Repository};
 use crate::linear::{Board, Opener as LinearOpener, Opens, QueuedIssue};
+use crate::puller::{Splitter, Stopping, Worker};
 use crate::pulling::{Heading, PullEvent, Pulled, Pulling, Splits, Ticket, Works};
 use crate::queue::{Chosen, Named, Refusal, Skipped, choose, take_named};
 use crate::settings::Settings;
@@ -88,8 +86,15 @@ pub fn pull(scope: &str, ticket: Option<&str>, dry_run: bool) -> Result<(), Erro
             open: &LinearOpener,
             repo: &Git::at(&root),
             forge: &Gh::at(&root),
-            split: &Splitter::new(watching(&progress)),
-            sessions: &Worker::new(scope, prepared.held(), watching(&progress)),
+            // A shell has no stop button, so nothing ever reads the handles
+            // these publish.
+            split: &Splitter::new(watching(&progress), Stopping::default()),
+            sessions: &Worker::new(
+                scope,
+                prepared.held(),
+                watching(&progress),
+                Stopping::default(),
+            ),
             freshen: &Freshener::new(watching(&progress)),
         },
         &progress,
@@ -149,17 +154,9 @@ pub(crate) fn pulled<O: Opens, R: Repository, F: Forge, S: Splits, W: Works, P: 
     }
 
     let board = ports.open.open(prepared.value());
-    let assignee = board.viewer()?;
-    // The records this checkout holds for the scope, which is what tells a ticket
-    // in `In Progress` here from one in progress somewhere else. An unreadable one
-    // is a line and not a failure: the scan names it, and the run it describes may
-    // be holding uncommitted work on a branch.
-    let runs = held_runs(home, root, scope).map_err(|source| Error::Runs { source })?;
-    for unreadable in runs.unreadable() {
-        tell(progress, &format!("{unreadable}"));
-    }
-
-    let selected = select(&board, record, &assignee, named, runs.runs())?;
+    let selected = selection(&board, record, home, root, named, &mut |line| {
+        tell(progress, &line);
+    })?;
 
     if dry_run {
         for line in would(scope, named, &selected) {
@@ -172,21 +169,9 @@ pub(crate) fn pulled<O: Opens, R: Repository, F: Forge, S: Splits, W: Works, P: 
         tell(progress, &passed_over(skipped));
     }
 
-    let issue = match selected.taken() {
-        Taken::Issue(issue) => issue,
-        // Both endings that work nothing, and the difference between them is who
-        // asked: a queue with nothing available is an answer and a **0**, and a
-        // ticket somebody named that cannot be worked is a refusal.
-        Taken::Nothing => {
-            tell(progress, &nothing_ready(scope));
-            return Ok(());
-        }
-        Taken::Refused(refusal) => {
-            return Err(Error::NotPulled {
-                ticket: named.unwrap_or_default().to_owned(),
-                refusal: refusal.clone(),
-            });
-        }
+    let Some(issue) = selected.issue(named)? else {
+        tell(progress, &nothing_ready(scope));
+        return Ok(());
     };
 
     let ticket = Ticket {
@@ -370,7 +355,31 @@ pub(crate) fn clean<R: Repository>(repo: &R) -> Result<(), Error> {
     }
 }
 
-pub(crate) fn select(
+/// Which ticket the queue gives up, with the records this checkout holds for the
+/// scope read first: they are what tells a ticket in `In Progress` here from one
+/// in progress somewhere else.
+///
+/// An unreadable record is a line handed to `unreadable` and not a failure: the
+/// scan names it, and the run it describes may be holding uncommitted work on a
+/// branch. The line goes out before the queue is read, so a refusal from the
+/// board does not swallow it.
+pub(crate) fn selection(
+    board: &impl Board,
+    record: &ScopeRecord,
+    home: &Path,
+    root: &Path,
+    named: Option<&str>,
+    unreadable: &mut dyn FnMut(String),
+) -> Result<Selected, Error> {
+    let assignee = board.viewer()?;
+    let runs = held_runs(home, root, record.name()).map_err(|source| Error::Runs { source })?;
+    for record in runs.unreadable() {
+        unreadable(one_line(&record.to_string()));
+    }
+    select(board, record, &assignee, named, runs.runs())
+}
+
+fn select(
     board: &impl Board,
     record: &ScopeRecord,
     assignee: &str,
@@ -410,6 +419,19 @@ pub(crate) enum Taken<'a> {
 }
 
 impl Selected {
+    /// The ticket to work, `None` for a queue with nothing available, and a
+    /// refusal for a ticket somebody named that cannot be worked.
+    pub(crate) fn issue(&self, named: Option<&str>) -> Result<Option<&QueuedIssue>, Error> {
+        match self.taken() {
+            Taken::Issue(issue) => Ok(Some(issue)),
+            Taken::Nothing => Ok(None),
+            Taken::Refused(refusal) => Err(Error::NotPulled {
+                ticket: named.unwrap_or_default().to_owned(),
+                refusal: refusal.clone(),
+            }),
+        }
+    }
+
     pub(crate) fn taken(&self) -> Taken<'_> {
         match self {
             Self::Chosen(chosen) => chosen.taken().map_or(Taken::Nothing, Taken::Issue),
@@ -489,14 +511,6 @@ pub(crate) fn unchanged(ticket: &str) -> String {
         "`{ticket}` is in review with nothing to merge: the work was already there, so nothing \
          was pushed and what each sub-task found is a comment on the ticket"
     )
-}
-
-pub(crate) fn no_start_state(team: &str) -> String {
-    format!("the team `{team}` has no `In Progress` state, so the ticket was not moved")
-}
-
-pub(crate) fn no_review_state(team: &str, state: &str) -> String {
-    format!("the team `{team}` has no `{state}` state, so the ticket was not moved into review")
 }
 
 /// `WAR-140` is 140, which is the middle of the branch name.
@@ -598,57 +612,30 @@ impl<W: Write> Progress<W> {
     }
 
     pub(crate) fn on(&mut self, event: PullEvent) {
-        match event {
-            PullEvent::Heading(Heading::Split { ticket, title }) => {
-                self.subtask = None;
-                self.said = None;
-                say(&mut self.out, &format!("splitting `{ticket}` — {title}"));
+        if let PullEvent::Activity(activity) = &event {
+            let Some(line) = activity_line(activity) else {
+                return;
+            };
+            // A tool line repeats only when the session really did the same
+            // thing twice, so only the two running states are collapsed.
+            let running = matches!(activity, Activity::Thinking | Activity::Writing { .. });
+            if running && self.said.as_deref() == Some(line.as_str()) {
+                return;
             }
-            // The fraction is the loop's own, one-based, and its denominator is the
-            // split's answer rather than a running total, as `running.rs`'s is.
-            PullEvent::Heading(Heading::Subtask {
-                id,
-                goal,
-                position,
-                total,
-            }) => {
-                say(
-                    &mut self.out,
-                    &format!("[{position}/{total}] `{id}` {goal}"),
-                );
-                self.subtask = Some(id);
-                self.said = None;
-            }
-            PullEvent::Heading(Heading::PullRequest { branch }) => {
-                self.subtask = None;
-                self.said = None;
-                say(
-                    &mut self.out,
-                    &format!("`{branch}` is pushed, opening a pull request"),
-                );
-            }
-            PullEvent::Activity(activity) => {
-                let Some(line) = activity_line(&activity) else {
-                    return;
-                };
-                // A tool line repeats only when the session really did the same
-                // thing twice, so only the two running states are collapsed.
-                let running = matches!(activity, Activity::Thinking | Activity::Writing { .. });
-                if running && self.said.as_deref() == Some(line.as_str()) {
-                    return;
-                }
-                say(&mut self.out, &line);
-                self.append(&line);
-                self.said = Some(line);
-            }
-            PullEvent::Repair { note } => say(&mut self.out, &note),
-            // Both board lines are facts about a workflow nobody has finished
-            // setting up, said where the run they happened in is being read.
-            PullEvent::NoStartState { team } => say(&mut self.out, &no_start_state(&team)),
-            PullEvent::NoReviewState { team, state } => {
-                say(&mut self.out, &no_review_state(&team, &state))
-            }
-            PullEvent::Project { line } => say(&mut self.out, &line),
+            say(&mut self.out, &line);
+            self.append(&line);
+            self.said = Some(line);
+            return;
+        }
+        if let PullEvent::Heading(heading) = &event {
+            self.subtask = match heading {
+                Heading::Subtask { id, .. } => Some(id.clone()),
+                Heading::Split { .. } | Heading::PullRequest { .. } => None,
+            };
+            self.said = None;
+        }
+        if let Some(line) = event.line() {
+            say(&mut self.out, &line);
         }
     }
 
@@ -693,66 +680,13 @@ pub(crate) fn activity_line(activity: &Activity) -> Option<String> {
     }
 }
 
-/// The splitting session, and the port it reports into.
-///
-/// One agent for the run rather than one per attempt: an agent is a command line
-/// and a timeout, so nothing is spawned until a split is asked for.
-struct Splitter {
-    agent: ChatAgent,
-    activities: Activities,
-}
-
-impl Splitter {
-    fn new(activities: Activities) -> Self {
-        Self {
-            agent: ChatAgent::splitting(),
-            activities,
-        }
-    }
-}
-
-impl Splits for Splitter {
-    fn split(&self, ticket: &str, title: &str, description: &str) -> Split {
-        Splitting::for_ticket(&self.agent, ticket, title, description)
-            .reporting(self.activities.clone())
-            .run()
-    }
-}
-
-/// One sub-task session per call, at the system prompt the scope and the sigils
-/// make.
-///
-/// The prompt is built once, because it says which scope the work is under and
-/// which sigils this machine holds, and neither moves for the length of a run.
-struct Worker {
-    agent: ChatAgent,
-    activities: Activities,
-}
-
-impl Worker {
-    fn new(scope: &str, held: &[String], activities: Activities) -> Self {
-        Self {
-            agent: ChatAgent::working(&working_system_prompt(scope, held)),
-            activities,
-        }
-    }
-}
-
-impl Works for Worker {
-    fn work(&self, opening: &str) -> Worked {
-        Working::on(&self.agent, opening)
-            .reporting(self.activities.clone())
-            .run()
-    }
-}
-
 /// The freshness pass on the real road: the document agent `warlock refresh`
 /// spends, and the one [`Cancel`] it and the descent under it both answer to.
 ///
-/// A [`ClaudeAgent`] and not the [`ChatAgent`] the two sessions above hold,
-/// because a document pass is not a conversation: it is the agent
-/// [`descend`](crate::descent::descend) is given everywhere else, asked for on the
-/// terms a pact names rather than the reader's own model.
+/// A [`ClaudeAgent`] and not the [`ChatAgent`](crate::claude::ChatAgent) the
+/// split and the sub-tasks hold, because a document pass is not a conversation:
+/// it is the agent [`descend`](crate::descent::descend) is given everywhere
+/// else, asked for on the terms a pact names rather than the reader's own model.
 struct Freshener {
     agent: ClaudeAgent,
     /// Nothing latches this today — no `Ctrl-C` handler is installed on this road,
