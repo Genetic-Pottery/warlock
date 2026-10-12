@@ -151,12 +151,8 @@ pub(crate) fn rescope(
     })
 }
 
-// The same comparison [`route_facts`](warlock_engine::route_facts) routes by,
-// and it has to stay that way: a lookup that folded, trimmed or matched loosely
-// here would answer "no record" for a name `warlock check` then routes through,
-// and a second record would be written that the router never reads.
 pub(crate) fn records_scope(manifest: &Manifest, name: &str) -> bool {
-    manifest.scopes().iter().any(|record| record.name() == name)
+    manifest.scope_record(name).is_some()
 }
 
 // A rebuild rather than a mutation, because [`Manifest`] has no mutating scope

@@ -55,16 +55,19 @@ pub fn load_tree(working_dir: impl AsRef<Path>) -> Result<Loaded, Error> {
         other => other.map_err(|source| Error::Manifest { source })?,
     };
 
-    let builder = Builder {
+    let mut builder = Builder {
         directories: walk(&working_dir)?,
         repo_root,
-        manifest,
+        entries: BTreeMap::new(),
     };
+    for entry in manifest.entries() {
+        builder.entries.entry(entry.module()).or_insert(entry);
+    }
     let mut problems = Vec::new();
     let root = builder.node(&working_dir, &mut problems);
     Ok(Loaded {
         tree: Tree::new(root),
-        manifest: builder.manifest,
+        manifest,
         problems,
     })
 }
@@ -212,23 +215,24 @@ struct Directory {
 }
 
 #[derive(Debug)]
-struct Builder {
+struct Builder<'m> {
     directories: BTreeMap<PathBuf, Directory>,
     repo_root: PathBuf,
-    manifest: Manifest,
+    entries: BTreeMap<&'m str, &'m PactEntry>,
 }
 
-impl Builder {
-    fn node(&self, dir: &Path, problems: &mut Vec<Problem>) -> Node {
-        let children: Vec<Node> = self
-            .children_of(dir)
+impl Builder<'_> {
+    fn node(&mut self, dir: &Path, problems: &mut Vec<Problem>) -> Node {
+        let below: Vec<PathBuf> = self.children_of(dir).map(Path::to_path_buf).collect();
+        let children: Vec<Node> = below
+            .iter()
             .map(|child| self.node(child, problems))
             .collect();
 
-        let (document, files, ignored) = match self.directories.get(dir) {
+        let (document, files, ignored) = match self.directories.remove(dir) {
             Some(directory) => (
                 directory.has_document.then(|| dir.join(DOCUMENT_FILE)),
-                directory.files.clone(),
+                directory.files,
                 directory.ignored,
             ),
             None => (None, Vec::new(), false),
@@ -240,7 +244,7 @@ impl Builder {
         // report because nobody pacted it.
         let entry = to_manifest_path(&self.repo_root, dir)
             .ok()
-            .and_then(|key| self.manifest.entry(&key));
+            .and_then(|key| self.entries.get(key.as_str()).copied());
         let state = state_of(dir, entry, ignored, problems);
         let scope = scope_of(dir, entry, problems);
 

@@ -114,6 +114,21 @@ impl Manifest {
         self.entries.iter().find(|entry| entry.module == module)
     }
 
+    pub(crate) fn entry_at(&self, root: &Path, path: &Path) -> Option<&PactEntry> {
+        to_manifest_path(root, path)
+            .ok()
+            .and_then(|module| self.entry(&module))
+    }
+
+    // Exact, and the one comparison every caller looks a scope up by: a lookup
+    // that folded, trimmed or matched loosely would answer "no record" for a
+    // name `warlock check` routes through, and a second record would be written
+    // that the router never reads.
+    #[must_use]
+    pub fn scope_record(&self, name: &str) -> Option<&ScopeRecord> {
+        self.scopes.iter().find(|record| record.name() == name)
+    }
+
     /// ```
     /// use warlock_engine::{Manifest, PactEntry};
     ///
@@ -313,6 +328,19 @@ pub struct PactEntry {
     lines: Option<BTreeMap<String, String>>,
 }
 
+// `carry` is `None` where the digest could not be taken, rather than the grant
+// being dropped: no shortcut next time, but still a grant.
+#[derive(Debug)]
+pub(crate) struct Grant {
+    pub(crate) hash: String,
+    pub(crate) at: String,
+    pub(crate) carry: Option<String>,
+    // What each file hashed to as its line was settled. Written with the grant
+    // by the same save, so a line believed current can never be judged against
+    // a hash from another one.
+    pub(crate) lines: BTreeMap<String, String>,
+}
+
 impl PactEntry {
     /// ```
     /// use warlock_engine::PactEntry;
@@ -352,16 +380,6 @@ impl PactEntry {
     pub fn with_carry_hash(mut self, carry_hash: impl Into<String>) -> Self {
         self.carry_hash = Some(carry_hash.into());
         self
-    }
-
-    #[must_use]
-    pub fn with_lines(mut self, lines: BTreeMap<String, String>) -> Self {
-        self.lines = Some(lines);
-        self
-    }
-
-    pub(crate) fn set_lines(&mut self, lines: BTreeMap<String, String>) {
-        self.lines = Some(lines);
     }
 
     #[must_use]
@@ -412,30 +430,40 @@ impl PactEntry {
     // A mutation rather than a fresh entry to swap in, so that a field a person
     // owns survives every pact and refresh without anyone remembering to carry
     // it across: `scope` is not a parameter and is not assigned below, so no run
-    // can write one and no run can clear one. The grant travels as one triple
+    // can write one and no run can clear one. The grant travels as one value
     // for the same reason — a carry digest left behind by a cleared grant is a
     // stale answer that could later skip a pass that was owed.
+    //
+    // The run wrote the document, so whatever lines were recorded against the
+    // last one describe a file that is no longer on the page. A run that
+    // granted nothing, or recorded no lines, leaves the entry saying nothing is
+    // reusable, which is the only honest thing it can say.
     pub(crate) fn overwrite_run_fields(
         &mut self,
         module: String,
         document: String,
-        grant: Option<(String, String, Option<String>)>,
+        grant: Option<Grant>,
     ) {
-        let (granted_hash, granted_at, carry_hash) = match grant {
-            Some((hash, at, carry)) => (Some(hash), Some(at), carry),
-            None => (None, None, None),
+        let (granted_hash, granted_at, carry_hash, lines) = match grant {
+            Some(Grant {
+                hash,
+                at,
+                carry,
+                lines,
+            }) => (
+                Some(hash),
+                Some(at),
+                carry,
+                Some(lines).filter(|lines| !lines.is_empty()),
+            ),
+            None => (None, None, None, None),
         };
         self.module = module;
         self.document = document;
         self.granted_hash = granted_hash;
         self.granted_at = granted_at;
         self.carry_hash = carry_hash;
-        // The run wrote the document, so whatever lines were recorded against
-        // the last one describe a file that is no longer on the page. A caller
-        // that wrote per-file lines records them itself afterwards; everything
-        // else leaves the entry saying nothing is reusable, which is the only
-        // honest thing it can say.
-        self.lines = None;
+        self.lines = lines;
     }
 
     #[must_use]
@@ -648,23 +676,35 @@ pub fn manifest_path(root: impl AsRef<Path>) -> PathBuf {
 // the crate is built on skip hidden entries, so a temporary sitting in a module
 // directory cannot reach a tree, a subtree hash or a pact request while it
 // exists. Naming it without the dot would let a half-written file be hashed.
-pub(crate) fn temp_file_name(target: &str) -> String {
+fn temp_file_name(target: &str) -> String {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
     format!(".{target}.{}.{n}.tmp", std::process::id())
 }
 
-// The temporary must sit in the same directory as the target, so the rename
-// cannot cross a filesystem and stop being atomic. The error names the path that
-// failed: the temporary when the write did, the target when the rename did.
 pub(crate) fn write_atomically(
     dir: &Path,
     name: &str,
     bytes: &[u8],
 ) -> Result<(), (PathBuf, std::io::Error)> {
+    write_atomically_with(dir, name, bytes, |_| Ok(()))
+}
+
+// The temporary must sit in the same directory as the target, so the rename
+// cannot cross a filesystem and stop being atomic. `prepare` runs on the
+// temporary before a byte is written into it. The error names the path that
+// failed: the temporary when `prepare` or the write did, the target when the
+// rename did.
+pub(crate) fn write_atomically_with(
+    dir: &Path,
+    name: &str,
+    bytes: &[u8],
+    prepare: impl FnOnce(&Path) -> std::io::Result<()>,
+) -> Result<(), (PathBuf, std::io::Error)> {
     let temp = dir.join(temp_file_name(name));
     let target = dir.join(name);
-    let written = write_and_sync(&temp, bytes)
+    let written = prepare(&temp)
+        .and_then(|()| write_and_sync(&temp, bytes))
         .map_err(|source| (temp.clone(), source))
         .and_then(|()| fs::rename(&temp, &target).map_err(|source| (target, source)));
     if written.is_err() {
@@ -673,7 +713,7 @@ pub(crate) fn write_atomically(
     written
 }
 
-pub(crate) fn write_and_sync(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+fn write_and_sync(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let mut file = fs::File::create(path)?;
     file.write_all(bytes)?;
     // The `sync_all` is the point of this function: without it the rename that

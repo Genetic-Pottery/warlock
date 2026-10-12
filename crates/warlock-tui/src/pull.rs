@@ -301,11 +301,7 @@ pub(crate) fn prepare(
     home: &Path,
     scope: &str,
 ) -> Result<Prepared, Error> {
-    let Some(record) = manifest
-        .scopes()
-        .iter()
-        .find(|record| record.name() == scope)
-    else {
+    let Some(record) = manifest.scope_record(scope) else {
         return Err(Error::UnrecordedScope {
             scope: scope.to_owned(),
             recorded: manifest

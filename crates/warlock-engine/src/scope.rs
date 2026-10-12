@@ -156,7 +156,7 @@ pub(crate) fn valid_scope(entry: &PactEntry) -> Option<&str> {
 // Segments cut at `/`, which is what keeps the walk segment-wise rather than
 // textual: the ancestors of `crates/engine-tools` are `crates` and `.`, and
 // `crates/engine` is never among them however much of a prefix it looks like.
-fn at_or_above(stored: &str) -> impl Iterator<Item = &str> {
+pub(crate) fn at_or_above(stored: &str) -> impl Iterator<Item = &str> {
     let mut next = Some(stored);
     std::iter::from_fn(move || {
         let current = next?;
