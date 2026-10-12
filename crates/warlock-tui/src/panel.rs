@@ -1,16 +1,3 @@
-//! The right-hand pane: an [`Account`] of the run, a [`Thread`] of the
-//! conversation, and the lines of a document somebody pressed `v` on — three
-//! cards, exactly one showing, and the swap key stepping between the ones there
-//! is anything to see in.
-//!
-//! It is a module because everything here was a private struct inside `app.rs`
-//! with twenty-three [`App`](crate::app::App) methods reaching into it, so a question
-//! about card-swapping or panel scrolling could only be asked by building a
-//! whole `App` — a `Tree`, a row list, a selection and a scroll offset, none of
-//! which the panel has ever had an opinion about. `App` still forwards every one
-//! of those methods, because nothing is bought by making two hundred call sites
-//! say `app.panel()` instead.
-
 use std::time::Instant;
 
 use crate::account::{Account, Line};
@@ -23,9 +10,6 @@ use crate::wrap::rows as wrap_rows;
 /// read again *because* a run finished and dropping it would wipe the record at
 /// the moment the reader turned to read it; a run that ends with nothing
 /// recorded carries it too, because an account is not a claim about the tree.
-/// That second rule used to be `App::take_account_from`, a method whose whole
-/// purpose was to reach into a live app and steal back the fields that must not
-/// roll back. It is a field move now.
 ///
 /// A filled card stays filled: reading a file does not throw the account away, a
 /// pact starting does not throw the document away, and neither empties the
@@ -397,10 +381,6 @@ pub(crate) fn panel_offset_for(
     if following { end } else { offset.min(end) }
 }
 
-/// Every one of these used to be a method on [`App`](crate::app::App) that touched
-/// `self.panel` and nothing else. They are here so the panel can be built,
-/// driven and asserted about without a tree, a row list, a selection or a scroll
-/// offset anywhere near it.
 impl Panel {
     #[cfg(test)]
     #[must_use]

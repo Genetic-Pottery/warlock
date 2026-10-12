@@ -1,8 +1,9 @@
 //! `here` and `home` are where a subcommand turns the process environment into
 //! a repository root, a working directory and a home directory; everything
 //! below takes all three as parameters. `at` is the way past them, and it is
-//! not only for tests — `session::load_app` has already walked to a root and
-//! asking the environment a second time could answer differently.
+//! not only for tests — `session::load_manifest` is handed a root the loop
+//! already holds, and asking the environment a second time could answer
+//! differently.
 //!
 //! A question stands here and nothing more, because none of `stale`, `fresh` or
 //! `check` writes a pact. A write stands and is let
@@ -110,10 +111,9 @@ impl Standing {
         })
     }
 
-    // For tests, and for the one caller that has already done the walk:
-    // `session::load_app` loads a tree first and gets the root out of it, so
-    // asking the environment again would be a second answer to a settled
-    // question.
+    // For tests, and for `session::load_manifest`, whose root the loop already
+    // holds: asking the environment again would be a second answer to a
+    // settled question.
     pub(crate) const fn at(working_dir: PathBuf, repo_root: PathBuf) -> Self {
         Self {
             working_dir,
