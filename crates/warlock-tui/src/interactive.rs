@@ -12,7 +12,7 @@ use crate::app::{App, Focus, Run, Working};
 use crate::chatting::Chat;
 use crate::claude::{ChatAgent, ClaudeAgent, Converses, Wired};
 use crate::clipboard::{self, Clip, Clipboard};
-use crate::composer::{Composed, paste_for};
+use crate::composer::{Composed, Composer, paste_for};
 use crate::confirm::QuitConfirm;
 use crate::confirm::Reviewed;
 use crate::cutting::Cutter;
@@ -535,11 +535,7 @@ impl<K: Seams> Session<K> {
     // name somebody has to guess at, and every line past the limit is a comment.
     #[allow(clippy::too_many_lines)]
     fn press(&mut self, key: KeyEvent, now: Instant) -> Result<bool, Error> {
-        // The composer is offered on exactly the condition that lights its border,
-        // which is the keyboard being pointed at it: with the keys anywhere else
-        // this is `None`, there is no draft to type into, and every letter is the
-        // command it has always been.
-        let typing = (self.app.focus() == Focus::Composer).then(|| self.chat.composer());
+        let typing = self.typing();
         // A local because two arms further down are about the same run; what a
         // turn is doing is asked for once, here, and read nowhere else.
         let running = self.pact.running();
@@ -557,20 +553,13 @@ impl<K: Seams> Session<K> {
             // Nothing joins the worker: it is left to be ended by the process,
             // having written whole documents or none, and the manifest it never got
             // to rewrite still says what it said before.
-            //
-            // Every way out arrives here: a Yes to the question, and `q` during a
-            // run. The second spelling is the app's old quit, which
-            // [`press_for`] no longer produces — naming it beside the first keeps
-            // one road out of this loop rather than two that have to be kept doing
-            // the same thing.
-            Pressed::Leave | Pressed::Act(Action::Quit) => return Ok(false),
+            Pressed::Leave => return Ok(false),
             // The question, opened, moved, or taken down again. Nothing else
             // happens and nothing else needs to: the app was never touched, so a
             // No has nothing to put back, and the top of this loop draws whatever
             // the question now is.
             Pressed::Confirm(next) => self.confirm = next,
             Pressed::Help(next) => self.help = next,
-            Pressed::Act(Action::Help) => self.help = HelpSheet::open(),
             // The push dialog, moved or answered: see [`Pushes::answer`].
             Pressed::Push(answered) => self.pushes.answer(&mut self.app, answered, now),
             // And the question a `/draft` puts up once the board has answered,
@@ -895,8 +884,9 @@ impl<K: Seams> Session<K> {
             // [`Session::composed`]'s to say.
             Pressed::Compose(outcome) => self.composed(outcome, now),
             // A key nothing is bound to, or one whose press has already been
-            // answered where it was decided.
-            Pressed::Nothing => {}
+            // answered where it was decided. `press_for` turns quit and help
+            // into their own answers, so neither arrives as an action.
+            Pressed::Nothing | Pressed::Act(Action::Quit | Action::Help) => {}
         }
 
         Ok(true)
@@ -1012,6 +1002,14 @@ impl<K: Seams> Session<K> {
         self.say(said.map(|said| said.line().to_owned()), now);
     }
 
+    // The composer is offered on exactly the condition that lights its border,
+    // which is the keyboard being pointed at it: with the keys anywhere else this
+    // is `None`, there is no draft to type into, and every letter is the command
+    // it has always been.
+    fn typing(&self) -> Option<&Composer> {
+        (self.app.focus() == Focus::Composer).then(|| self.chat.composer())
+    }
+
     fn say(&mut self, said: Result<String, Error>, now: Instant) {
         let line = said.unwrap_or_else(one_line);
         self.app.panel_mut().note(line, now);
@@ -1020,18 +1018,10 @@ impl<K: Seams> Session<K> {
     /// A block the terminal handed over whole. Nothing is returned and nothing
     /// can be: a paste never ends the session and never starts a turn, whatever
     /// newlines are in it.
-    ///
-    /// The two gates are here rather than in [`paste_for`], because a paste is
-    /// a single arrival carrying however much was copied and a gate missed at a
-    /// call site would land the lot.
     fn paste(&mut self, text: &str) {
-        let Some(typing) = (self.app.focus() == Focus::Composer).then(|| self.chat.composer())
-        else {
+        let Some(typing) = self.typing() else {
             return;
         };
-        if typing.is_muted() {
-            return;
-        }
 
         let pasted = paste_for(text, typing);
         self.chat.paste(pasted);

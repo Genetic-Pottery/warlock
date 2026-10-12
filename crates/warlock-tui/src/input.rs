@@ -59,16 +59,10 @@ pub(crate) fn action_for(key: KeyEvent, in_flight: bool) -> Option<Action> {
     }
 
     match key.code {
-        // `contains` rather than equality: shift or caps lock can ride along
-        // (some terminals report the upper-case letter with it), and Ctrl-C is
-        // still Ctrl-C.
-        KeyCode::Char('c' | 'C') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            Some(Action::Quit)
-        }
         // Before the quit arm below, and the only arm the mode touches: Esc
         // stops being a way out for as long as there is a run to stop, while
-        // `q` and Ctrl-C — the keys a reader reaches for deliberately — go on
-        // meaning quit.
+        // `q` — the key a reader reaches for deliberately — goes on meaning
+        // quit. Ctrl-C never arrives here: `press_for` takes it first.
         KeyCode::Esc if in_flight => Some(Action::CancelPact),
         KeyCode::Char('q') | KeyCode::Esc => Some(Action::Quit),
         KeyCode::Tab => Some(Action::ToggleFocus),
@@ -179,10 +173,8 @@ fn review_scroll(key: KeyEvent) -> Option<Scroll> {
     }
 }
 
-// Spelled here rather than reached for through `action_for`, because
-// `press_for` has to answer Ctrl-C before it consults anything else: two
-// spellings of the one keystroke that must always work is how it stops working
-// in one of them.
+// `contains` rather than equality: shift or caps lock can ride along (some
+// terminals report the upper-case letter with it), and Ctrl-C is still Ctrl-C.
 fn is_ctrl_c(key: KeyEvent) -> bool {
     key.kind == KeyEventKind::Press
         && matches!(key.code, KeyCode::Char('c' | 'C'))

@@ -1,6 +1,7 @@
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
 
-use super::{Action, action_for};
+use super::{Action, Pressed, action_for, press_for};
+use crate::confirm::QuitConfirm;
 
 fn press(code: KeyCode) -> KeyEvent {
     KeyEvent::new(code, KeyModifiers::NONE)
@@ -16,9 +17,7 @@ fn q_and_esc_quit_with_no_pact_running() {
 }
 
 #[test]
-fn esc_cancels_the_pact_in_flight_while_q_and_ctrl_c_still_quit() {
-    let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
-
+fn esc_cancels_the_pact_in_flight_while_q_still_quits() {
     assert_eq!(
         action_for(press(KeyCode::Esc), true),
         Some(Action::CancelPact),
@@ -27,9 +26,8 @@ fn esc_cancels_the_pact_in_flight_while_q_and_ctrl_c_still_quit() {
     assert_eq!(
         action_for(press(KeyCode::Char('q')), true),
         Some(Action::Quit),
-        "and the ways out are still the ways out"
+        "and the way out is still the way out"
     );
-    assert_eq!(action_for(ctrl_c, true), Some(Action::Quit));
 }
 
 #[test]
@@ -69,15 +67,7 @@ fn esc_is_the_only_key_a_pact_in_flight_changes_the_meaning_of() {
 }
 
 #[test]
-fn ctrl_c_quits_but_a_bare_c_does_not() {
-    let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
-
-    assert_eq!(action_for(ctrl_c, false), Some(Action::Quit));
-    assert_eq!(action_for(press(KeyCode::Char('c')), false), None);
-}
-
-#[test]
-fn ctrl_c_quits_with_caps_lock_or_shift_held() {
+fn ctrl_c_asks_to_quit_with_caps_lock_or_shift_held() {
     // Some terminals report Ctrl-C as an upper-case `C` when shift or caps
     // lock is in play; it is still the key everyone reaches for to get out.
     let ctrl_shift_c = KeyEvent::new(
@@ -85,7 +75,10 @@ fn ctrl_c_quits_with_caps_lock_or_shift_held() {
         KeyModifiers::CONTROL | KeyModifiers::SHIFT,
     );
 
-    assert_eq!(action_for(ctrl_shift_c, false), Some(Action::Quit));
+    assert_eq!(
+        press_for(ctrl_shift_c, None, None, false, false),
+        Pressed::Confirm(QuitConfirm::open())
+    );
 }
 
 #[test]
