@@ -36,6 +36,8 @@ use ratatui::crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 
 use crate::error::Error;
 
+pub(crate) const ERASE: &str = "\u{8} \u{8}";
+
 /// One question, asked and answered.
 ///
 /// `None` is EOF — Ctrl-D at a terminal, an empty or exhausted pipe everywhere
@@ -243,7 +245,7 @@ pub(crate) fn step(answer: &mut String, event: &Event, queued: bool) -> Step {
                 KeyCode::Backspace => match answer.chars().last() {
                     Some(last) if last != '\n' => {
                         answer.pop();
-                        Step::Echo("\u{8} \u{8}".to_owned())
+                        Step::Echo(ERASE.to_owned())
                     }
                     _ => Step::Echo(String::new()),
                 },

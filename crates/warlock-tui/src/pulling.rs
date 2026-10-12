@@ -53,7 +53,7 @@ use crate::git::{
     Touched, branch_name, commit_message, pull_request_body, pull_request_title,
 };
 use crate::linear::{Board, Error as LinearError};
-use crate::queue::IN_PROGRESS;
+use crate::queue::{IN_PROGRESS, same_name};
 
 /// Everything one pull is allowed to touch, built by whichever door is pulling.
 ///
@@ -985,7 +985,7 @@ fn project_review(board: &impl Board, issue: &str, review: &str) -> Option<Strin
     };
     let drafted = project
         .status()
-        .is_some_and(|status| status.trim().eq_ignore_ascii_case(IN_PROGRESS));
+        .is_some_and(|status| same_name(status, IN_PROGRESS));
     if !drafted {
         return None;
     }
@@ -993,7 +993,7 @@ fn project_review(board: &impl Board, issue: &str, review: &str) -> Option<Strin
     let reviewed = project
         .states()
         .iter()
-        .all(|(state, kind)| kind.settled() || state.trim().eq_ignore_ascii_case(review.trim()));
+        .all(|(state, kind)| kind.settled() || same_name(state, review));
     if !reviewed {
         return None;
     }

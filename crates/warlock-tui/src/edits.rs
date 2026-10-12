@@ -17,6 +17,7 @@ use std::path::{Path, PathBuf};
 
 use warlock_engine::{Manifest, PactEntry, unpact_subtree};
 
+use crate::account::plural;
 use crate::boundary::{Operation, Verdict, permits};
 use crate::error::Error;
 use crate::query::spelled;
@@ -67,11 +68,8 @@ impl Opened {
         // Flattened here, at the door: what the shell needs is the two-valued
         // fact the gate takes, and the third state is a line only the header
         // and `warlock check` ever print. See `boundary::permits`.
-        let held: Vec<String> = Settings::at(home.map(Path::to_path_buf), &repo_root)
-            .sigils_or_unknown()
-            .as_slice()
-            .to_vec();
-        let verdict = permits(operation, &target, &repo_root, &manifest, &held);
+        let held = Settings::at(home.map(Path::to_path_buf), &repo_root).sigils_or_unknown();
+        let verdict = permits(operation, &target, &repo_root, &manifest, held.as_slice());
         // Refused paths are spellable by construction: a path with no manifest
         // form has no coverage and nothing below it, so it did not reach here.
         // The `?` keeps the fallible call honest rather than being a second
@@ -286,18 +284,9 @@ fn unpacted_line(path: &str, dropped: &[&PactEntry]) -> String {
     } else {
         format!(", {} scoped ({})", scoped.len(), scoped.join(", "))
     };
-    // Singular for one, because a line a person reads should not say "1
-    // entries"; the count itself is what a script would parse either way.
-    let entries = if dropped.len() == 1 {
-        "entry"
-    } else {
-        "entries"
-    };
+    let entries = plural(dropped.len(), "entry", "entries");
 
-    format!(
-        "unpacted {path} — {} {entries} dropped{taken}",
-        dropped.len()
-    )
+    format!("unpacted {path} — {entries} dropped{taken}")
 }
 
 // The scope that was there before is named only when there was a different one:

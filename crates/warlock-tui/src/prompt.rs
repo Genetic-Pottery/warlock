@@ -19,17 +19,10 @@
 //! before consulting this module; treated as text it would put a `c` in the
 //! field.
 
-use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind};
 use warlock_engine::scope::MAXIMUM_CHARACTERS;
 
-// Shift is deliberately absent: an upper-case letter arrives with it on some
-// terminals and without it on others, and either way it is text. Everything here
-// is a chord — Ctrl-C first among them — and a chord is not text.
-const CHORD: KeyModifiers = KeyModifiers::CONTROL
-    .union(KeyModifiers::ALT)
-    .union(KeyModifiers::SUPER)
-    .union(KeyModifiers::HYPER)
-    .union(KeyModifiers::META);
+use crate::composer::typed_char;
 
 // Every window this field is drawn in is sized off its text, so an uncapped one
 // grows past the screen's edge. Only typing is refused at the cap: a path
@@ -260,11 +253,8 @@ pub(crate) fn edit_for(key: KeyEvent, field: &ScopeField) -> Edited {
             Some(_) => edited(removed(field.cursor), field.cursor),
             None => unchanged(),
         },
-        // A chord is a command somebody sent, not a character somebody typed,
-        // and control characters are not text however they arrived — Ctrl-C
-        // among them, which the loop above has already had its chance at.
         KeyCode::Char(_) if field.text.chars().count() >= field.cap => unchanged(),
-        KeyCode::Char(character) if !key.modifiers.intersects(CHORD) && !character.is_control() => {
+        KeyCode::Char(_) if let Some(character) = typed_char(key) => {
             let mut text = field.text.clone();
             text.insert(field.cursor, character);
             edited(text, field.cursor + character.len_utf8())

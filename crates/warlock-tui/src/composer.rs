@@ -30,13 +30,24 @@ const MARGIN: usize = 2;
 
 // The modifiers that make a character a command rather than something somebody
 // typed. Shift is deliberately absent: an upper-case letter arrives with it on
-// some terminals and without it on others, and either way it is text. Ctrl-C is
-// in here, and the loop above has already had its chance at it.
+// some terminals and without it on others, and either way it is text.
 const CHORD: KeyModifiers = KeyModifiers::CONTROL
     .union(KeyModifiers::ALT)
     .union(KeyModifiers::SUPER)
     .union(KeyModifiers::HYPER)
     .union(KeyModifiers::META);
+
+// A chord is a command somebody sent, not a character somebody typed, and
+// control characters are not text however they arrived — Ctrl-C among them,
+// which `press_for` has already had its chance at.
+pub(crate) fn typed_char(key: KeyEvent) -> Option<char> {
+    match key.code {
+        KeyCode::Char(character) if !key.modifiers.intersects(CHORD) && !character.is_control() => {
+            Some(character)
+        }
+        _ => None,
+    }
+}
 
 /// The invariant every value in this module holds by construction: `cursor` is
 /// a `char` boundary of `draft` and at most its length. [`Composer::at`] is the
@@ -549,12 +560,7 @@ pub(crate) fn compose_for(key: KeyEvent, composer: &Composer) -> Composed {
                 unchanged()
             }
         }
-        // A chord is a command somebody sent, not a character somebody typed,
-        // and control characters are not text however they arrived — Ctrl-C
-        // among them, which the loop above has already had its chance at.
-        KeyCode::Char(character) if !key.modifiers.intersects(CHORD) && !character.is_control() => {
-            inserted(character)
-        }
+        KeyCode::Char(_) => typed_char(key).map_or_else(unchanged, inserted),
         _ => unchanged(),
     }
 }

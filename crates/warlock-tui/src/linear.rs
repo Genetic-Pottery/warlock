@@ -19,6 +19,8 @@ use ureq::Agent;
 use ureq::http::HeaderValue;
 use ureq::http::header::AUTHORIZATION;
 
+use crate::queue::same_name;
+
 /// The clock one call runs under, end to end: the DNS lookup, the connection,
 /// the TLS handshake, the request, the answer and its body are all inside it.
 ///
@@ -373,7 +375,7 @@ fn project_status(linear: &impl Posts, name: &str) -> Result<Option<String>, Err
         status
             .get("name")
             .and_then(Value::as_str)
-            .is_some_and(|found| found.trim().eq_ignore_ascii_case(name.trim()))
+            .is_some_and(|found| same_name(found, name))
     })
     .map(node_id)
     .transpose()
@@ -601,7 +603,7 @@ fn workflow_state(linear: &impl Posts, team: &str, name: &str) -> Result<Option<
         state
             .get("name")
             .and_then(Value::as_str)
-            .is_some_and(|found| found.trim().eq_ignore_ascii_case(name.trim()))
+            .is_some_and(|found| same_name(found, name))
     })
     .map(node_id)
     .transpose()

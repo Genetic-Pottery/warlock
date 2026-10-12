@@ -809,7 +809,7 @@ fn scaled(bytes: u64, unit: u64, name: &str) -> String {
 
 /// `1 directory`, `9 directories`, so no line has to be worded twice or read
 /// as `1 directories`.
-fn plural(count: usize, one: &str, many: &str) -> String {
+pub(crate) fn plural(count: usize, one: &str, many: &str) -> String {
     let noun = if count == 1 { one } else { many };
     format!("{count} {noun}")
 }

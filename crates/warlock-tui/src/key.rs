@@ -33,7 +33,7 @@ use warlock_engine::{
     save_key_binding, sigils_path, validate_scope,
 };
 
-use crate::asking::{self, Asks, Cooked};
+use crate::asking::{self, Asks, Cooked, ERASE};
 use crate::error::{Error, one_line, say};
 use crate::query::{envelope, write_object};
 use crate::standing::{FOR_KEY, Standing};
@@ -50,8 +50,6 @@ const PROMPT: &str = "key> ";
 // is a paste, and a prompt that shows nothing cannot be told apart from one
 // where the paste never landed.
 const BULLET: &str = "•";
-
-const ERASE: &str = "\u{8} \u{8}";
 
 // The two tails of `Error::UnknownKey`'s sentence, which is one fact — the
 // store holds no such name — costing the two verbs different things.

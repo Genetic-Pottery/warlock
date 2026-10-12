@@ -1,3 +1,4 @@
+use crate::account::plural;
 use crate::app::App;
 use crate::error::{Error, one_line};
 
@@ -16,7 +17,7 @@ pub(crate) struct Clipboard {
     // it. Wayland's data-control is the same arrangement under other names. A
     // handle opened per copy would pass a test that reads the clipboard back in
     // the same breath and then lose every paste in real use, which is why there
-    // is one of these and `run` owns it.
+    // is one of these and `Session` owns it.
     //
     // The failure to open is kept rather than returned, because a session with
     // no clipboard is still a session: warlock opens on a machine with no
@@ -55,13 +56,8 @@ impl Clip for Clipboard {
 pub(crate) fn copy(clipboard: &mut impl Clip, app: &mut App, text: &str) {
     match clipboard.put(text) {
         Ok(()) => {
-            let characters = text.chars().count();
-            let unit = if characters == 1 {
-                "character"
-            } else {
-                "characters"
-            };
-            app.set_message(format!("copied {characters} {unit}"));
+            let characters = plural(text.chars().count(), "character", "characters");
+            app.set_message(format!("copied {characters}"));
         }
         // Flattened onto the footer's one line like every other non-fatal
         // failure in this binary, and here for a reason of its own: what

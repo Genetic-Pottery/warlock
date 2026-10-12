@@ -57,8 +57,10 @@ fn not_briefing() -> String {
     format!("{WRITE} is only in brief mode — {BRIEF} enters it")
 }
 
+const BRIEF_UNREAD: &str = " — /brief did nothing, so fix or remove the file and type it again";
+
 fn unreadable_template(error: &TemplateError) -> String {
-    format!("{error} — /brief did nothing, so fix or remove the file and type it again")
+    format!("{error}{BRIEF_UNREAD}")
 }
 
 fn brief_asking(root: &Path) -> Result<String, TemplateError> {
@@ -69,10 +71,7 @@ fn brief_asking(root: &Path) -> Result<String, TemplateError> {
 // `briefs.toml` that will not parse carries the TOML parser's multi-line
 // diagnostic inside it, and a note on the card is one line.
 fn unreadable_briefs(error: &briefs::Error) -> String {
-    format!(
-        "{} — /brief did nothing, so fix or remove the file and type it again",
-        one_line(error)
-    )
+    format!("{}{BRIEF_UNREAD}", one_line(error))
 }
 
 // Both of `/brief`'s optional files, re-read at every `/brief` so that either of

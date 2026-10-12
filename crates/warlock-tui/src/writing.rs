@@ -19,7 +19,7 @@
 //! neither the path a brief is proposed at, the shape it is held to, nor the
 //! bytes that reach the disk can differ between a panel and a shell.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 use std::{fs, io};
 
@@ -131,21 +131,12 @@ pub(crate) fn write_submit(
     if typed.is_empty() {
         return refused(field, NO_PATH);
     }
-    // The one spelling of the path, produced before anything is done with it:
-    // the bytes go to it and the line names it, so both are the same string and
-    // cannot come to disagree.
-    let stored = match to_manifest_path(repo_root, typed) {
-        Ok(stored) => stored,
-        // The engine's own wording about a path that is not inside the root,
-        // flattened as every other manifest failure in this binary is — on the
-        // rule line rather than the footer, because it is the field's text that
-        // is wrong and the field is still up.
-        Err(source) => return refused(field, Error::Manifest { source }.to_string()),
+    // On the rule line rather than the footer, because it is the field's text
+    // that is wrong and the field is still up.
+    let (stored, path) = match target(repo_root, typed, taken_rule) {
+        Ok(target) => target,
+        Err(rule) => return refused(field, rule),
     };
-    let path = from_manifest_path(repo_root, &stored);
-    if path.exists() {
-        return refused(field, taken_rule(&stored));
-    }
 
     let Some(document) = document_on(app) else {
         return closed_saying(app, NOTHING_TO_WRITE);
@@ -207,16 +198,10 @@ pub(crate) enum Landed {
 /// outlive an edit to the template, so it reads the file at the write, while
 /// `warlock brief` holds the reply to the shape it asked the model for.
 pub(crate) fn landed(repo_root: &Path, typed: &str, shape: &str, reply: &str) -> Landed {
-    // The one spelling of the path, produced before anything is done with it,
-    // for `write_submit`'s reason: the bytes go to it and the line names it.
-    let stored = match to_manifest_path(repo_root, typed) {
-        Ok(stored) => stored,
-        Err(source) => return Landed::Path(Error::Manifest { source }.to_string()),
+    let (stored, path) = match target(repo_root, typed, taken) {
+        Ok(target) => target,
+        Err(line) => return Landed::Path(line),
     };
-    let path = from_manifest_path(repo_root, &stored);
-    if path.exists() {
-        return Landed::Path(taken(&stored));
-    }
 
     match put_shaped(&path, &stored, shape, &document(reply)) {
         Ok(line) => Landed::Wrote(line),
@@ -267,6 +252,24 @@ fn wrote_line(stored: &str, bytes: u64) -> String {
 // puts its own tail on. Split rather than copied, so the one thing a reader has
 // to be told — the file is there and nothing was written over it — cannot come
 // to be said two ways.
+// The one spelling of the path, produced before anything is done with it: the
+// bytes go to it and the line names it, so both are the same string and cannot
+// come to disagree. A path outside the root is refused in the engine's own
+// words, flattened as every other manifest failure in this binary is.
+fn target(
+    repo_root: &Path,
+    typed: &str,
+    taken: fn(&str) -> String,
+) -> Result<(String, PathBuf), String> {
+    let stored = to_manifest_path(repo_root, typed)
+        .map_err(|source| Error::Manifest { source }.to_string())?;
+    let path = from_manifest_path(repo_root, &stored);
+    if path.exists() {
+        return Err(taken(&stored));
+    }
+    Ok((stored, path))
+}
+
 fn taken(stored: &str) -> String {
     format!("{stored} already exists — nothing was written")
 }
