@@ -4,7 +4,7 @@ use std::fmt::Write as _;
 
 use serde::{Deserialize, Serialize};
 
-use crate::fill::{self, Asking, Reask, Rewrite, cut, fit, flattened, line, turned_down};
+use crate::fill::{self, Asking, Reask, cut, fit, flattened, line, turned_down};
 
 // The splitting road asks again exactly as often as the document and drafting
 // roads do, and a third bound would be a number to keep in step with this one
@@ -396,58 +396,28 @@ pub use crate::drafting::MEND_PASSES;
 
 pub type Mend = fill::Mend<Mended, Slot>;
 
+pub type Mended = fill::Mended<Lost>;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Mended {
-    // The value spanned lines and keeps its first.
-    FirstLine,
-    // The value ran over its cap and was cut to it, counting characters.
-    Cut { from: usize, to: usize },
-    // The list ran over its cap and keeps its first entries.
-    Shortened { from: usize, to: usize },
+pub enum Lost {
     // The entry was left blank, and a blank line in a list is nothing a session
     // could work from, so it is gone from the list.
     Blank,
     // Positions pointing outside this ticket's own sub-tasks, or at the
     // sub-task carrying them, and so gone.
     Dropped { count: usize },
-    // The slot was never answered and fell to warlock's own line about the
-    // ticket. See [`fallback`].
-    Supplied,
 }
 
-impl From<Rewrite> for Mended {
-    fn from(rewrite: Rewrite) -> Self {
-        match rewrite {
-            Rewrite::FirstLine => Self::FirstLine,
-            Rewrite::Cut { from, to } => Self::Cut { from, to },
-        }
-    }
-}
+impl fill::Wording for Lost {
+    // Warlock's own line about the ticket. See [`fallback`].
+    const SUPPLIED: &'static str = "the ticket's own text";
 
-impl fmt::Display for Mend {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let field = &self.field;
-        match self.done {
-            Mended::FirstLine => {
-                write!(f, "{field} ran to more than one line and keeps its first")
-            }
-            Mended::Cut { from, to } => {
-                write!(f, "{field} was {from} characters and was cut to {to}")
-            }
-            Mended::Shortened { from, to } => {
-                write!(
-                    f,
-                    "{field} had {from} entries and was cut to the first {to}"
-                )
-            }
-            Mended::Blank => write!(f, "{field} was left blank and was dropped from its list"),
-            Mended::Dropped { count } => write!(
+    fn word(&self, field: &dyn fmt::Display, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Blank => write!(f, "{field} was left blank and was dropped from its list"),
+            Self::Dropped { count } => write!(
                 f,
                 "{field} named {count} position(s) outside this ticket's sub-tasks and lost them"
-            ),
-            Mended::Supplied => write!(
-                f,
-                "{field} was not answered and was filled in from the ticket's own text"
             ),
         }
     }
@@ -496,7 +466,7 @@ fn prune(fill: &mut Fill, mends: &mut Vec<Mend>) {
         if dropped > 0 {
             mends.push(Mend {
                 field: Slot::DependsOn(index),
-                done: Mended::Dropped { count: dropped },
+                done: Mended::Own(Lost::Dropped { count: dropped }),
             });
         }
     }
@@ -657,11 +627,11 @@ impl Plan {
                 !self.cut_off(index) && self.filled_goals.insert(index),
             ),
             Slot::Done(index, Some(entry)) => (
-                Mended::Blank,
+                Mended::Own(Lost::Blank),
                 !self.dropped_done(index, entry) && self.blank_done.insert((index, entry)),
             ),
             Slot::Files(index, Some(entry)) => (
-                Mended::Blank,
+                Mended::Own(Lost::Blank),
                 !self.dropped_file(index, entry) && self.blank_files.insert((index, entry)),
             ),
             Slot::Subtasks

@@ -41,13 +41,13 @@ use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
-use warlock_engine::{Manifest, route_facts, scope_opens_to, sigils_path};
+use warlock_engine::{Manifest, route_facts, scope_opens_to};
 
 use crate::app::Sigils;
 use crate::boundary::closed_scope_message;
 use crate::error::Error;
 use crate::query::{envelope, spelled, write_object};
-use crate::settings::{sigils_line, sigils_under};
+use crate::settings::{Settings, sigils_line};
 use crate::standing::{FOR_CHECK, Standing};
 
 const CHECK: &str = "check";
@@ -215,7 +215,8 @@ fn checked(
     let facts =
         route_facts(target, repo_root, manifest, home).map_err(|source| Error::Route { source })?;
     let scope = facts.scope().map(str::to_owned);
-    let sigils = sigils_under(home, repo_root);
+    let settings = Settings::at(home.map(Path::to_path_buf), repo_root);
+    let sigils = settings.sigils_or_unknown();
     // `Nothing` and `Unknown` are both the empty slice on the way in
     // (`Sigils::as_slice`), which is what makes `opens` false for both over a
     // scoped path and true for both over an unscoped one.
@@ -226,7 +227,7 @@ fn checked(
         path,
         scope,
         sigils,
-        config: home.map(|home| sigils_path(home, repo_root)),
+        config: settings.config(),
         opens,
         team: record.map(|record| record.team_key().to_owned()),
         review_state: record.map(|record| record.review_state().to_owned()),

@@ -353,8 +353,12 @@ const COMPOSER_CURSOR: &str = SCOPE_CURSOR;
 
 const COMPOSER_MIN_HEIGHT: u16 = 1 + 2 * BORDER_THICKNESS;
 
+// `cut` is the round's own, measured from the same `Shape::of` the hit test and
+// the app's heights were; `composer` only draws where `cut` gave it rows, so a
+// field that is not on screen is never drawn whichever composer is passed.
 pub(crate) fn draw(
     frame: &mut Frame<'_>,
+    cut: &Cut,
     app: &App,
     chrome: &Chrome,
     now: Instant,
@@ -362,15 +366,10 @@ pub(crate) fn draw(
     composer: Option<&Composer>,
 ) {
     let screen = frame.area();
-    let composer = on_screen(app, composer);
+    debug_assert_eq!(cut.screen, screen, "the cut was measured for another frame");
     let header = app.run_header();
-    let cut = Shape::new(screen.as_size())
-        .composer(composer)
-        .header(header.as_ref())
-        .sigils(chrome.sigils())
-        .cut();
 
-    draw_panel(frame, &cut, app, header.as_ref(), now);
+    draw_panel(frame, cut, app, header.as_ref(), now);
     if let (Some(area), Some(composer)) = (cut.composer, composer) {
         // Two things have to be true for the field to be drawn as the place the
         // next character lands: the keys have to be pointed at it, and it has to
@@ -386,7 +385,7 @@ pub(crate) fn draw(
         let strip = workflow_line(app.panel().mode(), app.panel().ready(), app.working());
         draw_composer(frame, area, composer, live, strip);
     }
-    draw_tree_pane(frame, &cut, app, chrome, now);
+    draw_tree_pane(frame, cut, app, chrome, now);
     if let Some(area) = cut.sigils {
         draw_sigils(frame, area, chrome.sigils());
     }
@@ -400,6 +399,7 @@ pub(crate) fn draw(
     }
 }
 
+#[cfg(test)]
 static NO_SIGILS: Sigils = Sigils::Nothing;
 
 /// Everything the layout depends on, and nothing else. A field added here is
@@ -415,6 +415,22 @@ pub(crate) struct Shape<'a> {
 
 impl<'a> Shape<'a> {
     #[must_use]
+    pub(crate) fn of(
+        size: Size,
+        app: &App,
+        composer: Option<&'a Composer>,
+        sigils: &'a Sigils,
+    ) -> Self {
+        Self {
+            size,
+            composer: composer.and_then(|field| composer_on_screen(app, field)),
+            run_header: app.run_header().is_some(),
+            sigils,
+        }
+    }
+
+    #[must_use]
+    #[cfg(test)]
     pub(crate) fn new(size: Size) -> Self {
         Self {
             size,
@@ -425,11 +441,13 @@ impl<'a> Shape<'a> {
     }
 
     #[must_use]
+    #[cfg(test)]
     pub(crate) fn composer(self, composer: Option<&'a Composer>) -> Self {
         Self { composer, ..self }
     }
 
     #[must_use]
+    #[cfg(test)]
     pub(crate) fn header(self, header: Option<&RunHeader>) -> Self {
         Self {
             run_header: header.is_some(),
@@ -438,21 +456,19 @@ impl<'a> Shape<'a> {
     }
 
     #[must_use]
+    #[cfg(test)]
     pub(crate) fn sigils(self, sigils: &'a Sigils) -> Self {
         Self { sigils, ..self }
     }
 
     #[must_use]
     pub(crate) fn cut(self) -> Cut {
-        let screen = Rect::from(self.size);
-        let [above, footer] =
-            Layout::vertical([Constraint::Min(0), Constraint::Length(FOOTER_HEIGHT)]).areas(screen);
-        let width = tree_width(above.width);
-        let [panel, column] = Layout::horizontal([
-            Constraint::Length(above.width - width),
-            Constraint::Length(width),
-        ])
-        .areas(above);
+        let Columns {
+            screen,
+            panel,
+            column,
+            footer,
+        } = Columns::of(self.size);
         let (panel, composer) = split_column(panel, self.composer);
         let (run_header, panel_rows) = panel_split(panel, self.run_header);
         let (tree, sigils) = tree_column(column, self.sigils);
@@ -463,7 +479,6 @@ impl<'a> Shape<'a> {
             run_header,
             panel_rows,
             composer,
-            tree_column: column,
             tree,
             tree_rows: pane_inner(tree),
             sigils,
@@ -485,7 +500,6 @@ pub(crate) struct Cut {
     run_header: Option<Rect>,
     panel_rows: Rect,
     composer: Option<Rect>,
-    tree_column: Rect,
     tree: Rect,
     tree_rows: Rect,
     sigils: Option<Rect>,
@@ -515,17 +529,43 @@ fn split_column(column: Rect, composer: Option<&Composer>) -> (Rect, Option<Rect
     (panel, Some(field))
 }
 
-// Called from `interactive.rs` too, so a keystroke is routed by the same
-// question the frame was cut by. `on_screen` below is this one over an
-// `Option`, and `draw` goes through it: if the two answers ever came from two
-// rules, keys would go to a field the reader cannot see.
 #[must_use]
-pub(crate) fn composer_on_screen<'a>(app: &App, composer: &'a Composer) -> Option<&'a Composer> {
+fn composer_on_screen<'a>(app: &App, composer: &'a Composer) -> Option<&'a Composer> {
     app.panel().composer_showable().then_some(composer)
 }
 
-fn on_screen<'a>(app: &App, composer: Option<&'a Composer>) -> Option<&'a Composer> {
-    composer.and_then(|field| composer_on_screen(app, field))
+// The horizontal half of a cut, on its own so the panel's width can be read
+// before anything vertical is known, and from the same split the frame uses.
+struct Columns {
+    screen: Rect,
+    panel: Rect,
+    column: Rect,
+    footer: Rect,
+}
+
+impl Columns {
+    fn of(size: Size) -> Self {
+        let screen = Rect::from(size);
+        let [above, footer] =
+            Layout::vertical([Constraint::Min(0), Constraint::Length(FOOTER_HEIGHT)]).areas(screen);
+        let width = tree_width(above.width);
+        let [panel, column] = Layout::horizontal([
+            Constraint::Length(above.width - width),
+            Constraint::Length(width),
+        ])
+        .areas(above);
+        Self {
+            screen,
+            panel,
+            column,
+            footer,
+        }
+    }
+}
+
+#[must_use]
+pub(crate) fn panel_width(size: Size) -> u16 {
+    pane_inner(Columns::of(size).panel).width
 }
 
 fn tree_width(width: u16) -> u16 {
@@ -593,23 +633,6 @@ impl Cut {
     #[must_use]
     pub(crate) fn panel_height(&self) -> u16 {
         self.panel_rows.height
-    }
-
-    #[must_use]
-    pub(crate) fn panel_width(&self) -> u16 {
-        pane_inner(self.panel).width
-    }
-
-    #[must_use]
-    #[cfg(test)]
-    pub(crate) fn run_header_height(&self) -> u16 {
-        self.run_header.map_or(0, |area| area.height)
-    }
-
-    #[must_use]
-    #[cfg(test)]
-    pub(crate) fn composer_height(&self) -> u16 {
-        self.composer.map_or(0, |area| area.height)
     }
 
     /// Where the panes are and nothing else: what a row offset stands for is
@@ -1195,8 +1218,18 @@ pub(crate) fn sigil_lines(sigils: &Sigils) -> Vec<String> {
     }
 }
 
+// The length of `sigil_lines` without building them, for a layout cut on every
+// round and every mouse motion. The two must agree, or the box is cut for one
+// count of lines and filled with another.
+fn sigil_line_count(sigils: &Sigils) -> usize {
+    match sigils {
+        Sigils::Held(held) => held.len().min(SIGILS_MOST_LINES),
+        Sigils::Nothing | Sigils::Unknown => 1,
+    }
+}
+
 fn tree_column(tree: Rect, sigils: &Sigils) -> (Rect, Option<Rect>) {
-    let lines = u16::try_from(sigil_lines(sigils).len()).unwrap_or(u16::MAX);
+    let lines = u16::try_from(sigil_line_count(sigils)).unwrap_or(u16::MAX);
     let rows = lines.saturating_add(2 * BORDER_THICKNESS);
     let floor = 2 * BORDER_THICKNESS + TREE_MIN_ROWS;
     if tree.height < rows.saturating_add(floor) {
@@ -1498,15 +1531,15 @@ impl<'a> Dialog<'a> {
                 lines.push(Line::default());
             }
             lines.push(Line::from(*heading).bold());
-            let rows: Box<dyn Iterator<Item = &(&str, &str)>> = match rows {
-                Rows::Keys(keys) => Box::new(keys.iter()),
-                Rows::Commands => Box::new(help_rows()),
-            };
-            for (key, does) in rows {
-                lines.push(Line::from(vec![
+            let row = |(key, does): &(&str, &'static str)| {
+                Line::from(vec![
                     Span::raw(format!("{key:<HELP_KEY_WIDTH$}")),
                     Span::raw(*does).dim(),
-                ]));
+                ])
+            };
+            match rows {
+                Rows::Keys(keys) => lines.extend(keys.iter().map(row)),
+                Rows::Commands => lines.extend(help_rows().map(row)),
             }
         }
 

@@ -31,7 +31,7 @@ use crate::inflight::{Lost, Port, Stream, Workers, settled};
 use crate::pacting::CancelGuard;
 use crate::panel::Mode;
 use crate::prompt::{Edited, ScopePrompt};
-use crate::submission::{Submitted, Wanted, submitted_for};
+use crate::submission::{BRIEF, CHAT, Submitted, WRITE, Wanted, submitted_for};
 use crate::template::{Error as TemplateError, brief_template};
 use crate::thread::{Ending, ending_for};
 use crate::writing::{write_edit, write_opened};
@@ -39,14 +39,6 @@ use crate::writing::{write_edit, write_opened};
 // Said of a lost turn. Worded as the tail of `Ending::Broke`'s sentence rather
 // than as a sentence of its own, so the line reads like every other failed turn.
 const TURN_LOST: &str = "it stopped without saying how it went";
-
-// What the commands are shown as on the card — never what is sent, which for
-// the three that open a turn is a paragraph warlock wrote. Spelled here rather
-// than taken from the draft because `submitted_for` trims, so `"  /brief  "`
-// and `"/brief"` are one command and have to draw as one row.
-const BRIEF_COMMAND: &str = "/brief";
-const CHAT_COMMAND: &str = "/chat";
-const WRITE_COMMAND: &str = "/write";
 
 // Said on a *change* of register only, so a `/brief` typed in brief mode costs a
 // turn and no line. Each names the way out, because that is the one thing a
@@ -62,7 +54,9 @@ pub(crate) const CHAT_NOTE: &str =
 // document, is a question nobody asked and money nobody meant to spend.
 const ALREADY_CHATTING: &str = "already in chat mode — /brief is what changes that.";
 
-const NOT_BRIEFING: &str = "/write is only in brief mode — /brief enters it";
+fn not_briefing() -> String {
+    format!("{WRITE} is only in brief mode — {BRIEF} enters it")
+}
 
 fn unreadable_template(error: &TemplateError) -> String {
     format!("{error} — /brief did nothing, so fix or remove the file and type it again")
@@ -296,7 +290,7 @@ impl<C: Converses> Chat<C> {
                         app.panel_mut().note(BRIEF_NOTE, now);
                     }
                     app.panel_mut().set_ready(false);
-                    self.say(app, BRIEF_COMMAND, &instruction, Asked::Answer, now);
+                    self.say(app, BRIEF, &instruction, Asked::Answer, now);
                 }
                 Err(line) => app.panel_mut().note(line, now),
             },
@@ -311,9 +305,9 @@ impl<C: Converses> Chat<C> {
             // refusal would contradict the strip.
             Submitted::Write => {
                 if app.panel().mode() == Mode::Brief {
-                    self.say(app, WRITE_COMMAND, WRITE_INSTRUCTION, Asked::Document, now);
+                    self.say(app, WRITE, WRITE_INSTRUCTION, Asked::Document, now);
                 } else {
-                    app.panel_mut().note(NOT_BRIEFING, now);
+                    app.panel_mut().note(not_briefing(), now);
                 }
             }
             // Everything else is about a board, a queue, a working tree or a file
@@ -365,7 +359,7 @@ impl<C: Converses> Chat<C> {
         }
         app.panel_mut().set_ready(false);
         app.panel_mut().note(CHAT_NOTE, now);
-        self.say(app, CHAT_COMMAND, CHAT_INSTRUCTION, Asked::Answer, now);
+        self.say(app, CHAT, CHAT_INSTRUCTION, Asked::Answer, now);
         true
     }
 }

@@ -4,9 +4,9 @@ use super::{Defect, Slot};
 
 use super::{
     Accepted, Caught, DEPENDS_ON_PER_SUBTASK, DONE_CHARS, DONE_PER_SUBTASK, FILE_CHARS,
-    FILES_PER_SUBTASK, Fill, GOAL_CHARS, GOAL_MINIMUM, MEND_PASSES, Mend, Mended, NOTES_CHARS,
-    Numbered, SPLIT_PROMPT, SUBTASKS_PER_TICKET, Subtask, TEST_PLAN_CHARS, accept, check, mend,
-    mended, number, split_instructions, stub_answer,
+    FILES_PER_SUBTASK, Fill, GOAL_CHARS, GOAL_MINIMUM, Lost, MEND_PASSES, Mend, Mended,
+    NOTES_CHARS, Numbered, SPLIT_PROMPT, SUBTASKS_PER_TICKET, Subtask, TEST_PLAN_CHARS, accept,
+    check, mend, mended, number, split_instructions, stub_answer,
 };
 
 const DONE: &str = "The module exists and its tests pass.";
@@ -484,7 +484,7 @@ fn a_position_outside_the_ticket_is_dropped_by_the_repair() {
         mends,
         vec![Mend {
             field: Slot::DependsOn(2),
-            done: Mended::Dropped { count: 2 },
+            done: Mended::Own(Lost::Dropped { count: 2 }),
         }]
     );
     assert_eq!(
@@ -507,7 +507,7 @@ fn a_subtask_that_waits_on_itself_loses_the_position() {
         mends,
         vec![Mend {
             field: Slot::DependsOn(2),
-            done: Mended::Dropped { count: 1 },
+            done: Mended::Own(Lost::Dropped { count: 1 }),
         }]
     );
 }
@@ -546,7 +546,7 @@ fn subtasks_past_the_cap_go_from_the_end_and_the_positions_into_them_go_too() {
             },
             Mend {
                 field: Slot::DependsOn(0),
-                done: Mended::Dropped { count: 1 },
+                done: Mended::Own(Lost::Dropped { count: 1 }),
             },
         ]
     );
@@ -628,15 +628,15 @@ fn a_blank_list_entry_is_dropped_and_the_drop_is_named() {
         vec![
             Mend {
                 field: Slot::Done(2, Some(1)),
-                done: Mended::Blank,
+                done: Mended::Own(Lost::Blank),
             },
             Mend {
                 field: Slot::Done(2, Some(2)),
-                done: Mended::Blank,
+                done: Mended::Own(Lost::Blank),
             },
             Mend {
                 field: Slot::Files(2, Some(0)),
-                done: Mended::Blank,
+                done: Mended::Own(Lost::Blank),
             },
         ],
         "each blank is named at the position it was read at, before the list shortened"

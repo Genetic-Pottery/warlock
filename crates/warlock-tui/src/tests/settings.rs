@@ -6,7 +6,7 @@ use warlock_engine::{
     save_sigils, sigils_path,
 };
 
-use super::{Settings, sigils_line, sigils_under};
+use super::{Said, Settings, sigils_line};
 use crate::app::{Held, Sigils};
 use crate::error::Error;
 use crate::submission::{Branching, Sigiling};
@@ -46,7 +46,10 @@ fn add_keeps_what_is_held_folds_case_and_skips_repeats() {
         .sigil(&Sigiling::Add(names(&["Warlock-Team", "docs", "*"])))
         .expect("every name is a sigil");
 
-    assert_eq!(said, "holding `docs`, `warlock-team`, `*`");
+    assert_eq!(
+        said,
+        Said::Wrote("holding `docs`, `warlock-team`, `*`".to_owned())
+    );
     assert_eq!(
         held(home.path(), root.path()),
         names(&["docs", "warlock-team", "*"])
@@ -82,7 +85,7 @@ fn remove_takes_out_what_is_held_and_refuses_what_is_not() {
     );
 
     let removed = settings.sigil(&Sigiling::Remove(names(&["DOCS"]))).unwrap();
-    assert_eq!(removed, "holding `warlock-team`");
+    assert_eq!(removed.line(), "holding `warlock-team`");
     assert_eq!(held(home.path(), root.path()), names(&["warlock-team"]));
 }
 
@@ -95,7 +98,7 @@ fn clear_holds_nothing() {
         settings(home.path(), root.path())
             .sigil(&Sigiling::Clear)
             .unwrap(),
-        "holding nothing"
+        Said::Wrote("holding nothing".to_owned())
     );
     assert_eq!(held(home.path(), root.path()), Vec::<String>::new());
 }
@@ -105,11 +108,17 @@ fn show_names_what_is_held_and_writes_nothing() {
     let (home, root) = (a_dir(), a_dir());
     let settings = settings(home.path(), root.path());
 
-    assert_eq!(settings.sigil(&Sigiling::Show).unwrap(), "holding nothing");
+    assert_eq!(
+        settings.sigil(&Sigiling::Show).unwrap(),
+        Said::Shown("holding nothing".to_owned())
+    );
     assert!(!sigils_path(home.path(), root.path()).exists());
 
     save_sigils(home.path(), root.path(), &names(&["docs"])).unwrap();
-    assert_eq!(settings.sigil(&Sigiling::Show).unwrap(), "holding `docs`");
+    assert_eq!(
+        settings.sigil(&Sigiling::Show).unwrap().line(),
+        "holding `docs`"
+    );
 }
 
 #[test]
@@ -142,7 +151,10 @@ fn no_home_refuses_every_sigil_command_in_standing_s_words() {
     // Naming the base needs no file: with none, pulls go where the remote says.
     assert_eq!(
         settings.branch(&Branching::Show, Some("main")).unwrap(),
-        "pulls start from and open pull requests against the remote's default branch, `main`"
+        Said::Shown(
+            "pulls start from and open pull requests against the remote's default branch, `main`"
+                .to_owned()
+        )
     );
 }
 
@@ -156,7 +168,7 @@ fn branch_use_sets_the_base_and_clear_goes_back_to_the_remotes_default() {
         .expect("sets the base");
     assert_eq!(
         said,
-        "pulls start from and open pull requests against `develop`"
+        Said::Wrote("pulls start from and open pull requests against `develop`".to_owned())
     );
     assert_eq!(
         held_base_branch(home.path(), root.path())
@@ -165,14 +177,20 @@ fn branch_use_sets_the_base_and_clear_goes_back_to_the_remotes_default() {
         Some("develop")
     );
     assert_eq!(
-        settings.branch(&Branching::Show, Some("main")).unwrap(),
-        said
+        settings
+            .branch(&Branching::Show, Some("main"))
+            .unwrap()
+            .line(),
+        said.line()
     );
 
     let said = settings
         .branch(&Branching::Clear, None)
         .expect("clears the base");
-    assert!(said.ends_with("the remote's default branch"), "{said}");
+    assert!(
+        said.line().ends_with("the remote's default branch"),
+        "{said:?}"
+    );
     assert_eq!(
         held_base_branch(home.path(), root.path()).expect("reads"),
         None
@@ -258,10 +276,13 @@ fn a_machine_that_never_ran_warlock_holds_nothing() {
     let (home, repo) = (a_dir(), a_dir());
 
     assert_eq!(
-        sigils_under(Some(home.path()), repo.path()),
+        settings(home.path(), repo.path()).sigils_or_unknown(),
         Sigils::Nothing
     );
-    assert_eq!(sigils_under(None, repo.path()), Sigils::Nothing);
+    assert_eq!(
+        Settings::at(None, repo.path()).sigils_or_unknown(),
+        Sigils::Nothing
+    );
 }
 
 #[test]
@@ -271,7 +292,7 @@ fn the_sigils_on_disk_are_the_sigils_the_header_states() {
     save_sigils(home.path(), repo.path(), &held).expect("a config that writes");
 
     assert_eq!(
-        sigils_under(Some(home.path()), repo.path()),
+        settings(home.path(), repo.path()).sigils_or_unknown(),
         Sigils::Held(held)
     );
 }
@@ -282,7 +303,7 @@ fn a_config_holding_the_empty_set_is_the_same_nothing_as_no_config_at_all() {
     save_sigils(home.path(), repo.path(), &[]).expect("a config that writes");
 
     assert_eq!(
-        sigils_under(Some(home.path()), repo.path()),
+        settings(home.path(), repo.path()).sigils_or_unknown(),
         Sigils::Nothing
     );
 }
@@ -295,7 +316,7 @@ fn a_config_that_will_not_parse_is_said_rather_than_ending_the_session() {
     broken(home.path(), repo.path());
 
     assert_eq!(
-        sigils_under(Some(home.path()), repo.path()),
+        settings(home.path(), repo.path()).sigils_or_unknown(),
         Sigils::Unknown
     );
 }

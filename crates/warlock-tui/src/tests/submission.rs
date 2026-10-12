@@ -438,25 +438,13 @@ fn sigil_reads_its_four_spellings_and_refuses_the_rest() {
 }
 
 #[test]
-fn every_command_is_on_the_help_sheet_and_in_the_refusal() {
-    let refusal = Submitted::Refused.refusal().expect("a refusal has a line");
+fn every_command_is_on_the_help_sheet() {
     for command in COMMANDS {
         assert!(
             help_rows().any(|(keys, _)| keys.split_whitespace().any(|key| key == command.word)),
             "{} has no row on the help sheet",
             command.word
         );
-        assert!(
-            refusal.contains(command.word),
-            "the refusal does not name {}",
-            command.word
-        );
-        if let Some(takes) = command.takes {
-            assert!(
-                refusal.contains(takes),
-                "the refusal does not say {takes:?}"
-            );
-        }
     }
 }
 

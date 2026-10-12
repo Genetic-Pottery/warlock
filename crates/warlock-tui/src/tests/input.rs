@@ -3739,7 +3739,7 @@ mod pointer {
     use crate::modal::{Modal, Modals};
     use crate::prompt::{RecordPrompt, ScopePrompt};
     use crate::selection::Cell;
-    use crate::ui::{Reach, Shape};
+    use crate::ui::{Reach, Shape, panel_width};
 
     // The one terminal every test below points at, and the layout it comes
     // to. Eighty columns is wide enough that the tree takes its floor of
@@ -3858,7 +3858,7 @@ mod pointer {
         let cut = Shape::new(SIZE).cut();
         app.set_viewport_height(cut.tree_height());
         app.panel_mut().set_height(cut.panel_height());
-        app.panel_mut().set_width(cut.panel_width());
+        app.panel_mut().set_width(panel_width(SIZE));
         app
     }
 
@@ -3880,7 +3880,7 @@ mod pointer {
     }
 
     fn panel_cells() -> usize {
-        usize::from(Shape::new(SIZE).cut().panel_width())
+        usize::from(panel_width(SIZE))
     }
 
     fn asks(mouse: MouseEvent, app: &App) -> Option<MouseAction> {

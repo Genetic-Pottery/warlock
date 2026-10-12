@@ -1168,10 +1168,7 @@ mod submitting {
 
     use warlock_engine::{DEFAULT_BRIEF_DIRECTORY, briefs_path, load_briefs};
 
-    use super::super::{
-        ALREADY_CHATTING, BRIEF_COMMAND, BRIEF_NOTE, CHAT_COMMAND, CHAT_NOTE, Chat, NOT_BRIEFING,
-        WRITE_COMMAND, brief_asking,
-    };
+    use super::super::{ALREADY_CHATTING, BRIEF_NOTE, CHAT_NOTE, Chat, brief_asking, not_briefing};
     use crate::account::Line;
     use crate::app::App;
     use crate::claude::Converses;
@@ -1179,6 +1176,7 @@ mod submitting {
     use crate::composer::{Composed, Composer};
     use crate::error::one_line;
     use crate::panel::Mode;
+    use crate::submission::{BRIEF, CHAT, WRITE};
     use crate::submission::{Submitted, ToDraft, ToPush, Wanted};
     use crate::template::DEFAULT_TEMPLATE;
     use crate::thread::Ending;
@@ -1326,7 +1324,7 @@ mod submitting {
             );
             assert_eq!(
                 rows(&app, now),
-                vec![note(NOT_BRIEFING)],
+                vec![note(&not_briefing())],
                 "{draft:?} did not leave exactly one note"
             );
             assert_eq!(turns(&app), 0, "{draft:?} opened a turn");
@@ -1348,7 +1346,7 @@ mod submitting {
         submit_into(&mut app, &mut chat, "/write", now);
 
         assert_eq!(turns(&app), before, "/write out of the mode cost a turn");
-        assert_eq!(rows(&app, now).last(), Some(&note(NOT_BRIEFING)));
+        assert_eq!(rows(&app, now).last(), Some(&note(&not_briefing())));
     }
 
     #[test]
@@ -1466,8 +1464,8 @@ mod submitting {
             rows(&app, now),
             [
                 vec![note(BRIEF_NOTE)],
-                asked(BRIEF_COMMAND).to_vec(),
-                asked(WRITE_COMMAND).to_vec(),
+                asked(BRIEF).to_vec(),
+                asked(WRITE).to_vec(),
             ]
             .concat(),
             "/write is not one turn shown as the command",
@@ -1510,7 +1508,7 @@ mod submitting {
             );
             assert_eq!(
                 rows(&app, now),
-                [vec![note(BRIEF_NOTE)], asked(BRIEF_COMMAND).to_vec()].concat(),
+                [vec![note(BRIEF_NOTE)], asked(BRIEF).to_vec()].concat(),
                 "{draft:?} is not one note and one turn"
             );
             assert_eq!(turns(&app), 1, "{draft:?} did not open one turn");
@@ -1540,7 +1538,7 @@ mod submitting {
         assert_eq!(app.panel().mode(), Mode::Brief, "the mode was not entered");
         assert_eq!(
             rows(&app, now),
-            [vec![note(BRIEF_NOTE)], asked(BRIEF_COMMAND).to_vec()].concat(),
+            [vec![note(BRIEF_NOTE)], asked(BRIEF).to_vec()].concat(),
         );
         assert_eq!(turns(&app), 1, "the brief did not open one turn");
         assert!(chat.answering(), "the brief asked the model nothing");
@@ -1700,7 +1698,7 @@ mod submitting {
         assert_eq!(app.panel().mode(), Mode::Brief, "the mode was not entered");
         assert_eq!(
             rows(&app, now),
-            [vec![note(BRIEF_NOTE)], asked(BRIEF_COMMAND).to_vec()].concat(),
+            [vec![note(BRIEF_NOTE)], asked(BRIEF).to_vec()].concat(),
             "a setting that reads said something on the card",
         );
         assert_eq!(chat.directory(), "plans");
@@ -1918,8 +1916,8 @@ mod submitting {
             rows(&app, now),
             [
                 vec![note(BRIEF_NOTE)],
-                asked(BRIEF_COMMAND).to_vec(),
-                asked(BRIEF_COMMAND).to_vec(),
+                asked(BRIEF).to_vec(),
+                asked(BRIEF).to_vec(),
             ]
             .concat(),
         );
@@ -1947,9 +1945,9 @@ mod submitting {
             rows(&app, now),
             [
                 vec![note(BRIEF_NOTE)],
-                asked(BRIEF_COMMAND).to_vec(),
+                asked(BRIEF).to_vec(),
                 vec![note(CHAT_NOTE)],
-                asked(CHAT_COMMAND).to_vec(),
+                asked(CHAT).to_vec(),
             ]
             .concat(),
         );
@@ -2009,9 +2007,9 @@ mod submitting {
             [
                 before,
                 vec![note(BRIEF_NOTE)],
-                asked(BRIEF_COMMAND).to_vec(),
+                asked(BRIEF).to_vec(),
                 vec![note(CHAT_NOTE)],
-                asked(CHAT_COMMAND).to_vec(),
+                asked(CHAT).to_vec(),
             ]
             .concat(),
         );

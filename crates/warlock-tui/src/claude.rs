@@ -441,8 +441,8 @@ pub fn propose_answer<C: Converses>(
     prose: &str,
     question: &str,
 ) -> Result<String, agent::Error> {
-    let agent = agent.fresh().wired(Cancel::new(), Activities::none());
-    let reply = agent.turn(&proposing_instruction(brief, title, prose, question))?;
+    let reply =
+        Conversation::fresh(agent).turn(&proposing_instruction(brief, title, prose, question))?;
     Ok(proposed(&reply))
 }
 
@@ -2489,7 +2489,6 @@ pub enum Drafted {
     Unusable(drafting::Defect),
 }
 
-/// The one agent a session talks to, and the cancel handle that reaches it.
 #[derive(Debug)]
 struct Conversation<C> {
     agent: C,

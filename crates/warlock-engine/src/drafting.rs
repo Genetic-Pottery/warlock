@@ -4,7 +4,7 @@ use std::fmt::Write as _;
 
 use serde::{Deserialize, Serialize};
 
-use crate::fill::{self, Asking, Reask, Rewrite, fit, flattened, line, turned_down};
+use crate::fill::{self, Asking, Reask, fit, flattened, line, turned_down};
 
 // The drafting road asks again exactly as often as the document road does, and
 // a second bound would be a number to keep in step with this one for no gain.
@@ -396,56 +396,25 @@ pub const MEND_PASSES: usize = 3;
 
 pub type Mend = fill::Mend<Mended, Slot>;
 
+pub type Mended = fill::Mended<Dropped>;
+
+// References pointing outside this slice's own drafts, or at the draft carrying
+// them, and so gone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Mended {
-    // The value spanned lines and keeps its first.
-    FirstLine,
-    // The value ran over its cap and was cut to it, counting characters.
-    Cut { from: usize, to: usize },
-    // The list ran over its cap and keeps its first entries.
-    Shortened { from: usize, to: usize },
-    // References pointing outside this slice's own drafts, or at the draft
-    // carrying them, and so gone.
-    Dropped { count: usize },
-    // The slot was never answered and fell to warlock's own line about the
-    // slice. See [`fallback`].
-    Supplied,
+pub struct Dropped {
+    pub count: usize,
 }
 
-impl From<Rewrite> for Mended {
-    fn from(rewrite: Rewrite) -> Self {
-        match rewrite {
-            Rewrite::FirstLine => Self::FirstLine,
-            Rewrite::Cut { from, to } => Self::Cut { from, to },
-        }
-    }
-}
+impl fill::Wording for Dropped {
+    // Warlock's own line about the slice. See [`fallback`].
+    const SUPPLIED: &'static str = "the slice's own text";
 
-impl fmt::Display for Mend {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let field = &self.field;
-        match self.done {
-            Mended::FirstLine => {
-                write!(f, "{field} ran to more than one line and keeps its first")
-            }
-            Mended::Cut { from, to } => {
-                write!(f, "{field} was {from} characters and was cut to {to}")
-            }
-            Mended::Shortened { from, to } => {
-                write!(
-                    f,
-                    "{field} had {from} entries and was cut to the first {to}"
-                )
-            }
-            Mended::Dropped { count } => write!(
-                f,
-                "{field} named {count} position(s) outside this slice's drafts and lost them"
-            ),
-            Mended::Supplied => write!(
-                f,
-                "{field} was not answered and was filled in from the slice's own text"
-            ),
-        }
+    fn word(&self, field: &dyn fmt::Display, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let count = self.count;
+        write!(
+            f,
+            "{field} named {count} position(s) outside this slice's drafts and lost them"
+        )
     }
 }
 
@@ -491,7 +460,7 @@ fn prune(fill: &mut Fill, mends: &mut Vec<Mend>) {
             if dropped > 0 {
                 mends.push(Mend {
                     field,
-                    done: Mended::Dropped { count: dropped },
+                    done: Mended::Own(Dropped { count: dropped }),
                 });
             }
         }

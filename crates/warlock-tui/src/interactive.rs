@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use ratatui::crossterm::event::{KeyEvent, MouseEvent};
 use ratatui::layout::Size;
-use warlock_engine::{Agent, Manifest, to_manifest_path};
+use warlock_engine::{Agent, Manifest};
 
 use crate::app::{App, Focus, Run, Working};
 use crate::chatting::Chat;
@@ -35,8 +35,9 @@ use crate::scoping::{record_edit, scope_edit, scope_press};
 use crate::screen::Screen;
 use crate::selection::{Cell, Position, copied_text, position_at};
 use crate::session::{Scope, Watched, load_app, start_watching};
+use crate::settings::Said;
 use crate::submission::{ToPush, Wanted};
-use crate::ui::{Reach, Shape, composer_on_screen, draw, help_most_scroll};
+use crate::ui::{Reach, Shape, draw, help_most_scroll, panel_width};
 use crate::viewing::view_press;
 
 /// How long the loop waits for a keystroke before going round anyway.
@@ -374,7 +375,7 @@ impl<K: Seams> Session<K> {
         // field's own rows are folded at and therefore the width its row-wise
         // keys move over. Told here, before the key that reads it, because the
         // loop draws and then waits.
-        let width = Shape::new(size).cut().panel_width();
+        let width = panel_width(size);
         self.chat.set_composer_width(width);
         self.help = self.help.clamped(help_most_scroll(size));
         // And the other thing the field is told once a round: which slice of a
@@ -382,13 +383,13 @@ impl<K: Seams> Session<K> {
         // at the two edges of a question, so a field cannot be left labelled for
         // a question that is over — see [`Cutter::answering`].
         self.chat.set_composer_answering(self.cutter.answering());
-        let field = composer_on_screen(&self.app, self.chat.composer());
-        let header = self.app.run_header();
-        let cut = Shape::new(size)
-            .composer(field)
-            .header(header.as_ref())
-            .sigils(self.scope.chrome.sigils())
-            .cut();
+        let cut = Shape::of(
+            size,
+            &self.app,
+            Some(self.chat.composer()),
+            self.scope.chrome.sigils(),
+        )
+        .cut();
         self.app.set_viewport_height(cut.tree_height());
         let panel = self.app.panel_mut();
         panel.set_height(cut.panel_height());
@@ -405,9 +406,9 @@ impl<K: Seams> Session<K> {
             &self.chat,
         )
         .current();
-        let (app, chrome) = (&self.app, &self.scope.chrome);
+        let (app, chrome, field) = (&self.app, &self.scope.chrome, self.chat.composer());
         self.screen.draw(|frame| {
-            draw(frame, app, chrome, Instant::now(), modal, field);
+            draw(frame, &cut, app, chrome, Instant::now(), modal, Some(field));
         })
     }
 
@@ -424,12 +425,12 @@ impl<K: Seams> Session<K> {
         // the draft the frame was drawn with are the session's: what the event
         // means is decided against them, and what it then does is the app's
         // alone.
-        let field = composer_on_screen(&self.app, self.chat.composer());
-        let header = self.app.run_header();
-        let shape = Shape::new(size)
-            .composer(field)
-            .header(header.as_ref())
-            .sigils(self.scope.chrome.sigils());
+        let shape = Shape::of(
+            size,
+            &self.app,
+            Some(self.chat.composer()),
+            self.scope.chrome.sigils(),
+        );
         let action = mouse_action(mouse, shape, &self.app, self.modal());
         // Before the action is acted on, because this is bookkeeping about the
         // gesture rather than part of it: what the app does with a press or a
@@ -948,20 +949,10 @@ impl<K: Seams> Session<K> {
         };
         let root = &self.scope.repo_root;
         match wanted {
-            // The manifest's spelling of the typed path, made before anything
-            // else is asked so a path that climbs out of the repository is
-            // refused in the engine's own words. The thread names files against
-            // the repository root, so a typed path is read against it too.
-            Wanted::Push(ToPush { scope, path }) => match to_manifest_path(root, &path) {
-                Ok(brief) => {
-                    self.pushes
-                        .press(&mut self.app, &self.manifest, root, &scope, &brief, now);
-                }
-                Err(source) => self
-                    .app
-                    .panel_mut()
-                    .note(one_line(&source.to_string()), now),
-            },
+            Wanted::Push(ToPush { scope, path }) => {
+                self.pushes
+                    .press(&mut self.app, &self.manifest, root, &scope, &path, now);
+            }
             Wanted::Draft(drafting) => {
                 self.cutter.press(
                     &mut self.app,
@@ -1007,14 +998,16 @@ impl<K: Seams> Session<K> {
         }
     }
 
-    // The chrome is read again from the file rather than left to the next
-    // round's stat, so the box and the boundary checks move with the line even
-    // where the file's clock is too coarse to see the write. A pull underway has
-    // already been refused above with every other submit, which matters: its
-    // base was read when it started.
-    fn settled(&mut self, said: Result<String, Error>, now: Instant) {
-        self.scope.chrome.set_held(self.scope.settings.snapshot());
-        self.say(said, now);
+    // After a write the chrome is read again from the file rather than left to
+    // the next round's stat, so the box and the boundary checks move with the
+    // line even where the file's clock is too coarse to see the write. A pull
+    // underway has already been refused above with every other submit, which
+    // matters: its base was read when it started.
+    fn settled(&mut self, said: Result<Said, Error>, now: Instant) {
+        if matches!(said, Ok(Said::Wrote(_))) {
+            self.scope.chrome.set_held(self.scope.settings.snapshot());
+        }
+        self.say(said.map(|said| said.line().to_owned()), now);
     }
 
     fn say(&mut self, said: Result<String, Error>, now: Instant) {

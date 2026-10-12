@@ -1,4 +1,5 @@
 use std::fs;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -7,7 +8,9 @@ use warlock_engine::{
 };
 
 use crate::app::{Held, Sigils, Target};
+use crate::cut::listed;
 use crate::error::Error;
+use crate::standing::Standing;
 use crate::submission::{Branching, Sigiling};
 
 /// This checkout's settings on this machine: the sigils held and the branch
@@ -16,7 +19,6 @@ use crate::submission::{Branching, Sigiling};
 /// The CLI's `warlock sigil` and `warlock branch` and the chat bar's `/sigil`
 /// and `/branch` all go through here, so the two doors read, write and word
 /// the setting the same way.
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Settings {
     home: Option<PathBuf>,
     root: PathBuf,
@@ -43,11 +45,20 @@ impl Settings {
         }
     }
 
-    pub(crate) fn home(&self) -> Option<&Path> {
+    pub(crate) fn here(wanted: &'static str) -> Result<Self, Error> {
+        let standing = Standing::here(wanted)?;
+        Ok(Self::at(Some(Standing::home()?), standing.repo_root()))
+    }
+
+    pub(crate) fn root(&self) -> &Path {
+        &self.root
+    }
+
+    fn home(&self) -> Option<&Path> {
         self.home.as_deref()
     }
 
-    fn config(&self) -> Option<PathBuf> {
+    pub(crate) fn config(&self) -> Option<PathBuf> {
         self.home().map(|home| sigils_path(home, &self.root))
     }
 
@@ -56,7 +67,7 @@ impl Settings {
     pub(crate) fn snapshot(&mut self) -> Held {
         self.stamp = Stamp::Read(self.modified());
         Held {
-            sigils: sigils_under(self.home(), &self.root),
+            sigils: self.sigils_or_unknown(),
             base: self
                 .home()
                 .and_then(|home| held_base_branch(home, &self.root).ok().flatten()),
@@ -94,23 +105,14 @@ impl Settings {
         held_base_branch(home, &self.root).map_err(|source| Error::Sigils { source })
     }
 
-    /// `/sigil` and `warlock sigil`: the sigils held afterwards, as one line.
-    pub(crate) fn sigil(&self, sigiling: &Sigiling) -> Result<String, Error> {
-        let held = match sigiling {
-            Sigiling::Show => self.sigils()?,
-            change => self.change_sigils(change)?,
-        };
-        Ok(sigils_line(&Sigils::held(held), None))
-    }
-
     // Every name is judged before anything is written, so a typo in the third
     // name of an `add` leaves the first two unwritten too rather than half done.
     // A config that will not read is refused rather than written over: `add` and
     // `remove` are edits of what is there, and there is no telling what is there.
-    fn change_sigils(&self, change: &Sigiling) -> Result<Vec<String>, Error> {
+    pub(crate) fn sigil(&self, sigiling: &Sigiling) -> Result<Said, Error> {
         let mut held = self.sigils()?;
-        match change {
-            Sigiling::Show => {}
+        match sigiling {
+            Sigiling::Show => return Ok(Said::Shown(sigils_line(&Sigils::held(held), None))),
             Sigiling::Add(names) => {
                 for name in names {
                     let sigil = folded(name)?;
@@ -132,25 +134,26 @@ impl Settings {
         }
         let home = self.home().ok_or(Error::NoHome)?;
         save_sigils(home, &self.root, &held).map_err(|source| Error::Sigils { source })?;
-        Ok(held)
+        Ok(Said::Wrote(sigils_line(&Sigils::held(held), None)))
     }
 
-    /// `/branch` and `warlock branch`: where pulls start from afterwards, as
-    /// one line. `remote_head` is only named in the line, never resolved here.
+    /// `remote_head` is only named in the line, never resolved here.
     pub(crate) fn branch(
         &self,
         branching: &Branching,
         remote_head: Option<&str>,
-    ) -> Result<String, Error> {
-        let base = match branching {
-            Branching::Show => self.base()?,
-            Branching::Use(name) => self.set_base(Some(name))?,
-            Branching::Clear => self.set_base(None)?,
+    ) -> Result<Said, Error> {
+        let line = |base: Option<&str>| {
+            format!(
+                "pulls start from and open pull requests against {}",
+                Target::of(base, remote_head).sentence()
+            )
         };
-        Ok(format!(
-            "pulls start from and open pull requests against {}",
-            Target::of(base.as_deref(), remote_head).sentence()
-        ))
+        Ok(match branching {
+            Branching::Show => Said::Shown(line(self.base()?.as_deref())),
+            Branching::Use(name) => Said::Wrote(line(self.set_base(Some(name))?.as_deref())),
+            Branching::Clear => Said::Wrote(line(self.set_base(None)?.as_deref())),
+        })
     }
 
     fn set_base(&self, base: Option<&str>) -> Result<Option<String>, Error> {
@@ -159,9 +162,15 @@ impl Settings {
         Ok(base.map(ToOwned::to_owned))
     }
 
-    /// A line from [`Settings::sigil`] or [`Settings::branch`] that wrote, with
-    /// where it wrote, for a shell that has no chrome to show it on.
-    pub(crate) fn written(&self, line: &str) -> String {
+    pub(crate) fn print(&self, said: &Said) {
+        let line = match said {
+            Said::Shown(line) => line.clone(),
+            Said::Wrote(line) => self.written(line),
+        };
+        drop(writeln!(io::stdout(), "warlock: {line}"));
+    }
+
+    fn written(&self, line: &str) -> String {
         let config = self
             .config()
             .map_or_else(String::new, |path| path.display().to_string());
@@ -171,7 +180,6 @@ impl Settings {
         )
     }
 
-    /// A bare `/pull`, answered with the scopes this machine holds.
     pub(crate) fn pull_line(&self) -> Result<String, Error> {
         let held = self.sigils()?;
         if held.is_empty() {
@@ -183,26 +191,41 @@ impl Settings {
         }
         Ok(format!(
             "`/pull` takes a scope: this machine holds {}",
-            holding(&held)
+            listed(&held)
         ))
+    }
+
+    // Never an error: what a machine holds is a line on a header, and warlock is
+    // a way of reading a tree. A config that will not parse becomes
+    // `Sigils::Unknown` — said out loud, so that broken is never drawn as absent
+    // — and nothing here can return upwards to end the event loop.
+    // [`Settings::sigils`], and the engine's filing and routing through
+    // `held_sigils`, read the same file and refuse instead; the difference is
+    // theirs to keep.
+    //
+    // No home reads as nothing held rather than as a config that would not read:
+    // there is no file in that case and no path to name one by, so
+    // `Sigils::Unknown` would be claiming something on disk is broken when
+    // nothing on disk was ever looked at.
+    pub(crate) fn sigils_or_unknown(&self) -> Sigils {
+        self.home().map_or(Sigils::Nothing, |home| {
+            held_sigils(home, &self.root).map_or(Sigils::Unknown, Sigils::held)
+        })
     }
 }
 
-// Never an error, and that is the whole reason it is a function of its own: what
-// a machine holds is a line on a header, and warlock is a way of reading a tree.
-// A config that will not parse becomes `Sigils::Unknown` — said out loud, so that
-// broken is never drawn as absent — and nothing here can return upwards to end
-// the event loop. Filing and routing read the same file through
-// `Settings::sigils` and refuse instead; the difference is theirs to keep.
-//
-// No home reads as nothing held rather than as a config that would not read:
-// there is no file in that case and no path to name one by, so `Sigils::Unknown`
-// would be claiming something on disk is broken when nothing on disk was ever
-// looked at.
-pub(crate) fn sigils_under(home: Option<&Path>, root: &Path) -> Sigils {
-    home.map_or(Sigils::Nothing, |home| {
-        held_sigils(home, root).map_or(Sigils::Unknown, Sigils::held)
-    })
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Said {
+    Shown(String),
+    Wrote(String),
+}
+
+impl Said {
+    pub(crate) fn line(&self) -> &str {
+        match self {
+            Self::Shown(line) | Self::Wrote(line) => line,
+        }
+    }
 }
 
 /// What is held, as one line: the one wording for the panel, `warlock sigil`
@@ -210,7 +233,7 @@ pub(crate) fn sigils_under(home: Option<&Path>, root: &Path) -> Sigils {
 pub(crate) fn sigils_line(sigils: &Sigils, config: Option<&Path>) -> String {
     match (sigils, config) {
         (Sigils::Held(held), _) => format!("holding {}", holding(held)),
-        (Sigils::Nothing, _) => format!("holding {}", holding(&[])),
+        (Sigils::Nothing, _) => "holding nothing".to_owned(),
         (Sigils::Unknown, Some(path)) => {
             format!("holding unknown: `{}` could not be read", path.display())
         }
@@ -222,11 +245,7 @@ fn holding(sigils: &[String]) -> String {
     if sigils.is_empty() {
         return "nothing".to_owned();
     }
-    sigils
-        .iter()
-        .map(|sigil| format!("`{sigil}`"))
-        .collect::<Vec<_>>()
-        .join(", ")
+    listed(sigils)
 }
 
 // `to_ascii_lowercase` rather than `to_lowercase`, because the character class

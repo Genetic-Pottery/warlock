@@ -333,8 +333,6 @@ impl Sigils {
     }
 }
 
-/// What the chrome draws of this checkout's settings, as last read by
-/// [`Settings`](crate::settings::Settings).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
 pub(crate) struct Held {
     pub(crate) sigils: Sigils,

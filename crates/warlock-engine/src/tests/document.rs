@@ -1,5 +1,5 @@
 use super::{
-    Accepted, Defect, Described, ENTRY_CHARS, ENTRY_MINIMUM, Entry, Evidence, Expected,
+    Accepted, Defect, Described, Dropped, ENTRY_CHARS, ENTRY_MINIMUM, Entry, Evidence, Expected,
     FILE_PROMPT, Fill, LIST_CAP, MEND_PASSES, Mend, Mended, PURPOSE_CHARS, STAMP, SYNTHESIS_PROMPT,
     Slot, accept_file, accept_synthesis, check, fallback, human, lines_of, mend, mended,
     names_tool, render, stub_answer, synthesis_instructions,
@@ -1483,11 +1483,11 @@ fn a_value_naming_the_tool_is_dropped_and_falls_to_the_next_rule() {
             },
             Mend {
                 field: Slot::Directory("src".to_owned()),
-                done: Mended::Dropped
+                done: Mended::Own(Dropped)
             },
             Mend {
                 field: Slot::Entry(0),
-                done: Mended::Dropped
+                done: Mended::Own(Dropped)
             },
             Mend {
                 field: Slot::Directory("src".to_owned()),
@@ -1540,7 +1540,7 @@ fn the_mend_settles_inside_its_bound_and_two_rules_cannot_spin() {
     assert_eq!(check(&repaired, &expected, &Described::default()), []);
     assert_eq!(
         mends.iter().map(|mend| mend.done).collect::<Vec<_>>(),
-        [Mended::Dropped, Mended::Supplied],
+        [Mended::Own(Dropped), Mended::Supplied],
         "twice over the same slot and then done: {mends:?}"
     );
     assert_eq!(passes, 2);

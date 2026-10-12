@@ -27,6 +27,7 @@ use crate::chatting::Chat;
 use crate::claude::Converses;
 use crate::error::{Error, one_line};
 use crate::standing::{FOR_RESUME, Standing};
+use crate::submission::PULL;
 
 pub fn resume(ticket: &str, failed_only: bool) -> Result<(), Error> {
     let standing = Standing::here(FOR_RESUME)?;
@@ -128,7 +129,7 @@ pub(crate) fn resume_press<C: Converses>(
             // a reader does about a halt they have just released is theirs, and
             // a `/pull` warlock sent for them would start a run off a keystroke
             // that asked for a record to be written.
-            chat.offer(&format!("/pull {} {}", release.scope, release.ticket));
+            chat.offer(&format!("{PULL} {} {}", release.scope, release.ticket));
         }
         // The ticket this checkout never pulled and the run with nothing left to
         // put back, flattened as the thread takes a line. Neither wrote anything.

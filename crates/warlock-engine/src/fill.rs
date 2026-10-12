@@ -215,6 +215,62 @@ pub struct Mend<M, S> {
     pub done: M,
 }
 
+/// A repair as a road records it: the four every road makes, and `Own` for the
+/// ones only one road makes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mended<X> {
+    FirstLine,
+    Cut { from: usize, to: usize },
+    Shortened { from: usize, to: usize },
+    // The slot was never answered and fell to warlock's own text, which
+    // `Wording::SUPPLIED` names.
+    Supplied,
+    Own(X),
+}
+
+impl<X> From<Rewrite> for Mended<X> {
+    fn from(rewrite: Rewrite) -> Self {
+        match rewrite {
+            Rewrite::FirstLine => Self::FirstLine,
+            Rewrite::Cut { from, to } => Self::Cut { from, to },
+        }
+    }
+}
+
+/// A road's side of a [`Mend`]'s sentence.
+pub trait Wording {
+    /// What a `Supplied` slot was filled in from.
+    const SUPPLIED: &'static str;
+
+    fn word(&self, field: &dyn fmt::Display, f: &mut fmt::Formatter<'_>) -> fmt::Result;
+}
+
+impl<X: Wording, S: fmt::Display> fmt::Display for Mend<Mended<X>, S> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let field = &self.field;
+        match &self.done {
+            Mended::FirstLine => {
+                write!(f, "{field} ran to more than one line and keeps its first")
+            }
+            Mended::Cut { from, to } => {
+                write!(f, "{field} was {from} characters and was cut to {to}")
+            }
+            Mended::Shortened { from, to } => {
+                write!(
+                    f,
+                    "{field} had {from} entries and was cut to the first {to}"
+                )
+            }
+            Mended::Supplied => write!(
+                f,
+                "{field} was not answered and was filled in from {}",
+                X::SUPPLIED
+            ),
+            Mended::Own(own) => own.word(field, f),
+        }
+    }
+}
+
 /// The two repairs every road makes the same way, rewriting a one-line value
 /// in place.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

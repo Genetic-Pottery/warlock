@@ -10,6 +10,14 @@
 //! A command is added there and nowhere else in this file. Nothing here enters a
 //! mode, writes a file or opens a turn.
 
+// Named outside the table for the lines that echo or offer a command back: the
+// card's row for a `/brief` is spelled from here rather than from the draft,
+// because `submitted_for` trims and `"  /brief  "` has to draw as `/brief`.
+pub(crate) const BRIEF: &str = "/brief";
+pub(crate) const WRITE: &str = "/write";
+pub(crate) const CHAT: &str = "/chat";
+pub(crate) const PULL: &str = "/pull";
+
 // One row per command word, and the only place warlock says which commands
 // exist: the parse, the refusal sentence and the `?` sheet's rows are all read
 // off it, so none of the three can name a command the others do not.
@@ -17,8 +25,6 @@ struct Command {
     word: &'static str,
     // Handed everything after the word, trimmed; `None` is a refusal.
     read: fn(&str) -> Option<Submitted>,
-    // What the refusal says the word takes, or `None` for a word that takes
-    // nothing.
     takes: Option<&'static str>,
     // A word can leave this empty when another word's row already names it.
     help: &'static [(&'static str, &'static str)],
@@ -26,19 +32,19 @@ struct Command {
 
 const COMMANDS: &[Command] = &[
     Command {
-        word: "/brief",
+        word: BRIEF,
         read: |after| after.is_empty().then_some(Submitted::Brief),
         takes: None,
         help: &[("/brief  /write  /chat", "talk a brief into a document")],
     },
     Command {
-        word: "/write",
+        word: WRITE,
         read: |after| after.is_empty().then_some(Submitted::Write),
         takes: None,
         help: &[],
     },
     Command {
-        word: "/chat",
+        word: CHAT,
         read: |after| after.is_empty().then_some(Submitted::Chat),
         takes: None,
         help: &[],
@@ -59,7 +65,7 @@ const COMMANDS: &[Command] = &[
         ],
     },
     Command {
-        word: "/pull",
+        word: PULL,
         read: read_pull,
         takes: Some("a scope and optionally a ticket for /pull"),
         help: &[("/pull SCOPE [TICKET]", "work a ticket to a pull request")],
@@ -97,7 +103,6 @@ const COMMANDS: &[Command] = &[
     },
 ];
 
-/// The `?` sheet's rows for the commands, in [`COMMANDS`]'s order.
 pub(crate) fn help_rows() -> impl Iterator<Item = &'static (&'static str, &'static str)> {
     COMMANDS.iter().flat_map(|command| command.help)
 }
@@ -287,30 +292,34 @@ fn owned(names: &[&str]) -> Vec<String> {
 }
 
 fn read_draft(after: &str) -> Option<Submitted> {
-    let (scope, project) = match words(after).as_slice() {
-        [scope] => (*scope, None),
-        [scope, project] => (*scope, Some(*project)),
+    let drafting = match words(after).as_slice() {
+        [scope] => ToDraft {
+            scope: (*scope).to_owned(),
+            project: None,
+        },
+        [scope, project] => ToDraft {
+            scope: (*scope).to_owned(),
+            project: Some((*project).to_owned()),
+        },
         _ => return None,
     };
-    Some(Submitted::Wanted(Wanted::Draft(ToDraft {
-        scope: scope.to_owned(),
-        project: project.map(str::to_owned),
-    })))
+    Some(Submitted::Wanted(Wanted::Draft(drafting)))
 }
 
 fn read_pull(after: &str) -> Option<Submitted> {
     let taking = match words(after).as_slice() {
         [] => None,
-        [scope] => Some((*scope, None)),
-        [scope, ticket] => Some((*scope, Some(*ticket))),
+        [scope] => Some(Taking {
+            scope: (*scope).to_owned(),
+            ticket: None,
+        }),
+        [scope, ticket] => Some(Taking {
+            scope: (*scope).to_owned(),
+            ticket: Some((*ticket).to_owned()),
+        }),
         _ => return None,
     };
-    Some(Submitted::Wanted(Wanted::Pull(taking.map(
-        |(scope, ticket)| Taking {
-            scope: scope.to_owned(),
-            ticket: ticket.map(str::to_owned),
-        },
-    ))))
+    Some(Submitted::Wanted(Wanted::Pull(taking)))
 }
 
 fn read_resume(after: &str) -> Option<Submitted> {

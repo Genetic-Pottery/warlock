@@ -6,7 +6,7 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 use crate::agent::{File, Request};
-use crate::fill::{self, Asking, Reask, Rewrite, fit, line, turned_down};
+use crate::fill::{self, Asking, Reask, fit, line, turned_down};
 use crate::languages;
 
 pub type Defect = fill::Defect<Slot>;
@@ -885,20 +885,12 @@ fn keyed(given: &BTreeMap<String, String>, wanted: &[&str], defects: &mut Vec<De
         }
     }
     for (key, value) in given {
+        let slot = Slot::Directory(key.clone());
         // An entry for something the request does not hold cannot reach here:
         // `accept_synthesis` and `mended` take it out before the check, because
         // no answer could make it right.
-        debug_assert!(
-            wanted.contains(&key.as_str()),
-            "directories[{key:?}] was never asked for"
-        );
-        line(
-            &Slot::Directory(key.clone()),
-            value,
-            ENTRY_MINIMUM,
-            ENTRY_CHARS,
-            defects,
-        );
+        debug_assert!(wanted.contains(&key.as_str()), "{slot} was never asked for");
+        line(&slot, value, ENTRY_MINIMUM, ENTRY_CHARS, defects);
     }
 }
 
@@ -1173,56 +1165,23 @@ pub const MEND_PASSES: usize = 4;
 
 pub type Mend = fill::Mend<Mended, Slot>;
 
+pub type Mended = fill::Mended<Dropped>;
+
+// The entry could not be made right from the model's own text — it names
+// something that is not here, or names the tool — so it is gone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Mended {
-    // The value spanned lines and keeps its first.
-    FirstLine,
-    // The value ran over its cap and was cut to it, counting characters.
-    Cut { from: usize, to: usize },
-    // The list ran over `LIST_CAP` and keeps its first entries.
-    Shortened { from: usize, to: usize },
-    // The entry could not be made right from the model's own text — it names
-    // something that is not here, or names the tool — so it is gone.
-    Dropped,
-    // The slot fell to the factual line: the name, the size and the symbols
-    // warlock measured. See [`fallback`].
-    Supplied,
-}
+pub struct Dropped;
 
-impl From<Rewrite> for Mended {
-    fn from(rewrite: Rewrite) -> Self {
-        match rewrite {
-            Rewrite::FirstLine => Self::FirstLine,
-            Rewrite::Cut { from, to } => Self::Cut { from, to },
-        }
-    }
-}
+impl fill::Wording for Dropped {
+    // The factual line: the name, the size and the symbols warlock measured.
+    // See [`fallback`].
+    const SUPPLIED: &'static str = "what warlock measured";
 
-impl fmt::Display for Mend {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let field = &self.field;
-        match self.done {
-            Mended::FirstLine => {
-                write!(f, "{field} ran to more than one line and keeps its first")
-            }
-            Mended::Cut { from, to } => {
-                write!(f, "{field} was {from} characters and was cut to {to}")
-            }
-            Mended::Shortened { from, to } => {
-                write!(
-                    f,
-                    "{field} had {from} entries and was cut to the first {to}"
-                )
-            }
-            Mended::Dropped => write!(
-                f,
-                "{field} could not be repaired from the answer and was dropped"
-            ),
-            Mended::Supplied => write!(
-                f,
-                "{field} was not answered and was filled in from what warlock measured"
-            ),
-        }
+    fn word(&self, field: &dyn fmt::Display, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{field} could not be repaired from the answer and was dropped"
+        )
     }
 }
 
@@ -1346,7 +1305,7 @@ impl Plan {
                 !std::mem::replace(&mut self.purpose, true),
                 Mended::Supplied,
             ),
-            Slot::Directory(key) => (self.dropped_directories.insert(key), Mended::Dropped),
+            Slot::Directory(key) => (self.dropped_directories.insert(key), Mended::Own(Dropped)),
             // A files line falls to `fallback::file` rather than going: the
             // document renders one line per file whatever happens, so dropping
             // the key leaves an entry with nothing after its size, while the
@@ -1358,9 +1317,9 @@ impl Plan {
             // prompt says an empty list is fine, so there is nothing to fall
             // back to and nothing lost by the gap.
             Slot::Entry(index) | Slot::Names(index, _) => {
-                (self.dropped_structure.insert(index), Mended::Dropped)
+                (self.dropped_structure.insert(index), Mended::Own(Dropped))
             }
-            Slot::Structure => (false, Mended::Dropped),
+            Slot::Structure => (false, Mended::Own(Dropped)),
         };
         if recorded {
             mends.push(Mend {
@@ -1389,10 +1348,10 @@ impl Plan {
             ),
             // A list entry is dropped rather than filled, and says so.
             Slot::Entry(index) | Slot::Names(index, _) => {
-                (self.dropped_structure.insert(index), Mended::Dropped)
+                (self.dropped_structure.insert(index), Mended::Own(Dropped))
             }
             Slot::FileLine(path) => (self.filled_files.insert(path), Mended::Supplied),
-            Slot::Structure => (false, Mended::Dropped),
+            Slot::Structure => (false, Mended::Own(Dropped)),
         };
         if recorded {
             mends.push(Mend {

@@ -3,7 +3,7 @@ use std::collections::BTreeSet;
 use super::{Defect, Slot};
 
 use super::{
-    Accepted, DRAFTING_PROMPT, DRAFTS_PER_SLICE, Draft, Fill, MEND_PASSES, Mend, Mended,
+    Accepted, DRAFTING_PROMPT, DRAFTS_PER_SLICE, Draft, Dropped, Fill, MEND_PASSES, Mend, Mended,
     REFERENCES_PER_LIST, TITLE_CHARS, TITLE_MINIMUM, accept, check, drafting_instructions, mend,
     mended, stub_answer,
 };
@@ -334,7 +334,7 @@ fn a_reference_beyond_the_array_is_dropped_by_the_repair() {
         mends,
         vec![Mend {
             field: Slot::BlockedBy(2),
-            done: Mended::Dropped { count: 1 },
+            done: Mended::Own(Dropped { count: 1 }),
         }]
     );
     assert_eq!(
@@ -356,7 +356,7 @@ fn a_draft_that_refers_to_itself_loses_the_reference() {
         mends,
         vec![Mend {
             field: Slot::Blocks(2),
-            done: Mended::Dropped { count: 1 },
+            done: Mended::Own(Dropped { count: 1 }),
         }]
     );
 }
@@ -395,7 +395,7 @@ fn drafts_past_the_cap_go_from_the_end_and_the_references_into_them_go_too() {
             },
             Mend {
                 field: Slot::Blocks(0),
-                done: Mended::Dropped { count: 1 },
+                done: Mended::Own(Dropped { count: 1 }),
             },
         ]
     );
