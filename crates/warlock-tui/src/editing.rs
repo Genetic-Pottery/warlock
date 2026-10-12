@@ -125,7 +125,7 @@ fn came_back(
         Ok(Viewed { text, cut }) => app.panel_mut().refill_document(text.lines(), cut),
         // The engine's wording, flattened onto one line exactly as `view_press`
         // flattens it — the same failure, reached without a keystroke of its own.
-        Err(error) => note(app, one_line(&error.to_string())),
+        Err(error) => note(app, one_line(error)),
     }
 }
 
@@ -201,7 +201,7 @@ pub(crate) fn run_editor(editor: &Editor, path: &Path) -> Option<String> {
         // as well as the program.
         Err(error) => Some(format!(
             "could not run `{program}`: {}; check `$EDITOR`",
-            one_line(&error.to_string())
+            one_line(error)
         )),
     }
 }

@@ -393,8 +393,7 @@ where
         // `Standing::home`'s own sentence, asked of the error that words it
         // rather than written again here.
         let Some(home) = self.home.clone() else {
-            app.panel_mut()
-                .note(one_line(&Error::NoHome.to_string()), now);
+            app.panel_mut().note(one_line(Error::NoHome), now);
             return;
         };
         let prepared = match prepare(manifest, repo_root, &home, &taking.scope) {
@@ -403,7 +402,7 @@ where
             // sigils do not open, and the checkout with no key bound, each in
             // `error.rs`'s words and flattened as the thread takes a line.
             Err(error) => {
-                app.panel_mut().note(one_line(&error.to_string()), now);
+                app.panel_mut().note(one_line(error), now);
                 return;
             }
         };
@@ -995,9 +994,7 @@ fn spawn_choice<O: Opens, R: Repository + Send + 'static>(
     work: Work,
     cancel: Cancel,
 ) -> Once<Landing> {
-    workers.once(move || {
-        chose(&open, &repo, &work, &cancel).map_err(|error| one_line(&error.to_string()))
-    })
+    workers.once(move || chose(&open, &repo, &work, &cancel).map_err(one_line))
 }
 
 /// Which ticket this pull would work, in `pulled`'s own order: the tree before the
@@ -1145,9 +1142,7 @@ where
             }
             .pull(&undertook.ticket.ticket());
 
-            events.send(Step::Finished(
-                pulled.map_err(|error| one_line(&error.to_string())),
-            ));
+            events.send(Step::Finished(pulled.map_err(one_line)));
         }
     })
 }
@@ -1245,19 +1240,13 @@ fn ended_line(pulled: &Pulled) -> String {
     match pulled {
         Pulled::Opened { ticket, url } => opened(ticket, url.as_deref()),
         Pulled::Unchanged { ticket } => unchanged(ticket),
-        Pulled::Halted { ticket } => one_line(
-            &Error::Halted {
-                ticket: ticket.clone(),
-            }
-            .to_string(),
-        ),
-        Pulled::Crossed { ticket, subtask } => one_line(
-            &Error::Crossed {
-                ticket: ticket.clone(),
-                subtask: subtask.clone(),
-            }
-            .to_string(),
-        ),
+        Pulled::Halted { ticket } => one_line(Error::Halted {
+            ticket: ticket.clone(),
+        }),
+        Pulled::Crossed { ticket, subtask } => one_line(Error::Crossed {
+            ticket: ticket.clone(),
+            subtask: subtask.clone(),
+        }),
     }
 }
 

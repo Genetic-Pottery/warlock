@@ -303,12 +303,12 @@ pub(crate) fn listing(named: &[String]) -> String {
 fn unreadable_shape_line(error: &TemplateError) -> String {
     format!(
         "could not read the brief shape, so nothing was written: {}",
-        one_line(&error.to_string())
+        one_line(error)
     )
 }
 
 fn failure_line(stored: &str, error: &io::Error) -> String {
-    format!("could not write {stored}: {}", one_line(&error.to_string()))
+    format!("could not write {stored}: {}", one_line(error))
 }
 
 // Deliberately narrow: all three of these have to hold, or the reply is handed

@@ -49,7 +49,7 @@ use crate::claude::{Activity, Sibling, Split, Worked, working_opening};
 use crate::crossings::{Crossing, crossings_after};
 use crate::freshness::{Freshened, Freshening, Freshens};
 use crate::git::{
-    Dirty, Error as GitError, Finished, Forge, Freshness, LeftStale, PullRequest, Repository,
+    Dirty, Error as GitError, Finished, Forge, Freshness, Head, LeftStale, PullRequest, Repository,
     Touched, branch_name, commit_message, pull_request_body, pull_request_title,
 };
 use crate::linear::{Board, Error as LinearError};
@@ -286,13 +286,13 @@ impl<B: Board, R: Repository, F: Forge, S: Splits, W: Works> Pulling<'_, B, R, F
             // its own work out of the tree: whatever `git status` says next is no
             // longer an account of what that session wrote, so the crossing check
             // would be reading a clean tree and answering "nothing crossed".
-            if after != before {
+            if let Head::Moved { from, to } = Head::between(&before, &after) {
                 let moved = format!(
                     "the session committed. `HEAD` moved from {} to {}, so what this sub-task \
                      wrote is in a commit warlock did not make and cannot check. Nothing further \
                      was committed.",
-                    before.short(),
-                    after.short(),
+                    from.short(),
+                    to.short(),
                 );
                 run.subtask_mut(&id)
                     .expect(IN_THE_RUN)

@@ -18,6 +18,7 @@ use std::path::Path;
 
 use warlock_engine::{Manifest, closed_scopes_at_or_below, scope_covering, scope_opens_to};
 
+use crate::cut::listed;
 use crate::descent::Descent;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -132,7 +133,6 @@ pub(crate) fn closed_scope_message(label: &str, scope: &str) -> String {
 // It names the way out that needs no sigil at all — un-pact the parts you hold —
 // because that is usually what was meant.
 pub(crate) fn blocking_scopes_message(label: &str, scopes: &[String]) -> String {
-    let named: Vec<String> = scopes.iter().map(|scope| format!("`{scope}`")).collect();
     // Singular for one, because the ordinary refusal is by a single boundary and
     // a line a person reads should not say "hold those sigils" about one of them.
     let sigils = if scopes.len() == 1 {
@@ -144,7 +144,7 @@ pub(crate) fn blocking_scopes_message(label: &str, scopes: &[String]) -> String 
     format!(
         "un-pacting {label} would drop pacts scoped {} — hold {sigils} with `warlock sigil add`, \
          or un-pact the parts you hold",
-        named.join(", ")
+        listed(scopes)
     )
 }
 

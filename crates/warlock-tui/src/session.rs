@@ -101,10 +101,7 @@ pub(crate) fn reload(app: &mut App, scope: &Scope, manifest: &mut Manifest) -> O
         // will not parse arrives as the TOML parser's several lines, and the
         // footer is one.
         Err(source) => {
-            note(
-                app,
-                format!("{NOT_REFRESHED}: {}", one_line(&source.to_string())),
-            );
+            note(app, format!("{NOT_REFRESHED}: {}", one_line(source)));
             None
         }
     }
@@ -128,7 +125,7 @@ pub(crate) fn reload(app: &mut App, scope: &Scope, manifest: &mut Manifest) -> O
 fn clean_ignored(repo_root: &Path, root: &Path) -> Option<String> {
     dropped_ignored(repo_root, root)
         .err()
-        .map(|error| format!("{NOT_CLEANED}: {}", one_line(&error.to_string())))
+        .map(|error| format!("{NOT_CLEANED}: {}", one_line(error)))
 }
 
 // Saved only when something went, because `Manifest::save` rewrites the file:

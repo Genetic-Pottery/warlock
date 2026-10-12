@@ -107,6 +107,30 @@ impl fmt::Debug for Client {
     }
 }
 
+/// A key value held for a run that opens a board later, on a worker.
+///
+/// `Debug` is hand-written for [`Client`]'s reason: the values holding one are
+/// kept across the panel's rounds, and a failing assertion anywhere in the suite
+/// may print whatever is in scope.
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct Key(String);
+
+impl Key {
+    pub(crate) fn new(value: &str) -> Self {
+        Self(value.to_owned())
+    }
+
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Debug for Key {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("<redacted>")
+    }
+}
+
 impl Posts for Client {
     fn post(&self, document: &str, variables: Value) -> Result<Value, Error> {
         let mut response = self

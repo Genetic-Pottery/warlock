@@ -586,11 +586,6 @@ impl<R: Runs> Git<R> {
         }
     }
 
-    #[must_use]
-    pub fn directory(&self) -> &Path {
-        &self.directory
-    }
-
     /// One `git`, whatever it exited with: for the calls that ask a question
     /// and read the answer off a refusal as readily as off a success.
     fn ran(&self, args: &[&str]) -> Result<Ran, Error> {
@@ -662,9 +657,11 @@ impl<R: Runs> Repository for Git<R> {
     fn catch_up(&self, branch: &str) -> Result<(), Error> {
         // `--ff-only` and not a plain pull: a base branch that has diverged from
         // the remote is a checkout somebody is in the middle of something in,
-        // and the answer to that is to stop, not to make a merge commit on it. The remote and the branch are named rather than left to the
-        // upstream configuration, so what this pulls does not depend on how the
-        // checkout was set up.
+        // and the answer to that is to stop, not to make a merge commit on it.
+        //
+        // The remote and the branch are named rather than left to the upstream
+        // configuration, so what this pulls does not depend on how the checkout
+        // was set up.
         self.done(&["pull", "--ff-only", REMOTE, branch])?;
         Ok(())
     }
@@ -1287,11 +1284,6 @@ impl<R: Runs> Gh<R> {
             runs,
             directory: directory.into(),
         }
-    }
-
-    #[must_use]
-    pub fn directory(&self) -> &Path {
-        &self.directory
     }
 }
 

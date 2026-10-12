@@ -46,10 +46,7 @@ impl Listing {
     }
 
     const fn word(self) -> &'static str {
-        match self {
-            Self::Stale => "stale",
-            Self::Fresh => "fresh",
-        }
+        state_word(self.wanted())
     }
 }
 

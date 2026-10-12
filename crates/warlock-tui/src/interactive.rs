@@ -1011,7 +1011,7 @@ impl<K: Seams> Session<K> {
     }
 
     fn say(&mut self, said: Result<String, Error>, now: Instant) {
-        let line = said.unwrap_or_else(|error| one_line(&error.to_string()));
+        let line = said.unwrap_or_else(one_line);
         self.app.panel_mut().note(line, now);
     }
 

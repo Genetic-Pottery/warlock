@@ -72,7 +72,7 @@ fn brief_asking(root: &Path) -> Result<String, TemplateError> {
 fn unreadable_briefs(error: &briefs::Error) -> String {
     format!(
         "{} — /brief did nothing, so fix or remove the file and type it again",
-        one_line(&error.to_string())
+        one_line(error)
     )
 }
 

@@ -192,7 +192,7 @@ fn report(root: &Path, failures: &[pact::Failure], total: usize) -> Option<Repor
         if named_already.contains(&directory) {
             continue;
         }
-        lines.push(format!("{directory} — {}", one_line(&failure.to_string())));
+        lines.push(format!("{directory} — {}", one_line(failure)));
         named_already.push(directory);
     }
 

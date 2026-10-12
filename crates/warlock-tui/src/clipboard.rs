@@ -67,6 +67,6 @@ pub(crate) fn copy(clipboard: &mut impl Clip, app: &mut App, text: &str) {
         // failure in this binary, and here for a reason of its own: what
         // arboard hands over is whatever the compositor's helper said, which is
         // some other program's output and is under nobody's control.
-        Err(source) => app.set_message(one_line(&Error::Clipboard { source }.to_string())),
+        Err(source) => app.set_message(one_line(Error::Clipboard { source })),
     }
 }

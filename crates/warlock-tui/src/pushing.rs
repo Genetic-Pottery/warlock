@@ -188,7 +188,7 @@ impl<O: Opens> Pushes<O> {
         }
         let brief = match to_manifest_path(repo_root, typed) {
             Ok(brief) => brief,
-            Err(source) => return saying(app, one_line(&source.to_string()), now),
+            Err(source) => return saying(app, one_line(source), now),
         };
         let Some(home) = self.home.as_deref() else {
             return no_home(app, now);
@@ -197,7 +197,7 @@ impl<O: Opens> Pushes<O> {
         let path = from_manifest_path(repo_root, &brief);
         match prepare(manifest, repo_root, home, scope, &path) {
             Ok(ready) => Pushing::confirming(ready),
-            Err(error) => saying(app, one_line(&error.to_string()), now),
+            Err(error) => saying(app, one_line(error), now),
         }
     }
 
@@ -267,9 +267,7 @@ impl<O: Opens> Pushes<O> {
 // own — a conversation is not a terminal — and the address it needs comes back
 // from the call rather than out of the bytes.
 fn spawn_push<O: Opens>(workers: Workers, open: O, ready: Prepared) -> Once<Landing> {
-    workers.once(move || {
-        file(&ready, &open, &mut io::sink()).map_err(|error| one_line(&error.to_string()))
-    })
+    workers.once(move || file(&ready, &open, &mut io::sink()).map_err(one_line))
 }
 
 fn filing_line(team: &str) -> String {
@@ -298,7 +296,7 @@ fn saying(app: &mut App, line: impl Into<String>, now: Instant) -> Pushing {
 // rather than worded again here — the session holds the answer to it (see
 // [`Pushes`]) and not the failure.
 fn no_home(app: &mut App, now: Instant) -> Pushing {
-    saying(app, one_line(&Error::NoHome.to_string()), now)
+    saying(app, one_line(Error::NoHome), now)
 }
 
 // Every test drives a temporary repository and a temporary home, through the

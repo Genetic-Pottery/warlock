@@ -291,7 +291,7 @@ fn account(app: &App) -> String {
 // The engine's own sentence for a refusal, flattened as the thread takes it: the
 // tests below assert the line *is* that sentence rather than restating it.
 fn refusal(error: &Error) -> String {
-    one_line(&error.to_string())
+    one_line(error)
 }
 
 /// A released run for this ticket on this machine: `resumed` is the status

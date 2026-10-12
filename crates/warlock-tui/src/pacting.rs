@@ -826,7 +826,7 @@ impl From<&pact::Failure> for Refusal {
             // Flattened for the same reason every other line here is: a failure
             // can carry a manifest error, which carries the TOML parser's
             // several lines, and a panel row is one row.
-            reason: one_line(&failure.to_string()),
+            reason: one_line(failure),
         }
     }
 }
@@ -853,7 +853,7 @@ fn apply_toggle(
         cancel,
         sink,
     )
-    .map_err(|error| one_line(&error.to_string()))?;
+    .map_err(one_line)?;
 
     Ok(match work {
         Work::Pact(toggle) if !toggle.pacted => Toggled {

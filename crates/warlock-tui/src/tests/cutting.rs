@@ -221,7 +221,7 @@ fn through<O: Opens, A: Converses>(app: &mut App, cutter: &mut Cutter<O, A>) {
 // The engine's own sentence for a refusal, flattened as the thread takes it:
 // these tests assert the line *is* that sentence rather than restating it.
 fn refusal(error: &Error) -> String {
-    one_line(&error.to_string())
+    one_line(error)
 }
 
 // The workspace every test here reads back: one project, planned, with three

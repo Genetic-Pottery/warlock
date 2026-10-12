@@ -114,8 +114,7 @@ pub(crate) fn resume_press<C: Converses>(
     // `Standing::home`'s own sentence, asked of the error that words it rather
     // than written again here.
     let Some(home) = home else {
-        app.panel_mut()
-            .note(one_line(&Error::NoHome.to_string()), now);
+        app.panel_mut().note(one_line(Error::NoHome), now);
         return;
     };
 
@@ -133,7 +132,7 @@ pub(crate) fn resume_press<C: Converses>(
         }
         // The ticket this checkout never pulled and the run with nothing left to
         // put back, flattened as the thread takes a line. Neither wrote anything.
-        Err(error) => app.panel_mut().note(one_line(&error.to_string()), now),
+        Err(error) => app.panel_mut().note(one_line(error), now),
     }
 }
 

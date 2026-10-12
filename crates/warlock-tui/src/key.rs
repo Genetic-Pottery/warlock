@@ -197,7 +197,7 @@ fn stored_under(home: &Path, name: &str) -> Stored {
     match load_key_names(home) {
         Ok(names) if names.iter().any(|stored| stored == name) => Stored::Key,
         Ok(_) | Err(keys::Error::NotFound { .. }) => Stored::Nothing,
-        Err(error) => Stored::Unknown(one_line(&error.to_string())),
+        Err(error) => Stored::Unknown(one_line(error)),
     }
 }
 

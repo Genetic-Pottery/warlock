@@ -49,6 +49,8 @@ use std::time::Duration;
 use warlock_engine::fill::{self, Settled};
 use warlock_engine::{Agent, agent, drafting, splitting, working};
 
+use crate::cut::listed;
+
 /// The clock one invocation runs under. A child that outlives it is killed *and*
 /// reaped rather than abandoned.
 pub const INVOCATION_TIMEOUT: Duration = Duration::from_mins(5);
@@ -562,11 +564,10 @@ fn working_boundary(scope: &str, sigils: &[String]) -> String {
     let holding = if sigils.is_empty() {
         "this machine holds no sigils at all".to_owned()
     } else {
-        let named: Vec<String> = sigils.iter().map(|sigil| format!("`{sigil}`")).collect();
         format!(
             "this machine holds the sigil{} {}",
             if sigils.len() == 1 { "" } else { "s" },
-            named.join(", "),
+            listed(sigils),
         )
     };
     format!(

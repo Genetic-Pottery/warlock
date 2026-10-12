@@ -1724,11 +1724,7 @@ mod submitting {
         // The loader's own sentence, flattened the way the note flattens it:
         // a `briefs.toml` that will not parse carries the TOML parser's
         // multi-line diagnostic, and the card is one line a note.
-        let reason = one_line(
-            &load_briefs(repo.path())
-                .expect_err("a config that is not TOML")
-                .to_string(),
-        );
+        let reason = one_line(load_briefs(repo.path()).expect_err("a config that is not TOML"));
         let mut app = App::default();
         let mut chat = conversation_in(repo.path());
 

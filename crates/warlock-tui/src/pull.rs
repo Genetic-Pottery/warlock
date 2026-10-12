@@ -24,11 +24,10 @@
 //! here to work somebody else's ticket — [`take_named`] checks the assignee by id
 //! against the user the key belongs to, and nothing takes a flag past it.
 //!
-//! No key value is printed here and none can be: [`Prepared`] carries one with a
-//! redacting `Debug`, it is read on one line per door — the opener's, here and in
+//! No key value is printed here and none can be: [`Prepared`] carries one as a
+//! [`Key`], whose `Debug` redacts it, it is read on one line per door — the opener's, here and in
 //! [`mod@crate::puller`] — and nothing that prints is given it.
 
-use std::fmt;
 use std::fs::OpenOptions;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -38,11 +37,12 @@ use warlock_engine::{
     Manifest, PullRun, ScopeRecord, brief_path, held_runs, resolve_filing, scope_opens_to,
 };
 
+use crate::account::{THINKING, WRITING, tool_line};
 use crate::claude::{Activities, Activity, Cancel, ClaudeAgent};
 use crate::error::{Error, one_line, say};
 use crate::freshness::{Freshened, Freshening, Freshens, freshened};
 use crate::git::{Error as GitError, Forge, Gh, Git, Repository};
-use crate::linear::{Board, Opener as LinearOpener, Opens, QueuedIssue};
+use crate::linear::{Board, Key, Opener as LinearOpener, Opens, QueuedIssue};
 use crate::puller::{Splitter, Stopping, Worker};
 use crate::pulling::{Heading, PullEvent, Pulled, Pulling, Splits, Ticket, Works};
 use crate::queue::{Chosen, Named, Refusal, Skipped, choose, take_named};
@@ -225,7 +225,7 @@ pub(crate) fn pulled<O: Opens, R: Repository, F: Forge, S: Splits, W: Works, P: 
 
 /// A pull with every refusal that costs nothing already asked: the scope found in
 /// a `[[scope]]` record, the sigil for it held, and a key bound to this checkout.
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub(crate) struct Prepared {
     /// The repository the run commits in, and what the run record's directory is
     /// keyed by.
@@ -239,7 +239,7 @@ pub(crate) struct Prepared {
     /// The branch this checkout set with `warlock branch use`, or `None` for the
     /// remote's default.
     base: Option<String>,
-    value: String,
+    value: Key,
 }
 
 impl Prepared {
@@ -268,22 +268,7 @@ impl Prepared {
     /// worker of its own, so the value has to cross out of here, and the type it
     /// sits on redacts it in `Debug`.
     pub(crate) fn value(&self) -> &str {
-        &self.value
-    }
-}
-
-// Hand-written for `Target`'s reason: this holds the key value, and a failing
-// assertion anywhere in the suite may print whatever is in scope.
-impl fmt::Debug for Prepared {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Prepared")
-            .field("root", &self.root)
-            .field("home", &self.home)
-            .field("record", &self.record)
-            .field("held", &self.held)
-            .field("base", &self.base)
-            .field("value", &"<redacted>")
-            .finish()
+        self.value.as_str()
     }
 }
 
@@ -338,7 +323,7 @@ pub(crate) fn prepare(
         record: record.clone(),
         held,
         base,
-        value: target.value().to_owned(),
+        value: Key::new(target.value()),
     })
 }
 
@@ -370,7 +355,7 @@ pub(crate) fn selection(
     let assignee = board.viewer()?;
     let runs = held_runs(home, root, record.name()).map_err(|source| Error::Runs { source })?;
     for record in runs.unreadable() {
-        unreadable(one_line(&record.to_string()));
+        unreadable(one_line(record));
     }
     select(board, record, &assignee, named, runs.runs())
 }
@@ -577,11 +562,7 @@ pub(crate) struct Progress<W: Write> {
     /// activity is appended. `None` outside a sub-task — the split and the pull
     /// request have no brief of their own to write into.
     subtask: Option<String>,
-    /// The last activity line said, so a stretch of thinking or writing is one
-    /// line rather than one per report. The panel redraws its activity line in
-    /// place, and a session reports `Writing` again with every delta; printed on a
-    /// screen that only scrolls, that was a column of identical lines.
-    said: Option<String>,
+    watched: Watched,
 }
 
 impl<W: Write> Progress<W> {
@@ -592,7 +573,7 @@ impl<W: Write> Progress<W> {
             root: root.to_path_buf(),
             ticket: None,
             subtask: None,
-            said: None,
+            watched: Watched::default(),
         }
     }
 
@@ -609,18 +590,10 @@ impl<W: Write> Progress<W> {
 
     pub(crate) fn on(&mut self, event: &PullEvent) {
         if let PullEvent::Activity(activity) = event {
-            let Some(line) = activity_line(activity) else {
-                return;
-            };
-            // A tool line repeats only when the session really did the same
-            // thing twice, so only the two running states are collapsed.
-            let running = matches!(activity, Activity::Thinking | Activity::Writing { .. });
-            if running && self.said.as_deref() == Some(line.as_str()) {
-                return;
+            if let Some(line) = self.watched.line(activity) {
+                say(&mut self.out, &line);
+                self.append(&line);
             }
-            say(&mut self.out, &line);
-            self.append(&line);
-            self.said = Some(line);
             return;
         }
         if let PullEvent::Heading(heading) = event {
@@ -628,7 +601,7 @@ impl<W: Write> Progress<W> {
                 Heading::Subtask { id, .. } => Some(id.clone()),
                 Heading::Split { .. } | Heading::PullRequest { .. } => None,
             };
-            self.said = None;
+            self.watched = Watched::default();
         }
         if let Some(line) = event.line() {
             say(&mut self.out, &line);
@@ -662,17 +635,37 @@ impl<W: Write> Progress<W> {
 /// A cost is no line at all, following the panel's account card: it is a fact
 /// about the pass rather than an action, and a run that printed one per report
 /// would be a column of money in the middle of the work.
-pub(crate) fn activity_line(activity: &Activity) -> Option<String> {
+fn activity_line(activity: &Activity) -> Option<String> {
     match activity {
-        Activity::Tool { name, detail } => Some(match detail {
-            Some(detail) => format!("{name} {detail}"),
-            None => name.clone(),
-        }),
-        Activity::Thinking => Some("thinking".to_owned()),
+        Activity::Tool { name, detail } => Some(tool_line(name, detail.as_ref())),
+        Activity::Thinking => Some(THINKING.to_owned()),
         // No byte count: the count is only worth reading where it can tick up in
         // place, and here it would make every report a different line.
-        Activity::Writing { .. } => Some("writing".to_owned()),
+        Activity::Writing { .. } => Some(WRITING.to_owned()),
         Activity::Cost { .. } => None,
+    }
+}
+
+/// The activity lines of one session at a shell door, with a stretch of
+/// thinking or writing said once: the panel redraws its activity line in place,
+/// but a session reports `Writing` again with every delta, and printed on a
+/// screen that only scrolls that is a column of identical lines. A tool line
+/// repeats only when the session did the same thing twice, so it is never
+/// collapsed.
+#[derive(Debug, Default)]
+pub(crate) struct Watched {
+    said: Option<String>,
+}
+
+impl Watched {
+    pub(crate) fn line(&mut self, activity: &Activity) -> Option<String> {
+        let line = activity_line(activity)?;
+        let running = matches!(activity, Activity::Thinking | Activity::Writing { .. });
+        if running && self.said.as_deref() == Some(line.as_str()) {
+            return None;
+        }
+        self.said = Some(line.clone());
+        Some(line)
     }
 }
 

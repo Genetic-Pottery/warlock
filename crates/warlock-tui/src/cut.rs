@@ -13,10 +13,11 @@
 //!
 //! Its own module rather than [`mod@crate::planned`]'s, which sequences the slices
 //! and issues no write of its own.
-//! No key is read here and none can be: the seam arrives built, as it does for
-//! a cut.
+//!
+//! No key is read here and none can be: the seam arrives built.
 
 use std::collections::HashSet;
+use std::fmt;
 use std::io::Write;
 use std::path::Path;
 
@@ -336,14 +337,13 @@ fn relate(linear: &impl Board, edges: &[(&LinearIssue, &LinearIssue)]) -> Vec<St
         .collect()
 }
 
-// Shared with `error.rs`, which names the same identifiers in the refusal that
-// says they were not recorded: one spelling for the list, so the line a person
-// reads off a cut and the line they read off its failure name the issues the
-// same way.
-pub(crate) fn listed(issues: &[String]) -> String {
-    issues
+// The one spelling for a list of names, so the line a person reads off a cut and
+// the line they read off its failure — or off any other refusal that names
+// several things — name them the same way.
+pub(crate) fn listed(items: &[impl fmt::Display]) -> String {
+    items
         .iter()
-        .map(|issue| format!("`{issue}`"))
+        .map(|item| format!("`{item}`"))
         .collect::<Vec<_>>()
         .join(", ")
 }

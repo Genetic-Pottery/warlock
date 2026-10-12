@@ -349,7 +349,7 @@ impl Error {
     pub(crate) fn from_problems(problems: &[load::Problem]) -> Option<Self> {
         let first = problems.first()?;
         Some(Self::Problems {
-            first: one_line(&first.to_string()),
+            first: one_line(first),
             rest: problems.len() - 1,
         })
     }
@@ -368,7 +368,8 @@ pub(crate) fn say<W: Write>(out: &mut W, fact: &str) {
 // they are not in a fixed-width block. Dropping the last line instead would
 // throw away the only part that says *why*. Single-line messages, which is every
 // I/O error and everything this workspace writes itself, come back untouched.
-pub(crate) fn one_line(message: &str) -> String {
+pub(crate) fn one_line(message: impl fmt::Display) -> String {
+    let message = message.to_string();
     let mut lines = message
         .lines()
         .map(str::trim)
@@ -478,11 +479,10 @@ fn unheld_scope_message(scope: &str, held: &[String]) -> String {
 // about to run `git status` themselves, and a refusal that renamed the codes would
 // make them translate back before they could look.
 fn dirty_tree_message(dirty: &[Dirty]) -> String {
-    let entries: Vec<String> = dirty.iter().map(|entry| format!("`{entry}`")).collect();
     format!(
         "the working tree is not clean, so no ticket was pulled: {} — warlock commits what a \
          session writes, and what is already there is yours",
-        entries.join(", ")
+        listed(dirty)
     )
 }
 
@@ -543,7 +543,7 @@ fn uncut_message(issues: &[String], source: &LinearError) -> String {
         "the issues {} were created, and warlock could not note them on the project, so the next \
          draft offers this slice again: {}",
         listed(issues),
-        one_line(&source.to_string())
+        one_line(source)
     )
 }
 
@@ -565,7 +565,7 @@ impl fmt::Display for Error {
             // The engine's own wording, which is already the sentence to show
             // a user — flattened, because a manifest that will not parse
             // carries the TOML parser's multi-line diagnostic inside it.
-            Self::Load { source } => write!(f, "{}", one_line(&source.to_string())),
+            Self::Load { source } => write!(f, "{}", one_line(source)),
             // Flattened for the same reason as a load: the manifest's own
             // errors carry the TOML parser's multi-line diagnostic.
             //
@@ -576,12 +576,12 @@ impl fmt::Display for Error {
             // two do not share is what happened, and that is on the variants
             // themselves rather than in this line.
             Self::Manifest { source } | Self::Unspellable { source } => {
-                write!(f, "{}", one_line(&source.to_string()))
+                write!(f, "{}", one_line(source))
             }
             // The walker's own sentence, flattened like the manifest's: it names
             // the directory it could not list and what the filesystem said,
             // which is the whole of what happened.
-            Self::Pact { source } => write!(f, "{}", one_line(&source.to_string())),
+            Self::Pact { source } => write!(f, "{}", one_line(source)),
             // The count, under the lines that named each of them, and the fact
             // a reader most needs next: the run's record is on disk, so the
             // directories that did work are granted and re-running describes
@@ -627,7 +627,7 @@ impl fmt::Display for Error {
             // and that is the half they need. Flattened, because an unknown
             // failure carries whatever some other program printed.
             Self::Clipboard { source } => {
-                write!(f, "nothing was copied: {}", one_line(&source.to_string()))
+                write!(f, "nothing was copied: {}", one_line(source))
             }
             // The footer's own sentence, to the letter: the same fact refused
             // at a keystroke and at a shell prompt says the same thing, names
@@ -682,7 +682,7 @@ impl fmt::Display for Error {
             ),
             // Flattened like the manifest's, and for the same reason: a config
             // that will not parse carries the TOML parser's diagnostic.
-            Self::Sigils { source } => write!(f, "{}", one_line(&source.to_string())),
+            Self::Sigils { source } => write!(f, "{}", one_line(source)),
             Self::UnheldSigil { sigil } => write!(
                 f,
                 "this machine does not hold `{sigil}`, so nothing was written"
@@ -712,17 +712,17 @@ impl fmt::Display for Error {
             // Flattened like the sigil config's: a store that will not parse
             // carries a position rather than the parser's own diagnostic, and
             // the rest is the filesystem's, which can still run to two lines.
-            Self::Keys { source } => write!(f, "{}", one_line(&source.to_string())),
+            Self::Keys { source } => write!(f, "{}", one_line(source)),
             // Flattened for the same reason again: what reaches here wraps a
             // manifest or key-store error whose text can run to two lines.
-            Self::Route { source } => write!(f, "{}", one_line(&source.to_string())),
+            Self::Route { source } => write!(f, "{}", one_line(source)),
             // The engine's sentence and nothing around it, for `Scope`'s
             // reason: each of these already says what is missing and what
             // writes it, and two of them are `route.rs`'s own words about a
             // key, which a person has already met from `warlock check`.
             // Flattened because the key store and the manifest underneath can
             // carry a parser's diagnostic.
-            Self::Filing { source } => write!(f, "{}", one_line(&source.to_string())),
+            Self::Filing { source } => write!(f, "{}", one_line(source)),
             // The reader's own sentence about the document, which already ends
             // in what it cost — nothing was pushed.
             Self::Brief { source } => write!(f, "{source}"),
@@ -730,8 +730,8 @@ impl fmt::Display for Error {
             // filesystem says about a file it would not read can run to more
             // than one line, and a `briefs.toml` that will not parse carries the
             // TOML parser's own multi-line diagnostic.
-            Self::Template { source } => write!(f, "{}", one_line(&source.to_string())),
-            Self::Briefs { source } => write!(f, "{}", one_line(&source.to_string())),
+            Self::Template { source } => write!(f, "{}", one_line(source)),
+            Self::Briefs { source } => write!(f, "{}", one_line(source)),
             // The two push refusals with wording of their own, said as free
             // functions above rather than here, as every long sentence is.
             Self::AlreadyFiled { name, url } => write!(f, "{}", already_filed_message(name, url)),
@@ -739,7 +739,7 @@ impl fmt::Display for Error {
             // Flattened for the transport's sake: Linear's own refusals are one
             // line, and what a socket failure carries is whatever the network
             // stack said.
-            Self::Linear { source } => write!(f, "{}", one_line(&source.to_string())),
+            Self::Linear { source } => write!(f, "{}", one_line(source)),
             // The two cut refusals with wording of their own, said below for
             // the push refusals' reason.
             Self::UnknownProject { slug, scope } => {
@@ -763,7 +763,7 @@ impl fmt::Display for Error {
                 f,
                 "`{title}` was skipped, and warlock could not note the skip on the project, so \
                  the next draft offers it again: {}",
-                one_line(&source.to_string())
+                one_line(source)
             ),
             // The pull's own refusals, worded above for the reason the push's and
             // the cut's are: the sentences are the interesting part of them.
@@ -786,8 +786,8 @@ impl fmt::Display for Error {
             // Flattened like the rest of the carried failures: the loop's `Dirty`
             // lists a tree an entry to a line, and `git`, Linear and the run record
             // each carry their own multi-line news.
-            Self::Pull { source } => write!(f, "{}", one_line(&source.to_string())),
-            Self::Runs { source } => write!(f, "{}", one_line(&source.to_string())),
+            Self::Pull { source } => write!(f, "{}", one_line(source)),
+            Self::Runs { source } => write!(f, "{}", one_line(source)),
             // The resume's two refusals, worded above for the reason the pull's
             // are: the sentences are the interesting part of them.
             Self::NoRun { ticket, directory } => {
@@ -802,7 +802,7 @@ impl fmt::Display for Error {
                 "{}",
                 nothing_to_resume_message(ticket, *status, *failed_only)
             ),
-            Self::Git { source } => write!(f, "{}", one_line(&source.to_string())),
+            Self::Git { source } => write!(f, "{}", one_line(source)),
             Self::Problems { first, rest: 0 } => write!(f, "{first}"),
             Self::Problems { first, rest } => {
                 write!(f, "{first} (and {rest} more like it)")
