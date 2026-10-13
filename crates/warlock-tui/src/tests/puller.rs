@@ -218,10 +218,10 @@ fn press(app: &mut App, puller: &mut Panel, ground: &Ground, ticket: Option<&str
         app,
         &ground.manifest,
         ground.root.path(),
-        Some(Taking {
-            scope: SCOPE,
-            ticket,
-        }),
+        &Taking {
+            scope: SCOPE.to_owned(),
+            ticket: ticket.map(str::to_owned),
+        },
         now(),
     );
 }
@@ -291,7 +291,7 @@ fn account(app: &App) -> String {
 // The engine's own sentence for a refusal, flattened as the thread takes it: the
 // tests below assert the line *is* that sentence rather than restating it.
 fn refusal(error: &Error) -> String {
-    one_line(&error.to_string())
+    one_line(error)
 }
 
 /// A released run for this ticket on this machine: `resumed` is the status
@@ -315,44 +315,6 @@ fn released(ground: &Ground, subtasks: &[(&str, &str)]) {
     run.set_status(RunStatus::Resumed);
     run.save(ground.home.path(), ground.root.path())
         .expect("a record that writes");
-}
-
-#[test]
-fn a_bare_pull_names_the_scopes_this_machine_holds_and_reads_nothing_else() {
-    let ground = Ground::new();
-    let linear = Boarding::unreachable();
-    let repo = checkout();
-    let mut puller = puller(
-        &ground,
-        linear.clone(),
-        repo.clone(),
-        Forging::opening(URL),
-        unasked(),
-    );
-    let mut app = App::default();
-
-    puller.press(&mut app, &ground.manifest, ground.root.path(), None, now());
-
-    let said = notes(&app).pop().expect("the pull said nothing");
-    assert!(
-        said.contains(SCOPE),
-        "{said:?} does not name the sigil held"
-    );
-    assert!(
-        !said.contains(CLOSED),
-        "{said:?} names a scope this machine does not hold"
-    );
-    assert!(
-        repo.calls().is_empty(),
-        "a bare `/pull` ran `git`: {:?}",
-        repo.calls()
-    );
-    assert!(!puller.choosing(), "a bare `/pull` started a worker");
-    assert!(
-        !puller.confirm().is_open(),
-        "a bare `/pull` opened the dialog"
-    );
-    drop(linear);
 }
 
 #[test]
@@ -390,20 +352,20 @@ fn a_scope_no_record_holds_and_one_this_machine_does_not_hold_are_prepare_s_refu
         &mut app,
         &ground.manifest,
         ground.root.path(),
-        Some(Taking {
-            scope: "billing",
+        &Taking {
+            scope: "billing".to_owned(),
             ticket: None,
-        }),
+        },
         now(),
     );
     puller.press(
         &mut app,
         &ground.manifest,
         ground.root.path(),
-        Some(Taking {
-            scope: CLOSED,
+        &Taking {
+            scope: CLOSED.to_owned(),
             ticket: None,
-        }),
+        },
         now(),
     );
 

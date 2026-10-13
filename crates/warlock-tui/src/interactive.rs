@@ -6,13 +6,13 @@ use std::time::{Duration, Instant};
 
 use ratatui::crossterm::event::{KeyEvent, MouseEvent};
 use ratatui::layout::Size;
-use warlock_engine::{Agent, Manifest, save_base_branch};
+use warlock_engine::{Agent, Manifest};
 
 use crate::app::{App, Focus, Run, Working};
-use crate::chatting::{Branched, Chat, Takes, Wanted};
+use crate::chatting::Chat;
 use crate::claude::{ChatAgent, ClaudeAgent, Converses, Wired};
 use crate::clipboard::{self, Clip, Clipboard};
-use crate::composer::{Composed, paste_for};
+use crate::composer::{Composed, Composer, paste_for};
 use crate::confirm::QuitConfirm;
 use crate::confirm::Reviewed;
 use crate::cutting::Cutter;
@@ -35,17 +35,16 @@ use crate::scoping::{record_edit, scope_edit, scope_press};
 use crate::screen::Screen;
 use crate::selection::{Cell, Position, copied_text, position_at};
 use crate::session::{Scope, Watched, load_app, start_watching};
-use crate::submission::ToDraft;
-use crate::ui::{
-    Reach, composer_on_screen, draw, help_most_scroll, panel_height, panel_width, tree_height,
-};
+use crate::settings::Said;
+use crate::submission::{ToPush, Wanted};
+use crate::ui::{Reach, Shape, draw, help_most_scroll, panel_width};
 use crate::viewing::view_press;
 
 /// How long the loop waits for a keystroke before going round anyway.
 ///
-/// The ceiling on how stale the footer's clock and a run's progress line can
-/// get, and the reason an idle warlock redraws ten times a second rather than
-/// sleeping: the worker threads have no way to wake this one.
+/// The ceiling on how stale the footer's clock and a run's header can get, and
+/// the reason an idle warlock redraws ten times a second rather than sleeping:
+/// the worker threads have no way to wake this one.
 pub const POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 /// How long the footer keeps what it was told.
@@ -179,6 +178,7 @@ where
         // copy of either would be a second answer to what a slice is waiting for.
         review: cutter.reviewing(),
         carry: cutter.carrying(),
+        write_brief: chat.write_offer(),
         scope,
         record,
         write: chat.write_prompt(),
@@ -348,13 +348,20 @@ impl<K: Seams> Session<K> {
         .current()
     }
 
+    fn reread_config(&mut self) {
+        if let Some(held) = self.scope.settings.changed() {
+            self.scope.chrome.set_held(held);
+        }
+    }
+
     /// Everything that has to be told the frame's dimensions before anything
     /// reads them. The loop draws and *then* waits for a key, which is what
     /// lets the composer's row-wise keys and the panel's wrapping both work off
     /// a width nothing has measured yet at startup.
     fn draw(&mut self, size: Size) -> io::Result<()> {
+        self.reread_config();
         self.app.set_mouse_captured(self.mouse_captured);
-        self.app.set_working(if self.puller.in_flight().is_some() {
+        self.app.set_working(if self.puller.busy() {
             Some(Working::Pull)
         } else if self.cutter.running() || self.cutter.confirm().cutting().is_some() {
             Some(Working::Draft)
@@ -371,17 +378,24 @@ impl<K: Seams> Session<K> {
         // loop draws and then waits.
         let width = panel_width(size);
         self.chat.set_composer_width(width);
-        self.help = self.help.clamped(help_most_scroll(size));
+        if self.help.scroll().is_some() {
+            self.help = self.help.clamped(help_most_scroll(size));
+        }
         // And the other thing the field is told once a round: which slice of a
         // cut, if any, the next submission answers for. Told here rather than
         // at the two edges of a question, so a field cannot be left labelled for
         // a question that is over — see [`Cutter::answering`].
         self.chat.set_composer_answering(self.cutter.answering());
-        let field = composer_on_screen(&self.app, self.chat.composer());
-        let header = self.app.run_header();
-        self.app.set_viewport_height(tree_height(size));
+        let cut = Shape::of(
+            size,
+            &self.app,
+            Some(self.chat.composer()),
+            self.scope.chrome.sigils(),
+        )
+        .cut();
+        self.app.set_viewport_height(cut.tree_height());
         let panel = self.app.panel_mut();
-        panel.set_height(panel_height(size, field, header.as_ref()));
+        panel.set_height(cut.panel_height());
         panel.set_width(width);
 
         let modal = modals(
@@ -395,9 +409,21 @@ impl<K: Seams> Session<K> {
             &self.chat,
         )
         .current();
-        let (app, chrome) = (&self.app, &self.scope.chrome);
+        let (app, chrome, field) = (&self.app, &self.scope.chrome, self.chat.composer());
         self.screen.draw(|frame| {
-            draw(frame, app, chrome, Instant::now(), modal, field);
+            // The terminal can be resized between `size` being read and this
+            // frame being handed out — a window manager settling a new window
+            // does it at startup — and ratatui's frame is the newer size. The
+            // frame is cut again at that size rather than drawn with a cut
+            // that no longer fits it; the heights told to the app above stay a
+            // round behind, and the next round, a poll interval away, measures
+            // again.
+            let cut = if frame.area() == cut.screen() {
+                cut
+            } else {
+                Shape::of(frame.area().as_size(), app, Some(field), chrome.sigils()).cut()
+            };
+            draw(frame, &cut, app, chrome, Instant::now(), modal, Some(field));
         })
     }
 
@@ -414,8 +440,13 @@ impl<K: Seams> Session<K> {
         // the draft the frame was drawn with are the session's: what the event
         // means is decided against them, and what it then does is the app's
         // alone.
-        let field = composer_on_screen(&self.app, self.chat.composer());
-        let action = mouse_action(mouse, size, &self.app, self.modal(), field);
+        let shape = Shape::of(
+            size,
+            &self.app,
+            Some(self.chat.composer()),
+            self.scope.chrome.sigils(),
+        );
+        let action = mouse_action(mouse, shape, &self.app, self.modal());
         // Before the action is acted on, because this is bookkeeping about the
         // gesture rather than part of it: what the app does with a press or a
         // drag is the same whether or not the button stays down afterwards.
@@ -510,59 +541,30 @@ impl<K: Seams> Session<K> {
     /// Every arm below is one key. Nothing here re-gates what the module it
     /// dispatches to already refuses, which is why most arms have no error case
     /// — a refusal is a line on the footer and the loop goes round again.
-    // Over the pedantic line count because the arms carry their reasoning, and
-    // the fix the lint is asking for is the one this function exists to refuse:
-    // an arm dispatching on a value computed elsewhere is a key a reader cannot
-    // find here. Splitting by key group would put half the keyboard behind a
-    // name somebody has to guess at, and every line past the limit is a comment.
+    // Over the pedantic line count on purpose: splitting by key group would put
+    // half the keyboard behind a name somebody has to guess at, where here every
+    // arm is one key a reader can find.
     #[allow(clippy::too_many_lines)]
     fn press(&mut self, key: KeyEvent, now: Instant) -> Result<bool, Error> {
-        // The composer is offered on exactly the condition that lights its border,
-        // which is the keyboard being pointed at it: with the keys anywhere else
-        // this is `None`, there is no draft to type into, and every letter is the
-        // command it has always been.
-        let typing = (self.app.focus() == Focus::Composer).then(|| self.chat.composer());
-        // A local because two arms further down are about the same run; what a
-        // turn is doing is asked for once, here, and read nowhere else.
+        let typing = self.typing();
         let running = self.pact.running();
-        // The same for a pull, and read for the same three keys: the line each of
-        // them is refused with while a run of a ticket is editing this tree.
         let pulling = self.puller.in_flight();
         let pressed = press_for(key, self.modal(), typing, running, self.chat.answering());
 
         match pressed {
-            // Saying the session is over is the whole of quitting, and it is
-            // enough even with a pact in flight: [`run`] returns on this answer and
-            // returning is what does the rest. `pact` drops on the way out, which
-            // cancels the run and kills the `claude` it was waiting on (see
-            // [`Running`]); the guard drops after it and puts the terminal back.
-            // Nothing joins the worker: it is left to be ended by the process,
-            // having written whole documents or none, and the manifest it never got
-            // to rewrite still says what it said before.
-            //
-            // Every way out arrives here: a Yes to the question, and `q` during a
-            // run. The second spelling is the app's old quit, which
-            // [`press_for`] no longer produces — naming it beside the first keeps
-            // one road out of this loop rather than two that have to be kept doing
-            // the same thing.
-            Pressed::Leave | Pressed::Act(Action::Quit) => return Ok(false),
-            // The question, opened, moved, or taken down again. Nothing else
-            // happens and nothing else needs to: the app was never touched, so a
-            // No has nothing to put back, and the top of this loop draws whatever
-            // the question now is.
+            // Enough even with a pact in flight: `pact` drops on the way out,
+            // which cancels the run and kills the `claude` it was waiting on (see
+            // [`Running`]), and the guard drops after it and puts the terminal
+            // back. Nothing joins the worker: it has written whole documents or
+            // none, and the manifest it never got to rewrite still says what it
+            // said before.
+            Pressed::Leave => return Ok(false),
             Pressed::Confirm(next) => self.confirm = next,
             Pressed::Help(next) => self.help = next,
-            Pressed::Act(Action::Help) => self.help = HelpSheet::open(),
-            // The push dialog, moved or answered: see [`Pushes::answer`].
             Pressed::Push(answered) => self.pushes.answer(&mut self.app, answered, now),
-            // And the question a `/draft` puts up once the board has answered,
-            // and the two windows the run itself puts up: what becomes of one
-            // slice's drafts, and whether a skipped slice ends the run. See
-            // [`Cutter::confirmed`], [`Cutter::reviewed`] and [`Cutter::carried`].
             Pressed::Cut(answered) => self.cutter.confirmed(&mut self.app, answered, now),
-            // Forman's `[e]dit`, here rather than in the cut because it hands
-            // the screen to `$EDITOR` the way `e` on a file does. The window
-            // stays up behind it and asks about whatever was saved.
+            // Here rather than in the cut because it hands the screen to
+            // `$EDITOR` the way `e` on a file does.
             Pressed::Review(Reviewed::Edit) => {
                 if let Some((slice, drafts)) = self.cutter.editing() {
                     let edited = match editor() {
@@ -585,90 +587,35 @@ impl<K: Seams> Session<K> {
                 }
             }
             Pressed::Carry(answered) => self.cutter.carried(&mut self.app, answered, now),
-            // The question a `/pull` puts up once the queue has answered: moved,
-            // declined, or confirmed, which starts the run. See
-            // [`Puller::answered`].
+            Pressed::WriteBrief(answered) => self.chat.offered(&mut self.app, answered, now),
             Pressed::Pull(answered) => self.puller.answered(&mut self.app, answered, now),
-            // Esc with a run in flight. The handle does both halves at once — it
-            // latches, so the descent stops at the next directory instead of
-            // starting a pass for it, and it kills the `claude` running right now,
-            // so that stop happens in milliseconds rather than at the end of a
-            // five-minute pass.
-            //
             // The pact is deliberately *not* taken down here. The worker is still
             // going to hash what it wrote, save the manifest and report, and all
-            // of that arrives at the bottom of this loop like any other outcome;
-            // forgetting about it now would leave the footer's progress line up
-            // for a run nobody was listening to any more.
+            // of that arrives at the bottom of the loop like any other outcome;
+            // forgetting about it now would leave the run header up for a run
+            // nobody was listening to any more.
             Pressed::Act(Action::CancelPact) => self.pact.stop(),
-            // Ctrl-C with a turn being answered, and the one keystroke in warlock
-            // that stops something without leaving. The handle is the turn's own —
-            // the same `Cancel` a run is stopped through — so it kills the
-            // `claude` this turn is waiting on and the worker comes back within
-            // milliseconds.
-            //
             // The turn is deliberately *not* taken down here, exactly as a
             // cancelled pact is not: the worker still has one thing to say, and it
-            // says it at the bottom of this loop like any other ending. That is
+            // says it at the bottom of the loop like any other ending. That is
             // what puts the cancelled line under whatever work had already arrived
             // and gives the field the keyboard back — a turn forgotten here would
             // leave the composer muted for the rest of the session.
             Pressed::CancelTurn => self.chat.stop(),
-            // Nothing but a bit of view state moves here, and deliberately so:
-            // focus decides which border the next frame lights and which pane a
-            // movement key is about, and both of those questions are answered
-            // where they are asked — by the renderer reading `App::focus`, and by
-            // the app's own movement methods, which move the tree's selection or
-            // scroll the panel's window depending on the pane being driven
-            // (WAR-26.02). There is nothing for this arm to gate a second time,
-            // and no message: a key that changes what the *next* key means has
-            // nothing to report.
             Pressed::Act(Action::ToggleFocus) => self.app.toggle_focus(),
             Pressed::Act(Action::SelectPrevious) => self.app.select_previous(),
             Pressed::Act(Action::SelectNext) => self.app.select_next(),
-            // No height is passed: the app was told the viewport's height at the
-            // top of this loop, so a page is whatever the frame just drawn could
-            // show.
             Pressed::Act(Action::SelectPageUp) => self.app.select_page_up(),
             Pressed::Act(Action::SelectPageDown) => self.app.select_page_down(),
             Pressed::Act(Action::SelectFirst) => self.app.select_first(),
             Pressed::Act(Action::SelectLast) => self.app.select_last(),
-            // Nothing else happens here on purpose. What is collapsed is the front
-            // end's view of the tree and never touches disk (§8), so there is no
-            // manifest to write; the tree has not changed, so there is nothing to
-            // re-read. The app moves the selection and the scroll offset back into
-            // range itself, and the next frame — the top of this same loop — draws
-            // the shorter or longer list.
             Pressed::Act(Action::ToggleCollapsed) => self.app.toggle_collapsed(),
-            // Nothing else happens here either, and for the same reasons as
-            // collapsing: which rows are worth looking at is the front end's view
-            // of the tree and is never written down (§5), so there is no manifest
-            // to save, and the tree itself has not changed, so there is nothing to
-            // re-read. The app re-flows its rows and puts the selection and the
-            // scroll offset back in range; the next frame draws whatever is left.
             Pressed::Act(Action::TogglePactedOnly) => self.app.toggle_pacted_only(),
-            // Nothing else here either, for the third time and for the same
-            // reasons as the two arms above: whether the files inside a module are
-            // on screen is the front end's view of the tree and is never written
-            // down (§5), so there is no manifest to save, and the files were read
-            // by the load that built these rows, so there is nothing to re-read.
-            // The app re-flows its rows and keeps the selection and the scroll
-            // offset in range; the next frame draws the longer or shorter list.
             Pressed::Act(Action::ToggleFiles) => self.app.toggle_files(),
-            // The two keystrokes that write anything, and the two that take longer
-            // than a frame — so they are the ones that are not done here. Both go
-            // to a worker thread and both fill the one run `Pact` keeps, which is
-            // what makes them refuse each other; everything they produce arrives at
-            // the bottom of this loop, one directory at a time and finally as an
-            // outcome, and until it does the loop goes round as usual — drawing,
-            // scrolling, filtering.
-            //
-            // Two arms rather than one, because the list of keys is what this
-            // function is for and a key dispatching on a value computed elsewhere
-            // would be a key a reader could not find here. The kind is the app's own
-            // [`Run`], the only thing the two runs differ by all the way down;
-            // everything either side of it, and everything they refuse, is
-            // [`Pact::press`]'s.
+            // Two arms rather than one dispatching on a computed [`Run`], because
+            // the list of keys is what this function is for and a key dispatching
+            // on a value computed elsewhere would be a key a reader could not
+            // find here.
             Pressed::Act(Action::TogglePact) => {
                 self.pact.press(
                     Run::Pact,
@@ -689,66 +636,18 @@ impl<K: Seams> Session<K> {
                     now,
                 );
             }
-            // The one key that reads a file and the only one that shows anything a
-            // model wrote. It is done here, on this thread, between two frames: a
-            // read capped at a few kilobytes is over inside a frame, so there is
-            // no worker, no channel and no account, and nothing to reload
-            // afterwards because reading a file changes nothing about the tree.
-            //
-            // It needs no answer of its own, for the reason the scope key's arm
-            // needs none: everything this press can refuse it refuses inside
-            // `view_press` — a directory row through `App::message` — and every
-            // way the read itself can fail ends as one line on that same footer
-            // with the panel left as it was. So the loop goes round again after a
-            // failure exactly as it does after a success. Unlike `p`, `r` and `s`
-            // it is not handed the run: a read races nothing, so there is nothing
-            // for a run in flight to refuse. See `viewing::view_press`.
-            //
-            // What comes back is the file that is now on the document card, and it
-            // is kept here because the app is never told: `App::show_document`
-            // takes lines and never a path, so "which file the panel is holding"
-            // is this loop's to know. The one thing that asks for it is the edit
-            // key, which re-reads the card only when the file it just handed to an
-            // editor is the file on it. A press that read nothing — refused, or a
-            // read that failed — leaves the card holding what it held, which is
-            // why what was remembered before is what a `None` falls back to rather
-            // than being cleared.
+            // A press that read nothing leaves the card holding what it held, so
+            // a `None` keeps the file remembered before rather than clearing it:
+            // the edit key re-reads the card only when the file it edited is
+            // this one.
             Pressed::Act(Action::ViewFile) => {
                 if let Some(read) = view_press(&mut self.app) {
                     self.document = Some(read);
                 }
             }
-            // The one key that gives the screen away, and the only one whose
-            // answer is measured in minutes of somebody typing rather than in
-            // frames. The loop stops here for the whole of it: the terminal is put
-            // back the way warlock found it, `$EDITOR` is run on the selected file
-            // as a foreground child, the child is waited on, and the terminal is
-            // taken again — every one of those through the guard this loop already
-            // holds, so there is one spelling of teardown and one of setup (see
-            // `Screen::suspended`). Nothing is drawn behind the editor and
-            // no progress event is drained while it runs, which is the honest
-            // shape of handing the terminal to somebody else.
-            //
             // `mouse_captured` is handed over because it is this thread's only
             // record of what `m` last did: resuming without it would switch
             // reporting back on behind a reader who turned it off.
-            //
-            // It needs no answer of its own, for the reason `v`'s and `s`'s arms
-            // need none: everything this press can refuse it refuses inside
-            // `edit_press` — a directory row in the very words `v` uses, a run in
-            // flight on the progress line, an `$EDITOR` naming nothing on the
-            // footer — and both ways the child itself can go wrong end as one line
-            // on that footer with the loop going round again. The `?` is the
-            // terminal and only the terminal: a screen that could not be taken
-            // back is not news for a footer nobody could read, so it leaves
-            // through the guard like every other terminal failure. See
-            // `editing::edit_press`.
-            //
-            // Two things are read again on the way back, and both are inside
-            // `edit_press`: the tree, so a directory whose file changed goes
-            // yellow without a further keystroke, and the document card — but only
-            // when the file just edited is the one on it, which is what `document`
-            // is kept for. Which card is showing does not move for either.
             Pressed::Act(Action::EditFile) => {
                 edit_press(
                     &mut self.app,
@@ -760,45 +659,16 @@ impl<K: Seams> Session<K> {
                     running,
                 )?;
             }
-            // The panel's other card, and nothing else: the account if the
-            // document is up, the document if the account is. It is done here, on
-            // this thread, without reading anything — both cards are already in
-            // the app, so a swap is one field moved and the next frame drawing the
-            // other one.
-            //
-            // It needs no answer of its own, for `v`'s reason: the one thing this
-            // press can refuse — a session with no document read yet — it refuses
-            // inside `App::swap_card`, which leaves the panel on the account and
-            // puts a line on the footer naming the key that would make a second
-            // card. A swap that worked says nothing, because the reader can see
-            // it. Unlike `p`, `r` and `s` it is not handed the run: a swap races
-            // nothing, and a run that changed which card is showing would take a
-            // document out of the reader's hands.
             Pressed::Act(Action::SwapCard) => self.app.swap_card(),
-            // The one key that answers to the terminal rather than to the app. The
-            // sequence is written first and the flag moved only if it went out, so
-            // what this thread believes about the terminal is what it last
-            // successfully told it; a write that fails takes the whole loop down
-            // through the guard, which turns capture off on the way past whatever
-            // state it was left in.
-            //
-            // Nothing else happens: no focus moves, no row is selected, nothing is
-            // redrawn here — the top of the loop draws every round, and it is
-            // where the footer picks the new wording up. With capture off the
-            // terminal keeps the pointer to itself, so `Event::Mouse` simply stops
-            // arriving and the mouse handler needs no gate of its own.
+            // The sequence is written first and the flag moved only if it went
+            // out, so what this thread believes about the terminal is what it
+            // last successfully told it; a write that fails takes the whole loop
+            // down through the guard, which turns capture off on the way past
+            // whatever state it was left in.
             Pressed::Act(Action::ToggleMouseCapture) => {
                 self.screen.report_mouse(!self.mouse_captured)?;
                 self.mouse_captured = !self.mouse_captured;
             }
-            // The third key that writes to disk, and the one that is not a run: it
-            // opens a window holding the scope the selected directory carries now,
-            // read out of the manifest this loop is already holding. Everything it
-            // can refuse it refuses inside `scope_press` — a file row and an
-            // unpacted one through `App::message`, a press during a run through
-            // the progress line — and every one of those comes back as a prompt
-            // that is still closed, so this arm needs no `None` case of its own.
-            // See `scoping::scope_press`.
             Pressed::Act(Action::OpenScope) => {
                 self.prompt = scope_press(
                     &mut self.app,
@@ -815,18 +685,6 @@ impl<K: Seams> Session<K> {
                 // filed under a scope name from an earlier one.
                 self.record = RecordPrompt::Closed;
             }
-            // Somebody typing into that window: a character more or less in the
-            // field, the window abandoned, or — on Enter — the manifest written.
-            // The whole of that last one happens here, on this thread, between two
-            // frames: no worker, no channel, no account and no reload, because a
-            // scope is one string written into one entry of a file already in this
-            // thread's hand (see `mod@scoping`). What comes back is both windows
-            // at once: the scope one down for a submit that was answered and
-            // still up over the text for one the engine refused, and the record
-            // one up in place of a write when the name submitted has no
-            // `[[scope]]` record yet. Both are taken from the one value, because
-            // a submit that puts the second up is the same submit that takes the
-            // first down. See `scoping::scope_edit`.
             Pressed::Scope(edited) => {
                 let windows = scope_edit(
                     &mut self.app,
@@ -838,15 +696,6 @@ impl<K: Seams> Session<K> {
                 self.prompt = windows.scope;
                 self.record = windows.record;
             }
-            // Somebody typing into that second window: a character more or less
-            // in one of the three fields, the focus moved between them, the
-            // window abandoned, or — on Enter — the pact's scope and the new
-            // `[[scope]]` record written together. That last one happens here
-            // too, on this thread, between two frames and in one save: no
-            // worker, no channel and no reload, for the reason the scope key's
-            // own write has none (see `mod@scoping`). An Esc writes nothing at
-            // all and has nothing to put back, because the manifest was never
-            // told the first window was answered. See `scoping::record_edit`.
             Pressed::Record(edited) => {
                 self.record = record_edit(
                     &mut self.app,
@@ -856,29 +705,13 @@ impl<K: Seams> Session<K> {
                     edited,
                 );
             }
-            // Somebody typing into the other window: a character more or less in
-            // the path, the window abandoned, or — on Enter — the document
-            // written. The whole of that last one happens here too, on this
-            // thread, between two frames: the bytes are the answer already on the
-            // card and the destination is the line on screen, so there is nothing
-            // to spawn and nothing to wait for (see `mod@writing`). What comes
-            // back is the prompt from here on — down for a write that happened and
-            // for an Esc that wrote nothing, still up over the typed path for one
-            // that was refused. An Esc changes nothing else at all: the reply
-            // stays on the card and the register stays what it was, because the
-            // app was never told the question was asked. See
-            // `writing::write_edit`.
             Pressed::Write(edited) => {
                 self.chat.write(&mut self.app, edited, now);
             }
-            // Somebody typing at the foot of the panel's column: a character more
-            // or less in the draft, the keyboard handed back, or a draft offered
-            // up. Which of the two conversations that last one reaches is
-            // [`Session::composed`]'s to say.
             Pressed::Compose(outcome) => self.composed(outcome, now),
-            // A key nothing is bound to, or one whose press has already been
-            // answered where it was decided.
-            Pressed::Nothing => {}
+            // `press_for` turns quit and help into their own answers, so neither
+            // arrives as an action.
+            Pressed::Nothing | Pressed::Act(Action::Quit | Action::Help) => {}
         }
 
         Ok(true)
@@ -899,11 +732,9 @@ impl<K: Seams> Session<K> {
     /// more thing to clear on every way a question can end, and the cut already
     /// knows (see [`Cutter::relaying`]).
     ///
-    /// What a chat submission can hand back is a brief and what is wanted of
-    /// it: the document this session wrote or the one the command named, which
-    /// the conversation knows and can do neither thing with, because which board
-    /// it reaches is the manifest's, the machine's sigils' and the key store's.
-    /// A `/push` is answered on this thread — no socket is opened by any of it —
+    /// What a chat submission can hand back is a [`Wanted`]: a command about a
+    /// board, a queue or this machine's settings, none of which the conversation
+    /// holds. A `/push` is answered on this thread — no socket is opened by any of it —
     /// and what comes back is the window the reader is now looking at. A `/draft`
     /// has nothing to put up until a project has been read back, so it goes
     /// straight onto a worker and what comes back arrives at the bottom of a
@@ -930,105 +761,92 @@ impl<K: Seams> Session<K> {
         }
 
         let pulling = self.puller.in_flight();
-        match self.chat.compose(&mut self.app, outcome, now) {
-            Some(Wanted::Filed { scope, brief }) => {
-                self.pushes.press(
-                    &mut self.app,
-                    &self.manifest,
-                    &self.scope.repo_root,
-                    &scope,
-                    &brief,
-                    now,
-                );
+        let Some(wanted) = self.chat.compose(&mut self.app, outcome, now) else {
+            return;
+        };
+        let root = &self.scope.repo_root;
+        match wanted {
+            Wanted::Push(ToPush { scope, path }) => {
+                self.pushes
+                    .press(&mut self.app, &self.manifest, root, &scope, &path, now);
             }
-            Some(Wanted::Cut { scope, project }) => {
+            Wanted::Draft(drafting) => {
                 self.cutter.press(
                     &mut self.app,
                     &self.manifest,
-                    &self.scope.repo_root,
-                    ToDraft {
-                        scope: &scope,
-                        project: project.as_deref(),
-                    },
+                    root,
+                    &drafting,
                     pulling.as_deref(),
                     now,
                 );
             }
-            Some(Wanted::Pull(takes)) => {
-                self.puller.press(
-                    &mut self.app,
-                    &self.manifest,
-                    &self.scope.repo_root,
-                    takes.as_ref().map(Takes::taking),
-                    now,
-                );
+            Wanted::Pull(Some(taking)) => {
+                self.puller
+                    .press(&mut self.app, &self.manifest, root, &taking, now);
             }
-            Some(Wanted::Branch(branched)) => self.branch(branched, now),
-            Some(Wanted::Resume(ticket)) => {
+            // Answered from a file under the home and nothing else: no board is
+            // opened, no `git` runs and no session is raised.
+            Wanted::Pull(None) => {
+                let said = self.scope.settings.pull_line();
+                self.say(said, now);
+            }
+            Wanted::Branch(branching) => {
+                let said = self
+                    .scope
+                    .settings
+                    .branch(&branching, self.scope.chrome.remote_head());
+                self.settled(said, now);
+            }
+            Wanted::Sigil(sigiling) => {
+                let said = self.scope.settings.sigil(&sigiling);
+                self.settled(said, now);
+            }
+            Wanted::Resume(ticket) => {
                 resume_press(
                     &mut self.app,
                     &mut self.chat,
                     self.puller.home(),
-                    &self.scope.repo_root,
+                    root,
                     &ticket,
                     pulling.as_deref(),
                     now,
                 );
             }
-            None => {}
         }
     }
 
-    // Saved before the chrome moves, so the title never names a base the next
-    // pull would not use. A pull underway has already been refused above with
-    // every other submit, which matters: its base was read when it started.
-    fn branch(&mut self, branched: Branched, now: Instant) {
-        let base = match branched {
-            Branched::Show => {
-                let line = format!(
-                    "pulls start from and open pull requests against {}",
-                    self.scope.chrome.target().sentence()
-                );
-                self.app.panel_mut().note(line, now);
-                return;
-            }
-            Branched::Use(name) => Some(name),
-            Branched::Clear => None,
-        };
-        let Some(home) = self.puller.home() else {
-            self.app
-                .panel_mut()
-                .note(one_line(&Error::NoHome.to_string()), now);
-            return;
-        };
-        if let Err(source) = save_base_branch(home, &self.scope.repo_root, base.as_deref()) {
-            let line = one_line(&Error::Sigils { source }.to_string());
-            self.app.panel_mut().note(line, now);
-            return;
+    // After a write the chrome is read again from the file rather than left to
+    // the next round's stat, so the box and the boundary checks move with the
+    // line even where the file's clock is too coarse to see the write. A pull
+    // underway has already been refused above with every other submit, which
+    // matters: its base was read when it started.
+    fn settled(&mut self, said: Result<Said, Error>, now: Instant) {
+        if matches!(said, Ok(Said::Wrote(_))) {
+            self.scope.chrome.set_held(self.scope.settings.snapshot());
         }
-        self.scope.chrome.set_base(base);
-        let line = format!(
-            "pulls now start from and open pull requests against {}",
-            self.scope.chrome.target().sentence()
-        );
+        self.say(said.map(|said| said.line().to_owned()), now);
+    }
+
+    // The composer is offered on exactly the condition that lights its border,
+    // which is the keyboard being pointed at it: with the keys anywhere else this
+    // is `None`, there is no draft to type into, and every letter is the command
+    // it has always been.
+    fn typing(&self) -> Option<&Composer> {
+        (self.app.focus() == Focus::Composer).then(|| self.chat.composer())
+    }
+
+    fn say(&mut self, said: Result<String, Error>, now: Instant) {
+        let line = said.unwrap_or_else(one_line);
         self.app.panel_mut().note(line, now);
     }
 
     /// A block the terminal handed over whole. Nothing is returned and nothing
     /// can be: a paste never ends the session and never starts a turn, whatever
     /// newlines are in it.
-    ///
-    /// The two gates are here rather than in [`paste_for`], because a paste is
-    /// a single arrival carrying however much was copied and a gate missed at a
-    /// call site would land the lot.
     fn paste(&mut self, text: &str) {
-        let Some(typing) = (self.app.focus() == Focus::Composer).then(|| self.chat.composer())
-        else {
+        let Some(typing) = self.typing() else {
             return;
         };
-        if typing.is_muted() {
-            return;
-        }
 
         let pasted = paste_for(text, typing);
         self.chat.paste(pasted);
@@ -1087,10 +905,11 @@ impl<K: Seams> Session<K> {
             self.pact.running(),
             now,
         );
-        // And the conversation's own bottom end. Nothing comes back: a `/write`
-        // turn's answer opens the window that goes over it, and that window is the
-        // conversation's, so it is opened in there rather than here out of two
-        // values this loop would otherwise have to be handed. See [`Chat::keep_up`].
+        // And the conversation's own bottom end. Nothing comes back: a ready
+        // brief's question and a write turn's path prompt are the
+        // conversation's windows, so they are opened in there rather than here
+        // out of values this loop would otherwise have to be handed. See
+        // [`Chat::keep_up`].
         self.chat.keep_up(&mut self.app, now);
         // And a brief on its way to the board, which says one thing and is over:
         // the project's address or one line about why there is none. Drained like
@@ -1101,11 +920,9 @@ impl<K: Seams> Session<K> {
         // slice being drafted has come to. Nothing here writes, so a cut that
         // never reports has left the board exactly as it was.
         //
-        // The one thing it hands back is warlock's attempt at a question a slice
-        // asked, offered into the field as an ordinary draft: every editing key
-        // works on it, Enter sends whatever the field then holds, and clearing it
-        // and typing sends that instead. It is put here rather than in there
-        // because the field is the conversation's — see [`Chat::offer`].
+        // What it hands back is warlock's attempt at a question a slice asked,
+        // shown as a ghost and not written into the field as a draft — see
+        // [`Chat::suggest`].
         if let Some(proposal) = self.cutter.keep_up(&mut self.app, now) {
             self.chat.suggest(&proposal);
         }

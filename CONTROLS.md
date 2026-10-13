@@ -46,9 +46,10 @@ drawing on it. `v` and `Shift-Tab` are never refused — they race nothing.
 the nearest pacted directory at or above it — nearest wins outright, so an outer
 scope is a default for whatever said nothing below it rather than a second gate
 to also satisfy — and a key marked *yes* is refused there unless this machine
-holds a sigil matching it. The footer names the scope wanted.
-[`warlock config`](#the-headless-cli) prints and sets what this machine holds;
-a sigil of `*` opens everything.
+holds a sigil matching it. The footer names the scope wanted. The sigils box
+under the tree lists what this machine holds. To change it, use `/sigil` in the
+chat bar or [`warlock sigil`](#the-headless-cli); a sigil of `*` opens
+everything.
 
 The permissive default is on the **directory** and only there: a directory nobody
 scoped is open to anyone, which is why a repository that has never drawn a
@@ -93,8 +94,7 @@ Reached with `Tab`. While it holds the keyboard, ordinary characters go into the
 draft.
 
 The strip on the chat bar's top border shows the workflow: chat, brief, write,
-push, draft, and pull. The current mode is lit. Write lights beside brief when
-the model says the brief is ready to write. While a push, draft, or pull is
+push, draft, and pull. The current mode is lit. While a push, draft, or pull is
 running, it is the only stage lit.
 
 | Key | What it does |
@@ -107,8 +107,7 @@ running, it is the only stage lit.
 | `Esc` | Hand the keyboard back and keep the draft exactly as it was |
 | `Tab` | Move the focus on — the one key the composer does not take |
 | `Ctrl-C` | Cancel the turn if one is being answered; otherwise ask whether to quit |
-| `/brief` | Enter brief mode: the same conversation is now converging on a document, sent the instruction the brief template describes |
-| `/write` | Only in brief mode: ask for the document, then open an editable path prompt already holding a proposal like `docs/warlock-brief-13-scopes-and-sigils.md`. Writing the file returns to chat mode |
+| `/brief` | Enter brief mode: the same conversation is now converging on a document, sent the instruction the brief template describes. When the model has enough, a window asks **Write the brief?** Yes asks for the document, then opens an editable path prompt already holding a proposal like `docs/warlock-brief-13-scopes-and-sigils.md`; writing the file returns to chat mode. No keeps talking; ask for the document in your own words and the question comes back |
 | `/chat` | Leave brief mode, writing nothing — back to answering questions as they come |
 | `/push <SCOPE> <PATH>` | File the brief at `PATH` to the scope's Linear team as a project, after a Yes/No question |
 | `/draft <SCOPE>` | List the scope's planned projects, one per line, slug first |
@@ -120,6 +119,10 @@ running, it is the only stage lit.
 | `/branch` | Name the branch pulls start from and open pull requests against |
 | `/branch use <BRANCH>` | Make pulls start from and open pull requests against `BRANCH`, the same as `warlock branch use` |
 | `/branch clear` | Go back to the remote's default branch, the same as `warlock branch clear` |
+| `/sigil` | Name the sigils this machine holds for this repository |
+| `/sigil add <NAME>...` | Hold these sigils as well, the same as `warlock sigil add` |
+| `/sigil remove <NAME>...` | Stop holding these sigils, the same as `warlock sigil remove` |
+| `/sigil clear` | Stop holding every sigil, the same as `warlock sigil clear` |
 
 Commands are case-sensitive and take their arguments on the same line. A
 mistyped command is refused with a line listing every command, and nothing is

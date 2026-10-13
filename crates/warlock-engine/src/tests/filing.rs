@@ -219,7 +219,7 @@ fn the_four_ways_to_have_no_candidate_are_four_different_refusals() {
             "the refusal names the file to go and fix: {text}"
         );
         assert!(
-            !text.contains("sigil") && !text.contains("warlock config"),
+            !text.contains("sigil"),
             "the fix is in the repository, not on this machine: {text}"
         );
         boardless.push(error);
@@ -234,7 +234,7 @@ fn the_four_ways_to_have_no_candidate_are_four_different_refusals() {
         .expect_err("a machine holding nothing files to nothing");
     assert!(matches!(unsigiled, Error::Unsigiled), "{unsigiled:?}");
     assert!(
-        unsigiled.to_string().contains("warlock config"),
+        unsigiled.to_string().contains("warlock sigil add"),
         "{unsigiled}"
     );
 

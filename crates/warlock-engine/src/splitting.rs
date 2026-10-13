@@ -4,7 +4,7 @@ use std::fmt::Write as _;
 
 use serde::{Deserialize, Serialize};
 
-use crate::fill::{self, Asking, Defect, Reask, Rewrite, cut, fit, flattened, line, turned_down};
+use crate::fill::{self, Asking, Reask, cut, fit, flattened, line, turned_down};
 
 // The splitting road asks again exactly as often as the document and drafting
 // roads do, and a third bound would be a number to keep in step with this one
@@ -161,7 +161,42 @@ impl Fill {
     }
 }
 
-pub type Accepted = fill::Accepted<Fill>;
+pub type Accepted = fill::Accepted<Fill, Slot>;
+
+pub type Defect = fill::Defect<Slot>;
+
+// The two lists are named either whole or one entry at a time —
+// `subtasks[2].likely_files` and `subtasks[2].likely_files[1]` — and the entry
+// is what the second member carries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Slot {
+    Subtasks,
+    Goal(usize),
+    DependsOn(usize),
+    Done(usize, Option<usize>),
+    Files(usize, Option<usize>),
+    TestPlan(usize),
+    Notes(usize),
+}
+
+impl fmt::Display for Slot {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let (index, name, entry) = match *self {
+            Self::Subtasks => return f.write_str("subtasks"),
+            Self::Goal(index) => (index, "goal", None),
+            Self::DependsOn(index) => (index, "depends_on", None),
+            Self::Done(index, entry) => (index, "definition_of_done", entry),
+            Self::Files(index, entry) => (index, "likely_files", entry),
+            Self::TestPlan(index) => (index, "test_plan", None),
+            Self::Notes(index) => (index, "notes", None),
+        };
+        write!(f, "subtasks[{index}].{name}")?;
+        match entry {
+            Some(entry) => write!(f, "[{entry}]"),
+            None => Ok(()),
+        }
+    }
+}
 
 /// Read a splitting answer, in the layout [`crate::drafting::accept`] uses: the
 /// object lifted out of whatever prose surrounds it, then [`check`].
@@ -179,17 +214,14 @@ pub fn accept(answer: &str) -> Accepted {
     fill::accept(answer, check)
 }
 
-/// Every slot of a filled splitting answer, in [`Defect`]'s own vocabulary, with
-/// `field` spelt as the path to the slot: `subtasks`, `subtasks[2].goal`,
-/// `subtasks[2].depends_on`, `subtasks[2].definition_of_done[1]`.
+/// Every slot of a filled splitting answer, in [`Defect`]'s own vocabulary.
 ///
 /// ```
-/// use warlock_engine::document::Defect;
-/// use warlock_engine::splitting::{Fill, check};
+/// use warlock_engine::splitting::{Defect, Fill, Slot, check};
 ///
 /// assert_eq!(
 ///     check(&Fill::default()),
-///     vec![Defect::Missing { field: "subtasks".to_owned() }],
+///     vec![Defect::Missing { field: Slot::Subtasks }],
 /// );
 /// ```
 #[must_use]
@@ -203,12 +235,12 @@ pub fn check(fill: &Fill) -> Vec<Defect> {
     // nothing in it to work from is called on the document road.
     if fill.subtasks.is_empty() {
         defects.push(Defect::Missing {
-            field: "subtasks".to_owned(),
+            field: Slot::Subtasks,
         });
     }
     if fill.subtasks.len() > SUBTASKS_PER_TICKET {
         defects.push(Defect::TooMany {
-            field: "subtasks".to_owned(),
+            field: Slot::Subtasks,
             count: fill.subtasks.len(),
             cap: SUBTASKS_PER_TICKET,
         });
@@ -216,39 +248,35 @@ pub fn check(fill: &Fill) -> Vec<Defect> {
 
     for (index, subtask) in fill.subtasks.iter().enumerate() {
         line(
-            &format!("subtasks[{index}].goal"),
+            &Slot::Goal(index),
             &subtask.goal,
             GOAL_MINIMUM,
             GOAL_CHARS,
             &mut defects,
         );
-        depends_on(
-            &format!("subtasks[{index}].depends_on"),
-            &subtask.depends_on,
-            &mut defects,
-        );
+        depends_on(Slot::DependsOn(index), &subtask.depends_on, &mut defects);
         lines(
-            &format!("subtasks[{index}].definition_of_done"),
+            |entry| Slot::Done(index, entry),
             &subtask.definition_of_done,
             DONE_PER_SUBTASK,
             DONE_CHARS,
             &mut defects,
         );
         lines(
-            &format!("subtasks[{index}].likely_files"),
+            |entry| Slot::Files(index, entry),
             &subtask.likely_files,
             FILES_PER_SUBTASK,
             FILE_CHARS,
             &mut defects,
         );
         prose(
-            &format!("subtasks[{index}].test_plan"),
+            Slot::TestPlan(index),
             &subtask.test_plan,
             TEST_PLAN_CHARS,
             &mut defects,
         );
         prose(
-            &format!("subtasks[{index}].notes"),
+            Slot::Notes(index),
             &subtask.notes,
             NOTES_CHARS,
             &mut defects,
@@ -264,16 +292,22 @@ pub fn check(fill: &Fill) -> Vec<Defect> {
 // would make it defective. An empty list is no defect either — only the goal is
 // required, and a sub-task the pass had nothing more to say about is a thin
 // brief rather than a broken answer.
-fn lines(field: &str, given: &[String], entries: usize, cap: usize, defects: &mut Vec<Defect>) {
+fn lines(
+    slot: impl Fn(Option<usize>) -> Slot,
+    given: &[String],
+    entries: usize,
+    cap: usize,
+    defects: &mut Vec<Defect>,
+) {
     if given.len() > entries {
         defects.push(Defect::TooMany {
-            field: field.to_owned(),
+            field: slot(None),
             count: given.len(),
             cap: entries,
         });
     }
     for (index, entry) in given.iter().enumerate() {
-        line(&format!("{field}[{index}]"), entry, 0, cap, defects);
+        line(&slot(Some(index)), entry, 0, cap, defects);
     }
 }
 
@@ -281,14 +315,10 @@ fn lines(field: &str, given: &[String], entries: usize, cap: usize, defects: &mu
 // held to a cap and to nothing else: blank is how a pass says there was nothing
 // to add, and reporting that as `Empty` would send the repair road off to invent
 // a test plan out of a ticket title.
-fn prose(field: &str, value: &str, cap: usize, defects: &mut Vec<Defect>) {
+fn prose(field: Slot, value: &str, cap: usize, defects: &mut Vec<Defect>) {
     let chars = value.trim().chars().count();
     if chars > cap {
-        defects.push(Defect::TooLong {
-            field: field.to_owned(),
-            chars,
-            cap,
-        });
+        defects.push(Defect::TooLong { field, chars, cap });
     }
 }
 
@@ -300,10 +330,10 @@ fn prose(field: &str, value: &str, cap: usize, defects: &mut Vec<Defect>) {
 // at all. Re-asking would buy nothing either, since dropping the position is the
 // whole of the repair. So `check` over a mended fill is empty, because nothing
 // here reports what the mend dropped.
-fn depends_on(field: &str, given: &[usize], defects: &mut Vec<Defect>) {
+fn depends_on(field: Slot, given: &[usize], defects: &mut Vec<Defect>) {
     if given.len() > DEPENDS_ON_PER_SUBTASK {
         defects.push(Defect::TooMany {
-            field: field.to_owned(),
+            field,
             count: given.len(),
             cap: DEPENDS_ON_PER_SUBTASK,
         });
@@ -364,60 +394,30 @@ mod fallback {
 // second bound would be a number to keep in step with that one for no gain.
 pub use crate::drafting::MEND_PASSES;
 
-pub type Mend = fill::Mend<Mended>;
+pub type Mend = fill::Mend<Mended, Slot>;
+
+pub type Mended = fill::Mended<Lost>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Mended {
-    // The value spanned lines and keeps its first.
-    FirstLine,
-    // The value ran over its cap and was cut to it, counting characters.
-    Cut { from: usize, to: usize },
-    // The list ran over its cap and keeps its first entries.
-    Shortened { from: usize, to: usize },
+pub enum Lost {
     // The entry was left blank, and a blank line in a list is nothing a session
     // could work from, so it is gone from the list.
     Blank,
     // Positions pointing outside this ticket's own sub-tasks, or at the
     // sub-task carrying them, and so gone.
     Dropped { count: usize },
-    // The slot was never answered and fell to warlock's own line about the
-    // ticket. See [`fallback`].
-    Supplied,
 }
 
-impl From<Rewrite> for Mended {
-    fn from(rewrite: Rewrite) -> Self {
-        match rewrite {
-            Rewrite::FirstLine => Self::FirstLine,
-            Rewrite::Cut { from, to } => Self::Cut { from, to },
-        }
-    }
-}
+impl fill::Wording for Lost {
+    // Warlock's own line about the ticket. See [`fallback`].
+    const SUPPLIED: &'static str = "the ticket's own text";
 
-impl fmt::Display for Mend {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let field = &self.field;
-        match self.done {
-            Mended::FirstLine => {
-                write!(f, "{field} ran to more than one line and keeps its first")
-            }
-            Mended::Cut { from, to } => {
-                write!(f, "{field} was {from} characters and was cut to {to}")
-            }
-            Mended::Shortened { from, to } => {
-                write!(
-                    f,
-                    "{field} had {from} entries and was cut to the first {to}"
-                )
-            }
-            Mended::Blank => write!(f, "{field} was left blank and was dropped from its list"),
-            Mended::Dropped { count } => write!(
+    fn word(&self, field: &dyn fmt::Display, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Blank => write!(f, "{field} was left blank and was dropped from its list"),
+            Self::Dropped { count } => write!(
                 f,
                 "{field} named {count} position(s) outside this ticket's sub-tasks and lost them"
-            ),
-            Mended::Supplied => write!(
-                f,
-                "{field} was not answered and was filled in from the ticket's own text"
             ),
         }
     }
@@ -465,8 +465,8 @@ fn prune(fill: &mut Fill, mends: &mut Vec<Mend>) {
         let dropped = before - subtask.depends_on.len();
         if dropped > 0 {
             mends.push(Mend {
-                field: format!("subtasks[{index}].depends_on"),
-                done: Mended::Dropped { count: dropped },
+                field: Slot::DependsOn(index),
+                done: Mended::Own(Lost::Dropped { count: dropped }),
             });
         }
     }
@@ -479,6 +479,7 @@ struct Mending<'a> {
 
 impl fill::Schema for Mending<'_> {
     type Fill = Fill;
+    type Slot = Slot;
     type Mended = Mended;
     type Plan = Plan;
 
@@ -502,11 +503,11 @@ impl fill::Schema for Mending<'_> {
         plan
     }
 
-    fn rewritable<'f>(plan: &Plan, fill: &'f mut Fill, field: &str) -> Option<&'f mut String> {
-        if plan.covers(field) {
+    fn rewritable<'f>(plan: &Plan, fill: &'f mut Fill, slot: &Slot) -> Option<&'f mut String> {
+        if plan.covers(*slot) {
             return None;
         }
-        match slot(field) {
+        match *slot {
             Slot::Goal(index) => fill
                 .subtasks
                 .get_mut(index)
@@ -527,11 +528,9 @@ impl fill::Schema for Mending<'_> {
                 .subtasks
                 .get_mut(index)
                 .map(|subtask| &mut subtask.notes),
-            Slot::Subtasks
-            | Slot::DependsOn(_)
-            | Slot::Done(_, None)
-            | Slot::Files(_, None)
-            | Slot::Unknown => None,
+            Slot::Subtasks | Slot::DependsOn(_) | Slot::Done(_, None) | Slot::Files(_, None) => {
+                None
+            }
         }
     }
 
@@ -559,13 +558,19 @@ impl Plan {
     // all, and nothing here may depend on the order `check` reported them in.
     fn note_array(&mut self, defect: &Defect, mends: &mut Vec<Mend>) {
         let done = match defect {
-            Defect::Missing { field } if slot(field) == Slot::Subtasks => {
+            Defect::Missing {
+                field: Slot::Subtasks,
+            } => {
                 if std::mem::replace(&mut self.subtasks, true) {
                     return;
                 }
                 Mended::Supplied
             }
-            Defect::TooMany { field, count, cap } if slot(field) == Slot::Subtasks => {
+            Defect::TooMany {
+                field: Slot::Subtasks,
+                count,
+                cap,
+            } => {
                 if std::mem::replace(&mut self.cut_subtasks, true) {
                     return;
                 }
@@ -577,7 +582,7 @@ impl Plan {
             _ => return,
         };
         mends.push(Mend {
-            field: "subtasks".to_owned(),
+            field: Slot::Subtasks,
             done,
         });
     }
@@ -586,7 +591,7 @@ impl Plan {
         let Defect::TooMany { field, count, cap } = defect else {
             return;
         };
-        let recorded = match slot(field) {
+        let recorded = match *field {
             Slot::DependsOn(index) => !self.cut_off(index) && self.cut_depends_on.insert(index),
             Slot::Done(index, None) => !self.cut_off(index) && self.cut_done.insert(index),
             Slot::Files(index, None) => !self.cut_off(index) && self.cut_files.insert(index),
@@ -595,12 +600,11 @@ impl Plan {
             | Slot::Done(_, Some(_))
             | Slot::Files(_, Some(_))
             | Slot::TestPlan(_)
-            | Slot::Notes(_)
-            | Slot::Unknown => false,
+            | Slot::Notes(_) => false,
         };
         if recorded {
             mends.push(Mend {
-                field: field.clone(),
+                field: *field,
                 done: Mended::Shortened {
                     from: *count,
                     to: *cap,
@@ -617,17 +621,17 @@ impl Plan {
         let (Defect::Empty { field } | Defect::TooShort { field, .. }) = defect else {
             return;
         };
-        let (done, recorded) = match slot(field) {
+        let (done, recorded) = match *field {
             Slot::Goal(index) => (
                 Mended::Supplied,
                 !self.cut_off(index) && self.filled_goals.insert(index),
             ),
             Slot::Done(index, Some(entry)) => (
-                Mended::Blank,
+                Mended::Own(Lost::Blank),
                 !self.dropped_done(index, entry) && self.blank_done.insert((index, entry)),
             ),
             Slot::Files(index, Some(entry)) => (
-                Mended::Blank,
+                Mended::Own(Lost::Blank),
                 !self.dropped_file(index, entry) && self.blank_files.insert((index, entry)),
             ),
             Slot::Subtasks
@@ -635,19 +639,18 @@ impl Plan {
             | Slot::Done(_, None)
             | Slot::Files(_, None)
             | Slot::TestPlan(_)
-            | Slot::Notes(_)
-            | Slot::Unknown => (Mended::Supplied, false),
+            | Slot::Notes(_) => (Mended::Supplied, false),
         };
         if recorded {
             mends.push(Mend {
-                field: field.clone(),
+                field: *field,
                 done,
             });
         }
     }
 
-    fn covers(&self, field: &str) -> bool {
-        match slot(field) {
+    fn covers(&self, slot: Slot) -> bool {
+        match slot {
             Slot::Subtasks => self.subtasks,
             Slot::Goal(index) => self.cut_off(index) || self.filled_goals.contains(&index),
             Slot::Done(index, Some(entry)) => {
@@ -661,7 +664,6 @@ impl Plan {
             | Slot::Files(index, None)
             | Slot::TestPlan(index)
             | Slot::Notes(index) => self.cut_off(index),
-            Slot::Unknown => false,
         }
     }
 
@@ -739,64 +741,6 @@ impl Plan {
         if self.cut_subtasks {
             fill.subtasks.truncate(SUBTASKS_PER_TICKET);
         }
-    }
-}
-
-// The slot a defect's `field` names, read back out of the spelling `check`
-// wrote it in. The two lists are named either whole or one entry at a time —
-// `subtasks[2].likely_files` and `subtasks[2].likely_files[1]` — and the entry
-// is what the second member carries.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Slot {
-    Subtasks,
-    Goal(usize),
-    DependsOn(usize),
-    Done(usize, Option<usize>),
-    Files(usize, Option<usize>),
-    TestPlan(usize),
-    Notes(usize),
-    Unknown,
-}
-
-fn slot(field: &str) -> Slot {
-    if field == "subtasks" {
-        return Slot::Subtasks;
-    }
-    let Some(rest) = field.strip_prefix("subtasks[") else {
-        return Slot::Unknown;
-    };
-    let Some((inside, tail)) = rest.split_once(']') else {
-        return Slot::Unknown;
-    };
-    let Ok(index) = inside.parse::<usize>() else {
-        return Slot::Unknown;
-    };
-    match tail {
-        ".goal" => Slot::Goal(index),
-        ".depends_on" => Slot::DependsOn(index),
-        ".test_plan" => Slot::TestPlan(index),
-        ".notes" => Slot::Notes(index),
-        _ => listed(index, tail),
-    }
-}
-
-fn listed(index: usize, tail: &str) -> Slot {
-    let (name, entry) = match tail.split_once('[') {
-        None => (tail, None),
-        Some((name, rest)) => {
-            let Some(inside) = rest.strip_suffix(']') else {
-                return Slot::Unknown;
-            };
-            let Ok(entry) = inside.parse::<usize>() else {
-                return Slot::Unknown;
-            };
-            (name, Some(entry))
-        }
-    };
-    match name {
-        ".definition_of_done" => Slot::Done(index, entry),
-        ".likely_files" => Slot::Files(index, entry),
-        _ => Slot::Unknown,
     }
 }
 

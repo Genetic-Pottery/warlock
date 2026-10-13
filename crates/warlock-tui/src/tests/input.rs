@@ -1,6 +1,7 @@
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
 
-use super::{Action, action_for};
+use super::{Action, Pressed, action_for, press_for};
+use crate::confirm::QuitConfirm;
 
 fn press(code: KeyCode) -> KeyEvent {
     KeyEvent::new(code, KeyModifiers::NONE)
@@ -16,9 +17,7 @@ fn q_and_esc_quit_with_no_pact_running() {
 }
 
 #[test]
-fn esc_cancels_the_pact_in_flight_while_q_and_ctrl_c_still_quit() {
-    let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
-
+fn esc_cancels_the_pact_in_flight_while_q_still_quits() {
     assert_eq!(
         action_for(press(KeyCode::Esc), true),
         Some(Action::CancelPact),
@@ -27,9 +26,8 @@ fn esc_cancels_the_pact_in_flight_while_q_and_ctrl_c_still_quit() {
     assert_eq!(
         action_for(press(KeyCode::Char('q')), true),
         Some(Action::Quit),
-        "and the ways out are still the ways out"
+        "and the way out is still the way out"
     );
-    assert_eq!(action_for(ctrl_c, true), Some(Action::Quit));
 }
 
 #[test]
@@ -69,15 +67,7 @@ fn esc_is_the_only_key_a_pact_in_flight_changes_the_meaning_of() {
 }
 
 #[test]
-fn ctrl_c_quits_but_a_bare_c_does_not() {
-    let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
-
-    assert_eq!(action_for(ctrl_c, false), Some(Action::Quit));
-    assert_eq!(action_for(press(KeyCode::Char('c')), false), None);
-}
-
-#[test]
-fn ctrl_c_quits_with_caps_lock_or_shift_held() {
+fn ctrl_c_asks_to_quit_with_caps_lock_or_shift_held() {
     // Some terminals report Ctrl-C as an upper-case `C` when shift or caps
     // lock is in play; it is still the key everyone reaches for to get out.
     let ctrl_shift_c = KeyEvent::new(
@@ -85,7 +75,10 @@ fn ctrl_c_quits_with_caps_lock_or_shift_held() {
         KeyModifiers::CONTROL | KeyModifiers::SHIFT,
     );
 
-    assert_eq!(action_for(ctrl_shift_c, false), Some(Action::Quit));
+    assert_eq!(
+        press_for(ctrl_shift_c, None, None, false, false),
+        Pressed::Confirm(QuitConfirm::open())
+    );
 }
 
 #[test]
@@ -924,7 +917,7 @@ mod gate {
     };
     use crate::modal::Modals;
     use crate::prompt::{Edited, RecordPrompt, ScopeField, ScopePrompt, edit_for};
-    use crate::ui::{panel_height, tree_height};
+    use crate::ui::Shape;
 
     const SIZE: Size = Size {
         width: 80,
@@ -970,9 +963,12 @@ mod gate {
     }
 
     fn app_on_screen() -> App {
-        let mut rows = vec![
-            Row::new(0, "/repo", "/repo/.warlock.md", NodeState::PactedStale).with_child_count(12),
-        ];
+        let mut rows = vec![Row::new(
+            0,
+            "/repo",
+            "/repo/.warlock.md",
+            NodeState::PactedStale,
+        )];
         for n in 0..12 {
             let directory = format!("/repo/d{n:02}");
             let state = if n % 2 == 0 {
@@ -984,8 +980,9 @@ mod gate {
             rows.push(Row::file(2, format!("{directory}/lib.rs"), state));
         }
         let mut app = App::from_rows(rows);
-        app.set_viewport_height(tree_height(SIZE));
-        app.panel_mut().set_height(panel_height(SIZE, None, None));
+        let cut = Shape::new(SIZE).cut();
+        app.set_viewport_height(cut.tree_height());
+        app.panel_mut().set_height(cut.panel_height());
         app
     }
 
@@ -1111,6 +1108,9 @@ mod gate {
             }
             Pressed::Carry(answered) => {
                 panic!("{answered:?} came from a carry-on question that is not up")
+            }
+            Pressed::WriteBrief(answered) => {
+                panic!("{answered:?} came from a write question that is not up")
             }
             Pressed::Help(sheet) => panic!("{sheet:?} came from a help key no round presses"),
             // The loop's three composer arms, and the reason the draft is a
@@ -1965,7 +1965,7 @@ mod gate {
         #[test]
         fn the_scope_prompt_has_the_keys_while_both_windows_are_up() {
             // The precedence, and the one situation that needs one: `s`
-            // opens the scope prompt from the tree while a `/write` turn is
+            // opens the scope prompt from the tree while a write turn is
             // still out, and the answer to that turn opens this window with
             // no keystroke at all. The scope prompt is the one somebody is
             // typing in, so it keeps the keyboard; the write prompt waits
@@ -2025,6 +2025,72 @@ mod gate {
 
     // The fourth window: the three values a brand-new scope name is recorded
     // with, which `s` puts up as it takes the scope window down.
+    mod offering {
+        use super::{Answer, Composer, INERT, KeyCode, Modals, Pressed, ctrl_c, press, press_for};
+        use crate::confirm::{Answered, answer_for};
+
+        fn asked(key: super::KeyEvent, lit: Answer, composer: Option<&Composer>) -> Pressed {
+            press_for(
+                key,
+                Modals {
+                    write_brief: Some(lit),
+                    ..Modals::default()
+                }
+                .current(),
+                composer,
+                false,
+                false,
+            )
+        }
+
+        #[test]
+        fn every_key_is_the_questions_and_none_reaches_the_app_or_the_field() {
+            let draft = Composer::new("say something");
+
+            for code in
+                INERT
+                    .into_iter()
+                    .chain([KeyCode::Char('a'), KeyCode::Char('q'), KeyCode::Enter])
+            {
+                let key = press(code);
+
+                assert_eq!(
+                    asked(key, Answer::No, Some(&draft)),
+                    Pressed::WriteBrief(answer_for(key, Answer::No)),
+                    "{code:?} while the write question is up"
+                );
+            }
+        }
+
+        #[test]
+        fn y_says_yes_and_enter_on_the_lit_no_says_no() {
+            assert_eq!(
+                asked(press(KeyCode::Char('y')), Answer::No, None),
+                Pressed::WriteBrief(Answered::Leave)
+            );
+            assert_eq!(
+                asked(press(KeyCode::Enter), Answer::No, None),
+                Pressed::WriteBrief(Answered::Close)
+            );
+            assert_eq!(
+                asked(press(KeyCode::Left), Answer::No, None),
+                Pressed::WriteBrief(Answered::Open(Answer::Yes))
+            );
+            assert_eq!(
+                asked(press(KeyCode::Enter), Answer::Yes, None),
+                Pressed::WriteBrief(Answered::Leave)
+            );
+        }
+
+        #[test]
+        fn ctrl_c_is_still_the_quit_question() {
+            assert!(matches!(
+                asked(ctrl_c(), Answer::No, None),
+                Pressed::Confirm(_)
+            ));
+        }
+    }
+
     mod recording {
         use super::{
             Composer, INERT, KeyCode, KeyEvent, Modals, Pressed, QuitConfirm, ctrl_c, press,
@@ -2315,7 +2381,7 @@ mod gate {
 
         #[test]
         fn the_dialog_has_the_keys_while_any_of_the_three_fields_is_up() {
-            // The precedence, written down: a `/write` turn still out opens the
+            // The precedence, written down: a write turn still out opens the
             // write prompt on no keystroke at all, and a field that came up
             // under this dialog does not get to take the keys off it.
             let push = open();
@@ -2501,7 +2567,7 @@ mod gate {
 
         #[test]
         fn the_dialog_has_the_keys_while_any_of_the_three_fields_is_up() {
-            // The precedence, written down: a `/write` turn still out opens the
+            // The precedence, written down: a write turn still out opens the
             // write prompt on no keystroke at all, and a field that came up
             // under this dialog does not get to take the keys off it.
             let cut = open();
@@ -2720,7 +2786,7 @@ mod gate {
 
         #[test]
         fn the_dialog_has_the_keys_while_any_of_the_three_fields_is_up() {
-            // The precedence, written down: a `/write` turn still out opens the
+            // The precedence, written down: a write turn still out opens the
             // write prompt on no keystroke at all, and a field that came up
             // under this dialog does not get to take the keys off it.
             let pull = open();
@@ -3738,7 +3804,7 @@ mod pointer {
     use crate::modal::{Modal, Modals};
     use crate::prompt::{RecordPrompt, ScopePrompt};
     use crate::selection::Cell;
-    use crate::ui::{Reach, panel_height, panel_width, tree_height};
+    use crate::ui::{Reach, Shape, panel_width};
 
     // The one terminal every test below points at, and the layout it comes
     // to. Eighty columns is wide enough that the tree takes its floor of
@@ -3747,11 +3813,13 @@ mod pointer {
     // constant below moves:
     //
     //   columns  0        panel        49 50       tree        79
-    //   row  0   ┌───────────────────────┐┌───────────────────────┐
-    //   row  1   │ panel line 0          ││ tree header           │
-    //   row  2   │ panel line 1          ││ tree row 0            │
+    //   row  0   ┌───────────────────────┐┌ pulls into … ─────────┐
+    //   row  1   │ panel line 0          ││ tree row 0            │
     //    ...     │  ...                  ││  ...                  │
-    //   row 19   │ panel line 18         ││ tree row 17           │
+    //   row 16   │ panel line 15         ││ tree row 15           │
+    //   row 17   │ panel line 16         │└───────────────────────┘
+    //   row 18   │ panel line 17         │┌ sigils ───────────────┐
+    //   row 19   │ panel line 18         ││                       │
     //   row 20   └───────────────────────┘└───────────────────────┘
     //   rows 21-23                     the footer
     const SIZE: Size = Size {
@@ -3763,11 +3831,9 @@ mod pointer {
 
     const IN_PANEL: u16 = 10;
 
-    const FIRST_TREE_ROW: u16 = 2;
+    const FIRST_TREE_ROW: u16 = 1;
 
     const FIRST_PANEL_LINE: u16 = 1;
-
-    const TREE_HEADER: u16 = 1;
 
     const FOOTER: u16 = 22;
 
@@ -3787,7 +3853,7 @@ mod pointer {
     ];
 
     fn viewport() -> usize {
-        usize::from(tree_height(SIZE))
+        usize::from(Shape::new(SIZE).cut().tree_height())
     }
 
     fn wheel_down(column: u16, row: u16) -> MouseEvent {
@@ -3827,21 +3893,23 @@ mod pointer {
             wheel_up(IN_PANEL, FIRST_PANEL_LINE),
             left_click(IN_TREE, FIRST_TREE_ROW),
             left_click(IN_TREE, FIRST_TREE_ROW + 9),
-            left_click(IN_TREE, TREE_HEADER),
+            left_click(IN_TREE, FIRST_TREE_ROW + 3),
             left_click(IN_PANEL, FIRST_PANEL_LINE + 3),
         ]
     }
 
     fn rows() -> Vec<Row> {
-        let mut rows = vec![
-            Row::new(0, "/repo", "/repo/.warlock.md", NodeState::PactedStale).with_child_count(24),
-        ];
+        let mut rows = vec![Row::new(
+            0,
+            "/repo",
+            "/repo/.warlock.md",
+            NodeState::PactedStale,
+        )];
         for n in 0..24 {
             let directory = format!("/repo/d{n:02}");
-            // No child count: the row under each of these is the file below,
-            // and a file is not a child. What makes them collapsible is the
-            // file toggle being on, which is `App::can_collapse`'s answer
-            // and not the tree's.
+            // The row under each of these is the file below. What makes them
+            // collapsible is the file toggle being on, which is
+            // `App::can_collapse`'s answer and not the tree's.
             rows.push(Row::new(1, directory.clone(), None, NodeState::Unpacted));
             rows.push(Row::file(
                 2,
@@ -3854,8 +3922,9 @@ mod pointer {
 
     fn app_on_screen() -> App {
         let mut app = App::from_rows(rows());
-        app.set_viewport_height(tree_height(SIZE));
-        app.panel_mut().set_height(panel_height(SIZE, None, None));
+        let cut = Shape::new(SIZE).cut();
+        app.set_viewport_height(cut.tree_height());
+        app.panel_mut().set_height(cut.panel_height());
         app.panel_mut().set_width(panel_width(SIZE));
         app
     }
@@ -3886,11 +3955,16 @@ mod pointer {
     }
 
     fn asks_under(mouse: MouseEvent, app: &App, modal: Option<Modal<'_>>) -> Option<MouseAction> {
-        mouse_action(mouse, SIZE, app, modal, None)
+        let header = app.run_header();
+        mouse_action(mouse, Shape::new(SIZE).header(header.is_some()), app, modal)
     }
 
     fn asks_composing(mouse: MouseEvent, app: &App, composer: &Composer) -> Option<MouseAction> {
-        mouse_action(mouse, SIZE, app, None, Some(composer))
+        let header = app.run_header();
+        let shape = Shape::new(SIZE)
+            .composer(Some(composer))
+            .header(header.is_some());
+        mouse_action(mouse, shape, app, None)
     }
 
     fn round(app: &mut App, confirm: QuitConfirm, mouse: MouseEvent) {
@@ -3939,9 +4013,9 @@ mod pointer {
         // The table above is load-bearing: every point below is a literal
         // read off it, so a layout that moved would otherwise turn these
         // tests into assertions about somewhere else.
-        assert_eq!(viewport(), 18, "eighteen rows of tree at 80x24");
+        assert_eq!(viewport(), 16, "sixteen rows of tree at 80x24");
         assert_eq!(
-            usize::from(panel_height(SIZE, None, None)),
+            usize::from(Shape::new(SIZE).cut().panel_height()),
             19,
             "nineteen lines of panel: no header of its own"
         );
@@ -3958,14 +4032,6 @@ mod pointer {
         assert_eq!(
             asks(wheel_up(IN_TREE, FIRST_TREE_ROW + 4), &app),
             Some(MouseAction::SelectPreviousBy(3)),
-        );
-        // Every part of the pane's inside answers for the pane, the header
-        // included: a wheel is aimed at a column, and a notch that did
-        // nothing because the pointer sat on the naming line would read as a
-        // wheel that sticks.
-        assert_eq!(
-            asks(wheel_down(IN_TREE, TREE_HEADER), &app),
-            Some(MouseAction::SelectNextBy(3)),
         );
     }
 
@@ -4361,12 +4427,6 @@ mod pointer {
         for (column, row, pressed, past) in [
             (
                 IN_TREE,
-                TREE_HEADER,
-                Some(MouseAction::Focus(Focus::Tree)),
-                None,
-            ),
-            (
-                IN_TREE,
                 FIRST_TREE_ROW,
                 Some(MouseAction::ToggleCollapsed),
                 None,
@@ -4443,7 +4503,7 @@ mod pointer {
         // is one below.
         let app = app_talking();
         let first = FIRST_PANEL_LINE;
-        let last = FIRST_PANEL_LINE + panel_height(SIZE, None, None) - 1;
+        let last = FIRST_PANEL_LINE + Shape::new(SIZE).cut().panel_height() - 1;
         assert_eq!(last, 19, "nineteen lines of card, ending at row 19");
 
         for (row, past) in [
@@ -4563,7 +4623,10 @@ mod pointer {
         // at the first row the reader drags onto.
         let mut app = app_talking();
         let composer = Composer::default();
-        let rows = panel_height(SIZE, Some(&composer), None);
+        let rows = Shape::new(SIZE)
+            .composer(Some(&composer))
+            .cut()
+            .panel_height();
         app.panel_mut().set_height(rows);
         // The panel's rows start at `FIRST_PANEL_LINE`, so its bottom border
         // is the row after the last of them and the field's own top border
@@ -4616,8 +4679,12 @@ mod pointer {
         let mut app = app_talking();
         app.set_pact_in_flight("/repo/d00", 0, 24);
         let header = app.run_header();
-        app.panel_mut()
-            .set_height(panel_height(SIZE, None, header.as_ref()));
+        app.panel_mut().set_height(
+            Shape::new(SIZE)
+                .header(header.is_some())
+                .cut()
+                .panel_height(),
+        );
         let past = Reach::Above {
             rows: 2,
             column: IN_PANEL - 1,
@@ -4749,14 +4816,13 @@ mod pointer {
             assert_eq!(
                 mouse_action(
                     mouse,
-                    SIZE,
+                    Shape::new(SIZE),
                     &app,
                     Modals {
                         push: &push,
                         ..Modals::default()
                     }
                     .current(),
-                    None
                 ),
                 None,
                 "{mouse:?} should mean nothing while the push dialog is up"
@@ -4786,14 +4852,13 @@ mod pointer {
             assert_eq!(
                 mouse_action(
                     mouse,
-                    SIZE,
+                    Shape::new(SIZE),
                     &app,
                     Modals {
                         cut: &cut,
                         ..Modals::default()
                     }
                     .current(),
-                    None
                 ),
                 None,
                 "{mouse:?} should mean nothing while the draft dialog is up"
@@ -4822,7 +4887,7 @@ mod pointer {
                 assert_eq!(
                     mouse_action(
                         mouse,
-                        SIZE,
+                        Shape::new(SIZE),
                         &app,
                         Modals {
                             review: drafts,
@@ -4830,33 +4895,12 @@ mod pointer {
                             ..Modals::default()
                         }
                         .current(),
-                        None
                     ),
                     None,
                     "{mouse:?} should mean nothing while a run's window is up"
                 );
             }
         }
-    }
-
-    #[test]
-    fn a_click_on_the_tree_header_takes_the_keys_and_no_more() {
-        let mut app = app_on_screen();
-        app.set_focus(Focus::Panel);
-        let selected = app.selected();
-
-        assert_eq!(
-            asks(left_click(IN_TREE, TREE_HEADER), &app),
-            Some(MouseAction::Focus(Focus::Tree)),
-        );
-
-        round(
-            &mut app,
-            QuitConfirm::Closed,
-            left_click(IN_TREE, TREE_HEADER),
-        );
-        assert_eq!(app.focus(), Focus::Tree);
-        assert_eq!(app.selected(), selected, "the selection did not move");
     }
 
     #[test]
@@ -4871,7 +4915,7 @@ mod pointer {
             "/repo/.warlock.md",
             NodeState::PactedStale,
         )]);
-        app.set_viewport_height(tree_height(SIZE));
+        app.set_viewport_height(Shape::new(SIZE).cut().tree_height());
         app.set_focus(Focus::Panel);
 
         assert_eq!(
@@ -4928,7 +4972,7 @@ mod pointer {
         ] {
             for (column, row) in [
                 (IN_TREE, FIRST_TREE_ROW),
-                (IN_TREE, TREE_HEADER),
+                (IN_TREE, FIRST_TREE_ROW + 1),
                 (IN_PANEL, FIRST_PANEL_LINE),
                 (IN_PANEL, FOOTER),
                 (50, FIRST_TREE_ROW),

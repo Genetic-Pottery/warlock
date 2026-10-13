@@ -104,7 +104,7 @@ impl Ground {
         }
     }
 
-    fn prepared(&self) -> Prepared<'_> {
+    fn prepared(&self) -> Prepared {
         prepare(&self.manifest, self.root.path(), self.home.path(), SCOPE)
             .expect("the scope is recorded, held, and has a key bound")
     }
@@ -204,7 +204,7 @@ fn wrote(path: &str) -> Vec<Dirty> {
 /// `pull` spends once it has resolved a repository, a home and a scope.
 fn pull_with(
     ground: &Ground,
-    prepared: &Prepared<'_>,
+    prepared: &Prepared,
     ports: &Ports<'_, Boarding, Checkout, Forging, Slicing, Sessions>,
     ticket: Option<&str>,
     dry_run: bool,
@@ -311,7 +311,7 @@ fn a_scope_this_machine_does_not_hold_is_the_boundary_s_status() {
     // typo against a sigil this machine already has.
     assert!(said.contains("`control-plane`"), "{said}");
     assert!(said.contains("`warlock-team`"), "{said}");
-    assert!(said.contains("warlock config"), "{said}");
+    assert!(said.contains("warlock sigil add control-plane"), "{said}");
     // The register the writes already refuse in, and the reason the record
     // question is asked separately from this one: `resolve_filing` would have
     // answered "no such candidate" and spent a 1 on a boundary.
@@ -656,7 +656,7 @@ fn a_whole_pull_prints_a_header_per_section_with_the_session_s_lines_under_it() 
     assert!(outcome.is_ok(), "{outcome:?}: {printed}");
     // A header per section, the fraction one-based over the split's own answer.
     assert!(
-        printed.contains(&format!("warlock: splitting `{TICKET}` — {TITLE}")),
+        printed.contains(&format!("warlock: {TICKET} — splitting {TITLE}")),
         "{printed}"
     );
     assert!(

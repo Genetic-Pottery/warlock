@@ -599,7 +599,10 @@ impl Thread {
     /// same instant give the same rows every time.
     #[must_use]
     pub fn lines(&self, now: Instant) -> Vec<Line> {
-        self.window(0, self.line_count(), now)
+        self.entries
+            .iter()
+            .flat_map(|entry| entry.rows(now))
+            .collect()
     }
 
     /// Asking for more rows than there are, or starting past the end, gives back

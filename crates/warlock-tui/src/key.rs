@@ -33,8 +33,8 @@ use warlock_engine::{
     save_key_binding, sigils_path, validate_scope,
 };
 
-use crate::asking::{self, Asks, Cooked};
-use crate::error::{Error, one_line};
+use crate::asking::{self, Asks, Cooked, ERASE};
+use crate::error::{Error, one_line, say};
 use crate::query::{envelope, write_object};
 use crate::standing::{FOR_KEY, Standing};
 
@@ -50,8 +50,6 @@ const PROMPT: &str = "key> ";
 // is a paste, and a prompt that shows nothing cannot be told apart from one
 // where the paste never landed.
 const BULLET: &str = "•";
-
-const ERASE: &str = "\u{8} \u{8}";
 
 // The two tails of `Error::UnknownKey`'s sentence, which is one fact — the
 // store holds no such name — costing the two verbs different things.
@@ -110,9 +108,8 @@ pub fn key_forget(name: &str) -> Result<(), Error> {
 // seen. `masked` is passed rather than asked for here because a test has no
 // terminal, and the preamble's wording is the thing under test.
 //
-// That order is the part worth pinning, and it is `config::prompted`'s. The
-// preamble is flushed before the question is asked, because a person is about to
-// read it and answer; EOF is answered before anything is looked at; and the
+// That order is the part worth pinning. The preamble is flushed before the
+// question is asked, because a person is about to read it and answer; EOF is answered before anything is looked at; and the
 // confirmation names the file only after the engine has written it. The prompt
 // itself is the ask's, whichever of the two reads is underneath it.
 fn added<W: Write>(
@@ -170,16 +167,14 @@ fn added<W: Write>(
     }
 
     save_key(home, name, key).map_err(|source| Error::Keys { source })?;
-    drop(writeln!(
+    say(
         out,
-        "warlock: stored a key for `{name}` in `{}`",
-        path.display()
-    ));
+        &format!("stored a key for `{name}` in `{}`", path.display()),
+    );
     Ok(())
 }
 
-// Three answers rather than two, for `config::Held`'s reason: a store that is
-// there and cannot be read has to stay apart from one that simply holds no key
+// Three answers rather than two: a store that is there and cannot be read has to stay apart from one that simply holds no key
 // under this name, because that is the case where what this prints is not what
 // is on disk. The save refuses it a moment later — the engine replaces a store
 // it could not read for nobody — so the preamble saying "unknown" is the whole
@@ -199,7 +194,7 @@ fn stored_under(home: &Path, name: &str) -> Stored {
     match load_key_names(home) {
         Ok(names) if names.iter().any(|stored| stored == name) => Stored::Key,
         Ok(_) | Err(keys::Error::NotFound { .. }) => Stored::Nothing,
-        Err(error) => Stored::Unknown(one_line(&error.to_string())),
+        Err(error) => Stored::Unknown(one_line(error)),
     }
 }
 
@@ -314,12 +309,14 @@ fn bound<W: Write>(home: &Path, root: &Path, name: &str, out: &mut W) -> Result<
     }
 
     save_key_binding(home, root, name).map_err(|source| Error::Sigils { source })?;
-    drop(writeln!(
+    say(
         out,
-        "warlock: `{}` is bound to the key `{name}`, written to `{}`",
-        root.display(),
-        sigils_path(home, root).display()
-    ));
+        &format!(
+            "`{}` is bound to the key `{name}`, written to `{}`",
+            root.display(),
+            sigils_path(home, root).display()
+        ),
+    );
     Ok(())
 }
 
@@ -364,11 +361,13 @@ fn forgotten<W: Write>(home: &Path, root: &Path, name: &str, out: &mut W) -> Res
     } else {
         String::new()
     };
-    drop(writeln!(
+    say(
         out,
-        "warlock: forgot the key `{name}`, removed from `{}`{unbound}",
-        keys_path(home).display()
-    ));
+        &format!(
+            "forgot the key `{name}`, removed from `{}`{unbound}",
+            keys_path(home).display()
+        ),
+    );
     Ok(())
 }
 

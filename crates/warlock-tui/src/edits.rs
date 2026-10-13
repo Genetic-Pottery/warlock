@@ -6,9 +6,7 @@
 //! the existence check, before any look at what the manifest holds. A closed
 //! boundary must not be able to answer "there is no entry for that directory",
 //! because that is a fact about the inside of a manifest a reader has just been
-//! told they may not work in. [`closed_scope`](crate::session::closed_scope) is
-//! the same rule's other door and is not written in terms of this one, since it
-//! is about a selected row on an `App` and there is no app here.
+//! told they may not work in.
 //!
 //! A boundary this machine does not open is one line on stderr and exit status
 //! **3** rather than 1, because the two want opposite things done about them: a
@@ -19,11 +17,12 @@ use std::path::{Path, PathBuf};
 
 use warlock_engine::{Manifest, PactEntry, unpact_subtree};
 
+use crate::account::plural;
 use crate::boundary::{Operation, Verdict, permits};
 use crate::error::Error;
 use crate::query::spelled;
 use crate::rescope::{RecordFields, rescope};
-use crate::session::sigils_under;
+use crate::settings::Settings;
 use crate::standing::{FOR_SCOPE_ADD, FOR_SCOPE_REMOVE, FOR_UNPACT, Standing};
 
 // The type is the gate: the fields are private to this module and the only
@@ -50,9 +49,8 @@ impl Opened {
     // and a temporary repository. The environment becomes those parameters in
     // exactly one place, `opened`.
     //
-    // A path the manifest cannot spell is passed through as open, which is
-    // `closed_scope`'s own reading of that case: coverage has nothing to say
-    // about a path that is not in this repository, and the command's own refusal
+    // A path the manifest cannot spell is passed through as open: coverage has
+    // nothing to say about a path that is not in this repository, and the command's own refusal
     // — one line, naming the root it is not inside — is the better sentence than
     // a boundary refusal on a technicality. It is refused a moment later, in the
     // write, so nothing is written either way.
@@ -70,10 +68,8 @@ impl Opened {
         // Flattened here, at the door: what the shell needs is the two-valued
         // fact the gate takes, and the third state is a line only the header
         // and `warlock check` ever print. See `boundary::permits`.
-        let held: Vec<String> = home.map_or_else(Vec::new, |home| {
-            sigils_under(home, &repo_root).as_slice().to_vec()
-        });
-        let verdict = permits(operation, &target, &repo_root, &manifest, &held);
+        let held = Settings::at(home.map(Path::to_path_buf), &repo_root).sigils_or_unknown();
+        let verdict = permits(operation, &target, &repo_root, &manifest, held.as_slice());
         // Refused paths are spellable by construction: a path with no manifest
         // form has no coverage and nothing below it, so it did not reach here.
         // The `?` keeps the fallible call honest rather than being a second
@@ -288,18 +284,9 @@ fn unpacted_line(path: &str, dropped: &[&PactEntry]) -> String {
     } else {
         format!(", {} scoped ({})", scoped.len(), scoped.join(", "))
     };
-    // Singular for one, because a line a person reads should not say "1
-    // entries"; the count itself is what a script would parse either way.
-    let entries = if dropped.len() == 1 {
-        "entry"
-    } else {
-        "entries"
-    };
+    let entries = plural(dropped.len(), "entry", "entries");
 
-    format!(
-        "unpacted {path} — {} {entries} dropped{taken}",
-        dropped.len()
-    )
+    format!("unpacted {path} — {entries} dropped{taken}")
 }
 
 // The scope that was there before is named only when there was a different one:

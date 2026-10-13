@@ -55,18 +55,20 @@ pub fn resolve_route(
 ) -> Result<Route<'_>, Error> {
     let (path, root, home) = (path.as_ref(), root.as_ref(), home.as_ref());
 
-    // `Some(home)` even though only the scope half of these facts is read now:
-    // the key store is what `route_facts` can fail on, and passing `None` would
-    // move a `Keys` refusal from here to after the three scope refusals below.
-    let facts = route_facts(path, root, manifest, Some(home))?;
+    let RouteFacts {
+        scope,
+        record,
+        key,
+        stored,
+    } = route_facts(path, root, manifest, Some(home))?;
 
-    let Some(scope) = facts.scope() else {
+    let Some(scope) = scope else {
         return Err(Error::Unscoped {
             path: path.to_path_buf(),
         });
     };
 
-    let Some(record) = facts.record() else {
+    let Some(record) = record else {
         return Err(Error::Unrecorded {
             scope: scope.to_owned(),
             path: manifest_path(root),
@@ -79,7 +81,20 @@ pub fn resolve_route(
     // than as a checkout bound to nothing.
     let held = held_sigils(home, root).map_err(|source| Error::Sigils { source })?;
 
-    let key = bound_key(home, root)?;
+    let key = match (key, stored) {
+        (None, _) => {
+            return Err(Error::Unbound {
+                path: sigils_path(home, root),
+            });
+        }
+        (Some(key), false) => {
+            return Err(Error::Dangling {
+                key,
+                path: keys_path(home),
+            });
+        }
+        (Some(key), true) => key,
+    };
 
     Ok(Route {
         scope,
@@ -89,15 +104,11 @@ pub fn resolve_route(
     })
 }
 
-// The two key refusals live here rather than inline above so that `filing.rs`,
-// which asks the same question of a repository with no path to walk up, gets the
-// same two sentences from the same `Display` instead of restating them; a second
-// copy of "bind one with `warlock key use <name>`" would drift from this one.
-//
-// A key store that is unreadable or will not parse is an error, while a binding
-// that cannot be read is nothing bound — the same asymmetry `route_facts`
-// documents, and it has to match, because `resolve_route` reads both through
-// both paths and the earlier one would otherwise decide.
+// The key refusals for `filing.rs`, which asks the question `resolve_route`
+// does of a repository with no path to walk up. A key store that is unreadable
+// or will not parse is an error, while a binding that cannot be read is nothing
+// bound — the same asymmetry `route_facts` documents, and it has to match, or a
+// push and a route would answer one broken file two ways.
 pub(crate) fn bound_key(home: &Path, root: &Path) -> Result<String, Error> {
     let Some(key) = load_key_binding(home, root).unwrap_or_default() else {
         return Err(Error::Unbound {
@@ -180,12 +191,7 @@ pub fn route_facts<'m>(
     let (path, root) = (path.as_ref(), root.as_ref());
 
     let scope = scope_covering(path, root, manifest).map_err(|source| Error::Path { source })?;
-    let record = scope.and_then(|scope| {
-        manifest
-            .scopes()
-            .iter()
-            .find(|record| record.name() == scope)
-    });
+    let record = scope.and_then(|scope| manifest.scope_record(scope));
 
     let Some(home) = home else {
         return Ok(RouteFacts {

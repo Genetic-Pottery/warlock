@@ -1,8 +1,8 @@
 use super::{
-    Accepted, Defect, Described, ENTRY_CHARS, ENTRY_MINIMUM, Entry, Evidence, Expected,
+    Accepted, Defect, Described, Dropped, ENTRY_CHARS, ENTRY_MINIMUM, Entry, Evidence, Expected,
     FILE_PROMPT, Fill, LIST_CAP, MEND_PASSES, Mend, Mended, PURPOSE_CHARS, STAMP, SYNTHESIS_PROMPT,
-    accept_file, accept_synthesis, check, fallback, human, lines_of, mend, mended, names_tool,
-    render, stub_answer, synthesis_instructions,
+    Slot, accept_file, accept_synthesis, check, fallback, guarded, human, lines_of, mend, mended,
+    names_tool, render, stub_answer, synthesis_instructions,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -183,7 +183,7 @@ fn a_bare_word_is_a_skipped_slot_and_not_an_entry() {
         Accepted::Defective {
             fill: "duplicate".to_owned(),
             defects: vec![Defect::TooShort {
-                field: "files[\"lib.rs\"]".to_owned(),
+                field: Slot::FileLine("lib.rs".to_owned()),
                 chars: 9,
                 minimum: ENTRY_MINIMUM
             }]
@@ -202,13 +202,13 @@ fn every_value_is_one_line_under_its_cap() {
     fill.structure = vec![Entry::naming("x".repeat(ENTRY_CHARS + 1), "lib.rs")];
     let found = defects(&fill);
     assert!(found.contains(&Defect::Empty {
-        field: "purpose".to_owned()
+        field: Slot::Purpose
     }));
     assert!(found.contains(&Defect::Multiline {
-        field: "directories[\"src\"]".to_owned()
+        field: Slot::Directory("src".to_owned())
     }));
     assert!(found.contains(&Defect::TooLong {
-        field: "structure[0]".to_owned(),
+        field: Slot::Entry(0),
         chars: ENTRY_CHARS + 1,
         cap: ENTRY_CHARS
     }));
@@ -225,7 +225,7 @@ fn every_value_is_one_line_under_its_cap() {
         Accepted::Defective {
             fill: "x".repeat(ENTRY_CHARS + 1),
             defects: vec![Defect::TooLong {
-                field: "files[\"lib.rs\"]".to_owned(),
+                field: Slot::FileLine("lib.rs".to_owned()),
                 chars: ENTRY_CHARS + 1,
                 cap: ENTRY_CHARS
             }]
@@ -252,12 +252,12 @@ fn a_list_over_the_cap_is_a_defect_and_so_is_each_bad_entry_in_it() {
         defects(&fill),
         [
             Defect::TooMany {
-                field: "structure".to_owned(),
+                field: Slot::Structure,
                 count: LIST_CAP + 1,
                 cap: LIST_CAP
             },
             Defect::Empty {
-                field: "structure[3]".to_owned()
+                field: Slot::Entry(3)
             }
         ]
     );
@@ -319,7 +319,7 @@ fn a_claim_naming_something_that_is_not_here_is_a_defect() {
     assert_eq!(
         defects(&fill),
         [Defect::UnknownTarget {
-            field: "structure[0].names[0]".to_owned(),
+            field: Slot::Names(0, Some(0)),
             name: "load_tree".to_owned(),
         }],
         "no file in the request holds that name, so the claim is not checkable",
@@ -356,7 +356,7 @@ fn a_name_the_request_cannot_vouch_for_is_taken_from_what_warlock_measured() {
     assert_eq!(
         check(&fill, &expected, &Described::default()),
         [Defect::UnknownTarget {
-            field: "structure[0].names[0]".to_owned(),
+            field: Slot::Names(0, Some(0)),
             name: "walk_one_deep".to_owned(),
         }],
         "nothing witnesses the name: not the request, and nothing measured",
@@ -395,7 +395,7 @@ fn a_name_neither_witness_has_ever_seen_is_still_refused() {
     assert_eq!(
         check(&fill, &expected, &measured),
         [Defect::UnknownTarget {
-            field: "structure[0].names[0]".to_owned(),
+            field: Slot::Names(0, Some(0)),
             name: "load_tree".to_owned(),
         }],
         "a second witness widens the evidence and does not retire the check",
@@ -409,7 +409,7 @@ fn a_structure_entry_must_name_something() {
     assert_eq!(
         defects(&fill),
         [Defect::Empty {
-            field: "structure[0].names".to_owned(),
+            field: Slot::Names(0, None),
         }],
         "a statement about how files fit together that names no file is not that statement",
     );
@@ -438,7 +438,7 @@ fn an_entry_answered_as_a_bare_string_is_read_rather_than_refused() {
                 ..fill
             },
             defects: vec![Defect::Empty {
-                field: "structure[0].names".to_owned(),
+                field: Slot::Names(0, None),
             }],
         },
     );
@@ -479,10 +479,10 @@ fn naming_the_tool_is_a_defect_unless_the_files_name_it() {
         defects(&fill),
         [
             Defect::ToolNamed {
-                field: "purpose".to_owned()
+                field: Slot::Purpose
             },
             Defect::ToolNamed {
-                field: "structure[0]".to_owned()
+                field: Slot::Entry(0)
             },
         ]
     );
@@ -688,7 +688,7 @@ fn the_road_without_the_text_checks_no_more_weakly_than_the_road_with_it() {
         ..directory_wide
     };
     let refused = [Defect::UnknownTarget {
-        field: "structure[0].names[0]".to_owned(),
+        field: Slot::Names(0, Some(0)),
         name: "load_tree".to_owned(),
     }];
     assert_eq!(
@@ -744,7 +744,7 @@ fn a_leaf_that_writes_the_tools_name_may_say_so() {
     assert_eq!(
         check(&fill, &expected, &Described::default()),
         [Defect::ToolNamed {
-            field: "purpose".to_owned(),
+            field: Slot::Purpose,
         }],
         "and one whose files never mention it still may not",
     );
@@ -786,7 +786,7 @@ fn a_name_a_file_writes_witnesses_a_claim_the_table_cannot_read() {
     assert_eq!(
         check(&fill, &expected, &Described::default()),
         [Defect::UnknownTarget {
-            field: "structure[0].names[0]".to_owned(),
+            field: Slot::Names(0, Some(0)),
             name: "total".to_owned(),
         }],
         "and without the measurement there is nothing to witness it",
@@ -814,7 +814,7 @@ fn a_name_merely_contained_in_a_longer_one_is_not_witnessed() {
     assert_eq!(
         check(&fill, &Expected::of(&request), &described),
         [Defect::UnknownTarget {
-            field: "structure[0].names[0]".to_owned(),
+            field: Slot::Names(0, Some(0)),
             name: "Apply".to_owned(),
         }]
     );
@@ -895,7 +895,7 @@ fn a_refused_name_is_told_that_a_declared_name_would_have_done() {
     // pass looking for the wrong thing.
     assert_eq!(
         Defect::UnknownTarget {
-            field: "structure[0].names[8]".to_owned(),
+            field: Slot::Names(0, Some(8)),
             name: "areas".to_owned(),
         }
         .to_string(),
@@ -1034,35 +1034,35 @@ fn every_defect_reads_as_one_line_naming_its_slot() {
             detail: "expected value at line 1".to_owned(),
         },
         Defect::Missing {
-            field: "files[\"a\"]".to_owned(),
+            field: Slot::FileLine("a".to_owned()),
         },
         Defect::Empty {
-            field: "purpose".to_owned(),
+            field: Slot::Purpose,
         },
         Defect::Multiline {
-            field: "structure[0]".to_owned(),
+            field: Slot::Entry(0),
         },
         Defect::TooShort {
-            field: "files[\"c\"]".to_owned(),
+            field: Slot::FileLine("c".to_owned()),
             chars: 3,
             minimum: ENTRY_MINIMUM,
         },
         Defect::TooLong {
-            field: "structure[1]".to_owned(),
+            field: Slot::Entry(1),
             chars: 300,
             cap: ENTRY_CHARS,
         },
         Defect::TooMany {
-            field: "structure".to_owned(),
+            field: Slot::Structure,
             count: 20,
             cap: LIST_CAP,
         },
         Defect::UnknownTarget {
-            field: "structure[0].names[0]".to_owned(),
+            field: Slot::Names(0, Some(0)),
             name: "x".to_owned(),
         },
         Defect::ToolNamed {
-            field: "purpose".to_owned(),
+            field: Slot::Purpose,
         },
     ];
     for defect in all {
@@ -1129,29 +1129,44 @@ fn a_fallback_line_is_the_name_the_size_and_the_symbols() {
     let described = declared();
 
     assert_eq!(
-        fallback::file("lib.rs", &expected, &described),
+        fallback::file(
+            "lib.rs",
+            &expected,
+            &described,
+            guarded(&expected, &described)
+        ),
         "A 39 B file named `lib.rs`, declaring `pact`, `subtree_hash`."
     );
     // A file warlock extracted nothing from still gets its name and size,
     // and says only that and that it found no names.
     assert_eq!(
-        fallback::file("Cargo.toml", &expected, &described),
+        fallback::file(
+            "Cargo.toml",
+            &expected,
+            &described,
+            guarded(&expected, &described)
+        ),
         "A 26 B file named `Cargo.toml`, with no symbols extracted from it."
     );
     // The purpose is the directory's name and what is in it: five files,
     // one child. No sentence about what any of it is for.
     assert_eq!(
-        fallback::purpose("engine", &expected, &Described::default()),
+        fallback::purpose(
+            "engine",
+            &expected,
+            guarded(&expected, &Described::default())
+        ),
         "`engine` holds 5 files and 1 subdirectory."
     );
     assert_eq!(
-        fallback::directory("src", &expected, &Described::default()),
+        fallback::directory("src", guarded(&expected, &Described::default())),
         "A subdirectory named `src`."
     );
 
     let bare = Request::new("describe", "/repo/empty");
+    let bare = Expected::of(&bare);
     assert_eq!(
-        fallback::purpose("empty", &Expected::of(&bare), &Described::default()),
+        fallback::purpose("empty", &bare, guarded(&bare, &Described::default())),
         "`empty` holds no files and no subdirectories."
     );
 }
@@ -1174,11 +1189,23 @@ fn every_fallback_line_holds_one_line_and_both_caps() {
         "a",
         "",
     ] {
-        holds_the_shape(&fallback::file(path, &expected, &described));
+        holds_the_shape(&fallback::file(
+            path,
+            &expected,
+            &described,
+            guarded(&expected, &described),
+        ));
     }
     for name in ["engine", "a", ""] {
-        holds_the_shape(&fallback::purpose(name, &expected, &Described::default()));
-        holds_the_shape(&fallback::directory(name, &expected, &Described::default()));
+        holds_the_shape(&fallback::purpose(
+            name,
+            &expected,
+            guarded(&expected, &Described::default()),
+        ));
+        holds_the_shape(&fallback::directory(
+            name,
+            guarded(&expected, &Described::default()),
+        ));
     }
 
     // The symbol list stops at the cap rather than being cut through a
@@ -1192,7 +1219,7 @@ fn every_fallback_line_holds_one_line_and_both_caps() {
         .collect(),
         ..Described::default()
     };
-    let line = fallback::file("lib.rs", &expected, &long);
+    let line = fallback::file("lib.rs", &expected, &long, guarded(&expected, &long));
     holds_the_shape(&line);
     assert!(line.ends_with("`."), "cut between names: {line:?}");
 }
@@ -1237,13 +1264,22 @@ fn a_name_warlock_shares_does_not_trip_the_tool_rule() {
         ..Described::default()
     };
 
-    let line = fallback::file("warlock.rs", &expected, &described);
+    let line = fallback::file(
+        "warlock.rs",
+        &expected,
+        &described,
+        guarded(&expected, &described),
+    );
     assert!(!names_tool(&line), "{line}");
     assert!(line.contains("`draw`"), "the other symbols stay: {line}");
     holds_the_shape(&line);
     for named in [
-        fallback::purpose("warlock", &expected, &Described::default()),
-        fallback::directory("warlock-tui", &expected, &Described::default()),
+        fallback::purpose(
+            "warlock",
+            &expected,
+            guarded(&expected, &Described::default()),
+        ),
+        fallback::directory("warlock-tui", guarded(&expected, &Described::default())),
     ] {
         assert!(!names_tool(&named), "{named}");
         holds_the_shape(&named);
@@ -1251,10 +1287,19 @@ fn a_name_warlock_shares_does_not_trip_the_tool_rule() {
 
     // And the rule the caller applies cannot fire on a fill built of them.
     let fill = Fill {
-        purpose: fallback::purpose("crates", &expected, &Described::default()),
+        purpose: fallback::purpose(
+            "crates",
+            &expected,
+            guarded(&expected, &Described::default()),
+        ),
         files: [(
             "warlock.rs".to_owned(),
-            fallback::file("warlock.rs", &expected, &described),
+            fallback::file(
+                "warlock.rs",
+                &expected,
+                &described,
+                guarded(&expected, &described),
+            ),
         )]
         .into_iter()
         .collect(),
@@ -1268,11 +1313,12 @@ fn a_name_warlock_shares_does_not_trip_the_tool_rule() {
         .with_files([File::present("warlock.rs", *b"//! The warlock engine.\n")]);
     let own = Expected::of(&own);
     assert!(Evidence::new(&own, &Described::default()).mentions_tool());
-    let line = fallback::file("warlock.rs", &own, &described);
+    let line = fallback::file("warlock.rs", &own, &described, guarded(&own, &described));
     assert!(line.contains("`warlock.rs`"), "{line}");
     assert!(line.contains("`warlock_run`"), "{line}");
     assert!(
-        fallback::purpose("warlock", &own, &Described::default()).contains("`warlock`"),
+        fallback::purpose("warlock", &own, guarded(&own, &Described::default()))
+            .contains("`warlock`"),
         "the directory names itself too"
     );
 }
@@ -1283,10 +1329,24 @@ fn no_fallback_line_speaks_in_the_stubs_words() {
     let expected = Expected::of(&request);
     let described = declared();
     let lines = [
-        fallback::file("lib.rs", &expected, &described),
-        fallback::file("logo.png", &expected, &described),
-        fallback::purpose("engine", &expected, &Described::default()),
-        fallback::directory("src", &expected, &Described::default()),
+        fallback::file(
+            "lib.rs",
+            &expected,
+            &described,
+            guarded(&expected, &described),
+        ),
+        fallback::file(
+            "logo.png",
+            &expected,
+            &described,
+            guarded(&expected, &described),
+        ),
+        fallback::purpose(
+            "engine",
+            &expected,
+            guarded(&expected, &Described::default()),
+        ),
+        fallback::directory("src", guarded(&expected, &Described::default())),
     ];
     // `Fill::stub` is a test double's wording; a repaired document says
     // what warlock measured, and never that.
@@ -1323,21 +1383,25 @@ fn an_empty_value_falls_back_to_what_warlock_measured() {
     let (repaired, mends) = mend_of(&fill);
     assert_eq!(
         repaired.purpose,
-        fallback::purpose("engine", &expected, &Described::default())
+        fallback::purpose(
+            "engine",
+            &expected,
+            guarded(&expected, &Described::default())
+        )
     );
     assert_eq!(
         repaired.directories["src"],
-        fallback::directory("src", &expected, &Described::default())
+        fallback::directory("src", guarded(&expected, &Described::default()))
     );
     assert_eq!(
         mends,
         [
             Mend {
-                field: "purpose".to_owned(),
+                field: Slot::Purpose,
                 done: Mended::Supplied
             },
             Mend {
-                field: "directories[\"src\"]".to_owned(),
+                field: Slot::Directory("src".to_owned()),
                 done: Mended::Supplied
             },
         ]
@@ -1353,7 +1417,10 @@ fn a_value_under_the_floor_falls_back_to_what_warlock_measured() {
     let (repaired, mends) = mend_of(&fill);
     assert_eq!(
         repaired.directories["src"],
-        fallback::directory("src", &Expected::of(&request), &Described::default())
+        fallback::directory(
+            "src",
+            guarded(&Expected::of(&request), &Described::default())
+        )
     );
     assert_eq!(mends.first().map(|mend| mend.done), Some(Mended::Supplied));
     assert_eq!(mends.len(), 1, "{mends:?}");
@@ -1371,7 +1438,7 @@ fn a_value_over_more_than_one_line_keeps_the_first() {
     assert_eq!(
         mends,
         [Mend {
-            field: "directories[\"src\"]".to_owned(),
+            field: Slot::Directory("src".to_owned()),
             done: Mended::FirstLine
         }]
     );
@@ -1397,14 +1464,14 @@ fn a_value_over_its_cap_is_cut_to_it_counting_characters() {
         mends,
         [
             Mend {
-                field: "purpose".to_owned(),
+                field: Slot::Purpose,
                 done: Mended::Cut {
                     from: PURPOSE_CHARS + 1,
                     to: PURPOSE_CHARS
                 }
             },
             Mend {
-                field: "directories[\"src\"]".to_owned(),
+                field: Slot::Directory("src".to_owned()),
                 done: Mended::Cut {
                     from: ENTRY_CHARS + 20,
                     to: ENTRY_CHARS
@@ -1436,7 +1503,7 @@ fn a_list_over_its_cap_keeps_its_first_entries() {
     assert_eq!(
         mends,
         [Mend {
-            field: "structure".to_owned(),
+            field: Slot::Structure,
             done: Mended::Shortened {
                 from: LIST_CAP + 2,
                 to: LIST_CAP
@@ -1464,11 +1531,15 @@ fn a_value_naming_the_tool_is_dropped_and_falls_to_the_next_rule() {
     let (repaired, mends) = mend_of(&fill);
     assert_eq!(
         repaired.directories["src"],
-        fallback::directory("src", &expected, &Described::default())
+        fallback::directory("src", guarded(&expected, &Described::default()))
     );
     assert_eq!(
         repaired.purpose,
-        fallback::purpose("engine", &expected, &Described::default())
+        fallback::purpose(
+            "engine",
+            &expected,
+            guarded(&expected, &Described::default())
+        )
     );
     assert!(
         repaired.structure.is_empty(),
@@ -1478,19 +1549,19 @@ fn a_value_naming_the_tool_is_dropped_and_falls_to_the_next_rule() {
         mends,
         [
             Mend {
-                field: "purpose".to_owned(),
+                field: Slot::Purpose,
                 done: Mended::Supplied
             },
             Mend {
-                field: "directories[\"src\"]".to_owned(),
-                done: Mended::Dropped
+                field: Slot::Directory("src".to_owned()),
+                done: Mended::Own(Dropped)
             },
             Mend {
-                field: "structure[0]".to_owned(),
-                done: Mended::Dropped
+                field: Slot::Entry(0),
+                done: Mended::Own(Dropped)
             },
             Mend {
-                field: "directories[\"src\"]".to_owned(),
+                field: Slot::Directory("src".to_owned()),
                 done: Mended::Supplied
             },
         ],
@@ -1540,7 +1611,7 @@ fn the_mend_settles_inside_its_bound_and_two_rules_cannot_spin() {
     assert_eq!(check(&repaired, &expected, &Described::default()), []);
     assert_eq!(
         mends.iter().map(|mend| mend.done).collect::<Vec<_>>(),
-        [Mended::Dropped, Mended::Supplied],
+        [Mended::Own(Dropped), Mended::Supplied],
         "twice over the same slot and then done: {mends:?}"
     );
     assert_eq!(passes, 2);
@@ -1704,16 +1775,19 @@ fn a_multibyte_name_is_cut_on_a_character_boundary() {
     };
 
     // No panic, and the count is characters rather than bytes.
-    let line = fallback::file(&name, &expected, &described);
+    let line = fallback::file(&name, &expected, &described, guarded(&expected, &described));
     holds_the_shape(&line);
     assert_eq!(line.chars().count(), ENTRY_CHARS);
     assert!(line.len() > ENTRY_CHARS, "multibyte: {} bytes", line.len());
 
-    holds_the_shape(&fallback::purpose(&name, &expected, &Described::default()));
-    holds_the_shape(&fallback::directory(
+    holds_the_shape(&fallback::purpose(
         &name,
         &expected,
-        &Described::default(),
+        guarded(&expected, &Described::default()),
+    ));
+    holds_the_shape(&fallback::directory(
+        &name,
+        guarded(&expected, &Described::default()),
     ));
 }
 
@@ -1775,7 +1849,7 @@ fn a_files_line_may_not_assert_a_mechanism_only_a_comment_claims() {
     assert!(
         mends
             .iter()
-            .any(|mend| mend.field == "files[\"balance.rs\"]"),
+            .any(|mend| mend.field == Slot::FileLine("balance.rs".to_owned())),
         "the mend says which line it replaced: {mends:?}"
     );
 
@@ -1883,5 +1957,33 @@ fn a_claim_resting_on_a_comment_is_refused_even_where_one_reached_a_pass() {
             Defect::UnknownTarget { name, .. } if name == "reconcile"
         )),
         "a call that only the comment supports is refused: {defects:?}"
+    );
+}
+
+#[test]
+fn a_slot_is_shown_to_the_model_as_its_path() {
+    let shown: Vec<String> = [
+        Slot::Purpose,
+        Slot::Directory("src".to_owned()),
+        Slot::FileLine("lib.rs".to_owned()),
+        Slot::Structure,
+        Slot::Entry(3),
+        Slot::Names(3, None),
+        Slot::Names(3, Some(1)),
+    ]
+    .iter()
+    .map(ToString::to_string)
+    .collect();
+    assert_eq!(
+        shown,
+        [
+            "purpose",
+            "directories[\"src\"]",
+            "files[\"lib.rs\"]",
+            "structure",
+            "structure[3]",
+            "structure[3].names",
+            "structure[3].names[1]",
+        ]
     );
 }

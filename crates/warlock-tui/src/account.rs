@@ -772,18 +772,11 @@ fn spend(cost: Option<f64>) -> String {
 /// `934 bytes`, `1.8 KB`, `403 KB`, `1.6 MB`, `12 MB`.
 ///
 /// Base 1024, spelled `KB` rather than `KiB`, which is the spelling the panel
-/// is specified in; the engine writes `KiB` for the same arithmetic and
-/// settling that is not this module's call.
+/// is specified in.
 ///
 /// The unit is chosen by magnitude *before* the rounding happens inside it, so
 /// nothing is promoted across a boundary by being rounded: 1048575 bytes is
 /// `1024 KB` and not `1.0 MB`, which would claim a megabyte had been reached.
-/// `MB` is the largest unit because the request cap is measured in megabytes.
-///
-/// Public because two ledgers need the panel's spelling of a size — the
-/// account's request lines and the line the thread says when `/write` puts a
-/// file on disk — and two formatters would be two spellings the day either
-/// changed.
 #[must_use]
 pub(crate) fn size(bytes: u64) -> String {
     const KB: u64 = 1024;
@@ -816,7 +809,7 @@ fn scaled(bytes: u64, unit: u64, name: &str) -> String {
 
 /// `1 directory`, `9 directories`, so no line has to be worded twice or read
 /// as `1 directories`.
-fn plural(count: usize, one: &str, many: &str) -> String {
+pub(crate) fn plural(count: usize, one: &str, many: &str) -> String {
     let noun = if count == 1 { one } else { many };
     format!("{count} {noun}")
 }

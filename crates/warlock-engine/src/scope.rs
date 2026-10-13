@@ -59,8 +59,8 @@ impl std::error::Error for Rule {}
 // no repaired scope anywhere in this crate to be confused with the one somebody
 // wrote. Folding case here — the obvious kindness — would put the manifest
 // reader in the business of correcting committed bytes. It belongs instead at
-// the two places a person supplies the string, the scope prompt and
-// `warlock config`, which lower-case and *then* ask.
+// the places a person supplies the string, the scope prompt and the sigil
+// commands, which lower-case and *then* ask.
 pub fn validate_scope(scope: &str) -> Result<(), Rule> {
     // Taking the two end characters here is also the emptiness check: a string
     // with no first character is the empty one.
@@ -156,7 +156,7 @@ pub(crate) fn valid_scope(entry: &PactEntry) -> Option<&str> {
 // Segments cut at `/`, which is what keeps the walk segment-wise rather than
 // textual: the ancestors of `crates/engine-tools` are `crates` and `.`, and
 // `crates/engine` is never among them however much of a prefix it looks like.
-fn at_or_above(stored: &str) -> impl Iterator<Item = &str> {
+pub(crate) fn at_or_above(stored: &str) -> impl Iterator<Item = &str> {
     let mut next = Some(stored);
     std::iter::from_fn(move || {
         let current = next?;

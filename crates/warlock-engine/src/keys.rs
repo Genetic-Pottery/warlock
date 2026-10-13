@@ -11,10 +11,9 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::manifest::{temp_file_name, write_and_sync};
+use crate::manifest::write_atomically_with;
 use crate::scope::{Rule, validate_scope};
-
-const KEY_DIR: &str = ".warlock";
+use crate::sigils::HOME_DIR;
 
 const KEY_FILE: &str = "keys.toml";
 
@@ -33,7 +32,7 @@ const OWNER_ONLY: u32 = 0o600;
 /// ```
 #[must_use]
 pub fn keys_path(home: impl AsRef<Path>) -> PathBuf {
-    home.as_ref().join(KEY_DIR).join(KEY_FILE)
+    home.as_ref().join(HOME_DIR).join(KEY_FILE)
 }
 
 /// ```
@@ -156,33 +155,14 @@ fn write(home: &Path, config: &Config) -> Result<(), Error> {
     // as TOML should not leave a new directory behind.
     let text = toml::to_string(config).map_err(|_| Error::Serialize)?;
 
-    let dir = home.join(KEY_DIR);
+    let dir = home.join(HOME_DIR);
     fs::create_dir_all(&dir).map_err(|source| Error::Io {
         path: dir.clone(),
         source,
     })?;
 
-    let target = dir.join(KEY_FILE);
-    // The temporary must sit in the same directory as the target, so the rename
-    // below cannot cross a filesystem and stops being atomic.
-    let temp = dir.join(temp_file_name(KEY_FILE));
-    let written = owner_only(&temp)
-        .and_then(|()| write_and_sync(&temp, text.as_bytes()))
-        .map_err(|source| Error::Io {
-            path: temp.clone(),
-            source,
-        })
-        .and_then(|()| {
-            fs::rename(&temp, &target).map_err(|source| Error::Io {
-                path: target.clone(),
-                source,
-            })
-        });
-
-    if written.is_err() {
-        drop(fs::remove_file(&temp));
-    }
-    written
+    write_atomically_with(&dir, KEY_FILE, text.as_bytes(), owner_only)
+        .map_err(|(path, source)| Error::Io { path, source })
 }
 
 // The mode is arranged here rather than in `write_and_sync`, which sets none:

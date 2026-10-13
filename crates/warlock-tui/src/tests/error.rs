@@ -355,7 +355,7 @@ fn a_brief_the_board_already_holds_leads_with_its_address() {
 
 // Both of the refusals added for a cut, held to the register every other one
 // of its refusals takes: the ordinary 1, and never the boundary's 3 — a script
-// reading one of these as "ask for a sigil" would be sent to `warlock config`
+// reading one of these as "ask for a sigil" would be sent to `warlock sigil add`
 // over a brief with no `## Scope` heading.
 #[test]
 fn neither_new_cut_refusal_spends_the_boundarys_status() {
@@ -500,7 +500,7 @@ fn no_home_says_which_variables_were_looked_at_and_what_to_do() {
         Error::NoHome.to_string(),
         "neither `HOME` nor `USERPROFILE` is set, so there is no home directory \
              to keep the sigils for this repository under: set `HOME` and run \
-             `warlock config` again"
+             the command again"
     );
 }
 

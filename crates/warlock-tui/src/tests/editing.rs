@@ -157,11 +157,9 @@ fn a_press_while_a_run_is_in_flight_suspends_nothing_and_says_so_on_the_progress
         refused
     };
     assert_eq!(app, refused, "the press did more than say so");
-    assert!(
-        app.pact_line()
-            .is_some_and(|line| line.ends_with("— already running")),
-        "the refusal is worded onto the line the reader is watching: {:?}",
-        app.pact_line()
+    assert_eq!(
+        app.refused_line().as_deref(),
+        Some("pacting crates/tui — already running")
     );
     assert_eq!(
         app.message(),
@@ -305,6 +303,7 @@ mod back {
     use crate::account::Line;
     use crate::app::{App, Chrome};
     use crate::session::Scope;
+    use crate::settings::Settings;
 
     // Room for more lines than any file here has, so what a test reads off the panel
     // is the whole card. One test narrows it, because parking a window needs one to
@@ -362,6 +361,7 @@ mod back {
         let scope = Scope {
             chrome: Chrome::of(&repo_root, tree.root_path()),
             root: tree.root_path().to_path_buf(),
+            settings: Settings::at(None, &repo_root),
             repo_root,
         };
         (app, scope)

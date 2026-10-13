@@ -18,6 +18,7 @@ use std::path::Path;
 
 use warlock_engine::{Manifest, closed_scopes_at_or_below, scope_covering, scope_opens_to};
 
+use crate::cut::listed;
 use crate::descent::Descent;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -57,10 +58,7 @@ impl Verdict {
         match self {
             Self::Open => None,
             Self::Closed { scope } => Some(closed_scope_message(label, scope)),
-            Self::ClosedBelow { scopes } => {
-                let named: Vec<&str> = scopes.iter().map(String::as_str).collect();
-                Some(blocking_scopes_message(label, &named))
-            }
+            Self::ClosedBelow { scopes } => Some(blocking_scopes_message(label, scopes)),
         }
     }
 }
@@ -123,17 +121,18 @@ pub(crate) fn permits(
 }
 
 // Names the scope wanted rather than the sigils held: what is missing is the
-// thing to say, and what is held is `warlock config`'s to print.
+// thing to say, and what is held is the sigils box's to show.
 pub(crate) fn closed_scope_message(label: &str, scope: &str) -> String {
-    format!("{label} is scoped `{scope}` — hold that sigil to work here, with `warlock config`")
+    format!(
+        "{label} is scoped `{scope}` — hold that sigil to work here, with `warlock sigil add {scope}`"
+    )
 }
 
 // A different sentence from `closed_scope_message` because it is a different
 // refusal: the directory named is open and what is in the way is underneath it.
 // It names the way out that needs no sigil at all — un-pact the parts you hold —
 // because that is usually what was meant.
-pub(crate) fn blocking_scopes_message(label: &str, scopes: &[&str]) -> String {
-    let named: Vec<String> = scopes.iter().map(|scope| format!("`{scope}`")).collect();
+pub(crate) fn blocking_scopes_message(label: &str, scopes: &[String]) -> String {
     // Singular for one, because the ordinary refusal is by a single boundary and
     // a line a person reads should not say "hold those sigils" about one of them.
     let sigils = if scopes.len() == 1 {
@@ -143,9 +142,9 @@ pub(crate) fn blocking_scopes_message(label: &str, scopes: &[&str]) -> String {
     };
 
     format!(
-        "un-pacting {label} would drop pacts scoped {} — hold {sigils} with `warlock config`, \
+        "un-pacting {label} would drop pacts scoped {} — hold {sigils} with `warlock sigil add`, \
          or un-pact the parts you hold",
-        named.join(", ")
+        listed(scopes)
     )
 }
 

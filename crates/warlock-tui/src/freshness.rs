@@ -293,7 +293,7 @@ pub(crate) fn freshened(
             // half-written record of this one.
             Err(error) => outcome.left_stale.push(StaleDirectory {
                 directory: module,
-                reason: one_line(&error.to_string()),
+                reason: one_line(error),
             }),
         }
     }
@@ -321,7 +321,7 @@ fn failed(root: &Path, failures: &[pact::Failure]) -> Option<String> {
         .iter()
         .filter_map(|failure| {
             let directory = named(root, failure.directory());
-            let reason = format!("`{directory}` — {}", one_line(&failure.to_string()));
+            let reason = format!("`{directory}` — {}", one_line(failure));
             named_already.insert(directory).then_some(reason)
         })
         .collect();
@@ -406,6 +406,13 @@ fn refresh_message(ticket: &str) -> String {
 // of the engine cannot have and which is not worth a panic if it ever does.
 pub(crate) fn named(root: &Path, directory: &Path) -> String {
     to_manifest_path(root, directory).unwrap_or_else(|_| directory.display().to_string())
+}
+
+pub(crate) fn label(root: &Path, directory: &Path) -> String {
+    match to_manifest_path(root, directory) {
+        Ok(relative) if relative != "." => relative,
+        _ => directory.display().to_string(),
+    }
 }
 
 #[cfg(test)]

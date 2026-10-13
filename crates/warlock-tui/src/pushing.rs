@@ -22,7 +22,7 @@ use std::mem;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use warlock_engine::{Manifest, from_manifest_path};
+use warlock_engine::{Manifest, from_manifest_path, to_manifest_path};
 
 use crate::app::App;
 use crate::confirm::{PushAnswered, PushConfirm};
@@ -155,21 +155,23 @@ impl<O: Opens> Pushes<O> {
         &self.window
     }
 
-    // `/push <SCOPE> <PATH>` typed into the composer, with the path already
-    // spelled the manifest's way. The two refusals are asked in the order they
-    // have to be: a push already in flight is answered before anything is read,
-    // because resolving a board for a request that cannot be sent would read
-    // three files to no purpose.
+    // `/push <SCOPE> <PATH>` typed into the composer, the path as typed. The
+    // refusals are asked in the order they have to be: a push already in flight
+    // is answered before anything is read, because resolving a board for a
+    // request that cannot be sent would read three files to no purpose. The
+    // path is spelled the manifest's way next, so one that climbs out of the
+    // repository is refused in the engine's own words; the thread names files
+    // against the repository root, so a typed path is read against it too.
     pub(crate) fn press(
         &mut self,
         app: &mut App,
         manifest: &Manifest,
         repo_root: &Path,
         scope: &str,
-        brief: &str,
+        typed: &str,
         now: Instant,
     ) {
-        self.window = self.pressed(app, manifest, repo_root, scope, brief, now);
+        self.window = self.pressed(app, manifest, repo_root, scope, typed, now);
     }
 
     fn pressed(
@@ -178,20 +180,24 @@ impl<O: Opens> Pushes<O> {
         manifest: &Manifest,
         repo_root: &Path,
         scope: &str,
-        brief: &str,
+        typed: &str,
         now: Instant,
     ) -> Pushing {
         if self.sending() {
             return saying(app, ALREADY_FILING, now);
         }
+        let brief = match to_manifest_path(repo_root, typed) {
+            Ok(brief) => brief,
+            Err(source) => return saying(app, one_line(source), now),
+        };
         let Some(home) = self.home.as_deref() else {
             return no_home(app, now);
         };
 
-        let path = from_manifest_path(repo_root, brief);
+        let path = from_manifest_path(repo_root, &brief);
         match prepare(manifest, repo_root, home, scope, &path) {
             Ok(ready) => Pushing::confirming(ready),
-            Err(error) => saying(app, one_line(&error.to_string()), now),
+            Err(error) => saying(app, one_line(error), now),
         }
     }
 
@@ -215,10 +221,9 @@ impl<O: Opens> Pushes<O> {
     }
 
     fn send(&mut self, app: &mut App, ready: Prepared, now: Instant) {
-        if self.sending() {
-            saying(app, ALREADY_FILING, now);
-            return;
-        }
+        // `push` refused before the dialog that leads here was opened, and the
+        // dialog holds every key until it is answered.
+        debug_assert!(!self.sending(), "a second push reached send");
 
         let team = ready.destination().team_key().to_owned();
         // Before the worker starts, so the thread says which board is being
@@ -262,9 +267,7 @@ impl<O: Opens> Pushes<O> {
 // own — a conversation is not a terminal — and the address it needs comes back
 // from the call rather than out of the bytes.
 fn spawn_push<O: Opens>(workers: Workers, open: O, ready: Prepared) -> Once<Landing> {
-    workers.once(move || {
-        file(&ready, &open, &mut io::sink()).map_err(|error| one_line(&error.to_string()))
-    })
+    workers.once(move || file(&ready, &open, &mut io::sink()).map_err(one_line))
 }
 
 fn filing_line(team: &str) -> String {
@@ -293,7 +296,7 @@ fn saying(app: &mut App, line: impl Into<String>, now: Instant) -> Pushing {
 // rather than worded again here — the session holds the answer to it (see
 // [`Pushes`]) and not the failure.
 fn no_home(app: &mut App, now: Instant) -> Pushing {
-    saying(app, one_line(&Error::NoHome.to_string()), now)
+    saying(app, one_line(Error::NoHome), now)
 }
 
 // Every test drives a temporary repository and a temporary home, through the

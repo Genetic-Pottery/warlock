@@ -44,15 +44,14 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use warlock_engine::pact::Event;
-use warlock_engine::{Manifest, PullRun, ScopeRecord, held_runs, held_sigils};
+use warlock_engine::{Manifest, PullRun, ScopeRecord};
 
 use crate::app::App;
 use crate::claude::{
-    Activities, Activity, Cancel, ChatAgent, ClaudeAgent, Split, Splitting, UNTIMED, Worked,
+    Activities, Activity, Cancel, CancelGuard, ChatAgent, ClaudeAgent, Split, Splitting, Worked,
     Working, working_system_prompt,
 };
 use crate::confirm::{PullAnswered, PullConfirm, Undertaking};
-use crate::cut::listed;
 use crate::error::{Error, one_line};
 use crate::freshness::{Freshened, Freshening, Freshens, freshened};
 use crate::git::{Commit, Dirty, Error as GitError, Forge, Gh, Git, Repository, branch_name};
@@ -62,12 +61,10 @@ use crate::linear::{
     NamedIssue, NewIssue, NewProject, Opener as LinearOpener, Opens, Project as LinearProject,
     Queue,
 };
-use crate::pacting::CancelGuard;
 use crate::pull::{
-    Taken, clean, no_review_state, no_start_state, nothing_ready, number_in, opened, passed_over,
-    prepare, select, unchanged,
+    Prepared, clean, nothing_ready, number_in, opened, passed_over, prepare, selection, unchanged,
 };
-use crate::pulling::{Heading, PullEvent, Pulled, Pulling, Splits, Ticket, Works, next_runnable};
+use crate::pulling::{PullEvent, Pulled, Pulling, Splits, Ticket, Works, next_runnable};
 use crate::standing::Standing;
 use crate::submission::Taking;
 
@@ -75,10 +72,11 @@ use crate::submission::Taking;
 // sequence that reads a tree and a queue and writes neither.
 const CHOICE_LOST: &str = "the pull stopped while choosing a ticket; nothing was read or changed";
 
-// Said of a lost run, and it promises far less: a run that died half-way through has a branch with commits on it and a record under the home
-// saying how far it got, which is what `/resume` and the next `/pull` read.
-const PULL_LOST: &str = "the pull stopped without saying how it went; the run record under your home says how far it \
-     got";
+// Said of a lost run, and it promises far less: a run that died half-way
+// through has a branch with commits on it and a record under the home saying
+// how far it got, which is what `/resume` and the next `/pull` read.
+const PULL_LOST: &str = "the pull stopped without saying how it went; the run record under \
+                         your home says how far it got";
 
 /// The pull a session is doing, if it is doing one, and every seam it spends.
 ///
@@ -169,27 +167,13 @@ struct Underway {
 /// Everything one pull is allowed to know, owned, because all of it crosses onto
 /// a worker.
 ///
-/// The manifest is cloned as a pact's is. The scope record is cloned rather than
-/// borrowed out of the manifest the loop holds: the run outlives the round that
-/// prepared it, and asking the manifest again on the worker could disagree with
-/// the boundary the reader was shown.
+/// The manifest is cloned as a pact's is. The scope record is the one
+/// [`Prepared`] cloned rather than one asked of the manifest again on the
+/// worker, which could disagree with the boundary the reader was shown.
 #[derive(Clone)]
 struct Work {
+    prepared: Prepared,
     manifest: Manifest,
-    root: PathBuf,
-    /// Where the run record goes, never under [`root`](Self::root).
-    home: PathBuf,
-    record: ScopeRecord,
-    /// The flattened sigils this machine holds, as the crossing check after every
-    /// session and the sessions' own system prompt take them.
-    held: Vec<String>,
-    /// The branch this checkout set with `warlock branch use`, or `None` for the
-    /// remote's default.
-    base: Option<String>,
-    /// The key the board is opened with, read on exactly one line — the opener's.
-    /// Nothing that prints is given this value, and the type it sits on has no
-    /// `Debug` at all.
-    value: String,
     /// The ticket somebody named, or `None` for the queue's own choice.
     named: Option<String>,
 }
@@ -350,6 +334,12 @@ where
         self.choosing.is_some()
     }
 
+    // `in_flight().is_some()` without wording a line on every draw; the two must
+    // answer alike.
+    pub(crate) fn busy(&self) -> bool {
+        self.underway.is_some() || self.confirm.undertaking().is_some() || self.choosing.is_some()
+    }
+
     /// The line a keystroke that races a pull is refused with, and `None` when
     /// nothing is in flight.
     ///
@@ -375,17 +365,14 @@ where
         let choosing = self.choosing.as_ref()?;
         Some(format!(
             "a pull of `{}` is choosing a ticket",
-            choosing.work.record.name()
+            choosing.work.prepared.record().name()
         ))
     }
 
-    /// `/pull` typed into the composer, with or without its scope.
+    /// `/pull <SCOPE>` typed into the composer. A bare `/pull` never reaches
+    /// here: the loop answers it from this checkout's settings.
     ///
-    /// A bare `/pull` is answered with the scopes this machine holds and nothing
-    /// else: no board is opened, no `git` runs and no session is raised, because
-    /// the answer is a file under the home directory.
-    ///
-    /// The refusals past it are asked in the order they have to be. A pull already
+    /// The refusals are asked in the order they have to be. A pull already
     /// in flight is answered before anything is read; a machine with no home is a
     /// fact about a request that is not going to be made anyway; and the three
     /// [`prepare`] asks are the ones `warlock pull` asks, in its order and its
@@ -395,13 +382,9 @@ where
         app: &mut App,
         manifest: &Manifest,
         repo_root: &Path,
-        taking: Option<Taking<'_>>,
+        taking: &Taking,
         now: Instant,
     ) {
-        let Some(taking) = taking else {
-            self.holding(app, repo_root, now);
-            return;
-        };
         if let Some(line) = self.in_flight() {
             app.panel_mut().note(refused(&line), now);
             return;
@@ -409,36 +392,30 @@ where
         // `Standing::home`'s own sentence, asked of the error that words it
         // rather than written again here.
         let Some(home) = self.home.clone() else {
-            app.panel_mut()
-                .note(one_line(&Error::NoHome.to_string()), now);
+            app.panel_mut().note(one_line(Error::NoHome), now);
             return;
         };
-        let prepared = match prepare(manifest, repo_root, &home, taking.scope) {
+        let prepared = match prepare(manifest, repo_root, &home, &taking.scope) {
             Ok(prepared) => prepared,
             // The scope no `[[scope]]` record holds, the scope this machine's
             // sigils do not open, and the checkout with no key bound, each in
             // `error.rs`'s words and flattened as the thread takes a line.
             Err(error) => {
-                app.panel_mut().note(one_line(&error.to_string()), now);
+                app.panel_mut().note(one_line(error), now);
                 return;
             }
         };
 
         let work = Work {
+            prepared,
             manifest: manifest.clone(),
-            root: repo_root.to_path_buf(),
-            home,
-            record: prepared.record().clone(),
-            held: prepared.held().to_vec(),
-            base: prepared.base().map(ToOwned::to_owned),
-            value: prepared.value().to_owned(),
-            named: taking.ticket.map(ToOwned::to_owned),
+            named: taking.ticket.clone(),
         };
         // Before the worker starts, so the thread says which queue is being read
         // from the instant it is: the answer is a request away and a reader who
         // has just typed the command is looking at the conversation.
         app.panel_mut()
-            .note(reading_line(taking.scope, taking.ticket), now);
+            .note(reading_line(&taking.scope, taking.ticket.as_deref()), now);
         let cancel = CancelGuard::new();
         self.choosing = Some(Choosing {
             landings: spawn_choice(
@@ -451,27 +428,6 @@ where
             work,
             cancel,
         });
-    }
-
-    /// A bare `/pull`, answered with what this machine holds.
-    ///
-    /// One file read under the home and nothing else. The sigils are asked for
-    /// here rather than taken off the manifest the loop is holding, because the
-    /// question is about this machine and not about this repository.
-    fn holding(&self, app: &mut App, repo_root: &Path, now: Instant) {
-        let Some(home) = self.home.as_deref() else {
-            app.panel_mut()
-                .note(one_line(&Error::NoHome.to_string()), now);
-            return;
-        };
-        let line = match held_sigils(home, repo_root) {
-            Ok(held) => holding_line(&held),
-            // A config that would not parse, in the engine's own words: the
-            // answer to "what does this machine hold" is that file, so a failure
-            // to read it is the answer.
-            Err(source) => one_line(&Error::Sigils { source }.to_string()),
-        };
-        app.panel_mut().note(line, now);
     }
 
     /// What the pull has said since the last round: what selection chose, and
@@ -508,7 +464,7 @@ where
         // The question goes up over the lines that report the reading: what a
         // reader is being asked to confirm is what they have just read.
         if let Some(undertook) = chose.undertook {
-            self.confirm = asking(&undertook, &choosing.work.record);
+            self.confirm = asking(&undertook, choosing.work.prepared.record());
             self.ready = Some(Ready {
                 work: choosing.work,
                 undertook,
@@ -668,24 +624,10 @@ impl Raises for Claudes {
     fn raise(&self, asked: Raising<'_>) -> Raised<Splitter, Worker, Freshener> {
         let activities = activity_port(&asked.events);
         Raised {
-            split: Splitter {
-                agent: ChatAgent::splitting(),
-                activities: activities.clone(),
-                stopping: asked.stopping.clone(),
-            },
-            // The prompt is built once, because it says which scope the work is
-            // under and which sigils this machine holds, and neither moves for
-            // the length of a run.
-            sessions: Worker {
-                agent: ChatAgent::working(&working_system_prompt(asked.scope, asked.held)),
-                activities: activities.clone(),
-                stopping: asked.stopping,
-            },
+            split: Splitter::new(activities.clone(), asked.stopping.clone()),
+            sessions: Worker::new(asked.scope, asked.held, activities.clone(), asked.stopping),
             freshen: Freshener {
-                agent: ClaudeAgent::new()
-                    .with_timeout(UNTIMED)
-                    .with_cancel(asked.cancel.clone())
-                    .with_activities(activities),
+                agent: ClaudeAgent::freshening(asked.cancel.clone(), activities),
                 cancel: asked.cancel,
                 events: asked.events,
             },
@@ -695,13 +637,22 @@ impl Raises for Claudes {
 
 /// The splitting session, and the ports it reports and answers through.
 ///
-/// Not `pull.rs`'s [`Splitter`](crate::pull) even though it raises the same
-/// session, and the difference is the one line that is not there: a shell has no
-/// stop button, so the CLI's never publishes the handle the session minted.
+/// One agent for the run rather than one per attempt: an agent is a command line
+/// and a timeout, so nothing is spawned until a split is asked for.
 pub(crate) struct Splitter {
     agent: ChatAgent,
     activities: Activities,
     stopping: Stopping,
+}
+
+impl Splitter {
+    pub(crate) fn new(activities: Activities, stopping: Stopping) -> Self {
+        Self {
+            agent: ChatAgent::splitting(),
+            activities,
+            stopping,
+        }
+    }
 }
 
 impl Splits for Splitter {
@@ -714,11 +665,29 @@ impl Splits for Splitter {
 }
 
 /// One sub-task session per call, at the system prompt the scope and the sigils
-/// make, and the same difference from `pull.rs`'s.
+/// make.
+///
+/// The prompt is built once, because it says which scope the work is under and
+/// which sigils this machine holds, and neither moves for the length of a run.
 pub(crate) struct Worker {
     agent: ChatAgent,
     activities: Activities,
     stopping: Stopping,
+}
+
+impl Worker {
+    pub(crate) fn new(
+        scope: &str,
+        held: &[String],
+        activities: Activities,
+        stopping: Stopping,
+    ) -> Self {
+        Self {
+            agent: ChatAgent::working(&working_system_prompt(scope, held)),
+            activities,
+            stopping,
+        }
+    }
 }
 
 impl Works for Worker {
@@ -1024,9 +993,7 @@ fn spawn_choice<O: Opens, R: Repository + Send + 'static>(
     work: Work,
     cancel: Cancel,
 ) -> Once<Landing> {
-    workers.once(move || {
-        chose(&open, &repo, &work, &cancel).map_err(|error| one_line(&error.to_string()))
-    })
+    workers.once(move || chose(&open, &repo, &work, &cancel).map_err(one_line))
 }
 
 /// Which ticket this pull would work, in `pulled`'s own order: the tree before the
@@ -1049,47 +1016,26 @@ fn chose<O: Opens, R: Repository>(
     }
     clean(repo)?;
 
-    let board = open.open(&work.value);
-    let assignee = board.viewer()?;
-    let runs = held_runs(&work.home, &work.root, work.record.name())
-        .map_err(|source| Error::Runs { source })?;
-    // An unreadable record is a line and not a failure: the scan names it, and the
-    // run it describes may be holding uncommitted work on a branch.
-    let mut lines: Vec<String> = runs
-        .unreadable()
-        .iter()
-        .map(|unreadable| one_line(&unreadable.to_string()))
-        .collect();
-
-    let selected = select(
+    let board = open.open(work.prepared.value());
+    let mut lines = Vec::new();
+    let selected = selection(
         &board,
-        &work.record,
-        &assignee,
+        work.prepared.record(),
+        work.prepared.home(),
+        work.prepared.root(),
         work.named.as_deref(),
-        runs.runs(),
+        &mut |line| lines.push(line),
     )?;
     for skipped in selected.skipped() {
         lines.push(passed_over(skipped));
     }
 
-    let issue = match selected.taken() {
-        Taken::Issue(issue) => issue,
-        // A queue with nothing available is an answer and no question at all; a
-        // ticket somebody named that cannot be worked is a refusal in the
-        // chooser's own words.
-        Taken::Nothing => {
-            lines.push(nothing_ready(work.record.name()));
-            return Ok(Chose {
-                lines,
-                undertook: None,
-            });
-        }
-        Taken::Refused(refusal) => {
-            return Err(Error::NotPulled {
-                ticket: work.named.clone().unwrap_or_default(),
-                refusal: refusal.clone(),
-            });
-        }
+    let Some(issue) = selected.issue(work.named.as_deref())? else {
+        lines.push(nothing_ready(work.prepared.record().name()));
+        return Ok(Chose {
+            lines,
+            undertook: None,
+        });
     };
     if cancel.is_cancelled() {
         return Err(Error::Cancelled);
@@ -1105,19 +1051,26 @@ fn chose<O: Opens, R: Repository>(
     // What the dialog names, and the one thing here that is not the queue's: a run
     // this checkout already holds keeps the branch its record names and carries on
     // from the sub-task the loop would run next, and a ticket with no record is
-    // told the branch it will be given.
-    // `Runs` because it is the same failure the scan above has: a record under
-    // this home that cannot be read. The loop words its own with the same
-    // `pulls::Error` underneath, so the two say the same sentence.
-    let held = PullRun::find(&work.home, &work.root, &ticket.identifier)
-        .map_err(|source| Error::Runs { source })?;
+    // told the branch it will be given. A record that cannot be read is `Runs`,
+    // the failure the scan above has, and the loop words its own over the same
+    // `pulls::Error`, so the two say the same sentence.
+    let held = PullRun::find(
+        work.prepared.home(),
+        work.prepared.root(),
+        &ticket.identifier,
+    )
+    .map_err(|source| Error::Runs { source })?;
     let (branch, resuming) = match held.as_ref() {
         Some(run) => (
             run.branch().to_owned(),
             next_runnable(run).map(|next| next.id().to_owned()),
         ),
         None => (
-            branch_name(work.record.team_key(), ticket.number, &ticket.title),
+            branch_name(
+                work.prepared.record().team_key(),
+                ticket.number,
+                &ticket.title,
+            ),
             None,
         ),
     };
@@ -1151,8 +1104,8 @@ where
         move || {
             let Ready { work, undertook } = ready;
             let raised = spending.raises.raise(Raising {
-                scope: work.record.name(),
-                held: &work.held,
+                scope: work.prepared.record().name(),
+                held: work.prepared.held(),
                 events: events.clone(),
                 cancel: cancel.clone(),
                 stopping,
@@ -1162,7 +1115,7 @@ where
             // one line. Wrapped in the run's own say-when, so a run stopped by the
             // panel quitting tells the board nothing on its way out — see [`Quiet`].
             let board = Quiet {
-                inner: spending.open.open(&work.value),
+                inner: spending.open.open(work.prepared.value()),
                 cancel,
             };
             let repo = Committing {
@@ -1178,19 +1131,17 @@ where
                 split: &raised.split,
                 sessions: &raised.sessions,
                 freshen: &raised.freshen,
-                scope: &work.record,
+                scope: work.prepared.record(),
                 manifest: &work.manifest,
-                held: &work.held,
-                base: work.base.as_deref(),
-                root: &work.root,
-                home: &work.home,
+                held: work.prepared.held(),
+                base: work.prepared.base(),
+                root: work.prepared.root(),
+                home: work.prepared.home(),
                 progress: &mut progress,
             }
             .pull(&undertook.ticket.ticket());
 
-            events.send(Step::Finished(
-                pulled.map_err(|error| one_line(&error.to_string())),
-            ));
+            events.send(Step::Finished(pulled.map_err(one_line)));
         }
     })
 }
@@ -1205,40 +1156,17 @@ fn said(app: &mut App, event: PullEvent, now: Instant) {
     match event {
         // The three headings, each a phase on the thread. Opening one stops the
         // clock of the one above it, so two never run at once.
-        PullEvent::Heading(Heading::Split { ticket, title }) => {
-            phase(app, &format!("{ticket} — splitting {title}"), now);
-        }
-        PullEvent::Heading(Heading::Subtask {
-            id,
-            goal,
-            position,
-            total,
-        }) => {
-            phase(app, &format!("[{position}/{total}] `{id}` {goal}"), now);
-        }
-        PullEvent::Heading(Heading::PullRequest { branch }) => {
-            phase(
-                app,
-                &format!("`{branch}` is pushed, opening a pull request"),
-                now,
-            );
-        }
+        PullEvent::Heading(heading) => phase(app, &heading.line(), now),
         // Filed under the live phase, which is the one the heading before it
         // opened. What each activity comes to is the thread's business — a tool is
         // its name and its one detail, thinking and writing are the words for
         // them, and a cost is dropped. See `Thread::record`.
         PullEvent::Activity(activity) => app.panel_mut().record_turn(&activity, now),
-        // A milestone: the sub-tasks a run works are not quite the ones the split
-        // wrote, and a manifest nobody was told had been mended reads as one the
-        // model produced.
-        PullEvent::Repair { note } => app.panel_mut().note(note, now),
-        // Both board lines are facts about a workflow nobody has finished setting
-        // up, said where the run they happened in is being read.
-        PullEvent::NoStartState { team } => app.panel_mut().note(no_start_state(&team), now),
-        PullEvent::NoReviewState { team, state } => {
-            app.panel_mut().note(no_review_state(&team, &state), now);
+        event => {
+            if let Some(line) = event.line() {
+                app.panel_mut().note(line, now);
+            }
         }
-        PullEvent::Project { line } => app.panel_mut().note(line, now),
     }
 }
 
@@ -1311,32 +1239,14 @@ fn ended_line(pulled: &Pulled) -> String {
     match pulled {
         Pulled::Opened { ticket, url } => opened(ticket, url.as_deref()),
         Pulled::Unchanged { ticket } => unchanged(ticket),
-        Pulled::Halted { ticket } => one_line(
-            &Error::Halted {
-                ticket: ticket.clone(),
-            }
-            .to_string(),
-        ),
-        Pulled::Crossed { ticket, subtask } => one_line(
-            &Error::Crossed {
-                ticket: ticket.clone(),
-                subtask: subtask.clone(),
-            }
-            .to_string(),
-        ),
+        Pulled::Halted { ticket } => one_line(Error::Halted {
+            ticket: ticket.clone(),
+        }),
+        Pulled::Crossed { ticket, subtask } => one_line(Error::Crossed {
+            ticket: ticket.clone(),
+            subtask: subtask.clone(),
+        }),
     }
-}
-
-// What a bare `/pull` is answered with. The scopes and not the tickets: reading a
-// queue is a request, and the answer to "which of these do I type" is under the
-// home directory.
-fn holding_line(held: &[String]) -> String {
-    if held.is_empty() {
-        return "`/pull` takes a scope, and this machine holds no sigil at all — `warlock config` \
-                is where one is held"
-            .to_owned();
-    }
-    format!("`/pull` takes a scope: this machine holds {}", listed(held))
 }
 
 // The queue being read, named before the request goes out. The named ticket is

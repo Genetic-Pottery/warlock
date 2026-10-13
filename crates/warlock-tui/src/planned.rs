@@ -18,7 +18,7 @@
 //!
 //! Nothing a slice drafts becomes an issue on its own. The drafts are printed
 //! and a line is read before [`Planned::filing`] is asked for at all, so a skip
-//! costs no request, and anything that is neither `accept` nor `skip` is
+//! costs no request, and anything that is not `create`, `edit` or `quit` is
 //! feedback the same session drafts again from. It is the panel's own review
 //! window in [`mod@crate::cutting`] with a line typed where that has keys, and
 //! the two doors word what they say about a slice out of the same helpers here.
@@ -28,7 +28,7 @@
 //! place whichever door is driving.
 //!
 //! No key value is printed here and none can be. [`Planned`], [`Filing`] and
-//! [`Skipping`] each carry one with a redacting `Debug`, it is read only on the
+//! [`Skipping`] each carry one as a [`Key`], whose `Debug` redacts it, it is read only on the
 //! lines that open a board, and everything that prints takes a [`Destination`],
 //! which names the key and never holds it.
 
@@ -43,19 +43,19 @@ use warlock_engine::{Destination, Manifest, agent, resolve_filing};
 use crate::asking::{self, Asks};
 use crate::brief::{Slice, scope_block_in};
 use crate::claude::{
-    Activities, Activity, ChatAgent, Converses, Drafted, Drafting, NOTHING_SETTLES_IT, Replied,
+    Activities, ChatAgent, Converses, Drafted, Drafting, NOTHING_SETTLES_IT, Replied,
     propose_answer,
 };
 use crate::linear::{
-    Board, Issue as LinearIssue, Listing, Opener as LinearOpener, Opens, QueuedIssue,
+    Board, Issue as LinearIssue, Key, Listing, Opener as LinearOpener, Opens, QueuedIssue,
 };
 // The module rather than its `cut` and `Slice`, which would both be a second
 // name for something this file already has: the slices here are the document's,
 // and `cut::Slice` is one slice's drafts on their way to a board.
 use crate::cut::{self, Cut, fold_title, listed};
 use crate::editing::{self, NO_EDITOR, run_editor};
-use crate::error::{Error, one_line};
-use crate::pull::activity_line;
+use crate::error::{Error, one_line, say};
+use crate::pull::Watched;
 use crate::standing::{FOR_CUT, Standing};
 
 // The one status a project is read back from, and the only spelling accepted:
@@ -156,28 +156,6 @@ fn printing() -> Activities {
     })
 }
 
-/// The activity lines of one session, with a stretch of thinking or writing
-/// said once: a session reports `Writing` again with every delta, and printed on
-/// a screen that only scrolls that is a column of identical lines. A tool line
-/// repeats only when the session did the same thing twice, so it is never
-/// collapsed. `/pull`'s shell door collapses the same way.
-#[derive(Debug, Default)]
-struct Watched {
-    said: Option<String>,
-}
-
-impl Watched {
-    fn line(&mut self, activity: &Activity) -> Option<String> {
-        let line = activity_line(activity)?;
-        let running = matches!(activity, Activity::Thinking | Activity::Writing { .. });
-        if running && self.said.as_deref() == Some(line.as_str()) {
-            return None;
-        }
-        self.said = Some(line.clone());
-        Some(line)
-    }
-}
-
 // Split from `cut` the way `pushed` is split from `push`: the environment — the
 // working directory, the repository root, the home the sigils and the key store
 // sit under — is three parameters rather than three reads, so every refusal can
@@ -272,7 +250,7 @@ fn cut_with<O: Opens, A: Converses, P: Converses, K: Asks, W: Write>(
                 }
                 ask.discard_typed_ahead();
                 let carry = ask.ask(CARRY_PROMPT)?.unwrap_or_default();
-                if matches!(carry.trim().to_lowercase().as_str(), "y" | "yes") {
+                if asking::yes(&carry) {
                     continue;
                 }
                 say(out, &stopped_line(next.left()));
@@ -343,11 +321,11 @@ pub(crate) fn listing_lines(destination: &Destination, listing: &Listing) -> Vec
         .collect()
 }
 
-/// One slice drafted in one session and reviewed, or `None` with what went
-/// wrong — or what was skipped — already said.
+/// One slice drafted in one session and reviewed, with what went wrong — or
+/// what was skipped — already said.
 ///
 /// The drafts come back here rather than going on to [`Planned::filing`] on
-/// their own: they are printed, a line is read, and only `accept` hands them
+/// their own: they are printed, a line is read, and only `create` hands them
 /// over. The review is in this call and not beside it because feedback is a turn
 /// of *this* session — the conversation that drafted them — and a slice
 /// redrafted by a fresh session would be one answering talk nobody in it had
@@ -402,23 +380,16 @@ fn drafted<A: Converses, P: Converses, K: Asks, W: Write>(
                         Reviewed::Skip => return Ok(Ended::Skipped),
                         Reviewed::Unanswered => return Ok(Ended::Left),
                         Reviewed::Edit(before) => {
-                            drafts = match editing::editor() {
-                                None => {
-                                    say(out, &unedited_line(slice, NO_EDITOR));
-                                    before
-                                }
+                            let edited = match editing::editor() {
+                                None => Err(NO_EDITOR.to_owned()),
                                 Some(editor) => {
-                                    match edited_drafts(slice, &before, |path| {
-                                        run_editor(&editor, path)
-                                    }) {
-                                        Ok(edited) => edited,
-                                        Err(why) => {
-                                            say(out, &unedited_line(slice, &why));
-                                            before
-                                        }
-                                    }
+                                    edited_drafts(slice, &before, |path| run_editor(&editor, path))
                                 }
                             };
+                            drafts = edited.unwrap_or_else(|why| {
+                                say(out, &unedited_line(slice, &why));
+                                before
+                            });
                         }
                         Reviewed::Feedback(feedback) => break feedback,
                     }
@@ -532,7 +503,7 @@ fn review_prompt(count: usize) -> String {
     format!("[c]reate {count} ticket(s), [e]dit, [q]uit, or type feedback to redraft: ")
 }
 
-fn titles(drafts: &[Draft]) -> Vec<String> {
+pub(crate) fn titles(drafts: &[Draft]) -> Vec<String> {
     drafts.iter().map(|draft| draft.title.clone()).collect()
 }
 
@@ -624,18 +595,10 @@ fn proposed<P: Converses, W: Write>(
             Some(proposal)
         }
         Err(error) => {
-            say(out, &unproposed_line(slice, &one_line(&error.to_string())));
+            say(out, &unproposed_line(slice, &one_line(error)));
             None
         }
     }
-}
-
-// A failed write is ignored, exactly as `running.rs`'s `Progress` ignores one
-// and for its reason: `warlock draft docs/brief.md | head -1` is a closed stdout,
-// and failing a run of drafting sessions over the state of a pipe would spend
-// somebody's tokens and then throw away what they bought.
-fn say<W: Write>(out: &mut W, fact: &str) {
-    drop(writeln!(out, "warlock: {fact}"));
 }
 
 // One line for the run and one per slice, rather than push's single sentence:
@@ -666,6 +629,7 @@ fn would(mut planned: Planned) -> Vec<String> {
 
 /// A project read back and gated, with every slice's standing: what is left to
 /// cut, what earlier runs cut it into, and what this run has created so far.
+#[derive(Debug)]
 pub(crate) struct Planned {
     root: PathBuf,
     // Linear's id for the project, which issues are created in and notes are
@@ -678,13 +642,12 @@ pub(crate) struct Planned {
     status: String,
     brief: String,
     destination: Destination,
-    value: String,
+    value: Key,
     // The user the key belongs to, resolved once by `prepare`: every issue this
     // run files is assigned to them, and nothing here can name anybody else.
     assignee: String,
-    // `ordered` and not `slices`: the order is the order tickets are filed and
-    // blocked in, so a slice is only reached once everything it waits on has
-    // been.
+    // In the order tickets are filed and blocked in, so a slice is only reached
+    // once everything it waits on has been.
     slices: Vec<Slice>,
     // Beside `slices`, one entry each: the identifiers a cut note names, which
     // is all such a note keeps of an issue, and `None` for a slice still to
@@ -706,28 +669,6 @@ pub(crate) struct Planned {
     // an edge to nothing.
     became: Vec<Vec<LinearIssue>>,
     at: usize,
-}
-
-// Hand-written for `Target`'s reason: this holds the key value, and the panel
-// keeps one across rounds, which a failing assertion anywhere in the suite may
-// print.
-impl fmt::Debug for Planned {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Planned")
-            .field("root", &self.root)
-            .field("project", &self.project)
-            .field("name", &self.name)
-            .field("status", &self.status)
-            .field("destination", &self.destination)
-            .field("value", &"<redacted>")
-            .field("assignee", &self.assignee)
-            .field("slices", &self.slices)
-            .field("already", &self.already)
-            .field("settled", &self.settled)
-            .field("became", &self.became)
-            .field("at", &self.at)
-            .finish_non_exhaustive()
-    }
 }
 
 // The board is resolved before the key is read, so a machine that cannot say
@@ -817,7 +758,7 @@ pub(crate) fn prepare<O: Opens>(
         status: status.to_owned(),
         brief: block.brief().to_owned(),
         destination: target.destination(),
-        value: target.value().to_owned(),
+        value: Key::new(target.value()),
         assignee,
         slices: ordered.into_iter().cloned().collect(),
         settled: already
@@ -1049,11 +990,12 @@ impl Next {
 }
 
 /// One slice's drafts on their way to the board.
+#[derive(Debug)]
 pub(crate) struct Filing {
     root: PathBuf,
     project: String,
     destination: Destination,
-    value: String,
+    value: Key,
     assignee: String,
     title: String,
     drafts: Vec<Draft>,
@@ -1062,30 +1004,13 @@ pub(crate) struct Filing {
     finishes: bool,
 }
 
-impl fmt::Debug for Filing {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Filing")
-            .field("root", &self.root)
-            .field("project", &self.project)
-            .field("destination", &self.destination)
-            .field("value", &"<redacted>")
-            .field("assignee", &self.assignee)
-            .field("title", &self.title)
-            .field("drafts", &self.drafts)
-            .field("needs", &self.needs)
-            .field("open", &self.open)
-            .field("finishes", &self.finishes)
-            .finish()
-    }
-}
-
 impl Filing {
     // `out` is where [`cut::cut`]'s own lines go: stdout for the subcommand, and
     // `io::sink` for the panel, which words its own beside the slice they are
     // about.
     pub(crate) fn file<O: Opens, W: Write>(&self, open: &O, out: &mut W) -> Result<Cut, Error> {
         let needs: Vec<&[LinearIssue]> = self.needs.iter().map(Vec::as_slice).collect();
-        let board = open.open(&self.value);
+        let board = open.open(self.value.as_str());
 
         let mut cut = cut::cut(
             &board,
@@ -1119,29 +1044,19 @@ pub(crate) struct Settled {
 }
 
 /// A slice's skip note on its way to the project.
+#[derive(Debug)]
 pub(crate) struct Skipping {
     project: String,
     title: String,
-    value: String,
+    value: Key,
     finishes: bool,
-}
-
-impl fmt::Debug for Skipping {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Skipping")
-            .field("project", &self.project)
-            .field("title", &self.title)
-            .field("value", &"<redacted>")
-            .field("finishes", &self.finishes)
-            .finish()
-    }
 }
 
 impl Skipping {
     /// The note said, and the line about the project's move when this skip is
     /// the one that finishes it.
     pub(crate) fn post<O: Opens>(&self, open: &O) -> Result<Option<String>, Error> {
-        let board = open.open(&self.value);
+        let board = open.open(self.value.as_str());
         cut::skip(&board, &self.project, &self.title)?;
         Ok(self.finishes.then(|| cut::finish(&board, &self.project)))
     }
@@ -1192,12 +1107,6 @@ pub(crate) fn replied(slice: &Slice, replied: Result<Replied, agent::Error>) -> 
 pub(crate) fn not_drafted(slice: &Slice, why: impl fmt::Display) -> String {
     format!("{} was not drafted: {why}", named(slice))
 }
-
-// The four lines a relayed question is read back by, here rather than beside
-// either door: the shell and the panel put the same question to a person and
-// send whatever they say, and two copies of these wordings would be two doors
-// naming one conversation differently. `named` is in each of them for the same
-// reason it is `pub(crate)`.
 
 /// Drafts read back out of [`drafts_document`]'s layout: a `## N. title` line
 /// opens each, everything under it is its body, and trailing `Blocked by #N` and
@@ -1296,14 +1205,14 @@ pub(crate) fn edited_drafts(
     ));
     let mut text = drafts_document(slice, drafts).join("\n");
     text.push('\n');
-    std::fs::write(&path, text).map_err(|error| one_line(&error.to_string()))?;
+    std::fs::write(&path, text).map_err(one_line)?;
     let said = run(&path);
     let read = std::fs::read_to_string(&path);
     drop(std::fs::remove_file(&path));
     if let Some(said) = said {
         return Err(said);
     }
-    let read = read.map_err(|error| one_line(&error.to_string()))?;
+    let read = read.map_err(one_line)?;
     let drafts = drafts_from_document(&read)?;
     let (mended, _) = drafting::mend(&drafting::Fill { drafts }, slice.heading(), slice.prose());
     Ok(mended.drafts)
@@ -1347,7 +1256,7 @@ pub(crate) fn drafted_line(slice: &Slice, titles: &[String]) -> String {
 }
 
 /// Every draft whole — title, body and the edges between them — as the issues
-/// `accept` would file. The panel puts it on the document card and the shell
+/// `create` would file. The panel puts it on the document card and the shell
 /// prints it, both before the review: an answer about drafts nobody has read is
 /// an answer about their titles, and feedback on a title is feedback on a guess.
 ///

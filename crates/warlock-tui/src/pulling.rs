@@ -49,11 +49,11 @@ use crate::claude::{Activity, Sibling, Split, Worked, working_opening};
 use crate::crossings::{Crossing, crossings_after};
 use crate::freshness::{Freshened, Freshening, Freshens};
 use crate::git::{
-    Dirty, Error as GitError, Finished, Forge, Freshness, LeftStale, PullRequest, Repository,
+    Dirty, Error as GitError, Finished, Forge, Freshness, Head, LeftStale, PullRequest, Repository,
     Touched, branch_name, commit_message, pull_request_body, pull_request_title,
 };
 use crate::linear::{Board, Error as LinearError};
-use crate::queue::IN_PROGRESS;
+use crate::queue::{IN_PROGRESS, same_name};
 
 /// Everything one pull is allowed to touch, built by whichever door is pulling.
 ///
@@ -286,13 +286,13 @@ impl<B: Board, R: Repository, F: Forge, S: Splits, W: Works> Pulling<'_, B, R, F
             // its own work out of the tree: whatever `git status` says next is no
             // longer an account of what that session wrote, so the crossing check
             // would be reading a clean tree and answering "nothing crossed".
-            if after != before {
+            if let Head::Moved { from, to } = Head::between(&before, &after) {
                 let moved = format!(
                     "the session committed. `HEAD` moved from {} to {}, so what this sub-task \
                      wrote is in a commit warlock did not make and cannot check. Nothing further \
                      was committed.",
-                    before.short(),
-                    after.short(),
+                    from.short(),
+                    to.short(),
                 );
                 run.subtask_mut(&id)
                     .expect(IN_THE_RUN)
@@ -873,10 +873,7 @@ impl Pulled {
     /// two agree is an assertion in `tests/pull.rs` — this is the statement of
     /// what the loop thinks each ending is worth, held against what the shell
     /// actually returns.
-    #[allow(
-        dead_code,
-        reason = "read by the tests that hold `status_for` to these numbers"
-    )]
+    #[cfg(test)]
     pub(crate) const fn status(&self) -> u8 {
         match self {
             Self::Opened { .. } | Self::Unchanged { .. } => 0,
@@ -893,10 +890,7 @@ impl Pulled {
         }
     }
 
-    #[allow(
-        dead_code,
-        reason = "read by the tests; the door destructures the ending it words"
-    )]
+    #[cfg(test)]
     pub(crate) fn ticket(&self) -> &str {
         match self {
             Self::Opened { ticket, .. }
@@ -949,6 +943,29 @@ pub(crate) enum PullEvent {
     },
 }
 
+fn no_start_state(team: &str) -> String {
+    format!("the team `{team}` has no `In Progress` state, so the ticket was not moved")
+}
+
+fn no_review_state(team: &str, state: &str) -> String {
+    format!("the team `{team}` has no `{state}` state, so the ticket was not moved into review")
+}
+
+impl PullEvent {
+    /// The line both doors say, or `None` for an activity, which each words for
+    /// itself.
+    pub(crate) fn line(&self) -> Option<String> {
+        match self {
+            Self::Heading(heading) => Some(heading.line()),
+            Self::Activity(_) => None,
+            Self::Repair { note } => Some(note.clone()),
+            Self::NoStartState { team } => Some(no_start_state(team)),
+            Self::NoReviewState { team, state } => Some(no_review_state(team, state)),
+            Self::Project { line } => Some(line.clone()),
+        }
+    }
+}
+
 /// The ticket's project moved to the review state when it is `In Progress` —
 /// every slice drafted — and each of its issues is in review or closed. `None`
 /// when there is nothing to say: no project, a project still being drafted, or
@@ -968,7 +985,7 @@ fn project_review(board: &impl Board, issue: &str, review: &str) -> Option<Strin
     };
     let drafted = project
         .status()
-        .is_some_and(|status| status.trim().eq_ignore_ascii_case(IN_PROGRESS));
+        .is_some_and(|status| same_name(status, IN_PROGRESS));
     if !drafted {
         return None;
     }
@@ -976,7 +993,7 @@ fn project_review(board: &impl Board, issue: &str, review: &str) -> Option<Strin
     let reviewed = project
         .states()
         .iter()
-        .all(|(state, kind)| kind.settled() || state.trim().eq_ignore_ascii_case(review.trim()));
+        .all(|(state, kind)| kind.settled() || same_name(state, review));
     if !reviewed {
         return None;
     }
@@ -1025,6 +1042,21 @@ pub(crate) enum Heading {
     PullRequest {
         branch: String,
     },
+}
+
+impl Heading {
+    pub(crate) fn line(&self) -> String {
+        match self {
+            Self::Split { ticket, title } => format!("{ticket} — splitting {title}"),
+            Self::Subtask {
+                id,
+                goal,
+                position,
+                total,
+            } => format!("[{position}/{total}] `{id}` {goal}"),
+            Self::PullRequest { branch } => format!("`{branch}` is pushed, opening a pull request"),
+        }
+    }
 }
 
 /// The sub-task to work next: the first [`Pending`](SubtaskStatus::Pending) one

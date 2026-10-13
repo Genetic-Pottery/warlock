@@ -41,13 +41,13 @@ use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
-use warlock_engine::{Manifest, route_facts, scope_opens_to, sigils_path};
+use warlock_engine::{Manifest, route_facts, scope_opens_to};
 
 use crate::app::Sigils;
 use crate::boundary::closed_scope_message;
 use crate::error::Error;
 use crate::query::{envelope, spelled, write_object};
-use crate::session::sigils_under;
+use crate::settings::{Settings, sigils_line};
 use crate::standing::{FOR_CHECK, Standing};
 
 const CHECK: &str = "check";
@@ -137,7 +137,7 @@ struct Checked {
 // the spelling below rather than resolved into something inside it.
 pub fn check(path: PathBuf, json: bool) -> Result<(), Error> {
     // A home that cannot be resolved is `None` and reads as nothing held — see
-    // the module docs for why it is not `Unknown`.
+    // `Settings::sigils_or_unknown` for why it is not `Unknown`.
     checked_onto(
         &Standing::here(FOR_CHECK)?,
         Standing::home().ok().as_deref(),
@@ -215,7 +215,8 @@ fn checked(
     let facts =
         route_facts(target, repo_root, manifest, home).map_err(|source| Error::Route { source })?;
     let scope = facts.scope().map(str::to_owned);
-    let sigils = home.map_or(Sigils::Nothing, |home| sigils_under(home, repo_root));
+    let settings = Settings::at(home.map(Path::to_path_buf), repo_root);
+    let sigils = settings.sigils_or_unknown();
     // `Nothing` and `Unknown` are both the empty slice on the way in
     // (`Sigils::as_slice`), which is what makes `opens` false for both over a
     // scoped path and true for both over an unscoped one.
@@ -226,7 +227,7 @@ fn checked(
         path,
         scope,
         sigils,
-        config: home.map(|home| sigils_path(home, repo_root)),
+        config: settings.config().map(Path::to_path_buf),
         opens,
         team: record.map(|record| record.team_key().to_owned()),
         review_state: record.map(|record| record.review_state().to_owned()),
@@ -403,7 +404,7 @@ fn denial(path: &str, scope: &str) -> Value {
 
 // The boundary's own sentence, and deliberately not a wording of its own: the
 // same fact refused at a keystroke, at a shell prompt and at a hook says the same
-// thing, names the same scope and points at the same `warlock config`. A sigil
+// thing, names the same scope and points at the same `warlock sigil add`. A sigil
 // and the scope it opens share a name, so naming the scope is naming the sigil
 // this write wants — which is why "hold that sigil" needs nothing added to it.
 //
@@ -444,7 +445,7 @@ fn prose(checked: &Checked) -> String {
             checked.review_state.as_deref(),
             checked.label.as_deref(),
         ),
-        holding_line(&checked.sigils, checked.config.as_deref()),
+        sigils_line(&checked.sigils, checked.config.as_deref()),
         verdict_line(checked.scope.as_deref(), checked.opens),
         key_line(
             checked.key.as_deref(),
@@ -501,32 +502,17 @@ fn route_line(
     }
 }
 
-// The wording is `warlock config`'s and the header's to the letter — one fact
-// should not have two wordings. What is added here is the file: `Sigils::line`
-// says only "holding unknown", and a reader running a subcommand about a config
-// that will not parse is owed the path to go and fix.
-fn holding_line(sigils: &Sigils, config: Option<&Path>) -> String {
-    match (sigils, config) {
-        (Sigils::Unknown, Some(path)) => {
-            format!("holding unknown: `{}` could not be read", path.display())
-        }
-        _ => sigils
-            .line()
-            .unwrap_or_else(|| "holding nothing".to_owned()),
-    }
-}
-
 // The unscoped case is stated as the permissive default it comes from rather
 // than as a bare "open": a reader just told nothing scopes the path should not
-// be left wondering which sigil did it. The closed line ends by naming `warlock
-// config`, which is the one place a sigil is recorded.
+// be left wondering which sigil did it. The closed line ends with the command
+// that holds the sigil it wants.
 fn verdict_line(scope: Option<&str>, opens: bool) -> String {
     match scope {
         None => "an unscoped path is open to anyone, so this machine may work here".to_owned(),
         Some(scope) if opens => format!("`{scope}` is open to this machine"),
         Some(scope) => format!(
             "`{scope}` is closed to this machine — hold that sigil to work here, \
-             with `warlock config`"
+             with `warlock sigil add {scope}`"
         ),
     }
 }

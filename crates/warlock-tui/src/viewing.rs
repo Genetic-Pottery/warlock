@@ -41,7 +41,7 @@ pub(crate) fn view_press(app: &mut App) -> Option<PathBuf> {
         // a reader who could not read this file is still looking at whatever
         // they were looking at before they asked.
         Err(error) => {
-            app.set_message(one_line(&error.to_string()));
+            app.set_message(one_line(error));
             None
         }
     }

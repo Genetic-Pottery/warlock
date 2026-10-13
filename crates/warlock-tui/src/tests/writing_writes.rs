@@ -37,7 +37,7 @@ fn app_answering(root: &Path, reply: &str) -> App {
         None::<PathBuf>,
         NodeState::Unpacted,
     )));
-    app.panel_mut().start_turn("/write", now());
+    app.panel_mut().start_turn("write the brief", now());
     app.panel_mut().answer_turn(reply, now());
     app.set_message(LAST_KEY);
     app
@@ -159,7 +159,7 @@ fn enter_writes_the_document_and_says_what_landed() {
     // last keystroke's, and nothing about the run state moved.
     assert_eq!(app.message(), Some(LAST_KEY));
     assert!(!app.is_pacting());
-    assert_eq!(app.pact_line(), None);
+    assert_eq!(app.run_header().map(|header| header.words()), None);
 }
 
 #[test]
@@ -807,7 +807,7 @@ mod rounds {
     fn a_refused_path_reopens_the_field_and_the_next_enter_writes() {
         // A path that is taken, typed out of the way and written: the
         // refusal keeps the window up over the very text that earned it, so
-        // the fix is a keystroke rather than a second `/write`.
+        // the fix is a keystroke rather than a second yes.
         //
         // The file in the way appears after the window opened, which is the
         // situation the check is for: the proposal is a guess made once, at
@@ -905,11 +905,12 @@ mod whole {
     use crate::account::Line;
     use crate::chatting::CHAT_NOTE;
     use crate::chatting::Chat;
-    use crate::claude::Converses;
+    use crate::claude::{Converses, WRITE_INSTRUCTION};
     use crate::composer::{Composed, Composer};
+    use crate::confirm::{Answer, Answered};
     use crate::panel::Mode;
     use crate::prompt::{ScopePrompt, edit_for};
-    use crate::stubs::Saying;
+    use crate::stubs::{Answering, Scripted};
 
     const AT_MOST: Duration = Duration::from_secs(5);
 
@@ -937,7 +938,7 @@ mod whole {
     }
 
     #[test]
-    fn a_write_typed_at_the_composer_ends_as_a_document_on_disk() {
+    fn a_yes_to_the_offer_ends_as_a_document_on_disk() {
         let repo = a_repo();
         let base = now();
         let mut app = App::from_tree(&Tree::new(Node::new(
@@ -945,30 +946,28 @@ mod whole {
             None::<PathBuf>,
             NodeState::Unpacted,
         )));
-        // The register the command is only allowed in. Nothing else is
-        // arranged: the write path is handed the app, the root and the
-        // field, and the ledger is no part of it.
-        app.panel_mut().set_mode(Mode::Brief);
-        // The conversation, rooted in that repository: where a brief goes
-        // is its own now, settled at `/brief` and read at `/write` without
-        // being looked at again.
-        let mut chat = Chat::with_agent(repo.path(), Saying::answering(DOCUMENT));
+        let model = Scripted::saying([
+            Answering::says("Every section is settled.\n[ready to write]"),
+            Answering::says(DOCUMENT),
+            Answering::says("Back to talking."),
+        ]);
+        let mut chat = Chat::with_agent(repo.path(), model.clone());
 
-        // The reader typing the word and pressing Enter at the foot of the
-        // panel, through the very method the loop's composer arm calls.
-        chat.compose(&mut app, Composed::Typing(Composer::new("/write")), base);
+        chat.compose(&mut app, Composed::Typing(Composer::new("/brief")), base);
         chat.compose(&mut app, Composed::Submit, base);
-
-        assert!(chat.answering(), "the command started no turn");
-        assert_eq!(
-            chat.composer().draft(),
-            "",
-            "the field kept the submitted word"
-        );
-
-        // Then the rounds, until the answer lands and the window opens over
-        // it — pre-filled, headed, and complaining about nothing.
         rounds_until_answered(&mut chat, &mut app, base);
+        assert_eq!(chat.write_offer(), Some(Answer::No), "nothing was offered");
+
+        // Yes, through the very method the loop's dialog arm calls.
+        chat.offered(&mut app, Answered::Leave, base);
+        assert!(chat.answering(), "yes started no turn");
+        assert_eq!(chat.write_offer(), None, "the offer outlived its yes");
+
+        rounds_until_answered(&mut chat, &mut app, base);
+        assert_eq!(
+            model.said().get(1).map(String::as_str),
+            Some(WRITE_INSTRUCTION)
+        );
 
         let field = chat
             .write_prompt()
@@ -983,18 +982,18 @@ mod whole {
             Vec::<String>::new(),
             "a proposal wrote something"
         );
-        // The card shows the word that was typed and the document that came
-        // back — never the paragraph warlock sent.
+        // The card shows the yes in words and the document that came back —
+        // never the paragraph warlock sent.
         let rows = app
             .panel()
             .thread()
             .expect("the conversation is there")
             .lines(base);
-        assert_eq!(
-            rows.first(),
-            Some(&Line::Said {
-                text: "/write".to_owned()
-            })
+        assert!(
+            rows.contains(&Line::Said {
+                text: "write the brief".to_owned()
+            }),
+            "the yes is not on the card: {rows:?}"
         );
         assert!(
             rows.iter().any(|line| *line
@@ -1020,14 +1019,13 @@ mod whole {
         // The brief is on disk, so the conversation leaves brief mode the way
         // `/chat` does: the note, the mode, and a turn telling the model.
         assert_eq!(
-            notes(&app),
+            notes(&app)[1..],
             [
                 format!("wrote {PROPOSED} — {} bytes", written.len()),
                 CHAT_NOTE.to_owned()
             ]
         );
         assert_eq!(app.panel().mode(), Mode::Chat);
-        assert!(!app.panel().ready());
         assert!(chat.answering(), "the model was not told the brief is over");
         // The whole repository, after the whole path: the output directory
         // and the one file in it. No transcript, no draft of the brief, and

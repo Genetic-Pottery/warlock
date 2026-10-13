@@ -7,8 +7,8 @@ use crate::document::{self, Defect};
 use crate::fitting::{Assembled, Problem, Snapshot, Synthesised};
 use crate::hash::carry_hash;
 use crate::ignores;
-use crate::manifest::{ROOT_MODULE, write_atomically};
-use crate::scope::at_or_below;
+use crate::manifest::{Grant, write_atomically};
+use crate::scope::{at_or_above, at_or_below};
 use crate::walk::{self, DOCUMENT_FILE};
 use crate::{
     Agent, Manifest, NodeState, PactEntry, agent, decide_state, from_manifest_path, hash, manifest,
@@ -147,9 +147,13 @@ pub fn refresh_subtree(
     sink: &mut dyn FnMut(Event) -> Pacting,
 ) -> Result<PactedSubtree, Error> {
     let (directory, root) = (directory.as_ref(), root.as_ref());
-    let stale: Vec<PathBuf> = pactable_directories(directory)?
+    let stale: Vec<(PathBuf, Option<&PactEntry>)> = pactable_directories(directory)?
         .into_iter()
-        .filter(|candidate| !is_fresh(manifest, root, candidate))
+        .map(|candidate| {
+            let entry = manifest.entry_at(root, &candidate);
+            (candidate, entry)
+        })
+        .filter(|(candidate, entry)| !is_fresh(*entry, candidate))
         .collect();
 
     // Read here, where the manifest is, so `describe_and_grant` keeps knowing
@@ -158,10 +162,7 @@ pub fn refresh_subtree(
     // directories themselves.
     let mut recorded: BTreeMap<PathBuf, String> = BTreeMap::new();
     let mut line_hashes: BTreeMap<PathBuf, BTreeMap<String, String>> = BTreeMap::new();
-    for candidate in &stale {
-        let entry = to_manifest_path(root, candidate)
-            .ok()
-            .and_then(|module| manifest.entry(&module));
+    for (candidate, entry) in &stale {
         let Some(entry) = entry else {
             continue;
         };
@@ -173,6 +174,7 @@ pub fn refresh_subtree(
         }
     }
 
+    let stale: Vec<PathBuf> = stale.into_iter().map(|(candidate, _)| candidate).collect();
     let Described {
         outcomes,
         failures,
@@ -202,10 +204,7 @@ pub fn refresh_subtree(
 // Neither way of having no answer is an error: an unnameable path and an
 // unhashable directory both fall to the stale side, because calling either
 // fresh would be a false green earned on no evidence.
-fn is_fresh(manifest: &Manifest, root: &Path, directory: &Path) -> bool {
-    let entry = to_manifest_path(root, directory)
-        .ok()
-        .and_then(|module| manifest.entry(&module));
+fn is_fresh(entry: Option<&PactEntry>, directory: &Path) -> bool {
     let Ok(computed) = subtree_hash(directory) else {
         return false;
     };
@@ -231,41 +230,13 @@ struct Outcome {
     grant: Option<Grant>,
 }
 
-// `carry` is `None` where the digest could not be taken, rather than the grant
-// being dropped: no shortcut next time, but still a grant.
-#[derive(Debug)]
-struct Grant {
-    hash: String,
-    at: String,
-    carry: Option<String>,
-    // What each file hashed to as its line was settled. Written with the grant
-    // by the same save, so a line believed current can never be judged against
-    // a hash from another one.
-    lines: BTreeMap<String, String>,
-}
-
 impl Outcome {
     fn apply(self, entry: &mut PactEntry) {
-        let (grant, lines) = match self.grant {
-            Some(Grant {
-                hash,
-                at,
-                carry,
-                lines,
-            }) => (Some((hash, at, carry)), lines),
-            None => (None, BTreeMap::new()),
-        };
-        entry.overwrite_run_fields(self.module, self.document, grant);
-        // After `overwrite_run_fields`, which clears the field: what this run
-        // recorded is what stands, and a run that granted nothing leaves the
-        // entry saying no line is reusable.
-        if !lines.is_empty() {
-            entry.set_lines(lines);
-        }
+        entry.overwrite_run_fields(self.module, self.document, self.grant);
     }
 
     fn into_entry(self) -> PactEntry {
-        let mut entry = PactEntry::stored(self.module.clone(), self.document.clone());
+        let mut entry = PactEntry::stored(String::new(), String::new());
         self.apply(&mut entry);
         entry
     }
@@ -688,7 +659,7 @@ pub fn unpact_ignored(
         // ancestors are asked too: gitignore does not let a rule re-include
         // anything below an excluded directory, and a walk that starts inside
         // one would never see the rule that removed it.
-        for module in ancestry(entry.module(), &loaded_module) {
+        for module in at_or_above(entry.module()) {
             let ignored = if let Some(&known) = verdicts.get(module) {
                 known
             } else {
@@ -700,6 +671,9 @@ pub fn unpact_ignored(
             };
             if ignored {
                 excluded.insert(module);
+                break;
+            }
+            if module == loaded_module {
                 break;
             }
         }
@@ -720,22 +694,6 @@ pub fn unpact_ignored(
         })?;
     }
     Ok(kept)
-}
-
-// Stops at the loaded root, and at `ROOT_MODULE` whatever the root: without the
-// second stop a module with no `/` left to cut would name the repository root
-// forever.
-fn ancestry<'module>(module: &'module str, loaded: &str) -> Vec<&'module str> {
-    let mut candidates = vec![module];
-    let mut current = module;
-    while current != loaded && current != ROOT_MODULE {
-        current = match current.rsplit_once('/') {
-            Some((above, _)) => above,
-            None => ROOT_MODULE,
-        };
-        candidates.push(current);
-    }
-    candidates
 }
 
 // This entry point is never shown the directory's previous document — it hands
@@ -815,7 +773,7 @@ fn pact_directory_watched(
         .iter()
         .map(|name| {
             let mend = document::Mend {
-                field: format!("files[{name:?}]"),
+                field: document::Slot::FileLine(name.clone()),
                 done: document::Mended::Supplied,
             };
             announce_repair(directory, mend, sink)

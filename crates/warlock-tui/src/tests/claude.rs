@@ -7,19 +7,18 @@ use std::time::{Duration, Instant};
 use super::stream;
 use super::{
     Activities, Activity, BRIEF_EFFORT, BRIEF_MODEL, Bounded, CHAT_INSTRUCTION, CHAT_SYSTEM_PROMPT,
-    Cancel, ChatAgent, ClaudeAgent, Converses, DRAFT_NOW_INSTRUCTION, DRAFTING_CONTRACT,
-    DRAFTING_ONE_SHOT_CONTRACT, DRAFTING_ROUNDS, Drafted, Drafting, EFFORT, EFFORT_VAR,
-    INVOCATION_TIMEOUT, MODEL, MODEL_VAR, NOTHING_SETTLES_IT, OsString, PROPOSING_SYSTEM_PROMPT,
-    Replied, SYSTEM_PROMPT, Split, Splitting, Stopped, UNTIMED, Unsplit, WORKING_ATTEMPTS,
-    WORKING_TURNS, WRITE_INSTRUCTION, Wired, Worked, Working, brief_instruction, drafting_opening,
-    or_default, overridden, propose_answer, proposing_instruction, render, session_id,
-    working_opening, working_retry, working_system_prompt,
+    Cancel, ChatAgent, ClaudeAgent, Conversation, Converses, DRAFT_NOW_INSTRUCTION,
+    DRAFTING_CONTRACT, DRAFTING_ONE_SHOT_CONTRACT, DRAFTING_ROUNDS, Drafted, Drafting, EFFORT,
+    EFFORT_VAR, INVOCATION_TIMEOUT, MODEL, MODEL_VAR, NOTHING_SETTLES_IT, OsString,
+    PROPOSING_SYSTEM_PROMPT, Replied, SYSTEM_PROMPT, Split, Splitting, Stopped, UNTIMED, Unsplit,
+    WORKING_ATTEMPTS, WORKING_TURNS, WRITE_INSTRUCTION, Wired, Worked, Working, brief_instruction,
+    drafting_opening, or_default, overridden, propose_answer, proposing_instruction, render,
+    session_id, working_opening, working_retry, working_system_prompt,
 };
 use crate::brief::scope_block_in;
 use crate::panel::Mode;
 use crate::stubs::{Answering, Scripted};
 use crate::template::DEFAULT_TEMPLATE;
-use warlock_engine::document::Defect;
 use warlock_engine::{Agent, agent, drafting, splitting, working};
 
 // A name no directory on `PATH` can hold, so the lookup fails the way it does on
@@ -502,13 +501,13 @@ fn every_slice_drafted_off_one_agent_is_a_conversation_of_its_own() {
 
     let mut first = Drafting::for_slice(&agent, "the brief", "one", "the first slice");
     let _ = first.open();
-    let opened = turn_args(&first.agent);
+    let opened = turn_args(&first.conversation.agent);
     let first_id = value_of(&opened, "--resume")
         .expect("the first slice's next turn resumes its own conversation")
         .to_owned();
 
     let second = Drafting::for_slice(&agent, "the brief", "two", "the second slice");
-    let second_args = turn_args(&second.agent);
+    let second_args = turn_args(&second.conversation.agent);
     let second_id = value_of(&second_args, "--session-id")
         .expect("the second slice opens a conversation rather than resuming one");
 
@@ -2281,7 +2280,7 @@ fn drafting_is_a_session_of_its_own_rather_than_a_register_of_the_panels() {
 // The shape is written down twice — as the template, and restated inside
 // `WRITE_INSTRUCTION` — and only the template is enforced: `write_submit` refuses
 // a document missing one of its sections. So a section the instruction never asks
-// for is not a gap in a document, it is a `/write` that can never succeed. That
+// for is not a gap in a document, it is a write that can never succeed. That
 // happened once, with `## Scope` named in the template and omitted from the
 // instruction; this is the assertion that catches it.
 #[test]
@@ -3424,6 +3423,29 @@ fn a_cancelled_attempt_is_not_taken_again_and_is_not_blamed_on_the_session() {
 }
 
 #[test]
+fn a_conversations_handle_reaches_the_agent_through_every_rewiring() {
+    // `reporting` and `at_turns` are the two things that hand the conversation
+    // a different copy of the agent after the handle was minted; either one
+    // replacing the agent rather than re-wiring it would leave the handle
+    // reaching a copy nothing is running.
+    let agent = Attempting::default();
+    let mut conversation = Conversation::fresh(&agent).reporting(Activities::none());
+    conversation.at_turns(WORKING_TURNS * 2);
+    let cancel = conversation.cancel();
+
+    thread::spawn(move || cancel.cancel())
+        .join()
+        .expect("the cancelling thread ran");
+
+    let wirings = agent.cancels.lock().expect("the script is not poisoned");
+    assert_eq!(wirings.len(), 2, "fresh, then reporting");
+    assert!(
+        wirings.iter().all(Cancel::is_cancelled),
+        "a wiring the handle does not reach",
+    );
+}
+
+#[test]
 fn the_handle_a_sub_task_session_hands_out_reaches_the_agent_it_runs() {
     let agent = Attempting::taking([Attempt::Says(working::stub_answer("nothing to do"))]);
     let session = a_session(&agent);
@@ -3631,7 +3653,7 @@ fn a_ticket_that_never_parses_is_reported_rather_than_split_by_warlock() {
     assert_eq!(session.attempts(), splitting::ATTEMPTS);
     assert_eq!(agent.said().len(), splitting::ATTEMPTS);
     assert!(
-        matches!(halted, Unsplit::Unusable(Defect::NotJson { .. })),
+        matches!(halted, Unsplit::Unusable(splitting::Defect::NotJson { .. })),
         "{halted:?}",
     );
 
@@ -5166,4 +5188,39 @@ fn every_session_that_reads_the_repository_is_told_silence_is_not_absence() {
 
     // A pass reads only what its request carries, so the habit is nothing to it.
     assert!(!SYSTEM_PROMPT.contains(said));
+}
+
+mod marker {
+    use super::super::without_marker;
+
+    #[test]
+    fn a_last_line_that_is_the_marker_is_taken_off_and_counts() {
+        assert_eq!(
+            without_marker("We have every section.\n\n[ready to write]\n".to_owned()),
+            ("We have every section.".to_owned(), true)
+        );
+    }
+
+    #[test]
+    fn a_reply_that_is_only_the_marker_is_empty_and_counts() {
+        assert_eq!(
+            without_marker("  [ready to write]\n".to_owned()),
+            (String::new(), true)
+        );
+    }
+
+    #[test]
+    fn the_marker_anywhere_but_alone_on_the_last_line_is_left_and_does_not_count() {
+        for answer in [
+            "The brief is offered when I say [ready to write] last.",
+            "[ready to write]\nOne more question.",
+            "Nothing to report.",
+        ] {
+            assert_eq!(
+                without_marker(answer.to_owned()),
+                (answer.to_owned(), false),
+                "{answer:?}"
+            );
+        }
+    }
 }

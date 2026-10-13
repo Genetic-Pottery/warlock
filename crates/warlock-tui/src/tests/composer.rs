@@ -1507,7 +1507,7 @@ fn every_offset_is_drawn_somewhere_and_comes_back_from_there() {
 
 #[test]
 fn an_offset_at_a_row_break_is_column_zero_of_the_row_below() {
-    // The rule stated on `Composer::place`, asserted rather than left to the
+    // The rule stated on `composer::place`, asserted rather than left to the
     // round trip: the round trip would pass just as well with the offset
     // drawn at the end of the row above.
     let wrapped = composer("one two");

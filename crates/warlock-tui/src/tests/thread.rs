@@ -656,7 +656,7 @@ fn a_note_lands_between_the_turns_exactly_where_it_was_said() {
 
     // Note, turn, note: warlock says something before anybody has asked
     // anything, and again after the answer.
-    thread.note("commands are /brief, /write and /chat", base);
+    thread.note("commands are /brief, /draft and /chat", base);
     thread.ask("what does the engine do?", at(base, 4));
     thread.record(&Activity::Thinking, at(base, 5));
     thread.answer("It walks the tree.", at(base, 8));
@@ -671,7 +671,7 @@ fn a_note_lands_between_the_turns_exactly_where_it_was_said() {
         thread.lines(at(base, 30)),
         vec![
             Line::Note {
-                text: "commands are /brief, /write and /chat".to_owned(),
+                text: "commands are /brief, /draft and /chat".to_owned(),
             },
             Line::Said {
                 text: "what does the engine do?".to_owned(),

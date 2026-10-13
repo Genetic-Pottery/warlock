@@ -1,31 +1,15 @@
-//! The right-hand pane: an [`Account`] of the run, a [`Thread`] of the
-//! conversation, and the lines of a document somebody pressed `v` on — three
-//! cards, exactly one showing, and the swap key stepping between the ones there
-//! is anything to see in.
-//!
-//! It is a module because everything here was a private struct inside `app.rs`
-//! with twenty-three [`App`](crate::app::App) methods reaching into it, so a question
-//! about card-swapping or panel scrolling could only be asked by building a
-//! whole `App` — a `Tree`, a row list, a selection and a scroll offset, none of
-//! which the panel has ever had an opinion about. `App` still forwards every one
-//! of those methods, because nothing is bought by making two hundred call sites
-//! say `app.panel()` instead.
-
 use std::time::Instant;
 
 use crate::account::{Account, Line};
 use crate::app::cut_at_cap_message;
 use crate::claude::Activity;
 use crate::thread::{Ending, Thread};
-use crate::wrap::rows as wrap_rows;
+use crate::wrap;
 
 /// The group that survives everything. A reload carries it, because the tree is
 /// read again *because* a run finished and dropping it would wipe the record at
 /// the moment the reader turned to read it; a run that ends with nothing
 /// recorded carries it too, because an account is not a claim about the tree.
-/// That second rule used to be `App::take_account_from`, a method whose whole
-/// purpose was to reach into a live app and steal back the fields that must not
-/// roll back. It is a field move now.
 ///
 /// A filled card stays filled: reading a file does not throw the account away, a
 /// pact starting does not throw the document away, and neither empties the
@@ -64,9 +48,6 @@ pub(crate) struct Panel {
     document: Card<Vec<Line>>,
     showing: Showing,
     mode: Mode,
-    // Whether the latest brief-mode answer ended in the model's ready marker.
-    // Beside `mode` for `mode`'s reason: a pact rolling back must not take it.
-    ready: bool,
     height: usize,
     width: usize,
 }
@@ -120,6 +101,15 @@ pub(crate) enum Mode {
     #[default]
     Chat,
     Brief,
+}
+
+/// The showing card as one frame draws it: the card row its window starts at,
+/// how many rows are below that window, and the rows in it.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct View {
+    pub offset: usize,
+    pub below: usize,
+    pub lines: Vec<Line>,
 }
 
 /// Generic over what is on the card because the window rule is not: an offset, a
@@ -225,12 +215,20 @@ impl<T: Shown> Card<T> {
         )
     }
 
-    fn window(&self, height: usize, width: usize, now: Instant) -> Vec<Line> {
-        self.held.as_ref().map_or_else(Vec::new, |held| {
-            held.window(self.scroll_offset(height, width), height, width, now)
-        })
+    fn view(&self, height: usize, width: usize, now: Instant) -> View {
+        let count = self.line_count(width);
+        let offset = panel_offset_for(count, height, self.offset, self.following());
+        View {
+            offset,
+            below: count.saturating_sub(offset + height),
+            lines: self
+                .held
+                .as_ref()
+                .map_or_else(Vec::new, |held| held.window(offset, height, width, now)),
+        }
     }
 
+    #[cfg(test)]
     fn lines_below(&self, height: usize, width: usize) -> usize {
         self.line_count(width)
             .saturating_sub(self.scroll_offset(height, width) + height)
@@ -309,13 +307,13 @@ impl Shown for Vec<Line> {
 /// drawn cannot come apart. That module also decides the shape of a
 /// continuation row.
 fn row_count(lines: &[Line], width: usize) -> usize {
-    lines.iter().map(|line| wrap_rows(line, width).len()).sum()
+    lines.iter().map(|line| wrap::row_count(line, width)).sum()
 }
 
 fn row_window(lines: &[Line], offset: usize, height: usize, width: usize) -> Vec<Line> {
     lines
         .iter()
-        .flat_map(|line| wrap_rows(line, width))
+        .flat_map(|line| wrap::rows(line, width))
         .skip(offset)
         .take(height)
         .collect()
@@ -331,15 +329,25 @@ impl Panel {
         }
     }
 
+    /// Everything a frame draws from the showing card, counted and wrapped once
+    /// rather than once per question the renderer asks of it.
     #[must_use]
-    pub(crate) fn window(&self, now: Instant) -> Vec<Line> {
+    pub(crate) fn frame(&self, now: Instant) -> View {
+        let (height, width) = (self.height, self.width);
         match self.showing {
-            Showing::Account => self.account.window(self.height, self.width, now),
-            Showing::Thread => self.thread.window(self.height, self.width, now),
-            Showing::Document => self.document.window(self.height, self.width, now),
+            Showing::Account => self.account.view(height, width, now),
+            Showing::Thread => self.thread.view(height, width, now),
+            Showing::Document => self.document.view(height, width, now),
         }
     }
 
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn window(&self, now: Instant) -> Vec<Line> {
+        self.frame(now).lines
+    }
+
+    #[cfg(test)]
     #[must_use]
     pub(crate) fn lines_below(&self) -> usize {
         match self.showing {
@@ -397,10 +405,6 @@ pub(crate) fn panel_offset_for(
     if following { end } else { offset.min(end) }
 }
 
-/// Every one of these used to be a method on [`App`](crate::app::App) that touched
-/// `self.panel` and nothing else. They are here so the panel can be built,
-/// driven and asserted about without a tree, a row list, a selection or a scroll
-/// offset anywhere near it.
 impl Panel {
     #[cfg(test)]
     #[must_use]
@@ -625,15 +629,6 @@ impl Panel {
     #[must_use]
     pub(crate) const fn mode(&self) -> Mode {
         self.mode
-    }
-
-    #[must_use]
-    pub(crate) const fn ready(&self) -> bool {
-        self.ready
-    }
-
-    pub(crate) const fn set_ready(&mut self, ready: bool) {
-        self.ready = ready;
     }
 
     /// The answer is what a caller needs and cannot easily get back afterwards: a

@@ -463,7 +463,7 @@ fn a_machine_with_no_board_to_file_to_is_refused() {
     holding(no_record.path(), unrecorded.path(), &[SCOPE]);
 
     for (repo, home, expected) in [
-        (&holds_nothing, &nothing, "warlock config"),
+        (&holds_nothing, &nothing, "warlock sigil add"),
         (&unmatched, &elsewhere, "billing"),
         (&unrecorded, &no_record, "[[scope]]"),
     ] {

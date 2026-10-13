@@ -230,13 +230,13 @@ fn unavailable(
         });
     }
 
-    if named(issue.state(), review_state) {
+    if same_name(issue.state(), review_state) {
         return Some(Reason::InReview {
             state: issue.state().to_owned(),
         });
     }
 
-    if status.is_none() && named(issue.state(), IN_PROGRESS) {
+    if status.is_none() && same_name(issue.state(), IN_PROGRESS) {
         return Some(Reason::InProgressElsewhere);
     }
 
@@ -257,11 +257,11 @@ fn unavailable(
 /// typed or a future `--ticket war-9` should still find its own run rather than
 /// starting a second one over the same branch.
 fn run_for<'a>(runs: &'a [PullRun], identifier: &str) -> Option<&'a PullRun> {
-    runs.iter().find(|run| named(run.ticket(), identifier))
+    runs.iter().find(|run| same_name(run.ticket(), identifier))
 }
 
-fn named(state: &str, name: &str) -> bool {
-    state.trim().eq_ignore_ascii_case(name.trim())
+pub(crate) fn same_name(found: &str, name: &str) -> bool {
+    found.trim().eq_ignore_ascii_case(name.trim())
 }
 
 fn skip(issue: &QueuedIssue, reason: Reason) -> Skipped {
@@ -438,7 +438,7 @@ pub(crate) fn take_named(
         }));
     };
 
-    if !named(found.team(), record.team_key()) {
+    if !same_name(found.team(), record.team_key()) {
         return Ok(Named::Refused(Refusal::NotOnTeam {
             team: record.team_key().to_owned(),
             found: found.team().to_owned(),
@@ -448,7 +448,7 @@ pub(crate) fn take_named(
     if !found
         .labels()
         .iter()
-        .any(|label| named(label, record.label()))
+        .any(|label| same_name(label, record.label()))
     {
         return Ok(Named::Refused(Refusal::Unlabelled {
             label: record.label().to_owned(),

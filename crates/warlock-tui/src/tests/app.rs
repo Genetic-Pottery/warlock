@@ -4,8 +4,8 @@ use std::time::{Duration, Instant};
 use warlock_engine::{Node, NodeState, StateCounts, Tree};
 
 use super::{
-    App, Chrome, Focus, PactIntent, PactToggle, Row, Run, Showing, Sigils, cut_at_cap_message,
-    ignored_row_message, no_document_message, reseat_on, scroll_offset_for,
+    App, Chrome, Focus, Held, PactIntent, PactToggle, Row, Run, Showing, Sigils,
+    cut_at_cap_message, ignored_row_message, no_document_message, reseat_on, scroll_offset_for,
 };
 use crate::account::{Account, Line, Outcome};
 use crate::claude::Activity;
@@ -61,14 +61,13 @@ fn three_rows() -> Vec<Row> {
 
 fn rooted_rows() -> Vec<Row> {
     vec![
-        Row::new(0, "/repo", "/repo/.warlock.md", NodeState::PactedStale).with_child_count(1),
+        Row::new(0, "/repo", "/repo/.warlock.md", NodeState::PactedStale),
         Row::new(
             1,
             "/repo/crates",
             "/repo/crates/.warlock.md",
             NodeState::PactedStale,
-        )
-        .with_child_count(1),
+        ),
         Row::new(
             2,
             "/repo/crates/warlock-engine",
@@ -355,6 +354,10 @@ fn a_root_outside_the_repository_falls_back_to_printing_itself() {
     );
 }
 
+fn held(sigils: Sigils) -> Held {
+    Held { sigils, base: None }
+}
+
 #[test]
 fn a_chrome_nobody_built_states_nothing_at_all() {
     let chrome = Chrome::default();
@@ -371,7 +374,7 @@ fn the_header_is_not_app_state_and_no_app_carries_one() {
     // on every reload has no business holding either. What is left to check
     // is that building one costs an app nothing — a `Chrome` is a function
     // of two paths and a config, and there is no `App` anywhere in it.
-    let chrome = Chrome::of("/repo", "/repo/crates").with_sigils(Sigils::held(["billing"]));
+    let chrome = Chrome::of("/repo", "/repo/crates").with_held(held(Sigils::held(["billing"])));
 
     assert_eq!(chrome.header(), "crates");
     assert_eq!(chrome.sigils(), &Sigils::Held(vec!["billing".to_owned()]));
@@ -385,20 +388,15 @@ fn a_chrome_that_was_never_told_what_is_held_states_nothing() {
     let chrome = Chrome::of("/repo", "/repo/crates");
 
     assert_eq!(chrome.sigils(), &Sigils::Nothing);
-    assert_eq!(chrome.sigils().line(), None);
 }
 
 #[test]
 fn the_sigils_held_are_listed_in_the_order_the_config_has_them() {
-    let chrome = Chrome::default().with_sigils(Sigils::held(["billing", "web"]));
+    let chrome = Chrome::default().with_held(held(Sigils::held(["billing", "web"])));
 
     assert_eq!(
         chrome.sigils(),
         &Sigils::Held(vec!["billing".to_owned(), "web".to_owned()])
-    );
-    assert_eq!(
-        chrome.sigils().line(),
-        Some("holding `billing`, `web`".into())
     );
 }
 
@@ -410,7 +408,7 @@ fn a_missing_config_and_an_empty_set_are_the_same_nothing() {
     let empty: [String; 0] = [];
 
     assert_eq!(Sigils::held(empty), Sigils::Nothing);
-    assert_eq!(Sigils::held(Vec::<String>::new()).line(), None);
+    assert_eq!(Sigils::held(Vec::<String>::new()), Sigils::Nothing);
 }
 
 #[test]
@@ -420,24 +418,23 @@ fn a_config_that_would_not_read_is_said_out_loud_rather_than_looking_absent() {
     // draw the same line.
     let unknown = Sigils::Unknown;
 
-    assert_eq!(unknown.line(), Some("holding unknown".into()));
-    assert_ne!(unknown.line(), Sigils::Nothing.line());
-    assert_ne!(unknown.line(), Sigils::held(["billing"]).line());
+    assert_ne!(unknown, Sigils::Nothing);
+    assert_ne!(unknown, Sigils::held(["billing"]));
+    assert!(unknown.as_slice().is_empty());
 }
 
 #[test]
 fn holding_nothing_leaves_the_header_byte_for_byte_what_it_was() {
-    // The promise the three states are arranged around: a reader who never
-    // runs `warlock config` sees the header they have always seen, in both
-    // spellings of nothing and whether or not anything was ever set.
+    // Holding nothing, in either spelling of nothing, leaves the header
+    // exactly as it was and gives no holding line.
     let told = Chrome::of("/repo", "/repo/crates/engine");
     let before = told.header().to_owned();
 
     for nothing in [Sigils::Nothing, Sigils::held(Vec::<String>::new())] {
-        let chrome = told.clone().with_sigils(nothing);
+        let chrome = told.clone().with_held(held(nothing));
 
         assert_eq!(chrome.header(), before);
-        assert_eq!(chrome.sigils().line(), None);
+        assert_eq!(chrome.sigils(), &Sigils::Nothing);
     }
 }
 
@@ -449,7 +446,7 @@ fn what_is_held_changes_nothing_but_what_the_header_states() {
     // because a `Chrome` has no rows to reach.
     let chrome = Chrome::of("/repo", "/repo/crates");
 
-    let holding = chrome.clone().with_sigils(Sigils::held(["billing"]));
+    let holding = chrome.clone().with_held(held(Sigils::held(["billing"])));
 
     assert_eq!(holding.header(), chrome.header());
 }
@@ -1215,7 +1212,7 @@ fn a_file_row_is_refused_in_the_pact_keys_own_words() {
 
 fn rows_with_one_kept_out() -> Vec<Row> {
     vec![
-        Row::new(0, "repo", "repo/.warlock.md", NodeState::PactedStale).with_child_count(2),
+        Row::new(0, "repo", "repo/.warlock.md", NodeState::PactedStale),
         // Kept out by the rules: unpacted like any other unpacted directory,
         // and carrying no state of its own for being excluded.
         Row::new(1, "repo/notes", None, NodeState::Unpacted).with_ignored(true),
@@ -1753,7 +1750,7 @@ fn a_pact_in_flight_names_the_directory_relative_to_the_root_with_its_place() {
     // manifest spelling whatever the platform's separator is, with a
     // one-based place in the run beside it.
     assert_eq!(
-        app.pact_line().as_deref(),
+        app.run_header().map(|header| header.words()).as_deref(),
         Some("pacting crates/warlock-engine (2/12)")
     );
 }
@@ -1767,7 +1764,10 @@ fn the_root_of_the_tree_is_named_as_it_stands_in_a_pact_line() {
     // The root cannot be named relative to itself, so it is named as it
     // stands rather than as the `"."` relative spelling would give — the
     // same rule every other label here follows.
-    assert_eq!(app.pact_line().as_deref(), Some("pacting /repo (0/5)"));
+    assert_eq!(
+        app.run_header().map(|header| header.words()).as_deref(),
+        Some("pacting /repo (0/5)")
+    );
 }
 
 #[test]
@@ -1780,7 +1780,11 @@ fn the_pact_line_moves_as_the_caller_advances_the_run() {
         .enumerate()
     {
         app.set_pact_in_flight(path, position + 1, 3);
-        said.push(app.pact_line().expect("a pact is in flight"));
+        said.push(
+            app.run_header()
+                .map(|header| header.words())
+                .expect("a pact is in flight"),
+        );
     }
 
     assert_eq!(
@@ -1805,7 +1809,11 @@ fn the_progress_line_takes_its_verb_from_the_kind_of_run() {
 
         // One word apart: the directory, the fraction and the shape of the
         // line are the same, because it is the same kind of work.
-        assert_eq!(app.pact_line().as_deref(), Some(said), "{run:?}");
+        assert_eq!(
+            app.run_header().map(|header| header.words()).as_deref(),
+            Some(said),
+            "{run:?}"
+        );
         // And a refresh is a run in flight for everything else that asks.
         assert!(app.is_pacting(), "{run:?}");
         assert!(app.is_in_flight(&rooted_engine()), "{run:?}");
@@ -1820,7 +1828,10 @@ fn the_pact_key_starts_the_pacting_verb_and_nothing_has_to_say_so() {
 
     // `set_pact_in_flight` is `set_run_in_flight` with the kind filled in,
     // so every caller that predates the refresh goes on wording pacts.
-    assert_eq!(app.pact_line().as_deref(), Some("pacting /repo (0/5)"));
+    assert_eq!(
+        app.run_header().map(|header| header.words()).as_deref(),
+        Some("pacting /repo (0/5)")
+    );
 }
 
 #[test]
@@ -1835,40 +1846,40 @@ fn a_refresh_counts_the_stale_directories_it_was_given_and_keeps_its_clauses() {
     // The refusal is worded exactly as it is for a pact, and still goes
     // last.
     assert_eq!(
-        app.pact_line().as_deref(),
-        Some("refreshing crates/warlock-engine (2/7) — already running")
+        app.refused_line().as_deref(),
+        Some("refreshing crates/warlock-engine — already running")
     );
 
     // The run moving on re-words the line around the new directory and
     // carries the refusal along, refresh or not.
     app.set_run_in_flight(Run::Refresh, rooted_crates(), 4, 7);
     assert_eq!(
-        app.pact_line().as_deref(),
-        Some("refreshing crates (3/7) — already running")
+        app.refused_line().as_deref(),
+        Some("refreshing crates — already running")
     );
 
     // And the end of the run takes the whole line down, kind and all.
     app.clear_pact_in_flight();
     assert!(!app.is_pacting());
-    assert_eq!(app.pact_line(), None);
+    assert_eq!(app.run_header().map(|header| header.words()), None);
 }
 
 #[test]
 fn an_app_with_no_pact_running_has_no_pact_line() {
     let mut app = App::from_tree(&fixture::tree());
     assert!(!app.is_pacting());
-    assert_eq!(app.pact_line(), None);
-    assert_eq!(App::from_rows(three_rows()).pact_line(), None);
+    assert_eq!(app.run_header().map(|header| header.words()), None);
+    assert_eq!(App::from_rows(three_rows()).run_header(), None);
 
     app.set_pact_in_flight("warlock/crates", 2, 4);
     app.clear_pact_in_flight();
 
     // And the run being over is the caller's to say, whichever way it ended.
     assert!(!app.is_pacting());
-    assert_eq!(app.pact_line(), None);
+    assert_eq!(app.run_header().map(|header| header.words()), None);
     // Clearing one that was never there changes nothing.
     app.clear_pact_in_flight();
-    assert_eq!(app.pact_line(), None);
+    assert_eq!(app.run_header().map(|header| header.words()), None);
 }
 
 #[test]
@@ -1886,7 +1897,7 @@ fn an_app_with_no_run_in_flight_has_no_run_header() {
     // however the run ended.
     app.clear_pact_in_flight();
     assert!(app.run_header().is_none());
-    assert_eq!(app.pact_line(), None);
+    assert_eq!(app.run_header().map(|header| header.words()), None);
 }
 
 #[test]
@@ -1965,7 +1976,7 @@ fn the_run_headers_directory_is_spelled_the_way_the_footer_spells_it() {
     let header = app.run_header().expect("a run in flight has a header");
     assert_eq!(header.directory(), "crates/warlock-engine");
     assert_eq!(
-        app.pact_line().as_deref(),
+        app.run_header().map(|header| header.words()).as_deref(),
         Some("pacting crates/warlock-engine (2/12)")
     );
 
@@ -1979,7 +1990,8 @@ fn the_run_headers_directory_is_spelled_the_way_the_footer_spells_it() {
         Path::new("/elsewhere/notes").display().to_string()
     );
     assert!(
-        app.pact_line()
+        app.run_header()
+            .map(|header| header.words())
             .expect("a run in flight has a line")
             .contains(header.directory()),
         "the footer spelled it some other way"
@@ -2005,9 +2017,6 @@ fn the_run_headers_position_never_goes_backwards_within_one_run() {
     let header = app.run_header().expect("a run in flight has a header");
     assert_eq!(header.position(), 3);
     assert_eq!(header.total(), 12);
-    // The footer is untouched by the high-water mark and goes on reporting
-    // the directory and position it was just handed.
-    assert_eq!(app.pact_line().as_deref(), Some("pacting crates (1/12)"));
 
     // And it goes on rising the moment the run gets past where it had been.
     app.set_pact_in_flight(rooted_engine(), 5, 12);
@@ -2130,14 +2139,14 @@ fn a_pact_in_flight_takes_the_message_line_and_hands_it_back() {
     // message is kept rather than dropped: starting a pact is not a
     // keystroke, so it neither says anything nor takes anything down.
     assert_eq!(
-        app.pact_line().as_deref(),
+        app.run_header().map(|header| header.words()).as_deref(),
         Some("pacting warlock/crates (1/4)")
     );
     assert_eq!(app.message(), Some("something the caller said"));
 
     app.clear_pact_in_flight();
 
-    assert_eq!(app.pact_line(), None);
+    assert_eq!(app.run_header().map(|header| header.words()), None);
     assert_eq!(app.message(), Some("something the caller said"));
 }
 
@@ -2157,7 +2166,7 @@ fn a_keystroke_clears_a_message_and_leaves_the_pact_in_flight_alone() {
         // line describing it goes on being true.
         assert!(app.is_pacting(), "{name} stopped the pact");
         assert_eq!(
-            app.pact_line().as_deref(),
+            app.run_header().map(|header| header.words()).as_deref(),
             Some("pacting warlock/crates/engine (2/12)"),
             "{name} blanked the line for a pact that is still running"
         );
@@ -2172,8 +2181,8 @@ fn a_press_refused_by_a_running_pact_is_said_on_the_end_of_the_pact_line() {
     app.set_pact_refused();
 
     assert_eq!(
-        app.pact_line().as_deref(),
-        Some("pacting warlock/crates/engine (2/12) — already running")
+        app.refused_line().as_deref(),
+        Some("pacting warlock/crates/engine — already running")
     );
 
     // A second, third and fourth press say the same thing, because there is
@@ -2196,8 +2205,8 @@ fn the_run_moving_on_re_words_the_refusal_and_keeps_it() {
     app.set_pact_in_flight("warlock/crates/tui", 4, 12);
 
     assert_eq!(
-        app.pact_line().as_deref(),
-        Some("pacting warlock/crates/tui (3/12) — already running")
+        app.refused_line().as_deref(),
+        Some("pacting warlock/crates/tui — already running")
     );
 }
 
@@ -2213,7 +2222,7 @@ fn a_keystroke_takes_the_refusal_down_the_way_it_takes_a_message_down() {
         // The refusal belonged to the key that earned it; the run it was
         // about goes on, and its line goes back to being about the run.
         assert_eq!(
-            app.pact_line().as_deref(),
+            app.run_header().map(|header| header.words()).as_deref(),
             Some("pacting warlock/crates/engine (2/12)"),
             "{name} left the refusal on the line"
         );
@@ -2232,8 +2241,8 @@ fn a_refused_press_leaves_the_message_where_it_was() {
     // it is not routed through the message, so the message is still the last
     // keystroke's.
     assert_eq!(
-        app.pact_line().as_deref(),
-        Some("pacting warlock/crates (1/4) — already running")
+        app.refused_line().as_deref(),
+        Some("pacting warlock/crates — already running")
     );
     assert_eq!(app.message(), Some("something the caller said"));
 
@@ -2241,7 +2250,7 @@ fn a_refused_press_leaves_the_message_where_it_was() {
 
     // And when the run ends the message is handed back untouched, with no
     // sign of the refusal anywhere: the run it was about is over.
-    assert_eq!(app.pact_line(), None);
+    assert_eq!(app.run_header().map(|header| header.words()), None);
     assert_eq!(app.message(), Some("something the caller said"));
 }
 
@@ -2255,7 +2264,7 @@ fn a_refusal_says_nothing_while_no_pact_is_running() {
     // Nothing to be a suffix on, so nothing is said — and the pact key with
     // no run in flight goes on refusing the way it always did, through the
     // message.
-    assert_eq!(app.pact_line(), None);
+    assert_eq!(app.run_header().map(|header| header.words()), None);
     assert_eq!(app.message(), Some("something the caller said"));
 }
 
@@ -2265,26 +2274,6 @@ fn a_fresh_app_has_nothing_collapsed_and_draws_the_whole_walk() {
 
     assert!(app.collapsed().is_empty());
     assert_eq!(drawn(&app), whole_fixture());
-    // And it knows which of those rows could be collapsed at all. The
-    // document rows drawn beside them stand for files, which the tree knows
-    // nothing about and which hold nothing.
-    for row in app.rows().iter().filter(|row| !row.is_file()) {
-        assert_eq!(
-            row.children,
-            children_in_fixture(&row.path),
-            "child count for {}",
-            row.path.display()
-        );
-        assert_eq!(row.has_children(), row.children > 0);
-    }
-}
-
-fn children_in_fixture(path: &Path) -> usize {
-    fixture::tree()
-        .find(path)
-        .expect("the row came from the fixture")
-        .children
-        .len()
 }
 
 #[test]
@@ -2416,7 +2405,7 @@ fn toggling_a_node_with_nothing_under_it_changes_nothing_at_all() {
     // a leaf there is a row with something under it now.
     let mut app = select(
         App::from_rows(vec![
-            Row::new(0, "repo", "repo/.warlock.md", NodeState::PactedStale).with_child_count(1),
+            Row::new(0, "repo", "repo/.warlock.md", NodeState::PactedStale),
             Row::new(1, "repo/crates", None, NodeState::Unpacted),
         ]),
         "repo/crates",
@@ -2546,9 +2535,9 @@ fn collapsing_a_directory_leaves_a_sibling_whose_name_it_prefixes_alone() {
 }
 
 #[test]
-fn rows_from_a_bare_list_collapse_only_where_they_claim_children() {
+fn rows_from_a_bare_list_collapse_only_where_a_deeper_row_follows() {
     let mut app = App::from_rows(vec![
-        Row::new(0, "repo", "repo/.warlock.md", NodeState::PactedStale).with_child_count(1),
+        Row::new(0, "repo", "repo/.warlock.md", NodeState::PactedStale),
         Row::new(1, "repo/crates", None, NodeState::Unpacted),
     ]);
 
@@ -2557,7 +2546,7 @@ fn rows_from_a_bare_list_collapse_only_where_they_claim_children() {
 
     app.toggle_collapsed();
     assert_eq!(drawn(&app), ["repo", "repo/crates"]);
-    // The child, which claims none of its own, is not collapsible.
+    // The child, with nothing deeper after it, is not collapsible.
     app.select_next();
     app.toggle_collapsed();
     assert!(app.collapsed().is_empty());
@@ -2765,7 +2754,7 @@ fn collapsing_under_the_filter_hides_descendants_as_it_always_did() {
 #[test]
 fn nothing_pacted_narrows_to_nothing_at_all() {
     let mut app = App::from_rows(vec![
-        Row::new(0, "repo", "repo/.warlock.md", NodeState::Unpacted).with_child_count(1),
+        Row::new(0, "repo", "repo/.warlock.md", NodeState::Unpacted),
         Row::new(1, "repo/crates", None, NodeState::Unpacted),
     ]);
 
@@ -2926,7 +2915,6 @@ fn a_documented_directory_draws_its_document_beneath_it_and_an_undocumented_one_
         assert_eq!(document.state, directory.state);
         assert_eq!(document.is_ignored(), directory.is_ignored());
         assert_eq!(document.document, None);
-        assert!(!document.has_children());
     }
     assert!(app.rows()[4].is_ignored(), "the excluded one is excluded");
 
@@ -3024,7 +3012,6 @@ fn a_documented_childless_directory_collapses_with_the_files_hidden() {
     // with something under it is a row the collapse key has work to do on.
     let mut app = app_selecting("warlock/assets");
 
-    assert!(app.selected_row().is_some_and(|row| !row.has_children()));
     assert!(app.can_collapse(app.selected()));
 
     app.toggle_collapsed();
@@ -3117,8 +3104,6 @@ fn a_file_row_documents_nothing_contains_nothing_and_takes_its_modules_state() {
             "{} claims a document",
             row.path.display()
         );
-        assert_eq!(row.children, 0);
-        assert!(!row.has_children());
         let directory = row.path.parent().expect("a file sits in a directory");
         let node = tree.find(directory).expect("the file came from that node");
         assert_eq!(
@@ -3317,8 +3302,7 @@ fn collapsing_a_directory_hides_its_files_with_it_and_expanding_puts_them_back()
 fn a_directory_holding_only_files_collapses_exactly_when_the_files_are_shown() {
     // `repo/assets` has no child directories, no document and lists one
     // file, so whether anything is under it is the file toggle's answer and
-    // not the tree's. Asking the tree — `Row::children`, which is 0 here —
-    // is what used to leave the key doing nothing at all on such a row.
+    // not the tree's.
     let tree =
         Tree::new(
             Node::new("repo", "repo/.warlock.md", NodeState::PactedStale)
@@ -3329,7 +3313,6 @@ fn a_directory_holding_only_files_collapses_exactly_when_the_files_are_shown() {
     let selected = app.selected();
 
     assert!(!app.can_collapse(selected), "nothing is drawn under it");
-    assert!(app.selected_row().is_some_and(|row| !row.has_children()));
 
     app.toggle_collapsed();
     assert!(app.collapsed().is_empty(), "and the key refuses it");
@@ -3352,8 +3335,8 @@ fn a_directory_the_filter_has_emptied_does_not_collapse() {
     // and the pacted-only view takes it away. A row with nothing under it is
     // a row with nothing to hide, whichever filter emptied it.
     let mut app = App::from_rows(vec![
-        Row::new(0, "repo", "repo/.warlock.md", NodeState::PactedStale).with_child_count(1),
-        Row::new(1, "repo/crates", None, NodeState::Unpacted).with_child_count(1),
+        Row::new(0, "repo", "repo/.warlock.md", NodeState::PactedStale),
+        Row::new(1, "repo/crates", None, NodeState::Unpacted),
         Row::new(2, "repo/crates/tui", None, NodeState::Unpacted),
     ]);
 
@@ -3363,10 +3346,6 @@ fn a_directory_the_filter_has_emptied_does_not_collapse() {
 
     assert_eq!(drawn(&app), ["repo"], "the unpacted pair is filtered out");
     assert!(!app.can_collapse(0), "so the root holds nothing");
-    assert!(
-        app.selected_row().is_some_and(Row::has_children),
-        "though the tree still says it has a child"
-    );
 
     app.toggle_collapsed();
     assert!(app.collapsed().is_empty());
@@ -3463,7 +3442,7 @@ fn showing_files_leaves_the_window_in_range_with_the_selection_in_it() {
 #[test]
 fn a_bare_list_of_rows_can_hold_files_too_and_starts_with_them_hidden() {
     let app = App::from_rows(vec![
-        Row::new(0, "repo", "repo/.warlock.md", NodeState::PactedStale).with_child_count(1),
+        Row::new(0, "repo", "repo/.warlock.md", NodeState::PactedStale),
         Row::file(1, "repo/.warlock.md", NodeState::PactedStale),
         Row::new(1, "repo/crates", None, NodeState::Unpacted),
     ]);
@@ -5456,7 +5435,7 @@ fn a_reload_carries_the_thread_over_with_the_rest_of_the_panel() {
     ask_and_answer(&mut app, base);
     let thread = panel_text(&app, at(base, 9));
 
-    let reseated = reseat_on(&app, &fixture::tree_after_a_run());
+    let reseated = reseat_on(app.clone(), &fixture::tree_after_a_run());
 
     // The tree is read again *because* something happened, and a
     // conversation is not a claim about the tree: the card, the turn on it
@@ -6158,7 +6137,7 @@ fn a_re_seat_carries_the_account_and_the_panels_window() {
     app.select_first();
     let before = panel_text(&app, at(base, 9));
 
-    let reseated = reseat_on(&app, &fixture::tree());
+    let reseated = reseat_on(app.clone(), &fixture::tree());
 
     assert_eq!(reseated.panel().account(), app.panel().account());
     assert_eq!(reseated.panel().height(), usize::from(PANEL));
@@ -6180,7 +6159,7 @@ fn a_re_seat_under_a_document_leaves_it_showing_with_the_account_behind_it() {
 
     // What the watcher does when something on disk changed: a new tree,
     // everything else carried.
-    let reseated = reseat_on(&app, &fixture::tree_after_a_run());
+    let reseated = reseat_on(app.clone(), &fixture::tree_after_a_run());
 
     // The same card is on screen, on the same line of it. A reload that put
     // the account back would take a document out of the reader's hands at
@@ -6230,7 +6209,7 @@ fn selected_path(app: &App) -> Option<&Path> {
 fn a_re_seat_takes_its_rows_its_states_and_its_tally_from_the_new_tree() {
     let app = App::from_tree(&fixture::tree());
 
-    let reseated = reseat_on(&app, &fixture::tree_after_a_run());
+    let reseated = reseat_on(app.clone(), &fixture::tree_after_a_run());
 
     // The same five nodes, and the one the run worked on carrying the
     // document it wrote, in the state the new tree gives it — and drawing
@@ -6261,7 +6240,7 @@ fn a_file_the_new_tree_lists_and_the_old_one_did_not_gets_a_row() {
     let written = "warlock/crates/.warlock.md".to_owned();
     assert!(!drawn(&app).contains(&written));
 
-    let reseated = reseat_on(&app, &fixture::tree_after_a_run());
+    let reseated = reseat_on(app.clone(), &fixture::tree_after_a_run());
 
     assert!(reseated.show_files(), "the file toggle did not carry");
     assert!(
@@ -6274,7 +6253,7 @@ fn a_file_the_new_tree_lists_and_the_old_one_did_not_gets_a_row() {
 fn a_re_seat_keeps_the_selection_on_the_node_it_was_on() {
     let app = app_selecting("warlock/crates/tui");
 
-    let reseated = reseat_on(&app, &fixture::tree_after_a_run());
+    let reseated = reseat_on(app.clone(), &fixture::tree_after_a_run());
 
     assert_eq!(
         selected_path(&reseated),
@@ -6286,7 +6265,7 @@ fn a_re_seat_keeps_the_selection_on_the_node_it_was_on() {
 fn a_selection_the_new_tree_lost_lands_on_its_nearest_surviving_ancestor() {
     let app = app_selecting("warlock/crates/tui");
 
-    let reseated = reseat_on(&app, &tree_without_the_tui_crate());
+    let reseated = reseat_on(app.clone(), &tree_without_the_tui_crate());
 
     // The directory the node was in, which is where it went — not the first
     // row, which is a different part of the tree entirely.
@@ -6300,7 +6279,7 @@ fn a_selection_the_new_tree_lost_lands_on_its_nearest_surviving_ancestor() {
         "elsewhere/.warlock.md",
         NodeState::Unpacted,
     ));
-    let reseated = reseat_on(&app, &elsewhere);
+    let reseated = reseat_on(app.clone(), &elsewhere);
 
     assert_eq!(reseated.selected(), 0);
     assert_eq!(selected_path(&reseated), Some(Path::new("elsewhere")));
@@ -6310,7 +6289,7 @@ fn a_selection_the_new_tree_lost_lands_on_its_nearest_surviving_ancestor() {
 fn a_re_seat_carries_the_collapsed_set_including_paths_the_new_tree_lacks() {
     let app = App::from_tree(&fixture::tree()).with_collapsed(["warlock/crates", "warlock/gone"]);
 
-    let reseated = reseat_on(&app, &tree_without_the_tui_crate());
+    let reseated = reseat_on(app.clone(), &tree_without_the_tui_crate());
 
     // Both paths carried, the one the tree has no node for included: a
     // directory that comes back should come back shut.
@@ -6335,7 +6314,7 @@ fn the_view_flags_and_the_window_survive_a_re_seat() {
     app.set_pact_in_flight("warlock/crates", 2, 5);
     app.toggle_focus();
 
-    let reseated = reseat_on(&app, &fixture::tree_after_a_run());
+    let reseated = reseat_on(app.clone(), &fixture::tree_after_a_run());
 
     assert!(reseated.show_files());
     assert!(reseated.pacted_only());
@@ -6345,7 +6324,10 @@ fn the_view_flags_and_the_window_survive_a_re_seat() {
         reseated.message(),
         Some("something from the last keystroke")
     );
-    assert_eq!(reseated.pact_line(), app.pact_line());
+    assert_eq!(
+        reseated.run_header().map(|header| header.words()),
+        app.run_header().map(|header| header.words())
+    );
     assert_eq!(selected_path(&reseated), selected_path(&app));
     // The window may have had to move by the rows the new tree added above
     // the selection, but never further than it had to, and never off the
@@ -6379,7 +6361,7 @@ fn re_seating_on_a_tree_that_has_not_changed_leaves_the_view_exactly_as_it_was()
     // What the binary does when a load turns up a tree nothing has happened
     // to: every field of the re-seated app is the field it carried, down to
     // the header, the scroll offset and the pact still in flight.
-    let reseated = reseat_on(&app, &fixture::tree());
+    let reseated = reseat_on(app.clone(), &fixture::tree());
 
     assert_eq!(reseated, app);
 }
@@ -6480,7 +6462,6 @@ fn an_inserted_file_row_is_a_file_row_in_its_directorys_colour_now() {
     assert_eq!(row.depth, 2);
     assert_eq!(row.state, NodeState::PactedFresh);
     assert_eq!(row.document, None);
-    assert_eq!(row.children, 0);
     assert!(!row.is_ignored());
 }
 
@@ -6607,7 +6588,7 @@ fn with_files_hidden_a_document_written_mid_run_is_drawn_at_once() {
     // finds. Path and depth, because the two apps are two accounts of the
     // same screen and not the same value — the reload knows `crates/` has a
     // document and the mid-run tree does not.
-    let reloaded = reseat_on(&app, &fixture::tree_after_a_run());
+    let reloaded = reseat_on(app.clone(), &fixture::tree_after_a_run());
     assert_eq!(
         paths_and_depths(app.rows()),
         paths_and_depths(reloaded.rows())

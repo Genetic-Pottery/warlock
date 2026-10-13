@@ -47,7 +47,7 @@ Workflow
 
 ### Writing a brief
 ![writing a brief demo](./assets/write.gif)
-> type /write once your shared understanding with the AI has been reached and a document will be written which eventually will be turned into tickets
+> once the AI has enough it asks whether to write the brief; say yes and a document is written which eventually will be turned into tickets, or say no and ask for it later in your own words
 
 ### Pushing a brief
 ![pushing a brief demo](./assets/push.gif)

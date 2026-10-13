@@ -22,8 +22,9 @@ use crate::puller::{Claudes, Puller, Raises};
 use crate::pushing::Pushes;
 use crate::screen::Screen;
 use crate::session::{Scope, Watched};
+use crate::settings::Settings;
 use crate::stubs::{Boarding, Checkout, Copying, Forging, Passing, Saying, Scripted};
-use crate::ui::tree_height;
+use crate::ui::Shape;
 
 #[derive(Debug)]
 struct FakeScreen {
@@ -160,6 +161,7 @@ fn session(rows: Vec<Row>) -> Driven {
         chrome: Chrome::of(&root, &root),
         root: root.clone(),
         repo_root: root.clone(),
+        settings: Settings::at(None, &root),
     };
     // A one-node tree for the watcher to be started over. Nothing is there,
     // so no watcher is granted and `Watching` says why — which is exactly
@@ -226,6 +228,7 @@ fn loading(root: &Path) -> (App, Scope, Tree) {
     let scope = Scope {
         chrome: Chrome::of(&repo_root, tree.root_path()),
         root: tree.root_path().to_path_buf(),
+        settings: Settings::at(None, &repo_root),
         repo_root,
     };
     (App::from_tree(&tree), scope, tree)
@@ -250,7 +253,12 @@ fn a_round_tells_the_app_the_size_the_frame_is_being_cut_at() {
 
     assert_eq!(
         driven.app.viewport_height(),
-        usize::from(tree_height(size)),
+        usize::from(
+            Shape::new(size)
+                .sigils(driven.scope.chrome.sigils())
+                .cut()
+                .tree_height()
+        ),
         "the app was told the height this frame gives the tree"
     );
 }
@@ -1706,6 +1714,98 @@ mod pasting {
     }
 }
 
+mod offering {
+    use super::{AT_MOST, Driven, Focus, Instant, KeyCode, directory, key, pressed, session};
+    use crate::chatting::Chat;
+    use crate::confirm::Answer;
+    use crate::panel::Mode;
+    use crate::stubs::Saying;
+
+    const READY: &str = "Every section is settled.\n[ready to write]";
+
+    fn briefed() -> Driven {
+        let mut driven = session(vec![directory("/repo/crates")]);
+        driven.chat = Chat::with_agent("/warlock/no/such/repository", Saying::answering(READY));
+        driven.app.set_focus(Focus::Composer);
+        driven.paste("/brief");
+        assert!(
+            pressed(&mut driven, key(KeyCode::Enter)),
+            "/brief ended the session"
+        );
+        answered(&mut driven);
+        driven
+    }
+
+    fn answered(driven: &mut Driven) {
+        let waited = Instant::now();
+        while driven.chat.answering() && waited.elapsed() < AT_MOST {
+            let size = driven.size().expect("the fake screen has a size");
+            driven.draw(size).expect("the fake screen draws");
+            driven.keep_up();
+        }
+        assert!(!driven.chat.answering(), "the turn never ended");
+        let size = driven.size().expect("the fake screen has a size");
+        driven.draw(size).expect("the fake screen draws");
+    }
+
+    fn on_screen(driven: &Driven, word: &str) -> bool {
+        let buffer = driven.screen.terminal.backend().buffer();
+        let area = buffer.area;
+        (0..area.height).any(|row| {
+            let line: String = (0..area.width).map(|x| buffer[(x, row)].symbol()).collect();
+            line.contains(word)
+        })
+    }
+
+    #[test]
+    fn a_ready_brief_puts_the_question_up_over_the_composer_with_no_lit() {
+        let driven = briefed();
+
+        assert_eq!(driven.app.panel().mode(), Mode::Brief);
+        assert_eq!(driven.chat.write_offer(), Some(Answer::No));
+        assert!(
+            on_screen(&driven, "Write the brief?"),
+            "the question was not drawn"
+        );
+    }
+
+    #[test]
+    fn a_key_typed_while_the_question_is_up_never_reaches_the_draft() {
+        let mut driven = briefed();
+
+        assert!(pressed(&mut driven, key(KeyCode::Char('a'))));
+
+        assert_eq!(driven.chat.composer().draft(), "");
+        assert_eq!(driven.chat.write_offer(), Some(Answer::No));
+    }
+
+    #[test]
+    fn enter_on_the_lit_no_takes_the_question_down_and_asks_nothing() {
+        let mut driven = briefed();
+
+        assert!(pressed(&mut driven, key(KeyCode::Enter)));
+
+        assert_eq!(driven.chat.write_offer(), None);
+        assert!(!driven.chat.answering(), "no started a turn");
+        assert_eq!(driven.app.panel().mode(), Mode::Brief);
+    }
+
+    #[test]
+    fn y_asks_for_the_document_and_the_path_prompt_opens_over_it() {
+        let mut driven = briefed();
+
+        assert!(pressed(&mut driven, key(KeyCode::Char('y'))));
+        assert_eq!(driven.chat.write_offer(), None);
+        assert!(driven.chat.answering(), "yes asked the model nothing");
+        answered(&mut driven);
+
+        assert!(
+            driven.chat.write_prompt().is_open(),
+            "the document opened no path prompt"
+        );
+    }
+}
+
 // A `/push` driven the whole way through a session — `/push <scope> <path>`,
 // Left, Enter — over a Linear that answers out of memory and a home this module
 // made. Nothing here opens a socket, reads a real credential or looks at the
@@ -1945,6 +2045,27 @@ mod filing {
                 "{command} put the dialog up"
             );
         }
+    }
+
+    #[test]
+    fn a_push_of_a_path_outside_the_repository_is_refused_before_anything_is_read() {
+        let repo = a_repository();
+        let home = a_home(repo.path());
+        let linear = Boarding::unreachable();
+        let mut driven = filing_session(repo.path(), home.path(), &linear);
+
+        typing(
+            &mut driven,
+            &format!("/push {SCOPE} ../elsewhere/a-brief.md"),
+        );
+        round(&mut driven);
+
+        let said = notes(&driven);
+        assert_eq!(said.len(), 1, "the refusal was not one line: {said:?}");
+        assert!(
+            !driven.pushes.window().confirm.is_open(),
+            "a path outside the repository put the dialog up"
+        );
     }
 
     #[test]
@@ -2826,6 +2947,7 @@ mod pulling {
     use crate::prompt::ScopePrompt;
     use crate::puller::Puller;
     use crate::pushing::Pushes;
+    use crate::settings::Settings;
     use crate::stubs::{
         Boarding, Checkout, Forging, Op, Refreshing, Scripted, Sessions, Slicing, VIEWER, Written,
         said,
@@ -2962,6 +3084,7 @@ mod pulling {
             ),
         );
         driven.manifest = a_manifest();
+        driven.scope.settings = Settings::at(Some(home.to_path_buf()), repo);
         driven
     }
 
@@ -3163,7 +3286,7 @@ mod pulling {
     }
 
     #[test]
-    fn a_word_nobody_made_a_command_is_refused_in_the_sentence_naming_all_seven() {
+    fn a_word_nobody_made_a_command_is_refused_in_the_sentence_naming_them() {
         let repo = a_repository();
         let home = a_home(repo.path());
         let linear = Boarding::unopened();
@@ -3184,10 +3307,8 @@ mod pulling {
         let refusal = submitted_for("/pullll")
             .refusal()
             .expect("a word nobody made a command is refused");
-        assert_eq!(notes(&driven), vec![refusal.to_owned()]);
-        for command in [
-            "/brief", "/write", "/chat", "/push", "/draft", "/pull", "/resume",
-        ] {
+        assert_eq!(notes(&driven), vec![refusal.clone()]);
+        for command in ["/brief", "/chat", "/push", "/draft", "/pull", "/resume"] {
             assert!(
                 refusal.contains(command),
                 "{refusal:?} does not name {command}"
@@ -3422,6 +3543,85 @@ mod pulling {
     }
 
     #[test]
+    fn sigil_add_writes_the_config_and_moves_the_box() {
+        let repo = a_repository();
+        let home = a_home(repo.path());
+        let mut driven = pulling_session(repo.path(), home.path(), board(), checkout(), working());
+
+        typing(&mut driven, "/sigil add Docs");
+
+        let wanted = vec![SCOPE.to_owned(), "docs".to_owned()];
+        assert_eq!(
+            warlock_engine::held_sigils(home.path(), repo.path()).expect("the config reads"),
+            wanted
+        );
+        assert_eq!(
+            driven.scope.chrome.sigils(),
+            &crate::app::Sigils::held(wanted)
+        );
+        let said = notes(&driven);
+        assert!(
+            said.last().is_some_and(|line| line.contains("`docs`")),
+            "{said:?}"
+        );
+        assert!(!driven.chat.answering(), "a `/sigil` opened a turn");
+    }
+
+    #[test]
+    fn removing_a_sigil_not_held_says_so_and_writes_nothing() {
+        let repo = a_repository();
+        let home = a_home(repo.path());
+        let mut driven = pulling_session(repo.path(), home.path(), board(), checkout(), working());
+        round(&mut driven);
+        let before = driven.scope.chrome.sigils().clone();
+
+        typing(&mut driven, "/sigil remove elsewhere");
+
+        assert_eq!(
+            warlock_engine::held_sigils(home.path(), repo.path()).expect("the config reads"),
+            vec![SCOPE.to_owned()]
+        );
+        assert_eq!(driven.scope.chrome.sigils(), &before);
+        let said = notes(&driven);
+        assert!(
+            said.last()
+                .is_some_and(|line| line.contains("does not hold `elsewhere`")),
+            "{said:?}"
+        );
+    }
+
+    #[test]
+    fn a_config_written_behind_the_sessions_back_is_read_on_the_next_round() {
+        let repo = a_repository();
+        let home = a_home(repo.path());
+        let mut driven = pulling_session(repo.path(), home.path(), board(), checkout(), working());
+        round(&mut driven);
+        assert_eq!(
+            driven.scope.chrome.sigils(),
+            &crate::app::Sigils::held([SCOPE])
+        );
+
+        save_sigils(home.path(), repo.path(), &["other".to_owned()]).expect("a config that writes");
+        warlock_engine::save_base_branch(home.path(), repo.path(), Some("dev"))
+            .expect("a config that writes");
+        // Pushed forward so a filesystem with a coarse clock still sees the
+        // write as a change.
+        fs::File::options()
+            .write(true)
+            .open(warlock_engine::sigils_path(home.path(), repo.path()))
+            .expect("the config is there")
+            .set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(10))
+            .expect("the mtime sets");
+        round(&mut driven);
+
+        assert_eq!(
+            driven.scope.chrome.sigils(),
+            &crate::app::Sigils::held(["other"])
+        );
+        assert_eq!(driven.scope.chrome.target(), crate::app::Target::Set("dev"));
+    }
+
+    #[test]
     fn branch_use_saves_the_base_moves_the_title_and_clear_puts_it_back() {
         let repo = a_repository();
         let home = a_home(repo.path());
@@ -3461,8 +3661,11 @@ mod pulling {
     fn a_bare_branch_names_the_base_and_writes_nothing() {
         let repo = a_repository();
         let home = a_home(repo.path());
+        warlock_engine::save_base_branch(home.path(), repo.path(), Some("dev"))
+            .expect("a config that writes");
         let mut driven = pulling_session(repo.path(), home.path(), board(), checkout(), working());
-        driven.scope.chrome.set_base(Some("dev".to_owned()));
+        let before = fs::read(warlock_engine::sigils_path(home.path(), repo.path()))
+            .expect("the config is there");
 
         typing(&mut driven, "/branch");
         let said = notes(&driven);
@@ -3471,9 +3674,38 @@ mod pulling {
             "{said:?}"
         );
         assert_eq!(
-            warlock_engine::held_base_branch(home.path(), repo.path()).expect("the config reads"),
-            None
+            fs::read(warlock_engine::sigils_path(home.path(), repo.path()))
+                .expect("the config is there"),
+            before
         );
+    }
+
+    #[test]
+    fn a_bare_pull_names_the_scopes_held_and_reads_nothing_else() {
+        let repo = a_repository();
+        let home = a_home(repo.path());
+        let linear = board();
+        let mut driven = pulling_session(
+            repo.path(),
+            home.path(),
+            linear.clone(),
+            checkout(),
+            working(),
+        );
+
+        typing(&mut driven, "/pull");
+
+        let said = notes(&driven);
+        assert!(
+            said.last().is_some_and(|line| line.contains(SCOPE)),
+            "{said:?}"
+        );
+        assert!(!driven.puller.choosing(), "a bare `/pull` read a queue");
+        assert!(
+            !driven.puller.confirm().is_open(),
+            "a bare `/pull` opened the dialog"
+        );
+        assert_eq!(linear.requests(), 0, "a bare `/pull` reached the board");
     }
 
     #[test]

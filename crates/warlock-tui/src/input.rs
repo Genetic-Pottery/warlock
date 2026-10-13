@@ -10,9 +10,8 @@
 use ratatui::crossterm::event::{
     KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
-use ratatui::layout::Size;
 
-use crate::app::{App, Focus, RunHeader};
+use crate::app::{App, Focus};
 use crate::composer::{Composed, Composer, compose_for};
 use crate::confirm::{
     Answered, CarryAnswered, CutAnswered, PullAnswered, PushAnswered, QuitConfirm, Reviewed,
@@ -23,7 +22,7 @@ use crate::help::{HelpSheet, help_for};
 use crate::modal::Modal;
 use crate::prompt::{Edited, RecordEdited, edit_for, record_edit_for};
 use crate::selection::Cell;
-use crate::ui::{Hit, Reach, hit_test, panel_reach};
+use crate::ui::{Cut, Hit, Reach, Shape};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Action {
@@ -60,16 +59,10 @@ pub(crate) fn action_for(key: KeyEvent, in_flight: bool) -> Option<Action> {
     }
 
     match key.code {
-        // `contains` rather than equality: shift or caps lock can ride along
-        // (some terminals report the upper-case letter with it), and Ctrl-C is
-        // still Ctrl-C.
-        KeyCode::Char('c' | 'C') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            Some(Action::Quit)
-        }
         // Before the quit arm below, and the only arm the mode touches: Esc
         // stops being a way out for as long as there is a run to stop, while
-        // `q` and Ctrl-C — the keys a reader reaches for deliberately — go on
-        // meaning quit.
+        // `q` — the key a reader reaches for deliberately — goes on meaning
+        // quit. Ctrl-C never arrives here: `press_for` takes it first.
         KeyCode::Esc if in_flight => Some(Action::CancelPact),
         KeyCode::Char('q') | KeyCode::Esc => Some(Action::Quit),
         KeyCode::Tab => Some(Action::ToggleFocus),
@@ -148,6 +141,7 @@ pub(crate) enum Pressed {
     // And the two-answer question a skipped slice leaves behind, which is the
     // quit dialog's shape said in the run's words.
     Carry(CarryAnswered),
+    WriteBrief(Answered),
     Scope(Edited),
     Record(RecordEdited),
     Write(Edited),
@@ -180,10 +174,8 @@ fn review_scroll(key: KeyEvent) -> Option<Scroll> {
     }
 }
 
-// Spelled here rather than reached for through `action_for`, because
-// `press_for` has to answer Ctrl-C before it consults anything else: two
-// spellings of the one keystroke that must always work is how it stops working
-// in one of them.
+// `contains` rather than equality: shift or caps lock can ride along (some
+// terminals report the upper-case letter with it), and Ctrl-C is still Ctrl-C.
 fn is_ctrl_c(key: KeyEvent) -> bool {
     key.kind == KeyEventKind::Press
         && matches!(key.code, KeyCode::Char('c' | 'C'))
@@ -249,6 +241,7 @@ pub(crate) fn press_for(
                 Pressed::Scroll,
             ),
             Modal::Carry(asked) => Pressed::Carry(carry_answer_for(key, asked.answer())),
+            Modal::WriteBrief(highlighted) => Pressed::WriteBrief(answer_for(key, highlighted)),
             Modal::Scope(field) => Pressed::Scope(edit_for(key, field)),
             Modal::Record(form) => Pressed::Record(record_edit_for(key, form)),
             Modal::Write(field) => Pressed::Write(edit_for(key, field)),
@@ -341,29 +334,26 @@ pub(crate) struct Drag {
     pub(crate) past: Option<Reach>,
 }
 
-// `size` is the size the round measured before it drew, and `composer` the
-// draft that frame was drawn with, because the hit test has to agree with the
-// frame the reader is pointing at: a second opinion about the layout — or one
-// that had not been told the field took rows from the panel — answers
-// `PanelLine` for a point on the composer and scrolls a window the pointer is
-// not over.
+// `shape` is the one the round measured with before it drew, because the hit
+// test has to agree with the frame the reader is pointing at: a shape that had
+// not been told the field took rows from the panel answers `PanelLine` for a
+// point on the composer and scrolls a window the pointer is not over.
 //
 // No window has anything clickable in it, so while one is up every event is
 // dropped, wheel and click alike: a click that reached the tree behind one
 // would select a row the reader cannot see.
 pub(crate) fn mouse_action(
     mouse: MouseEvent,
-    size: Size,
+    shape: Shape<'_>,
     app: &App,
     modal: Option<Modal<'_>>,
-    composer: Option<&Composer>,
 ) -> Option<MouseAction> {
     if modal.is_some() {
         return None;
     }
 
-    let header = app.run_header();
-    let hit = hit_test(mouse.column, mouse.row, size, composer, header.as_ref());
+    let cut = shape.cut();
+    let hit = cut.hit(mouse.column, mouse.row);
     match mouse.kind {
         // Down the tree and down the account are the same direction, so one
         // notch reads the same way over either pane.
@@ -388,15 +378,10 @@ pub(crate) fn mouse_action(
         // to come back with this event or not at all.
         MouseEventKind::Drag(MouseButton::Left) => cell_under(hit, app)
             .map(MouseAction::ExtendSelection)
-            .or_else(|| {
-                past_rows(mouse, size, app, composer, header.as_ref())
-                    .map(MouseAction::ExtendPastEdge)
-            }),
+            .or_else(|| past_rows(mouse, &cut, app).map(MouseAction::ExtendPastEdge)),
         MouseEventKind::Up(MouseButton::Left) => cell_under(hit, app)
             .map(MouseAction::EndSelection)
-            .or_else(|| {
-                past_rows(mouse, size, app, composer, header.as_ref()).map(MouseAction::EndPastEdge)
-            }),
+            .or_else(|| past_rows(mouse, &cut, app).map(MouseAction::EndPastEdge)),
         _ => None,
     }
 }
@@ -447,14 +432,14 @@ pub(crate) fn drag_after(
 }
 
 // The wheel drives whichever pane the pointer is over, focus notwithstanding,
-// and every part of a pane's inside answers for it — headers included, because
-// a notch that did nothing on the one line naming the tree reads as a wheel
-// that sticks. The composer answers nothing: it scrolls itself as somebody
+// and every part of a pane's inside answers for it — the run header included,
+// because a notch that did nothing on one line of a pane reads as a wheel that
+// sticks. The composer answers nothing: it scrolls itself as somebody
 // types, and scrolling the account because the pointer was resting on the field
 // would move the half of the screen the reader is not pointing at.
 fn wheel(hit: Hit, tree: MouseAction, panel: MouseAction) -> Option<MouseAction> {
     match hit {
-        Hit::TreeHeader | Hit::TreeRow { .. } | Hit::TreeBelowRows => Some(tree),
+        Hit::TreeRow { .. } | Hit::TreeBelowRows => Some(tree),
         Hit::PanelHeader | Hit::PanelLine { .. } => Some(panel),
         Hit::Composer | Hit::Footer | Hit::Border | Hit::Offscreen => None,
     }
@@ -481,7 +466,7 @@ fn click(hit: Hit, app: &App) -> Option<MouseAction> {
                 Some(MouseAction::SelectRow(index))
             }
         }
-        Hit::TreeHeader | Hit::TreeBelowRows => Some(MouseAction::Focus(Focus::Tree)),
+        Hit::TreeBelowRows => Some(MouseAction::Focus(Focus::Tree)),
         // Over a conversation the press anchors a selection, and that action
         // takes the keys too: everywhere else in the panel — its header, either
         // of the other two cards, a thread card with nothing on it yet — there is
@@ -532,18 +517,12 @@ fn cell_under(hit: Hit, app: &App) -> Option<Cell> {
 // refusal: the account and the document are read past, not copied out of, and a
 // pointer dragged off the bottom of either has to go on meaning what it meant
 // before a drag off the thread card meant anything.
-fn past_rows(
-    mouse: MouseEvent,
-    size: Size,
-    app: &App,
-    composer: Option<&Composer>,
-    header: Option<&RunHeader>,
-) -> Option<Reach> {
+fn past_rows(mouse: MouseEvent, cut: &Cut, app: &App) -> Option<Reach> {
     if !selectable(app) {
         return None;
     }
 
-    match panel_reach(mouse.column, mouse.row, size, composer, header) {
+    match cut.reach(mouse.column, mouse.row) {
         Reach::Inside { .. } => None,
         past => Some(past),
     }

@@ -1,12 +1,12 @@
 use std::collections::BTreeSet;
 
-use crate::fill::Defect;
+use super::{Defect, Slot};
 
 use super::{
     Accepted, Caught, DEPENDS_ON_PER_SUBTASK, DONE_CHARS, DONE_PER_SUBTASK, FILE_CHARS,
-    FILES_PER_SUBTASK, Fill, GOAL_CHARS, GOAL_MINIMUM, MEND_PASSES, Mend, Mended, NOTES_CHARS,
-    Numbered, SPLIT_PROMPT, SUBTASKS_PER_TICKET, Subtask, TEST_PLAN_CHARS, accept, check, mend,
-    mended, number, split_instructions, stub_answer,
+    FILES_PER_SUBTASK, Fill, GOAL_CHARS, GOAL_MINIMUM, Lost, MEND_PASSES, Mend, Mended,
+    NOTES_CHARS, Numbered, SPLIT_PROMPT, SUBTASKS_PER_TICKET, Subtask, TEST_PLAN_CHARS, accept,
+    check, mend, mended, number, split_instructions, stub_answer,
 };
 
 const DONE: &str = "The module exists and its tests pass.";
@@ -27,9 +27,9 @@ fn sound(which: usize) -> Subtask {
     }
 }
 
-// Three sound sub-tasks with the one under test third, so every field string a
-// defect carries is `subtasks[2]...` and an index read off the wrong list shows
-// up as a mismatch rather than passing by luck.
+// Three sound sub-tasks with the one under test third, so every slot a defect
+// carries is at index 2 and an index read off the wrong list shows up as a
+// mismatch rather than passing by luck.
 fn third(subtask: Subtask) -> Fill {
     split(vec![sound(0), sound(1), subtask])
 }
@@ -116,7 +116,7 @@ fn a_sound_answer_is_filled_and_a_defective_one_carries_its_defects() {
     assert_eq!(
         defects,
         vec![Defect::Empty {
-            field: "subtasks[2].goal".to_owned()
+            field: Slot::Goal(2)
         }]
     );
 
@@ -170,7 +170,7 @@ fn a_ticket_nobody_split_is_a_missing_array() {
     assert_eq!(
         check(&split(Vec::new())),
         vec![Defect::Missing {
-            field: "subtasks".to_owned()
+            field: Slot::Subtasks
         }]
     );
 }
@@ -181,7 +181,7 @@ fn more_subtasks_than_the_cap_are_reported_against_the_array() {
     assert_eq!(
         check(&fill),
         vec![Defect::TooMany {
-            field: "subtasks".to_owned(),
+            field: Slot::Subtasks,
             count: SUBTASKS_PER_TICKET + 1,
             cap: SUBTASKS_PER_TICKET,
         }]
@@ -193,7 +193,7 @@ fn an_empty_goal_is_reported_at_its_slot() {
     assert_eq!(
         check(&third(goal("   "))),
         vec![Defect::Empty {
-            field: "subtasks[2].goal".to_owned()
+            field: Slot::Goal(2)
         }]
     );
 }
@@ -203,7 +203,7 @@ fn a_goal_running_to_two_lines_is_reported_at_its_slot() {
     assert_eq!(
         check(&third(goal("Add the split contract\nand its repair"))),
         vec![Defect::Multiline {
-            field: "subtasks[2].goal".to_owned()
+            field: Slot::Goal(2)
         }]
     );
 }
@@ -213,7 +213,7 @@ fn a_goal_under_the_minimum_is_reported_at_its_slot() {
     assert_eq!(
         check(&third(goal("g".repeat(GOAL_MINIMUM - 1)))),
         vec![Defect::TooShort {
-            field: "subtasks[2].goal".to_owned(),
+            field: Slot::Goal(2),
             chars: GOAL_MINIMUM - 1,
             minimum: GOAL_MINIMUM,
         }]
@@ -225,7 +225,7 @@ fn a_goal_over_its_cap_is_reported_at_its_slot() {
     assert_eq!(
         check(&third(goal("g".repeat(GOAL_CHARS + 1)))),
         vec![Defect::TooLong {
-            field: "subtasks[2].goal".to_owned(),
+            field: Slot::Goal(2),
             chars: GOAL_CHARS + 1,
             cap: GOAL_CHARS,
         }]
@@ -239,7 +239,7 @@ fn more_dependencies_than_the_list_cap_are_reported_against_the_list() {
     assert_eq!(
         check(&third(subtask)),
         vec![Defect::TooMany {
-            field: "subtasks[2].depends_on".to_owned(),
+            field: Slot::DependsOn(2),
             count: DEPENDS_ON_PER_SUBTASK + 1,
             cap: DEPENDS_ON_PER_SUBTASK,
         }],
@@ -265,7 +265,7 @@ fn more_definition_of_done_entries_than_the_cap_are_reported_against_the_list() 
     assert_eq!(
         check(&third(subtask)),
         vec![Defect::TooMany {
-            field: "subtasks[2].definition_of_done".to_owned(),
+            field: Slot::Done(2, None),
             count: DONE_PER_SUBTASK + 1,
             cap: DONE_PER_SUBTASK,
         }]
@@ -285,15 +285,15 @@ fn a_definition_of_done_entry_is_held_to_one_line_and_to_its_cap() {
         check(&third(subtask)),
         vec![
             Defect::Empty {
-                field: "subtasks[2].definition_of_done[1]".to_owned()
+                field: Slot::Done(2, Some(1))
             },
             Defect::TooLong {
-                field: "subtasks[2].definition_of_done[2]".to_owned(),
+                field: Slot::Done(2, Some(2)),
                 chars: DONE_CHARS + 1,
                 cap: DONE_CHARS,
             },
             Defect::Multiline {
-                field: "subtasks[2].definition_of_done[3]".to_owned()
+                field: Slot::Done(2, Some(3))
             },
         ],
         "each entry is reported at its own position, and a short entry is no defect"
@@ -307,7 +307,7 @@ fn more_likely_files_than_the_cap_are_reported_against_the_list() {
     assert_eq!(
         check(&third(subtask)),
         vec![Defect::TooMany {
-            field: "subtasks[2].likely_files".to_owned(),
+            field: Slot::Files(2, None),
             count: FILES_PER_SUBTASK + 1,
             cap: FILES_PER_SUBTASK,
         }]
@@ -321,7 +321,7 @@ fn a_likely_file_over_its_cap_is_reported_at_its_position() {
     assert_eq!(
         check(&third(subtask)),
         vec![Defect::TooLong {
-            field: "subtasks[2].likely_files[1]".to_owned(),
+            field: Slot::Files(2, Some(1)),
             chars: FILE_CHARS + 1,
             cap: FILE_CHARS,
         }],
@@ -336,7 +336,7 @@ fn a_test_plan_over_its_cap_is_reported_at_its_slot() {
     assert_eq!(
         check(&third(subtask)),
         vec![Defect::TooLong {
-            field: "subtasks[2].test_plan".to_owned(),
+            field: Slot::TestPlan(2),
             chars: TEST_PLAN_CHARS + 1,
             cap: TEST_PLAN_CHARS,
         }]
@@ -350,7 +350,7 @@ fn notes_over_their_cap_are_reported_at_their_slot() {
     assert_eq!(
         check(&third(subtask)),
         vec![Defect::TooLong {
-            field: "subtasks[2].notes".to_owned(),
+            field: Slot::Notes(2),
             chars: NOTES_CHARS + 1,
             cap: NOTES_CHARS,
         }]
@@ -451,10 +451,10 @@ fn the_instructions_carry_the_ticket_and_the_shape() {
 fn a_rejected_defect_is_listed_back_as_one_not_to_repeat() {
     let rejected = vec![
         Defect::Empty {
-            field: "subtasks[2].goal".to_owned(),
+            field: Slot::Goal(2),
         },
         Defect::TooMany {
-            field: "subtasks".to_owned(),
+            field: Slot::Subtasks,
             count: SUBTASKS_PER_TICKET + 4,
             cap: SUBTASKS_PER_TICKET,
         },
@@ -483,8 +483,8 @@ fn a_position_outside_the_ticket_is_dropped_by_the_repair() {
     assert_eq!(
         mends,
         vec![Mend {
-            field: "subtasks[2].depends_on".to_owned(),
-            done: Mended::Dropped { count: 2 },
+            field: Slot::DependsOn(2),
+            done: Mended::Own(Lost::Dropped { count: 2 }),
         }]
     );
     assert_eq!(
@@ -506,8 +506,8 @@ fn a_subtask_that_waits_on_itself_loses_the_position() {
     assert_eq!(
         mends,
         vec![Mend {
-            field: "subtasks[2].depends_on".to_owned(),
-            done: Mended::Dropped { count: 1 },
+            field: Slot::DependsOn(2),
+            done: Mended::Own(Lost::Dropped { count: 1 }),
         }]
     );
 }
@@ -538,15 +538,15 @@ fn subtasks_past_the_cap_go_from_the_end_and_the_positions_into_them_go_too() {
         mends,
         vec![
             Mend {
-                field: "subtasks".to_owned(),
+                field: Slot::Subtasks,
                 done: Mended::Shortened {
                     from: SUBTASKS_PER_TICKET + 2,
                     to: SUBTASKS_PER_TICKET,
                 },
             },
             Mend {
-                field: "subtasks[0].depends_on".to_owned(),
-                done: Mended::Dropped { count: 1 },
+                field: Slot::DependsOn(0),
+                done: Mended::Own(Lost::Dropped { count: 1 }),
             },
         ]
     );
@@ -576,21 +576,21 @@ fn a_list_over_its_cap_keeps_its_first_entries() {
         mends,
         vec![
             Mend {
-                field: "subtasks[2].depends_on".to_owned(),
+                field: Slot::DependsOn(2),
                 done: Mended::Shortened {
                     from: DEPENDS_ON_PER_SUBTASK + 1,
                     to: DEPENDS_ON_PER_SUBTASK,
                 },
             },
             Mend {
-                field: "subtasks[2].definition_of_done".to_owned(),
+                field: Slot::Done(2, None),
                 done: Mended::Shortened {
                     from: DONE_PER_SUBTASK + 1,
                     to: DONE_PER_SUBTASK,
                 },
             },
             Mend {
-                field: "subtasks[2].likely_files".to_owned(),
+                field: Slot::Files(2, None),
                 done: Mended::Shortened {
                     from: FILES_PER_SUBTASK + 1,
                     to: FILES_PER_SUBTASK,
@@ -627,16 +627,16 @@ fn a_blank_list_entry_is_dropped_and_the_drop_is_named() {
         mends,
         vec![
             Mend {
-                field: "subtasks[2].definition_of_done[1]".to_owned(),
-                done: Mended::Blank,
+                field: Slot::Done(2, Some(1)),
+                done: Mended::Own(Lost::Blank),
             },
             Mend {
-                field: "subtasks[2].definition_of_done[2]".to_owned(),
-                done: Mended::Blank,
+                field: Slot::Done(2, Some(2)),
+                done: Mended::Own(Lost::Blank),
             },
             Mend {
-                field: "subtasks[2].likely_files[0]".to_owned(),
-                done: Mended::Blank,
+                field: Slot::Files(2, Some(0)),
+                done: Mended::Own(Lost::Blank),
             },
         ],
         "each blank is named at the position it was read at, before the list shortened"
@@ -676,36 +676,36 @@ fn a_multiline_goal_keeps_its_first_line_and_over_cap_prose_is_cut() {
         mends,
         vec![
             Mend {
-                field: "subtasks[2].goal".to_owned(),
+                field: Slot::Goal(2),
                 done: Mended::FirstLine,
             },
             Mend {
-                field: "subtasks[2].definition_of_done[0]".to_owned(),
+                field: Slot::Done(2, Some(0)),
                 done: Mended::FirstLine,
             },
             Mend {
-                field: "subtasks[2].definition_of_done[1]".to_owned(),
+                field: Slot::Done(2, Some(1)),
                 done: Mended::Cut {
                     from: DONE_CHARS + 1,
                     to: DONE_CHARS,
                 },
             },
             Mend {
-                field: "subtasks[2].likely_files[0]".to_owned(),
+                field: Slot::Files(2, Some(0)),
                 done: Mended::Cut {
                     from: FILE_CHARS + 1,
                     to: FILE_CHARS,
                 },
             },
             Mend {
-                field: "subtasks[2].test_plan".to_owned(),
+                field: Slot::TestPlan(2),
                 done: Mended::Cut {
                     from: TEST_PLAN_CHARS + 5,
                     to: TEST_PLAN_CHARS,
                 },
             },
             Mend {
-                field: "subtasks[2].notes".to_owned(),
+                field: Slot::Notes(2),
                 done: Mended::Cut {
                     from: NOTES_CHARS + 5,
                     to: NOTES_CHARS,
@@ -760,7 +760,7 @@ fn a_goal_nobody_wrote_is_filled_from_the_ticket_itself() {
     assert_eq!(
         mends,
         vec![Mend {
-            field: "subtasks[2].goal".to_owned(),
+            field: Slot::Goal(2),
             done: Mended::Supplied,
         }]
     );
@@ -796,7 +796,7 @@ fn a_ticket_nobody_split_becomes_one_sub_task_built_from_the_ticket() {
         assert_eq!(
             mends,
             vec![Mend {
-                field: "subtasks".to_owned(),
+                field: Slot::Subtasks,
                 done: Mended::Supplied,
             }]
         );
@@ -816,11 +816,11 @@ fn a_goal_cut_back_to_one_line_that_is_then_too_short_falls_to_the_ticket() {
         mends,
         vec![
             Mend {
-                field: "subtasks[2].goal".to_owned(),
+                field: Slot::Goal(2),
                 done: Mended::FirstLine,
             },
             Mend {
-                field: "subtasks[2].goal".to_owned(),
+                field: Slot::Goal(2),
                 done: Mended::Supplied,
             },
         ],
@@ -1324,4 +1324,36 @@ fn the_module_speaks_no_git_http_or_linear_vocabulary() {
             "the splitting contract mentions {word:?}"
         );
     }
+}
+
+#[test]
+fn a_slot_is_shown_to_the_model_as_its_path() {
+    let shown: Vec<String> = [
+        Slot::Subtasks,
+        Slot::Goal(2),
+        Slot::DependsOn(2),
+        Slot::Done(2, None),
+        Slot::Done(2, Some(1)),
+        Slot::Files(2, None),
+        Slot::Files(2, Some(1)),
+        Slot::TestPlan(2),
+        Slot::Notes(2),
+    ]
+    .iter()
+    .map(ToString::to_string)
+    .collect();
+    assert_eq!(
+        shown,
+        [
+            "subtasks",
+            "subtasks[2].goal",
+            "subtasks[2].depends_on",
+            "subtasks[2].definition_of_done",
+            "subtasks[2].definition_of_done[1]",
+            "subtasks[2].likely_files",
+            "subtasks[2].likely_files[1]",
+            "subtasks[2].test_plan",
+            "subtasks[2].notes",
+        ]
+    );
 }

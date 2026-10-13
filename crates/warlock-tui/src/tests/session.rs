@@ -2,11 +2,12 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::{env, fs, process};
 
-use warlock_engine::{Manifest, PactEntry, manifest_path, save_sigils, sigils_path};
+use warlock_engine::{Manifest, PactEntry, manifest_path};
 
-use super::{NOT_CLEANED, Scope, load_app_in, load_manifest, reload, sigils_under};
-use crate::app::{App, Chrome, Sigils};
+use super::{NOT_CLEANED, Scope, load_app_in, load_manifest, reload};
+use crate::app::{App, Chrome, Held, Sigils};
 use crate::error::Error;
+use crate::settings::Settings;
 
 #[test]
 fn what_is_held_survives_a_reload_because_a_reload_never_touches_it() {
@@ -23,7 +24,11 @@ fn what_is_held_survives_a_reload_because_a_reload_never_touches_it() {
     let scope = Scope {
         root: PathBuf::from("/repo/crates"),
         repo_root: PathBuf::from("/repo"),
-        chrome: Chrome::of("/repo", "/repo/crates").with_sigils(Sigils::held(["billing", "web"])),
+        chrome: Chrome::of("/repo", "/repo/crates").with_held(Held {
+            sigils: Sigils::held(["billing", "web"]),
+            base: None,
+        }),
+        settings: Settings::at(None, "/repo"),
     };
 
     // A load from a path that is not there fails, which is the arm that
@@ -123,59 +128,6 @@ fn a_manifest_that_will_not_parse_is_an_error_rather_than_an_empty_start() {
     );
 }
 
-#[test]
-fn a_machine_that_never_ran_warlock_config_holds_nothing() {
-    // The ordinary state of a machine, and the one the header says nothing
-    // at all about: no file, no directory, nothing to say.
-    let home = a_dir();
-    let repo = a_dir();
-
-    assert_eq!(sigils_under(home.path(), repo.path()), Sigils::Nothing);
-}
-
-#[test]
-fn the_sigils_on_disk_are_the_sigils_the_header_states() {
-    let home = a_dir();
-    let repo = a_dir();
-    let held = ["billing".to_owned(), "web".to_owned()];
-    save_sigils(home.path(), repo.path(), &held).expect("a config that writes");
-
-    assert_eq!(
-        sigils_under(home.path(), repo.path()),
-        Sigils::Held(held.to_vec())
-    );
-}
-
-#[test]
-fn a_config_holding_the_empty_set_is_the_same_nothing_as_no_config_at_all() {
-    // Clearing a holding puts the header back where it was, rather than
-    // leaving an empty list drawn on it.
-    let home = a_dir();
-    let repo = a_dir();
-    save_sigils(home.path(), repo.path(), &[]).expect("a config that writes");
-
-    assert_eq!(sigils_under(home.path(), repo.path()), Sigils::Nothing);
-}
-
-#[test]
-fn a_config_that_will_not_parse_is_said_rather_than_ending_the_session() {
-    // The whole point of this returning a state instead of a `Result`: a
-    // broken config is a word on a header, never a reason to keep the tree
-    // off the screen — and never drawn as absent, since the two mean
-    // opposite things about what is on disk.
-    let home = a_dir();
-    let repo = a_dir();
-    let path = sigils_path(home.path(), repo.path());
-    fs::create_dir_all(
-        path.parent()
-            .expect("the config lives in a project directory"),
-    )
-    .expect("the project directory");
-    fs::write(&path, "not a config\n").expect("a file that is not TOML");
-
-    assert_eq!(sigils_under(home.path(), repo.path()), Sigils::Unknown);
-}
-
 // A load walks up looking for `.git/` and refuses without one, so every
 // repository here has a `HEAD` in it. `vendor/` is what the rules exclude
 // and `crates/` is what survives them.
@@ -203,6 +155,7 @@ fn a_scope(scratch: &Scratch) -> Scope {
         root: scratch.root.clone(),
         repo_root: scratch.root.clone(),
         chrome: Chrome::of(&scratch.root, &scratch.root),
+        settings: Settings::at(None, &scratch.root),
     }
 }
 
@@ -436,10 +389,4 @@ fn a_cleanup_that_failed_is_attempted_again_on_the_next_load() {
         ["crates"],
         "the second load did not try the cleanup again"
     );
-}
-
-// Every test here builds both its home *and* its repository root out of
-// these, so nothing in this module goes near the developer's real home.
-fn a_dir() -> tempfile::TempDir {
-    tempfile::tempdir().expect("a temporary directory")
 }

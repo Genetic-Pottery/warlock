@@ -30,10 +30,8 @@ use crate::session::closed_scope;
 // The four refusals are ordered deliberately, matching
 // [`pact_press`](crate::pacting::pact_press): a pull in flight, a run in flight,
 // then the boundary, then whatever the app makes of the row. A refusal during a
-// run goes to the progress line rather than the message line, because a run has
-// taken the message line and a sentence left there is the one sentence the
-// reader cannot see; a refusal during a pull goes on the thread, where there is
-// no progress line and the ticket has to be named.
+// pull goes on the thread, because it has to name the ticket whose session is
+// editing this tree.
 //
 // The field opens on the scope read out of the manifest, never off a
 // [`Row`](crate::app::Row): a fourth row field holding this string would be a
@@ -114,13 +112,6 @@ pub(crate) struct Windows {
 }
 
 impl Windows {
-    pub(crate) const fn closed() -> Self {
-        Self {
-            scope: ScopePrompt::Closed,
-            record: RecordPrompt::Closed,
-        }
-    }
-
     fn asking(field: ScopeField) -> Self {
         Self {
             scope: ScopePrompt::Open(field),
@@ -151,10 +142,10 @@ pub(crate) fn scope_edit(
 ) -> Windows {
     match edited {
         Edited::Open(field) => Windows::asking(field),
-        Edited::Close => Windows::closed(),
+        Edited::Close => Windows::default(),
         Edited::Submit => match prompt.field() {
             Some(field) => scope_submit(app, manifest, repo_root, field),
-            None => Windows::closed(),
+            None => Windows::default(),
         },
     }
 }
@@ -188,7 +179,7 @@ pub(crate) fn scope_submit(
     match rescope(manifest, module, scope, RecordFields::default()) {
         Ok(rescoped) => {
             save(app, manifest, repo_root, rescoped.manifest);
-            Windows::closed()
+            Windows::default()
         }
         // The engine's sentence about the one rule that was broken, under the
         // field that broke it.
@@ -198,7 +189,7 @@ pub(crate) fn scope_submit(
         Err(ScopeRefusal::NeedsRecord { scope, .. }) => Windows::recording(module, &scope),
         Err(refusal) => {
             app.set_message(refusal.to_string());
-            Windows::closed()
+            Windows::default()
         }
     }
 }

@@ -29,9 +29,10 @@ use ratatui::crossterm::event::{self, Event};
 use warlock_tui::check::{self, check};
 use warlock_tui::planned;
 use warlock_tui::{
-    Error, Interactive, Listing, POLL_INTERVAL, RecordFields, branch_clear, branch_use, brief,
-    configure, key_add, key_forget, key_list, key_use, list, pact, pull, push, refresh, resume,
-    scope_add, scope_remove, status_for, unpact,
+    Error, Interactive, Listing, POLL_INTERVAL, RecordFields, branch_clear, branch_show,
+    branch_use, brief, key_add, key_forget, key_list, key_use, list, pact, pull, push, refresh,
+    resume, scope_add, scope_remove, sigil_add, sigil_clear, sigil_list, sigil_remove, status_for,
+    unpact,
 };
 
 mod terminal;
@@ -62,10 +63,15 @@ struct Cli {
 #[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
 enum Command {
     #[command(
-        about = "Set the sigils this machine holds for this repository.",
+        about = "List, add and remove the sigils this machine holds for this repository.",
         long_about = None
     )]
-    Config,
+    Sigil {
+        // Optional, so a bare `warlock sigil` lists what is held, the way a
+        // bare `/sigil` does in the chat bar.
+        #[command(subcommand)]
+        command: Option<SigilCommand>,
+    },
     #[command(
         about = "List the pacted directories that are stale.",
         long_about = None
@@ -172,12 +178,14 @@ enum Command {
         command: KeyCommand,
     },
     #[command(
-        about = "Set the branch this checkout's pulls start from and open pull requests against.",
+        about = "Show or set the branch this checkout's pulls start from and open pull requests against.",
         long_about = None
     )]
     Branch {
+        // Optional, so a bare `warlock branch` names the base, the way a bare
+        // `/branch` does in the chat bar.
         #[command(subcommand)]
-        command: BranchCommand,
+        command: Option<BranchCommand>,
     },
     #[command(
         about = "Argue a brief at the shell, sending a turn on a blank line.",
@@ -387,6 +395,24 @@ enum KeyCommand {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
+enum SigilCommand {
+    #[command(about = "Hold these sigils as well as the ones already held.", long_about = None)]
+    Add {
+        /// Scope names, or `*` for every scope.
+        #[arg(value_name = "NAME", required = true)]
+        names: Vec<String>,
+    },
+    #[command(about = "Stop holding these sigils.", long_about = None)]
+    Remove {
+        /// Sigils this machine holds.
+        #[arg(value_name = "NAME", required = true)]
+        names: Vec<String>,
+    },
+    #[command(about = "Stop holding every sigil.", long_about = None)]
+    Clear,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
 enum BranchCommand {
     #[command(
         about = "Pull from and open pull requests against this branch.",
@@ -436,30 +462,19 @@ fn main() -> ExitCode {
             install_panic_hook();
             run()
         }
-        // The second subcommand, dispatched here for the first one's reasons:
-        // it prints on the ordinary screen and reads a line from stdin in cooked
-        // mode, so nothing about it may touch the terminal — including the panic
-        // hook, which exists to restore a terminal this path never takes.
-        Some(Command::Config) => configure(),
-        // The two questions, dispatched here for the same reason and with one
-        // more of their own: they print their answer on the ordinary screen and
-        // a script reads it, so a program that had entered the alternate screen
-        // would have piped its answer into a repaint. Neither writes anything,
-        // neither spawns anything, and neither installs the panic hook — there
-        // is no terminal for it to restore.
+        Some(Command::Sigil { command }) => match command {
+            None => sigil_list(),
+            Some(SigilCommand::Add { names }) => sigil_add(&names),
+            Some(SigilCommand::Remove { names }) => sigil_remove(&names),
+            Some(SigilCommand::Clear) => sigil_clear(),
+        },
         Some(Command::Stale { path, json }) => list(Listing::Stale, path, json),
         Some(Command::Fresh { path, json }) => list(Listing::Fresh, path, json),
-        // The third question, beside the two listings and for their reasons. It
-        // is the one that can answer "no" — a scope this machine's sigils do not
-        // open — and it still exits 0 for it: a closed boundary is the answer,
-        // not a failure to reach one, which is what leaves `jq -e '.opens'` to
-        // spend the non-zero status on the verdict. See [`check`].
-        //
-        // `--gate` is that same question with the verdict spent on the exit
-        // status instead of printed: nothing on stdout, and a closed scope is the
-        // boundary's **3** through `Error::ClosedScope`, which is the register
-        // the writes already refuse in. It is the one caller that wants the
-        // non-zero status, so it takes the one `jq` would otherwise have spent.
+        // A plain check exits 0 for a closed scope: the closed boundary is its
+        // answer, not a failure to reach one, which leaves `jq -e '.opens'` to
+        // spend the non-zero status on the verdict. `--gate` spends it instead:
+        // nothing on stdout, and a closed scope is the boundary's **3** through
+        // `Error::ClosedScope`, the register the writes already refuse in.
         //
         // The pathless `None` is the `PreToolUse` hook form, which clap only lets
         // through for `--gate`'s sake: the path arrives in a payload on stdin
@@ -472,28 +487,9 @@ fn main() -> ExitCode {
             (Some(path), true) => check::gate(path),
             (None, _) => check::hook(),
         },
-        // The first subcommand that writes, dispatched here for every reason
-        // the questions are — it prints one line on the ordinary screen and
-        // takes no terminal — and with none of a run's machinery: no worker
-        // thread, no subprocess, no model pass. What keeps it honest is the
-        // boundary, asked before anything else it does; see [`mod@edits`].
         Some(Command::Unpact { path }) => unpact(&path),
-        // The two runs, and the first subcommands that spend anything: minutes
-        // of model passes, one `claude --print` per directory, a `.warlock.md`
-        // beside each of them and one manifest save at the end. Dispatched here
-        // with every other subcommand and for the same reasons — their progress
-        // is lines on the ordinary screen that a script reads through a pipe, so
-        // no alternate screen, no raw mode and no panic hook — and gated at the
-        // same boundary the cheap writes are, asked before a single directory is
-        // walked. See [`mod@running`].
         Some(Command::Pact { path }) => pact(&path),
         Some(Command::Refresh { path }) => refresh(&path),
-        // The other two writes, dispatched beside it and through the same gate:
-        // the boundary is asked before either of them looks at whether the path
-        // has an entry at all, so a closed scope answers with the scope refusal
-        // rather than with what the manifest does or does not hold. The nesting
-        // is clap's and stops here — each arm is one call into [`mod@edits`],
-        // with no work done in this match.
         Some(Command::Scope { command }) => match command {
             ScopeCommand::Add {
                 path,
@@ -512,16 +508,6 @@ fn main() -> ExitCode {
             ),
             ScopeCommand::Remove { path } => scope_remove(&path),
         },
-        // The key store, dispatched here for `config`'s reasons and with one
-        // more of its own: `add` takes the terminal itself for the length of
-        // one read, so a program that had already entered the alternate screen
-        // would be prompting for a secret underneath a frame. What it takes it
-        // puts back — see [`mod@key`] — and it arms no panic hook, because the
-        // hook exists to restore a session this path never starts. The first two verbs stand in
-        // no repository — a key is a fact about the machine — and the last two
-        // stand in one because a binding is a fact about a checkout; each
-        // resolves what it needs itself. The nesting is clap's and stops here,
-        // each arm one call into [`mod@key`].
         Some(Command::Key { command }) => match command {
             KeyCommand::Add { name } => key_add(&name),
             KeyCommand::List { json } => key_list(json),
@@ -529,65 +515,26 @@ fn main() -> ExitCode {
             KeyCommand::Forget { name } => key_forget(&name),
         },
         Some(Command::Branch { command }) => match command {
-            BranchCommand::Use { name } => branch_use(&name),
-            BranchCommand::Clear => branch_clear(),
+            None => branch_show(),
+            Some(BranchCommand::Use { name }) => branch_use(&name),
+            Some(BranchCommand::Clear) => branch_clear(),
         },
-        // The first step of the workflow, dispatched here for `config`'s reasons:
-        // it prints on the ordinary screen and reads cooked lines off stdin for
-        // as long as somebody keeps typing, so nothing about it may touch the
-        // terminal — no alternate screen, no raw mode and no panic hook, because
-        // the hook exists to restore a session this path never starts. What it
-        // spends is one conversation with `claude`, and its only refusals — a
-        // brief template or a `briefs.toml` that will not read — are made before
-        // the first turn. Gated by nothing here: it writes no file and opens no
-        // board, so none of it is the boundary's **3**. See [`mod@briefing`].
         Some(Command::Brief) => brief(),
-        // The one subcommand that sends anything anywhere, dispatched here for
-        // every reason the writes are — it prints its lines on the ordinary
-        // screen and takes no terminal — and gated by nothing here: the scope
-        // picks the board rather than opening a directory, so none of what it
-        // refuses is the boundary's **3**. Every refusal but a project of the
-        // same name already on the board is reached before the socket is
-        // opened; see [`mod@push`].
         Some(Command::Push {
             scope,
             path,
             dry_run,
         }) => push(&scope, &path, dry_run),
-        // The other half of that one, dispatched beside it and gated by nothing
-        // here for the same reason: a cut picks its board by the sigil rather
-        // than by opening a directory, so not one of its refusals — a slug the
-        // board does not know, a status that is not `Planned`, a scope block
-        // that will not parse, nothing left to cut — is the boundary's **3**.
-        // They are all ordinary **1**s through `status_for`'s catch-all. What it
-        // spends past the read is one drafting session per slice and the issues
-        // those file; see [`mod@planned`].
         Some(Command::Cut {
             scope,
             project,
             dry_run,
         }) => planned::cut(&scope, project.as_deref(), dry_run),
-        // The third step of the workflow and the one that spends the most:
-        // a splitting pass, one session per sub-task, a commit each, a push and a
-        // pull request. Dispatched here with the rest and for the same reasons —
-        // its progress is lines on the ordinary screen that a script reads through
-        // a pipe, so no alternate screen, no raw mode and no panic hook — and
-        // gated by the sigil rather than by opening a directory. Two of its
-        // refusals are the boundary's **3** all the same: a scope this machine
-        // does not hold, and a session that wrote past one. See [`mod@pull`].
         Some(Command::Pull {
             scope,
             ticket,
             dry_run,
         }) => pull(&scope, ticket.as_deref(), dry_run),
-        // The one command that turns a halt back into runnable work, dispatched
-        // here with the rest and for their reasons — it prints its lines on the
-        // ordinary screen and takes no terminal — and the cheapest thing in this
-        // match: one file read and one file written, under the home. No board, no
-        // `git`, no session and no ticket moved, so there is nothing for a scope to
-        // gate and neither of its refusals is the boundary's **3**; both are
-        // ordinary **1**s through `status_for`'s catch-all. The pull it hands off
-        // to is where the boundary is asked. See [`mod@resume`].
         Some(Command::Resume {
             ticket,
             failed_only,
@@ -634,12 +581,6 @@ fn run() -> Result<(), Error> {
             // rather than from the first thing the model got round to saying.
             let now = Instant::now();
             match event::read()? {
-                // `false` is the one thing a press can say that is answered
-                // here, and it says the session is over. Returning is the whole
-                // of quitting and it happens on this stack, so the session
-                // drops on the way out — cancelling any run and killing the
-                // `claude` it was waiting on — and its screen drops with it and
-                // puts the terminal back.
                 Event::Key(key) => {
                     if !session.press(key, now)? {
                         return Ok(());
@@ -651,7 +592,7 @@ fn run() -> Result<(), Error> {
                 // screen costs nothing.
                 Event::Mouse(mouse) => session.point(mouse, size, now),
                 // A block of text the terminal handed over whole, because
-                // bracketed paste is on (see `take_terminal`). Nothing is
+                // bracketed paste is on (see `TerminalGuard::enter`). Nothing is
                 // returned and nothing can be: a paste never ends the session
                 // and never starts a turn, whatever newlines are in it, so
                 // there is no answer for this arm to act on. On a terminal

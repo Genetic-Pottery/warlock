@@ -24,31 +24,29 @@
 //! here to work somebody else's ticket — [`take_named`] checks the assignee by id
 //! against the user the key belongs to, and nothing takes a flag past it.
 //!
-//! No key value is printed here and none can be: [`Prepared`] carries one with a
-//! redacting `Debug`, it is read on one line per door — the opener's, here and in
+//! No key value is printed here and none can be: [`Prepared`] carries one as a
+//! [`Key`], whose `Debug` redacts it, it is read on one line per door — the opener's, here and in
 //! [`mod@crate::puller`] — and nothing that prints is given it.
 
-use std::fmt;
 use std::fs::OpenOptions;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use warlock_engine::{
-    Manifest, PullRun, ScopeRecord, brief_path, held_base_branch, held_runs, held_sigils,
-    resolve_filing, scope_opens_to,
+    Manifest, PullRun, ScopeRecord, brief_path, held_runs, resolve_filing, scope_opens_to,
 };
 
-use crate::claude::{
-    Activities, Activity, Cancel, ChatAgent, ClaudeAgent, Split, Splitting, UNTIMED, Worked,
-    Working, working_system_prompt,
-};
-use crate::error::Error;
+use crate::account::{THINKING, WRITING, tool_line};
+use crate::claude::{Activities, Activity, Cancel, ClaudeAgent};
+use crate::error::{Error, one_line, say};
 use crate::freshness::{Freshened, Freshening, Freshens, freshened};
 use crate::git::{Error as GitError, Forge, Gh, Git, Repository};
-use crate::linear::{Board, Opener as LinearOpener, Opens, QueuedIssue};
+use crate::linear::{Board, Key, Opener as LinearOpener, Opens, QueuedIssue};
+use crate::puller::{Splitter, Stopping, Worker};
 use crate::pulling::{Heading, PullEvent, Pulled, Pulling, Splits, Ticket, Works};
 use crate::queue::{Chosen, Named, Refusal, Skipped, choose, take_named};
+use crate::settings::Settings;
 use crate::standing::{FOR_PULL, Standing};
 
 /// The subcommand, and the only function here that reads the environment.
@@ -88,8 +86,15 @@ pub fn pull(scope: &str, ticket: Option<&str>, dry_run: bool) -> Result<(), Erro
             open: &LinearOpener,
             repo: &Git::at(&root),
             forge: &Gh::at(&root),
-            split: &Splitter::new(watching(&progress)),
-            sessions: &Worker::new(scope, prepared.held(), watching(&progress)),
+            // A shell has no stop button, so nothing ever reads the handles
+            // these publish.
+            split: &Splitter::new(watching(&progress), Stopping::default()),
+            sessions: &Worker::new(
+                scope,
+                prepared.held(),
+                watching(&progress),
+                Stopping::default(),
+            ),
             freshen: &Freshener::new(watching(&progress)),
         },
         &progress,
@@ -131,7 +136,7 @@ pub(crate) struct Ports<'a, O: Opens, R: Repository, F: Forge, S: Splits, W: Wor
 /// promised not to run.
 pub(crate) fn pulled<O: Opens, R: Repository, F: Forge, S: Splits, W: Works, P: Write>(
     manifest: &Manifest,
-    prepared: &Prepared<'_>,
+    prepared: &Prepared,
     named: Option<&str>,
     dry_run: bool,
     ports: &Ports<'_, O, R, F, S, W>,
@@ -149,44 +154,24 @@ pub(crate) fn pulled<O: Opens, R: Repository, F: Forge, S: Splits, W: Works, P: 
     }
 
     let board = ports.open.open(prepared.value());
-    let assignee = board.viewer()?;
-    // The records this checkout holds for the scope, which is what tells a ticket
-    // in `In Progress` here from one in progress somewhere else. An unreadable one
-    // is a line and not a failure: the scan names it, and the run it describes may
-    // be holding uncommitted work on a branch.
-    let runs = held_runs(home, root, scope).map_err(|source| Error::Runs { source })?;
-    for unreadable in runs.unreadable() {
-        say(progress, &format!("{unreadable}"));
-    }
-
-    let selected = select(&board, record, &assignee, named, runs.runs())?;
+    let selected = selection(&board, record, home, root, named, &mut |line| {
+        tell(progress, &line);
+    })?;
 
     if dry_run {
         for line in would(scope, named, &selected) {
-            say(progress, &line);
+            tell(progress, &line);
         }
         return Ok(());
     }
 
     for skipped in selected.skipped() {
-        say(progress, &passed_over(skipped));
+        tell(progress, &passed_over(skipped));
     }
 
-    let issue = match selected.taken() {
-        Taken::Issue(issue) => issue,
-        // Both endings that work nothing, and the difference between them is who
-        // asked: a queue with nothing available is an answer and a **0**, and a
-        // ticket somebody named that cannot be worked is a refusal.
-        Taken::Nothing => {
-            say(progress, &nothing_ready(scope));
-            return Ok(());
-        }
-        Taken::Refused(refusal) => {
-            return Err(Error::NotPulled {
-                ticket: named.unwrap_or_default().to_owned(),
-                refusal: refusal.clone(),
-            });
-        }
+    let Some(issue) = selected.issue(named)? else {
+        tell(progress, &nothing_ready(scope));
+        return Ok(());
     };
 
     let ticket = Ticket {
@@ -199,7 +184,7 @@ pub(crate) fn pulled<O: Opens, R: Repository, F: Forge, S: Splits, W: Works, P: 
     held(progress).about(ticket.identifier);
 
     let pulled = {
-        let mut sink = |event: PullEvent| held(progress).on(event);
+        let mut sink = |event: PullEvent| held(progress).on(&event);
         Pulling {
             board: &board,
             repo: ports.repo,
@@ -223,11 +208,11 @@ pub(crate) fn pulled<O: Opens, R: Repository, F: Forge, S: Splits, W: Works, P: 
 
     match pulled {
         Pulled::Opened { ticket, url } => {
-            say(progress, &opened(&ticket, url.as_deref()));
+            tell(progress, &opened(&ticket, url.as_deref()));
             Ok(())
         }
         Pulled::Unchanged { ticket } => {
-            say(progress, &unchanged(&ticket));
+            tell(progress, &unchanged(&ticket));
             Ok(())
         }
         // Both carry what the ticket's own comment already says at length, because
@@ -240,24 +225,24 @@ pub(crate) fn pulled<O: Opens, R: Repository, F: Forge, S: Splits, W: Works, P: 
 
 /// A pull with every refusal that costs nothing already asked: the scope found in
 /// a `[[scope]]` record, the sigil for it held, and a key bound to this checkout.
-#[derive(Clone)]
-pub(crate) struct Prepared<'m> {
+#[derive(Debug, Clone)]
+pub(crate) struct Prepared {
     /// The repository the run commits in, and what the run record's directory is
     /// keyed by.
     root: PathBuf,
     /// Where that record goes, never under [`root`](Self::root).
     home: PathBuf,
-    record: &'m ScopeRecord,
+    record: ScopeRecord,
     /// The flattened sigils this machine holds, which the crossing check after
     /// every session is judged against and the session's own system prompt names.
     held: Vec<String>,
     /// The branch this checkout set with `warlock branch use`, or `None` for the
     /// remote's default.
     base: Option<String>,
-    value: String,
+    value: Key,
 }
 
-impl<'m> Prepared<'m> {
+impl Prepared {
     pub(crate) fn root(&self) -> &Path {
         &self.root
     }
@@ -266,8 +251,8 @@ impl<'m> Prepared<'m> {
         &self.home
     }
 
-    pub(crate) const fn record(&self) -> &'m ScopeRecord {
-        self.record
+    pub(crate) const fn record(&self) -> &ScopeRecord {
+        &self.record
     }
 
     pub(crate) fn held(&self) -> &[String] {
@@ -283,22 +268,7 @@ impl<'m> Prepared<'m> {
     /// worker of its own, so the value has to cross out of here, and the type it
     /// sits on redacts it in `Debug`.
     pub(crate) fn value(&self) -> &str {
-        &self.value
-    }
-}
-
-// Hand-written for `Target`'s reason: this holds the key value, and a failing
-// assertion anywhere in the suite may print whatever is in scope.
-impl fmt::Debug for Prepared<'_> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Prepared")
-            .field("root", &self.root)
-            .field("home", &self.home)
-            .field("record", self.record)
-            .field("held", &self.held)
-            .field("base", &self.base)
-            .field("value", &"<redacted>")
-            .finish()
+        self.value.as_str()
     }
 }
 
@@ -310,17 +280,13 @@ impl fmt::Debug for Prepared<'_> {
 /// recorded scope this machine does not hold is a boundary and its own status.
 /// The key last, through the very [`resolve_filing`] a push and a draft go
 /// through, so an unbound checkout is told the same sentence by all three verbs.
-pub(crate) fn prepare<'m>(
-    manifest: &'m Manifest,
+pub(crate) fn prepare(
+    manifest: &Manifest,
     root: &Path,
     home: &Path,
     scope: &str,
-) -> Result<Prepared<'m>, Error> {
-    let Some(record) = manifest
-        .scopes()
-        .iter()
-        .find(|record| record.name() == scope)
-    else {
+) -> Result<Prepared, Error> {
+    let Some(record) = manifest.scope_record(scope) else {
         return Err(Error::UnrecordedScope {
             scope: scope.to_owned(),
             recorded: manifest
@@ -331,7 +297,8 @@ pub(crate) fn prepare<'m>(
         });
     };
 
-    let held = held_sigils(home, root).map_err(|source| Error::Sigils { source })?;
+    let settings = Settings::at(Some(home.to_path_buf()), root);
+    let held = settings.sigils()?;
     // `scope_opens_to` and nothing written here, so the wildcard is honoured by
     // the one function that knows about it: a comparison of this module's own
     // would be a second copy of the boundary rule, and it is the copy that would
@@ -348,15 +315,15 @@ pub(crate) fn prepare<'m>(
     // What is left of it is the key half, which is why it is asked at all.
     let target = resolve_filing(manifest, root, home, Some(scope))
         .map_err(|source| Error::Filing { source })?;
-    let base = held_base_branch(home, root).map_err(|source| Error::Sigils { source })?;
+    let base = settings.base()?;
 
     Ok(Prepared {
         root: root.to_path_buf(),
         home: home.to_path_buf(),
-        record,
+        record: record.clone(),
         held,
         base,
-        value: target.value().to_owned(),
+        value: Key::new(target.value()),
     })
 }
 
@@ -369,7 +336,31 @@ pub(crate) fn clean<R: Repository>(repo: &R) -> Result<(), Error> {
     }
 }
 
-pub(crate) fn select(
+/// Which ticket the queue gives up, with the records this checkout holds for the
+/// scope read first: they are what tells a ticket in `In Progress` here from one
+/// in progress somewhere else.
+///
+/// An unreadable record is a line handed to `unreadable` and not a failure: the
+/// scan names it, and the run it describes may be holding uncommitted work on a
+/// branch. The line goes out before the queue is read, so a refusal from the
+/// board does not swallow it.
+pub(crate) fn selection(
+    board: &impl Board,
+    record: &ScopeRecord,
+    home: &Path,
+    root: &Path,
+    named: Option<&str>,
+    unreadable: &mut dyn FnMut(String),
+) -> Result<Selected, Error> {
+    let assignee = board.viewer()?;
+    let runs = held_runs(home, root, record.name()).map_err(|source| Error::Runs { source })?;
+    for record in runs.unreadable() {
+        unreadable(one_line(record));
+    }
+    select(board, record, &assignee, named, runs.runs())
+}
+
+fn select(
     board: &impl Board,
     record: &ScopeRecord,
     assignee: &str,
@@ -409,6 +400,19 @@ pub(crate) enum Taken<'a> {
 }
 
 impl Selected {
+    /// The ticket to work, `None` for a queue with nothing available, and a
+    /// refusal for a ticket somebody named that cannot be worked.
+    pub(crate) fn issue(&self, named: Option<&str>) -> Result<Option<&QueuedIssue>, Error> {
+        match self.taken() {
+            Taken::Issue(issue) => Ok(Some(issue)),
+            Taken::Nothing => Ok(None),
+            Taken::Refused(refusal) => Err(Error::NotPulled {
+                ticket: named.unwrap_or_default().to_owned(),
+                refusal: refusal.clone(),
+            }),
+        }
+    }
+
     pub(crate) fn taken(&self) -> Taken<'_> {
         match self {
             Self::Chosen(chosen) => chosen.taken().map_or(Taken::Nothing, Taken::Issue),
@@ -490,14 +494,6 @@ pub(crate) fn unchanged(ticket: &str) -> String {
     )
 }
 
-pub(crate) fn no_start_state(team: &str) -> String {
-    format!("the team `{team}` has no `In Progress` state, so the ticket was not moved")
-}
-
-pub(crate) fn no_review_state(team: &str, state: &str) -> String {
-    format!("the team `{team}` has no `{state}` state, so the ticket was not moved into review")
-}
-
 /// `WAR-140` is 140, which is the middle of the branch name.
 ///
 /// Zero for an identifier not built that way, rather than a refusal: the
@@ -537,8 +533,8 @@ pub(crate) fn held<W: Write>(progress: &Shared<W>) -> MutexGuard<'_, Progress<W>
         .expect("nothing panics holding the progress")
 }
 
-fn say<W: Write>(progress: &Shared<W>, fact: &str) {
-    held(progress).say(fact);
+fn tell<W: Write>(progress: &Shared<W>, fact: &str) {
+    say(&mut held(progress).out, fact);
 }
 
 /// What a pull is seen doing, on stdout in `running.rs`'s shape: `warlock: ` a
@@ -566,11 +562,7 @@ pub(crate) struct Progress<W: Write> {
     /// activity is appended. `None` outside a sub-task — the split and the pull
     /// request have no brief of their own to write into.
     subtask: Option<String>,
-    /// The last activity line said, so a stretch of thinking or writing is one
-    /// line rather than one per report. The panel redraws its activity line in
-    /// place, and a session reports `Writing` again with every delta; printed on a
-    /// screen that only scrolls, that was a column of identical lines.
-    said: Option<String>,
+    watched: Watched,
 }
 
 impl<W: Write> Progress<W> {
@@ -581,13 +573,13 @@ impl<W: Write> Progress<W> {
             root: root.to_path_buf(),
             ticket: None,
             subtask: None,
-            said: None,
+            watched: Watched::default(),
         }
     }
 
     /// What a test reads the run's output off. Nothing on the real road reads it
     /// again — the writer there is stdout, and the lines have already gone.
-    #[allow(dead_code, reason = "read by the tests that drive this door")]
+    #[cfg(test)]
     pub(crate) const fn written(&self) -> &W {
         &self.out
     }
@@ -596,55 +588,23 @@ impl<W: Write> Progress<W> {
         self.ticket = Some(ticket.to_owned());
     }
 
-    fn say(&mut self, fact: &str) {
-        // Ignored on purpose; see the type's doc.
-        drop(writeln!(self.out, "warlock: {fact}"));
-    }
-
-    pub(crate) fn on(&mut self, event: PullEvent) {
-        match event {
-            PullEvent::Heading(Heading::Split { ticket, title }) => {
-                self.subtask = None;
-                self.said = None;
-                self.say(&format!("splitting `{ticket}` — {title}"));
-            }
-            // The fraction is the loop's own, one-based, and its denominator is the
-            // split's answer rather than a running total, as `running.rs`'s is.
-            PullEvent::Heading(Heading::Subtask {
-                id,
-                goal,
-                position,
-                total,
-            }) => {
-                self.say(&format!("[{position}/{total}] `{id}` {goal}"));
-                self.subtask = Some(id);
-                self.said = None;
-            }
-            PullEvent::Heading(Heading::PullRequest { branch }) => {
-                self.subtask = None;
-                self.said = None;
-                self.say(&format!("`{branch}` is pushed, opening a pull request"));
-            }
-            PullEvent::Activity(activity) => {
-                let Some(line) = activity_line(&activity) else {
-                    return;
-                };
-                // A tool line repeats only when the session really did the same
-                // thing twice, so only the two running states are collapsed.
-                let running = matches!(activity, Activity::Thinking | Activity::Writing { .. });
-                if running && self.said.as_deref() == Some(line.as_str()) {
-                    return;
-                }
-                self.say(&line);
+    pub(crate) fn on(&mut self, event: &PullEvent) {
+        if let PullEvent::Activity(activity) = event {
+            if let Some(line) = self.watched.line(activity) {
+                say(&mut self.out, &line);
                 self.append(&line);
-                self.said = Some(line);
             }
-            PullEvent::Repair { note } => self.say(&note),
-            // Both board lines are facts about a workflow nobody has finished
-            // setting up, said where the run they happened in is being read.
-            PullEvent::NoStartState { team } => self.say(&no_start_state(&team)),
-            PullEvent::NoReviewState { team, state } => self.say(&no_review_state(&team, &state)),
-            PullEvent::Project { line } => self.say(&line),
+            return;
+        }
+        if let PullEvent::Heading(heading) = event {
+            self.subtask = match heading {
+                Heading::Subtask { id, .. } => Some(id.clone()),
+                Heading::Split { .. } | Heading::PullRequest { .. } => None,
+            };
+            self.watched = Watched::default();
+        }
+        if let Some(line) = event.line() {
+            say(&mut self.out, &line);
         }
     }
 
@@ -675,80 +635,47 @@ impl<W: Write> Progress<W> {
 /// A cost is no line at all, following the panel's account card: it is a fact
 /// about the pass rather than an action, and a run that printed one per report
 /// would be a column of money in the middle of the work.
-pub(crate) fn activity_line(activity: &Activity) -> Option<String> {
+fn activity_line(activity: &Activity) -> Option<String> {
     match activity {
-        Activity::Tool { name, detail } => Some(match detail {
-            Some(detail) => format!("{name} {detail}"),
-            None => name.clone(),
-        }),
-        Activity::Thinking => Some("thinking".to_owned()),
+        Activity::Tool { name, detail } => Some(tool_line(name, detail.as_ref())),
+        Activity::Thinking => Some(THINKING.to_owned()),
         // No byte count: the count is only worth reading where it can tick up in
         // place, and here it would make every report a different line.
-        Activity::Writing { .. } => Some("writing".to_owned()),
+        Activity::Writing { .. } => Some(WRITING.to_owned()),
         Activity::Cost { .. } => None,
     }
 }
 
-/// The splitting session, and the port it reports into.
-///
-/// One agent for the run rather than one per attempt: an agent is a command line
-/// and a timeout, so nothing is spawned until a split is asked for.
-struct Splitter {
-    agent: ChatAgent,
-    activities: Activities,
+/// The activity lines of one session at a shell door, with a stretch of
+/// thinking or writing said once: the panel redraws its activity line in place,
+/// but a session reports `Writing` again with every delta, and printed on a
+/// screen that only scrolls that is a column of identical lines. A tool line
+/// repeats only when the session did the same thing twice, so it is never
+/// collapsed.
+#[derive(Debug, Default)]
+pub(crate) struct Watched {
+    said: Option<String>,
 }
 
-impl Splitter {
-    fn new(activities: Activities) -> Self {
-        Self {
-            agent: ChatAgent::splitting(),
-            activities,
+impl Watched {
+    pub(crate) fn line(&mut self, activity: &Activity) -> Option<String> {
+        let line = activity_line(activity)?;
+        let running = matches!(activity, Activity::Thinking | Activity::Writing { .. });
+        if running && self.said.as_deref() == Some(line.as_str()) {
+            return None;
         }
-    }
-}
-
-impl Splits for Splitter {
-    fn split(&self, ticket: &str, title: &str, description: &str) -> Split {
-        Splitting::for_ticket(&self.agent, ticket, title, description)
-            .reporting(self.activities.clone())
-            .run()
-    }
-}
-
-/// One sub-task session per call, at the system prompt the scope and the sigils
-/// make.
-///
-/// The prompt is built once, because it says which scope the work is under and
-/// which sigils this machine holds, and neither moves for the length of a run.
-struct Worker {
-    agent: ChatAgent,
-    activities: Activities,
-}
-
-impl Worker {
-    fn new(scope: &str, held: &[String], activities: Activities) -> Self {
-        Self {
-            agent: ChatAgent::working(&working_system_prompt(scope, held)),
-            activities,
-        }
-    }
-}
-
-impl Works for Worker {
-    fn work(&self, opening: &str) -> Worked {
-        Working::on(&self.agent, opening)
-            .reporting(self.activities.clone())
-            .run()
+        self.said = Some(line.clone());
+        Some(line)
     }
 }
 
 /// The freshness pass on the real road: the document agent `warlock refresh`
 /// spends, and the one [`Cancel`] it and the descent under it both answer to.
 ///
-/// A [`ClaudeAgent`] and not the [`ChatAgent`] the two sessions above hold,
-/// because a document pass is not a conversation: it is the agent
-/// [`descend`](crate::descent::descend) is given everywhere else, asked for on the
-/// terms a pact names rather than the reader's own model.
+/// A [`ClaudeAgent`] and not the [`ChatAgent`](crate::claude::ChatAgent) the
+/// split and the sub-tasks hold, because a document pass is not a conversation:
+/// it is the agent [`descend`](crate::descent::descend) is given everywhere
+/// else, asked for on the terms a pact names rather than the reader's own model.
 struct Freshener {
     agent: ClaudeAgent,
     /// Nothing latches this today — no `Ctrl-C` handler is installed on this road,
@@ -763,10 +690,7 @@ impl Freshener {
     fn new(activities: Activities) -> Self {
         let cancel = Cancel::new();
         Self {
-            agent: ClaudeAgent::new()
-                .with_timeout(UNTIMED)
-                .with_cancel(cancel.clone())
-                .with_activities(activities),
+            agent: ClaudeAgent::freshening(cancel.clone(), activities),
             cancel,
         }
     }
@@ -789,7 +713,7 @@ impl Freshens for Freshener {
 /// wherever the session reports.
 fn watching<W: Write + Send + 'static>(progress: &Shared<W>) -> Activities {
     let progress = Arc::clone(progress);
-    Activities::new(move |activity| held(&progress).on(PullEvent::Activity(activity)))
+    Activities::new(move |activity| held(&progress).on(&PullEvent::Activity(activity)))
 }
 
 // Every refusal above is asked over values against a temporary repository and a

@@ -1,12 +1,12 @@
 use std::sync::mpsc::{self, Sender};
 use std::time::{Duration, Instant};
 
-use super::{Asked, Chat, Chatting, TurnEvent, apply_turn};
+use super::{Asked, Chat, Chatting, TurnEvent, Turned, WRITE_SHOWN, apply_turn};
 use crate::account::Line;
 use crate::app::App;
+use crate::claude::CancelGuard;
 use crate::claude::{Activity, ChatAgent, INVOCATION_TIMEOUT};
 use crate::inflight::Stream;
-use crate::pacting::CancelGuard;
 use crate::panel::Mode;
 use crate::thread::Ending;
 
@@ -21,7 +21,7 @@ fn asking(base: Instant) -> (App, Sender<TurnEvent>, Option<Chatting>) {
 }
 
 fn writing(base: Instant) -> (App, Sender<TurnEvent>, Option<Chatting>) {
-    started("/write", Asked::Document, base)
+    started(WRITE_SHOWN, Asked::Document, base)
 }
 
 fn started(shown: &str, asked: Asked, base: Instant) -> (App, Sender<TurnEvent>, Option<Chatting>) {
@@ -139,7 +139,7 @@ fn an_answer_lands_on_the_thread_and_takes_the_turn_down() {
 
 #[test]
 fn a_write_turn_hands_its_answer_back_and_leaves_it_on_the_card_as_well() {
-    // The one difference `/write` makes to the drain, and both halves of it:
+    // The one difference a document turn makes to the drain, and both halves of it:
     // the loop is handed the document — which is what it opens the path
     // prompt over — and the card keeps the reply, which is what the reader
     // reads and what the write itself takes its bytes from.
@@ -153,13 +153,13 @@ fn a_write_turn_hands_its_answer_back_and_leaves_it_on_the_card_as_well() {
         .expect("the loop is still listening");
     let document = apply_turn(&mut chat, &mut app, at(base, 4));
 
-    assert_eq!(document.as_deref(), Some(DOCUMENT));
+    assert_eq!(document, Some(Turned::Document(DOCUMENT.to_owned())));
     assert!(chat.is_none(), "an answered turn is still in flight");
     assert_eq!(
         rows(&app, at(base, 4)),
         vec![
             Line::Said {
-                text: "/write".to_owned()
+                text: WRITE_SHOWN.to_owned()
             },
             clocked(4, "waiting"),
             // The card holds the answer as the lines it is made of, which
@@ -556,11 +556,14 @@ mod unix {
     use std::time::{Duration, Instant};
     use std::{env, fs, process, thread};
 
-    use super::super::{Asked, Chat, TurnEvent, run_turn, spawn_turn, start_turn, wired};
+    use super::super::{
+        Asked, Chat, TurnEvent, WRITE_SHOWN, run_turn, spawn_turn, start_turn, wired,
+    };
     use super::{ASKED, at, chatting, clocked, drain, rows, said};
     use crate::app::App;
     use crate::claude::Converses;
     use crate::claude::{Activity, Cancel, ChatAgent};
+    use crate::confirm::Answered;
     use crate::inflight::Port;
     use crate::panel::Mode;
     use crate::prompt::ScopePrompt;
@@ -1041,8 +1044,8 @@ mod unix {
 
     #[test]
     fn a_write_turn_that_answers_hands_the_document_to_the_loop() {
-        // The whole of what `/write` adds to a turn, through the value the
-        // loop holds and a `/bin/sh` standing in for the model: the answer
+        // The whole of what a yes to the offer adds to a turn, through the
+        // value the loop holds and a `/bin/sh` standing in for the model: the answer
         // comes back to the caller — which is what the path prompt opens
         // over — and the same answer is on the card, where the reader reads
         // it and where the write takes its bytes from.
@@ -1052,13 +1055,7 @@ mod unix {
         app.panel_mut().set_mode(Mode::Brief);
         let mut chat = Chat::with_agent(NO_REPOSITORY, stand_in(&printing(&TURN)));
 
-        chat.say(
-            &mut app,
-            "/write",
-            crate::claude::WRITE_INSTRUCTION,
-            Asked::Document,
-            base,
-        );
+        chat.offered(&mut app, Answered::Leave, base);
         let opened = settled(&mut chat, &mut app, at(base, 1));
 
         // The answer is handed to the window rather than to the loop: the
@@ -1077,7 +1074,7 @@ mod unix {
             rows(&app, at(base, 1)),
             vec![
                 crate::account::Line::Said {
-                    text: "/write".to_owned()
+                    text: WRITE_SHOWN.to_owned()
                 },
                 clocked(1, "Read src/lib.rs"),
                 clocked(1, "thinking"),
@@ -1112,13 +1109,7 @@ mod unix {
         app.panel_mut().set_mode(Mode::Brief);
         let mut chat = Chat::with_agent(NO_REPOSITORY, stand_in(&script));
 
-        chat.say(
-            &mut app,
-            "/write",
-            crate::claude::WRITE_INSTRUCTION,
-            Asked::Document,
-            base,
-        );
+        chat.offered(&mut app, Answered::Leave, base);
         assert_eq!(
             settled(&mut chat, &mut app, at(base, 1)),
             ScopePrompt::Closed,
@@ -1134,7 +1125,7 @@ mod unix {
             rows(&app, at(base, 30)),
             vec![
                 crate::account::Line::Said {
-                    text: "/write".to_owned()
+                    text: WRITE_SHOWN.to_owned()
                 },
                 clocked(1, &line),
             ]
@@ -1168,10 +1159,7 @@ mod submitting {
 
     use warlock_engine::{DEFAULT_BRIEF_DIRECTORY, briefs_path, load_briefs};
 
-    use super::super::{
-        ALREADY_CHATTING, BRIEF_COMMAND, BRIEF_NOTE, CHAT_COMMAND, CHAT_NOTE, Chat, NOT_BRIEFING,
-        WRITE_COMMAND, Wanted, brief_asking,
-    };
+    use super::super::{ALREADY_CHATTING, BRIEF_NOTE, CHAT_NOTE, Chat, brief_asking};
     use crate::account::Line;
     use crate::app::App;
     use crate::claude::Converses;
@@ -1179,7 +1167,8 @@ mod submitting {
     use crate::composer::{Composed, Composer};
     use crate::error::one_line;
     use crate::panel::Mode;
-    use crate::submission::Submitted;
+    use crate::submission::{BRIEF, CHAT};
+    use crate::submission::{Submitted, ToDraft, ToPush, Wanted};
     use crate::template::DEFAULT_TEMPLATE;
     use crate::thread::Ending;
     use crate::writing::write_opened;
@@ -1308,13 +1297,9 @@ mod submitting {
     }
 
     #[test]
-    fn write_outside_brief_mode_is_one_note_and_costs_no_turn() {
-        // Nothing is being converged on, so there is nothing to ask for: the
-        // command says which register it wants and how to get there, and
-        // spends neither a turn nor a `claude`. The line is decided from
-        // `App::mode`, which is the state the border title is drawn from, so
-        // it cannot say one register while the header says the other.
+    fn write_is_refused_in_either_register_and_costs_no_turn() {
         let now = Instant::now();
+        let refusal = Submitted::Refused.refusal().expect("a refusal has a line");
 
         for draft in ["/write", "  /write  "] {
             let (app, chat) = submit(draft, now);
@@ -1326,8 +1311,8 @@ mod submitting {
             );
             assert_eq!(
                 rows(&app, now),
-                vec![note(NOT_BRIEFING)],
-                "{draft:?} did not leave exactly one note"
+                vec![note(&refusal)],
+                "{draft:?} did not leave exactly the refusal"
             );
             assert_eq!(turns(&app), 0, "{draft:?} opened a turn");
             assert!(!chat.answering(), "{draft:?} started something");
@@ -1337,18 +1322,15 @@ mod submitting {
             );
         }
 
-        // And after a mode that was entered and left again: the refusal is
-        // about the register the conversation is in now, not about whether
-        // it was ever in the other one.
         let mut app = App::default();
         let mut chat = conversation();
         submit_into(&mut app, &mut chat, "/brief", now);
-        submit_into(&mut app, &mut chat, "/chat", now);
         let before = turns(&app);
         submit_into(&mut app, &mut chat, "/write", now);
 
-        assert_eq!(turns(&app), before, "/write out of the mode cost a turn");
-        assert_eq!(rows(&app, now).last(), Some(&note(NOT_BRIEFING)));
+        assert_eq!(app.panel().mode(), Mode::Brief, "/write moved the register");
+        assert_eq!(turns(&app), before, "/write in brief mode cost a turn");
+        assert_eq!(rows(&app, now).last(), Some(&note(&refusal)));
     }
 
     #[test]
@@ -1376,7 +1358,7 @@ mod submitting {
             );
             assert_eq!(
                 rows(&app, now),
-                vec![note(refusal)],
+                vec![note(&refusal)],
                 "{draft:?} did not leave exactly the refusal"
             );
             assert_eq!(turns(&app), 0, "{draft:?} opened a turn");
@@ -1389,18 +1371,17 @@ mod submitting {
             submit_into(&mut app, &mut chat, draft, now);
 
             assert_eq!(turns(&app), before, "{draft:?} in brief mode cost a turn");
-            assert_eq!(rows(&app, now).last(), Some(&note(refusal)));
+            assert_eq!(rows(&app, now).last(), Some(&note(&refusal)));
         }
     }
 
     #[test]
-    fn push_hands_up_the_scope_and_the_brief_it_names() {
-        // The brief goes up in the manifest's own spelling, says nothing on the
-        // card and leaves the register alone.
+    fn push_hands_up_the_scope_and_the_path_as_typed() {
+        // Says nothing on the card and leaves the register alone: the
+        // manifest's spelling of the path is the loop's to make.
         let now = Instant::now();
-        let root = a_root();
         let mut app = App::default();
-        let mut chat = conversation_in(root.path());
+        let mut chat = conversation();
 
         chat.compose(
             &mut app,
@@ -1411,25 +1392,13 @@ mod submitting {
 
         assert_eq!(
             filed,
-            Some(Wanted::Filed {
+            Some(Wanted::Push(ToPush {
                 scope: "warlock-team".to_owned(),
-                brief: "docs/a-brief.md".to_owned(),
-            })
+                path: "./docs/a-brief.md".to_owned(),
+            }))
         );
         assert!(rows(&app, now).is_empty(), "a named brief left a line");
         assert_eq!(turns(&app), 0, "a named brief opened a turn");
-
-        // A path that climbs out of the repository is refused in the engine's
-        // own words, with nothing handed up for the loop to file.
-        chat.compose(
-            &mut app,
-            Composed::Typing(Composer::new("/push warlock-team ../elsewhere/a-brief.md")),
-            now,
-        );
-        let refused = chat.compose(&mut app, Composed::Submit, now);
-
-        assert_eq!(refused, None, "a path outside the repository was filed");
-        assert_eq!(rows(&app, now).len(), 1, "the refusal was not one line");
     }
 
     #[test]
@@ -1449,59 +1418,15 @@ mod submitting {
 
             assert_eq!(
                 cut,
-                Some(Wanted::Cut {
+                Some(Wanted::Draft(ToDraft {
                     scope: "warlock-team".to_owned(),
                     project: project.map(ToOwned::to_owned),
-                }),
+                })),
                 "{draft:?}"
             );
             assert!(rows(&app, now).is_empty(), "{draft:?} left a line");
             assert_eq!(turns(&app), 0, "{draft:?} opened a turn");
         }
-    }
-
-    #[test]
-    fn write_in_brief_mode_sends_one_turn_shown_as_the_command() {
-        // The ask for the artifact, and it is an ordinary turn in every
-        // respect but the one word it is shown as: the card carries `/write`
-        // and never the paragraph that went to the model, and no note is
-        // added because no register changed. `chatting.rs` asserts the
-        // instruction really is what reaches the child's stdin.
-        let now = Instant::now();
-        let mut app = App::default();
-        let mut chat = conversation();
-
-        submit_into(&mut app, &mut chat, "/brief", now);
-        submit_into(&mut app, &mut chat, "  /write  ", now);
-
-        assert_eq!(app.panel().mode(), Mode::Brief, "/write moved the register");
-        assert_eq!(
-            rows(&app, now),
-            [
-                vec![note(BRIEF_NOTE)],
-                asked(BRIEF_COMMAND).to_vec(),
-                asked(WRITE_COMMAND).to_vec(),
-            ]
-            .concat(),
-            "/write is not one turn shown as the command",
-        );
-        assert_eq!(turns(&app), 2, "/write did not open one turn");
-        assert!(chat.answering(), "/write asked the model nothing");
-        assert!(
-            chat.composer().draft().is_empty(),
-            "/write was left in the field"
-        );
-
-        // And again, because asking twice is asking twice: a second document
-        // costs a second turn and still says nothing about the mode.
-        submit_into(&mut app, &mut chat, "/write", now);
-
-        assert_eq!(turns(&app), 3, "the second /write cost no turn");
-        assert_eq!(
-            rows(&app, now).len(),
-            1 + 2 + 2 + 2,
-            "the second /write said something about the register",
-        );
     }
 
     #[test]
@@ -1523,7 +1448,7 @@ mod submitting {
             );
             assert_eq!(
                 rows(&app, now),
-                [vec![note(BRIEF_NOTE)], asked(BRIEF_COMMAND).to_vec()].concat(),
+                [vec![note(BRIEF_NOTE)], asked(BRIEF).to_vec()].concat(),
                 "{draft:?} is not one note and one turn"
             );
             assert_eq!(turns(&app), 1, "{draft:?} did not open one turn");
@@ -1553,7 +1478,7 @@ mod submitting {
         assert_eq!(app.panel().mode(), Mode::Brief, "the mode was not entered");
         assert_eq!(
             rows(&app, now),
-            [vec![note(BRIEF_NOTE)], asked(BRIEF_COMMAND).to_vec()].concat(),
+            [vec![note(BRIEF_NOTE)], asked(BRIEF).to_vec()].concat(),
         );
         assert_eq!(turns(&app), 1, "the brief did not open one turn");
         assert!(chat.answering(), "the brief asked the model nothing");
@@ -1667,8 +1592,8 @@ mod submitting {
 
     #[test]
     fn a_repository_that_says_nothing_briefs_into_the_default_directory() {
-        // Where a `/write` in this mode would put the document is a value
-        // this command settles and the loop then holds: `/write` reads
+        // Where a write in this mode would put the document is a value
+        // this command settles and the loop then holds: a write reads
         // nothing, so a brief that has taken twenty turns cannot arrive at a
         // window that will not open. A repository with no
         // `.warlock/briefs.toml` has stated no preference, which is the
@@ -1713,7 +1638,7 @@ mod submitting {
         assert_eq!(app.panel().mode(), Mode::Brief, "the mode was not entered");
         assert_eq!(
             rows(&app, now),
-            [vec![note(BRIEF_NOTE)], asked(BRIEF_COMMAND).to_vec()].concat(),
+            [vec![note(BRIEF_NOTE)], asked(BRIEF).to_vec()].concat(),
             "a setting that reads said something on the card",
         );
         assert_eq!(chat.directory(), "plans");
@@ -1739,11 +1664,7 @@ mod submitting {
         // The loader's own sentence, flattened the way the note flattens it:
         // a `briefs.toml` that will not parse carries the TOML parser's
         // multi-line diagnostic, and the card is one line a note.
-        let reason = one_line(
-            &load_briefs(repo.path())
-                .expect_err("a config that is not TOML")
-                .to_string(),
-        );
+        let reason = one_line(load_briefs(repo.path()).expect_err("a config that is not TOML"));
         let mut app = App::default();
         let mut chat = conversation_in(repo.path());
 
@@ -1931,8 +1852,8 @@ mod submitting {
             rows(&app, now),
             [
                 vec![note(BRIEF_NOTE)],
-                asked(BRIEF_COMMAND).to_vec(),
-                asked(BRIEF_COMMAND).to_vec(),
+                asked(BRIEF).to_vec(),
+                asked(BRIEF).to_vec(),
             ]
             .concat(),
         );
@@ -1960,9 +1881,9 @@ mod submitting {
             rows(&app, now),
             [
                 vec![note(BRIEF_NOTE)],
-                asked(BRIEF_COMMAND).to_vec(),
+                asked(BRIEF).to_vec(),
                 vec![note(CHAT_NOTE)],
-                asked(CHAT_COMMAND).to_vec(),
+                asked(CHAT).to_vec(),
             ]
             .concat(),
         );
@@ -2022,9 +1943,9 @@ mod submitting {
             [
                 before,
                 vec![note(BRIEF_NOTE)],
-                asked(BRIEF_COMMAND).to_vec(),
+                asked(BRIEF).to_vec(),
                 vec![note(CHAT_NOTE)],
-                asked(CHAT_COMMAND).to_vec(),
+                asked(CHAT).to_vec(),
             ]
             .concat(),
         );
@@ -2145,7 +2066,7 @@ mod submitting {
             assert_eq!(
                 rows(&app, now),
                 vec![Line::Note {
-                    text: refusal.to_owned()
+                    text: refusal.clone()
                 }],
                 "{draft:?} did not leave exactly one note"
             );
@@ -2230,45 +2151,18 @@ mod submitting {
     }
 }
 
-mod marker {
-    use super::super::without_marker;
-
-    #[test]
-    fn a_last_line_that_is_the_marker_is_taken_off_and_counts() {
-        assert_eq!(
-            without_marker("We have every section.\n\n[ready to write]\n".to_owned()),
-            ("We have every section.".to_owned(), true)
-        );
-    }
-
-    #[test]
-    fn the_marker_anywhere_but_alone_on_the_last_line_is_left_and_does_not_count() {
-        for answer in [
-            "The strip lights when I say [ready to write] last.",
-            "[ready to write]\nOne more question.",
-            "Nothing to report.",
-        ] {
-            assert_eq!(
-                without_marker(answer.to_owned()),
-                (answer.to_owned(), false),
-                "{answer:?}"
-            );
-        }
-    }
-}
-
 mod readiness {
     use super::*;
 
-    fn answered(mode: Mode, answer: &str) -> App {
+    fn answered(mode: Mode, asked: Asked, answer: &str) -> (App, Option<Turned>) {
         let base = Instant::now();
-        let (mut app, events, mut chat) = asking(base);
+        let (mut app, events, mut chat) = started(ASKED, asked, base);
         app.panel_mut().set_mode(mode);
         events
             .send(TurnEvent::Finished(Ok(answer.to_owned())))
             .expect("the loop is still listening");
-        drain(&mut chat, &mut app, at(base, 2));
-        app
+        let turned = apply_turn(&mut chat, &mut app, at(base, 2));
+        (app, turned)
     }
 
     fn said(app: &App) -> String {
@@ -2277,28 +2171,209 @@ mod readiness {
 
     #[test]
     fn a_brief_answer_ending_in_the_marker_is_ready_and_the_card_never_shows_it() {
-        let app = answered(Mode::Brief, "Every section is settled.\n[ready to write]");
-        assert!(app.panel().ready());
+        let (app, turned) = answered(
+            Mode::Brief,
+            Asked::Answer,
+            "Every section is settled.\n[ready to write]",
+        );
+        assert_eq!(turned, Some(Turned::Ready));
         assert!(!said(&app).contains("[ready to write]"), "{}", said(&app));
+        assert!(said(&app).contains("Every section is settled."));
     }
 
     #[test]
-    fn a_brief_answer_without_it_takes_readiness_back() {
-        let base = Instant::now();
-        let (mut app, events, mut chat) = asking(base);
-        app.panel_mut().set_mode(Mode::Brief);
-        app.panel_mut().set_ready(true);
-        events
-            .send(TurnEvent::Finished(Ok("One more question.".to_owned())))
-            .expect("the loop is still listening");
-        drain(&mut chat, &mut app, at(base, 2));
-        assert!(!app.panel().ready());
+    fn a_brief_answer_without_it_hands_nothing_back() {
+        let (_, turned) = answered(Mode::Brief, Asked::Answer, "One more question.");
+        assert_eq!(turned, None);
     }
 
     #[test]
     fn a_chat_answer_is_left_as_it_came() {
-        let app = answered(Mode::Chat, "Quoting it:\n[ready to write]");
-        assert!(!app.panel().ready());
+        let (app, turned) = answered(Mode::Chat, Asked::Answer, "Quoting it:\n[ready to write]");
+        assert_eq!(turned, None);
         assert!(said(&app).contains("[ready to write]"), "{}", said(&app));
+    }
+
+    #[test]
+    fn a_document_that_ends_in_the_marker_is_handed_back_without_it() {
+        let (app, turned) = answered(Mode::Brief, Asked::Document, "# A brief\n[ready to write]");
+        assert_eq!(turned, Some(Turned::Document("# A brief".to_owned())));
+        assert!(!said(&app).contains("[ready to write]"), "{}", said(&app));
+    }
+
+    #[test]
+    fn a_document_is_handed_back_whatever_the_mode() {
+        for mode in [Mode::Brief, Mode::Chat] {
+            let (_, turned) = answered(mode, Asked::Document, "# A brief");
+            assert_eq!(
+                turned,
+                Some(Turned::Document("# A brief".to_owned())),
+                "{mode:?}"
+            );
+        }
+    }
+}
+
+mod offer {
+    use std::path::Path;
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    use super::super::{Chat, WRITE_SHOWN};
+    use crate::account::Line;
+    use crate::app::App;
+    use crate::claude::{CHAT_INSTRUCTION, WRITE_INSTRUCTION};
+    use crate::composer::{Composed, Composer};
+    use crate::confirm::{Answer, Answered};
+    use crate::panel::Mode;
+    use crate::stubs::{Answering, Scripted};
+
+    const NO_REPOSITORY: &str = "/warlock/no/such/repository";
+
+    const READY: &str = "Every section is settled.\n[ready to write]";
+
+    const DOCUMENT: &str = "# A brief\n\nsomething was said.";
+
+    fn conversation(answers: &[&str]) -> (Chat<Scripted>, Scripted) {
+        let model = Scripted::saying(answers.iter().map(|answer| Answering::says(*answer)));
+        (
+            Chat::with_agent(Path::new(NO_REPOSITORY), model.clone()),
+            model,
+        )
+    }
+
+    fn submit(app: &mut App, chat: &mut Chat<Scripted>, draft: &str, now: Instant) {
+        chat.compose(app, Composed::Typing(Composer::new(draft)), now);
+        chat.compose(app, Composed::Submit, now);
+        settle(app, chat, now);
+    }
+
+    fn settle(app: &mut App, chat: &mut Chat<Scripted>, now: Instant) {
+        let waited = Instant::now();
+        while chat.answering() && waited.elapsed() < Duration::from_secs(5) {
+            chat.keep_up(app, now);
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(!chat.answering(), "the turn never ended");
+    }
+
+    // A conversation in brief mode whose `/brief` turn was answered `READY`.
+    fn offered(answers: &[&str]) -> (App, Chat<Scripted>, Scripted) {
+        let now = Instant::now();
+        let mut app = App::default();
+        let (mut chat, model) = conversation(&[&[READY], answers].concat());
+        submit(&mut app, &mut chat, "/brief", now);
+        assert_eq!(chat.write_offer(), Some(Answer::No), "nothing was offered");
+        (app, chat, model)
+    }
+
+    #[test]
+    fn a_brief_answer_ending_in_the_marker_opens_the_offer_with_no_lit() {
+        let (app, chat, model) = offered(&[]);
+
+        assert_eq!(app.panel().mode(), Mode::Brief);
+        assert_eq!(chat.write_offer(), Some(Answer::No));
+        assert_eq!(model.turns(), 1, "the offer cost a turn of its own");
+    }
+
+    #[test]
+    fn moving_the_highlight_keeps_the_offer_open_and_sends_nothing() {
+        let (mut app, mut chat, model) = offered(&[]);
+
+        chat.offered(&mut app, Answered::Open(Answer::Yes), Instant::now());
+
+        assert_eq!(chat.write_offer(), Some(Answer::Yes));
+        assert!(!chat.answering());
+        assert_eq!(model.turns(), 1);
+    }
+
+    #[test]
+    fn no_closes_the_offer_and_sends_nothing() {
+        let (mut app, mut chat, model) = offered(&[]);
+
+        chat.offered(&mut app, Answered::Close, Instant::now());
+
+        assert_eq!(chat.write_offer(), None);
+        assert!(!chat.answering(), "no started a turn");
+        assert_eq!(model.turns(), 1, "no cost a turn");
+        assert_eq!(app.panel().mode(), Mode::Brief, "no left brief mode");
+    }
+
+    #[test]
+    fn yes_asks_for_the_document_shown_as_write_the_brief_and_opens_the_path_prompt() {
+        let now = Instant::now();
+        let (mut app, mut chat, model) = offered(&[DOCUMENT]);
+
+        chat.offered(&mut app, Answered::Leave, now);
+        assert_eq!(chat.write_offer(), None, "the offer outlived its yes");
+        assert!(chat.answering(), "yes asked the model nothing");
+        settle(&mut app, &mut chat, now);
+
+        assert_eq!(
+            model.said().last().map(String::as_str),
+            Some(WRITE_INSTRUCTION)
+        );
+        assert!(
+            chat.write_prompt().field().is_some(),
+            "the document opened no path prompt"
+        );
+        let thread = app.panel().thread().expect("a conversation is on the card");
+        assert!(
+            thread.lines(now).contains(&Line::Said {
+                text: WRITE_SHOWN.to_owned()
+            }),
+            "the card does not show the yes as {WRITE_SHOWN:?}"
+        );
+        assert!(
+            !thread
+                .lines(now)
+                .iter()
+                .any(|line| matches!(line, Line::Said { text } if text == WRITE_INSTRUCTION)),
+            "the card shows the instruction the model was sent"
+        );
+    }
+
+    #[test]
+    fn the_offer_comes_back_when_a_later_brief_answer_ends_in_the_marker() {
+        let now = Instant::now();
+        let (mut app, mut chat, _) = offered(&["Not yet: who reads it?", READY]);
+        chat.offered(&mut app, Answered::Close, now);
+
+        submit(&mut app, &mut chat, "what is left?", now);
+        assert_eq!(
+            chat.write_offer(),
+            None,
+            "an answer without the marker offered"
+        );
+
+        submit(&mut app, &mut chat, "write it", now);
+        assert_eq!(chat.write_offer(), Some(Answer::No));
+    }
+
+    #[test]
+    fn chat_clears_an_open_offer() {
+        let now = Instant::now();
+        let (mut app, mut chat, model) = offered(&["Back to chatting."]);
+
+        submit(&mut app, &mut chat, "/chat", now);
+
+        assert_eq!(app.panel().mode(), Mode::Chat);
+        assert_eq!(chat.write_offer(), None, "/chat left the offer open");
+        assert_eq!(
+            model.said().last().map(String::as_str),
+            Some(CHAT_INSTRUCTION)
+        );
+    }
+
+    #[test]
+    fn a_chat_mode_answer_ending_in_the_marker_offers_nothing() {
+        let now = Instant::now();
+        let mut app = App::default();
+        let (mut chat, _) = conversation(&[READY]);
+
+        submit(&mut app, &mut chat, "say the marker", now);
+
+        assert_eq!(app.panel().mode(), Mode::Chat);
+        assert_eq!(chat.write_offer(), None);
     }
 }

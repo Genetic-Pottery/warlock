@@ -10,12 +10,11 @@
 //! dry run and the panel's dialog are both answered from its [`Prepared`], and
 //! the socket is opened inside [`file`] and nowhere earlier.
 //!
-//! No key value is printed here and none can be. [`Prepared`] carries one with a
-//! redacting `Debug`, it is read on exactly one line — the opener's — and
+//! No key value is printed here and none can be. [`Prepared`] carries one as a
+//! [`Key`], whose `Debug` redacts it, it is read on exactly one line — the opener's — and
 //! [`sent`], the half that prints, takes a [`Destination`], which holds the key
 //! by name only.
 
-use std::fmt;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
@@ -23,8 +22,8 @@ use warlock_engine::{Destination, Manifest, manifest_path, resolve_filing};
 
 use crate::account::size;
 use crate::brief::{Brief, brief_at};
-use crate::error::Error;
-use crate::linear::{Board, NewProject, Opener as LinearOpener, Opens};
+use crate::error::{Error, say};
+use crate::linear::{Board, Key, NewProject, Opener as LinearOpener, Opens};
 use crate::standing::{FOR_PUSH, Standing};
 
 pub fn push(scope: &str, path: &Path, dry_run: bool) -> Result<(), Error> {
@@ -82,12 +81,12 @@ fn pushed<O: Opens, W: Write>(
 
 /// A push with every refusal that costs nothing already asked: the brief read
 /// and the board resolved.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Prepared {
     root: PathBuf,
     brief: Brief,
     destination: Destination,
-    value: String,
+    value: Key,
 }
 
 impl Prepared {
@@ -97,20 +96,6 @@ impl Prepared {
 
     pub(crate) const fn destination(&self) -> &Destination {
         &self.destination
-    }
-}
-
-// Hand-written for `Target`'s reason: this holds the key value, and the panel
-// keeps one in the window its dialog is drawn from, which a failing assertion
-// anywhere in the suite may print.
-impl fmt::Debug for Prepared {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Prepared")
-            .field("root", &self.root)
-            .field("brief", &self.brief)
-            .field("destination", &self.destination)
-            .field("value", &"<redacted>")
-            .finish()
     }
 }
 
@@ -132,7 +117,7 @@ pub(crate) fn prepare(
         root: root.to_path_buf(),
         brief,
         destination: target.destination(),
-        value: target.value().to_owned(),
+        value: Key::new(target.value()),
     })
 }
 
@@ -141,7 +126,7 @@ pub(crate) fn file<O: Opens, W: Write>(
     open: &O,
     out: &mut W,
 ) -> Result<String, Error> {
-    let linear = open.open(&prepared.value);
+    let linear = open.open(prepared.value.as_str());
     sent(
         &linear,
         &prepared.root,
@@ -198,14 +183,16 @@ pub(crate) fn sent<W: Write>(
             .with_status(status.as_deref()),
     )?;
 
-    drop(writeln!(
+    say(
         out,
-        "warlock: filed `{}` to `{}`, labelled `{}`: {}",
-        brief.name(),
-        destination.team_key(),
-        destination.label(),
-        project.url()
-    ));
+        &format!(
+            "filed `{}` to `{}`, labelled `{}`: {}",
+            brief.name(),
+            destination.team_key(),
+            destination.label(),
+            project.url()
+        ),
+    );
 
     Ok(project.url().to_owned())
 }

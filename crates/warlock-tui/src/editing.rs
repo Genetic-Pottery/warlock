@@ -75,7 +75,7 @@ pub(crate) fn edit_press(
         return Ok(());
     };
     // Read once, and only once the press is known to be worth reading it for.
-    let Some(editor) = editor_command(env::var_os(EDITOR_VAR).as_deref()) else {
+    let Some(editor) = editor() else {
         app.set_message(NO_EDITOR);
         return Ok(());
     };
@@ -125,7 +125,7 @@ fn came_back(
         Ok(Viewed { text, cut }) => app.panel_mut().refill_document(text.lines(), cut),
         // The engine's wording, flattened onto one line exactly as `view_press`
         // flattens it — the same failure, reached without a keystroke of its own.
-        Err(error) => note(app, one_line(&error.to_string())),
+        Err(error) => note(app, one_line(error)),
     }
 }
 
@@ -135,14 +135,19 @@ fn came_back(
 // not a file in the words `v` uses.
 fn edit_target(app: &mut App, in_flight: bool) -> Option<PathBuf> {
     if in_flight {
-        // The whole of the refusal: a bit of wording on a line that is already
-        // on screen. Setting it again says the same thing, so a reader leaning
-        // on the key changes nothing after the first press — and nothing is
-        // suspended, so the run goes on drawing on a screen it still owns.
+        // The whole of the refusal is a flag the footer words. Setting it again
+        // says the same thing, so a reader leaning on the key changes nothing
+        // after the first press — and nothing is suspended, so the run goes on
+        // drawing on a screen it still owns.
         app.set_pact_refused();
         return None;
     }
     app.view_target()
+}
+
+/// `$EDITOR`, read and split, or `None` for [`NO_EDITOR`]'s four cases.
+pub(crate) fn editor() -> Option<Editor> {
+    editor_command(env::var_os(EDITOR_VAR).as_deref())
 }
 
 // `split_whitespace` is the whole of the parsing, which answers the awkward
@@ -154,15 +159,9 @@ fn edit_target(app: &mut App, in_flight: bool) -> Option<PathBuf> {
 // running the whole thing unsplit would make `EDITOR="code -w"` behave
 // differently depending on the encoding of the bytes around it.
 //
-// Takes the value rather than reading the variable, for the reason
-// `claude::or_default` is written that way: setting a real environment variable
-// is process-wide, racy against every other test on the runner and unsafe
-// besides.
-/// `$EDITOR`, read and split, or `None` for [`NO_EDITOR`]'s four cases.
-pub(crate) fn editor() -> Option<Editor> {
-    editor_command(env::var_os(EDITOR_VAR).as_deref())
-}
-
+// Takes the value rather than reading the variable: setting a real environment
+// variable is process-wide, racy against every other test on the runner and
+// unsafe besides.
 fn editor_command(value: Option<&OsStr>) -> Option<Editor> {
     let mut words = value?.to_str()?.split_whitespace();
     let program = words.next()?.to_owned();
@@ -201,7 +200,7 @@ pub(crate) fn run_editor(editor: &Editor, path: &Path) -> Option<String> {
         // as well as the program.
         Err(error) => Some(format!(
             "could not run `{program}`: {}; check `$EDITOR`",
-            one_line(&error.to_string())
+            one_line(error)
         )),
     }
 }

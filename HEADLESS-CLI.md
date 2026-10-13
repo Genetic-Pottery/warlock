@@ -16,11 +16,15 @@ plain line and the terminal is never touched.
 
 | Command | What it does | What it spends |
 | --- | --- | --- |
-| `warlock config` | Print the sigils this machine holds here, and read a line replacing them | nothing |
+| `warlock sigil` | Print the sigils this machine holds here | nothing |
+| `warlock sigil add <NAME>...` | Hold these sigils as well as the ones already held | one config write |
+| `warlock sigil remove <NAME>...` | Stop holding these sigils | one config write |
+| `warlock sigil clear` | Stop holding every sigil | one config write |
 | `warlock key add <name>` | Read a Linear key on stdin and store it under a name | one key-store write |
 | `warlock key list` | Print the names this machine holds keys for, and never a key | nothing |
 | `warlock key use <name>` | Bind one of the stored names to this checkout | one config write |
 | `warlock key forget <name>` | Remove a stored key from this machine by name | one key-store write |
+| `warlock branch` | Print the branch this checkout's pulls start from and open pull requests against | nothing |
 | `warlock branch use <BRANCH>` | Make this checkout's pulls start from `BRANCH` and open pull requests against it | one config write |
 | `warlock branch clear` | Go back to the remote's default branch | one config write |
 | `warlock stale [path]` | List the pacted directories at or below `path` that are stale | nothing |
@@ -31,7 +35,7 @@ plain line and the terminal is never touched.
 | `warlock scope remove <path>` | Clear the scope on a pacted directory | one manifest write |
 | `warlock pact <path>` | Describe a directory and everything below it, a `.warlock.md` each | a model pass per directory |
 | `warlock refresh <path>` | The same over only the directories that are not fresh | a model pass per stale directory |
-| `warlock brief` | Argue a brief in one conversation at the shell, and write it where `briefs.toml` says | a turn per blank line, one more for `/write`, and the document it writes |
+| `warlock brief` | Argue a brief in one conversation at the shell, and write it where `briefs.toml` says | a turn per blank line, one more for each yes to the write question, and the document it writes |
 | `warlock push <SCOPE> <PATH>` | File the brief at `PATH` as a project on the board `SCOPE` files to | one project on somebody's board |
 | `warlock draft <SCOPE> [SLUG]` | Without `SLUG`, list the scope's planned projects. With it, cut that project into issues | a list costs one read; a cut costs a drafting session per uncut slice with a turn for each answer or piece of feedback, a proposing pass per question, and for each settled slice its issues and one comment on the project |
 | `warlock pull <SCOPE>` | Work the next ready ticket in that scope's queue to an open pull request | a splitting pass, a model pass per sub-task, a commit each, a pushed branch, a pull request, and two moves on somebody's board |
@@ -43,12 +47,12 @@ omission: the largest thing warlock can do to a repository must not also be the
 thing an absent argument does by itself. `warlock pact .` is somebody having
 said so.
 
-`config` is the one that is about the checkout rather than the ledger.
-`warlock config` prints the repository, the file this machine keeps
-sigils in and what is held now, then reads one line: the sigils on it replace
-everything held for this repository, a blank line clears it, and Ctrl-C or EOF
-changes nothing. It is the only road to a sigil, and a sigil is the only thing
-that opens a scope.
+`warlock sigil` is about the checkout rather than the ledger. `add` and
+`remove` take one or more names, folded to lowercase, and `*` opens every
+scope. Every name is checked before anything is written, so one bad name writes
+nothing. Removing a sigil this machine doesn't hold is refused. A sigil is the
+only thing that opens a scope, and `warlock sigil` and `/sigil` in the TUI are
+the only roads to one.
 
 ### Keys
 
@@ -147,12 +151,15 @@ anywhere.
 ### Base branch
 
 A pull starts from the remote's default branch and opens its pull request
-against it. `warlock branch use <BRANCH>` replaces that for this checkout, and
-`warlock branch clear` puts it back:
+against it. `warlock branch use <BRANCH>` replaces that for this checkout,
+`warlock branch clear` puts it back, and `warlock branch` on its own prints
+where pulls start from now, the same as `/branch` in the TUI:
 
 ```sh
+$ warlock branch
+warlock: pulls start from and open pull requests against the remote's default branch, `main`
 $ warlock branch use develop
-warlock: pulls in `/repo` start from and open pull requests against `develop`, written to `/home/you/.warlock/repo-f447b89a747182e2/config.toml`
+warlock: pulls start from and open pull requests against `develop` for `/repo`, written to `/home/you/.warlock/repo-f447b89a747182e2/config.toml`
 ```
 
 The setting is per person and per checkout, in the same `config.toml` as the
@@ -266,7 +273,7 @@ and **exit 0** when it does:
 
 ```sh
 $ warlock check --gate crates/engine/src/lib.rs
-warlock: crates/engine/src/lib.rs is scoped `data-plane` — hold that sigil to work here, with `warlock config`
+warlock: crates/engine/src/lib.rs is scoped `data-plane` — hold that sigil to work here, with `warlock sigil add data-plane`
 $ echo $?
 3
 
@@ -288,7 +295,7 @@ envelope:
 
 ```sh
 $ warlock check --gate < payload.json
-{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"warlock: `crates/engine/src/lib.rs` is scoped `data-plane` — hold that sigil to work here, with `warlock config`"}}
+{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"warlock: `crates/engine/src/lib.rs` is scoped `data-plane` — hold that sigil to work here, with `warlock sigil add data-plane`"}}
 $ echo $?
 0
 ```
@@ -322,7 +329,7 @@ entry at all, so a command aimed inside a scope this machine does not hold
 answers with the refusal and never with what the manifest holds. A refusal is
 one line on stderr and **exit 3**, with the file byte-identical to what was
 read. There is no `--force` and no environment variable past it:
-`warlock config` is the one road, here exactly as it is in the panel.
+`warlock sigil add` is the one road, here exactly as `/sigil add` is in the panel.
 
 An un-pact has a second refusal that is not that one. When the boundary over the
 path itself is open but something *below* it carries a scope this machine does
@@ -337,7 +344,7 @@ they are required is a fact about the manifest rather than about the command
 line: a scope name nothing records yet is written with all three or not at all,
 and a name that already has a record takes none of them. Both refusals are an
 ordinary **1** and both leave the file byte-identical — not the 3, which is the
-sigil boundary's alone and would send a script to `warlock config` over a
+sigil boundary's alone and would send a script to `warlock sigil add` over a
 missing `--team-key`.
 
 A new name with a record is one manifest write and not two. The scope on the
@@ -481,31 +488,46 @@ end of the run: what reaches it is a missing binary, a timeout and a cancel,
 the session id has not moved, and ending an argument twenty turns old over any
 of the three would throw away the one thing the command exists to produce.
 
-`/write` is the only command at the prompt and it takes nothing after it. Every
-other line is the brief, and a command word that is not it is refused on a line
-rather than sent, so a mistyped command costs a line here instead of a turn:
+There are no commands at the prompt. Every line is the brief, and a panel
+command word is refused on a line rather than sent, so a mistyped command costs
+a line here instead of a turn:
 
 ```sh
 > /push warlock-team docs/brief.md
-warlock: /write is the only command here and takes nothing after it — every other line is the brief; `warlock push` and `warlock draft` are commands of their own
+warlock: there are no commands here — every line is the brief, and the document is offered once the model says it has enough; `warlock push` and `warlock draft` are commands of their own
 ```
 
-It is the panel's own parser that reads the line, so `/write ` with the space a
-hand leaves behind is the command, `/WRITE` is not, and a line opening with a
-path — `/tmp/notes is where I keep them` — is prose. Lines typed and not yet
-sent are left exactly where they are: a `/write` is about the conversation that
-has happened, and lines nobody has sent are not part of it.
+It is the panel's own parser that reads the line, so a line opening with a
+path — `/tmp/notes is where I keep them` — is prose.
 
-A `/write` asks the conversation for the document, prints the reply as every
-other reply is printed, and then proposes a path for it: the directory
-`briefs.toml` names, the next number among the names already in it, and a slug
-off the document's first `# ` line. Enter accepts the proposal and any other
-text replaces it entirely — nothing weighs the two against each other. The file
-is what the conversation was for, so the prompt does not come back after it:
-the run ends on the line that named the path, and that is a **0**.
+When the model has enough to write the brief, it ends its reply with
+`[ready to write]`. warlock takes that line off the reply and asks whether to
+write it. Anything but `y` or `yes` is no: warlock says so and the conversation
+goes on. To get the question back later, ask for the document in your own
+words. If the model agrees that everything is settled, its reply ends in the
+marker again; if not, it says what is still open. EOF at the question ends the
+run with nothing written, the same as EOF at the `> ` cursor.
 
 ```sh
-> /write
+warlock: Both changes run through one asking seam.
+write the brief? [y/N] n
+warlock: not written — ask for it when you want it, and this comes back
+> write it up
+> 
+warlock: Everything is settled.
+write the brief? [y/N] y
+```
+
+A yes asks the conversation for the document, prints the reply as every other
+reply is printed, and then proposes a path for it: the directory `briefs.toml`
+names, the next number among the names already in it, and a slug off the
+document's first `# ` line. Enter accepts the proposal and any other text
+replaces it entirely — nothing weighs the two against each other. The file is
+what the conversation was for, so the prompt does not come back after it: the
+run ends on the line that named the path, and that is a **0**.
+
+```sh
+write the brief? [y/N] y
 warlock: # Give the headless CLI a voice
 …
 warlock: the document goes to `docs/warlock-brief-01-give-the-headless-cli-a-voice.md` — Enter writes it there, another path replaces it
@@ -615,7 +637,7 @@ file:
 
 ```sh
 warlock: `/repo/.warlock/pacts.toml` records no `[[scope]]` record, so there is nowhere to file: add one
-warlock: this machine holds no sigil, so nothing says which board to file to: hold one with `warlock config`
+warlock: this machine holds no sigil, so nothing says which board to file to: hold one with `warlock sigil add`
 warlock: this machine holds `platform`, and `/repo/.warlock/pacts.toml` records no scope of any of those names
 warlock: this machine holds `platform`, and that scope has no `[[scope]]` record: add one to `/repo/.warlock/pacts.toml`
 warlock: `billing` is not a scope this machine can file to here: `data-plane`, `web`
@@ -1006,7 +1028,7 @@ can file to", which would send somebody to fix a record that is right.
 
 ```sh
 $ warlock pull control-plane
-warlock: the scope `control-plane` is not one this machine's sigils open, so nothing was pulled: this machine holds `warlock-team` — hold that sigil with `warlock config`
+warlock: the scope `control-plane` is not one this machine's sigils open, so nothing was pulled: this machine holds `warlock-team` — hold that sigil with `warlock sigil add control-plane`
 $ echo $?
 3
 ```
@@ -1305,7 +1327,7 @@ start the ticket over.
 | `0` | Completed. The question was answered or the write happened, whatever the answer turned out to be — an empty listing, a queue with nothing ready to pull, and a scope closed to this machine included |
 | `1` | Warlock could not do it, or would not: the repository will not resolve, the manifest will not parse or will not save, the path has no repository-relative spelling, a scope name nothing records yet was given without all three record flags or with a blank one, a name that already has a record was given any of them, a brief's template or `briefs.toml` will not read, a push or draft names a scope that is not a board here, the brief is not one or a project of its name is already filed, a draft's slug is one Linear does not know or its project is not `Planned`, the scope block will not cut or has nothing left to cut, the team has no `Backlog` state, a pull's scope is one nothing records, the working tree is dirty, a named ticket is one the queue's rules turn down, a run halted, a resume was asked for a ticket this machine holds no run for or a run with nothing to put back, or Linear refused what was sent. The line on stderr is the thing to go and read |
 | `2` | The command line was never a request. Clap's status and its wording, for a word warlock has no place for |
-| `3` | The sigil boundary, in the three places it is reached: this machine's sigils do not open the scope covering the path, they do not open the scope a pull was asked for — both refused at the start with nothing spent — or a pull's sub-task wrote under a scope they do not open, which stops the run with nothing committed and the tree as that session left it. Retrying changes nothing, and the road out is `warlock config` |
+| `3` | The sigil boundary, in the three places it is reached: this machine's sigils do not open the scope covering the path, they do not open the scope a pull was asked for — both refused at the start with nothing spent — or a pull's sub-task wrote under a scope they do not open, which stops the run with nothing committed and the tree as that session left it. Retrying changes nothing, and the road out is `warlock sigil add` |
 | `4` | Completed with failures: a run wrote the documents it could and saved the manifest, and the lines above the count name the directories that did not come out of it |
 | `130` | Cancelled: somebody pressed Ctrl-C during a run, and what had finished by then is saved and granted. 128 plus SIGINT, so a shell, `make` and CI read it as interrupted without being told anything about warlock |
 

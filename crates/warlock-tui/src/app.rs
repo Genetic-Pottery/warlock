@@ -24,6 +24,7 @@ use std::time::Instant;
 
 use warlock_engine::{IntoDocument, NodeState, StateCounts, Tree, to_manifest_path};
 
+use crate::freshness::label;
 use crate::panel::{Panel, Showing};
 use crate::selection::{Position, Selection};
 
@@ -45,7 +46,6 @@ pub(crate) struct Row {
     /// A file row carries the state of the directory holding it, which is what
     /// makes a file take its module's colour.
     pub state: NodeState,
-    pub children: usize,
     pub file: bool,
     /// Set on the one file row that is its directory's own `.warlock.md`. Kept
     /// on the row because the comparison against the node's document cannot be
@@ -71,7 +71,6 @@ impl Row {
             path: path.into(),
             document: document.into_document(),
             state,
-            children: 0,
             file: false,
             document_row: false,
             ignored: false,
@@ -85,12 +84,6 @@ impl Row {
             file: true,
             ..Self::new(depth, path, None, state)
         }
-    }
-
-    #[must_use]
-    pub(crate) const fn with_child_count(mut self, children: usize) -> Self {
-        self.children = children;
-        self
     }
 
     #[must_use]
@@ -109,12 +102,6 @@ impl Row {
     pub(crate) fn with_scope(mut self, scope: Option<String>) -> Self {
         self.scope = scope;
         self
-    }
-
-    #[must_use]
-    #[cfg(test)]
-    pub(crate) const fn has_children(&self) -> bool {
-        self.children > 0
     }
 
     #[must_use]
@@ -157,6 +144,15 @@ pub(crate) enum Run {
     Refresh,
 }
 
+impl Run {
+    pub(crate) const fn word(self) -> &'static str {
+        match self {
+            Self::Pact => crate::ui::PACTING_RUN,
+            Self::Refresh => crate::ui::REFRESHING_RUN,
+        }
+    }
+}
+
 // The board work the workflow strip lights. Not a second `Run`: a pact is the
 // tree's, and these three are the board's, each on a value of its own in the
 // loop.
@@ -186,15 +182,6 @@ struct InFlight {
     files: Option<(usize, usize)>,
 }
 
-impl InFlight {
-    // What is finished, which is the node being worked less itself. The header,
-    // its bar and the footer line all count this way, so the three cannot
-    // disagree about how far along a run is.
-    const fn done(&self) -> usize {
-        self.position.saturating_sub(1)
-    }
-}
-
 /// The run in flight, as the header draws it.
 ///
 /// [`RunHeader::position`] is the furthest node this run has reached, which is
@@ -217,11 +204,13 @@ pub(crate) struct RunHeader {
 
 impl RunHeader {
     #[must_use]
+    #[cfg(test)]
     pub(crate) const fn run(&self) -> Run {
         self.run
     }
 
     #[must_use]
+    #[cfg(test)]
     pub(crate) fn directory(&self) -> &str {
         &self.directory
     }
@@ -244,6 +233,17 @@ impl RunHeader {
     #[must_use]
     pub(crate) const fn completed(&self) -> usize {
         self.position.saturating_sub(1)
+    }
+
+    #[must_use]
+    pub(crate) fn words(&self) -> String {
+        format!(
+            "{} {} ({}/{})",
+            self.run.word(),
+            self.directory,
+            self.completed(),
+            self.total
+        )
     }
 
     /// The file being described of the files this directory is paying for,
@@ -299,12 +299,13 @@ impl Focus {
     }
 }
 
-/// Which sigils the machine holds, for the one line the chrome draws about it.
+/// Which sigils the machine holds.
 ///
 /// `Nothing` and `Unknown` are not the same answer and must not be merged:
-/// holding no sigil draws no line at all, while failing to find out draws
-/// "holding unknown". [`Sigils::held`] folds an empty list into `Nothing`, so
-/// `Held` is never empty and the line is never a dangling "holding".
+/// one is a config that holds nothing, the other a config that would not read,
+/// and drawing broken as absent tells a reader they hold nothing when warlock
+/// could not find out. [`Sigils::held`] folds an empty list into `Nothing`, so
+/// `Held` is never empty.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
 pub(crate) enum Sigils {
     #[default]
@@ -330,31 +331,21 @@ impl Sigils {
             Self::Held(sigils) => sigils,
         }
     }
+}
 
-    #[must_use]
-    pub(crate) fn line(&self) -> Option<String> {
-        match self {
-            Self::Nothing => None,
-            Self::Held(sigils) => Some(format!(
-                "holding {}",
-                sigils
-                    .iter()
-                    .map(|sigil| format!("`{sigil}`"))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            )),
-            Self::Unknown => Some("holding unknown".to_owned()),
-        }
-    }
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
+pub(crate) struct Held {
+    pub(crate) sigils: Sigils,
+    pub(crate) base: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct Chrome {
     header: String,
-    sigils: Sigils,
-    // Kept apart rather than resolved into one name, so `/branch clear` has
-    // the remote's default to fall back to without asking `git` again.
-    base: Option<String>,
+    held: Held,
+    // Kept apart from the base rather than resolved into one name, so
+    // `/branch clear` has the remote's default to fall back to without asking
+    // `git` again.
     remote_head: Option<String>,
 }
 
@@ -372,15 +363,14 @@ impl Chrome {
         };
         Self {
             header,
-            sigils: Sigils::Nothing,
-            base: None,
+            held: Held::default(),
             remote_head: None,
         }
     }
 
     #[must_use]
-    pub(crate) fn with_sigils(mut self, sigils: Sigils) -> Self {
-        self.sigils = sigils;
+    pub(crate) fn with_held(mut self, held: Held) -> Self {
+        self.held = held;
         self
     }
 
@@ -391,27 +381,27 @@ impl Chrome {
 
     #[must_use]
     pub(crate) const fn sigils(&self) -> &Sigils {
-        &self.sigils
+        &self.held.sigils
     }
 
     #[must_use]
-    pub(crate) fn with_target(mut self, base: Option<String>, remote_head: Option<String>) -> Self {
-        self.base = base;
+    pub(crate) fn with_remote_head(mut self, remote_head: Option<String>) -> Self {
         self.remote_head = remote_head;
         self
     }
 
-    pub(crate) fn set_base(&mut self, base: Option<String>) {
-        self.base = base;
+    pub(crate) fn set_held(&mut self, held: Held) {
+        self.held = held;
+    }
+
+    #[must_use]
+    pub(crate) fn remote_head(&self) -> Option<&str> {
+        self.remote_head.as_deref()
     }
 
     #[must_use]
     pub(crate) fn target(&self) -> Target<'_> {
-        match (&self.base, &self.remote_head) {
-            (Some(base), _) => Target::Set(base),
-            (None, Some(head)) => Target::Default(head),
-            (None, None) => Target::Unknown,
-        }
+        Target::of(self.held.base.as_deref(), self.remote_head())
     }
 }
 
@@ -423,7 +413,16 @@ pub(crate) enum Target<'a> {
     Unknown,
 }
 
-impl Target<'_> {
+impl<'a> Target<'a> {
+    #[must_use]
+    pub(crate) const fn of(base: Option<&'a str>, remote_head: Option<&'a str>) -> Self {
+        match (base, remote_head) {
+            (Some(base), _) => Self::Set(base),
+            (None, Some(head)) => Self::Default(head),
+            (None, None) => Self::Unknown,
+        }
+    }
+
     #[must_use]
     pub(crate) fn sentence(self) -> String {
         match self {
@@ -680,22 +679,23 @@ impl App {
         })
     }
 
+    /// The footer says a refused press and nothing else about a run: the
+    /// panel's run header already says what is running and how far along it is.
     #[must_use]
-    pub(crate) fn pact_line(&self) -> Option<String> {
-        self.status.in_flight.as_ref().map(|in_flight| {
-            let label = self.label_for(&in_flight.path);
-            let line = match in_flight.run {
-                // Finished, not started, the same as the bar and the header:
-                // see `RunHeader::completed`.
-                Run::Pact => pacting_message(&label, in_flight.done(), in_flight.total),
-                Run::Refresh => refreshing_message(&label, in_flight.done(), in_flight.total),
-            };
-            if self.status.pact_refused {
-                already_running_message(&line)
-            } else {
-                line
-            }
+    pub(crate) fn refused_line(&self) -> Option<String> {
+        let in_flight = self.status.in_flight.as_ref()?;
+        self.status.pact_refused.then(|| {
+            already_running_message(&format!(
+                "{} {}",
+                in_flight.run.word(),
+                self.label_for(&in_flight.path)
+            ))
         })
+    }
+
+    #[must_use]
+    pub(crate) const fn has_run(&self) -> bool {
+        self.status.in_flight.is_some()
     }
 
     #[must_use]
@@ -1099,14 +1099,10 @@ impl App {
 
     #[must_use]
     pub(crate) fn label_for(&self, path: &Path) -> String {
-        match self
-            .rows
-            .first()
-            .map(|root| to_manifest_path(&root.path, path))
-        {
-            Some(Ok(relative)) if relative != "." => relative,
-            _ => path.display().to_string(),
-        }
+        self.rows.first().map_or_else(
+            || path.display().to_string(),
+            |root| label(&root.path, path),
+        )
     }
 
     pub(crate) fn toggle_collapsed(&mut self) {
@@ -1258,10 +1254,10 @@ impl App {
             // zeroes that never described those rows, and nudging one field up
             // while the other cannot come down would turn a tally that is
             // merely absent into one that counts a node that is not there.
-            let old = count_mut(&mut self.counts, row.state);
+            let old = self.counts.get_mut(row.state);
             if let Some(fewer) = old.checked_sub(1) {
                 *old = fewer;
-                *count_mut(&mut self.counts, state) += 1;
+                *self.counts.get_mut(state) += 1;
             }
         }
 
@@ -1356,7 +1352,7 @@ fn file_row_position(rows: &[Row], directory: usize, depth: usize, path: &Path) 
 }
 
 #[must_use]
-pub(crate) fn reseat_on(view: &App, tree: &Tree) -> App {
+pub(crate) fn reseat_on(view: App, tree: &Tree) -> App {
     // Taken before anything is rebuilt, because it is the one fact about the
     // old view that the new rows cannot be asked for.
     let selected = view.selected_row().map(|row| row.path.clone());
@@ -1365,9 +1361,6 @@ pub(crate) fn reseat_on(view: &App, tree: &Tree) -> App {
     // `..`: this function is the one place that decides what survives a reload,
     // and a pattern that names every field is what makes adding a tenth one a
     // compile error here rather than a fact that quietly stops being carried.
-    // That used to be twenty assignments nobody could check, and the proof it
-    // could not be checked is that the header was among them — carried here and
-    // then immediately recomputed by the only caller.
     let App {
         // From the tree, every time. Whatever the old view held for these is a
         // description of a tree that has just been replaced.
@@ -1401,10 +1394,10 @@ pub(crate) fn reseat_on(view: &App, tree: &Tree) -> App {
         counts: tree.counts(),
         selected: 0,
         scroll_offset: 0,
-        viewpoint: viewpoint.clone(),
-        status: status.clone(),
-        panel: panel.clone(),
-        highlight: *highlight,
+        viewpoint,
+        status,
+        panel,
+        highlight,
     };
 
     // Re-filter first, so the selection is looked up in the rows that will
@@ -1418,7 +1411,7 @@ pub(crate) fn reseat_on(view: &App, tree: &Tree) -> App {
     // selection; the offset the reader left is the one the window rule is owed,
     // so it goes back before that rule is applied to where the selection really
     // landed. A window that still holds the selection does not move at all.
-    reseated.scroll_offset = *scroll_offset;
+    reseated.scroll_offset = scroll_offset;
     reseated.rescroll();
 
     reseated
@@ -1429,7 +1422,6 @@ fn walk_of(tree: &Tree) -> Vec<Row> {
     for (node, depth) in tree.walk() {
         rows.push(
             Row::new(depth, node.path.clone(), node.document.clone(), node.state)
-                .with_child_count(node.children.len())
                 .with_ignored(node.is_ignored())
                 .with_scope(node.scope.clone()),
         );
@@ -1537,14 +1529,6 @@ fn left_on_disk_message(label: &str) -> String {
     )
 }
 
-fn pacting_message(label: &str, done: usize, total: usize) -> String {
-    format!("pacting {label} ({done}/{total})")
-}
-
-fn refreshing_message(label: &str, done: usize, total: usize) -> String {
-    format!("refreshing {label} ({done}/{total})")
-}
-
 fn already_fresh_message(label: &str) -> String {
     format!("{label} is already fresh — there is nothing under it to describe again")
 }
@@ -1587,14 +1571,6 @@ fn ignored_row_message(label: &str) -> String {
     format!(
         "{label} is kept out by .warlockignore — Warlock covers nothing in there, so there is nothing to pact"
     )
-}
-
-fn count_mut(counts: &mut StateCounts, state: NodeState) -> &mut usize {
-    match state {
-        NodeState::Unpacted => &mut counts.unpacted,
-        NodeState::PactedStale => &mut counts.pacted_stale,
-        NodeState::PactedFresh => &mut counts.pacted_fresh,
-    }
 }
 
 #[cfg(test)]

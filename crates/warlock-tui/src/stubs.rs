@@ -1,15 +1,3 @@
-//! No agent here stops a turn on the say-when, reports activities, or records
-//! the model it was raised at, and that is what says which tests they are not
-//! for: cancelling a run, attaching the activity port, and the argv a brief
-//! runs at are facts about a child process, asserted on the real adapter in
-//! `pacting.rs` and `chatting.rs`. A second record of them here would be a copy
-//! for the two to disagree over.
-//!
-//! [`Scripted`] keeping the handles it was wired to is not that record: what it
-//! answers never depends on them, and what they buy is the one question the
-//! real adapter cannot be asked from the panel's side — whether the session in
-//! flight was told to stop.
-
 use std::collections::VecDeque;
 use std::fmt;
 use std::path::PathBuf;
@@ -297,12 +285,7 @@ impl Wired for Scripted {
 impl Converses for Scripted {
     fn turn(&self, message: &str) -> Result<String, agent::Error> {
         if self.cancel.as_ref().is_some_and(Cancel::is_cancelled) {
-            return Err(agent::Error::Io {
-                source: std::io::Error::new(
-                    std::io::ErrorKind::Interrupted,
-                    "the model pass was cancelled before it finished",
-                ),
-            });
+            return Err(crate::claude::cancelled());
         }
         locked(&self.said).push(message.to_owned());
         for activity in &self.doing {
@@ -681,14 +664,10 @@ impl Boarding {
 
     /// Every project move asked for, as the project id and the status id.
     pub(crate) fn moves(&self) -> Vec<(String, String)> {
-        self.log()
-            .calls
-            .iter()
-            .filter_map(|call| match call {
-                Call::MoveProject { project, status } => Some((project.clone(), status.clone())),
-                _ => None,
-            })
-            .collect()
+        self.picked(|call| match call {
+            Call::MoveProject { project, status } => Some((project.clone(), status.clone())),
+            _ => None,
+        })
     }
 
     pub(crate) fn without_team(mut self) -> Self {
@@ -772,49 +751,33 @@ impl Boarding {
     }
 
     pub(crate) fn projects_created(&self) -> Vec<ProjectAsked> {
-        self.log()
-            .calls
-            .iter()
-            .filter_map(|call| match call {
-                Call::CreateProject(asked) => Some(asked.clone()),
-                _ => None,
-            })
-            .collect()
+        self.picked(|call| match call {
+            Call::CreateProject(asked) => Some(asked.clone()),
+            _ => None,
+        })
     }
 
     pub(crate) fn issues_created(&self) -> Vec<IssueAsked> {
-        self.log()
-            .calls
-            .iter()
-            .filter_map(|call| match call {
-                Call::CreateIssue(asked) => Some(asked.clone()),
-                _ => None,
-            })
-            .collect()
+        self.picked(|call| match call {
+            Call::CreateIssue(asked) => Some(asked.clone()),
+            _ => None,
+        })
     }
 
     /// Every edge asked for, blocker first.
     pub(crate) fn relations(&self) -> Vec<(String, String)> {
-        self.log()
-            .calls
-            .iter()
-            .filter_map(|call| match call {
-                Call::Relation { blocker, waiting } => Some((blocker.clone(), waiting.clone())),
-                _ => None,
-            })
-            .collect()
+        self.picked(|call| match call {
+            Call::Relation { blocker, waiting } => Some((blocker.clone(), waiting.clone())),
+            _ => None,
+        })
     }
 
     /// Every project comment asked for, as the project id and the body.
     pub(crate) fn comments(&self) -> Vec<(String, String)> {
-        self.log()
-            .calls
-            .iter()
-            .filter_map(|call| match call {
-                Call::Comment { project, body } => Some((project.clone(), body.clone())),
-                _ => None,
-            })
-            .collect()
+        self.picked(|call| match call {
+            Call::Comment { project, body } => Some((project.clone(), body.clone())),
+            _ => None,
+        })
     }
 
     /// Every key this board was opened with, which is how a test says the value
@@ -825,6 +788,10 @@ impl Boarding {
 
     fn log(&self) -> MutexGuard<'_, Log> {
         locked(&self.log)
+    }
+
+    fn picked<T>(&self, pick: impl Fn(&Call) -> Option<T>) -> Vec<T> {
+        self.log().calls.iter().filter_map(pick).collect()
     }
 
     fn ask(&self, call: Call) -> Result<(), LinearError> {
@@ -1197,8 +1164,7 @@ impl Checkout {
 
     // The nth call of one kind, saturating at the last written-down answer.
     fn answer<T: Clone>(&self, answers: &[T], of: &GitCall) -> T {
-        let at = self
-            .calls()
+        let at = locked(&self.log)
             .iter()
             .filter(|call| std::mem::discriminant(*call) == std::mem::discriminant(of))
             .count();
@@ -1700,8 +1666,8 @@ impl Raises for Written {
 
 /// The sub-task sessions as the panel raises them: each mints the handle its own
 /// child would answer and publishes it where the thread that quits can reach it,
-/// which is what [`Working::on`](crate::claude::Working) does under the real one. A
-/// stand-in that skipped this would be a run nothing could stop.
+/// which is what the panel's [`Worker`](crate::puller::Worker) does under the real one.
+/// A stand-in that skipped this would be a run nothing could stop.
 pub(crate) struct Publishing {
     inner: Sessions,
     stopping: Stopping,

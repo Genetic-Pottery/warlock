@@ -159,8 +159,7 @@ fn press(code: KeyCode) -> KeyEvent {
 
 /// What the footer says when the boundary turns `s` down over
 /// `crates/engine`, which the fixture scopes `data-plane`.
-const CLOSED: &str =
-    "crates/engine is scoped `data-plane` — hold that sigil to work here, with `warlock config`";
+const CLOSED: &str = "crates/engine is scoped `data-plane` — hold that sigil to work here, with `warlock sigil add data-plane`";
 
 #[test]
 fn s_is_refused_on_a_directory_whose_scope_this_machine_does_not_hold() {
@@ -232,7 +231,7 @@ fn a_machine_that_holds_no_sigil_is_refused_by_a_scoped_directory() {
     let repo = a_repo();
 
     for sigils in [
-        // Nobody has run `warlock config` here. A sigil is what opens a
+        // Nobody has run `warlock sigil add` here. A sigil is what opens a
         // scope, so holding none opens none — the empty set is not a
         // universal bypass, or the boundary would hold for exactly those
         // people who had already opted into being bound by it.
@@ -476,11 +475,9 @@ fn a_press_while_a_run_is_in_flight_opens_nothing_and_says_so_on_the_progress_li
         refused
     };
     assert_eq!(app, refused, "the press did more than say so");
-    assert!(
-        app.pact_line()
-            .is_some_and(|line| line.ends_with("— already running")),
-        "the refusal is worded onto the line the reader is watching: {:?}",
-        app.pact_line()
+    assert_eq!(
+        app.refused_line().as_deref(),
+        Some("pacting crates/tui — already running")
     );
     assert_eq!(
         app.message(),
@@ -540,7 +537,7 @@ fn enter_sets_the_scope_and_leaves_the_document_and_the_grant_alone() {
         &field("crates/engine", "billing"),
     );
 
-    assert_eq!(windows, Windows::closed(), "the window is answered");
+    assert_eq!(windows, Windows::default(), "the window is answered");
     let written = saved(repo.path()).expect("the submit wrote the manifest");
     assert_eq!(
         written, manifest,
@@ -606,7 +603,7 @@ fn a_set_and_a_clear_both_leave_the_records_in_the_file() {
             &field("crates/engine", text),
         );
 
-        assert_eq!(windows, Windows::closed());
+        assert_eq!(windows, Windows::default());
         let written = saved(repo.path()).expect("the submit wrote the manifest");
         assert_eq!(
             written.scopes(),
@@ -640,7 +637,7 @@ fn enter_on_an_empty_field_clears_the_scope_and_keeps_the_grant() {
     );
 
     // Neither window: clearing is an answer, and there is no name to record.
-    assert_eq!(windows, Windows::closed());
+    assert_eq!(windows, Windows::default());
     let written = saved(repo.path()).expect("the submit wrote the manifest");
     assert_eq!(written, manifest);
     assert_eq!(
@@ -674,9 +671,13 @@ fn a_set_and_a_clear_leave_the_run_state_and_the_message_line_untouched() {
             &field("crates/engine", text),
         );
 
-        assert_eq!(windows, Windows::closed());
+        assert_eq!(windows, Windows::default());
         assert!(!app.is_pacting(), "writing {text:?} started a run");
-        assert_eq!(app.pact_line(), None, "and put a progress line up");
+        assert_eq!(
+            app.run_header().map(|header| header.words()),
+            None,
+            "and put a progress line up"
+        );
         assert!(app.panel().account().is_none(), "and opened an account");
         assert_eq!(app.message(), Some(LAST_KEY), "and took the message line");
         assert_eq!(app, before, "writing {text:?} moved the view");
@@ -750,7 +751,7 @@ fn what_was_typed_is_folded_before_it_is_judged_and_stored() {
     // `Data-Plane` is not.
     assert_eq!(
         windows,
-        Windows::closed(),
+        Windows::default(),
         "the fold happened before the judge"
     );
     assert!(validate_scope("Data-Plane").is_err());
@@ -782,7 +783,7 @@ fn a_manifest_that_will_not_save_puts_its_reason_on_the_message_line() {
     // The reason goes on the footer and the window comes down off it; the
     // manifest this thread holds still says what is on disk, which is that
     // the scope was not changed.
-    assert_eq!(windows, Windows::closed());
+    assert_eq!(windows, Windows::default());
     assert!(
         app.message().is_some_and(|line| !line.is_empty()),
         "a save that failed said nothing"
@@ -809,7 +810,7 @@ fn a_directory_the_manifest_has_no_entry_for_writes_nothing_and_says_so() {
 
     // And no record window either: a name with nowhere to be written is
     // turned down before the three fields are asked for.
-    assert_eq!(windows, Windows::closed());
+    assert_eq!(windows, Windows::default());
     assert_eq!(saved(repo.path()), None, "something was written anyway");
     assert_eq!(manifest, pacts());
     let message = app.message().expect("the refusal said nothing");
@@ -880,7 +881,7 @@ fn typing_and_abandoning_move_the_prompt_and_nothing_else() {
             &ScopePrompt::open("crates/engine", "web"),
             Edited::Close,
         ),
-        Windows::closed(),
+        Windows::default(),
     );
     assert_eq!(saved(repo.path()), None, "typing wrote to disk");
     assert_eq!(manifest, pacts(), "typing edited the manifest");
@@ -903,7 +904,7 @@ fn a_submit_with_no_window_up_writes_nothing() {
         Edited::Submit,
     );
 
-    assert_eq!(windows, Windows::closed());
+    assert_eq!(windows, Windows::default());
     assert_eq!(saved(repo.path()), None);
     assert_eq!(manifest, pacts());
 }
@@ -951,7 +952,7 @@ fn the_whole_path_from_the_press_to_the_saved_manifest_is_one_key_at_a_time() {
     // And the run state and the message line came through the whole of it
     // untouched: no key of those six was a run.
     assert!(!app.is_pacting());
-    assert_eq!(app.pact_line(), None);
+    assert_eq!(app.run_header().map(|header| header.words()), None);
     assert_eq!(app.message(), Some(LAST_KEY));
 }
 
@@ -1100,7 +1101,7 @@ fn a_name_that_already_has_a_record_is_written_with_no_second_window() {
 
     assert_eq!(
         windows,
-        Windows::closed(),
+        Windows::default(),
         "a recorded name was asked about"
     );
     assert_eq!(
@@ -1130,7 +1131,7 @@ fn an_empty_field_clears_the_scope_and_asks_for_no_record() {
         &field("crates/engine", ""),
     );
 
-    assert_eq!(windows, Windows::closed());
+    assert_eq!(windows, Windows::default());
     assert_eq!(scope_on(&manifest, "crates/engine"), None);
     assert_eq!(
         scope_on(
@@ -1435,7 +1436,7 @@ fn the_whole_path_through_both_windows_is_one_key_at_a_time() {
     // And the run state and the message line came through the whole of it
     // untouched: not one of those keys was a run.
     assert!(!app.is_pacting());
-    assert_eq!(app.pact_line(), None);
+    assert_eq!(app.run_header().map(|header| header.words()), None);
     assert_eq!(app.message(), Some(LAST_KEY));
 }
 

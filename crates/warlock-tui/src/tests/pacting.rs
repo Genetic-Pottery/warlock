@@ -18,6 +18,7 @@ use crate::app::{App, Chrome, PactToggle, Run, Sigils};
 use crate::claude::Cancel;
 use crate::claude::{Activities, Activity, ClaudeAgent};
 use crate::panel::Mode;
+use crate::settings::Settings;
 
 use super::{
     CancelGuard, PACT_CANCELLED, PACT_LOST, Pact, PactEvent, Reloaded, Running, Toggled,
@@ -46,6 +47,7 @@ fn pact_press(app: &mut App, in_flight: bool, at: Instant) -> Option<PactToggle>
         turn(in_flight),
         at,
     )
+    .map(|(pressed, _)| pressed)
 }
 
 fn refresh_press(app: &mut App, in_flight: bool, at: Instant) -> Option<PathBuf> {
@@ -57,6 +59,7 @@ fn refresh_press(app: &mut App, in_flight: bool, at: Instant) -> Option<PathBuf>
         turn(in_flight),
         at,
     )
+    .map(|(pressed, _)| pressed)
 }
 
 const DOCUMENT_FILE: &str = ".warlock.md";
@@ -299,6 +302,7 @@ fn load(scratch: &Scratch) -> (App, Scope) {
     let scope = Scope {
         chrome: Chrome::of(&repo_root, tree.root_path()),
         root: tree.root_path().to_path_buf(),
+        settings: Settings::at(None, &repo_root),
         repo_root,
     };
     (app, scope)
@@ -357,6 +361,7 @@ fn nowhere() -> Scope {
         root: PathBuf::from("/repo/crates"),
         repo_root: PathBuf::from("/repo"),
         chrome: Chrome::of("/repo", "/repo/crates"),
+        settings: Settings::at(None, "/repo"),
     }
 }
 
@@ -1186,8 +1191,8 @@ fn the_pact_key_starts_nothing_while_a_pact_is_in_flight() {
     let refused = refusing(&before);
     assert_eq!(app, refused, "the press did more than say so");
     assert_eq!(
-        app.pact_line().as_deref(),
-        Some("pacting engine (2/12) — already running"),
+        app.refused_line().as_deref(),
+        Some("pacting engine — already running"),
         "the refusal is worded onto the line the reader is watching"
     );
     assert_eq!(
@@ -1227,8 +1232,8 @@ fn leaning_on_the_pact_key_while_a_pact_is_in_flight_changes_nothing_further() {
 
     assert_eq!(app, after_one, "pressing again changed something");
     assert_eq!(
-        app.pact_line().as_deref(),
-        Some("pacting engine (2/12) — already running")
+        app.refused_line().as_deref(),
+        Some("pacting engine — already running")
     );
 }
 
@@ -1262,7 +1267,11 @@ fn a_press_on_a_file_row_with_nothing_running_still_refuses_through_the_message(
         app.message().is_some_and(|message| !message.is_empty()),
         "the file row said nothing"
     );
-    assert_eq!(app.pact_line(), None, "nothing is running to be refused by");
+    assert_eq!(
+        app.run_header().map(|header| header.words()),
+        None,
+        "nothing is running to be refused by"
+    );
 }
 
 #[test]
@@ -1305,7 +1314,11 @@ fn a_press_on_a_row_the_ignore_file_keeps_out_starts_nothing() {
         !app.panel().has_account(),
         "an account was opened for no run"
     );
-    assert_eq!(app.pact_line(), None, "nothing is running to be refused by");
+    assert_eq!(
+        app.run_header().map(|header| header.words()),
+        None,
+        "nothing is running to be refused by"
+    );
     let refused = saying(&before, app.message().expect("the app said why"));
     assert_eq!(app, refused, "the press did more than say so");
 }
@@ -1320,8 +1333,7 @@ fn scoped() -> Manifest {
     .with_scope("data-plane")])
 }
 
-const CLOSED: &str =
-    "/repo/crates is scoped `data-plane` — hold that sigil to work here, with `warlock config`";
+const CLOSED: &str = "/repo/crates is scoped `data-plane` — hold that sigil to work here, with `warlock sigil add data-plane`";
 
 fn app_over(state: NodeState) -> App {
     App::from_tree(&Tree::new(Node::new(
@@ -1343,7 +1355,8 @@ fn p_is_refused_on_a_directory_whose_scope_this_machine_does_not_hold() {
         &Sigils::held(["web"]),
         turn(false),
         Instant::now(),
-    );
+    )
+    .map(|(pressed, _)| pressed);
 
     assert_eq!(toggle, None, "the press must not paint or start a run");
     assert_eq!(app.message(), Some(CLOSED));
@@ -1373,7 +1386,8 @@ fn the_un_pact_direction_is_refused_too_and_is_what_this_is_for() {
             &Sigils::held(["web"]),
             turn(false),
             Instant::now(),
-        );
+        )
+        .map(|(pressed, _)| pressed);
 
         assert_eq!(toggle, None, "{state:?} was un-pacted across a boundary");
         assert_eq!(app.message(), Some(CLOSED));
@@ -1398,7 +1412,7 @@ fn scoped_below() -> Manifest {
 }
 
 const CLOSED_BELOW: &str = "un-pacting /repo/crates would drop pacts scoped `data-plane` — \
-                                hold that sigil with `warlock config`, or un-pact the parts you \
+                                hold that sigil with `warlock sigil add`, or un-pact the parts you \
                                 hold";
 
 #[test]
@@ -1419,7 +1433,8 @@ fn p_un_pacting_ward_is_refused_by_a_boundary_below_the_row() {
             &Sigils::held(["web"]),
             turn(false),
             Instant::now(),
-        );
+        )
+        .map(|(pressed, _)| pressed);
 
         assert_eq!(toggle, None, "{state:?} un-pacted a boundary below it");
         assert_eq!(app.message(), Some(CLOSED_BELOW));
@@ -1443,6 +1458,7 @@ fn the_boundary_below_binds_the_un_pact_direction_and_no_other_key() {
         turn(false),
         Instant::now(),
     )
+    .map(|(pressed, _)| pressed)
     .expect("a pact leaves every scope below exactly as it found it");
     assert!(toggle.pacted);
     assert_eq!(app.message(), None, "the pact direction was told something");
@@ -1456,7 +1472,8 @@ fn the_boundary_below_binds_the_un_pact_direction_and_no_other_key() {
             &Sigils::held(["web"]),
             turn(false),
             Instant::now()
-        ),
+        )
+        .map(|(pressed, _)| pressed),
         Some(PathBuf::from(format!("{ROOT}/crates"))),
         "a refresh was gated on a boundary it cannot destroy"
     );
@@ -1468,7 +1485,7 @@ fn holding_the_boundary_below_lets_the_un_pact_through() {
     for sigils in [Sigils::held(["data-plane"]), Sigils::held(["*"])] {
         let mut app = app_over(NodeState::PactedFresh);
 
-        let toggle = super::pact_press(
+        let (toggle, _) = super::pact_press(
             &mut app,
             &scoped_below(),
             Path::new(ROOT),
@@ -1497,7 +1514,8 @@ fn r_is_refused_on_a_directory_whose_scope_this_machine_does_not_hold() {
         &Sigils::held(["web"]),
         turn(false),
         Instant::now(),
-    );
+    )
+    .map(|(pressed, _)| pressed);
 
     // What a refresh spends is model time inside somebody else's boundary,
     // on documents that are theirs to have an opinion about.
@@ -1519,7 +1537,7 @@ fn holding_the_scope_lets_both_keys_through() {
         Sigils::held(["*"]),
     ] {
         let mut app = app_over(NodeState::Unpacted);
-        let toggle = super::pact_press(
+        let (toggle, _) = super::pact_press(
             &mut app,
             &scoped(),
             Path::new(ROOT),
@@ -1540,7 +1558,8 @@ fn holding_the_scope_lets_both_keys_through() {
                 &sigils,
                 turn(false),
                 Instant::now()
-            ),
+            )
+            .map(|(pressed, _)| pressed),
             Some(PathBuf::from(format!("{ROOT}/crates"))),
             "{sigils:?} opens `data-plane` for a refresh"
         );
@@ -1549,7 +1568,7 @@ fn holding_the_scope_lets_both_keys_through() {
 
 #[test]
 fn a_machine_that_holds_no_sigil_is_refused_by_both_keys() {
-    // The state every machine is in before anybody runs `warlock config`,
+    // The state every machine is in before anybody runs `warlock sigil add`,
     // and the one this was originally built the wrong way round: an empty
     // set opens nothing that is scoped, because a sigil is what opens a
     // scope. Reading it as unrestricted would make the default state of
@@ -1564,7 +1583,8 @@ fn a_machine_that_holds_no_sigil_is_refused_by_both_keys() {
                 &sigils,
                 turn(false),
                 Instant::now()
-            ),
+            )
+            .map(|(pressed, _)| pressed),
             None,
             "{sigils:?} pacted across a boundary"
         );
@@ -1579,7 +1599,8 @@ fn a_machine_that_holds_no_sigil_is_refused_by_both_keys() {
                 &sigils,
                 turn(false),
                 Instant::now()
-            ),
+            )
+            .map(|(pressed, _)| pressed),
             None,
             "{sigils:?} refreshed across a boundary"
         );
@@ -1601,6 +1622,7 @@ fn an_unscoped_directory_stays_open_to_a_machine_holding_nothing() {
         turn(false),
         Instant::now(),
     )
+    .map(|(pressed, _)| pressed)
     .expect("nothing scopes this directory");
 
     assert!(toggle.pacted);
@@ -1623,7 +1645,8 @@ fn a_run_in_flight_is_answered_before_the_boundary_is() {
             &Sigils::held(["web"]),
             turn(true),
             Instant::now()
-        ),
+        )
+        .map(|(pressed, _)| pressed),
         None
     );
     assert_eq!(
@@ -1632,8 +1655,8 @@ fn a_run_in_flight_is_answered_before_the_boundary_is() {
         "the boundary spoke over a run's own line"
     );
     assert_eq!(
-        app.pact_line().as_deref(),
-        Some("pacting /repo/crates (0/2) — already running")
+        app.refused_line().as_deref(),
+        Some("pacting /repo/crates — already running")
     );
 }
 
@@ -1723,8 +1746,8 @@ fn either_key_starts_nothing_while_a_run_is_in_flight() {
     let refused = refusing(&before);
     assert_eq!(app, refused, "the presses did more than say so");
     assert_eq!(
-        app.pact_line().as_deref(),
-        Some("refreshing engine (1/7) — already running"),
+        app.refused_line().as_deref(),
+        Some("refreshing engine — already running"),
         "the refusal is worded onto the line the reader is watching"
     );
     assert_eq!(
@@ -1743,8 +1766,8 @@ fn either_key_starts_nothing_while_a_run_is_in_flight() {
     app.set_pact_in_flight("/repo/crates/engine", 3, 12);
     assert_eq!(refresh_press(&mut app, true, at(base, 3)), None);
     assert_eq!(
-        app.pact_line().as_deref(),
-        Some("pacting engine (2/12) — already running")
+        app.refused_line().as_deref(),
+        Some("pacting engine — already running")
     );
 }
 
@@ -1801,8 +1824,8 @@ fn a_second_run_is_refused_in_the_same_words_with_the_thread_showing() {
     let refused = refusing(&before);
     assert_eq!(app, refused, "the presses did more than say so");
     assert_eq!(
-        app.pact_line().as_deref(),
-        Some("pacting engine (2/12) — already running"),
+        app.refused_line().as_deref(),
+        Some("pacting engine — already running"),
         "the refusal is worded onto the line the reader is watching"
     );
     assert_eq!(
@@ -1853,7 +1876,11 @@ fn a_refresh_of_a_directory_with_nothing_stale_under_it_starts_no_run() {
         "the fresh row said nothing: {:?}",
         app.message()
     );
-    assert_eq!(app.pact_line(), None, "nothing is running to be refused by");
+    assert_eq!(
+        app.run_header().map(|header| header.words()),
+        None,
+        "nothing is running to be refused by"
+    );
 
     // The same key on the same directory gone stale is the press that
     // starts a run, and it starts the panel's account at the moment of the
@@ -2441,8 +2468,8 @@ fn a_pass_fills_the_panel_under_the_directory_it_is_working_on() {
     let mut in_flight = before.clone();
     in_flight.set_pact_in_flight("/repo/crates/engine", 1, 2);
     assert_eq!(
-        app.pact_line(),
-        in_flight.pact_line(),
+        app.run_header().map(|header| header.words()),
+        in_flight.run_header().map(|header| header.words()),
         "and the footer's progress line says what it always said"
     );
     assert_eq!(
@@ -2558,8 +2585,8 @@ fn the_request_a_directory_was_handed_draws_a_line_under_it() {
     let mut in_flight = before.clone();
     in_flight.set_pact_in_flight("/repo/crates/engine", 1, 1);
     assert_eq!(
-        app.pact_line(),
-        in_flight.pact_line(),
+        app.run_header().map(|header| header.words()),
+        in_flight.run_header().map(|header| header.words()),
         "the footer says exactly what it said before the panel joined in"
     );
 }
@@ -2613,8 +2640,8 @@ fn a_subtree_pact_reads_as_a_section_per_directory_in_walk_order() {
     let mut in_flight = before.clone();
     in_flight.set_pact_in_flight("/repo/crates/tui", 2, 2);
     assert_eq!(
-        app.pact_line(),
-        in_flight.pact_line(),
+        app.run_header().map(|header| header.words()),
+        in_flight.run_header().map(|header| header.words()),
         "and the footer is still the footer"
     );
 
@@ -2630,7 +2657,10 @@ fn a_subtree_pact_reads_as_a_section_per_directory_in_walk_order() {
     pact.keep_up(&mut app, &mut manifest, &nowhere(), at(base, 120));
 
     assert!(!pact.running(), "the run is over");
-    assert!(app.pact_line().is_none(), "so nothing is being pacted now");
+    assert!(
+        app.run_header().map(|header| header.words()).is_none(),
+        "so nothing is being pacted now"
+    );
     // Nothing the run did is on the footer, because nothing went wrong
     // in it. The line that is there belongs to the reload at the bottom
     // of the call, which has no `/repo/crates` on disk to read.
@@ -3154,7 +3184,7 @@ fn replay_work(
         let frame = u64::try_from(frame).expect("a run of fewer than 2^64 events");
         events.send(event).expect("the loop is still listening");
         pact.keep_up(app, manifest, scope, at(base, frame * FRAME));
-        if let Some(line) = app.pact_line()
+        if let Some(line) = app.run_header().map(|header| header.words())
             && progress.last() != Some(&line)
         {
             progress.push(line);
@@ -4735,7 +4765,7 @@ fn a_worker_that_says_nothing_more_ends_the_run_rather_than_hanging() {
 
     assert!(pact.running(), "a run that has only started is still on");
     assert!(
-        app.pact_line().is_some(),
+        app.run_header().map(|header| header.words()).is_some(),
         "and the footer says where it has got to"
     );
 
@@ -4745,9 +4775,9 @@ fn a_worker_that_says_nothing_more_ends_the_run_rather_than_hanging() {
 
     assert!(!pact.running(), "the run is over, however it ended");
     assert!(
-        app.pact_line().is_none(),
+        app.run_header().map(|header| header.words()).is_none(),
         "so nothing is being pacted now: {:?}",
-        app.pact_line()
+        app.run_header().map(|header| header.words())
     );
     assert_eq!(app.message(), Some(PACT_LOST), "and the footer says so");
     assert_eq!(
@@ -5598,7 +5628,7 @@ fn a_pull_in_flight_turns_down_both_keys_on_the_thread_before_anything_else() {
     };
 
     let mut app = app_over(NodeState::PactedStale);
-    let before = app.pact_line();
+    let before = app.run_header().map(|header| header.words());
     assert_eq!(
         super::pact_press(
             &mut app,
@@ -5607,7 +5637,8 @@ fn a_pull_in_flight_turns_down_both_keys_on_the_thread_before_anything_else() {
             &Sigils::held(["web"]),
             pulled,
             Instant::now(),
-        ),
+        )
+        .map(|(pressed, _)| pressed),
         None
     );
     assert_eq!(
@@ -5618,13 +5649,18 @@ fn a_pull_in_flight_turns_down_both_keys_on_the_thread_before_anything_else() {
             &Sigils::held(["web"]),
             pulled,
             Instant::now(),
-        ),
+        )
+        .map(|(pressed, _)| pressed),
         None
     );
 
     let line = format!("{PULLING}; no pass was started");
     assert_eq!(thread_notes(&app), [line.clone(), line]);
     assert_eq!(app.message(), None, "the boundary spoke as well");
-    assert_eq!(app.pact_line(), before, "a pass's own refusal was said too");
+    assert_eq!(
+        app.run_header().map(|header| header.words()),
+        before,
+        "a pass's own refusal was said too"
+    );
     assert!(!app.panel().has_account(), "a refused key started a run");
 }

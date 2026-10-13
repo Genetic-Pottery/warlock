@@ -1,9 +1,9 @@
 use std::collections::BTreeSet;
 
-use crate::fill::Defect;
+use super::{Defect, Slot};
 
 use super::{
-    Accepted, DRAFTING_PROMPT, DRAFTS_PER_SLICE, Draft, Fill, MEND_PASSES, Mend, Mended,
+    Accepted, DRAFTING_PROMPT, DRAFTS_PER_SLICE, Draft, Dropped, Fill, MEND_PASSES, Mend, Mended,
     REFERENCES_PER_LIST, TITLE_CHARS, TITLE_MINIMUM, accept, check, drafting_instructions, mend,
     mended, stub_answer,
 };
@@ -22,9 +22,9 @@ fn sound(which: usize) -> Draft {
     Draft::of(format!("Draft number {which} of this slice"), BODY)
 }
 
-// Three sound drafts with the one under test third, so every field string a
-// defect carries is `drafts[2]...` and an index read off the wrong list shows
-// up as a mismatch rather than passing by luck.
+// Three sound drafts with the one under test third, so every slot a defect
+// carries is at index 2 and an index read off the wrong list shows up as a
+// mismatch rather than passing by luck.
 fn third(draft: Draft) -> Fill {
     drafted(vec![sound(0), sound(1), draft])
 }
@@ -111,7 +111,7 @@ fn a_sound_answer_is_filled_and_a_defective_one_carries_its_defects() {
     assert_eq!(
         defects,
         vec![Defect::Empty {
-            field: "drafts[2].title".to_owned()
+            field: Slot::Title(2)
         }]
     );
 
@@ -137,7 +137,7 @@ fn an_empty_title_is_reported_at_its_slot() {
     assert_eq!(
         check(&third(Draft::of("   ", BODY))),
         vec![Defect::Empty {
-            field: "drafts[2].title".to_owned()
+            field: Slot::Title(2)
         }]
     );
 }
@@ -150,7 +150,7 @@ fn a_title_running_to_two_lines_is_reported_at_its_slot() {
             BODY
         ))),
         vec![Defect::Multiline {
-            field: "drafts[2].title".to_owned()
+            field: Slot::Title(2)
         }]
     );
 }
@@ -161,7 +161,7 @@ fn a_title_over_its_cap_is_reported_at_its_slot() {
     assert_eq!(
         check(&third(Draft::of(title, BODY))),
         vec![Defect::TooLong {
-            field: "drafts[2].title".to_owned(),
+            field: Slot::Title(2),
             chars: TITLE_CHARS + 1,
             cap: TITLE_CHARS,
         }]
@@ -174,7 +174,7 @@ fn a_title_under_the_minimum_is_reported_at_its_slot() {
     assert_eq!(
         check(&third(Draft::of(title, BODY))),
         vec![Defect::TooShort {
-            field: "drafts[2].title".to_owned(),
+            field: Slot::Title(2),
             chars: TITLE_MINIMUM - 1,
             minimum: TITLE_MINIMUM,
         }]
@@ -210,7 +210,7 @@ fn a_slice_nobody_drafted_is_a_missing_array() {
     assert_eq!(
         check(&drafted(Vec::new())),
         vec![Defect::Missing {
-            field: "drafts".to_owned()
+            field: Slot::Drafts
         }]
     );
 }
@@ -221,7 +221,7 @@ fn more_drafts_than_the_cap_are_reported_against_the_array() {
     assert_eq!(
         check(&fill),
         vec![Defect::TooMany {
-            field: "drafts".to_owned(),
+            field: Slot::Drafts,
             count: DRAFTS_PER_SLICE + 1,
             cap: DRAFTS_PER_SLICE,
         }]
@@ -236,7 +236,7 @@ fn more_references_than_the_list_cap_are_reported_against_the_list() {
     assert_eq!(
         check(&third(draft)),
         vec![Defect::TooMany {
-            field: "drafts[2].blocked_by".to_owned(),
+            field: Slot::BlockedBy(2),
             count: REFERENCES_PER_LIST + 1,
             cap: REFERENCES_PER_LIST,
         }],
@@ -299,10 +299,10 @@ fn the_instructions_carry_the_brief_the_slice_and_the_shape() {
 fn a_rejected_defect_is_listed_back_as_one_not_to_repeat() {
     let rejected = vec![
         Defect::Empty {
-            field: "drafts[2].title".to_owned(),
+            field: Slot::Title(2),
         },
         Defect::TooLong {
-            field: "drafts[0].title".to_owned(),
+            field: Slot::Title(0),
             chars: TITLE_CHARS + 40,
             cap: TITLE_CHARS,
         },
@@ -333,8 +333,8 @@ fn a_reference_beyond_the_array_is_dropped_by_the_repair() {
     assert_eq!(
         mends,
         vec![Mend {
-            field: "drafts[2].blocked_by".to_owned(),
-            done: Mended::Dropped { count: 1 },
+            field: Slot::BlockedBy(2),
+            done: Mended::Own(Dropped { count: 1 }),
         }]
     );
     assert_eq!(
@@ -355,8 +355,8 @@ fn a_draft_that_refers_to_itself_loses_the_reference() {
     assert_eq!(
         mends,
         vec![Mend {
-            field: "drafts[2].blocks".to_owned(),
-            done: Mended::Dropped { count: 1 },
+            field: Slot::Blocks(2),
+            done: Mended::Own(Dropped { count: 1 }),
         }]
     );
 }
@@ -387,15 +387,15 @@ fn drafts_past_the_cap_go_from_the_end_and_the_references_into_them_go_too() {
         mends,
         vec![
             Mend {
-                field: "drafts".to_owned(),
+                field: Slot::Drafts,
                 done: Mended::Shortened {
                     from: DRAFTS_PER_SLICE + 2,
                     to: DRAFTS_PER_SLICE,
                 },
             },
             Mend {
-                field: "drafts[0].blocks".to_owned(),
-                done: Mended::Dropped { count: 1 },
+                field: Slot::Blocks(0),
+                done: Mended::Own(Dropped { count: 1 }),
             },
         ]
     );
@@ -413,7 +413,7 @@ fn a_reference_list_over_its_cap_keeps_its_first_entries() {
     assert_eq!(
         mends,
         vec![Mend {
-            field: "drafts[2].blocked_by".to_owned(),
+            field: Slot::BlockedBy(2),
             done: Mended::Shortened {
                 from: REFERENCES_PER_LIST + 1,
                 to: REFERENCES_PER_LIST,
@@ -433,7 +433,7 @@ fn a_multiline_title_keeps_its_first_line() {
     assert_eq!(
         mends,
         vec![Mend {
-            field: "drafts[2].title".to_owned(),
+            field: Slot::Title(2),
             done: Mended::FirstLine,
         }]
     );
@@ -475,11 +475,11 @@ fn a_title_and_body_nobody_wrote_are_filled_from_the_slice_itself() {
         mends,
         vec![
             Mend {
-                field: "drafts[2].title".to_owned(),
+                field: Slot::Title(2),
                 done: Mended::Supplied,
             },
             Mend {
-                field: "drafts[2].body".to_owned(),
+                field: Slot::Body(2),
                 done: Mended::Supplied,
             },
         ]
@@ -500,7 +500,7 @@ fn a_slice_nobody_drafted_is_filled_with_one_draft() {
     assert_eq!(
         mends,
         vec![Mend {
-            field: "drafts".to_owned(),
+            field: Slot::Drafts,
             done: Mended::Supplied,
         }]
     );
@@ -519,11 +519,11 @@ fn a_title_cut_back_to_one_line_that_is_then_too_short_falls_to_the_slice() {
         mends,
         vec![
             Mend {
-                field: "drafts[2].title".to_owned(),
+                field: Slot::Title(2),
                 done: Mended::FirstLine,
             },
             Mend {
-                field: "drafts[2].title".to_owned(),
+                field: Slot::Title(2),
                 done: Mended::Supplied,
             },
         ],
@@ -736,4 +736,28 @@ fn blocked_by_takes_positions_and_existing_tickets_side_by_side() {
 
     assert_eq!(fill.drafts[1].blocked_by, [0, 1]);
     assert_eq!(fill.drafts[1].waits_on, ["WAR-142"]);
+}
+
+#[test]
+fn a_slot_is_shown_to_the_model_as_its_path() {
+    let shown: Vec<String> = [
+        Slot::Drafts,
+        Slot::Title(2),
+        Slot::Body(2),
+        Slot::BlockedBy(2),
+        Slot::Blocks(2),
+    ]
+    .iter()
+    .map(ToString::to_string)
+    .collect();
+    assert_eq!(
+        shown,
+        [
+            "drafts",
+            "drafts[2].title",
+            "drafts[2].body",
+            "drafts[2].blocked_by",
+            "drafts[2].blocks",
+        ]
+    );
 }

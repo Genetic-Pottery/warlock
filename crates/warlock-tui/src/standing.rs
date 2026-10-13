@@ -1,11 +1,12 @@
 //! `here` and `home` are where a subcommand turns the process environment into
 //! a repository root, a working directory and a home directory; everything
 //! below takes all three as parameters. `at` is the way past them, and it is
-//! not only for tests — `session::load_app` has already walked to a root and
-//! asking the environment a second time could answer differently.
+//! not only for tests — `session::load_manifest` is handed a root the loop
+//! already holds, and asking the environment a second time could answer
+//! differently.
 //!
-//! A question stands here and nothing more, because none of `stale`, `fresh`,
-//! `check` or `config` writes a pact. A write stands and is let
+//! A question stands here and nothing more, because none of `stale`, `fresh` or
+//! `check` writes a pact. A write stands and is let
 //! through: `edits::Opened` is built on top of this one and cannot be
 //! constructed without `boundary::permits` having said the operation it names
 //! is open to this machine, so the gate is not a step a write can forget.
@@ -83,7 +84,7 @@ pub(crate) const FOR_BRIEF: &str = "argue a brief about";
 // that used only the root would resolve `warlock check src` against the wrong
 // place from a subdirectory.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Standing {
+pub(crate) struct Standing {
     working_dir: PathBuf,
     repo_root: PathBuf,
 }
@@ -97,7 +98,7 @@ impl Standing {
     // caller here edits or answers about one path, and walking the tree to find
     // its root would read every directory in the repository to answer a question
     // about ancestors.
-    pub fn here(wanted: &'static str) -> Result<Self, Error> {
+    pub(crate) fn here(wanted: &'static str) -> Result<Self, Error> {
         let working_dir =
             env::current_dir().map_err(|source| Error::WorkingDirectory { source })?;
         let repo_root = repository_root(&working_dir).ok_or(Error::NoRepository {
@@ -110,10 +111,9 @@ impl Standing {
         })
     }
 
-    // For tests, and for the one caller that has already done the walk:
-    // `session::load_app` loads a tree first and gets the root out of it, so
-    // asking the environment again would be a second answer to a settled
-    // question.
+    // For tests, and for `session::load_manifest`, whose root the loop already
+    // holds: asking the environment again would be a second answer to a
+    // settled question.
     pub(crate) const fn at(working_dir: PathBuf, repo_root: PathBuf) -> Self {
         Self {
             working_dir,
@@ -122,7 +122,7 @@ impl Standing {
     }
 
     #[must_use]
-    pub fn repo_root(&self) -> &Path {
+    pub(crate) fn repo_root(&self) -> &Path {
         &self.repo_root
     }
 
@@ -152,7 +152,7 @@ impl Standing {
     //
     // Callers that can do without one say `.ok()`: a home that will not resolve
     // means nothing is held, which is a state of the answer rather than a
-    // failure to reach one. `warlock config` takes the error, because a home is
+    // failure to reach one. `warlock sigil` takes the error, because a home is
     // the thing it was asked to write under.
     pub(crate) fn home() -> Result<PathBuf, Error> {
         [HOME, USERPROFILE]

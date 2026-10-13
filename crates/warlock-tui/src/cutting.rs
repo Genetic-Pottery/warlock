@@ -64,8 +64,8 @@ use warlock_engine::{Manifest, agent};
 use crate::app::{App, Focus};
 use crate::brief::Slice;
 use crate::claude::{
-    Activities, Activity, Cancel, ChatAgent, Converses, Drafting, NOTHING_SETTLES_IT, Replied,
-    propose_answer,
+    Activities, Activity, Cancel, CancelGuard, ChatAgent, Converses, Drafting, NOTHING_SETTLES_IT,
+    Replied, propose_answer,
 };
 use crate::confirm::{
     Answer, Carry, CarryAnswered, Choice, CutAnswered, CutConfirm, Review, Reviewed,
@@ -74,7 +74,6 @@ use crate::cut::{Cut, listed};
 use crate::error::{Error, one_line};
 use crate::inflight::{Lost, Once, Stream, Workers, settled};
 use crate::linear::{Opener as LinearOpener, Opens};
-use crate::pacting::CancelGuard;
 // The lines about a relayed question come from there rather than from here, as
 // `named` and `not_drafted` do: the shell and the panel put the same question to
 // a person, and a second set of wordings would be the two doors naming one
@@ -82,7 +81,7 @@ use crate::pacting::CancelGuard;
 use crate::planned::{
     self, Next, Planned, Reply, Settled, Skipping, answer_line, counted, drafted_line,
     drafts_document, feedback_line, listing, listing_lines, named, not_drafted, prepare, replied,
-    settled_line, skipped_line, stopped_line, unedited_line, unproposed_line,
+    settled_line, skipped_line, stopped_line, titles, unedited_line, unproposed_line,
 };
 use crate::standing::Standing;
 use crate::submission::ToDraft;
@@ -263,17 +262,11 @@ enum Stage<A: Converses> {
 /// The drafts are kept whole while the titles alone are on the thread and in the
 /// window: what create files is this, and a review that held titles would be a
 /// window whose Yes had to ask the model again for the bodies.
-///
-/// The session is `Some` for exactly as long as this slice still has its one
-/// redraft. It is the conversation that drafted these, so feedback given to it
-/// is feedback about something it said; once spent it goes, because a second
-/// redraft is not offered and a session nobody can reach is a `claude` held
-/// open for nothing.
 #[derive(Debug)]
 struct Reviewing<A> {
     review: Review,
     drafts: Vec<Draft>,
-    session: Option<Drafting<A>>,
+    session: Drafting<A>,
 }
 
 // One slice being filed, from the panel's side: what the worker will say, and
@@ -391,15 +384,10 @@ impl<O: Opens, A: Converses> Cutter<O, A> {
         &self.confirm
     }
 
-    // Read once a round by the loop and once per `/draft` by this value itself,
-    // off the one run it keeps: a flag beside it would be a second record of
-    // whether a project is being read back.
     pub(crate) const fn fetching(&self) -> bool {
         self.fetching.is_some()
     }
 
-    // Read once a round by the loop and once per `/draft` by this value itself,
-    // off the one run it keeps, for the reason above.
     pub(crate) const fn drafting(&self) -> bool {
         self.slicing.is_some()
     }
@@ -429,11 +417,12 @@ impl<O: Opens, A: Converses> Cutter<O, A> {
         app: &mut App,
         manifest: &Manifest,
         repo_root: &Path,
-        drafting: ToDraft<'_>,
+        drafting: &ToDraft,
         pulling: Option<&str>,
         now: Instant,
     ) {
         let ToDraft { scope, project } = drafting;
+        let project = project.as_deref();
         if let Some(pulling) = pulling {
             app.panel_mut().note(refused(pulling), now);
             return;
@@ -446,8 +435,7 @@ impl<O: Opens, A: Converses> Cutter<O, A> {
         // rather than written again here: the session holds the answer to that
         // reading and not the failure, so this is where the failure is said.
         let Some(home) = self.home.clone() else {
-            app.panel_mut()
-                .note(one_line(&Error::NoHome.to_string()), now);
+            app.panel_mut().note(one_line(Error::NoHome), now);
             return;
         };
 
@@ -519,17 +507,15 @@ impl<O: Opens, A: Converses> Cutter<O, A> {
     // when the skip was the one that moved the project: a note that was said is
     // on the project and not again here.
     fn noted(&mut self, app: &mut App, now: Instant) {
-        let mut lines = Vec::new();
         self.skipping.retain(|once| {
             let Some(landed) = once.landed() else {
                 return true;
             };
-            lines.extend(landed.unwrap_or_else(|Lost| Some(SKIP_LOST.to_owned())));
+            if let Some(line) = landed.unwrap_or_else(|Lost| Some(SKIP_LOST.to_owned())) {
+                app.panel_mut().note(line, now);
+            }
             false
         });
-        for line in lines {
-            app.panel_mut().note(line, now);
-        }
     }
 
     // Whichever of the things the slice under way is doing has a worker to
@@ -609,7 +595,6 @@ impl<O: Opens, A: Converses> Cutter<O, A> {
             Ended::Drafted {
                 session,
                 drafts,
-                titles,
                 lines,
             } => {
                 // The drafts whole, as the work turn's answer — Forman prints
@@ -626,9 +611,9 @@ impl<O: Opens, A: Converses> Cutter<O, A> {
                 // of redrafts, and the session goes with the drafts so the next
                 // feedback is a turn of the same conversation.
                 slicing.stage = Stage::Reviewing(Reviewing {
-                    review: Review::open(named(slicing.next.slice()), titles),
+                    review: Review::open(named(slicing.next.slice()), titles(&drafts)),
                     drafts,
-                    session: Some(session),
+                    session,
                 });
                 self.slicing = Some(slicing);
                 return;
@@ -722,7 +707,7 @@ impl<O: Opens, A: Converses> Cutter<O, A> {
         let (_, proposal) = settled(&mut waiting.proposing, |once| once.landed())?;
         let proposal = match proposal {
             Ok(Ok(proposal)) => Ok(proposal),
-            Ok(Err(error)) => Err(one_line(&error.to_string())),
+            Ok(Err(error)) => Err(one_line(error)),
             // The question is still up with nothing in the field.
             Err(Lost) => Err(SLICE_LOST.to_owned()),
         };
@@ -912,8 +897,7 @@ impl<O: Opens, A: Converses> Cutter<O, A> {
         let slice = slicing.next.slice();
         match edited {
             Ok(drafts) => {
-                let titles = drafts.iter().map(|draft| draft.title.clone()).collect();
-                reviewing.review = Review::open(named(slice), titles);
+                reviewing.review = Review::open(named(slice), titles(&drafts));
                 app.panel_mut()
                     .say(drafts_document(slice, &drafts).join("\n"), now);
                 reviewing.drafts = drafts;
@@ -1017,10 +1001,7 @@ impl<O: Opens, A: Converses> Cutter<O, A> {
             return;
         };
         let session = match slicing.stage {
-            Stage::Reviewing(Reviewing {
-                session: Some(session),
-                ..
-            }) => session,
+            Stage::Reviewing(Reviewing { session, .. }) => session,
             stage => {
                 slicing.stage = stage;
                 self.slicing = Some(slicing);
@@ -1224,7 +1205,7 @@ fn spawn_proposal<A: Converses>(
 ///
 /// The session rides out on the first two and not on the third, which is the
 /// whole distinction: a question's next turn is whatever somebody answers and
-/// drafts can be asked for again once, while an ending is an ending — the slices
+/// drafts can be asked for again, while an ending is an ending — the slices
 /// left are other work, they were ordered so that nothing is drafted before what
 /// it waits on, and a run that stopped would leave the reader typing `/draft`
 /// again to reach them.
@@ -1236,7 +1217,6 @@ enum Ended<A> {
     Drafted {
         session: Drafting<A>,
         drafts: Vec<Draft>,
-        titles: Vec<String>,
         /// What to say about them as they arrive: the titles, then one line per
         /// repair.
         lines: Vec<String>,
@@ -1257,13 +1237,11 @@ fn ended<A>(slice: &Slice, turned: Result<Turned<A>, Lost>) -> Ended<A> {
         // answer, and the session goes with them because feedback is a turn of
         // this same conversation. The titles go first, over the repairs.
         Reply::Drafts { drafts, lines } => {
-            let titles: Vec<String> = drafts.iter().map(|draft| draft.title.clone()).collect();
-            let mut said = vec![drafted_line(slice, &titles)];
+            let mut said = vec![drafted_line(slice, &titles(&drafts))];
             said.extend(lines);
             Ended::Drafted {
                 session,
                 drafts,
-                titles,
                 lines: said,
             }
         }
@@ -1335,11 +1313,7 @@ fn spawn_filing<O: Opens>(
     open: O,
     filing: planned::Filing,
 ) -> Once<Result<Cut, String>> {
-    workers.once(move || {
-        filing
-            .file(&open, &mut io::sink())
-            .map_err(|error| one_line(&error.to_string()))
-    })
+    workers.once(move || filing.file(&open, &mut io::sink()).map_err(one_line))
 }
 
 // A skip note, on a worker for the reason a create is on one: it is a request,
@@ -1348,13 +1322,12 @@ fn spawn_skip<O: Opens>(workers: Workers, open: O, skipping: Skipping) -> Once<O
     workers.once(move || {
         skipping
             .post(&open)
-            .unwrap_or_else(|error| Some(one_line(&error.to_string())))
+            .unwrap_or_else(|error| Some(one_line(error)))
     })
 }
 
 fn spawn_fetch<O: Opens>(workers: Workers, open: O, work: Work, cancel: Cancel) -> Once<Landing> {
-    workers
-        .once(move || fetched(&open, &work, &cancel).map_err(|error| one_line(&error.to_string())))
+    workers.once(move || fetched(&open, &work, &cancel).map_err(one_line))
 }
 
 // The cancel is asked either side of [`prepare`] and nowhere else. A socket

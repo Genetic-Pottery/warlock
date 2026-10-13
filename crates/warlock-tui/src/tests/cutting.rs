@@ -163,7 +163,7 @@ fn notes(app: &App) -> Vec<String> {
 // handed to it when it was built, which is what keeps every test here off the
 // machine's.
 fn press<O: Opens, A: Converses>(app: &mut App, cutter: &mut Cutter<O, A>, repo: &Path) {
-    cutter.press(app, &a_manifest(), repo, drafting(), None, now());
+    cutter.press(app, &a_manifest(), repo, &drafting(), None, now());
 }
 
 // The rounds a helper may drive before it gives up: a count for inline workers,
@@ -221,7 +221,7 @@ fn through<O: Opens, A: Converses>(app: &mut App, cutter: &mut Cutter<O, A>) {
 // The engine's own sentence for a refusal, flattened as the thread takes it:
 // these tests assert the line *is* that sentence rather than restating it.
 fn refusal(error: &Error) -> String {
-    one_line(&error.to_string())
+    one_line(error)
 }
 
 // The workspace every test here reads back: one project, planned, with three
@@ -412,7 +412,7 @@ fn a_machine_with_no_home_is_refused_before_anything_is_read() {
         &mut app,
         &a_manifest(),
         repo.path(),
-        drafting(),
+        &drafting(),
         None,
         now(),
     );
@@ -2263,7 +2263,7 @@ fn a_pull_in_flight_turns_a_draft_down_before_anything_is_read() {
         &mut app,
         &a_manifest(),
         repo.path(),
-        drafting(),
+        &drafting(),
         Some("`WAR-140` is being pulled"),
         now(),
     );
@@ -2275,9 +2275,9 @@ fn a_pull_in_flight_turns_a_draft_down_before_anything_is_read() {
     assert!(!cutter.fetching(), "a refused draft started a fetch");
 }
 
-const fn drafting() -> ToDraft<'static> {
+fn drafting() -> ToDraft {
     ToDraft {
-        scope: SCOPE,
-        project: Some(SLUG),
+        scope: SCOPE.to_owned(),
+        project: Some(SLUG.to_owned()),
     }
 }

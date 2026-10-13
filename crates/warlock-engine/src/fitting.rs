@@ -4,7 +4,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::document::{self, Defect, Described};
-use crate::fill::{self, Accepted, Settled};
+use crate::fill::{self, Settled};
 use crate::pact::{Error, Event, Pacting, Refusal};
 use crate::{Agent, agent, hash, languages, walk};
 
@@ -327,8 +327,8 @@ fn ask<F>(
     agent: &dyn Agent,
     sink: &mut dyn FnMut(Event) -> Pacting,
     request: impl Fn(&[Defect]) -> agent::Request,
-    accept: impl Fn(&str) -> Accepted<F>,
-) -> Result<Settled<F>, Error> {
+    accept: impl Fn(&str) -> document::Accepted<F>,
+) -> Result<Settled<F, document::Slot>, Error> {
     fill::settle(
         document::ASKING,
         |rejected| {
@@ -381,15 +381,16 @@ pub(crate) struct Synthesised {
 }
 
 fn describe(described: &mut Described, path: &Path, name: &str, text: &str) {
+    let code = languages::without_comments(path, text);
+    describe_code(described, path, name, text, code.as_deref().unwrap_or(text));
+}
+
+fn describe_code(described: &mut Described, path: &Path, name: &str, text: &str, code: &str) {
     let names = languages::declared_names(path, text);
     if !names.is_empty() {
         described.declared.insert(name.to_owned(), names);
     }
-    let evidence = languages::without_comments(path, text);
-    described.tokens.insert(
-        name.to_owned(),
-        tokens_of(evidence.as_deref().unwrap_or(text)),
-    );
+    described.tokens.insert(name.to_owned(), tokens_of(code));
 }
 
 // Read whole rather than capped, and for the same reason the declared list is
@@ -450,8 +451,10 @@ pub(crate) fn one_file(
     let text = file
         .kept()
         .or_else(|| file.bytes().and_then(|bytes| str::from_utf8(bytes).ok()));
+    // `elided_or_whole` has already cut the comments out of whatever text the
+    // file carries, so it is its own code.
     if let Some(text) = text {
-        describe(&mut described, &path, name, text);
+        describe_code(&mut described, &path, name, text, text);
     }
 
     Ok((

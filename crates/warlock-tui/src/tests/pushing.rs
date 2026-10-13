@@ -137,7 +137,7 @@ fn refusal(repo: &Path, home: &Path, scope: &str) -> String {
         &from_manifest_path(repo, WRITTEN),
     )
     .expect_err("a refusal");
-    one_line(&error.to_string())
+    one_line(error)
 }
 
 #[test]
