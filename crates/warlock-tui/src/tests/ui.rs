@@ -3436,72 +3436,44 @@ fn lit_stages(line: &ratatui::text::Line<'_>) -> Vec<String> {
 
 #[test]
 fn the_workflow_strip_draws_every_stage_and_lights_the_mode() {
-    let now = Instant::now();
-    let chat = workflow_line(Mode::Chat, None, None, now);
+    let chat = workflow_line(Mode::Chat, false, None);
     let text: String = chat
         .spans
         .iter()
         .map(|span| span.content.as_ref())
         .collect();
-    for stage in ["chat", "brief", "push", "draft", "pull"] {
+    for stage in ["chat", "brief", "write", "push", "draft", "pull"] {
         assert!(text.contains(stage), "{stage} in {text:?}");
     }
-    assert!(
-        !text.contains("write"),
-        "write shares brief's box: {text:?}"
-    );
     assert_eq!(lit_stages(&chat), ["chat"]);
     assert_eq!(
-        lit_stages(&workflow_line(Mode::Brief, None, None, now)),
+        lit_stages(&workflow_line(Mode::Brief, false, None)),
         ["brief"]
     );
 }
 
 #[test]
-fn a_ready_brief_turns_its_box_between_brief_and_write_each_second() {
-    let since = Instant::now();
-    let at = |millis| since + Duration::from_millis(millis);
-    for (millis, word) in [
-        (0, "brief"),
-        (999, "brief"),
-        (1000, "write"),
-        (1999, "write"),
-        (2000, "brief"),
-        (3500, "write"),
-    ] {
-        assert_eq!(
-            lit_stages(&workflow_line(Mode::Brief, Some(since), None, at(millis))),
-            [word],
-            "{millis}ms in"
-        );
-    }
-    // A ready instant left over in chat mode turns nothing: write is brief's.
+fn write_lights_beside_brief_only_while_the_brief_is_ready() {
     assert_eq!(
-        lit_stages(&workflow_line(Mode::Chat, Some(since), None, at(1000))),
-        ["chat"]
+        lit_stages(&workflow_line(Mode::Brief, true, None)),
+        ["brief", "write"]
     );
+    // A ready flag left over in chat mode lights nothing: write is brief's.
+    assert_eq!(lit_stages(&workflow_line(Mode::Chat, true, None)), ["chat"]);
 }
 
 #[test]
 fn board_work_lights_alone() {
-    let since = Instant::now();
-    let now = since + Duration::from_secs(1);
     for (working, stage) in [
         (Working::Push, "push"),
         (Working::Draft, "draft"),
         (Working::Pull, "pull"),
     ] {
-        for (mode, ready) in [(Mode::Chat, None), (Mode::Brief, Some(since))] {
+        for (mode, ready) in [(Mode::Chat, false), (Mode::Brief, true)] {
             assert_eq!(
-                lit_stages(&workflow_line(mode, ready, Some(working), now)),
+                lit_stages(&workflow_line(mode, ready, Some(working))),
                 [stage]
             );
-            let text: String = workflow_line(mode, ready, Some(working), now)
-                .spans
-                .iter()
-                .map(|span| span.content.as_ref())
-                .collect();
-            assert!(!text.contains("write"), "{text:?}");
         }
     }
 }

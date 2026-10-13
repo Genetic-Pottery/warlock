@@ -287,7 +287,7 @@ impl<C: Converses> Chat<C> {
                     if app.panel_mut().set_mode(Mode::Brief) {
                         app.panel_mut().note(BRIEF_NOTE, now);
                     }
-                    app.panel_mut().set_ready(None);
+                    app.panel_mut().set_ready(false);
                     self.say(app, BRIEF, &instruction, Asked::Answer, now);
                 }
                 Err(line) => app.panel_mut().note(line, now),
@@ -355,7 +355,7 @@ impl<C: Converses> Chat<C> {
         if !app.panel_mut().set_mode(Mode::Chat) {
             return false;
         }
-        app.panel_mut().set_ready(None);
+        app.panel_mut().set_ready(false);
         app.panel_mut().note(CHAT_NOTE, now);
         self.say(app, CHAT, CHAT_INSTRUCTION, Asked::Answer, now);
         true
@@ -519,7 +519,7 @@ pub(crate) fn apply_turn(
             let document = (asked == Asked::Document).then(|| answer.clone());
             let answer = if asked == Asked::Answer && app.panel().mode() == Mode::Brief {
                 let (answer, ready) = without_marker(answer);
-                app.panel_mut().set_ready(ready.then_some(now));
+                app.panel_mut().set_ready(ready);
                 answer
             } else {
                 answer

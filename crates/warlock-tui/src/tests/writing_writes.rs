@@ -1027,7 +1027,7 @@ mod whole {
             ]
         );
         assert_eq!(app.panel().mode(), Mode::Chat);
-        assert!(app.panel().ready().is_none());
+        assert!(!app.panel().ready());
         assert!(chat.answering(), "the model was not told the brief is over");
         // The whole repository, after the whole path: the output directory
         // and the one file in it. No transcript, no draft of the brief, and
