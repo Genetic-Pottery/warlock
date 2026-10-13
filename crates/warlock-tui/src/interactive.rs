@@ -410,6 +410,18 @@ impl<K: Seams> Session<K> {
         .current();
         let (app, chrome, field) = (&self.app, &self.scope.chrome, self.chat.composer());
         self.screen.draw(|frame| {
+            // The terminal can be resized between `size` being read and this
+            // frame being handed out — a window manager settling a new window
+            // does it at startup — and ratatui's frame is the newer size. The
+            // frame is cut again at that size rather than drawn with a cut
+            // that no longer fits it; the heights told to the app above stay a
+            // round behind, and the next round, a poll interval away, measures
+            // again.
+            let cut = if frame.area() == cut.screen() {
+                cut
+            } else {
+                Shape::of(frame.area().as_size(), app, Some(field), chrome.sigils()).cut()
+            };
             draw(frame, &cut, app, chrome, Instant::now(), modal, Some(field));
         })
     }

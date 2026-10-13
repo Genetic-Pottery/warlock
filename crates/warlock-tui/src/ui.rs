@@ -608,6 +608,11 @@ pub(crate) enum Reach {
 
 impl Cut {
     #[must_use]
+    pub(crate) const fn screen(&self) -> Rect {
+        self.screen
+    }
+
+    #[must_use]
     pub(crate) fn tree_height(&self) -> u16 {
         self.tree_rows.height
     }
