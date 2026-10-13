@@ -6,3 +6,5 @@
 demo.cast
 # `nix build` leaves its output symlink here.
 /result
+# Claude Code puts subagent worktrees here; each is its own checkout.
+.claude/worktrees/
