@@ -48,9 +48,11 @@ pub(crate) struct Panel {
     document: Card<Vec<Line>>,
     showing: Showing,
     mode: Mode,
-    // Whether the latest brief-mode answer ended in the model's ready marker.
-    // Beside `mode` for `mode`'s reason: a pact rolling back must not take it.
-    ready: bool,
+    // Since when the brief-mode answers have ended in the model's ready marker:
+    // the instant is the strip's flash phase, so it opens on brief rather than
+    // wherever the clock happens to be. Beside `mode` for `mode`'s reason: a
+    // pact rolling back must not take it.
+    ready: Option<Instant>,
     height: usize,
     width: usize,
 }
@@ -635,12 +637,14 @@ impl Panel {
     }
 
     #[must_use]
-    pub(crate) const fn ready(&self) -> bool {
+    pub(crate) const fn ready(&self) -> Option<Instant> {
         self.ready
     }
 
-    pub(crate) const fn set_ready(&mut self, ready: bool) {
-        self.ready = ready;
+    /// A ready answer after a ready answer keeps the first one's instant, so
+    /// the flash does not restart on every turn.
+    pub(crate) fn set_ready(&mut self, at: Option<Instant>) {
+        self.ready = at.map(|at| self.ready.unwrap_or(at));
     }
 
     /// The answer is what a caller needs and cannot easily get back afterwards: a

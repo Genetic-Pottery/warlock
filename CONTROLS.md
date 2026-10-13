@@ -93,10 +93,10 @@ usable while a pact or a refresh works.
 Reached with `Tab`. While it holds the keyboard, ordinary characters go into the
 draft.
 
-The strip on the chat bar's top border shows the workflow: chat, brief, write,
-push, draft, and pull. The current mode is lit. Write lights beside brief when
-the model says the brief is ready to write. While a push, draft, or pull is
-running, it is the only stage lit.
+The strip on the chat bar's top border shows the workflow: chat, brief, push,
+draft, and pull. The current mode is lit. When the model says the brief is ready
+to write, the brief box turns between brief and write once a second. While a
+push, draft, or pull is running, it is the only stage lit.
 
 | Key | What it does |
 | --- | --- |

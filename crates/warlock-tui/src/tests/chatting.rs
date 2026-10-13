@@ -2259,7 +2259,7 @@ mod readiness {
     #[test]
     fn a_brief_answer_ending_in_the_marker_is_ready_and_the_card_never_shows_it() {
         let app = answered(Mode::Brief, "Every section is settled.\n[ready to write]");
-        assert!(app.panel().ready());
+        assert!(app.panel().ready().is_some());
         assert!(!said(&app).contains("[ready to write]"), "{}", said(&app));
     }
 
@@ -2268,18 +2268,18 @@ mod readiness {
         let base = Instant::now();
         let (mut app, events, mut chat) = asking(base);
         app.panel_mut().set_mode(Mode::Brief);
-        app.panel_mut().set_ready(true);
+        app.panel_mut().set_ready(Some(Instant::now()));
         events
             .send(TurnEvent::Finished(Ok("One more question.".to_owned())))
             .expect("the loop is still listening");
         drain(&mut chat, &mut app, at(base, 2));
-        assert!(!app.panel().ready());
+        assert!(app.panel().ready().is_none());
     }
 
     #[test]
     fn a_chat_answer_is_left_as_it_came() {
         let app = answered(Mode::Chat, "Quoting it:\n[ready to write]");
-        assert!(!app.panel().ready());
+        assert!(app.panel().ready().is_none());
         assert!(said(&app).contains("[ready to write]"), "{}", said(&app));
     }
 }

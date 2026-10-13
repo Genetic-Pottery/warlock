@@ -180,6 +180,8 @@ const BORDER_THICKNESS: u16 = 1;
 
 const PULSE_PHASE: Duration = Duration::from_millis(500);
 
+const WRITE_FLASH: Duration = Duration::from_secs(1);
+
 const CONFIRM_QUESTION: &str = "Leave warlock?";
 
 const HELP_TITLE: &str = " keys · Esc or ? closes · j/k scrolls ";
@@ -367,7 +369,7 @@ pub(crate) fn draw(
         // showing — it is drawn under the conversation and under neither of the
         // other two — which is [`on_screen`]'s question and not this one.
         let live = app.focus() == Focus::Composer && !composer.is_muted();
-        let strip = workflow_line(app.panel().mode(), app.panel().ready(), app.working());
+        let strip = workflow_line(app.panel().mode(), app.panel().ready(), app.working(), now);
         draw_composer(frame, area, composer, live, strip);
     }
     draw_tree_pane(frame, cut, app, chrome, now);
@@ -1020,15 +1022,26 @@ const WORKFLOW_LIT: Style = Style::new()
 const WORKFLOW_DIM: Style = Style::new().fg(Color::Indexed(245)).bg(Color::Indexed(236));
 
 // Every stage is drawn whatever is lit, so a reader new to warlock sees the
-// whole road and where they are on it. Brief and write light together when the
-// model thinks the brief is ready. A push, draft or pull running lights alone:
-// the conversation's mode beside it read as a second thing going on.
-fn workflow_line(mode: Mode, ready: bool, working: Option<Working>) -> Line<'static> {
+// whole road and where they are on it. Write is not a stage of its own: it is
+// what a ready brief can do next, so it shares brief's box and the box turns
+// between the two words while the brief is ready. A push, draft or pull running
+// lights alone: the conversation's mode beside it read as a second thing going
+// on.
+fn workflow_line(
+    mode: Mode,
+    ready: Option<Instant>,
+    working: Option<Working>,
+    now: Instant,
+) -> Line<'static> {
     let talking = working.is_none();
+    let briefing = talking && mode == Mode::Brief;
+    let writing = briefing
+        && ready.is_some_and(|since| {
+            now.saturating_duration_since(since).as_millis() / WRITE_FLASH.as_millis() % 2 == 1
+        });
     let stages = [
         ("chat", talking && mode == Mode::Chat),
-        ("brief", talking && mode == Mode::Brief),
-        ("write", talking && mode == Mode::Brief && ready),
+        (if writing { "write" } else { "brief" }, briefing),
         ("push", working == Some(Working::Push)),
         ("draft", working == Some(Working::Draft)),
         ("pull", working == Some(Working::Pull)),
