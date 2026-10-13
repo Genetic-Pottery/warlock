@@ -135,10 +135,10 @@ fn came_back(
 // not a file in the words `v` uses.
 fn edit_target(app: &mut App, in_flight: bool) -> Option<PathBuf> {
     if in_flight {
-        // The whole of the refusal: a bit of wording on a line that is already
-        // on screen. Setting it again says the same thing, so a reader leaning
-        // on the key changes nothing after the first press — and nothing is
-        // suspended, so the run goes on drawing on a screen it still owns.
+        // The whole of the refusal is a flag the footer words. Setting it again
+        // says the same thing, so a reader leaning on the key changes nothing
+        // after the first press — and nothing is suspended, so the run goes on
+        // drawing on a screen it still owns.
         app.set_pact_refused();
         return None;
     }

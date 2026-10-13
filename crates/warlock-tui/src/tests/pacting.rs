@@ -1191,8 +1191,8 @@ fn the_pact_key_starts_nothing_while_a_pact_is_in_flight() {
     let refused = refusing(&before);
     assert_eq!(app, refused, "the press did more than say so");
     assert_eq!(
-        app.pact_line().as_deref(),
-        Some("pacting engine (2/12) — already running"),
+        app.refused_line().as_deref(),
+        Some("pacting engine — already running"),
         "the refusal is worded onto the line the reader is watching"
     );
     assert_eq!(
@@ -1232,8 +1232,8 @@ fn leaning_on_the_pact_key_while_a_pact_is_in_flight_changes_nothing_further() {
 
     assert_eq!(app, after_one, "pressing again changed something");
     assert_eq!(
-        app.pact_line().as_deref(),
-        Some("pacting engine (2/12) — already running")
+        app.refused_line().as_deref(),
+        Some("pacting engine — already running")
     );
 }
 
@@ -1267,7 +1267,11 @@ fn a_press_on_a_file_row_with_nothing_running_still_refuses_through_the_message(
         app.message().is_some_and(|message| !message.is_empty()),
         "the file row said nothing"
     );
-    assert_eq!(app.pact_line(), None, "nothing is running to be refused by");
+    assert_eq!(
+        app.run_header().map(|header| header.words()),
+        None,
+        "nothing is running to be refused by"
+    );
 }
 
 #[test]
@@ -1310,7 +1314,11 @@ fn a_press_on_a_row_the_ignore_file_keeps_out_starts_nothing() {
         !app.panel().has_account(),
         "an account was opened for no run"
     );
-    assert_eq!(app.pact_line(), None, "nothing is running to be refused by");
+    assert_eq!(
+        app.run_header().map(|header| header.words()),
+        None,
+        "nothing is running to be refused by"
+    );
     let refused = saying(&before, app.message().expect("the app said why"));
     assert_eq!(app, refused, "the press did more than say so");
 }
@@ -1647,8 +1655,8 @@ fn a_run_in_flight_is_answered_before_the_boundary_is() {
         "the boundary spoke over a run's own line"
     );
     assert_eq!(
-        app.pact_line().as_deref(),
-        Some("pacting /repo/crates (0/2) — already running")
+        app.refused_line().as_deref(),
+        Some("pacting /repo/crates — already running")
     );
 }
 
@@ -1738,8 +1746,8 @@ fn either_key_starts_nothing_while_a_run_is_in_flight() {
     let refused = refusing(&before);
     assert_eq!(app, refused, "the presses did more than say so");
     assert_eq!(
-        app.pact_line().as_deref(),
-        Some("refreshing engine (1/7) — already running"),
+        app.refused_line().as_deref(),
+        Some("refreshing engine — already running"),
         "the refusal is worded onto the line the reader is watching"
     );
     assert_eq!(
@@ -1758,8 +1766,8 @@ fn either_key_starts_nothing_while_a_run_is_in_flight() {
     app.set_pact_in_flight("/repo/crates/engine", 3, 12);
     assert_eq!(refresh_press(&mut app, true, at(base, 3)), None);
     assert_eq!(
-        app.pact_line().as_deref(),
-        Some("pacting engine (2/12) — already running")
+        app.refused_line().as_deref(),
+        Some("pacting engine — already running")
     );
 }
 
@@ -1816,8 +1824,8 @@ fn a_second_run_is_refused_in_the_same_words_with_the_thread_showing() {
     let refused = refusing(&before);
     assert_eq!(app, refused, "the presses did more than say so");
     assert_eq!(
-        app.pact_line().as_deref(),
-        Some("pacting engine (2/12) — already running"),
+        app.refused_line().as_deref(),
+        Some("pacting engine — already running"),
         "the refusal is worded onto the line the reader is watching"
     );
     assert_eq!(
@@ -1868,7 +1876,11 @@ fn a_refresh_of_a_directory_with_nothing_stale_under_it_starts_no_run() {
         "the fresh row said nothing: {:?}",
         app.message()
     );
-    assert_eq!(app.pact_line(), None, "nothing is running to be refused by");
+    assert_eq!(
+        app.run_header().map(|header| header.words()),
+        None,
+        "nothing is running to be refused by"
+    );
 
     // The same key on the same directory gone stale is the press that
     // starts a run, and it starts the panel's account at the moment of the
@@ -2456,8 +2468,8 @@ fn a_pass_fills_the_panel_under_the_directory_it_is_working_on() {
     let mut in_flight = before.clone();
     in_flight.set_pact_in_flight("/repo/crates/engine", 1, 2);
     assert_eq!(
-        app.pact_line(),
-        in_flight.pact_line(),
+        app.run_header().map(|header| header.words()),
+        in_flight.run_header().map(|header| header.words()),
         "and the footer's progress line says what it always said"
     );
     assert_eq!(
@@ -2573,8 +2585,8 @@ fn the_request_a_directory_was_handed_draws_a_line_under_it() {
     let mut in_flight = before.clone();
     in_flight.set_pact_in_flight("/repo/crates/engine", 1, 1);
     assert_eq!(
-        app.pact_line(),
-        in_flight.pact_line(),
+        app.run_header().map(|header| header.words()),
+        in_flight.run_header().map(|header| header.words()),
         "the footer says exactly what it said before the panel joined in"
     );
 }
@@ -2628,8 +2640,8 @@ fn a_subtree_pact_reads_as_a_section_per_directory_in_walk_order() {
     let mut in_flight = before.clone();
     in_flight.set_pact_in_flight("/repo/crates/tui", 2, 2);
     assert_eq!(
-        app.pact_line(),
-        in_flight.pact_line(),
+        app.run_header().map(|header| header.words()),
+        in_flight.run_header().map(|header| header.words()),
         "and the footer is still the footer"
     );
 
@@ -2645,7 +2657,10 @@ fn a_subtree_pact_reads_as_a_section_per_directory_in_walk_order() {
     pact.keep_up(&mut app, &mut manifest, &nowhere(), at(base, 120));
 
     assert!(!pact.running(), "the run is over");
-    assert!(app.pact_line().is_none(), "so nothing is being pacted now");
+    assert!(
+        app.run_header().map(|header| header.words()).is_none(),
+        "so nothing is being pacted now"
+    );
     // Nothing the run did is on the footer, because nothing went wrong
     // in it. The line that is there belongs to the reload at the bottom
     // of the call, which has no `/repo/crates` on disk to read.
@@ -3169,7 +3184,7 @@ fn replay_work(
         let frame = u64::try_from(frame).expect("a run of fewer than 2^64 events");
         events.send(event).expect("the loop is still listening");
         pact.keep_up(app, manifest, scope, at(base, frame * FRAME));
-        if let Some(line) = app.pact_line()
+        if let Some(line) = app.run_header().map(|header| header.words())
             && progress.last() != Some(&line)
         {
             progress.push(line);
@@ -4750,7 +4765,7 @@ fn a_worker_that_says_nothing_more_ends_the_run_rather_than_hanging() {
 
     assert!(pact.running(), "a run that has only started is still on");
     assert!(
-        app.pact_line().is_some(),
+        app.run_header().map(|header| header.words()).is_some(),
         "and the footer says where it has got to"
     );
 
@@ -4760,9 +4775,9 @@ fn a_worker_that_says_nothing_more_ends_the_run_rather_than_hanging() {
 
     assert!(!pact.running(), "the run is over, however it ended");
     assert!(
-        app.pact_line().is_none(),
+        app.run_header().map(|header| header.words()).is_none(),
         "so nothing is being pacted now: {:?}",
-        app.pact_line()
+        app.run_header().map(|header| header.words())
     );
     assert_eq!(app.message(), Some(PACT_LOST), "and the footer says so");
     assert_eq!(
@@ -5613,7 +5628,7 @@ fn a_pull_in_flight_turns_down_both_keys_on_the_thread_before_anything_else() {
     };
 
     let mut app = app_over(NodeState::PactedStale);
-    let before = app.pact_line();
+    let before = app.run_header().map(|header| header.words());
     assert_eq!(
         super::pact_press(
             &mut app,
@@ -5642,6 +5657,10 @@ fn a_pull_in_flight_turns_down_both_keys_on_the_thread_before_anything_else() {
     let line = format!("{PULLING}; no pass was started");
     assert_eq!(thread_notes(&app), [line.clone(), line]);
     assert_eq!(app.message(), None, "the boundary spoke as well");
-    assert_eq!(app.pact_line(), before, "a pass's own refusal was said too");
+    assert_eq!(
+        app.run_header().map(|header| header.words()),
+        before,
+        "a pass's own refusal was said too"
+    );
     assert!(!app.panel().has_account(), "a refused key started a run");
 }

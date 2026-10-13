@@ -30,10 +30,8 @@ use crate::session::closed_scope;
 // The four refusals are ordered deliberately, matching
 // [`pact_press`](crate::pacting::pact_press): a pull in flight, a run in flight,
 // then the boundary, then whatever the app makes of the row. A refusal during a
-// run goes to the progress line rather than the message line, because a run has
-// taken the message line and a sentence left there is the one sentence the
-// reader cannot see; a refusal during a pull goes on the thread, where there is
-// no progress line and the ticket has to be named.
+// pull goes on the thread, because it has to name the ticket whose session is
+// editing this tree.
 //
 // The field opens on the scope read out of the manifest, never off a
 // [`Row`](crate::app::Row): a fourth row field holding this string would be a

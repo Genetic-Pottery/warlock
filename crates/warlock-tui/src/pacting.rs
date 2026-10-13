@@ -283,12 +283,11 @@ struct TurnedDown<'a> {
 }
 
 // The three refusals both keys share, in the order they have to be asked in. A
-// pull in flight is answered first and on the thread, because there is no
-// progress line on screen for a reworded line to land on and the sentence has to
-// name the ticket whose session is editing this tree. This type's own run is
-// answered by rewording a line that *is* already on screen, which says the same
-// thing however often it is pressed; the boundary is asked last, and all three
-// are past before anything that paints rather than asks.
+// pull in flight is answered first and on the thread, because the sentence has
+// to name the ticket whose session is editing this tree. This type's own run is
+// answered by a flag the footer words, which says the same thing however often
+// it is pressed; the boundary is asked last, and all three are past before
+// anything that paints rather than asks.
 fn turned_down(
     app: &mut App,
     operation: Operation,
@@ -717,8 +716,8 @@ fn apply_toggle(
     // The descent and the one save are [`descend`]'s, shared with the shell's
     // `warlock pact` and `warlock refresh` — see [`mod@crate::descent`]. What is
     // left here is the panel's half: an un-pact grants nothing and has nothing
-    // to report, and the other two are read for a footer line and a refusal per
-    // directory.
+    // to report, and the other two are read for the run header and a refusal
+    // per directory.
     let subtree = descend(
         work.descent(),
         work.path(),

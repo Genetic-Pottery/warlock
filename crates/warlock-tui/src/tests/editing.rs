@@ -157,11 +157,9 @@ fn a_press_while_a_run_is_in_flight_suspends_nothing_and_says_so_on_the_progress
         refused
     };
     assert_eq!(app, refused, "the press did more than say so");
-    assert!(
-        app.pact_line()
-            .is_some_and(|line| line.ends_with("— already running")),
-        "the refusal is worded onto the line the reader is watching: {:?}",
-        app.pact_line()
+    assert_eq!(
+        app.refused_line().as_deref(),
+        Some("pacting crates/tui — already running")
     );
     assert_eq!(
         app.message(),

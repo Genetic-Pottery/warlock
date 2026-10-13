@@ -475,11 +475,9 @@ fn a_press_while_a_run_is_in_flight_opens_nothing_and_says_so_on_the_progress_li
         refused
     };
     assert_eq!(app, refused, "the press did more than say so");
-    assert!(
-        app.pact_line()
-            .is_some_and(|line| line.ends_with("— already running")),
-        "the refusal is worded onto the line the reader is watching: {:?}",
-        app.pact_line()
+    assert_eq!(
+        app.refused_line().as_deref(),
+        Some("pacting crates/tui — already running")
     );
     assert_eq!(
         app.message(),
@@ -675,7 +673,11 @@ fn a_set_and_a_clear_leave_the_run_state_and_the_message_line_untouched() {
 
         assert_eq!(windows, Windows::default());
         assert!(!app.is_pacting(), "writing {text:?} started a run");
-        assert_eq!(app.pact_line(), None, "and put a progress line up");
+        assert_eq!(
+            app.run_header().map(|header| header.words()),
+            None,
+            "and put a progress line up"
+        );
         assert!(app.panel().account().is_none(), "and opened an account");
         assert_eq!(app.message(), Some(LAST_KEY), "and took the message line");
         assert_eq!(app, before, "writing {text:?} moved the view");
@@ -950,7 +952,7 @@ fn the_whole_path_from_the_press_to_the_saved_manifest_is_one_key_at_a_time() {
     // And the run state and the message line came through the whole of it
     // untouched: no key of those six was a run.
     assert!(!app.is_pacting());
-    assert_eq!(app.pact_line(), None);
+    assert_eq!(app.run_header().map(|header| header.words()), None);
     assert_eq!(app.message(), Some(LAST_KEY));
 }
 
@@ -1434,7 +1436,7 @@ fn the_whole_path_through_both_windows_is_one_key_at_a_time() {
     // And the run state and the message line came through the whole of it
     // untouched: not one of those keys was a run.
     assert!(!app.is_pacting());
-    assert_eq!(app.pact_line(), None);
+    assert_eq!(app.run_header().map(|header| header.words()), None);
     assert_eq!(app.message(), Some(LAST_KEY));
 }
 

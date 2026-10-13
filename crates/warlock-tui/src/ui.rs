@@ -827,13 +827,7 @@ fn draw_run_header(frame: &mut Frame<'_>, area: Rect, header: &RunHeader) {
 }
 
 fn run_header_line(header: &RunHeader, width: usize) -> String {
-    let words = format!(
-        "{} {} ({}/{})",
-        header.run().word(),
-        header.directory(),
-        header.completed(),
-        header.total(),
-    );
+    let words = header.words();
 
     let room = width
         .saturating_sub(display_width(&words))
@@ -1421,7 +1415,7 @@ fn draw_footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
     .dim();
 
     let message = Line::from(
-        app.pact_line()
+        app.refused_line()
             .unwrap_or_else(|| app.message().unwrap_or_default().to_owned()),
     )
     .dim();

@@ -1750,7 +1750,7 @@ fn a_pact_in_flight_names_the_directory_relative_to_the_root_with_its_place() {
     // manifest spelling whatever the platform's separator is, with a
     // one-based place in the run beside it.
     assert_eq!(
-        app.pact_line().as_deref(),
+        app.run_header().map(|header| header.words()).as_deref(),
         Some("pacting crates/warlock-engine (2/12)")
     );
 }
@@ -1764,7 +1764,10 @@ fn the_root_of_the_tree_is_named_as_it_stands_in_a_pact_line() {
     // The root cannot be named relative to itself, so it is named as it
     // stands rather than as the `"."` relative spelling would give — the
     // same rule every other label here follows.
-    assert_eq!(app.pact_line().as_deref(), Some("pacting /repo (0/5)"));
+    assert_eq!(
+        app.run_header().map(|header| header.words()).as_deref(),
+        Some("pacting /repo (0/5)")
+    );
 }
 
 #[test]
@@ -1777,7 +1780,11 @@ fn the_pact_line_moves_as_the_caller_advances_the_run() {
         .enumerate()
     {
         app.set_pact_in_flight(path, position + 1, 3);
-        said.push(app.pact_line().expect("a pact is in flight"));
+        said.push(
+            app.run_header()
+                .map(|header| header.words())
+                .expect("a pact is in flight"),
+        );
     }
 
     assert_eq!(
@@ -1802,7 +1809,11 @@ fn the_progress_line_takes_its_verb_from_the_kind_of_run() {
 
         // One word apart: the directory, the fraction and the shape of the
         // line are the same, because it is the same kind of work.
-        assert_eq!(app.pact_line().as_deref(), Some(said), "{run:?}");
+        assert_eq!(
+            app.run_header().map(|header| header.words()).as_deref(),
+            Some(said),
+            "{run:?}"
+        );
         // And a refresh is a run in flight for everything else that asks.
         assert!(app.is_pacting(), "{run:?}");
         assert!(app.is_in_flight(&rooted_engine()), "{run:?}");
@@ -1817,7 +1828,10 @@ fn the_pact_key_starts_the_pacting_verb_and_nothing_has_to_say_so() {
 
     // `set_pact_in_flight` is `set_run_in_flight` with the kind filled in,
     // so every caller that predates the refresh goes on wording pacts.
-    assert_eq!(app.pact_line().as_deref(), Some("pacting /repo (0/5)"));
+    assert_eq!(
+        app.run_header().map(|header| header.words()).as_deref(),
+        Some("pacting /repo (0/5)")
+    );
 }
 
 #[test]
@@ -1832,40 +1846,40 @@ fn a_refresh_counts_the_stale_directories_it_was_given_and_keeps_its_clauses() {
     // The refusal is worded exactly as it is for a pact, and still goes
     // last.
     assert_eq!(
-        app.pact_line().as_deref(),
-        Some("refreshing crates/warlock-engine (2/7) — already running")
+        app.refused_line().as_deref(),
+        Some("refreshing crates/warlock-engine — already running")
     );
 
     // The run moving on re-words the line around the new directory and
     // carries the refusal along, refresh or not.
     app.set_run_in_flight(Run::Refresh, rooted_crates(), 4, 7);
     assert_eq!(
-        app.pact_line().as_deref(),
-        Some("refreshing crates (3/7) — already running")
+        app.refused_line().as_deref(),
+        Some("refreshing crates — already running")
     );
 
     // And the end of the run takes the whole line down, kind and all.
     app.clear_pact_in_flight();
     assert!(!app.is_pacting());
-    assert_eq!(app.pact_line(), None);
+    assert_eq!(app.run_header().map(|header| header.words()), None);
 }
 
 #[test]
 fn an_app_with_no_pact_running_has_no_pact_line() {
     let mut app = App::from_tree(&fixture::tree());
     assert!(!app.is_pacting());
-    assert_eq!(app.pact_line(), None);
-    assert_eq!(App::from_rows(three_rows()).pact_line(), None);
+    assert_eq!(app.run_header().map(|header| header.words()), None);
+    assert_eq!(App::from_rows(three_rows()).run_header(), None);
 
     app.set_pact_in_flight("warlock/crates", 2, 4);
     app.clear_pact_in_flight();
 
     // And the run being over is the caller's to say, whichever way it ended.
     assert!(!app.is_pacting());
-    assert_eq!(app.pact_line(), None);
+    assert_eq!(app.run_header().map(|header| header.words()), None);
     // Clearing one that was never there changes nothing.
     app.clear_pact_in_flight();
-    assert_eq!(app.pact_line(), None);
+    assert_eq!(app.run_header().map(|header| header.words()), None);
 }
 
 #[test]
@@ -1883,7 +1897,7 @@ fn an_app_with_no_run_in_flight_has_no_run_header() {
     // however the run ended.
     app.clear_pact_in_flight();
     assert!(app.run_header().is_none());
-    assert_eq!(app.pact_line(), None);
+    assert_eq!(app.run_header().map(|header| header.words()), None);
 }
 
 #[test]
@@ -1962,7 +1976,7 @@ fn the_run_headers_directory_is_spelled_the_way_the_footer_spells_it() {
     let header = app.run_header().expect("a run in flight has a header");
     assert_eq!(header.directory(), "crates/warlock-engine");
     assert_eq!(
-        app.pact_line().as_deref(),
+        app.run_header().map(|header| header.words()).as_deref(),
         Some("pacting crates/warlock-engine (2/12)")
     );
 
@@ -1976,7 +1990,8 @@ fn the_run_headers_directory_is_spelled_the_way_the_footer_spells_it() {
         Path::new("/elsewhere/notes").display().to_string()
     );
     assert!(
-        app.pact_line()
+        app.run_header()
+            .map(|header| header.words())
             .expect("a run in flight has a line")
             .contains(header.directory()),
         "the footer spelled it some other way"
@@ -2002,9 +2017,6 @@ fn the_run_headers_position_never_goes_backwards_within_one_run() {
     let header = app.run_header().expect("a run in flight has a header");
     assert_eq!(header.position(), 3);
     assert_eq!(header.total(), 12);
-    // The footer is untouched by the high-water mark and goes on reporting
-    // the directory and position it was just handed.
-    assert_eq!(app.pact_line().as_deref(), Some("pacting crates (1/12)"));
 
     // And it goes on rising the moment the run gets past where it had been.
     app.set_pact_in_flight(rooted_engine(), 5, 12);
@@ -2127,14 +2139,14 @@ fn a_pact_in_flight_takes_the_message_line_and_hands_it_back() {
     // message is kept rather than dropped: starting a pact is not a
     // keystroke, so it neither says anything nor takes anything down.
     assert_eq!(
-        app.pact_line().as_deref(),
+        app.run_header().map(|header| header.words()).as_deref(),
         Some("pacting warlock/crates (1/4)")
     );
     assert_eq!(app.message(), Some("something the caller said"));
 
     app.clear_pact_in_flight();
 
-    assert_eq!(app.pact_line(), None);
+    assert_eq!(app.run_header().map(|header| header.words()), None);
     assert_eq!(app.message(), Some("something the caller said"));
 }
 
@@ -2154,7 +2166,7 @@ fn a_keystroke_clears_a_message_and_leaves_the_pact_in_flight_alone() {
         // line describing it goes on being true.
         assert!(app.is_pacting(), "{name} stopped the pact");
         assert_eq!(
-            app.pact_line().as_deref(),
+            app.run_header().map(|header| header.words()).as_deref(),
             Some("pacting warlock/crates/engine (2/12)"),
             "{name} blanked the line for a pact that is still running"
         );
@@ -2169,8 +2181,8 @@ fn a_press_refused_by_a_running_pact_is_said_on_the_end_of_the_pact_line() {
     app.set_pact_refused();
 
     assert_eq!(
-        app.pact_line().as_deref(),
-        Some("pacting warlock/crates/engine (2/12) — already running")
+        app.refused_line().as_deref(),
+        Some("pacting warlock/crates/engine — already running")
     );
 
     // A second, third and fourth press say the same thing, because there is
@@ -2193,8 +2205,8 @@ fn the_run_moving_on_re_words_the_refusal_and_keeps_it() {
     app.set_pact_in_flight("warlock/crates/tui", 4, 12);
 
     assert_eq!(
-        app.pact_line().as_deref(),
-        Some("pacting warlock/crates/tui (3/12) — already running")
+        app.refused_line().as_deref(),
+        Some("pacting warlock/crates/tui — already running")
     );
 }
 
@@ -2210,7 +2222,7 @@ fn a_keystroke_takes_the_refusal_down_the_way_it_takes_a_message_down() {
         // The refusal belonged to the key that earned it; the run it was
         // about goes on, and its line goes back to being about the run.
         assert_eq!(
-            app.pact_line().as_deref(),
+            app.run_header().map(|header| header.words()).as_deref(),
             Some("pacting warlock/crates/engine (2/12)"),
             "{name} left the refusal on the line"
         );
@@ -2229,8 +2241,8 @@ fn a_refused_press_leaves_the_message_where_it_was() {
     // it is not routed through the message, so the message is still the last
     // keystroke's.
     assert_eq!(
-        app.pact_line().as_deref(),
-        Some("pacting warlock/crates (1/4) — already running")
+        app.refused_line().as_deref(),
+        Some("pacting warlock/crates — already running")
     );
     assert_eq!(app.message(), Some("something the caller said"));
 
@@ -2238,7 +2250,7 @@ fn a_refused_press_leaves_the_message_where_it_was() {
 
     // And when the run ends the message is handed back untouched, with no
     // sign of the refusal anywhere: the run it was about is over.
-    assert_eq!(app.pact_line(), None);
+    assert_eq!(app.run_header().map(|header| header.words()), None);
     assert_eq!(app.message(), Some("something the caller said"));
 }
 
@@ -2252,7 +2264,7 @@ fn a_refusal_says_nothing_while_no_pact_is_running() {
     // Nothing to be a suffix on, so nothing is said — and the pact key with
     // no run in flight goes on refusing the way it always did, through the
     // message.
-    assert_eq!(app.pact_line(), None);
+    assert_eq!(app.run_header().map(|header| header.words()), None);
     assert_eq!(app.message(), Some("something the caller said"));
 }
 
@@ -6312,7 +6324,10 @@ fn the_view_flags_and_the_window_survive_a_re_seat() {
         reseated.message(),
         Some("something from the last keystroke")
     );
-    assert_eq!(reseated.pact_line(), app.pact_line());
+    assert_eq!(
+        reseated.run_header().map(|header| header.words()),
+        app.run_header().map(|header| header.words())
+    );
     assert_eq!(selected_path(&reseated), selected_path(&app));
     // The window may have had to move by the rows the new tree added above
     // the selection, but never further than it had to, and never off the

@@ -182,15 +182,6 @@ struct InFlight {
     files: Option<(usize, usize)>,
 }
 
-impl InFlight {
-    // What is finished, which is the node being worked less itself. The header,
-    // its bar and the footer line all count this way, so the three cannot
-    // disagree about how far along a run is.
-    const fn done(&self) -> usize {
-        self.position.saturating_sub(1)
-    }
-}
-
 /// The run in flight, as the header draws it.
 ///
 /// [`RunHeader::position`] is the furthest node this run has reached, which is
@@ -213,11 +204,13 @@ pub(crate) struct RunHeader {
 
 impl RunHeader {
     #[must_use]
+    #[cfg(test)]
     pub(crate) const fn run(&self) -> Run {
         self.run
     }
 
     #[must_use]
+    #[cfg(test)]
     pub(crate) fn directory(&self) -> &str {
         &self.directory
     }
@@ -240,6 +233,17 @@ impl RunHeader {
     #[must_use]
     pub(crate) const fn completed(&self) -> usize {
         self.position.saturating_sub(1)
+    }
+
+    #[must_use]
+    pub(crate) fn words(&self) -> String {
+        format!(
+            "{} {} ({}/{})",
+            self.run.word(),
+            self.directory,
+            self.completed(),
+            self.total
+        )
     }
 
     /// The file being described of the files this directory is paying for,
@@ -675,23 +679,17 @@ impl App {
         })
     }
 
+    /// The footer says a refused press and nothing else about a run: the
+    /// panel's run header already says what is running and how far along it is.
     #[must_use]
-    pub(crate) fn pact_line(&self) -> Option<String> {
-        self.status.in_flight.as_ref().map(|in_flight| {
-            let label = self.label_for(&in_flight.path);
-            // Finished, not started, the same as the bar and the header: see
-            // `RunHeader::completed`.
-            let line = format!(
-                "{} {label} ({}/{})",
+    pub(crate) fn refused_line(&self) -> Option<String> {
+        let in_flight = self.status.in_flight.as_ref()?;
+        self.status.pact_refused.then(|| {
+            already_running_message(&format!(
+                "{} {}",
                 in_flight.run.word(),
-                in_flight.done(),
-                in_flight.total
-            );
-            if self.status.pact_refused {
-                already_running_message(&line)
-            } else {
-                line
-            }
+                self.label_for(&in_flight.path)
+            ))
         })
     }
 

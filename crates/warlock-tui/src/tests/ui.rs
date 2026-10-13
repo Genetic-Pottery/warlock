@@ -1680,7 +1680,7 @@ fn a_refused_toggle_shows_its_message_on_the_footers_last_line_until_the_next_ke
 }
 
 #[test]
-fn a_pact_in_flight_names_its_directory_on_the_footers_last_line() {
+fn a_pact_in_flight_leaves_its_progress_to_the_panel() {
     let mut app = App::from_tree(&fixture::tree());
     let height = 10;
     let before = render(&app, KEYS_WIDTH, height);
@@ -1688,36 +1688,9 @@ fn a_pact_in_flight_names_its_directory_on_the_footers_last_line() {
     app.set_pact_in_flight("warlock/crates/engine", 3, 12);
     let buffer = render(&app, KEYS_WIDTH, height);
 
-    // On the last row of the footer, which is the last row of the screen.
-    // The fixture's paths are relative, and the engine's manifest spelling
-    // takes a relative path to be relative to the root already; the app
-    // tests cover the cutting-down an absolutely-rooted tree gets.
-    assert_eq!(
-        footer_line(&buffer, FOOTER_HEIGHT - 1),
-        "pacting warlock/crates/engine (2/12)"
-    );
-    // The tally has not moved, and no fourth line grew under the footer:
-    // the progress line took the message line rather than adding one.
+    assert_eq!(footer_line(&buffer, FOOTER_HEIGHT - 1), "");
     assert_eq!(footer_line(&buffer, 0), footer_line(&before, 0));
-    assert_eq!(buffer.area.height, height);
-    // And the tree above the footer is untouched: nothing marks the
-    // directory being worked.
     assert_eq!(tree_rows(&buffer), tree_rows(&before));
-
-    // It moves with the run.
-    app.set_pact_in_flight("warlock/assets", 4, 12);
-    let buffer = render(&app, KEYS_WIDTH, height);
-    assert_eq!(
-        footer_line(&buffer, FOOTER_HEIGHT - 1),
-        "pacting warlock/assets (3/12)"
-    );
-
-    // And goes when the run does, leaving the line as blank as it started.
-    app.clear_pact_in_flight();
-    assert_eq!(
-        rows_text(&render(&app, KEYS_WIDTH, height)),
-        rows_text(&before)
-    );
 }
 
 #[test]
@@ -1735,7 +1708,7 @@ fn a_refused_pact_press_re_words_the_progress_line_and_moves_nothing_else() {
     // screen, which is the last row of the footer.
     assert_eq!(
         footer_line(&buffer, FOOTER_HEIGHT - 1),
-        "pacting warlock/crates/engine (2/12) — already running"
+        "pacting warlock/crates/engine — already running"
     );
     // The keys line is still the pacting one: a press that started nothing
     // does not change what the keys do, and Esc still says cancel.
@@ -1756,7 +1729,7 @@ fn a_refused_pact_press_re_words_the_progress_line_and_moves_nothing_else() {
 }
 
 #[test]
-fn a_terminal_too_narrow_for_the_refusal_cuts_the_suffix_and_keeps_the_fraction() {
+fn a_terminal_too_narrow_for_the_refusal_cuts_the_suffix_and_keeps_the_run() {
     let mut app = App::from_tree(&fixture::tree());
     let height = 10;
     app.set_pact_in_flight("warlock/crates/engine", 3, 12);
@@ -1764,18 +1737,18 @@ fn a_terminal_too_narrow_for_the_refusal_cuts_the_suffix_and_keeps_the_fraction(
 
     // The two halves of the line, so the test can be drawn at a width that
     // fits one and not the other.
-    let progress = "pacting warlock/crates/engine (2/12)";
+    let progress = "pacting warlock/crates/engine";
     let suffix = " — already running";
     assert_eq!(
-        app.pact_line().expect("a pact is in flight"),
+        app.refused_line().expect("a refused press is said"),
         format!("{progress}{suffix}"),
         "the app words the line; this test only measures it"
     );
     let fits = u16::try_from(display_width(progress) + 2 * usize::from(BORDER_THICKNESS))
         .expect("a footer line's worth of columns");
 
-    // Drawn with exactly the fraction's columns of footer and not one more,
-    // the inset at each edge aside: the fraction survives whole and the
+    // Drawn with exactly the run's columns of footer and not one more,
+    // the inset at each edge aside: the run's name survives whole and the
     // suffix is the part that is gone.
     let buffer = render(&app, fits, height);
     assert_eq!(footer_line(&buffer, FOOTER_HEIGHT - 1), progress);
@@ -1800,7 +1773,7 @@ fn a_terminal_too_narrow_for_the_refusal_cuts_the_suffix_and_keeps_the_fraction(
     assert_eq!(buffer.area.height, height);
 
     // The cut is at the right edge and column by column: two columns wider
-    // and the first of the suffix is back, with the fraction still whole in
+    // and the first of the suffix is back, with the name still whole in
     // front of it rather than shortened to make room for it.
     let wider = render(&app, fits + 2, height);
     assert_eq!(

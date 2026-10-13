@@ -42,9 +42,9 @@ use crate::viewing::view_press;
 
 /// How long the loop waits for a keystroke before going round anyway.
 ///
-/// The ceiling on how stale the footer's clock and a run's progress line can
-/// get, and the reason an idle warlock redraws ten times a second rather than
-/// sleeping: the worker threads have no way to wake this one.
+/// The ceiling on how stale the footer's clock and a run's header can get, and
+/// the reason an idle warlock redraws ten times a second rather than sleeping:
+/// the worker threads have no way to wake this one.
 pub const POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 /// How long the footer keeps what it was told.
@@ -590,8 +590,8 @@ impl<K: Seams> Session<K> {
             // The pact is deliberately *not* taken down here. The worker is still
             // going to hash what it wrote, save the manifest and report, and all
             // of that arrives at the bottom of the loop like any other outcome;
-            // forgetting about it now would leave the footer's progress line up
-            // for a run nobody was listening to any more.
+            // forgetting about it now would leave the run header up for a run
+            // nobody was listening to any more.
             Pressed::Act(Action::CancelPact) => self.pact.stop(),
             // The turn is deliberately *not* taken down here, exactly as a
             // cancelled pact is not: the worker still has one thing to say, and it

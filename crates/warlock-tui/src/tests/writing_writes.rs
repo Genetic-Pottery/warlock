@@ -159,7 +159,7 @@ fn enter_writes_the_document_and_says_what_landed() {
     // last keystroke's, and nothing about the run state moved.
     assert_eq!(app.message(), Some(LAST_KEY));
     assert!(!app.is_pacting());
-    assert_eq!(app.pact_line(), None);
+    assert_eq!(app.run_header().map(|header| header.words()), None);
 }
 
 #[test]
