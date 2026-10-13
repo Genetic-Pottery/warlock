@@ -26,6 +26,8 @@
               ./Cargo.toml
               ./Cargo.lock
               ./crates
+              # Read by a test, which checks it names every slash command.
+              ./CONTROLS.md
             ];
           };
           cargoLock.lockFile = ./Cargo.lock;
