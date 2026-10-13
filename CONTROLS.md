@@ -94,8 +94,7 @@ Reached with `Tab`. While it holds the keyboard, ordinary characters go into the
 draft.
 
 The strip on the chat bar's top border shows the workflow: chat, brief, write,
-push, draft, and pull. The current mode is lit. Write lights beside brief when
-the model says the brief is ready to write. While a push, draft, or pull is
+push, draft, and pull. The current mode is lit. While a push, draft, or pull is
 running, it is the only stage lit.
 
 | Key | What it does |
@@ -108,8 +107,7 @@ running, it is the only stage lit.
 | `Esc` | Hand the keyboard back and keep the draft exactly as it was |
 | `Tab` | Move the focus on — the one key the composer does not take |
 | `Ctrl-C` | Cancel the turn if one is being answered; otherwise ask whether to quit |
-| `/brief` | Enter brief mode: the same conversation is now converging on a document, sent the instruction the brief template describes |
-| `/write` | Only in brief mode: ask for the document, then open an editable path prompt already holding a proposal like `docs/warlock-brief-13-scopes-and-sigils.md`. Writing the file returns to chat mode |
+| `/brief` | Enter brief mode: the same conversation is now converging on a document, sent the instruction the brief template describes. When the model has enough, a window asks **Write the brief?** Yes asks for the document, then opens an editable path prompt already holding a proposal like `docs/warlock-brief-13-scopes-and-sigils.md`; writing the file returns to chat mode. No keeps talking; ask for the document in your own words and the question comes back |
 | `/chat` | Leave brief mode, writing nothing — back to answering questions as they come |
 | `/push <SCOPE> <PATH>` | File the brief at `PATH` to the scope's Linear team as a project, after a Yes/No question |
 | `/draft <SCOPE>` | List the scope's planned projects, one per line, slug first |

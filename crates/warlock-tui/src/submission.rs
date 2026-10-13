@@ -14,7 +14,6 @@
 // card's row for a `/brief` is spelled from here rather than from the draft,
 // because `submitted_for` trims and `"  /brief  "` has to draw as `/brief`.
 pub(crate) const BRIEF: &str = "/brief";
-pub(crate) const WRITE: &str = "/write";
 pub(crate) const CHAT: &str = "/chat";
 pub(crate) const PULL: &str = "/pull";
 
@@ -35,13 +34,7 @@ const COMMANDS: &[Command] = &[
         word: BRIEF,
         read: |after| after.is_empty().then_some(Submitted::Brief),
         takes: None,
-        help: &[("/brief  /write  /chat", "talk a brief into a document")],
-    },
-    Command {
-        word: WRITE,
-        read: |after| after.is_empty().then_some(Submitted::Write),
-        takes: None,
-        help: &[],
+        help: &[("/brief  /chat", "talk a brief into a document")],
     },
     Command {
         word: CHAT,
@@ -200,7 +193,6 @@ pub(crate) enum Wanted {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) enum Submitted {
     Brief,
-    Write,
     Chat,
     Wanted(Wanted),
     Message,

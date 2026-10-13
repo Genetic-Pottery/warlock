@@ -141,6 +141,7 @@ pub(crate) enum Pressed {
     // And the two-answer question a skipped slice leaves behind, which is the
     // quit dialog's shape said in the run's words.
     Carry(CarryAnswered),
+    WriteBrief(Answered),
     Scope(Edited),
     Record(RecordEdited),
     Write(Edited),
@@ -240,6 +241,7 @@ pub(crate) fn press_for(
                 Pressed::Scroll,
             ),
             Modal::Carry(asked) => Pressed::Carry(carry_answer_for(key, asked.answer())),
+            Modal::WriteBrief(highlighted) => Pressed::WriteBrief(answer_for(key, highlighted)),
             Modal::Scope(field) => Pressed::Scope(edit_for(key, field)),
             Modal::Record(form) => Pressed::Record(record_edit_for(key, form)),
             Modal::Write(field) => Pressed::Write(edit_for(key, field)),

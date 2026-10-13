@@ -2280,7 +2280,7 @@ fn drafting_is_a_session_of_its_own_rather_than_a_register_of_the_panels() {
 // The shape is written down twice — as the template, and restated inside
 // `WRITE_INSTRUCTION` — and only the template is enforced: `write_submit` refuses
 // a document missing one of its sections. So a section the instruction never asks
-// for is not a gap in a document, it is a `/write` that can never succeed. That
+// for is not a gap in a document, it is a write that can never succeed. That
 // happened once, with `## Scope` named in the template and omitted from the
 // instruction; this is the assertion that catches it.
 #[test]
@@ -5188,4 +5188,39 @@ fn every_session_that_reads_the_repository_is_told_silence_is_not_absence() {
 
     // A pass reads only what its request carries, so the habit is nothing to it.
     assert!(!SYSTEM_PROMPT.contains(said));
+}
+
+mod marker {
+    use super::super::without_marker;
+
+    #[test]
+    fn a_last_line_that_is_the_marker_is_taken_off_and_counts() {
+        assert_eq!(
+            without_marker("We have every section.\n\n[ready to write]\n".to_owned()),
+            ("We have every section.".to_owned(), true)
+        );
+    }
+
+    #[test]
+    fn a_reply_that_is_only_the_marker_is_empty_and_counts() {
+        assert_eq!(
+            without_marker("  [ready to write]\n".to_owned()),
+            (String::new(), true)
+        );
+    }
+
+    #[test]
+    fn the_marker_anywhere_but_alone_on_the_last_line_is_left_and_does_not_count() {
+        for answer in [
+            "The brief is offered when I say [ready to write] last.",
+            "[ready to write]\nOne more question.",
+            "Nothing to report.",
+        ] {
+            assert_eq!(
+                without_marker(answer.to_owned()),
+                (answer.to_owned(), false),
+                "{answer:?}"
+            );
+        }
+    }
 }

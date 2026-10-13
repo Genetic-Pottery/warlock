@@ -178,6 +178,7 @@ where
         // copy of either would be a second answer to what a slice is waiting for.
         review: cutter.reviewing(),
         carry: cutter.carrying(),
+        write_brief: chat.write_offer(),
         scope,
         record,
         write: chat.write_prompt(),
@@ -586,6 +587,7 @@ impl<K: Seams> Session<K> {
                 }
             }
             Pressed::Carry(answered) => self.cutter.carried(&mut self.app, answered, now),
+            Pressed::WriteBrief(answered) => self.chat.offered(&mut self.app, answered, now),
             Pressed::Pull(answered) => self.puller.answered(&mut self.app, answered, now),
             // The pact is deliberately *not* taken down here. The worker is still
             // going to hash what it wrote, save the manifest and report, and all
@@ -903,10 +905,11 @@ impl<K: Seams> Session<K> {
             self.pact.running(),
             now,
         );
-        // And the conversation's own bottom end. Nothing comes back: a `/write`
-        // turn's answer opens the window that goes over it, and that window is the
-        // conversation's, so it is opened in there rather than here out of two
-        // values this loop would otherwise have to be handed. See [`Chat::keep_up`].
+        // And the conversation's own bottom end. Nothing comes back: a ready
+        // brief's question and a write turn's path prompt are the
+        // conversation's windows, so they are opened in there rather than here
+        // out of values this loop would otherwise have to be handed. See
+        // [`Chat::keep_up`].
         self.chat.keep_up(&mut self.app, now);
         // And a brief on its way to the board, which says one thing and is over:
         // the project's address or one line about why there is none. Drained like

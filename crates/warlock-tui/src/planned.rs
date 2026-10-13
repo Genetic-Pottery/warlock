@@ -250,7 +250,7 @@ fn cut_with<O: Opens, A: Converses, P: Converses, K: Asks, W: Write>(
                 }
                 ask.discard_typed_ahead();
                 let carry = ask.ask(CARRY_PROMPT)?.unwrap_or_default();
-                if matches!(carry.trim().to_lowercase().as_str(), "y" | "yes") {
+                if asking::yes(&carry) {
                     continue;
                 }
                 say(out, &stopped_line(next.left()));

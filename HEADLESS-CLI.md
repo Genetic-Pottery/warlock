@@ -35,7 +35,7 @@ plain line and the terminal is never touched.
 | `warlock scope remove <path>` | Clear the scope on a pacted directory | one manifest write |
 | `warlock pact <path>` | Describe a directory and everything below it, a `.warlock.md` each | a model pass per directory |
 | `warlock refresh <path>` | The same over only the directories that are not fresh | a model pass per stale directory |
-| `warlock brief` | Argue a brief in one conversation at the shell, and write it where `briefs.toml` says | a turn per blank line, one more for `/write`, and the document it writes |
+| `warlock brief` | Argue a brief in one conversation at the shell, and write it where `briefs.toml` says | a turn per blank line, one more for each yes to the write question, and the document it writes |
 | `warlock push <SCOPE> <PATH>` | File the brief at `PATH` as a project on the board `SCOPE` files to | one project on somebody's board |
 | `warlock draft <SCOPE> [SLUG]` | Without `SLUG`, list the scope's planned projects. With it, cut that project into issues | a list costs one read; a cut costs a drafting session per uncut slice with a turn for each answer or piece of feedback, a proposing pass per question, and for each settled slice its issues and one comment on the project |
 | `warlock pull <SCOPE>` | Work the next ready ticket in that scope's queue to an open pull request | a splitting pass, a model pass per sub-task, a commit each, a pushed branch, a pull request, and two moves on somebody's board |
@@ -488,31 +488,46 @@ end of the run: what reaches it is a missing binary, a timeout and a cancel,
 the session id has not moved, and ending an argument twenty turns old over any
 of the three would throw away the one thing the command exists to produce.
 
-`/write` is the only command at the prompt and it takes nothing after it. Every
-other line is the brief, and a command word that is not it is refused on a line
-rather than sent, so a mistyped command costs a line here instead of a turn:
+There are no commands at the prompt. Every line is the brief, and a panel
+command word is refused on a line rather than sent, so a mistyped command costs
+a line here instead of a turn:
 
 ```sh
 > /push warlock-team docs/brief.md
-warlock: /write is the only command here and takes nothing after it — every other line is the brief; `warlock push` and `warlock draft` are commands of their own
+warlock: there are no commands here — every line is the brief, and the document is offered once the model says it has enough; `warlock push` and `warlock draft` are commands of their own
 ```
 
-It is the panel's own parser that reads the line, so `/write ` with the space a
-hand leaves behind is the command, `/WRITE` is not, and a line opening with a
-path — `/tmp/notes is where I keep them` — is prose. Lines typed and not yet
-sent are left exactly where they are: a `/write` is about the conversation that
-has happened, and lines nobody has sent are not part of it.
+It is the panel's own parser that reads the line, so a line opening with a
+path — `/tmp/notes is where I keep them` — is prose.
 
-A `/write` asks the conversation for the document, prints the reply as every
-other reply is printed, and then proposes a path for it: the directory
-`briefs.toml` names, the next number among the names already in it, and a slug
-off the document's first `# ` line. Enter accepts the proposal and any other
-text replaces it entirely — nothing weighs the two against each other. The file
-is what the conversation was for, so the prompt does not come back after it:
-the run ends on the line that named the path, and that is a **0**.
+When the model has enough to write the brief, it ends its reply with
+`[ready to write]`. warlock takes that line off the reply and asks whether to
+write it. Anything but `y` or `yes` is no: warlock says so and the conversation
+goes on. To get the question back later, ask for the document in your own
+words. If the model agrees that everything is settled, its reply ends in the
+marker again; if not, it says what is still open. EOF at the question ends the
+run with nothing written, the same as EOF at the `> ` cursor.
 
 ```sh
-> /write
+warlock: Both changes run through one asking seam.
+write the brief? [y/N] n
+warlock: not written — ask for it when you want it, and this comes back
+> write it up
+> 
+warlock: Everything is settled.
+write the brief? [y/N] y
+```
+
+A yes asks the conversation for the document, prints the reply as every other
+reply is printed, and then proposes a path for it: the directory `briefs.toml`
+names, the next number among the names already in it, and a slug off the
+document's first `# ` line. Enter accepts the proposal and any other text
+replaces it entirely — nothing weighs the two against each other. The file is
+what the conversation was for, so the prompt does not come back after it: the
+run ends on the line that named the path, and that is a **0**.
+
+```sh
+write the brief? [y/N] y
 warlock: # Give the headless CLI a voice
 …
 warlock: the document goes to `docs/warlock-brief-01-give-the-headless-cli-a-voice.md` — Enter writes it there, another path replaces it

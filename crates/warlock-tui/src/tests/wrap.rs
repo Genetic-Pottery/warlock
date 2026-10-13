@@ -127,7 +127,7 @@ fn a_note_is_broken_under_its_own_marker_and_stays_plain() {
     // throughout, where a question of the same length is bold throughout.
     let rows = rows(
         &Line::Note {
-            text: "the commands are /brief, /write and /chat".to_owned(),
+            text: "the commands are /brief, /draft and /chat".to_owned(),
         },
         NARROW,
     );
@@ -139,7 +139,7 @@ fn a_note_is_broken_under_its_own_marker_and_stays_plain() {
                 text: "the commands are".to_owned(),
             },
             Line::Wrapped {
-                text: "  /brief, /write".to_owned(),
+                text: "  /brief, /draft".to_owned(),
                 heading: false,
                 voice: Voice::Warlock,
             },
@@ -197,7 +197,7 @@ fn no_row_of_any_line_is_wider_than_the_panel() {
             text: "what is the name of this repository?".to_owned(),
         },
         Line::Note {
-            text: "the commands are /brief, /write and /chat".to_owned(),
+            text: "the commands are /brief, /draft and /chat".to_owned(),
         },
         Line::Text {
             text: "It walks the tree and writes what it finds.".to_owned(),

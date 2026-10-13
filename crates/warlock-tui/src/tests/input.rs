@@ -1109,6 +1109,9 @@ mod gate {
             Pressed::Carry(answered) => {
                 panic!("{answered:?} came from a carry-on question that is not up")
             }
+            Pressed::WriteBrief(answered) => {
+                panic!("{answered:?} came from a write question that is not up")
+            }
             Pressed::Help(sheet) => panic!("{sheet:?} came from a help key no round presses"),
             // The loop's three composer arms, and the reason the draft is a
             // local here exactly as it is there: nothing about it is ever
@@ -1962,7 +1965,7 @@ mod gate {
         #[test]
         fn the_scope_prompt_has_the_keys_while_both_windows_are_up() {
             // The precedence, and the one situation that needs one: `s`
-            // opens the scope prompt from the tree while a `/write` turn is
+            // opens the scope prompt from the tree while a write turn is
             // still out, and the answer to that turn opens this window with
             // no keystroke at all. The scope prompt is the one somebody is
             // typing in, so it keeps the keyboard; the write prompt waits
@@ -2022,6 +2025,72 @@ mod gate {
 
     // The fourth window: the three values a brand-new scope name is recorded
     // with, which `s` puts up as it takes the scope window down.
+    mod offering {
+        use super::{Answer, Composer, INERT, KeyCode, Modals, Pressed, ctrl_c, press, press_for};
+        use crate::confirm::{Answered, answer_for};
+
+        fn asked(key: super::KeyEvent, lit: Answer, composer: Option<&Composer>) -> Pressed {
+            press_for(
+                key,
+                Modals {
+                    write_brief: Some(lit),
+                    ..Modals::default()
+                }
+                .current(),
+                composer,
+                false,
+                false,
+            )
+        }
+
+        #[test]
+        fn every_key_is_the_questions_and_none_reaches_the_app_or_the_field() {
+            let draft = Composer::new("say something");
+
+            for code in
+                INERT
+                    .into_iter()
+                    .chain([KeyCode::Char('a'), KeyCode::Char('q'), KeyCode::Enter])
+            {
+                let key = press(code);
+
+                assert_eq!(
+                    asked(key, Answer::No, Some(&draft)),
+                    Pressed::WriteBrief(answer_for(key, Answer::No)),
+                    "{code:?} while the write question is up"
+                );
+            }
+        }
+
+        #[test]
+        fn y_says_yes_and_enter_on_the_lit_no_says_no() {
+            assert_eq!(
+                asked(press(KeyCode::Char('y')), Answer::No, None),
+                Pressed::WriteBrief(Answered::Leave)
+            );
+            assert_eq!(
+                asked(press(KeyCode::Enter), Answer::No, None),
+                Pressed::WriteBrief(Answered::Close)
+            );
+            assert_eq!(
+                asked(press(KeyCode::Left), Answer::No, None),
+                Pressed::WriteBrief(Answered::Open(Answer::Yes))
+            );
+            assert_eq!(
+                asked(press(KeyCode::Enter), Answer::Yes, None),
+                Pressed::WriteBrief(Answered::Leave)
+            );
+        }
+
+        #[test]
+        fn ctrl_c_is_still_the_quit_question() {
+            assert!(matches!(
+                asked(ctrl_c(), Answer::No, None),
+                Pressed::Confirm(_)
+            ));
+        }
+    }
+
     mod recording {
         use super::{
             Composer, INERT, KeyCode, KeyEvent, Modals, Pressed, QuitConfirm, ctrl_c, press,
@@ -2312,7 +2381,7 @@ mod gate {
 
         #[test]
         fn the_dialog_has_the_keys_while_any_of_the_three_fields_is_up() {
-            // The precedence, written down: a `/write` turn still out opens the
+            // The precedence, written down: a write turn still out opens the
             // write prompt on no keystroke at all, and a field that came up
             // under this dialog does not get to take the keys off it.
             let push = open();
@@ -2498,7 +2567,7 @@ mod gate {
 
         #[test]
         fn the_dialog_has_the_keys_while_any_of_the_three_fields_is_up() {
-            // The precedence, written down: a `/write` turn still out opens the
+            // The precedence, written down: a write turn still out opens the
             // write prompt on no keystroke at all, and a field that came up
             // under this dialog does not get to take the keys off it.
             let cut = open();
@@ -2717,7 +2786,7 @@ mod gate {
 
         #[test]
         fn the_dialog_has_the_keys_while_any_of_the_three_fields_is_up() {
-            // The precedence, written down: a `/write` turn still out opens the
+            // The precedence, written down: a write turn still out opens the
             // write prompt on no keystroke at all, and a field that came up
             // under this dialog does not get to take the keys off it.
             let pull = open();

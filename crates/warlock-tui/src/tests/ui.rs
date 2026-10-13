@@ -3436,30 +3436,18 @@ fn lit_stages(line: &ratatui::text::Line<'_>) -> Vec<String> {
 
 #[test]
 fn the_workflow_strip_draws_every_stage_and_lights_the_mode() {
-    let chat = workflow_line(Mode::Chat, false, None);
+    let chat = workflow_line(Mode::Chat, None);
     let text: String = chat
         .spans
         .iter()
         .map(|span| span.content.as_ref())
         .collect();
-    for stage in ["chat", "brief", "write", "push", "draft", "pull"] {
+    for stage in ["chat", "brief", "push", "draft", "pull"] {
         assert!(text.contains(stage), "{stage} in {text:?}");
     }
+    assert!(!text.contains("write"), "{text:?}");
     assert_eq!(lit_stages(&chat), ["chat"]);
-    assert_eq!(
-        lit_stages(&workflow_line(Mode::Brief, false, None)),
-        ["brief"]
-    );
-}
-
-#[test]
-fn write_lights_beside_brief_only_while_the_brief_is_ready() {
-    assert_eq!(
-        lit_stages(&workflow_line(Mode::Brief, true, None)),
-        ["brief", "write"]
-    );
-    // A ready flag left over in chat mode lights nothing: write is brief's.
-    assert_eq!(lit_stages(&workflow_line(Mode::Chat, true, None)), ["chat"]);
+    assert_eq!(lit_stages(&workflow_line(Mode::Brief, None)), ["brief"]);
 }
 
 #[test]
@@ -3469,11 +3457,8 @@ fn board_work_lights_alone() {
         (Working::Draft, "draft"),
         (Working::Pull, "pull"),
     ] {
-        for (mode, ready) in [(Mode::Chat, false), (Mode::Brief, true)] {
-            assert_eq!(
-                lit_stages(&workflow_line(mode, ready, Some(working))),
-                [stage]
-            );
+        for mode in [Mode::Chat, Mode::Brief] {
+            assert_eq!(lit_stages(&workflow_line(mode, Some(working))), [stage]);
         }
     }
 }

@@ -5,17 +5,18 @@
 //! The panel's `/brief` is a *mode* of the conversation a reader is already in —
 //! see [`mod@crate::chatting`] — and this is the whole conversation instead:
 //! there is no chat to come from and none to go back to, which is what keeps the
-//! prompt's vocabulary to prose and `/write`. No `/chat` here, because this
-//! command *is* brief mode; and the two register words are not this module's to
-//! choose, so [`raised`] names them once and takes them from `claude.rs`, which
-//! is where the panel takes them from too.
+//! prompt's vocabulary to prose. No `/chat` here, because this command *is*
+//! brief mode; and the two register words are not this module's to choose, so
+//! [`raised`] names them once and takes them from `claude.rs`, which is where
+//! the panel takes them from too.
 //!
-//! `/write` decides nothing about a brief either. The request is the panel's
+//! Writing decides nothing about a brief either. The question is asked when a
+//! reply ends in the panel's ready marker, the request is the panel's
 //! [`WRITE_INSTRUCTION`], the path is [`proposed_path`]'s, and the shape, the
 //! bytes and every refusal are [`landed`]'s — see [`mod@crate::writing`] — so the
-//! only thing written here is the conversation around them: the offer over the
-//! cursor, the empty line that accepts it, and the run ending on the file rather
-//! than going round again.
+//! only thing written here is the conversation around them: the question, the
+//! offer over the cursor, the empty line that accepts it, and the run ending on
+//! the file rather than going round again.
 //!
 //! Both of `/brief`'s files are read before a word is sent, which is
 //! [`mod@crate::chatting`]'s rule at the other door: a template or a
@@ -36,6 +37,7 @@ use warlock_engine::load_briefs;
 use crate::asking::{self, Asks};
 use crate::claude::{
     BRIEF_EFFORT, BRIEF_MODEL, ChatAgent, Converses, WRITE_INSTRUCTION, brief_instruction,
+    without_marker,
 };
 use crate::error::{Error, say};
 use crate::standing::{FOR_BRIEF, Standing};
@@ -64,16 +66,22 @@ const OPENING: &str = "brief mode — this conversation is converging on a docum
 // rather than an oversight here.
 const OVER: &str = "the conversation is over";
 
-// Every command word that is not `/write`, which is every other command the
-// panel has. `/brief` and `/chat` are a register this session cannot leave
-// because it *is* that register; `/push`, `/draft`, `/pull` and `/resume` are
-// subcommands of warlock's own, so the shell composes them rather than this
-// prompt growing a third spelling of each. Refused rather than sent, for
-// `submission.rs`'s reason: a mistyped command costs a line here and a turn if
-// it goes.
-const ONLY_WRITE: &str = "/write is the only command here and takes nothing after it — every \
-                          other line is the brief; `warlock push` and `warlock draft` are \
-                          commands of their own";
+// Every panel command word. `/brief` and `/chat` are a register this session
+// cannot leave because it *is* that register; `/push`, `/draft`, `/pull` and
+// `/resume` are subcommands of warlock's own, so the shell composes them rather
+// than this prompt growing a third spelling of each. Refused rather than sent,
+// for `submission.rs`'s reason: a mistyped command costs a line here and a turn
+// if it goes.
+const NO_COMMANDS: &str = "there are no commands here — every line is the brief, and the \
+                           document is offered once the model says it has enough; \
+                           `warlock push` and `warlock draft` are commands of their own";
+
+// The panel's "Write the brief?", and its default for the panel's reason: the
+// question comes up on no keystroke, and a write is the most expensive turn
+// there is.
+const WRITE_PROMPT: &str = "write the brief? [y/N] ";
+
+const NOT_WRITTEN: &str = "not written — ask for it when you want it, and this comes back";
 
 pub fn brief() -> Result<(), Error> {
     let standing = Standing::here(FOR_BRIEF)?;
@@ -114,7 +122,7 @@ fn briefing<C: Converses, K: Asks, W: Write>(
     // one, exactly as `/brief` sends it: it ends by telling the model to open by
     // asking what the change is, so a turn that carried somebody's own opening
     // underneath it would be answering a question before it was put.
-    drop(turned(&agent, &brief_instruction(&opening.shape), out));
+    let mut ready = conversed(&agent, &brief_instruction(&opening.shape), out);
     ask.discard_typed_ahead();
 
     // Lines until a blank one, then those lines as one turn. Multi-line prose is
@@ -125,15 +133,35 @@ fn briefing<C: Converses, K: Asks, W: Write>(
     // `?` and not a reported line: a stdin that cannot be read is not a fact
     // about this turn, and a conversation that carried on would be asking a
     // sequence of questions into a pipe that is broken.
-    while let Some(line) = ask.ask(PROMPT)? {
+    loop {
+        if ready {
+            ready = false;
+            let Some(answer) = ask.ask(WRITE_PROMPT)? else {
+                break;
+            };
+            if !asking::yes(&answer) {
+                say(out, NOT_WRITTEN);
+                continue;
+            }
+            match written(&agent, root, &opening, ask, out)? {
+                // The file is what the conversation was for, so there is nothing
+                // to ask after it: the prompt does not come back and the process
+                // ends on the line that named the path.
+                Landing::Wrote => return Ok(()),
+                Landing::Carry => continue,
+                Landing::Over => break,
+            }
+        }
+        let Some(line) = ask.ask(PROMPT)? else {
+            break;
+        };
         // Trimmed at the end alone: a pipe's newline is never part of what
         // somebody meant to say, and leading spaces are — a list or an indented
         // block is prose a brief is argued in.
         let line = line.trim_end();
-        // The panel's own parser and not a comparison here, so `/write ` with
-        // the space a hand leaves behind is the command, `/WRITE` is not, and a
-        // line that opens with a path is prose — three rules this module would
-        // otherwise be stating a second time. See `submission.rs`.
+        // The panel's own parser and not a comparison here, so a line that
+        // opens with a path is prose and a command word is refused by the rules
+        // the panel refuses it by. See `submission.rs`.
         match submitted_for(line) {
             Submitted::Message => {
                 if !line.trim().is_empty() {
@@ -147,25 +175,14 @@ fn briefing<C: Converses, K: Asks, W: Write>(
                     continue;
                 }
 
-                drop(turned(&agent, &typed.join("\n"), out));
+                ready = conversed(&agent, &typed.join("\n"), out);
                 ask.discard_typed_ahead();
                 // Cleared whatever the turn came to: the lines were sent, and a
                 // failed turn is not a reason to send them again behind the
                 // reader's back.
                 typed.clear();
             }
-            // Whatever has been typed and not sent is left exactly as it is: a
-            // `/write` is about the conversation that has happened, and lines
-            // nobody has sent are not part of it.
-            Submitted::Write => match written(&agent, root, &opening, ask, out)? {
-                // The file is what the conversation was for, so there is nothing
-                // to ask after it: the prompt does not come back and the process
-                // ends on the line that named the path.
-                Landing::Wrote => return Ok(()),
-                Landing::Carry => {}
-                Landing::Over => break,
-            },
-            _ => say(out, ONLY_WRITE),
+            _ => say(out, NO_COMMANDS),
         }
     }
 
@@ -185,7 +202,7 @@ struct Opening {
     /// One read and not two, which is the whole of why it is kept: the
     /// instruction that opened the conversation was built from these bytes, so
     /// checking the reply against them is holding the document to the shape the
-    /// model was actually given. The panel reads the file again at its `/write`
+    /// model was actually given. The panel reads the file again when it writes
     /// because its conversation can outlive an edit to it; a run of this command
     /// is one conversation and cannot.
     shape: String,
@@ -205,7 +222,7 @@ fn reading(root: &Path) -> Result<Opening, Error> {
     Ok(Opening { shape, directory })
 }
 
-/// What a `/write` came to, as the loop has to answer it.
+/// What a yes to the write question came to, as the loop has to answer it.
 enum Landing {
     /// A document is on disk: the run is over and the exit status is zero.
     Wrote,
@@ -218,12 +235,12 @@ enum Landing {
     Over,
 }
 
-// One `/write`: the request the panel sends, the path warlock proposes for the
+// One write: the request the panel sends, the path warlock proposes for the
 // reply, and the line that accepts or replaces it.
 //
 // The read blocks, which is what makes the offer worth something: the run waits
-// at the cursor for as long as whoever typed `/write` takes, and nothing here
-// decides on their behalf. A path refused is the offer again and another line —
+// at the cursor for as long as whoever said yes takes, and nothing here decides
+// on their behalf. A path refused is the offer again and another line —
 // a path that is taken is the one mistake a reader fixes by typing — while a
 // document the shape turned down goes back to the conversation, because another
 // path would be refused in exactly the same words.
@@ -236,11 +253,17 @@ fn written<C: Converses, K: Asks, W: Write>(
 ) -> Result<Landing, Error> {
     // The panel's own request and not a second wording of it, so the document
     // asked for at a shell is the document asked for in the panel.
-    let Some(reply) = turned(agent, WRITE_INSTRUCTION, out) else {
+    let Some(reply) = replied(agent, WRITE_INSTRUCTION, out) else {
         // The ending is already said. There is no reply to write and none to
         // propose a path from, and the conversation is still there to ask again.
         return Ok(Landing::Carry);
     };
+    // Off the document for the panel's reason — see `chatting::apply_turn` —
+    // and otherwise said whole: it is the one reply that becomes bytes, and a
+    // reader watching it go by is the only sight of it they get before the file
+    // lands.
+    let (reply, _) = without_marker(reply);
+    say(out, &reply);
 
     // Proposed once, from the reply that just landed, and offered again under
     // every refusal: the proposal is a fact about the document rather than about
@@ -293,9 +316,21 @@ fn raised<C: Converses>(agent: &C) -> C {
     Converses::raised(agent, BRIEF_MODEL, BRIEF_EFFORT)
 }
 
-// One turn sent and what came back said, which is the whole of what this road
-// does with the model. `None` is a turn that failed, with the line that says so
-// already printed.
+// A conversation turn: the reply said with the ready marker taken off, and
+// whether it was there.
+fn conversed<C: Converses, W: Write>(agent: &C, message: &str, out: &mut W) -> bool {
+    let Some(reply) = replied(agent, message, out) else {
+        return false;
+    };
+    let (reply, ready) = without_marker(reply);
+    if !reply.is_empty() {
+        say(out, &reply);
+    }
+    ready
+}
+
+// One turn sent, which is the whole of what this road does with the model.
+// `None` is a turn that failed, with the line that says so already printed.
 //
 // A turn that failed is a line and the prompt again rather than the end of the
 // run: what reaches here is a missing binary, a timeout and a cancel, and ending
@@ -303,25 +338,11 @@ fn raised<C: Converses>(agent: &C) -> C {
 // away the one thing this command exists to produce. The session id has not
 // moved, so the turn after a failed one is still the same conversation. The
 // wording is `Ending`'s, so a failed turn reads the same here as on the panel.
-//
-// The answer is said on the way past rather than by the caller, so the document
-// a `/write` asks for is printed exactly as every other reply is: it is the one
-// reply that becomes bytes, and a reader watching it go by is the only sight of
-// it they get before the file lands.
-fn turned<C: Converses, W: Write>(agent: &C, message: &str, out: &mut W) -> Option<String> {
-    match agent.turn(message) {
-        // Whole and unflattened, which is the point of the command: a brief is
-        // argued in paragraphs, and `one_line` is for a refusal rather than for
-        // something somebody is meant to read.
-        Ok(reply) => {
-            say(out, &reply);
-            Some(reply)
-        }
-        Err(error) => {
-            say(out, &ending_for(&error).line());
-            None
-        }
-    }
+fn replied<C: Converses, W: Write>(agent: &C, message: &str, out: &mut W) -> Option<String> {
+    agent
+        .turn(message)
+        .map_err(|error| say(out, &ending_for(&error).line()))
+        .ok()
 }
 
 // A failed write is ignored, for `planned::say`'s reason: `warlock brief | head`

@@ -39,7 +39,6 @@ fn names(names: &[&str]) -> Vec<String> {
 #[test]
 fn each_command_word_is_its_own_command() {
     assert_eq!(submitted_for("/brief"), Submitted::Brief);
-    assert_eq!(submitted_for("/write"), Submitted::Write);
     assert_eq!(submitted_for("/chat"), Submitted::Chat);
     // The one command word that is worth passing up without its argument: only
     // the panel knows which scopes this machine holds, so a bare `/pull` is
@@ -257,6 +256,7 @@ fn a_word_that_is_not_a_command_is_refused() {
     for draft in [
         "/breif",
         "/plan",
+        "/write",
         "/BRIEF",
         "/Brief",
         "/PUSH",
@@ -287,7 +287,6 @@ fn a_command_word_with_anything_after_it_is_refused() {
     for draft in [
         "/brief now",
         "/brief  now",
-        "/write docs/plan.md",
         "/chat please",
         "/brief\nsome text",
         "/brief \n some text ",
@@ -308,6 +307,7 @@ fn every_refusal_is_the_same_one_line() {
     let refusals = [
         "/breif",
         "/plan",
+        "/write",
         "/BRIEF",
         "/",
         "/brief now",
@@ -335,14 +335,18 @@ fn every_refusal_is_the_same_one_line() {
 
         assert!(!line.contains('\n'), "{draft:?} gave more than one line");
         for command in [
-            "/brief", "/write", "/chat", "/push", "/draft", "/pull", "/resume", "/branch", "/sigil",
+            "/brief", "/chat", "/push", "/draft", "/pull", "/resume", "/branch", "/sigil",
         ] {
             assert!(
                 line.contains(command),
-                "{draft:?} did not name {command}, one of warlock's nine commands"
+                "{draft:?} did not name {command}, one of warlock's eight commands"
             );
         }
-        // The list on its own would leave six of the nine looking like `/brief`
+        assert!(
+            !line.contains("/write"),
+            "{draft:?} named a command that is gone"
+        );
+        // The list on its own would leave six of the eight looking like `/brief`
         // and send somebody to a shell to find out what `/pull` wants.
         for said in [
             "a scope and a brief for /push",
@@ -366,7 +370,6 @@ fn nothing_but_a_refusal_has_a_line_to_say() {
     // only when it has refused to do what was asked.
     for draft in [
         "/brief",
-        "/write",
         "/chat",
         "/push warlock-team docs/a.md",
         "/draft warlock-team",

@@ -308,6 +308,10 @@ const REVIEW_ANSWER_GAP: &str = CONFIRM_ANSWER_GAP;
 
 const CARRY_QUESTION: &str = "Carry on to the next slice?";
 
+const WRITE_QUESTION: &str = "Write the brief?";
+
+const WRITE_LATER: &str = "No keeps talking — ask for it later and this comes back";
+
 /// Said after the count the run handed over, which words the noun: `3 slices`
 /// becomes `3 slices left`.
 const CARRY_LEFT: &str = " left";
@@ -367,7 +371,7 @@ pub(crate) fn draw(
         // showing — it is drawn under the conversation and under neither of the
         // other two — which is [`on_screen`]'s question and not this one.
         let live = app.focus() == Focus::Composer && !composer.is_muted();
-        let strip = workflow_line(app.panel().mode(), app.panel().ready(), app.working());
+        let strip = workflow_line(app.panel().mode(), app.working());
         draw_composer(frame, area, composer, live, strip);
     }
     draw_tree_pane(frame, cut, app, chrome, now);
@@ -1020,15 +1024,13 @@ const WORKFLOW_LIT: Style = Style::new()
 const WORKFLOW_DIM: Style = Style::new().fg(Color::Indexed(245)).bg(Color::Indexed(236));
 
 // Every stage is drawn whatever is lit, so a reader new to warlock sees the
-// whole road and where they are on it. Brief and write light together when the
-// model thinks the brief is ready. A push, draft or pull running lights alone:
-// the conversation's mode beside it read as a second thing going on.
-fn workflow_line(mode: Mode, ready: bool, working: Option<Working>) -> Line<'static> {
+// whole road and where they are on it. A push, draft or pull running lights
+// alone: the conversation's mode beside it read as a second thing going on.
+fn workflow_line(mode: Mode, working: Option<Working>) -> Line<'static> {
     let talking = working.is_none();
     let stages = [
         ("chat", talking && mode == Mode::Chat),
         ("brief", talking && mode == Mode::Brief),
-        ("write", talking && mode == Mode::Brief && ready),
         ("push", working == Some(Working::Push)),
         ("draft", working == Some(Working::Draft)),
         ("pull", working == Some(Working::Pull)),
@@ -1460,6 +1462,7 @@ impl<'a> Dialog<'a> {
             Modal::Pull(undertaking) => Self::pull(undertaking),
             Modal::Review(review) => Self::review(review),
             Modal::Carry(carry) => Self::carry(carry),
+            Modal::WriteBrief(highlighted) => Self::write_brief(highlighted),
             Modal::Scope(field) => Self::scope(field, SCOPE_HEADING, scope::RULES),
             Modal::Record(form) => Self::record(form),
             Modal::Write(field) => Self::scope(field, PATH_HEADING, PATH_RULES),
@@ -1527,6 +1530,16 @@ impl<'a> Dialog<'a> {
     fn quit(highlighted: Answer) -> Self {
         Self::new(vec![
             Line::from(CONFIRM_QUESTION).centered(),
+            Line::default(),
+            answers_line(highlighted),
+        ])
+    }
+
+    fn write_brief(highlighted: Answer) -> Self {
+        Self::new(vec![
+            Line::from(WRITE_QUESTION).centered(),
+            Line::default(),
+            Line::from(WRITE_LATER).dim().centered(),
             Line::default(),
             answers_line(highlighted),
         ])

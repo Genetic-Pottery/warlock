@@ -25,9 +25,10 @@ use warlock_engine::scope::MAXIMUM_CHARACTERS;
 use crate::composer::typed_char;
 
 // Every window this field is drawn in is sized off its text, so an uncapped one
-// grows past the screen's edge. Only typing is refused at the cap: a path
-// `/write` proposes opens whole whatever its length, and its slug is held to
-// `SLUG_MAX` in `writing.rs`, so a default directory leaves it well under this.
+// grows past the screen's edge. Only typing is refused at the cap: the path a
+// written brief is proposed at opens whole whatever its length, and its slug is
+// held to `SLUG_MAX` in `writing.rs`, so a default directory leaves it well
+// under this.
 // The scope prompt caps lower, at the engine's own ceiling.
 pub(crate) const FIELD_CHARS: usize = 100;
 
@@ -129,7 +130,7 @@ pub(crate) enum ScopePrompt {
 impl ScopePrompt {
     // Named constructors rather than `Open(ScopeField::new(..))` at the call
     // site: what a fresh prompt starts on, its cap included, is decided here
-    // rather than wherever the `s` key or `/write` happens to be handled.
+    // rather than wherever the `s` key or a write happens to be handled.
     #[must_use]
     pub(crate) fn open(directory: impl Into<String>, text: impl Into<String>) -> Self {
         Self::Open(ScopeField::new(directory, text).capped(MAXIMUM_CHARACTERS))

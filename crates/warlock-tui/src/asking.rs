@@ -38,6 +38,11 @@ use crate::error::Error;
 
 pub(crate) const ERASE: &str = "\u{8} \u{8}";
 
+// The answer to a `[y/N]` question: anything but a yes is the default.
+pub(crate) fn yes(answer: &str) -> bool {
+    matches!(answer.trim().to_lowercase().as_str(), "y" | "yes")
+}
+
 /// One question, asked and answered.
 ///
 /// `None` is EOF — Ctrl-D at a terminal, an empty or exhausted pipe everywhere

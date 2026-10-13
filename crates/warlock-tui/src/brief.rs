@@ -7,8 +7,8 @@
 //! second opinion about what a slice is, waiting to drift.
 //!
 //! Path in, never text: a caller holding bytes in memory could push a document
-//! nobody can open afterwards, and a brief edited with `e` after `/write` would
-//! not be the brief that went up. The file is the document, and it is read here
+//! nobody can open afterwards, and a brief edited with `e` after it was written
+//! would not be the brief that went up. The file is the document, and it is read here
 //! at the moment of the push.
 //!
 //! Nothing is summarised, re-headed or re-ordered, and no word is warlock's:
@@ -94,7 +94,7 @@ pub fn brief_at(root: impl AsRef<Path>, path: impl AsRef<Path>) -> Result<Brief,
     let shape = brief_template(root).map_err(|source| Error::Shape { source })?;
     // The one section check in warlock, borrowed rather than repeated: a
     // second one worded here would be a second opinion about what a brief is,
-    // and `/write` and `/push` would come to disagree about the same document.
+    // and writing and `/push` would come to disagree about the same document.
     let missing = missing_sections(&shape, &document);
     if !missing.is_empty() {
         return Err(Error::Sections {
@@ -741,7 +741,7 @@ pub enum Error {
     },
     /// A document with no `# ` title line, and a document whose title says
     /// nothing once the marker is off, are one refusal on purpose. There is no
-    /// `untitled` here as there is behind `/write`: a filename a reader can see
+    /// `untitled` here as there is behind a write: a filename a reader can see
     /// in a field and retype is one thing, and a project filed on somebody's
     /// board under a placeholder is another.
     NoTitle {

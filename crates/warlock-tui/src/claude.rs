@@ -186,15 +186,28 @@ why, and push back when what I am describing is bigger, vaguer or more \
 expensive than I am saying it is. Agreement is not the product; a decision I \
 can defend is. Keep your replies short and ask one question at a time.\n\n\
 Once we have settled everything the document needs, end your reply \
-with the line [ready to write] on its own, and end every reply after it the same \
-way for as long as that stays true. Leave the line off any reply where it is not \
-true. Never say it any other way. Start now by asking what the change is and \
-what it is for.";
+with the line [ready to write] on its own, and I will be asked whether to write \
+it. Say it once and leave it off the replies after, unless I ask in \
+conversation for the document to be written: then end that reply with it again \
+if everything is still settled, or say what is still open if it is not. Never \
+say it any other way, and never put it in the document itself. Start now by \
+asking what the change is and what it is for.";
 
 /// The line [`BRIEF_ARGUMENT`] asks for, spelled out in it by hand because a
 /// `const` string cannot be formatted. Change both or neither: a marker the
-/// model was never told about is a strip that never lights.
+/// model was never told about is a brief nobody is ever offered.
 pub(crate) const READY_MARKER: &str = "[ready to write]";
+
+// Only a last line that is the marker and nothing else counts, so a reply
+// that quotes it mid-sentence neither asks the question nor loses words.
+pub(crate) fn without_marker(answer: String) -> (String, bool) {
+    let kept = answer.trim_end();
+    match kept.rsplit_once('\n') {
+        Some((before, last)) if last.trim() == READY_MARKER => (before.trim_end().to_owned(), true),
+        None if kept.trim() == READY_MARKER => (String::new(), true),
+        _ => (answer, false),
+    }
+}
 
 /// The instruction that aims the session at a brief, shaped by `template`.
 ///

@@ -1,5 +1,5 @@
-//! The path `/write` proposes, and the one function in warlock that puts a
-//! document somebody asked for on disk.
+//! The path a written brief is proposed at, and the one function in warlock
+//! that puts a document somebody asked for on disk.
 //!
 //! [`write_submit`] writes the path that was on screen when Enter was pressed,
 //! never the proposal, which is what makes every rule in the first half cheap:
@@ -14,7 +14,7 @@
 //! the footer and not a reason to tear the screen down.
 //!
 //! Two doors write a brief and this file holds the rules for both: [`landed`] is
-//! [`write_submit`] without a screen, for `warlock brief`'s own `/write` — see
+//! [`write_submit`] without a screen, for `warlock brief`'s own write — see
 //! [`mod@crate::briefing`] — and it calls the very functions the window calls, so
 //! neither the path a brief is proposed at, the shape it is held to, nor the
 //! bytes that reach the disk can differ between a panel and a shell.
@@ -59,7 +59,7 @@ pub(crate) fn proposed_path(repo_root: &Path, directory: &str, reply: &str) -> S
     format!("{directory}/{BRIEF_PREFIX}-{number}-{slug}.md")
 }
 
-// Nothing presses a key to get here — the prompt opens because a `/write` turn
+// Nothing presses a key to get here — the prompt opens because a write turn
 // answered — so this takes the reply rather than the app, which keeps the path
 // on screen about the very turn that just landed. `directory` comes the same
 // way, off the loop, so nothing is read here to find it and a window that opens
@@ -155,7 +155,7 @@ pub(crate) fn write_submit(
         Err(line) => return closed_saying(app, line),
     }
     // The same string the line was just worded from, handed on rather than
-    // spelled a second time: what the session remembers `/write` wrote and what
+    // spelled a second time: what the session remembers was written and what
     // the reader was told it wrote cannot come to disagree.
     Wrote {
         prompt: ScopePrompt::Closed,

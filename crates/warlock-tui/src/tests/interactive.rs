@@ -1714,6 +1714,98 @@ mod pasting {
     }
 }
 
+mod offering {
+    use super::{AT_MOST, Driven, Focus, Instant, KeyCode, directory, key, pressed, session};
+    use crate::chatting::Chat;
+    use crate::confirm::Answer;
+    use crate::panel::Mode;
+    use crate::stubs::Saying;
+
+    const READY: &str = "Every section is settled.\n[ready to write]";
+
+    fn briefed() -> Driven {
+        let mut driven = session(vec![directory("/repo/crates")]);
+        driven.chat = Chat::with_agent("/warlock/no/such/repository", Saying::answering(READY));
+        driven.app.set_focus(Focus::Composer);
+        driven.paste("/brief");
+        assert!(
+            pressed(&mut driven, key(KeyCode::Enter)),
+            "/brief ended the session"
+        );
+        answered(&mut driven);
+        driven
+    }
+
+    fn answered(driven: &mut Driven) {
+        let waited = Instant::now();
+        while driven.chat.answering() && waited.elapsed() < AT_MOST {
+            let size = driven.size().expect("the fake screen has a size");
+            driven.draw(size).expect("the fake screen draws");
+            driven.keep_up();
+        }
+        assert!(!driven.chat.answering(), "the turn never ended");
+        let size = driven.size().expect("the fake screen has a size");
+        driven.draw(size).expect("the fake screen draws");
+    }
+
+    fn on_screen(driven: &Driven, word: &str) -> bool {
+        let buffer = driven.screen.terminal.backend().buffer();
+        let area = buffer.area;
+        (0..area.height).any(|row| {
+            let line: String = (0..area.width).map(|x| buffer[(x, row)].symbol()).collect();
+            line.contains(word)
+        })
+    }
+
+    #[test]
+    fn a_ready_brief_puts_the_question_up_over_the_composer_with_no_lit() {
+        let driven = briefed();
+
+        assert_eq!(driven.app.panel().mode(), Mode::Brief);
+        assert_eq!(driven.chat.write_offer(), Some(Answer::No));
+        assert!(
+            on_screen(&driven, "Write the brief?"),
+            "the question was not drawn"
+        );
+    }
+
+    #[test]
+    fn a_key_typed_while_the_question_is_up_never_reaches_the_draft() {
+        let mut driven = briefed();
+
+        assert!(pressed(&mut driven, key(KeyCode::Char('a'))));
+
+        assert_eq!(driven.chat.composer().draft(), "");
+        assert_eq!(driven.chat.write_offer(), Some(Answer::No));
+    }
+
+    #[test]
+    fn enter_on_the_lit_no_takes_the_question_down_and_asks_nothing() {
+        let mut driven = briefed();
+
+        assert!(pressed(&mut driven, key(KeyCode::Enter)));
+
+        assert_eq!(driven.chat.write_offer(), None);
+        assert!(!driven.chat.answering(), "no started a turn");
+        assert_eq!(driven.app.panel().mode(), Mode::Brief);
+    }
+
+    #[test]
+    fn y_asks_for_the_document_and_the_path_prompt_opens_over_it() {
+        let mut driven = briefed();
+
+        assert!(pressed(&mut driven, key(KeyCode::Char('y'))));
+        assert_eq!(driven.chat.write_offer(), None);
+        assert!(driven.chat.answering(), "yes asked the model nothing");
+        answered(&mut driven);
+
+        assert!(
+            driven.chat.write_prompt().is_open(),
+            "the document opened no path prompt"
+        );
+    }
+}
+
 // A `/push` driven the whole way through a session — `/push <scope> <path>`,
 // Left, Enter — over a Linear that answers out of memory and a home this module
 // made. Nothing here opens a socket, reads a real credential or looks at the
@@ -3194,7 +3286,7 @@ mod pulling {
     }
 
     #[test]
-    fn a_word_nobody_made_a_command_is_refused_in_the_sentence_naming_all_seven() {
+    fn a_word_nobody_made_a_command_is_refused_in_the_sentence_naming_them() {
         let repo = a_repository();
         let home = a_home(repo.path());
         let linear = Boarding::unopened();
@@ -3216,9 +3308,7 @@ mod pulling {
             .refusal()
             .expect("a word nobody made a command is refused");
         assert_eq!(notes(&driven), vec![refusal.clone()]);
-        for command in [
-            "/brief", "/write", "/chat", "/push", "/draft", "/pull", "/resume",
-        ] {
+        for command in ["/brief", "/chat", "/push", "/draft", "/pull", "/resume"] {
             assert!(
                 refusal.contains(command),
                 "{refusal:?} does not name {command}"

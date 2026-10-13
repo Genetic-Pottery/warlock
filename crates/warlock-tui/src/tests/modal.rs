@@ -1,7 +1,7 @@
 use warlock_engine::Destination;
 
 use super::{Modal, Modals};
-use crate::confirm::{Carry, CutConfirm, PullConfirm, PushConfirm, QuitConfirm, Review};
+use crate::confirm::{Answer, Carry, CutConfirm, PullConfirm, PushConfirm, QuitConfirm, Review};
 use crate::help::HelpSheet;
 use crate::prompt::{RecordPrompt, ScopePrompt};
 
@@ -11,7 +11,7 @@ fn nothing_up_is_no_modal() {
 }
 
 #[test]
-fn the_precedence_is_quit_help_the_five_questions_then_the_three_fields() {
+fn the_precedence_is_quit_help_the_six_questions_then_the_three_fields() {
     let push = PushConfirm::open(
         "Push a brief to the board",
         Destination::new("warlock-team", "Warlock", "warlock", "work"),
@@ -40,6 +40,7 @@ fn the_precedence_is_quit_help_the_five_questions_then_the_three_fields() {
         pull: &pull,
         review: Some(&review),
         carry: Some(&carry),
+        write_brief: Some(Answer::No),
         scope: &scope,
         record: &record,
         write: &write,
@@ -55,6 +56,7 @@ fn the_precedence_is_quit_help_the_five_questions_then_the_three_fields() {
             Modal::Pull(_) => modals.pull = &PullConfirm::Closed,
             Modal::Review(_) => modals.review = None,
             Modal::Carry(_) => modals.carry = None,
+            Modal::WriteBrief(_) => modals.write_brief = None,
             Modal::Scope(_) => modals.scope = &ScopePrompt::Closed,
             Modal::Record(_) => modals.record = &RecordPrompt::Closed,
             Modal::Write(_) => modals.write = &ScopePrompt::Closed,
@@ -71,6 +73,7 @@ fn the_precedence_is_quit_help_the_five_questions_then_the_three_fields() {
             Modal::Pull(pull.undertaking().expect("open")),
             Modal::Review(&review),
             Modal::Carry(&carry),
+            Modal::WriteBrief(Answer::No),
             Modal::Scope(scope.field().expect("open")),
             Modal::Record(record.form().expect("open")),
             Modal::Write(write.field().expect("open")),

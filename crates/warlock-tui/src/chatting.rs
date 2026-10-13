@@ -1,6 +1,6 @@
 //! The conversation an interactive session keeps: an agent, at most one turn in
-//! flight, the draft at the foot of the panel, and the window a written brief
-//! opens in.
+//! flight, the draft at the foot of the panel, the question a ready brief asks,
+//! and the window a written brief opens in.
 //!
 //! The register the conversation is in is deliberately not held here. It lives
 //! on the panel, the one part of the app a failed pact restores untouched, so a
@@ -23,14 +23,15 @@ use warlock_engine::{DEFAULT_BRIEF_DIRECTORY, briefs, load_briefs};
 use crate::app::{App, Focus};
 use crate::claude::{
     Activities, Activity, BRIEF_EFFORT, BRIEF_MODEL, CHAT_INSTRUCTION, Cancel, CancelGuard,
-    ChatAgent, Converses, READY_MARKER, WRITE_INSTRUCTION, brief_instruction,
+    ChatAgent, Converses, WRITE_INSTRUCTION, brief_instruction, without_marker,
 };
 use crate::composer::{Composed, Composer, Pasted};
+use crate::confirm::{Answer, Answered};
 use crate::error::one_line;
 use crate::inflight::{Lost, Port, Stream, Workers, settled};
 use crate::panel::Mode;
 use crate::prompt::{Edited, ScopePrompt};
-use crate::submission::{BRIEF, CHAT, Submitted, WRITE, Wanted, submitted_for};
+use crate::submission::{BRIEF, CHAT, Submitted, Wanted, submitted_for};
 use crate::template::{Error as TemplateError, brief_template};
 use crate::thread::{Ending, ending_for};
 use crate::writing::{write_edit, write_opened};
@@ -48,14 +49,14 @@ const BRIEF_NOTE: &str =
 pub(crate) const CHAT_NOTE: &str =
     "chat mode — the brief is over and nothing is being converged on.";
 
-// The two refusals. Both are a line and no turn: telling the model it is where
-// it already is, or asking it to brief a conversation that was never aimed at a
-// document, is a question nobody asked and money nobody meant to spend.
+// A line and no turn: telling the model it is where it already is would be a
+// question nobody asked and money nobody meant to spend.
 const ALREADY_CHATTING: &str = "already in chat mode — /brief is what changes that.";
 
-fn not_briefing() -> String {
-    format!("{WRITE} is only in brief mode — {BRIEF} enters it")
-}
+// What the card shows as the reader's turn when they answer Yes: the model is
+// sent `WRITE_INSTRUCTION`, and a screen of warlock's prose in the place the
+// reader's own words go would be warlock putting words in their mouth.
+const WRITE_SHOWN: &str = "write the brief";
 
 const BRIEF_UNREAD: &str = " — /brief did nothing, so fix or remove the file and type it again";
 
@@ -102,10 +103,14 @@ pub(crate) struct Chat<C> {
     // it back over the live one, so a draft stored there would be a draft a run
     // could swallow half a sentence into. Nothing a run does can reach this.
     composer: Composer,
-    // Where a `/write` in this conversation would propose to put the document.
-    // Written at every `/brief` and read at `/write`, which is why `/write` can
-    // never fail for want of a file.
+    // Where a written brief in this conversation would be proposed to go.
+    // Written at every `/brief` and read when the document comes back, which is
+    // why writing can never fail for want of a file.
     directory: String,
+    // "Write the brief?", open from the brief-mode answer that ended in the
+    // ready marker until it is answered. No is lit on open: the question comes
+    // up on no keystroke, and a write is the most expensive turn there is.
+    offer: Option<Answer>,
     prompt: ScopePrompt,
 }
 
@@ -126,6 +131,7 @@ impl<C: Converses> Chat<C> {
             root: root.into(),
             composer: Composer::default(),
             directory: DEFAULT_BRIEF_DIRECTORY.to_owned(),
+            offer: None,
             prompt: ScopePrompt::default(),
         }
     }
@@ -181,6 +187,24 @@ impl<C: Converses> Chat<C> {
 
     pub(crate) const fn write_prompt(&self) -> &ScopePrompt {
         &self.prompt
+    }
+
+    pub(crate) const fn write_offer(&self) -> Option<Answer> {
+        self.offer
+    }
+
+    // No leaves the conversation where it was: asking for the document in
+    // words gets an answer that ends in the marker again, and the question
+    // with it.
+    pub(crate) fn offered(&mut self, app: &mut App, answered: Answered, now: Instant) {
+        match answered {
+            Answered::Open(answer) => self.offer = Some(answer),
+            Answered::Close => self.offer = None,
+            Answered::Leave => {
+                self.offer = None;
+                self.say(app, WRITE_SHOWN, WRITE_INSTRUCTION, Asked::Document, now);
+            }
+        }
     }
 
     #[cfg(test)]
@@ -287,7 +311,6 @@ impl<C: Converses> Chat<C> {
                     if app.panel_mut().set_mode(Mode::Brief) {
                         app.panel_mut().note(BRIEF_NOTE, now);
                     }
-                    app.panel_mut().set_ready(false);
                     self.say(app, BRIEF, &instruction, Asked::Answer, now);
                 }
                 Err(line) => app.panel_mut().note(line, now),
@@ -295,17 +318,6 @@ impl<C: Converses> Chat<C> {
             Submitted::Chat => {
                 if !self.leave_brief(app, now) {
                     app.panel_mut().note(ALREADY_CHATTING, now);
-                }
-            }
-            // Asked of the app rather than of anything this value remembers,
-            // because that is the state the workflow strip is drawn from: two
-            // readings of the register would eventually be two answers, and the
-            // refusal would contradict the strip.
-            Submitted::Write => {
-                if app.panel().mode() == Mode::Brief {
-                    self.say(app, WRITE, WRITE_INSTRUCTION, Asked::Document, now);
-                } else {
-                    app.panel_mut().note(not_briefing(), now);
                 }
             }
             // Everything else is about a board, a queue, a working tree or a file
@@ -329,13 +341,15 @@ impl<C: Converses> Chat<C> {
         self.composer = next;
     }
 
-    // `apply_turn` hands back a document only on the round a `/write` turn
-    // answered in, so every other ending leaves the window closed and the line
-    // already on the thread is the whole report. The path is proposed into a
-    // directory settled turns ago, so nothing here reads a file or can fail.
+    // The path is proposed into a directory settled turns ago, so nothing here
+    // reads a file or can fail.
     pub(crate) fn keep_up(&mut self, app: &mut App, now: Instant) {
-        if let Some(document) = apply_turn(&mut self.turn, app, now) {
-            self.prompt = write_opened(&self.root, &self.directory, &document);
+        match apply_turn(&mut self.turn, app, now) {
+            Some(Turned::Ready) => self.offer = Some(Answer::No),
+            Some(Turned::Document(document)) => {
+                self.prompt = write_opened(&self.root, &self.directory, &document);
+            }
+            None => {}
         }
         self.settle_field();
     }
@@ -355,7 +369,7 @@ impl<C: Converses> Chat<C> {
         if !app.panel_mut().set_mode(Mode::Chat) {
             return false;
         }
-        app.panel_mut().set_ready(false);
+        self.offer = None;
         app.panel_mut().note(CHAT_NOTE, now);
         self.say(app, CHAT, CHAT_INSTRUCTION, Asked::Answer, now);
         true
@@ -376,8 +390,8 @@ pub(crate) struct Chatting {
 
 // What a turn was started to get, written down on the turn rather than as a flag
 // beside it in the event loop. A loop-side flag would be a second record of which
-// question is out, and the two would disagree the first time a `/write` ended in
-// a way nobody remembered to clear it on — a cancel, a missing `claude`, a
+// question is out, and the two would disagree the first time a write turn ended
+// in a way nobody remembered to clear it on — a cancel, a missing `claude`, a
 // panicked worker. This rides on the turn, so it goes down exactly when the turn
 // does. It changes nothing about how the turn is run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -478,16 +492,15 @@ fn run_turn<C: Converses>(message: &str, agent: &C, cancel: &Cancel, events: &Po
 // drift. An answer says nothing on the footer: it is already on the card the
 // question brought to the front.
 //
-// The one thing handed back is the document, on the one round a `/write` turn
-// answers in. It comes back from here rather than being read off the card
-// afterwards because this is where the turn is known to have been the write
-// request; a loop that went looking for the newest answer would be a second
+// Handed back from here rather than read off the card afterwards because this
+// is where the turn is known to have been the write request or a brief-mode
+// answer; a loop that went looking for the newest answer would be a second
 // opinion about which turn just ended.
 pub(crate) fn apply_turn(
     chat: &mut Option<Chatting>,
     app: &mut App,
     now: Instant,
-) -> Option<String> {
+) -> Option<Turned> {
     let (chatting, finished) = settled(chat, |chatting| {
         chatting.events.drained(|event| match event {
             // Filed under the live turn, which is the one this worker is
@@ -511,21 +524,26 @@ pub(crate) fn apply_turn(
 
     match finished {
         Ok(answer) => {
-            // Cloned only for the turn that asked for a document, and cloned
-            // rather than moved because the answer belongs on the card first:
-            // the reply is a turn of the conversation whatever is done with it,
-            // and a `/write` whose answer went to the loop instead of the thread
-            // would be a document nobody could read.
-            let document = (asked == Asked::Document).then(|| answer.clone());
-            let answer = if asked == Asked::Answer && app.panel().mode() == Mode::Brief {
-                let (answer, ready) = without_marker(answer);
-                app.panel_mut().set_ready(ready);
-                answer
-            } else {
-                answer
+            // Cloned rather than moved because the answer belongs on the card
+            // first: the reply is a turn of the conversation whatever is done
+            // with it, and a document that went to the loop instead of the
+            // thread would be a document nobody could read.
+            let (answer, turned) = match asked {
+                // Through `without_marker` as well: a model that ends the
+                // document the way it ends a ready reply would otherwise write
+                // the marker into the file.
+                Asked::Document => {
+                    let (answer, _) = without_marker(answer);
+                    (answer.clone(), Some(Turned::Document(answer)))
+                }
+                Asked::Answer if app.panel().mode() == Mode::Brief => {
+                    let (answer, ready) = without_marker(answer);
+                    (answer, ready.then_some(Turned::Ready))
+                }
+                Asked::Answer => (answer, None),
             };
             app.panel_mut().answer_turn(answer, now);
-            document
+            turned
         }
         Err(ending) => {
             end(app, &ending, now);
@@ -534,16 +552,11 @@ pub(crate) fn apply_turn(
     }
 }
 
-// Only a last line that is the marker and nothing else counts, so a reply
-// that quotes it mid-sentence — talking about the strip, say — neither lights
-// it nor loses words.
-fn without_marker(answer: String) -> (String, bool) {
-    let kept = answer.trim_end();
-    match kept.rsplit_once('\n') {
-        Some((before, last)) if last.trim() == READY_MARKER => (before.trim_end().to_owned(), true),
-        None if kept.trim() == READY_MARKER => (String::new(), true),
-        _ => (answer, false),
-    }
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Turned {
+    // A brief-mode answer that ended in the ready marker, marker taken off.
+    Ready,
+    Document(String),
 }
 
 fn end(app: &mut App, ending: &Ending, now: Instant) {
