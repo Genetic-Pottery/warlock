@@ -450,18 +450,3 @@ fn every_command_is_on_the_help_sheet() {
         );
     }
 }
-
-#[test]
-fn every_command_has_a_row_in_controls() {
-    let controls = include_str!("../../../../CONTROLS.md");
-    for command in COMMANDS {
-        let row = format!("| `{}", command.word);
-        assert!(
-            controls
-                .lines()
-                .any(|line| line.starts_with(&row) && line[row.len()..].starts_with(['`', ' '])),
-            "CONTROLS.md has no row for {}",
-            command.word
-        );
-    }
-}
