@@ -4622,3 +4622,35 @@ mod marker {
         }
     }
 }
+
+#[test]
+fn drafts_missing_their_last_brace_are_an_attempt_and_not_a_question() {
+    // The live failure: the whole object, one brace short, with every round
+    // still left. Relayed, it reached the person as a question and the
+    // proposer answered it; taken as an attempt, the session asks again.
+    let broken = ONE_DRAFT.strip_suffix('}').expect("ends on a brace");
+    let agent = scripted([broken, ONE_DRAFT]);
+    let mut session = drafting_with(&agent);
+
+    let (fill, _) = drafts(session.open().expect("a turn"));
+
+    assert_eq!(fill.drafts.len(), 1);
+    assert_eq!(session.questions_left(), DRAFTING_ROUNDS);
+}
+
+#[test]
+fn a_fenced_object_is_an_attempt_and_prose_with_braces_is_still_a_question() {
+    let fenced = format!(
+        "```json\n{}",
+        ONE_DRAFT.strip_suffix('}').expect("ends on a brace")
+    );
+    let agent = scripted([fenced.as_str(), ONE_DRAFT]);
+    drafts(drafting_with(&agent).open().expect("a turn"));
+
+    let question = "Should a `{keys}` table with no rows be written or left out?";
+    let agent = scripted([question]);
+    assert_eq!(
+        asking(drafting_with(&agent).open().expect("a turn")),
+        question
+    );
+}

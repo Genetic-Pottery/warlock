@@ -2179,6 +2179,14 @@ impl Bounded for ChatAgent {
 /// word for how many it had spent would have no bound at all.
 pub(crate) const DRAFTING_ROUNDS: usize = 3;
 
+fn attempted(reply: &str) -> bool {
+    let reply = reply.trim_start();
+    let unfenced = reply
+        .strip_prefix("```")
+        .map_or(reply, |rest| rest.trim_start_matches("json").trim_start());
+    unfenced.starts_with('{')
+}
+
 /// What one turn of a [`Drafting`] session came back as, and the whole of the
 /// contract in the type: a reply is either a question for somebody or the
 /// answer, and nothing else.
@@ -2445,12 +2453,14 @@ impl<C: Converses> Drafting<C> {
     fn said(&mut self, message: &str) -> Result<Replied, agent::Error> {
         let reply = self.conversation.turn(message)?;
         match drafting::accept(&reply) {
-            // Not JSON at all, and there is still a round to spend on it: the
-            // one shape a question can arrive in. The two readings of prose meet
-            // here — it is a question while somebody is being asked, and a
-            // failed attempt once the asking is over, which on the one-shot road
-            // is from the first turn.
-            drafting::Accepted::Unparsed(_) if self.questions_left() > 0 => {
+            // Prose with a round left to spend on it: the one shape a question
+            // can arrive in. Prose is a question while somebody is being asked
+            // and a failed attempt once the asking is over, which on the
+            // one-shot road is from the first turn. A reply that opens on the
+            // object is an attempt either way, however broken: a model that
+            // dropped the last brace once had its drafts relayed to the person
+            // as a question and answered by the proposer.
+            drafting::Accepted::Unparsed(_) if self.questions_left() > 0 && !attempted(&reply) => {
                 self.asked += 1;
                 Ok(Replied::Question(reply))
             }
