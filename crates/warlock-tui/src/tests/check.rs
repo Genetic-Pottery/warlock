@@ -564,9 +564,13 @@ fn a_path_no_scope_covers_says_there_is_nothing_to_route_to() {
          with `warlock scope add`\n\
          holding nothing\n\
          an unscoped path is closed to everyone, so no AI may work here\n\
-         no key is bound to this checkout: `warlock key use <name>` binds a name this \
-         machine stores, and `warlock key add <name>` stores a new one"
+         a key is bound to a scope, so there is none to report and none to bind until a scope \
+         covers this path"
     );
+    // No scope to name and no `warlock key use` to spell: the command takes a
+    // scope argument, and there is none here to put in it.
+    let said = prose(&answer(home.path(), "docs/adr"));
+    assert!(!said.contains("warlock key use"), "{said}");
 }
 
 #[test]
@@ -595,7 +599,8 @@ fn an_unbound_checkout_is_sent_to_key_use_and_key_add_and_a_dangling_name_to_key
     // The two absences are fixed in different files by different commands, so
     // the lines differ: nothing bound is the checkout's config, a name the
     // store has never heard of is the store. Both are exit 0 and both print the
-    // route above them.
+    // route above them, and both name the covering scope — the binding is per
+    // scope, so `warlock key use` is spelled with the scope it would bind.
     let unbound = a_dir();
     holding(unbound.path(), &["data-plane"]);
 
@@ -606,8 +611,9 @@ fn an_unbound_checkout_is_sent_to_key_use_and_key_add_and_a_dangling_name_to_key
          moves the ticket to `In Review`\n\
          holding `data-plane`\n\
          `data-plane` is open to this machine\n\
-         no key is bound to this checkout: `warlock key use <name>` binds a name this \
-         machine stores, and `warlock key add <name>` stores a new one"
+         no key is bound to the scope `data-plane`: `warlock key add <name>` stores a new key \
+         on this machine, and a name it already stores is bound with `warlock key use \
+         data-plane <name>`"
     );
 
     let dangling = a_dir();
@@ -622,8 +628,8 @@ fn an_unbound_checkout_is_sent_to_key_use_and_key_add_and_a_dangling_name_to_key
          moves the ticket to `In Review`\n\
          holding `data-plane`\n\
          `data-plane` is open to this machine\n\
-         the key `work` is bound here and this machine has not stored it: \
-         `warlock key add work` stores it, `warlock key use <name>` binds another"
+         the key `work` is bound to the scope `data-plane` and this machine has not stored it: \
+         `warlock key add work` stores it, `warlock key use data-plane <name>` binds another"
     );
 }
 
