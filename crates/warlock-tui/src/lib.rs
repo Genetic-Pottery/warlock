@@ -134,6 +134,7 @@ pub use interactive::POLL_INTERVAL;
 pub use key::key_add;
 pub use key::key_forget;
 pub use key::key_list;
+pub use key::key_show;
 pub use key::key_use;
 pub use linear::Client as LinearClient;
 pub use linear::Error as LinearError;

@@ -8,7 +8,7 @@ use warlock_engine::{
 
 use ratatui::crossterm::event::{KeyCode, KeyModifiers};
 
-use super::{PROMPT, Typed, added, bound, forgotten, listed, typed};
+use super::{PROMPT, Typed, added, bound, bound_name, forgotten, listed, names_line, typed};
 use crate::error::Error;
 use crate::stubs::Typing;
 
@@ -549,4 +549,101 @@ fn forgetting_a_name_several_scopes_share_names_every_one_of_them() {
         load_key_binding(home.path(), repo.path(), "billing").expect("the config still loads"),
         Some("personal".to_owned())
     );
+}
+
+#[test]
+fn a_bound_scope_is_answered_with_its_name_and_never_its_key() {
+    let (home, repo) = (a_dir(), a_dir());
+    a_store_of_two(home.path());
+    save_key_binding(home.path(), repo.path(), "web", "acme").expect("a binding that saves");
+    save_key_binding(home.path(), repo.path(), "billing", "personal")
+        .expect("a binding that saves");
+
+    let named = bound_name(
+        home.path(),
+        repo.path(),
+        &recording(&["billing", "web"]),
+        "web",
+    )
+    .expect("a bound scope is named");
+
+    assert_eq!(named, "acme", "the other scope's binding was answered");
+}
+
+// A checkout with no config at all is the first thing a new member meets, and
+// it is unbound rather than a file that would not read.
+#[test]
+fn an_unbound_scope_is_refused_with_the_command_that_binds_it() {
+    let (home, repo) = (a_dir(), a_dir());
+    a_store_of_two(home.path());
+    let manifest = recording(&["billing", "web"]);
+
+    for configured in [false, true] {
+        if configured {
+            save_key_binding(home.path(), repo.path(), "billing", "acme")
+                .expect("a binding that saves");
+        }
+        let error = bound_name(home.path(), repo.path(), &manifest, "web")
+            .expect_err("an unbound scope names nothing");
+
+        assert!(
+            matches!(error, Error::NoBinding { key: None, .. }),
+            "configured: {configured}, {error:?}"
+        );
+        assert!(
+            error.to_string().contains("`warlock key use web <name>`"),
+            "{error}"
+        );
+    }
+}
+
+#[test]
+fn a_scope_bound_to_a_name_the_store_lacks_is_refused_with_the_command_that_stores_it() {
+    let (home, repo) = (a_dir(), a_dir());
+    a_store_of_two(home.path());
+    save_key_binding(home.path(), repo.path(), "web", "gone").expect("a binding that saves");
+
+    let error = bound_name(home.path(), repo.path(), &recording(&["web"]), "web")
+        .expect_err("a dangling name is not an answer");
+
+    assert!(
+        matches!(&error, Error::NoBinding { key: Some(key), .. } if key == "gone"),
+        "{error:?}"
+    );
+    assert!(
+        error.to_string().contains("`warlock key add gone`"),
+        "{error}"
+    );
+}
+
+// The record is asked first, so a typo is answered with the names it was a typo
+// of and never sent off to bind a scope that does not exist.
+#[test]
+fn naming_the_key_of_a_scope_no_record_holds_names_the_recorded_scopes() {
+    let (home, repo) = (a_dir(), a_dir());
+    a_store_of_two(home.path());
+
+    let error = bound_name(home.path(), repo.path(), &recording(&["web"]), "wbe")
+        .expect_err("a scope nothing records is refused");
+
+    assert!(matches!(error, Error::UnrecordedScope { .. }), "{error:?}");
+    let message = error.to_string();
+    assert!(message.contains("`web`"), "{message}");
+    assert!(message.contains("there is no binding to name"), "{message}");
+}
+
+#[test]
+fn the_names_line_quotes_every_stored_name_and_says_when_there_are_none() {
+    let home = a_dir();
+
+    let none = names_line(home.path()).expect("a machine with no store holds nothing");
+    assert!(none.contains("`warlock key add <name>`"), "{none}");
+
+    a_store_of_two(home.path());
+    let two = names_line(home.path()).expect("a store that was just written lists");
+    assert!(
+        two.contains("`acme`") && two.contains("`personal`"),
+        "{two}"
+    );
+    assert!(!two.contains(SECRET), "the key reached the thread: {two}");
 }

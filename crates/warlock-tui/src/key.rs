@@ -1,6 +1,3 @@
-//! `warlock key add`, `list`, `use` and `forget`: the Linear keys this machine
-//! holds, by name, and which of them each scope of this checkout is bound to.
-//!
 //! The secret is taken on stdin and never in argv, because an argument is
 //! readable by every process on the box for as long as the command runs and is
 //! written into a shell history file afterwards.
@@ -29,12 +26,13 @@ use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, Ke
 use ratatui::crossterm::terminal::enable_raw_mode;
 use serde_json::Value;
 use warlock_engine::{
-    Forgotten, Manifest, forget_key, keys, keys_path, load_key_names, save_key, save_key_binding,
-    scopes_bound_to, sigils_path, validate_scope,
+    Forgotten, Manifest, forget_key, keys, keys_path, load_key_binding, load_key_names, save_key,
+    save_key_binding, scopes_bound_to, sigils, sigils_path, validate_scope,
 };
 
 use crate::asking::{self, Asks, Cooked, ERASE};
-use crate::error::{Error, NOT_BOUND, one_line, say};
+use crate::cut;
+use crate::error::{Error, NOT_BOUND, NOT_NAMED, one_line, say};
 use crate::query::{envelope, write_object};
 use crate::standing::{FOR_KEY, Standing};
 use crate::writing::listing;
@@ -108,6 +106,19 @@ pub fn key_use(scope: &str, name: &str) -> Result<(), Error> {
         name,
         &mut io::stdout(),
     )
+}
+
+// The bare name on stdout and nothing else, as `key list` prints its names, so
+// `$(warlock key warlock-team)` is the name. Every way of having no usable name
+// is an error, for `Error::NoBinding`'s reason.
+pub fn key_show(scope: &str) -> Result<(), Error> {
+    let standing = Standing::here(FOR_KEY)?;
+    let home = Standing::home()?;
+    let manifest = standing.manifest()?;
+
+    let name = bound_name(&home, standing.repo_root(), &manifest, scope)?;
+    drop(writeln!(io::stdout(), "{name}"));
+    Ok(())
 }
 
 pub fn key_forget(name: &str) -> Result<(), Error> {
@@ -304,6 +315,56 @@ fn object(names: &[String]) -> Value {
             Value::Array(names.iter().cloned().map(Value::String).collect()),
         )],
     )
+}
+
+// Shared by `warlock key <SCOPE>` and the panel's `/key <SCOPE>`. Asked in
+// `bound`'s order — the record, then the binding, then the store — so a typo in
+// the scope is answered with the recorded names rather than with "bound to
+// nothing", which would send somebody to bind a scope that does not exist. A
+// checkout with no config binds nothing; one that will not read stays an error,
+// because printing it as unbound would send somebody to overwrite a binding
+// that is sitting in the file.
+pub(crate) fn bound_name(
+    home: &Path,
+    root: &Path,
+    manifest: &Manifest,
+    scope: &str,
+) -> Result<String, Error> {
+    if manifest.scope_record(scope).is_none() {
+        return Err(Error::unrecorded(manifest, scope, NOT_NAMED));
+    }
+
+    let bound = match load_key_binding(home, root, scope) {
+        Err(sigils::Error::NotFound { .. }) => None,
+        other => other.map_err(|source| Error::Sigils { source })?,
+    };
+    let Some(name) = bound else {
+        return Err(Error::NoBinding {
+            scope: scope.to_owned(),
+            key: None,
+        });
+    };
+
+    if !names(home)?.contains(&name) {
+        return Err(Error::NoBinding {
+            scope: scope.to_owned(),
+            key: Some(name),
+        });
+    }
+    Ok(name)
+}
+
+// `/key list`'s line: the names `warlock key list` prints, said as a sentence
+// for the thread rather than one a line.
+pub(crate) fn names_line(home: &Path) -> Result<String, Error> {
+    let names = names(home)?;
+    if names.is_empty() {
+        return Ok("this machine holds no key: `warlock key add <name>` stores one".to_owned());
+    }
+    Ok(format!(
+        "this machine holds keys under {}",
+        cut::listed(&names)
+    ))
 }
 
 // Split from `key_use` for `listed`'s reason: `out` is what a test reads back,

@@ -30,8 +30,8 @@ use warlock_tui::check::{self, check};
 use warlock_tui::planned;
 use warlock_tui::{
     Error, Interactive, POLL_INTERVAL, RecordFields, branch_clear, branch_show, branch_use, brief,
-    key_add, key_forget, key_list, key_use, pull, push, resume, scope_add, scope_remove, sigil_add,
-    sigil_clear, sigil_list, sigil_remove, status_for,
+    key_add, key_forget, key_list, key_show, key_use, pull, push, resume, scope_add, scope_remove,
+    sigil_add, sigil_clear, sigil_list, sigil_remove, status_for,
 };
 
 mod terminal;
@@ -104,12 +104,22 @@ enum Command {
         command: ScopeCommand,
     },
     #[command(
-        about = "Store, list, bind and forget the named Linear keys this machine holds.",
-        long_about = None
+        about = "Name the key a scope is bound to, or store, list, bind and forget the named Linear keys this machine holds.",
+        long_about = None,
+        args_conflicts_with_subcommands = true,
+        arg_required_else_help = true
     )]
     Key {
+        // A positional beside the subcommands rather than a `show` word, so
+        // `warlock key <SCOPE>` reads as `/key <SCOPE>` does in the chat bar.
+        // A subcommand word wins over a scope spelled the same, so a scope
+        // named `list` is answered by `key list` here; `/key list` does the
+        // same.
+        /// The scope whose bound key name to print.
+        #[arg(value_name = "SCOPE")]
+        scope: Option<String>,
         #[command(subcommand)]
-        command: KeyCommand,
+        command: Option<KeyCommand>,
     },
     #[command(
         about = "Show or set the branch this checkout's pulls start from and open pull requests against.",
@@ -447,11 +457,14 @@ fn main() -> ExitCode {
             ),
             ScopeCommand::Remove { path } => scope_remove(&path),
         },
-        Some(Command::Key { command }) => match command {
-            KeyCommand::Add { name } => key_add(&name),
-            KeyCommand::List { json } => key_list(json),
-            KeyCommand::Use { scope, name } => key_use(&scope, &name),
-            KeyCommand::Forget { name } => key_forget(&name),
+        Some(Command::Key { scope, command }) => match (scope, command) {
+            (_, Some(KeyCommand::Add { name })) => key_add(&name),
+            (_, Some(KeyCommand::List { json })) => key_list(json),
+            (_, Some(KeyCommand::Use { scope, name })) => key_use(&scope, &name),
+            (_, Some(KeyCommand::Forget { name })) => key_forget(&name),
+            (Some(scope), None) => key_show(&scope),
+            // `arg_required_else_help` prints the help before this is reached.
+            (None, None) => unreachable!("clap requires a scope or a subcommand"),
         },
         Some(Command::Branch { command }) => match command {
             None => branch_show(),

@@ -22,7 +22,8 @@ plain line and the terminal is never touched.
 | `warlock sigil clear` | Stop holding every sigil | one config write |
 | `warlock key add <name>` | Read a Linear key on stdin and store it under a name | one key-store write |
 | `warlock key list` | Print the names this machine holds keys for, and never a key | nothing |
-| `warlock key use <name>` | Bind one of the stored names to this checkout | one config write |
+| `warlock key use <scope> <name>` | Bind one of the stored names to a scope of this checkout | one config write |
+| `warlock key <scope>` | Print the name a scope of this checkout is bound to, and never a key | nothing |
 | `warlock key forget <name>` | Remove a stored key from this machine by name | one key-store write |
 | `warlock branch` | Print the branch this checkout's pulls start from and open pull requests against | nothing |
 | `warlock branch use <BRANCH>` | Make this checkout's pulls start from `BRANCH` and open pull requests against it | one config write |
@@ -118,12 +119,27 @@ $ warlock key list --json
 A machine nobody has run `key add` on holds no keys, which is an empty answer
 and a 0.
 
-`warlock key use <name>` binds one of those names to this checkout, written
-into the per-project `config.toml` with the sigils already there left where they
-were. A checkout that has bound none is *unbound* rather than defaulted:
-warlock does not reach for whichever key happens to be first in the store, and
-`use` is how a checkout stops being unbound. One checkout binds one name, and
-the name is the only thing written — the key itself stays in `keys.toml`.
+`warlock key use <scope> <name>` binds one of those names to a scope of this
+checkout, written into the `[keys]` table of the per-project `config.toml` with
+the sigils and the other bindings left where they were. A scope that has bound
+none is *unbound* rather than defaulted: warlock does not reach for another
+scope's key or for whichever key happens to be first in the store. The name is
+the only thing written — the key itself stays in `keys.toml`.
+
+`warlock key <scope>` prints the name that scope is bound to, alone on the line,
+so `$(warlock key <scope>)` is the name. An unbound scope, a scope bound to a
+name the store lacks, and a scope `.warlock/scopes.toml` does not record each
+exit 1 with one line saying which command fixes it. A subcommand word wins over
+a scope spelled the same, so a scope named `list` cannot be asked about this
+way.
+
+```sh
+$ warlock key warlock-team
+acme
+```
+
+In the panel, `/key <scope>` says the same answer on the thread and `/key list`
+names the keys this machine holds.
 
 `warlock key forget <name>` removes a key from the machine. When this checkout
 was the one bound to it, the removal still happens and the line says so: this

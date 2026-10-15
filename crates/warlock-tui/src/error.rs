@@ -29,6 +29,8 @@ pub(crate) const NO_QUEUE: &str = "there is no queue to read";
 
 pub(crate) const NOT_BOUND: &str = "nothing was written";
 
+pub(crate) const NOT_NAMED: &str = "there is no binding to name";
+
 // One vocabulary for the panel and every subcommand rather than one enum
 // each: they fail in the same ways and are printed by the same line of `main`,
 // so a second enum would be a second wording of the same sentences.
@@ -122,6 +124,15 @@ pub enum Error {
     UnknownKey {
         name: String,
         wanted: &'static str,
+    },
+    // A recorded scope `warlock key <SCOPE>` or `/key <SCOPE>` could name no
+    // stored key for: bound to nothing when `key` is `None`, bound to a name
+    // the store does not hold when it is `Some`. An error rather than a line on
+    // stdout, so a script reading the bare name off a 0 exit never reads a
+    // sentence as the name.
+    NoBinding {
+        scope: String,
+        key: Option<String>,
     },
     // The engine's key store, and the one variant here that wraps an error from
     // a module holding secrets. It is safe to carry and to print because
@@ -224,14 +235,14 @@ pub enum Error {
     NoBacklog {
         team: String,
     },
-    // A scope `warlock pull` or `warlock key use` was given that no `[[scope]]`
-    // record in this repository holds. The recorded names are carried because the
-    // usual cause is a near miss against one of them, and they are the answer
-    // either way: a machine can neither pull nor bind a key under a scope this
-    // repository has never written down. `cost` is one of [`NO_QUEUE`] and
-    // [`NOT_BOUND`], following `UnknownKey`'s `wanted` — one fact costing the two
-    // verbs different things — and it carries the whole clause rather than a verb
-    // because the two costs are not the same shape of phrase.
+    // A scope `warlock pull`, `warlock key use` or `warlock key <SCOPE>` was
+    // given that no `[[scope]]` record in this repository holds. The recorded
+    // names are carried because the usual cause is a near miss against one of
+    // them, and they are the answer either way. `cost` is one of [`NO_QUEUE`],
+    // [`NOT_BOUND`] and [`NOT_NAMED`], following `UnknownKey`'s `wanted` — one
+    // fact costing each verb something different — and it carries the whole
+    // clause rather than a verb because the costs are not the same shape of
+    // phrase.
     UnrecordedScope {
         scope: String,
         recorded: Vec<String>,
@@ -709,6 +720,19 @@ impl fmt::Display for Error {
                 "this machine holds no key called `{name}`, so there was nothing to {wanted}: \
                  `warlock key list` names the keys it does hold"
             ),
+            Self::NoBinding { scope, key: None } => write!(
+                f,
+                "no key is bound to the scope `{scope}` in this checkout: `warlock key use \
+                 {scope} <name>` binds one of the names `warlock key list` prints"
+            ),
+            Self::NoBinding {
+                scope,
+                key: Some(key),
+            } => write!(
+                f,
+                "the scope `{scope}` is bound to the key `{key}`, which this machine does not \
+                 store: `warlock key add {key}` stores it"
+            ),
             // Flattened like the sigil config's: a store that will not parse
             // carries a position rather than the parser's own diagnostic, and
             // the rest is the filesystem's, which can still run to two lines.
@@ -829,6 +853,7 @@ impl std::error::Error for Error {
             // stored a key under, are a person and not a failure underneath.
             | Self::NoKey { .. }
             | Self::UnknownKey { .. }
+            | Self::NoBinding { .. }
             | Self::UnheldSigil { .. }
             // Nor here: a brief the board already holds, and a team key Linear
             // does not know, are a disagreement rather than a failure

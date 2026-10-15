@@ -23,6 +23,7 @@ use crate::help::HelpSheet;
 use crate::input::{
     Action, Drag, MouseAction, Pressed, Scroll, drag_after, mouse_action, press_for,
 };
+use crate::key::{bound_name, names_line};
 use crate::linear::{Opener as LinearOpener, Opens};
 use crate::modal::{Modal, Modals};
 use crate::planned::edited_drafts;
@@ -35,7 +36,7 @@ use crate::screen::Screen;
 use crate::selection::{Cell, Position, copied_text, position_at};
 use crate::session::{Scope, Watched, load_app, reload, start_watching};
 use crate::settings::Said;
-use crate::submission::{ToPush, Wanted};
+use crate::submission::{Keying, ToPush, Wanted};
 use crate::ui::{Reach, Shape, draw, help_most_scroll, panel_width};
 use crate::viewing::view_press;
 
@@ -857,6 +858,22 @@ impl<K: Seams> Session<K> {
                     .settings
                     .branch(&branching, self.scope.chrome.remote_head());
                 self.settled(said, now);
+            }
+            // `say` rather than `settled`: nothing is written, so there is no
+            // chrome to read again.
+            Wanted::Key(keying) => {
+                let said = match self.scope.settings.home() {
+                    None => Err(Error::NoHome),
+                    Some(home) => match keying {
+                        Keying::List => names_line(home),
+                        Keying::Scope(scope) => {
+                            bound_name(home, root, &self.manifest, &scope).map(|name| {
+                                format!("the scope `{scope}` is bound to the key `{name}`")
+                            })
+                        }
+                    },
+                };
+                self.say(said, now);
             }
             Wanted::Sigil(sigiling) => {
                 let said = self.scope.settings.sigil(&sigiling);

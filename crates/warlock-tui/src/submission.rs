@@ -82,6 +82,15 @@ const COMMANDS: &[Command] = &[
         ],
     },
     Command {
+        word: "/key",
+        read: read_key,
+        takes: Some("`list` or a scope for /key"),
+        help: &[
+            ("/key SCOPE", "name the key SCOPE is bound to"),
+            ("/key list", "name the keys this machine holds"),
+        ],
+    },
+    Command {
         word: "/sigil",
         read: read_sigil,
         takes: Some(
@@ -149,6 +158,15 @@ pub(crate) enum Branching {
     Clear,
 }
 
+// Read-only, both of them: a key is stored with `warlock key add` and bound with
+// `warlock key use` or the key window, never typed into the chat bar, whose
+// drafts are drawn on screen and kept in the conversation.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) enum Keying {
+    List,
+    Scope(String),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) enum Sigiling {
     Show,
@@ -181,6 +199,7 @@ pub(crate) enum Wanted {
     // could offer back — the refusal already says a ticket goes after the word.
     Resume(String),
     Branch(Branching),
+    Key(Keying),
     Sigil(Sigiling),
 }
 
@@ -329,6 +348,16 @@ fn read_branch(after: &str) -> Option<Submitted> {
         _ => return None,
     };
     Some(Submitted::Wanted(Wanted::Branch(branching)))
+}
+
+// `list` is the word and never a scope, as `warlock key list` is.
+fn read_key(after: &str) -> Option<Submitted> {
+    let keying = match words(after).as_slice() {
+        ["list"] => Keying::List,
+        [scope] => Keying::Scope((*scope).to_owned()),
+        _ => return None,
+    };
+    Some(Submitted::Wanted(Wanted::Key(keying)))
 }
 
 fn read_sigil(after: &str) -> Option<Submitted> {

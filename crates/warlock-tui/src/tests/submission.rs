@@ -1,5 +1,5 @@
 use super::{
-    Branching, COMMANDS, Sigiling, Submitted, Taking, ToDraft, ToPush, Wanted, help_rows,
+    Branching, COMMANDS, Keying, Sigiling, Submitted, Taking, ToDraft, ToPush, Wanted, help_rows,
     submitted_for,
 };
 
@@ -435,6 +435,24 @@ fn sigil_reads_its_four_spellings_and_refuses_the_rest() {
         "/sigil hold a",
         "/sigil a",
         "/sigil add a\nand a thought",
+    ] {
+        assert_eq!(submitted_for(draft), Submitted::Refused, "{draft:?}");
+    }
+}
+
+#[test]
+fn key_reads_list_or_one_scope_and_refuses_the_rest() {
+    let key = |keying| Submitted::Wanted(Wanted::Key(keying));
+    assert_eq!(submitted_for("/key list "), key(Keying::List));
+    assert_eq!(
+        submitted_for("/key warlock-team"),
+        key(Keying::Scope("warlock-team".to_owned()))
+    );
+    for draft in [
+        "/key",
+        "/key warlock-team acme",
+        "/key use warlock-team acme",
+        "/key warlock-team\nand a thought",
     ] {
         assert_eq!(submitted_for(draft), Submitted::Refused, "{draft:?}");
     }
