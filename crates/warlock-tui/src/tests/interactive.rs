@@ -1849,14 +1849,17 @@ mod filing {
     use ratatui::crossterm::event::KeyCode;
     use tempfile::TempDir;
     use warlock_engine::{
-        Manifest, ScopeRecord, ScopedDirectory, save_key, save_key_binding, save_sigils,
+        Manifest, ScopeRecord, ScopedDirectory, load_key_binding, save_key, save_key_binding,
+        save_sigils,
     };
 
     use super::{AT_MOST, Driven, key, pressed, session_over};
     use crate::account::Line;
     use crate::app::Focus;
+    use crate::confirm::Answer;
     use crate::cutting::Cutter;
     use crate::pushing::{ALREADY_FILING, Pushes};
+    use crate::settings::Settings;
     use crate::stubs::{Boarding, Gate, Op, Scripted};
 
     // Not a key, and named so that nothing reading this file mistakes it for
@@ -1919,11 +1922,21 @@ mod filing {
     }
 
     // One sigil and one record of that name, so nothing is ambiguous and the
-    // dialog comes straight up.
+    // dialog comes straight up. The binding is written here as well, so the
+    // question that comes before the dialog is already answered for every test
+    // but the three that drive it.
     fn a_home(root: &Path) -> TempDir {
+        let home = an_unbound_home(root);
+        save_key_binding(home.path(), root, SCOPE, KEY_NAME).expect("a binding that writes");
+        home
+    }
+
+    // The same home with the scope bound to nothing: the checkout somebody has
+    // just cloned, where a `/push` is asked which key it files with before
+    // anything is prepared.
+    fn an_unbound_home(root: &Path) -> TempDir {
         let home = tempfile::tempdir().expect("a temporary directory");
         save_sigils(home.path(), root, &[SCOPE.to_owned()]).expect("a config that writes");
-        save_key_binding(home.path(), root, SCOPE, KEY_NAME).expect("a binding that writes");
         save_key(home.path(), KEY_NAME, NOT_A_KEY).expect("a key store that writes");
         home
     }
@@ -1935,6 +1948,11 @@ mod filing {
         let mut driven = session_over(repo);
         driven.manifest = a_manifest();
         driven.pushes = Pushes::with_client(linear.clone(), Some(home.to_path_buf()));
+        // The same home the push resolves its board under, because the session
+        // writes a binding through these settings: the config a key window's
+        // Enter lands in has to be the file the push then reads the binding out
+        // of, and `loading` leaves this with no home at all.
+        driven.scope.settings = Settings::at(Some(home.to_path_buf()), repo);
         // The same home for a `/draft`, so the command reaches the board through
         // this test's sigils rather than being refused for want of one. The
         // client is the same stand-in because the session opens both through
@@ -2303,6 +2321,119 @@ mod filing {
         for note in notes(&driven) {
             assert!(!note.contains(NOT_A_KEY), "{note} carries the key");
         }
+    }
+
+    // The name `SCOPE` is bound to in this checkout's config under `home`, which
+    // the config holds because every home here writes a sigil into it: unbound
+    // is `None`, and a config that will not read is this test's own failure.
+    fn bound(home: &Path, repo: &Path) -> Option<String> {
+        load_key_binding(home, repo, SCOPE).expect("the config this test wrote still reads")
+    }
+
+    #[test]
+    fn a_push_of_an_unbound_scope_opens_the_key_window_and_sends_nothing() {
+        // A checkout somebody has just cloned: the sigil says this machine may
+        // file the scope, and nothing says which key it files with. The board
+        // panics if it is opened at all, which is the whole of "nothing was
+        // sent".
+        let repo = a_repository();
+        let home = an_unbound_home(repo.path());
+        let mut driven = filing_session(repo.path(), home.path(), &Boarding::unopened());
+
+        typing(&mut driven, &format!("/push {SCOPE} {PATH}"));
+        round(&mut driven);
+
+        let choice = driven.key.choice().expect("the key window is up");
+        assert_eq!(choice.scope(), SCOPE, "the window names another scope");
+        assert_eq!(choice.names(), [KEY_NAME], "the rows are not this store's");
+        assert!(
+            !driven.pushes.window().confirm.is_open(),
+            "the push dialog came up as well: {:?}",
+            notes(&driven)
+        );
+        assert!(!driven.pushes.sending(), "a push was started");
+        assert!(notes(&driven).is_empty(), "{:?}", notes(&driven));
+        assert_eq!(
+            bound(home.path(), repo.path()),
+            None,
+            "a binding was written"
+        );
+    }
+
+    #[test]
+    fn an_enter_at_the_key_window_binds_the_scope_and_opens_the_push_dialog() {
+        // The whole road, driven by the keys a reader presses: the command, the
+        // one row this store holds, and the Enter that binds it. What the push
+        // dialog then names is the scope and the brief the command named.
+        let repo = a_repository();
+        let home = an_unbound_home(repo.path());
+        let mut driven = filing_session(repo.path(), home.path(), &Boarding::unopened());
+        typing(&mut driven, &format!("/push {SCOPE} {PATH}"));
+        assert!(driven.key.is_open(), "{:?}", notes(&driven));
+
+        assert!(pressed(&mut driven, key(KeyCode::Enter)));
+        round(&mut driven);
+
+        assert_eq!(
+            bound(home.path(), repo.path()).as_deref(),
+            Some(KEY_NAME),
+            "the Enter wrote no binding: {:?}",
+            notes(&driven)
+        );
+        assert!(!driven.key.is_open(), "the key window is still up");
+        let filing = driven
+            .pushes
+            .window()
+            .confirm
+            .filing()
+            .expect("the push dialog the binding led to");
+        assert_eq!(filing.destination().scope(), SCOPE);
+        assert_eq!(filing.destination().team_key(), TEAM);
+        assert_eq!(filing.destination().key(), KEY_NAME);
+        assert_eq!(filing.answer(), Answer::No, "the dialog opened on Yes");
+        assert!(
+            !driven.pushes.sending(),
+            "the dialog sent before it was answered"
+        );
+        // No second question on the way through, and no key value anywhere on
+        // the thread.
+        for note in notes(&driven) {
+            assert!(!note.contains(NOT_A_KEY), "{note} carries the key");
+        }
+    }
+
+    #[test]
+    fn an_esc_at_the_key_window_puts_the_whole_push_down() {
+        let repo = a_repository();
+        let home = an_unbound_home(repo.path());
+        let mut driven = filing_session(repo.path(), home.path(), &Boarding::unopened());
+        typing(&mut driven, &format!("/push {SCOPE} {PATH}"));
+        assert!(driven.key.is_open(), "{:?}", notes(&driven));
+
+        assert!(
+            pressed(&mut driven, key(KeyCode::Esc)),
+            "the Esc ended the session"
+        );
+        round(&mut driven);
+
+        assert_eq!(
+            bound(home.path(), repo.path()),
+            None,
+            "an abandoned question bound the scope"
+        );
+        assert!(!driven.key.is_open(), "the key window is still up");
+        assert!(
+            !driven.pushes.window().confirm.is_open(),
+            "the push dialog came up: {:?}",
+            notes(&driven)
+        );
+        assert!(!driven.pushes.sending(), "a push was started");
+        // And the session goes on: the Esc answered the window rather than
+        // reaching the quit question underneath it.
+        assert!(
+            pressed(&mut driven, key(KeyCode::Char('j'))),
+            "the keyboard stopped working"
+        );
     }
 }
 

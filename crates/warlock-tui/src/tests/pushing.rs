@@ -4,15 +4,16 @@ use std::time::Instant;
 
 use tempfile::TempDir;
 use warlock_engine::{
-    Manifest, ScopeRecord, ScopedDirectory, from_manifest_path, save_key, save_key_binding,
-    save_sigils,
+    Manifest, ScopeRecord, ScopedDirectory, from_manifest_path, load_key_binding, save_key,
+    save_key_binding, save_sigils,
 };
 
 use super::{Pushes, Pushing};
 use crate::account::Line;
 use crate::app::App;
-use crate::confirm::PushAnswered;
-use crate::error::one_line;
+use crate::confirm::{Answer, PushAnswered};
+use crate::error::{Error, one_line};
+use crate::prompt::KeyPrompt;
 use crate::push::prepare;
 use crate::stubs::{Boarding, Op};
 
@@ -125,11 +126,37 @@ fn pushes(home: &Path) -> Pushes<Boarding> {
     Pushes::with_client(Boarding::unopened(), Some(home.to_path_buf()))
 }
 
-// `/push <scope> docs/brief.md`.
+// `/push <scope> docs/brief.md`, over a scope with a key bound: every test that
+// goes through here is one of those, and the key window that comes back is the
+// assertion that none of them was asked for a binding instead.
 fn pressing(app: &mut App, repo: &Path, home: &Path, scope: &str) -> Pushing {
     let mut pushes = pushes(home);
-    pushes.press(app, &a_manifest(), repo, scope, WRITTEN, now());
+    let prompt = pushes.press(app, &a_manifest(), repo, scope, WRITTEN, now());
+    assert_eq!(
+        prompt,
+        KeyPrompt::Closed,
+        "a bound scope was asked for a binding"
+    );
     pushes.window
+}
+
+// The same command over a scope bound to nothing: both halves of what it comes
+// to, which is the window the flow holds and the key window the session is to
+// put up.
+fn asking(app: &mut App, repo: &Path, home: &Path, scope: &str) -> (Pushes<Boarding>, KeyPrompt) {
+    let mut pushes = pushes(home);
+    let prompt = pushes.press(app, &a_manifest(), repo, scope, WRITTEN, now());
+    (pushes, prompt)
+}
+
+// A home with the sigil and a key in the store, and no binding for any scope:
+// the checkout somebody has just cloned, which is the road this question
+// exists for.
+fn an_unbound_home(root: &Path) -> TempDir {
+    let home = a_dir();
+    save_sigils(home.path(), root, &[SCOPE.to_owned()]).expect("a config that writes");
+    save_key(home.path(), KEY_NAME, NOT_A_KEY).expect("a key store that writes");
+    home
 }
 
 // The sentence `push.rs` words for this refusal, asked of it rather than spelled
@@ -208,8 +235,10 @@ fn a_machine_that_could_file_to_either_board_files_to_the_scope_typed() {
 fn every_refusal_is_push_rs_own_line_on_the_thread_with_no_window_up() {
     // What the panel adds to `prepare`'s refusals: one line on the thread, in
     // `push.rs`'s words, and no window. One of each kind — a machine holding
-    // no sigil, a checkout with no key bound, a bound name the key store no
-    // longer holds, a scope that is no candidate, and a brief that is gone.
+    // no sigil, a bound name the key store no longer holds, a scope that is no
+    // candidate, and a brief that is gone. Every home here binds the scope the
+    // command names, because an unbound one is the question asked ahead of
+    // `prepare` rather than one of its refusals.
     let repo = a_repository();
 
     let unsigiled = a_dir();
@@ -217,14 +246,16 @@ fn every_refusal_is_push_rs_own_line_on_the_thread_with_no_window_up() {
         .expect("a binding that writes");
     save_key(unsigiled.path(), KEY_NAME, NOT_A_KEY).expect("a key store that writes");
 
-    let unbound = a_dir();
-    save_sigils(unbound.path(), repo.path(), &[SCOPE.to_owned()]).expect("a config that writes");
-
     let dangling = a_dir();
     save_sigils(dangling.path(), repo.path(), &[SCOPE.to_owned()]).expect("a config that writes");
     save_key_binding(dangling.path(), repo.path(), SCOPE, KEY_NAME).expect("a binding that writes");
 
     let held = a_home(repo.path(), &[SCOPE]);
+    // `billing` is no candidate here, and that is the refusal this case is
+    // about: the binding is written so the push reaches `prepare` to be told
+    // so, rather than being asked which key a scope nothing records files
+    // with.
+    save_key_binding(held.path(), repo.path(), "billing", KEY_NAME).expect("a binding that writes");
 
     let missing = a_repository();
     let missing_home = a_home(missing.path(), &[SCOPE]);
@@ -232,7 +263,6 @@ fn every_refusal_is_push_rs_own_line_on_the_thread_with_no_window_up() {
 
     for (repo, home, scope) in [
         (&repo, &unsigiled, SCOPE),
-        (&repo, &unbound, SCOPE),
         (&repo, &dangling, SCOPE),
         (&repo, &held, "billing"),
         (&missing, &missing_home, SCOPE),
@@ -317,4 +347,122 @@ fn a_yes_to_a_brief_the_board_already_holds_says_so_on_the_thread_and_creates_no
         "{:?}",
         notes(&app)
     );
+}
+
+// The question asked ahead of `prepare`, over a temporary repository and a
+// temporary home every time: the binding this checkout holds for the scope
+// typed is read out of the config under that home and nowhere else.
+#[test]
+fn a_push_of_a_scope_bound_to_nothing_asks_for_the_key_and_opens_no_dialog() {
+    let repo = a_repository();
+    let home = an_unbound_home(repo.path());
+    let mut app = App::default();
+
+    let (pushes, prompt) = asking(&mut app, repo.path(), home.path(), SCOPE);
+
+    let choice = prompt.choice().expect("the key window is up");
+    assert_eq!(
+        choice.scope(),
+        SCOPE,
+        "the window names a scope the command never did"
+    );
+    assert_eq!(
+        choice.names(),
+        [KEY_NAME],
+        "the rows are not this home's key store"
+    );
+    assert_eq!(
+        pushes.window,
+        Pushing::closed(),
+        "the question put a push dialog up as well"
+    );
+    assert!(notes(&app).is_empty(), "{:?}", notes(&app));
+    // The board panics if it is opened, so nothing being sent is the stand-in's
+    // own assertion; this is the other half of it — nothing was prepared, so
+    // there is no key in anything the flow holds.
+    assert!(
+        !format!("{pushes:?}").contains(NOT_A_KEY),
+        "the parked push carries a key value"
+    );
+}
+
+#[test]
+fn the_binding_written_leads_to_the_dialog_over_the_same_scope_and_brief() {
+    // What the key window's Enter does, in the engine's own call, and then the
+    // push picked up behind it: the dialog over the scope and the brief the
+    // command named, with No lit, and no second question.
+    let repo = a_repository();
+    let home = an_unbound_home(repo.path());
+    let mut app = App::default();
+    let (mut pushes, prompt) = asking(&mut app, repo.path(), home.path(), SCOPE);
+    assert!(prompt.is_open(), "{:?}", notes(&app));
+    save_key_binding(home.path(), repo.path(), SCOPE, KEY_NAME).expect("a binding that writes");
+
+    pushes.bound(&mut app, &a_manifest(), repo.path(), now());
+
+    let filing = pushes
+        .window
+        .confirm
+        .filing()
+        .expect("the dialog the binding led to");
+    assert_eq!(filing.project(), TITLE, "the brief is not the one typed");
+    assert_eq!(filing.destination().scope(), SCOPE);
+    assert_eq!(filing.destination().team_key(), TEAM);
+    assert_eq!(filing.destination().key(), KEY_NAME);
+    assert_eq!(filing.answer(), Answer::No, "the dialog opened on Yes");
+    assert!(notes(&app).is_empty(), "{:?}", notes(&app));
+
+    // And the push is answered once: the question is not waiting to be asked
+    // again, so a second Enter at a window somebody else's road put up picks
+    // nothing up.
+    let dialog = pushes.window.clone();
+    pushes.bound(&mut app, &a_manifest(), repo.path(), now());
+
+    assert_eq!(pushes.window, dialog, "the push was prepared twice");
+    assert!(notes(&app).is_empty(), "{:?}", notes(&app));
+}
+
+#[test]
+fn an_abandoned_question_puts_the_whole_push_down_and_writes_no_binding() {
+    // Esc on the key window: the window is the one that writes, and it never
+    // opens the config, so what is asserted here is the other half — nothing is
+    // prepared, no dialog opens and the scope is still bound to nothing.
+    let repo = a_repository();
+    let home = an_unbound_home(repo.path());
+    let mut app = App::default();
+    let (mut pushes, prompt) = asking(&mut app, repo.path(), home.path(), SCOPE);
+    assert!(prompt.is_open(), "{:?}", notes(&app));
+
+    pushes.put_down();
+    // The press that answers the window is answered by the flow either way, so
+    // an Esc followed by an Enter at a later window cannot pick this push up.
+    pushes.bound(&mut app, &a_manifest(), repo.path(), now());
+
+    assert_eq!(pushes.window, Pushing::closed(), "a dialog came up");
+    assert!(!pushes.sending(), "something was sent");
+    assert_eq!(
+        load_key_binding(home.path(), repo.path(), SCOPE).expect("the config still reads"),
+        None,
+        "the scope was bound by an abandoned question"
+    );
+    assert!(notes(&app).is_empty(), "{:?}", notes(&app));
+}
+
+#[test]
+fn a_checkout_with_no_config_at_all_is_one_line_on_the_thread_and_no_question() {
+    // The other answer `load_key_binding` has, and the reason the question is
+    // only asked on `Ok(None)`: there is no config to write a binding into, so
+    // the engine's own sentence about that goes on the thread and nothing comes
+    // up.
+    let repo = a_repository();
+    let home = a_dir();
+    let mut app = App::default();
+
+    let (pushes, prompt) = asking(&mut app, repo.path(), home.path(), SCOPE);
+
+    let source = load_key_binding(home.path(), repo.path(), SCOPE)
+        .expect_err("a checkout nobody configured");
+    assert_eq!(notes(&app), vec![one_line(Error::Sigils { source })]);
+    assert_eq!(prompt, KeyPrompt::Closed, "a question was asked anyway");
+    assert_eq!(pushes.window, Pushing::closed(), "a dialog came up");
 }

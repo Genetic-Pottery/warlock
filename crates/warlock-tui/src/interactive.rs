@@ -26,7 +26,7 @@ use crate::input::{
 use crate::linear::{Opener as LinearOpener, Opens};
 use crate::modal::{Modal, Modals};
 use crate::planned::edited_drafts;
-use crate::prompt::{KeyPrompt, RecordPrompt, ScopePrompt};
+use crate::prompt::{KeyEdited, KeyPrompt, RecordPrompt, ScopePrompt};
 use crate::puller::{Claudes, Puller, Raises};
 use crate::pushing::Pushes;
 use crate::resume::resume_press;
@@ -267,11 +267,13 @@ struct Session<K: Seams> {
     /// down as the other comes up, in the one
     /// [`scoping::Windows`](crate::scoping::Windows) a submit hands back.
     record: RecordPrompt,
-    /// The window that binds one of this machine's stored keys to a scope, put
-    /// up by the record form's submit over the scope it just recorded — a
-    /// created scope nothing on this machine could push into is the thing it is
-    /// there to prevent. Never up at the same time as either window above, for
-    /// [`Session::record`]'s reason and out of the same value. See
+    /// The window that binds one of this machine's stored keys to a scope, and
+    /// the session's one copy of it: the record form's submit puts it up over
+    /// the scope it just recorded — a created scope nothing on this machine
+    /// could push into is the thing it is there to prevent — and a `/push` of a
+    /// scope bound to nothing puts it up in front of the push, which waits in
+    /// [`Pushes`] for the answer. Never up at the same time as either window
+    /// above, for [`Session::record`]'s reason and out of the same value. See
     /// [`KeyPrompt`].
     key: KeyPrompt,
     /// The left button held down over the conversation, if it is: the one piece
@@ -692,6 +694,15 @@ impl<K: Seams> Session<K> {
             // resolved once in `load_app` — and the file a binding lands in is
             // the very file those settings read the sigils out of.
             Pressed::Key(edited) => {
+                // Which of the window's three roads this press is on, read
+                // before it is answered because answering takes it. It is also
+                // what happens to a `/push` parked behind the window: a submit
+                // has written the binding that push was waiting on, an Esc puts
+                // it down, and a move of the highlight leaves it waiting.
+                let (wrote, abandoned) = (
+                    matches!(edited, KeyEdited::Submit),
+                    matches!(edited, KeyEdited::Close),
+                );
                 self.key = match self.scope.settings.home() {
                     Some(home) => key_edit(
                         &mut self.app,
@@ -706,6 +717,18 @@ impl<K: Seams> Session<K> {
                     // down and nothing is written.
                     None => KeyPrompt::Closed,
                 };
+                // The push the window was opened in front of, if it was opened
+                // in front of one: on to `prepare` over the scope and the brief
+                // it parked, which is the road a `/push` with a key bound takes
+                // on the round it is typed. Nothing at all happens here when
+                // the window came up over a scope just recorded by the `s` key,
+                // which parks no push.
+                if wrote {
+                    self.pushes
+                        .bound(&mut self.app, &self.manifest, &self.scope.repo_root, now);
+                } else if abandoned {
+                    self.pushes.put_down();
+                }
             }
             Pressed::Write(edited) => {
                 self.chat.write(&mut self.app, edited, now);
@@ -779,9 +802,15 @@ impl<K: Seams> Session<K> {
         };
         let root = &self.scope.repo_root;
         match wanted {
+            // The key window, over a scope this checkout binds to nothing:
+            // `prepare` is what resolves the key, so the binding is asked for
+            // ahead of it and the push waits in the flow for the answer. Every
+            // other road hands back `KeyPrompt::Closed`, so this is the one copy
+            // of that window either way — the flow holds none.
             Wanted::Push(ToPush { scope, path }) => {
-                self.pushes
-                    .press(&mut self.app, &self.manifest, root, &scope, &path, now);
+                self.key =
+                    self.pushes
+                        .press(&mut self.app, &self.manifest, root, &scope, &path, now);
             }
             Wanted::Draft(drafting) => {
                 self.cutter.press(

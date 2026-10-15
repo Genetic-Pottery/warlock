@@ -13,6 +13,17 @@
 //! nowhere in this file, and every refusal is `push.rs`'s own sentence put on the
 //! thread.
 //!
+//! One question comes before that one. [`prepare`] is also what resolves the
+//! key, so a scope this checkout binds to nothing is a push it can only refuse —
+//! and a reader who has just cloned the repository would be sent to a shell to
+//! find `warlock key use`. So the binding is asked for first, between the home
+//! and [`prepare`]: the key window goes up over the names this machine holds,
+//! the `/push` waits in [`Parked`], and that answer decides whether there is a
+//! push to prepare at all. The window is the one the `s` key puts up, held by
+//! the session — nothing here keeps a second copy of it — and nothing on the
+//! road reads a key: the question is about names, and the binding is written by
+//! [`mod@crate::scoping`].
+//!
 //! A confirmed dialog files the [`Prepared`] it was drawn from, with nothing
 //! resolved again: what the reader said yes to is what is sent.
 
@@ -21,13 +32,14 @@ use std::mem;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use warlock_engine::{Manifest, from_manifest_path, to_manifest_path};
+use warlock_engine::{Manifest, from_manifest_path, load_key_binding, to_manifest_path};
 
 use crate::app::App;
 use crate::confirm::{PushAnswered, PushConfirm};
 use crate::error::{Error, one_line};
 use crate::inflight::{Lost, Once, Workers, settled};
 use crate::linear::{Opener as LinearOpener, Opens};
+use crate::prompt::KeyPrompt;
 use crate::push::{Prepared, file, prepare};
 use crate::standing::Standing;
 
@@ -97,8 +109,42 @@ pub(crate) struct Pushes<O: Opens> {
     open: O,
     home: Option<PathBuf>,
     window: Pushing,
+    /// The `/push` waiting on a binding, if one is. Never more than one: a key
+    /// window takes every keystroke while it is up, so no second `/push` can be
+    /// typed behind this one.
+    parked: Option<Parked>,
     sending: Option<Sending>,
     workers: Workers,
+}
+
+/// A `/push` waiting on a binding: the scope it named and the brief it was
+/// about, as that command resolved them.
+///
+/// Parked rather than resolved again when the window is answered, for the reason
+/// the dialog holds its [`Prepared`]: a second reading of the command could name
+/// another scope, or another brief, from the one the question was asked about.
+/// And the scope only — no key, no name and nothing off the store — because the
+/// window the reader is looking at is what holds the choice.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Parked {
+    scope: String,
+    brief: PathBuf,
+}
+
+/// What a `/push` comes to between two frames.
+///
+/// The window is the ordinary answer, and every refusal is that same arm with
+/// the line already on the thread and nothing up. The other is the question
+/// asked ahead of [`prepare`]: the binding, with the push to pick up once it is
+/// written.
+// Unboxed for [`RecordEdited`](crate::prompt::RecordEdited)'s reason: this is
+// built by the one `/push` that made it, read by the caller that asked for it
+// and dropped, between two frames of one keystroke. A `Box` would buy an
+// allocation and a pointer chase on the keystroke's own thread.
+#[allow(clippy::large_enum_variant)]
+enum Next {
+    Window(Pushing),
+    Binding(Parked, KeyPrompt),
 }
 
 // The channel and the board its answer is about. The team rides along because
@@ -129,6 +175,7 @@ impl<O: Opens> Pushes<O> {
             open,
             home,
             window: Pushing::closed(),
+            parked: None,
             sending: None,
             workers: Workers::Threaded,
         }
@@ -160,6 +207,11 @@ impl<O: Opens> Pushes<O> {
     // path is spelled the manifest's way next, so one that climbs out of the
     // repository is refused in the engine's own words; the thread names files
     // against the repository root, so a typed path is read against it too.
+    //
+    // What comes back is the key window the session is to put up, which is
+    // [`KeyPrompt::Closed`] on every road but the one unbound scope takes: the
+    // session holds that window, and this value holds the push waiting behind
+    // it.
     pub(crate) fn press(
         &mut self,
         app: &mut App,
@@ -168,8 +220,28 @@ impl<O: Opens> Pushes<O> {
         scope: &str,
         typed: &str,
         now: Instant,
-    ) {
-        self.window = self.pressed(app, manifest, repo_root, scope, typed, now);
+    ) -> KeyPrompt {
+        // Whatever an earlier `/push` parked goes here: this command says which
+        // scope and which brief the next question is about. Nothing can be
+        // parked in practice — a key window up takes every keystroke, so no
+        // `/push` reaches the composer behind one — and it is dropped anyway,
+        // because a push that outlived its own window would be prepared by an
+        // Enter meant for another one.
+        self.parked = None;
+        match self.pressed(app, manifest, repo_root, scope, typed, now) {
+            Next::Window(window) => {
+                self.window = window;
+                KeyPrompt::Closed
+            }
+            // No dialog on this road and nothing resolved: there is no board,
+            // no brief read and nothing to say yes to until the binding is
+            // written.
+            Next::Binding(parked, prompt) => {
+                self.window = Pushing::closed();
+                self.parked = Some(parked);
+                prompt
+            }
+        }
     }
 
     fn pressed(
@@ -180,23 +252,91 @@ impl<O: Opens> Pushes<O> {
         scope: &str,
         typed: &str,
         now: Instant,
-    ) -> Pushing {
+    ) -> Next {
         if self.sending() {
-            return saying(app, ALREADY_FILING, now);
+            return Next::Window(saying(app, ALREADY_FILING, now));
         }
         let brief = match to_manifest_path(repo_root, typed) {
             Ok(brief) => brief,
-            Err(source) => return saying(app, one_line(source), now),
+            Err(source) => return Next::Window(saying(app, one_line(source), now)),
         };
         let Some(home) = self.home.as_deref() else {
-            return no_home(app, now);
+            return Next::Window(no_home(app, now));
         };
 
         let path = from_manifest_path(repo_root, &brief);
-        match prepare(manifest, repo_root, home, scope, &path) {
+        // After the home, which is where the config sits, and before `prepare`,
+        // which is what resolves the key: a scope bound to nothing gets the
+        // question rather than the refusal.
+        match load_key_binding(home, repo_root, scope) {
+            // Bound, which is every `/push` that worked before this question
+            // existed: on to `prepare`, and the dialog over what it resolved.
+            // The name is not kept — what the dialog names comes back from
+            // `prepare` with the board, and this read is only whether there is
+            // one.
+            Ok(Some(_)) => {}
+            // Bound to nothing, so nothing on this machine could file this
+            // scope: the window, and the push parked behind it.
+            Ok(None) => return binding(app, home, scope, &path, now),
+            // A checkout nobody has configured, and a config that will not
+            // read. The engine's own sentence on the thread, as every other
+            // `/push` refusal is, and no window: the answer would be written
+            // into the very file that could not be read.
+            Err(source) => {
+                return Next::Window(saying(app, one_line(Error::Sigils { source }), now));
+            }
+        }
+
+        Next::Window(match prepare(manifest, repo_root, home, scope, &path) {
             Ok(ready) => Pushing::confirming(ready),
             Err(error) => saying(app, one_line(error), now),
-        }
+        })
+    }
+
+    /// The parked push picked up over the binding the key window has just
+    /// written: straight to `prepare`, which is the road a `/push` with a key
+    /// bound takes on the round it is typed.
+    ///
+    /// Taken rather than read and then cleared, so one question leads to one
+    /// dialog and no later Enter at the key window — from the `s` key's road, or
+    /// from a session with no home — can pick this push up a second time. Does
+    /// nothing at all when no `/push` is waiting, which is every other way that
+    /// window is answered.
+    ///
+    /// A binding the submit could not write is not asked about again: `prepare`
+    /// refuses an unbound scope in the engine's own words, and that line on the
+    /// thread is the answer rather than a second window.
+    pub(crate) fn bound(
+        &mut self,
+        app: &mut App,
+        manifest: &Manifest,
+        repo_root: &Path,
+        now: Instant,
+    ) {
+        let Some(parked) = self.parked.take() else {
+            return;
+        };
+        // The home this value was built with, as the press that parked the push
+        // read it: a home cannot move under a running warlock, and this is the
+        // one it was resolved against.
+        let Some(home) = self.home.as_deref() else {
+            self.window = no_home(app, now);
+            return;
+        };
+
+        self.window = match prepare(manifest, repo_root, home, &parked.scope, &parked.brief) {
+            Ok(ready) => Pushing::confirming(ready),
+            Err(error) => saying(app, one_line(error), now),
+        };
+    }
+
+    /// The key window abandoned, and the push that was waiting on it with it:
+    /// nothing is prepared, no dialog opens and nothing is sent.
+    ///
+    /// The binding is the window's own to not write — Esc never opens the config
+    /// — so this is the whole of what an Esc costs on this side.
+    pub(crate) fn put_down(&mut self) {
+        self.parked = None;
     }
 
     /// The dialog, moved or answered. An arrow re-lights the question that is
@@ -276,6 +416,30 @@ fn filing_line(team: &str) -> String {
 // to do.
 fn filed_line(team: &str, url: &str) -> String {
     format!("filed to {team}: {url}")
+}
+
+// The key window over this machine's key names, with the push parked behind it.
+//
+// Names and no values, which is [`KeyPrompt::open`]'s whole shape: it lists the
+// store through `load_key_names`, exactly as the `s` key's own road does, and
+// there is no field on it a value could sit in.
+//
+// A free function because nothing about it is the push's: the home and the scope
+// are handed in, and what comes back is a window the session puts up.
+fn binding(app: &mut App, home: &Path, scope: &str, brief: &Path, now: Instant) -> Next {
+    match KeyPrompt::open(home, scope) {
+        Ok(prompt) => Next::Binding(
+            Parked {
+                scope: scope.to_owned(),
+                brief: brief.to_path_buf(),
+            },
+            prompt,
+        ),
+        // A store that will not read, in the engine's own sentence on the
+        // thread: there is nothing to pick from, so no window goes up and no
+        // push waits for one.
+        Err(source) => Next::Window(saying(app, one_line(Error::Keys { source }), now)),
+    }
 }
 
 // On the thread and not the footer, where `/push`'s other refusal already
