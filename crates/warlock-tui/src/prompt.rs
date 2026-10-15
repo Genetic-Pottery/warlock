@@ -570,20 +570,6 @@ impl KeyPrompt {
     /// The names are read off the store here rather than passed in, so there is
     /// one place that decides what the rows are and which of them opens
     /// highlighted.
-    // Nothing in the library opens this window: the keys, the frame and the
-    // write are all wired up, and what is still missing is the decision about
-    // when to ask — the record form's submit and the push, draft and pull paths
-    // are each a slice of their own. So this one function is dead in the library
-    // and alive in the tests below. `cfg_attr` is what keeps both builds quiet:
-    // a bare `expect` is unfulfilled under `cfg(test)`, where the tests do call
-    // it, and warns there instead.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "nothing opens this window until a flow decides to ask"
-        )
-    )]
     pub(crate) fn open(home: &Path, scope: impl Into<String>) -> Result<Self, keys::Error> {
         Ok(Self::Open(KeyChoice::over(home, scope)?))
     }

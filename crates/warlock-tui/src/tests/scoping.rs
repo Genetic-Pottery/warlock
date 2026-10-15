@@ -882,6 +882,13 @@ fn opened(key: KeyEvent, form: &RecordForm) -> RecordForm {
     }
 }
 
+// The home handed to a record submit by the tests below that are about the
+// manifest rather than about the question that follows a save: a machine with
+// no home has no config a binding could land in, so it writes the scope and its
+// record and asks for no key. The home the asking itself is driven over is a
+// directory of the test's own — see [`a_home`].
+const NO_HOME: Option<&Path> = None;
+
 /// The record window [`scope_submit`] puts up over `text`, panicking when the
 /// name took the write road instead.
 fn asked_for(
@@ -926,6 +933,7 @@ fn a_name_no_record_claims_puts_the_second_window_up_and_writes_nothing() {
         Windows {
             scope: ScopePrompt::Closed,
             record: RecordPrompt::open("crates/tui", "billing"),
+            key: KeyPrompt::Closed,
         },
     );
     assert_eq!(saved(repo.path()), None, "the question wrote to disk");
@@ -1003,9 +1011,10 @@ fn a_blank_value_is_refused_under_its_own_field_and_writes_nothing() {
         let before = app.clone();
         let typed = filled(&RecordForm::new("crates/tui", "billing"), values);
 
-        let prompt = record_submit(&mut app, &mut manifest, repo.path(), &typed);
+        let windows = record_submit(&mut app, &mut manifest, repo.path(), NO_HOME, &typed);
 
-        let form = prompt
+        let form = windows
+            .record
             .form()
             .unwrap_or_else(|| panic!("a blank {} closed the window", which.name()));
         let rule = form
@@ -1019,7 +1028,10 @@ fn a_blank_value_is_refused_under_its_own_field_and_writes_nothing() {
         );
         // Everything else exactly as it was typed, cursors included — one
         // keystroke away from being fixed, in the field that was refused.
-        assert_eq!(prompt, RecordPrompt::Open(typed.refused(which, rule)));
+        assert_eq!(
+            windows.record,
+            RecordPrompt::Open(typed.refused(which, rule))
+        );
         assert_eq!(saved(repo.path()), None, "a refusal wrote to disk");
         assert_eq!(manifest, scoped(), "a refusal edited the manifest");
         assert_eq!(app, before, "a refusal moved the view");
@@ -1036,12 +1048,15 @@ fn a_blank_team_key_is_refused_in_the_words_the_field_is_labelled_in() {
         ["", "In Review", "area/billing"],
     );
 
-    let prompt = record_submit(&mut app, &mut manifest, repo.path(), &typed);
+    let windows = record_submit(&mut app, &mut manifest, repo.path(), NO_HOME, &typed);
 
     // Spelled out rather than built from `name()`: the sentence a reader is
     // stopped by is the one place the value is called a key, so it is read
     // here as a reader reads it.
-    let form = prompt.form().expect("a blank team key closed the window");
+    let form = windows
+        .record
+        .form()
+        .expect("a blank team key closed the window");
     assert_eq!(
         form.field(RecordField::TeamKey).rule(),
         Some("a team key cannot be blank"),
@@ -1110,14 +1125,19 @@ fn the_record_submit_writes_the_scope_and_the_record_in_one_save() {
         "Billing",
     );
     assert_eq!(saved(repo.path()), None, "the question wrote to disk");
-    let prompt = record_submit(
+    let windows = record_submit(
         &mut app,
         &mut manifest,
         repo.path(),
+        NO_HOME,
         &filled(&form, [" Billing Squad ", "In Review", "Area/Billing"]),
     );
 
-    assert_eq!(prompt, RecordPrompt::Closed, "the window is answered");
+    assert_eq!(
+        windows.record,
+        RecordPrompt::Closed,
+        "the window is answered"
+    );
     let written = saved(repo.path()).expect("the submit wrote the manifest");
     assert_eq!(
         written, manifest,
@@ -1154,6 +1174,7 @@ fn the_router_finds_the_team_review_state_and_label_the_window_was_given() {
         &mut app,
         &mut manifest,
         repo.path(),
+        NO_HOME,
         &filled(&form, ["Billing", "In Review", "area/billing"]),
     );
 
@@ -1181,9 +1202,9 @@ fn a_name_recorded_since_the_window_opened_is_not_rewritten() {
         ["Someone Else", "Done", "area/other"],
     );
 
-    let prompt = record_submit(&mut app, &mut manifest, repo.path(), &form);
+    let windows = record_submit(&mut app, &mut manifest, repo.path(), NO_HOME, &form);
 
-    assert_eq!(prompt, RecordPrompt::Closed);
+    assert_eq!(windows.record, RecordPrompt::Closed);
     assert_eq!(
         saved(repo.path()),
         None,
@@ -1209,9 +1230,9 @@ fn a_record_that_will_not_save_puts_its_reason_on_the_message_line() {
         ["Billing", "In Review", "area/billing"],
     );
 
-    let prompt = record_submit(&mut app, &mut manifest, repo.path(), &form);
+    let windows = record_submit(&mut app, &mut manifest, repo.path(), NO_HOME, &form);
 
-    assert_eq!(prompt, RecordPrompt::Closed);
+    assert_eq!(windows.record, RecordPrompt::Closed);
     assert_ne!(
         app.message(),
         Some(LAST_KEY),
@@ -1262,7 +1283,15 @@ fn the_whole_path_through_both_windows_is_one_key_at_a_time() {
             let form = record.form().expect("the second window is still up");
             record_edit_for(press(code), form)
         };
-        record = record_edit(&mut app, &mut manifest, repo.path(), &record, edited);
+        record = record_edit(
+            &mut app,
+            &mut manifest,
+            repo.path(),
+            NO_HOME,
+            &record,
+            edited,
+        )
+        .record;
     }
 
     assert_eq!(record, RecordPrompt::Closed, "Enter left the window up");

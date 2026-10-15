@@ -30,7 +30,7 @@ use crate::prompt::{KeyPrompt, RecordPrompt, ScopePrompt};
 use crate::puller::{Claudes, Puller, Raises};
 use crate::pushing::Pushes;
 use crate::resume::resume_press;
-use crate::scoping::{key_edit, record_edit, scope_edit, scope_press};
+use crate::scoping::{Windows, key_edit, record_edit, scope_edit, scope_press};
 use crate::screen::Screen;
 use crate::selection::{Cell, Position, copied_text, position_at};
 use crate::session::{Scope, Watched, load_app, reload, start_watching};
@@ -267,10 +267,12 @@ struct Session<K: Seams> {
     /// down as the other comes up, in the one
     /// [`scoping::Windows`](crate::scoping::Windows) a submit hands back.
     record: RecordPrompt,
-    /// The window that binds one of this machine's stored keys to a scope.
-    /// Starts closed and stays closed: the keys, the frame and the write all
-    /// reach it, and nothing in the session opens it yet — which flow asks, and
-    /// when, is a decision of its own. See [`KeyPrompt`].
+    /// The window that binds one of this machine's stored keys to a scope, put
+    /// up by the record form's submit over the scope it just recorded — a
+    /// created scope nothing on this machine could push into is the thing it is
+    /// there to prevent. Never up at the same time as either window above, for
+    /// [`Session::record`]'s reason and out of the same value. See
+    /// [`KeyPrompt`].
     key: KeyPrompt,
     /// The left button held down over the conversation, if it is: the one piece
     /// of a gesture that outlives the event carrying it, because the rounds
@@ -641,11 +643,14 @@ impl<K: Seams> Session<K> {
                     pulling.as_deref(),
                     now,
                 );
-                // Put down rather than left as it was, though `press_for` only
-                // lets this key through with it already down: a record window
-                // that outlived the press it belonged to would be three values
-                // filed under a scope name from an earlier one.
+                // Both of the later windows put down rather than left as they
+                // were, though `press_for` only lets this key through with all
+                // of them already down: a record window that outlived the press
+                // it belonged to would be three values filed under a scope name
+                // from an earlier one, and a key window that did would bind a
+                // key to it.
                 self.record = RecordPrompt::Closed;
+                self.key = KeyPrompt::Closed;
             }
             Pressed::Scope(edited) => {
                 let before = self.manifest.clone();
@@ -656,29 +661,34 @@ impl<K: Seams> Session<K> {
                     &self.prompt,
                     edited,
                 );
-                self.prompt = windows.scope;
-                self.record = windows.record;
+                self.apply_windows(windows);
                 self.recolour(&before, now);
             }
+            // The home is handed over from the settings this session was loaded
+            // under, as the key arm below hands it over: a submit that saves a
+            // record goes on to ask which key the scope is pushed with, and the
+            // store it lists is this machine's. A session with no home saves the
+            // record and asks nothing.
             Pressed::Record(edited) => {
                 let before = self.manifest.clone();
-                self.record = record_edit(
+                let windows = record_edit(
                     &mut self.app,
                     &mut self.manifest,
                     &self.scope.repo_root,
+                    self.scope.settings.home(),
                     &self.record,
                     edited,
                 );
+                self.apply_windows(windows);
                 self.recolour(&before, now);
             }
             // No `recolour` and no reload beside it: a binding is a fact about
             // this machine written into this checkout's config, so no row of
             // the tree changes colour and the manifest is not opened at all.
             //
-            // Nothing in this loop opens the window, so nothing reaches this
-            // arm yet; it is here because the gate's answer is exhaustive, and
-            // it is the one caller of the pair in [`mod@crate::scoping`] that
-            // writes a binding. The home and the root are the session's own,
+            // The one caller of the pair in [`mod@crate::scoping`] that writes a
+            // binding, reached by the keys pressed at the window a record
+            // submit put up. The home and the root are the session's own,
             // resolved once in `load_app` — and the file a binding lands in is
             // the very file those settings read the sigils out of.
             Pressed::Key(edited) => {
@@ -707,6 +717,17 @@ impl<K: Seams> Session<K> {
         }
 
         Ok(true)
+    }
+
+    // Destructured rather than read field by field, so a fourth window added to
+    // [`Windows`] fails to compile here instead of being silently left down:
+    // every one of them is put up or down together, which is what keeps a submit
+    // from being applied by halves.
+    fn apply_windows(&mut self, windows: Windows) {
+        let Windows { scope, record, key } = windows;
+        self.prompt = scope;
+        self.record = record;
+        self.key = key;
     }
 
     /// A keystroke at the foot of the panel's column, and the one place it is
