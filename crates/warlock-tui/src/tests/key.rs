@@ -2,8 +2,8 @@ use std::fs;
 use std::path::Path;
 
 use warlock_engine::{
-    keys_path, load_key, load_key_binding, load_key_names, load_sigils, save_key, save_key_binding,
-    save_sigils, sigils_path,
+    Manifest, ScopeRecord, keys_path, load_key, load_key_binding, load_key_names, load_sigils,
+    save_key, save_key_binding, save_sigils, sigils_path,
 };
 
 use ratatui::crossterm::event::{KeyCode, KeyModifiers};
@@ -68,9 +68,30 @@ fn listing(home: &Path, json: bool) -> String {
     text(out)
 }
 
+// The scopes `.warlock/scopes.toml` would record, in memory: `bound` refuses a
+// scope no `[[scope]]` record holds, so a binding test that supplied no manifest
+// would be testing that refusal and nothing else.
+fn recording(scopes: &[&str]) -> Manifest {
+    Manifest::new().with_scopes(
+        scopes
+            .iter()
+            .map(|scope| ScopeRecord::new(*scope, "WAR", "In Review", "area/core")),
+    )
+}
+
 fn bind(home: &Path, root: &Path, scope: &str, name: &str) -> (Result<(), Error>, String) {
+    bind_against(home, root, &recording(&["billing", "web"]), scope, name)
+}
+
+fn bind_against(
+    home: &Path,
+    root: &Path,
+    manifest: &Manifest,
+    scope: &str,
+    name: &str,
+) -> (Result<(), Error>, String) {
     let mut out = Vec::new();
-    let outcome = bound(home, root, scope, name, &mut out);
+    let outcome = bound(home, root, manifest, scope, name, &mut out);
     (outcome, text(out))
 }
 
@@ -277,6 +298,82 @@ fn the_json_listing_is_one_object_carrying_names_only() {
         !said.contains(SECRET),
         "the key reached the machine-readable answer too: {said}"
     );
+}
+
+// A binding written under a misspelled scope reads as a binding and covers
+// nothing, so the push it was meant to enable fails later over something else.
+// The recorded names are the answer, and one of them is what was meant.
+#[test]
+fn binding_a_scope_no_record_holds_is_refused_and_the_recorded_scopes_are_named() {
+    let (home, repo) = (a_dir(), a_dir());
+    save_key(home.path(), "acme", SECRET).expect("a store that saves");
+
+    let (outcome, said) = bind_against(
+        home.path(),
+        repo.path(),
+        &recording(&["data-plane", "web"]),
+        "data-palne",
+        "acme",
+    );
+
+    let error = outcome.expect_err("a scope nothing records is refused");
+    assert!(matches!(error, Error::UnrecordedScope { .. }), "{error:?}");
+    let message = error.to_string();
+    assert!(message.contains("`data-palne`"), "{message}");
+    assert!(
+        message.contains("`data-plane`") && message.contains("`web`"),
+        "the refusal does not name the recorded scopes: {message}"
+    );
+    // The binding's cost rather than the pull's: nothing here was going to read
+    // a queue, and the two verbs share the variant.
+    assert!(message.contains("nothing was written"), "{message}");
+    assert!(!message.contains("queue"), "{message}");
+    assert!(
+        said.is_empty(),
+        "a refusal printed a confirmation: {said:?}"
+    );
+
+    // And a repository that records nothing at all is told so in words, rather
+    // than handed the empty list an unchecked manifest would leave.
+    let (outcome, _) = bind_against(
+        home.path(),
+        repo.path(),
+        &Manifest::new(),
+        "data-plane",
+        "acme",
+    );
+    let message = outcome
+        .expect_err("an empty manifest records nothing")
+        .to_string();
+    assert!(
+        message.contains("no `[[scope]]` record at all"),
+        "{message}"
+    );
+}
+
+#[test]
+fn binding_a_scope_no_record_holds_writes_no_byte() {
+    let (home, repo) = (a_dir(), a_dir());
+    save_key(home.path(), "acme", SECRET).expect("a store that saves");
+    let path = sigils_path(home.path(), repo.path());
+    let unrecorded = recording(&["web"]);
+
+    assert!(
+        bind_against(home.path(), repo.path(), &unrecorded, "billing", "acme")
+            .0
+            .is_err()
+    );
+    assert!(!path.exists(), "a missing config was created by a refusal");
+
+    // And an existing one is byte for byte what it was.
+    save_sigils(home.path(), repo.path(), &["billing".to_owned()]).expect("a config that saves");
+    let before = fs::read(&path).expect("the config just written reads");
+    assert!(
+        bind_against(home.path(), repo.path(), &unrecorded, "billing", "acme")
+            .0
+            .is_err()
+    );
+    assert_eq!(fs::read(&path).expect("reads"), before);
 }
 
 #[test]
