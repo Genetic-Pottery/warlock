@@ -19,6 +19,7 @@ use crate::claude::Converses;
 use crate::error::{Error, one_line};
 use crate::inflight::Workers;
 use crate::linear::{FetchedProject, Opens};
+use crate::prompt::KeyPrompt;
 use crate::stubs::{Answering, Boarding, Gate, Scripted};
 use crate::submission::ToDraft;
 
@@ -160,11 +161,18 @@ fn notes(app: &App) -> Vec<String> {
         .collect()
 }
 
-// A `/draft` pressed at the value the loop holds. The home is the value's own,
-// handed to it when it was built, which is what keeps every test here off the
-// machine's.
+// A `/draft` pressed at the value the loop holds, over a scope with a key
+// bound: every test that goes through here is one of those, and the key window
+// that comes back is the assertion that none of them was asked for a binding
+// instead. The home is the value's own, handed to it when it was built, which is
+// what keeps every test here off the machine's.
 fn press<O: Opens, A: Converses>(app: &mut App, cutter: &mut Cutter<O, A>, repo: &Path) {
-    cutter.press(app, &a_manifest(), repo, &drafting(), None, now());
+    let prompt = cutter.press(app, &a_manifest(), repo, &drafting(), None, now());
+    assert_eq!(
+        prompt,
+        KeyPrompt::Closed,
+        "a bound scope was asked for a binding"
+    );
 }
 
 // The rounds a helper may drive before it gives up: a count for inline workers,
@@ -404,12 +412,13 @@ fn a_project_that_is_not_planned_is_one_line_with_nothing_torn_down() {
 fn a_machine_with_no_home_is_refused_before_anything_is_read() {
     // The one refusal this value answers itself, in `Standing::home`'s own
     // words: with no home there are no sigils, no binding and no key store, so
-    // there is no board to resolve and nothing to read the record for.
+    // there is nothing to ask which key this scope files with, no board to
+    // resolve and nothing to read the record for.
     let repo = a_repository();
     let mut cutter = Cutter::with_client(Boarding::unopened(), None, unasked(), unasked());
     let mut app = App::default();
 
-    cutter.press(
+    let prompt = cutter.press(
         &mut app,
         &a_manifest(),
         repo.path(),
@@ -420,6 +429,11 @@ fn a_machine_with_no_home_is_refused_before_anything_is_read() {
 
     assert_eq!(notes(&app), vec![refusal(&Error::NoHome)]);
     assert!(!cutter.fetching(), "a refusal started a draft");
+    assert_eq!(
+        prompt,
+        KeyPrompt::Closed,
+        "a machine with no home was asked for a binding"
+    );
 }
 
 #[test]
@@ -543,6 +557,272 @@ fn dropping_the_session_ends_the_cut_without_waiting_for_it() {
     // Opened afterwards so the worker finishes and the suite leaves no thread
     // parked: a gate nobody opens is a thread held until the binary exits.
     gate.open();
+}
+
+// The question asked ahead of the fetch, over a temporary repository and a
+// temporary home every time: the binding this checkout holds for the scope typed
+// is read out of the config under that home and nowhere else. Ported from
+// `tests/pushing.rs`, whose `/push` asks the same question in the same place —
+// the difference being what the answer leads to, which here is a worker.
+mod binding {
+    use std::path::Path;
+
+    use tempfile::TempDir;
+    use warlock_engine::{load_key_binding, save_key, save_key_binding, save_sigils};
+
+    use super::{
+        App, Boarding, Cutter, KEY_NAME, KeyPrompt, NAME, NOT_A_KEY, PREPARED, SCOPE, SLUG,
+        Scripted, TEAM, a_dir, a_manifest, a_project, a_repository, drafting, landing, notes, now,
+        unasked,
+    };
+    use crate::confirm::Answer;
+    use crate::error::{Error, one_line};
+    use crate::linear::Listing;
+    use crate::submission::ToDraft;
+
+    // A home with the sigil and a key in the store, and no binding for any
+    // scope: the checkout somebody has just cloned, which is the road this
+    // question exists for.
+    fn an_unbound_home(root: &Path) -> TempDir {
+        let home = a_dir();
+        save_sigils(home.path(), root, &[SCOPE.to_owned()]).expect("a config that writes");
+        save_key(home.path(), KEY_NAME, NOT_A_KEY).expect("a key store that writes");
+        home
+    }
+
+    // The value the loop holds over the board handed in, with workers inline and
+    // a model no slice may reach: every test here is decided before a session is
+    // opened.
+    fn cutter(linear: Boarding, home: &Path) -> Cutter<Boarding, Scripted> {
+        Cutter::with_client(linear, Some(home.to_path_buf()), unasked(), unasked()).inline()
+    }
+
+    // `/draft <scope> [slug]` pressed, and the key window it came to.
+    fn asking(
+        app: &mut App,
+        cutter: &mut Cutter<Boarding, Scripted>,
+        repo: &Path,
+        drafting: &ToDraft,
+    ) -> KeyPrompt {
+        cutter.press(app, &a_manifest(), repo, drafting, None, now())
+    }
+
+    // `/draft <scope>`, with no project named: the other road to the worker, and
+    // it resolves the key as well.
+    fn listing() -> ToDraft {
+        ToDraft {
+            scope: SCOPE.to_owned(),
+            project: None,
+        }
+    }
+
+    // The name `SCOPE` is bound to in this checkout's config, which the config
+    // holds because every home here writes a sigil into it: unbound is `None`,
+    // and a config that will not read is this test's own failure.
+    fn bound(home: &Path, repo: &Path) -> Option<String> {
+        load_key_binding(home, repo, SCOPE).expect("the config this test wrote still reads")
+    }
+
+    #[test]
+    fn a_draft_of_a_scope_bound_to_nothing_asks_for_the_key_and_reads_nothing() {
+        let repo = a_repository();
+        let home = an_unbound_home(repo.path());
+        let mut cutter = cutter(Boarding::unopened(), home.path());
+        let mut app = App::default();
+
+        let prompt = asking(&mut app, &mut cutter, repo.path(), &drafting());
+
+        let choice = prompt.choice().expect("the key window is up");
+        assert_eq!(
+            choice.scope(),
+            SCOPE,
+            "the window names a scope the command never did"
+        );
+        assert_eq!(
+            choice.names(),
+            [KEY_NAME],
+            "the rows are not this home's key store"
+        );
+        assert!(!cutter.fetching(), "the question started a worker");
+        assert!(
+            !cutter.confirm().is_open(),
+            "the question put the cut dialog up as well"
+        );
+        // No reading line either: nothing is being read, so saying so would be
+        // a line about a request that was never made.
+        assert!(notes(&app).is_empty(), "{:?}", notes(&app));
+        // The board panics if it is opened, so nothing being requested is the
+        // stand-in's own assertion; this is the other half of it — nothing was
+        // read, so there is no key in anything the flow holds.
+        assert!(
+            !format!("{cutter:?}").contains(NOT_A_KEY),
+            "the parked draft carries a key value"
+        );
+    }
+
+    #[test]
+    fn a_draft_with_only_a_scope_is_asked_the_same_question() {
+        // The listing road resolves the key as well, so it is asked in the same
+        // place and parks the same way — with no slug to park.
+        let repo = a_repository();
+        let home = an_unbound_home(repo.path());
+        let mut cutter = cutter(Boarding::unopened(), home.path());
+        let mut app = App::default();
+
+        let prompt = asking(&mut app, &mut cutter, repo.path(), &listing());
+
+        let choice = prompt.choice().expect("the key window is up");
+        assert_eq!(choice.scope(), SCOPE);
+        assert!(!cutter.fetching(), "the question started a worker");
+        assert!(notes(&app).is_empty(), "{:?}", notes(&app));
+    }
+
+    #[test]
+    fn the_binding_written_reads_the_project_back_and_puts_the_dialog_up() {
+        // What the key window's Enter does, in the engine's own call, and then
+        // the `/draft` picked up behind it: the reading line, the fetch, and the
+        // dialog over the project the command named on the round the board
+        // answered.
+        let repo = a_repository();
+        let home = an_unbound_home(repo.path());
+        let linear = a_project();
+        let mut cutter = cutter(linear.clone(), home.path());
+        let mut app = App::default();
+        let prompt = asking(&mut app, &mut cutter, repo.path(), &drafting());
+        assert!(prompt.is_open(), "{:?}", notes(&app));
+        save_key_binding(home.path(), repo.path(), SCOPE, KEY_NAME).expect("a binding that writes");
+
+        cutter.bound(&mut app, &a_manifest(), repo.path(), now());
+
+        let said = notes(&app);
+        assert!(
+            said.first().is_some_and(|line| line.contains(SLUG)),
+            "the pick-up did not say what it was reading: {said:?}"
+        );
+        assert!(cutter.fetching(), "the binding started no worker");
+        landing(&mut app, &mut cutter);
+        let cutting = cutter
+            .confirm()
+            .cutting()
+            .expect("the dialog the binding led to");
+        assert_eq!(cutting.project(), NAME);
+        assert_eq!(cutting.slices(), 3);
+        assert_eq!(cutting.team(), TEAM);
+        // The key by name, and nowhere for its bytes.
+        assert_eq!(cutting.key(), KEY_NAME);
+        assert_eq!(cutting.answer(), Answer::No, "the dialog opened on Yes");
+        assert_eq!(linear.requests(), PREPARED, "the pick-up read twice");
+        for line in notes(&app) {
+            assert!(!line.contains(NOT_A_KEY), "{line} carries the key");
+        }
+
+        // And the `/draft` is picked up once: the question is not waiting to be
+        // asked again, so a second Enter at a window somebody else's road put
+        // up reads nothing.
+        cutter.cancelled();
+        cutter.bound(&mut app, &a_manifest(), repo.path(), now());
+
+        assert!(!cutter.fetching(), "the draft was read back twice");
+        assert!(!cutter.confirm().is_open(), "a second dialog came up");
+    }
+
+    #[test]
+    fn the_binding_written_lists_the_projects_the_slugless_draft_asked_for() {
+        // The same pick-up on the other road: what the command named is what is
+        // read, so a `/draft` with no slug comes back a listing and no dialog.
+        let repo = a_repository();
+        let home = an_unbound_home(repo.path());
+        let linear = Boarding::filing("").listing(Listing::new(&[(SLUG, NAME)]));
+        let mut cutter = cutter(linear, home.path());
+        let mut app = App::default();
+        let prompt = asking(&mut app, &mut cutter, repo.path(), &listing());
+        assert!(prompt.is_open(), "{:?}", notes(&app));
+        save_key_binding(home.path(), repo.path(), SCOPE, KEY_NAME).expect("a binding that writes");
+
+        cutter.bound(&mut app, &a_manifest(), repo.path(), now());
+        landing(&mut app, &mut cutter);
+
+        let said = notes(&app);
+        assert!(
+            said.iter()
+                .any(|line| line.contains(SLUG) && line.contains(NAME)),
+            "the planned projects were not listed: {said:?}"
+        );
+        assert!(
+            !cutter.confirm().is_open(),
+            "a listing put the dialog up: {said:?}"
+        );
+    }
+
+    #[test]
+    fn an_abandoned_question_puts_the_whole_draft_down_and_writes_no_binding() {
+        // Esc on the key window: the window is the one that writes, and it never
+        // opens the config, so what is asserted here is the other half —
+        // nothing is read, no dialog opens and the scope is still bound to
+        // nothing.
+        let repo = a_repository();
+        let home = an_unbound_home(repo.path());
+        let mut cutter = cutter(Boarding::unopened(), home.path());
+        let mut app = App::default();
+        let prompt = asking(&mut app, &mut cutter, repo.path(), &drafting());
+        assert!(prompt.is_open(), "{:?}", notes(&app));
+
+        cutter.put_down();
+        // The press that answers the window is answered by the flow either way,
+        // so an Esc followed by an Enter at a later window cannot pick this
+        // draft up.
+        cutter.bound(&mut app, &a_manifest(), repo.path(), now());
+
+        assert!(!cutter.fetching(), "something was read");
+        assert!(!cutter.confirm().is_open(), "a dialog came up");
+        assert!(!cutter.drafting(), "a run started");
+        assert_eq!(
+            bound(home.path(), repo.path()),
+            None,
+            "the scope was bound by an abandoned question"
+        );
+        assert!(notes(&app).is_empty(), "{:?}", notes(&app));
+    }
+
+    #[test]
+    fn a_checkout_with_no_config_at_all_is_one_line_on_the_thread_and_no_question() {
+        // The other answer `load_key_binding` has, and the reason the question
+        // is only asked on `Ok(None)`: there is no config to write a binding
+        // into, so the engine's own sentence about that goes on the thread and
+        // nothing comes up.
+        let repo = a_repository();
+        let home = a_dir();
+        let mut cutter = cutter(Boarding::unopened(), home.path());
+        let mut app = App::default();
+
+        let prompt = asking(&mut app, &mut cutter, repo.path(), &drafting());
+
+        let source = load_key_binding(home.path(), repo.path(), SCOPE)
+            .expect_err("a checkout nobody configured");
+        assert_eq!(notes(&app), vec![one_line(Error::Sigils { source })]);
+        assert_eq!(prompt, KeyPrompt::Closed, "a question was asked anyway");
+        assert!(!cutter.fetching(), "a refusal started a worker");
+    }
+
+    #[test]
+    fn a_scope_with_a_key_bound_is_read_back_with_no_question_at_all() {
+        // What every other test in this file drives, asserted once here: a
+        // binding already written costs the command nothing — no window, and no
+        // round trip it would not have made anyway.
+        let repo = a_repository();
+        let home = an_unbound_home(repo.path());
+        save_key_binding(home.path(), repo.path(), SCOPE, KEY_NAME).expect("a binding that writes");
+        let linear = a_project();
+        let mut cutter = cutter(linear.clone(), home.path());
+        let mut app = App::default();
+
+        let prompt = asking(&mut app, &mut cutter, repo.path(), &drafting());
+        landing(&mut app, &mut cutter);
+
+        assert_eq!(prompt, KeyPrompt::Closed, "a bound scope was asked");
+        assert!(cutter.confirm().is_open(), "the dialog never came up");
+        assert_eq!(linear.requests(), PREPARED, "the draft read more than once");
+    }
 }
 
 // The question between the fetch and the run, asked of the value the loop
@@ -2260,7 +2540,7 @@ fn a_pull_in_flight_turns_a_draft_down_before_anything_is_read() {
     let mut cutter = Cutter::with_client(Boarding::unopened(), None, unasked(), unasked());
     let mut app = App::default();
 
-    cutter.press(
+    let prompt = cutter.press(
         &mut app,
         &a_manifest(),
         repo.path(),
@@ -2274,6 +2554,11 @@ fn a_pull_in_flight_turns_a_draft_down_before_anything_is_read() {
         ["`WAR-140` is being pulled; this `/draft` cut nothing"]
     );
     assert!(!cutter.fetching(), "a refused draft started a fetch");
+    assert_eq!(
+        prompt,
+        KeyPrompt::Closed,
+        "a draft refused for a pull asked for a binding"
+    );
 }
 
 fn drafting() -> ToDraft {

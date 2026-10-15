@@ -51,6 +51,18 @@
 //! A `/draft` with a scope and no slug reads nothing but the list of planned
 //! projects, and notes it on the thread one line each: picking one is the
 //! reader's, and the next `/draft` names it by slug.
+//!
+//! One question comes before the worker, for [`mod@crate::pushing`]'s reason
+//! and ported from it. Both roads the worker takes resolve the key — `listing`
+//! without a slug, [`prepare`] with one — so a scope this checkout binds to
+//! nothing is a request that can only come back refused, a round trip later,
+//! sending the reader to a shell to find `warlock key use`. So the binding is
+//! asked for first, between the home and the worker: the key window goes up
+//! over the names this machine holds, the `/draft` waits in [`Parked`], and that
+//! answer decides whether there is a project to read at all. The window is the
+//! one the `s` key puts up, held by the session — nothing here keeps a second
+//! copy of it — and nothing on the road reads a key: the question is about
+//! names, and the binding is written by [`mod@crate::scoping`].
 
 use std::io;
 use std::mem;
@@ -59,7 +71,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use warlock_engine::drafting::Draft;
-use warlock_engine::{Manifest, agent};
+use warlock_engine::{Manifest, agent, load_key_binding};
 
 use crate::app::{App, Focus};
 use crate::brief::Slice;
@@ -83,6 +95,7 @@ use crate::planned::{
     drafts_document, feedback_line, listing, listing_lines, named, not_drafted, prepare, replied,
     settled_line, skipped_line, stopped_line, titles, unedited_line, unproposed_line,
 };
+use crate::prompt::KeyPrompt;
 use crate::standing::Standing;
 use crate::submission::ToDraft;
 
@@ -173,6 +186,10 @@ pub(crate) struct Cutter<O: Opens, A: Converses> {
     // answer, and not the panel's chat, which has heard the reader's talk and
     // none of the brief. See [`ChatAgent::proposing`].
     proposer: A,
+    /// The `/draft` waiting on a binding, if one is. Never more than one: a key
+    /// window takes every keystroke while it is up, so no second `/draft` can
+    /// be typed behind this one.
+    parked: Option<Parked>,
     fetching: Option<Fetching>,
     // The question between the fetch and the run, held here rather than beside
     // the session's other windows because it is a state of the cut and not of
@@ -195,6 +212,22 @@ pub(crate) struct Cutter<O: Opens, A: Converses> {
     // quitting leaves a worker that finishes into nowhere.
     skipping: Vec<Once<Option<String>>>,
     workers: Workers,
+}
+
+/// A `/draft` waiting on a binding: the scope it named and the project it
+/// named, if it named one, as that command spelled them.
+///
+/// Parked rather than read again when the window is answered, for the reason the
+/// dialog holds its [`Planned`]: a second reading of the command could name
+/// another scope, or another project, from the one the question was asked about.
+/// And those two names only — no key, no binding and nothing off the store —
+/// because the window the reader is looking at is what holds the choice.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Parked {
+    scope: String,
+    // `None` lists the planned projects rather than reading one, exactly as
+    // [`Work::project`] does.
+    project: Option<String>,
 }
 
 // The channel, and the handle that is the whole of how a cut is stopped.
@@ -361,6 +394,7 @@ impl<O: Opens, A: Converses> Cutter<O, A> {
             home,
             agent,
             proposer,
+            parked: None,
             fetching: None,
             confirm: CutConfirm::Closed,
             ready: None,
@@ -407,8 +441,15 @@ impl<O: Opens, A: Converses> Cutter<O, A> {
     /// flight is answered before anything else, because a run editing this
     /// working tree is the loudest fact about the keystroke; a cut already
     /// running comes next, because a machine with no home is a fact about a
-    /// request that is not going to be made anyway. Everything past them is the
-    /// worker's, so this returns having read nothing but the clock.
+    /// request that is not going to be made anyway. Past them one question is
+    /// asked on this thread — the binding, read out of the config under the
+    /// home — and everything past that is the worker's, so this returns having
+    /// read nothing else but the clock.
+    ///
+    /// What comes back is the key window the session is to put up, which is
+    /// [`KeyPrompt::Closed`] on every road but the one an unbound scope takes:
+    /// the session holds that window, and this value holds the `/draft` waiting
+    /// behind it.
     ///
     /// `pulling` is the line naming the pull, or `None` with none — handed in
     /// rather than read here, because the pull is not this type's to ask about.
@@ -420,36 +461,159 @@ impl<O: Opens, A: Converses> Cutter<O, A> {
         drafting: &ToDraft,
         pulling: Option<&str>,
         now: Instant,
-    ) {
+    ) -> KeyPrompt {
+        // Whatever an earlier `/draft` parked goes here: this command says which
+        // scope and which project the next question is about. Nothing can be
+        // parked in practice — a key window up takes every keystroke, so no
+        // `/draft` reaches the composer behind one — and it is dropped anyway,
+        // because a cut that outlived its own window would be read back by an
+        // Enter meant for another one.
+        self.parked = None;
         let ToDraft { scope, project } = drafting;
         let project = project.as_deref();
         if let Some(pulling) = pulling {
             app.panel_mut().note(refused(pulling), now);
-            return;
+            return KeyPrompt::Closed;
         }
         if self.running() {
             app.panel_mut().note(ALREADY_CUTTING, now);
-            return;
+            return KeyPrompt::Closed;
         }
         // `Standing::home`'s own sentence, asked of the error that words it
         // rather than written again here: the session holds the answer to that
         // reading and not the failure, so this is where the failure is said.
         let Some(home) = self.home.clone() else {
             app.panel_mut().note(one_line(Error::NoHome), now);
+            return KeyPrompt::Closed;
+        };
+
+        // After the home, which is where the config sits, and before the
+        // worker, which is where both roads resolve the key: a scope bound to
+        // nothing gets the question rather than a refusal a round trip later.
+        match load_key_binding(&home, repo_root, scope) {
+            // Bound, which is every `/draft` that worked before this question
+            // existed: on to the worker, and the dialog over what it reads
+            // back. The name is not kept — what the dialog names comes back
+            // with the project, and this read is only whether there is one.
+            Ok(Some(_)) => {}
+            // Bound to nothing, so nothing on this machine could read this
+            // scope's board: the window, and the cut parked behind it. No
+            // reading line either, because nothing is being read.
+            Ok(None) => return self.binding(app, &home, scope, project, now),
+            // A checkout nobody has configured, and a config that will not
+            // read. The engine's own sentence on the thread, as every other
+            // `/draft` refusal is, and no window: the answer would be written
+            // into the very file that could not be read.
+            Err(source) => {
+                app.panel_mut()
+                    .note(one_line(Error::Sigils { source }), now);
+                return KeyPrompt::Closed;
+            }
+        }
+
+        self.fetch(
+            app,
+            Work::over(manifest, repo_root, home, scope, project),
+            now,
+        );
+        KeyPrompt::Closed
+    }
+
+    /// The parked `/draft` picked up over the binding the key window has just
+    /// written: straight to the worker, which is the road a `/draft` with a key
+    /// bound takes on the round it is typed — the reading line on the thread,
+    /// the fetch on a worker, and the dialog on the round the board answers.
+    ///
+    /// Taken rather than read and then cleared, so one question leads to one
+    /// fetch and no later Enter at the key window — from the `s` key's road, or
+    /// from a session with no home — can pick this cut up a second time. Does
+    /// nothing at all when no `/draft` is waiting, which is every other way
+    /// that window is answered.
+    ///
+    /// A binding the submit could not write is not asked about again: the worker
+    /// refuses an unbound scope in the engine's own words, and that line on the
+    /// thread is the answer rather than a second window.
+    pub(crate) fn bound(
+        &mut self,
+        app: &mut App,
+        manifest: &Manifest,
+        repo_root: &Path,
+        now: Instant,
+    ) {
+        let Some(parked) = self.parked.take() else {
+            return;
+        };
+        // The home this value was built with, as the press that parked the cut
+        // read it: a home cannot move under a running warlock, and this is the
+        // one it was resolved against.
+        let Some(home) = self.home.clone() else {
+            app.panel_mut().note(one_line(Error::NoHome), now);
             return;
         };
 
-        let work = Work {
-            manifest: manifest.clone(),
-            root: repo_root.to_path_buf(),
-            home,
-            scope: scope.to_owned(),
-            project: project.map(ToOwned::to_owned),
-        };
-        // Before the worker starts, so the thread says what is being read back
-        // from the instant it is: the answer is a request away and a reader who
-        // has just typed the command is looking at the conversation.
-        app.panel_mut().note(reading_line(scope, project), now);
+        self.fetch(
+            app,
+            Work::over(
+                manifest,
+                repo_root,
+                home,
+                &parked.scope,
+                parked.project.as_deref(),
+            ),
+            now,
+        );
+    }
+
+    /// The key window abandoned, and the `/draft` that was waiting on it with
+    /// it: nothing is read, no worker starts and no dialog opens.
+    ///
+    /// The binding is the window's own to not write — Esc never opens the
+    /// config — so this is the whole of what an Esc costs on this side.
+    pub(crate) fn put_down(&mut self) {
+        self.parked = None;
+    }
+
+    // The key window over this machine's key names, with the cut parked behind
+    // it.
+    //
+    // Names and no values, which is [`KeyPrompt::open`]'s whole shape: it lists
+    // the store through `load_key_names`, exactly as the `s` key's own road
+    // does, and there is no field on it a value could sit in.
+    fn binding(
+        &mut self,
+        app: &mut App,
+        home: &Path,
+        scope: &str,
+        project: Option<&str>,
+        now: Instant,
+    ) -> KeyPrompt {
+        match KeyPrompt::open(home, scope) {
+            Ok(prompt) => {
+                self.parked = Some(Parked {
+                    scope: scope.to_owned(),
+                    project: project.map(ToOwned::to_owned),
+                });
+                prompt
+            }
+            // A store that will not read, in the engine's own sentence on the
+            // thread: there is nothing to pick from, so no window goes up and
+            // no cut waits for one.
+            Err(source) => {
+                app.panel_mut().note(one_line(Error::Keys { source }), now);
+                KeyPrompt::Closed
+            }
+        }
+    }
+
+    // Where both roads to a fetch end: the `/draft` typed over a scope with a
+    // key bound, and the one picked up behind the key window. The line goes on
+    // the thread before the worker starts, so it says what is being read back
+    // from the instant it is — the answer is a request away and a reader who has
+    // just typed the command, or just bound the scope, is looking at the
+    // conversation.
+    fn fetch(&mut self, app: &mut App, work: Work, now: Instant) {
+        app.panel_mut()
+            .note(reading_line(&work.scope, work.project.as_deref()), now);
         let cancel = CancelGuard::new();
         self.fetching = Some(Fetching {
             events: spawn_fetch(self.workers, self.open.clone(), work, cancel.handle()),
@@ -1296,6 +1460,27 @@ struct Work {
     scope: String,
     // `None` lists the planned projects rather than reading one.
     project: Option<String>,
+}
+
+impl Work {
+    // Built on the event loop's thread, by either road to the fetch: the names
+    // the command gave, the repository they are read against, and the home the
+    // board is resolved under.
+    fn over(
+        manifest: &Manifest,
+        root: &Path,
+        home: PathBuf,
+        scope: &str,
+        project: Option<&str>,
+    ) -> Self {
+        Self {
+            manifest: manifest.clone(),
+            root: root.to_path_buf(),
+            home,
+            scope: scope.to_owned(),
+            project: project.map(ToOwned::to_owned),
+        }
+    }
 }
 
 // One slice's drafts handed to a worker to be filed. No cancel handle, for
