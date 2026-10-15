@@ -429,8 +429,8 @@ fn denial(sentence: &str) -> Value {
 //
 // The repository's two facts lead — what covers the path and where work under
 // it is filed are true for anyone who clones this — then what this machine
-// holds, then the verdict where those two meet, then the key this checkout is
-// bound to.
+// holds, then the verdict where those two meet, then the key the covering scope
+// is bound to here.
 //
 // Every line is composed from the same `Checked` the object is rendered from,
 // with no lookup of its own, which is what keeps `prose` and `object` two
@@ -448,6 +448,7 @@ fn prose(checked: &Checked) -> String {
         sigils_line(&checked.sigils, checked.config.as_deref()),
         verdict_line(checked.scope.as_deref(), checked.opens),
         key_line(
+            checked.scope.as_deref(),
             checked.key.as_deref(),
             checked.key_found,
             checked.team.as_deref(),
@@ -520,27 +521,47 @@ fn verdict_line(scope: Option<&str>, opens: bool) -> String {
 // The name a key is stored under and never a key: nothing in this module holds
 // a value, so there is none for a format string to reach.
 //
-// The two ways of having no usable key are fixed in different files by
-// different commands, so they get different lines rather than one line hedging
-// between them — `warlock key use` writes the checkout's binding, `warlock key
-// add` writes the machine's store, and sending somebody to the wrong one costs
-// them a read of both.
+// Both unusable cases name the covering scope and spell `warlock key use` with
+// it, because a binding is per scope and `route::Error::Unbound` already
+// refuses that way: a sentence about "this checkout" would send somebody to a
+// config that can hold a key for every other scope in the repository and still
+// be missing this one, and to a command spelled without the argument it takes.
+// The scope is `Checked`'s own field and not a lookup here, which is what keeps
+// this line and the object two renderings of one answer.
+//
+// The two ways of having no usable key are still different lines rather than
+// one line hedging between them, because they are fixed in different files:
+// `warlock key use` writes the checkout's binding, `warlock key add` writes the
+// machine's store, and sending somebody to the wrong one costs them a read of
+// both. Nothing bound ends at the binding, since a machine that already stores
+// a name is one command from working; a dangling name leads with the store,
+// which is where that name is missing.
+//
+// A path nothing scopes has no scope to name, so its line carries no fix at
+// all: a `warlock key use` spelled without a scope is a command that will not
+// run, and the scope to draw first is `warlock scope add` on the route line
+// above.
 //
 // A bound name that resolves is said together with the team it would file to,
 // because that pairing is the question being asked: "where does work here go,
 // and can this checkout file it". Naming the key alone would answer half of it
 // on a line that looks like the whole answer. With no record there is no team
 // to pair it with, and the line says only what is true.
-fn key_line(key: Option<&str>, found: bool, team: Option<&str>) -> String {
-    match (key, found) {
-        (None, _) => "no key is bound to this checkout: `warlock key use <name>` binds a name \
-             this machine stores, and `warlock key add <name>` stores a new one"
+fn key_line(scope: Option<&str>, key: Option<&str>, found: bool, team: Option<&str>) -> String {
+    match (scope, key, found) {
+        (None, ..) => "a key is bound to a scope, so there is none to report and none to bind \
+             until a scope covers this path"
             .to_owned(),
-        (Some(key), false) => format!(
-            "the key `{key}` is bound here and this machine has not stored it: \
-             `warlock key add {key}` stores it, `warlock key use <name>` binds another"
+        (Some(scope), None, _) => format!(
+            "no key is bound to the scope `{scope}`: `warlock key add <name>` stores a new key \
+             on this machine, and a name it already stores is bound with `warlock key use \
+             {scope} <name>`"
         ),
-        (Some(key), true) => match team {
+        (Some(scope), Some(key), false) => format!(
+            "the key `{key}` is bound to the scope `{scope}` and this machine has not stored it: \
+             `warlock key add {key}` stores it, `warlock key use {scope} <name>` binds another"
+        ),
+        (Some(_), Some(key), true) => match team {
             Some(team) => {
                 format!("filing to `{team}` would use the key `{key}`, which this machine stores")
             }
