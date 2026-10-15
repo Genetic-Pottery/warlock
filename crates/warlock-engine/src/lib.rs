@@ -81,6 +81,7 @@ pub use sigils::project_directory;
 pub use sigils::save_base_branch;
 pub use sigils::save_key_binding;
 pub use sigils::save_sigils;
+pub use sigils::scopes_bound_to;
 pub use sigils::sigils_path;
 pub use tree::DepthFirst;
 pub use tree::Node;

@@ -200,14 +200,14 @@ fn branch_use_sets_the_base_and_clear_goes_back_to_the_remotes_default() {
 #[test]
 fn setting_the_base_keeps_the_key_binding() {
     let (home, root) = (a_dir(), a_dir());
-    save_key_binding(home.path(), root.path(), "work").expect("binds a key");
+    save_key_binding(home.path(), root.path(), "data-plane", "work").expect("binds a key");
 
     settings(home.path(), root.path())
         .branch(&Branching::Use("develop".to_owned()), None)
         .expect("sets the base");
 
     assert_eq!(
-        load_key_binding(home.path(), root.path())
+        load_key_binding(home.path(), root.path(), "data-plane")
             .expect("reads")
             .as_deref(),
         Some("work")

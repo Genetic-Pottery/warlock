@@ -278,10 +278,18 @@ fn a_home(root: &Path) -> TempDir {
 // The same machine holding whichever sigils a test names, which is how a
 // checkout standing at two boards is built: that is the ambiguity `--scope`
 // settles, and it is a fact about the home rather than about the repository.
+//
+// Each of those scopes is bound, to the one name, because the config holds a
+// key name per scope: a checkout standing at two boards that had bound only
+// one of them would refuse the second cut for a reason no test here is about.
+// Every sigil these tests name is a scope name, so the two lists are the same
+// words.
 fn a_home_holding(root: &Path, sigils: &[&str]) -> TempDir {
     let home = a_dir();
     holding(home.path(), root, sigils);
-    save_key_binding(home.path(), root, KEY_NAME).expect("a binding that writes");
+    for scope in sigils {
+        save_key_binding(home.path(), root, scope, KEY_NAME).expect("a binding that writes");
+    }
     save_key(home.path(), KEY_NAME, NOT_A_KEY).expect("a key store that writes");
     home
 }

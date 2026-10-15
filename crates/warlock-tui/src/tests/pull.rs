@@ -66,12 +66,22 @@ fn scoped(directory: &str, scope: &str) -> ScopedDirectory {
     ScopedDirectory::new(".", directory, scope).expect("a relative module path is inside the root")
 }
 
-/// The home of a machine holding the scope's sigil, with a name bound and a key
-/// stored under it: everything a pull needs, under a directory of this test's own.
+/// The home of a machine holding the scope's sigil, with a name bound for each
+/// of the manifest's two recorded scopes and a key stored under it: everything a
+/// pull needs, under a directory of this test's own.
+///
+/// Both scopes are bound, to the one name, because the config holds a key name
+/// per scope and the sigil wildcard gains no meaning for keys: the test that
+/// pulls under `CLOSED` on a wildcard machine is about which sigils open a
+/// scope, and leaving that scope unbound would refuse it for a reason that test
+/// is not about. Only one sigil is held, because that is the fact those tests
+/// vary.
 fn a_home(root: &Path) -> TempDir {
     let home = a_dir();
     holding(home.path(), root, &[SCOPE]);
-    save_key_binding(home.path(), root, KEY_NAME).expect("a binding that writes");
+    for scope in [SCOPE, CLOSED] {
+        save_key_binding(home.path(), root, scope, KEY_NAME).expect("a binding that writes");
+    }
     save_key(home.path(), KEY_NAME, NOT_A_KEY).expect("a key store that writes");
     home
 }

@@ -30,8 +30,11 @@ use crate::sigils::{self, held_sigils};
 /// ]);
 ///
 /// save_sigils(home.path(), root.path(), &["data-plane".to_owned()])?;
-/// save_key_binding(home.path(), root.path(), "work")?;
+/// save_key_binding(home.path(), root.path(), "data-plane", "work")?;
 /// save_key(home.path(), "work", "lin_api_example")?;
+/// // The other scope files to another workspace, under a key of its own.
+/// save_key_binding(home.path(), root.path(), "web", "personal")?;
+/// save_key(home.path(), "personal", "lin_api_other")?;
 ///
 /// // One sigil, one record of that name: one board, and no question to ask.
 /// let target = resolve_filing(&manifest, root.path(), home.path(), None)?;
@@ -52,6 +55,7 @@ use crate::sigils::{self, held_sigils};
 /// // A name picks one of them, and a name that is not a candidate is refused.
 /// let target = resolve_filing(&manifest, root.path(), home.path(), Some("web"))?;
 /// assert_eq!(target.record().team_key(), "WEB");
+/// assert_eq!(target.key(), "personal");
 /// assert!(matches!(
 ///     resolve_filing(&manifest, root.path(), home.path(), Some("billing")),
 ///     Err(filing::Error::Unknown { .. })
@@ -117,7 +121,11 @@ pub fn resolve_filing<'m>(
         None => candidates[0],
     };
 
-    let key = bound_key(home, root).map_err(|source| Error::Key { source })?;
+    // The record's own name, so the key resolved is the key of the board this
+    // is about to file to: a repository whose scopes sit in two Linear
+    // workspaces has two bindings, and picking the board and then resolving
+    // some other scope's key is the push that lands in the wrong workspace.
+    let key = bound_key(home, root, record.name()).map_err(|source| Error::Key { source })?;
 
     // `load_key` rather than `load_key_names`, unlike everything else that asks
     // this question: a caller filing to a board needs the value, and fetching it
@@ -134,6 +142,7 @@ pub fn resolve_filing<'m>(
         // of one thing for a case nobody will reproduce.
         .ok_or_else(|| Error::Key {
             source: route::Error::Dangling {
+                scope: record.name().to_owned(),
                 key: key.clone(),
                 path: keys_path(home),
             },

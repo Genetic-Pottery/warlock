@@ -1923,7 +1923,7 @@ mod filing {
     fn a_home(root: &Path) -> TempDir {
         let home = tempfile::tempdir().expect("a temporary directory");
         save_sigils(home.path(), root, &[SCOPE.to_owned()]).expect("a config that writes");
-        save_key_binding(home.path(), root, KEY_NAME).expect("a binding that writes");
+        save_key_binding(home.path(), root, SCOPE, KEY_NAME).expect("a binding that writes");
         save_key(home.path(), KEY_NAME, NOT_A_KEY).expect("a key store that writes");
         home
     }
@@ -2395,7 +2395,7 @@ mod cutting {
     fn a_home(root: &Path) -> TempDir {
         let home = tempfile::tempdir().expect("a temporary directory");
         save_sigils(home.path(), root, &[SCOPE.to_owned()]).expect("a config that writes");
-        save_key_binding(home.path(), root, KEY_NAME).expect("a binding that writes");
+        save_key_binding(home.path(), root, SCOPE, KEY_NAME).expect("a binding that writes");
         save_key(home.path(), KEY_NAME, NOT_A_KEY).expect("a key store that writes");
         home
     }
@@ -3068,7 +3068,7 @@ mod pulling {
     fn a_home(root: &Path) -> TempDir {
         let home = tempfile::tempdir().expect("a temporary directory");
         save_sigils(home.path(), root, &[SCOPE.to_owned()]).expect("a config that writes");
-        save_key_binding(home.path(), root, KEY_NAME).expect("a binding that writes");
+        save_key_binding(home.path(), root, SCOPE, KEY_NAME).expect("a binding that writes");
         save_key(home.path(), KEY_NAME, NOT_A_KEY).expect("a key store that writes");
         home
     }

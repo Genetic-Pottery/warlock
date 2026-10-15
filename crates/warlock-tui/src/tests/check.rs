@@ -174,8 +174,12 @@ fn holding_in(home: &Path, repo: &Path, sigils: &[&str]) {
     save_sigils(home, repo, &sigils).expect("a config that writes");
 }
 
-fn bound(home: &Path, name: &str) {
-    save_key_binding(home, Path::new(REPO), name).expect("a binding that writes");
+// The scope is a parameter because the config holds a key name per scope, and
+// `check` reads the binding of the scope covering the path it was asked about:
+// each caller below passes the scope its own path resolves to, so a binding
+// written for the other scope of `a_manifest` would not be the one read.
+fn bound(home: &Path, scope: &str, name: &str) {
+    save_key_binding(home, Path::new(REPO), scope, name).expect("a binding that writes");
 }
 
 fn keeping(home: &Path, name: &str) {
@@ -414,7 +418,7 @@ fn the_whole_answer_for_a_scoped_recorded_and_bound_checkout_is_one_flat_object(
     // spelled as the `[[scope]]` record spells it.
     let home = a_dir();
     holding(home.path(), &["data-plane"]);
-    bound(home.path(), "work");
+    bound(home.path(), "data-plane", "work");
     keeping(home.path(), "work");
 
     let printed = object(&answer(home.path(), "crates/engine/src")).to_string();
@@ -435,7 +439,7 @@ fn a_covering_scope_with_no_record_routes_to_null_rather_than_to_empty_strings()
     // `""` would tell a script the work is filed to a team whose name is the
     // empty string, which is a thing a tracker will accept.
     let home = a_dir();
-    bound(home.path(), "work");
+    bound(home.path(), "platform", "work");
     keeping(home.path(), "work");
 
     assert_eq!(
@@ -458,7 +462,7 @@ fn the_three_key_states_are_told_apart_by_the_name_and_never_by_the_boolean() {
     // Bound to a name this machine has never stored: the store is not there at
     // all, which is the same answer as a store without that name in it.
     let dangling = a_dir();
-    bound(dangling.path(), "work");
+    bound(dangling.path(), "data-plane", "work");
     let checked = answer(dangling.path(), "crates/engine");
     assert_eq!(checked.key.as_deref(), Some("work"));
     assert!(!checked.key_found);
@@ -483,7 +487,7 @@ fn a_closed_scope_still_carries_the_whole_route_beside_the_closed_verdict() {
     // colleague with a verdict and nowhere to file.
     let home = a_dir();
     holding(home.path(), &["platform"]);
-    bound(home.path(), "work");
+    bound(home.path(), "data-plane", "work");
     keeping(home.path(), "work");
 
     let closed = answer(home.path(), "crates/engine");
@@ -504,7 +508,7 @@ fn a_closed_scope_still_carries_the_whole_route_beside_the_closed_verdict() {
 fn the_prose_for_a_scoped_recorded_and_bound_checkout_says_the_route_and_the_key() {
     let home = a_dir();
     holding(home.path(), &["data-plane"]);
-    bound(home.path(), "work");
+    bound(home.path(), "data-plane", "work");
     keeping(home.path(), "work");
 
     let answered = answer(home.path(), "crates/engine/src");
@@ -534,7 +538,7 @@ fn a_closed_scope_keeps_its_whole_route_in_the_prose_beside_the_closed_line() {
     // would be crossing and still where the work files.
     let home = a_dir();
     holding(home.path(), &["platform"]);
-    bound(home.path(), "work");
+    bound(home.path(), "data-plane", "work");
     keeping(home.path(), "work");
 
     assert_eq!(
@@ -571,7 +575,7 @@ fn a_covering_scope_nobody_recorded_says_which_scope_is_missing_a_record() {
     // scope and the file, because those are the two things somebody filing the
     // record needs and neither is in the rest of the answer.
     let home = a_dir();
-    bound(home.path(), "work");
+    bound(home.path(), "platform", "work");
     keeping(home.path(), "work");
 
     assert_eq!(
@@ -608,7 +612,7 @@ fn an_unbound_checkout_is_sent_to_key_use_and_key_add_and_a_dangling_name_to_key
 
     let dangling = a_dir();
     holding(dangling.path(), &["data-plane"]);
-    bound(dangling.path(), "work");
+    bound(dangling.path(), "data-plane", "work");
     keeping(dangling.path(), "personal");
 
     assert_eq!(
@@ -721,7 +725,7 @@ fn every_half_finished_route_is_still_a_zero() {
     holding(closed.path(), &["platform"]);
 
     let dangling = a_dir();
-    bound(dangling.path(), "work");
+    bound(dangling.path(), "data-plane", "work");
 
     for (home, path) in [
         (&closed, "crates/engine"),

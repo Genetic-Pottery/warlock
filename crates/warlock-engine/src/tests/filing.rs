@@ -11,6 +11,10 @@ use crate::sigils::{save_key_binding, save_sigils, sigils_path};
 // it proves the redaction and not an unlucky choice of needle.
 const KEY: &str = "lin_api_9f3c0d11aa47";
 
+// The second scope's key, so a target that resolved the wrong binding is told
+// apart by its value and not only by its name.
+const OTHER_KEY: &str = "lin_api_7b21e4c0fd93";
+
 fn a_dir() -> tempfile::TempDir {
     tempfile::tempdir().expect("a temporary directory")
 }
@@ -45,11 +49,16 @@ fn holds(home: &Path, root: &Path, sigils: &[&str]) {
     save_sigils(home, root, &owned(sigils)).expect("records what this machine holds");
 }
 
-// A checkout bound to a key this machine really holds, so a test about the board
-// half fails for its own reason rather than at `Unbound`.
+// The two scopes these fixtures can file to, each bound to a key this machine
+// really holds, so a test about the board half fails for its own reason rather
+// than at `Unbound`. Two different names rather than one: the binding is per
+// scope, and a fixture that bound both to one key could not tell a target that
+// resolved the right scope's key from one that resolved whatever was bound.
 fn bound(home: &Path, root: &Path) {
-    save_key_binding(home, root, "work").expect("binds this checkout to a key");
+    save_key_binding(home, root, "data-plane", "work").expect("binds the first scope");
+    save_key_binding(home, root, "web", "personal").expect("binds the second");
     save_key(home, "work", KEY).expect("stores that key on this machine");
+    save_key(home, "personal", OTHER_KEY).expect("stores the other");
 }
 
 #[test]
@@ -159,6 +168,12 @@ fn a_name_among_the_candidates_picks_that_board() {
 
     assert_eq!(target.scope(), "web");
     assert_eq!(target.record().team_key(), "Team web");
+    assert_eq!(
+        target.key(),
+        "personal",
+        "the key resolved is the one bound to the record that was picked"
+    );
+    assert_eq!(target.value(), OTHER_KEY);
 }
 
 #[test]
@@ -362,13 +377,13 @@ fn the_unbound_and_dangling_refusals_are_route_s_own_sentences() {
     let (unbound_home, unbound_root) = (a_dir(), a_dir());
     holds(unbound_home.path(), unbound_root.path(), &["data-plane"]);
     let unbound = resolve_filing(&manifest, unbound_root.path(), unbound_home.path(), None)
-        .expect_err("this checkout is bound to no key");
+        .expect_err("the scope this files to is bound to no key");
     assert!(
         matches!(
             &unbound,
             Error::Key {
-                source: route::Error::Unbound { .. }
-            }
+                source: route::Error::Unbound { scope, .. }
+            } if scope == "data-plane"
         ),
         "{unbound:?}"
     );
@@ -394,7 +409,13 @@ fn the_unbound_and_dangling_refusals_are_route_s_own_sentences() {
 
     let (dangling_home, dangling_root) = (a_dir(), a_dir());
     holds(dangling_home.path(), dangling_root.path(), &["data-plane"]);
-    save_key_binding(dangling_home.path(), dangling_root.path(), "work").expect("binds");
+    save_key_binding(
+        dangling_home.path(),
+        dangling_root.path(),
+        "data-plane",
+        "work",
+    )
+    .expect("binds");
     save_key(dangling_home.path(), "personal", KEY).expect("stores a different name's key");
     let dangling = resolve_filing(&manifest, dangling_root.path(), dangling_home.path(), None)
         .expect_err("the bound name is in no key store");

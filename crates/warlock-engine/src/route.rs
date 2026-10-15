@@ -24,7 +24,7 @@ use crate::sigils::{self, held_sigils, load_key_binding, sigils_path};
 /// .with_scopes([ScopeRecord::new("data-plane", "WAR", "In Review", "area/data-plane")]);
 ///
 /// save_sigils(home.path(), root.path(), &["web".to_owned()])?;
-/// save_key_binding(home.path(), root.path(), "work")?;
+/// save_key_binding(home.path(), root.path(), "data-plane", "work")?;
 /// save_key(home.path(), "work", "lin_api_example")?;
 ///
 /// let route = resolve_route("crates/engine/src", root.path(), &manifest, home.path())?;
@@ -81,14 +81,21 @@ pub fn resolve_route(
     // than as a checkout bound to nothing.
     let held = held_sigils(home, root).map_err(|source| Error::Sigils { source })?;
 
+    // Both refusals name the covering scope, because that is the scope the
+    // binding is read for and the word a person types back at `warlock key
+    // use`. A sentence about "this checkout" would send somebody to a file that
+    // can hold a key for every other scope in the repository and still be
+    // missing this one.
     let key = match (key, stored) {
         (None, _) => {
             return Err(Error::Unbound {
+                scope: scope.to_owned(),
                 path: sigils_path(home, root),
             });
         }
         (Some(key), false) => {
             return Err(Error::Dangling {
+                scope: scope.to_owned(),
                 key,
                 path: keys_path(home),
             });
@@ -105,19 +112,26 @@ pub fn resolve_route(
 }
 
 // The key refusals for `filing.rs`, which asks the question `resolve_route`
-// does of a repository with no path to walk up. A key store that is unreadable
-// or will not parse is an error, while a binding that cannot be read is nothing
-// bound — the same asymmetry `route_facts` documents, and it has to match, or a
-// push and a route would answer one broken file two ways.
-pub(crate) fn bound_key(home: &Path, root: &Path) -> Result<String, Error> {
-    let Some(key) = load_key_binding(home, root).unwrap_or_default() else {
+// does of a repository with no path to walk up. The scope is a parameter rather
+// than something read here, because that caller has already picked which board
+// it is filing to and the binding is per scope: deciding it twice is two
+// answers that can disagree.
+//
+// A key store that is unreadable or will not parse is an error, while a binding
+// that cannot be read is nothing bound — the same asymmetry `route_facts`
+// documents, and it has to match, or a push and a route would answer one broken
+// file two ways.
+pub(crate) fn bound_key(home: &Path, root: &Path, scope: &str) -> Result<String, Error> {
+    let Some(key) = load_key_binding(home, root, scope).unwrap_or_default() else {
         return Err(Error::Unbound {
+            scope: scope.to_owned(),
             path: sigils_path(home, root),
         });
     };
 
     if !is_stored(home, &key)? {
         return Err(Error::Dangling {
+            scope: scope.to_owned(),
             key,
             path: keys_path(home),
         });
@@ -147,7 +161,7 @@ fn is_stored(home: &Path, name: &str) -> Result<bool, Error> {
 /// let manifest = Manifest::with_directories([
 ///     ScopedDirectory::new(root.path(), "crates", "data-plane")?,
 /// ]);
-/// save_key_binding(home.path(), root.path(), "work")?;
+/// save_key_binding(home.path(), root.path(), "data-plane", "work")?;
 ///
 /// // A scope with no `[[scope]]` record, bound to a name this machine has not
 /// // stored: two of the things `resolve_route` refuses on, both answers here.
@@ -157,10 +171,12 @@ fn is_stored(home: &Path, name: &str) -> Result<bool, Error> {
 /// assert_eq!(facts.key(), Some("work"));
 /// assert!(!facts.stored());
 ///
-/// // Nothing covers this one, and the key half is reported all the same.
+/// // Nothing covers this one, so there is no scope to read a binding for: a
+/// // key is bound to a scope, and a path outside every scope has none.
 /// let facts = route_facts("docs/adr", root.path(), &manifest, Some(home.path()))?;
 /// assert_eq!(facts.scope(), None);
-/// assert_eq!(facts.key(), Some("work"));
+/// assert_eq!(facts.key(), None);
+/// assert!(!facts.stored());
 /// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
 // The reporting half of `resolve_route`, and the reason there are two: each of
@@ -181,7 +197,11 @@ fn is_stored(home: &Path, name: &str) -> Result<bool, Error> {
 //
 // `home` is `None` for a caller that could not resolve one, and that reads as
 // no key bound: a machine with no home has no key store to bind to either, and
-// `warlock key use` is the fix for both.
+// `warlock key use` is the fix for both. A path no scope covers reads the same
+// way, for a different reason: the binding is per scope, so with no covering
+// scope there is no question to ask the config, and reporting whatever some
+// other scope is bound to would name a key that has nothing to do with this
+// path.
 pub fn route_facts<'m>(
     path: impl AsRef<Path>,
     root: impl AsRef<Path>,
@@ -193,7 +213,7 @@ pub fn route_facts<'m>(
     let scope = scope_covering(path, root, manifest).map_err(|source| Error::Path { source })?;
     let record = scope.and_then(|scope| manifest.scope_record(scope));
 
-    let Some(home) = home else {
+    let (Some(home), Some(covering)) = (home, scope) else {
         return Ok(RouteFacts {
             scope,
             record,
@@ -211,9 +231,9 @@ pub fn route_facts<'m>(
     // trace anywhere. Propagating it instead would make `warlock check` exit
     // non-zero on a machine whose config needs a hand fix, which is the one
     // thing that command never does.
-    let key = load_key_binding(home, root).unwrap_or_default();
+    let key = load_key_binding(home, root, covering).unwrap_or_default();
 
-    // A checkout bound to nothing does not read the store at all, which is what
+    // A scope bound to nothing does not read the store at all, which is what
     // keeps a broken store an `Unbound` rather than a `Keys` refusal in the
     // wrapper.
     let stored = match &key {
@@ -312,13 +332,31 @@ impl<'m> RouteFacts<'m> {
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum Error {
-    Unscoped { path: PathBuf },
-    Unrecorded { scope: String, path: PathBuf },
-    Unbound { path: PathBuf },
-    Dangling { key: String, path: PathBuf },
-    Path { source: manifest::Error },
-    Sigils { source: sigils::Error },
-    Keys { source: keys::Error },
+    Unscoped {
+        path: PathBuf,
+    },
+    Unrecorded {
+        scope: String,
+        path: PathBuf,
+    },
+    Unbound {
+        scope: String,
+        path: PathBuf,
+    },
+    Dangling {
+        scope: String,
+        key: String,
+        path: PathBuf,
+    },
+    Path {
+        source: manifest::Error,
+    },
+    Sigils {
+        source: sigils::Error,
+    },
+    Keys {
+        source: keys::Error,
+    },
 }
 
 impl fmt::Display for Error {
@@ -334,14 +372,17 @@ impl fmt::Display for Error {
                 "the scope `{scope}` has no `[[scope]]` record: add one to `{}`",
                 path.display()
             ),
-            Self::Unbound { path } => write!(
+            // Both name the scope, because a checkout binds a key per scope:
+            // the fix is one line for one scope, and the sentence has to say
+            // which one or a person rebinds the scope that already worked.
+            Self::Unbound { scope, path } => write!(
                 f,
-                "no key is bound to this checkout in `{}`: bind one with `warlock key use <name>`",
+                "no key is bound to the scope `{scope}` in `{}`: bind one with `warlock key use {scope} <name>`",
                 path.display()
             ),
-            Self::Dangling { key, path } => write!(
+            Self::Dangling { scope, key, path } => write!(
                 f,
-                "this checkout is bound to `{key}`, which is not in `{}`: store it with `warlock key add {key}`",
+                "the scope `{scope}` is bound to `{key}`, which is not in `{}`: store it with `warlock key add {key}`",
                 path.display()
             ),
             Self::Path { source } => {

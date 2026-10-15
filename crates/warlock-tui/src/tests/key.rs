@@ -68,9 +68,9 @@ fn listing(home: &Path, json: bool) -> String {
     text(out)
 }
 
-fn bind(home: &Path, root: &Path, name: &str) -> (Result<(), Error>, String) {
+fn bind(home: &Path, root: &Path, scope: &str, name: &str) -> (Result<(), Error>, String) {
     let mut out = Vec::new();
-    let outcome = bound(home, root, name, &mut out);
+    let outcome = bound(home, root, scope, name, &mut out);
     (outcome, text(out))
 }
 
@@ -285,7 +285,7 @@ fn binding_a_name_the_store_has_never_heard_of_writes_no_byte() {
     save_key(home.path(), "acme", SECRET).expect("a store that saves");
     let path = sigils_path(home.path(), repo.path());
 
-    let (outcome, said) = bind(home.path(), repo.path(), "acne");
+    let (outcome, said) = bind(home.path(), repo.path(), "billing", "acne");
 
     let error = outcome.expect_err("a name nobody stored is refused");
     assert!(matches!(error, Error::UnknownKey { .. }), "{error:?}");
@@ -298,7 +298,7 @@ fn binding_a_name_the_store_has_never_heard_of_writes_no_byte() {
     // And an existing one is byte for byte what it was.
     save_sigils(home.path(), repo.path(), &["billing".to_owned()]).expect("a config that saves");
     let before = fs::read(&path).expect("the config just written reads");
-    assert!(bind(home.path(), repo.path(), "acne").0.is_err());
+    assert!(bind(home.path(), repo.path(), "billing", "acne").0.is_err());
     assert_eq!(fs::read(&path).expect("reads"), before);
 }
 
@@ -313,7 +313,7 @@ fn binding_keeps_the_sigils_the_config_already_held() {
     )
     .expect("a config that saves");
 
-    let (outcome, said) = bind(home.path(), repo.path(), "acme");
+    let (outcome, said) = bind(home.path(), repo.path(), "billing", "acme");
 
     outcome.expect("a stored name binds");
     assert_eq!(
@@ -322,8 +322,18 @@ fn binding_keeps_the_sigils_the_config_already_held() {
         "binding a key cost this checkout its sigils"
     );
     assert_eq!(
-        load_key_binding(home.path(), repo.path()).expect("the config still loads"),
+        load_key_binding(home.path(), repo.path(), "billing").expect("the config still loads"),
         Some("acme".to_owned())
+    );
+    // The scope asked for and no other: a second scope of the same checkout is
+    // bound by nothing until somebody binds it.
+    assert_eq!(
+        load_key_binding(home.path(), repo.path(), "web").expect("the config still loads"),
+        None
+    );
+    assert!(
+        said.contains("billing"),
+        "the confirmation does not name the scope it bound: {said}"
     );
     assert!(
         said.contains(&sigils_path(home.path(), repo.path()).display().to_string()),
@@ -367,27 +377,37 @@ fn forgetting_a_name_the_store_has_never_heard_of_removes_nothing() {
 }
 
 #[test]
-fn forgetting_the_bound_name_says_this_checkout_is_now_unbound() {
+fn forgetting_a_bound_name_names_the_one_scope_that_was_bound_to_it() {
     let (home, repo) = (a_dir(), a_dir());
     a_store_of_two(home.path());
-    save_key_binding(home.path(), repo.path(), "acme").expect("a config that saves");
+    save_key_binding(home.path(), repo.path(), "data-plane", "acme").expect("a config that saves");
 
-    // The name this checkout is not bound to: removed, with nothing said about
-    // a binding that never was.
+    // The name no scope of this checkout is bound to: removed, with nothing
+    // said about a binding that never was.
     let (outcome, said) = forget(home.path(), repo.path(), "personal");
     outcome.expect("a stored name is forgotten");
     assert!(!said.contains("unbound"), "{said}");
+    assert!(!said.contains("scope"), "{said}");
 
     let (outcome, said) = forget(home.path(), repo.path(), "acme");
 
     outcome.expect("a stored name is forgotten");
     assert!(
         said.contains("unbound"),
-        "the checkout lost its key and was not told: {said}"
+        "a scope lost its key and was not told: {said}"
+    );
+    assert!(
+        said.contains("`data-plane`"),
+        "the sentence does not name the scope it is about: {said}"
     );
     assert!(
         said.contains(&repo.path().display().to_string()),
         "the sentence does not name the checkout it is about: {said}"
+    );
+    // The way back is that scope's own `key use`, spelled with it.
+    assert!(
+        said.contains("warlock key use data-plane <name>"),
+        "the sentence does not say how to rebind the scope: {said}"
     );
     assert_eq!(said.lines().count(), 1, "not one line: {said:?}");
     assert_eq!(
@@ -395,4 +415,41 @@ fn forgetting_the_bound_name_says_this_checkout_is_now_unbound() {
         Vec::<String>::new()
     );
     assert!(!said.contains(SECRET), "the key reached the screen: {said}");
+}
+
+// One key can carry several scopes, which is what the per-scope map made
+// possible: forgetting it unbinds every one of them, so every one of them is
+// named. A sentence about "this checkout" would leave a reader guessing which
+// of its scopes had gone dark, and a scope bound to another name must not be
+// swept up in the count.
+#[test]
+fn forgetting_a_name_several_scopes_share_names_every_one_of_them() {
+    let (home, repo) = (a_dir(), a_dir());
+    a_store_of_two(home.path());
+    for scope in ["web", "data-plane"] {
+        save_key_binding(home.path(), repo.path(), scope, "acme").expect("a config that saves");
+    }
+    save_key_binding(home.path(), repo.path(), "billing", "personal").expect("a config that saves");
+
+    let (outcome, said) = forget(home.path(), repo.path(), "acme");
+
+    outcome.expect("a stored name is forgotten");
+    assert!(
+        said.contains("`data-plane` and `web`"),
+        "the sentence does not name both scopes: {said}"
+    );
+    assert!(
+        !said.contains("billing"),
+        "a scope bound to another name was swept up: {said}"
+    );
+    assert!(
+        said.contains("warlock key use <scope> <name>"),
+        "the sentence does not say how to rebind them: {said}"
+    );
+    assert_eq!(said.lines().count(), 1, "not one line: {said:?}");
+    // The other binding is still in the config, and still the other name.
+    assert_eq!(
+        load_key_binding(home.path(), repo.path(), "billing").expect("the config still loads"),
+        Some("personal".to_owned())
+    );
 }

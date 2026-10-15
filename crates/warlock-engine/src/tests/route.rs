@@ -34,7 +34,7 @@ fn a_manifest() -> Manifest {
 // key half of a route needs, so a test about the scope half fails for its own
 // reason rather than at `Unbound`.
 fn bound(home: &Path, root: &Path) {
-    save_key_binding(home, root, "work").expect("binds this checkout to a key");
+    save_key_binding(home, root, "data-plane", "work").expect("binds that scope to a key");
     save_key(home, "work", KEY).expect("stores that key on this machine");
 }
 
@@ -186,18 +186,17 @@ fn the_four_refusals_are_four_different_variants() {
         &manifest,
         unbound_home.path(),
     )
-    .expect_err("this checkout is bound to no key");
-    assert!(matches!(unbound, Error::Unbound { .. }), "{unbound:?}");
-    let text = unbound.to_string();
+    .expect_err("the covering scope is bound to no key");
     assert!(
-        text.contains(
-            &sigils_path(unbound_home.path(), unbound_root.path())
-                .display()
-                .to_string()
-        ),
-        "{text}"
+        matches!(&unbound, Error::Unbound { scope, .. } if scope == "data-plane"),
+        "{unbound:?}"
     );
-    assert!(text.contains("warlock key use"), "{text}");
+    let text = unbound.to_string();
+    let config = sigils_path(unbound_home.path(), unbound_root.path());
+    assert!(
+        text.contains(&config.display().to_string()) && text.contains("warlock key use data-plane"),
+        "the fix is one line for one scope in that file: {text}"
+    );
 
     // A checkout nobody has configured at all is the same refusal, against the
     // config file that would hold the binding: `load_sigils` saying NotFound is
@@ -217,22 +216,23 @@ fn the_four_refusals_are_four_different_variants() {
     );
 
     let (dangling_home, dangling_root) = (a_dir(), a_dir());
-    save_key_binding(dangling_home.path(), dangling_root.path(), "work").expect("binds");
-    let dangling = resolve_route(
-        "crates/engine",
-        dangling_root.path(),
-        &manifest,
-        dangling_home.path(),
-    )
-    .expect_err("the bound name is in no key store");
-    assert!(matches!(dangling, Error::Dangling { .. }), "{dangling:?}");
-    let text = dangling.to_string();
-    assert!(text.contains("`work`"), "{text}");
+    let (home, root) = (dangling_home.path(), dangling_root.path());
+    save_key_binding(home, root, "data-plane", "work").expect("binds");
+    let dangling = resolve_route("crates/engine", root, &manifest, home)
+        .expect_err("the bound name is in no key store");
     assert!(
-        text.contains(&keys_path(dangling_home.path()).display().to_string()),
+        matches!(&dangling, Error::Dangling { scope, .. } if scope == "data-plane"),
+        "{dangling:?}"
+    );
+    let text = dangling.to_string();
+    let store = keys_path(home);
+    assert!(
+        text.contains("`work`")
+            && text.contains("`data-plane`")
+            && text.contains(&store.display().to_string())
+            && text.contains("warlock key add"),
         "{text}"
     );
-    assert!(text.contains("warlock key add"), "{text}");
 
     let refusals = [&unscoped, &unrecorded, &unbound, &dangling];
     for (index, one) in refusals.iter().enumerate() {
@@ -319,7 +319,10 @@ fn a_covering_scope_with_no_record_still_reports_the_scope_and_the_key() {
 }
 
 #[test]
-fn a_path_nothing_covers_still_reports_the_key_half() {
+fn a_path_nothing_covers_reports_no_scope_and_no_key() {
+    // A key is bound to a scope, so a path outside every scope has no binding
+    // to report: naming whatever some other scope is bound to would put a key
+    // beside a path it has nothing to do with.
     let (home, root) = (a_dir(), a_dir());
     bound(home.path(), root.path());
     let manifest = a_manifest();
@@ -329,8 +332,61 @@ fn a_path_nothing_covers_still_reports_the_key_half() {
 
     assert_eq!(facts.scope(), None);
     assert!(facts.record().is_none());
-    assert_eq!(facts.key(), Some("work"));
-    assert!(facts.stored());
+    assert_eq!(facts.key(), None);
+    assert!(!facts.stored());
+}
+
+#[test]
+fn two_scopes_in_one_repository_route_to_two_different_keys() {
+    // The repository this ticket exists for: two scopes filing to boards in two
+    // Linear workspaces, each path resolving the key of the scope that covers
+    // it and not the one that happens to be bound first.
+    let (home, root) = (a_dir(), a_dir());
+    let manifest =
+        Manifest::with_directories([scoped("crates", "data-plane"), scoped("site", "web")])
+            .with_scopes([
+                ScopeRecord::new("data-plane", "Data Plane", "In Review", "area/data-plane"),
+                ScopeRecord::new("web", "Web", "In Review", "area/web"),
+            ]);
+
+    save_key_binding(home.path(), root.path(), "data-plane", "work").expect("binds one scope");
+    save_key_binding(home.path(), root.path(), "web", "personal").expect("binds the other");
+    save_key(home.path(), "work", KEY).expect("stores one key");
+    save_key(home.path(), "personal", "lin_api_7b21e4c0fd93").expect("stores the other");
+
+    let here = resolve_route("crates/engine/src", root.path(), &manifest, home.path())
+        .expect("a scoped path on a bound scope resolves");
+    let there = resolve_route("site/pages", root.path(), &manifest, home.path())
+        .expect("and so does one under the other scope");
+
+    assert_eq!(here.scope(), "data-plane");
+    assert_eq!(here.key(), "work");
+    assert_eq!(there.scope(), "web");
+    assert_eq!(there.key(), "personal");
+    assert_ne!(
+        here.key(),
+        there.key(),
+        "one checkout, two scopes, two keys: the whole reason the binding is \
+         a map"
+    );
+
+    // And a third scope bound by nobody is refused by name while these two
+    // still route: there is no fallback to either of them.
+    let unbound = resolve_route("crates/engine", root.path(), &manifest, home.path());
+    assert!(unbound.is_ok(), "{unbound:?}");
+    let error = resolve_route(
+        "billing/src",
+        root.path(),
+        &Manifest::with_directories([scoped("billing", "billing")]).with_scopes([
+            ScopeRecord::new("billing", "Billing", "In Review", "area/billing"),
+        ]),
+        home.path(),
+    )
+    .expect_err("nothing binds `billing`");
+    assert!(
+        matches!(&error, Error::Unbound { scope, .. } if scope == "billing"),
+        "{error:?}"
+    );
 }
 
 #[test]
@@ -374,7 +430,7 @@ fn a_checkout_bound_to_nothing_reports_no_key() {
 #[test]
 fn a_bound_name_that_is_in_no_store_is_reported_by_name() {
     let (home, root) = (a_dir(), a_dir());
-    save_key_binding(home.path(), root.path(), "work").expect("binds this checkout");
+    save_key_binding(home.path(), root.path(), "data-plane", "work").expect("binds that scope");
     save_key(home.path(), "personal", KEY).expect("stores a different name's key");
     let manifest = a_manifest();
 
@@ -394,7 +450,8 @@ fn a_bound_name_that_is_in_no_store_is_reported_by_name() {
 
     // An empty store and no store at all are the same answer as the wrong name.
     let (bare_home, bare_root) = (a_dir(), a_dir());
-    save_key_binding(bare_home.path(), bare_root.path(), "work").expect("binds this checkout");
+    save_key_binding(bare_home.path(), bare_root.path(), "data-plane", "work")
+        .expect("binds that scope");
     let facts = route_facts(
         "crates/engine",
         bare_root.path(),
@@ -409,7 +466,7 @@ fn a_bound_name_that_is_in_no_store_is_reported_by_name() {
 #[test]
 fn a_dangling_binding_names_the_key_and_never_a_key_value() {
     let (home, root) = (a_dir(), a_dir());
-    save_key_binding(home.path(), root.path(), "work").expect("binds this checkout");
+    save_key_binding(home.path(), root.path(), "data-plane", "work").expect("binds that scope");
     save_key(home.path(), "personal", KEY).expect("stores a different name's key");
     let manifest = a_manifest();
 

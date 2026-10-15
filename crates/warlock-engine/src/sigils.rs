@@ -3,6 +3,7 @@
 // test in this crate read or write the developer's real home, and the caller
 // that resolved a home is the one that knows which home it means.
 
+use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::fmt;
 use std::fs;
@@ -121,54 +122,127 @@ pub fn held_sigils(home: impl AsRef<Path>, root: impl AsRef<Path>) -> Result<Vec
 /// let (home, root) = (tempfile::tempdir()?, tempfile::tempdir()?);
 /// // A checkout nobody has configured has no config to be bound by.
 /// assert!(matches!(
-///     load_key_binding(home.path(), root.path()),
+///     load_key_binding(home.path(), root.path(), "data-plane"),
 ///     Err(sigils::Error::NotFound { .. })
 /// ));
 ///
-/// save_key_binding(home.path(), root.path(), "work")?;
-/// assert_eq!(load_key_binding(home.path(), root.path())?.as_deref(), Some("work"));
+/// save_key_binding(home.path(), root.path(), "data-plane", "work")?;
+/// assert_eq!(
+///     load_key_binding(home.path(), root.path(), "data-plane")?.as_deref(),
+///     Some("work"),
+/// );
+/// // Another scope of the same checkout is bound by nothing until it is bound.
+/// assert_eq!(load_key_binding(home.path(), root.path(), "web")?, None);
 /// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
 // Unbound is `Ok(None)` and unconfigured is `Err(NotFound)`, following
-// `load_key`: "this checkout is bound to no key" and "this checkout has no
-// config at all" are answers a caller sends a person to different places with,
-// and collapsing them here would take that choice away.
+// `load_key`: "this scope is bound to no key" and "this checkout has no config
+// at all" are answers a caller sends a person to different places with, and
+// collapsing them here would take that choice away.
+//
+// The answer is about the scope that was asked about and no other. There is no
+// fallback to another binding and no wildcard entry: a push that quietly used
+// the one key that happened to be bound is work filed into the wrong Linear
+// workspace, which is the failure this map exists to end.
 pub fn load_key_binding(
     home: impl AsRef<Path>,
     root: impl AsRef<Path>,
+    scope: &str,
 ) -> Result<Option<String>, Error> {
-    read(home.as_ref(), root.as_ref()).map(|config| config.key)
+    read(home.as_ref(), root.as_ref()).map(|config| config.keys.get(scope).cloned())
 }
 
 /// ```
-/// use warlock_engine::{load_sigils, save_key_binding, save_sigils};
+/// use warlock_engine::{save_key_binding, scopes_bound_to};
 ///
 /// let (home, root) = (tempfile::tempdir()?, tempfile::tempdir()?);
-/// save_sigils(home.path(), root.path(), &["data-plane".to_owned()])?;
-/// save_key_binding(home.path(), root.path(), "work")?;
+/// // A checkout nobody has configured binds no scope to anything.
+/// assert!(scopes_bound_to(home.path(), root.path(), "work")?.is_empty());
 ///
-/// // The binding is written beside the sigils, not over them.
-/// assert_eq!(load_sigils(home.path(), root.path())?, ["data-plane"]);
-/// // A name that is not a scope name is refused, and nothing is written.
-/// assert!(save_key_binding(home.path(), root.path(), "Work!").is_err());
+/// save_key_binding(home.path(), root.path(), "web", "work")?;
+/// save_key_binding(home.path(), root.path(), "data-plane", "work")?;
+/// save_key_binding(home.path(), root.path(), "billing", "personal")?;
+///
+/// // Every scope bound to that one name, in the order the file holds them.
+/// assert_eq!(
+///     scopes_bound_to(home.path(), root.path(), "work")?,
+///     ["data-plane", "web"],
+/// );
+/// assert_eq!(scopes_bound_to(home.path(), root.path(), "nobody")?, [] as [String; 0]);
 /// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
-// Judged by `validate_scope`, so a key name, a scope and a sigil are one
-// character class across the workspace rather than three that drift. A looser
-// rule of its own for key names was rejected: the name is typed at a prompt and
-// read back off a config line, which is exactly what that class is for.
-pub fn save_key_binding(
+// The question `load_key_binding` cannot be asked, and the reason it is a
+// second function rather than a looser first one: this reads the whole `[keys]`
+// table, and `load_key_binding` must only ever answer for the scope it was
+// handed. Nothing is exported that hands the map itself out, so no caller can
+// print a checkout's bindings wholesale — the only thing askable is which
+// scopes a name already given covers, which is what `warlock key forget` needs
+// to say what its removal cost.
+//
+// Absent is an empty answer rather than `NotFound`, unlike `load_key_binding`:
+// every caller asks this *about a name it is acting on*, and a checkout with no
+// config bound that name in no scope. A config that is there and will not read
+// stays an error, for `load_sigils`'s reason.
+pub fn scopes_bound_to(
     home: impl AsRef<Path>,
     root: impl AsRef<Path>,
     name: &str,
+) -> Result<Vec<String>, Error> {
+    match read(home.as_ref(), root.as_ref()) {
+        Ok(config) => Ok(config
+            .keys
+            .into_iter()
+            .filter(|(_, bound)| bound == name)
+            .map(|(scope, _)| scope)
+            .collect()),
+        Err(Error::NotFound { .. }) => Ok(Vec::new()),
+        Err(error) => Err(error),
+    }
+}
+
+/// ```
+/// use warlock_engine::{load_key_binding, load_sigils, save_key_binding, save_sigils};
+///
+/// let (home, root) = (tempfile::tempdir()?, tempfile::tempdir()?);
+/// save_sigils(home.path(), root.path(), &["data-plane".to_owned()])?;
+/// save_key_binding(home.path(), root.path(), "data-plane", "work")?;
+/// save_key_binding(home.path(), root.path(), "web", "personal")?;
+///
+/// // Each binding is written beside the others, and beside the sigils.
+/// assert_eq!(load_sigils(home.path(), root.path())?, ["data-plane"]);
+/// assert_eq!(
+///     load_key_binding(home.path(), root.path(), "data-plane")?.as_deref(),
+///     Some("work"),
+/// );
+/// // Neither name may be one `validate_scope` refuses, and nothing is written.
+/// assert!(save_key_binding(home.path(), root.path(), "data-plane", "Work!").is_err());
+/// assert!(save_key_binding(home.path(), root.path(), "Web!", "work").is_err());
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
+// Both names are judged by `validate_scope`, so a key name, a scope and a sigil
+// are one character class across the workspace rather than three that drift. A
+// looser rule of its own for key names was rejected: the name is typed at a
+// prompt and read back off a config line, which is exactly what that class is
+// for. Both are judged before the file is read, so a refusal writes nothing.
+//
+// One scope's entry is replaced and the rest of the map is carried through
+// `held`, along with the sigils and the base branch: binding a second workspace
+// must not be the way a person loses the first one.
+pub fn save_key_binding(
+    home: impl AsRef<Path>,
+    root: impl AsRef<Path>,
+    scope: &str,
+    name: &str,
 ) -> Result<(), Error> {
-    validate_scope(name).map_err(|rule| Error::Name {
-        name: name.to_owned(),
-        rule,
-    })?;
+    for judged in [scope, name] {
+        validate_scope(judged).map_err(|rule| Error::Name {
+            name: judged.to_owned(),
+            rule,
+        })?;
+    }
 
     let mut config = held(home.as_ref(), root.as_ref());
-    config.key = Some(name.to_owned());
+    config.keys.insert(scope.to_owned(), name.to_owned());
     write(home.as_ref(), root.as_ref(), &config)
 }
 
@@ -311,16 +385,26 @@ fn readable_name(canonical: &Path) -> String {
 struct Config {
     #[serde(default)]
     sigils: Vec<String>,
-    // `skip_serializing_if` rather than `Option`'s serialiser doing the right
-    // thing by itself: serde writes `None` as a TOML value, so without this an
-    // unbound checkout's config would gain a `key = ` line it cannot read back.
-    // A file nobody has bound stays byte-identical to one written before this
-    // field existed.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    key: Option<String>,
-    // Skipped when unset for `key`'s reason above.
+    // Skipped when unset rather than letting `Option`'s serialiser write it:
+    // serde writes `None` as a TOML value, so without this a config nobody has
+    // set a branch on would gain a line it cannot read back.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     branch: Option<String>,
+    // Scope name to key name, replacing the single `key` line a checkout used
+    // to carry: a repository whose scopes file to boards in two Linear
+    // workspaces needs two keys, and one line can only ever name one of them.
+    // A file holding the old line now fails to parse against
+    // `deny_unknown_fields`, which is the intended answer — there is no
+    // migration, and the fix is a hand edit of a two-line file.
+    //
+    // Last of the three fields so the declaration reads in the order the file
+    // does: the serialiser emits every plain value before the first table
+    // whatever order they are declared in, so `[keys]` is the end of the file
+    // and `branch` can never land under that header. Skipped when empty so a
+    // checkout that has bound nothing writes the bytes it wrote before this
+    // field existed.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    keys: BTreeMap<String, String>,
 }
 
 #[derive(Debug)]
@@ -366,8 +450,11 @@ impl fmt::Display for Error {
             Self::Serialize { source } => {
                 write!(f, "could not write the sigil config as TOML: {source}")
             }
+            // One sentence for both of `save_key_binding`'s names, because one
+            // rule judges both: a second variant would have to be told apart by
+            // a caller that has just typed the two words beside each other.
             Self::Name { name, rule } => {
-                write!(f, "`{name}` is not a key name: {rule}")
+                write!(f, "`{name}` is not a scope or key name: {rule}")
             }
             Self::BranchName { name } => {
                 write!(
