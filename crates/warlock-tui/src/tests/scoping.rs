@@ -1601,3 +1601,232 @@ fn a_key_submit_with_no_window_up_writes_nothing() {
     assert_eq!(config(home.path(), repo.path()), None);
     assert_eq!(app.message(), Some(LAST_KEY));
 }
+
+/// The scope the chain below brings into being: a name [`recorded`] claims no
+/// record for, so the press takes the road through all three windows.
+const NEW_SCOPE: &str = "billing";
+
+#[test]
+fn the_whole_path_from_the_press_to_the_key_window_is_one_key_at_a_time() {
+    // The event loop's own arms over all three windows, in the order a reader
+    // presses them: `s`, a name nothing records, Enter, the three values with a
+    // Tab between them, Enter. Nothing here is a terminal, a worker or a
+    // `claude` — the whole path is these five functions over a repository and a
+    // home of this test's own, and the three windows are never up together.
+    let repo = a_repo();
+    let home = a_home();
+    let mut app = app_on(repo.path(), TUI_ROW);
+    let mut manifest = recorded();
+
+    let mut prompt = scope_press(&mut app, &manifest, repo.path());
+    assert_eq!(prompt, ScopePrompt::open("crates/tui", ""));
+
+    let mut record = RecordPrompt::Closed;
+    for code in NEW_SCOPE.chars().map(KeyCode::Char).chain([KeyCode::Enter]) {
+        let edited = {
+            let field = prompt.field().expect("the first window is still up");
+            edit_for(press(code), field)
+        };
+        let windows = scope_edit(&mut app, &mut manifest, repo.path(), &prompt, edited);
+        // The first window never asks for a key, whatever it hands on to: there
+        // is nothing recorded yet to bind a key to.
+        assert_eq!(
+            windows.key,
+            KeyPrompt::Closed,
+            "{code:?} on the first window asked for a key",
+        );
+        prompt = windows.scope;
+        record = windows.record;
+    }
+
+    assert_eq!(prompt, ScopePrompt::Closed);
+    assert_eq!(record, RecordPrompt::open("crates/tui", NEW_SCOPE));
+
+    let mut key = KeyPrompt::Closed;
+    for code in ["Billing Squad", "In Review", "area/billing"]
+        .into_iter()
+        .flat_map(|value| value.chars().map(KeyCode::Char).chain([KeyCode::Tab]))
+        .chain([KeyCode::Enter])
+    {
+        assert_eq!(
+            config(home.path(), repo.path()),
+            None,
+            "{code:?} wrote the config before anything was recorded",
+        );
+        let edited = {
+            let form = record.form().expect("the second window is still up");
+            record_edit_for(press(code), form)
+        };
+        let windows = record_edit(
+            &mut app,
+            &mut manifest,
+            repo.path(),
+            Some(home.path()),
+            &record,
+            edited,
+        );
+        record = windows.record;
+        key = windows.key;
+    }
+
+    // The second window down and the third up out of the one Enter, over the
+    // scope that was just recorded and over the names this machine stores.
+    assert_eq!(record, RecordPrompt::Closed, "Enter left the window up");
+    assert_eq!(
+        key,
+        KeyPrompt::Open(a_choice(home.path(), NEW_SCOPE)),
+        "the save did not end with the key window over the scope just recorded",
+    );
+    // The record is on disk before the question is asked, which is the order
+    // that lets the question be abandoned.
+    let written = saved(repo.path()).expect("the keys wrote the manifest");
+    assert_eq!(
+        written, manifest,
+        "what is on disk is what the loop believes"
+    );
+    assert_eq!(scope_on(&written, "crates/tui"), Some(NEW_SCOPE));
+    let record = written.scopes().last().expect("the record was written");
+    assert_eq!(record.name(), NEW_SCOPE);
+    assert_eq!(record.team_key(), "Billing Squad");
+    // And asking is not binding: nothing has reached this machine's config, and
+    // the message line came through the whole of it untouched.
+    assert_eq!(
+        config(home.path(), repo.path()),
+        None,
+        "the question wrote the config",
+    );
+    assert_eq!(app.message(), Some(LAST_KEY));
+}
+
+#[test]
+fn an_abandoned_key_window_leaves_the_scope_recorded_and_unbound() {
+    // Esc on the third window, over a machine that holds keys and a scope whose
+    // record is already on disk: the one outcome the fixed order exists for.
+    let repo = a_repo();
+    let home = a_home();
+    let mut app = app_on(repo.path(), TUI_ROW);
+    let mut manifest = recorded();
+
+    let form = asked_for(
+        &mut app,
+        &mut manifest,
+        repo.path(),
+        "crates/tui",
+        "Billing",
+    );
+    let windows = record_submit(
+        &mut app,
+        &mut manifest,
+        repo.path(),
+        Some(home.path()),
+        &filled(&form, ["Billing", "In Review", "area/billing"]),
+    );
+    let choice = windows
+        .key
+        .choice()
+        .expect("a record that saved ends with the key window up")
+        .clone();
+    assert_eq!(choice.scope(), NEW_SCOPE);
+    let path = repo.path().join(".warlock").join("scopes.toml");
+    let saved_bytes = fs::read(&path).expect("the submit wrote the manifest");
+
+    // The loop's own Esc arm, through the pure function that decides it.
+    assert_eq!(key_edit_for(press(KeyCode::Esc), &choice), KeyEdited::Close);
+    let prompt = key_edit(
+        &mut app,
+        home.path(),
+        repo.path(),
+        &windows.key,
+        KeyEdited::Close,
+    );
+
+    // Nothing written to this machine, and nothing taken back from the
+    // repository: the record was saved first and the key asked second, so the
+    // scope stands recorded and unbound rather than half written.
+    assert_eq!(prompt, KeyPrompt::Closed);
+    assert_eq!(
+        config(home.path(), repo.path()),
+        None,
+        "Esc wrote the config",
+    );
+    assert_eq!(
+        bound(home.path(), repo.path(), NEW_SCOPE),
+        None,
+        "Esc bound the scope",
+    );
+    assert_eq!(
+        fs::read(&path).expect("the manifest reads back"),
+        saved_bytes,
+        "Esc moved a byte of the manifest",
+    );
+    let written = saved(repo.path()).expect("the manifest is still there");
+    assert_eq!(
+        written, manifest,
+        "Esc edited the manifest this thread holds"
+    );
+    assert_eq!(
+        scope_on(&written, "crates/tui"),
+        Some(NEW_SCOPE),
+        "Esc took the scope off the row",
+    );
+    assert!(
+        written
+            .scopes()
+            .iter()
+            .any(|record| record.name() == NEW_SCOPE),
+        "Esc dropped the `[[scope]]` record: {written:?}",
+    );
+    assert_eq!(app.message(), Some(LAST_KEY), "and it kept the last line");
+}
+
+#[test]
+fn a_record_that_will_not_save_asks_for_no_key_on_a_machine_holding_three() {
+    // The same disk that will not take a scope, with a store that would have
+    // answered: the save is what decides whether the question is asked, so the
+    // chain ends on the message line and the third window stays down.
+    let repo = a_repo();
+    let home = a_home();
+    fs::write(repo.path().join(".warlock"), "not a directory\n")
+        .expect("writes a file in the way of the manifest directory");
+    let mut app = app_on(repo.path(), TUI_ROW);
+    let mut manifest = scoped();
+    let form = filled(
+        &RecordForm::new("crates/tui", NEW_SCOPE),
+        ["Billing", "In Review", "area/billing"],
+    );
+
+    let windows = record_submit(
+        &mut app,
+        &mut manifest,
+        repo.path(),
+        Some(home.path()),
+        &form,
+    );
+
+    // Neither window up, and the reason on the footer.
+    assert_eq!(windows, Windows::default());
+    assert!(
+        app.message().is_some_and(|line| !line.is_empty()),
+        "a save that failed said nothing",
+    );
+    assert_ne!(app.message(), Some(LAST_KEY), "and said it here");
+    // The store is not why: asked straight out, this home opens a window. What
+    // is missing is a record on disk to bind a key to.
+    assert!(
+        KeyPrompt::open(home.path(), NEW_SCOPE)
+            .expect("the store reads")
+            .is_open(),
+        "the store would not have opened a window either",
+    );
+    assert_eq!(manifest, scoped(), "the failed write was believed");
+    assert_eq!(
+        config(home.path(), repo.path()),
+        None,
+        "a save that failed wrote the config",
+    );
+    assert_eq!(
+        fs::read_to_string(repo.path().join(".warlock"))
+            .expect("the file in the way is still readable"),
+        "not a directory\n",
+    );
+}
