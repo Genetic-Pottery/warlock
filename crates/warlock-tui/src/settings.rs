@@ -60,7 +60,13 @@ impl Settings {
         &self.root
     }
 
-    fn home(&self) -> Option<&Path> {
+    /// The home this checkout's settings were read under, for the one caller
+    /// outside this file that writes something else into the same config: the
+    /// key window's binding. Read off here rather than resolved a second time,
+    /// for the reason every write below takes it from this field — a home
+    /// cannot move under a running warlock, and a second resolution could name
+    /// a different machine's config from the one the chrome is drawn off.
+    pub(crate) fn home(&self) -> Option<&Path> {
         self.home.as_deref()
     }
 

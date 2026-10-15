@@ -7,23 +7,24 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::{Position, Rect, Size};
 use ratatui::style::{Color, Modifier};
 use ratatui::widgets::{Paragraph, Widget};
-use warlock_engine::{Destination, scope};
+use warlock_engine::{Destination, save_key, scope};
 
 use super::{
     BORDER_THICKNESS, CARRY_LEFT, CARRY_QUESTION, COMPOSER_CURSOR, COMPOSER_MIN_HEIGHT,
     CONFIRM_ANSWER_GAP, CONFIRM_NO, CONFIRM_QUESTION, CONFIRM_YES, CUT_QUESTION, CUT_SLICES,
     CUT_STATUS, Carry, Cut, DIALOG_MARGIN, DIALOG_MARGIN_ROWS, DROP_ORDER, Dialog, ELLIPSIS,
     FOOTER_HEIGHT, GUIDE, GUIDE_BRANCH, GUIDE_LAST, HELP_KEY, Hit, IDENTITY_MIN_WIDTH, INDENT,
-    KEY_GAP, KEYS, LIVE_KEY, MARK, MARK_MARGIN, MARK_MARGIN_ROWS, NO_MARKER, NOTE_MARKER,
-    PANEL_INDENT, PATH_HEADING, PATH_RULES, PULL_BRANCH, PULL_FROM, PULL_QUESTION,
-    PULL_RESUME_QUESTION, PULL_SCOPE, PUSH_KEY, PUSH_QUESTION, PUSH_TEAM, QUIT_KEY, RECORD_HEADING,
-    RECORD_LABEL_GAP, RECORD_RULES, REVIEW_ANSWER_GAP, REVIEW_CREATE, REVIEW_EDIT, REVIEW_FEEDBACK,
-    REVIEW_QUESTION, REVIEW_READ, REVIEW_SKIP, Reach, Review, SAID_MARKER, SCOPE_CURSOR,
-    SCOPE_HEADING, SCROLLBACK_ARROW, SELECTED, SELECTION_MARKER, SIGILS_MOST_LINES, SIGILS_TITLE,
-    Shape, THREAD_TITLE, TREE_MIN_ROWS, TREE_MIN_WIDTH, TREE_PERCENT, WILDCARD, WORKFLOW_LIT,
-    composer_on_screen, display_width, draw, footer_text_area, guide_prefixes, help_most_scroll,
-    identity_title, keys_line, label_width, mark_area, pane_inner, panel_row, panel_width,
-    sigil_line_count, sigil_lines, target_title, tree_column, tree_width, truncated, workflow_line,
+    KEY_GAP, KEY_HEADING, KEY_RULES, KEYS, LIVE_KEY, MARK, MARK_MARGIN, MARK_MARGIN_ROWS,
+    NO_MARKER, NOTE_MARKER, PANEL_INDENT, PATH_HEADING, PATH_RULES, PULL_BRANCH, PULL_FROM,
+    PULL_QUESTION, PULL_RESUME_QUESTION, PULL_SCOPE, PUSH_KEY, PUSH_QUESTION, PUSH_TEAM, QUIT_KEY,
+    RECORD_HEADING, RECORD_LABEL_GAP, RECORD_RULES, REVIEW_ANSWER_GAP, REVIEW_CREATE, REVIEW_EDIT,
+    REVIEW_FEEDBACK, REVIEW_QUESTION, REVIEW_READ, REVIEW_SKIP, Reach, Review, SAID_MARKER,
+    SCOPE_CURSOR, SCOPE_HEADING, SCROLLBACK_ARROW, SELECTED, SELECTION_MARKER, SIGILS_MOST_LINES,
+    SIGILS_TITLE, Shape, THREAD_TITLE, TREE_MIN_ROWS, TREE_MIN_WIDTH, TREE_PERCENT, WILDCARD,
+    WORKFLOW_LIT, composer_on_screen, display_width, draw, footer_text_area, guide_prefixes,
+    help_most_scroll, identity_title, key_none_line, keys_line, label_width, mark_area, pane_inner,
+    panel_row, panel_width, sigil_line_count, sigil_lines, target_title, tree_column, tree_width,
+    truncated, workflow_line,
 };
 use crate::account::Line as Entry;
 use crate::app::{App, Chrome, Focus, Held, Row, Sigils, Working};
@@ -33,9 +34,11 @@ use crate::composer::COMPOSER_MAX_ROWS;
 use crate::composer::Composer;
 use crate::confirm::{Answer, Choice, CutConfirm, PullConfirm, PushConfirm, QuitConfirm};
 use crate::fixture;
-use crate::modal::Modals;
+use crate::modal::{Modal, Modals};
 use crate::panel::Mode;
-use crate::prompt::{RecordField, RecordForm, RecordPrompt, ScopeField, ScopePrompt};
+use crate::prompt::{
+    KeyChoice, KeyPrompt, RecordField, RecordForm, RecordPrompt, ScopeField, ScopePrompt,
+};
 // Renamed because `Position` in here is ratatui's point on the screen, and a
 // selection's is a byte of the thread's text.
 use crate::selection::Position as Spot;
@@ -6457,6 +6460,164 @@ fn a_terminal_too_small_for_the_record_window_clamps_it_and_still_shows_it() {
             "the window changed nothing on screen at {size}"
         );
     }
+}
+
+const KEY_SCOPE: &str = "data-plane";
+
+// Stored in an order the listing does not keep, so the rows below cannot come
+// out right by accident of the order they were saved in.
+const KEY_NAMES: [&str; 3] = ["work", "acme", "personal"];
+
+// Stored under every name below, so "this window drew a key" has one needle to
+// look for and a window that leaked could not leak a value the assertions do
+// not know about. `tests/prompt.rs` holds the same needle for the same reason.
+const STORED_VALUE: &str = "lin_api_this_value_must_never_be_drawn";
+
+// Through a throwaway home and `KeyPrompt::open`, so the rows are the ones a
+// store answers with rather than a list written here — and so nothing reads the
+// developer's real `~/.warlock`.
+fn a_key_choice(names: &[&str]) -> KeyChoice {
+    let home = tempfile::tempdir().expect("a temporary directory");
+    for name in names {
+        save_key(home.path(), name, STORED_VALUE).expect("a key stores");
+    }
+
+    KeyPrompt::open(home.path(), KEY_SCOPE)
+        .expect("a store that reads opens a window")
+        .choice()
+        .expect("an open prompt holds its choice")
+        .clone()
+}
+
+// Through `Dialog::of` and the `Modal` the precedence hands it, as the windows
+// above are, but over a bare screen rather than a whole frame: nothing in the
+// loop opens this one, so there is no app to put it up over and the lines are
+// the whole of what these tests are about.
+fn render_key(choice: &KeyChoice, width: u16, height: u16) -> Buffer {
+    let mut terminal =
+        Terminal::new(TestBackend::new(width, height)).expect("test backend never fails");
+    terminal
+        .draw(|frame| {
+            let screen = frame.area();
+            Dialog::of(Modal::Key(choice)).draw(frame, screen);
+        })
+        .expect("test backend never fails");
+    terminal.backend().buffer().clone()
+}
+
+fn key_rect(buffer: &Buffer, choice: &KeyChoice) -> Rect {
+    Dialog::of(Modal::Key(choice)).area(buffer.area)
+}
+
+fn key_rows(buffer: &Buffer, choice: &KeyChoice) -> Vec<String> {
+    let area = key_rect(buffer, choice);
+    (0..area.height)
+        .map(|index| text_in(buffer, area, area.y + index))
+        .collect()
+}
+
+// Which rows of the window carry the highlight, counted from its top border, so
+// a second lit row fails rather than going unlooked at.
+fn lit_rows(buffer: &Buffer, choice: &KeyChoice) -> Vec<u16> {
+    let area = key_rect(buffer, choice);
+    (0..area.height)
+        .filter(|index| {
+            (area.x..area.x + area.width).any(|x| {
+                buffer[(x, area.y + index)]
+                    .modifier
+                    .contains(SELECTED.add_modifier)
+            })
+        })
+        .collect()
+}
+
+// Heading, rows, rules — everything inside the border and its margin row.
+fn key_said(rows: &[String]) -> Vec<String> {
+    let margin = usize::from(BORDER_THICKNESS + DIALOG_MARGIN_ROWS);
+
+    rows[margin..rows.len() - margin]
+        .iter()
+        .map(|row| inside_the_border(row))
+        .collect()
+}
+
+#[test]
+fn the_key_window_names_the_scope_and_every_stored_name_with_one_of_them_lit() {
+    let choice = a_key_choice(&KEY_NAMES);
+
+    let buffer = render_key(&choice, WIDTH, FIXTURE_HEIGHT);
+
+    let rows = key_rows(&buffer, &choice);
+    assert!(
+        rows[0].starts_with('┌') && rows[0].ends_with('┐'),
+        "{rows:?}"
+    );
+    let last = rows.last().expect("the window has rows");
+    assert!(last.starts_with('└') && last.ends_with('┘'), "{rows:?}");
+
+    // The scope it was opened for, a row for every name the store holds in the
+    // order it listed them, and what the two keys do last.
+    assert_eq!(
+        key_said(&rows),
+        vec![
+            format!("{KEY_HEADING}{KEY_SCOPE}"),
+            String::new(),
+            "acme".to_owned(),
+            "personal".to_owned(),
+            "work".to_owned(),
+            String::new(),
+            KEY_RULES.to_owned(),
+        ],
+        "{rows:?}"
+    );
+
+    // One row is lit, and it is the one the window would bind.
+    let first = BORDER_THICKNESS + DIALOG_MARGIN_ROWS + 2;
+    assert_eq!(choice.highlighted(), Some("acme"));
+    assert_eq!(lit_rows(&buffer, &choice), vec![first], "{rows:?}");
+
+    // And no cell of the frame holds what any of those names is a name for.
+    for y in 0..buffer.area.height {
+        let line = text_in(&buffer, buffer.area, y);
+        assert!(!line.contains(STORED_VALUE), "row {y}: {line:?}");
+    }
+}
+
+#[test]
+fn a_key_window_with_no_names_draws_no_rows_and_says_how_to_store_one_and_bind_it() {
+    let choice = a_key_choice(&[]);
+
+    assert!(choice.names().is_empty());
+    assert_eq!(choice.highlighted(), None);
+
+    let buffer = render_key(&choice, WIDTH, FIXTURE_HEIGHT);
+
+    let rows = key_rows(&buffer, &choice);
+    let said = key_said(&rows);
+    assert_eq!(
+        said,
+        vec![
+            format!("{KEY_HEADING}{KEY_SCOPE}"),
+            String::new(),
+            key_none_line(KEY_SCOPE),
+            String::new(),
+            KEY_RULES.to_owned(),
+        ],
+        "{rows:?}"
+    );
+
+    // One sentence, naming the command that stores a key and then the one that
+    // binds a stored name to this window's scope.
+    let add = said[2]
+        .find("warlock key add <name>")
+        .unwrap_or_else(|| panic!("{said:?}"));
+    let use_here = said[2]
+        .find(&format!("warlock key use {KEY_SCOPE} <name>"))
+        .unwrap_or_else(|| panic!("{said:?}"));
+    assert!(add < use_here, "{said:?}");
+
+    // Nothing is lit, because there is no row to light.
+    assert!(lit_rows(&buffer, &choice).is_empty(), "{rows:?}");
 }
 
 mod help {

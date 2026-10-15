@@ -516,19 +516,6 @@ pub(crate) struct KeyChoice {
     row: usize,
 }
 
-// Nothing puts this window up yet: the keystroke, the frame and the session
-// field are the wiring ticket's, so what is here is dead in the library and
-// alive in the tests below. `cfg_attr` is what keeps both builds quiet — a bare
-// `expect` is unfulfilled under `cfg(test)`, where the tests do call these, and
-// warns there instead. The same pair sits on `KeyPrompt` and on `key_edit_for`,
-// and all three come off when the wiring lands.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the scope and the rows are read by the frame, which is the wiring ticket's"
-    )
-)]
 impl KeyChoice {
     fn over(home: &Path, scope: impl Into<String>) -> Result<Self, keys::Error> {
         Ok(Self {
@@ -579,18 +566,24 @@ pub(crate) enum KeyPrompt {
     Open(KeyChoice),
 }
 
-// Dead in the library and alive in the tests, as `KeyChoice` above is.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "nothing opens or draws this window until the wiring ticket"
-    )
-)]
 impl KeyPrompt {
     /// The names are read off the store here rather than passed in, so there is
     /// one place that decides what the rows are and which of them opens
     /// highlighted.
+    // Nothing in the library opens this window: the keys, the frame and the
+    // write are all wired up, and what is still missing is the decision about
+    // when to ask — the record form's submit and the push, draft and pull paths
+    // are each a slice of their own. So this one function is dead in the library
+    // and alive in the tests below. `cfg_attr` is what keeps both builds quiet:
+    // a bare `expect` is unfulfilled under `cfg(test)`, where the tests do call
+    // it, and warns there instead.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "nothing opens this window until a flow decides to ask"
+        )
+    )]
     pub(crate) fn open(home: &Path, scope: impl Into<String>) -> Result<Self, keys::Error> {
         Ok(Self::Open(KeyChoice::over(home, scope)?))
     }
@@ -638,14 +631,6 @@ pub(crate) enum KeyEdited {
 /// Every other key leaves the choice byte for byte as it was, the tree's own
 /// bindings and `j`/`k` included, and only presses count — both for
 /// [`edit_for`]'s reasons.
-// Dead in the library and alive in the tests, as the two above are.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "no keystroke reaches this window until the wiring ticket"
-    )
-)]
 #[must_use]
 pub(crate) fn key_edit_for(key: KeyEvent, choice: &KeyChoice) -> KeyEdited {
     if key.kind != KeyEventKind::Press {

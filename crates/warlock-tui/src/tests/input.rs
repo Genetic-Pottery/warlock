@@ -797,6 +797,9 @@ mod gate {
             Pressed::Record(edited) => {
                 panic!("{edited:?} came from a record window that is not up")
             }
+            Pressed::Key(edited) => {
+                panic!("{edited:?} came from a key window that is not up")
+            }
             Pressed::Push(answered) => {
                 panic!("{answered:?} came from a push dialog that is not up")
             }
@@ -1894,6 +1897,305 @@ mod gate {
                     asked(key, &RecordPrompt::Closed),
                     press_for(key, None, None, false),
                     "{code:?} was answered by a window that is not up"
+                );
+            }
+        }
+    }
+
+    // The fifth window: one row per key this machine holds, and Enter over the
+    // lit one binds it to a scope. Nothing in the loop opens it yet, which
+    // changes nothing about the gate — what is asserted here is that a key
+    // pressed while it is current is `key_edit_for`'s answer and nobody
+    // else's.
+    mod binding {
+        use super::{
+            Composer, CutConfirm, INERT, KeyCode, KeyEvent, Modals, Pressed, PullConfirm,
+            PushConfirm, QuitConfirm, ctrl_c, cut_answer_for, press, press_for, pull_answer_for,
+            push_answer_for,
+        };
+        use crate::prompt::{KeyChoice, KeyEdited, KeyPrompt, key_edit_for};
+
+        const SCOPE: &str = "data-plane";
+
+        // Stored under every name, so "no key value is on this road" has one
+        // needle to look for and a gate that carried one could not carry a
+        // value these assertions do not know about.
+        const SECRET: &str = "lin_api_this_value_must_never_be_pressed";
+
+        // Through a throwaway home and `KeyPrompt::open`, as the window's other
+        // tests do: the rows are a store's own answer rather than a list
+        // written here, and nothing below reads the developer's `~/.warlock`.
+        // The directory goes away with this call — the choice holds the names
+        // it read, and nothing on this road opens the store again.
+        fn a_window() -> (KeyPrompt, KeyChoice) {
+            let home = tempfile::tempdir().expect("a temporary directory");
+            for name in ["work", "acme", "personal"] {
+                warlock_engine::save_key(home.path(), name, SECRET).expect("a key stores");
+            }
+
+            let prompt =
+                KeyPrompt::open(home.path(), SCOPE).expect("a store that reads opens a window");
+            let choice = prompt.choice().expect("the window is up").clone();
+            (prompt, choice)
+        }
+
+        // The gate with this window up and every other one down, which is the
+        // only way it is ever up in a session.
+        fn asked(key: KeyEvent, prompt: &KeyPrompt) -> Pressed {
+            asked_composing(key, prompt, None)
+        }
+
+        fn asked_composing(
+            key: KeyEvent,
+            prompt: &KeyPrompt,
+            composer: Option<&Composer>,
+        ) -> Pressed {
+            press_for(
+                key,
+                Modals {
+                    key: prompt,
+                    ..Modals::default()
+                }
+                .current(),
+                composer,
+                false,
+            )
+        }
+
+        #[test]
+        fn every_binding_goes_to_the_rows_and_none_of_them_reaches_the_app() {
+            // The same promise the four windows above make, over the whole
+            // list: while a binding is being picked there is no `s` that opens
+            // the scope window under it, no `e` that hands the terminal to an
+            // editor and no `j` that moves a selection nobody can see. `j` and
+            // `k` are on the list and this window does not walk its rows on
+            // them — they leave the choice byte for byte as it was, which is
+            // still `key_edit_for`'s answer and not the tree's.
+            let (prompt, lit) = a_window();
+
+            for code in INERT {
+                let key = press(code);
+
+                assert_eq!(
+                    asked(key, &prompt),
+                    Pressed::Key(key_edit_for(key, &lit)),
+                    "{code:?} should have gone to the rows"
+                );
+            }
+        }
+
+        #[test]
+        fn enter_binds_the_lit_row_and_esc_leaves_it_unbound() {
+            let (prompt, _) = a_window();
+
+            assert_eq!(
+                asked(press(KeyCode::Enter), &prompt),
+                Pressed::Key(KeyEdited::Submit)
+            );
+            assert_eq!(
+                asked(press(KeyCode::Esc), &prompt),
+                Pressed::Key(KeyEdited::Close)
+            );
+            // And nothing else is either of those two: a key that bound a row
+            // nobody pressed Enter on would write this machine's config behind
+            // the reader.
+            for code in INERT {
+                let pressed = asked(press(code), &prompt);
+
+                assert_ne!(pressed, Pressed::Key(KeyEdited::Submit), "{code:?}");
+                assert_ne!(pressed, Pressed::Key(KeyEdited::Close), "{code:?}");
+            }
+        }
+
+        #[test]
+        fn ctrl_c_is_still_answered_before_the_window() {
+            // Answered before this window as before every other: with nothing
+            // out it asks the quit question, and it stops the turn when one is
+            // being answered.
+            let (prompt, _) = a_window();
+
+            assert_eq!(
+                asked(ctrl_c(), &prompt),
+                Pressed::Confirm(QuitConfirm::open())
+            );
+            assert_eq!(
+                press_for(
+                    ctrl_c(),
+                    Modals {
+                        key: &prompt,
+                        ..Modals::default()
+                    }
+                    .current(),
+                    None,
+                    true
+                ),
+                Pressed::CancelTurn
+            );
+        }
+
+        #[test]
+        fn the_quit_confirmation_is_answered_before_the_rows_too() {
+            // Not a situation the loop gets into — `q` is not a key this
+            // window lets through, so the question cannot come up behind it —
+            // but the order is the gate's, and it is asserted where the gate is
+            // read rather than inferred from the window that happens to be up.
+            let (prompt, _) = a_window();
+
+            assert_eq!(
+                press_for(
+                    press(KeyCode::Char('y')),
+                    Modals {
+                        quit: QuitConfirm::open(),
+                        key: &prompt,
+                        ..Modals::default()
+                    }
+                    .current(),
+                    None,
+                    false
+                ),
+                Pressed::Leave
+            );
+        }
+
+        #[test]
+        fn the_composer_is_not_consulted_while_the_window_is_up() {
+            // The window is drawn over the draft at the foot of the panel, so
+            // a key cannot be both a row being picked and a character typed
+            // into a draft. Tab included: there is nowhere for the keyboard to
+            // move while a window is up, and this one does not move on it.
+            let (prompt, lit) = a_window();
+            let draft = Composer::new("web");
+
+            for code in [KeyCode::Char('j'), KeyCode::Tab, KeyCode::Enter] {
+                let key = press(code);
+
+                assert_eq!(
+                    asked_composing(key, &prompt, Some(&draft)),
+                    Pressed::Key(key_edit_for(key, &lit)),
+                    "{code:?} reached the draft from behind the window"
+                );
+            }
+        }
+
+        #[test]
+        fn a_push_draft_or_pull_dialog_already_up_keeps_the_keys() {
+            // Where this window sits in the precedence, said at the gate: each
+            // of those three is a question somebody is looking at, and a
+            // binding asked for underneath one of them does not take the keys
+            // off it.
+            let (prompt, lit) = a_window();
+            let push = PushConfirm::open(
+                "Push a brief to the board",
+                warlock_engine::Destination::new("warlock-team", "Warlock", "warlock", "work"),
+            );
+            let cut = CutConfirm::open(
+                "Cut a planned project into tickets",
+                "planned",
+                9,
+                "Warlock",
+                "work",
+            );
+            let pull = PullConfirm::open(
+                "WAR-163",
+                "Wire the key-binding window into the frame",
+                "warlock-team",
+                "Warlock",
+                "war-163/wire-the-key-binding-window",
+            );
+
+            for code in INERT.into_iter().chain([KeyCode::Enter, KeyCode::Esc]) {
+                let key = press(code);
+
+                assert_eq!(
+                    press_for(
+                        key,
+                        Modals {
+                            push: &push,
+                            key: &prompt,
+                            ..Modals::default()
+                        }
+                        .current(),
+                        None,
+                        false
+                    ),
+                    Pressed::Push(push_answer_for(
+                        key,
+                        push.filing().expect("the dialog is up").answer()
+                    )),
+                    "{code:?} was answered by the key window over the push dialog"
+                );
+                assert_eq!(
+                    press_for(
+                        key,
+                        Modals {
+                            cut: &cut,
+                            key: &prompt,
+                            ..Modals::default()
+                        }
+                        .current(),
+                        None,
+                        false
+                    ),
+                    Pressed::Cut(cut_answer_for(
+                        key,
+                        cut.cutting().expect("the dialog is up").answer()
+                    )),
+                    "{code:?} was answered by the key window over the draft dialog"
+                );
+                assert_eq!(
+                    press_for(
+                        key,
+                        Modals {
+                            pull: &pull,
+                            key: &prompt,
+                            ..Modals::default()
+                        }
+                        .current(),
+                        None,
+                        false
+                    ),
+                    Pressed::Pull(pull_answer_for(
+                        key,
+                        pull.undertaking().expect("the dialog is up").answer()
+                    )),
+                    "{code:?} was answered by the key window over the pull dialog"
+                );
+            }
+            // And the window underneath is untouched by all of it: it is read,
+            // never written, on that road.
+            assert_eq!(prompt.choice(), Some(&lit));
+        }
+
+        #[test]
+        fn the_window_being_down_leaves_every_key_to_the_tree() {
+            // The other half: nothing above is a rule about the key, only
+            // about the window, so with it closed the gate is the gate it
+            // always was.
+            for code in INERT {
+                let key = press(code);
+
+                assert_eq!(
+                    asked(key, &KeyPrompt::Closed),
+                    press_for(key, None, None, false),
+                    "{code:?} was answered by a window that is not up"
+                );
+            }
+        }
+
+        #[test]
+        fn no_stored_value_is_anywhere_on_what_the_gate_hands_back() {
+            // The window holds names and the gate carries the choice those
+            // names came in, so a key value could only be here if one had been
+            // read — and nothing on this road reads one. Asserted over the
+            // debug of every answer, which is where a leaked value would show.
+            let (prompt, _) = a_window();
+
+            for code in INERT.into_iter().chain([KeyCode::Enter, KeyCode::Esc]) {
+                let pressed = format!("{:?}", asked(press(code), &prompt));
+
+                assert!(
+                    !pressed.contains(SECRET),
+                    "{code:?} carried a stored key: {pressed}"
                 );
             }
         }

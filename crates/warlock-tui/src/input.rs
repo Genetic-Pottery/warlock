@@ -19,7 +19,7 @@ use crate::confirm::{
 };
 use crate::help::{HelpSheet, help_for};
 use crate::modal::Modal;
-use crate::prompt::{Edited, RecordEdited, edit_for, record_edit_for};
+use crate::prompt::{Edited, KeyEdited, RecordEdited, edit_for, key_edit_for, record_edit_for};
 use crate::selection::Cell;
 use crate::ui::{Cut, Hit, Reach, Shape};
 
@@ -134,6 +134,11 @@ pub(crate) enum Pressed {
     WriteBrief(Answered),
     Scope(Edited),
     Record(RecordEdited),
+    // The fourth window, and a `KeyEdited` of its own for `Record`'s reason:
+    // there is no text in it, so a submit is the lit row and not a string, and
+    // the loop answers it by writing this machine's config rather than the
+    // manifest the three above write.
+    Key(KeyEdited),
     Write(Edited),
     Compose(Composed),
     Act(Action),
@@ -233,6 +238,7 @@ pub(crate) fn press_for(
             Modal::WriteBrief(highlighted) => Pressed::WriteBrief(answer_for(key, highlighted)),
             Modal::Scope(field) => Pressed::Scope(edit_for(key, field)),
             Modal::Record(form) => Pressed::Record(record_edit_for(key, form)),
+            Modal::Key(choice) => Pressed::Key(key_edit_for(key, choice)),
             Modal::Write(field) => Pressed::Write(edit_for(key, field)),
         };
     }
