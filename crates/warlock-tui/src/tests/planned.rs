@@ -1480,9 +1480,12 @@ mod headless {
         // on the board carrying the skipped slice's stand-in titles.
         assert_eq!(agent.turns(), 2, "{:?}", agent.said());
         assert_eq!(linear.issues_created().len(), 4);
+        // Its prose and not its title: a later session is shown the title among
+        // the tickets earlier slices became, but only a drafted slice is sent
+        // its prose.
         for said in agent.said() {
             assert!(
-                !said.contains(FIRST),
+                !said.contains("What it resolves."),
                 "the skipped slice was drafted: {said}"
             );
         }
@@ -2605,6 +2608,44 @@ mod backlog {
         assert!(
             !brief.contains("already exist and are still open"),
             "{brief}"
+        );
+    }
+
+    #[test]
+    fn a_later_slice_is_shown_what_earlier_slices_became_and_can_wait_on_it() {
+        let repo = a_scoped_repository();
+        let home = a_home(repo.path());
+        let linear = a_sliced_project(SLICED);
+        let mut planned = prepared(repo.path(), home.path(), &linear);
+
+        let first = planned.next_uncut().expect("a first slice");
+        let cut = planned
+            .filing(&first, drafts_for(FIRST))
+            .file(&linear, &mut io::sink())
+            .expect("a slice that files");
+        let filed = cut.issues[0].identifier().to_owned();
+        planned.settle(&first, cut);
+
+        let brief = planned.drafting_brief();
+        assert!(
+            brief.contains(&format!("{filed}  slice 1 `{FIRST}`  Stand in for {FIRST}")),
+            "{brief}"
+        );
+
+        let second = planned.next_uncut().expect("a second slice");
+        let mut drafts = drafts_for(SECOND);
+        drafts[0].waits_on = vec![filed];
+        let cut = planned
+            .filing(&second, drafts)
+            .file(&linear, &mut io::sink())
+            .expect("a slice that files");
+
+        assert!(
+            !cut.reported
+                .iter()
+                .any(|line| line.contains("not one of the tickets")),
+            "{:?}",
+            cut.reported
         );
     }
 }

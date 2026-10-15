@@ -4,7 +4,7 @@ use tempfile::TempDir;
 use warlock_engine::Destination;
 use warlock_engine::drafting::Draft;
 
-use super::{Cut, Filing, Slice, cut, fold_title, noted, skip};
+use super::{Cut, Filing, Slice, cut, cut_note, fold_title, noted, quoted, skip};
 use crate::error::Error;
 use crate::error::status_for;
 use crate::linear::{Board, Issue as LinearIssue};
@@ -514,7 +514,10 @@ fn a_refused_relation_is_a_reported_line_and_the_slice_still_files() {
 
     let outcome = cut_into(repo.path(), &linear, TITLE, &drafts).0;
 
-    let Ok(Cut { issues, reported }) = outcome else {
+    let Ok(Cut {
+        issues, reported, ..
+    }) = outcome
+    else {
         panic!("a refused edge failed the slice: {outcome:?}");
     };
     let identifiers: Vec<&str> = issues.iter().map(LinearIssue::identifier).collect();
@@ -679,4 +682,28 @@ fn a_draft_waiting_on_an_open_ticket_it_was_shown_is_blocked_by_it_and_no_other(
     let reported = reported(outcome);
     assert_eq!(reported.len(), 1, "{reported:?}");
     assert!(reported[0].contains("`WAR-999`"), "{reported:?}");
+}
+
+#[test]
+fn a_title_holding_backticks_is_fenced_past_them_on_screen() {
+    assert_eq!(quoted("Parse the scope"), "`Parse the scope`");
+    assert_eq!(
+        quoted("Bind keys in `warlock key use`"),
+        "`` Bind keys in `warlock key use` ``"
+    );
+    assert_eq!(quoted("a `` b"), "```a `` b```");
+}
+
+#[test]
+fn a_cut_note_for_a_title_holding_backticks_reads_back() {
+    let title = "Bind keys in `warlock key use`";
+    let note = cut_note(title, &["WAR-159".to_owned(), "WAR-160".to_owned()]);
+
+    assert_eq!(
+        noted(&[note]),
+        [(
+            fold_title(title),
+            vec!["WAR-159".to_owned(), "WAR-160".to_owned()]
+        )]
+    );
 }

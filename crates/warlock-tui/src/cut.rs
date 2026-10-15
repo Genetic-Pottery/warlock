@@ -56,8 +56,9 @@ pub(crate) struct Slice<'a> {
     pub(crate) title: &'a str,
     pub(crate) drafts: &'a [Draft],
     pub(crate) needs: &'a [&'a [LinearIssue]],
-    /// The open tickets the drafting session was shown, which are the only ones
-    /// a draft's `waits_on` can name.
+    /// The tickets the drafting session was shown — the open queue and what
+    /// the project's earlier slices became — which are the only ones a draft's
+    /// `waits_on` can name.
     pub(crate) open: &'a [LinearIssue],
 }
 
@@ -71,6 +72,8 @@ pub(crate) struct Slice<'a> {
 #[derive(Debug)]
 pub(crate) struct Cut {
     pub(crate) issues: Vec<LinearIssue>,
+    /// Beside `issues`, one each: the title each was filed under.
+    pub(crate) titles: Vec<String>,
     pub(crate) reported: Vec<String>,
 }
 
@@ -130,7 +133,7 @@ pub(crate) fn cut<W: Write>(
     // that must not be lost, so they go out whatever the comment does next.
     say(
         out,
-        &format!("cut `{}` into {}", slice.title, listed(&identifiers)),
+        &format!("cut {} into {}", quoted(slice.title), listed(&identifiers)),
     );
 
     linear
@@ -140,7 +143,15 @@ pub(crate) fn cut<W: Write>(
             source: Box::new(source),
         })?;
 
-    Ok(Cut { issues, reported })
+    Ok(Cut {
+        issues,
+        titles: slice
+            .drafts
+            .iter()
+            .map(|draft| draft.title.clone())
+            .collect(),
+        reported,
+    })
 }
 
 /// The project moved to `In Progress`, said as one line however it went: the
@@ -310,9 +321,9 @@ fn unshown(slice: Slice<'_>) -> Vec<String> {
                 .filter(|name| shown(slice.open, name).is_none())
                 .map(move |name| {
                     format!(
-                        "`{}` waits on `{name}`, which is not one of the open tickets its \
+                        "{} waits on `{name}`, which is not one of the tickets its \
                          session was shown, so no edge was written",
-                        draft.title
+                        quoted(&draft.title)
                     )
                 })
         })
@@ -343,9 +354,27 @@ fn relate(linear: &impl Board, edges: &[(&LinearIssue, &LinearIssue)]) -> Vec<St
 pub(crate) fn listed(items: &[impl fmt::Display]) -> String {
     items
         .iter()
-        .map(|item| format!("`{item}`"))
+        .map(|item| quoted(&item.to_string()))
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+// Single backticks around a title that holds its own close early, and the
+// line reads as two spans. Markdown's rule instead: a fence longer than any run
+// inside, padded where the text starts or ends with a backtick.
+pub(crate) fn quoted(text: &str) -> String {
+    let longest = text
+        .split(|character| character != '`')
+        .map(str::len)
+        .max()
+        .unwrap_or(0);
+    let fence = "`".repeat(longest + 1);
+    let pad = if text.starts_with('`') || text.ends_with('`') {
+        " "
+    } else {
+        ""
+    };
+    format!("{fence}{pad}{text}{pad}{fence}")
 }
 
 #[cfg(test)]

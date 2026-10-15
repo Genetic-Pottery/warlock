@@ -668,6 +668,9 @@ pub(crate) struct Planned {
     // and an empty entry is left out of a cut's `needs` rather than written as
     // an edge to nothing.
     became: Vec<Vec<LinearIssue>>,
+    // Beside `became`, the title each of this run's issues was filed under. An
+    // earlier run's are unknown, since a cut note keeps only identifiers.
+    titled: Vec<Vec<String>>,
     at: usize,
 }
 
@@ -766,6 +769,7 @@ pub(crate) fn prepare<O: Opens>(
             .map(|issues| issues.as_ref().map(|issues| !issues.is_empty()))
             .collect(),
         already,
+        titled: vec![Vec::new(); became.len()],
         became,
         at: 0,
         open,
@@ -774,32 +778,62 @@ pub(crate) fn prepare<O: Opens>(
 
 impl Planned {
     /// The brief a slice's session and a proposal are given: the brief, then
-    /// Forman's digest of the open tickets, in Forman's words, which is what a
-    /// draft's `blocked_by` can name by identifier.
+    /// Forman's digest of the open tickets, in Forman's words, then the tickets
+    /// this project's earlier slices became — each what a draft's
+    /// `blocked_by` can name by identifier.
     pub(crate) fn drafting_brief(&self) -> String {
+        let mut sections = vec![self.brief.trim_end().to_owned()];
+
         let mut open: Vec<&QueuedIssue> = self.open.iter().collect();
-        if open.is_empty() {
-            return self.brief.clone();
+        if !open.is_empty() {
+            open.sort_by_key(|issue| natural(issue.identifier()));
+            let rows: Vec<String> = open
+                .iter()
+                .take(BACKLOG_LIMIT)
+                .map(|issue| {
+                    format!(
+                        "{}  [{}]  {}",
+                        issue.identifier(),
+                        issue.state(),
+                        issue.title()
+                    )
+                })
+                .collect();
+            sections.push(format!(
+                "These tickets already exist and are still open. If what you are drafting \
+                 cannot start until one of them has landed, put that identifier in blocked_by:\n\n{}",
+                rows.join("\n")
+            ));
         }
-        open.sort_by_key(|issue| natural(issue.identifier()));
-        let rows: Vec<String> = open
-            .iter()
-            .take(BACKLOG_LIMIT)
-            .map(|issue| {
-                format!(
-                    "{}  [{}]  {}",
-                    issue.identifier(),
-                    issue.state(),
-                    issue.title()
-                )
-            })
-            .collect();
-        format!(
-            "{}\n\nThese tickets already exist and are still open. If what you are drafting \
-             cannot start until one of them has landed, put that identifier in blocked_by:\n\n{}",
-            self.brief.trim_end(),
-            rows.join("\n")
-        )
+
+        // A session shown only the queue as the run started cannot see what
+        // the slices before it were cut into, and guessed which slice built
+        // what it needs — wrongly, and in every draft of the slice.
+        let rows: Vec<String> =
+            self.slices
+                .iter()
+                .flat_map(|slice| {
+                    let titles = &self.titled[at(slice)];
+                    self.became[at(slice)].iter().enumerate().map(
+                        move |(index, issue)| match titles.get(index) {
+                            Some(title) => {
+                                format!("{}  {}  {title}", issue.identifier(), named(slice))
+                            }
+                            None => format!("{}  {}", issue.identifier(), named(slice)),
+                        },
+                    )
+                })
+                .collect();
+        if !rows.is_empty() {
+            sections.push(format!(
+                "These tickets were cut from this project's earlier slices. When what you \
+                 are drafting builds on one, name it by its identifier, and put it in blocked_by \
+                 if it cannot start until that one has landed:\n\n{}",
+                rows.join("\n")
+            ));
+        }
+
+        sections.join("\n\n")
     }
 
     /// The note that records `next` as skipped, so no later run offers it,
@@ -917,7 +951,12 @@ impl Planned {
             title: next.slice.heading().to_owned(),
             drafts,
             needs,
-            open: self.open.iter().map(LinearIssue::listed).collect(),
+            open: self
+                .open
+                .iter()
+                .map(LinearIssue::listed)
+                .chain(self.became.iter().flatten().cloned())
+                .collect(),
             finishes: self.finishes(next),
         }
     }
@@ -930,6 +969,9 @@ impl Planned {
             .iter()
             .map(|issue| issue.identifier().to_owned())
             .collect();
+        if let Some(entry) = self.titled.get_mut(at(&next.slice)) {
+            *entry = cut.titles;
+        }
         if let Some(entry) = self.became.get_mut(at(&next.slice)) {
             *entry = cut.issues;
         }
@@ -1359,7 +1401,11 @@ pub(crate) fn unproposed_line(slice: &Slice, why: &str) -> String {
 // to the brief. `pub(crate)` for the panel's own lines about a slice, so the
 // two doors cannot come to name the same work differently.
 pub(crate) fn named(slice: &Slice) -> String {
-    format!("slice {} `{}`", slice.position(), slice.heading())
+    format!(
+        "slice {} {}",
+        slice.position(),
+        cut::quoted(slice.heading())
+    )
 }
 
 // `1 slice`, `9 slices`, so a count is not worded twice or read as `1 slices`.
