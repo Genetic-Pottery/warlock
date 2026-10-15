@@ -1,5 +1,5 @@
 //! `warlock key add`, `list`, `use` and `forget`: the Linear keys this machine
-//! holds, by name, and which of them this checkout is bound to.
+//! holds, by name, and which of them each scope of this checkout is bound to.
 //!
 //! The secret is taken on stdin and never in argv, because an argument is
 //! readable by every process on the box for as long as the command runs and is
@@ -29,14 +29,15 @@ use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, Ke
 use ratatui::crossterm::terminal::enable_raw_mode;
 use serde_json::Value;
 use warlock_engine::{
-    Forgotten, forget_key, keys, keys_path, load_key_binding, load_key_names, save_key,
-    save_key_binding, sigils_path, validate_scope,
+    Forgotten, forget_key, keys, keys_path, load_key_names, save_key, save_key_binding,
+    scopes_bound_to, sigils_path, validate_scope,
 };
 
 use crate::asking::{self, Asks, Cooked, ERASE};
 use crate::error::{Error, one_line, say};
 use crate::query::{envelope, write_object};
 use crate::standing::{FOR_KEY, Standing};
+use crate::writing::listing;
 
 const COMMAND: &str = "key list";
 
@@ -88,11 +89,16 @@ pub fn key_list(json: bool) -> Result<(), Error> {
 // writes into this checkout's config and `forget` can only say what it did to
 // this checkout by reading it. Both resolutions happen here and are passed down
 // as parameters, so nothing below reads `HOME` or the working directory.
-pub fn key_use(name: &str) -> Result<(), Error> {
+//
+// `use` takes the scope as well, because the config holds a name per scope: a
+// repository whose scopes file into two Linear workspaces needs two keys, and
+// one argument could only ever name one of them. The scope comes first, as it
+// does in `push <scope> <path>`, `draft <scope>` and `pull <scope>`.
+pub fn key_use(scope: &str, name: &str) -> Result<(), Error> {
     let standing = Standing::here(FOR_KEY)?;
     let home = Standing::home()?;
 
-    bound(&home, standing.repo_root(), name, &mut io::stdout())
+    bound(&home, standing.repo_root(), scope, name, &mut io::stdout())
 }
 
 pub fn key_forget(name: &str) -> Result<(), Error> {
@@ -294,13 +300,22 @@ fn object(names: &[String]) -> Value {
 // Split from `key_use` for `listed`'s reason: `out` is what a test reads back,
 // and the home and the root arrive as parameters rather than being asked of the
 // environment down here.
-fn bound<W: Write>(home: &Path, root: &Path, name: &str, out: &mut W) -> Result<(), Error> {
-    // The store is asked before a byte is written, and that ordering is the
+fn bound<W: Write>(
+    home: &Path,
+    root: &Path,
+    scope: &str,
+    name: &str,
+    out: &mut W,
+) -> Result<(), Error> {
+    // The store is asked before the config is opened, and that ordering is the
     // whole of the refusal: `save_key_binding` judges the *shape* of a name, so
-    // without this a typo would be written into the config and the checkout
-    // would look bound and fail at the API instead. What that save does with
-    // the sigils already in the config is its own business — it reads them
-    // first and writes them back.
+    // without this a typo would be written into the config and the scope would
+    // look bound and fail at the API instead. It is the only refusal here —
+    // whether the scope is one this repository records is `scopes.toml`'s
+    // question, and a binding written before the scope exists is a checkout
+    // made ready rather than a mistake. What the save does with the other
+    // bindings, the sigils and the branch already in the config is its own
+    // business: it reads them first and writes them back.
     if !names(home)?.iter().any(|stored| stored == name) {
         return Err(Error::UnknownKey {
             name: name.to_owned(),
@@ -308,11 +323,11 @@ fn bound<W: Write>(home: &Path, root: &Path, name: &str, out: &mut W) -> Result<
         });
     }
 
-    save_key_binding(home, root, name).map_err(|source| Error::Sigils { source })?;
+    save_key_binding(home, root, scope, name).map_err(|source| Error::Sigils { source })?;
     say(
         out,
         &format!(
-            "`{}` is bound to the key `{name}`, written to `{}`",
+            "the scope `{scope}` in `{}` is bound to the key `{name}`, written to `{}`",
             root.display(),
             sigils_path(home, root).display()
         ),
@@ -324,12 +339,18 @@ fn bound<W: Write>(home: &Path, root: &Path, name: &str, out: &mut W) -> Result<
 fn forgotten<W: Write>(home: &Path, root: &Path, name: &str, out: &mut W) -> Result<(), Error> {
     // Asked before the removal and answered after it. Before, because it is a
     // question about a different file that the removal never touches, and the
-    // removal is not waiting on it; after, because a checkout is only worth a
+    // removal is not waiting on it; after, because a scope is only worth a
     // sentence when the key really went. An unreadable or absent config reads
     // as "not this checkout" rather than as a failure: by the time this is
     // looked at the key is gone, and refusing then would tell a reader nothing
     // had happened when something had.
-    let unbinds = matches!(load_key_binding(home, root), Ok(Some(held)) if held == name);
+    //
+    // Every scope bound to the name rather than one, because the config holds a
+    // name per scope and forgetting one key can unbind several at once. Only the
+    // scopes bound to *this* name are asked for — the map itself is never read
+    // out here, so no part of `warlock key` can print a checkout's bindings
+    // wholesale.
+    let unbinds = scopes_bound_to(home, root, name).unwrap_or_default();
 
     match forget_key(home, name) {
         Ok(Forgotten::Key) => {}
@@ -347,19 +368,35 @@ fn forgotten<W: Write>(home: &Path, root: &Path, name: &str, out: &mut W) -> Res
     }
 
     // One line either way, with the checkout's half on the end of it rather
-    // than on a second line: the removal is what happened and the binding is
-    // what it cost. No prompt before any of this and no walk of the other
-    // checkouts' configs after it — warlock has no list of them to walk, and
-    // going looking would mean reading every project directory under the home
-    // to warn about machines-worth of bindings nobody asked about.
-    let unbound = if unbinds {
-        format!(
-            "; `{}` was bound to it and is now unbound, and warlock will refuse there until \
-             `warlock key use <name>` binds another",
+    // than on a second line: the removal is what happened and the bindings are
+    // what it cost. Every scope that was bound is named, because the fix is one
+    // `warlock key use` per scope and a reader counting them off the sentence is
+    // a reader who rebinds all of them; a sentence about "this checkout" would
+    // leave them guessing which of its scopes just went dark. Nothing is said
+    // when no scope was bound, so the ordinary removal stays one short line.
+    //
+    // No prompt before any of this and no walk of the other checkouts' configs
+    // after it — warlock has no list of them to walk, and going looking would
+    // mean reading every project directory under the home to warn about
+    // machines-worth of bindings nobody asked about.
+    let unbound = match unbinds.as_slice() {
+        [] => String::new(),
+        [only] => format!(
+            "; the scope `{only}` in `{}` was bound to it and is now unbound, and warlock will \
+             refuse there until `warlock key use {only} <name>` binds another",
             root.display()
-        )
-    } else {
-        String::new()
+        ),
+        scopes => format!(
+            "; the scopes {} in `{}` were bound to it and are now unbound, and warlock will \
+             refuse there until `warlock key use <scope> <name>` binds another for each",
+            listing(
+                &scopes
+                    .iter()
+                    .map(|scope| format!("`{scope}`"))
+                    .collect::<Vec<_>>()
+            ),
+            root.display()
+        ),
     };
     say(
         out,

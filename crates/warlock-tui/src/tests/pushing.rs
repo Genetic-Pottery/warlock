@@ -86,13 +86,20 @@ fn a_repository() -> TempDir {
 }
 
 // A home of this test's own, every time: the sigils that pick the board, the
-// binding and the key store are all under it, and the module under test is
+// bindings and the key store are all under it, and the module under test is
 // only ever asked about the one handed in below. Nothing here reads `HOME`.
+//
+// Both of the manifest's scopes are bound, to the one name, because the config
+// holds a key name per scope and a test that files into `OTHER_SCOPE` needs
+// that scope's binding as much as `SCOPE`'s. Which of the two is a candidate
+// stays the sigils' question, which is the rule these tests are about.
 fn a_home(root: &Path, sigils: &[&str]) -> TempDir {
     let home = a_dir();
     let held: Vec<String> = sigils.iter().map(|sigil| (*sigil).to_owned()).collect();
     save_sigils(home.path(), root, &held).expect("a config that writes");
-    save_key_binding(home.path(), root, KEY_NAME).expect("a binding that writes");
+    for scope in [SCOPE, OTHER_SCOPE] {
+        save_key_binding(home.path(), root, scope, KEY_NAME).expect("a binding that writes");
+    }
     save_key(home.path(), KEY_NAME, NOT_A_KEY).expect("a key store that writes");
     home
 }
@@ -206,7 +213,8 @@ fn every_refusal_is_push_rs_own_line_on_the_thread_with_no_window_up() {
     let repo = a_repository();
 
     let unsigiled = a_dir();
-    save_key_binding(unsigiled.path(), repo.path(), KEY_NAME).expect("a binding that writes");
+    save_key_binding(unsigiled.path(), repo.path(), SCOPE, KEY_NAME)
+        .expect("a binding that writes");
     save_key(unsigiled.path(), KEY_NAME, NOT_A_KEY).expect("a key store that writes");
 
     let unbound = a_dir();
@@ -214,7 +222,7 @@ fn every_refusal_is_push_rs_own_line_on_the_thread_with_no_window_up() {
 
     let dangling = a_dir();
     save_sigils(dangling.path(), repo.path(), &[SCOPE.to_owned()]).expect("a config that writes");
-    save_key_binding(dangling.path(), repo.path(), KEY_NAME).expect("a binding that writes");
+    save_key_binding(dangling.path(), repo.path(), SCOPE, KEY_NAME).expect("a binding that writes");
 
     let held = a_home(repo.path(), &[SCOPE]);
 

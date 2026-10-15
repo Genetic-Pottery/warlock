@@ -115,7 +115,7 @@ fn a_repository() -> TempDir {
 fn a_home(root: &Path) -> TempDir {
     let home = a_dir();
     save_sigils(home.path(), root, &[SCOPE.to_owned()]).expect("a config that writes");
-    save_key_binding(home.path(), root, KEY_NAME).expect("a binding that writes");
+    save_key_binding(home.path(), root, SCOPE, KEY_NAME).expect("a binding that writes");
     save_key(home.path(), KEY_NAME, NOT_A_KEY).expect("a key store that writes");
     home
 }

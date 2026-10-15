@@ -281,9 +281,12 @@ enum ScopeCommand {
 /// thing that could go in one of these is the name the command was already
 /// given.
 ///
-/// A checkout binds one name with `use` and there is no default for one that
-/// has bound none — an unbound checkout is unbound, and says so, rather than
-/// quietly reaching for whichever key happens to be first in the store.
+/// The store is machine-wide and a binding is per scope: `add` and `list` are
+/// about the box and stand in no repository, while `use` and `forget` act on
+/// this checkout's config. A scope binds one name with `use` and there is no
+/// default for one that has bound none, and no fallback to another scope's key
+/// — an unbound scope is unbound, and says so, rather than quietly filing into
+/// whichever Linear workspace some other scope happens to answer to.
 #[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
 enum KeyCommand {
     #[command(
@@ -309,10 +312,18 @@ enum KeyCommand {
         json: bool,
     },
     #[command(
-        about = "Bind one of the stored keys to this checkout by name.",
+        about = "Bind one of the stored keys to a scope of this checkout.",
         long_about = None
     )]
     Use {
+        // Scope first and key second, as in `push <scope> <path>`, `draft
+        // <scope>` and `pull <scope>`: the scope is what the whole family leads
+        // with. Neither is optional and neither is a flag — a one-argument
+        // spelling would have to guess which scope was meant, and the guess is
+        // work filed into the wrong Linear workspace.
+        /// The scope to bind, as `scopes.toml` names it.
+        #[arg(value_name = "SCOPE")]
+        scope: String,
         /// The name of a key this machine already holds.
         #[arg(value_name = "NAME")]
         name: String,
@@ -322,7 +333,7 @@ enum KeyCommand {
         long_about = None
     )]
     Forget {
-        /// The name to remove, whatever is bound to it.
+        /// The name to remove, whatever scopes are bound to it.
         #[arg(value_name = "NAME")]
         name: String,
     },
@@ -439,7 +450,7 @@ fn main() -> ExitCode {
         Some(Command::Key { command }) => match command {
             KeyCommand::Add { name } => key_add(&name),
             KeyCommand::List { json } => key_list(json),
-            KeyCommand::Use { name } => key_use(&name),
+            KeyCommand::Use { scope, name } => key_use(&scope, &name),
             KeyCommand::Forget { name } => key_forget(&name),
         },
         Some(Command::Branch { command }) => match command {

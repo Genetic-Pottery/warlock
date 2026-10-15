@@ -89,7 +89,7 @@ fn write_brief(root: &Path, document: &str) -> PathBuf {
 fn a_home(root: &Path) -> TempDir {
     let home = a_dir();
     holding(home.path(), root, &[SCOPE]);
-    bound(home.path(), root, KEY_NAME);
+    bound(home.path(), root, SCOPE, KEY_NAME);
     keeping(home.path(), KEY_NAME);
     home
 }
@@ -99,8 +99,11 @@ fn holding(home: &Path, root: &Path, sigils: &[&str]) {
     save_sigils(home, root, &sigils).expect("a config that writes");
 }
 
-fn bound(home: &Path, root: &Path, name: &str) {
-    save_key_binding(home, root, name).expect("a binding that writes");
+// One scope's binding, because that is what the config holds: a test standing
+// at two boards binds each of the two scopes it may file to, and one that only
+// ever files to `SCOPE` leaves the other unbound.
+fn bound(home: &Path, root: &Path, scope: &str, name: &str) {
+    save_key_binding(home, root, scope, name).expect("a binding that writes");
 }
 
 fn keeping(home: &Path, name: &str) {
@@ -379,7 +382,8 @@ fn every_refusal_prepare_raises_is_the_ordinary_status_with_nothing_printed_or_s
     );
     let both = a_dir();
     holding(both.path(), several.path(), &[SCOPE, "web"]);
-    bound(both.path(), several.path(), KEY_NAME);
+    bound(both.path(), several.path(), SCOPE, KEY_NAME);
+    bound(both.path(), several.path(), "web", KEY_NAME);
     keeping(both.path(), KEY_NAME);
 
     let unbound_repo = a_repository();
@@ -482,7 +486,8 @@ fn the_scope_typed_picks_the_board_and_one_that_is_not_a_candidate_names_the_can
     );
     let home = a_dir();
     holding(home.path(), repo.path(), &[SCOPE, "web"]);
-    bound(home.path(), repo.path(), KEY_NAME);
+    bound(home.path(), repo.path(), SCOPE, KEY_NAME);
+    bound(home.path(), repo.path(), "web", KEY_NAME);
     keeping(home.path(), KEY_NAME);
 
     // A machine that could file to either board files to the one typed.
@@ -517,6 +522,7 @@ fn an_unbound_checkout_and_a_dangling_name_are_route_s_two_sentences_reached_thr
     assert_eq!(
         said(&error),
         route::Error::Unbound {
+            scope: SCOPE.to_owned(),
             path: sigils_path(unbound.path(), repo.path()),
         }
         .to_string()
@@ -524,13 +530,14 @@ fn an_unbound_checkout_and_a_dangling_name_are_route_s_two_sentences_reached_thr
 
     let dangling = a_dir();
     holding(dangling.path(), repo.path(), &[SCOPE]);
-    bound(dangling.path(), repo.path(), KEY_NAME);
+    bound(dangling.path(), repo.path(), SCOPE, KEY_NAME);
     keeping(dangling.path(), "personal");
 
     let error = refused(repo.path(), dangling.path(), SCOPE);
     assert_eq!(
         said(&error),
         route::Error::Dangling {
+            scope: SCOPE.to_owned(),
             key: KEY_NAME.to_owned(),
             path: keys_path(dangling.path()),
         }

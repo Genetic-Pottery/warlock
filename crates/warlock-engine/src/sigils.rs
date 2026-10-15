@@ -153,6 +153,54 @@ pub fn load_key_binding(
 }
 
 /// ```
+/// use warlock_engine::{save_key_binding, scopes_bound_to};
+///
+/// let (home, root) = (tempfile::tempdir()?, tempfile::tempdir()?);
+/// // A checkout nobody has configured binds no scope to anything.
+/// assert!(scopes_bound_to(home.path(), root.path(), "work")?.is_empty());
+///
+/// save_key_binding(home.path(), root.path(), "web", "work")?;
+/// save_key_binding(home.path(), root.path(), "data-plane", "work")?;
+/// save_key_binding(home.path(), root.path(), "billing", "personal")?;
+///
+/// // Every scope bound to that one name, in the order the file holds them.
+/// assert_eq!(
+///     scopes_bound_to(home.path(), root.path(), "work")?,
+///     ["data-plane", "web"],
+/// );
+/// assert_eq!(scopes_bound_to(home.path(), root.path(), "nobody")?, [] as [String; 0]);
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
+// The question `load_key_binding` cannot be asked, and the reason it is a
+// second function rather than a looser first one: this reads the whole `[keys]`
+// table, and `load_key_binding` must only ever answer for the scope it was
+// handed. Nothing is exported that hands the map itself out, so no caller can
+// print a checkout's bindings wholesale — the only thing askable is which
+// scopes a name already given covers, which is what `warlock key forget` needs
+// to say what its removal cost.
+//
+// Absent is an empty answer rather than `NotFound`, unlike `load_key_binding`:
+// every caller asks this *about a name it is acting on*, and a checkout with no
+// config bound that name in no scope. A config that is there and will not read
+// stays an error, for `load_sigils`'s reason.
+pub fn scopes_bound_to(
+    home: impl AsRef<Path>,
+    root: impl AsRef<Path>,
+    name: &str,
+) -> Result<Vec<String>, Error> {
+    match read(home.as_ref(), root.as_ref()) {
+        Ok(config) => Ok(config
+            .keys
+            .into_iter()
+            .filter(|(_, bound)| bound == name)
+            .map(|(scope, _)| scope)
+            .collect()),
+        Err(Error::NotFound { .. }) => Ok(Vec::new()),
+        Err(error) => Err(error),
+    }
+}
+
+/// ```
 /// use warlock_engine::{load_key_binding, load_sigils, save_key_binding, save_sigils};
 ///
 /// let (home, root) = (tempfile::tempdir()?, tempfile::tempdir()?);
