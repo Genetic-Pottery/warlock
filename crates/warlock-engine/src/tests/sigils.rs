@@ -2,8 +2,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use super::{
-    DIGEST_CHARACTERS, Error, MAXIMUM_NAME_CHARACTERS, SIGIL_FILE, held_sigils, load_key_binding,
-    load_sigils, project_directory, save_key_binding, save_sigils, sigils_path,
+    DIGEST_CHARACTERS, Error, MAXIMUM_NAME_CHARACTERS, SIGIL_FILE, held_base_branch, held_sigils,
+    load_key_binding, load_sigils, project_directory, save_base_branch, save_key_binding,
+    save_sigils, sigils_path,
 };
 
 fn a_dir() -> tempfile::TempDir {
@@ -303,7 +304,7 @@ fn a_config_written_before_bindings_existed_reads_as_unbound() {
         "the field is optional, so yesterday's file is still today's file"
     );
     assert_eq!(
-        load_key_binding(home.path(), &root).expect("loads"),
+        load_key_binding(home.path(), &root, "web").expect("loads"),
         None,
         "no binding, rather than a default one"
     );
@@ -311,19 +312,19 @@ fn a_config_written_before_bindings_existed_reads_as_unbound() {
     // And unbound stays distinguishable from never configured.
     let never = named(elsewhere.path(), "other");
     assert!(matches!(
-        load_key_binding(home.path(), &never),
+        load_key_binding(home.path(), &never, "web"),
         Err(Error::NotFound { .. })
     ));
 }
 
 #[test]
-fn a_config_that_names_a_key_still_gives_its_sigils_back() {
+fn a_config_that_binds_a_scope_still_gives_its_sigils_back() {
     let (home, elsewhere) = (a_dir(), a_dir());
     let root = named(elsewhere.path(), "warlock");
     hand_write(
         home.path(),
         &root,
-        "sigils = [\"billing\", \"web\"]\nkey = \"work\"\n",
+        "sigils = [\"billing\", \"web\"]\n\n[keys]\nweb = \"work\"\n",
     );
 
     assert_eq!(
@@ -331,9 +332,38 @@ fn a_config_that_names_a_key_still_gives_its_sigils_back() {
         ["billing", "web"]
     );
     assert_eq!(
-        load_key_binding(home.path(), &root).expect("loads"),
+        load_key_binding(home.path(), &root, "web").expect("loads"),
         Some("work".to_owned())
     );
+    assert_eq!(
+        load_key_binding(home.path(), &root, "billing").expect("loads"),
+        None,
+        "a scope with no entry is bound by nothing, and never by another \
+         scope's entry"
+    );
+}
+
+#[test]
+fn the_single_key_line_a_checkout_used_to_carry_no_longer_parses() {
+    // There is no migration and no lenient read: the file is two lines and
+    // hand-editable, and a `key = "work"` silently ignored is a checkout that
+    // looks bound and files nowhere.
+    let (home, elsewhere) = (a_dir(), a_dir());
+    let root = named(elsewhere.path(), "warlock");
+    hand_write(
+        home.path(),
+        &root,
+        "sigils = [\"billing\"]\nkey = \"work\"\n",
+    );
+
+    assert!(matches!(
+        load_key_binding(home.path(), &root, "billing"),
+        Err(Error::Syntax { .. })
+    ));
+    assert!(matches!(
+        load_sigils(home.path(), &root),
+        Err(Error::Syntax { .. })
+    ));
 }
 
 #[test]
@@ -342,7 +372,7 @@ fn a_binding_and_a_set_of_sigils_do_not_overwrite_each_other() {
     let root = named(elsewhere.path(), "warlock");
 
     save_sigils(home.path(), &root, &owned(&["billing", "web"])).expect("saves");
-    save_key_binding(home.path(), &root, "work").expect("binds");
+    save_key_binding(home.path(), &root, "web", "work").expect("binds");
     assert_eq!(
         load_sigils(home.path(), &root).expect("loads"),
         ["billing", "web"],
@@ -350,23 +380,84 @@ fn a_binding_and_a_set_of_sigils_do_not_overwrite_each_other() {
     );
     assert_eq!(
         fs::read_to_string(sigils_path(home.path(), &root)).expect("reads"),
-        "sigils = [\"billing\", \"web\"]\nkey = \"work\"\n",
+        "sigils = [\"billing\", \"web\"]\n\n[keys]\nweb = \"work\"\n",
     );
 
     save_sigils(home.path(), &root, &owned(&["data-plane"])).expect("saves again");
     assert_eq!(
-        load_key_binding(home.path(), &root).expect("loads"),
+        load_key_binding(home.path(), &root, "web").expect("loads"),
         Some("work".to_owned()),
         "and changing the sigils is not a way to lose the binding"
     );
 
     // A rebinding replaces the name rather than accumulating names or files.
-    save_key_binding(home.path(), &root, "personal").expect("rebinds");
+    save_key_binding(home.path(), &root, "web", "personal").expect("rebinds");
     assert_eq!(
-        load_key_binding(home.path(), &root).expect("loads"),
+        load_key_binding(home.path(), &root, "web").expect("loads"),
         Some("personal".to_owned())
     );
     assert_eq!(project_dir_listing(home.path(), &root), [SIGIL_FILE]);
+}
+
+#[test]
+fn each_scope_is_bound_on_its_own_and_the_rest_of_the_file_is_carried() {
+    // The whole point of the map: a repository whose scopes file to boards in
+    // two Linear workspaces binds a key for each, and binding the second must
+    // not touch the first, the sigils or the base branch.
+    let (home, elsewhere) = (a_dir(), a_dir());
+    let root = named(elsewhere.path(), "warlock");
+
+    save_sigils(home.path(), &root, &owned(&["data-plane", "web"])).expect("saves");
+    save_base_branch(home.path(), &root, Some("develop")).expect("saves a base branch");
+    save_key_binding(home.path(), &root, "data-plane", "work").expect("binds the first scope");
+    save_key_binding(home.path(), &root, "web", "personal").expect("binds the second");
+
+    assert_eq!(
+        load_key_binding(home.path(), &root, "data-plane").expect("loads"),
+        Some("work".to_owned()),
+        "binding a second scope is not a way to lose the first"
+    );
+    assert_eq!(
+        load_key_binding(home.path(), &root, "web").expect("loads"),
+        Some("personal".to_owned())
+    );
+    assert_eq!(
+        load_sigils(home.path(), &root).expect("loads"),
+        ["data-plane", "web"]
+    );
+    assert_eq!(
+        held_base_branch(home.path(), &root).expect("loads"),
+        Some("develop".to_owned())
+    );
+    assert_eq!(
+        fs::read_to_string(sigils_path(home.path(), &root)).expect("reads"),
+        "sigils = [\"data-plane\", \"web\"]\nbranch = \"develop\"\n\n\
+         [keys]\ndata-plane = \"work\"\nweb = \"personal\"\n",
+        "one file, with the sigils and the branch above a `[keys]` table \
+         holding one line per scope"
+    );
+
+    // And rebinding one scope replaces that scope's name and no other.
+    save_key_binding(home.path(), &root, "web", "work").expect("rebinds the second");
+    assert_eq!(
+        load_key_binding(home.path(), &root, "web").expect("loads"),
+        Some("work".to_owned())
+    );
+    assert_eq!(
+        load_key_binding(home.path(), &root, "data-plane").expect("loads"),
+        Some("work".to_owned())
+    );
+
+    save_key_binding(home.path(), &root, "data-plane", "personal").expect("rebinds the first");
+    assert_eq!(
+        load_key_binding(home.path(), &root, "data-plane").expect("loads"),
+        Some("personal".to_owned())
+    );
+    assert_eq!(
+        load_key_binding(home.path(), &root, "web").expect("loads"),
+        Some("work".to_owned()),
+        "a rebinding is one entry's business"
+    );
 }
 
 #[test]
@@ -374,9 +465,9 @@ fn binding_the_first_key_for_a_checkout_needs_no_config_to_already_exist() {
     let (home, elsewhere) = (a_dir(), a_dir());
     let root = named(elsewhere.path(), "warlock");
 
-    save_key_binding(home.path(), &root, "work").expect("binds");
+    save_key_binding(home.path(), &root, "web", "work").expect("binds");
     assert_eq!(
-        load_key_binding(home.path(), &root).expect("loads"),
+        load_key_binding(home.path(), &root, "web").expect("loads"),
         Some("work".to_owned())
     );
     assert_eq!(
@@ -392,19 +483,23 @@ fn a_key_name_that_is_not_a_name_is_refused_and_nothing_is_written() {
     save_sigils(home.path(), &root, &owned(&["web"])).expect("saves");
     let before = fs::read_to_string(sigils_path(home.path(), &root)).expect("reads");
 
-    for name in ["", "Work", "-work", "work-", "work key", &"w".repeat(25)] {
-        match save_key_binding(home.path(), &root, name) {
-            Err(Error::Name {
-                name: refused,
-                rule,
-            }) => {
-                assert_eq!(refused, name);
-                assert!(
-                    !rule.to_string().is_empty(),
-                    "the refusal names the rule broken"
-                );
+    // Both arguments are judged, so a good scope cannot smuggle in a bad key
+    // name and a good key name cannot smuggle in a scope nothing could match.
+    for bad in ["", "Work", "-work", "work-", "work key", &"w".repeat(25)] {
+        for (scope, name) in [("web", bad), (bad, "work")] {
+            match save_key_binding(home.path(), &root, scope, name) {
+                Err(Error::Name {
+                    name: refused,
+                    rule,
+                }) => {
+                    assert_eq!(refused, bad);
+                    assert!(
+                        !rule.to_string().is_empty(),
+                        "the refusal names the rule broken"
+                    );
+                }
+                other => panic!("expected `{bad}` to be refused, got {other:?}"),
             }
-            other => panic!("expected `{name}` to be refused, got {other:?}"),
         }
     }
 
@@ -451,7 +546,7 @@ fn every_error_variant_says_what_happened_and_where() {
     };
     assert_eq!(
         name.to_string(),
-        "`Work` is not a key name: a scope holds only lowercase letters, \
+        "`Work` is not a scope or key name: a scope holds only lowercase letters, \
          digits, `-` and `_`, and this one holds `W`"
     );
 }
