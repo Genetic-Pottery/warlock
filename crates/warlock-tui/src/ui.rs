@@ -28,7 +28,7 @@ use crate::composer::Composer;
 use crate::confirm::{Answer, Carry, Choice, Cutting, Filing, Review, Undertaking};
 use crate::modal::Modal;
 use crate::panel::Mode;
-use crate::prompt::{RecordField, RecordForm, ScopeField};
+use crate::prompt::{KeyChoice, RecordField, RecordForm, ScopeField};
 // Renamed for the reason `Entry` above is: `Span` here is ratatui's piece of a
 // drawn line, and the selection's is the cells of one row the highlight covers;
 // its `Window` is the panel's view of the card, which is neither of the
@@ -292,6 +292,20 @@ const RECORD_RULES: &str =
     "Tab moves to the next field, Enter writes the scope and record, Esc writes nothing";
 
 const RECORD_LABEL_GAP: &str = "  ";
+
+const KEY_HEADING: &str = "Key for ";
+
+const KEY_RULES: &str = "Enter binds the highlighted name to the scope, Esc leaves it unbound";
+
+/// The two halves of what an empty window says, around the scope it was opened
+/// for: `warlock key use` takes a scope, so the sentence spells it with this
+/// window's, the way `warlock check` words the same advice. A line naming the
+/// command without the argument it takes would send a reader to something that
+/// will not run.
+const KEY_NONE: &str =
+    "No keys on this machine: warlock key add <name> stores one, and warlock key use ";
+
+const KEY_NONE_BINDS: &str = " <name> binds it";
 
 /// Reversed rather than a background colour of its own. Colour on the thread
 /// already means whose words these are — the model's, the reader's, warlock's —
@@ -1453,6 +1467,47 @@ impl<'a> Dialog<'a> {
         Self::new(lines).at_least(floor)
     }
 
+    // Rows to pick from rather than fields to type in, so neither `scope` nor
+    // `record` is the shape to follow: there is no caret, and so no floor to
+    // hold a column for one. The lit row carries `SELECTED` rather than
+    // `answer_style`, because it is a row of a list and not one of a window's
+    // answers — a row under the panel's own highlight reads as the thing it is.
+    //
+    // A key value is never drawn here because there is none to draw: a
+    // `KeyChoice` holds names, and this is every line the window has.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "nothing puts this window up until `Dialog::of` gains its arm"
+        )
+    )]
+    fn key(choice: &'a KeyChoice) -> Self {
+        let mut lines = vec![
+            Line::from(vec![
+                Span::raw(KEY_HEADING),
+                Span::raw(choice.scope()).bold(),
+            ]),
+            Line::default(),
+        ];
+        if choice.names().is_empty() {
+            lines.push(Line::from(key_none_line(choice.scope())).dim());
+        } else {
+            // By name rather than by index: the rows are a store's keys, so no
+            // two of them are the same string, and `highlighted` is the one
+            // answer about which row is lit.
+            for name in choice.names() {
+                let lit = choice.highlighted() == Some(name.as_str());
+                let style = if lit { SELECTED } else { Style::new() };
+                lines.push(Line::from(Span::styled(name.as_str(), style)));
+            }
+        }
+        lines.push(Line::default());
+        lines.push(Line::from(KEY_RULES).dim());
+
+        Self::new(lines)
+    }
+
     fn size(&self) -> Size {
         let widest = self
             .lines
@@ -1553,6 +1608,17 @@ fn review_read_line(review: &Review) -> String {
     let count = review.titles().len();
     let noun = if count == 1 { "draft" } else { "drafts" };
     format!("{count} {noun}{REVIEW_READ}")
+}
+
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "read by the window `Dialog::of` cannot put up yet"
+    )
+)]
+fn key_none_line(scope: &str) -> String {
+    format!("{KEY_NONE}{scope}{KEY_NONE_BINDS}")
 }
 
 fn carry_left_line(carry: &Carry) -> String {
