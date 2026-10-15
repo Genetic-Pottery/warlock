@@ -15,9 +15,18 @@
 //! The key window at the bottom of this file is the one thing here that does not
 //! write the manifest: a binding is a fact about this machine, so it lands in
 //! this checkout's config under the home directory and leaves
-//! `.warlock/scopes.toml` alone. Everything else about it is [`record_submit`]'s
-//! shape — Esc writes nothing, Enter is the one road to disk, and a refusal is
-//! the engine's own sentence on the message line.
+//! `.warlock/scopes.toml` alone. [`record_submit`] is what puts it up, and only
+//! once the record it was asked for is on disk — the order is the record first
+//! and the key second, so an Esc on it leaves a scope recorded and unbound
+//! rather than rolling either half back. Everything else about it is
+//! [`record_submit`]'s shape — Esc writes nothing, Enter is the one road to
+//! disk, and a refusal is the engine's own sentence on the message line.
+//!
+//! The home all of that happens under is a parameter, resolved once by the loop
+//! when the session loaded. Nothing here reads the environment: a second
+//! resolution could name a different machine's config from the one the chrome is
+//! drawn off, and a test drives this path over a home of its own rather than
+//! over the developer's keys.
 
 use std::path::Path;
 use std::time::Instant;
@@ -92,16 +101,24 @@ fn refused(pulling: &str) -> String {
     format!("{pulling}; no scope was written")
 }
 
-// Both windows in one value rather than a return each, because a submit of the
-// first one can take it down and put the second one up in the same breath: two
-// returns would let a caller apply half of that and leave the reader with both
-// windows or neither. They are never both open — the record window opens
-// exactly as the scope window closes — and nothing below writes a value where
-// they are.
+// All three windows the `s` key can have up, in one value rather than a return
+// each, because every submit on this path takes one down and may put the next
+// one up in the same breath: the scope window's submit opens the record form
+// over a name nothing records, and the record form's own submit opens the key
+// window over the scope it has just recorded. A return per window would let a
+// caller apply part of that and leave the reader looking at two of them, or at
+// none.
+//
+// Never more than one is open at a time. Each constructor below writes all
+// three fields, so a window a submit said nothing about is `Closed` here rather
+// than whatever the caller had before, and the precedence in
+// [`Modals::current`](crate::modal::Modals) is never asked to choose between
+// two of these.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct Windows {
     pub(crate) scope: ScopePrompt,
     pub(crate) record: RecordPrompt,
+    pub(crate) key: KeyPrompt,
 }
 
 impl Windows {
@@ -109,6 +126,7 @@ impl Windows {
         Self {
             scope: ScopePrompt::Open(field),
             record: RecordPrompt::Closed,
+            key: KeyPrompt::Closed,
         }
     }
 
@@ -116,6 +134,25 @@ impl Windows {
         Self {
             scope: ScopePrompt::Closed,
             record: RecordPrompt::open(module, scope),
+            key: KeyPrompt::Closed,
+        }
+    }
+
+    // The record form over a form already in hand, which is both the one being
+    // typed in and the one a refusal reopens over the field it complained about.
+    fn filling(form: RecordForm) -> Self {
+        Self {
+            scope: ScopePrompt::Closed,
+            record: RecordPrompt::Open(form),
+            key: KeyPrompt::Closed,
+        }
+    }
+
+    fn binding(key: KeyPrompt) -> Self {
+        Self {
+            scope: ScopePrompt::Closed,
+            record: RecordPrompt::Closed,
+            key,
         }
     }
 }
@@ -170,6 +207,12 @@ pub(crate) fn scope_submit(
     // written cannot be a different one from the row that was read.
     let module = field.directory();
     match rescope(manifest, module, scope, RecordFields::default()) {
+        // Written and done with, and no key asked for: the two names that get
+        // here are one a `[[scope]]` record already claims — a boundary
+        // somebody else set up, which this press is only pointing a directory
+        // at — and an empty field, which is a clear and so no scope to bind at
+        // all. Whether a recorded-but-unbound scope should be asked about here
+        // is left open on purpose; this road asks on creation only.
         Ok(rescoped) => {
             save(app, manifest, repo_root, rescoped.manifest);
             Windows::default()
@@ -187,10 +230,20 @@ pub(crate) fn scope_submit(
     }
 }
 
-fn save(app: &mut App, manifest: &mut Manifest, repo_root: &Path, next: Manifest) {
+// Whether the write landed, for the one caller that has something to do after
+// one: [`record_submit`] asks for a key only over a record that is on disk, so a
+// save that failed — and has already said why on the message line — must not
+// read as a scope to bind.
+fn save(app: &mut App, manifest: &mut Manifest, repo_root: &Path, next: Manifest) -> bool {
     match next.save(repo_root) {
-        Ok(()) => *manifest = next,
-        Err(source) => app.set_message(Error::Manifest { source }.to_string()),
+        Ok(()) => {
+            *manifest = next;
+            true
+        }
+        Err(source) => {
+            app.set_message(Error::Manifest { source }.to_string());
+            false
+        }
     }
 }
 
@@ -207,15 +260,16 @@ pub(crate) fn record_edit(
     app: &mut App,
     manifest: &mut Manifest,
     repo_root: &Path,
+    home: Option<&Path>,
     record: &RecordPrompt,
     edited: RecordEdited,
-) -> RecordPrompt {
+) -> Windows {
     match edited {
-        RecordEdited::Open(form) => RecordPrompt::Open(form),
-        RecordEdited::Close => RecordPrompt::Closed,
+        RecordEdited::Open(form) => Windows::filling(form),
+        RecordEdited::Close => Windows::default(),
         RecordEdited::Submit => match record.form() {
-            Some(form) => record_submit(app, manifest, repo_root, form),
-            None => RecordPrompt::Closed,
+            Some(form) => record_submit(app, manifest, repo_root, home, form),
+            None => Windows::default(),
         },
     }
 }
@@ -230,12 +284,21 @@ pub(crate) fn record_edit(
 // window that came down on a write that never happened is the one outcome a
 // reader cannot tell from success. Only a manifest edited in another window
 // since warlock read it reaches one.
+//
+// A scope that comes into being here is also a scope nothing on this machine
+// can push, draft or pull into, so the save is followed by the key window over
+// the name just recorded. The order cannot be swapped: the record is on disk
+// before the question is asked, which is what lets an Esc on that window leave
+// a recorded, unbound scope rather than something half written. Only the save
+// landing takes that road — a save that failed has said so and has no scope to
+// bind.
 pub(crate) fn record_submit(
     app: &mut App,
     manifest: &mut Manifest,
     repo_root: &Path,
+    home: Option<&Path>,
     form: &RecordForm,
-) -> RecordPrompt {
+) -> Windows {
     let record = RecordFields {
         team_key: Some(form.field(RecordField::TeamKey).text()),
         review_state: Some(form.field(RecordField::ReviewState).text()),
@@ -246,18 +309,48 @@ pub(crate) fn record_submit(
         Ok(rescoped) => rescoped.manifest,
         Err(ScopeRefusal::BlankRecord { fields }) => {
             let Some(&which) = fields.first() else {
-                return RecordPrompt::Closed;
+                return Windows::default();
             };
-            return RecordPrompt::Open(form.clone().refused(which, blank_message(which)));
+            return Windows::filling(form.clone().refused(which, blank_message(which)));
         }
         Err(refusal) => {
             app.set_message(refusal.to_string());
-            return RecordPrompt::Closed;
+            return Windows::default();
         }
     };
 
-    save(app, manifest, repo_root, next);
-    RecordPrompt::Closed
+    if !save(app, manifest, repo_root, next) {
+        return Windows::default();
+    }
+    Windows::binding(asked_for_a_key(app, home, form.scope()))
+}
+
+// The scope the window is opened over is the folded name off the form that was
+// just written, so the binding is filed under the name the row now carries: a
+// name read a second time off the field, or folded again here, could name a
+// boundary this write was never about.
+//
+// Names and no values: the window is built by [`KeyPrompt::open`], which lists
+// the store through `load_key_names`. Nothing on this road reads a key.
+fn asked_for_a_key(app: &mut App, home: Option<&Path>, scope: &str) -> KeyPrompt {
+    // A machine with no home has no config a binding could land in and no store
+    // to have listed, so the record stands and nothing is asked.
+    let Some(home) = home else {
+        return KeyPrompt::Closed;
+    };
+
+    match KeyPrompt::open(home, scope) {
+        Ok(prompt) => prompt,
+        // A store that will not read, said in the engine's own sentence and
+        // flattened by [`Error`]'s `Display` as every other key-store failure in
+        // this binary is. The scope and its record are saved either way, which
+        // is what this line has to not contradict: it is about the question,
+        // not about the write.
+        Err(source) => {
+            app.set_message(Error::Keys { source }.to_string());
+            KeyPrompt::Closed
+        }
+    }
 }
 
 // The engine's own wording about an empty scope — `a scope cannot be empty` —
