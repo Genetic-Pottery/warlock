@@ -1,8 +1,12 @@
+use std::fs;
+use std::path::Path;
+
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
+use warlock_engine::{keys, keys_path, load_key, save_key};
 
 use super::{
-    Edited, FIELD_CHARS, RecordEdited, RecordField, RecordForm, RecordPrompt, ScopeField,
-    ScopePrompt, edit_for, record_edit_for,
+    Edited, FIELD_CHARS, KeyChoice, KeyEdited, KeyPrompt, RecordEdited, RecordField, RecordForm,
+    RecordPrompt, ScopeField, ScopePrompt, edit_for, key_edit_for, record_edit_for,
 };
 
 // Every field below is opened over this, so a test that meant to change the
@@ -793,4 +797,291 @@ fn the_scope_prompt_stops_at_the_engines_ceiling_and_the_path_window_does_not() 
 fn a_field_taken_out_of_a_form_still_takes_typing() {
     let taken = ScopeField::default();
     assert_eq!(after(press(KeyCode::Char('x')), &taken).text(), "x");
+}
+
+// Stored under every name below, so "no part of this window holds a key" has one
+// needle to look for and a window that leaked could not leak a value the
+// assertions do not know about.
+const SECRET: &str = "lin_api_this_value_must_never_be_held";
+
+// Every home here is a temporary one, so nothing below reads the developer's
+// real `~/.warlock` or writes a key into it.
+fn a_dir() -> tempfile::TempDir {
+    tempfile::tempdir().expect("a temporary directory")
+}
+
+// Saved in an order the listing does not keep, so a test asserting the rows
+// cannot pass by accident of the order they were written in.
+fn a_home() -> tempfile::TempDir {
+    let home = a_dir();
+    for name in ["work", "acme", "personal"] {
+        save_key(home.path(), name, SECRET).expect("a key stores");
+    }
+    home
+}
+
+// The names the store lists, which is the order the rows are in: the store is a
+// `BTreeMap`, so it answers sorted whatever order the keys were added in.
+const NAMES: [&str; 3] = ["acme", "personal", "work"];
+
+fn opened(home: &Path) -> KeyPrompt {
+    KeyPrompt::open(home, SCOPE).expect("a store that reads opens a window")
+}
+
+fn choice(home: &Path) -> KeyChoice {
+    let prompt = opened(home);
+    prompt
+        .choice()
+        .expect("an open prompt holds its choice")
+        .clone()
+}
+
+fn after_key(key: KeyEvent, choice: &KeyChoice) -> KeyChoice {
+    match key_edit_for(key, choice) {
+        KeyEdited::Open(next) => next,
+        other => panic!("{key:?} should have left the key prompt open, and gave {other:?}"),
+    }
+}
+
+#[test]
+fn a_fresh_key_prompt_is_up_over_the_scope_with_every_stored_name() {
+    let home = a_home();
+    let prompt = opened(home.path());
+
+    assert!(prompt.is_open());
+    assert_eq!(prompt, KeyPrompt::Open(choice(home.path())));
+
+    let choice = choice(home.path());
+    assert_eq!(choice.scope(), SCOPE);
+    assert_eq!(choice.names(), NAMES);
+    assert_eq!(
+        choice.highlighted(),
+        Some("acme"),
+        "the first row opens lit, so one Enter binds something"
+    );
+}
+
+#[test]
+fn a_closed_key_prompt_is_the_default_and_holds_no_choice() {
+    assert_eq!(KeyPrompt::default(), KeyPrompt::Closed);
+    assert!(!KeyPrompt::Closed.is_open());
+    assert_eq!(KeyPrompt::Closed.choice(), None);
+}
+
+#[test]
+fn the_highlight_walks_the_rows_and_stops_at_both_ends() {
+    let home = a_home();
+    let top = choice(home.path());
+
+    // One press past the top is a key that changes nothing, as Backspace on an
+    // empty field is.
+    assert_eq!(
+        key_edit_for(press(KeyCode::Up), &top),
+        KeyEdited::Open(top.clone()),
+        "Up on the first row has nowhere to go"
+    );
+
+    let mut current = top.clone();
+    for expected in ["personal", "work"] {
+        current = after_key(press(KeyCode::Down), &current);
+        assert_eq!(current.highlighted(), Some(expected));
+    }
+
+    // Stopped rather than wrapped: a Down that jumped back to the top would bind
+    // whichever key is first to the next Enter.
+    assert_eq!(
+        key_edit_for(press(KeyCode::Down), &current),
+        KeyEdited::Open(current.clone()),
+        "Down on the last row has nowhere to go"
+    );
+
+    for expected in ["personal", "acme"] {
+        current = after_key(press(KeyCode::Up), &current);
+        assert_eq!(current.highlighted(), Some(expected));
+    }
+    assert_eq!(
+        current, top,
+        "walked down the list and back to where it was"
+    );
+}
+
+#[test]
+fn no_key_ever_changes_the_scope_or_the_rows() {
+    // Both are settled when the window opens: the binding written from here has
+    // to be for the scope it named, out of the keys this machine really holds.
+    let home = a_home();
+    let mut current = choice(home.path());
+
+    for code in BINDINGS.into_iter().chain([KeyCode::Backspace]) {
+        current = after_key(press(code), &current);
+
+        assert_eq!(current.scope(), SCOPE);
+        assert_eq!(current.names(), NAMES);
+    }
+}
+
+#[test]
+fn enter_submits_and_the_pick_is_the_row_that_is_lit() {
+    let home = a_home();
+    let first = choice(home.path());
+
+    assert_eq!(
+        key_edit_for(press(KeyCode::Enter), &first),
+        KeyEdited::Submit
+    );
+
+    // The submit carries nothing, so the caller reads the name off the choice it
+    // already holds — which is the only copy of the pick there is.
+    let moved = after_key(press(KeyCode::Down), &first);
+    assert_eq!(moved.highlighted(), Some("personal"));
+    assert_eq!(
+        key_edit_for(press(KeyCode::Enter), &moved),
+        KeyEdited::Submit
+    );
+}
+
+#[test]
+fn esc_closes_from_any_row() {
+    let home = a_home();
+    let mut current = choice(home.path());
+
+    for _ in NAMES {
+        assert_eq!(
+            key_edit_for(press(KeyCode::Esc), &current),
+            KeyEdited::Close
+        );
+        current = after_key(press(KeyCode::Down), &current);
+    }
+}
+
+#[test]
+fn nothing_but_enter_submits_and_nothing_but_esc_closes_in_the_key_prompt() {
+    let home = a_home();
+    let lit = choice(home.path());
+
+    for code in BINDINGS.into_iter().chain([
+        KeyCode::Backspace,
+        KeyCode::Delete,
+        KeyCode::BackTab,
+        KeyCode::Left,
+        KeyCode::Right,
+        KeyCode::Home,
+        KeyCode::End,
+        KeyCode::Insert,
+    ]) {
+        let outcome = key_edit_for(press(code), &lit);
+
+        assert_ne!(outcome, KeyEdited::Submit, "{code:?} should not submit");
+        assert_ne!(outcome, KeyEdited::Close, "{code:?} should not close");
+        if !matches!(code, KeyCode::Up | KeyCode::Down) {
+            assert_eq!(
+                outcome,
+                KeyEdited::Open(lit.clone()),
+                "{code:?} is not a key this window has"
+            );
+        }
+    }
+}
+
+#[test]
+fn releases_and_repeats_change_nothing_in_the_key_prompt() {
+    let home = a_home();
+    let before = after_key(press(KeyCode::Down), &choice(home.path()));
+
+    for code in [
+        KeyCode::Up,
+        KeyCode::Down,
+        KeyCode::Enter,
+        KeyCode::Esc,
+        KeyCode::Char('k'),
+    ] {
+        for kind in [KeyEventKind::Release, KeyEventKind::Repeat] {
+            let event = KeyEvent::new_with_kind_and_state(
+                code,
+                KeyModifiers::NONE,
+                kind,
+                KeyEventState::NONE,
+            );
+
+            assert_eq!(
+                key_edit_for(event, &before),
+                KeyEdited::Open(before.clone()),
+                "{kind:?} of {code:?} should do nothing"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_machine_with_no_store_opens_a_window_with_no_rows() {
+    let home = a_dir();
+    assert!(
+        !keys_path(home.path()).exists(),
+        "nothing has run `warlock key add` here"
+    );
+
+    let empty = choice(home.path());
+    assert!(empty.names().is_empty());
+    assert_eq!(empty.scope(), SCOPE);
+    assert_eq!(
+        empty.highlighted(),
+        None,
+        "no rows is the one state with nothing lit"
+    );
+
+    // No row to move onto and no name to submit, so all three are keys that
+    // change nothing. Esc still closes: a window a reader cannot leave is a trap.
+    for code in [KeyCode::Up, KeyCode::Down, KeyCode::Enter] {
+        assert_eq!(
+            key_edit_for(press(code), &empty),
+            KeyEdited::Open(empty.clone()),
+            "{code:?} over an empty window should change nothing"
+        );
+    }
+    assert_eq!(key_edit_for(press(KeyCode::Esc), &empty), KeyEdited::Close);
+}
+
+#[test]
+fn a_store_that_will_not_parse_is_the_engines_error_and_not_an_empty_window() {
+    // The two look identical on screen and mean opposite things: drawn as an
+    // empty list, a store warlock could not read would tell somebody they hold
+    // no keys while their keys sit in the file.
+    let home = a_dir();
+    let path = keys_path(home.path());
+    fs::create_dir_all(path.parent().expect("the store is in a directory")).expect("creates");
+    fs::write(&path, "this is not toml\n").expect("writes");
+
+    let error = KeyPrompt::open(home.path(), SCOPE).expect_err("a broken store");
+    assert!(matches!(error, keys::Error::Syntax { .. }), "{error:?}");
+}
+
+#[test]
+fn the_window_holds_names_and_never_a_key_value() {
+    let home = a_home();
+    let choice = choice(home.path());
+
+    assert_eq!(
+        load_key(home.path(), "work")
+            .expect("the store reads")
+            .as_deref(),
+        Some(SECRET),
+        "the store these names came from really does hold a value under each"
+    );
+
+    // Every field at once, through `Debug`: a value in any of them — including
+    // one a later edit added — would print here.
+    let held = format!("{choice:?}");
+    assert!(
+        !held.contains(SECRET),
+        "a key value reached the window: {held}"
+    );
+    for name in NAMES {
+        assert!(held.contains(name), "the names are what it holds: {held}");
+    }
+
+    let moved = after_key(press(KeyCode::Down), &choice);
+    assert!(
+        !format!("{moved:?}").contains(SECRET),
+        "moving the highlight read no value"
+    );
 }

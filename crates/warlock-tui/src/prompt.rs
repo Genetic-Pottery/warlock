@@ -1,26 +1,30 @@
-//! The two prompts the `s` key puts up: the scope itself — the directory being
-//! scoped, the text typed into the field, and the one line under it saying why
-//! the last submit was refused — and, when that name is new, the record it
-//! routes to, which is three of those fields and a cursor saying which one is
-//! being typed in.
+//! The prompts the panel puts up over the tree: the scope itself — the directory
+//! being scoped, the text typed into the field, and the one line under it saying
+//! why the last submit was refused — the record it routes to when that name is
+//! new, which is three of those fields and a cursor saying which one is being
+//! typed in, and the key binding, which is the one window here that is a list of
+//! choices rather than something to type into.
 //!
-//! [`ScopePrompt`] and [`RecordPrompt`] are values of their own and *not* fields
-//! on [`App`](crate::app::App), because Esc has to leave the app exactly as it was and
-//! an app that never heard of the prompt is a cheaper guarantee of that than
-//! putting every field back. The cursor is a byte offset into that text and
-//! every key here keeps it on a character boundary, because the text is sliced
-//! at it — by the edits below and by the frame, which draws the caret on the
-//! character it names. Nothing here judges the text either — Enter comes back as
-//! [`Edited::Submit`] whatever has been typed, empty included, because that is
-//! how a scope is cleared.
+//! [`ScopePrompt`], [`RecordPrompt`] and [`KeyPrompt`] are values of their own
+//! and *not* fields on [`App`](crate::app::App), because Esc has to leave the
+//! app exactly as it was and an app that never heard of the prompt is a cheaper
+//! guarantee of that than putting every field back. The cursor is a byte offset
+//! into that text and every key here keeps it on a character boundary, because
+//! the text is sliced at it — by the edits below and by the frame, which draws
+//! the caret on the character it names. Nothing here judges the text either —
+//! Enter comes back as [`Edited::Submit`] whatever has been typed, empty
+//! included, because that is how a scope is cleared.
 //!
 //! Ctrl-C is deliberately not answered here. Raw mode is exactly the mode in
 //! which the terminal stops turning it into `SIGINT`, so the loop takes it
 //! before consulting this module; treated as text it would put a `c` in the
 //! field.
 
+use std::path::Path;
+
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind};
 use warlock_engine::scope::MAXIMUM_CHARACTERS;
+use warlock_engine::{keys, load_key_names};
 
 use crate::composer::typed_char;
 
@@ -483,6 +487,189 @@ pub(crate) fn record_edit_for(key: KeyEvent, form: &RecordForm) -> RecordEdited 
                 RecordEdited::Open(next)
             }
         },
+    }
+}
+
+/// The window that binds a key to a scope: the scope it was opened for, the
+/// names this machine holds a key under, and which of those rows is highlighted.
+///
+/// Names and never values, which is the whole shape of this type: a value held
+/// here would be a live credential sitting in session state between two frames,
+/// one draw away from the screen. The names come from
+/// [`load_key_names`](warlock_engine::load_key_names) for the reason
+/// `stored_under` in [`mod@crate::key`] gives — nothing here needs a key, so
+/// nothing here reads one, and `load_key` would pull every value in the store
+/// into this process to answer a question about its names. There is no field a
+/// value could go in, so a later edit that wanted one would have to add it.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct KeyChoice {
+    // Already folded by the caller, as `RecordForm`'s is: the binding written
+    // from this window has to be for the scope the window named.
+    scope: String,
+    // In the order the store listed them, so the rows are the same rows `warlock
+    // key list` prints and a reader who has seen that list recognises this one.
+    names: Vec<String>,
+    // An index into `names` and never past its end: `highlighted` slices by it,
+    // and every move below clamps. Zero over an empty list, which is a row that
+    // is not there — which is why `highlighted` is an `Option` rather than this
+    // being read as a name.
+    row: usize,
+}
+
+// Nothing puts this window up yet: the keystroke, the frame and the session
+// field are the wiring ticket's, so what is here is dead in the library and
+// alive in the tests below. `cfg_attr` is what keeps both builds quiet — a bare
+// `expect` is unfulfilled under `cfg(test)`, where the tests do call these, and
+// warns there instead. The same pair sits on `KeyPrompt` and on `key_edit_for`,
+// and all three come off when the wiring lands.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the scope and the rows are read by the frame, which is the wiring ticket's"
+    )
+)]
+impl KeyChoice {
+    fn over(home: &Path, scope: impl Into<String>) -> Result<Self, keys::Error> {
+        Ok(Self {
+            scope: scope.into(),
+            names: stored(home)?,
+            row: 0,
+        })
+    }
+
+    #[must_use]
+    pub(crate) fn scope(&self) -> &str {
+        &self.scope
+    }
+
+    #[must_use]
+    pub(crate) fn names(&self) -> &[String] {
+        &self.names
+    }
+
+    /// The name the binding would be written for, or `None` when this machine
+    /// holds no keys at all — which is the one state with no row to highlight.
+    #[must_use]
+    pub(crate) fn highlighted(&self) -> Option<&str> {
+        self.names.get(self.row).map(String::as_str)
+    }
+}
+
+// A machine with no store holds no keys, which is an empty window and not a
+// failure, exactly as `names` in `key.rs` has it: `warlock key add` is what the
+// reader is missing, and a window saying so is how they find that out. A store
+// that exists and will not parse stays the engine's error for that function's
+// reason as well — drawn as an empty list it would tell somebody they hold
+// nothing while their keys sit in the file, and the binding they picked instead
+// would be no binding at all.
+fn stored(home: &Path) -> Result<Vec<String>, keys::Error> {
+    match load_key_names(home) {
+        Err(keys::Error::NotFound { .. }) => Ok(Vec::new()),
+        other => other,
+    }
+}
+
+// The choice lives inside `Open` for `ScopePrompt`'s reason: "closed, with a row
+// highlighted" is not a state that can be written down.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
+pub(crate) enum KeyPrompt {
+    #[default]
+    Closed,
+    Open(KeyChoice),
+}
+
+// Dead in the library and alive in the tests, as `KeyChoice` above is.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "nothing opens or draws this window until the wiring ticket"
+    )
+)]
+impl KeyPrompt {
+    /// The names are read off the store here rather than passed in, so there is
+    /// one place that decides what the rows are and which of them opens
+    /// highlighted.
+    pub(crate) fn open(home: &Path, scope: impl Into<String>) -> Result<Self, keys::Error> {
+        Ok(Self::Open(KeyChoice::over(home, scope)?))
+    }
+
+    #[must_use]
+    #[cfg(test)]
+    pub(crate) const fn is_open(&self) -> bool {
+        matches!(self, Self::Open(_))
+    }
+
+    #[must_use]
+    pub(crate) const fn choice(&self) -> Option<&KeyChoice> {
+        match self {
+            Self::Closed => None,
+            Self::Open(choice) => Some(choice),
+        }
+    }
+}
+
+/// What a keystroke comes to while the key prompt is open.
+///
+/// [`KeyEdited::Submit`] carries no name for the reason [`Edited::Submit`]
+/// carries no text: the caller reads [`KeyChoice::highlighted`] off the choice it
+/// already holds, so there is no second copy of the pick to disagree with the
+/// row that is lit — and no submit can name a key the window was not showing.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) enum KeyEdited {
+    Open(KeyChoice),
+    Close,
+    Submit,
+}
+
+/// What `key` does to a prompt open over `choice`.
+///
+/// Up and Down walk the rows and stop at both ends rather than wrapping, as the
+/// tree's own selection does: a list this short is read as a list, and a Down
+/// that jumped back to the top would bind whichever key happens to be first to
+/// the next Enter.
+///
+/// Esc closes from anywhere, an empty window included — a window a reader cannot
+/// leave is a trap. Enter over an empty one is a key that changes nothing, which
+/// is the other half of [`KeyChoice::highlighted`] being an `Option`: there is no
+/// name to submit, so no submit happens.
+///
+/// Every other key leaves the choice byte for byte as it was, the tree's own
+/// bindings and `j`/`k` included, and only presses count — both for
+/// [`edit_for`]'s reasons.
+// Dead in the library and alive in the tests, as the two above are.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "no keystroke reaches this window until the wiring ticket"
+    )
+)]
+#[must_use]
+pub(crate) fn key_edit_for(key: KeyEvent, choice: &KeyChoice) -> KeyEdited {
+    if key.kind != KeyEventKind::Press {
+        return KeyEdited::Open(choice.clone());
+    }
+
+    let unchanged = || KeyEdited::Open(choice.clone());
+    let moved = |row: usize| {
+        KeyEdited::Open(KeyChoice {
+            row,
+            ..choice.clone()
+        })
+    };
+    let last = choice.names.len().saturating_sub(1);
+
+    match key.code {
+        // The guard is what keeps a submit from an empty window: without it the
+        // caller would be handed a `Submit` it could only answer by looking up a
+        // row that is not there.
+        KeyCode::Enter if choice.highlighted().is_some() => KeyEdited::Submit,
+        KeyCode::Esc => KeyEdited::Close,
+        KeyCode::Up => moved(choice.row.saturating_sub(1)),
+        KeyCode::Down => moved(choice.row.saturating_add(1).min(last)),
+        _ => unchanged(),
     }
 }
 
