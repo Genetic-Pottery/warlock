@@ -5,14 +5,15 @@ use std::{fs, io};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use tempfile::TempDir;
 use warlock_engine::{
-    Manifest, Node, ScopeRecord, ScopedDirectory, Tree, manifest, route_facts, validate_scope,
+    Manifest, Node, ScopeRecord, ScopedDirectory, Tree, load_key_binding, manifest, route_facts,
+    save_key, save_key_binding, sigils, sigils_path, validate_scope,
 };
 
-use super::{Windows, record_edit, record_submit, scope_edit, scope_submit};
+use super::{Windows, key_edit, key_submit, record_edit, record_submit, scope_edit, scope_submit};
 use crate::app::{App, Sigils};
 use crate::prompt::{
-    Edited, RecordEdited, RecordField, RecordForm, RecordPrompt, ScopeField, ScopePrompt, edit_for,
-    record_edit_for,
+    Edited, KeyChoice, KeyEdited, KeyPrompt, RecordEdited, RecordField, RecordForm, RecordPrompt,
+    ScopeField, ScopePrompt, edit_for, key_edit_for, record_edit_for,
 };
 
 // `super::scope_press` with no boundary in the way, so these tests are about
@@ -1334,4 +1335,240 @@ fn a_pull_in_flight_is_answered_before_the_boundary_is() {
         Some(LAST_KEY),
         "the boundary spoke as well as the pull"
     );
+}
+
+/// The one value the key window must never touch, stored under all three names
+/// so that any sighting of it below is this path having read a key.
+const SECRET: &str = "lin_api_this_value_must_never_be_held";
+
+/// A machine holding three keys, as `warlock key add` would have left it: the
+/// window's rows are the store's names, so a binding needs a store to pick from.
+fn a_home() -> TempDir {
+    let home = tempfile::tempdir().expect("a temporary directory");
+    for name in ["work", "acme", "personal"] {
+        save_key(home.path(), name, SECRET).expect("a key stores");
+    }
+    home
+}
+
+/// The names the store lists, which is the order the rows are in and so which
+/// row each press of Down lands on: the store answers sorted.
+const NAMES: [&str; 3] = ["acme", "personal", "work"];
+
+/// The scope the window is opened over, which the fixture manifest records.
+const KEY_SCOPE: &str = "data-plane";
+
+/// A second scope of the same checkout, bound before the window opens: what a
+/// save here must carry through rather than replace.
+const OTHER_SCOPE: &str = "third-party";
+
+/// The window as [`KeyPrompt::open`] builds it over `scope`, with the first row
+/// lit.
+fn a_choice(home: &Path, scope: &str) -> KeyChoice {
+    KeyPrompt::open(home, scope)
+        .expect("a store that reads opens a window")
+        .choice()
+        .expect("an open prompt holds its choice")
+        .clone()
+}
+
+/// The name `scope` is bound to in this checkout's config, where a checkout
+/// with no config at all and a scope the config does not name are both the one
+/// answer: unbound.
+fn bound(home: &Path, root: &Path, scope: &str) -> Option<String> {
+    match load_key_binding(home, root, scope) {
+        Ok(name) => name,
+        Err(sigils::Error::NotFound { .. }) => None,
+        Err(error) => panic!("the config could not be read: {error}"),
+    }
+}
+
+/// The config file byte for byte, or `None` when none was ever written for this
+/// checkout — which is what an Esc over an unconfigured one has to leave.
+fn config(home: &Path, root: &Path) -> Option<Vec<u8>> {
+    let path = sigils_path(home, root);
+    match fs::read(&path) {
+        Ok(bytes) => Some(bytes),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+        Err(error) => panic!("{} could not be read: {error}", path.display()),
+    }
+}
+
+#[test]
+fn enter_binds_the_lit_row_to_the_windows_scope_and_says_nothing() {
+    let repo = a_repo();
+    let home = a_home();
+    let mut app = app_on(repo.path(), ENGINE_ROW);
+    let before = app.clone();
+    let choice = a_choice(home.path(), KEY_SCOPE);
+
+    let prompt = key_submit(&mut app, home.path(), repo.path(), &choice);
+
+    assert_eq!(prompt, KeyPrompt::Closed, "the window is answered");
+    // The row that was lit, asked of the window rather than spelled out twice:
+    // what reached the config has to be the name the reader was looking at.
+    assert_eq!(
+        bound(home.path(), repo.path(), KEY_SCOPE).as_deref(),
+        choice.highlighted(),
+    );
+    assert_eq!(choice.highlighted(), Some(NAMES[0]));
+    // A successful write says nothing at all, not even spending the last
+    // keystroke's sentence, and moves nothing about the view.
+    assert_eq!(
+        app.message(),
+        Some(LAST_KEY),
+        "the write took the message line"
+    );
+    assert_eq!(app, before, "the write moved the view");
+    // Nothing else in the checkout moved: the binding is a fact about this
+    // machine, so the manifest was never opened.
+    assert_eq!(saved(repo.path()), None, "a binding wrote the manifest");
+    // And a name is all that reached the file. There is no field a value could
+    // have gone in, and this is the assertion that none went anywhere else.
+    let written =
+        String::from_utf8(config(home.path(), repo.path()).expect("the submit wrote the config"))
+            .expect("the config is text");
+    assert!(written.contains(NAMES[0]), "{written}");
+    assert!(!written.contains(SECRET), "a key value reached the config");
+}
+
+#[test]
+fn the_whole_path_from_the_key_window_to_the_written_binding_is_one_key_at_a_time() {
+    // The event loop's own arms, in the order a reader presses them: one Down
+    // off the row that opened lit, then Enter. Nothing here is a terminal — the
+    // whole path is these two functions over a home and a repository of this
+    // test's own.
+    let repo = a_repo();
+    let home = a_home();
+    let mut app = app_on(repo.path(), ENGINE_ROW);
+    // A binding already in the file for another scope of the same checkout,
+    // which this write must carry through rather than replace.
+    save_key_binding(home.path(), repo.path(), OTHER_SCOPE, NAMES[2])
+        .expect("the other scope binds");
+    let mut prompt = KeyPrompt::Open(a_choice(home.path(), KEY_SCOPE));
+
+    for code in [KeyCode::Down, KeyCode::Enter] {
+        assert_eq!(
+            bound(home.path(), repo.path(), KEY_SCOPE),
+            None,
+            "{code:?} wrote before the submit"
+        );
+        let edited = {
+            let choice = prompt.choice().expect("the window is still up");
+            key_edit_for(press(code), choice)
+        };
+        prompt = key_edit(&mut app, home.path(), repo.path(), &prompt, edited);
+    }
+
+    assert_eq!(prompt, KeyPrompt::Closed, "Enter left the window up");
+    assert_eq!(
+        bound(home.path(), repo.path(), KEY_SCOPE).as_deref(),
+        Some(NAMES[1]),
+        "the Down was not the row that was bound",
+    );
+    assert_eq!(
+        bound(home.path(), repo.path(), OTHER_SCOPE).as_deref(),
+        Some(NAMES[2]),
+        "binding one scope took another scope's key",
+    );
+    assert_eq!(app.message(), Some(LAST_KEY));
+}
+
+#[test]
+fn esc_on_the_key_window_writes_nothing_and_leaves_the_scope_unbound() {
+    let repo = a_repo();
+    let home = a_home();
+    let mut app = app_on(repo.path(), ENGINE_ROW);
+    let before = app.clone();
+    // Both checkouts an Esc can happen over: one already configured, where
+    // "unchanged" is the file's own bytes, and one with no config at all, where
+    // it is the file still not being there.
+    for configured in [false, true] {
+        if configured {
+            save_key_binding(home.path(), repo.path(), OTHER_SCOPE, NAMES[2])
+                .expect("the other scope binds");
+        }
+        let was = config(home.path(), repo.path());
+        assert_eq!(was.is_some(), configured);
+        let choice = a_choice(home.path(), KEY_SCOPE);
+
+        // The loop's own Esc arm, through the pure function that decides it:
+        // the window comes down and the config is not opened, because nothing
+        // was written when the question was asked.
+        assert_eq!(key_edit_for(press(KeyCode::Esc), &choice), KeyEdited::Close);
+        let prompt = key_edit(
+            &mut app,
+            home.path(),
+            repo.path(),
+            &KeyPrompt::Open(choice),
+            KeyEdited::Close,
+        );
+
+        assert_eq!(prompt, KeyPrompt::Closed);
+        assert_eq!(
+            config(home.path(), repo.path()),
+            was,
+            "Esc moved a byte of the config"
+        );
+        assert_eq!(
+            bound(home.path(), repo.path(), KEY_SCOPE),
+            None,
+            "Esc bound the scope"
+        );
+        assert_eq!(app, before, "Esc moved the view");
+        assert_eq!(app.message(), Some(LAST_KEY), "and it kept the last line");
+    }
+}
+
+#[test]
+fn a_binding_the_engine_refuses_says_so_on_the_message_line_and_takes_the_window_down() {
+    // A file where this checkout's config directory has to be: the save cannot
+    // make the directory, which is the cheapest real version of a config that
+    // will not take the write.
+    let repo = a_repo();
+    let home = a_home();
+    let directory = sigils_path(home.path(), repo.path())
+        .parent()
+        .expect("the config sits in a project directory")
+        .to_path_buf();
+    fs::write(&directory, "not a directory\n")
+        .expect("writes a file in the way of the config directory");
+    let mut app = app_on(repo.path(), ENGINE_ROW);
+    let choice = a_choice(home.path(), KEY_SCOPE);
+
+    let prompt = key_submit(&mut app, home.path(), repo.path(), &choice);
+
+    // The reason goes on the footer and the window comes down off it, as
+    // `record_submit` has it: a window that closed on a write that never
+    // happened is the one outcome a reader cannot tell from success.
+    assert_eq!(prompt, KeyPrompt::Closed);
+    let message = app.message().expect("a save that failed said nothing");
+    assert!(!message.is_empty(), "a save that failed said nothing");
+    assert_ne!(app.message(), Some(LAST_KEY), "and said it here");
+    assert!(!message.contains(SECRET), "a key value reached the footer");
+    assert_eq!(
+        fs::read_to_string(&directory).expect("the file in the way is still readable"),
+        "not a directory\n"
+    );
+}
+
+#[test]
+fn a_key_submit_with_no_window_up_writes_nothing() {
+    // The road `press_for` cannot take — it only consults `key_edit_for` while
+    // the window is up — answered rather than left to be discovered.
+    let repo = a_repo();
+    let home = a_home();
+    let mut app = app_on(repo.path(), ENGINE_ROW);
+
+    let prompt = key_edit(
+        &mut app,
+        home.path(),
+        repo.path(),
+        &KeyPrompt::Closed,
+        KeyEdited::Submit,
+    );
+
+    assert_eq!(prompt, KeyPrompt::Closed);
+    assert_eq!(config(home.path(), repo.path()), None);
+    assert_eq!(app.message(), Some(LAST_KEY));
 }

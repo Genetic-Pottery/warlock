@@ -11,16 +11,24 @@
 //! [`rescope`]'s, shared with `warlock scope add` and `remove`; what this module
 //! adds is where each refusal lands on screen. An empty field clears the scope
 //! rather than being refused.
+//!
+//! The key window at the bottom of this file is the one thing here that does not
+//! write the manifest: a binding is a fact about this machine, so it lands in
+//! this checkout's config under the home directory and leaves
+//! `.warlock/scopes.toml` alone. Everything else about it is [`record_submit`]'s
+//! shape — Esc writes nothing, Enter is the one road to disk, and a refusal is
+//! the engine's own sentence on the message line.
 
 use std::path::Path;
 use std::time::Instant;
 
-use warlock_engine::{Manifest, ScopedDirectory, to_manifest_path};
+use warlock_engine::{Manifest, ScopedDirectory, save_key_binding, to_manifest_path};
 
 use crate::app::{App, Sigils};
 use crate::error::Error;
 use crate::prompt::{
-    Edited, RecordEdited, RecordField, RecordForm, RecordPrompt, ScopeField, ScopePrompt,
+    Edited, KeyChoice, KeyEdited, KeyPrompt, RecordEdited, RecordField, RecordForm, RecordPrompt,
+    ScopeField, ScopePrompt,
 };
 use crate::rescope::{RecordFields, ScopeRefusal, rescope};
 use crate::session::closed_scope;
@@ -256,6 +264,84 @@ pub(crate) fn record_submit(
 // said about the field that is empty here.
 fn blank_message(which: RecordField) -> String {
     format!("a {} cannot be blank", which.name())
+}
+
+// The key window's three roads, and the same three the two windows above take:
+// a move of the highlight moves the window alone, Esc puts it down with nothing
+// written — the config is not opened at all on that road, so there is no binding
+// to put back — and Enter is the one road to disk.
+//
+// The home and the root are parameters rather than read here, as everywhere else
+// on this path: the loop resolved both once, and a second resolution down here
+// could name a different checkout's config from the one the window was opened
+// over.
+//
+// The `None` arm is unreachable for [`scope_edit`]'s reason: `press_for` only
+// consults [`key_edit_for`](crate::prompt::key_edit_for) while this window is
+// up.
+//
+// Dead in the library until the wiring arm in `interactive.rs` calls it, as the
+// prompt's own half of this window is.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "no keystroke reaches this window until it is wired into the loop"
+    )
+)]
+pub(crate) fn key_edit(
+    app: &mut App,
+    home: &Path,
+    root: &Path,
+    prompt: &KeyPrompt,
+    edited: KeyEdited,
+) -> KeyPrompt {
+    match edited {
+        KeyEdited::Open(choice) => KeyPrompt::Open(choice),
+        KeyEdited::Close => KeyPrompt::Closed,
+        KeyEdited::Submit => match prompt.choice() {
+            Some(choice) => key_submit(app, home, root, choice),
+            None => KeyPrompt::Closed,
+        },
+    }
+}
+
+// One binding written for the scope the window was opened over and the row that
+// is lit, both read off the one [`KeyChoice`]: a scope or a name taken from
+// anywhere else could name a boundary this window was never about, and a
+// binding filed under the wrong scope is work pushed into the wrong Linear
+// workspace.
+//
+// No key value is read, held or written here, and there is none to read: the
+// choice carries names, and the engine is handed the name. What is under that
+// name stays in the store.
+//
+// A refusal is said on the message line and the window comes down, as
+// [`record_submit`] has it: a window closing on a write that never happened is
+// the one outcome a reader cannot tell from success. Both roads to one are the
+// engine's — a scope or a name whose shape `validate_scope` turns down, and a
+// config this machine cannot write — and the sentence is the engine's too,
+// flattened by [`Error`]'s `Display` as every other sigils failure in this
+// binary is.
+//
+// The `None` arm cannot be reached either: `key_edit_for` only answers `Submit`
+// while a row is lit, which is what keeps a submit off an empty window.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "no keystroke reaches this window until it is wired into the loop"
+    )
+)]
+pub(crate) fn key_submit(app: &mut App, home: &Path, root: &Path, choice: &KeyChoice) -> KeyPrompt {
+    let Some(name) = choice.highlighted() else {
+        return KeyPrompt::Closed;
+    };
+
+    if let Err(source) = save_key_binding(home, root, choice.scope(), name) {
+        app.set_message(Error::Sigils { source }.to_string());
+    }
+    KeyPrompt::Closed
 }
 
 // The whole path from press to saved file, over a repository of the test's own.
