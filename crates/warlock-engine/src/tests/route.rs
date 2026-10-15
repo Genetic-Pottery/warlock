@@ -4,7 +4,7 @@ use std::path::Path;
 
 use super::{Error, resolve_route, route_facts};
 use crate::keys::{keys_path, save_key};
-use crate::manifest::{Manifest, PactEntry, ScopeRecord, manifest_path};
+use crate::manifest::{Manifest, ScopeRecord, ScopedDirectory, manifest_path};
 use crate::scope::scope_opens_to;
 use crate::sigils::{save_key_binding, save_sigils, sigils_path};
 
@@ -17,15 +17,17 @@ fn a_dir() -> tempfile::TempDir {
     tempfile::tempdir().expect("a temporary directory")
 }
 
-fn entry(module: &str) -> PactEntry {
-    PactEntry::new(".", module, format!("{module}/.warlock.md"))
-        .expect("a relative module path is inside the root")
+fn scoped(path: &str, scope: &str) -> ScopedDirectory {
+    ScopedDirectory::new(".", path, scope).expect("a relative path is inside the root")
 }
 
 fn a_manifest() -> Manifest {
-    Manifest::with_entries([entry("crates").with_scope("data-plane"), entry("docs")]).with_scopes([
-        ScopeRecord::new("data-plane", "Data Plane", "In Review", "area/data-plane"),
-    ])
+    Manifest::with_directories([scoped("crates", "data-plane")]).with_scopes([ScopeRecord::new(
+        "data-plane",
+        "Data Plane",
+        "In Review",
+        "area/data-plane",
+    )])
 }
 
 // A checkout that is bound to a key this machine really holds: everything the
@@ -120,13 +122,11 @@ fn the_sigil_fact_is_scope_opens_to_and_never_changes_the_route() {
 
 #[test]
 fn an_unscoped_path_is_refused_by_name_whatever_this_machine_holds() {
-    // `scope_opens_to` calls an unscoped directory open to anyone, and it still
-    // does here. What is refused is not a boundary being crossed but work with
-    // nowhere to be filed: a machine holding the wildcard is turned down in the
-    // same words as one holding nothing, which is what "reported, not gated"
-    // costs on this side.
+    // Work with nowhere to be filed: a machine holding the wildcard is turned
+    // down in the same words as one holding nothing, because an unscoped
+    // directory is closed to every sigil and has no board either way.
     for held in [owned(&[]), owned(&["*"]), owned(&["data-plane"])] {
-        assert!(scope_opens_to(None, &held), "{held:?}");
+        assert!(!scope_opens_to(None, &held), "{held:?}");
 
         let (home, root) = (a_dir(), a_dir());
         bound(home.path(), root.path());
@@ -154,7 +154,7 @@ fn the_four_refusals_are_four_different_variants() {
     assert!(matches!(unscoped, Error::Unscoped { .. }), "{unscoped:?}");
     assert!(unscoped.to_string().contains("docs/adr"), "{unscoped}");
 
-    let unrecorded_manifest = Manifest::with_entries([entry("crates").with_scope("data-plane")]);
+    let unrecorded_manifest = Manifest::with_directories([scoped("crates", "data-plane")]);
     let unrecorded = resolve_route(
         "crates/engine",
         root.path(),
@@ -296,8 +296,8 @@ fn a_covering_scope_with_no_record_still_reports_the_scope_and_the_key() {
     let (home, root) = (a_dir(), a_dir());
     bound(home.path(), root.path());
     // The same manifest the `Unrecorded` refusal is built on: a scope written on
-    // a pact that no `[[scope]]` record names.
-    let manifest = Manifest::with_entries([entry("crates").with_scope("data-plane")]);
+    // a directory that no `[[scope]]` record names.
+    let manifest = Manifest::with_directories([scoped("crates", "data-plane")]);
 
     let facts = route_facts("crates/engine", root.path(), &manifest, Some(home.path()))
         .expect("a scope nobody recorded is an absent record, not a refusal");

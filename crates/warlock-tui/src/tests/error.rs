@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use warlock_engine::{Manifest, briefs, manifest, manifest_path, resolve_filing, scope, sigils};
 
 use super::{Error, one_line, status_for};
+use crate::boundary::unscoped_message;
 use crate::brief::{ScopeBlockError, brief_at};
 use crate::linear::Error as LinearError;
 use crate::query::spelled;
@@ -13,9 +14,9 @@ use crate::template::Error as TemplateError;
 // sentence nothing said any more.
 use crate::standing::{FOR_CUT, FOR_SIGILS};
 
-const PROBLEM: &str = "`/repo/crates/engine` could not be hashed and is stale: \
-                           could not read `/repo/crates/engine/src/lib.rs`, so the \
-                           subtree has no hash: permission denied";
+const PROBLEM: &str = "`/repo/crates/engine` carries `Data Plane`, which is not a scope, so \
+                       it reads as unscoped: a scope holds only lowercase letters, digits, \
+                       `-` and `_`, and this one holds ` `";
 
 #[test]
 fn a_message_that_is_already_one_line_is_left_alone() {
@@ -28,13 +29,13 @@ fn a_message_that_is_already_one_line_is_left_alone() {
 fn a_parser_diagnostic_keeps_where_and_why_and_drops_the_snippet() {
     // Exactly the shape `toml` produces for a manifest that will not
     // parse, wrapped in the engine's own wording.
-    let message = "could not read the pact manifest: malformed pact manifest: \
+    let message = "malformed scope manifest: \
                        TOML parse error at line 1, column 5\n  |\n1 | not a manifest\n  \
                        |     ^\nkey with no value, expected `=`\n";
 
     assert_eq!(
         one_line(message),
-        "could not read the pact manifest: malformed pact manifest: TOML parse \
+        "malformed scope manifest: TOML parse \
              error at line 1, column 5: key with no value, expected `=`",
     );
 }
@@ -90,7 +91,7 @@ fn every_message_quoting_another_error_is_one_line_so_it_prints_as_one() {
         },
         Error::Manifest {
             source: manifest::Error::Io {
-                path: PathBuf::from("/repo/.warlock/pacts.toml"),
+                path: PathBuf::from("/repo/.warlock/scopes.toml"),
                 source: std::io::Error::other("boom"),
             },
         },
@@ -161,9 +162,6 @@ fn every_message_quoting_another_error_is_one_line_so_it_prints_as_one() {
                 rule: scope::Rule::Empty,
             },
         },
-        Error::Signal {
-            source: ctrlc::Error::MultipleHandlers,
-        },
         Error::Clipboard {
             source: arboard::Error::ClipboardOccupied,
         },
@@ -204,18 +202,13 @@ fn every_message_warlock_words_itself_is_one_line_so_it_prints_as_one() {
             path: "crates/engine".to_owned(),
             scope: "data-plane".to_owned(),
         },
+        Error::Unscoped {
+            path: "crates/engine".to_owned(),
+        },
         Error::Scope {
-            refusal: ScopeRefusal::NoPact {
-                module: "crates/engine".to_owned(),
+            refusal: ScopeRefusal::Recorded {
+                scope: "data-plane".to_owned(),
             },
-        },
-        Error::Failures {
-            failed: 3,
-            total: 12,
-        },
-        Error::Failures {
-            failed: 1,
-            total: 1,
         },
         Error::AllCut {
             name: "Push a brief".to_owned(),
@@ -404,21 +397,21 @@ fn a_clipboard_that_refused_says_what_it_cost_and_prints_as_one_line() {
 fn a_manifest_that_cannot_be_saved_says_so_in_the_engines_words() {
     let error = Error::Manifest {
         source: manifest::Error::Io {
-            path: PathBuf::from("/repo/.warlock/pacts.toml"),
+            path: PathBuf::from("/repo/.warlock/scopes.toml"),
             source: std::io::Error::other("permission denied"),
         },
     };
 
     assert_eq!(
         error.to_string(),
-        "could not read or write `/repo/.warlock/pacts.toml`: permission denied"
+        "could not read or write `/repo/.warlock/scopes.toml`: permission denied"
     );
 }
 
 #[test]
 fn a_path_with_no_repository_relative_form_says_which_root_it_is_not_inside() {
-    // What `warlock stale /elsewhere` prints. The engine's sentence is
-    // already the whole fact, so nothing is wrapped around it.
+    // The engine's sentence is already the whole fact, so nothing is wrapped
+    // around it.
     let error = Error::Unspellable {
         source: manifest::Error::PathOutsideRoot {
             root: PathBuf::from("/repo"),
@@ -481,8 +474,8 @@ fn a_string_that_is_not_a_sigil_names_itself_and_the_rule_it_broke() {
 
 #[test]
 fn a_scope_refusal_is_the_refusals_own_sentence_and_nothing_wrapped_round_it() {
-    let refusal = ScopeRefusal::NoPact {
-        module: "crates/engine".to_owned(),
+    let refusal = ScopeRefusal::Rule {
+        rule: scope::Rule::Empty,
     };
 
     assert_eq!(
@@ -491,6 +484,17 @@ fn a_scope_refusal_is_the_refusals_own_sentence_and_nothing_wrapped_round_it() {
         }
         .to_string(),
         refusal.to_string()
+    );
+}
+
+#[test]
+fn an_unscoped_path_says_what_the_boundary_says_about_it() {
+    assert_eq!(
+        Error::Unscoped {
+            path: "assets".to_owned(),
+        }
+        .to_string(),
+        unscoped_message("assets")
     );
 }
 
@@ -524,27 +528,25 @@ fn a_sigil_config_that_cannot_be_read_says_so_in_the_engines_words() {
 fn an_answered_question_is_a_zero_whatever_the_answer_was() {
     // The half of the exit contract that carries the verdicts: warlock ran
     // the query and the answer is in the output, so the status says the
-    // question was answered and nothing more. The two answers that read
-    // most like failures and are not — an empty listing and a scope closed
-    // to this machine — are `Ok(())` where they are produced, pinned in
-    // `query::tests` and `check::tests` against this same function.
+    // question was answered and nothing more. A scope closed to this machine
+    // reads like a failure and is not; `check::tests` pins it as `Ok(())`
+    // against this same function.
     assert_eq!(status_for(&Ok(())), 0);
 }
 
 #[test]
 fn a_question_warlock_could_not_answer_is_a_one_and_never_a_two() {
     // The other half: no repository above the working directory, a load
-    // that could not colour what it was asked about, and a path with no
-    // repository-relative spelling — the last of them built by the very
-    // function the three subcommands spell their paths through, so this is
-    // the refusal a reader would actually get.
+    // that could not read what it was asked about, and a path with no
+    // repository-relative spelling — the last of them built by `spelled`, so
+    // this is the refusal a reader would actually get.
     let refusals = [
         Error::NoRepository {
             start: PathBuf::from("/nowhere"),
             wanted: FOR_SIGILS,
         },
         Error::Problems {
-            first: "`/repo/docs`: `.warlock.md` could not be read".to_owned(),
+            first: PROBLEM.to_owned(),
             rest: 2,
         },
         spelled(Path::new("/repo"), Path::new("/elsewhere"))
@@ -565,24 +567,21 @@ fn a_boundary_this_machine_does_not_hold_is_a_three_and_nothing_else_is() {
     // The write half of the contract, and the only verdict of warlock's own
     // that is neither a 0 nor a 1: nothing was spent, so it is not a
     // failure, and re-running it will never work, so it is not something to
-    // read on stderr and try again. Pinned here beside the other statuses;
-    // the three write commands pin their own ends in `edits::tests`.
+    // read on stderr and try again.
     let refusal = Error::ClosedScope {
         path: "crates/engine".to_owned(),
         scope: "data-plane".to_owned(),
     };
     assert_eq!(status_for(&Err(refusal)), 3);
 
-    // And it is the refusal's alone. The descendant refusal keeps a 1 by
-    // the argument on `status_for`, and so does everything warlock could
-    // not do.
-    assert_eq!(
-        status_for(&Err(Error::ClosedScopeBelow {
-            path: ".".to_owned(),
-            scopes: vec!["platform".to_owned()],
-        })),
-        1
-    );
+    // A path nothing covers is closed to every machine, so it spends the same
+    // register as a scope this machine does not hold.
+    let unscoped = Error::Unscoped {
+        path: "assets".to_owned(),
+    };
+    assert_eq!(status_for(&Err(unscoped)), 3);
+
+    // Everything warlock could not do keeps a 1.
     assert_eq!(
         status_for(&Err(Error::NoRepository {
             start: PathBuf::from("/nowhere"),
@@ -593,14 +592,12 @@ fn a_boundary_this_machine_does_not_hold_is_a_three_and_nothing_else_is() {
 }
 
 #[test]
-fn the_statuses_the_older_subcommands_leave_are_where_they_were() {
+fn the_statuses_already_sorted_stay_where_they_are() {
     // Pinned as a table rather than left to be noticed, because `status_for`
     // grows a variant every time warlock grows a verb: a refusal added to the
-    // catch-all must not move anything already sorted above it. One error per
-    // register, each taken from the subcommand that really produces it.
+    // catch-all must not move anything already sorted above it.
     let statuses = [
         (Ok(()), 0),
-        // The three questions and the writes, which are all the ordinary 1.
         (
             Err(Error::NoRepository {
                 start: PathBuf::from("/nowhere"),
@@ -610,7 +607,7 @@ fn the_statuses_the_older_subcommands_leave_are_where_they_were() {
         ),
         (
             Err(Error::Problems {
-                first: "`/repo/docs`: `.warlock.md` could not be read".to_owned(),
+                first: PROBLEM.to_owned(),
                 rest: 2,
             }),
             1,
@@ -618,8 +615,8 @@ fn the_statuses_the_older_subcommands_leave_are_where_they_were() {
         (Err(Error::NoHome), 1),
         (
             Err(Error::Scope {
-                refusal: ScopeRefusal::NoPact {
-                    module: "crates/engine".to_owned(),
+                refusal: ScopeRefusal::Recorded {
+                    scope: "data-plane".to_owned(),
                 },
             }),
             1,
@@ -631,16 +628,6 @@ fn the_statuses_the_older_subcommands_leave_are_where_they_were() {
             }),
             1,
         ),
-        // The un-pact's downward refusal, which is deliberately not the
-        // boundary's number.
-        (
-            Err(Error::ClosedScopeBelow {
-                path: ".".to_owned(),
-                scopes: vec!["platform".to_owned()],
-            }),
-            1,
-        ),
-        // The boundary itself, and the two a run leaves behind.
         (
             Err(Error::ClosedScope {
                 path: "crates/engine".to_owned(),
@@ -649,11 +636,10 @@ fn the_statuses_the_older_subcommands_leave_are_where_they_were() {
             3,
         ),
         (
-            Err(Error::Failures {
-                failed: 3,
-                total: 12,
+            Err(Error::Unscoped {
+                path: "assets".to_owned(),
             }),
-            4,
+            3,
         ),
         (Err(Error::Cancelled), 130),
     ];

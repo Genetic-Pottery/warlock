@@ -8,10 +8,10 @@ use std::path::{Path, PathBuf};
 use std::{fmt, io};
 
 use warlock_engine::{
-    RunStatus, briefs, filing, keys, load, manifest, pact, pulls, route, scope, sigils,
+    RunStatus, briefs, filing, keys, load, manifest, pulls, route, scope, sigils,
 };
 
-use crate::boundary::{blocking_scopes_message, closed_scope_message};
+use crate::boundary::{closed_scope_message, unscoped_message};
 use crate::brief::{Error as BriefError, ScopeBlockError};
 use crate::cut::listed;
 use crate::git::{Dirty, Error as GitError};
@@ -42,8 +42,8 @@ pub enum Error {
     // Kept apart from `Manifest` even though both carry the engine's
     // `manifest::Error`: that one is a file that would not read or write, this
     // one never opens a file at all. A path with no repository-relative form is
-    // refused rather than quietly dropped from a listing, because an answer with
-    // it left out would tell a script nothing is stale there.
+    // refused rather than quietly dropped from an answer, because an answer with
+    // it left out would tell a script nothing is there.
     Unspellable {
         source: manifest::Error,
     },
@@ -55,41 +55,21 @@ pub enum Error {
         path: String,
         scope: String,
     },
-    // `ClosedScope`'s question aimed downwards, and the only refusal an
-    // un-pact has that the other writes do not: coverage walks up, so that one
-    // answers whether this machine may act *at* the path, while an un-pact drops
-    // every entry below as well and an entry is the only home a scope has.
-    // Without this a boundary could be erased by aiming at its parent. Argued in
-    // `docs/warlock-decision-un-pacting-across-a-descendant-scope.md`.
-    ClosedScopeBelow {
+    // `ClosedScope` with no scope to name: a path nothing covers is closed to
+    // every machine, so the fix is drawing a scope rather than holding a sigil.
+    Unscoped {
         path: String,
-        scopes: Vec<String>,
     },
     // Every refusal `warlock scope add` and `remove` have past the boundary,
     // worded once by `ScopeRefusal` for both doors.
     Scope {
         refusal: ScopeRefusal,
     },
-    Pact {
-        source: pact::Error,
-    },
-    Failures {
-        failed: usize,
-        total: usize,
-    },
     Cancelled,
-    // A refusal rather than a shrug: a `warlock pact` is minutes of somebody's
-    // tokens with no panel to press Esc in, and the signal is the only say-when
-    // a shell has over it. Free to refuse here — the handler is installed after
-    // the boundary is asked and before the first pass is spent.
-    Signal {
-        source: ctrlc::Error,
-    },
     // The one failure here that is another program's: the selection owner, the
     // compositor's helper, or nothing at all on a session with no display.
-    // Source-carrying like `Signal` above and for the same reason — the crate's
-    // own sentence is the whole of what went wrong, and what it cost is
-    // warlock's to say.
+    // Source-carrying because the crate's own sentence is the whole of what went
+    // wrong, and what it cost is warlock's to say.
     Clipboard {
         source: arboard::Error,
     },
@@ -191,7 +171,7 @@ pub enum Error {
     },
     // The team key is the manifest's, so the file to fix is named with it. A
     // team Linear does not know is not a client failure and `linear.rs` does not
-    // word it: that module holds no sentence about `.warlock/pacts.toml`.
+    // word it: that module holds no sentence about `.warlock/scopes.toml`.
     UnknownTeam {
         team: String,
         path: PathBuf,
@@ -278,7 +258,7 @@ pub enum Error {
         ticket: String,
     },
     // The one halt that is a boundary and so the one that spends the **3**: a
-    // session wrote under a scope this machine does not hold, nothing was
+    // session wrote outside the scopes this machine holds, nothing was
     // committed, and the tree was left exactly as the session left it.
     Crossed {
         ticket: String,
@@ -470,7 +450,7 @@ fn unrecorded_scope_message(
     };
     write!(
         f,
-        "nothing in `.warlock/pacts.toml` records the scope `{scope}`, so there is no queue to \
+        "nothing in `.warlock/scopes.toml` records the scope `{scope}`, so there is no queue to \
          read: this repository {named}"
     )
 }
@@ -520,7 +500,7 @@ fn halted_message(f: &mut fmt::Formatter<'_>, ticket: &str) -> fmt::Result {
 fn crossed_message(f: &mut fmt::Formatter<'_>, ticket: &str, subtask: &str) -> fmt::Result {
     write!(
         f,
-        "`{subtask}` wrote under a scope this machine does not hold, so the run for `{ticket}` \
+        "`{subtask}` wrote outside the scopes this machine holds, so the run for `{ticket}` \
          stopped with nothing committed: the working tree is exactly as that session left it, and \
          the ticket's comment names the paths"
     )
@@ -609,50 +589,15 @@ impl fmt::Display for Error {
             Self::Manifest { source } | Self::Unspellable { source } => {
                 write!(f, "{}", one_line(source))
             }
-            // The walker's own sentence, flattened like the manifest's: it names
-            // the directory it could not list and what the filesystem said,
-            // which is the whole of what happened.
-            Self::Pact { source } => write!(f, "{}", one_line(source)),
-            // The count, under the lines that named each of them, and the fact
-            // a reader most needs next: the run's record is on disk, so the
-            // directories that did work are granted and re-running describes
-            // the ones that did not. Singular when the run was one directory,
-            // because "1 of 1 directories" is a sentence nobody writes.
-            Self::Failures { failed, total } => {
-                let directories = if *total == 1 {
-                    "directory"
-                } else {
-                    "directories"
-                };
-                write!(
-                    f,
-                    "{failed} of {total} {directories} failed — the manifest holds what the \
-                     rest earned"
-                )
-            }
             // What was stopped and what survives it, in that order, because the
             // second half is the thing a reader wonders about a run they killed
-            // half way through: the documents that were written are still
-            // written and the manifest records them, so the next run picks up
-            // from there rather than starting again. The footer says the same
-            // two things about the same event over a pact stopped with Esc.
+            // half way through.
             Self::Cancelled => write!(
                 f,
                 "the run was cancelled; what it finished first is recorded"
             ),
-            // What could not be arranged, then what warlock did about it: the
-            // crate's own sentence is "Ctrl-C signal handler already
-            // registered" or the system's complaint, neither of which says on
-            // its own that no pass was spent — and that is the half a reader at
-            // a shell prompt needs, because it is the difference between
-            // re-running and going to look at a subtree.
-            Self::Signal { source } => write!(
-                f,
-                "{source}, so no run was started — a pact nobody could stop with Ctrl-C is not \
-                 one warlock will spend passes on"
-            ),
             // The crate's sentence about the clipboard, with what it cost on
-            // the end of it, in `Signal`'s shape: "the native clipboard is not
+            // the end of it: "the native clipboard is not
             // accessible due to being held by another party" does not say by
             // itself that the text a reader asked for is not on the clipboard,
             // and that is the half they need. Flattened, because an unknown
@@ -666,13 +611,7 @@ impl fmt::Display for Error {
             Self::ClosedScope { path, scope } => {
                 write!(f, "{}", closed_scope_message(path, scope))
             }
-            // The footer's other boundary sentence, to the letter and for the
-            // same reason: `p` un-pacting-ward over this subtree is refused by
-            // the same engine answer, names the same scopes in the same order,
-            // and offers the same two roads out.
-            Self::ClosedScopeBelow { path, scopes } => {
-                write!(f, "{}", blocking_scopes_message(path, scopes))
-            }
+            Self::Unscoped { path } => write!(f, "{}", unscoped_message(path)),
             // The shell's road out of a record it will not rewrite, which the
             // panel has no flags to take.
             Self::Scope {
@@ -826,7 +765,6 @@ impl std::error::Error for Error {
             | Self::Prompt { source } => Some(source),
             Self::Load { source } => Some(source),
             Self::Manifest { source } | Self::Unspellable { source } => Some(source),
-            Self::Pact { source } => Some(source),
             Self::Sigil { rule, .. } | Self::KeyName { rule, .. } => Some(rule),
             // The refusal's own cause rather than the refusal, which is the
             // rule for a scope the engine refuses and nothing for the others:
@@ -846,7 +784,6 @@ impl std::error::Error for Error {
             Self::Runs { source } => Some(source),
             Self::Git { source } => Some(source),
             Self::Pull { source } => Some(source.as_ref()),
-            Self::Signal { source } => Some(source),
             Self::Clipboard { source } => Some(source),
             // No source, and there is none to have: a boundary this machine
             // does not hold is a fact about two files agreeing rather than a
@@ -855,7 +792,7 @@ impl std::error::Error for Error {
             | Self::NoRepository { .. }
             | Self::NoHome
             | Self::ClosedScope { .. }
-            | Self::ClosedScopeBelow { .. }
+            | Self::Unscoped { .. }
             // Nor here: a prompt answered with a blank line, and a name nobody
             // stored a key under, are a person and not a failure underneath.
             | Self::NoKey { .. }
@@ -893,12 +830,8 @@ impl std::error::Error for Error {
             // would not read is `Runs` above, which does carry its cause.
             | Self::NoRun { .. }
             | Self::NothingToResume { .. }
-            // Nor here, and there could not be one: a run's failures are N
-            // errors rather than one, they have already been printed in full,
-            // and picking a first to be "the" cause would be the summary
-            // pretending to be a failure. A cancel has no cause underneath it
-            // at all — somebody pressed Ctrl-C.
-            | Self::Failures { .. }
+            // Nor here: a cancel has no cause underneath it at all — somebody
+            // pressed Ctrl-C.
             | Self::Cancelled => None,
         }
     }
@@ -921,38 +854,34 @@ impl From<io::Error> for Error {
 
 /// The process's exit status.
 ///
-/// Four non-zero registers, kept distinct so a script can tell them apart
-/// without reading a word of the message: **2** is clap's, for a command line
-/// it could not parse; **1** is warlock could not do it; **3** is a boundary
-/// this machine's sigils do not open, refused with nothing spent; **4** is a
-/// run that finished with some directories failed, which is the one non-zero
-/// status that comes with the work having been done and saved; and
-/// [`CANCELLED`] is a run somebody stopped, likewise saved.
+/// Three non-zero registers of warlock's own, kept distinct so a script can
+/// tell them apart without reading a word of the message, beside clap's **2**
+/// for a command line it could not parse: **1** is warlock could not do it;
+/// **3** is a boundary this machine's sigils do not open, refused with nothing
+/// spent; and [`CANCELLED`] is a run somebody stopped.
 ///
-/// **0** means the question was answered whatever the answer was — an empty
-/// listing is "nothing is stale", and a closed scope is `check`'s answer rather
-/// than a failure to reach one.
+/// **0** means the question was answered whatever the answer was — a closed
+/// scope is `check`'s answer rather than a failure to reach one.
 #[must_use]
 pub const fn status_for(outcome: &Result<(), Error>) -> u8 {
     match outcome {
         Ok(()) => 0,
-        // A pull's two boundary refusals spend the same register and nothing else
-        // does: a scope this machine's sigils do not open, refused before a request
-        // with nothing spent, and a session that wrote under one, which is a run
-        // that stopped with nothing committed and the tree left as it was. The
-        // numbers here and `Pulled::status`'s are one decision, asserted against
-        // each other in the tests.
-        Err(Error::ClosedScope { .. } | Error::UnheldScope { .. } | Error::Crossed { .. }) => 3,
-        // A run that finished with some of its directories failed. Above the
-        // catch-all rather than folded into it, because it is the one non-zero
-        // status that comes with the work having been done: the documents that
-        // could be written are written and the manifest is saved, and the line
-        // printed for it is a count under a list already on stderr.
-        Err(Error::Failures { .. }) => 4,
+        // The boundary's refusals spend the same register and nothing else does:
+        // a scope this machine's sigils do not open or a path no scope covers,
+        // refused before a request with nothing spent, and a session that wrote
+        // outside the scopes it holds, which is a run that stopped with nothing
+        // committed and the tree left as it was. The numbers here and
+        // `Pulled::status`'s are one decision, asserted against each other in
+        // the tests.
+        Err(
+            Error::ClosedScope { .. }
+            | Error::Unscoped { .. }
+            | Error::UnheldScope { .. }
+            | Error::Crossed { .. },
+        ) => 3,
         // A run somebody stopped, and the one status here that is not warlock's
-        // verdict on anything: the work up to the Ctrl-C is saved, so this sits
-        // beside the 4 rather than under the catch-all, and it is the number a
-        // shell already spells an interrupted process with.
+        // verdict on anything: it sits apart from the catch-all because it is
+        // the number a shell already spells an interrupted process with.
         Err(Error::Cancelled) => CANCELLED,
         // Everything else, and that includes `warlock scope add`'s three
         // refusals about a `[[scope]]` record — deliberately, rather than for

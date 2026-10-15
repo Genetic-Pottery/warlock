@@ -1,72 +1,60 @@
 use std::path::PathBuf;
 
-use warlock_engine::{Manifest, PactEntry};
+use warlock_engine::{Manifest, ScopedDirectory};
 
-use super::{Operation, Verdict, permits};
+use super::{Verdict, permits, unscoped_message};
 use crate::error::Error;
 
 // Never read: nothing in this module touches a disk.
 const ROOT: &str = "/repo";
 
-fn pact(module: &str, scope: Option<&str>) -> PactEntry {
-    let entry = PactEntry::new(ROOT, module, format!("{module}/.warlock.md"))
-        .expect("a relative module path is inside the root");
-    match scope {
-        Some(scope) => entry.with_scope(scope),
-        None => entry,
-    }
-}
-
-fn pacts(entries: &[(&str, Option<&str>)]) -> Manifest {
-    Manifest::with_entries(entries.iter().map(|(module, scope)| pact(module, *scope)))
+fn scoped(directories: &[(&str, &str)]) -> Manifest {
+    Manifest::with_directories(directories.iter().map(|(module, scope)| {
+        ScopedDirectory::new(ROOT, module, *scope)
+            .expect("a relative module path is inside the root")
+    }))
 }
 
 fn at(module: &str) -> PathBuf {
     PathBuf::from(ROOT).join(module)
 }
 
-fn asked(manifest: &Manifest, module: &str, sigils: &[&str], operation: Operation) -> Verdict {
+fn asked(manifest: &Manifest, module: &str, sigils: &[&str]) -> Verdict {
     let held: Vec<String> = sigils.iter().map(|sigil| (*sigil).to_owned()).collect();
-    permits(
-        operation,
-        &at(module),
-        &PathBuf::from(ROOT),
-        manifest,
-        &held,
-    )
+    permits(&at(module), &PathBuf::from(ROOT), manifest, &held)
 }
 
 #[test]
 fn a_directory_nothing_covers_is_open_to_anyone() {
-    let manifest = pacts(&[("crates", None)]);
+    let manifest = scoped(&[("assets", "assets")]);
 
     assert_eq!(
-        asked(&manifest, "crates", &[], Operation::Pact),
+        asked(&manifest, "crates", &[]),
         Verdict::Open,
-        "the permissive default sits on the directory, not on the operator"
+        "anyone may draw the first scope over a directory nothing covers"
     );
 }
 
 #[test]
 fn a_scope_no_held_sigil_opens_closes_the_directory() {
-    let manifest = pacts(&[("crates", Some("platform"))]);
+    let manifest = scoped(&[("crates", "platform")]);
 
     assert_eq!(
-        asked(&manifest, "crates", &["web"], Operation::Pact),
+        asked(&manifest, "crates", &["web"]),
         Verdict::Closed {
             scope: "platform".to_owned()
         },
         "holding the wrong sigil is refused"
     );
     assert_eq!(
-        asked(&manifest, "crates", &[], Operation::Pact),
+        asked(&manifest, "crates", &[]),
         Verdict::Closed {
             scope: "platform".to_owned()
         },
         "and so is holding none at all"
     );
     assert_eq!(
-        asked(&manifest, "crates", &["platform"], Operation::Pact),
+        asked(&manifest, "crates", &["platform"]),
         Verdict::Open,
         "the sigil that names the scope opens it"
     );
@@ -74,10 +62,10 @@ fn a_scope_no_held_sigil_opens_closes_the_directory() {
 
 #[test]
 fn a_scope_covers_everything_beneath_it() {
-    let manifest = pacts(&[("crates", Some("platform")), ("crates/engine", None)]);
+    let manifest = scoped(&[("crates", "platform")]);
 
     assert_eq!(
-        asked(&manifest, "crates/engine", &[], Operation::Pact),
+        asked(&manifest, "crates/engine", &[]),
         Verdict::Closed {
             scope: "platform".to_owned()
         },
@@ -87,52 +75,43 @@ fn a_scope_covers_everything_beneath_it() {
 
 #[test]
 fn asking_about_here_says_nothing_about_what_is_underneath() {
-    // The directory itself is open; the pact under it is not.
-    let manifest = pacts(&[("crates", None), ("crates/engine", Some("platform"))]);
-
-    for operation in [Operation::Pact, Operation::Refresh, Operation::Scope] {
-        assert_eq!(
-            asked(&manifest, "crates", &[], operation),
-            Verdict::Open,
-            "{operation:?} touches one directory and asks about one directory"
-        );
-    }
-    assert_eq!(
-        asked(&manifest, "crates", &[], Operation::Unpact),
-        Verdict::ClosedBelow {
-            scopes: vec!["platform".to_owned()]
-        },
-        "an un-pact drops the pacts underneath, so it has to ask about them"
-    );
-}
-
-#[test]
-fn a_boundary_underneath_that_is_held_is_no_obstacle() {
-    let manifest = pacts(&[("crates", None), ("crates/engine", Some("platform"))]);
+    let manifest = scoped(&[("crates/engine", "platform")]);
 
     assert_eq!(
-        asked(&manifest, "crates", &["platform"], Operation::Unpact),
+        asked(&manifest, "crates", &[]),
         Verdict::Open,
-        "the rule refuses over scopes not held, not over having any"
+        "a scope beneath a directory does not close the directory"
     );
 }
 
 #[test]
-fn the_scope_above_is_answered_before_the_scopes_below() {
-    // Closed both ways at once: a scope on the directory itself, and a
-    // different one on a pact beneath it.
-    let manifest = pacts(&[
-        ("crates", Some("platform")),
-        ("crates/engine", Some("data-plane")),
-    ]);
+fn the_nearest_scope_answers_over_the_one_above_it() {
+    let manifest = scoped(&[("crates", "platform"), ("crates/engine", "data-plane")]);
 
     assert_eq!(
-        asked(&manifest, "crates", &[], Operation::Unpact),
+        asked(&manifest, "crates/engine", &["platform"]),
         Verdict::Closed {
-            scope: "platform".to_owned()
+            scope: "data-plane".to_owned()
         },
-        "an operator who may not act here at all does not need a list of \
-             what is underneath"
+        "holding the outer scope does not open a directory scoped inside it"
+    );
+    assert_eq!(
+        asked(&manifest, "crates/engine", &["data-plane"]),
+        Verdict::Open,
+    );
+}
+
+#[test]
+fn the_unscoped_sentence_names_the_way_to_draw_a_scope() {
+    let shell = Error::Unscoped {
+        path: "assets".to_owned(),
+    }
+    .to_string();
+
+    assert_eq!(
+        shell,
+        unscoped_message("assets"),
+        "the shell words an unscoped path the way the boundary does"
     );
 }
 

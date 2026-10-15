@@ -3,7 +3,7 @@
 //! The diff of the working tree is the authority on that, and nothing a session
 //! says about itself is. The `PreToolUse` gate hook sees `Edit` and `Write` and
 //! never sees a `sed`, a `python -c` or a heredoc inside `Bash`, so a pass can
-//! leave changes under a scope this machine does not hold without any refusal
+//! leave changes outside the scopes this machine holds without any refusal
 //! having been available to give. Reading `git status` after the session is the
 //! only check that covers every way a byte can reach the tree.
 //!
@@ -11,8 +11,8 @@
 //! manifest and the flattened held sigils go in, and the two lists come out with
 //! no repository, no filesystem and no `git` anywhere on the path. The
 //! classification itself is [`scope_covering`] and [`scope_opens_to`] — the same
-//! pair `r` and the gate ask — so there is one nearest-scope walk and one
-//! membership test in the workspace.
+//! pair the gate asks — so there is one nearest-scope walk and one membership
+//! test in the workspace.
 //!
 //! [`crossings_after`] is the one place the two meet: it reads the tree through
 //! the [`Repository`] seam and hands what it read to `crossings_in`. Split in two
@@ -30,8 +30,9 @@ use warlock_engine::{Manifest, scope_covering, scope_opens_to};
 
 use crate::git::{Dirty, Error, Repository, Touched};
 
-/// One changed path together with the scope covering it that this machine does
-/// not hold.
+/// One changed path this machine may not write: the scope covering it that no
+/// held sigil opens, or `None` for a path no scope covers, which is closed to
+/// everyone.
 ///
 /// The scope is named on every path rather than the paths being grouped under
 /// it, because this is what a halt reason reads out and a reason that grouped
@@ -39,17 +40,17 @@ use crate::git::{Dirty, Error, Repository, Touched};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Crossing<'a> {
     pub path: &'a str,
-    pub scope: &'a str,
+    pub scope: Option<&'a str>,
 }
 
 /// What the tree's changes came to, once the boundary is applied to them.
 ///
-/// Two lists and no third: a path under no scope, or under a directory nobody
-/// has pacted, is open and appears in neither. Empty on both counts is the
-/// ordinary session.
+/// Two lists and no third: a path under the scope the ticket was pulled under
+/// appears in neither. Empty on both counts is the ordinary session.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Crossings<'a> {
-    /// Every path under a scope no held sigil opens. What a `crossed` halt names.
+    /// Every path under a scope no held sigil opens, or under no scope at all.
+    /// What a `crossed` halt names.
     pub crossed: Vec<Crossing<'a>>,
     /// Scopes this machine does hold, other than the one the ticket was pulled
     /// under, with the paths written under them — already the shape
@@ -66,11 +67,11 @@ impl Crossings<'_> {
 
 /// ```
 /// use warlock_tui::{Crossing, Dirty, crossings_in};
-/// use warlock_engine::{Manifest, PactEntry};
+/// use warlock_engine::{Manifest, ScopedDirectory};
 ///
-/// let manifest = Manifest::with_entries([
-///     PactEntry::new(".", "crates/engine", "crates/engine/.warlock.md")?.with_scope("data-plane"),
-///     PactEntry::new(".", "crates/web", "crates/web/.warlock.md")?.with_scope("web"),
+/// let manifest = Manifest::with_directories([
+///     ScopedDirectory::new(".", "crates/engine", "data-plane")?,
+///     ScopedDirectory::new(".", "crates/web", "web")?,
 /// ]);
 /// let held = ["web".to_owned()];
 /// let dirty = [Dirty {
@@ -85,7 +86,7 @@ impl Crossings<'_> {
 /// // a crossing, and the new side is the scope the ticket was pulled under.
 /// assert_eq!(
 ///     crossings.crossed,
-///     [Crossing { path: "crates/engine/src/route.rs", scope: "data-plane" }]
+///     [Crossing { path: "crates/engine/src/route.rs", scope: Some("data-plane") }]
 /// );
 /// assert!(crossings.touched.is_empty());
 /// # Ok::<(), warlock_engine::manifest::Error>(())
@@ -120,18 +121,17 @@ pub fn crossings_in<'a>(
     // two readings that disagreed about the order or repeated a path would read
     // as two findings instead of one.
     for path in sides {
-        // Nothing covering the path means nothing drew a boundary here, and a
-        // path with no manifest-relative spelling reads the same way rather than
-        // making this fallible: `git status` paths are repository-root-relative
-        // already, so a path the root rejects takes a `repo_root` that is not the
-        // root of the checkout the status came from — a caller's mistake to
-        // report, and one every caller has a better sentence for than one
-        // invented here.
-        let Some(scope) = scope_covering(path, repo_root, manifest).ok().flatten() else {
-            continue;
-        };
+        // A path with no manifest-relative spelling reads as covered by nothing
+        // rather than making this fallible: `git status` paths are
+        // repository-root-relative already, so a path the root rejects takes a
+        // `repo_root` that is not the root of the checkout the status came from —
+        // a caller's mistake to report, and one every caller has a better
+        // sentence for than one invented here.
+        let covering = scope_covering(path, repo_root, manifest).ok().flatten();
 
-        if scope_opens_to(Some(scope), held) {
+        if let Some(scope) = covering
+            && scope_opens_to(Some(scope), held)
+        {
             if Some(scope) == pulled_under {
                 continue;
             }
@@ -148,9 +148,12 @@ pub fn crossings_in<'a>(
             }
         } else if !crossed
             .iter()
-            .any(|crossing| crossing.path == path && crossing.scope == scope)
+            .any(|crossing| crossing.path == path && crossing.scope == covering)
         {
-            crossed.push(Crossing { path, scope });
+            crossed.push(Crossing {
+                path,
+                scope: covering,
+            });
         }
     }
 
@@ -169,7 +172,7 @@ pub fn crossings_in<'a>(
 ///
 /// ```
 /// use warlock_tui::{Crossing, Git, GitError, Ran, Runs, crossings_after};
-/// use warlock_engine::{Manifest, PactEntry};
+/// use warlock_engine::{Manifest, ScopedDirectory};
 /// # use std::ffi::{OsStr, OsString};
 /// # use std::path::Path;
 /// # struct Scripted;
@@ -181,9 +184,8 @@ pub fn crossings_in<'a>(
 ///
 /// // A stand-in `Runs` answering with the bytes a real `git status` printed.
 /// let checkout = Git::new(Scripted, ".");
-/// let manifest = Manifest::with_entries([
-///     PactEntry::new(".", "crates/engine", "crates/engine/.warlock.md")?
-///         .with_scope("data-plane"),
+/// let manifest = Manifest::with_directories([
+///     ScopedDirectory::new(".", "crates/engine", "data-plane")?,
 /// ]);
 /// let mut changed = Vec::new();
 ///
@@ -192,7 +194,7 @@ pub fn crossings_in<'a>(
 ///
 /// assert_eq!(
 ///     crossings.crossed,
-///     [Crossing { path: "crates/engine/src/new.rs", scope: "data-plane" }]
+///     [Crossing { path: "crates/engine/src/new.rs", scope: Some("data-plane") }]
 /// );
 /// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```

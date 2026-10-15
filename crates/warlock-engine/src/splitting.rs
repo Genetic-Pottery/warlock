@@ -9,7 +9,7 @@ use crate::fill::{self, Asking, Reask, cut, fit, flattened, line, turned_down};
 // The splitting road asks again exactly as often as the document and drafting
 // roads do, and a third bound would be a number to keep in step with this one
 // for no gain.
-pub use crate::document::ATTEMPTS;
+pub use crate::fill::ATTEMPTS;
 
 pub const ASKING: Asking = Asking {
     attempts: ATTEMPTS,
@@ -77,7 +77,7 @@ pub struct Subtask {
 }
 
 // Three slips a model makes here, and reading any of them strictly would answer
-// it with `document::Defect::NotJson` — the one defect with nothing to repair
+// it with `fill::Defect::NotJson` — the one defect with nothing to repair
 // from, which throws a whole read-only session's work away over one key. Read
 // leniently and each becomes a slot the repair road already handles: a sub-task
 // answered as a bare goal string, a list answered as one line, and a field the
@@ -231,8 +231,8 @@ pub fn check(fill: &Fill) -> Vec<Defect> {
     // `Missing` rather than `Empty` for a ticket nobody split, because
     // `#[serde(default)]` reads an absent `subtasks` key and an empty array as
     // the same value and there is no way back to which was written. The repair
-    // has to build a sub-task either way, and `Missing` is what a slot with
-    // nothing in it to work from is called on the document road.
+    // has to build a sub-task either way, and `Missing` is the slot with
+    // nothing in it to work from.
     if fill.subtasks.is_empty() {
         defects.push(Defect::Missing {
             field: Slot::Subtasks,
@@ -1081,8 +1081,7 @@ it rather than padding it out.
 Write each sub-task in its own voice: no first person, and nothing about this \
 request or about what you were or were not shown.";
 
-/// The splitting prompt with the ticket and the shape to fill appended, in the
-/// layout [`crate::document::synthesis_instructions`] uses.
+/// The splitting prompt with the ticket and the shape to fill appended.
 ///
 /// The ticket arrives as its plain title and description, so nothing about
 /// where it came from or where its sub-tasks are going reaches the engine.

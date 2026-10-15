@@ -27,27 +27,19 @@ plain line and the terminal is never touched.
 | `warlock branch` | Print the branch this checkout's pulls start from and open pull requests against | nothing |
 | `warlock branch use <BRANCH>` | Make this checkout's pulls start from `BRANCH` and open pull requests against it | one config write |
 | `warlock branch clear` | Go back to the remote's default branch | one config write |
-| `warlock stale [path]` | List the pacted directories at or below `path` that are stale | nothing |
-| `warlock fresh [path]` | The same for the fresh ones | nothing |
-| `warlock check <path>` | Say which scope covers `path`, where work under it is filed, what this machine holds, and whether the two meet — or, with `--gate`, refuse a closed scope instead of describing it | nothing |
-| `warlock unpact <path>` | Drop the pact on a directory and every pact below it | one manifest write |
-| `warlock scope add <path> <scope>` | Write a scope onto a pacted directory, and — `--team-key`, `--review-state`, `--label` — the `[[scope]]` record routing it, when nothing records the name yet | one manifest write |
-| `warlock scope remove <path>` | Clear the scope on a pacted directory | one manifest write |
-| `warlock pact <path>` | Describe a directory and everything below it, a `.warlock.md` each | a model pass per directory |
-| `warlock refresh <path>` | The same over only the directories that are not fresh | a model pass per stale directory |
+| `warlock check <path>` | Say which scope covers `path`, where work under it is filed, what this machine holds, and whether the two meet — or, with `--gate`, refuse a closed or unscoped path instead of describing it | nothing |
+| `warlock scope add <path> <scope>` | Write a scope onto a directory, and — `--team-key`, `--review-state`, `--label` — the `[[scope]]` record routing it, when nothing records the name yet | one manifest write |
+| `warlock scope remove <path>` | Clear the scope on a directory | one manifest write |
 | `warlock brief` | Argue a brief in one conversation at the shell, and write it where `briefs.toml` says | a turn per blank line, one more for each yes to the write question, and the document it writes |
 | `warlock push <SCOPE> <PATH>` | File the brief at `PATH` as a project on the board `SCOPE` files to | one project on somebody's board |
 | `warlock draft <SCOPE> [SLUG]` | Without `SLUG`, list the scope's planned projects. With it, cut that project into issues | a list costs one read; a cut costs a drafting session per uncut slice with a turn for each answer or piece of feedback, a proposing pass per question, and for each settled slice its issues and one comment on the project |
 | `warlock pull <SCOPE>` | Work the next ready ticket in that scope's queue to an open pull request | a splitting pass, a model pass per sub-task, a commit each, a pushed branch, a pull request, and two moves on somebody's board |
 | `warlock resume <TICKET>` | Put the sub-tasks a halted run stopped on back to `pending`, so the next pull of that ticket finds work | one run-record write |
 
-The two listings take the repository root when the path is left off. Every other
-path is required, and on `unpact` and `pact` that is the point rather than an
-omission: the largest thing warlock can do to a repository must not also be the
-thing an absent argument does by itself. `warlock pact .` is somebody having
-said so.
+Every path is required. The one command that runs without one is
+`warlock check --gate`, which then reads the path from a hook payload on stdin.
 
-`warlock sigil` is about the checkout rather than the ledger. `add` and
+`warlock sigil` is about the checkout rather than the manifest. `add` and
 `remove` take one or more names, folded to lowercase, and `*` opens every
 scope. Every name is checked before anything is written, so one bad name writes
 nothing. Removing a sigil this machine doesn't hold is refused. A sigil is the
@@ -124,7 +116,7 @@ $ warlock key list --json
 ```
 
 A machine nobody has run `key add` on holds no keys, which is an empty answer
-and a 0, exactly as nothing stale is.
+and a 0.
 
 `warlock key use <name>` binds one of those names to this checkout, written
 into the per-project `config.toml` with the sigils already there left where they
@@ -139,11 +131,10 @@ checkout is unbound and will refuse until another `use` binds a key. No other
 checkout is read and none is warned, because warlock keeps no list of them to
 walk.
 
-`add`, `use` and `forget` take no `--json`, matching `unpact` and the two
-`scope` verbs. A name the store has never heard of is refused by `use` before a
+`add`, `use` and `forget` take no `--json`, matching the two `scope` verbs. A name the store has never heard of is refused by `use` before a
 byte reaches the config and by `forget` with nothing removed, one line on
-stderr and an ordinary **1** — not the 3, which is a scope this machine's
-sigils do not open and which no name in a key store has anything to do with.
+stderr and an ordinary **1** — not the 3, which is the scope boundary's and
+which no name in a key store has anything to do with.
 `use` and `forget` also want a repository, because a binding belongs to a
 checkout; `add` and `list` want none and answer for the same store from
 anywhere.
@@ -169,27 +160,11 @@ that the remote has the branch when you set it; the next pull's `git pull
 
 ### Asking
 
-`stale`, `fresh` and `check` only read. None of them writes to
-`.warlock/pacts.toml`, none spawns a process and none runs a model pass, so
-asking costs no tokens, no minutes and no risk of a manifest left in a state
-nobody asked for — which is what makes them safe to put in a CI job or an
-agent's hands. What they read is what the tree itself reads: the same walk, the
-same staleness rule, the same coverage, never a second opinion written on the
-shell side.
-
-The listings print one path a line and nothing else on the line, relative to the
-repository root and spelled the way the manifest spells them:
-
-```sh
-$ warlock stale
-.
-crates
-crates/warlock-engine
-crates/warlock-engine/src
-
-# nothing under the engine is behind its code
-$ test -z "$(warlock stale crates/warlock-engine)"
-```
+`check` only reads. It doesn't write to `.warlock/scopes.toml`, spawn a
+process or run a model pass, so asking costs no tokens, no minutes and no risk
+of a manifest left in a state nobody asked for — which is what makes it safe to
+put in a CI job or an agent's hands. What it reads is what the tree itself
+reads: the same coverage, never a second opinion written on the shell side.
 
 `check` walks up from one path and answers in five lines — the scope covering
 it, where work under that scope is filed, what this machine holds, whether the
@@ -208,26 +183,37 @@ The first two lines are the repository's and true for anyone who clones it; the
 last three are this machine's. All five print every time, so an answer with
 something missing is a line that says what is missing rather than one fewer
 line to count: a scope with no `[[scope]]` record names the scope and
-`.warlock/pacts.toml`, a path no scope covers says there is nothing to route to
-and that a scope would fix it, and an unbound checkout is sent to
+`.warlock/scopes.toml`, a path no scope covers says there is nothing to route
+to and that `warlock scope add` would fix it, and an unbound checkout is sent to
 `warlock key use` and `warlock key add`. A closed scope keeps its whole route,
 with the closed line beside it rather than in place of it — somebody covering
 for a colleague is told both what they would be crossing and where the work
 files. Only key *names* are ever printed, here and everywhere else.
 
-All three take `--json` and answer as one object on one line instead:
+A path no scope covers is closed to every AI session, whatever this machine
+holds — a `*` sigil included. Its first line is `nothing scopes <path>`, and its
+verdict line says why it is closed rather than only that it is:
 
 ```sh
-$ warlock stale --json
-{"command":"stale","directories":[{"path":".","state":"stale"}]}
+$ warlock check notes
+nothing scopes `notes`
+there is nothing to route to: a scope covering this path is what would fix it, with `warlock scope add`
+holding `data-plane`
+an unscoped path is closed to everyone, so no AI may work here
+no key is bound to this checkout: `warlock key use <name>` binds a name this machine stores, and `warlock key add <name>` stores a new one
+```
 
+`--json` answers as one object on one line instead:
+
+```sh
 $ warlock check crates/engine --json
 {"command":"check","path":"crates/engine","scope":"data-plane","sigils":["data-plane"],"opens":true,"team":"Data Plane","review_state":"In Review","label":"area/data-plane","key":"work","key_found":true}
 ```
 
 `path` is repository-root-relative, `scope` is the covering scope or `null`,
 `sigils` is what this machine holds (`null`, and never `[]`, when the config
-would not read), and `opens` is whether the two meet. The five beside them are
+would not read), and `opens` is whether the two meet — `false` for a path no
+scope covers, whatever the sigils. The five beside them are
 the route and the key, flat in the same object rather than nested, so nothing
 has to know which half of the answer a field was added with:
 
@@ -254,8 +240,7 @@ heard of and a path no scope covers. That is what leaves the exit status free:
 `warlock check <path> --json | jq -e '.opens'` spends `jq`'s status on the
 verdict, and `warlock check <path> --json | jq -e '.opens and .key_found'`
 spends it on "this machine may work here and can file the ticket" — warlock
-spends none of its own on saying no either way. The same goes for an empty
-listing — nothing stale is an answer, and it is a 0.
+spends none of its own on saying no either way.
 
 `warlock check --gate` is the one exception, and the paragraph above is the rule
 it is the exception to. A shell about to write a file, and a `PreToolUse` hook
@@ -268,8 +253,8 @@ in every respect: the same five lines, the same fields in the same order, the
 same 0.
 
 Given a path, a gate is one line on stderr and **exit 3** when the scope
-covering that path does not open to this machine's sigils, and nothing at all
-and **exit 0** when it does:
+covering that path does not open to this machine's sigils or when no scope
+covers it, and nothing at all and **exit 0** when it opens:
 
 ```sh
 $ warlock check --gate crates/engine/src/lib.rs
@@ -282,16 +267,25 @@ $ warlock check --gate crates/engine/src/lib.rs && echo may write
 may write
 ```
 
-The 3 and the line are the boundary's own, the ones `unpact` and `scope add`
-refuse with, so nothing was invented for the gate. A path no scope covers exits
-0, and so does a path in a directory nothing has pacted: an unscoped path is
-open to anyone, exactly as the verdict line above says it is.
+A path no scope covers is refused the same way, with a sentence that sends the
+reader to draw a scope rather than to hold a sigil, because there is no sigil
+that opens it:
+
+```sh
+$ warlock check --gate notes/todo.md
+warlock: nothing scopes notes/todo.md, so no AI may work there — draw a scope with `warlock scope add`
+$ echo $?
+3
+```
+
+The 3 and the closed-scope line are the boundary's own, the ones `scope add`
+and `scope remove` refuse with, so nothing was invented for the gate.
 
 With no path at all, `--gate` is the hook form. It reads a Claude Code
 `PreToolUse` payload on stdin and takes the path from `tool_input.file_path`,
-and it answers on stdout rather than in a status — a closed scope is exactly one
-deny object on one line, in Claude Code's vocabulary rather than warlock's
-envelope:
+and it answers on stdout rather than in a status — a closed scope or an
+unscoped path is exactly one deny object on one line, in Claude Code's
+vocabulary rather than warlock's envelope:
 
 ```sh
 $ warlock check --gate < payload.json
@@ -302,13 +296,20 @@ $ echo $?
 
 The reason is the boundary's one sentence with `warlock: ` in front of it, so it
 names the path, the covering scope and — a sigil and the scope it opens share a
-name — the sigil the write wants. The prefix is there because the line Claude
-Code shows says only that permission was denied, and warlock is the program to
-go and argue with.
+name — the sigil the write wants. For an unscoped path the reason is the
+unscoped sentence instead:
 
-An open scope, a path no scope covers, a payload that will not parse and a
-payload with no `tool_input.file_path` in it all write nothing at all: a hook
-cannot refuse a write it cannot name. Every one of them exits **0**, and so does
+```sh
+$ warlock check --gate < payload.json
+{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"warlock: nothing scopes `notes/todo.md`, so no AI may work there — draw a scope with `warlock scope add`"}}
+```
+
+The prefix is there because the line Claude Code shows says only that
+permission was denied, and warlock is the program to go and argue with.
+
+An open scope, a payload that will not parse and a payload with no
+`tool_input.file_path` in it all write nothing at all: a hook cannot refuse a
+write it cannot name. Every one of them exits **0**, and so does
 the refusal. That asymmetry with the path form is the point rather than an
 oversight: **2** is the only status Claude Code honours from a hook, and it
 means "block this tool call" for every event rather than "the scope is closed",
@@ -320,22 +321,29 @@ a path.
 
 ## Writing
 
-`unpact`, `scope add` and `scope remove` are `.warlock/pacts.toml` rewritten and
-nothing else. No terminal, no process, no model pass, and every `.warlock.md`
-left exactly where it was — un-pacting drops the record, not the documents.
+`scope add` and `scope remove` are `.warlock/scopes.toml` rewritten and nothing
+else. No terminal, no process, no model pass. The manifest holds a
+`[[directory]]` table per scoped directory, with a `path` and a `scope`, beside
+the `[[scope]]` records that route each name. `scope add` writes a directory's
+row, on any directory, and `scope remove` deletes it.
 
-All three ask the boundary first, before they look at whether the path has an
-entry at all, so a command aimed inside a scope this machine does not hold
-answers with the refusal and never with what the manifest holds. A refusal is
-one line on stderr and **exit 3**, with the file byte-identical to what was
-read. There is no `--force` and no environment variable past it:
-`warlock sigil add` is the one road, here exactly as `/sigil add` is in the panel.
+Both ask the boundary first, before they look at whether the path has a row at
+all, so a command aimed inside a scope this machine does not hold answers with
+the refusal and never with what the manifest holds. The boundary is the scope
+covering the directory — its own, or the nearest ancestor's. When one covers
+it, this machine must hold that scope's sigil. A refusal is one line on stderr
+and **exit 3**, with the file byte-identical to what was read. There is no
+`--force` and no environment variable past it: `warlock sigil add` is the one
+road, here exactly as `/sigil add` is in the panel.
 
-An un-pact has a second refusal that is not that one. When the boundary over the
-path itself is open but something *below* it carries a scope this machine does
-not hold, what is being refused is the blast radius rather than the place — so
-it is an ordinary **1**, and the sentence offers the road that needs no sigil:
-un-pact the parts you hold.
+```sh
+$ warlock scope add crates/engine/src web
+warlock: crates/engine/src is scoped `data-plane` — hold that sigil to work here, with `warlock sigil add data-plane`
+```
+
+A directory nothing covers is open to anyone for this one purpose. An unscoped
+path is closed to every AI session, but if drawing the first scope needed a
+sigil, no repository could ever be set up.
 
 `scope add` has two refusals of its own beside the boundary's, both of them
 about the `[[scope]]` record rather than the place. `--team-key`,
@@ -347,9 +355,9 @@ ordinary **1** and both leave the file byte-identical — not the 3, which is th
 sigil boundary's alone and would send a script to `warlock sigil add` over a
 missing `--team-key`.
 
-A new name with a record is one manifest write and not two. The scope on the
-pact and the `[[scope]]` record are built together and saved once, so no run
-leaves a name on a pact with nothing to route it, and there is nothing to undo
+A new name with a record is one manifest write and not two. The directory's
+row and the `[[scope]]` record are built together and saved once, so no run
+leaves a name on a directory with nothing to route it, and there is nothing to undo
 when the second half is the half that fails. The refusal names every flag that
 was left out, so the command is retyped once rather than three times:
 
@@ -383,7 +391,7 @@ $ warlock scope add src data-plane
 warlock: src is scoped `data-plane`
 
 $ warlock scope add src data-plane --team-key 'Data Plane'
-warlock: `data-plane` already has a record in `.warlock/pacts.toml`, and warlock does not rewrite one: run without `--team-key`, `--review-state` and `--label` to write the scope, or edit the file to change the record
+warlock: `data-plane` already has a record in `.warlock/scopes.toml`, and warlock does not rewrite one: run without `--team-key`, `--review-state` and `--label` to write the scope, or edit the file to change the record
 ```
 
 A value handed to a name that already routes would be a value dropped on the
@@ -391,50 +399,6 @@ floor, which is why it is refused rather than ignored. Warlock does not rewrite,
 merge or delete a record from here at all: the file is the road to changing one.
 A scope name already in use with no record stays legal and stays unrouted —
 `scope add` offers nothing about the names it did not just create.
-
-## Running
-
-`pact` and `refresh` are the two subcommands that spend anything: minutes, one
-`claude --print` per directory, a `.warlock.md` written beside each of them, and
-one manifest save at the end. They pass the same gate the cheap writes do, asked
-before a single directory is walked — a boundary asked any later would be asked
-after somebody's tokens were spent and somebody else's prose overwritten, and no
-exit status puts that back.
-
-Which directories a `refresh` describes is the engine's judgement, the same one
-the `r` key gets: the ones that are not fresh, no wider and no narrower.
-
-Progress is two lines a directory on stdout, and the denominator does not move
-for the length of the run:
-
-```
-warlock: [3/6] documenting crates/warlock-engine/src
-warlock: documented crates/warlock-engine/src
-```
-
-A directory whose pass failed never gets its second line. What it gets instead
-is stderr, where every failing directory is named, one line each, and then
-counted:
-
-```
-warlock: crates/warlock-tui/src — nothing was written for `/repo/crates/warlock-tui/src`: the model pass produced no answer: …
-warlock: 1 of 6 directories failed — the manifest holds what the rest earned
-```
-
-That run exits **4**, and the manifest is saved either way: the grants the rest
-of the subtree earned are on disk, so the thing to do about a 4 is re-run over
-what failed rather than buy the whole descent again. The split between the two
-streams is what makes it readable — `warlock pact . > run.log` puts the descent
-in the file and leaves what went wrong on the terminal.
-
-Ctrl-C is the only key a headless run has, and it is the panel's two answers in
-order. The first press is Esc: the `claude` in flight is killed, so the stop
-takes milliseconds rather than the rest of a five-minute pass, the descent ends
-at the next directory rather than part way through one, and everything that
-finished is hashed, granted and saved before the process leaves with **130**.
-The second press is `q`: it exits at once, saving nothing and printing nothing.
-Nothing is corrupted by taking it — every document and the manifest are written
-beside and renamed over, so what is on disk is always a whole file.
 
 ## Briefing
 
@@ -636,10 +600,10 @@ way of failing that is its own sentence, because each is fixed in a different
 file:
 
 ```sh
-warlock: `/repo/.warlock/pacts.toml` records no `[[scope]]` record, so there is nowhere to file: add one
+warlock: `/repo/.warlock/scopes.toml` records no `[[scope]]` record, so there is nowhere to file: add one
 warlock: this machine holds no sigil, so nothing says which board to file to: hold one with `warlock sigil add`
-warlock: this machine holds `platform`, and `/repo/.warlock/pacts.toml` records no scope of any of those names
-warlock: this machine holds `platform`, and that scope has no `[[scope]]` record: add one to `/repo/.warlock/pacts.toml`
+warlock: this machine holds `platform`, and `/repo/.warlock/scopes.toml` records no scope of any of those names
+warlock: this machine holds `platform`, and that scope has no `[[scope]]` record: add one to `/repo/.warlock/scopes.toml`
 warlock: `billing` is not a scope this machine can file to here: `data-plane`, `web`
 ```
 
@@ -669,7 +633,7 @@ file the key is written in, because the usual cause is a record carrying a
 team's name instead of its key:
 
 ```sh
-warlock: Linear knows no team with the key `Data Plane`, so nothing was filed: the `[[scope]]` record in `/repo/.warlock/pacts.toml` is where that key is written
+warlock: Linear knows no team with the key `Data Plane`, so nothing was filed: the `[[scope]]` record in `/repo/.warlock/scopes.toml` is where that key is written
 ```
 
 A label that won't resolve is refused with nothing created, because it's
@@ -948,7 +912,7 @@ warlock: the team `WAR` has no workflow state called `Backlog`, so no issue was 
 ```
 
 A team key Linear does not know is the push's refusal, worded there and named
-against `.warlock/pacts.toml` here too. The one failure after something was
+against `.warlock/scopes.toml` here too. The one failure after something was
 spent is a comment Linear would not take: the issues exist, the line that named
 them has already gone to stdout, and the failure goes to stderr under it with
 the identifiers in it, because nothing on the project names them and the next
@@ -1018,7 +982,7 @@ recorded names lead because one of them is almost certainly what was meant:
 
 ```sh
 $ warlock pull warlock-tem
-warlock: nothing in `.warlock/pacts.toml` records the scope `warlock-tem`, so there is no queue to read: this repository records `warlock-team`, `control-plane`
+warlock: nothing in `.warlock/scopes.toml` records the scope `warlock-tem`, so there is no queue to read: this repository records `warlock-team`, `control-plane`
 ```
 
 A recorded scope this machine's sigils do not open is the boundary's refusal and
@@ -1162,15 +1126,23 @@ means what the session wrote is in a commit warlock did not make and cannot
 check, so nothing further is committed.
 
 A crossing is the one halt that is a boundary, and the second of the two **3**s.
-A session that wrote under a scope this machine does not hold stops the run
-where it stands — nothing is committed, the tree is left exactly as that session
-left it, and what happens to the work is a person's to decide:
+A session that wrote under a scope this machine does not hold, or under no
+scope at all, stops the run where it stands — nothing is committed, the tree is
+left exactly as that session left it, and what happens to the work is a
+person's to decide:
 
 ```sh
 $ warlock pull warlock-team
-warlock: `WAR-140.01` wrote under a scope this machine does not hold, so the run for `WAR-140` stopped with nothing committed: the working tree is exactly as that session left it, and the ticket's comment names the paths
+warlock: `WAR-140.01` wrote outside the scopes this machine holds, so the run for `WAR-140` stopped with nothing committed: the working tree is exactly as that session left it, and the ticket's comment names the paths
 $ echo $?
 3
+```
+
+The halt reason in the ticket's comment and the run record names each path and
+what it is under:
+
+```text
+wrote outside the scopes this machine holds, so nothing was committed: `crates/control/src/lib.rs` is scoped `control-plane`; `notes/todo.md` is under no scope.
 ```
 
 A resumed run is picked up on its own branch, and a clean tree is required there
@@ -1219,10 +1191,10 @@ all stops a pull, because then nothing can say which runs this machine is
 holding.
 
 Exit status is **0** when a pull request was opened and when nothing was ready —
-an empty queue is an answer, exactly as an empty listing is. It is **3** twice,
-and both are the boundary's: a scope this machine's sigils do not open, refused
-at the start with nothing spent, and a sub-task that wrote past one, which is a
-run stopped with nothing committed. Everything else is an ordinary **1** — the
+an empty queue is an answer, not a failure. It is **3** twice, and both are the
+boundary's: a scope this machine's sigils do not open, refused at the start with
+nothing spent, and a sub-task that wrote under a scope they do not open or under
+no scope, which is a run stopped with nothing committed. Everything else is an ordinary **1** — the
 unrecorded scope, the two key refusals, a dirty tree either side of a resume, a
 named ticket the queue's rules turn down, a halt, and whatever `git`, Linear or
 the run record said when it would not answer. A missing scope is clap's **2**,
@@ -1258,7 +1230,7 @@ writes nothing, so the dry run is the run.
 $ warlock resume WAR-142
 warlock: `WAR-142.02` was `failed` and is `pending` again — `cargo test` came back red
 warlock: `WAR-142.03` was `blocked` and is `pending` again — the Linear key for `control-plane` is not on this machine
-warlock: `WAR-142.04` was `crossed` and is `pending` again — wrote `crates/control/src/lib.rs`
+warlock: `WAR-142.04` was `crossed` and is `pending` again — wrote outside the scopes this machine holds, so nothing was committed: `crates/control/src/lib.rs` is scoped `control-plane`.
 warlock: `warlock pull warlock-team --ticket WAR-142` works the ticket again
 $ echo $?
 0
@@ -1324,18 +1296,15 @@ start the ticket over.
 
 | Status | What it means |
 | --- | --- |
-| `0` | Completed. The question was answered or the write happened, whatever the answer turned out to be — an empty listing, a queue with nothing ready to pull, and a scope closed to this machine included |
+| `0` | Completed. The question was answered or the write happened, whatever the answer turned out to be — a queue with nothing ready to pull, and a scope closed to this machine included |
 | `1` | Warlock could not do it, or would not: the repository will not resolve, the manifest will not parse or will not save, the path has no repository-relative spelling, a scope name nothing records yet was given without all three record flags or with a blank one, a name that already has a record was given any of them, a brief's template or `briefs.toml` will not read, a push or draft names a scope that is not a board here, the brief is not one or a project of its name is already filed, a draft's slug is one Linear does not know or its project is not `Planned`, the scope block will not cut or has nothing left to cut, the team has no `Backlog` state, a pull's scope is one nothing records, the working tree is dirty, a named ticket is one the queue's rules turn down, a run halted, a resume was asked for a ticket this machine holds no run for or a run with nothing to put back, or Linear refused what was sent. The line on stderr is the thing to go and read |
 | `2` | The command line was never a request. Clap's status and its wording, for a word warlock has no place for |
-| `3` | The sigil boundary, in the three places it is reached: this machine's sigils do not open the scope covering the path, they do not open the scope a pull was asked for — both refused at the start with nothing spent — or a pull's sub-task wrote under a scope they do not open, which stops the run with nothing committed and the tree as that session left it. Retrying changes nothing, and the road out is `warlock sigil add` |
-| `4` | Completed with failures: a run wrote the documents it could and saved the manifest, and the lines above the count name the directories that did not come out of it |
-| `130` | Cancelled: somebody pressed Ctrl-C during a run, and what had finished by then is saved and granted. 128 plus SIGINT, so a shell, `make` and CI read it as interrupted without being told anything about warlock |
+| `3` | The scope boundary, in the four places it is reached: this machine's sigils do not open the scope covering the path, no scope covers the path, the sigils do not open the scope a pull was asked for — all three refused with nothing spent — or a pull's sub-task wrote under a scope the sigils do not open or under no scope, which stops the run with nothing committed and the tree as that session left it. Retrying changes nothing. The road out is `warlock sigil add` for a closed scope and `warlock scope add` for an unscoped path |
+| `130` | Cancelled: somebody stopped a run, and what it had finished by then is recorded. 128 plus SIGINT, so a shell, `make` and CI read it as interrupted without being told anything about warlock |
 
-The three that are not 1 are not 1 because they want different things done about
-them. A 3 says this checkout is outside that boundary, so stop and go and get
-the sigil — and where a pull crossed one, the tree is still holding what that
-session wrote. A 4 says the work is partly on disk, so re-run over the part that
-is not. A 130 says somebody decided to stop it, so nothing should retry it at
-all.
-Telling those apart by their wording would be telling them apart by parsing
-prose.
+A 3 and a 130 are kept apart from 1 because they want different things done
+about them. A 3 says this checkout is outside the boundary, so stop and go and
+get the sigil or draw the scope — and where a pull crossed one, the tree is
+still holding what that session wrote. A 130 says somebody decided to stop it,
+so nothing should retry it at all. Telling those apart by their wording would
+be telling them apart by parsing prose.

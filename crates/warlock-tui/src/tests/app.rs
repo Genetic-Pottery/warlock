@@ -1,17 +1,16 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use warlock_engine::{Node, NodeState, StateCounts, Tree};
+use warlock_engine::{Node, Tree};
 
 use super::{
-    App, Chrome, Focus, Held, PactIntent, PactToggle, Row, Run, Showing, Sigils,
-    cut_at_cap_message, ignored_row_message, no_document_message, reseat_on, scroll_offset_for,
+    App, Chrome, Focus, Held, Row, Sigils, cut_at_cap_message, no_document_message, reseat_on,
+    scroll_offset_for,
 };
-use crate::account::{Account, Line, Outcome};
+use crate::account::Line;
 use crate::claude::Activity;
 use crate::fixture;
-use crate::panel::Mode;
-use crate::panel::panel_offset_for;
+use crate::panel::{Mode, Showing, panel_offset_for};
 use crate::selection::{Position, copied_text};
 use crate::thread::Ending;
 
@@ -37,43 +36,23 @@ const KEYSTROKES: [(&str, Movement); 9] = [
     ("select_first", App::select_first),
     ("select_last", App::select_last),
     ("toggle_collapsed", App::toggle_collapsed),
-    ("toggle_pacted_only", App::toggle_pacted_only),
+    ("toggle_scoped_only", App::toggle_scoped_only),
     ("toggle_files", App::toggle_files),
 ];
 
 fn three_rows() -> Vec<Row> {
     vec![
-        Row::new(0, "repo", "repo/.warlock.md", NodeState::PactedStale),
-        Row::new(
-            1,
-            "repo/crates",
-            "repo/crates/.warlock.md",
-            NodeState::PactedFresh,
-        ),
-        Row::new(
-            1,
-            "repo/assets",
-            "repo/assets/.warlock.md",
-            NodeState::Unpacted,
-        ),
+        Row::new(0, "repo", false),
+        Row::new(1, "repo/crates", true).with_scope(Some("platform".to_owned())),
+        Row::new(1, "repo/assets", false),
     ]
 }
 
 fn rooted_rows() -> Vec<Row> {
     vec![
-        Row::new(0, "/repo", "/repo/.warlock.md", NodeState::PactedStale),
-        Row::new(
-            1,
-            "/repo/crates",
-            "/repo/crates/.warlock.md",
-            NodeState::PactedStale,
-        ),
-        Row::new(
-            2,
-            "/repo/crates/warlock-engine",
-            "/repo/crates/warlock-engine/.warlock.md",
-            NodeState::PactedFresh,
-        ),
+        Row::new(0, "/repo", false),
+        Row::new(1, "/repo/crates", false),
+        Row::new(2, "/repo/crates/warlock-engine", true).with_scope(Some("data-plane".to_owned())),
     ]
 }
 
@@ -89,28 +68,15 @@ fn rooted_engine() -> PathBuf {
     rooted_crates().join("warlock-engine")
 }
 
-fn tally(app: &App) -> StateCounts {
-    let mut counts = StateCounts::default();
-    for row in app.rows().iter().filter(|row| !row.is_file()) {
-        match row.state {
-            NodeState::Unpacted => counts.unpacted += 1,
-            NodeState::PactedStale => counts.pacted_stale += 1,
-            NodeState::PactedFresh => counts.pacted_fresh += 1,
-        }
-    }
-    counts
+fn tally(app: &App) -> (usize, usize) {
+    let directories = app.rows().iter().filter(|row| !row.is_file());
+    let scoped = directories.clone().filter(|row| row.covered).count();
+    (scoped, directories.count() - scoped)
 }
 
 fn many_rows(count: usize) -> Vec<Row> {
     (0..count)
-        .map(|index| {
-            Row::new(
-                1,
-                format!("repo/module{index}"),
-                format!("repo/module{index}/.warlock.md"),
-                NodeState::Unpacted,
-            )
-        })
+        .map(|index| Row::new(1, format!("repo/module{index}"), false))
         .collect()
 }
 
@@ -130,12 +96,6 @@ fn drawn(app: &App) -> Vec<String> {
         .collect()
 }
 
-fn paths_and_depths(rows: &[Row]) -> Vec<(String, usize)> {
-    rows.iter()
-        .map(|row| (row.path.to_string_lossy().into_owned(), row.depth))
-        .collect()
-}
-
 fn node_paths(app: &App) -> Vec<String> {
     app.rows()
         .iter()
@@ -144,77 +104,43 @@ fn node_paths(app: &App) -> Vec<String> {
         .collect()
 }
 
-fn states(app: &App) -> Vec<(&str, NodeState)> {
-    app.rows()
-        .iter()
-        .map(|row| (row.path.to_str().expect("ascii path"), row.state))
-        .collect()
-}
-
 fn whole_fixture() -> Vec<String> {
     vec![
         "warlock".to_owned(),
-        "warlock/.warlock.md".to_owned(),
         "warlock/crates".to_owned(),
         "warlock/crates/engine".to_owned(),
-        "warlock/crates/engine/.warlock.md".to_owned(),
         "warlock/crates/tui".to_owned(),
-        "warlock/crates/tui/.warlock.md".to_owned(),
         "warlock/assets".to_owned(),
-        "warlock/assets/.warlock.md".to_owned(),
     ]
 }
 
-fn pacted_fixture() -> Vec<String> {
+fn scoped_fixture() -> Vec<String> {
     vec![
         "warlock".to_owned(),
-        "warlock/.warlock.md".to_owned(),
         "warlock/crates".to_owned(),
         "warlock/crates/engine".to_owned(),
-        "warlock/crates/engine/.warlock.md".to_owned(),
         "warlock/crates/tui".to_owned(),
-        "warlock/crates/tui/.warlock.md".to_owned(),
-    ]
-}
-
-fn whole_fixture_after_a_run() -> Vec<String> {
-    vec![
-        "warlock".to_owned(),
-        "warlock/.warlock.md".to_owned(),
-        "warlock/crates".to_owned(),
-        "warlock/crates/.warlock.md".to_owned(),
-        "warlock/crates/engine".to_owned(),
-        "warlock/crates/engine/.warlock.md".to_owned(),
-        "warlock/crates/tui".to_owned(),
-        "warlock/crates/tui/.warlock.md".to_owned(),
-        "warlock/assets".to_owned(),
-        "warlock/assets/.warlock.md".to_owned(),
     ]
 }
 
 fn collapsed_over_crates() -> Vec<String> {
     vec![
         "warlock".to_owned(),
-        "warlock/.warlock.md".to_owned(),
         "warlock/crates".to_owned(),
         "warlock/assets".to_owned(),
-        "warlock/assets/.warlock.md".to_owned(),
     ]
 }
 
 fn whole_fixture_with_files() -> Vec<String> {
     vec![
         "warlock".to_owned(),
-        "warlock/.warlock.md".to_owned(),
         "warlock/README.md".to_owned(),
         "warlock/crates".to_owned(),
         "warlock/crates/engine".to_owned(),
-        "warlock/crates/engine/.warlock.md".to_owned(),
         "warlock/crates/engine/Cargo.toml".to_owned(),
         "warlock/crates/tui".to_owned(),
-        "warlock/crates/tui/.warlock.md".to_owned(),
+        "warlock/crates/tui/Cargo.toml".to_owned(),
         "warlock/assets".to_owned(),
-        "warlock/assets/.warlock.md".to_owned(),
         "warlock/assets/logo.svg".to_owned(),
     ]
 }
@@ -241,22 +167,13 @@ fn select(mut app: App, path: &str) -> App {
 #[test]
 fn flattening_a_tree_keeps_depth_first_order_and_depth() {
     let tree = Tree::new(
-        Node::new("repo", "repo/.warlock.md", NodeState::PactedStale).with_children([
-            Node::new(
-                "repo/crates",
-                "repo/crates/.warlock.md",
-                NodeState::PactedFresh,
-            )
-            .with_children([Node::new(
-                "repo/crates/engine",
-                "repo/crates/engine/.warlock.md",
-                NodeState::PactedFresh,
-            )]),
-            Node::new(
-                "repo/assets",
-                "repo/assets/.warlock.md",
-                NodeState::Unpacted,
-            ),
+        Node::new("repo").with_children([
+            Node::new("repo/crates")
+                .with_scope(Some("platform".to_owned()))
+                .with_children([
+                    Node::new("repo/crates/engine").with_covering(Some("platform".to_owned()))
+                ]),
+            Node::new("repo/assets"),
         ]),
     );
 
@@ -279,40 +196,34 @@ fn flattening_a_tree_keeps_depth_first_order_and_depth() {
 }
 
 #[test]
-fn flattening_a_tree_keeps_every_node_and_its_state() {
+fn flattening_a_tree_keeps_every_node_and_whether_a_scope_covers_it() {
     let tree = fixture::tree();
 
     let app = App::from_tree(&tree);
 
-    // The default view draws a document row under each documented
-    // directory too, so the nodes are the rows that are not files.
-    assert_eq!(node_paths(&app).len(), tree.counts().total());
+    assert_eq!(node_paths(&app).len(), tree.walk().count());
     for row in app.rows().iter().filter(|row| !row.is_file()) {
         let node = tree.find(&row.path).expect("row came from the tree");
-        assert_eq!(row.state, node.state);
+        assert_eq!(row.covered, node.is_covered(), "{}", row.path.display());
     }
 }
 
 #[test]
-fn an_app_carries_the_trees_own_counts() {
-    let tree = fixture::tree();
+fn an_app_counts_scoped_and_unscoped_directories_across_the_whole_walk() {
+    let app = App::from_tree(&fixture::tree());
 
-    let app = App::from_tree(&tree);
-
-    assert_eq!(app.counts(), tree.counts());
-    // Directories are what is counted, and the document rows beside them
-    // are not: see [`tally`].
-    assert_eq!(app.counts().total(), node_paths(&app).len());
+    // `crates`, `engine` and `tui` are covered; the root and `assets` are not.
+    // Files are not directories and are not counted, shown or hidden.
+    assert_eq!(app.coverage(), (3, 2));
+    let mut with_files = app.clone();
+    with_files.toggle_files();
+    assert_eq!(with_files.coverage(), (3, 2));
 }
 
 #[test]
-fn an_app_built_from_bare_rows_counts_nothing_until_told() {
-    let counts = fixture::tree().counts();
-
-    let app = App::from_rows(three_rows());
-
-    assert_eq!(app.counts(), StateCounts::default());
-    assert_eq!(app.with_counts(counts).counts(), counts);
+fn an_app_built_from_bare_rows_counts_the_rows_it_was_handed() {
+    assert_eq!(App::from_rows(three_rows()).coverage(), (1, 2));
+    assert_eq!(App::from_rows(Vec::new()).coverage(), (0, 0));
 }
 
 #[test]
@@ -743,37 +654,6 @@ fn scrolling_an_empty_app_is_a_no_op() {
     assert_eq!(app.selected_row(), None);
 }
 
-#[test]
-fn flattening_a_tree_carries_each_nodes_document() {
-    let tree = fixture::tree();
-
-    let app = App::from_tree(&tree);
-
-    for row in app.rows().iter().filter(|row| !row.is_file()) {
-        let node = tree.find(&row.path).expect("row came from the tree");
-        assert_eq!(
-            row.document,
-            node.document,
-            "document for {}",
-            row.path.display()
-        );
-    }
-    // The document rows drawn beside them stand for a file and so document
-    // nothing themselves — a directory *has* a document and is not one.
-    assert!(
-        app.rows()
-            .iter()
-            .filter(|row| row.is_file())
-            .all(|row| row.document.is_none() && row.is_document())
-    );
-    // Including `crates/`, whose document is honestly absent.
-    assert!(
-        app.rows()
-            .iter()
-            .any(|row| row.document.is_none() && row.path == Path::new("warlock/crates"))
-    );
-}
-
 fn shape(app: &App) -> Vec<(String, usize, bool)> {
     app.rows()
         .iter()
@@ -792,23 +672,19 @@ fn showing_files_draws_every_file_once_under_its_directory_at_one_more_depth() {
     let mut app = App::from_tree(&fixture::tree());
     app.toggle_files();
 
-    // Pinned whole: every file the fixture lists — the documents among them
-    // — once each, in path order, directly after the directory listing it
-    // and one level deeper. Nothing about documents may move this.
+    // Pinned whole: every file the fixture lists, once each, in path order,
+    // directly after the directory listing it and one level deeper.
     assert_eq!(
         shape(&app),
         [
             ("warlock".to_owned(), 0, false),
-            ("warlock/.warlock.md".to_owned(), 1, true),
             ("warlock/README.md".to_owned(), 1, true),
             ("warlock/crates".to_owned(), 1, false),
             ("warlock/crates/engine".to_owned(), 2, false),
-            ("warlock/crates/engine/.warlock.md".to_owned(), 3, true),
             ("warlock/crates/engine/Cargo.toml".to_owned(), 3, true),
             ("warlock/crates/tui".to_owned(), 2, false),
-            ("warlock/crates/tui/.warlock.md".to_owned(), 3, true),
+            ("warlock/crates/tui/Cargo.toml".to_owned(), 3, true),
             ("warlock/assets".to_owned(), 1, false),
-            ("warlock/assets/.warlock.md".to_owned(), 2, true),
             ("warlock/assets/logo.svg".to_owned(), 2, true),
         ]
     );
@@ -822,300 +698,9 @@ fn showing_files_draws_every_file_once_under_its_directory_at_one_more_depth() {
 }
 
 #[test]
-fn only_a_directorys_own_document_is_flagged_as_one() {
-    let mut app = App::from_tree(&fixture::tree());
-    app.toggle_files();
-
-    let flagged: Vec<(String, bool)> = app
-        .rows()
-        .iter()
-        .map(|row| (row.path.to_string_lossy().into_owned(), row.is_document()))
-        .collect();
-
-    assert_eq!(
-        flagged,
-        [
-            ("warlock".to_owned(), false),
-            // A README documents nothing as far as the tree is concerned.
-            ("warlock/.warlock.md".to_owned(), true),
-            ("warlock/README.md".to_owned(), false),
-            // No document loaded, so nothing under it could be one.
-            ("warlock/crates".to_owned(), false),
-            ("warlock/crates/engine".to_owned(), false),
-            ("warlock/crates/engine/.warlock.md".to_owned(), true),
-            ("warlock/crates/engine/Cargo.toml".to_owned(), false),
-            ("warlock/crates/tui".to_owned(), false),
-            ("warlock/crates/tui/.warlock.md".to_owned(), true),
-            ("warlock/assets".to_owned(), false),
-            // Unpacted and documented: presence on disk, not pactedness, is
-            // what the flag follows.
-            ("warlock/assets/.warlock.md".to_owned(), true),
-            ("warlock/assets/logo.svg".to_owned(), false),
-        ]
-    );
-    // Said again as the two rules it stands for: a directory is never a
-    // document, and each documented directory has exactly one.
-    assert!(
-        app.rows()
-            .iter()
-            .all(|row| !row.is_document() || row.is_file())
-    );
-    for (node, _) in fixture::tree().walk() {
-        let documents = app
-            .rows()
-            .iter()
-            .filter(|row| row.is_document() && row.path.parent() == Some(node.path.as_path()))
-            .count();
-        assert_eq!(documents, usize::from(node.document.is_some()));
-    }
-}
-
-#[test]
-fn a_row_handed_over_without_a_tree_is_no_document() {
-    // The safe default: `from_rows` tests hand rows over with no node
-    // behind them, and a row nobody told about a document has none.
-    assert!(!Row::file(1, "repo/.warlock.md", NodeState::PactedFresh).is_document());
-    assert!(
-        Row::file(1, "repo/.warlock.md", NodeState::PactedFresh)
-            .with_document_row(true)
-            .is_document()
-    );
-    assert!(!Row::new(0, "repo", "repo/.warlock.md", NodeState::PactedFresh).is_document());
-}
-
-#[test]
-fn pacting_an_unpacted_node_makes_it_stale_and_pacting_again_undoes_it() {
-    let mut app = app_selecting("warlock/assets");
-
-    let pacted = app.toggle_pact().expect("a directory can be pacted");
-
-    assert_eq!(
-        pacted,
-        PactToggle {
-            path: PathBuf::from("warlock/assets"),
-            pacted: true,
-        }
-    );
-    // Never fresh: a pact with no granted hash was never judged.
-    assert_eq!(
-        app.selected_row().map(|row| row.state),
-        Some(NodeState::PactedStale)
-    );
-
-    let unpacted = app.toggle_pact().expect("a directory can be un-pacted");
-
-    assert_eq!(
-        unpacted,
-        PactToggle {
-            path: PathBuf::from("warlock/assets"),
-            pacted: false,
-        }
-    );
-    assert_eq!(
-        app.selected_row().map(|row| row.state),
-        Some(NodeState::Unpacted)
-    );
-    assert_eq!(app.rows(), App::from_tree(&fixture::tree()).rows());
-}
-
-#[test]
-fn unpacting_a_fresh_node_drops_it_all_the_way_out() {
-    let mut app = app_selecting("warlock/crates/engine");
-
-    let toggled = app.toggle_pact().expect("a directory can be un-pacted");
-
-    // Fresh goes straight to unpacted: the grant goes with the pact.
-    assert!(!toggled.pacted);
-    assert_eq!(
-        app.selected_row().map(|row| row.state),
-        Some(NodeState::Unpacted)
-    );
-}
-
-#[test]
-fn a_directory_with_no_document_is_pacted_like_any_other() {
-    // `crates/` has no `.warlock.md` in the fixture, which is exactly the
-    // case the pact operation exists to fix: it writes one.
-    let mut app = app_selecting("warlock/crates");
-    assert_eq!(
-        app.selected_row().and_then(|row| row.document.clone()),
-        None
-    );
-
-    let pacted = app.toggle_pact().expect("an undocumented directory pacts");
-
-    assert_eq!(
-        pacted,
-        PactToggle {
-            path: PathBuf::from("warlock/crates"),
-            pacted: true,
-        }
-    );
-    assert_eq!(
-        app.selected_row().map(|row| row.state),
-        Some(NodeState::PactedStale)
-    );
-    assert_eq!(app.message(), None);
-    assert_eq!(app.counts(), tally(&app));
-}
-
-#[test]
-fn pacting_a_directory_pacts_everything_below_it() {
-    let mut app = app_selecting("warlock/crates");
-
-    app.toggle_pact().expect("a directory can be pacted");
-
-    // The directory the key was pressed on and both modules under it, and
-    // nothing outside the subtree. The document rows take their
-    // directory's colour, here as everywhere.
-    assert_eq!(
-        states(&app),
-        [
-            ("warlock", NodeState::PactedStale),
-            ("warlock/.warlock.md", NodeState::PactedStale),
-            ("warlock/crates", NodeState::PactedStale),
-            ("warlock/crates/engine", NodeState::PactedStale),
-            ("warlock/crates/engine/.warlock.md", NodeState::PactedStale),
-            ("warlock/crates/tui", NodeState::PactedStale),
-            ("warlock/crates/tui/.warlock.md", NodeState::PactedStale),
-            ("warlock/assets", NodeState::Unpacted),
-            ("warlock/assets/.warlock.md", NodeState::Unpacted),
-        ]
-    );
-    assert_eq!(app.counts(), tally(&app));
-    assert_eq!(app.counts().total(), 5);
-}
-
-#[test]
-fn un_pacting_a_directory_greys_the_whole_subtree() {
-    // The root, so the subtree is the whole tree and holds all three states
-    // on the way in.
-    let mut app = app_selecting("warlock");
-
-    let toggled = app.toggle_pact().expect("a directory can be un-pacted");
-
-    assert!(!toggled.pacted);
-    assert!(
-        app.rows()
-            .iter()
-            .all(|row| row.state == NodeState::Unpacted),
-        "{:?}",
-        states(&app)
-    );
-    assert_eq!(app.counts(), tally(&app));
-    assert_eq!(app.counts().unpacted, 5);
-    assert_eq!(app.counts().total(), 5);
-}
-
-#[test]
-fn un_pacting_says_the_documents_were_left_on_disk() {
-    let mut app = app_selecting("warlock/crates/tui");
-
-    app.toggle_pact().expect("a directory can be un-pacted");
-
-    let message = app.message().expect("un-pacting says what it left behind");
-    assert!(message.starts_with("warlock/crates/tui"), "{message}");
-    assert!(message.contains("left on disk"), "{message}");
-}
-
-#[test]
-fn a_subtree_can_be_put_into_a_state_the_toggle_never_reaches() {
-    // What a caller that has really pacted a subtree — documents written,
-    // hashes granted — says afterwards. The toggle itself never reaches
-    // fresh, because it grants nothing.
-    let mut app = App::from_tree(&fixture::tree());
-
-    app.set_subtree_state("warlock/crates", NodeState::PactedFresh);
-
-    assert_eq!(
-        states(&app),
-        [
-            ("warlock", NodeState::PactedStale),
-            ("warlock/.warlock.md", NodeState::PactedStale),
-            ("warlock/crates", NodeState::PactedFresh),
-            ("warlock/crates/engine", NodeState::PactedFresh),
-            ("warlock/crates/engine/.warlock.md", NodeState::PactedFresh),
-            ("warlock/crates/tui", NodeState::PactedFresh),
-            ("warlock/crates/tui/.warlock.md", NodeState::PactedFresh),
-            ("warlock/assets", NodeState::Unpacted),
-            ("warlock/assets/.warlock.md", NodeState::Unpacted),
-        ]
-    );
-    assert_eq!(app.counts(), tally(&app));
-    assert_eq!(app.counts().total(), 5);
-}
-
-#[test]
-fn a_subtree_state_reaches_the_rows_no_view_is_drawing() {
-    let mut app = App::from_tree(&fixture::tree()).with_collapsed(["warlock/crates"]);
-    assert_eq!(drawn(&app), collapsed_over_crates());
-
-    app.set_subtree_state("warlock/crates", NodeState::PactedFresh);
-    let mut app = select(app, "warlock/crates");
-    app.toggle_collapsed();
-
-    // Hidden under a collapsed directory while the state was set, and still
-    // coloured by it when the directory opens again.
-    let engine = app
-        .rows()
-        .iter()
-        .find(|row| row.path == Path::new("warlock/crates/engine"))
-        .expect("expanding brought it back");
-    assert_eq!(engine.state, NodeState::PactedFresh);
-    assert_eq!(app.counts(), tally(&app));
-}
-
-#[test]
-fn a_subtree_state_for_a_path_no_row_stands_for_changes_nothing() {
-    let mut app = App::from_tree(&fixture::tree());
-    let before = app.clone();
-
-    app.set_subtree_state("warlock/crates-old", NodeState::PactedFresh);
-
-    // A sibling is not a descendant, however much of its name it shares,
-    // and a directory the tree has never heard of is nothing at all.
-    assert_eq!(app.rows(), before.rows());
-    assert_eq!(app.counts(), before.counts());
-}
-
-#[test]
-fn a_subtree_state_leaves_the_message_alone() {
-    let mut app = App::from_tree(&fixture::tree());
-    app.set_message("something the caller said");
-
-    app.set_subtree_state("warlock", NodeState::PactedFresh);
-
-    // Not a keystroke: it neither says anything nor takes down what the
-    // keystroke it belongs to put up.
-    assert_eq!(app.message(), Some("something the caller said"));
-}
-
-#[test]
-fn the_counts_move_with_the_rows_and_the_total_never_changes() {
-    let mut app = App::from_tree(&fixture::tree());
-    let total = app.counts().total();
-
-    assert_eq!(app.counts(), tally(&app));
-    // Every row in turn, twice over, so each state is both entered and left.
-    for _ in 0..2 {
-        for index in 0..app.rows().len() {
-            while app.selected() != index {
-                app.select_next();
-            }
-            app.toggle_pact();
-            assert_eq!(app.counts(), tally(&app), "after toggling row {index}");
-            assert_eq!(app.counts().total(), total);
-        }
-        for _ in 0..app.rows().len() {
-            app.select_previous();
-        }
-    }
-}
-
-#[test]
 fn the_next_keystroke_clears_the_message() {
     let mut app = app_with_files_selecting("warlock/assets/logo.svg");
-    assert_eq!(app.toggle_pact(), None);
+    assert_eq!(app.scope_target(), None);
     assert!(app.message().is_some());
 
     app.select_next();
@@ -1136,386 +721,38 @@ fn every_movement_clears_a_message() {
 }
 
 #[test]
-fn a_pact_that_goes_through_leaves_no_refusal_behind() {
-    let mut app = app_with_files_selecting("warlock/assets/logo.svg");
-    assert_eq!(app.toggle_pact(), None);
-    assert!(app.message().is_some());
+fn every_keystroke_clears_a_message() {
+    for (name, keystroke) in KEYSTROKES {
+        // `warlock/crates` has children, so the collapse key is a keystroke
+        // that does something here rather than a no-op.
+        let mut app = app_selecting("warlock/crates");
+        app.set_message("something to forget");
 
-    // Onto the directory holding it, which the movement clears the message
-    // for, and then a toggle that works, which must not put one back.
-    app.select_previous();
-    app.select_previous();
-    assert_eq!(
-        app.selected_row().map(|row| row.path.clone()),
-        Some(PathBuf::from("warlock/assets"))
-    );
-    app.toggle_pact().expect("a directory can be pacted");
+        keystroke(&mut app);
 
-    assert_eq!(app.message(), None);
-}
-
-#[test]
-fn a_root_with_no_document_is_pacted_and_named_as_it_stands() {
-    let mut app = App::from_rows(vec![Row::new(0, "repo", None, NodeState::PactedStale)])
-        .with_counts(StateCounts {
-            pacted_stale: 1,
-            ..StateCounts::default()
-        });
-
-    let toggled = app.toggle_pact().expect("the root can be un-pacted");
-
-    assert!(!toggled.pacted);
-    assert_eq!(app.counts(), tally(&app));
-    // The root cannot be named relative to itself, so it is named as it
-    // stands rather than as the `"."` that relative spelling would give.
-    let message = app.message().expect("un-pacting says what it left behind");
-    assert!(message.starts_with("repo is no longer pacted"), "{message}");
-}
-
-#[test]
-fn refreshing_a_stale_directory_hands_its_subtree_back_and_says_nothing() {
-    let mut app = app_selecting("warlock/crates/tui");
-    app.set_message("something the last keystroke said");
-    let before = app.clone();
-
-    let asked = app.refresh();
-
-    // The root of the subtree to describe again, for whoever runs the pass.
-    assert_eq!(asked, Some(PathBuf::from("warlock/crates/tui")));
-    // A press that does something says nothing, and does nothing else here:
-    // the states, the tally, the selection and the panel are the run's to
-    // move once it is under way, not this key's.
-    assert_eq!(app.message(), None);
-    assert_eq!(app.rows(), before.rows());
-    assert_eq!(app.counts(), before.counts());
-    assert!(!app.panel().has_account());
-    assert!(!app.is_pacting());
-}
-
-#[test]
-fn a_file_row_is_refused_in_the_pact_keys_own_words() {
-    let mut refreshed = app_with_files_selecting("warlock/assets/logo.svg");
-    let mut pacted = app_with_files_selecting("warlock/assets/logo.svg");
-
-    assert_eq!(refreshed.refresh(), None);
-    assert_eq!(pacted.toggle_pact(), None);
-
-    // The same refusal, because it is the same reason: a file is part of a
-    // module rather than being one, so neither key has a subtree here.
-    let message = refreshed.message().expect("a file row is refused out loud");
-    assert_eq!(Some(message), pacted.message());
-    assert!(
-        message.starts_with("warlock/assets/logo.svg is a file"),
-        "{message}"
-    );
-}
-
-fn rows_with_one_kept_out() -> Vec<Row> {
-    vec![
-        Row::new(0, "repo", "repo/.warlock.md", NodeState::PactedStale),
-        // Kept out by the rules: unpacted like any other unpacted directory,
-        // and carrying no state of its own for being excluded.
-        Row::new(1, "repo/notes", None, NodeState::Unpacted).with_ignored(true),
-        Row::new(
-            1,
-            "repo/crates",
-            "repo/crates/.warlock.md",
-            NodeState::Unpacted,
-        ),
-    ]
-}
-
-#[test]
-fn a_row_kept_out_by_the_ignore_file_is_refused_and_nothing_moves() {
-    let mut app =
-        select(App::from_rows(rows_with_one_kept_out()), "repo/notes").with_counts(StateCounts {
-            unpacted: 2,
-            pacted_stale: 1,
-            ..StateCounts::default()
-        });
-    let mut before = app.clone();
-    let states: Vec<NodeState> = app.rows().iter().map(|row| row.state).collect();
-
-    assert_eq!(app.toggle_pact(), None, "an excluded row started something");
-
-    // The rule is the repository author's and is written down in a file
-    // they can open, so the refusal names it rather than sounding like a
-    // verdict of Warlock's own.
-    let message = app.message().expect("an excluded row is refused out loud");
-    assert!(message.contains(".warlockignore"), "{message}");
-    assert!(message.starts_with("repo/notes is kept out"), "{message}");
-    // No state moved: not the excluded row's, not its siblings', not the
-    // root's above it.
-    assert_eq!(
-        app.rows().iter().map(|row| row.state).collect::<Vec<_>>(),
-        states
-    );
-    assert_eq!(app.counts(), before.counts());
-    // And the message is the whole of what the press changed: no subtree
-    // repainted, no selection moved, no account started, no run in flight.
-    before.set_message(message);
-    assert_eq!(app, before, "refusing an excluded row moved something else");
-    assert!(!app.panel().has_account());
-    assert!(!app.is_pacting());
-}
-
-#[test]
-fn asking_what_the_pact_key_means_changes_nothing_at_all() {
-    // The whole point of splitting the question off the press: a caller
-    // that has to decline before anything moves can ask, and asking is
-    // free of consequence — no subtree repainted, no message written, no
-    // selection moved.
-    for (row, expected) in [
-        (
-            "repo/crates",
-            PactIntent::Toggles(PactToggle {
-                path: PathBuf::from("repo/crates"),
-                pacted: true,
-            }),
-        ),
-        (
-            "repo/notes",
-            PactIntent::Refused(ignored_row_message("repo/notes")),
-        ),
-    ] {
-        let app = select(App::from_rows(rows_with_one_kept_out()), row);
-        let before = app.clone();
-
-        assert_eq!(app.pact_intent(), expected, "{row}");
-        assert_eq!(app.pact_intent(), expected, "{row}: asking twice differs");
-        assert_eq!(app, before, "{row}: asking moved something");
-        assert_eq!(app.message(), None, "{row}: asking said something");
+        assert_eq!(app.message(), None, "{name} left the message behind");
     }
 }
 
 #[test]
-fn the_reach_of_a_press_answers_for_a_row_its_meaning_refuses() {
-    // The two questions are deliberately not the same one. Whether a press
-    // would lose a scope boundary is settled before the repository's own
-    // rules are applied to it, so an excluded row has a reach even though
-    // it has no meaning.
-    let app = select(App::from_rows(rows_with_one_kept_out()), "repo/notes");
-    assert!(matches!(app.pact_intent(), PactIntent::Refused(_)));
-    assert_eq!(
-        app.pact_reach(),
-        Some(PactToggle {
-            path: PathBuf::from("repo/notes"),
-            pacted: true,
-        }),
-        "an excluded row still says which way a press would go"
-    );
+fn a_row_is_labelled_relative_to_the_root_in_the_manifest_spelling() {
+    let app = App::from_rows(rooted_rows());
 
-    // A file row is no module either way: there is no subtree to reach.
-    let mut app = App::from_rows(vec![
-        Row::new(0, "repo", "repo/.warlock.md", NodeState::PactedFresh),
-        Row::file(1, "repo/lib.rs", NodeState::PactedFresh),
-    ]);
-    // File rows are detail asked for, so they have to be on screen before
-    // one can be selected.
-    app.toggle_files();
-    let app = select(app, "repo/lib.rs");
-    assert!(matches!(app.pact_intent(), PactIntent::Refused(_)));
-    assert_eq!(app.pact_reach(), None);
-}
-
-#[test]
-fn a_covered_sibling_of_an_excluded_row_pacts_as_usual() {
-    let mut app = select(App::from_rows(rows_with_one_kept_out()), "repo/crates");
-
-    let toggled = app
-        .toggle_pact()
-        .expect("a covered directory can be pacted");
-
-    // The refusal is about the row the rules name, not about the tree it is
-    // in, and a press that goes through says nothing.
-    assert_eq!(
-        toggled,
-        PactToggle {
-            path: PathBuf::from("repo/crates"),
-            pacted: true,
-        }
-    );
-    assert_eq!(app.message(), None);
-}
-
-#[test]
-fn pacting_a_subtree_leaves_an_excluded_row_out_of_the_pact() {
-    // The press the reader actually makes: `p` on a directory *above* the
-    // excluded one, which never asks `toggle_pact`'s refusal anything. The
-    // fixture's root is pacted already, so the first press takes the subtree
-    // out and the second is the one under test.
-    let mut app =
-        select(App::from_rows(rows_with_one_kept_out()), "repo").with_counts(StateCounts {
-            unpacted: 2,
-            pacted_stale: 1,
-            ..StateCounts::default()
-        });
-    app.toggle_pact().expect("the root can be un-pacted");
-
-    let toggled = app.toggle_pact().expect("and pacted again");
-
-    assert!(toggled.pacted);
-    // The engine's pact walk reads `.warlockignore` and will never reach
-    // `repo/notes`, so painting it yellow would promise a document that no
-    // run is going to write.
-    assert_eq!(
-        states(&app),
-        [
-            ("repo", NodeState::PactedStale),
-            ("repo/notes", NodeState::Unpacted),
-            ("repo/crates", NodeState::PactedStale),
-        ]
-    );
-    assert_eq!(app.counts(), tally(&app));
-    assert_eq!(app.counts().unpacted, 1);
-    assert_eq!(app.counts().total(), 3);
-}
-
-#[test]
-fn a_granted_subtree_leaves_an_excluded_row_out_too() {
-    // The other half of the same rule, and the one a run reaches: the
-    // caller with grants in hand says so over the whole subtree, and green
-    // is a claim about a document that `repo/notes` has no more of than
-    // yellow was.
-    let mut app = App::from_rows(rows_with_one_kept_out());
-
-    app.set_subtree_state("repo", NodeState::PactedFresh);
-
-    assert_eq!(
-        states(&app),
-        [
-            ("repo", NodeState::PactedFresh),
-            ("repo/notes", NodeState::Unpacted),
-            ("repo/crates", NodeState::PactedFresh),
-        ]
-    );
-}
-
-#[test]
-fn an_excluded_row_still_follows_its_subtree_out_of_a_pact() {
-    // The direction that does move it. `unpact_subtree` is manifest
-    // arithmetic and drops every entry at or below the directory without
-    // asking the ignore rules anything, so a directory excluded after it was
-    // pacted loses its entry with the rest — and a row held back here would
-    // keep a colour the manifest no longer has anything to say for.
-    let mut rows = rows_with_one_kept_out();
-    rows[1].state = NodeState::PactedFresh;
-    let mut app = App::from_rows(rows);
-
-    app.set_subtree_state("repo", NodeState::Unpacted);
-
-    assert_eq!(
-        states(&app),
-        [
-            ("repo", NodeState::Unpacted),
-            ("repo/notes", NodeState::Unpacted),
-            ("repo/crates", NodeState::Unpacted),
-        ]
-    );
-}
-
-#[test]
-fn a_file_inside_excluded_content_is_held_back_with_its_directory() {
-    // A file row carries its directory's ignore flag precisely so that it
-    // is not left drawn in a colour its module never took.
-    let tree = Tree::new(
-        Node::new("repo", "repo/.warlock.md", NodeState::Unpacted)
-            .with_files([PathBuf::from("repo/.warlock.md")])
-            .with_children([Node::new("repo/notes", None, NodeState::Unpacted)
-                .with_files([PathBuf::from("repo/notes/plan.md")])
-                .with_ignored(true)]),
-    );
-    let mut app = App::from_tree(&tree);
-    app.toggle_files();
-
-    app.set_subtree_state("repo", NodeState::PactedStale);
-
-    assert_eq!(
-        states(&app),
-        [
-            ("repo", NodeState::PactedStale),
-            ("repo/.warlock.md", NodeState::PactedStale),
-            ("repo/notes", NodeState::Unpacted),
-            ("repo/notes/plan.md", NodeState::Unpacted),
-        ]
-    );
-}
-
-#[test]
-fn an_excluded_row_is_drawn_in_no_colour_of_its_own() {
-    let app = App::from_rows(rows_with_one_kept_out());
-    let excluded = app
-        .rows()
-        .iter()
-        .find(|row| row.is_ignored())
-        .expect("the fixture keeps one row out");
-
-    // Gray already means outside Warlock's management, and being kept out is
-    // not a fourth state: the flag changes nothing the renderer reads.
-    assert_eq!(excluded.state, NodeState::Unpacted);
-    assert_eq!(
-        *excluded,
-        Row::new(1, "repo/notes", None, NodeState::Unpacted).with_ignored(true)
-    );
-}
-
-#[test]
-fn flattening_a_tree_carries_the_ignore_flag_onto_the_rows() {
-    let tree = Tree::new(
-        Node::new("repo", "repo/.warlock.md", NodeState::PactedStale).with_children([
-            Node::new("repo/notes", None, NodeState::Unpacted)
-                .with_files([PathBuf::from("repo/notes/plan.md")])
-                .with_ignored(true),
-            Node::new("repo/crates", None, NodeState::Unpacted),
-        ]),
-    );
-    let mut app = App::from_tree(&tree);
-    app.toggle_files();
-
-    let flagged: Vec<(String, bool)> = app
-        .rows()
-        .iter()
-        .map(|row| (row.path.to_string_lossy().into_owned(), row.is_ignored()))
-        .collect();
-    assert_eq!(
-        flagged,
-        [
-            ("repo".to_owned(), false),
-            ("repo/notes".to_owned(), true),
-            // The rules exclude a directory's content along with it, so the
-            // file listed inside it is told what the directory was told.
-            ("repo/notes/plan.md".to_owned(), true),
-            ("repo/crates".to_owned(), false),
-        ]
-    );
-
-    // And the flag is enough on its own to refuse the key, with no tree,
-    // loader or filesystem behind the app by the time it is pressed.
-    let mut app = select(app, "repo/notes");
-    assert_eq!(app.toggle_pact(), None);
-    assert!(
-        app.message()
-            .expect("an excluded row is refused")
-            .contains(".warlockignore")
-    );
+    assert_eq!(app.label_for(&rooted_engine()), "crates/warlock-engine");
+    assert_eq!(app.label_for(&rooted_crates()), "crates");
+    // The root itself is no relative path at all, so it is named as it
+    // stands rather than as a dot.
+    assert_eq!(app.label_for(Path::new("/repo")), "/repo");
 }
 
 fn tree_with_one_scoped_directory() -> Tree {
     Tree::new(
-        Node::new("repo", "repo/.warlock.md", NodeState::PactedStale)
+        Node::new("repo")
             .with_scope(Some("tui-team".to_owned()))
             .with_files([PathBuf::from("repo/README.md")])
             .with_children([
-                // Pacted, and covered by the scope written above it, which is
-                // not the same as carrying one.
-                Node::new(
-                    "repo/crates",
-                    "repo/crates/.warlock.md",
-                    NodeState::PactedFresh,
-                ),
-                // Nobody pacted it, so there is no entry a scope could be
-                // written on.
-                Node::new("repo/notes", None, NodeState::Unpacted),
+                Node::new("repo/crates").with_covering(Some("tui-team".to_owned())),
+                Node::new("repo/notes").with_covering(Some("tui-team".to_owned())),
             ]),
     )
 }
@@ -1525,193 +762,93 @@ fn flattening_a_tree_carries_each_nodes_own_scope_onto_its_row() {
     let mut app = App::from_tree(&tree_with_one_scoped_directory());
     app.toggle_files();
 
-    let scoped: Vec<(String, Option<&str>)> = app
+    let scoped: Vec<(String, Option<&str>, bool)> = app
         .rows()
         .iter()
         .map(|row| {
             (
                 row.path.to_string_lossy().into_owned(),
                 row.scope.as_deref(),
+                row.covered,
             )
         })
         .collect();
     assert_eq!(
         scoped,
         [
-            // The directory the scope was written on, and the only row of
-            // the four with one.
-            ("repo".to_owned(), Some("tui-team")),
-            // A file has no pact entry, so it takes no scope from the
-            // directory listing it — unlike the state and the ignore flag,
-            // which it does take.
-            ("repo/README.md".to_owned(), None),
-            // Covered by the scope above it and carrying none: the label
-            // marks where a boundary starts, so nothing is inherited down.
-            ("repo/crates".to_owned(), None),
-            // Unpacted, so there is no entry to have written one on.
-            ("repo/notes".to_owned(), None),
+            ("repo".to_owned(), Some("tui-team"), true),
+            // A file is scoped by nothing of its own, but it is covered by
+            // its directory's scope and so takes its directory's colour.
+            ("repo/README.md".to_owned(), None, true),
+            // The label marks where a boundary starts, so nothing is
+            // inherited down: covered, and carrying no scope.
+            ("repo/crates".to_owned(), None, true),
+            ("repo/notes".to_owned(), None, true),
         ]
     );
 }
 
 #[test]
-fn a_scope_on_a_row_moves_no_state_and_needs_no_tree() {
-    let plain = Row::new(0, "repo", "repo/.warlock.md", NodeState::PactedStale);
+fn a_scope_on_a_row_moves_nothing_else_and_needs_no_tree() {
+    let plain = Row::new(0, "repo", true);
     let scoped = plain.clone().with_scope(Some("tui-team".to_owned()));
 
-    // A row nobody told about a scope has none: the fact comes from a pact
-    // entry somebody wrote, never from the row's own shape.
     assert_eq!(plain.scope, None);
     assert_eq!(scoped.scope.as_deref(), Some("tui-team"));
-    // A scope is a label, not a state: nothing else about the row moves, so
-    // a scoped row is drawn in the colour it would have had unlabelled.
-    assert_eq!(scoped.state, plain.state);
+    assert_eq!(scoped.covered, plain.covered);
     assert_eq!(scoped.clone().with_scope(None), plain);
 
-    // And the builder is enough on its own: an app can be handed a scoped
-    // row with no tree, loader or disk behind it.
     let app = App::from_rows(vec![scoped]);
     assert_eq!(app.rows()[0].scope.as_deref(), Some("tui-team"));
 }
 
 #[test]
-fn a_fresh_directory_is_refused_and_nothing_else_moves() {
-    let mut app = app_selecting("warlock/crates/engine");
-    let mut before = app.clone();
-
-    assert_eq!(app.refresh(), None);
-
-    let message = app.message().expect("a fresh directory is refused");
-    assert!(
-        message.starts_with("warlock/crates/engine is already fresh"),
-        "{message}"
-    );
-    // The message is the whole of what the press changed: no subtree
-    // repainted, no tally moved, no account started, no run in flight.
-    before.set_message(message);
-    assert_eq!(app, before, "refusing a fresh row moved something else");
-}
-
-#[test]
-fn an_unpacted_directory_is_refused_by_naming_the_pact_key() {
-    // Two ways a directory comes to be unpacted: one the loader found no
-    // document for, and one that has a document and no manifest entry —
-    // which is how a directory a `.warlockignore` keeps out reads here. The
-    // refusal does not care which, because the answer is the same.
-    for path in ["warlock/crates", "warlock/assets"] {
-        let mut app = app_selecting(path);
-        let mut before = app.clone();
-
-        assert_eq!(app.refresh(), None, "{path} started something");
-
-        let message = app.message().expect("an unpacted row is refused");
-        assert!(
-            message.starts_with(&format!("{path} is not pacted")),
-            "{message}"
-        );
-        // The key that would help is named, since the reader is one
-        // keystroke away from what they asked for.
-        assert!(message.contains("press p to pact it"), "{message}");
-        before.set_message(message);
-        assert_eq!(app, before, "refusing {path} moved something else");
-    }
-}
-
-#[test]
-fn an_app_with_no_rows_refreshes_nothing() {
-    assert_eq!(App::from_rows(Vec::new()).refresh(), None);
-    assert_eq!(App::from_rows(Vec::new()).message(), None);
-}
-
-#[test]
-fn scoping_a_pacted_directory_hands_it_back_and_changes_nothing_at_all() {
-    // Stale and fresh alike: whether the grants still hold has nothing to
-    // do with which team the module belongs to.
-    for path in ["warlock/crates/tui", "warlock/crates/engine"] {
+fn scoping_a_directory_hands_it_back_and_changes_nothing_at_all() {
+    // Scoped, covered from above, and under no scope at all: the key opens the
+    // prompt on every one of them, since an unscoped directory is where a
+    // first scope is drawn.
+    for path in [
+        "warlock",
+        "warlock/crates",
+        "warlock/crates/tui",
+        "warlock/crates/engine",
+        "warlock/assets",
+    ] {
         let mut app = app_selecting(path);
         app.set_message("something the last keystroke said");
         let before = app.clone();
 
         let asked = app.scope_target();
 
-        // The directory whose entry the prompt will be opened on.
         assert_eq!(asked, Some(PathBuf::from(path)), "{path}");
-        // And nothing whatever moved — including the message line, which
-        // this key alone leaves standing: a prompt opened and dismissed
-        // with Esc has to leave the app exactly as it was found.
+        // Nothing whatever moved — including the message line, which this
+        // key alone leaves standing: a prompt opened and dismissed with Esc
+        // has to leave the app exactly as it was found.
         assert_eq!(app, before, "an accepted press moved something on {path}");
     }
 }
 
 #[test]
-fn a_file_row_is_refused_by_the_scope_key_in_the_pact_keys_own_words() {
-    let mut scoped = app_with_files_selecting("warlock/assets/logo.svg");
-    let mut pacted = app_with_files_selecting("warlock/assets/logo.svg");
-
-    assert_eq!(scoped.scope_target(), None);
-    assert_eq!(pacted.toggle_pact(), None);
-
-    // The same refusal, because it is the same reason: a file is part of a
-    // module rather than being one, and the module is what carries the pact
-    // a scope hangs off.
-    let message = scoped.message().expect("a file row is refused out loud");
-    assert_eq!(Some(message), pacted.message());
-    assert!(
-        message.starts_with("warlock/assets/logo.svg is a file"),
-        "{message}"
-    );
-}
-
-#[test]
-fn an_unpacted_directory_is_refused_by_the_scope_key_naming_the_pact_key() {
-    // The two ways a directory comes to be unpacted, as in the refresh
-    // key's test: one the loader found no document for, and one with a
-    // document and no manifest entry.
-    for path in ["warlock/crates", "warlock/assets"] {
-        let mut app = app_selecting(path);
+fn a_file_row_is_refused_by_the_scope_key_and_nothing_else_moves() {
+    for path in [
+        "warlock/assets/logo.svg",
+        "warlock/crates/engine/Cargo.toml",
+    ] {
+        let mut app = app_with_files_selecting(path);
         let mut before = app.clone();
 
         assert_eq!(app.scope_target(), None, "{path} opened something");
 
-        let message = app.message().expect("an unpacted row is refused");
-        assert!(
-            message.starts_with(&format!("{path} is not pacted")),
-            "{message}"
+        let message = app.message().expect("a file row is refused out loud");
+        assert_eq!(
+            message,
+            format!(
+                "{path} is a file — scopes are drawn on the directory holding it, not on a file"
+            )
         );
-        // The key that would help is named, as it is on the refresh key —
-        // but what a pact would leave behind is worded for this key: a pact
-        // to scope, not something to refresh.
-        assert!(message.contains("press p to pact it"), "{message}");
-        assert!(
-            message.ends_with("there will be a pact to scope"),
-            "{message}"
-        );
-        // The message is the whole of what the press changed.
         before.set_message(message);
         assert_eq!(app, before, "refusing {path} moved something else");
     }
-}
-
-#[test]
-fn a_row_kept_out_by_the_ignore_file_is_refused_by_the_scope_key_as_unpacted() {
-    let mut app =
-        select(App::from_rows(rows_with_one_kept_out()), "repo/notes").with_counts(StateCounts {
-            unpacted: 2,
-            pacted_stale: 1,
-            ..StateCounts::default()
-        });
-    let mut before = app.clone();
-
-    assert_eq!(app.scope_target(), None, "an excluded row opened something");
-
-    // Refused for having no pact rather than for being kept out: as far as
-    // the manifest goes those are the same fact, and the sentence stays
-    // true either way.
-    let message = app.message().expect("an excluded row is refused out loud");
-    assert!(message.starts_with("repo/notes is not pacted"), "{message}");
-    assert!(message.contains("press p to pact it"), "{message}");
-    before.set_message(message);
-    assert_eq!(app, before, "refusing an excluded row moved something else");
 }
 
 #[test]
@@ -1732,172 +869,11 @@ fn an_app_with_nothing_to_say_says_nothing() {
 fn a_caller_can_put_its_own_line_up_and_the_next_move_takes_it_down() {
     let mut app = App::from_rows(three_rows());
 
-    app.set_message("could not write the pact manifest");
+    app.set_message("could not write the scope manifest");
 
-    assert_eq!(app.message(), Some("could not write the pact manifest"));
+    assert_eq!(app.message(), Some("could not write the scope manifest"));
     app.select_next();
     assert_eq!(app.message(), None);
-}
-
-#[test]
-fn a_pact_in_flight_names_the_directory_relative_to_the_root_with_its_place() {
-    let mut app = App::from_rows(rooted_rows());
-
-    app.set_pact_in_flight(rooted_engine(), 3, 12);
-
-    assert!(app.is_pacting());
-    // Relative to the tree's own root, in the engine's forward-slash
-    // manifest spelling whatever the platform's separator is, with a
-    // one-based place in the run beside it.
-    assert_eq!(
-        app.run_header().map(|header| header.words()).as_deref(),
-        Some("pacting crates/warlock-engine (2/12)")
-    );
-}
-
-#[test]
-fn the_root_of_the_tree_is_named_as_it_stands_in_a_pact_line() {
-    let mut app = App::from_rows(rooted_rows());
-
-    app.set_pact_in_flight("/repo", 1, 5);
-
-    // The root cannot be named relative to itself, so it is named as it
-    // stands rather than as the `"."` relative spelling would give — the
-    // same rule every other label here follows.
-    assert_eq!(
-        app.run_header().map(|header| header.words()).as_deref(),
-        Some("pacting /repo (0/5)")
-    );
-}
-
-#[test]
-fn the_pact_line_moves_as_the_caller_advances_the_run() {
-    let mut app = App::from_rows(rooted_rows());
-    let mut said = Vec::new();
-
-    for (position, path) in ["/repo", "/repo/crates", "/repo/crates/warlock-engine"]
-        .into_iter()
-        .enumerate()
-    {
-        app.set_pact_in_flight(path, position + 1, 3);
-        said.push(
-            app.run_header()
-                .map(|header| header.words())
-                .expect("a pact is in flight"),
-        );
-    }
-
-    assert_eq!(
-        said,
-        [
-            "pacting /repo (0/3)",
-            "pacting crates (1/3)",
-            "pacting crates/warlock-engine (2/3)",
-        ]
-    );
-}
-
-#[test]
-fn the_progress_line_takes_its_verb_from_the_kind_of_run() {
-    for (run, said) in [
-        (Run::Pact, "pacting crates/warlock-engine (2/12)"),
-        (Run::Refresh, "refreshing crates/warlock-engine (2/12)"),
-    ] {
-        let mut app = App::from_rows(rooted_rows());
-
-        app.set_run_in_flight(run, rooted_engine(), 3, 12);
-
-        // One word apart: the directory, the fraction and the shape of the
-        // line are the same, because it is the same kind of work.
-        assert_eq!(
-            app.run_header().map(|header| header.words()).as_deref(),
-            Some(said),
-            "{run:?}"
-        );
-        // And a refresh is a run in flight for everything else that asks.
-        assert!(app.is_pacting(), "{run:?}");
-        assert!(app.is_in_flight(&rooted_engine()), "{run:?}");
-    }
-}
-
-#[test]
-fn the_pact_key_starts_the_pacting_verb_and_nothing_has_to_say_so() {
-    let mut app = App::from_rows(rooted_rows());
-
-    app.set_pact_in_flight("/repo", 1, 5);
-
-    // `set_pact_in_flight` is `set_run_in_flight` with the kind filled in,
-    // so every caller that predates the refresh goes on wording pacts.
-    assert_eq!(
-        app.run_header().map(|header| header.words()).as_deref(),
-        Some("pacting /repo (0/5)")
-    );
-}
-
-#[test]
-fn a_refresh_counts_the_stale_directories_it_was_given_and_keeps_its_clauses() {
-    let mut app = App::from_rows(rooted_rows());
-
-    // Seven of the subtree's forty directories are stale, which is the
-    // engine's counting for the refresh and is passed straight through.
-    app.set_run_in_flight(Run::Refresh, rooted_engine(), 3, 7);
-    app.set_pact_refused();
-
-    // The refusal is worded exactly as it is for a pact, and still goes
-    // last.
-    assert_eq!(
-        app.refused_line().as_deref(),
-        Some("refreshing crates/warlock-engine — already running")
-    );
-
-    // The run moving on re-words the line around the new directory and
-    // carries the refusal along, refresh or not.
-    app.set_run_in_flight(Run::Refresh, rooted_crates(), 4, 7);
-    assert_eq!(
-        app.refused_line().as_deref(),
-        Some("refreshing crates — already running")
-    );
-
-    // And the end of the run takes the whole line down, kind and all.
-    app.clear_pact_in_flight();
-    assert!(!app.is_pacting());
-    assert_eq!(app.run_header().map(|header| header.words()), None);
-}
-
-#[test]
-fn an_app_with_no_pact_running_has_no_pact_line() {
-    let mut app = App::from_tree(&fixture::tree());
-    assert!(!app.is_pacting());
-    assert_eq!(app.run_header().map(|header| header.words()), None);
-    assert_eq!(App::from_rows(three_rows()).run_header(), None);
-
-    app.set_pact_in_flight("warlock/crates", 2, 4);
-    app.clear_pact_in_flight();
-
-    // And the run being over is the caller's to say, whichever way it ended.
-    assert!(!app.is_pacting());
-    assert_eq!(app.run_header().map(|header| header.words()), None);
-    // Clearing one that was never there changes nothing.
-    app.clear_pact_in_flight();
-    assert_eq!(app.run_header().map(|header| header.words()), None);
-}
-
-#[test]
-fn an_app_with_no_run_in_flight_has_no_run_header() {
-    let mut app = App::from_rows(rooted_rows());
-
-    // Before the first run there is nothing to head: a panel with no run
-    // draws no header and keeps those rows for the account.
-    assert!(app.run_header().is_none());
-
-    app.set_pact_in_flight(rooted_crates(), 2, 4);
-    assert!(app.run_header().is_some());
-
-    // And the run being over takes the header down with the footer's line,
-    // however the run ended.
-    app.clear_pact_in_flight();
-    assert!(app.run_header().is_none());
-    assert_eq!(app.run_header().map(|header| header.words()), None);
 }
 
 #[test]
@@ -1907,10 +883,8 @@ fn setting_the_mode_changes_the_mode_and_nothing_else() {
     app.panel_mut().start_turn("what does this do", base);
     app.panel_mut()
         .answer_turn("it walks the tree", at(base, 1));
-    app.set_run_in_flight(Run::Pact, rooted_crates(), 1, 4);
 
     let before = app.panel().window(at(base, 2));
-    let header = app.run_header().expect("a run in flight has a header");
 
     // Chat until somebody says otherwise, and the change is reported.
     assert_eq!(app.panel().mode(), Mode::Chat);
@@ -1920,18 +894,13 @@ fn setting_the_mode_changes_the_mode_and_nothing_else() {
     );
     assert_eq!(app.panel().mode(), Mode::Brief);
 
-    // Nothing else moved: same rows in the same order, same card, same
-    // header — the mode wrote no note and started no turn of its own.
+    // Nothing else moved: same rows in the same order, same card — the mode
+    // wrote no note and started no turn of its own.
     assert_eq!(app.panel().window(at(base, 2)), before);
     assert!(
         app.panel().showing_thread(),
         "the mode moved the card showing"
     );
-    let after = app.run_header().expect("the mode took the header down");
-    assert_eq!(after.run(), header.run());
-    assert_eq!(after.directory(), header.directory());
-    assert_eq!(after.position(), header.position());
-    assert_eq!(after.total(), header.total());
 
     // Setting the mode it is already in is no change, and says so: that is
     // how a re-sent instruction knows to add no second note.
@@ -1945,327 +914,6 @@ fn setting_the_mode_changes_the_mode_and_nothing_else() {
         "brief to chat is a change"
     );
     assert_eq!(app.panel().window(at(base, 2)), before);
-}
-
-#[test]
-fn the_run_header_states_the_kind_the_directory_and_the_fraction() {
-    for run in [Run::Pact, Run::Refresh] {
-        let mut app = App::from_rows(rooted_rows());
-
-        app.set_run_in_flight(run, rooted_engine(), 3, 12);
-
-        let header = app.run_header().expect("a run in flight has a header");
-        // The kind is the caller's, said back unchanged: the header is the
-        // one place that has to know a refresh from a pact without reading
-        // the footer's wording for it.
-        assert_eq!(header.run(), run, "{run:?}");
-        assert_eq!(header.directory(), "crates/warlock-engine", "{run:?}");
-        assert_eq!(header.position(), 3, "{run:?}");
-        assert_eq!(header.total(), 12, "{run:?}");
-    }
-}
-
-#[test]
-fn the_run_headers_directory_is_spelled_the_way_the_footer_spells_it() {
-    let mut app = App::from_rows(rooted_rows());
-
-    app.set_pact_in_flight(rooted_engine(), 3, 12);
-
-    // One speller, so the header and the footer drawn in the same frame
-    // cannot name one directory two ways.
-    let header = app.run_header().expect("a run in flight has a header");
-    assert_eq!(header.directory(), "crates/warlock-engine");
-    assert_eq!(
-        app.run_header().map(|header| header.words()).as_deref(),
-        Some("pacting crates/warlock-engine (2/12)")
-    );
-
-    // The root of the tree on screen is what it is spelled against, and a
-    // path that is not under that root is printed as it stands rather than
-    // as nothing at all.
-    app.set_pact_in_flight(Path::new("/elsewhere").join("notes"), 4, 12);
-    let header = app.run_header().expect("a run in flight has a header");
-    assert_eq!(
-        header.directory(),
-        Path::new("/elsewhere/notes").display().to_string()
-    );
-    assert!(
-        app.run_header()
-            .map(|header| header.words())
-            .expect("a run in flight has a line")
-            .contains(header.directory()),
-        "the footer spelled it some other way"
-    );
-}
-
-#[test]
-fn the_run_headers_position_never_goes_backwards_within_one_run() {
-    let mut app = App::from_rows(rooted_rows());
-
-    app.set_pact_in_flight(rooted_crates(), 3, 12);
-    assert_eq!(
-        app.run_header()
-            .expect("a run in flight has a header")
-            .position(),
-        3
-    );
-
-    // A position lower than one already seen leaves the fill where it is: a
-    // bar that goes backwards mid-run is a bar that is reporting the event
-    // order rather than the progress.
-    app.set_pact_in_flight(rooted_crates(), 2, 12);
-    let header = app.run_header().expect("a run in flight has a header");
-    assert_eq!(header.position(), 3);
-    assert_eq!(header.total(), 12);
-
-    // And it goes on rising the moment the run gets past where it had been.
-    app.set_pact_in_flight(rooted_engine(), 5, 12);
-    assert_eq!(
-        app.run_header()
-            .expect("a run in flight has a header")
-            .position(),
-        5
-    );
-}
-
-#[test]
-fn a_fresh_run_starts_the_headers_fraction_again() {
-    let mut app = App::from_rows(rooted_rows());
-
-    app.set_pact_in_flight(rooted_crates(), 12, 12);
-    app.clear_pact_in_flight();
-
-    // The high-water mark went with the record that held it, so run two is
-    // one of twelve rather than a bar that starts full.
-    app.set_run_in_flight(Run::Refresh, rooted_crates(), 1, 12);
-    let header = app.run_header().expect("a run in flight has a header");
-    assert_eq!(header.run(), Run::Refresh);
-    assert_eq!(header.position(), 1);
-    assert_eq!(header.total(), 12);
-}
-
-#[test]
-fn the_app_says_which_row_is_the_one_being_worked() {
-    let mut app = App::from_rows(rooted_rows());
-    let engine = rooted_engine();
-
-    // Nothing is in flight, so no row is.
-    assert!(!app.is_in_flight(&engine));
-
-    app.set_pact_in_flight(engine.clone(), 3, 12);
-
-    // Exactly the one directory: not the root above it, not the parent, and
-    // not anything beneath it.
-    assert!(app.is_in_flight(&engine));
-    assert!(!app.is_in_flight(Path::new("/repo")));
-    assert!(!app.is_in_flight(&rooted_crates()));
-    assert!(!app.is_in_flight(&engine.join("src")));
-
-    // And it follows the run to the next directory.
-    app.set_pact_in_flight(rooted_crates(), 4, 12);
-    assert!(!app.is_in_flight(&engine));
-    assert!(app.is_in_flight(&rooted_crates()));
-}
-
-#[test]
-fn the_pass_in_flight_covers_its_directory_and_the_files_it_holds() {
-    let mut app = App::from_rows(rooted_rows());
-    let engine = rooted_engine();
-    let covered = |app: &App, row: &Row| app.in_flight_covers(row);
-
-    // Nothing is in flight, so nothing is covered.
-    let directory = Row::new(2, engine.clone(), None::<PathBuf>, NodeState::PactedStale);
-    assert!(!covered(&app, &directory));
-
-    app.set_pact_in_flight(engine.clone(), 3, 12);
-
-    // The directory being worked, and the files directly inside it: they
-    // are what its pass is reading.
-    assert!(covered(&app, &directory));
-    assert!(covered(
-        &app,
-        &Row::file(3, engine.join("Cargo.toml"), NodeState::PactedStale)
-    ));
-
-    // Not a child directory — its pass already ran — and not a file that
-    // belongs to that pass, however the paths nest.
-    assert!(!covered(
-        &app,
-        &Row::new(
-            3,
-            engine.join("src"),
-            None::<PathBuf>,
-            NodeState::PactedStale
-        )
-    ));
-    assert!(!covered(
-        &app,
-        &Row::file(4, engine.join("src").join("lib.rs"), NodeState::PactedStale)
-    ));
-    // And not the parent, nor a file beside the directory rather than in
-    // it.
-    assert!(!covered(
-        &app,
-        &Row::new(1, rooted_crates(), None::<PathBuf>, NodeState::PactedStale)
-    ));
-    assert!(!covered(
-        &app,
-        &Row::file(2, rooted_crates().join("README.md"), NodeState::PactedStale)
-    ));
-}
-
-#[test]
-fn no_row_is_in_flight_once_the_run_is_over() {
-    let mut app = App::from_rows(rooted_rows());
-    let engine = rooted_engine();
-
-    app.set_pact_in_flight(engine.clone(), 3, 12);
-    app.clear_pact_in_flight();
-
-    // However the run ended, the row it was on goes back to being an
-    // ordinary row on the next frame.
-    assert!(!app.is_pacting());
-    assert!(!app.is_in_flight(&engine));
-}
-
-#[test]
-fn a_pact_in_flight_takes_the_message_line_and_hands_it_back() {
-    let mut app = App::from_tree(&fixture::tree());
-    app.set_message("something the caller said");
-
-    app.set_pact_in_flight("warlock/crates", 2, 4);
-
-    // The progress line outranks the message while the run is on, and the
-    // message is kept rather than dropped: starting a pact is not a
-    // keystroke, so it neither says anything nor takes anything down.
-    assert_eq!(
-        app.run_header().map(|header| header.words()).as_deref(),
-        Some("pacting warlock/crates (1/4)")
-    );
-    assert_eq!(app.message(), Some("something the caller said"));
-
-    app.clear_pact_in_flight();
-
-    assert_eq!(app.run_header().map(|header| header.words()), None);
-    assert_eq!(app.message(), Some("something the caller said"));
-}
-
-#[test]
-fn a_keystroke_clears_a_message_and_leaves_the_pact_in_flight_alone() {
-    for (name, keystroke) in KEYSTROKES {
-        // `warlock/crates` has children, so the collapse key is a keystroke
-        // that does something here rather than a no-op.
-        let mut app = app_selecting("warlock/crates");
-        app.set_message("something to forget");
-        app.set_pact_in_flight("warlock/crates/engine", 3, 12);
-
-        keystroke(&mut app);
-
-        assert_eq!(app.message(), None, "{name} left the message behind");
-        // The pact goes on running however much the reader scrolls, so the
-        // line describing it goes on being true.
-        assert!(app.is_pacting(), "{name} stopped the pact");
-        assert_eq!(
-            app.run_header().map(|header| header.words()).as_deref(),
-            Some("pacting warlock/crates/engine (2/12)"),
-            "{name} blanked the line for a pact that is still running"
-        );
-    }
-}
-
-#[test]
-fn a_press_refused_by_a_running_pact_is_said_on_the_end_of_the_pact_line() {
-    let mut app = app_selecting("warlock/crates");
-    app.set_pact_in_flight("warlock/crates/engine", 3, 12);
-
-    app.set_pact_refused();
-
-    assert_eq!(
-        app.refused_line().as_deref(),
-        Some("pacting warlock/crates/engine — already running")
-    );
-
-    // A second, third and fourth press say the same thing, because there is
-    // nothing further to say.
-    let after_one = app.clone();
-    app.set_pact_refused();
-    app.set_pact_refused();
-    app.set_pact_refused();
-    assert_eq!(app, after_one, "pressing again changed something");
-}
-
-#[test]
-fn the_run_moving_on_re_words_the_refusal_and_keeps_it() {
-    let mut app = app_selecting("warlock/crates");
-    app.set_pact_in_flight("warlock/crates/engine", 3, 12);
-    app.set_pact_refused();
-
-    // The tick that lands a moment after the press: it says where the run is
-    // now, and says nothing about the keystroke either way.
-    app.set_pact_in_flight("warlock/crates/tui", 4, 12);
-
-    assert_eq!(
-        app.refused_line().as_deref(),
-        Some("pacting warlock/crates/tui — already running")
-    );
-}
-
-#[test]
-fn a_keystroke_takes_the_refusal_down_the_way_it_takes_a_message_down() {
-    for (name, keystroke) in KEYSTROKES {
-        let mut app = app_selecting("warlock/crates");
-        app.set_pact_in_flight("warlock/crates/engine", 3, 12);
-        app.set_pact_refused();
-
-        keystroke(&mut app);
-
-        // The refusal belonged to the key that earned it; the run it was
-        // about goes on, and its line goes back to being about the run.
-        assert_eq!(
-            app.run_header().map(|header| header.words()).as_deref(),
-            Some("pacting warlock/crates/engine (2/12)"),
-            "{name} left the refusal on the line"
-        );
-    }
-}
-
-#[test]
-fn a_refused_press_leaves_the_message_where_it_was() {
-    let mut app = App::from_tree(&fixture::tree());
-    app.set_message("something the caller said");
-    app.set_pact_in_flight("warlock/crates", 2, 4);
-
-    app.set_pact_refused();
-
-    // The refusal is a bit of wording on the progress line and nothing else:
-    // it is not routed through the message, so the message is still the last
-    // keystroke's.
-    assert_eq!(
-        app.refused_line().as_deref(),
-        Some("pacting warlock/crates — already running")
-    );
-    assert_eq!(app.message(), Some("something the caller said"));
-
-    app.clear_pact_in_flight();
-
-    // And when the run ends the message is handed back untouched, with no
-    // sign of the refusal anywhere: the run it was about is over.
-    assert_eq!(app.run_header().map(|header| header.words()), None);
-    assert_eq!(app.message(), Some("something the caller said"));
-}
-
-#[test]
-fn a_refusal_says_nothing_while_no_pact_is_running() {
-    let mut app = App::from_tree(&fixture::tree());
-    app.set_message("something the caller said");
-
-    app.set_pact_refused();
-
-    // Nothing to be a suffix on, so nothing is said — and the pact key with
-    // no run in flight goes on refusing the way it always did, through the
-    // message.
-    assert_eq!(app.run_header().map(|header| header.words()), None);
-    assert_eq!(app.message(), Some("something the caller said"));
 }
 
 #[test]
@@ -2294,7 +942,7 @@ fn collapsing_a_directory_hides_its_descendants_and_expanding_puts_them_back() {
     app.toggle_collapsed();
 
     // Byte for byte the rows that were there before: same nodes, same
-    // order, same depths, same states.
+    // order, same depths, same coverage.
     assert_eq!(app.rows(), before);
     assert!(app.collapsed().is_empty());
 }
@@ -2361,13 +1009,12 @@ fn expanding_under_a_collapsed_parent_draws_nothing_until_the_parent_opens() {
 #[test]
 fn a_collapse_above_the_selection_leaves_it_on_the_same_node() {
     let app = app_selecting("warlock/assets");
-    assert_eq!(app.selected(), 7);
+    assert_eq!(app.selected(), 4);
 
     let app = app.with_collapsed(["warlock/crates"]);
 
-    // Four rows fewer above it — two modules and the document row under
-    // each — and the same node under it.
-    assert_eq!(app.selected(), 3);
+    // Two rows fewer above it, and the same node under it.
+    assert_eq!(app.selected(), 2);
     assert_eq!(
         app.selected_row().map(|row| row.path.clone()),
         Some(PathBuf::from("warlock/assets"))
@@ -2400,13 +1047,10 @@ fn a_collapsed_path_the_new_tree_has_no_node_for_hides_nothing() {
 
 #[test]
 fn toggling_a_node_with_nothing_under_it_changes_nothing_at_all() {
-    // Undocumented as well as childless: every leaf in the shared fixture
-    // has a document, and the default view draws that document under it, so
-    // a leaf there is a row with something under it now.
     let mut app = select(
         App::from_rows(vec![
-            Row::new(0, "repo", "repo/.warlock.md", NodeState::PactedStale),
-            Row::new(1, "repo/crates", None, NodeState::Unpacted),
+            Row::new(0, "repo", false),
+            Row::new(1, "repo/crates", false),
         ]),
         "repo/crates",
     );
@@ -2434,38 +1078,17 @@ fn toggling_collapse_on_an_empty_app_is_a_no_op() {
 }
 
 #[test]
-fn collapsing_leaves_the_engines_tally_alone() {
-    let tree = fixture::tree();
-    let mut app = App::from_tree(&tree);
+fn collapsing_leaves_the_coverage_count_alone() {
+    let mut app = App::from_tree(&fixture::tree());
+    let coverage = app.coverage();
 
     app.select_first();
     app.toggle_collapsed();
 
     // Four of the five rows are hidden; the footer still describes the
-    // whole tree, because that is what the engine counted.
+    // whole tree.
     assert_eq!(app.rows().len(), 1);
-    assert_eq!(app.counts(), tree.counts());
-    assert_eq!(app.counts().total(), 5);
-}
-
-#[test]
-fn a_pact_survives_a_collapse_and_expand_of_the_directory_above_it() {
-    let mut app = app_selecting("warlock/crates/tui");
-    app.toggle_pact().expect("tui has a document");
-    assert_eq!(
-        app.selected_row().map(|row| row.state),
-        Some(NodeState::Unpacted)
-    );
-
-    let mut app = app.with_collapsed(["warlock/crates"]);
-    app.toggle_collapsed();
-
-    let row = app
-        .rows()
-        .iter()
-        .find(|row| row.path == Path::new("warlock/crates/tui"))
-        .expect("expanding brought it back");
-    assert_eq!(row.state, NodeState::Unpacted);
+    assert_eq!(app.coverage(), coverage);
 }
 
 #[test]
@@ -2502,11 +1125,8 @@ fn window_is_in_range(app: &App) -> bool {
 
 #[test]
 fn a_collapse_clears_the_last_keystrokes_message() {
-    // The root, which has both something to say when it is un-pacted and
-    // children to collapse.
     let mut app = app_selecting("warlock");
-    app.toggle_pact().expect("a directory can be un-pacted");
-    assert!(app.message().is_some());
+    app.set_message("something from the last keystroke");
 
     app.toggle_collapsed();
 
@@ -2515,16 +1135,10 @@ fn a_collapse_clears_the_last_keystrokes_message() {
 
 #[test]
 fn collapsing_a_directory_leaves_a_sibling_whose_name_it_prefixes_alone() {
-    let tree = Tree::new(
-        Node::new("repo", "repo/.warlock.md", NodeState::PactedStale).with_children([
-            Node::new("repo/crates", None, NodeState::Unpacted).with_children([Node::new(
-                "repo/crates/engine",
-                "repo/crates/engine/.warlock.md",
-                NodeState::PactedFresh,
-            )]),
-            Node::new("repo/crates-old", None, NodeState::Unpacted),
-        ]),
-    );
+    let tree = Tree::new(Node::new("repo").with_children([
+        Node::new("repo/crates").with_children([Node::new("repo/crates/engine")]),
+        Node::new("repo/crates-old"),
+    ]));
     let mut app = App::from_tree(&tree);
 
     app.select_next();
@@ -2537,8 +1151,8 @@ fn collapsing_a_directory_leaves_a_sibling_whose_name_it_prefixes_alone() {
 #[test]
 fn rows_from_a_bare_list_collapse_only_where_a_deeper_row_follows() {
     let mut app = App::from_rows(vec![
-        Row::new(0, "repo", "repo/.warlock.md", NodeState::PactedStale),
-        Row::new(1, "repo/crates", None, NodeState::Unpacted),
+        Row::new(0, "repo", false),
+        Row::new(1, "repo/crates", false),
     ]);
 
     app.toggle_collapsed();
@@ -2553,61 +1167,51 @@ fn rows_from_a_bare_list_collapse_only_where_a_deeper_row_follows() {
 }
 
 #[test]
-fn toggling_a_pact_on_an_empty_app_is_a_no_op() {
-    let mut app = App::from_rows(Vec::new());
-
-    assert_eq!(app.toggle_pact(), None);
-
-    assert!(app.is_empty());
-    assert_eq!(app.counts(), StateCounts::default());
-}
-
-#[test]
-fn a_fresh_app_draws_the_whole_tree_rather_than_only_the_pacted_part() {
+fn a_fresh_app_draws_the_whole_tree_rather_than_only_the_scoped_part() {
     let app = App::from_tree(&fixture::tree());
 
-    assert!(!app.pacted_only());
+    assert!(!app.scoped_only());
     assert_eq!(drawn(&app), whole_fixture());
 }
 
 #[test]
-fn the_filter_keeps_the_pacted_nodes_and_the_way_to_them_and_nothing_else() {
+fn the_filter_keeps_the_covered_nodes_and_the_way_to_them_and_nothing_else() {
     let mut app = app_selecting("warlock/crates/tui");
     let before = app.clone();
 
-    app.toggle_pacted_only();
+    app.toggle_scoped_only();
 
-    assert!(app.pacted_only());
-    assert_eq!(drawn(&app), pacted_fixture());
-    // Every drawn row is pacted or is on the way to one that is, and every
-    // pacted node in the tree is drawn.
+    assert!(app.scoped_only());
+    assert_eq!(drawn(&app), scoped_fixture());
+    // Every drawn row is covered or is on the way to one that is, and every
+    // covered node in the tree is drawn.
     for row in app.rows() {
         assert!(
-            row.state.is_pacted()
+            row.covered
                 || app
                     .rows()
                     .iter()
-                    .any(|other| other.state.is_pacted() && other.path.starts_with(&row.path)),
-            "{} is neither pacted nor the way to anything pacted",
+                    .any(|other| other.covered && other.path.starts_with(&row.path)),
+            "{} is neither covered nor the way to anything covered",
             row.path.display()
         );
     }
     assert_eq!(
         app.rows()
             .iter()
-            .filter(|row| !row.is_file() && row.state.is_pacted())
+            .filter(|row| !row.is_file() && row.covered)
             .count(),
         fixture::tree()
             .walk()
-            .filter(|(node, _)| node.state.is_pacted())
+            .filter(|(node, _)| node.is_covered())
             .count()
     );
 
-    app.toggle_pacted_only();
+    app.toggle_scoped_only();
 
     // Widening again is the whole walk back, and — the selection having
     // survived the narrowing — an app indistinguishable from the one before.
-    assert!(!app.pacted_only());
+    assert!(!app.scoped_only());
     assert_eq!(drawn(&app), whole_fixture());
     assert_eq!(app, before);
 }
@@ -2616,27 +1220,23 @@ fn the_filter_keeps_the_pacted_nodes_and_the_way_to_them_and_nothing_else() {
 fn the_filter_keeps_the_depths_and_the_order_the_walk_gave() {
     let mut app = App::from_tree(&fixture::tree());
 
-    app.toggle_pacted_only();
+    app.toggle_scoped_only();
 
     let seen: Vec<(usize, &str)> = app
         .rows()
         .iter()
         .map(|row| (row.depth, row.path.to_str().expect("ascii path")))
         .collect();
-    // `engine` and `tui` still sit at depth 2 under a `crates` that is only
-    // drawn as their way in, and each document row still sits one level
-    // under the directory that owns it: the filter narrows the view, it does
-    // not reparent anything.
+    // `engine` and `tui` still sit at depth 2 under `crates`, under a root
+    // that is drawn only as their way in: the filter narrows the view, it
+    // does not reparent anything.
     assert_eq!(
         seen,
         [
             (0, "warlock"),
-            (1, "warlock/.warlock.md"),
             (1, "warlock/crates"),
             (2, "warlock/crates/engine"),
-            (3, "warlock/crates/engine/.warlock.md"),
             (2, "warlock/crates/tui"),
-            (3, "warlock/crates/tui/.warlock.md"),
         ]
     );
 }
@@ -2645,7 +1245,7 @@ fn the_filter_keeps_the_depths_and_the_order_the_walk_gave() {
 fn filtering_the_selected_node_away_lands_the_selection_on_a_drawn_row() {
     let mut app = app_selecting("warlock/assets");
 
-    app.toggle_pacted_only();
+    app.toggle_scoped_only();
 
     // `assets` is gone, and its nearest surviving ancestor is the root,
     // which is the first row.
@@ -2660,23 +1260,17 @@ fn filtering_the_selected_node_away_lands_the_selection_on_a_drawn_row() {
 #[test]
 fn widening_the_view_keeps_the_selection_on_the_node_it_was_on() {
     let mut app = app_selecting("warlock/assets");
-    app.toggle_pacted_only();
+    app.toggle_scoped_only();
 
-    // Down to the last row the narrowed view has — `tui`'s document — and
-    // then up onto the node holding it, which the wide view puts somewhere
+    // The last row the narrowed view has, which the wide view puts somewhere
     // else entirely.
     app.select_last();
-    assert_eq!(
-        app.selected_row().map(|row| row.path.clone()),
-        Some(PathBuf::from("warlock/crates/tui/.warlock.md"))
-    );
-    app.select_previous();
     assert_eq!(
         app.selected_row().map(|row| row.path.clone()),
         Some(PathBuf::from("warlock/crates/tui"))
     );
 
-    app.toggle_pacted_only();
+    app.toggle_scoped_only();
 
     assert_eq!(
         app.selected_row().map(|row| row.path.clone()),
@@ -2686,26 +1280,22 @@ fn widening_the_view_keeps_the_selection_on_the_node_it_was_on() {
 }
 
 #[test]
-fn the_filter_leaves_the_engines_tally_alone() {
-    let tree = fixture::tree();
-    let mut app = App::from_tree(&tree);
-    let before = app.counts();
+fn the_filter_leaves_the_coverage_count_alone() {
+    let mut app = App::from_tree(&fixture::tree());
+    let before = app.coverage();
 
-    app.toggle_pacted_only();
+    app.toggle_scoped_only();
 
-    // Two rows fewer on screen — `assets` and the document row that goes
-    // with it — and the same five nodes tallied: the footer describes the
-    // tree, not the view.
-    assert_eq!(drawn(&app), pacted_fixture());
-    assert_eq!(node_paths(&app).len(), 4);
-    assert_eq!(app.counts(), before);
-    assert_eq!(app.counts(), tree.counts());
-    assert_eq!(app.counts().total(), 5);
+    // One row fewer on screen — `assets` — and the same five directories
+    // counted: the footer describes the tree, not the view.
+    assert_eq!(drawn(&app), scoped_fixture());
+    assert_eq!(app.coverage(), before);
+    assert_ne!(tally(&app), before);
 
-    app.toggle_pacted_only();
+    app.toggle_scoped_only();
 
-    assert_eq!(app.counts(), before);
-    assert_eq!(app.counts(), tally(&app));
+    assert_eq!(app.coverage(), before);
+    assert_eq!(tally(&app), before);
 }
 
 #[test]
@@ -2714,18 +1304,15 @@ fn a_directory_collapsed_before_the_filter_is_still_collapsed_after_it() {
     app.toggle_collapsed();
     assert_eq!(drawn(&app), collapsed_over_crates());
 
-    app.toggle_pacted_only();
+    app.toggle_scoped_only();
 
-    // `crates` is unpacted and its descendants are hidden, but it is still
-    // the way to them, so it keeps its row: what survives the filter is read
-    // off the whole walk, not off what collapsing left drawn.
-    assert_eq!(
-        drawn(&app),
-        ["warlock", "warlock/.warlock.md", "warlock/crates"]
-    );
+    // The root is unscoped, and `crates`' descendants are hidden, but the
+    // root is still the way to them, so it keeps its row: what survives the
+    // filter is read off the whole walk, not off what collapsing left drawn.
+    assert_eq!(drawn(&app), ["warlock", "warlock/crates"]);
     assert!(app.is_collapsed("warlock/crates"));
 
-    app.toggle_pacted_only();
+    app.toggle_scoped_only();
 
     assert!(app.is_collapsed("warlock/crates"));
     assert_eq!(drawn(&app), collapsed_over_crates());
@@ -2739,7 +1326,7 @@ fn a_directory_collapsed_before_the_filter_is_still_collapsed_after_it() {
 #[test]
 fn collapsing_under_the_filter_hides_descendants_as_it_always_did() {
     let mut app = App::from_tree(&fixture::tree());
-    app.toggle_pacted_only();
+    app.toggle_scoped_only();
 
     app.toggle_collapsed();
 
@@ -2748,75 +1335,43 @@ fn collapsing_under_the_filter_hides_descendants_as_it_always_did() {
     assert!(app.is_collapsed("warlock"));
 
     app.toggle_collapsed();
-    assert_eq!(drawn(&app), pacted_fixture());
+    assert_eq!(drawn(&app), scoped_fixture());
 }
 
 #[test]
-fn nothing_pacted_narrows_to_nothing_at_all() {
+fn nothing_scoped_narrows_to_nothing_at_all() {
     let mut app = App::from_rows(vec![
-        Row::new(0, "repo", "repo/.warlock.md", NodeState::Unpacted),
-        Row::new(1, "repo/crates", None, NodeState::Unpacted),
+        Row::new(0, "repo", false),
+        Row::new(1, "repo/crates", false),
     ]);
 
-    app.toggle_pacted_only();
+    app.toggle_scoped_only();
 
-    // No pacted node means no ancestors worth keeping either, and an app
+    // No covered node means no ancestors worth keeping either, and an app
     // with no rows selects nothing rather than an index off the end.
     assert!(app.is_empty());
     assert_eq!(app.selected(), 0);
     assert_eq!(app.selected_row(), None);
 
-    app.toggle_pacted_only();
+    app.toggle_scoped_only();
     assert_eq!(drawn(&app), ["repo", "repo/crates"]);
 }
 
 #[test]
-fn pacting_a_node_under_the_filter_brings_its_row_into_the_view_to_stay() {
-    let mut app = app_selecting("warlock/assets");
-    app.toggle_pact().expect("assets has a document");
-
-    app.toggle_pacted_only();
-
-    // Newly pacted, so newly worth drawing — and the document row under it
-    // comes back with it, carrying the state that saved them both: the
-    // filter reads the states as they are now, not as the tree was loaded
-    // with them.
-    assert_eq!(
-        drawn(&app),
-        [
-            "warlock",
-            "warlock/.warlock.md",
-            "warlock/crates",
-            "warlock/crates/engine",
-            "warlock/crates/engine/.warlock.md",
-            "warlock/crates/tui",
-            "warlock/crates/tui/.warlock.md",
-            "warlock/assets",
-            "warlock/assets/.warlock.md",
-        ]
+fn an_unscoped_subtree_goes_whole_while_its_unscoped_siblings_way_in_stays() {
+    let tree = Tree::new(
+        Node::new("repo").with_children([
+            Node::new("repo/kept")
+                .with_children([Node::new("repo/kept/deep").with_scope(Some("deep".to_owned()))]),
+            Node::new("repo/gone").with_children([Node::new("repo/gone/deep")]),
+        ]),
     );
-}
-
-#[test]
-fn an_unpacted_subtree_goes_whole_while_its_unpacted_siblings_way_in_stays() {
-    let tree = Tree::new(Node::new("repo", None, NodeState::Unpacted).with_children([
-        Node::new("repo/kept", None, NodeState::Unpacted).with_children([Node::new(
-            "repo/kept/deep",
-            "repo/kept/deep/.warlock.md",
-            NodeState::PactedFresh,
-        )]),
-        Node::new("repo/gone", None, NodeState::Unpacted).with_children([Node::new(
-            "repo/gone/deep",
-            "repo/gone/deep/.warlock.md",
-            NodeState::Unpacted,
-        )]),
-    ]));
     let mut app = App::from_tree(&tree);
 
-    app.toggle_pacted_only();
+    app.toggle_scoped_only();
 
-    // An unpacted root and an unpacted directory both survive as the way to
-    // one pacted node; the sibling branch with nothing pacted in it goes
+    // An unscoped root and an unscoped directory both survive as the way to
+    // one scoped node; the sibling branch with nothing scoped in it goes
     // whole, parent and child together.
     assert_eq!(drawn(&app), ["repo", "repo/kept", "repo/kept/deep"]);
 }
@@ -2824,206 +1379,12 @@ fn an_unpacted_subtree_goes_whole_while_its_unpacted_siblings_way_in_stays() {
 #[test]
 fn toggling_the_filter_clears_the_last_keystrokes_message() {
     let mut app = app_with_files_selecting("warlock/assets/logo.svg");
-    assert_eq!(app.toggle_pact(), None);
+    assert_eq!(app.scope_target(), None);
     assert!(app.message().is_some());
 
-    app.toggle_pacted_only();
+    app.toggle_scoped_only();
 
     assert_eq!(app.message(), None);
-}
-
-#[test]
-fn a_fresh_app_draws_the_directories_and_no_file_but_each_ones_document() {
-    let app = App::from_tree(&fixture::tree());
-
-    assert!(!app.show_files());
-    assert_eq!(drawn(&app), whole_fixture());
-    // Every file row drawn is the document of the directory above it, and
-    // no other file the fixture lists is anywhere on screen.
-    assert!(app.rows().iter().filter(|row| row.is_file()).count() > 0);
-    assert!(
-        app.rows()
-            .iter()
-            .filter(|row| row.is_file())
-            .all(Row::is_document)
-    );
-    for held in ["warlock/README.md", "warlock/assets/logo.svg"] {
-        assert!(
-            !drawn(&app).iter().any(|path| path == held),
-            "{held} is held by a directory, not written by Warlock"
-        );
-    }
-    // And they are hidden rather than absent: the fixture holds them.
-    assert!(
-        fixture::tree()
-            .walk()
-            .any(|(node, _)| !node.files.is_empty())
-    );
-}
-
-#[test]
-fn a_documented_directory_draws_its_document_beneath_it_and_an_undocumented_one_draws_nothing() {
-    // A documented root, an undocumented directory under it, and a
-    // documented one a `.warlockignore` excludes.
-    let tree = Tree::new(
-        Node::new("repo", "repo/.warlock.md", NodeState::PactedFresh)
-            .with_files([
-                PathBuf::from("repo/README.md"),
-                PathBuf::from("repo/.warlock.md"),
-            ])
-            .with_children([
-                Node::new("repo/crates", None, NodeState::Unpacted),
-                Node::new(
-                    "repo/vendor",
-                    "repo/vendor/.warlock.md",
-                    NodeState::Unpacted,
-                )
-                .with_files([PathBuf::from("repo/vendor/.warlock.md")])
-                .with_ignored(true),
-            ]),
-    );
-
-    let app = App::from_tree(&tree);
-
-    assert!(!app.show_files());
-    assert_eq!(
-        drawn(&app),
-        [
-            "repo",
-            "repo/.warlock.md",
-            // Nothing under `crates`, which has no document to draw.
-            "repo/crates",
-            "repo/vendor",
-            "repo/vendor/.warlock.md",
-        ]
-    );
-    // Exactly the row `f` draws for the same file: a file row, one level
-    // under its directory, carrying that directory's state and its
-    // exclusion flag, and documenting nothing itself.
-    for (directory, document) in [(0, 1), (3, 4)] {
-        let directory = app.rows()[directory].clone();
-        let document = &app.rows()[document];
-        assert_eq!(document.path, directory.path.join(".warlock.md"));
-        assert_eq!(
-            Some(document.path.as_path()),
-            directory.document.as_deref(),
-            "the row is the document the node names"
-        );
-        assert_eq!(document.depth, directory.depth + 1);
-        assert!(document.is_file());
-        assert!(document.is_document());
-        assert_eq!(document.state, directory.state);
-        assert_eq!(document.is_ignored(), directory.is_ignored());
-        assert_eq!(document.document, None);
-    }
-    assert!(app.rows()[4].is_ignored(), "the excluded one is excluded");
-
-    // And it is the same row, field for field, as the one the file toggle
-    // shows: hiding the files changes which rows are kept, not what a row is.
-    let mut shown = App::from_tree(&tree);
-    shown.toggle_files();
-    for row in app.rows().iter().filter(|row| row.is_file()) {
-        assert!(
-            shown.rows().contains(row),
-            "{} is not the row `f` draws",
-            row.path.display()
-        );
-    }
-}
-
-#[test]
-fn the_filter_keeps_a_pacted_directorys_document_and_drops_a_leftover_one() {
-    // `repo/left` is gray with a `.warlock.md` an un-pact left on disk, and
-    // is drawn only as the way down to the pacted node below it.
-    let tree = Tree::new(
-        Node::new("repo", None, NodeState::Unpacted).with_children([Node::new(
-            "repo/left",
-            "repo/left/.warlock.md",
-            NodeState::Unpacted,
-        )
-        .with_files([PathBuf::from("repo/left/.warlock.md")])
-        .with_children([Node::new(
-            "repo/left/deep",
-            "repo/left/deep/.warlock.md",
-            NodeState::PactedFresh,
-        )
-        .with_files([PathBuf::from("repo/left/deep/.warlock.md")])])]),
-    );
-    let mut app = App::from_tree(&tree);
-    assert_eq!(
-        drawn(&app),
-        [
-            "repo",
-            "repo/left",
-            "repo/left/.warlock.md",
-            "repo/left/deep",
-            "repo/left/deep/.warlock.md",
-        ]
-    );
-
-    app.toggle_pacted_only();
-
-    // The pacted directory keeps its document; the gray one keeps its own
-    // row as the way in and loses the leftover document, which carries that
-    // gray state and so has nothing to save it — and could not have saved
-    // the directory above it either.
-    assert_eq!(
-        drawn(&app),
-        [
-            "repo",
-            "repo/left",
-            "repo/left/deep",
-            "repo/left/deep/.warlock.md"
-        ]
-    );
-}
-
-#[test]
-fn collapsing_a_documented_directory_takes_its_document_row_with_it() {
-    let mut app = app_selecting("warlock/crates/engine");
-
-    app.toggle_collapsed();
-
-    // The directory keeps its row and its document goes with the rest of
-    // what was under it, because that is where the document row sits.
-    assert_eq!(
-        drawn(&app),
-        [
-            "warlock",
-            "warlock/.warlock.md",
-            "warlock/crates",
-            "warlock/crates/engine",
-            "warlock/crates/tui",
-            "warlock/crates/tui/.warlock.md",
-            "warlock/assets",
-            "warlock/assets/.warlock.md",
-        ]
-    );
-
-    app.toggle_collapsed();
-
-    assert_eq!(drawn(&app), whole_fixture());
-}
-
-#[test]
-fn a_documented_childless_directory_collapses_with_the_files_hidden() {
-    // `warlock/assets` has no child directories, and the tree still says
-    // so — but the default view now draws its document under it, and a row
-    // with something under it is a row the collapse key has work to do on.
-    let mut app = app_selecting("warlock/assets");
-
-    assert!(app.can_collapse(app.selected()));
-
-    app.toggle_collapsed();
-
-    // Everything but the last row: `assets` keeps its place and its
-    // document is hidden under it.
-    assert_eq!(drawn(&app), whole_fixture()[..8]);
-    assert!(app.is_collapsed("warlock/assets"));
-
-    app.toggle_collapsed();
-
-    assert_eq!(drawn(&app), whole_fixture());
 }
 
 #[test]
@@ -3049,16 +1410,13 @@ fn showing_files_puts_each_one_under_its_directory_one_level_deeper() {
         seen,
         [
             (0, "warlock", false),
-            (1, "warlock/.warlock.md", true),
             (1, "warlock/README.md", true),
             (1, "warlock/crates", false),
             (2, "warlock/crates/engine", false),
-            (3, "warlock/crates/engine/.warlock.md", true),
             (3, "warlock/crates/engine/Cargo.toml", true),
             (2, "warlock/crates/tui", false),
-            (3, "warlock/crates/tui/.warlock.md", true),
+            (3, "warlock/crates/tui/Cargo.toml", true),
             (1, "warlock/assets", false),
-            (2, "warlock/assets/.warlock.md", true),
             (2, "warlock/assets/logo.svg", true),
         ]
     );
@@ -3091,154 +1449,47 @@ fn hiding_the_files_again_puts_the_app_back_as_it_was() {
 }
 
 #[test]
-fn a_file_row_documents_nothing_contains_nothing_and_takes_its_modules_state() {
+fn a_file_row_carries_no_scope_of_its_own_and_takes_its_directorys_coverage() {
     let tree = fixture::tree();
     let mut app = App::from_tree(&tree);
 
     app.toggle_files();
 
     for row in app.rows().iter().filter(|row| row.is_file()) {
-        assert_eq!(
-            row.document,
-            None,
-            "{} claims a document",
-            row.path.display()
-        );
+        assert_eq!(row.scope, None, "{} claims a scope", row.path.display());
         let directory = row.path.parent().expect("a file sits in a directory");
         let node = tree.find(directory).expect("the file came from that node");
         assert_eq!(
-            row.state,
-            node.state,
-            "{} is not its module's colour",
+            row.covered,
+            node.is_covered(),
+            "{} is not its directory's colour",
             row.path.display()
         );
     }
-    // Including files under two different states, so the copy is a copy of
-    // the right node rather than of any node.
-    assert!(
-        app.rows()
-            .iter()
-            .any(|row| row.is_file() && row.state == NodeState::PactedFresh)
-    );
-    assert!(
-        app.rows()
-            .iter()
-            .any(|row| row.is_file() && row.state == NodeState::Unpacted)
-    );
+    // Including files under both a covered and an uncovered directory, so
+    // the copy is a copy of the right node rather than of any node.
+    assert!(app.rows().iter().any(|row| row.is_file() && row.covered));
+    assert!(app.rows().iter().any(|row| row.is_file() && !row.covered));
 }
 
 #[test]
-fn pacting_a_directory_recolours_the_files_in_it() {
-    let mut app = app_with_files_selecting("warlock/assets");
-
-    app.toggle_pact().expect("assets has a document");
-
-    // The directory's own files move with it; a file of another directory
-    // does not.
-    let state_of = |app: &App, path: &str| {
-        app.rows()
-            .iter()
-            .find(|row| row.path == Path::new(path))
-            .map(|row| row.state)
-    };
-    assert_eq!(
-        state_of(&app, "warlock/assets"),
-        Some(NodeState::PactedStale)
-    );
-    assert_eq!(
-        state_of(&app, "warlock/assets/.warlock.md"),
-        Some(NodeState::PactedStale)
-    );
-    assert_eq!(
-        state_of(&app, "warlock/assets/logo.svg"),
-        Some(NodeState::PactedStale)
-    );
-    assert_eq!(
-        state_of(&app, "warlock/crates/tui/.warlock.md"),
-        Some(NodeState::PactedStale),
-    );
-    assert_eq!(
-        state_of(&app, "warlock/crates/engine/.warlock.md"),
-        Some(NodeState::PactedFresh)
-    );
-
-    // And in the list behind the drawn one, or the colour would revert the
-    // moment anything re-filtered the rows.
-    app.toggle_files();
-    app.toggle_files();
-    assert_eq!(
-        state_of(&app, "warlock/assets/logo.svg"),
-        Some(NodeState::PactedStale)
-    );
-}
-
-#[test]
-fn a_file_cannot_be_pacted_and_the_refusal_says_why() {
-    let mut app = app_with_files_selecting("warlock/assets/logo.svg");
-    let before = app.clone();
-
-    assert_eq!(app.toggle_pact(), None);
-
-    // Everything but the message is exactly as it was: no state change, no
-    // count change, and nothing for the caller to write down.
-    assert_eq!(app.rows(), before.rows());
-    assert_eq!(app.counts(), before.counts());
-    assert_eq!(app.selected(), before.selected());
-    let message = app.message().expect("a refusal says why");
-    assert!(
-        message.starts_with("warlock/assets/logo.svg is a file"),
-        "{message}"
-    );
-    // Its own wording, not the missing-document one, though a file has no
-    // document either.
-    assert!(!message.contains("no .warlock.md"), "{message}");
-    assert!(message.contains("directory"), "{message}");
-}
-
-#[test]
-fn a_file_under_a_documented_directory_is_refused_all_the_same() {
-    // The document of a documented module, which is the row most likely
-    // to be mistaken for the module itself.
-    let mut app = app_with_files_selecting("warlock/crates/tui/.warlock.md");
-    let before = app.clone();
-
-    assert_eq!(app.toggle_pact(), None);
-
-    assert_eq!(app.rows(), before.rows());
-    assert_eq!(app.counts(), before.counts());
-    assert!(app.message().is_some());
-}
-
-#[test]
-fn showing_files_leaves_the_engines_tally_alone() {
+fn showing_files_leaves_the_coverage_count_alone() {
     let tree = fixture::tree();
     let mut app = App::from_tree(&tree);
-    let before = app.counts();
+    let before = app.coverage();
     assert_eq!(before, tally(&app));
 
     app.toggle_files();
 
-    // More rows on screen and not one more node: the footer counts modules.
-    assert!(app.rows().len() > tree.counts().total());
-    assert_eq!(app.counts(), before);
-    assert_eq!(app.counts(), tree.counts());
+    // More rows on screen and not one more directory: the footer counts
+    // directories.
+    assert!(app.rows().len() > tree.walk().count());
+    assert_eq!(app.coverage(), before);
+    assert_eq!(tally(&app), before);
 
     app.toggle_files();
 
-    assert_eq!(app.counts(), before);
-    assert_eq!(app.counts(), tally(&app));
-}
-
-#[test]
-fn pacting_with_files_shown_still_moves_exactly_one_node_in_the_tally() {
-    let mut app = app_with_files_selecting("warlock/assets");
-    let before = app.counts();
-
-    app.toggle_pact().expect("assets has a document");
-
-    assert_eq!(app.counts().total(), before.total());
-    assert_eq!(app.counts().unpacted, before.unpacted - 1);
-    assert_eq!(app.counts().pacted_stale, before.pacted_stale + 1);
+    assert_eq!(app.coverage(), before);
 }
 
 #[test]
@@ -3255,14 +1506,12 @@ fn collapsing_a_directory_hides_its_files_with_it_and_expanding_puts_them_back()
         drawn(&leaf),
         [
             "warlock",
-            "warlock/.warlock.md",
             "warlock/README.md",
             "warlock/crates",
             "warlock/crates/engine",
-            "warlock/crates/engine/.warlock.md",
             "warlock/crates/engine/Cargo.toml",
             "warlock/crates/tui",
-            "warlock/crates/tui/.warlock.md",
+            "warlock/crates/tui/Cargo.toml",
             "warlock/assets",
         ]
     );
@@ -3282,11 +1531,9 @@ fn collapsing_a_directory_hides_its_files_with_it_and_expanding_puts_them_back()
         drawn(&app),
         [
             "warlock",
-            "warlock/.warlock.md",
             "warlock/README.md",
             "warlock/crates",
             "warlock/assets",
-            "warlock/assets/.warlock.md",
             "warlock/assets/logo.svg",
         ]
     );
@@ -3294,21 +1541,17 @@ fn collapsing_a_directory_hides_its_files_with_it_and_expanding_puts_them_back()
     app.toggle_collapsed();
 
     // Byte for byte what was there before: same rows, same order, same
-    // depths, same states.
+    // depths, same coverage.
     assert_eq!(app.rows(), before);
 }
 
 #[test]
 fn a_directory_holding_only_files_collapses_exactly_when_the_files_are_shown() {
-    // `repo/assets` has no child directories, no document and lists one
-    // file, so whether anything is under it is the file toggle's answer and
-    // not the tree's.
-    let tree =
-        Tree::new(
-            Node::new("repo", "repo/.warlock.md", NodeState::PactedStale)
-                .with_children([Node::new("repo/assets", None, NodeState::Unpacted)
-                    .with_files([PathBuf::from("repo/assets/logo.svg")])]),
-        );
+    // `repo/assets` has no child directories and lists one file, so whether
+    // anything is under it is the file toggle's answer and not the tree's.
+    let tree = Tree::new(Node::new("repo").with_children([
+        Node::new("repo/assets").with_files([PathBuf::from("repo/assets/logo.svg")]),
+    ]));
     let mut app = select(App::from_tree(&tree), "repo/assets");
     let selected = app.selected();
 
@@ -3332,19 +1575,19 @@ fn a_directory_holding_only_files_collapses_exactly_when_the_files_are_shown() {
 #[test]
 fn a_directory_the_filter_has_emptied_does_not_collapse() {
     // The mirror of the case above: `repo/crates` has a child in the tree,
-    // and the pacted-only view takes it away. A row with nothing under it is
+    // and the scoped-only view takes it away. A row with nothing under it is
     // a row with nothing to hide, whichever filter emptied it.
     let mut app = App::from_rows(vec![
-        Row::new(0, "repo", "repo/.warlock.md", NodeState::PactedStale),
-        Row::new(1, "repo/crates", None, NodeState::Unpacted),
-        Row::new(2, "repo/crates/tui", None, NodeState::Unpacted),
+        Row::new(0, "repo", true).with_scope(Some("platform".to_owned())),
+        Row::new(1, "repo/crates", false),
+        Row::new(2, "repo/crates/tui", false),
     ]);
 
     assert!(app.can_collapse(0), "the whole walk is drawn");
 
-    app.toggle_pacted_only();
+    app.toggle_scoped_only();
 
-    assert_eq!(drawn(&app), ["repo"], "the unpacted pair is filtered out");
+    assert_eq!(drawn(&app), ["repo"], "the unscoped pair is filtered out");
     assert!(!app.can_collapse(0), "so the root holds nothing");
 
     app.toggle_collapsed();
@@ -3370,9 +1613,8 @@ fn hiding_the_files_under_the_selection_lands_it_on_the_directory() {
 
     app.toggle_files();
 
-    // The file's row is gone — it is an ordinary file, not the document the
-    // hidden view keeps — and what it went behind is the directory that
-    // held it.
+    // The file's row is gone, and what it went behind is the directory
+    // that held it.
     assert_eq!(
         app.selected_row().map(|row| row.path.clone()),
         Some(PathBuf::from("warlock/crates/engine"))
@@ -3381,27 +1623,24 @@ fn hiding_the_files_under_the_selection_lands_it_on_the_directory() {
 }
 
 #[test]
-fn the_filter_keeps_the_files_of_pacted_directories_and_no_others() {
+fn the_filter_keeps_the_files_of_covered_directories_and_no_others() {
     let mut app = App::from_tree(&fixture::tree());
     app.toggle_files();
 
-    app.toggle_pacted_only();
+    app.toggle_scoped_only();
 
-    // `crates/` survives as the way down to the pacted modules, but nothing
-    // of it is pacted, so it brings no files with it — and it has none.
-    // `assets/` is unpacted and goes whole, its files with it.
+    // The root survives as the way down to the scoped directories, but it is
+    // unscoped, so it brings no files with it. `assets/` is unscoped and goes
+    // whole, its files with it.
     assert_eq!(
         drawn(&app),
         [
             "warlock",
-            "warlock/.warlock.md",
-            "warlock/README.md",
             "warlock/crates",
             "warlock/crates/engine",
-            "warlock/crates/engine/.warlock.md",
             "warlock/crates/engine/Cargo.toml",
             "warlock/crates/tui",
-            "warlock/crates/tui/.warlock.md",
+            "warlock/crates/tui/Cargo.toml",
         ]
     );
 
@@ -3409,13 +1648,13 @@ fn the_filter_keeps_the_files_of_pacted_directories_and_no_others() {
 
     // And with the files hidden again the narrowed view is exactly the one
     // it was before files existed.
-    assert_eq!(drawn(&app), pacted_fixture());
+    assert_eq!(drawn(&app), scoped_fixture());
 }
 
 #[test]
 fn toggling_the_files_clears_the_last_keystrokes_message() {
     let mut app = app_with_files_selecting("warlock/assets/logo.svg");
-    assert_eq!(app.toggle_pact(), None);
+    assert_eq!(app.scope_target(), None);
     assert!(app.message().is_some());
 
     app.toggle_files();
@@ -3442,9 +1681,9 @@ fn showing_files_leaves_the_window_in_range_with_the_selection_in_it() {
 #[test]
 fn a_bare_list_of_rows_can_hold_files_too_and_starts_with_them_hidden() {
     let app = App::from_rows(vec![
-        Row::new(0, "repo", "repo/.warlock.md", NodeState::PactedStale),
-        Row::file(1, "repo/.warlock.md", NodeState::PactedStale),
-        Row::new(1, "repo/crates", None, NodeState::Unpacted),
+        Row::new(0, "repo", false),
+        Row::file(1, "repo/README.md", false),
+        Row::new(1, "repo/crates", false),
     ]);
 
     assert!(!app.show_files());
@@ -3452,7 +1691,7 @@ fn a_bare_list_of_rows_can_hold_files_too_and_starts_with_them_hidden() {
 
     let mut app = app;
     app.toggle_files();
-    assert_eq!(drawn(&app), ["repo", "repo/.warlock.md", "repo/crates"]);
+    assert_eq!(drawn(&app), ["repo", "repo/README.md", "repo/crates"]);
 }
 
 #[test]
@@ -3461,12 +1700,12 @@ fn narrowing_leaves_the_window_in_range_with_the_selection_in_it() {
     app.set_viewport_height(2);
     assert!(selection_is_on_screen(&app));
 
-    app.toggle_pacted_only();
+    app.toggle_scoped_only();
 
     assert!(window_is_in_range(&app));
     assert!(selection_is_on_screen(&app));
 
-    app.toggle_pacted_only();
+    app.toggle_scoped_only();
 
     assert!(window_is_in_range(&app));
     assert!(selection_is_on_screen(&app));
@@ -3519,28 +1758,19 @@ fn the_focus_key_walks_the_tree_the_panel_and_the_composer_and_comes_back() {
 
 #[test]
 fn the_composer_is_showable_only_while_the_conversation_is_the_card_up() {
-    let base = Instant::now();
     let mut app = App::from_rows(three_rows());
     assert!(
         app.panel().composer_showable(),
         "an app opens with room to type"
     );
 
-    // The file gives the panel those rows back, and so does the run: a
-    // field under either is a field about the wrong card.
+    // The file gives the panel those rows back: a field under it is a field
+    // about the wrong card.
     app.show_document(["a line of a file"], false);
     assert!(
         !app.panel().composer_showable(),
         "the document card hid nothing"
     );
-
-    app.start_account(base);
-    assert_eq!(
-        app.panel.showing(),
-        Showing::Document,
-        "the run took the panel"
-    );
-    assert!(!app.panel().composer_showable());
 
     app.swap_card();
     assert_eq!(app.panel.showing(), Showing::Thread);
@@ -3550,58 +1780,8 @@ fn the_composer_is_showable_only_while_the_conversation_is_the_card_up() {
     );
 
     app.swap_card();
-    assert_eq!(app.panel.showing(), Showing::Account);
-    assert!(
-        !app.panel().composer_showable(),
-        "the run drew a field of its own"
-    );
-}
-
-#[test]
-fn a_run_takes_the_panel_only_from_a_card_with_nothing_on_it() {
-    let base = Instant::now();
-
-    // Nothing said and nothing read: the panel is warlock's mark, and the
-    // run the reader just asked for is worth more than that.
-    let mut app = App::from_rows(three_rows());
-    app.panel_mut().set_height(PANEL);
-    app.start_account(base);
-    assert_eq!(app.panel.showing(), Showing::Account);
-
-    // A conversation on screen is something they chose to look at, and a
-    // run started behind it leaves it exactly where it is.
-    let mut app = App::from_rows(three_rows());
-    app.panel_mut().set_height(PANEL);
-    ask_and_answer(&mut app, base);
-    app.start_account(at(base, 10));
-    assert_eq!(app.panel.showing(), Showing::Thread);
-
-    // And so is a file.
-    let mut app = App::from_rows(three_rows());
-    app.panel_mut().set_height(PANEL);
-    app.show_document(document_lines(), false);
-    app.start_account(at(base, 10));
     assert_eq!(app.panel.showing(), Showing::Document);
-}
-
-#[test]
-fn a_run_taking_an_empty_panel_takes_the_keyboard_off_the_field_with_it() {
-    // The account draws no field, so a keyboard left pointing at one would
-    // be pointing at nothing — the same rescue a document does.
-    let mut app = App::from_rows(three_rows());
-    app.panel_mut().set_height(PANEL);
-    app.set_focus(Focus::Composer);
-    assert_eq!(app.focus(), Focus::Composer);
-
-    app.start_account(Instant::now());
-
-    assert_eq!(app.panel.showing(), Showing::Account);
     assert!(!app.panel().composer_showable());
-    assert_eq!(
-        app.focus(),
-        Focus::Panel,
-        "the keys stayed on a hidden field"
-    );
 }
 
 #[test]
@@ -3658,36 +1838,14 @@ fn a_click_cannot_put_the_keys_on_a_composer_that_is_not_on_screen() {
 }
 
 #[test]
-fn a_run_rolled_back_under_a_document_leaves_the_keys_somewhere_they_can_be() {
-    // The copy is taken with the composer focused; the run puts a document
-    // up behind it and then records nothing, so the pre-run focus meets a
-    // panel that has moved on.
-    let mut app = composer_focused();
-    let before = app.clone();
-    app.show_document(["a line of a file"], false);
-
-    app.restore_from(before);
-
-    assert!(
-        !app.panel().composer_showable(),
-        "the panel came back with the app"
-    );
-    assert_eq!(
-        app.focus(),
-        Focus::Panel,
-        "the keys came back to a hidden field"
-    );
-}
-
-#[test]
 fn no_movement_key_moves_anything_while_the_composer_has_the_focus() {
     // The keyboard is the draft's, so a movement key is a character and
-    // never arrives here; if one does, it moves neither pane. An account of
-    // more lines than the panel is tall and a selection in the middle of the
+    // never arrives here; if one does, it moves neither pane. A conversation
+    // of more lines than the panel is tall and a selection in the middle of the
     // tree, so both windows have somewhere to go if anything lets them.
     for (name, movement) in MOVEMENTS {
         let base = Instant::now();
-        let mut app = app_pacting(9, base);
+        let mut app = app_talking(9, base);
         // The conversation, which is the card the field is drawn under, with
         // enough on it that the panel's window has somewhere to go.
         ask_and_answer(&mut app, base);
@@ -3789,22 +1947,15 @@ fn moving_the_focus_moves_nothing_else() {
 #[test]
 fn nothing_but_a_movement_key_cares_which_pane_has_the_focus() {
     type Change = fn(&mut App);
-    let changes: [(&str, Change); 8] = [
+    let changes: [(&str, Change); 6] = [
         ("toggle_collapsed", App::toggle_collapsed),
-        ("toggle_pacted_only", App::toggle_pacted_only),
+        ("toggle_scoped_only", App::toggle_scoped_only),
         ("toggle_files", App::toggle_files),
-        ("toggle_pact", |app| {
-            app.toggle_pact();
+        ("scope_target", |app| {
+            app.scope_target();
         }),
-        ("set_pact_in_flight", |app| {
-            app.set_pact_in_flight("warlock/crates", 2, 5);
-        }),
-        ("clear_pact_in_flight", |app| {
-            app.set_pact_in_flight("warlock/crates", 2, 5);
-            app.clear_pact_in_flight();
-        }),
-        ("set_subtree_state", |app| {
-            app.set_subtree_state("warlock/crates", NodeState::PactedFresh);
+        ("view_target", |app| {
+            app.view_target();
         }),
         ("set_viewport_height", |app| app.set_viewport_height(2)),
     ];
@@ -3830,36 +1981,42 @@ fn at(base: Instant, seconds: u64) -> Instant {
     base + Duration::from_secs(seconds)
 }
 
-fn app_pacting(lines: usize, base: Instant) -> App {
+fn app_at_the_panel() -> App {
     let mut app = App::from_rows(three_rows());
     app.panel_mut().set_height(PANEL);
     app.toggle_focus();
-    app.start_account(base);
+    app
+}
 
-    let account = app
-        .panel_mut()
-        .account_mut()
-        .expect("a run has just started");
-    account.open_section("crates/engine", base);
+// A turn still under way, so that what arrives next is a work line, and a work
+// line leaves a parked window where it is: a note or a question would put the
+// card back on its newest line.
+fn app_talking(lines: u64, base: Instant) -> App {
+    let mut app = App::from_rows(three_rows());
+    app.panel_mut().set_height(PANEL);
+    app.toggle_focus();
+    app.panel_mut().start_turn("start", base);
     for line in 0..lines {
-        account.record(
-            &Activity::Tool {
-                name: "Read".to_owned(),
-                detail: Some(format!("line {line}")),
-            },
-            at(base, line as u64 + 1),
-        );
+        work(&mut app, line, at(base, line + 1));
     }
     app
+}
+
+fn work(app: &mut App, line: u64, at: Instant) {
+    app.panel_mut().record_turn(
+        &Activity::Tool {
+            name: format!("line {line}"),
+            detail: None,
+        },
+        at,
+    );
 }
 
 // A document's line is its own text and nothing else, which is exactly what
 // a test asserting on what is drawn wants back.
 fn line_text(line: &Line) -> String {
     match line {
-        Line::Directory { path } => path.display().to_string(),
         Line::Clocked { text, .. }
-        | Line::Summary { text }
         | Line::Text { text }
         | Line::Said { text }
         | Line::Note { text }
@@ -3872,7 +2029,7 @@ fn panel_text(app: &App, now: Instant) -> Vec<String> {
 }
 
 #[test]
-fn an_app_that_has_run_no_pact_has_no_account_and_draws_no_panel() {
+fn an_app_nobody_has_talked_to_has_no_thread_and_draws_no_panel() {
     let now = Instant::now();
 
     for app in [
@@ -3883,86 +2040,36 @@ fn an_app_that_has_run_no_pact_has_no_account_and_draws_no_panel() {
         let mut app = app;
         app.panel_mut().set_height(PANEL);
 
-        assert!(!app.panel().has_account());
-        assert_eq!(app.panel().account(), None);
+        assert!(!app.panel().has_thread());
         assert_eq!(app.panel().window(now), Vec::new());
         assert_eq!(app.panel().lines_below(), 0);
         assert_eq!(app.panel().scroll_offset(), 0);
 
-        // Not even a movement key can make a panel with no account say
+        // Not even a movement key can make a panel with nothing in it say
         // something.
         app.toggle_focus();
         for (_, movement) in MOVEMENTS {
             movement(&mut app);
         }
-        assert!(!app.panel().has_account());
+        assert!(!app.panel().has_thread());
         assert_eq!(app.panel().window(now), Vec::new());
     }
 }
 
 #[test]
-fn a_second_pact_starts_the_account_again_from_empty() {
-    let base = Instant::now();
-    let mut app = app_pacting(9, base);
-    assert_eq!(app.panel().account().map(Account::line_count), Some(10));
-
-    app.start_account(at(base, 100));
-
-    assert!(app.panel().has_account());
-    assert_eq!(app.panel().account().map(Account::line_count), Some(0));
-    assert_eq!(app.panel().window(at(base, 100)), Vec::new());
-    assert_eq!(app.panel().scroll_offset(), 0);
-    assert!(app.panel().follows());
-}
-
-#[test]
-fn a_second_pact_puts_a_scrolled_back_panel_at_the_top_of_the_new_run() {
-    let base = Instant::now();
-    let mut app = app_pacting(9, base);
-    app.select_first();
-    assert!(!app.panel().follows());
-
-    app.start_account(at(base, 100));
-    app.panel_mut()
-        .account_mut()
-        .expect("a run has just started")
-        .open_section("crates/tui", at(base, 100));
-
-    assert!(app.panel().follows());
-    assert_eq!(
-        panel_text(&app, at(base, 100)),
-        ["crates/tui".to_owned(), "waiting".to_owned()]
-    );
-}
-
-#[test]
 fn the_panel_keeps_the_newest_line_on_the_bottom_row_while_it_follows() {
     let base = Instant::now();
-    let mut app = app_pacting(2, base);
+    let mut app = app_talking(2, base);
 
     // Shorter than the panel: everything is on screen and there is nothing
     // to scroll.
     assert_eq!(app.panel().scroll_offset(), 0);
-    assert_eq!(
-        panel_text(&app, at(base, 3)),
-        ["crates/engine", "Read line 0", "Read line 1"],
-    );
+    assert_eq!(panel_text(&app, at(base, 3)), ["start", "line 0", "line 1"],);
 
     // Longer than the panel: the window is the last screenful, and moves as
-    // each line arrives without anybody telling it to. Numbered tools
-    // rather than thinking, because a stretch of thinking is one line
-    // however often it is reported and this test needs several.
+    // each line arrives without anybody telling it to.
     for line in 2..6 {
-        app.panel_mut()
-            .account_mut()
-            .expect("a run is under way")
-            .record(
-                &Activity::Tool {
-                    name: "Read".to_owned(),
-                    detail: Some(format!("line {line}")),
-                },
-                at(base, line + 1),
-            );
+        work(&mut app, line, at(base, line + 1));
     }
 
     assert!(app.panel().follows());
@@ -3970,31 +2077,26 @@ fn the_panel_keeps_the_newest_line_on_the_bottom_row_while_it_follows() {
     assert_eq!(app.panel().lines_below(), 0);
     assert_eq!(
         panel_text(&app, at(base, 7)),
-        ["Read line 3", "Read line 4", "Read line 5"],
+        ["line 3", "line 4", "line 5"],
     );
 }
 
 #[test]
 fn scrolling_up_in_the_panel_stops_it_following() {
     let base = Instant::now();
-    let mut app = app_pacting(9, base);
-    assert_eq!(
-        panel_text(&app, at(base, 9)).first().unwrap(),
-        "Read line 6"
-    );
+    let mut app = app_talking(9, base);
+    assert_eq!(panel_text(&app, at(base, 9)).first().unwrap(), "line 6");
 
     app.select_previous();
 
     assert!(!app.panel().follows());
     let parked = panel_text(&app, at(base, 9));
-    assert_eq!(parked, ["Read line 5", "Read line 6", "Read line 7"]);
+    assert_eq!(parked, ["line 5", "line 6", "line 7"]);
 
     // And the lines that arrive afterwards leave the window where it is.
     for line in 9..20 {
         app.panel_mut()
-            .account_mut()
-            .expect("a run is under way")
-            .record(&Activity::Thinking, at(base, line + 1));
+            .record_turn(&Activity::Thinking, at(base, line + 1));
     }
 
     assert_eq!(panel_text(&app, at(base, 30)), parked);
@@ -4004,7 +2106,7 @@ fn scrolling_up_in_the_panel_stops_it_following() {
 #[test]
 fn the_end_of_list_key_puts_the_panel_back_on_live() {
     let base = Instant::now();
-    let mut app = app_pacting(9, base);
+    let mut app = app_talking(9, base);
     app.select_first();
     assert!(!app.panel().follows());
     assert_eq!(app.panel().scroll_offset(), 0);
@@ -4014,25 +2116,23 @@ fn the_end_of_list_key_puts_the_panel_back_on_live() {
     assert!(app.panel().follows());
     assert_eq!(
         panel_text(&app, at(base, 9)),
-        ["Read line 6", "Read line 7", "Read line 8"],
+        ["line 6", "line 7", "line 8"],
     );
 
     // Live means live: the next line to arrive moves the window again.
     app.panel_mut()
-        .account_mut()
-        .expect("a run is under way")
-        .record(&Activity::Thinking, at(base, 10));
+        .record_turn(&Activity::Thinking, at(base, 10));
 
     assert_eq!(
         panel_text(&app, at(base, 10)),
-        ["Read line 7", "Read line 8", "thinking"],
+        ["line 7", "line 8", "thinking"],
     );
 }
 
 #[test]
 fn scrolling_back_down_to_the_end_is_following_again() {
     let base = Instant::now();
-    let mut app = app_pacting(9, base);
+    let mut app = app_talking(9, base);
 
     app.select_page_up();
     assert!(!app.panel().follows());
@@ -4050,7 +2150,7 @@ fn scrolling_back_down_to_the_end_is_following_again() {
 #[test]
 fn the_panel_says_how_many_lines_are_below_the_view() {
     let base = Instant::now();
-    let mut app = app_pacting(9, base);
+    let mut app = app_talking(9, base);
 
     // Ten lines, three of them on screen at the end: nothing below.
     assert_eq!(app.panel().lines_below(), 0);
@@ -4068,11 +2168,11 @@ fn the_panel_says_how_many_lines_are_below_the_view() {
 #[test]
 fn a_panel_nobody_has_measured_has_nothing_to_scroll() {
     let base = Instant::now();
-    let mut app = app_pacting(9, base);
+    let mut app = app_talking(9, base);
     app.panel_mut().set_height(0);
 
     // No height means no window: nothing is drawn, so the honest offset is
-    // the top however long the account is, and no movement key can push it
+    // the top however long the card is, and no movement key can push it
     // off one — the same reading the tree's rule takes of a viewport of
     // zero rows.
     for (name, movement) in MOVEMENTS {
@@ -4083,7 +2183,7 @@ fn a_panel_nobody_has_measured_has_nothing_to_scroll() {
             "{name} moved a panel of no height"
         );
         assert_eq!(app.panel().window(at(base, 9)), Vec::new(), "{name}");
-        // Nothing is drawn, so the whole account is below what is drawn.
+        // Nothing is drawn, so the whole card is below what is drawn.
         assert_eq!(app.panel().lines_below(), 10, "{name}");
     }
 
@@ -4094,125 +2194,19 @@ fn a_panel_nobody_has_measured_has_nothing_to_scroll() {
 
 #[test]
 fn the_panel_window_rule_follows_the_end_or_stays_where_it_was_put() {
-    // Following: the last screenful, whatever the account's length.
+    // Following: the last screenful, whatever the card's length.
     assert_eq!(panel_offset_for(10, 3, 0, true), 7);
     assert_eq!(panel_offset_for(11, 3, 99, true), 8);
     // Parked: the reader's own offset, clamped to what is there.
     assert_eq!(panel_offset_for(10, 3, 4, false), 4);
     assert_eq!(panel_offset_for(10, 3, 99, false), 7);
-    // An account that fits, and a panel nobody has measured, are both the
+    // A card that fits, and a panel nobody has measured, are both the
     // top — and following one is the same as being parked at it.
     for following in [true, false] {
         assert_eq!(panel_offset_for(3, 3, 2, following), 0);
         assert_eq!(panel_offset_for(0, 3, 2, following), 0);
         assert_eq!(panel_offset_for(10, 0, 2, following), 0);
     }
-}
-
-#[test]
-fn the_run_headers_row_costs_the_window_one_line_and_the_scrollback_counts_it() {
-    // What a panel has inside its border at one fixed terminal size, and
-    // what a frame with a run in flight leaves the account underneath the
-    // header. How many rows a header really takes is [`crate::ui`]'s
-    // `RUN_HEADER_HEIGHT` and is asserted over there; one is enough here,
-    // where the question is what a shorter window does, so nothing is
-    // measured and no frame is drawn.
-    const WHOLE: usize = 6;
-    const HEADER: usize = 1;
-
-    let base = Instant::now();
-    let mut below_at_top = Vec::new();
-    for (name, window, in_flight) in [
-        ("with no run in flight", WHOLE, false),
-        ("under a run's header", WHOLE - HEADER, true),
-    ] {
-        // The same account either way — twelve lines, the section heading
-        // included — so the only difference between the two passes is the
-        // row the header took off the window.
-        let mut app = app_pacting(11, base);
-        let lines = app
-            .panel()
-            .account()
-            .map(Account::line_count)
-            .expect("a run has started");
-        assert_eq!(lines, 12);
-        if in_flight {
-            app.set_run_in_flight(Run::Pact, "crates/engine", 2, 5);
-        }
-        app.panel_mut()
-            .set_height(u16::try_from(window).expect("a window this small"));
-
-        // Following the newest line: the window is the last screenful of
-        // the window it was given, and nothing is below it however many
-        // rows the header took.
-        assert!(app.panel().follows(), "{name}");
-        assert_eq!(
-            app.panel().scroll_offset(),
-            panel_offset_for(lines, window, 0, true),
-            "{name}"
-        );
-        assert_eq!(app.panel().scroll_offset(), lines - window, "{name}");
-        assert_eq!(app.panel().lines_below(), 0, "{name}");
-        assert_eq!(app.panel().window(at(base, 99)).len(), window, "{name}");
-
-        // Parked at the first line: what is below is everything the shorter
-        // window does not cover, counted against that window rather than
-        // against the one the panel would have had with no header on it.
-        app.select_first();
-        assert!(!app.panel().follows(), "{name}");
-        assert_eq!(
-            app.panel().scroll_offset(),
-            panel_offset_for(lines, window, 0, false),
-            "{name}"
-        );
-        assert_eq!(app.panel().lines_below(), lines - window, "{name}");
-        below_at_top.push(app.panel().lines_below());
-
-        // Parked in the middle: what is above the window, what is drawn in
-        // it and what is below it come to the account, so the header's row
-        // is neither counted twice nor lost between the three.
-        app.select_next();
-        app.select_next();
-        let offset = app.panel().scroll_offset();
-        assert_eq!(offset, 2, "{name}");
-        assert_eq!(
-            offset,
-            panel_offset_for(lines, window, offset, false),
-            "{name}"
-        );
-        assert_eq!(
-            offset + app.panel().window(at(base, 99)).len() + app.panel().lines_below(),
-            lines,
-            "{name}"
-        );
-
-        // And the count is off by exactly nothing: a line at a time down
-        // reaches the end of the account after that many presses, and the
-        // window is following again when it gets there.
-        let below = app.panel().lines_below();
-        for step in 1..=below {
-            app.select_next();
-            assert_eq!(
-                app.panel().lines_below(),
-                below - step,
-                "{name}, {step} down"
-            );
-        }
-        assert!(app.panel().follows(), "{name}");
-
-        // An offset past the end is clamped to the last screenful of the
-        // window there is, header or no header.
-        assert_eq!(
-            panel_offset_for(lines, window, lines * 2, false),
-            lines - window,
-            "{name}"
-        );
-    }
-
-    // The whole of the difference is the header's row: the same account
-    // parked at the same line has exactly one more line below a window that
-    // has paid for a header, and never two.
-    assert_eq!(below_at_top[1], below_at_top[0] + HEADER);
 }
 
 fn document_lines() -> Vec<String> {
@@ -4361,59 +2355,6 @@ fn the_panel_scrolls_by_rows_of_a_wrapped_document_rather_than_by_its_lines() {
     assert_eq!(app.panel().lines_below(), 2);
 }
 
-#[test]
-fn an_account_line_too_long_for_the_panel_is_broken_under_its_own_clock() {
-    // The panel's other card, at a width its lines do not fit in. A pass
-    // that reported a long path — or failed with a sentence of somebody
-    // else's stderr in it — is worth reading to the end, so the line is
-    // broken into the rows it needs, in the column it started in. See
-    // [`mod@crate::wrap`].
-    let base = Instant::now();
-    let mut app = app_pacting(0, base);
-    app.panel_mut().set_height(9);
-    let account = app
-        .panel_mut()
-        .account_mut()
-        .expect("a run has just started");
-    account.record(
-        &Activity::Tool {
-            name: "Read".to_owned(),
-            detail: Some("crates/warlock-engine/src/pact.rs".to_owned()),
-        },
-        at(base, 1),
-    );
-
-    // Nobody has measured the panel yet: two lines, two rows.
-    assert_eq!(app.panel().width(), 0);
-    assert_eq!(panel_text(&app, at(base, 9)).len(), 2);
-
-    app.panel_mut().set_width(NARROW);
-
-    // Five rows, and the whole of the path on screen. The clock's own
-    // columns are blank under it rather than repeated, so a row with
-    // nothing in that column is the row above it still going.
-    assert_eq!(
-        panel_text(&app, at(base, 9)),
-        [
-            "crates/engine",
-            "Read",
-            "       crates/warl",
-            "       ock-engine/",
-            "       src/pact.rs",
-        ]
-    );
-    assert_eq!(app.panel().lines_below(), 0);
-
-    // And wider again is the account it always was: what a card holds is
-    // what happened, never the rows some width once broke it into.
-    app.panel_mut().set_width(80);
-    assert_eq!(panel_text(&app, at(base, 9)).len(), 2);
-}
-
-fn account_window(app: &App) -> (usize, bool) {
-    app.panel.window_of(Showing::Account)
-}
-
 fn thread_window(app: &App) -> (usize, bool) {
     app.panel.window_of(Showing::Thread)
 }
@@ -4427,86 +2368,31 @@ fn document_text(app: &App) -> Vec<String> {
 }
 
 #[test]
-fn a_document_shows_over_the_account_rather_than_taking_the_panel_from_it() {
-    let base = Instant::now();
-    let mut app = app_pacting(9, base);
-    assert!(app.panel().has_account());
-
-    app.show_document(document_lines(), false);
-
-    // Two cards in one slot: the document is what is drawn, and the account
-    // is still there behind it — held, handed out by the getters, and with
-    // its own window exactly where it was.
-    assert!(app.panel().has_document());
-    assert!(app.panel().has_account());
-    assert_eq!(app.panel().account().map(Account::line_count), Some(10));
-    assert!(app.panel_mut().account_mut().is_some());
-    assert!(app.panel().has_content());
-    assert_eq!(panel_text(&app, at(base, 9))[0], "line 0");
-    assert_eq!(account_window(&app), (10 - usize::from(PANEL), true));
-}
-
-#[test]
-fn a_pact_started_under_a_document_fills_the_card_behind_it() {
-    let base = Instant::now();
-    let mut app = app_pacting(9, base);
-    app.show_document(document_lines(), false);
-    let shown = panel_text(&app, at(base, 9));
-
-    app.start_account(at(base, 100));
-
-    // The run took nothing: the document is still the card on screen, and
-    // the account started behind it on its own terms — empty, at the top,
-    // following.
-    assert!(app.panel().has_document());
-    assert_eq!(panel_text(&app, at(base, 100)), shown);
-    assert_eq!(app.panel().scroll_offset(), 0);
-    assert!(!app.panel().follows());
-    assert!(app.panel().has_account());
-    assert_eq!(app.panel().account().map(Account::line_count), Some(0));
-    assert_eq!(account_window(&app), (0, true));
-
-    // And the run goes on reporting into that card while the reader reads,
-    // with its window following the newest line for when they swap to it.
-    let account = app
-        .panel_mut()
-        .account_mut()
-        .expect("the run has its own card");
-    account.open_section("crates/tui", at(base, 100));
-    for line in 0..9 {
-        account.record(&Activity::Thinking, at(base, 101 + line));
-    }
-    assert_eq!(app.panel().account().map(Account::line_count), Some(2));
-    assert_eq!(panel_text(&app, at(base, 120)), shown);
-    assert_eq!(account_window(&app), (0, true));
-}
-
-#[test]
 fn each_card_keeps_a_window_of_its_own() {
     let base = Instant::now();
-    let mut app = app_pacting(9, base);
+    let mut app = app_talking(9, base);
 
-    // The account parked six lines down, and then a document over it.
+    // The conversation parked a line down, and then a document over it.
     app.select_first();
     app.select_next();
-    assert_eq!(account_window(&app), (1, false));
+    assert_eq!(thread_window(&app), (1, false));
 
     app.show_document(document_lines(), false);
     assert_eq!(document_window(&app), (0, false));
 
-    // Moving the document's window moves the document's window: the account
-    // is where the reader left it, still parked.
+    // Moving the document's window moves the document's window: the
+    // conversation is where the reader left it, still parked.
     app.select_next();
     assert_eq!(document_window(&app), (1, false));
     assert_eq!(app.panel().scroll_offset(), 1);
-    assert_eq!(account_window(&app), (1, false));
+    assert_eq!(thread_window(&app), (1, false));
 
     // Including when the movement takes the document to its own end, which
     // is the one thing that sets a follow flag.
     app.select_last();
     assert_eq!(document_window(&app), (5 - usize::from(PANEL), true));
     assert!(app.panel().follows());
-    assert_eq!(account_window(&app), (1, false));
+    assert_eq!(thread_window(&app), (1, false));
 }
 
 #[test]
@@ -4514,14 +2400,14 @@ fn a_movement_at_the_panel_moves_only_the_card_that_is_showing() {
     let base = Instant::now();
 
     for (name, movement) in MOVEMENTS {
-        let mut app = app_pacting(9, base);
+        let mut app = app_talking(9, base);
         app.select_first();
         app.show_document(document_lines(), false);
-        let parked = account_window(&app);
+        let parked = thread_window(&app);
 
         movement(&mut app);
 
-        assert_eq!(account_window(&app), parked, "{name} moved the account");
+        assert_eq!(thread_window(&app), parked, "{name} moved the conversation");
         assert_eq!(
             app.panel().scroll_offset(),
             document_window(&app).0,
@@ -4532,15 +2418,23 @@ fn a_movement_at_the_panel_moves_only_the_card_that_is_showing() {
     // And the wheel, which names the pane rather than accepting the focus,
     // reads the same way.
     for lines in [1, 3, 99] {
-        let mut app = app_pacting(9, base);
+        let mut app = app_talking(9, base);
         app.select_first();
         app.show_document(document_lines(), false);
-        let parked = account_window(&app);
+        let parked = thread_window(&app);
 
         app.scroll_panel_down(lines);
-        assert_eq!(account_window(&app), parked, "a wheel moved the account");
+        assert_eq!(
+            thread_window(&app),
+            parked,
+            "a wheel moved the conversation"
+        );
         app.scroll_panel_up(lines);
-        assert_eq!(account_window(&app), parked, "a wheel moved the account");
+        assert_eq!(
+            thread_window(&app),
+            parked,
+            "a wheel moved the conversation"
+        );
         assert_eq!(document_window(&app), (0, false));
     }
 }
@@ -4565,24 +2459,18 @@ fn an_empty_document_is_still_something_the_panel_is_holding() {
 #[test]
 fn the_swap_shows_the_other_card_and_the_next_swap_shows_it_back() {
     let base = Instant::now();
-    let mut app = app_pacting(9, base);
-    let account = panel_text(&app, at(base, 9));
+    let mut app = app_talking(9, base);
+    let thread = panel_text(&app, at(base, 9));
 
     app.show_document(document_lines(), false);
     let document = panel_text(&app, at(base, 9));
-    assert_ne!(document, account, "the two cards draw the same thing");
+    assert_ne!(document, thread, "the two cards draw the same thing");
 
     // Round the cycle, because a swap that only went one way would strand a
-    // reader on whichever card they were not reading. The conversation sits
-    // between the two — always a stop, empty or not, because it is where the
-    // field is — so the file is two presses from the run either way.
+    // reader on whichever card they were not reading.
     app.swap_card();
     assert_eq!(app.panel.showing(), Showing::Thread);
-    assert!(!app.panel().has_content(), "nothing has been asked");
-
-    app.swap_card();
-    assert_eq!(panel_text(&app, at(base, 9)), account);
-    assert!(app.panel().has_content());
+    assert_eq!(panel_text(&app, at(base, 9)), thread);
 
     app.swap_card();
     assert_eq!(panel_text(&app, at(base, 9)), document);
@@ -4592,7 +2480,7 @@ fn the_swap_shows_the_other_card_and_the_next_swap_shows_it_back() {
 #[test]
 fn a_swap_moves_nothing_but_which_card_is_showing() {
     let base = Instant::now();
-    let mut app = app_pacting(9, base);
+    let mut app = app_talking(9, base);
     app.show_document(document_lines(), false);
     // A window of the document's own, then the focus and a selection of the
     // tree's own, then something on the footer: everything a swap could
@@ -4622,22 +2510,21 @@ fn rewritten_lines() -> Vec<String> {
 #[test]
 fn a_re_read_fills_the_document_card_without_bringing_it_to_the_front() {
     let base = Instant::now();
-    let mut app = app_pacting(9, base);
+    let mut app = app_talking(9, base);
     // A document read once and then left: the reader is back on the
-    // account, which is where a run they are watching puts them. Two presses
-    // from the file, since the conversation sits between them.
+    // conversation.
     app.show_document(document_lines(), false);
     app.swap_card();
-    app.swap_card();
-    assert_eq!(app.panel.showing(), Showing::Account);
-    let account = panel_text(&app, at(base, 9));
+    assert_eq!(app.panel.showing(), Showing::Thread);
+    let thread = panel_text(&app, at(base, 9));
 
     app.panel_mut().refill_document(rewritten_lines(), false);
 
     // The panel is exactly where they left it. The new lines are on the card
     // behind it, waiting for the swap they will ask for themselves — a file
-    // being saved in an editor is not a reason to take a run off the screen.
-    assert_eq!(panel_text(&app, at(base, 9)), account);
+    // being saved in an editor is not a reason to take the conversation off
+    // the screen.
+    assert_eq!(panel_text(&app, at(base, 9)), thread);
     assert!(app.panel().has_document());
     assert_eq!(document_text(&app), rewritten_lines());
 
@@ -4648,13 +2535,13 @@ fn a_re_read_fills_the_document_card_without_bringing_it_to_the_front() {
 #[test]
 fn a_re_read_under_a_showing_document_leaves_it_showing_from_its_first_line() {
     let base = Instant::now();
-    let mut app = app_pacting(9, base);
+    let mut app = app_talking(9, base);
     app.show_document(document_lines(), false);
     // Parked at the end of the file that was there before, which is the
     // window a re-read has to decide what to do with.
     app.select_last();
     assert!(app.panel().follows());
-    let parked = account_window(&app);
+    let parked = thread_window(&app);
 
     app.panel_mut().refill_document(rewritten_lines(), false);
 
@@ -4664,9 +2551,9 @@ fn a_re_read_under_a_showing_document_leaves_it_showing_from_its_first_line() {
     assert_eq!(panel_text(&app, at(base, 9)), rewritten_lines());
     assert_eq!(app.panel().scroll_offset(), 0);
     assert!(!app.panel().follows());
-    // And the account behind it is where it was, still following its own
-    // newest line.
-    assert_eq!(account_window(&app), parked);
+    // And the conversation behind it is where it was, still following its
+    // own newest line.
+    assert_eq!(thread_window(&app), parked);
 }
 
 #[test]
@@ -4688,7 +2575,7 @@ fn a_re_read_the_cap_cut_short_says_so_exactly_as_the_first_read_did() {
 #[test]
 fn a_re_read_moves_nothing_but_the_document_card() {
     let base = Instant::now();
-    let mut app = app_pacting(9, base);
+    let mut app = app_talking(9, base);
     app.show_document(document_lines(), false);
     // A window of the document's own, the focus and a selection of the
     // tree's own, and something on the footer: everything a re-read could
@@ -4701,9 +2588,10 @@ fn a_re_read_moves_nothing_but_the_document_card() {
 
     app.panel_mut().refill_document(rewritten_lines(), false);
 
-    // The whole of what changed is what is on the one card: the account, the
-    // focus, the selection, the tree's window, the bit saying which card is
-    // drawn and the footer are all the app's own clone, untouched.
+    // The whole of what changed is what is on the one card: the
+    // conversation, the focus, the selection, the tree's window, the bit
+    // saying which card is drawn and the footer are all the app's own clone,
+    // untouched.
     before.panel.refill_document(rewritten_lines(), false);
     assert_eq!(
         app, before,
@@ -4714,13 +2602,13 @@ fn a_re_read_moves_nothing_but_the_document_card() {
 #[test]
 fn each_cards_window_survives_a_swap_away_and_back() {
     let base = Instant::now();
-    let mut app = app_pacting(9, base);
+    let mut app = app_talking(9, base);
 
-    // The account parked a line down from the top, and a document over it
-    // parked a line down from its own.
+    // The conversation parked a line down from the top, and a document over
+    // it parked a line down from its own.
     app.select_first();
     app.select_next();
-    let parked = account_window(&app);
+    let parked = thread_window(&app);
     assert_eq!(parked, (1, false));
 
     app.show_document(document_lines(), false);
@@ -4728,13 +2616,12 @@ fn each_cards_window_survives_a_swap_away_and_back() {
     let left = document_window(&app);
     assert_eq!(left, (1, false));
 
-    // Away, past the empty conversation: the account's window is the one the
-    // reader left it on, not the top and not the end.
+    // Away: the conversation's window is the one the reader left it on, not
+    // the top and not the end.
     app.swap_card();
-    app.swap_card();
-    assert_eq!(app.panel.showing(), Showing::Account);
+    assert_eq!(app.panel.showing(), Showing::Thread);
     assert_eq!(app.panel().scroll_offset(), parked.0);
-    assert_eq!(panel_text(&app, at(base, 9))[0], "Read line 0");
+    assert_eq!(panel_text(&app, at(base, 9))[0], "line 0");
 
     // And back: the document is on the line they left it on.
     app.swap_card();
@@ -4747,39 +2634,40 @@ fn each_cards_window_survives_a_swap_away_and_back() {
 }
 
 #[test]
-fn the_account_shows_its_newest_line_on_return_unless_it_was_parked() {
+fn the_conversation_shows_its_newest_line_on_return_unless_it_was_parked() {
     let base = Instant::now();
 
-    // Following: a run that went on reporting while the document was up is
+    // Following: a turn that went on reporting while the document was up is
     // at its newest line the moment the reader swaps to it.
-    let mut app = app_pacting(9, base);
+    let mut app = app_talking(9, base);
+    app.panel_mut().start_turn(QUESTION, at(base, 10));
     app.show_document(document_lines(), false);
-    record_lines(&mut app, 9..12, base);
+    record_lines(&mut app, 11..14, base);
 
-    app.swap_card();
     app.swap_card();
     let drawn = panel_text(&app, at(base, 20));
     assert!(app.panel().follows());
-    assert_eq!(drawn.last().expect("the account has lines"), "Read line 11");
+    assert_eq!(drawn.last().expect("the thread has lines"), "Read line 13");
 
     // Parked: the reader put that window where it is, and lines arriving
     // behind a document do not take it off the line they chose.
-    let mut app = app_pacting(9, base);
+    let mut app = app_talking(9, base);
+    app.panel_mut().start_turn(QUESTION, at(base, 10));
     app.select_first();
     app.show_document(document_lines(), false);
-    record_lines(&mut app, 9..12, base);
+    record_lines(&mut app, 11..14, base);
 
-    app.swap_card();
     app.swap_card();
     assert!(!app.panel().follows());
     assert_eq!(app.panel().scroll_offset(), 0);
-    assert_eq!(panel_text(&app, at(base, 20))[0], "crates/engine");
+    assert_eq!(panel_text(&app, at(base, 20))[0], "start");
 }
 
+// Work lines on the turn in flight, which unlike a note do not bring the
+// conversation to the front.
 fn record_lines(app: &mut App, lines: std::ops::Range<u64>, base: Instant) {
-    let account = app.panel_mut().account_mut().expect("a run has started");
     for line in lines {
-        account.record(
+        app.panel_mut().record_turn(
             &Activity::Tool {
                 name: "Read".to_owned(),
                 detail: Some(format!("line {line}")),
@@ -4792,45 +2680,35 @@ fn record_lines(app: &mut App, lines: std::ops::Range<u64>, base: Instant) {
 #[test]
 fn the_document_card_is_a_snapshot_of_what_was_read_and_nothing_rewrites_it() {
     let base = Instant::now();
-    let mut app = app_pacting(9, base);
+    let mut app = app_talking(9, base);
     app.panel_mut().set_height(9);
     app.show_document(document_lines(), false);
     assert_eq!(document_text(&app), document_lines());
 
     // Everything a session does that is not another read: the reader walks
     // the tree, reshapes it, scrolls both cards, swaps between them, and a
-    // second run starts and reports behind the document all the while.
+    // turn reports behind the document all the while.
     app.toggle_focus();
     app.select_next();
     app.select_last();
     app.toggle_collapsed();
     app.toggle_files();
-    app.toggle_pacted_only();
+    app.toggle_scoped_only();
     app.toggle_focus();
     app.select_next();
     app.swap_card();
     app.select_next();
+    app.panel_mut().start_turn(QUESTION, at(base, 100));
     app.swap_card();
-    app.swap_card();
-    app.start_account(at(base, 100));
-    app.panel_mut()
-        .account_mut()
-        .expect("a second run has started")
-        .open_section("crates/tui", at(base, 100));
     record_lines(&mut app, 0..4, at(base, 100));
     app.set_message("something the last keystroke said");
 
     // The card holds the lines it was handed, in the order it was handed
     // them: it does not follow the selection, it is not appended to by the
-    // run, and no window the reader moved has edited what it is a window
+    // turn, and no window the reader moved has edited what it is a window
     // over.
     assert_eq!(document_text(&app), document_lines());
     assert_eq!(panel_text(&app, at(base, 200)), document_lines());
-    assert_eq!(
-        app.panel().account().map(Account::line_count),
-        Some(5),
-        "the run behind the document recorded nothing"
-    );
 
     // The only thing that writes the card is another read, which replaces it
     // whole rather than adding to it.
@@ -4842,8 +2720,8 @@ fn the_document_card_is_a_snapshot_of_what_was_read_and_nothing_rewrites_it() {
 fn a_swap_with_nothing_but_the_conversation_is_refused_naming_the_view_key() {
     // The only press that has nowhere to go. The conversation is always a
     // stop, so a swap is refused exactly when it is the only card there is:
-    // no pact has run and no file has been read, and the two cards the key
-    // would reach are both cards about nothing.
+    // no file has been read, and the card the key would reach is a card
+    // about nothing.
     let mut app = App::from_rows(three_rows());
     app.panel_mut().set_height(PANEL);
     app.set_message("something the last keystroke said");
@@ -4893,7 +2771,7 @@ fn selected_text(app: &App) -> String {
 #[test]
 fn a_press_highlights_nothing_until_a_drag_extends_it() {
     let base = Instant::now();
-    let mut app = app_pacting(9, base);
+    let mut app = app_at_the_panel();
     ask_and_answer(&mut app, base);
 
     let (from, to) = DOES;
@@ -4913,7 +2791,7 @@ fn a_press_highlights_nothing_until_a_drag_extends_it() {
 #[test]
 fn a_drag_back_past_its_anchor_selects_from_the_anchor() {
     let base = Instant::now();
-    let mut app = app_pacting(9, base);
+    let mut app = app_at_the_panel();
     ask_and_answer(&mut app, base);
 
     // The press lands at the end of the word and the drag goes left, which
@@ -4936,7 +2814,7 @@ fn a_drag_back_past_its_anchor_selects_from_the_anchor() {
 #[test]
 fn a_drag_with_no_press_behind_it_highlights_nothing() {
     let base = Instant::now();
-    let mut app = app_pacting(9, base);
+    let mut app = app_at_the_panel();
     ask_and_answer(&mut app, base);
 
     app.extend_selection(DOES.1);
@@ -4946,8 +2824,7 @@ fn a_drag_with_no_press_behind_it_highlights_nothing() {
 
 #[test]
 fn a_press_with_no_conversation_to_measure_against_highlights_nothing() {
-    let base = Instant::now();
-    let mut app = app_pacting(9, base);
+    let mut app = app_at_the_panel();
     assert!(!app.panel().has_thread());
 
     app.start_selection(DOES.0);
@@ -4959,7 +2836,8 @@ fn a_press_with_no_conversation_to_measure_against_highlights_nothing() {
 #[test]
 fn nothing_but_the_swap_takes_the_highlight_down() {
     let base = Instant::now();
-    let mut app = app_pacting(9, base);
+    let mut app = app_at_the_panel();
+    app.show_document(document_lines(), false);
     ask_and_answer(&mut app, base);
     app.start_selection(DOES.0);
     app.extend_selection(DOES.1);
@@ -4978,12 +2856,6 @@ fn nothing_but_the_swap_takes_the_highlight_down() {
     app.select_previous();
     app.set_message("something the last keystroke said");
     assert_eq!(app.selection(), Some(held), "a key press cleared it");
-
-    // Esc, which is warlock's cancel while a run is in flight and its quit
-    // otherwise — neither of which is about the card.
-    app.set_pact_in_flight("repo/crates", 1, 4);
-    app.clear_pact_in_flight();
-    assert_eq!(app.selection(), Some(held), "Esc cleared it");
 
     // New text arriving on the thread, under the selection and after it.
     app.panel_mut().note("a note nobody asked for", at(base, 6));
@@ -5005,7 +2877,7 @@ fn nothing_but_the_swap_takes_the_highlight_down() {
 #[test]
 fn text_arriving_under_a_selection_leaves_it_on_the_same_words() {
     let base = Instant::now();
-    let mut app = app_pacting(9, base);
+    let mut app = app_at_the_panel();
     ask_and_answer(&mut app, base);
     app.start_selection(DOES.0);
     app.extend_selection(DOES.1);
@@ -5023,7 +2895,7 @@ fn text_arriving_under_a_selection_leaves_it_on_the_same_words() {
 #[test]
 fn the_swap_takes_the_highlight_down_wherever_it_lands() {
     let base = Instant::now();
-    let mut app = app_pacting(9, base);
+    let mut app = app_at_the_panel();
     ask_and_answer(&mut app, base);
     app.show_document(document_lines(), false);
     app.swap_card();
@@ -5033,11 +2905,10 @@ fn the_swap_takes_the_highlight_down_wherever_it_lands() {
     app.extend_selection(DOES.1);
     assert!(app.selection().is_some());
 
-    // Round the whole cycle: the highlight is gone at the first card and
+    // Round the whole cycle: the highlight is gone at the document and
     // does not come back when the conversation does.
     app.swap_card();
     assert_eq!(app.selection(), None);
-    app.swap_card();
     app.swap_card();
     assert!(app.panel().showing_thread());
     assert_eq!(app.selection(), None, "the swap back put it back");
@@ -5062,80 +2933,12 @@ fn a_swap_that_has_nowhere_to_go_leaves_the_highlight_alone() {
 }
 
 #[test]
-fn the_swap_key_goes_round_all_three_cards_and_leaves_none_unreachable() {
-    let base = Instant::now();
-    let mut app = app_pacting(9, base);
-    let account = panel_text(&app, at(base, 9));
-
-    // A question brings the thread to the front by itself, the way a read
-    // brings the document; both cards are filled behind whatever is drawn.
-    ask_and_answer(&mut app, base);
-    assert!(app.panel().has_thread());
-    let thread = panel_text(&app, at(base, 9));
-    app.show_document(document_lines(), false);
-    let document = panel_text(&app, at(base, 9));
-
-    // Three cards drawing three different things, so a swap landing on the
-    // wrong one could not pass for the right one.
-    assert_ne!(thread, account, "the run and the conversation draw alike");
-    assert_ne!(document, thread, "the conversation and the file draw alike");
-    assert_ne!(document, account, "the run and the file draw alike");
-
-    // Round twice from the document: the cycle is a cycle, every card is
-    // reachable from every other, and none of the three is skipped.
-    let mut seen = Vec::new();
-    for _ in 0..6 {
-        app.swap_card();
-        seen.push(panel_text(&app, at(base, 9)));
-    }
-    assert_eq!(
-        seen,
-        [
-            thread.clone(),
-            account.clone(),
-            document.clone(),
-            thread,
-            account,
-            document,
-        ]
-    );
-    // And nothing was said about any of it: the reader can see which card
-    // they are on.
-    assert!(app.message().is_none(), "a swap that worked said something");
-}
-
-#[test]
-fn a_swap_with_a_thread_and_no_document_goes_between_those_two() {
-    let base = Instant::now();
-    let mut app = app_pacting(9, base);
-    let account = panel_text(&app, at(base, 9));
-    ask_and_answer(&mut app, base);
-    let thread = panel_text(&app, at(base, 9));
-    assert!(!app.panel().has_document());
-
-    // The empty card is stepped over rather than shown, so the key never
-    // spends a press on warlock's mark — and it is never refused either,
-    // because there is somewhere to go.
-    app.swap_card();
-    assert_eq!(panel_text(&app, at(base, 9)), account);
-    app.swap_card();
-    assert_eq!(panel_text(&app, at(base, 9)), thread);
-    assert!(app.message().is_none(), "a swap that worked said something");
-}
-
-#[test]
-fn a_swap_out_of_a_document_lands_on_the_conversation_rather_than_an_empty_account() {
-    // The session this is most of: somebody has been talking to the panel,
-    // no pact has run, and they open a file. The swap back has to be the
-    // conversation they left — an empty account here would take their chat
-    // off the screen and give them warlock's mark, which is the one thing
-    // on this screen that says nothing.
+fn a_swap_out_of_a_document_lands_on_the_conversation_it_left() {
     let base = Instant::now();
     let mut app = App::from_rows(three_rows());
     app.panel_mut().set_height(PANEL);
     ask_and_answer(&mut app, base);
     let thread = panel_text(&app, at(base, 9));
-    assert!(!app.panel().has_account(), "no pact has run this session");
 
     app.show_document(document_lines(), false);
     let document = panel_text(&app, at(base, 9));
@@ -5146,8 +2949,7 @@ fn a_swap_out_of_a_document_lands_on_the_conversation_rather_than_an_empty_accou
     assert_eq!(panel_text(&app, at(base, 9)), thread);
     assert!(app.message().is_none(), "a swap that worked said something");
 
-    // And back to the file: a cycle of the two cards that have something on
-    // them, with the empty one stepped over in both directions.
+    // And back to the file: a cycle of the two cards.
     app.swap_card();
     assert_eq!(panel_text(&app, at(base, 9)), document);
     app.swap_card();
@@ -5156,11 +2958,9 @@ fn a_swap_out_of_a_document_lands_on_the_conversation_rather_than_an_empty_accou
 
 #[test]
 fn a_swap_out_of_a_document_with_nothing_else_lands_where_the_field_is() {
-    // The other half of that rule, and why the empty account is not simply
-    // skipped: a document hides the composer, so the way back out of one
-    // has to land on a card the field is drawn under. With no conversation
-    // to go to, the empty account is the only one there is — and a reader
-    // who has read a file on a fresh session can still type.
+    // A document hides the composer, so the way back out of one has to land
+    // on a card the field is drawn under, even an empty one: a reader who
+    // has read a file on a fresh session can still type.
     let mut app = App::from_rows(three_rows());
     app.panel_mut().set_height(PANEL);
     app.show_document(document_lines(), false);
@@ -5169,21 +2969,20 @@ fn a_swap_out_of_a_document_with_nothing_else_lands_where_the_field_is() {
     app.swap_card();
 
     assert!(app.panel().composer_showable());
-    assert!(!app.panel().has_content(), "the account is the empty one");
+    assert!(
+        !app.panel().has_content(),
+        "the conversation is the empty one"
+    );
     assert!(app.message().is_none(), "a swap that worked said something");
 }
 
 #[test]
-fn showing_one_card_throws_neither_of_the_other_two_away() {
+fn showing_one_card_throws_the_other_away() {
     let base = Instant::now();
-    let mut app = app_pacting(9, base);
+    let mut app = app_at_the_panel();
 
-    // The account parked a line down from its top, then a thread over it
-    // parked a line down from its own, then a document over that.
-    app.select_first();
-    app.select_next();
-    assert_eq!(account_window(&app), (1, false));
-
+    // A thread parked a line down from its top, then a document over it
+    // parked a line down from its own.
     ask_and_answer(&mut app, base);
     app.select_first();
     app.select_next();
@@ -5193,12 +2992,10 @@ fn showing_one_card_throws_neither_of_the_other_two_away() {
     app.select_next();
     assert_eq!(document_window(&app), (1, false));
 
-    // Every card is still filled and every window is still where it was
-    // left: showing one card neither empties the others nor moves them.
-    assert!(app.panel().has_account());
+    // Both cards are still filled and both windows are still where they were
+    // left: showing one card neither empties the other nor moves it.
     assert!(app.panel().has_thread());
     assert!(app.panel().has_document());
-    assert_eq!(account_window(&app), (1, false));
     assert_eq!(thread_window(&app), (1, false));
     assert_eq!(document_window(&app), (1, false));
 
@@ -5207,8 +3004,6 @@ fn showing_one_card_throws_neither_of_the_other_two_away() {
     app.swap_card();
     assert_eq!(panel_text(&app, at(base, 9))[0], "Grep thread line 0");
     app.swap_card();
-    assert_eq!(panel_text(&app, at(base, 9))[0], "Read line 0");
-    app.swap_card();
     assert_eq!(
         panel_text(&app, at(base, 9)),
         ["line 1", "line 2", "line 3"]
@@ -5216,39 +3011,31 @@ fn showing_one_card_throws_neither_of_the_other_two_away() {
 }
 
 #[test]
-fn each_of_the_three_cards_keeps_its_own_follow_flag() {
+fn each_card_keeps_its_own_follow_flag() {
     let base = Instant::now();
-    let mut app = app_pacting(9, base);
-    // The account parked, the thread left following, the document at the
-    // top of a file it was never following: three cards, three answers.
-    app.select_first();
+    let mut app = app_at_the_panel();
+    // The thread left following, the document at the top of a file it was
+    // never following: two cards, two answers.
     ask_and_answer(&mut app, base);
     app.show_document(document_lines(), false);
 
-    assert_eq!(account_window(&app), (0, false));
     assert_eq!(thread_window(&app), (2, true));
     assert_eq!(document_window(&app), (0, false));
 
     // Whichever card is showing is the one the panel answers about, and the
-    // other two go on being what they were. The document first, then round
-    // the cycle: the conversation it left following, then the account it
-    // left parked.
+    // other goes on being what it was.
     assert!(!app.panel().follows());
     assert_eq!(app.panel().scroll_offset(), 0);
     app.swap_card();
     assert!(app.panel().follows());
     assert_eq!(app.panel().scroll_offset(), 2);
-    app.swap_card();
-    assert!(!app.panel().follows());
-    assert_eq!(app.panel().scroll_offset(), 0);
 
     // A turn already under way goes on being answered behind a document,
     // and the document does not move an inch while it is. Asking brings the
-    // conversation to the front, so the file is two presses back.
+    // conversation to the front, so the file is a press back.
     app.panel_mut()
         .start_turn("and how long does it take?", at(base, 6));
     assert_eq!(app.panel.showing(), Showing::Thread);
-    app.swap_card();
     app.swap_card();
     assert_eq!(app.panel.showing(), Showing::Document);
     assert_eq!(
@@ -5262,7 +3049,7 @@ fn each_of_the_three_cards_keeps_its_own_follow_flag() {
     );
 
     // And the thread is at its newest row the moment the reader swaps back
-    // to it, exactly as a run left following is.
+    // to it.
     app.swap_card();
     assert_eq!(app.panel.showing(), Showing::Thread);
     assert!(app.panel().follows());
@@ -5275,7 +3062,7 @@ fn each_of_the_three_cards_keeps_its_own_follow_flag() {
 #[test]
 fn every_line_wider_than_the_panel_is_drawn_in_as_many_rows_as_it_needs() {
     let base = Instant::now();
-    let mut app = app_pacting(11, base);
+    let mut app = app_at_the_panel();
     app.panel_mut().set_height(11);
     ask_and_answer(&mut app, base);
 
@@ -5330,7 +3117,7 @@ fn every_line_wider_than_the_panel_is_drawn_in_as_many_rows_as_it_needs() {
 #[test]
 fn a_second_question_goes_under_the_first_rather_than_in_place_of_it() {
     let base = Instant::now();
-    let mut app = app_pacting(9, base);
+    let mut app = app_at_the_panel();
     // Nothing asked yet: there is no thread at all, and what a turn would
     // have reported falls on the floor rather than making one.
     assert!(!app.panel().has_thread());
@@ -5359,10 +3146,6 @@ fn a_second_question_goes_under_the_first_rather_than_in_place_of_it() {
     app.panel_mut().end_turn(&Ending::NothingSaid, at(base, 9));
     let thread = app.panel().thread().expect("a question has been asked");
     assert_eq!(thread.turns()[1].ending(), Some(&Ending::Cancelled));
-
-    // And the run behind all of it never heard a word: a conversation is
-    // not a pact.
-    assert_eq!(app.panel().account().map(Account::line_count), Some(10));
 }
 
 #[test]
@@ -5372,7 +3155,7 @@ fn a_note_brings_the_conversation_forward_and_costs_nobody_a_turn() {
     const REFUSED: &str = "/plan is not a command warlock has";
 
     let base = Instant::now();
-    let mut app = app_pacting(9, base);
+    let mut app = app_at_the_panel();
     // A file on screen, and not one question asked: the note has to make
     // the card as well as land on it.
     app.show_document(document_lines(), false);
@@ -5423,19 +3206,19 @@ fn a_note_brings_the_conversation_forward_and_costs_nobody_a_turn() {
         Some(1)
     );
 
-    // The other two cards are exactly as they were left, lines and all.
-    assert!(app.panel().has_account());
+    // The document is exactly as it was left, lines and all.
     assert!(app.panel().has_document());
+    assert_eq!(document_text(&app), document_lines());
 }
 
 #[test]
 fn a_reload_carries_the_thread_over_with_the_rest_of_the_panel() {
     let base = Instant::now();
-    let mut app = app_pacting(9, base);
+    let mut app = app_at_the_panel();
     ask_and_answer(&mut app, base);
     let thread = panel_text(&app, at(base, 9));
 
-    let reseated = reseat_on(app.clone(), &fixture::tree_after_a_run());
+    let reseated = reseat_on(app.clone(), &fixture::tree_after_a_rescope());
 
     // The tree is read again *because* something happened, and a
     // conversation is not a claim about the tree: the card, the turn on it
@@ -5449,317 +3232,8 @@ fn a_reload_carries_the_thread_over_with_the_rest_of_the_panel() {
 }
 
 #[test]
-fn a_run_rolled_back_leaves_the_conversation_where_it_was() {
-    let base = Instant::now();
-    let mut app = app_pacting(9, base);
-    // The copy is taken before the run, so it predates every word of the
-    // conversation held over it.
-    let before = app.clone();
-    ask_and_answer(&mut app, base);
-    let thread = panel_text(&app, at(base, 9));
-
-    app.restore_from(before);
-
-    // The panel is the one thing a rollback keeps, and the thread is on it:
-    // a question somebody asked is not a claim about the tree, and rolling
-    // one back would take the answer off the screen of the reader who
-    // wanted it.
-    assert!(app.panel().has_thread());
-    assert_eq!(
-        app.panel().thread().map(|thread| thread.turns().len()),
-        Some(1)
-    );
-    assert_eq!(panel_text(&app, at(base, 9)), thread);
-}
-
-fn run_a_pact(app: &mut App, base: Instant, from: u64) {
-    app.start_account(at(base, from));
-    app.panel_mut()
-        .write_run(|account| account.open_section("crates/tui", at(base, from)));
-    for line in 0..3 {
-        app.panel_mut().write_run(|account| {
-            account.record(
-                &Activity::Tool {
-                    name: "Read".to_owned(),
-                    detail: Some(format!("run line {line}")),
-                },
-                at(base, from + line + 1),
-            );
-        });
-    }
-    app.panel_mut().write_run(|account| {
-        account.close_section(
-            &Outcome::Wrote {
-                document: PathBuf::from("crates/tui").join(".warlock.md"),
-                bytes: 120,
-            },
-            at(base, from + 4),
-        );
-    });
-    app.panel_mut()
-        .write_run(|account| account.finish(at(base, from + 5)));
-}
-
-#[test]
-fn a_run_started_on_the_thread_puts_nothing_in_the_conversation() {
-    let base = Instant::now();
-    let mut app = app_pacting(9, base);
-    ask_and_answer(&mut app, base);
-    assert!(app.panel().showing_thread());
-    let asked = panel_text(&app, at(base, 9));
-
-    run_a_pact(&mut app, base, 10);
-
-    // The card the reader was on is the card they are on, drawing exactly
-    // what it drew: a pact has a card of its own, and a conversation that
-    // also carried it would be the same run written twice on one screen.
-    assert!(app.panel().showing_thread(), "the run took the panel");
-    assert_eq!(panel_text(&app, at(base, 20)), asked);
-    let thread = app.panel().thread().expect("a question has been asked");
-    assert_eq!(thread.turns().len(), 1, "the run took a turn");
-    assert_eq!(thread.turns()[0].message(), QUESTION);
-    assert_eq!(thread.turns()[0].answer(), Some(ANSWER));
-    // And nothing is in flight, so the field is the reader's: a run is not
-    // a question and does not mute the composer.
-    assert!(thread.in_flight().is_none());
-
-    // The run is all on its own card, whole.
-    assert_eq!(app.panel().account().map(Account::line_count), Some(6));
-}
-
-#[test]
-fn a_runs_events_reach_the_account_card_and_nowhere_else() {
-    let base = Instant::now();
-    let mut app = app_pacting(9, base);
-    ask_and_answer(&mut app, base);
-    let asked = panel_text(&app, at(base, 9));
-
-    // Fed one event at a time, and after each of them the conversation is
-    // the conversation: a run fills one card, as it happens, and the other
-    // two are none of its business.
-    app.start_account(at(base, 10));
-    app.panel_mut()
-        .write_run(|account| account.open_section("crates/tui", at(base, 10)));
-    let mut seen = Vec::new();
-    for (line, now) in [(0, 11), (1, 12), (2, 13)] {
-        app.panel_mut().write_run(|account| {
-            account.record(
-                &Activity::Tool {
-                    name: "Read".to_owned(),
-                    detail: Some(format!("run line {line}")),
-                },
-                at(base, now),
-            );
-        });
-        let card = app.panel().account().expect("the run started its own card");
-        seen.push(card.line_count());
-        assert_eq!(panel_text(&app, at(base, 20)), asked);
-    }
-    // Something did arrive on each of the three passes, so the equality
-    // above is about a card that was moving.
-    assert_eq!(seen, [2, 3, 4]);
-
-    // And the outcome and the summary are the same story: the account says
-    // how the run went, and the thread still says what was asked.
-    app.panel_mut().write_run(|account| {
-        account.close_section(
-            &Outcome::Refused {
-                reason: "the model would not".to_owned(),
-            },
-            at(base, 14),
-        );
-        account.finish(at(base, 15));
-    });
-    let card = app.panel().account().expect("the run started its own card");
-    assert!(
-        card.lines(at(base, 30))
-            .iter()
-            .any(|line| matches!(line, Line::Summary { .. })),
-        "the run never said how it went"
-    );
-    assert_eq!(panel_text(&app, at(base, 30)), asked);
-    assert_eq!(
-        app.panel().thread().map(|thread| thread.turns().len()),
-        Some(1),
-        "the run took a turn of the conversation"
-    );
-}
-
-#[test]
-fn a_run_with_no_conversation_behind_it_conjures_no_thread() {
-    let base = Instant::now();
-    let mut app = app_pacting(9, base);
-    assert!(!app.panel().has_thread());
-
-    run_a_pact(&mut app, base, 10);
-
-    // Nothing typed, no conversation held: a run fills its own card and
-    // nothing else, and it took the panel because the panel had nothing on
-    // it — the mark is not worth more than the run the reader just asked
-    // for.
-    assert!(!app.panel().has_thread());
-    assert!(app.panel().thread().is_none());
-    assert_eq!(app.panel.showing(), Showing::Account);
-    assert_eq!(app.panel().account().map(Account::line_count), Some(6));
-
-    // The conversation is still a card to swap to, empty or not: it is
-    // where the field is, so a reader who wants to ask something about the
-    // run they are watching is one press away from being able to.
-    app.swap_card();
-    assert_eq!(app.panel.showing(), Showing::Thread);
-    assert!(!app.panel().has_content(), "nothing has been asked");
-    assert!(app.panel().composer_showable(), "the field came with it");
-    assert!(app.message().is_none(), "a swap that worked said something");
-
-    // With no document read the key goes between those two and is never
-    // refused: there is always somewhere to go.
-    app.swap_card();
-    assert_eq!(app.panel.showing(), Showing::Account);
-    app.swap_card();
-    assert_eq!(app.panel.showing(), Showing::Thread);
-    assert!(app.message().is_none(), "a swap that worked said something");
-
-    // With a document read the cycle is all three, in order.
-    app.show_document(document_lines(), false);
-    assert_eq!(app.panel.showing(), Showing::Document);
-    app.swap_card();
-    assert_eq!(app.panel.showing(), Showing::Thread);
-    app.swap_card();
-    assert_eq!(app.panel.showing(), Showing::Account);
-    app.swap_card();
-    assert_eq!(app.panel.showing(), Showing::Document);
-}
-
-#[test]
-fn a_run_started_under_a_document_leaves_both_other_cards_alone() {
-    let base = Instant::now();
-    let mut app = app_pacting(9, base);
-    ask_and_answer(&mut app, base);
-    app.show_document(document_lines(), false);
-    let document = panel_text(&app, at(base, 9));
-
-    run_a_pact(&mut app, base, 10);
-
-    // Which card is showing is the reader's: the file they were reading is
-    // still what is drawn, and the run filled the one card it is about.
-    assert_eq!(app.panel.showing(), Showing::Document);
-    assert_eq!(panel_text(&app, at(base, 20)), document);
-    assert_eq!(app.panel().account().map(Account::line_count), Some(6));
-    assert_eq!(
-        app.panel().thread().map(|thread| thread.turns().len()),
-        Some(1),
-        "the run took a turn of the conversation"
-    );
-}
-
-#[test]
-fn the_account_is_a_swap_away_from_a_conversation_that_never_moved() {
-    let base = Instant::now();
-    let mut app = app_pacting(9, base);
-    ask_and_answer(&mut app, base);
-    app.select_first();
-    app.select_next();
-    assert_eq!(thread_window(&app), (1, false));
-    let parked = panel_text(&app, at(base, 20));
-
-    run_a_pact(&mut app, base, 10);
-
-    // A run behind the conversation moves nothing on it: not its lines, not
-    // its window, not where the reader parked it.
-    assert_eq!(thread_window(&app), (1, false));
-    assert_eq!(panel_text(&app, at(base, 20)), parked);
-
-    // One press to the account, which the run filled, and one back. The
-    // account is at its own window, following its own newest line: the
-    // reader's place in the thread had nothing to do with it.
-    app.swap_card();
-    assert_eq!(app.panel.showing(), Showing::Account);
-    assert_eq!(app.panel().account().map(Account::line_count), Some(6));
-    assert_eq!(account_window(&app), (6 - usize::from(PANEL), true));
-    assert_eq!(panel_text(&app, at(base, 20))[0], "Read run line 2");
-
-    app.swap_card();
-    assert_eq!(app.panel.showing(), Showing::Thread);
-    // Each card keeps its own window: the reader comes back to the line
-    // they left rather than to the end of a run that went on without them.
-    assert_eq!(thread_window(&app), (1, false));
-    assert_eq!(panel_text(&app, at(base, 20)), parked);
-}
-
-#[test]
-fn a_rollback_keeps_the_run_that_ended_and_the_conversation_beside_it() {
-    let base = Instant::now();
-    let mut app = app_pacting(9, base);
-    ask_and_answer(&mut app, base);
-    // The copy is taken when the key is pressed, before the run it is put
-    // back for has recorded a word of itself.
-    let before = app.clone();
-    run_a_pact(&mut app, base, 10);
-    let thread = panel_text(&app, at(base, 20));
-
-    app.restore_from(before);
-
-    // A run that ends with nothing recorded is exactly the run a reader
-    // most wants to see the end of, and the panel is what a rollback keeps:
-    // the account survives whole, and so does the conversation beside it.
-    assert!(app.panel().showing_thread());
-    assert_eq!(panel_text(&app, at(base, 20)), thread);
-    assert_eq!(app.panel().account().map(Account::line_count), Some(6));
-    let held = app.panel().thread().expect("a question has been asked");
-    assert_eq!(held.turns().len(), 1);
-    assert_eq!(held.turns()[0].answer(), Some(ANSWER));
-}
-
-#[test]
-fn a_run_under_way_when_a_question_is_asked_files_nothing_under_it() {
-    let base = Instant::now();
-    let mut app = app_pacting(9, base);
-
-    // The run is under way, and then somebody asks something.
-    app.start_account(at(base, 10));
-    app.panel_mut().start_turn(QUESTION, at(base, 11));
-    app.panel_mut()
-        .write_run(|account| account.open_section("crates/tui", at(base, 12)));
-    app.panel_mut()
-        .write_run(|account| account.finish(at(base, 13)));
-
-    // The run has a card and the question has a turn: a line filed under
-    // the question would put a pact's work under somebody's sentence.
-    assert_eq!(app.panel().account().map(Account::line_count), Some(3));
-    let thread = app.panel().thread().expect("a question has been asked");
-    assert_eq!(thread.turns().len(), 1);
-    assert_eq!(thread.turns()[0].message(), QUESTION);
-    assert_eq!(thread.turns()[0].answer(), None);
-}
-
-#[test]
-fn a_line_written_after_a_run_is_over_reaches_nothing_at_all() {
-    let base = Instant::now();
-    let mut app = app_pacting(9, base);
-    ask_and_answer(&mut app, base);
-    run_a_pact(&mut app, base, 10);
-    let thread = panel_text(&app, at(base, 20));
-    let turns = app.panel().thread().map(|thread| thread.turns().len());
-
-    // A late event — a worker that reported after its outcome landed — is
-    // dropped by the account, which is finished and says so on screen. The
-    // conversation hears nothing either, as it heard nothing about the rest
-    // of the run.
-    app.panel_mut()
-        .write_run(|account| account.record(&Activity::Thinking, at(base, 21)));
-
-    assert_eq!(
-        app.panel().thread().map(|thread| thread.turns().len()),
-        turns
-    );
-    assert_eq!(panel_text(&app, at(base, 30)), thread);
-    assert_eq!(app.panel().account().map(Account::line_count), Some(6));
-}
-
-#[test]
 fn a_file_row_hands_its_own_path_to_the_view_key_and_changes_nothing() {
-    // A `.warlock.md` is an ordinary file row, so both kinds are the yes.
-    for path in ["warlock/assets/logo.svg", "warlock/crates/tui/.warlock.md"] {
+    for path in ["warlock/assets/logo.svg", "warlock/crates/tui/Cargo.toml"] {
         let mut app = app_with_files_selecting(path);
         app.set_message("something the last keystroke said");
         let before = app.clone();
@@ -5775,52 +3249,26 @@ fn a_file_row_hands_its_own_path_to_the_view_key_and_changes_nothing() {
 }
 
 #[test]
-fn a_documented_directory_is_refused_by_the_view_key_naming_its_document() {
-    // Pacted or not: what decides the wording is whether there is a document
-    // to read, and `warlock/assets` has one without a manifest entry.
-    for (path, document) in [
-        ("warlock/crates/tui", "warlock/crates/tui/.warlock.md"),
-        ("warlock/assets", "warlock/assets/.warlock.md"),
-    ] {
+fn a_directory_is_refused_by_the_view_key_naming_the_file_rows() {
+    // Scoped or not, with files of its own or none: a directory is not a
+    // thing to read.
+    for path in ["warlock/crates", "warlock/crates/tui", "warlock/assets"] {
         let mut app = app_selecting(path);
         let mut before = app.clone();
 
         assert_eq!(app.view_target(), None, "{path} was read");
 
         let message = app.message().expect("a directory row is refused");
-        assert!(
-            message.starts_with(&format!("{path} is a directory")),
-            "{message}"
+        assert_eq!(
+            message,
+            format!("{path} is a directory — press v on one of its files to read it")
         );
-        // The row that would have worked is named, because it is the next
-        // one down.
-        assert!(message.contains(document), "{message}");
         // The message is the whole of what the press changed, and the panel
         // is untouched.
         before.set_message(message);
         assert_eq!(app, before, "refusing {path} moved something else");
         assert!(!app.panel().has_content(), "{path} drew something");
     }
-}
-
-#[test]
-fn an_undocumented_directory_is_refused_by_the_view_key_naming_the_pact_key() {
-    let mut app = app_selecting("warlock/crates");
-    let mut before = app.clone();
-
-    assert_eq!(app.view_target(), None, "an undocumented row was read");
-
-    let message = app.message().expect("a directory row is refused");
-    assert!(
-        message.starts_with("warlock/crates is a directory"),
-        "{message}"
-    );
-    // Nothing to point at, so it points at the key that would make
-    // something to point at.
-    assert!(message.contains("press p to pact it"), "{message}");
-    before.set_message(message);
-    assert_eq!(app, before, "refusing a directory moved something else");
-    assert!(!app.panel().has_content(), "the refusal drew something");
 }
 
 #[test]
@@ -5980,10 +3428,10 @@ fn the_wheel_over_the_panel_is_exactly_that_many_presses_at_the_panel() {
     let base = Instant::now();
 
     for lines in [0, 1, NOTCH, usize::from(PANEL), MANY] {
-        // `app_pacting` leaves the panel focused, so the keys reach it; the
+        // `app_talking` leaves the panel focused, so the keys reach it; the
         // wheel is asked of an app whose keys are pointed at the tree.
-        let mut stepped = app_pacting(9, base);
-        let mut wheeled = app_pacting(9, base);
+        let mut stepped = app_talking(9, base);
+        let mut wheeled = app_talking(9, base);
         wheeled.set_focus(Focus::Tree);
         for _ in 0..lines {
             stepped.select_previous();
@@ -6020,7 +3468,7 @@ fn the_wheel_over_the_panel_is_exactly_that_many_presses_at_the_panel() {
 #[test]
 fn the_wheel_over_the_panel_breaks_follow_and_scrolling_back_restores_it() {
     let base = Instant::now();
-    let mut app = app_pacting(9, base);
+    let mut app = app_talking(9, base);
     // The keys are pointed at the tree throughout: the pointer is over the
     // panel, and that is the whole of what decides which pane scrolls.
     app.set_focus(Focus::Tree);
@@ -6032,14 +3480,12 @@ fn the_wheel_over_the_panel_breaks_follow_and_scrolling_back_restores_it() {
     assert!(!app.panel().follows());
     assert_eq!(
         panel_text(&app, at(base, 9)),
-        ["Read line 3", "Read line 4", "Read line 5"],
+        ["line 3", "line 4", "line 5"],
     );
 
     // Parked means parked: the lines that arrive next leave it where it is.
     app.panel_mut()
-        .account_mut()
-        .expect("a run is under way")
-        .record(&Activity::Thinking, at(base, 10));
+        .record_turn(&Activity::Thinking, at(base, 10));
     assert_eq!(app.panel().scroll_offset(), 10 - usize::from(PANEL) - NOTCH);
     assert!(!app.panel().follows());
 
@@ -6051,7 +3497,7 @@ fn the_wheel_over_the_panel_breaks_follow_and_scrolling_back_restores_it() {
     assert_eq!(app.panel().lines_below(), 0);
     assert_eq!(
         panel_text(&app, at(base, 10)),
-        ["Read line 7", "Read line 8", "thinking"],
+        ["line 7", "line 8", "thinking"],
     );
     assert_eq!(app.selected(), selected, "the panel moved the tree");
     assert_eq!(app.focus(), Focus::Tree, "the panel took the keys");
@@ -6062,7 +3508,7 @@ fn the_wheel_over_the_panel_leaves_the_last_keystrokes_message_up() {
     // The same reading a movement key at the panel takes: the line belongs
     // to the tree column, and nothing there has moved.
     let base = Instant::now();
-    let mut app = app_pacting(9, base);
+    let mut app = app_talking(9, base);
     app.set_focus(Focus::Tree);
     app.set_message("something to keep");
 
@@ -6111,7 +3557,7 @@ fn none_of_the_pointers_moves_touches_the_tree_or_the_collapsed_set() {
     app.toggle_collapsed();
     let rows = drawn(&app);
     let collapsed = app.collapsed().clone();
-    let counts = app.counts();
+    let coverage = app.coverage();
 
     app.select_row(0);
     app.select_next_by(NOTCH);
@@ -6127,19 +3573,19 @@ fn none_of_the_pointers_moves_touches_the_tree_or_the_collapsed_set() {
         &collapsed,
         "the pointer collapsed something"
     );
-    assert_eq!(app.counts(), counts, "the pointer moved the tally");
+    assert_eq!(app.coverage(), coverage, "the pointer moved the tally");
 }
 
 #[test]
-fn a_re_seat_carries_the_account_and_the_panels_window() {
+fn a_re_seat_carries_the_conversation_and_the_panels_window() {
     let base = Instant::now();
-    let mut app = app_pacting(9, base);
+    let mut app = app_talking(9, base);
     app.select_first();
     let before = panel_text(&app, at(base, 9));
 
     let reseated = reseat_on(app.clone(), &fixture::tree());
 
-    assert_eq!(reseated.panel().account(), app.panel().account());
+    assert_eq!(reseated.panel().thread(), app.panel().thread());
     assert_eq!(reseated.panel().height(), usize::from(PANEL));
     assert_eq!(reseated.panel().scroll_offset(), 0);
     assert!(!reseated.panel().follows());
@@ -6147,9 +3593,9 @@ fn a_re_seat_carries_the_account_and_the_panels_window() {
 }
 
 #[test]
-fn a_re_seat_under_a_document_leaves_it_showing_with_the_account_behind_it() {
+fn a_re_seat_under_a_document_leaves_it_showing_with_the_conversation_behind_it() {
     let base = Instant::now();
-    let mut app = app_pacting(9, base);
+    let mut app = app_talking(9, base);
     app.show_document(document_lines(), false);
     // A line down the document, so what carries is the reader's window and
     // not the top of the card, which a rebuild would arrive at by accident.
@@ -6159,24 +3605,24 @@ fn a_re_seat_under_a_document_leaves_it_showing_with_the_account_behind_it() {
 
     // What the watcher does when something on disk changed: a new tree,
     // everything else carried.
-    let reseated = reseat_on(app.clone(), &fixture::tree_after_a_run());
+    let reseated = reseat_on(app.clone(), &fixture::tree_after_a_rescope());
 
     // The same card is on screen, on the same line of it. A reload that put
-    // the account back would take a document out of the reader's hands at
-    // exactly the moment they were reading it.
+    // the conversation back would take a document out of the reader's hands
+    // at exactly the moment they were reading it.
     assert_eq!(reseated.panel.showing(), Showing::Document);
     assert!(reseated.panel().has_document());
     assert_eq!(panel_text(&reseated, at(base, 9)), showing);
     assert_eq!(document_window(&reseated), document_window(&app));
-    // And the account is intact behind it, lines, window and all.
-    assert!(reseated.panel().has_account());
-    assert_eq!(reseated.panel().account(), app.panel().account());
-    assert_eq!(account_window(&reseated), account_window(&app));
+    // And the conversation is intact behind it, lines, window and all.
+    assert!(reseated.panel().has_thread());
+    assert_eq!(reseated.panel().thread(), app.panel().thread());
+    assert_eq!(thread_window(&reseated), thread_window(&app));
     // The card is a snapshot: the reload rewrote none of its lines, and the
     // swap still comes back to the whole of what was read.
     assert_eq!(document_text(&reseated), document_lines());
     let mut reseated = reseated;
-    for _ in 0..3 {
+    for _ in 0..2 {
         reseated.swap_card();
     }
     assert_eq!(reseated.panel.showing(), Showing::Document);
@@ -6186,17 +3632,13 @@ fn a_re_seat_under_a_document_leaves_it_showing_with_the_account_behind_it() {
 
 fn tree_without_the_tui_crate() -> Tree {
     Tree::new(
-        Node::new("warlock", "warlock/.warlock.md", NodeState::PactedStale).with_children([
-            Node::new("warlock/crates", None, NodeState::Unpacted).with_children([Node::new(
-                "warlock/crates/engine",
-                "warlock/crates/engine/.warlock.md",
-                NodeState::PactedFresh,
-            )]),
-            Node::new(
-                "warlock/assets",
-                "warlock/assets/.warlock.md",
-                NodeState::Unpacted,
-            ),
+        Node::new("warlock").with_children([
+            Node::new("warlock/crates")
+                .with_scope(Some("platform".to_owned()))
+                .with_children([
+                    Node::new("warlock/crates/engine").with_scope(Some("data-plane".to_owned()))
+                ]),
+            Node::new("warlock/assets"),
         ]),
     )
 }
@@ -6206,46 +3648,48 @@ fn selected_path(app: &App) -> Option<&Path> {
 }
 
 #[test]
-fn a_re_seat_takes_its_rows_its_states_and_its_tally_from_the_new_tree() {
+fn a_re_seat_takes_its_rows_and_their_scopes_from_the_new_tree() {
     let app = App::from_tree(&fixture::tree());
 
-    let reseated = reseat_on(app.clone(), &fixture::tree_after_a_run());
+    let reseated = reseat_on(app.clone(), &fixture::tree_after_a_rescope());
 
-    // The same five nodes, and the one the run worked on carrying the
-    // document it wrote, in the state the new tree gives it — and drawing
-    // that document beneath it, which is the row the whole view is for.
-    assert_eq!(drawn(&reseated), whole_fixture_after_a_run());
-    let crates = &reseated.rows()[2];
-    assert_eq!(crates.path, PathBuf::from("warlock/crates"));
-    assert_eq!(
-        crates.document,
-        Some(PathBuf::from("warlock/crates/.warlock.md")),
-        "the document the run wrote never reached the row"
-    );
-    assert_eq!(crates.state, NodeState::PactedFresh);
+    // The same five nodes, and the one rescoped carrying the scope written
+    // on it, drawn covered.
+    assert_eq!(drawn(&reseated), whole_fixture());
+    let assets = &reseated.rows()[4];
+    assert_eq!(assets.path, PathBuf::from("warlock/assets"));
+    assert_eq!(assets.scope.as_deref(), Some("assets"));
+    assert!(assets.covered);
     // The old app still says what it always said: a re-seat builds a new
     // value rather than editing the one it was handed.
-    assert_eq!(app.rows()[2].path, PathBuf::from("warlock/crates"));
-    assert_eq!(app.rows()[2].document, None);
-    assert_eq!(app.rows()[2].state, NodeState::Unpacted);
+    assert_eq!(app.rows()[4].path, PathBuf::from("warlock/assets"));
+    assert_eq!(app.rows()[4].scope, None);
+    assert!(!app.rows()[4].covered);
 
-    assert_eq!(reseated.counts(), fixture::tree_after_a_run().counts());
-    assert_eq!(tally(&reseated), reseated.counts());
+    assert_eq!(reseated.coverage(), (4, 1));
+    assert_eq!(tally(&reseated), reseated.coverage());
 }
 
 #[test]
 fn a_file_the_new_tree_lists_and_the_old_one_did_not_gets_a_row() {
     let mut app = App::from_tree(&fixture::tree());
     app.toggle_files();
-    let written = "warlock/crates/.warlock.md".to_owned();
+    let written = "warlock/crates/README.md".to_owned();
     assert!(!drawn(&app).contains(&written));
 
-    let reseated = reseat_on(app.clone(), &fixture::tree_after_a_run());
+    let tree = Tree::new(
+        Node::new("warlock")
+            .with_files([PathBuf::from("warlock/README.md")])
+            .with_children([Node::new("warlock/crates")
+                .with_scope(Some("platform".to_owned()))
+                .with_files([PathBuf::from(&written)])]),
+    );
+    let reseated = reseat_on(app.clone(), &tree);
 
     assert!(reseated.show_files(), "the file toggle did not carry");
     assert!(
         drawn(&reseated).contains(&written),
-        "the .warlock.md the run wrote is on disk and nowhere on screen"
+        "a file on disk is nowhere on screen"
     );
 }
 
@@ -6253,7 +3697,7 @@ fn a_file_the_new_tree_lists_and_the_old_one_did_not_gets_a_row() {
 fn a_re_seat_keeps_the_selection_on_the_node_it_was_on() {
     let app = app_selecting("warlock/crates/tui");
 
-    let reseated = reseat_on(app.clone(), &fixture::tree_after_a_run());
+    let reseated = reseat_on(app.clone(), &fixture::tree_after_a_rescope());
 
     assert_eq!(
         selected_path(&reseated),
@@ -6274,11 +3718,7 @@ fn a_selection_the_new_tree_lost_lands_on_its_nearest_surviving_ancestor() {
 
     // The first row only when nothing on the way to the node survived at
     // all, which is the honest answer rather than a shortcut to it.
-    let elsewhere = Tree::new(Node::new(
-        "elsewhere",
-        "elsewhere/.warlock.md",
-        NodeState::Unpacted,
-    ));
+    let elsewhere = Tree::new(Node::new("elsewhere"));
     let reseated = reseat_on(app.clone(), &elsewhere);
 
     assert_eq!(reseated.selected(), 0);
@@ -6307,26 +3747,21 @@ fn a_re_seat_carries_the_collapsed_set_including_paths_the_new_tree_lacks() {
 fn the_view_flags_and_the_window_survive_a_re_seat() {
     let mut app = App::from_tree(&fixture::tree());
     app.toggle_files();
-    app.toggle_pacted_only();
+    app.toggle_scoped_only();
     app.set_viewport_height(3);
     let mut app = select(app, "warlock/crates/tui");
     app.set_message("something from the last keystroke");
-    app.set_pact_in_flight("warlock/crates", 2, 5);
     app.toggle_focus();
 
-    let reseated = reseat_on(app.clone(), &fixture::tree_after_a_run());
+    let reseated = reseat_on(app.clone(), &fixture::tree_after_a_rescope());
 
     assert!(reseated.show_files());
-    assert!(reseated.pacted_only());
+    assert!(reseated.scoped_only());
     assert_eq!(reseated.viewport_height(), 3);
     assert_eq!(reseated.focus(), Focus::Panel);
     assert_eq!(
         reseated.message(),
         Some("something from the last keystroke")
-    );
-    assert_eq!(
-        reseated.run_header().map(|header| header.words()),
-        app.run_header().map(|header| header.words())
     );
     assert_eq!(selected_path(&reseated), selected_path(&app));
     // The window may have had to move by the rows the new tree added above
@@ -6340,8 +3775,8 @@ fn the_view_flags_and_the_window_survive_a_re_seat() {
 fn re_seating_on_a_tree_that_has_not_changed_leaves_the_view_exactly_as_it_was() {
     let mut app = App::from_tree(&fixture::tree());
     app.toggle_files();
-    app.toggle_pacted_only();
-    let mut app = select(app, "warlock/crates");
+    app.toggle_scoped_only();
+    let mut app = select(app, "warlock/crates/engine");
     app.toggle_collapsed();
     app.set_viewport_height(3);
     // Down to the bottom of the rows and back up into the middle of the
@@ -6352,7 +3787,6 @@ fn re_seating_on_a_tree_that_has_not_changed_leaves_the_view_exactly_as_it_was()
     app.select_previous();
     app.select_previous();
     app.set_message("something from the last keystroke");
-    app.set_pact_in_flight("warlock/crates", 2, 5);
     app.toggle_focus();
     // A view with something to lose in every field there is.
     assert!(app.scroll_offset() > 0);
@@ -6360,368 +3794,8 @@ fn re_seating_on_a_tree_that_has_not_changed_leaves_the_view_exactly_as_it_was()
 
     // What the binary does when a load turns up a tree nothing has happened
     // to: every field of the re-seated app is the field it carried, down to
-    // the header, the scroll offset and the pact still in flight.
+    // the scroll offset.
     let reseated = reseat_on(app.clone(), &fixture::tree());
 
     assert_eq!(reseated, app);
-}
-
-fn tree_listing(path: &str) -> Tree {
-    let mut tree = fixture::tree();
-    assert!(
-        list_file(&mut tree.root, Path::new(path)),
-        "no node for the directory holding {path}"
-    );
-    tree
-}
-
-fn list_file(node: &mut Node, path: &Path) -> bool {
-    if Some(node.path.as_path()) == path.parent() {
-        node.files.push(path.to_path_buf());
-        node.files.sort();
-        return true;
-    }
-    node.children.iter_mut().any(|child| list_file(child, path))
-}
-
-fn app_with_files() -> App {
-    let mut app = App::from_tree(&fixture::tree());
-    app.toggle_files();
-    app
-}
-
-fn as_the_document(mut app: App, path: &str) -> App {
-    let path = Path::new(path);
-    let mut found = false;
-    for row in app.all_rows.iter_mut().chain(app.rows.iter_mut()) {
-        if row.path == path {
-            row.document_row = true;
-            found = true;
-        }
-    }
-    assert!(found, "no row for {}", path.display());
-    app
-}
-
-#[test]
-fn inserting_a_file_row_lands_it_where_a_fresh_load_would_have_put_it() {
-    // Sorts between `.warlock.md` and `logo.svg`, so neither appending nor
-    // prepending would pass this.
-    let mut app = app_with_files();
-
-    app.insert_file_row("warlock/assets/index.html");
-
-    let mut expected = App::from_tree(&tree_listing("warlock/assets/index.html"));
-    expected.toggle_files();
-    assert_eq!(drawn(&app), drawn(&expected));
-    // Every field, not only the drawn paths: the depth, the state and the
-    // whole walk behind the drawn rows are the load's as well — bar the
-    // document flag, which an insertion decides for itself.
-    assert_eq!(app, as_the_document(expected, "warlock/assets/index.html"));
-}
-
-#[test]
-fn an_inserted_file_row_goes_before_the_rows_for_its_directorys_children() {
-    // `zzz.md` sorts after every file the root lists and after the name of
-    // its child directory, so only the files-before-children rule of the
-    // walk puts it in the right place.
-    let mut app = app_with_files();
-
-    app.insert_file_row("warlock/zzz.md");
-
-    let mut expected = App::from_tree(&tree_listing("warlock/zzz.md"));
-    expected.toggle_files();
-    assert_eq!(app, as_the_document(expected, "warlock/zzz.md"));
-    assert_eq!(
-        &drawn(&app)[..4],
-        [
-            "warlock".to_owned(),
-            "warlock/.warlock.md".to_owned(),
-            "warlock/README.md".to_owned(),
-            "warlock/zzz.md".to_owned(),
-        ]
-    );
-    assert_eq!(drawn(&app)[4], "warlock/crates");
-}
-
-#[test]
-fn an_inserted_file_row_is_a_file_row_in_its_directorys_colour_now() {
-    let mut app = app_with_files();
-    // The colour a run has just painted, which is the whole point: the
-    // state comes off the directory row as it stands, not off any tree.
-    app.set_subtree_state("warlock/assets", NodeState::PactedFresh);
-
-    app.insert_file_row("warlock/assets/.warlock.md");
-
-    let row = app
-        .rows()
-        .iter()
-        .find(|row| row.path == Path::new("warlock/assets/.warlock.md"))
-        .expect("the inserted row is drawn");
-    assert!(row.is_file());
-    assert_eq!(row.depth, 2);
-    assert_eq!(row.state, NodeState::PactedFresh);
-    assert_eq!(row.document, None);
-    assert!(!row.is_ignored());
-}
-
-#[test]
-fn an_inserted_file_row_carries_the_directorys_ignored_flag() {
-    let tree =
-        Tree::new(
-            Node::new("repo", "repo/.warlock.md", NodeState::PactedStale).with_children([
-                Node::new("repo/vendor", None, NodeState::Unpacted).with_ignored(true),
-            ]),
-        );
-    let mut app = App::from_tree(&tree);
-    app.toggle_files();
-
-    app.insert_file_row("repo/vendor/.warlock.md");
-    app.insert_file_row("repo/.warlock.md");
-
-    let ignored = |app: &App, path: &str| {
-        app.rows()
-            .iter()
-            .find(|row| row.path == Path::new(path))
-            .map(Row::is_ignored)
-    };
-    assert_eq!(ignored(&app, "repo/vendor/.warlock.md"), Some(true));
-    assert_eq!(ignored(&app, "repo/.warlock.md"), Some(false));
-}
-
-#[test]
-fn inserting_a_path_already_in_the_walk_changes_nothing() {
-    let app = app_with_files();
-
-    // A file the load already listed: a re-pact of a directory that was
-    // documented before the run started.
-    let mut again = app.clone();
-    again.insert_file_row("warlock/assets/logo.svg");
-    assert_eq!(again, app);
-
-    // And a second delivery of a row this method itself put there.
-    let mut twice = app.clone();
-    twice.insert_file_row("warlock/assets/index.html");
-    let once = twice.clone();
-    twice.insert_file_row("warlock/assets/index.html");
-    assert_eq!(twice, once);
-    assert_eq!(
-        twice
-            .rows()
-            .iter()
-            .filter(|row| row.path == Path::new("warlock/assets/index.html"))
-            .count(),
-        1,
-    );
-}
-
-#[test]
-fn inserting_under_a_directory_with_no_row_changes_nothing_at_all() {
-    let app = app_with_files();
-
-    for path in [
-        // No node for the directory.
-        "warlock/nowhere/.warlock.md",
-        // Nor for a file's own path read as one.
-        "warlock/assets/logo.svg/.warlock.md",
-        // Nor above the root of the tree on screen.
-        "elsewhere/.warlock.md",
-        // And a path with no directory to be in.
-        ".warlock.md",
-    ] {
-        let mut after = app.clone();
-        after.insert_file_row(path);
-        assert_eq!(after, app, "{path} moved something");
-    }
-}
-
-#[test]
-fn inserting_a_file_row_leaves_the_tally_alone() {
-    let mut app = app_with_files();
-    let before = app.counts();
-    assert_eq!(before, fixture::tree().counts());
-
-    app.insert_file_row("warlock/assets/index.html");
-    app.insert_file_row("warlock/crates/.warlock.md");
-
-    // Files are counted nowhere, so not one field of the footer's tally
-    // moves — not even the total.
-    assert_eq!(app.counts(), before);
-    assert_eq!(app.counts().total(), before.total());
-}
-
-#[test]
-fn an_inserted_file_row_survives_a_rebuild_of_the_drawn_rows() {
-    let mut app = app_with_files();
-
-    app.insert_file_row("warlock/assets/index.html");
-    let after = drawn(&app);
-
-    // The file toggle, which rebuilds the drawn rows from the whole walk:
-    // a row written only into the drawn list would go here and never come
-    // back.
-    app.toggle_files();
-    app.toggle_files();
-    assert_eq!(drawn(&app), after);
-
-    // And a collapse over it, which rebuilds them again.
-    let mut app = select(app, "warlock/assets");
-    app.toggle_collapsed();
-    app.toggle_collapsed();
-    assert_eq!(drawn(&app), after);
-}
-
-#[test]
-fn with_files_hidden_a_document_written_mid_run_is_drawn_at_once() {
-    // The case the first clause of the guard exists for. `crates/` had no
-    // document, a pass has this moment written one, and the reader is in the
-    // default view — the one warlock opens on, where the files a directory
-    // merely holds are hidden. The row goes in there and then rather than
-    // waiting for `f` or for the reload at the end of the run.
-    let mut app = App::from_tree(&fixture::tree());
-    app.set_subtree_state("warlock/crates", NodeState::PactedFresh);
-
-    app.insert_file_row("warlock/crates/.warlock.md");
-
-    // What the reload at the end of that run draws, reached the way the
-    // front end reaches it: the view carried onto the tree a second load
-    // finds. Path and depth, because the two apps are two accounts of the
-    // same screen and not the same value — the reload knows `crates/` has a
-    // document and the mid-run tree does not.
-    let reloaded = reseat_on(app.clone(), &fixture::tree_after_a_run());
-    assert_eq!(
-        paths_and_depths(app.rows()),
-        paths_and_depths(reloaded.rows())
-    );
-    // And the walk behind them, which is what the next rebuild of the drawn
-    // rows will be made from: the row went in at the load's index there too,
-    // among the files the load would have listed and not merely on screen.
-    assert_eq!(
-        paths_and_depths(&app.all_rows),
-        paths_and_depths(&reloaded.all_rows)
-    );
-    assert_eq!(drawn(&app), whole_fixture_after_a_run());
-    // Nothing else came with it: this is one row, not the file toggle.
-    assert!(!app.show_files());
-    assert!(!drawn(&app).contains(&"warlock/README.md".to_owned()));
-}
-
-#[test]
-fn an_insertion_is_the_documents_row_whatever_the_file_is_called() {
-    // `insert_file_row` is not "the loader listed one more file". Its caller
-    // is the pact observer, which passes the `.warlock.md` a pass has just
-    // written, so the row is a document row by construction — no name is
-    // compared, here or anywhere in this crate — and it is drawn with files
-    // hidden like every other document row.
-    let mut app = App::from_tree(&fixture::tree());
-
-    app.insert_file_row("warlock/assets/index.html");
-
-    let row = app
-        .rows()
-        .iter()
-        .find(|row| row.path == Path::new("warlock/assets/index.html"))
-        .expect("a document row is drawn with files hidden");
-    assert!(row.is_document());
-    assert!(row.is_file());
-    assert_eq!(row.depth, 2);
-    // And the whole of what the default view gained is that one row, in
-    // path order among the rows `assets/` already had.
-    let mut expected = whole_fixture();
-    expected.push("warlock/assets/index.html".to_owned());
-    assert_eq!(drawn(&app), expected);
-}
-
-#[test]
-fn an_insertion_under_a_collapsed_directory_waits_for_the_expand() {
-    let mut app = select(app_with_files(), "warlock/assets");
-    app.toggle_collapsed();
-    let before = drawn(&app);
-
-    app.insert_file_row("warlock/assets/index.html");
-
-    assert_eq!(
-        drawn(&app),
-        before,
-        "nothing is drawn under a collapsed row"
-    );
-
-    app.toggle_collapsed();
-
-    let mut expected = App::from_tree(&tree_listing("warlock/assets/index.html"));
-    expected.toggle_files();
-    assert_eq!(drawn(&app), drawn(&expected));
-}
-
-#[test]
-fn the_filter_draws_an_inserted_file_only_under_a_pacted_directory() {
-    let mut app = app_with_files();
-    app.toggle_pacted_only();
-    let before = drawn(&app);
-
-    // `warlock/assets` is unpacted, so the filter would drop a file row
-    // taking its colour, exactly as it drops the two it already has.
-    app.insert_file_row("warlock/assets/index.html");
-    assert_eq!(drawn(&app), before);
-
-    // `warlock/crates/engine` is pacted, so the filter keeps its files.
-    app.insert_file_row("warlock/crates/engine/index.html");
-
-    let mut expected = App::from_tree(&tree_listing("warlock/crates/engine/index.html"));
-    expected.toggle_files();
-    expected.toggle_pacted_only();
-    assert_eq!(drawn(&app), drawn(&expected));
-
-    // Both rows are in the walk all the same: the filter is a view, and
-    // widening it puts the one it dropped back.
-    app.toggle_pacted_only();
-    assert!(
-        drawn(&app).contains(&"warlock/assets/index.html".to_owned()),
-        "the walk kept the row the filter would not draw"
-    );
-}
-
-#[test]
-fn an_insertion_above_the_selection_keeps_the_selection_on_its_row() {
-    let mut app = app_with_files_selecting("warlock/assets/logo.svg");
-    let selected = app.selected();
-
-    // Sorts before the selected row, so the index it sits at is no longer
-    // the index it belongs at.
-    app.insert_file_row("warlock/assets/index.html");
-
-    assert_eq!(
-        app.selected_row().map(|row| row.path.clone()),
-        Some(PathBuf::from("warlock/assets/logo.svg"))
-    );
-    assert_eq!(app.selected(), selected + 1);
-
-    // A row landing below the selection moves nothing.
-    let selected = app.selected();
-    app.insert_file_row("warlock/assets/zebra.svg");
-    assert_eq!(app.selected(), selected);
-    assert_eq!(
-        app.selected_row().map(|row| row.path.clone()),
-        Some(PathBuf::from("warlock/assets/logo.svg"))
-    );
-    // And the message line is untouched throughout: this is not a keystroke.
-    assert_eq!(app.message(), None);
-}
-
-#[test]
-fn an_insertion_above_the_window_keeps_the_same_rows_on_screen() {
-    let mut app = app_with_files_selecting("warlock/assets/logo.svg");
-    app.set_viewport_height(4);
-    let offset = app.scroll_offset();
-    assert!(offset > 0, "the window has scrolled off the top");
-    let on_screen: Vec<String> = drawn(&app)[offset..offset + 4].to_vec();
-
-    // Above the window, so every row on screen would slide down a line if
-    // the offset were left where it was.
-    app.insert_file_row("warlock/README.txt");
-
-    let offset = app.scroll_offset();
-    assert_eq!(drawn(&app)[offset..offset + 4], on_screen[..]);
-    assert!(window_is_in_range(&app));
-    assert!(selection_is_on_screen(&app));
 }

@@ -7,7 +7,9 @@ use ratatui::backend::TestBackend;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::Size;
 use ratatui::{Frame, Terminal};
-use warlock_engine::{Loaded, Manifest, Node, NodeState, Tree, load_tree, repository_root};
+use warlock_engine::{
+    Loaded, Manifest, Node, ScopeRecord, ScopedDirectory, Tree, load_tree, repository_root,
+};
 
 use super::{Parts, Seams, Session};
 use crate::app::{App, Chrome, Focus, Row};
@@ -16,14 +18,13 @@ use crate::claude::Converses;
 use crate::confirm::QuitConfirm;
 use crate::cutting::Cutter;
 use crate::linear::Opens;
-use crate::pacting::Pact;
 use crate::prompt::{RecordPrompt, ScopePrompt};
 use crate::puller::{Claudes, Puller, Raises};
 use crate::pushing::Pushes;
 use crate::screen::Screen;
 use crate::session::{Scope, Watched};
 use crate::settings::Settings;
-use crate::stubs::{Boarding, Checkout, Copying, Forging, Passing, Saying, Scripted};
+use crate::stubs::{Boarding, Checkout, Copying, Forging, Saying, Scripted};
 use crate::ui::Shape;
 
 #[derive(Debug)]
@@ -78,7 +79,6 @@ struct Stubbed<O, A, M = Claudes>(PhantomData<(O, A, M)>);
 
 impl<O: Opens, A: Converses, M: Raises + Clone + Send + 'static> Seams for Stubbed<O, A, M> {
     type Screen = FakeScreen;
-    type Pass = Passing;
     type Talk = Saying;
     type Clip = Copying;
     type Board = O;
@@ -146,7 +146,6 @@ fn driving_over<O: Opens, A: Converses, M: Raises + Clone + Send + 'static>(
     let parts = Parts {
         screen: FakeScreen::of(80, 24),
         clipboard: Copying::taking(),
-        pact: Pact::with_agent(Passing::filling()),
         chat: Chat::with_agent(root, Saying::answering(ANSWER)),
         pushes,
         cutter,
@@ -167,7 +166,7 @@ fn session(rows: Vec<Row>) -> Driven {
     // so no watcher is granted and `Watching` says why — which is exactly
     // the state a session runs in when the platform refuses one, and costs
     // these tests nothing.
-    let tree = Tree::new(Node::new(&root, None::<PathBuf>, NodeState::Unpacted));
+    let tree = Tree::new(Node::new(&root));
     driving(App::from_rows(rows), scope, &tree)
 }
 
@@ -177,14 +176,14 @@ fn pressed(driven: &mut Driven, key: KeyEvent) -> bool {
         .expect("no key pressed here writes to a terminal")
 }
 
-const ANSWER: &str = "The tree, the manifest and the pact.";
+const ANSWER: &str = "The tree, the manifest and the scopes.";
 
 fn key(code: KeyCode) -> KeyEvent {
     KeyEvent::new(code, KeyModifiers::NONE)
 }
 
 fn directory(path: &str) -> Row {
-    Row::new(0, path, None, NodeState::Unpacted)
+    Row::new(0, path, false)
 }
 
 const AT_MOST: Duration = Duration::from_secs(5);
@@ -234,16 +233,6 @@ fn loading(root: &Path) -> (App, Scope, Tree) {
     (App::from_tree(&tree), scope, tree)
 }
 
-fn rounds_until_settled(driven: &mut Driven) {
-    let waited = Instant::now();
-    while driven.pact.running() && waited.elapsed() < AT_MOST {
-        let size = driven.size().expect("the fake screen has a size");
-        driven.draw(size).expect("the fake screen draws");
-        driven.keep_up();
-    }
-    assert!(!driven.pact.running(), "the run never finished");
-}
-
 #[test]
 fn a_round_tells_the_app_the_size_the_frame_is_being_cut_at() {
     let mut driven = session(vec![directory("/repo/crates")]);
@@ -263,89 +252,148 @@ fn a_round_tells_the_app_the_size_the_frame_is_being_cut_at() {
     );
 }
 
+// A record for every scope the tests below type, so a submit writes the scope
+// rather than putting the record window up for one.
+fn recorded(repo: &Path, directories: impl IntoIterator<Item = ScopedDirectory>) {
+    Manifest::with_directories(directories)
+        .with_scopes(
+            ["platform", "data-plane"]
+                .map(|name| ScopeRecord::new(name, "WAR", "In Review", "area/core")),
+        )
+        .save(repo)
+        .expect("a manifest that writes");
+}
+
+// `session_over` starts from an empty manifest, as `driving` does everywhere
+// else; these tests write through the session's copy, so it has to be the one
+// on disk.
+fn scoping_session(repo: &Path) -> Driven {
+    recorded(repo, []);
+    let mut driven = session_over(repo);
+    driven.manifest = Manifest::load(repo).expect("the manifest just saved");
+    driven
+}
+
+fn typed(driven: &mut Driven, text: &str) {
+    for character in text.chars() {
+        assert!(pressed(driven, key(KeyCode::Char(character))));
+    }
+}
+
+fn select(driven: &mut Driven, path: &Path) {
+    driven.app.select_first();
+    while driven.app.selected_row().expect("the tree has rows").path != path {
+        let before = driven.app.selected();
+        driven.app.select_next();
+        assert_ne!(
+            driven.app.selected(),
+            before,
+            "no row for {}",
+            path.display()
+        );
+    }
+}
+
 #[test]
-fn pressing_the_pact_key_descends_the_subtree_and_lands_its_documents() {
+fn the_scope_key_on_an_unscoped_directory_opens_the_window_over_it() {
+    // Nothing covers the root, so nothing is closed: anybody may draw the
+    // first scope.
     let repo = a_repository();
-    let mut driven = session_over(repo.path());
+    let mut driven = scoping_session(repo.path());
 
-    assert!(pressed(&mut driven, key(KeyCode::Char('p'))));
-    assert!(driven.pact.running(), "the press started a run");
+    assert!(pressed(&mut driven, key(KeyCode::Char('s'))));
 
-    rounds_until_settled(&mut driven);
-
-    assert!(
-        repo.path().join(".warlock.md").is_file(),
-        "the root was never documented"
-    );
-    assert!(
-        repo.path().join("crates/engine/src/.warlock.md").is_file(),
-        "the descent stopped short of the deepest directory"
-    );
+    let field = driven
+        .prompt
+        .field()
+        .expect("the window is up over the unscoped root");
+    assert_eq!(field.directory(), ".");
     assert_eq!(
-        driven.manifest.entries().len(),
-        4,
-        "every directory the walk produced should have been granted"
+        field.text(),
+        "",
+        "nothing scopes it, so nothing is filled in"
     );
 }
 
 #[test]
-fn a_scope_written_outside_warlock_survives_the_next_run_after_a_reload() {
+fn a_scope_typed_over_an_unscoped_directory_is_saved_and_held_by_the_session() {
+    let repo = a_repository();
+    let mut driven = scoping_session(repo.path());
+    let crates = repo.path().join("crates");
+    select(&mut driven, &crates);
+
+    pressed(&mut driven, key(KeyCode::Char('s')));
+    typed(&mut driven, "platform");
+    pressed(&mut driven, key(KeyCode::Enter));
+
+    assert_eq!(driven.prompt, ScopePrompt::Closed, "the window stayed up");
+    let on_disk = Manifest::load(repo.path()).expect("the manifest reads");
+    assert_eq!(
+        on_disk.directory("crates").map(ScopedDirectory::scope),
+        Some("platform")
+    );
+    assert_eq!(driven.manifest, on_disk, "the session holds what it saved");
+}
+
+#[test]
+fn a_saved_scope_colours_its_rows_without_waiting_for_the_watcher() {
+    let repo = a_repository();
+    let mut driven = scoping_session(repo.path());
+    let crates = repo.path().join("crates");
+    select(&mut driven, &crates);
+    assert!(!driven.app.selected_row().expect("a row").covered);
+
+    pressed(&mut driven, key(KeyCode::Char('s')));
+    typed(&mut driven, "platform");
+    pressed(&mut driven, key(KeyCode::Enter));
+
+    // No round of the loop between the save and these reads, so nothing the
+    // watcher does could have coloured them.
+    let row = |path: &Path| {
+        driven
+            .app
+            .rows()
+            .iter()
+            .find(|row| row.path == path)
+            .cloned()
+            .expect("the row is drawn")
+    };
+    assert!(row(&crates).covered, "the scoped row is still grey");
+    assert_eq!(row(&crates).scope.as_deref(), Some("platform"));
+    assert!(!row(repo.path()).covered, "the root above it was coloured");
+}
+
+#[test]
+fn a_scope_written_outside_warlock_survives_the_next_scope_written_after_a_reload() {
     // `git pull`, or `warlock scope add` in another terminal: the manifest on
     // disk moves while warlock is up. The reload that follows is what every
     // key after it has to act on, or the next save writes the old copy back
     // over the edit.
     let repo = a_repository();
-    let mut driven = session_over(repo.path());
-    pressed(&mut driven, key(KeyCode::Char('p')));
-    rounds_until_settled(&mut driven);
+    let mut driven = scoping_session(repo.path());
 
-    let outside = Manifest::load(repo.path()).expect("the run saved a manifest");
-    let outside = Manifest::with_entries(outside.entries().iter().map(|entry| {
-        if entry.module() == "crates/engine/src" {
-            entry.clone().with_scope("data-plane")
-        } else {
-            entry.clone()
-        }
-    }));
-    outside.save(repo.path()).expect("saves");
-    fs::write(
-        repo.path().join("crates/engine/src/lib.rs"),
-        "//! Core engine, revised.\n",
-    )
-    .expect("a scratch file is writable");
+    recorded(
+        repo.path(),
+        [ScopedDirectory::new(".", "crates/engine/src", "data-plane").expect("a relative path")],
+    );
     crate::session::reload(&mut driven.app, &driven.scope, &mut driven.manifest);
 
-    pressed(&mut driven, key(KeyCode::Char('r')));
-    rounds_until_settled(&mut driven);
+    select(&mut driven, &repo.path().join("crates"));
+    pressed(&mut driven, key(KeyCode::Char('s')));
+    typed(&mut driven, "platform");
+    pressed(&mut driven, key(KeyCode::Enter));
 
     let after = Manifest::load(repo.path()).expect("a manifest that reads");
     assert_eq!(
         after
-            .entry("crates/engine/src")
-            .and_then(warlock_engine::PactEntry::scope),
+            .directory("crates/engine/src")
+            .map(ScopedDirectory::scope),
         Some("data-plane"),
-        "the refresh wrote warlock's stale copy back over the outside edit"
+        "the save wrote warlock's old copy back over the outside edit"
     );
-}
-
-#[test]
-fn a_second_press_of_the_pact_key_takes_the_whole_subtree_back_out() {
-    let repo = a_repository();
-    let mut driven = session_over(repo.path());
-    pressed(&mut driven, key(KeyCode::Char('p')));
-    rounds_until_settled(&mut driven);
-
-    pressed(&mut driven, key(KeyCode::Char('p')));
-    rounds_until_settled(&mut driven);
-
     assert_eq!(
-        driven.manifest.entries().len(),
-        0,
-        "un-pacting left entries behind"
-    );
-    assert!(
-        repo.path().join(".warlock.md").is_file(),
-        "un-pacting deleted a document, which it has never done"
+        after.directory("crates").map(ScopedDirectory::scope),
+        Some("platform")
     );
 }
 
@@ -438,16 +486,21 @@ fn an_edit_over_a_directory_never_asks_for_the_screen() {
 }
 
 #[test]
-fn the_scope_prompt_swallows_the_pact_key() {
+fn the_scope_prompt_swallows_the_quit_key() {
     let mut driven = session(vec![directory("/repo/crates")]);
     driven.prompt = ScopePrompt::open("crates", "");
 
-    assert!(pressed(&mut driven, key(KeyCode::Char('p'))));
+    assert!(pressed(&mut driven, key(KeyCode::Char('q'))));
+    assert_eq!(
+        driven.confirm,
+        QuitConfirm::Closed,
+        "the quit question opened"
+    );
     let field = driven
         .prompt
         .field()
         .expect("the window is still up over the directory it opened on");
-    assert_eq!(field.text(), "p", "the key was typed, not pressed");
+    assert_eq!(field.text(), "q", "the key was typed, not pressed");
 }
 
 #[test]
@@ -1318,7 +1371,6 @@ mod dragging {
             found_at, point, redrawn, scrollback, wound_back,
         };
         use crate::claude::Activity;
-        use crate::panel::Showing;
 
         // A word nothing in the conversation has until the appends below put
         // it there, short enough that the panel cannot wrap it: finding it on
@@ -1584,29 +1636,6 @@ mod dragging {
 
             the_conversation_still_follows(&mut driven, where_it_was, now);
         }
-
-        #[test]
-        fn a_drag_over_the_account_card_leaves_the_conversation_following() {
-            let now = Instant::now();
-            let (mut driven, _) = scrollback(now);
-            let where_it_was = driven.app.panel().scroll_offset();
-            driven.app.start_account(now);
-            driven
-                .app
-                .panel_mut()
-                .write_run(|account| account.open_section("crates/engine", now));
-            // The conversation has content, so a run does not put its own
-            // account up: the swap key is what a reader would press, and this
-            // is that press without the keyboard.
-            driven.app.panel_mut().show(Showing::Account);
-            let size = redrawn(&mut driven);
-            let (column, row) = drawn_at(&driven, "crates/engine");
-
-            point(&mut driven, PRESS, (column, row), size, now);
-            point(&mut driven, DRAG, (column + 4, row), size, now);
-
-            the_conversation_still_follows(&mut driven, where_it_was, now);
-        }
     }
 }
 
@@ -1663,8 +1692,8 @@ mod pasting {
         // the one thing that sets the flag — is what `say` calls.
         driven.chat.say(
             &mut driven.app,
-            "what is a pact?",
-            "what is a pact?",
+            "what is a scope?",
+            "what is a scope?",
             Asked::Answer,
             Instant::now(),
         );
@@ -1692,11 +1721,11 @@ mod pasting {
         driven.app.set_focus(Focus::Composer);
 
         // The block that used to send line one and lose the other two.
-        driven.paste("what is a pact?\nand what is a scope?\nand a sigil?");
+        driven.paste("what is a scope?\nand what is a sigil?\nand a board?");
 
         assert_eq!(
             driven.chat.composer().draft(),
-            "what is a pact?\nand what is a scope?\nand a sigil?",
+            "what is a scope?\nand what is a sigil?\nand a board?",
             "the pasted lines did not all reach the draft"
         );
         assert!(
@@ -1727,11 +1756,13 @@ mod offering {
         let mut driven = session(vec![directory("/repo/crates")]);
         driven.chat = Chat::with_agent("/warlock/no/such/repository", Saying::answering(READY));
         driven.app.set_focus(Focus::Composer);
-        driven.paste("/brief");
-        assert!(
-            pressed(&mut driven, key(KeyCode::Enter)),
-            "/brief ended the session"
-        );
+        for typed in ["/brief", "add a flag"] {
+            driven.paste(typed);
+            assert!(
+                pressed(&mut driven, key(KeyCode::Enter)),
+                "{typed:?} ended the session"
+            );
+        }
         answered(&mut driven);
         driven
     }
@@ -1818,7 +1849,7 @@ mod filing {
     use ratatui::crossterm::event::KeyCode;
     use tempfile::TempDir;
     use warlock_engine::{
-        Manifest, PactEntry, ScopeRecord, save_key, save_key_binding, save_sigils,
+        Manifest, ScopeRecord, ScopedDirectory, save_key, save_key_binding, save_sigils,
     };
 
     use super::{AT_MOST, Driven, key, pressed, session_over};
@@ -1867,9 +1898,8 @@ mod filing {
                          ## Scope\n\n### 1. Read the file\n\ndepends_on: []\n";
 
     fn a_manifest() -> Manifest {
-        Manifest::with_entries([PactEntry::new(".", "docs", "docs/.warlock.md")
-            .expect("a relative module path is inside the root")
-            .with_scope(SCOPE)])
+        Manifest::with_directories([ScopedDirectory::new(".", "docs", SCOPE)
+            .expect("a relative module path is inside the root")])
         .with_scopes([ScopeRecord::new(SCOPE, TEAM, "In Review", "warlock")])
     }
 
@@ -2294,7 +2324,7 @@ mod cutting {
     use ratatui::crossterm::event::KeyCode;
     use tempfile::TempDir;
     use warlock_engine::{
-        Manifest, PactEntry, ScopeRecord, save_key, save_key_binding, save_sigils,
+        Manifest, ScopeRecord, ScopedDirectory, save_key, save_key_binding, save_sigils,
     };
 
     use super::{AT_MOST, Driven, key, session_reading};
@@ -2341,9 +2371,8 @@ mod cutting {
     const PROPOSED: &str = "The cut record, and nothing else.";
 
     fn a_manifest() -> Manifest {
-        Manifest::with_entries([PactEntry::new(".", "docs", "docs/.warlock.md")
-            .expect("a relative module path is inside the root")
-            .with_scope(SCOPE)])
+        Manifest::with_directories([ScopedDirectory::new(".", "docs", SCOPE)
+            .expect("a relative module path is inside the root")])
         .with_scopes([ScopeRecord::new(SCOPE, TEAM, "In Review", "warlock")])
     }
 
@@ -2933,8 +2962,8 @@ mod pulling {
     use ratatui::crossterm::event::KeyCode;
     use tempfile::TempDir;
     use warlock_engine::{
-        Manifest, PactEntry, PullRun, PullSubtask, RunStatus, ScopeRecord, SubtaskStatus, save_key,
-        save_key_binding, save_sigils, state_path,
+        Manifest, PullRun, PullSubtask, RunStatus, ScopeRecord, ScopedDirectory, SubtaskStatus,
+        save_key, save_key_binding, save_sigils, state_path,
     };
 
     use super::{AT_MOST, Session, Stubbed, key, session_reading};
@@ -2949,8 +2978,7 @@ mod pulling {
     use crate::pushing::Pushes;
     use crate::settings::Settings;
     use crate::stubs::{
-        Boarding, Checkout, Forging, Op, Refreshing, Scripted, Sessions, Slicing, VIEWER, Written,
-        said,
+        Boarding, Checkout, Forging, Op, Scripted, Sessions, Slicing, VIEWER, Written, said,
     };
     use crate::submission::submitted_for;
 
@@ -2989,8 +3017,6 @@ mod pulling {
     // What every refusal during a run says it did not do, beside the one sentence
     // naming the pull. Each is the wording of the module that refuses, so a test
     // asserting on it is asserting that the keystroke reached that module.
-    const NO_PASS: &str = "no pass was started";
-
     const NO_SCOPE: &str = "no scope was written";
 
     // And the composer's own, which is what a `/draft` or a `/resume` typed during
@@ -2998,13 +3024,13 @@ mod pulling {
     // the command is never recognised and neither module is reached at all.
     const UNSENT: &str = "nothing was sent, and quitting warlock stops the pull";
 
-    // Two recorded scopes, one pacted directory under each, so a run that stays
+    // Two recorded scopes, one scoped directory under each, so a run that stays
     // inside its boundary and one that writes past it are both reachable from the
     // one manifest.
     fn a_manifest() -> Manifest {
-        Manifest::with_entries([
-            pacted("crates/engine", SCOPE),
-            pacted("crates/control", CLOSED),
+        Manifest::with_directories([
+            scoped("crates/engine", SCOPE),
+            scoped("crates/control", CLOSED),
         ])
         .with_scopes([
             ScopeRecord::new(SCOPE, TEAM, "In Review", LABEL),
@@ -3012,13 +3038,11 @@ mod pulling {
         ])
     }
 
-    fn pacted(directory: &str, scope: &str) -> PactEntry {
-        PactEntry::new(".", directory, format!("{directory}/.warlock.md"))
-            .expect("a relative module path is inside the root")
-            .with_scope(scope)
+    fn scoped(directory: &str, scope: &str) -> ScopedDirectory {
+        ScopedDirectory::new(".", directory, scope).expect("a relative path is inside the root")
     }
 
-    // The checkout the session loads its tree from: a file under each pacted
+    // The checkout the session loads its tree from: a file under each scoped
     // directory, and the `.git` that makes it a repository to everything that
     // looks. No `git` is ever run in it — the repository seam is a stand-in.
     fn a_repository() -> TempDir {
@@ -3088,14 +3112,12 @@ mod pulling {
         driven
     }
 
-    // A run that works one sub-task and reports on the way: enough for the account
-    // to have something under its headings, and short enough that a test which
-    // drives one to the end is not driving two.
+    // A run that works one sub-task and reports on the way, short enough that a
+    // test which drives one to the end is not driving two.
     fn working() -> Written {
         Written::of(
             Slicing::into_chain(TICKET, &["Read the queue"]),
             Sessions::answering([said("done", "the queue is read", None)]),
-            Refreshing::quiet(),
         )
         .doing([
             Activity::Tool {
@@ -3298,7 +3320,6 @@ mod pulling {
             Written::of(
                 Slicing::into_chain(TICKET, &["Nothing this test lets a run reach"]),
                 Sessions::answering([]),
-                Refreshing::quiet(),
             ),
         );
 
@@ -3533,8 +3554,6 @@ mod pulling {
             "What does the tree hold?",
             "the draft was sent rather than left in the field"
         );
-        // The thread card is still a thread: the account is the run's output
-        // window, and what a reader typed into is readable under it.
         round(&mut driven);
         assert!(
             driven.app.panel().thread().is_some(),
@@ -3726,32 +3745,28 @@ mod pulling {
         held(&mut driven, &raises);
         let already = notes(&driven).len();
 
-        // The three keys first, with the keyboard on the tree, and then the two
-        // commands, which need it in the field: a `p` typed into the composer is
-        // a letter and not the pact key.
-        for code in [KeyCode::Char('p'), KeyCode::Char('r'), KeyCode::Char('s')] {
-            assert!(pressed(&mut driven, code), "{code:?} ended the session");
-        }
+        // The key first, with the keyboard on the tree, and then the two
+        // commands, which need it in the field.
+        assert!(
+            pressed(&mut driven, KeyCode::Char('s')),
+            "`s` ended the session"
+        );
         typing(&mut driven, "/draft docs/brief.md");
         typing(&mut driven, &format!("/resume {OTHER}"));
 
-        // Five keystrokes, five lines, and every one of them names the pull. The
-        // three keys are refused by the module each would have started, in its
-        // own words; the two commands never reach theirs, because the Enter that
+        // Three keystrokes, three lines, and every one of them names the pull.
+        // The key is refused by the module it would have started, in its own
+        // words; the two commands never reach theirs, because the Enter that
         // carries them is taken by the locked composer before the conversation
         // reads the draft — which is the stronger promise of the two, since a
         // command that was never recognised cannot have done anything.
         let said: Vec<String> = notes(&driven).split_off(already);
-        assert_eq!(said.len(), 5, "five refusals said {said:?}");
-        for (line, what) in said
-            .iter()
-            .zip([NO_PASS, NO_PASS, NO_SCOPE, UNSENT, UNSENT])
-        {
+        assert_eq!(said.len(), 3, "three refusals said {said:?}");
+        for (line, what) in said.iter().zip([NO_SCOPE, UNSENT, UNSENT]) {
             assert!(line.contains(TICKET), "{line:?} does not name the pull");
             assert!(line.contains(what), "{line:?} does not say {what:?}");
         }
         assert!(!driven.chat.answering(), "a refused command opened a turn");
-        assert!(!driven.pact.running(), "a refused key started a pass");
         assert_eq!(
             driven.prompt,
             ScopePrompt::Closed,

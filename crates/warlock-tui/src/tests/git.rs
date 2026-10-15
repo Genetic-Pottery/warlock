@@ -373,9 +373,7 @@ mod unix {
 }
 
 mod rendering {
-    use super::super::{
-        Finished, Freshness, HUMAN_GATE, LeftStale, Touched, pull_request_body, pull_request_title,
-    };
+    use super::super::{Finished, HUMAN_GATE, Touched, pull_request_body, pull_request_title};
 
     #[test]
     fn a_title_is_the_ticket_then_its_title() {
@@ -396,7 +394,7 @@ mod rendering {
     }
 
     #[test]
-    fn a_body_gives_the_ticket_the_sub_tasks_what_was_crossed_and_what_is_stale() {
+    fn a_body_gives_the_ticket_the_sub_tasks_and_the_scopes_touched() {
         let body = pull_request_body(
             "The queue query, ordered oldest first.\n\nEvery skipped ticket names its blocker.\n",
             &[
@@ -415,13 +413,6 @@ mod rendering {
                 scope: "control-plane",
                 paths: vec!["crates/control/src/lib.rs", "crates/control/src/plane.rs"],
             }],
-            &Freshness {
-                refreshed: &["crates/engine", "crates"],
-                left_stale: &[LeftStale {
-                    directory: "crates/control",
-                    reason: "closed to this machine, which holds no `control-plane` sigil",
-                }],
-            },
         );
 
         assert_eq!(
@@ -449,24 +440,13 @@ mod rendering {
              - `crates/control/src/lib.rs`\n\
              - `crates/control/src/plane.rs`\n\
              \n\
-             ## Documents refreshed\n\
-             \n\
-             Left stale by this branch's own changes and described again, so the map in review matches the code in review.\n\
-             \n\
-             - `crates/engine`\n\
-             - `crates`\n\
-             \n\
-             ## Directories left stale\n\
-             \n\
-             - `crates/control` — closed to this machine, which holds no `control-plane` sigil\n\
-             \n\
              The pull request and the ticket's review state are the human gate: warlock merges nothing, closes nothing and moves nothing past review.\n"
         );
         assert!(body.contains(HUMAN_GATE));
     }
 
     #[test]
-    fn a_run_that_crossed_nothing_and_left_nothing_stale_has_no_headings_for_them() {
+    fn a_run_that_touched_no_other_scope_has_no_heading_for_it() {
         let body = pull_request_body(
             "The queue query, ordered oldest first.",
             &[Finished {
@@ -475,7 +455,6 @@ mod rendering {
                 summary: "`issues` sends one query and parses the blockers.",
             }],
             &[],
-            &Freshness::default(),
         );
 
         assert_eq!(
@@ -496,7 +475,7 @@ mod rendering {
     fn the_emptiest_run_still_says_where_the_human_gate_is() {
         // What a comment on the ticket looks like with nothing to report: one
         // sentence, and no blank lines or bare headings above it.
-        let body = pull_request_body("", &[], &[], &Freshness::default());
+        let body = pull_request_body("", &[], &[]);
 
         assert_eq!(body, format!("{HUMAN_GATE}\n"));
         assert!(body.contains(HUMAN_GATE));
@@ -512,7 +491,6 @@ mod rendering {
                 summary: "   ",
             }],
             &[],
-            &Freshness::default(),
         );
 
         assert_eq!(
@@ -528,7 +506,7 @@ mod rendering {
     }
 
     #[test]
-    fn several_scopes_and_several_stale_directories_each_get_their_own_list() {
+    fn several_scopes_each_get_their_own_list() {
         let body = pull_request_body(
             "",
             &[],
@@ -542,19 +520,6 @@ mod rendering {
                     paths: vec!["web/app.ts", "web/index.html"],
                 },
             ],
-            &Freshness {
-                refreshed: &[],
-                left_stale: &[
-                    LeftStale {
-                        directory: "crates/control",
-                        reason: "closed to this machine",
-                    },
-                    LeftStale {
-                        directory: "web",
-                        reason: "the pass failed",
-                    },
-                ],
-            },
         );
 
         assert_eq!(
@@ -572,11 +537,6 @@ mod rendering {
                  \n\
                  - `web/app.ts`\n\
                  - `web/index.html`\n\
-                 \n\
-                 ## Directories left stale\n\
-                 \n\
-                 - `crates/control` — closed to this machine\n\
-                 - `web` — the pass failed\n\
                  \n\
                  {HUMAN_GATE}\n"
             )
@@ -1108,8 +1068,7 @@ mod operations {
     #[test]
     fn a_diff_git_refused_is_the_refusal_and_never_an_empty_list_of_paths() {
         // The opposite answers: "the diff failed" and "the branch changed
-        // nothing" would leave every stale directory unrefreshed and say so
-        // nowhere.
+        // nothing" would finish a run with no pull request and say so nowhere.
         let fake = Fake::new().refuses(128, "fatal: ambiguous argument 'main...HEAD'\n");
 
         let error = fake
@@ -1124,101 +1083,6 @@ mod operations {
                     "git diff --name-only --no-renames -z main...HEAD --"
                 );
                 assert_eq!(code, Some(128));
-            }
-            other => panic!("expected a refusal, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn a_documents_only_commit_names_its_paths_on_the_add_and_on_the_commit() {
-        let fake = Fake::new();
-        let paths = [
-            "crates/engine/.warlock.md".to_owned(),
-            ".warlock/pacts.toml".to_owned(),
-        ];
-
-        fake.checkout()
-            .commit_paths("WAR-141: refresh .warlock.md", &paths)
-            .expect("both calls succeed");
-
-        let vectors = fake.vectors();
-        assert_eq!(
-            words(&vectors[0]),
-            [
-                "add",
-                "--",
-                "crates/engine/.warlock.md",
-                ".warlock/pacts.toml"
-            ]
-        );
-        // The pathspec on the commit is what keeps code out of it: anything
-        // else the index holds is not in this commit.
-        assert_eq!(
-            words(&vectors[1]),
-            [
-                "commit",
-                "-m",
-                "WAR-141: refresh .warlock.md",
-                "--",
-                "crates/engine/.warlock.md",
-                ".warlock/pacts.toml",
-            ]
-        );
-    }
-
-    #[test]
-    fn a_commit_of_named_paths_stages_nothing_else_and_carries_no_sweep() {
-        let fake = Fake::new();
-
-        fake.checkout()
-            .commit_paths(
-                "WAR-141: refresh .warlock.md",
-                &["a/.warlock.md".to_owned()],
-            )
-            .expect("both calls succeed");
-
-        for vector in fake.vectors() {
-            assert!(
-                !words(&vector).contains(&"-A"),
-                "a documents-only commit never stages everything: {vector:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn a_commit_of_no_paths_is_refused_before_any_git_runs() {
-        // `git commit -m <message> --` with an empty pathspec commits the index,
-        // which is the one way this call could sweep in code.
-        let fake = Fake::new();
-
-        let error = fake
-            .checkout()
-            .commit_paths("WAR-141: refresh .warlock.md", &[])
-            .expect_err("a commit of nothing is not a commit");
-
-        assert!(matches!(error, Error::Empty { .. }), "{error:?}");
-        assert!(fake.vectors().is_empty(), "{:?}", fake.vectors());
-    }
-
-    #[test]
-    fn a_refresh_commit_with_nothing_to_commit_is_the_refusal_git_gave() {
-        let fake = Fake::new().says("").answers(Ok(Ran::new(
-            Some(1),
-            "nothing to commit, working tree clean\n",
-            "",
-        )));
-
-        let error = fake
-            .checkout()
-            .commit_paths(
-                "WAR-141: refresh .warlock.md",
-                &[".warlock/pacts.toml".to_owned()],
-            )
-            .expect_err("git refused");
-
-        match error {
-            Error::Refused { message, .. } => {
-                assert_eq!(message, "nothing to commit, working tree clean");
             }
             other => panic!("expected a refusal, got {other:?}"),
         }

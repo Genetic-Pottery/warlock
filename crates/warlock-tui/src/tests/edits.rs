@@ -1,32 +1,28 @@
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use warlock_engine::{
-    Manifest, Node, NodeState, PactEntry, ScopeRecord, Tree, manifest_path, route_facts,
-    save_sigils, validate_scope,
+    Manifest, Node, ScopeRecord, ScopedDirectory, Tree, manifest_path, route_facts, save_sigils,
+    validate_scope,
 };
 
-use super::{Opened, scoped_line, unpacted_line, unscoped_line};
+use super::{Opened, scoped_line, unscoped_line};
 use crate::app::App;
-use crate::error::Error;
-use crate::rescope::{RecordFields, ScopeRefusal};
-// The other door onto the un-pact rule, pressed here so that the two are
-// held to one answer in one place. See `pressed_p`.
-use crate::pacting::pressed_p;
 // The sentence itself, asked of the one function that writes it rather than
 // retyped: the footer and the shell refuse the same boundary in the same
 // words, and a test holding a copy of those words is a test that would go on
 // passing while the two doors drifted apart.
-use crate::boundary::{Operation, closed_scope_message};
+use crate::boundary::closed_scope_message;
+use crate::error::Error;
 use crate::error::status_for;
+use crate::prompt::ScopePrompt;
+use crate::rescope::RecordFields;
+// The other door onto the boundary, pressed here so that the two are held to
+// one answer in one place.
+use crate::scoping::scope_press;
 use crate::session::load_manifest;
 use crate::settings::Settings;
-
-// A grant on every entry, so that "the scope write left the run's own fields
-// alone" is an assertion about two values that are really there.
-const HASH: &str = "d0f5a1";
-
-const AT: &str = "2026-08-19T07:32:00Z";
 
 // Every test here builds both its repository and its home out of one of
 // these, so nothing goes near the developer's real home.
@@ -34,39 +30,23 @@ fn a_dir() -> tempfile::TempDir {
     tempfile::tempdir().expect("a temporary directory")
 }
 
-// Granted rather than bare, because a scope write promises to leave the run's
-// own fields where it found them and a promise about a hash needs a hash to be
-// about. An un-pact drops whole entries, so it neither knows nor cares.
-fn entry(module: &str) -> PactEntry {
-    PactEntry::new(".", module, format!("{module}/.warlock.md"))
-        .expect("a relative module path is inside the root")
-        .with_grant(HASH, AT)
+fn row(module: &str, scope: &str) -> ScopedDirectory {
+    ScopedDirectory::new(".", module, scope).expect("a relative module path is inside the root")
 }
 
+// `docs` has no row and nothing above it does, so nothing covers it.
 fn a_manifest() -> Manifest {
-    Manifest::with_entries([
-        entry("crates").with_scope("platform"),
-        entry("crates/engine").with_scope("data-plane"),
-        entry("crates/engine/src"),
-        entry("docs"),
+    Manifest::with_directories([
+        row("crates", "platform"),
+        row("crates/engine", "data-plane"),
     ])
 }
 
-// The documents are on disk rather than assumed, because "every `.warlock.md`
-// stays where it was" is one of the things an un-pact promises and a promise
-// about files needs files to be about.
 fn a_repository() -> tempfile::TempDir {
     let repo = a_dir();
     a_manifest()
         .save(repo.path())
         .expect("a manifest that saves");
-    for entry in a_manifest().entries() {
-        let document = entry.document_path(repo.path());
-        fs::create_dir_all(document.parent().expect("a document has a directory"))
-            .expect("a module directory");
-        fs::write(&document, "a document\n").expect("a document");
-    }
-
     repo
 }
 
@@ -82,22 +62,16 @@ fn manifest_bytes(repo_root: &Path) -> Option<Vec<u8>> {
 }
 
 // The production road exactly, with what the environment would have settled
-// handed in instead. The three writes below reach their edit through this
-// and only through this, so there is no way to the second half without the
-// first.
-fn open(repo_root: &Path, home: &Path, path: &str, operation: Operation) -> Result<Opened, Error> {
+// handed in instead. Both writes below reach their edit through this and only
+// through this, so there is no way to the second half without the first.
+fn open(repo_root: &Path, home: &Path, path: &str) -> Result<Opened, Error> {
     let manifest = load_manifest(repo_root).expect("a manifest that reads");
     Opened::new(
         repo_root.to_path_buf(),
         Some(home),
         manifest,
         repo_root.join(path),
-        operation,
     )
-}
-
-fn unpact(repo_root: &Path, home: &Path, path: &str) -> Result<String, Error> {
-    open(repo_root, home, path, Operation::Unpact)?.unpacted()
 }
 
 fn scope_add(
@@ -107,7 +81,7 @@ fn scope_add(
     scope: &str,
     flags: RecordFields<'_>,
 ) -> Result<String, Error> {
-    open(repo_root, home, path, Operation::Scope)?.scoped(scope, flags)
+    open(repo_root, home, path)?.scoped(scope, flags)
 }
 
 // The three flags a name nothing records has to be given, as one value, so a
@@ -121,76 +95,22 @@ fn a_record() -> RecordFields<'static> {
 }
 
 fn scope_remove(repo_root: &Path, home: &Path, path: &str) -> Result<String, Error> {
-    open(repo_root, home, path, Operation::Scope)?.unscoped()
+    open(repo_root, home, path)?.unscoped()
 }
 
-fn stored(repo_root: &Path, module: &str) -> PactEntry {
+fn stored_scope(repo_root: &Path, module: &str) -> Option<String> {
     load_manifest(repo_root)
         .expect("a manifest that reads")
-        .entry(module)
-        .expect("the manifest holds this module")
-        .clone()
+        .directory(module)
+        .map(|directory| directory.scope().to_owned())
 }
 
-#[test]
-fn an_open_boundary_drops_the_subtree_and_leaves_every_document_on_disk() {
-    let repo = a_repository();
-    let home = a_dir();
-    holding(home.path(), repo.path(), &["platform", "data-plane"]);
-
-    let said = unpact(repo.path(), home.path(), "crates").expect("an open boundary writes");
-
-    // The subtree went, the sibling that merely shares a prefix of the name
-    // did not, and the engine decided which was which.
-    let modules: Vec<String> = load_manifest(repo.path())
-        .expect("a manifest that reads")
-        .entries()
+fn paths(manifest: &Manifest) -> Vec<&str> {
+    manifest
+        .directories()
         .iter()
-        .map(|entry| entry.module().to_owned())
-        .collect();
-    assert_eq!(modules, ["docs"]);
-    assert!(
-        said.starts_with("unpacted crates — 3 entries dropped"),
-        "{said}"
-    );
-    assert_eq!(status_for(&Ok(())), 0);
-
-    // The promise the whole command is shaped around: warlock forgot the
-    // pact, and the prose is still the repository's.
-    for module in ["crates", "crates/engine", "crates/engine/src", "docs"] {
-        let document = repo.path().join(module).join(".warlock.md");
-        assert!(document.is_file(), "{} was removed", document.display());
-    }
-}
-
-#[test]
-fn a_closed_boundary_refuses_and_leaves_the_manifest_byte_identical() {
-    let repo = a_repository();
-    let home = a_dir();
-    // The nearest scope wins, so a machine holding the outer boundary is
-    // still outside the inner one.
-    holding(home.path(), repo.path(), &["platform"]);
-    let before = manifest_bytes(repo.path()).expect("a manifest on disk");
-
-    let refused = unpact(repo.path(), home.path(), "crates/engine");
-
-    let error = refused.expect_err("a scope this machine does not hold refuses");
-    assert!(
-        matches!(error, Error::ClosedScope { .. }),
-        "the boundary was refused as something else: {error:?}"
-    );
-    // The footer's own sentence, named rather than copied, about this path
-    // and this scope: the shell says what the keystroke says.
-    assert_eq!(
-        error.to_string(),
-        closed_scope_message("crates/engine", "data-plane")
-    );
-    assert!(!error.to_string().contains('\n'), "`main` prints one line");
-    // The refusal's own status: not the 1 warlock spends on something it
-    // could not do, because nothing was spent and nothing here can be
-    // retried into working.
-    assert_eq!(status_for(&Err(error)), 3);
-    assert_eq!(manifest_bytes(repo.path()).as_deref(), Some(&before[..]));
+        .map(ScopedDirectory::path)
+        .collect()
 }
 
 #[test]
@@ -202,229 +122,44 @@ fn a_machine_holding_nothing_is_refused_by_every_scope_it_meets() {
     let before = manifest_bytes(repo.path()).expect("a manifest on disk");
 
     for path in ["crates", "crates/engine", "crates/engine/src"] {
-        let error = unpact(repo.path(), home.path(), path)
+        let error = scope_remove(repo.path(), home.path(), path)
             .expect_err("holding nothing opens nothing that is scoped");
         assert!(
             matches!(error, Error::ClosedScope { .. }),
             "{path}: {error:?}"
         );
     }
-    // And the unscoped directory beside them is open to that same machine:
-    // the permissive default is on the directory and only there.
-    unpact(repo.path(), home.path(), "docs").expect("nothing scopes `docs`");
-    assert_ne!(manifest_bytes(repo.path()).as_deref(), Some(&before[..]));
-}
-
-#[test]
-fn the_success_line_names_every_dropped_entry_that_carried_a_scope() {
-    // `.` is the root and the root carries no scope, so the boundary over it
-    // waves this through — and the boundaries *under* it wave it through
-    // because this machine holds both of them. It then says out loud whose
-    // they were.
-    let repo = a_repository();
-    let home = a_dir();
-    holding(home.path(), repo.path(), &["platform", "data-plane"]);
-
-    let said = unpact(repo.path(), home.path(), ".").expect("every scope below is held");
-
-    assert_eq!(
-        said,
-        "unpacted . — 4 entries dropped, 2 scoped (crates: platform, \
-             crates/engine: data-plane)"
-    );
-    assert!(
-        load_manifest(repo.path())
-            .expect("a manifest that reads")
-            .entries()
-            .is_empty()
-    );
-}
-
-#[test]
-fn a_boundary_below_the_path_refuses_the_unpact_and_names_every_scope_in_the_way() {
-    // The blast radius, closed. `crates` opens to this machine and the root
-    // is scoped by nobody, but both un-pacts reach a boundary this machine
-    // is outside of — and an entry is the only home a scope has.
-    let repo = a_repository();
-    let home = a_dir();
-    holding(home.path(), repo.path(), &["platform"]);
-    let before = manifest_bytes(repo.path()).expect("a manifest on disk");
-
-    let error = unpact(repo.path(), home.path(), "crates")
-        .expect_err("`crates/engine` is scoped `data-plane` and this machine is not");
-    assert!(
-        matches!(error, Error::ClosedScopeBelow { .. }),
-        "the descendant boundary was refused as something else: {error:?}"
-    );
-    assert_eq!(
-        error.to_string(),
-        "un-pacting crates would drop pacts scoped `data-plane` — hold that sigil with \
-             `warlock sigil add`, or un-pact the parts you hold"
-    );
-    assert!(!error.to_string().contains('\n'), "`main` prints one line");
-    // A 1 and deliberately not the boundary's 3: this machine may work at
-    // `crates`, and the second road out of the sentence — un-pact the parts
-    // you hold — needs no sigil at all, so it is not the "you are outside,
-    // go and ask" verdict 3 exists for. Argued on `status_for`.
-    assert_eq!(status_for(&Err(error)), 1);
-
-    // The root, whose own unscoped-ness bought the whole repository today:
-    // every distinct scope in the way is named, deduplicated and in the
-    // manifest's order, so obtaining one sigil does not reveal the next.
-    let error = unpact(repo.path(), home.path(), ".")
-        .expect_err("an unscoped root is not permission over the scopes below it");
-    assert_eq!(
-        error.to_string(),
-        "un-pacting . would drop pacts scoped `data-plane` — hold that sigil with \
-             `warlock sigil add`, or un-pact the parts you hold"
-    );
-
-    // And nothing was written on the way to either refusal.
     assert_eq!(manifest_bytes(repo.path()).as_deref(), Some(&before[..]));
-
-    // What is left is the road out the sentence offers: the parts this
-    // machine does hold still un-pact, one subtree at a time.
-    assert_eq!(
-        unpact(repo.path(), home.path(), "docs").expect("nothing at or below `docs` is scoped"),
-        "unpacted docs — 1 entry dropped"
-    );
 }
 
 #[test]
-fn a_machine_holding_nothing_is_told_about_every_boundary_at_once() {
-    // Holding nothing — the ordinary state of a fresh checkout — the root
-    // un-pact meets both scopes, and both are named in the manifest's own
-    // order rather than one at a time.
+fn anyone_may_draw_the_first_scope_over_a_directory_nothing_covers() {
+    // A scope is the only thing that opens a directory to work, so if drawing
+    // the first one also needed a scope, no repository could ever be set up.
     let repo = a_repository();
     let home = a_dir();
 
-    let error = unpact(repo.path(), home.path(), ".")
-        .expect_err("holding nothing opens nothing that is scoped");
-    assert_eq!(
-        error.to_string(),
-        "un-pacting . would drop pacts scoped `platform`, `data-plane` — hold those sigils \
-             with `warlock sigil add`, or un-pact the parts you hold"
-    );
-    // The descendant refusal's 1 again, and holding nothing does not change
-    // it: what decides the status is which question was refused, not how
-    // much this machine holds. See `status_for`.
-    assert_eq!(status_for(&Err(error)), 1);
-}
-
-#[test]
-fn one_entry_is_counted_in_the_singular_and_an_unscoped_drop_says_no_more() {
-    let repo = a_repository();
-    let home = a_dir();
-
-    assert_eq!(
-        unpact(repo.path(), home.path(), "docs").expect("nothing scopes `docs`"),
-        "unpacted docs — 1 entry dropped"
-    );
-}
-
-#[test]
-fn a_path_with_no_manifest_form_is_refused_with_nothing_written() {
-    // Not a boundary question — coverage has nothing to say about a path
-    // that is not in this repository — so it is the command's own refusal,
-    // in the shape every other subcommand refuses one.
-    let repo = a_repository();
-    let home = a_dir();
-    let before = manifest_bytes(repo.path()).expect("a manifest on disk");
-
-    for outside in [PathBuf::from("/elsewhere"), repo.path().join("..")] {
-        let manifest = load_manifest(repo.path()).expect("a manifest that reads");
-        let refused = Opened::new(
-            repo.path().to_path_buf(),
-            Some(home.path()),
-            manifest,
-            outside.clone(),
-            Operation::Unpact,
-        )
-        .and_then(|opened| opened.unpacted());
-
-        let error = refused.expect_err("a path outside the repository has no manifest form");
-        assert!(
-            matches!(error, Error::Unspellable { .. }),
-            "{}: {error:?}",
-            outside.display()
-        );
-        assert!(!error.to_string().contains('\n'), "`main` prints one line");
-        assert_eq!(manifest_bytes(repo.path()).as_deref(), Some(&before[..]));
-    }
-}
-
-#[test]
-fn an_unpact_in_a_repository_that_never_pacted_anything_writes_the_empty_manifest() {
-    // The decision recorded in the module docs, pinned here: it succeeds, it
-    // drops nothing, and it saves — so the file that appears says exactly
-    // what was already true.
-    let repo = a_dir();
-    let home = a_dir();
-    assert_eq!(manifest_bytes(repo.path()), None);
-
-    assert_eq!(
-        unpact(repo.path(), home.path(), ".").expect("an empty manifest has no boundary"),
-        "unpacted . — 0 entries dropped"
-    );
-    assert!(
-        load_manifest(repo.path())
-            .expect("a manifest that reads")
-            .entries()
-            .is_empty()
-    );
-    assert!(manifest_bytes(repo.path()).is_some(), "nothing was saved");
-}
-
-#[test]
-fn a_scope_no_boundary_would_honour_is_still_named_when_it_is_dropped() {
-    // `Data Plane!` is not a scope, so coverage ignores it and it closed
-    // nothing — but somebody wrote it in the file, and a line that left it
-    // out would be warlock deciding it did not count.
-    let dropped = entry("crates/engine").with_scope("Data Plane!");
-
-    assert_eq!(
-        unpacted_line("crates", &[&dropped]),
-        "unpacted crates — 1 entry dropped, 1 scoped (crates/engine: Data Plane!)"
-    );
-}
-
-#[test]
-fn an_open_boundary_writes_the_scope_and_moves_nothing_else_in_the_file() {
-    let repo = a_repository();
-    let home = a_dir();
-
-    // `docs` carries no scope and nothing above it does, so it is open to a
-    // machine that has never run `warlock sigil add`.
     let said = scope_add(repo.path(), home.path(), "docs", "billing", a_record())
         .expect("nothing scopes `docs`");
 
     assert_eq!(said, "docs is scoped `billing`");
     assert_eq!(status_for(&Ok(())), 0);
-    let docs = stored(repo.path(), "docs");
-    assert_eq!(docs.scope(), Some("billing"));
-    // The one field a person owns, and nothing else on the entry.
-    assert_eq!(docs.document(), "docs/.warlock.md");
-    assert_eq!(docs.granted_hash(), Some(HASH));
-    assert_eq!(docs.granted_at(), Some(AT));
+    assert_eq!(
+        stored_scope(repo.path(), "docs").as_deref(),
+        Some("billing")
+    );
 
-    // Every other entry cloned untouched, in the order they were in, so the
-    // diff against what was there is the one scope line.
+    // Every other row untouched and in the order it was in, and the new one on
+    // the end, so the diff against what was there is the one row.
     let after = load_manifest(repo.path()).expect("a manifest that reads");
     let before = a_manifest();
-    assert_eq!(
-        after
-            .entries()
-            .iter()
-            .map(PactEntry::module)
-            .collect::<Vec<_>>(),
-        before
-            .entries()
-            .iter()
-            .map(PactEntry::module)
-            .collect::<Vec<_>>(),
-    );
-    for module in ["crates", "crates/engine", "crates/engine/src"] {
-        assert_eq!(after.entry(module), before.entry(module), "{module}");
+    assert_eq!(paths(&after), ["crates", "crates/engine", "docs"]);
+    for module in ["crates", "crates/engine"] {
+        assert_eq!(
+            after.directory(module),
+            before.directory(module),
+            "{module}"
+        );
     }
 }
 
@@ -443,11 +178,11 @@ fn a_scope_that_replaces_another_says_whose_boundary_it_moved() {
     )
     .expect("the machine holds the scope covering this directory");
 
-    // The mitigation the un-pact line is: a boundary that moved is named,
-    // because a script that quietly redrew somebody else's says whose.
+    // A boundary that moved is named, because a script that quietly redrew
+    // somebody else's says whose.
     assert_eq!(said, "crates/engine is scoped `billing` — was `data-plane`");
     assert_eq!(
-        stored(repo.path(), "crates/engine").scope(),
+        stored_scope(repo.path(), "crates/engine").as_deref(),
         Some("billing")
     );
     // And re-writing the scope a directory already carries has nothing to
@@ -471,11 +206,14 @@ fn what_was_given_is_folded_before_it_is_judged_and_stored() {
 
     assert!(validate_scope("Data-Plane").is_err());
     assert_eq!(said, "docs is scoped `data-plane`");
-    assert_eq!(stored(repo.path(), "docs").scope(), Some("data-plane"));
+    assert_eq!(
+        stored_scope(repo.path(), "docs").as_deref(),
+        Some("data-plane")
+    );
 }
 
 #[test]
-fn removing_a_scope_clears_it_and_leaves_the_document_and_the_grant() {
+fn removing_a_scope_drops_its_row_and_leaves_the_one_above() {
     let repo = a_repository();
     let home = a_dir();
     holding(home.path(), repo.path(), &["data-plane"]);
@@ -485,13 +223,11 @@ fn removing_a_scope_clears_it_and_leaves_the_document_and_the_grant() {
 
     assert_eq!(said, "crates/engine is no longer scoped — was `data-plane`");
     assert_eq!(status_for(&Ok(())), 0);
-    let engine = stored(repo.path(), "crates/engine");
-    assert_eq!(engine.scope(), None);
-    assert_eq!(engine.document(), "crates/engine/.warlock.md");
-    assert_eq!(engine.granted_hash(), Some(HASH));
-    assert_eq!(engine.granted_at(), Some(AT));
-    // The entry above it kept its own boundary: this is one entry's field.
-    assert_eq!(stored(repo.path(), "crates").scope(), Some("platform"));
+    assert_eq!(stored_scope(repo.path(), "crates/engine"), None);
+    assert_eq!(
+        stored_scope(repo.path(), "crates").as_deref(),
+        Some("platform")
+    );
 }
 
 #[test]
@@ -514,10 +250,10 @@ fn removing_a_scope_from_a_directory_that_carries_none_is_success_and_writes_the
     );
 }
 
-// `third-party` is named by no entry at all, and `data-plane` loses the only
-// entry that named it to the un-pact below: a writer that pruned the records to
-// what the entries spell would drop both, and where work under a scope is filed
-// is not the un-pact's to forget.
+// `third-party` is named by no row at all, and `data-plane` loses the only row
+// that named it to the clear below: a writer that pruned the records to what the
+// rows spell would drop both, and where work under a scope is filed is not a
+// clear's to forget.
 fn records() -> Vec<ScopeRecord> {
     vec![
         ScopeRecord::new("data-plane", "Data Plane", "In Review", "area/data-plane"),
@@ -525,11 +261,8 @@ fn records() -> Vec<ScopeRecord> {
     ]
 }
 
-// The same repository every other test here works over, with the records added
-// before the first write rather than after: what these assert is that a command
-// found them in the file and put them back.
 fn a_repository_of_records() -> tempfile::TempDir {
-    let repo = a_repository();
+    let repo = a_dir();
     a_manifest()
         .with_scopes(records())
         .save(repo.path())
@@ -572,35 +305,19 @@ fn both_scope_writes_leave_the_records_where_they_found_them() {
     );
 
     scope_remove(repo.path(), home.path(), "crates/engine").expect("the machine holds the scope");
+    scope_remove(repo.path(), home.path(), "docs").expect("the machine holds the scope");
     assert_eq!(
         record_bytes(repo.path()),
         before,
         "`scope remove` moved a record",
     );
-    assert_eq!(stored(repo.path(), "crates/engine").scope(), None);
-}
-
-#[test]
-fn an_unpact_keeps_the_records_including_the_one_it_orphaned() {
-    let repo = a_repository_of_records();
-    let home = a_dir();
-    holding(home.path(), repo.path(), &["platform", "data-plane"]);
-    let before = record_bytes(repo.path());
-
-    unpact(repo.path(), home.path(), "crates").expect("an open boundary writes");
-
     let after = load_manifest(repo.path()).expect("a manifest that reads");
     assert_eq!(
-        after
-            .entries()
-            .iter()
-            .map(PactEntry::module)
-            .collect::<Vec<_>>(),
-        ["docs"],
-        "the only entry naming `data-plane` really did go",
+        paths(&after),
+        ["crates"],
+        "no row names `data-plane` any more"
     );
     assert_eq!(after.scopes(), records());
-    assert_eq!(record_bytes(repo.path()), before);
 }
 
 // Spaces on both ends and kept there: blank is judged on a trimmed copy while
@@ -626,8 +343,6 @@ fn every_scope_refusal_is_one_line_a_1_and_nothing_written() {
             a_record(),
         ),
         scope_add(repo.path(), home.path(), "docs", "", a_record()),
-        scope_add(repo.path(), home.path(), "docs/adr", "billing", a_record()),
-        scope_remove(repo.path(), home.path(), "docs/adr"),
         scope_add(
             repo.path(),
             home.path(),
@@ -685,10 +400,10 @@ fn a_name_nothing_records_gets_its_scope_and_its_record_from_one_write() {
     assert_eq!(status_for(&Ok(())), 0);
     let after = load_manifest(repo.path()).expect("a manifest that reads");
     assert_eq!(
-        after.entry("docs").and_then(PactEntry::scope),
+        after.directory("docs").map(ScopedDirectory::scope),
         Some("billing")
     );
-    // The name on the record is the folded name on the pact, and the three
+    // The name on the record is the folded name on the row, and the three
     // values are what was typed — including the spaces around the team, which
     // nothing here is entitled to correct.
     assert_eq!(
@@ -712,28 +427,14 @@ fn a_name_nothing_records_gets_its_scope_and_its_record_from_one_write() {
         "a record that was there moved or changed"
     );
 
-    // And every row the write did not set out to change, including the run's
-    // own fields on the row it did.
     let untouched = a_manifest();
-    assert_eq!(
-        after
-            .entries()
-            .iter()
-            .map(PactEntry::module)
-            .collect::<Vec<_>>(),
-        untouched
-            .entries()
-            .iter()
-            .map(PactEntry::module)
-            .collect::<Vec<_>>(),
-    );
-    for module in ["crates", "crates/engine", "crates/engine/src"] {
-        assert_eq!(after.entry(module), untouched.entry(module), "{module}");
+    for module in ["crates", "crates/engine"] {
+        assert_eq!(
+            after.directory(module),
+            untouched.directory(module),
+            "{module}"
+        );
     }
-    let docs = stored(repo.path(), "docs");
-    assert_eq!(docs.document(), "docs/.warlock.md");
-    assert_eq!(docs.granted_hash(), Some(HASH));
-    assert_eq!(docs.granted_at(), Some(AT));
 }
 
 #[test]
@@ -755,7 +456,7 @@ fn a_name_something_records_is_written_flagless_and_gains_no_second_record() {
     assert_eq!(status_for(&Ok(())), 0);
     let after = load_manifest(repo.path()).expect("a manifest that reads");
     assert_eq!(
-        after.entry("docs").and_then(PactEntry::scope),
+        after.directory("docs").map(ScopedDirectory::scope),
         Some("data-plane")
     );
     assert_eq!(after.scopes(), records());
@@ -784,12 +485,11 @@ fn a_name_something_records_is_written_flagless_and_gains_no_second_record() {
 
 #[test]
 fn a_closed_boundary_answers_before_a_single_flag_is_looked_at() {
-    // The ordering the acceptance criteria turn on: whatever the flags said,
-    // a scope this machine does not hold is the same refusal it was before
-    // they existed. The four shapes below are the four different answers the
-    // new checks give, none of which is reached from out here — a refusal
-    // naming a record would be a fact about the inside of a manifest the
-    // reader has just been told they may not work in.
+    // Whatever the flags said, a scope this machine does not hold is the same
+    // refusal. The four shapes below are the four different answers the record
+    // checks give, none of which is reached from out here — a refusal naming a
+    // record would be a fact about the inside of a manifest the reader has just
+    // been told they may not work in.
     let repo = a_repository_of_records();
     let home = a_dir();
     holding(home.path(), repo.path(), &["platform"]);
@@ -828,7 +528,7 @@ fn a_closed_boundary_answers_before_a_single_flag_is_looked_at() {
 fn the_router_finds_the_team_review_state_and_label_the_flags_wrote() {
     // What `warlock check` prints for the directory just scoped, asked of the
     // router itself rather than of the manifest: a record filed under a name
-    // the pact does not carry would route nowhere, which is the whole reason
+    // the row does not carry would route nowhere, which is the whole reason
     // the flags are asked for in the same act that writes the name.
     let repo = a_repository_of_records();
     let home = a_dir();
@@ -872,127 +572,72 @@ fn a_closed_boundary_refuses_both_scope_writes_and_leaves_the_manifest_byte_iden
             matches!(error, Error::ClosedScope { .. }),
             "the boundary was refused as something else: {error:?}"
         );
-        // The same sentence the un-pact is refused with and the same one
-        // the footer puts up, asked of the one function that writes it.
+        // The same sentence the footer puts up, asked of the one function
+        // that writes it.
         assert_eq!(
             error.to_string(),
             closed_scope_message("crates/engine", "data-plane")
         );
         assert!(!error.to_string().contains('\n'), "`main` prints one line");
-        // The same boundary, so the same status the un-pact gets: one
-        // refusal, one number, whichever write met it.
+        // The refusal's own status: not the 1 warlock spends on something it
+        // could not do, because nothing here can be retried into working.
         assert_eq!(status_for(&Err(error)), 3);
     }
     assert_eq!(manifest_bytes(repo.path()).as_deref(), Some(&before[..]));
 }
 
 #[test]
-fn the_boundary_is_asked_before_the_path_is_checked_for_an_entry() {
-    // The ordering that is the security property: `crates/tui` has no entry
-    // in the manifest and sits inside the boundary `crates` draws, so from
-    // outside that boundary the answer is the scope refusal — never "is not
-    // in the manifest", which is a fact about the inside of a file the
-    // reader has just been told they may not work in.
-    let repo = a_repository();
-    let home = a_dir();
-    let before = manifest_bytes(repo.path()).expect("a manifest on disk");
-
-    let error = scope_add(
-        repo.path(),
-        home.path(),
-        "crates/tui",
-        "billing",
-        a_record(),
-    )
-    .expect_err("holding nothing opens nothing that is scoped");
-
-    assert!(
-        matches!(error, Error::ClosedScope { .. }),
-        "the manifest's shape leaked past a closed boundary: {error:?}"
-    );
-    assert!(
-        !error.to_string().contains("not in the manifest"),
-        "{error}"
-    );
-    assert_eq!(manifest_bytes(repo.path()).as_deref(), Some(&before[..]));
-
-    // And past the same boundary held, the same path answers with what the
-    // manifest holds — so the sentence exists and is only ever reached from
-    // inside.
-    holding(home.path(), repo.path(), &["platform"]);
-    let error = scope_add(
-        repo.path(),
-        home.path(),
-        "crates/tui",
-        "billing",
-        a_record(),
-    )
-    .expect_err("there is no entry to write a scope on");
-    assert!(
-        matches!(
-            error,
-            Error::Scope {
-                refusal: ScopeRefusal::NoPact { .. }
-            }
-        ),
-        "{error:?}"
-    );
-}
-
-#[test]
-fn a_closed_boundary_answers_a_clear_and_an_unpact_before_either_reads_the_manifest() {
-    // The ordering the test above pins for `scope add`, held over the other
-    // two writes, because it is one rule and the gate is one place: from
-    // outside the boundary `crates` draws, neither may say what the manifest
-    // holds about `crates/tui` — not "is not in the manifest" for the clear,
-    // and not "0 entries dropped" for the un-pact, which is the same fact
-    // about an empty subtree worded as a success.
+fn the_boundary_is_asked_before_the_manifest_is_read_for_a_row() {
+    // `crates/tui` has no row and sits inside the boundary `crates` draws, so
+    // from outside that boundary both writes answer with the scope refusal —
+    // never with what the manifest holds about `crates/tui`.
     let repo = a_repository();
     let home = a_dir();
     let before = manifest_bytes(repo.path()).expect("a manifest on disk");
 
     for refused in [
+        scope_add(
+            repo.path(),
+            home.path(),
+            "crates/tui",
+            "billing",
+            a_record(),
+        ),
         scope_remove(repo.path(), home.path(), "crates/tui"),
-        unpact(repo.path(), home.path(), "crates/tui"),
     ] {
         let error = refused.expect_err("holding nothing opens nothing that is scoped");
         assert!(
             matches!(error, Error::ClosedScope { .. }),
             "the manifest's shape leaked past a closed boundary: {error:?}"
         );
-        assert!(
-            !error.to_string().contains("not in the manifest"),
-            "{error}"
-        );
-        // And the status leaks nothing either: a closed boundary over a
-        // path with no entry is the boundary's 3, the same number it would
-        // be over a path with one.
         assert_eq!(status_for(&Err(error)), 3);
     }
     assert_eq!(manifest_bytes(repo.path()).as_deref(), Some(&before[..]));
 
-    // And past the same boundary held, each answers about the manifest
-    // after all: the clear with the refusal naming the pact that is not
-    // there, the un-pact with a subtree that had nothing in it — so both
-    // sentences exist and are only ever reached from inside.
+    // And past the same boundary held, the clear says there was nothing to
+    // take away and the add gives the directory a row of its own.
     holding(home.path(), repo.path(), &["platform"]);
-    let error = scope_remove(repo.path(), home.path(), "crates/tui")
-        .expect_err("there is no entry to clear a scope on");
-    assert!(
-        matches!(
-            error,
-            Error::Scope {
-                refusal: ScopeRefusal::NoPact { .. }
-            }
-        ),
-        "{error:?}"
-    );
     assert_eq!(
-        unpact(repo.path(), home.path(), "crates/tui")
-            .expect("nothing is pacted at or below `crates/tui`"),
-        "unpacted crates/tui — 0 entries dropped"
+        scope_remove(repo.path(), home.path(), "crates/tui")
+            .expect("a directory with no row carries no scope"),
+        "crates/tui carried no scope"
     );
     assert_eq!(manifest_bytes(repo.path()).as_deref(), Some(&before[..]));
+    assert_eq!(
+        scope_add(
+            repo.path(),
+            home.path(),
+            "crates/tui",
+            "billing",
+            a_record()
+        )
+        .expect("the machine holds the scope covering `crates/tui`"),
+        "crates/tui is scoped `billing`"
+    );
+    assert_eq!(
+        stored_scope(repo.path(), "crates/tui").as_deref(),
+        Some("billing")
+    );
 }
 
 #[test]
@@ -1009,7 +654,6 @@ fn a_path_with_no_manifest_form_is_refused_by_both_scope_writes() {
                 Some(home.path()),
                 manifest.clone(),
                 outside.clone(),
-                Operation::Scope,
             )
         };
 
@@ -1044,70 +688,45 @@ const HELD: &str = "platform";
 // The scope it does not, which is the one every refusal here is by.
 const CLOSED: &str = "data-plane";
 
-// Every shape the two doors have to answer alike, in one manifest: a root
-// entry carrying no scope, a boundary this machine holds on `crates`, one it
-// does not on `crates/engine` below that, and a second subtree whose only
-// boundary below is one it does hold. One manifest rather than one per case,
-// because a parity test over several fixtures would be showing that the two
-// doors agree about several different repositories.
-fn a_manifest_of_boundaries_both_ways() -> Manifest {
-    Manifest::with_entries([
-        // Spelled out rather than through `entry`, which would document the
-        // root as `./.warlock.md`.
-        PactEntry::new(".", ".", ".warlock.md")
-            .expect("the repository root is inside itself")
-            .with_grant(HASH, AT),
-        entry("crates").with_scope(HELD),
-        entry("crates/engine").with_scope(CLOSED),
-        entry("crates/engine/src"),
-        entry("docs"),
-        entry("docs/api").with_scope(HELD),
-    ])
-}
-
-// No documents on disk: these tests are about which un-pacts are allowed, and
-// neither door reads a `.warlock.md` to decide that. That an un-pact leaves
-// every document where it was is pinned above, over a repository that has
-// them.
+// Every shape the two doors have to answer alike, in one manifest: an unscoped
+// root, a boundary this machine holds on `crates`, one it does not on
+// `crates/engine` below that, and an unscoped `docs` over a held `docs/api`.
+// One manifest rather than one per case, because a parity test over several
+// fixtures would be showing that the two doors agree about several different
+// repositories.
 fn a_repository_of_boundaries() -> (tempfile::TempDir, tempfile::TempDir) {
     let repo = a_dir();
     let home = a_dir();
-    a_manifest_of_boundaries_both_ways()
-        .save(repo.path())
-        .expect("a manifest that saves");
+    Manifest::with_directories([
+        row("crates", HELD),
+        row("crates/engine", CLOSED),
+        row("docs/api", HELD),
+    ])
+    .save(repo.path())
+    .expect("a manifest that saves");
     holding(home.path(), repo.path(), &[HELD]);
 
     (repo, home)
 }
 
-// Every directory the manifest names, each one pacted, so that `p` on any row
-// is an un-pact.
 fn a_panel_over(repo_root: &Path) -> App {
-    let node = |name: &str, children: Vec<Node>| {
-        Node::new(
-            repo_root.join(name),
-            None::<PathBuf>,
-            NodeState::PactedFresh,
-        )
-        .with_children(children)
-    };
+    let node =
+        |name: &str, children: Vec<Node>| Node::new(repo_root.join(name)).with_children(children);
 
-    App::from_tree(&Tree::new(
-        Node::new(repo_root, None::<PathBuf>, NodeState::PactedFresh).with_children([
-            node(
-                "crates",
-                vec![node(
-                    "crates/engine",
-                    vec![node("crates/engine/src", Vec::new())],
-                )],
-            ),
-            node("docs", vec![node("docs/api", Vec::new())]),
-        ]),
-    ))
+    App::from_tree(&Tree::new(Node::new(repo_root).with_children([
+        node(
+            "crates",
+            vec![node(
+                "crates/engine",
+                vec![node("crates/engine/src", Vec::new())],
+            )],
+        ),
+        node("docs", vec![node("docs/api", Vec::new())]),
+    ])))
 }
 
 // The answer, and deliberately not the mechanism: the panel refuses by
-// painting nothing and putting a line on the footer, the shell by handing
+// opening no window and putting a line on the footer, the shell by handing
 // `main` an error to print. Those are two shapes of one rule, and this is
 // what the two of them have to be equal in.
 #[derive(Debug, PartialEq, Eq)]
@@ -1117,18 +736,15 @@ enum Answer {
 }
 
 // The one difference between the doors that is not about the rule:
-// `App::label_for` spells a row relative to the tree's root and falls back to
-// the absolute path for the root row itself, where the shell spells that row
-// `.`. Every other row is named by the manifest's own spelling on both sides,
-// so this is a no-op for them.
+// `App::label_for` spells the root row by its absolute path, where the shell
+// spells that row `.`. Every other row is named by the manifest's own spelling
+// on both sides, so this is a no-op for them.
 fn as_the_shell_says_it(sentence: &str, repo_root: &Path) -> String {
     sentence.replace(&repo_root.display().to_string(), ".")
 }
 
 fn panel_answer(repo_root: &Path, home: &Path, path: &str) -> Answer {
     let manifest = load_manifest(repo_root).expect("a manifest that reads");
-    // The session's own reading of the sigils config, which is what the
-    // running app holds and what the shell reads for itself.
     let sigils = Settings::at(Some(home.to_path_buf()), repo_root).sigils_or_unknown();
     let mut app = a_panel_over(repo_root);
     let target = if path == "." {
@@ -1136,19 +752,23 @@ fn panel_answer(repo_root: &Path, home: &Path, path: &str) -> Answer {
     } else {
         repo_root.join(path)
     };
-    let row = app
+    let index = app
         .rows()
         .iter()
         .position(|row| row.path == target)
         .expect("the panel draws a row for this directory");
-    app.select_row(row);
+    app.select_row(index);
 
-    match pressed_p(&mut app, &manifest, repo_root, &sigils) {
-        Some(toggle) => {
-            assert!(!toggle.pacted, "{path}: the press was not an un-pact");
-            Answer::WentAhead
-        }
-        None => Answer::Refused(as_the_shell_says_it(
+    match scope_press(
+        &mut app,
+        &manifest,
+        repo_root,
+        &sigils,
+        None,
+        Instant::now(),
+    ) {
+        ScopePrompt::Open(_) => Answer::WentAhead,
+        ScopePrompt::Closed => Answer::Refused(as_the_shell_says_it(
             app.message().expect("a refused press says why"),
             repo_root,
         )),
@@ -1156,48 +776,34 @@ fn panel_answer(repo_root: &Path, home: &Path, path: &str) -> Answer {
 }
 
 fn shell_answer(repo_root: &Path, home: &Path, path: &str) -> Answer {
-    match unpact(repo_root, home, path) {
+    match open(repo_root, home, path) {
         Ok(_) => Answer::WentAhead,
         Err(error) => Answer::Refused(error.to_string()),
     }
 }
 
 #[test]
-fn a_key_press_and_a_shell_prompt_answer_the_same_un_pact_alike() {
-    // The rule's own last clause: there is no path by which one door refuses
-    // and the other permits. Both are pressed over one manifest, by one
-    // machine holding one sigil, and the answers are held against each other
-    // *and* against what the answer is supposed to be — so a change to
-    // either door alone fails here, and so does a change to both that moves
-    // the rule.
-    //
-    // The rule is `docs/warlock-decision-un-pacting-across-a-descendant-scope.md`.
-    let refused_here = format!(
-        "crates/engine is scoped `{CLOSED}` — hold that sigil to work here, \
-             with `warlock sigil add {CLOSED}`"
-    );
-    let refused_below = |label: &str| {
-        format!(
-            "un-pacting {label} would drop pacts scoped `{CLOSED}` — hold that sigil with \
-                 `warlock sigil add`, or un-pact the parts you hold"
-        )
-    };
+fn a_key_press_and_a_shell_prompt_answer_the_same_scope_write_alike() {
+    // There is no path by which one door refuses and the other permits. Both
+    // are pressed over one manifest, by one machine holding one sigil, and the
+    // answers are held against each other *and* against what the answer is
+    // supposed to be — so a change to either door alone fails here, and so
+    // does a change to both that moves the rule.
+    let refused_here = closed_scope_message("crates/engine", CLOSED);
 
     for (path, expected) in [
-        // A scope on the target itself, which coverage has always seen.
         ("crates/engine", Answer::Refused(refused_here)),
-        // A target this machine's own sigil opens, over an entry below it
-        // that it does not: passing the first question is not permission for
-        // the second.
-        ("crates", Answer::Refused(refused_below("crates"))),
-        // A boundary below that this machine holds is no obstacle, so the
-        // subtree goes — the rule refuses over scopes, not over having any.
+        // Covered from above by the scope this machine does not hold.
+        (
+            "crates/engine/src",
+            Answer::Refused(closed_scope_message("crates/engine/src", CLOSED)),
+        ),
+        ("crates", Answer::WentAhead),
+        ("docs/api", Answer::WentAhead),
+        // Nothing covers these, so anyone may draw the first scope.
         ("docs", Answer::WentAhead),
-        // The root, which carries no scope of its own. That is the absence
-        // of a statement rather than permission over the statements below.
-        (".", Answer::Refused(refused_below("."))),
+        (".", Answer::WentAhead),
     ] {
-        // A repository each, because the un-pact that goes ahead saves.
         let (repo, home) = a_repository_of_boundaries();
 
         let panel = panel_answer(repo.path(), home.path(), path);
@@ -1205,7 +811,7 @@ fn a_key_press_and_a_shell_prompt_answer_the_same_un_pact_alike() {
 
         assert_eq!(
             panel, shell,
-            "`p` and `warlock unpact` disagree over {path}"
+            "`s` and `warlock scope add` disagree over {path}"
         );
         assert_eq!(panel, expected, "the answer over {path} has changed");
     }

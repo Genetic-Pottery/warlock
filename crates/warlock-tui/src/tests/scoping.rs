@@ -1,11 +1,11 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::Instant;
 use std::{fs, io};
 
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use tempfile::TempDir;
 use warlock_engine::{
-    Manifest, Node, NodeState, PactEntry, ScopeRecord, Tree, manifest, route_facts, validate_scope,
+    Manifest, Node, ScopeRecord, ScopedDirectory, Tree, manifest, route_facts, validate_scope,
 };
 
 use super::{Windows, record_edit, record_submit, scope_edit, scope_submit};
@@ -20,28 +20,16 @@ use crate::prompt::{
 // `Sigils::Nothing` because the fixture manifest *does* scope
 // `crates/engine`, and holding nothing opens nothing that is scoped. Tests
 // that are about the boundary call `super::scope_press` directly.
-fn scope_press(
-    app: &mut App,
-    manifest: &Manifest,
-    repo_root: &Path,
-    in_flight: bool,
-) -> ScopePrompt {
+fn scope_press(app: &mut App, manifest: &Manifest, repo_root: &Path) -> ScopePrompt {
     super::scope_press(
         app,
         manifest,
         repo_root,
         &Sigils::held(["*"]),
-        in_flight,
         None,
         Instant::now(),
     )
 }
-
-// A grant on every entry, so "the write left the grant alone" is an
-// assertion about two values that are really there.
-const HASH: &str = "d0f5a1";
-
-const AT: &str = "2026-08-19T07:32:00Z";
 
 // What no press of `s` and no Enter in its window is allowed to spend.
 const LAST_KEY: &str = "something the last key said";
@@ -54,33 +42,21 @@ fn a_repo() -> TempDir {
 
 /// The tree the app is built over, rooted at `root`.
 ///
-/// Two pacted directories and one unpacted one, which is everything the
-/// press has to tell apart: `crates/engine` is fresh and carries a scope in
-/// the manifest below, `crates/tui` is stale and carries none, and `crates`
-/// itself is pacted by nothing.
+/// `crates/engine` carries a scope in the manifest below, and nothing covers
+/// the other three.
 ///
 /// ```text
-/// <root>                      pacted, stale
-/// └── crates                  unpacted
-///     ├── crates/engine       pacted, fresh
-///     └── crates/tui          pacted, stale
+/// <root>
+/// └── crates
+///     ├── crates/engine       data-plane
+///     └── crates/tui
 /// ```
 fn tree(root: &Path) -> Tree {
     Tree::new(
-        Node::new(root, root.join(".warlock.md"), NodeState::PactedStale).with_children([
-            Node::new(root.join("crates"), None::<PathBuf>, NodeState::Unpacted).with_children([
-                Node::new(
-                    root.join("crates/engine"),
-                    root.join("crates/engine/.warlock.md"),
-                    NodeState::PactedFresh,
-                ),
-                Node::new(
-                    root.join("crates/tui"),
-                    root.join("crates/tui/.warlock.md"),
-                    NodeState::PactedStale,
-                ),
-            ]),
-        ]),
+        Node::new(root).with_children([Node::new(root.join("crates")).with_children([
+            Node::new(root.join("crates/engine")).with_scope(Some("data-plane".to_owned())),
+            Node::new(root.join("crates/tui")),
+        ])]),
     )
 }
 
@@ -101,30 +77,22 @@ fn app_on(root: &Path, row: usize) -> App {
     app
 }
 
-/// A granted entry for `module`, documented the way a pact documents it.
-fn entry(module: &str) -> PactEntry {
-    PactEntry::new(".", module, format!("{module}/.warlock.md"))
-        .expect("a relative module path is inside the root")
-        .with_grant(HASH, AT)
+fn row(module: &str, scope: &str) -> ScopedDirectory {
+    ScopedDirectory::new(".", module, scope).expect("a relative module path is inside the root")
 }
 
-/// The manifest the loop holds: `crates/engine` scoped, `crates/tui` not.
+/// The manifest the loop holds: `crates/engine` scoped, and no row for
+/// anything else.
 ///
 /// Named for what it holds rather than for its type, so that a test can
 /// have a `manifest` of its own to edit and still ask what the fixture said.
-fn pacts() -> Manifest {
-    Manifest::with_entries([
-        entry("crates/engine").with_scope("data-plane"),
-        entry("crates/tui"),
-    ])
+fn scoped() -> Manifest {
+    Manifest::with_directories([row("crates/engine", "data-plane")])
 }
 
-/// The scope stored on `module`, or `None` for an entry with none.
+/// The scope stored on `module`, or `None` for a directory with no row.
 fn scope_on<'manifest>(manifest: &'manifest Manifest, module: &str) -> Option<&'manifest str> {
-    manifest
-        .entry(module)
-        .expect("the fixture manifest holds this module")
-        .scope()
+    manifest.directory(module).map(ScopedDirectory::scope)
 }
 
 /// The manifest as it sits on disk under `root`, or `None` when none was
@@ -169,10 +137,9 @@ fn s_is_refused_on_a_directory_whose_scope_this_machine_does_not_hold() {
 
     let prompt = super::scope_press(
         &mut app,
-        &pacts(),
+        &scoped(),
         repo.path(),
         &Sigils::held(["web"]),
-        false,
         None,
         Instant::now(),
     );
@@ -187,7 +154,7 @@ fn s_is_refused_on_a_directory_whose_scope_this_machine_does_not_hold() {
         "the refusal names the scope wanted and where a sigil is recorded"
     );
     // Saying so is the whole of it: the same app with the new line on it and
-    // nothing else moved — no colour, no selection, no account started.
+    // nothing else moved — no colour and no selection.
     let said = {
         let mut said = before.clone();
         said.set_message(CLOSED);
@@ -209,10 +176,9 @@ fn holding_a_matching_sigil_opens_the_prompt() {
 
         let prompt = super::scope_press(
             &mut app,
-            &pacts(),
+            &scoped(),
             repo.path(),
             &sigils,
-            false,
             None,
             Instant::now(),
         );
@@ -245,10 +211,9 @@ fn a_machine_that_holds_no_sigil_is_refused_by_a_scoped_directory() {
 
         let prompt = super::scope_press(
             &mut app,
-            &pacts(),
+            &scoped(),
             repo.path(),
             &sigils,
-            false,
             None,
             Instant::now(),
         );
@@ -271,15 +236,14 @@ fn an_unscoped_directory_stays_open_to_a_machine_holding_nothing() {
     let repo = a_repo();
     let mut app = app_on(repo.path(), TUI_ROW);
 
-    // The permissive default lives on the directory and only there, which is
-    // what keeps a repository that has never scoped anything unaffected by
-    // boundaries existing at all.
+    // Anyone may draw the first scope over a directory nothing covers: a scope
+    // is the only thing that opens a directory to work, so if drawing one also
+    // needed a scope, no repository could ever be set up.
     let prompt = super::scope_press(
         &mut app,
-        &pacts(),
+        &scoped(),
         repo.path(),
         &Sigils::Nothing,
-        false,
         None,
         Instant::now(),
     );
@@ -296,10 +260,9 @@ fn a_directory_no_scope_covers_is_open_to_a_machine_holding_something_else() {
     // there is no boundary here to be outside of.
     let prompt = super::scope_press(
         &mut app,
-        &pacts(),
+        &scoped(),
         repo.path(),
         &Sigils::held(["data-plane"]),
-        false,
         None,
         Instant::now(),
     );
@@ -310,11 +273,8 @@ fn a_directory_no_scope_covers_is_open_to_a_machine_holding_something_else() {
 #[test]
 fn an_inner_scope_replaces_the_outer_one_rather_than_adding_to_it() {
     let repo = a_repo();
-    let manifest = Manifest::with_entries([
-        entry("crates/engine").with_scope("data-plane"),
-        entry("crates/tui"),
-        entry(".").with_scope("platform"),
-    ]);
+    let manifest =
+        Manifest::with_directories([row("crates/engine", "data-plane"), row(".", "platform")]);
 
     // Holding the outer scope alone does not reach the inner one: an outer
     // scope is a default for what said nothing below it, never a second gate
@@ -326,7 +286,6 @@ fn an_inner_scope_replaces_the_outer_one_rather_than_adding_to_it() {
             &manifest,
             repo.path(),
             &Sigils::held(["platform"]),
-            false,
             None,
             Instant::now()
         ),
@@ -341,7 +300,6 @@ fn an_inner_scope_replaces_the_outer_one_rather_than_adding_to_it() {
             &manifest,
             repo.path(),
             &Sigils::held(["platform"]),
-            false,
             None,
             Instant::now()
         ),
@@ -350,40 +308,12 @@ fn an_inner_scope_replaces_the_outer_one_rather_than_adding_to_it() {
 }
 
 #[test]
-fn a_run_in_flight_is_answered_before_the_boundary_is() {
-    let repo = a_repo();
-    let mut app = app_on(repo.path(), ENGINE_ROW);
-    app.set_pact_in_flight("/repo/crates/engine", 1, 2);
-
-    let prompt = super::scope_press(
-        &mut app,
-        &pacts(),
-        repo.path(),
-        &Sigils::held(["web"]),
-        true,
-        None,
-        Instant::now(),
-    );
-
-    // Both refusals apply; the in-flight one is the one on screen. It goes
-    // on the progress line the reader is already watching, and the message
-    // line the run has taken is left alone — a boundary sentence written
-    // there would be the one sentence they could not see.
-    assert_eq!(prompt, ScopePrompt::Closed);
-    assert_eq!(
-        app.message(),
-        Some(LAST_KEY),
-        "the boundary spoke over a run's own line"
-    );
-}
-
-#[test]
-fn s_on_a_pacted_row_opens_the_prompt_on_the_scope_that_directory_carries() {
+fn s_on_a_scoped_row_opens_the_prompt_on_the_scope_that_directory_carries() {
     let repo = a_repo();
     let mut app = app_on(repo.path(), ENGINE_ROW);
     let before = app.clone();
 
-    let prompt = scope_press(&mut app, &pacts(), repo.path(), false);
+    let prompt = scope_press(&mut app, &scoped(), repo.path());
 
     // Over the directory as the manifest spells it, holding what is true
     // right now — so an Enter pressed straight afterwards writes back what
@@ -401,7 +331,7 @@ fn esc_closes_the_prompt_and_leaves_the_app_exactly_as_it_was() {
     let mut app = app_on(repo.path(), ENGINE_ROW);
     let before = app.clone();
 
-    let prompt = scope_press(&mut app, &pacts(), repo.path(), false);
+    let prompt = scope_press(&mut app, &scoped(), repo.path());
     let field = prompt.field().expect("the prompt is up").clone();
 
     // The loop's own Esc arm, through the pure function that decides it:
@@ -417,21 +347,17 @@ fn a_directory_carrying_no_scope_opens_on_an_empty_field() {
     let repo = a_repo();
     let mut app = app_on(repo.path(), TUI_ROW);
 
-    let prompt = scope_press(&mut app, &pacts(), repo.path(), false);
+    let prompt = scope_press(&mut app, &scoped(), repo.path());
 
     assert_eq!(prompt, ScopePrompt::open("crates/tui", ""));
 }
 
 #[test]
-fn a_pacted_directory_the_manifest_has_no_entry_for_opens_on_an_empty_field() {
-    // The root of this fixture is pacted on screen and absent from the
-    // manifest, which is what a hand-edited file in another window leaves.
-    // The window still opens — the reader asked about the row in front of
-    // them — and holds nothing, because nothing is what is stored.
+fn the_root_opens_on_an_empty_field_spelled_as_the_manifest_spells_it() {
     let repo = a_repo();
     let mut app = app_on(repo.path(), ROOT_ROW);
 
-    let prompt = scope_press(&mut app, &pacts(), repo.path(), false);
+    let prompt = scope_press(&mut app, &scoped(), repo.path());
 
     assert_eq!(prompt, ScopePrompt::open(".", ""));
 }
@@ -443,79 +369,25 @@ fn the_field_holds_what_the_manifest_says_and_never_anything_off_the_row() {
     // read off the tree.
     let repo = a_repo();
     let mut app = app_on(repo.path(), ENGINE_ROW);
-    let elsewhere = Manifest::with_entries([entry("crates/engine").with_scope("web")]);
+    let elsewhere = Manifest::with_directories([row("crates/engine", "web")]);
 
     assert_eq!(
-        scope_press(&mut app, &pacts(), repo.path(), false),
+        scope_press(&mut app, &scoped(), repo.path()),
         ScopePrompt::open("crates/engine", "data-plane")
     );
     assert_eq!(
-        scope_press(&mut app, &elsewhere, repo.path(), false),
+        scope_press(&mut app, &elsewhere, repo.path()),
         ScopePrompt::open("crates/engine", "web")
     );
-}
-
-#[test]
-fn a_press_while_a_run_is_in_flight_opens_nothing_and_says_so_on_the_progress_line() {
-    let repo = a_repo();
-    let mut app = app_on(repo.path(), ENGINE_ROW);
-    // The run the press is going to bounce off, as the event loop would
-    // have told the app about it.
-    app.set_pact_in_flight(repo.path().join("crates/tui"), 3, 12);
-    let before = app.clone();
-
-    let prompt = scope_press(&mut app, &pacts(), repo.path(), true);
-
-    assert_eq!(prompt, ScopePrompt::Closed, "no window over a running pact");
-    // Saying so is the whole of it: the same app with the flag set and
-    // nothing else moved, exactly as a second `p` leaves it.
-    let refused = {
-        let mut refused = before.clone();
-        refused.set_pact_refused();
-        refused
-    };
-    assert_eq!(app, refused, "the press did more than say so");
-    assert_eq!(
-        app.refused_line().as_deref(),
-        Some("pacting crates/tui — already running")
-    );
-    assert_eq!(
-        app.message(),
-        Some(LAST_KEY),
-        "the refusal did not go through the message"
-    );
-}
-
-#[test]
-fn leaning_on_the_scope_key_during_a_run_changes_nothing_further() {
-    let repo = a_repo();
-    let mut app = app_on(repo.path(), ENGINE_ROW);
-    app.set_pact_in_flight(repo.path().join("crates/tui"), 3, 12);
-
-    assert_eq!(
-        scope_press(&mut app, &pacts(), repo.path(), true),
-        ScopePrompt::Closed
-    );
-    let after_one = app.clone();
-
-    assert_eq!(
-        scope_press(&mut app, &pacts(), repo.path(), true),
-        ScopePrompt::Closed
-    );
-    assert_eq!(app, after_one, "pressing again changed something");
 }
 
 #[test]
 fn a_directory_with_no_manifest_spelling_opens_nothing_and_says_why() {
     // A tree rooted outside its own repository: nothing on disk, because
     // whether a path can be spelled relative to a root is arithmetic.
-    let mut app = App::from_tree(&Tree::new(Node::new(
-        "/outside/thing",
-        "/outside/thing/.warlock.md",
-        NodeState::PactedFresh,
-    )));
+    let mut app = App::from_tree(&Tree::new(Node::new("/outside/thing")));
 
-    let prompt = scope_press(&mut app, &Manifest::new(), Path::new("/repo"), false);
+    let prompt = scope_press(&mut app, &Manifest::new(), Path::new("/repo"));
 
     assert_eq!(prompt, ScopePrompt::Closed);
     assert!(
@@ -525,16 +397,16 @@ fn a_directory_with_no_manifest_spelling_opens_nothing_and_says_why() {
 }
 
 #[test]
-fn enter_sets_the_scope_and_leaves_the_document_and_the_grant_alone() {
+fn enter_sets_the_scope_and_leaves_every_other_row_alone() {
     let repo = a_repo();
     let mut app = app_on(repo.path(), ENGINE_ROW);
-    let mut manifest = known();
+    let mut manifest = recorded();
 
     let windows = scope_submit(
         &mut app,
         &mut manifest,
         repo.path(),
-        &field("crates/engine", "billing"),
+        &field("crates/engine", "platform"),
     );
 
     assert_eq!(windows, Windows::default(), "the window is answered");
@@ -543,32 +415,23 @@ fn enter_sets_the_scope_and_leaves_the_document_and_the_grant_alone() {
         written, manifest,
         "what is on disk is what this thread believes"
     );
-    assert_eq!(scope_on(&written, "crates/engine"), Some("billing"));
-
-    // The one field a person owns, and nothing else on the entry: the run's
-    // fields are exactly as they were, and so is the entry beside it.
-    let engine = written
-        .entry("crates/engine")
-        .expect("the entry is still there");
-    assert_eq!(engine.document(), "crates/engine/.warlock.md");
-    assert_eq!(engine.granted_hash(), Some(HASH));
-    assert_eq!(engine.granted_at(), Some(AT));
-    assert_eq!(written.entry("crates/tui"), pacts().entry("crates/tui"));
+    assert_eq!(scope_on(&written, "crates/engine"), Some("platform"));
+    assert_eq!(written.directory("docs"), recorded().directory("docs"));
     // And the order the file is written in, so the diff is the scope line.
     assert_eq!(
         written
-            .entries()
+            .directories()
             .iter()
-            .map(PactEntry::module)
+            .map(ScopedDirectory::path)
             .collect::<Vec<_>>(),
-        ["crates/engine", "crates/tui"]
+        ["crates/engine", "docs"]
     );
 }
 
-// `third-party` is named by no entry in the fixture and `data-plane` loses its
-// only entry to the clear below: a write that pruned the records to what the
-// entries spell would drop both, and a record is the one thing here that is
-// allowed to outlive the pacts that named it.
+// `third-party` is named by no row in the fixture and `data-plane` loses its
+// only row to the clear below: a write that pruned the records to what the rows
+// spell would drop both, and a record is the one thing here that is allowed to
+// outlive the rows that named it.
 fn records() -> Vec<ScopeRecord> {
     vec![
         ScopeRecord::new("data-plane", "Data Plane", "In Review", "area/data-plane"),
@@ -576,14 +439,14 @@ fn records() -> Vec<ScopeRecord> {
     ]
 }
 
-/// [`pacts`] holding a record for every name the submits below write.
+/// [`scoped`] holding a record for every name the submits below write.
 ///
 /// A scope name no record claims puts the record window up instead of writing,
 /// so a test about the write itself has to name one that is already recorded —
 /// which the fixture above does not, and deliberately: the tests that are about
 /// the second window need a name nothing claims.
 fn known() -> Manifest {
-    pacts().with_scopes(records().into_iter().chain([
+    scoped().with_scopes(records().into_iter().chain([
         ScopeRecord::new("billing", "Billing", "In Review", "area/billing"),
         ScopeRecord::new("web", "Web", "Triage", "area/web"),
     ]))
@@ -619,15 +482,15 @@ fn a_set_and_a_clear_both_leave_the_records_in_the_file() {
     assert_eq!(
         scope_on(&manifest, "crates/engine"),
         None,
-        "the clear really did take the last entry naming `data-plane`",
+        "the clear really did take the last row naming `data-plane`",
     );
 }
 
 #[test]
-fn enter_on_an_empty_field_clears_the_scope_and_keeps_the_grant() {
+fn enter_on_an_empty_field_clears_the_scope_and_drops_the_row() {
     let repo = a_repo();
     let mut app = app_on(repo.path(), ENGINE_ROW);
-    let mut manifest = pacts();
+    let mut manifest = scoped();
 
     let windows = scope_submit(
         &mut app,
@@ -645,19 +508,13 @@ fn enter_on_an_empty_field_clears_the_scope_and_keeps_the_grant() {
         None,
         "an empty field clears the scope rather than storing one"
     );
-    let engine = written
-        .entry("crates/engine")
-        .expect("the entry is still there");
-    assert_eq!(engine.granted_hash(), Some(HASH));
-    assert_eq!(engine.granted_at(), Some(AT));
+    assert!(written.directories().is_empty(), "{written:?}");
 }
 
 #[test]
-fn a_set_and_a_clear_leave_the_run_state_and_the_message_line_untouched() {
-    // The whole of what a scope write is *not*: no worker thread to be in
-    // flight, no progress line, no account, no success message, and not
-    // even the last keystroke's sentence spent. The app is compared whole,
-    // which covers every one of those at once.
+fn a_set_and_a_clear_leave_the_view_and_the_message_line_untouched() {
+    // A successful write says nothing, and does not even spend the last
+    // keystroke's sentence. The app is compared whole.
     let repo = a_repo();
     let mut app = app_on(repo.path(), ENGINE_ROW);
     let mut manifest = known();
@@ -672,14 +529,11 @@ fn a_set_and_a_clear_leave_the_run_state_and_the_message_line_untouched() {
         );
 
         assert_eq!(windows, Windows::default());
-        assert!(!app.is_pacting(), "writing {text:?} started a run");
         assert_eq!(
-            app.run_header().map(|header| header.words()),
-            None,
-            "and put a progress line up"
+            app.message(),
+            Some(LAST_KEY),
+            "writing {text:?} took the message line"
         );
-        assert!(app.panel().account().is_none(), "and opened an account");
-        assert_eq!(app.message(), Some(LAST_KEY), "and took the message line");
         assert_eq!(app, before, "writing {text:?} moved the view");
     }
 }
@@ -688,7 +542,7 @@ fn a_set_and_a_clear_leave_the_run_state_and_the_message_line_untouched() {
 fn input_the_engine_refuses_keeps_the_prompt_up_and_writes_nothing() {
     let repo = a_repo();
     let mut app = app_on(repo.path(), ENGINE_ROW);
-    let mut manifest = pacts();
+    let mut manifest = scoped();
     let before = app.clone();
     let typed = field("crates/engine", "Control Plane");
 
@@ -701,7 +555,7 @@ fn input_the_engine_refuses_keeps_the_prompt_up_and_writes_nothing() {
         Windows::asking(typed.refused(refusal("control plane"))),
     );
     assert_eq!(saved(repo.path()), None, "a refusal wrote to disk");
-    assert_eq!(manifest, pacts(), "a refusal edited the manifest");
+    assert_eq!(manifest, scoped(), "a refusal edited the manifest");
     assert_eq!(app, before, "a refusal moved the view");
 }
 
@@ -709,7 +563,7 @@ fn input_the_engine_refuses_keeps_the_prompt_up_and_writes_nothing() {
 fn a_list_typed_into_the_field_is_refused_and_never_stored_as_two_scopes() {
     let repo = a_repo();
     let mut app = app_on(repo.path(), ENGINE_ROW);
-    let mut manifest = pacts();
+    let mut manifest = scoped();
     let typed = field("crates/engine", "control-plane, data-plane");
 
     let windows = scope_submit(&mut app, &mut manifest, repo.path(), &typed);
@@ -723,9 +577,9 @@ fn a_list_typed_into_the_field_is_refused_and_never_stored_as_two_scopes() {
     );
     assert_eq!(saved(repo.path()), None);
     assert_eq!(
-        manifest.entries().len(),
-        2,
-        "the list became a second entry"
+        manifest.directories().len(),
+        1,
+        "the list became a second row"
     );
     assert_eq!(scope_on(&manifest, "crates/engine"), Some("data-plane"));
 }
@@ -798,29 +652,25 @@ fn a_manifest_that_will_not_save_puts_its_reason_on_the_message_line() {
 }
 
 #[test]
-fn a_directory_the_manifest_has_no_entry_for_writes_nothing_and_says_so() {
-    // A pact hand-edited out of the file in another window between the
-    // press and the Enter: there is no entry to write a scope on, and a
-    // window that closed silently would be indistinguishable from success.
+fn a_directory_the_manifest_has_no_row_for_gets_one() {
     let repo = a_repo();
     let mut app = app_on(repo.path(), ROOT_ROW);
-    let mut manifest = pacts();
+    let mut manifest = known();
 
     let windows = scope_submit(&mut app, &mut manifest, repo.path(), &field(".", "billing"));
 
-    // And no record window either: a name with nowhere to be written is
-    // turned down before the three fields are asked for.
     assert_eq!(windows, Windows::default());
-    assert_eq!(saved(repo.path()), None, "something was written anyway");
-    assert_eq!(manifest, pacts());
-    let message = app.message().expect("the refusal said nothing");
-    assert!(message.contains('.'), "{message}");
-    assert!(message.contains("`p`"), "{message}");
+    assert_eq!(scope_on(&manifest, "."), Some("billing"));
+    assert_eq!(
+        scope_on(&saved(repo.path()).expect("the submit wrote"), "."),
+        Some("billing"),
+    );
+    assert_eq!(scope_on(&manifest, "crates/engine"), Some("data-plane"));
 }
 
 #[test]
 fn the_write_goes_to_the_manifest_under_the_repository_root() {
-    // Where the file lands, said once: `.warlock/pacts.toml` under the root
+    // Where the file lands, said once: `.warlock/scopes.toml` under the root
     // handed in, and nowhere else. The engine owns the path, and this is
     // the assertion that the root travelling through here is the one the
     // loop resolved.
@@ -835,7 +685,7 @@ fn the_write_goes_to_the_manifest_under_the_repository_root() {
         &field("crates/engine", "billing"),
     );
 
-    let written = repo.path().join(".warlock").join("pacts.toml");
+    let written = repo.path().join(".warlock").join("scopes.toml");
     assert!(written.is_file(), "{} is not a file", written.display());
     assert!(
         fs::read_to_string(&written)
@@ -851,14 +701,14 @@ fn the_write_goes_to_the_manifest_under_the_repository_root() {
                 .collect::<io::Result<Vec<String>>>()
         })
         .expect("the manifest directory reads back");
-    assert_eq!(beside, ["pacts.toml"]);
+    assert_eq!(beside, ["scopes.toml"]);
 }
 
 #[test]
 fn typing_and_abandoning_move_the_prompt_and_nothing_else() {
     let repo = a_repo();
     let mut app = app_on(repo.path(), ENGINE_ROW);
-    let mut manifest = pacts();
+    let mut manifest = scoped();
     let before = app.clone();
     let typed = field("crates/engine", "web");
 
@@ -884,7 +734,7 @@ fn typing_and_abandoning_move_the_prompt_and_nothing_else() {
         Windows::default(),
     );
     assert_eq!(saved(repo.path()), None, "typing wrote to disk");
-    assert_eq!(manifest, pacts(), "typing edited the manifest");
+    assert_eq!(manifest, scoped(), "typing edited the manifest");
     assert_eq!(app, before, "typing moved the view");
 }
 
@@ -894,7 +744,7 @@ fn a_submit_with_no_window_up_writes_nothing() {
     // window is up — answered rather than left to be discovered.
     let repo = a_repo();
     let mut app = app_on(repo.path(), ENGINE_ROW);
-    let mut manifest = pacts();
+    let mut manifest = scoped();
 
     let windows = scope_edit(
         &mut app,
@@ -906,7 +756,7 @@ fn a_submit_with_no_window_up_writes_nothing() {
 
     assert_eq!(windows, Windows::default());
     assert_eq!(saved(repo.path()), None);
-    assert_eq!(manifest, pacts());
+    assert_eq!(manifest, scoped());
 }
 
 #[test]
@@ -919,7 +769,7 @@ fn the_whole_path_from_the_press_to_the_saved_manifest_is_one_key_at_a_time() {
     let mut app = app_on(repo.path(), TUI_ROW);
     let mut manifest = known();
 
-    let mut prompt = scope_press(&mut app, &manifest, repo.path(), false);
+    let mut prompt = scope_press(&mut app, &manifest, repo.path());
     assert_eq!(prompt, ScopePrompt::open("crates/tui", ""));
 
     for code in [
@@ -949,10 +799,7 @@ fn the_whole_path_from_the_press_to_the_saved_manifest_is_one_key_at_a_time() {
         scope_on(&saved(repo.path()).expect("the keys wrote"), "crates/tui"),
         Some("web"),
     );
-    // And the run state and the message line came through the whole of it
-    // untouched: no key of those six was a run.
-    assert!(!app.is_pacting());
-    assert_eq!(app.run_header().map(|header| header.words()), None);
+    // And the message line came through the whole of it untouched.
     assert_eq!(app.message(), Some(LAST_KEY));
 }
 
@@ -981,18 +828,17 @@ fn a_refusal_typed_out_can_be_fixed_and_written_without_reopening_the_window() {
     assert_eq!(scope_on(&manifest, "crates/tui"), Some("web"));
 }
 
-/// A repository with more in it than the write touches: three `[[pact]]`
-/// rows and three `[[scope]]` records, only one of each of which the write
-/// below is allowed to reach.
+/// A repository with more in it than the write touches: two `[[directory]]`
+/// rows and three `[[scope]]` records, none of which the record writes below
+/// are allowed to change.
 ///
-/// Bigger than [`pacts`] on purpose. A rebuild that dropped everything it
+/// Bigger than [`scoped`] on purpose. A rebuild that dropped everything it
 /// did not write would pass over a file holding one untouched block, and the
 /// defect this fixture exists for dropped a whole section at once.
 fn recorded() -> Manifest {
-    Manifest::with_entries([
-        entry("crates/engine").with_scope("data-plane"),
-        entry("crates/tui"),
-        entry("docs").with_scope("third-party"),
+    Manifest::with_directories([
+        row("crates/engine", "data-plane"),
+        row("docs", "third-party"),
     ])
     .with_scopes(records().into_iter().chain([ScopeRecord::new(
         "platform",
@@ -1061,7 +907,7 @@ fn asked_for(
 fn a_name_no_record_claims_puts_the_second_window_up_and_writes_nothing() {
     let repo = a_repo();
     let mut app = app_on(repo.path(), TUI_ROW);
-    let mut manifest = pacts();
+    let mut manifest = scoped();
     let before = app.clone();
 
     let windows = scope_submit(
@@ -1072,7 +918,7 @@ fn a_name_no_record_claims_puts_the_second_window_up_and_writes_nothing() {
     );
 
     // The first window down and the second one up over the folded name, which
-    // is the name the record will be filed under and the one the pact will
+    // is the name the record will be filed under and the one the row will
     // carry — a second fold or a second read of the field could disagree.
     assert_eq!(
         windows,
@@ -1082,7 +928,7 @@ fn a_name_no_record_claims_puts_the_second_window_up_and_writes_nothing() {
         },
     );
     assert_eq!(saved(repo.path()), None, "the question wrote to disk");
-    assert_eq!(manifest, pacts(), "the question edited the manifest");
+    assert_eq!(manifest, scoped(), "the question edited the manifest");
     assert_eq!(app, before, "the question moved the view");
 }
 
@@ -1090,7 +936,7 @@ fn a_name_no_record_claims_puts_the_second_window_up_and_writes_nothing() {
 fn a_name_that_already_has_a_record_is_written_with_no_second_window() {
     let repo = a_repo();
     let mut app = app_on(repo.path(), TUI_ROW);
-    let mut manifest = pacts().with_scopes(records());
+    let mut manifest = scoped().with_scopes(records());
 
     let windows = scope_submit(
         &mut app,
@@ -1122,7 +968,7 @@ fn an_empty_field_clears_the_scope_and_asks_for_no_record() {
     // the manifest records.
     let repo = a_repo();
     let mut app = app_on(repo.path(), ENGINE_ROW);
-    let mut manifest = pacts();
+    let mut manifest = scoped();
 
     let windows = scope_submit(
         &mut app,
@@ -1152,7 +998,7 @@ fn a_blank_value_is_refused_under_its_own_field_and_writes_nothing() {
         (RecordField::Label, ["Billing", "In Review", ""]),
     ] {
         let mut app = app_on(repo.path(), TUI_ROW);
-        let mut manifest = pacts();
+        let mut manifest = scoped();
         let before = app.clone();
         let typed = filled(&RecordForm::new("crates/tui", "billing"), values);
 
@@ -1174,7 +1020,7 @@ fn a_blank_value_is_refused_under_its_own_field_and_writes_nothing() {
         // keystroke away from being fixed, in the field that was refused.
         assert_eq!(prompt, RecordPrompt::Open(typed.refused(which, rule)));
         assert_eq!(saved(repo.path()), None, "a refusal wrote to disk");
-        assert_eq!(manifest, pacts(), "a refusal edited the manifest");
+        assert_eq!(manifest, scoped(), "a refusal edited the manifest");
         assert_eq!(app, before, "a refusal moved the view");
     }
 }
@@ -1183,7 +1029,7 @@ fn a_blank_value_is_refused_under_its_own_field_and_writes_nothing() {
 fn a_blank_team_key_is_refused_in_the_words_the_field_is_labelled_in() {
     let repo = a_repo();
     let mut app = app_on(repo.path(), TUI_ROW);
-    let mut manifest = pacts();
+    let mut manifest = scoped();
     let typed = filled(
         &RecordForm::new("crates/tui", "billing"),
         ["", "In Review", "area/billing"],
@@ -1206,7 +1052,7 @@ fn esc_on_the_record_window_leaves_the_file_byte_identical() {
     let repo = a_repo();
     let fixture = recorded();
     fixture.save(repo.path()).expect("the fixture was written");
-    let path = repo.path().join(".warlock").join("pacts.toml");
+    let path = repo.path().join(".warlock").join("scopes.toml");
     let before = fs::read(&path).expect("the fixture reads back");
     let mut app = app_on(repo.path(), TUI_ROW);
     let mut manifest = fixture.clone();
@@ -1241,7 +1087,7 @@ fn esc_on_the_record_window_leaves_the_file_byte_identical() {
     assert_eq!(
         scope_on(&manifest, "crates/tui"),
         None,
-        "Esc scoped the pact"
+        "Esc scoped the directory"
     );
 }
 
@@ -1290,7 +1136,7 @@ fn the_record_submit_writes_the_scope_and_the_record_in_one_save() {
 #[test]
 fn the_router_finds_the_team_review_state_and_label_the_window_was_given() {
     // What `warlock check` prints for the directory just scoped, asked of the
-    // router itself: a record filed under a name the pact does not carry would
+    // router itself: a record filed under a name the row does not carry would
     // route nowhere, which is the whole reason the second window exists.
     let repo = a_repo();
     let mut app = app_on(repo.path(), TUI_ROW);
@@ -1356,7 +1202,7 @@ fn a_record_that_will_not_save_puts_its_reason_on_the_message_line() {
     fs::write(repo.path().join(".warlock"), "not a directory\n")
         .expect("writes a file in the way of the manifest directory");
     let mut app = app_on(repo.path(), TUI_ROW);
-    let mut manifest = pacts();
+    let mut manifest = scoped();
     let form = filled(
         &RecordForm::new("crates/tui", "billing"),
         ["Billing", "In Review", "area/billing"],
@@ -1370,7 +1216,7 @@ fn a_record_that_will_not_save_puts_its_reason_on_the_message_line() {
         Some(LAST_KEY),
         "a save that failed said nothing"
     );
-    assert_eq!(manifest, pacts(), "the failed write was believed");
+    assert_eq!(manifest, scoped(), "the failed write was believed");
 }
 
 #[test]
@@ -1384,7 +1230,7 @@ fn the_whole_path_through_both_windows_is_one_key_at_a_time() {
     let mut app = app_on(repo.path(), TUI_ROW);
     let mut manifest = recorded();
 
-    let mut prompt = scope_press(&mut app, &manifest, repo.path(), false);
+    let mut prompt = scope_press(&mut app, &manifest, repo.path());
     assert_eq!(prompt, ScopePrompt::open("crates/tui", ""));
 
     let mut record = RecordPrompt::Closed;
@@ -1419,7 +1265,7 @@ fn the_whole_path_through_both_windows_is_one_key_at_a_time() {
     }
 
     assert_eq!(record, RecordPrompt::Closed, "Enter left the window up");
-    // One file, holding both halves: the pact row carries the folded name and
+    // One file, holding both halves: the directory row carries the folded name and
     // the record filed under it carries the three values, so `warlock check`
     // on this directory has a route to print.
     let written = saved(repo.path()).expect("the keys wrote");
@@ -1433,10 +1279,7 @@ fn the_whole_path_through_both_windows_is_one_key_at_a_time() {
     assert_eq!(record.team_key(), "Billing Squad");
     assert_eq!(record.review_state(), "In Review");
     assert_eq!(record.label(), "area/billing");
-    // And the run state and the message line came through the whole of it
-    // untouched: not one of those keys was a run.
-    assert!(!app.is_pacting());
-    assert_eq!(app.run_header().map(|header| header.words()), None);
+    // And the message line came through the whole of it untouched.
     assert_eq!(app.message(), Some(LAST_KEY));
 }
 
@@ -1447,10 +1290,9 @@ fn a_pull_in_flight_turns_s_down_on_the_thread_and_opens_no_window() {
 
     let prompt = super::scope_press(
         &mut app,
-        &pacts(),
+        &scoped(),
         repo.path(),
         &Sigils::held(["*"]),
-        false,
         Some("`WAR-140` is being pulled"),
         Instant::now(),
     );
@@ -1468,4 +1310,28 @@ fn a_pull_in_flight_turns_s_down_on_the_thread_and_opens_no_window() {
         })
         .collect();
     assert_eq!(said, ["`WAR-140` is being pulled; no scope was written"]);
+}
+
+#[test]
+fn a_pull_in_flight_is_answered_before_the_boundary_is() {
+    let repo = a_repo();
+    let mut app = app_on(repo.path(), ENGINE_ROW);
+
+    let prompt = super::scope_press(
+        &mut app,
+        &scoped(),
+        repo.path(),
+        &Sigils::held(["web"]),
+        Some("`WAR-140` is being pulled"),
+        Instant::now(),
+    );
+
+    // Both refusals apply, and the pull's goes on the thread: the boundary's
+    // sentence is not put on the message line over it.
+    assert_eq!(prompt, ScopePrompt::Closed);
+    assert_eq!(
+        app.message(),
+        Some(LAST_KEY),
+        "the boundary spoke as well as the pull"
+    );
 }

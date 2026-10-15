@@ -9,7 +9,8 @@ use std::time::Instant;
 
 use tempfile::TempDir;
 use warlock_engine::{
-    Manifest, PactEntry, PullRun, RunStatus, ScopeRecord, save_key, save_key_binding, save_sigils,
+    Manifest, PullRun, RunStatus, ScopeRecord, ScopedDirectory, save_key, save_key_binding,
+    save_sigils,
 };
 
 use super::Puller;
@@ -18,12 +19,9 @@ use crate::app::App;
 use crate::claude::Activity;
 use crate::confirm::{Answer, PullAnswered};
 use crate::error::{Error, one_line};
-use crate::freshness::Freshened;
 use crate::git::Dirty;
 use crate::linear::{Assignee, NamedIssue, Priority, Queue, QueuedIssue, StateType};
-use crate::stubs::{
-    Boarding, Checkout, Forging, Refreshing, Sessions, Slicing, VIEWER, Written, said,
-};
+use crate::stubs::{Boarding, Checkout, Forging, Op, Sessions, Slicing, VIEWER, Written, said};
 use crate::submission::Taking;
 
 // Not a key, and named so that nothing reading this file mistakes it for one: it
@@ -63,12 +61,12 @@ fn a_dir() -> TempDir {
     tempfile::tempdir().expect("a temporary directory")
 }
 
-// Two recorded scopes, one pacted directory under each, so a crossing and a
+// Two recorded scopes, one scoped directory under each, so a crossing and a
 // closed scope are both reachable from one manifest.
 fn a_manifest() -> Manifest {
-    Manifest::with_entries([
-        pacted("crates/engine", SCOPE),
-        pacted("crates/control", CLOSED),
+    Manifest::with_directories([
+        scoped("crates/engine", SCOPE),
+        scoped("crates/control", CLOSED),
     ])
     .with_scopes([
         ScopeRecord::new(SCOPE, TEAM, REVIEW, LABEL),
@@ -76,10 +74,8 @@ fn a_manifest() -> Manifest {
     ])
 }
 
-fn pacted(directory: &str, scope: &str) -> PactEntry {
-    PactEntry::new(".", directory, format!("{directory}/.warlock.md"))
-        .expect("a relative module path is inside the root")
-        .with_scope(scope)
+fn scoped(directory: &str, scope: &str) -> ScopedDirectory {
+    ScopedDirectory::new(".", directory, scope).expect("a relative module path is inside the root")
 }
 
 // A home of this test's own: the sigils that pick the board, the binding, the key
@@ -125,7 +121,6 @@ fn working() -> Written {
             said("done", "the queue is read", None),
             said("done", "the ticket is worked", None),
         ]),
-        Refreshing::quiet(),
     )
     .doing([
         Activity::Tool {
@@ -144,7 +139,6 @@ fn unasked() -> Written {
     Written::of(
         Slicing::into_chain(TICKET, &["Nothing this test lets a run reach"]),
         Sessions::answering([]),
-        Refreshing::quiet(),
     )
 }
 
@@ -273,9 +267,8 @@ fn sections(app: &App) -> Vec<String> {
         .collect()
 }
 
-// Every line of the account card, headings and all: what a section holds is asked
-// of this rather than of the log, because the card is what a reader sees.
-// The work rows the phases ticked, which is where a session's activity goes.
+// The work rows the phases ticked on the thread, which is where a session's
+// activity goes.
 fn account(app: &App) -> String {
     app.panel()
         .thread()
@@ -447,10 +440,6 @@ fn a_no_starts_nothing_and_leaves_the_ticket_where_it_was() {
         repo.commits(),
         Vec::<String>::new(),
         "a No committed something"
-    );
-    assert!(
-        app.panel().account().is_none(),
-        "a No opened the run's output window"
     );
 }
 
@@ -724,63 +713,15 @@ fn a_queue_with_nothing_ready_is_an_answer_and_asks_nothing() {
 }
 
 #[test]
-fn the_refresh_pass_gets_a_section_of_its_own_per_directory_between_the_work_and_the_request() {
-    let ground = Ground::new();
-    let asked = Refreshing::answering(Freshened {
-        refreshed: vec!["crates/engine".to_owned()],
-        left_stale: Vec::new(),
-    });
-    let written = working()
-        .freshening(asked.clone())
-        .refreshing(&["crates/engine"]);
-    let mut puller = puller(
-        &ground,
-        board(queue([ready()])),
-        checkout(),
-        Forging::opening(URL),
-        written,
-    );
-    let mut app = App::default();
-
-    press(&mut app, &mut puller, &ground, None);
-    chosen(&mut app, &mut puller);
-    through(&mut app, &mut puller);
-
-    assert_eq!(asked.asked().len(), 1, "the run did not refresh once");
-    let sections = sections(&app);
-    let at = sections
-        .iter()
-        .position(|heading| heading.contains("crates/engine"))
-        .unwrap_or_else(|| panic!("{sections:?} has no phase for the directory refreshed"));
-    // Between the last sub-task and the pull request, which is where the pass
-    // runs: after the section of the sub-task whose commit it refreshes from, and
-    // before the request opened from what it wrote.
-    assert!(
-        sections[..at]
-            .iter()
-            .any(|heading| heading.contains("WAR-140.02")),
-        "{sections:?}"
-    );
-    assert!(
-        sections[at + 1..]
-            .iter()
-            .any(|heading| heading.contains("pull request")),
-        "{sections:?}"
-    );
-}
-
-#[test]
 fn a_failure_in_the_run_lands_as_one_line_and_leaves_the_panel_running() {
     let ground = Ground::new();
     let repo = checkout();
-    // The one failure the refresh hands back rather than reporting: a checkout
-    // that cannot be asked what the branch changed, which is how every other step
-    // of the loop fails.
-    let written = working().freshening(Refreshing::refusing());
+    // The board turning down the move to review, which is the run's last step.
+    let written = working();
     let forge = Forging::opening(URL);
     let mut puller = puller(
         &ground,
-        board(queue([ready()])),
+        board(queue([ready()])).refuse_from(Op::MoveIssue, 1, "Entity not found"),
         repo.clone(),
         forge.clone(),
         written,
@@ -793,8 +734,8 @@ fn a_failure_in_the_run_lands_as_one_line_and_leaves_the_panel_running() {
 
     let said = notes(&app).pop().expect("the failure said nothing");
     assert!(
-        said.contains("git"),
-        "{said:?} is not the failure `git.rs` words"
+        said.contains("Entity not found"),
+        "{said:?} is not the failure the board gave"
     );
     assert_eq!(said, one_line(said.trim()), "the failure is not one line");
     // Nothing came down with it: the run is over, the next `/pull` is allowed, the
@@ -805,8 +746,9 @@ fn a_failure_in_the_run_lands_as_one_line_and_leaves_the_panel_running() {
         !sections(&app).is_empty(),
         "a failure took the run's phases down"
     );
-    assert!(
-        forge.asked().is_empty(),
-        "the run opened a pull request past the failure"
+    assert_eq!(
+        forge.asked().len(),
+        1,
+        "the pull request came before the board"
     );
 }

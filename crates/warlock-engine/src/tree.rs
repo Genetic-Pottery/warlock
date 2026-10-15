@@ -2,40 +2,36 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::NodeState;
-
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Node {
     pub path: PathBuf,
-    pub document: Option<PathBuf>,
-    pub state: NodeState,
-    #[serde(default)]
-    pub ignored: bool,
+    // The scope this directory's own row carries, and never an ancestor's: a
+    // node says which boundary starts at it.
     #[serde(default)]
     pub scope: Option<String>,
+    // The scope that governs this directory, its own or the nearest
+    // ancestor's: what decides whether warlock may work here at all.
+    #[serde(default)]
+    pub covering: Option<String>,
     pub children: Vec<Node>,
     pub files: Vec<PathBuf>,
 }
 
 impl Node {
     /// ```
-    /// use warlock_engine::{Node, NodeState};
+    /// use warlock_engine::Node;
     ///
-    /// let module = Node::new("repo/docs", "repo/docs/.warlock.md", NodeState::Unpacted);
-    /// assert!(module.document.is_some());
+    /// let module = Node::new("repo/docs");
     /// assert!(module.files.is_empty());
-    ///
-    /// let undocumented = Node::new("repo/crates", None, NodeState::Unpacted);
-    /// assert_eq!(undocumented.document, None);
+    /// assert_eq!(module.scope, None);
+    /// assert_eq!(module.covering, None);
     /// ```
     #[must_use]
-    pub fn new(path: impl Into<PathBuf>, document: impl IntoDocument, state: NodeState) -> Self {
+    pub fn new(path: impl Into<PathBuf>) -> Self {
         Self {
             path: path.into(),
-            document: document.into_document(),
-            state,
-            ignored: false,
             scope: None,
+            covering: None,
             children: Vec::new(),
             files: Vec::new(),
         }
@@ -48,10 +44,10 @@ impl Node {
     }
 
     /// ```
-    /// use warlock_engine::{Node, NodeState};
+    /// use warlock_engine::Node;
     ///
-    /// let module = Node::new("repo/docs", "repo/docs/.warlock.md", NodeState::Unpacted)
-    ///     .with_files(["repo/docs/.warlock.md", "repo/docs/adr.md"].map(std::path::PathBuf::from));
+    /// let module = Node::new("repo/docs")
+    ///     .with_files(["repo/docs/guide.md", "repo/docs/adr.md"].map(std::path::PathBuf::from));
     /// assert_eq!(module.files.len(), 2);
     /// // Files are a listing, not children: a node with files is still a leaf.
     /// assert!(module.is_leaf());
@@ -63,77 +59,42 @@ impl Node {
     }
 
     /// ```
-    /// use warlock_engine::{Node, NodeState};
+    /// use warlock_engine::Node;
     ///
-    /// let assets = Node::new("repo/assets", None, NodeState::Unpacted).with_ignored(true);
-    /// assert!(assets.is_ignored());
-    /// // Still an ordinary unpacted node: no fourth state, no fourth colour.
-    /// assert_eq!(assets.state, NodeState::Unpacted);
-    /// ```
-    #[must_use]
-    pub fn with_ignored(mut self, ignored: bool) -> Self {
-        self.ignored = ignored;
-        self
-    }
-
-    #[must_use]
-    pub fn is_ignored(&self) -> bool {
-        self.ignored
-    }
-
-    /// ```
-    /// use warlock_engine::{Node, NodeState};
-    ///
-    /// let engine = Node::new("repo/engine", "repo/engine/.warlock.md", NodeState::PactedFresh)
-    ///     .with_scope(Some("data-plane".to_owned()));
+    /// let engine = Node::new("repo/engine").with_scope(Some("data-plane".to_owned()));
     /// assert_eq!(engine.scope.as_deref(), Some("data-plane"));
-    /// // Still an ordinary fresh node: a scope gates nothing and colours nothing.
-    /// assert_eq!(engine.state, NodeState::PactedFresh);
+    /// // Its own scope governs it.
+    /// assert_eq!(engine.covering.as_deref(), Some("data-plane"));
     /// assert_eq!(engine.with_scope(None).scope, None);
     /// ```
     #[must_use]
     pub fn with_scope(mut self, scope: Option<String>) -> Self {
+        self.covering.clone_from(&scope);
         self.scope = scope;
         self
+    }
+
+    /// ```
+    /// use warlock_engine::Node;
+    ///
+    /// let src = Node::new("repo/engine/src").with_covering(Some("data-plane".to_owned()));
+    /// assert_eq!(src.scope, None);
+    /// assert!(src.is_covered());
+    /// ```
+    #[must_use]
+    pub fn with_covering(mut self, covering: Option<String>) -> Self {
+        self.covering = covering;
+        self
+    }
+
+    #[must_use]
+    pub fn is_covered(&self) -> bool {
+        self.covering.is_some()
     }
 
     #[must_use]
     pub fn is_leaf(&self) -> bool {
         self.children.is_empty()
-    }
-}
-
-pub trait IntoDocument {
-    fn into_document(self) -> Option<PathBuf>;
-}
-
-impl IntoDocument for Option<PathBuf> {
-    fn into_document(self) -> Option<PathBuf> {
-        self
-    }
-}
-
-impl IntoDocument for PathBuf {
-    fn into_document(self) -> Option<PathBuf> {
-        Some(self)
-    }
-}
-
-impl IntoDocument for &Path {
-    fn into_document(self) -> Option<PathBuf> {
-        Some(self.to_path_buf())
-    }
-}
-
-impl IntoDocument for &str {
-    fn into_document(self) -> Option<PathBuf> {
-        Some(PathBuf::from(self))
-    }
-}
-
-impl IntoDocument for String {
-    fn into_document(self) -> Option<PathBuf> {
-        Some(PathBuf::from(self))
     }
 }
 
@@ -154,15 +115,11 @@ impl Tree {
     }
 
     /// ```
-    /// use warlock_engine::{Node, NodeState, Tree};
+    /// use warlock_engine::{Node, Tree};
     ///
     /// let tree = Tree::new(
-    ///     Node::new("repo", "repo/.warlock.md", NodeState::PactedStale)
-    ///         .with_children([Node::new(
-    ///             "repo/docs",
-    ///             "repo/docs/.warlock.md",
-    ///             NodeState::PactedFresh,
-    ///         )]),
+    ///     Node::new("repo")
+    ///         .with_children([Node::new("repo/docs").with_scope(Some("docs".to_owned()))]),
     /// );
     ///
     /// let lines: Vec<String> = tree
@@ -177,46 +134,15 @@ impl Tree {
     }
 
     /// ```
-    /// use warlock_engine::{Node, NodeState, Tree};
+    /// use warlock_engine::{Node, Tree};
     ///
     /// let tree = Tree::new(
-    ///     Node::new("repo", "repo/.warlock.md", NodeState::PactedStale)
-    ///         .with_children([Node::new(
-    ///             "repo/docs",
-    ///             "repo/docs/.warlock.md",
-    ///             NodeState::PactedFresh,
-    ///         )]),
-    /// );
-    ///
-    /// let counts = tree.counts();
-    /// assert_eq!(counts.pacted_stale, 1);
-    /// assert_eq!(counts.pacted_fresh, 1);
-    /// assert_eq!(counts.unpacted, 0);
-    /// assert_eq!(counts.total(), 2);
-    /// ```
-    #[must_use]
-    pub fn counts(&self) -> StateCounts {
-        let mut counts = StateCounts::default();
-        for (node, _) in self.walk() {
-            *counts.get_mut(node.state) += 1;
-        }
-        counts
-    }
-
-    /// ```
-    /// use warlock_engine::{Node, NodeState, Tree};
-    ///
-    /// let tree = Tree::new(
-    ///     Node::new("repo", "repo/.warlock.md", NodeState::PactedStale)
-    ///         .with_children([Node::new(
-    ///             "repo/docs",
-    ///             "repo/docs/.warlock.md",
-    ///             NodeState::PactedFresh,
-    ///         )]),
+    ///     Node::new("repo")
+    ///         .with_children([Node::new("repo/docs").with_scope(Some("docs".to_owned()))]),
     /// );
     ///
     /// let found = tree.find("repo/docs").expect("docs is in the tree");
-    /// assert_eq!(found.state, NodeState::PactedFresh);
+    /// assert_eq!(found.scope.as_deref(), Some("docs"));
     /// assert!(tree.find("repo/nowhere").is_none());
     /// ```
     #[must_use]
@@ -248,37 +174,6 @@ impl<'a> Iterator for DepthFirst<'a> {
         self.stack
             .extend(node.children.iter().rev().map(|child| (child, depth + 1)));
         Some((node, depth))
-    }
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
-pub struct StateCounts {
-    pub unpacted: usize,
-    pub pacted_stale: usize,
-    pub pacted_fresh: usize,
-}
-
-impl StateCounts {
-    #[must_use]
-    pub const fn get(&self, state: NodeState) -> usize {
-        match state {
-            NodeState::Unpacted => self.unpacted,
-            NodeState::PactedStale => self.pacted_stale,
-            NodeState::PactedFresh => self.pacted_fresh,
-        }
-    }
-
-    #[must_use]
-    pub const fn total(&self) -> usize {
-        self.unpacted + self.pacted_stale + self.pacted_fresh
-    }
-
-    pub const fn get_mut(&mut self, state: NodeState) -> &mut usize {
-        match state {
-            NodeState::Unpacted => &mut self.unpacted,
-            NodeState::PactedStale => &mut self.pacted_stale,
-            NodeState::PactedFresh => &mut self.pacted_fresh,
-        }
     }
 }
 

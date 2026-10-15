@@ -99,7 +99,7 @@ fn pasted(text: &str, composer: &Composer) -> Composer {
     next
 }
 
-const BINDINGS: [KeyCode; 18] = [
+const BINDINGS: [KeyCode; 16] = [
     KeyCode::Char('j'),
     KeyCode::Char('k'),
     KeyCode::Char('g'),
@@ -107,8 +107,6 @@ const BINDINGS: [KeyCode; 18] = [
     KeyCode::Char(' '),
     KeyCode::Char('o'),
     KeyCode::Char('f'),
-    KeyCode::Char('p'),
-    KeyCode::Char('r'),
     KeyCode::Char('m'),
     KeyCode::Char('s'),
     KeyCode::Char('v'),
@@ -709,7 +707,7 @@ fn esc_hands_the_keyboard_back_from_any_draft() {
 #[test]
 fn every_tree_binding_is_swallowed_as_text_or_as_nothing() {
     // Asserted over the whole list because "nothing reaches the app" is the
-    // promise: a stray `p` that pacted something behind the composer, or a
+    // promise: a stray `e` that opened an editor behind the composer, or a
     // `j` that moved a selection nobody is looking at, would be the same
     // accident by two routes.
     for code in BINDINGS {

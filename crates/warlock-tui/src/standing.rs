@@ -1,15 +1,13 @@
 //! `here` and `home` are where a subcommand turns the process environment into
 //! a repository root, a working directory and a home directory; everything
-//! below takes all three as parameters. `at` is the way past them, and it is
-//! not only for tests — `session::load_manifest` is handed a root the loop
-//! already holds, and asking the environment a second time could answer
-//! differently.
+//! below takes all three as parameters, and `at` is how a test stands somewhere
+//! without them.
 //!
-//! A question stands here and nothing more, because none of `stale`, `fresh` or
-//! `check` writes a pact. A write stands and is let
-//! through: `edits::Opened` is built on top of this one and cannot be
-//! constructed without `boundary::permits` having said the operation it names
-//! is open to this machine, so the gate is not a step a write can forget.
+//! A question stands here and nothing more, because `check` writes nothing. A
+//! write stands and is let through: `edits::Opened` is built on top of this one
+//! and cannot be constructed without `boundary::permits` having said this
+//! machine may redraw the boundary there, so the gate is not a step a write can
+//! forget.
 
 use std::env;
 use std::path::{Path, PathBuf};
@@ -40,17 +38,9 @@ pub(crate) const FOR_BRANCH: &str = "set the base branch of";
 
 pub(crate) const FOR_CHECK: &str = "answer about the boundary over";
 
-pub(crate) const FOR_LISTING: &str = "list the directories under";
-
-pub(crate) const FOR_UNPACT: &str = "un-pact anything under";
-
 pub(crate) const FOR_SCOPE_ADD: &str = "write a scope in";
 
 pub(crate) const FOR_SCOPE_REMOVE: &str = "clear a scope in";
-
-pub(crate) const FOR_PACT: &str = "pact anything under";
-
-pub(crate) const FOR_REFRESH: &str = "refresh anything under";
 
 // "from" rather than "at", because a push is about a file and the root is what
 // its record spells that file against: the brief itself may be anywhere a path
@@ -111,9 +101,7 @@ impl Standing {
         })
     }
 
-    // For tests, and for `session::load_manifest`, whose root the loop already
-    // holds: asking the environment again would be a second answer to a
-    // settled question.
+    #[cfg(test)]
     pub(crate) const fn at(working_dir: PathBuf, repo_root: PathBuf) -> Self {
         Self {
             working_dir,
@@ -133,11 +121,11 @@ impl Standing {
     }
 
     // A missing manifest is an empty one, the same reading the loader takes:
-    // nothing on disk and nothing pacted are the same thing to answer about, and
-    // pressing `p` in a repository with no `.warlock/` is how the first manifest
-    // gets written. A file that exists and will not parse is a failure rather
-    // than an empty answer — that is a repository whose pacts are unknown, not
-    // one with none.
+    // nothing on disk and nothing scoped are the same thing to answer about, and
+    // the first scope written in a repository with no `.warlock/` is how the
+    // first manifest gets written. A file that exists and will not parse is a
+    // failure rather than an empty answer — that is a repository whose scopes
+    // are unknown, not one with none.
     pub(crate) fn manifest(&self) -> Result<Manifest, Error> {
         match Manifest::load(&self.repo_root) {
             Err(manifest::Error::NotFound { .. }) => Ok(Manifest::new()),

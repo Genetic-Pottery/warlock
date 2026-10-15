@@ -1,5 +1,3 @@
-use std::path::PathBuf;
-
 use super::{Line, first_character, folded, rows, shape, wrapped, wrapped_at};
 use crate::account::Voice;
 use crate::ui::display_width;
@@ -24,15 +22,9 @@ fn a_line_that_fits_is_the_line_it_was() {
     // Not a copy worded some other way and not a wrapped row: the value the
     // card holds, so a test asserting on a panel asserts on the card.
     for line in [
-        Line::Directory {
-            path: PathBuf::from("crates/engine"),
-        },
         Line::Clocked {
             clock: "0:09".to_owned(),
             text: "thinking".to_owned(),
-        },
-        Line::Summary {
-            text: "pact finished".to_owned(),
         },
         Line::Said {
             text: "why?".to_owned(),
@@ -153,45 +145,11 @@ fn a_note_is_broken_under_its_own_marker_and_stays_plain() {
 }
 
 #[test]
-fn a_heading_too_long_for_the_panel_is_rows_rather_than_a_path_in_pieces() {
-    // A piece of a path is not a path, so a broken heading gives up the
-    // variant rather than holding a fragment that reads like a directory.
-    let rows = rows(
-        &Line::Directory {
-            path: PathBuf::from("crates/warlock-engine/src"),
-        },
-        NARROW,
-    );
-
-    assert_eq!(
-        rows,
-        vec![
-            Line::Wrapped {
-                text: "crates/warlock-eng".to_owned(),
-                heading: true,
-                voice: Voice::Warlock,
-            },
-            Line::Wrapped {
-                text: "ine/src".to_owned(),
-                heading: true,
-                voice: Voice::Warlock,
-            },
-        ],
-    );
-}
-
-#[test]
 fn no_row_of_any_line_is_wider_than_the_panel() {
     let lines = [
-        Line::Directory {
-            path: PathBuf::from("crates/warlock-engine/src/pact.rs"),
-        },
         Line::Clocked {
             clock: "10:09".to_owned(),
             text: "the turn failed — exit status 1: session already in use".to_owned(),
-        },
-        Line::Summary {
-            text: "pact finished — 12 directories, 21:30, $2.10".to_owned(),
         },
         Line::Said {
             text: "what is the name of this repository?".to_owned(),

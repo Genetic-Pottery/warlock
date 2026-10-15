@@ -1,20 +1,17 @@
 //! The conversation card: an ordered list of turns and of notes, one line each,
 //! that warlock says for itself.
 //!
-//! Plain data, as the account is. [`Instant::now`] is never called in this file,
-//! so a whole conversation can be driven off `base + Duration::from_secs` with
-//! nothing attached to stdout and no `claude` installed. The clock rule is
-//! literally the account's code — both are built on [`Log`] — and tool results,
-//! model reasoning and early fragments of an answer are kept out so the answer
-//! lands whole.
+//! Plain data. [`Instant::now`] is never called in this file, so a whole
+//! conversation can be driven off `base + Duration::from_secs` with nothing
+//! attached to stdout and no `claude` installed. The clock rule is [`Log`]'s,
+//! and tool results, model reasoning and early fragments of an answer are kept
+//! out so the answer lands whole.
 //!
 //! Notes share the sequence with the turns rather than sitting in a side table,
 //! because *when* one was said is the whole of what it means: a warning above
 //! the turn it is about and the same warning three turns later are different
-//! warnings. A pact running behind the conversation puts nothing here, because
-//! the account card already carries the passes and the summary. What a turn
-//! costs is heard and discarded (see [`Thread::record`]): a price under a single
-//! reply belongs to no total.
+//! warnings. What a turn costs is heard and discarded (see [`Thread::record`]):
+//! a price under a single reply belongs to no total.
 
 use std::time::{Duration, Instant};
 
@@ -648,8 +645,7 @@ fn broken(text: &str) -> impl Iterator<Item = (usize, &str)> {
     rows.into_iter()
 }
 
-/// Nothing is cut. The account refuses to truncate for the same reason: the
-/// width is a fact about a terminal, and this is not.
+/// Nothing is cut: the width is a fact about a terminal, and this is not.
 fn one_line(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }

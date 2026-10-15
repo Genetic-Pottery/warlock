@@ -3,7 +3,7 @@ use std::path::Path;
 
 use super::{Destination, Error, resolve_filing};
 use crate::keys::save_key;
-use crate::manifest::{Manifest, PactEntry, ScopeRecord, manifest_path};
+use crate::manifest::{Manifest, ScopeRecord, ScopedDirectory, manifest_path};
 use crate::route::{self, resolve_route};
 use crate::sigils::{save_key_binding, save_sigils, sigils_path};
 
@@ -15,20 +15,19 @@ fn a_dir() -> tempfile::TempDir {
     tempfile::tempdir().expect("a temporary directory")
 }
 
-fn entry(module: &str) -> PactEntry {
-    PactEntry::new(".", module, format!("{module}/.warlock.md"))
-        .expect("a relative module path is inside the root")
+fn scoped(path: &str, scope: &str) -> ScopedDirectory {
+    ScopedDirectory::new(".", path, scope).expect("a relative path is inside the root")
 }
 
-// One pact per scope, so the entries agree with the records: `Unrecorded` is
-// decided from the entries and the board refusals from the records, and a
-// fixture that recorded a scope no pact carries could pass one while the other
+// One directory per scope, so the rows agree with the records: `Unrecorded` is
+// decided from the rows and the board refusals from the records, and a fixture
+// that recorded a scope no directory carries could pass one while the other
 // never runs.
 fn a_manifest(scopes: &[&str]) -> Manifest {
-    Manifest::with_entries(
+    Manifest::with_directories(
         scopes
             .iter()
-            .map(|scope| entry(scope).with_scope(*scope))
+            .map(|scope| scoped(scope, scope))
             .collect::<Vec<_>>(),
     )
     .with_scopes(
@@ -202,7 +201,7 @@ fn the_four_ways_to_have_no_candidate_are_four_different_refusals() {
     // all three are the same repository.
     let (empty_home, empty_root) = (a_dir(), a_dir());
     bound(empty_home.path(), empty_root.path());
-    let recordless = Manifest::with_entries([entry("crates").with_scope("data-plane")]);
+    let recordless = Manifest::with_directories([scoped("crates", "data-plane")]);
     let mut boardless = Vec::new();
     for sigils in [&[][..], &["data-plane"][..], &["*"][..]] {
         holds(empty_home.path(), empty_root.path(), sigils);
@@ -268,12 +267,12 @@ fn the_four_ways_to_have_no_candidate_are_four_different_refusals() {
         "{text}"
     );
 
-    // And a held sigil some pact carries with no `[[scope]]` record: the manifest
-    // is one line short rather than the machine being wrong. It records `web`,
-    // because a manifest recording nothing at all is the refusal above rather
-    // than this one — this is a file one line short, not a file nobody has
-    // started.
-    let unrecorded_manifest = Manifest::with_entries([entry("crates").with_scope("data-plane")])
+    // And a held sigil some directory carries with no `[[scope]]` record: the
+    // manifest is one line short rather than the machine being wrong. It records
+    // `web`, because a manifest recording nothing at all is the refusal above
+    // rather than this one — this is a file one line short, not a file nobody
+    // has started.
+    let unrecorded_manifest = Manifest::with_directories([scoped("crates", "data-plane")])
         .with_scopes([ScopeRecord::new("web", "Team web", "In Review", "warlock")]);
     let (bare_home, bare_root) = (a_dir(), a_dir());
     bound(bare_home.path(), bare_root.path());
@@ -310,23 +309,23 @@ fn the_four_ways_to_have_no_candidate_are_four_different_refusals() {
 }
 
 #[test]
-fn a_recorded_scope_no_pact_carries_is_still_a_board() {
-    // The refusal above is on `scopes()` and not on the entries: where a brief
-    // files is the `[[scope]]` record's question alone, and a repository that has
-    // recorded a board before granting any directory to it can still push. A test
-    // written against the entries would have made this a refusal.
+fn a_recorded_scope_no_directory_carries_is_still_a_board() {
+    // The refusal above is on `scopes()` and not on the rows: where a brief files
+    // is the `[[scope]]` record's question alone, and a repository that has
+    // recorded a board before scoping any directory to it can still push. A test
+    // written against the rows would have made this a refusal.
     let (home, root) = (a_dir(), a_dir());
     bound(home.path(), root.path());
     holds(home.path(), root.path(), &["data-plane"]);
 
-    let manifest = Manifest::with_entries([entry("crates")]).with_scopes([ScopeRecord::new(
+    let manifest = Manifest::new().with_scopes([ScopeRecord::new(
         "data-plane",
         "WAR",
         "In Review",
         "warlock",
     )]);
     let target = resolve_filing(&manifest, root.path(), home.path(), None)
-        .expect("one record of the held name is one board, carried by no pact or not");
+        .expect("one record of the held name is one board, carried by a directory or not");
 
     assert_eq!(target.scope(), "data-plane");
     assert_eq!(target.record().team_key(), "WAR");

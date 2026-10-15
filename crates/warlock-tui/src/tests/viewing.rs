@@ -1,9 +1,9 @@
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::Instant;
 
 use tempfile::TempDir;
-use warlock_engine::{Node, NodeState, PER_FILE_BYTE_CAP, Tree, Viewed, view_file};
+use warlock_engine::{Node, PER_FILE_BYTE_CAP, Tree, Viewed, view_file};
 
 use super::view_press;
 use crate::account::Line;
@@ -25,7 +25,7 @@ fn a_repo() -> TempDir {
     let repo = tempfile::tempdir().expect("a temporary directory");
     let engine = repo.path().join("crates/engine");
     fs::create_dir_all(&engine).expect("the fixture's directories");
-    fs::write(engine.join(".warlock.md"), DOCUMENT).expect("the document");
+    fs::write(engine.join("README.md"), DOCUMENT).expect("the readme");
     fs::write(engine.join("notes.txt"), "one\ntwo\nthree\n").expect("a plain file");
     // Not text and not pretending to be: a PNG's first bytes, which stop
     // being UTF-8 at the second one.
@@ -61,28 +61,22 @@ fn over_the_cap() -> String {
 /// The tree the app is built over, rooted at `root`.
 ///
 /// ```text
-/// <root>                          pacted, stale, documented
-/// └── crates                      unpacted, no document
-///     └── crates/engine           pacted, fresh, documented
-///         .warlock.md, notes.txt, logo.png, huge.txt, gone.txt
+/// <root>                          unscoped
+/// └── crates                      scoped `platform`
+///     └── crates/engine           covered by `platform`
+///         README.md, notes.txt, logo.png, huge.txt, gone.txt
 /// ```
 fn tree(root: &Path) -> Tree {
     let engine = root.join("crates/engine");
     Tree::new(
-        Node::new(root, root.join(".warlock.md"), NodeState::PactedStale).with_children([
-            Node::new(root.join("crates"), None::<PathBuf>, NodeState::Unpacted).with_children([
-                Node::new(&engine, engine.join(".warlock.md"), NodeState::PactedFresh).with_files(
-                    [
-                        ".warlock.md",
-                        "notes.txt",
-                        "logo.png",
-                        "huge.txt",
-                        "gone.txt",
-                    ]
-                    .map(|file| engine.join(file)),
-                ),
-            ]),
-        ]),
+        Node::new(root).with_children([Node::new(root.join("crates"))
+            .with_scope(Some("platform".to_owned()))
+            .with_children([Node::new(&engine)
+                .with_covering(Some("platform".to_owned()))
+                .with_files(
+                    ["README.md", "notes.txt", "logo.png", "huge.txt", "gone.txt"]
+                        .map(|file| engine.join(file)),
+                )])]),
     )
 }
 
@@ -120,13 +114,13 @@ fn panel_text(app: &App) -> Vec<String> {
 #[test]
 fn v_on_a_file_row_puts_that_files_lines_in_the_panel() {
     let repo = a_repo();
-    let mut app = app_on_file(repo.path(), ".warlock.md");
+    let mut app = app_on_file(repo.path(), "README.md");
 
     let read = view_press(&mut app);
 
     // The file that is now on the card, said out loud: the app is never told
     // which file it is holding, so the press has to say.
-    assert_eq!(read, Some(repo.path().join("crates/engine/.warlock.md")));
+    assert_eq!(read, Some(repo.path().join("crates/engine/README.md")));
     assert!(app.panel().has_document(), "nothing was read");
     assert_eq!(
         panel_text(&app),
@@ -146,9 +140,7 @@ fn v_on_a_file_row_puts_that_files_lines_in_the_panel() {
 }
 
 #[test]
-fn a_file_that_is_not_a_document_is_read_the_same_way() {
-    // Section 5 is not bent for this key: a `.warlock.md` is an ordinary file
-    // row, and so an ordinary file is a readable one.
+fn a_plain_text_file_is_read_the_same_way() {
     let repo = a_repo();
     let mut app = app_on_file(repo.path(), "notes.txt");
 
@@ -159,7 +151,7 @@ fn a_file_that_is_not_a_document_is_read_the_same_way() {
 }
 
 #[test]
-fn v_on_a_documented_directory_reads_nothing_and_names_the_document_row() {
+fn v_on_a_directory_reads_nothing_and_says_to_press_it_on_a_file() {
     let repo = a_repo();
     let mut app = app_on(repo.path(), &repo.path().join("crates/engine"));
     let mut before = app.clone();
@@ -169,28 +161,12 @@ fn v_on_a_documented_directory_reads_nothing_and_names_the_document_row() {
     assert_eq!(view_press(&mut app), None);
 
     let message = app.message().expect("a directory row is refused");
-    assert!(message.contains("is a directory"), "{message}");
-    assert!(message.contains(".warlock.md"), "{message}");
+    assert_eq!(
+        message,
+        "crates/engine is a directory — press v on one of its files to read it"
+    );
     assert!(!app.panel().has_content(), "a directory drew something");
     // The message is the whole of what the press changed.
-    before.set_message(message);
-    assert_eq!(app, before, "refusing a directory moved something else");
-}
-
-#[test]
-fn v_on_an_undocumented_directory_reads_nothing_and_names_the_pact_key() {
-    let repo = a_repo();
-    let mut app = app_on(repo.path(), &repo.path().join("crates"));
-    let mut before = app.clone();
-
-    assert_eq!(view_press(&mut app), None);
-
-    let message = app.message().expect("a directory row is refused");
-    assert!(message.contains("is a directory"), "{message}");
-    // Nothing to point at, so it points at the key that would make
-    // something to point at.
-    assert!(message.contains("press p to pact it"), "{message}");
-    assert!(!app.panel().has_content(), "a directory drew something");
     before.set_message(message);
     assert_eq!(app, before, "refusing a directory moved something else");
 }
@@ -234,7 +210,7 @@ fn a_file_past_the_cap_is_shown_up_to_the_cap_and_says_it_was_cut() {
 // was" is an assertion about something a reader would have lost rather than
 // about emptiness.
 fn app_holding_a_document_on(root: &Path, file: &Path) -> App {
-    let mut app = app_on_file(root, ".warlock.md");
+    let mut app = app_on_file(root, "README.md");
     assert!(view_press(&mut app).is_some(), "the fixture read nothing");
     assert!(app.panel().has_document(), "the fixture read nothing");
     select(&mut app, file);
@@ -342,9 +318,9 @@ fn the_next_keystroke_is_answered_normally_after_a_read_that_failed() {
 #[test]
 fn reading_a_file_writes_no_byte_of_it() {
     let repo = a_repo();
-    let path = repo.path().join("crates/engine/.warlock.md");
-    let before = fs::read(&path).expect("the fixture's document");
-    let mut app = app_on_file(repo.path(), ".warlock.md");
+    let path = repo.path().join("crates/engine/README.md");
+    let before = fs::read(&path).expect("the fixture's readme");
+    let mut app = app_on_file(repo.path(), "README.md");
 
     assert_eq!(view_press(&mut app), Some(path.clone()));
     assert_eq!(view_press(&mut app), Some(path.clone()));
@@ -359,13 +335,13 @@ fn reading_a_file_writes_no_byte_of_it() {
 #[test]
 fn a_second_press_reads_the_file_again_from_disk() {
     let repo = a_repo();
-    let path = repo.path().join("crates/engine/.warlock.md");
-    let mut app = app_on_file(repo.path(), ".warlock.md");
+    let path = repo.path().join("crates/engine/README.md");
+    let mut app = app_on_file(repo.path(), "README.md");
 
     assert_eq!(view_press(&mut app), Some(path.clone()));
     assert_eq!(panel_text(&app)[0], "# The engine");
 
-    // The file rewritten under the reader, as a pass would rewrite it.
+    // The file rewritten under the reader, as another program would.
     fs::write(&path, "# Rewritten\n\nBy something else.\n").expect("the document rewrites");
     assert_eq!(view_press(&mut app), Some(path.clone()));
 

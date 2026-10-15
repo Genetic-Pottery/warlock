@@ -321,7 +321,8 @@ pub(crate) struct RecordForm {
     path: String,
     // Already folded by the caller, and stored so the window can show which name
     // is being recorded: the record written from this form has to be the one the
-    // pact names, and a second read of the first prompt could disagree.
+    // directory's row names, and a second read of the first prompt could
+    // disagree.
     scope: String,
     team: ScopeField,
     review_state: ScopeField,

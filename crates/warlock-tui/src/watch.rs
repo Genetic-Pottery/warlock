@@ -38,7 +38,7 @@ pub(crate) const RELOAD_CEILING: Duration = Duration::from_secs(2);
 
 /// How many further reloads the events arriving *during* a reload are worth
 /// between them, however many of them there were. Held as one bit rather than a
-/// count or a list, because a pact writes documents while the reload that will
+/// count or a list, because a burst of writes lands while the reload that will
 /// already see them runs: remembering each would leave the loop owing a reload
 /// per event and re-walking until the backlog drained. Named rather than left
 /// implicit in the code because the number is the rule, and it cannot grow.
@@ -49,7 +49,7 @@ pub(crate) const COALESCED_RELOADS: usize = 1;
 /// filesystem event is held against.
 ///
 /// Built from the tree and never from what is on screen — rows are filtered by
-/// the pacted-only and file toggles, so a filter built from them would stop
+/// the scoped-only and file toggles, so a filter built from them would stop
 /// noticing directories the moment somebody pressed a key.
 ///
 /// Paths are compared as stored, with no normalisation and no filesystem
@@ -62,13 +62,10 @@ pub struct NodeSet {
 
 impl NodeSet {
     /// ```
-    /// use warlock_engine::{Node, NodeState, Tree};
+    /// use warlock_engine::{Node, Tree};
     /// use warlock_tui::NodeSet;
     ///
-    /// let tree = Tree::new(
-    ///     Node::new("repo", "repo/.warlock.md", NodeState::PactedStale)
-    ///         .with_children([Node::new("repo/docs", None, NodeState::Unpacted)]),
-    /// );
+    /// let tree = Tree::new(Node::new("repo").with_children([Node::new("repo/docs")]));
     /// let watched = NodeSet::from_tree(&tree);
     ///
     /// // A file saved in a directory the walk produced.
@@ -117,14 +114,14 @@ impl NodeSet {
 /// ```
 /// use std::time::Instant;
 ///
-/// use warlock_engine::{Node, NodeState, Tree};
+/// use warlock_engine::{Node, Tree};
 /// use warlock_tui::WatchPolicy;
 ///
-/// let tree = Tree::new(Node::new("repo", "repo/.warlock.md", NodeState::PactedStale));
+/// let tree = Tree::new(Node::new("repo"));
 /// let mut policy = WatchPolicy::new(&tree);
 ///
 /// let saved_at = Instant::now();
-/// assert!(policy.saw("repo/.warlock.md", saved_at), "a file in a walked directory");
+/// assert!(policy.saw("repo/README.md", saved_at), "a file in a walked directory");
 /// assert!(!policy.due(saved_at), "not yet: the disk has only just moved");
 ///
 /// let settled = saved_at + warlock_tui::QUIET_PERIOD;
@@ -274,7 +271,7 @@ impl Watch {
     /// shows that subdirectory, and watching the repository above would hear
     /// about a build in a sibling crate that is not on screen.
     ///
-    /// The manifest is watched separately because a pact granted in another
+    /// The manifest is watched separately because a scope written in another
     /// window changes what every node's colour should be while nothing inside
     /// the tree has moved.
     #[must_use]
@@ -352,11 +349,12 @@ impl fmt::Debug for Watch {
 }
 
 /// Falls back from the file to `.warlock/` because the manifest is often absent
-/// — no pact made yet — and an absent path cannot be watched; the directory
+/// — no scope drawn yet — and an absent path cannot be watched; the directory
 /// watch also catches the create, and the rename a write lands as.
 ///
 /// Failure is not reported because there is nobody to report it to: the cost is
-/// one reload that happens at the end of a pact instead of during it.
+/// a scope written in another window that this one does not colour until
+/// something else moves.
 fn watch_manifest(handle: &mut RecommendedWatcher, repo_root: &Path) {
     let manifest = manifest_path(repo_root);
     if handle.watch(&manifest, RecursiveMode::NonRecursive).is_ok() {

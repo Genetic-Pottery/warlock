@@ -1,6 +1,4 @@
-use warlock_engine::NodeState;
-
-use super::{tree, tree_after_a_run};
+use super::{tree, tree_after_a_rescope};
 
 #[test]
 fn the_fixture_walks_in_a_fixed_depth_first_order() {
@@ -33,13 +31,21 @@ fn the_fixture_nests_more_than_one_level() {
 }
 
 #[test]
-fn every_state_appears_in_the_fixture() {
-    let counts = tree().counts();
+fn the_fixture_holds_a_scoped_a_covered_and_an_unscoped_directory() {
+    let tree = tree();
+    let node = |path: &str| tree.find(path).expect("the fixture has it").clone();
 
-    for state in NodeState::ALL {
-        assert!(counts.get(state) > 0, "no node is {state:?}");
+    let crates = node("warlock/crates");
+    assert_eq!(crates.scope.as_deref(), Some("platform"));
+    let tui = node("warlock/crates/tui");
+    assert_eq!(tui.scope, None);
+    assert_eq!(tui.covering.as_deref(), Some("platform"));
+    let engine = node("warlock/crates/engine");
+    assert_eq!(engine.covering.as_deref(), Some("data-plane"));
+    for unscoped in ["warlock", "warlock/assets"] {
+        assert!(!node(unscoped).is_covered(), "{unscoped} is covered");
     }
-    assert_eq!(counts.total(), 5);
+    assert_eq!(tree.walk().count(), 5);
 }
 
 #[test]
@@ -60,52 +66,38 @@ fn the_fixture_lists_files_under_more_than_one_directory() {
     assert_eq!(
         listing,
         [
-            (
-                "warlock".to_owned(),
-                vec![
-                    // A plain README beside the document, ordinary in every
-                    // way: the loader lists it and nothing else notices it.
-                    "warlock/.warlock.md".to_owned(),
-                    "warlock/README.md".to_owned(),
-                ],
-            ),
+            ("warlock".to_owned(), vec!["warlock/README.md".to_owned()],),
             // A directory of nothing but directories lists nothing.
             ("warlock/crates".to_owned(), Vec::new()),
             (
                 "warlock/crates/engine".to_owned(),
-                vec![
-                    "warlock/crates/engine/.warlock.md".to_owned(),
-                    "warlock/crates/engine/Cargo.toml".to_owned(),
-                ],
+                vec!["warlock/crates/engine/Cargo.toml".to_owned()],
             ),
             (
                 "warlock/crates/tui".to_owned(),
-                vec!["warlock/crates/tui/.warlock.md".to_owned()],
+                vec!["warlock/crates/tui/Cargo.toml".to_owned()],
             ),
             (
                 "warlock/assets".to_owned(),
-                vec![
-                    "warlock/assets/.warlock.md".to_owned(),
-                    "warlock/assets/logo.svg".to_owned(),
-                ],
+                vec!["warlock/assets/logo.svg".to_owned()],
             ),
         ]
     );
 }
 
 #[test]
-fn files_sit_under_both_a_pacted_and_an_unpacted_node() {
-    let with_files: Vec<NodeState> = tree()
+fn files_sit_under_both_a_covered_and_an_uncovered_node() {
+    let with_files: Vec<bool> = tree()
         .walk()
         .filter(|(node, _)| !node.files.is_empty())
-        .map(|(node, _)| node.state)
+        .map(|(node, _)| node.is_covered())
         .collect();
 
-    // A file takes its module's colour, so a fixture whose files all sat
-    // under one state could not tell a view that got the colour right from
-    // one that picked a single colour for every file.
-    assert!(with_files.iter().any(|state| state.is_pacted()));
-    assert!(with_files.iter().any(|state| !state.is_pacted()));
+    // A file takes its directory's colour, so a fixture whose files all sat
+    // under covered directories, or all under uncovered ones, could not tell a
+    // view that got the colour right from one that picked a single colour.
+    assert!(with_files.iter().any(|covered| *covered));
+    assert!(with_files.iter().any(|covered| !covered));
     assert!(with_files.len() > 1);
 }
 
@@ -144,7 +136,7 @@ fn listing_files_leaves_the_nodes_and_their_leaves_alone() {
 
     // Files are no part of the tree's shape: the same five nodes, and a
     // node with files and no subdirectories is still a leaf.
-    assert_eq!(tree.counts().total(), 5);
+    assert_eq!(tree.walk().count(), 5);
     let engine = tree
         .find("warlock/crates/engine")
         .expect("the fixture has an engine node");
@@ -153,9 +145,9 @@ fn listing_files_leaves_the_nodes_and_their_leaves_alone() {
 }
 
 #[test]
-fn the_second_fixture_is_the_first_one_with_a_document_the_run_wrote() {
+fn the_second_fixture_is_the_first_one_with_one_directory_rescoped() {
     let before = tree();
-    let after = tree_after_a_run();
+    let after = tree_after_a_rescope();
 
     // The same walk, in the same order: one load later, not another tree.
     let paths = |tree: &super::Tree| -> Vec<String> {
@@ -165,35 +157,16 @@ fn the_second_fixture_is_the_first_one_with_a_document_the_run_wrote() {
     };
     assert_eq!(paths(&before), paths(&after));
 
-    // And exactly one node differs, in exactly the way a finished pact
-    // makes one differ: a document where there was none, and the file it
-    // was written in listed beside it.
     let differing: Vec<String> = after
         .walk()
         .filter(|(node, _)| {
             let was = before.find(&node.path).expect("the same walk");
-            was.document != node.document || was.state != node.state || was.files != node.files
+            was.scope != node.scope || was.covering != node.covering || was.files != node.files
         })
         .map(|(node, _)| node.path.to_string_lossy().into_owned())
         .collect();
-    assert_eq!(differing, ["warlock/crates".to_owned()]);
+    assert_eq!(differing, ["warlock/assets".to_owned()]);
 
-    let crates = after.find("warlock/crates").expect("the same walk");
-    assert!(crates.document.is_some());
-    assert_eq!(crates.state, NodeState::PactedFresh);
-    assert_eq!(crates.files.len(), 1);
-}
-
-#[test]
-fn the_fixture_holds_a_directory_with_no_document() {
-    let undocumented = tree()
-        .find("warlock/crates")
-        .expect("the undocumented directory is in the fixture")
-        .clone();
-
-    assert_eq!(undocumented.document, None);
-    assert!(
-        !undocumented.is_leaf(),
-        "documented modules sit below it as well"
-    );
+    let assets = after.find("warlock/assets").expect("the same walk");
+    assert_eq!(assets.scope.as_deref(), Some("assets"));
 }

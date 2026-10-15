@@ -3,7 +3,7 @@ use std::path::Path;
 
 use tempfile::TempDir;
 use warlock_engine::{
-    Manifest, PactEntry, PullRun, RunStatus, ScopeRecord, brief_path, pulls_dir, save_key,
+    Manifest, PullRun, RunStatus, ScopeRecord, ScopedDirectory, brief_path, pulls_dir, save_key,
     save_key_binding, save_sigils, state_path,
 };
 
@@ -15,9 +15,7 @@ use crate::git::{Dirty, Opened};
 use crate::linear::{Assignee, Blocker, NamedIssue, Priority, Queue, QueuedIssue, StateType};
 use crate::pulling::Pulled;
 use crate::queue::{Reason, Refusal};
-use crate::stubs::{
-    Boarding, Checkout, Forging, GitCall, Refreshing, Sessions, Slicing, VIEWER, said,
-};
+use crate::stubs::{Boarding, Checkout, Forging, GitCall, Sessions, Slicing, VIEWER, said};
 
 // Not a key, and named so that nothing reading this file mistakes it for one: it
 // is stored only so that a bound name resolves.
@@ -51,12 +49,12 @@ fn a_dir() -> TempDir {
     tempfile::tempdir().expect("a temporary directory")
 }
 
-// Two recorded scopes, one pacted directory under each, so a crossing and a
+// Two recorded scopes, one scoped directory under each, so a crossing and a
 // held-but-foreign path are both reachable from one manifest.
 fn a_manifest() -> Manifest {
-    Manifest::with_entries([
-        pacted("crates/engine", SCOPE),
-        pacted("crates/control", CLOSED),
+    Manifest::with_directories([
+        scoped("crates/engine", SCOPE),
+        scoped("crates/control", CLOSED),
     ])
     .with_scopes([
         ScopeRecord::new(SCOPE, TEAM, REVIEW, LABEL),
@@ -64,10 +62,8 @@ fn a_manifest() -> Manifest {
     ])
 }
 
-fn pacted(directory: &str, scope: &str) -> PactEntry {
-    PactEntry::new(".", directory, format!("{directory}/.warlock.md"))
-        .expect("a relative module path is inside the root")
-        .with_scope(scope)
+fn scoped(directory: &str, scope: &str) -> ScopedDirectory {
+    ScopedDirectory::new(".", directory, scope).expect("a relative module path is inside the root")
 }
 
 /// The home of a machine holding the scope's sigil, with a name bound and a key
@@ -241,14 +237,6 @@ fn no_split() -> Slicing {
     Slicing::into_chain(TICKET, &["Nothing this test lets a run reach"])
 }
 
-// The ordinary branch: nothing pacted was made stale, so the pass has nothing to
-// refresh and nothing to commit. What the pass itself does with a stale directory
-// is `freshness.rs`'s to test, and what the loop does with the answer is
-// `pulling.rs`'s.
-fn no_refresh() -> Refreshing {
-    Refreshing::quiet()
-}
-
 #[test]
 fn a_scope_no_record_holds_is_refused_and_the_recorded_scopes_are_named() {
     let ground = Ground::new();
@@ -371,7 +359,6 @@ fn a_dirty_tree_is_refused_before_the_board_is_opened() {
             forge: &Forging::opening(URL),
             split: &no_split(),
             sessions: &no_sessions(),
-            freshen: &no_refresh(),
         },
         None,
         false,
@@ -421,7 +408,6 @@ fn a_dry_run_names_the_ticket_it_would_take_and_everything_it_passed_over() {
             forge: &Forging::opening(URL),
             split: &no_split(),
             sessions: &no_sessions(),
-            freshen: &no_refresh(),
         },
         None,
         true,
@@ -484,7 +470,6 @@ fn a_dry_run_on_a_named_ticket_says_whether_that_ticket_would_be_taken() {
             forge: &Forging::opening(URL),
             split: &no_split(),
             sessions: &no_sessions(),
-            freshen: &no_refresh(),
         },
         Some(TICKET),
         true,
@@ -509,7 +494,6 @@ fn a_dry_run_on_a_named_ticket_says_whether_that_ticket_would_be_taken() {
             forge: &Forging::opening(URL),
             split: &no_split(),
             sessions: &no_sessions(),
-            freshen: &no_refresh(),
         },
         Some(TICKET),
         true,
@@ -543,7 +527,6 @@ fn nothing_ready_names_every_ticket_and_why_and_is_an_answer() {
             forge: &Forging::opening(URL),
             split: &no_split(),
             sessions: &no_sessions(),
-            freshen: &no_refresh(),
         },
         None,
         false,
@@ -583,7 +566,6 @@ fn a_named_ticket_on_a_halted_run_refuses_with_the_command_that_frees_it() {
             forge: &Forging::opening(URL),
             split: &no_split(),
             sessions: &no_sessions(),
-            freshen: &no_refresh(),
         },
         Some(TICKET),
         false,
@@ -630,8 +612,8 @@ fn a_whole_pull_prints_a_header_per_section_with_the_session_s_lines_under_it() 
                 detail: Some("crates/engine/src/lib.rs".to_owned()),
             },
             Activity::Thinking,
-            // No line at all, following the panel's account card: a cost is a fact
-            // about the pass rather than something the pass did.
+            // No line at all: a cost is a fact about the pass rather than something
+            // the pass did.
             Activity::Cost { usd: 0.42 },
         ],
     );
@@ -647,7 +629,6 @@ fn a_whole_pull_prints_a_header_per_section_with_the_session_s_lines_under_it() 
             forge: &forge,
             split: &split,
             sessions: &sessions,
-            freshen: &no_refresh(),
         },
         &progress,
     );
@@ -747,7 +728,6 @@ fn a_stretch_of_thinking_or_writing_is_one_line_and_a_repeated_tool_is_not_colla
             forge: &forge,
             split: &split,
             sessions: &sessions,
-            freshen: &no_refresh(),
         },
         &progress,
     );
@@ -799,7 +779,6 @@ fn a_finished_pull_on_a_machine_with_no_gh_says_where_the_body_went() {
             forge: &Forging::without_gh(),
             split: &Slicing::into_chain(TICKET, &["Read the queue"]),
             sessions: &Sessions::answering([said("done", "the queue is read", None)]),
-            freshen: &no_refresh(),
         },
         None,
         false,
@@ -834,7 +813,6 @@ fn a_crossed_sub_task_is_the_boundary_s_status_and_the_loop_and_the_shell_agree(
             forge: &forge,
             split: &Slicing::into_chain(TICKET, &["Read the queue"]),
             sessions: &Sessions::answering([said("done", "the queue is read", None)]),
-            freshen: &no_refresh(),
         },
         None,
         false,
@@ -848,7 +826,10 @@ fn a_crossed_sub_task_is_the_boundary_s_status_and_the_loop_and_the_shell_agree(
     );
     let said = error.to_string();
     assert!(said.contains("`WAR-140.01`"), "{said}");
-    assert!(said.contains("scope this machine does not hold"), "{said}");
+    assert!(
+        said.contains("wrote outside the scopes this machine holds"),
+        "{said}"
+    );
 
     // The two statements of what each ending is worth, held against each other:
     // the loop's own, and the one the shell actually returns.
@@ -891,6 +872,40 @@ fn a_crossed_sub_task_is_the_boundary_s_status_and_the_loop_and_the_shell_agree(
 }
 
 #[test]
+fn a_sub_task_that_wrote_under_no_scope_is_a_crossing_too() {
+    // An unscoped path is closed to everyone, so a write there stops the run
+    // exactly as a write under a scope this machine does not hold does.
+    let ground = Ground::new();
+    let prepared = ground.prepared();
+    let repo = Checkout::clean(DEFAULT).trees([Vec::new(), wrote("docs/notes.md")]);
+    let forge = Forging::opening(URL);
+
+    let (outcome, printed) = pull_with(
+        &ground,
+        &prepared,
+        &Ports {
+            open: &board(queue([ready()])),
+            repo: &repo,
+            forge: &forge,
+            split: &Slicing::into_chain(TICKET, &["Read the queue"]),
+            sessions: &Sessions::answering([said("done", "the queue is read", None)]),
+        },
+        None,
+        false,
+    );
+
+    let error = outcome.expect_err("an unscoped write stops the run");
+    assert!(
+        matches!(&error, Error::Crossed { ticket, subtask }
+            if ticket == TICKET && subtask == "WAR-140.01"),
+        "{error:?}"
+    );
+    assert_eq!(status_for(&Err(error)), 3);
+    assert!(repo.commits().is_empty(), "{printed}");
+    assert!(forge.asked().is_empty());
+}
+
+#[test]
 fn a_halted_run_leaves_the_ticket_where_it_is_and_the_shell_spends_a_one() {
     let ground = Ground::new();
     let prepared = ground.prepared();
@@ -909,7 +924,6 @@ fn a_halted_run_leaves_the_ticket_where_it_is_and_the_shell_spends_a_one() {
                 "",
                 Some("only a person can settle this"),
             )]),
-            freshen: &no_refresh(),
         },
         None,
         false,
@@ -952,7 +966,6 @@ fn an_unreadable_run_record_is_a_line_and_not_a_failure() {
             forge: &Forging::opening(URL),
             split: &no_split(),
             sessions: &no_sessions(),
-            freshen: &no_refresh(),
         },
         None,
         false,
@@ -983,7 +996,6 @@ fn a_worked_ticket_is_the_one_the_queue_chose_and_the_board_was_asked_the_scope_
             forge: &Forging::opening(URL),
             split: &split,
             sessions: &Sessions::answering([said("done", "the queue is read", None)]),
-            freshen: &no_refresh(),
         },
         None,
         false,

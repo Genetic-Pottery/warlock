@@ -8,47 +8,35 @@
 //! cannot fail — a home that will not resolve or a config that will not parse is
 //! a state on the header rather than a reason not to draw a tree.
 //!
-//! [`closed_scope`] is where every key that can be refused over a boundary
-//! asks it, so a pact, an un-pact, a refresh and a scope write are turned down
-//! on the same grounds in the same words.
+//! [`closed_scope`] is where the `s` key asks the boundary, so it is turned down
+//! on the same grounds and in the same words as `warlock scope add`.
 
 use std::env;
 use std::mem;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use warlock_engine::{
-    Loaded, Manifest, Tree, load_tree, manifest_path, repository_root, unpact_ignored,
-};
+use warlock_engine::{Loaded, Manifest, Tree, load_tree, manifest_path, repository_root};
 
 use crate::app::{App, Chrome, Sigils, reseat_on};
-use crate::boundary::{Operation, permits};
+use crate::boundary::permits;
 use crate::error::{Error, one_line};
 use crate::git::Git;
 use crate::settings::Settings;
 use crate::standing::Standing;
 use crate::watch::{Watch, WatchPolicy, Watching};
 
-// Says what the reader lost, which is the refresh and nothing else: the run is
-// over, its documents are on disk, its manifest is saved, and the rows under
-// this line are the ones that were there before — true, only older than disk. A
-// fact about the view rather than a failure of the run, because the run did not
-// fail.
+// Says what the reader lost, which is the refresh and nothing else: the rows
+// under this line are the ones that were there before — true, only older than
+// disk. A fact about the view rather than a failure of anything else.
 pub(crate) const NOT_REFRESHED: &str = "the view could not be refreshed and is the tree as it was";
 
-// Says what the reader lost, which is the noticing: every key still works and a
-// pact still re-reads the tree when its run ends. What will not happen is a row
-// appearing because somebody saved a file in another window. Said once, when the
+// Says what the reader lost, which is the noticing: every key still works. What
+// will not happen is a row appearing because somebody saved a file in another
+// window. Said once, when the
 // watcher is asked for, rather than on every frame — a line re-set ten times a
 // second talks over everything else the footer has to say.
 pub(crate) const NOT_WATCHING: &str = "live updates are off; the tree is the one loaded at startup";
-
-// Says what is still on disk, because that is what the reader has to act on:
-// the manifest keeps entries for directories the repository has since excluded,
-// so `warlock stale` can name a module no walk will ever reach again. Nothing
-// was drawn wrong and no run was lost, which is why it is a line rather than an
-// error.
-pub(crate) const NOT_CLEANED: &str = "entries under an ignored directory are still in the manifest";
 
 // Called on the event loop's thread and on no other. A worker thread must never
 // reach in here: it would be reading a tree while the thread that draws it is
@@ -56,12 +44,10 @@ pub(crate) const NOT_CLEANED: &str = "entries under an ignored directory are sti
 //
 // A load that fails is not an error out of the loop, which is the deliberate
 // difference from `load_app`, where the same failure is fatal. Warlock is up,
-// the documents a run wrote are whole on disk and the manifest recording them is
-// saved; quitting here would throw away a run that cost minutes and money over
-// nothing worse than a stale screen. Problems that did not stop the load are a
-// different matter and the tree is taken: the engine has already coloured each
-// affected node conservatively, and a tree with the new documents in it beats
-// the stale one it would replace.
+// and quitting here would throw away whatever the session holds — a pull, a
+// conversation — over nothing worse than a stale screen. Problems that did not
+// stop the load are a different matter and the tree is taken: a bad scope reads
+// as no scope, and the line says so.
 //
 // The header is neither carried nor re-derived — it is the `Chrome` on the
 // `Scope` handed in, and carrying it here as well would be two ways of moving a
@@ -76,10 +62,6 @@ pub(crate) const NOT_CLEANED: &str = "entries under an ignored directory are sti
 // `git pull` or a `warlock scope add` in another terminal is lost to: the rows
 // show the new entries while every key judges and saves the old ones.
 pub(crate) fn reload(app: &mut App, scope: &Scope, manifest: &mut Manifest) -> Option<Tree> {
-    if let Some(line) = clean_ignored(&scope.repo_root, &scope.root) {
-        note(app, line);
-    }
-
     match load_tree(&scope.root) {
         Ok(Loaded {
             tree,
@@ -90,9 +72,7 @@ pub(crate) fn reload(app: &mut App, scope: &Scope, manifest: &mut Manifest) -> O
             *manifest = loaded;
             // The same count, in the same words, as the startup load that
             // refuses to draw a tree with problems in it: one problem quoted
-            // and the rest counted. A node the engine could not hash is
-            // already stale on screen, so this line is the only place the
-            // number of them appears.
+            // and the rest counted.
             if let Some(counted) = Error::from_problems(&problems) {
                 note(app, counted.to_string());
             }
@@ -108,47 +88,9 @@ pub(crate) fn reload(app: &mut App, scope: &Scope, manifest: &mut Manifest) -> O
     }
 }
 
-// Before the load rather than after it, so the walk that produces the rows on
-// screen and the manifest that colours them are read in that order and a row
-// cannot be drawn from an entry this call was about to drop.
-//
-// Nothing is kept between calls and nothing is returned upwards: a cleanup that
-// could not be finished leaves the manifest as it was, which is the state the
-// next reload starts from and tries again over. The line is the whole of what
-// happens about a failure, and it must not stop the tree being read — warlock is
-// a way of reading a tree, and an entry that outlived its directory is no reason
-// to stop drawing one.
-//
-// The two roots are taken apart rather than as a `Scope` because the startup
-// load has neither a `Scope` nor an `App` yet — it has a working directory and
-// the repository root above it, and its line has to be carried as a value until
-// there is a footer to put it on.
-fn clean_ignored(repo_root: &Path, root: &Path) -> Option<String> {
-    dropped_ignored(repo_root, root)
-        .err()
-        .map(|error| format!("{NOT_CLEANED}: {}", one_line(error)))
-}
-
-// Saved only when something went, because `Manifest::save` rewrites the file:
-// an unconditional save would touch `pacts.toml` on every reload, and the
-// watcher compares for that path by name, so every load would ask for the next
-// one.
-fn dropped_ignored(repo_root: &Path, root: &Path) -> Result<(), Error> {
-    let manifest = load_manifest(repo_root)?;
-    let left =
-        unpact_ignored(&manifest, repo_root, root).map_err(|source| Error::Pact { source })?;
-    if left.entries().len() < manifest.entries().len() {
-        left.save(repo_root)
-            .map_err(|source| Error::Manifest { source })?;
-    }
-
-    Ok(())
-}
-
 // The footer's precedence in one place, because two lines have it: how the
 // redraw went and whether the disk is being watched at all. Both give way to
-// whatever else is on the line, which in practice is a pact's own message —
-// what a run made of the subtree the reader asked for is the news, and how
+// whatever else is on the line — what the reader just did is the news, and how
 // warlock keeps itself up to date is housekeeping. Precedence, not merging: two
 // sentences joined by a semicolon would be a line nobody reads to the end of.
 pub(crate) fn note(app: &mut App, line: impl Into<String>) {
@@ -159,8 +101,7 @@ pub(crate) fn note(app: &mut App, line: impl Into<String>) {
 
 // The root is where a re-read starts and the repository root is what the
 // manifest is written under, which is why they travel together rather than being
-// guessed at again from a working directory that has since had a pact run over
-// it.
+// guessed at again from a working directory.
 pub(crate) struct Scope {
     // As the load came back rooted, not the working directory as typed.
     pub(crate) root: PathBuf,
@@ -177,10 +118,9 @@ pub(crate) struct Scope {
 pub(crate) struct Watched {
     pub(crate) watching: Watching,
     pub(crate) policy: WatchPolicy,
-    // `.warlock/pacts.toml` is hidden, so no walk produces it and the policy's
-    // filter rejects it — and yet a pact granted or dropped in another window
-    // changes the colour of every row on screen while nothing inside the tree has
-    // moved. So it is compared for by name, which is the one rule of this file's
+    // `.warlock/scopes.toml` is hidden, so no walk produces it and the policy's
+    // filter rejects it — and yet a scope written in another window changes the
+    // colour of every row below it while nothing inside the tree has moved. So it is compared for by name, which is the one rule of this file's
     // own about a path.
     pub(crate) manifest: PathBuf,
 }
@@ -211,17 +151,11 @@ impl Watched {
         }
     }
 
-    // `in_flight` is a pact running somewhere else, and it stops the reloading
-    // and not the draining: the events a run's own documents set off are
-    // remembered by the policy and answered by the reload at the end of the run,
-    // so a run whose documents moved the disk reads the tree once rather than
-    // twice — and never while the run is still writing to it.
     pub(crate) fn round(
         &mut self,
         app: &mut App,
         scope: &Scope,
         manifest: &mut Manifest,
-        in_flight: bool,
         now: Instant,
     ) -> bool {
         if let Watching::Live(watch) = &mut self.watching {
@@ -232,13 +166,13 @@ impl Watched {
             }
         }
 
-        if in_flight || !self.policy.due(now) {
+        if !self.policy.due(now) {
             return false;
         }
         let tree = reload(app, scope, manifest);
         // The clock is read again, and this is the one place in the loop that
         // does: everything else in a round is over in microseconds, while the
-        // load between these two lines is a walk and a hash per pacted subtree.
+        // load between these two lines is a walk of the tree.
         // What the policy measures from here is the quiet period owed to
         // anything that moved *during* that load, and measuring it from before
         // the load would be starting the wait before the events it is waiting
@@ -280,12 +214,11 @@ pub(crate) fn start_watching(app: &mut App, scope: &Scope, tree: &Tree) -> Watch
 // half of what to do about it.
 //
 // A file row passes through as open even though coverage would happily answer for
-// one: `p`, `r` and `s` all refuse a file on better grounds, and those refusals
-// name the row for what it is. So does a path the manifest cannot spell — a
+// one: `s` refuses a file on better grounds, and that refusal names the row for
+// what it is. So does a path the manifest cannot spell — a
 // boundary nobody could have drawn is not a boundary somebody is crossing.
 pub(crate) fn closed_scope(
     app: &mut App,
-    operation: Operation,
     manifest: &Manifest,
     repo_root: &Path,
     sigils: &Sigils,
@@ -298,7 +231,7 @@ pub(crate) fn closed_scope(
     }
 
     let path = row.path.clone();
-    let verdict = permits(operation, &path, repo_root, manifest, sigils.as_slice());
+    let verdict = permits(&path, repo_root, manifest, sigils.as_slice());
     let label = app.label_for(&path);
     let Some(line) = verdict.message(&label) else {
         return false;
@@ -307,8 +240,7 @@ pub(crate) fn closed_scope(
     true
 }
 
-// The loop holds two paths rather than a `Standing`, so this is the one line
-// that stands the front end where the subcommands already stand.
+#[cfg(test)]
 pub(crate) fn load_manifest(repo_root: &Path) -> Result<Manifest, Error> {
     Standing::at(repo_root.to_path_buf(), repo_root.to_path_buf()).manifest()
 }
@@ -322,12 +254,11 @@ pub(crate) fn load_manifest(repo_root: &Path) -> Result<Manifest, Error> {
 // should happen once, and the tree's root is the path the engine came back rooted
 // at, which a later load must be given rather than guess.
 //
-// A load that reported problems is refused rather than drawn: the problems are
-// files warlock could not read, so the nodes above them are coloured stale on no
-// evidence, and drawing that would put a colour on screen nothing on disk backs
-// up. That is a startup rule and stays one — mid-session, with a tree already
-// showing and a run's documents already written, `reload` takes the same
-// problems.
+// A load that reported problems is refused rather than drawn: a scope the
+// manifest spells wrongly reads as no scope, and drawing that would put a grey
+// row on screen over a boundary somebody meant to draw. That is a startup rule
+// and stays one — mid-session, with a tree already showing, `reload` takes the
+// same problems.
 pub(crate) fn load_app() -> Result<(App, Scope, Tree, Manifest), Error> {
     let working_dir = env::current_dir().map_err(|source| Error::WorkingDirectory { source })?;
     load_app_in(&working_dir, Standing::home().ok().as_deref())
@@ -342,14 +273,10 @@ fn load_app_in(
     working_dir: &Path,
     home: Option<&Path>,
 ) -> Result<(App, Scope, Tree, Manifest), Error> {
-    // Asked before the load rather than after it, because the cleanup has to
-    // run first and it is written under this root. A working directory with no
-    // repository above it is not refused here — `load_tree` is the one place
-    // that says so, in its own words, and it is about to.
+    // A working directory with no repository above it is not refused here —
+    // `load_tree` is the one place that says so, in its own words, and it is
+    // about to.
     let found = repository_root(working_dir);
-    let uncleaned = found
-        .as_deref()
-        .and_then(|repo_root| clean_ignored(repo_root, working_dir));
 
     let Loaded {
         tree,
@@ -365,12 +292,7 @@ fn load_app_in(
     // true if it ever is reached.
     let repo_root = found.unwrap_or_else(|| working_dir.to_path_buf());
 
-    let mut app = App::from_tree(&tree);
-    // A cleanup that could not be finished is a line and nothing more, said
-    // here because this is the first moment there is a footer to say it on.
-    if let Some(line) = uncleaned {
-        note(&mut app, line);
-    }
+    let app = App::from_tree(&tree);
     // Kept beside the roots it was built from and handed to the renderer every
     // frame. A reload does not touch it, which is why `reseat_on` does not carry
     // it: what moves it is the settings file, which the loop watches.

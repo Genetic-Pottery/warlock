@@ -7,19 +7,19 @@ use std::time::{Duration, Instant};
 use super::stream;
 use super::{
     Activities, Activity, BRIEF_EFFORT, BRIEF_MODEL, Bounded, CHAT_INSTRUCTION, CHAT_SYSTEM_PROMPT,
-    Cancel, ChatAgent, ClaudeAgent, Conversation, Converses, DRAFT_NOW_INSTRUCTION,
-    DRAFTING_CONTRACT, DRAFTING_ONE_SHOT_CONTRACT, DRAFTING_ROUNDS, Drafted, Drafting, EFFORT,
-    EFFORT_VAR, INVOCATION_TIMEOUT, MODEL, MODEL_VAR, NOTHING_SETTLES_IT, OsString,
-    PROPOSING_SYSTEM_PROMPT, Replied, SYSTEM_PROMPT, Split, Splitting, Stopped, UNTIMED, Unsplit,
-    WORKING_ATTEMPTS, WORKING_TURNS, WRITE_INSTRUCTION, Wired, Worked, Working, brief_instruction,
-    drafting_opening, or_default, overridden, propose_answer, proposing_instruction, render,
-    session_id, working_opening, working_retry, working_system_prompt,
+    Cancel, ChatAgent, Conversation, Converses, DRAFT_NOW_INSTRUCTION, DRAFTING_CONTRACT,
+    DRAFTING_ONE_SHOT_CONTRACT, DRAFTING_ROUNDS, Drafted, Drafting, EFFORT, EFFORT_VAR,
+    INVOCATION_TIMEOUT, MODEL, MODEL_VAR, NOTHING_SETTLES_IT, OsString, PROPOSING_SYSTEM_PROMPT,
+    Replied, Split, Splitting, Stopped, UNTIMED, Unsplit, WORKING_ATTEMPTS, WORKING_TURNS,
+    WRITE_INSTRUCTION, Wired, Worked, Working, brief_instruction, drafting_opening, or_default,
+    overridden, propose_answer, proposing_instruction, session_id, working_opening, working_retry,
+    working_system_prompt,
 };
 use crate::brief::scope_block_in;
 use crate::panel::Mode;
 use crate::stubs::{Answering, Scripted};
 use crate::template::DEFAULT_TEMPLATE;
-use warlock_engine::{Agent, agent, drafting, splitting, working};
+use warlock_engine::{agent, drafting, splitting, working};
 
 // A name no directory on `PATH` can hold, so the lookup fails the way it does on
 // a machine with no `claude` installed.
@@ -32,10 +32,6 @@ fn words(vector: &[OsString]) -> Vec<String> {
         .collect()
 }
 
-fn args(agent: &ClaudeAgent) -> Vec<String> {
-    words(agent.args())
-}
-
 fn turn_args(agent: &ChatAgent) -> Vec<String> {
     words(&agent.args())
 }
@@ -46,161 +42,6 @@ fn turn_args(agent: &ChatAgent) -> Vec<String> {
 fn value_of<'a>(vector: &'a [String], flag: &str) -> Option<&'a str> {
     let named = vector.iter().position(|word| word == flag)?;
     vector.get(named + 1).map(String::as_str)
-}
-
-#[test]
-fn the_defaults_are_the_real_thing() {
-    let agent = ClaudeAgent::new();
-
-    assert_eq!(agent.program(), "claude");
-    assert_eq!(agent.timeout(), INVOCATION_TIMEOUT);
-    assert_eq!(
-        INVOCATION_TIMEOUT.as_secs(),
-        300,
-        "five minutes, per invocation"
-    );
-    // Exactly this, in this order: print mode, the streaming output format,
-    // the `--verbose` the CLI insists on before it will stream at all, no MCP
-    // server, and then the three answers a pact refuses to inherit — which
-    // model, how hard it thinks, and what it may reach for.
-    assert_eq!(
-        args(&agent),
-        [
-            "--print",
-            "--output-format",
-            "stream-json",
-            "--verbose",
-            "--include-partial-messages",
-            "--strict-mcp-config",
-            "--model",
-            "claude-sonnet-5",
-            "--effort",
-            "low",
-            "--tools",
-            "",
-            "--system-prompt",
-            SYSTEM_PROMPT,
-            "--setting-sources",
-            "",
-        ],
-        "a pass names its own terms rather than taking the reader's",
-    );
-    assert_eq!(args(&ClaudeAgent::default()), args(&agent));
-    assert_eq!(ClaudeAgent::default().timeout(), agent.timeout());
-}
-
-#[test]
-fn a_rendered_request_carries_the_files_it_was_given() {
-    // The regression this file exists to never repeat. A request holds its
-    // prompt, its files and its children's documents as three separate
-    // things; stdin is one stream; and for a long time only the first of
-    // the three reached it. The pass then read a prompt telling it that it
-    // had been given this directory's files, found none, and wrote a
-    // .warlock.md saying so — which passed the length floor and was granted.
-    let request =
-        agent::Request::new("describe this directory", "/repo/crates/engine").with_files(vec![
-            agent::File::present("src/lib.rs", &b"//! Core engine.\n"[..]),
-            agent::File::present("Cargo.toml", &b"[package]\n"[..]),
-        ]);
-
-    let rendered = render(&request);
-
-    assert!(
-        rendered.starts_with("describe this directory"),
-        "{rendered}"
-    );
-    for said in ["src/lib.rs", "//! Core engine.", "Cargo.toml", "[package]"] {
-        assert!(rendered.contains(said), "{said:?} is missing:\n{rendered}");
-    }
-    // And the guard between the instructions and the repository's own text
-    // is in front of all of it.
-    let guard = rendered.find("---").expect("a guard line");
-    assert!(guard < rendered.find("//! Core engine.").expect("the file"));
-}
-
-#[test]
-fn each_of_a_files_states_renders_as_the_prompt_says_it_will() {
-    let request = agent::Request::new("describe this directory", "/repo").with_files(vec![
-        agent::File::present("small.rs", &b"fn small() {}\n"[..]),
-        agent::File::omitted("huge.bin", 4_200_000),
-    ]);
-
-    let rendered = render(&request);
-
-    // Sent whole: its text is there.
-    assert!(rendered.contains("fn small() {}"), "{rendered}");
-    // Left out: its name and its size, and nothing pretending to be its
-    // contents.
-    assert!(
-        rendered.contains("huge.bin (4200000 bytes, contents not sent)"),
-        "{rendered}"
-    );
-}
-
-#[test]
-fn bytes_that_are_not_text_are_named_rather_than_mangled_onto_stdin() {
-    // A directory holds whatever is in it, and `agent::File` carries bytes on
-    // purpose. There is no way to put a PNG on stdin as text, and a lossy
-    // conversion would send a screenful of replacement characters that a
-    // pass could only describe as the file's contents — so a file that is
-    // not text renders as one that was not sent.
-    let request = agent::Request::new("describe this directory", "/repo").with_files(vec![
-        agent::File::present("logo.png", &[0x89, b'P', b'N', b'G', 0xFF, 0xFE][..]),
-    ]);
-
-    let rendered = render(&request);
-
-    assert!(
-        rendered.contains("logo.png (6 bytes, not text)"),
-        "{rendered}"
-    );
-    assert!(
-        !rendered.contains('\u{FFFD}'),
-        "no replacement characters reached the prompt:\n{rendered}"
-    );
-}
-
-#[test]
-fn a_childs_document_is_carried_under_the_directory_it_belongs_to() {
-    let request = agent::Request::new("describe this directory", "/repo/crates/engine")
-        .with_child_documents(vec![agent::ChildDocument::new(
-            "src",
-            "# src\n\nThe engine's modules.\n",
-        )]);
-
-    let rendered = render(&request);
-
-    assert!(rendered.contains("the .warlock.md of src"), "{rendered}");
-    assert!(rendered.contains("The engine's modules."), "{rendered}");
-}
-
-#[test]
-fn a_rendered_request_names_the_directory_it_is_about() {
-    // The pass cannot see its own working directory — asked outright, it
-    // answers with the repository root — and the prompt tells it to head
-    // the document with the directory's name. So the request says it.
-    let request = agent::Request::new("describe this directory", "/repo/crates/engine/src")
-        .with_files(vec![agent::File::present("lib.rs", &b"//! Engine.\n"[..])]);
-
-    let rendered = render(&request);
-
-    assert!(rendered.contains("named `src`"), "{rendered}");
-    // The name, not the path: an absolute path is the reader's home
-    // directory, and it would be committed inside the document.
-    assert!(!rendered.contains("/repo/crates"), "{rendered}");
-}
-
-#[test]
-fn a_request_with_nothing_attached_is_its_prompt_and_no_more() {
-    // What every map and reduce pass is: the engine has already written the
-    // chunk into the prompt, so there is nothing here to lay out and
-    // nothing to say about laying it out.
-    let request = agent::Request::new("summarise this part of a file: fn main() {}", "/repo");
-
-    assert_eq!(
-        render(&request),
-        "summarise this part of a file: fn main() {}"
-    );
 }
 
 #[test]
@@ -278,40 +119,6 @@ fn no_two_session_ids_are_the_same() {
 }
 
 #[test]
-fn a_pass_is_given_no_tools_to_reach_for() {
-    // The empty string is the argument, not a missing one: `--tools ""` is
-    // how the CLI is told none, and dropping the pair would hand a pass
-    // the whole default set instead.
-    let args = args(&ClaudeAgent::new());
-    let tools = args
-        .iter()
-        .position(|arg| arg == "--tools")
-        .expect("a pass says what it may reach for");
-
-    assert_eq!(args.get(tools + 1).map(String::as_str), Some(""));
-}
-
-#[test]
-fn a_pass_reads_nobodys_standing_instructions_and_a_turn_reads_the_projects() {
-    // A pass runs inside the repository being pacted, and `claude --print`
-    // would otherwise load that repository's `CLAUDE.md` into it: a pass
-    // given warlock's own block wrote a stamp and a scope section of its
-    // own invention. A turn keeps them, because a turn answers questions
-    // about that repository and its standing instructions are context.
-    let pass = args(&ClaudeAgent::new());
-    assert_eq!(
-        value_of(&pass, "--setting-sources"),
-        Some(""),
-        "no setting source at all: {pass:?}"
-    );
-    let turn = turn_args(&ChatAgent::new());
-    assert!(
-        !turn.iter().any(|arg| arg == "--setting-sources"),
-        "a turn is not cut off from the project: {turn:?}"
-    );
-}
-
-#[test]
 fn a_turns_defaults_are_the_real_thing_too() {
     let agent = ChatAgent::new();
     let vector = turn_args(&agent);
@@ -320,10 +127,10 @@ fn a_turns_defaults_are_the_real_thing_too() {
     assert_eq!(agent.program(), "claude");
     assert_eq!(agent.timeout(), INVOCATION_TIMEOUT);
     assert!(is_uuid_shaped(session), "not UUID-shaped: {session}");
-    // The same six leading arguments a pass has, because the transport
-    // reads the same stream and no session reaches an MCP server; then the
-    // three answers a turn refuses to inherit, warlock's own system prompt,
-    // and the conversation this agent's turns all belong to.
+    // Six leading arguments because the transport reads a stream and no
+    // session reaches an MCP server; then the three answers a turn refuses to
+    // inherit, warlock's own system prompt, and the conversation this agent's
+    // turns all belong to.
     assert_eq!(
         vector,
         [
@@ -533,27 +340,22 @@ fn a_proposal_is_made_in_a_conversation_of_its_own() {
 }
 
 #[test]
-fn a_turn_runs_under_warlocks_own_prompt_rather_than_a_passs() {
+fn a_turn_runs_under_a_prompt_that_says_what_the_tree_on_screen_means() {
     let vector = turn_args(&ChatAgent::new());
     let prompt = value_of(&vector, "--system-prompt").expect("a turn brings its own");
 
-    assert!(!prompt.trim().is_empty());
-    // Not the pass's. A pass is told the least that will stop the CLI
-    // supplying a persona, because its request carries everything else; a
-    // message arrives with none of that, so this one says what a message
-    // cannot.
-    assert_ne!(prompt, SYSTEM_PROMPT, "a turn is not a documentation pass");
-    for said in ["warlock", "tree", ".warlock.md", "green", "yellow"] {
+    for said in ["warlock", "tree", "scoped", "green", "grey"] {
         assert!(
             prompt.contains(said),
             "{said:?} is missing from the prompt a turn runs under: {prompt}",
         );
     }
-    // And the pass's prompt is exactly where it was.
-    assert_eq!(
-        value_of(&args(&ClaudeAgent::new()), "--system-prompt"),
-        Some(SYSTEM_PROMPT),
-    );
+    for gone in [".warlock.md", "yellow", "pacted"] {
+        assert!(
+            !prompt.contains(gone),
+            "{gone:?} is still in the prompt a turn runs under: {prompt}",
+        );
+    }
 }
 
 #[test]
@@ -580,8 +382,8 @@ fn the_one_prompt_is_true_in_both_registers() {
             "{said:?} is missing from the prompt both registers run under: {CHAT_SYSTEM_PROMPT}",
         );
     }
-    // Still one prompt, and still not a pass's: the mode is a message and a
-    // level, not a second configuration of the agent.
+    // Still one prompt: the mode is a message and a level, not a second
+    // configuration of the agent.
     let agent = ChatAgent::new();
     for vector in [
         turn_args(&agent),
@@ -932,16 +734,15 @@ fn a_drafting_session_is_its_own_conversation_at_the_brief_register() {
     assert_ne!(BRIEF_MODEL, MODEL);
     assert_ne!(BRIEF_EFFORT, EFFORT);
 
-    // Not the chat session under another name: its own id, and a prompt
-    // that is neither the panel's nor a pass's.
+    // Not the chat session under another name: its own id and its own
+    // prompt.
     let session = value_of(&vector, "--session-id").expect("a drafting turn opens a conversation");
     assert!(is_uuid_shaped(session), "not UUID-shaped: {session}");
     let chat = turn_args(&ChatAgent::new());
     assert_ne!(value_of(&chat, "--session-id"), Some(session));
     let prompt = value_of(&vector, "--system-prompt").expect("a drafting turn brings its own");
     assert_ne!(prompt, CHAT_SYSTEM_PROMPT);
-    assert_ne!(prompt, SYSTEM_PROMPT);
-    assert!(prompt.contains("tickets") && prompt.contains(".warlock.md"));
+    assert!(prompt.contains("tickets"));
 
     // And the panel's own session is exactly where it was.
     assert_eq!(value_of(&chat, "--system-prompt"), Some(CHAT_SYSTEM_PROMPT));
@@ -1065,7 +866,7 @@ fn a_splitting_session_may_read_the_repository_and_do_nothing_whatever_else() {
         value_of(&turn_args(&ChatAgent::drafting()), "--system-prompt"),
         Some(prompt),
     );
-    assert!(prompt.contains("sub-tasks") && prompt.contains(".warlock.md"));
+    assert!(prompt.contains("sub-tasks"));
     assert_eq!(ChatAgent::splitting().timeout(), UNTIMED);
 }
 
@@ -1244,7 +1045,6 @@ fn the_sub_task_session_is_the_only_one_given_a_writing_tool() {
     // reason — writing is what it is for, and its fence is the hook and the
     // six-tool grant asserted above, not the absence of a tool name from its
     // vector.
-    names_no_writing_tool(&args(&ClaudeAgent::new()), "a pass");
     names_no_writing_tool(&turn_args(&ChatAgent::new()), "a panel turn");
     names_no_writing_tool(
         &turn_args(
@@ -1566,12 +1366,10 @@ fn proposing_opens_a_conversation_of_its_own_at_the_briefs_register() {
     let prompt = value_of(&vector, "--system-prompt").expect("a proposing turn brings its own");
     assert_eq!(prompt, PROPOSING_SYSTEM_PROMPT);
     assert_ne!(prompt, CHAT_SYSTEM_PROMPT);
-    assert_ne!(prompt, SYSTEM_PROMPT);
     assert_ne!(
         Some(prompt),
         value_of(&turn_args(&ChatAgent::drafting()), "--system-prompt"),
     );
-    assert!(prompt.contains(".warlock.md"));
     for said in ["one question", "plain prose"] {
         assert!(
             prompt.contains(said),
@@ -2322,8 +2120,8 @@ fn the_write_instruction_names_every_section_the_shape_is_checked_for() {
 
 #[test]
 fn a_chat_agents_program_arguments_and_clock_are_a_callers_to_replace() {
-    // The same three fields a pass has, for the same reason: every failure
-    // path is exercised with a stand-in on a machine with no `claude`.
+    // Fields rather than constants so every failure path is exercised with a
+    // stand-in on a machine with no `claude`.
     let agent = ChatAgent::new()
         .with_program("/bin/sh")
         .with_args(["-c", "echo hello"])
@@ -2365,36 +2163,9 @@ fn a_chat_agent_answers_to_the_handles_a_caller_attaches() {
 }
 
 #[test]
-fn the_arguments_are_a_field_a_caller_can_replace_outright() {
-    // Not appended to and not merged with: what a caller asks for is what
-    // is run, which is how every stand-in below works and how a later
-    // slice changes the invocation without touching this file.
-    let agent = ClaudeAgent::new().with_args(["-c", "echo hello"]);
-
-    assert_eq!(args(&agent), ["-c", "echo hello"]);
-    assert!(args(&ClaudeAgent::new().with_args(Vec::<&str>::new())).is_empty());
-}
-
-#[test]
-fn a_missing_binary_is_reported_by_name_not_as_an_errno() {
-    // No `claude` needed to test the no-`claude` case, which is the point:
-    // this is the state of every machine that has never installed it.
-    let agent = ClaudeAgent::new().with_program(NOT_A_PROGRAM);
-
-    let error = agent
-        .run(&agent::Request::new("anything", "."))
-        .expect_err("nothing by that name can be on PATH");
-
-    match error {
-        agent::Error::NotFound { program } => assert_eq!(program, NOT_A_PROGRAM),
-        other => panic!("expected a missing binary, got {other:?}"),
-    }
-}
-
-#[test]
 fn a_cancel_handle_is_one_flag_shared_by_every_clone() {
     // The property the whole mechanism rests on: the thread that cancels
-    // is never the thread that is running the pass.
+    // is never the thread that is running the session.
     fn held_across_threads<T: Send + Sync + 'static>(_: &T) {}
 
     let cancel = Cancel::new();
@@ -2429,13 +2200,13 @@ fn a_port_nobody_listens_to_swallows_everything_reported_to_it() {
     }
 
     // And that is what an agent nobody wired up has.
-    ClaudeAgent::new().activities().report(Activity::Thinking);
+    ChatAgent::new().activities().report(Activity::Thinking);
 }
 
 #[test]
 fn every_clone_of_a_port_reports_to_the_same_place() {
     // The property the whole port rests on, and [`Cancel`]'s in reverse:
-    // the thread running the pass is never the thread listening to it.
+    // the thread running the session is never the thread listening to it.
     fn held_across_threads<T: Send + Sync + 'static>(_: &T) {}
 
     let (sender, received) = mpsc::channel();
@@ -2470,21 +2241,6 @@ fn every_clone_of_a_port_reports_to_the_same_place() {
     // The original still reports to the same place after the clone is gone.
     activities.report(Activity::Thinking);
     assert_eq!(received.recv(), Ok(Activity::Thinking));
-}
-
-#[test]
-fn an_attached_port_is_the_one_the_agent_reports_to() {
-    let (sender, received) = mpsc::channel();
-    let agent = ClaudeAgent::new().with_activities(Activities::new(move |activity| {
-        let _ = sender.send(activity);
-    }));
-
-    agent.activities().report(Activity::Thinking);
-
-    assert_eq!(received.recv(), Ok(Activity::Thinking));
-    // Attaching one changes nothing else about the agent.
-    assert_eq!(agent.program(), "claude");
-    assert_eq!(agent.timeout(), INVOCATION_TIMEOUT);
 }
 
 // One assistant line carrying `blocks` as its content, the shape a real stream
@@ -2792,8 +2548,8 @@ fn the_rest_of_a_partial_message_stream_is_read_as_nothing() {
 #[test]
 fn every_other_system_line_is_still_somebody_elses_business() {
     // `init` names a working directory, `rate_limit_event` an allowance —
-    // neither is a thing the pass is doing, and the panel says only what a
-    // pass does.
+    // neither is a thing the session is doing, and the panel says only what
+    // a session does.
     for line in [
         r#"{"type":"system","subtype":"init","cwd":"/repo/crates/engine"}"#,
         r#"{"type":"system","subtype":"something_added_later"}"#,
@@ -3757,39 +3513,49 @@ mod unix {
     use std::time::{Duration, Instant};
     use std::{env, fs, process, thread};
 
-    use warlock_engine::{Agent, agent};
+    use warlock_engine::agent;
 
-    use super::super::{Activities, Activity, Cancel, ClaudeAgent};
+    use super::NOT_A_PROGRAM;
+    use crate::{Activities, Activity, Cancel, ChatAgent};
 
     // Only reached when something is already wrong; the waits themselves end as soon
     // as the pid file appears.
     const AT_MOST: Duration = Duration::from_secs(5);
 
-    // A plausible pass in miniature, so that what a real stream looks like is written
-    // down once: the opening line, a tool call, a thought beside the model's prose,
-    // and the result line carrying the document and the cost.
-    const PASS: [&str; 4] = [
-        r#"{"type":"system","subtype":"init","tools":["Read","Bash"]}"#,
-        r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"Read","input":{"file_path":"src/lib.rs"}}]}}"#,
-        r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"thinking","thinking":"a thought nobody is entitled to"},{"type":"text","text":"Here is the summary you asked for."}]}}"#,
-        r##"{"type":"result","subtype":"success","result":"# module\n\nWhat it does.\n","total_cost_usd":0.0342}"##,
+    // A plausible turn in miniature, so that what a real stream looks like is written
+    // down once: the opening line, a tool call, a sign of thinking, the moment it
+    // starts writing, the model's prose, and the result line carrying the answer and
+    // the cost.
+    const TURN: [&str; 6] = [
+        r#"{"type":"system","subtype":"init","tools":["Read","Grep","Glob"]}"#,
+        r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"Grep","input":{"pattern":"fn load"}}]}}"#,
+        r#"{"type":"system","subtype":"thinking_tokens","estimated_tokens":113,"estimated_tokens_delta":63}"#,
+        r#"{"type":"stream_event","event":{"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}}"#,
+        r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"The loader is in src/load.rs."}]}}"#,
+        r#"{"type":"result","subtype":"success","result":"The loader is in src/load.rs.","total_cost_usd":0.0042}"#,
     ];
 
-    const DOCUMENT: &str = "# module\n\nWhat it does.\n";
+    const ANSWER: &str = "The loader is in src/load.rs.";
 
     fn reported() -> Vec<Activity> {
         vec![
             Activity::Tool {
-                name: "Read".to_owned(),
-                detail: Some("src/lib.rs".to_owned()),
+                name: "Grep".to_owned(),
+                detail: Some("fn load".to_owned()),
             },
             Activity::Thinking,
-            Activity::Cost { usd: 0.0342 },
+            // Zero, and only zero: [`TURN`] opens a text block and never sends a
+            // delta, so the count begins and the answer arrives whole on the
+            // result line.
+            Activity::Writing { bytes: 0 },
+            Activity::Cost { usd: 0.0042 },
         ]
     }
 
-    fn stand_in(script: &str) -> ClaudeAgent {
-        ClaudeAgent::new()
+    // A turn runs wherever warlock does, which here is this source tree, so every
+    // script below names its files absolutely.
+    fn stand_in(script: &str) -> ChatAgent {
+        ChatAgent::new()
             .with_program("/bin/sh")
             .with_args(["-c", script])
     }
@@ -3802,7 +3568,7 @@ mod unix {
         format!("printf '%s\\n' {}", arguments.join(" "))
     }
 
-    fn listening(agent: ClaudeAgent) -> (ClaudeAgent, mpsc::Receiver<Activity>) {
+    fn listening(agent: ChatAgent) -> (ChatAgent, mpsc::Receiver<Activity>) {
         let (sender, received) = mpsc::channel();
         let agent = agent.with_activities(Activities::new(move |activity| {
             let _ = sender.send(activity);
@@ -3854,61 +3620,304 @@ mod unix {
     }
 
     #[test]
-    fn a_clean_run_comes_back_as_the_document_the_stream_carried() {
-        // `cat` is still the smallest possible model: it answers with the
-        // prompt it was given, which proves the prompt reached stdin *and*
-        // that stdin was closed — without EOF, `cat` would never return.
-        // What it is given is now the result line of a stream, so the same
-        // test also shows the parse working on bytes out of a real pipe
-        // rather than on a string literal.
-        let (agent, received) = listening(
-            ClaudeAgent::new()
-                .with_program("cat")
-                .with_args(Vec::<&str>::new()),
+    fn a_turns_stdin_is_the_message_and_not_one_byte_more() {
+        // The promise the whole thread card rests on: what reaches the
+        // model is the sentence somebody typed, with no tree dump, no
+        // repository contents and no transcript warlock appended. So
+        // the stand-in keeps its stdin instead of describing it, and
+        // the bytes are compared with the message as written —
+        // including the absence of a trailing newline, which is the
+        // easiest thing for a transport to add without meaning to.
+        let directory = scratch("turn-stdin");
+        let captured = directory.join("stdin");
+        let message = "where is the loader?\n\nand a second paragraph, with a 'quote' in it";
+        let script = format!("cat > '{}'; {}", captured.display(), printing(&TURN[5..]));
+
+        let answer = stand_in(&script)
+            .turn(message)
+            .expect("the stand-in exits cleanly and prints a result line");
+
+        assert_eq!(answer, ANSWER);
+        assert_eq!(
+            fs::read(&captured).expect("the stand-in kept its stdin"),
+            message.as_bytes(),
+            "something other than the message reached the child",
         );
 
-        let response = agent
-            .run(&agent::Request::new(format!("{}\n", PASS[3]), "."))
-            .expect("cat exits cleanly and prints what it was given");
+        // And `cat` says the other half of it. It answers with what it
+        // was given and returns only at EOF, so a turn that comes back
+        // at all is a turn whose stdin was written *and closed* —
+        // without the close, this call would hang until the timeout.
+        let echoed = ChatAgent::new()
+            .with_program("cat")
+            .with_args(Vec::<&str>::new())
+            .turn(&format!("{}\n", TURN[5]))
+            .expect("cat exits cleanly once its stdin is closed");
 
-        assert_eq!(response.text(), DOCUMENT);
-        assert_eq!(drained(&received), vec![Activity::Cost { usd: 0.0342 }]);
+        assert_eq!(echoed, ANSWER);
+        clean_up(&directory);
     }
 
     #[test]
-    fn a_whole_pass_reports_what_it_did_and_returns_its_document() {
-        let (agent, received) = listening(stand_in(&printing(&PASS)));
+    fn a_whole_turn_reports_what_it_did_and_returns_the_answer() {
+        // The four kinds of sign of life a turn gives, out of one
+        // canned stream and through a real pipe: the tool it reached
+        // for, that it thought, that it began writing, and what it
+        // cost.
+        let (agent, received) = listening(stand_in(&printing(&TURN)));
 
-        let response = agent
-            .run(&agent::Request::new("anything", "."))
-            .expect("the canned pass exits cleanly and prints a document");
+        let answer = agent
+            .turn("where is the loader?")
+            .expect("the canned turn exits cleanly and prints an answer");
 
-        // Byte for byte the result line's own field, newlines and all.
-        assert_eq!(response.text(), DOCUMENT);
+        assert_eq!(answer, ANSWER);
         let activities = drained(&received);
         assert_eq!(activities, reported());
-        // Said once more, because it is the promise the port is for: none
-        // of the thought and none of the prose came with it.
+        // The other half of the promise, and the one worth saying
+        // twice: the answer is the turn's return value, and no part of
+        // it went out over the port. A panel that showed the prose
+        // would be a viewer rather than a ledger.
         let seen = format!("{activities:?}");
-        assert!(!seen.contains("entitled"), "{seen}");
-        assert!(!seen.contains("summary"), "{seen}");
+        assert!(!seen.contains("The loader"), "{seen}");
+        assert!(!seen.contains("src/load.rs"), "{seen}");
     }
 
     #[test]
-    fn an_activity_reaches_the_port_while_the_pass_is_still_running() {
+    fn a_missing_binary_is_reported_by_name_not_as_an_errno() {
+        // No `claude` needed to test the no-`claude` case, which is the
+        // point: this is the state of every machine that has never
+        // installed it. And a turn names no directory of its own, so
+        // there is no second thing a `NotFound` could have been.
+        let error = ChatAgent::new()
+            .with_program(NOT_A_PROGRAM)
+            .turn("anything")
+            .expect_err("nothing by that name can be on PATH");
+
+        match error {
+            agent::Error::NotFound { program } => assert_eq!(program, NOT_A_PROGRAM),
+            other => panic!("expected a missing binary, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_turn_that_refuses_carries_its_status_and_its_stderr() {
+        let error = stand_in("echo boom >&2; exit 3")
+            .turn("anything")
+            .expect_err("this stand-in refuses");
+
+        match error {
+            agent::Error::Failed { code, stderr } => {
+                assert_eq!(code, Some(3));
+                assert_eq!(stderr.trim(), "boom", "stderr is captured, not dropped");
+            }
+            other => panic!("expected a non-zero exit, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_turn_that_says_nothing_is_empty_output() {
+        // Four silences: nothing at all, blank lines, a stream that never
+        // reached a result line, and a result line whose answer is
+        // whitespace.
+        let scripts = [
+            "exit 0".to_owned(),
+            "printf '\\n  \\n'".to_owned(),
+            printing(&TURN[..5]),
+            printing(&[r#"{"type":"result","result":"  \n\t"}"#]),
+        ];
+
+        for script in scripts {
+            let error = stand_in(&script)
+                .turn("anything")
+                .expect_err("there is no answer in silence");
+
+            assert!(
+                matches!(error, agent::Error::EmptyOutput),
+                "`{script}` gave {error:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_hanging_turn_times_out_and_its_child_stops() {
+        let directory = scratch("turn-hang");
+        let ticks = directory.join("ticks");
+        // Never exits on its own, and says so in a file: whether it is
+        // still running after the call is a question the test can ask.
+        let agent = stand_in(&format!(
+            "while :; do echo tick >> '{}'; sleep 0.05; done",
+            ticks.display()
+        ))
+        .with_timeout(Duration::from_millis(250));
+
+        let started = Instant::now();
+        let error = agent
+            .turn("anything")
+            .expect_err("this stand-in never finishes");
+        let elapsed = started.elapsed();
+
+        match error {
+            agent::Error::TimedOut { after } => {
+                assert_eq!(after, Duration::from_millis(250));
+            }
+            other => panic!("expected a timeout, got {other:?}"),
+        }
+        assert!(
+            elapsed < Duration::from_secs(10),
+            "the call waited {elapsed:?}, far past its timeout"
+        );
+
+        let before = fs::metadata(&ticks).map_or(0, |file| file.len());
+        thread::sleep(Duration::from_millis(300));
+        let after = fs::metadata(&ticks).map_or(0, |file| file.len());
+        assert_eq!(
+            before, after,
+            "the child outlived the turn that gave up on it"
+        );
+        clean_up(&directory);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_timed_out_turns_child_is_reaped_not_left_a_zombie() {
+        let directory = scratch("turn-reap");
+        let pid_file = directory.join("pid");
+        let agent = stand_in(&format!("echo $$ > '{}'; sleep 30", pid_file.display()))
+            .with_timeout(Duration::from_millis(250));
+
+        let error = agent
+            .turn("anything")
+            .expect_err("this stand-in sleeps far past its timeout");
+
+        assert!(matches!(error, agent::Error::TimedOut { .. }), "{error:?}");
+        let pid = pid(&pid_file).expect("the child wrote its pid");
+        assert!(
+            !Path::new(&format!("/proc/{pid}")).exists(),
+            "process {pid} is still in the table: killed but never reaped"
+        );
+        clean_up(&directory);
+    }
+
+    #[test]
+    fn a_cancel_from_another_thread_ends_a_turn_promptly() {
+        let directory = scratch("turn-cancel");
+        let pid_file = directory.join("pid");
+        let cancel = Cancel::new();
+        // The real five-minute timeout: the only thing that can end
+        // this call in time is the cancel.
+        let agent = stand_in(&format!("echo $$ > '{}'; sleep 30", pid_file.display()))
+            .with_cancel(cancel.clone());
+
+        let stopper = cancel_once_running(cancel, &pid_file);
+
+        let started = Instant::now();
+        let error = agent
+            .turn("anything")
+            .expect_err("a cancelled turn has no answer");
+        let elapsed = started.elapsed();
+        stopper.join().expect("the cancelling thread ran");
+
+        assert!(is_cancelled(&error), "{error:?}");
+        assert!(
+            elapsed < Duration::from_secs(20),
+            "the call sat out the sleep it was told to cut short: {elapsed:?}"
+        );
+        clean_up(&directory);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_cancelled_turns_process_is_gone_afterwards() {
+        let directory = scratch("turn-cancel-reap");
+        let pid_file = directory.join("pid");
+        let cancel = Cancel::new();
+        let agent = stand_in(&format!("echo $$ > '{}'; sleep 30", pid_file.display()))
+            .with_cancel(cancel.clone());
+
+        let stopper = cancel_once_running(cancel, &pid_file);
+
+        let error = agent
+            .turn("anything")
+            .expect_err("a cancelled turn has no answer");
+        stopper.join().expect("the cancelling thread ran");
+
+        assert!(is_cancelled(&error), "{error:?}");
+        let pid = pid(&pid_file).expect("the child wrote its pid before it was stopped");
+        assert!(
+            !Path::new(&format!("/proc/{pid}")).exists(),
+            "process {pid} survived the cancel, or was killed and never reaped"
+        );
+        clean_up(&directory);
+    }
+
+    #[test]
+    fn a_turn_started_after_a_cancel_spawns_nothing_at_all() {
+        let directory = scratch("turn-never-started");
+        let marker = directory.join("marker");
+        let cancel = Cancel::new();
+        cancel.cancel();
+        // Anything that ran would leave a file behind, and a turn only
+        // returns once its child has exited — so a missing marker is a
+        // child that never existed, not one that has not got there yet.
+        let agent = stand_in(&format!("touch '{}'", marker.display())).with_cancel(cancel);
+
+        let error = agent
+            .turn("anything")
+            .expect_err("a cancelled agent takes no turns");
+
+        assert!(is_cancelled(&error), "{error:?}");
+        assert!(!marker.exists(), "a cancelled agent spawned a child anyway");
+        clean_up(&directory);
+    }
+
+    #[test]
+    fn a_turn_nobody_listens_to_runs_exactly_as_it_did_before() {
+        // The port is a side channel here too. Every kind of ending a
+        // turn has — an answer, a refusal, a silence, a stream that
+        // never reached its result line — run twice, once with a
+        // listener and once without, and compared as a caller would
+        // see them.
+        let endings = [
+            printing(&TURN),
+            "echo boom >&2; exit 3".to_owned(),
+            "exit 0".to_owned(),
+            printing(&TURN[..5]),
+        ];
+
+        for script in endings {
+            let deaf = stand_in(&script).turn("anything");
+            let (agent, received) = listening(stand_in(&script));
+            let heard = agent.turn("anything");
+
+            // `agent::Error` is not comparable — it carries an
+            // `io::Error` — so the two endings are compared as they are
+            // written down.
+            assert_eq!(
+                format!("{deaf:?}"),
+                format!("{heard:?}"),
+                "`{script}` ended differently with somebody listening"
+            );
+            if script == printing(&TURN) {
+                assert_eq!(drained(&received), reported());
+            }
+        }
+    }
+
+    #[test]
+    fn an_activity_reaches_the_port_while_the_turn_is_still_running() {
         // The whole reason for reading a line at a time: the tool call is
         // reported, and only then does the child get around to finishing.
         // A drain-to-EOF reader passes every other test in this module and
         // fails this one.
         let script = format!(
             "{}; sleep 1; {}",
-            printing(&PASS[..2]),
-            printing(&PASS[3..])
+            printing(&TURN[..2]),
+            printing(&TURN[5..])
         );
         let (agent, received) = listening(stand_in(&script));
 
         let started = Instant::now();
-        let pass = thread::spawn(move || agent.run(&agent::Request::new("anything", ".")));
+        let turn = thread::spawn(move || agent.turn("anything"));
         let first = received
             .recv_timeout(AT_MOST)
             .expect("the tool call is reported as it happens");
@@ -3916,49 +3925,51 @@ mod unix {
         // Asked of the run itself rather than of the clock: the child is
         // a second into its sleep at this point, so a thread that has
         // already returned would mean the activity only turned up once
-        // the pass was over.
-        let still_running = !pass.is_finished();
-        let response = pass
+        // the turn was over.
+        let still_running = !turn.is_finished();
+        let answer = turn
             .join()
-            .expect("the pass ran")
-            .expect("the canned pass exits cleanly");
+            .expect("the turn ran")
+            .expect("the canned turn exits cleanly");
         let finished_after = started.elapsed();
 
         assert_eq!(first, reported()[0]);
         assert!(
             still_running,
-            "the pass had already returned by the time its first activity \
-                 arrived: that is a drain, not a stream"
+            "the turn had already returned by the time its first activity \
+             arrived: that is a drain, not a stream"
         );
         assert!(
             reported_after + Duration::from_millis(300) < finished_after,
-            "the activity arrived at {reported_after:?} and the pass ended at \
-                 {finished_after:?}: that is not streaming"
+            "the activity arrived at {reported_after:?} and the turn ended at \
+             {finished_after:?}: that is not streaming"
         );
-        assert_eq!(response.text(), DOCUMENT);
+        assert_eq!(answer, ANSWER);
     }
 
     #[test]
-    fn garbage_in_the_stream_costs_neither_the_document_nor_an_activity() {
+    fn garbage_in_the_stream_costs_neither_the_answer_nor_an_activity() {
         // A warning on stdout, a half-written line, and an event from a
         // future version of the CLI. None of it is a reason to throw away
-        // minutes of work and a written document.
+        // an answer.
         let lines = [
             "Warning: something the CLI felt like mentioning",
-            PASS[1],
+            TURN[1],
             "{not json",
             r#"{"type":"kraken","message":{"content":[{"type":"tool_use","name":"Read"}]}}"#,
-            PASS[2],
+            TURN[2],
+            TURN[3],
             "",
-            PASS[3],
+            TURN[4],
+            TURN[5],
         ];
         let (agent, received) = listening(stand_in(&printing(&lines)));
 
-        let response = agent
-            .run(&agent::Request::new("anything", "."))
-            .expect("a stream with junk in it still produced a document");
+        let answer = agent
+            .turn("anything")
+            .expect("a stream with junk in it still produced an answer");
 
-        assert_eq!(response.text(), DOCUMENT);
+        assert_eq!(answer, ANSWER);
         assert_eq!(drained(&received), reported());
     }
 
@@ -3980,19 +3991,19 @@ mod unix {
         let misfiled = r#"printf '{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"%s"}]}}\n' "$payload""#;
         let script = [
             payload,
-            &printing(&PASS[..2]),
+            &printing(&TURN[..2]),
             returned,
             misfiled,
-            &printing(&PASS[3..]),
+            &printing(&TURN[5..]),
         ]
         .join("; ");
         let (agent, received) = listening(stand_in(&script));
 
-        let response = agent
-            .run(&agent::Request::new("anything", "."))
-            .expect("a pass that read something still writes its document");
+        let answer = agent
+            .turn("anything")
+            .expect("a turn that read something still answers");
 
-        assert_eq!(response.text(), DOCUMENT);
+        assert_eq!(answer, ANSWER);
         let activities = drained(&received);
         // Asked first, and asked by length rather than by printing what
         // leaked: a failure here is half a megabyte wide, and a test that
@@ -4003,35 +4014,32 @@ mod unix {
             "a tool's output reached the port: {} bytes of activity",
             seen.len()
         );
-        // The call and the cost, and nothing in between: the result is
-        // not an activity, so it is not a line of a panel either.
         assert_eq!(
             activities,
-            vec![reported()[0].clone(), Activity::Cost { usd: 0.0342 }]
+            vec![reported()[0].clone(), Activity::Cost { usd: 0.0042 }]
         );
     }
 
     #[test]
     fn a_thought_reaches_the_port_as_the_bare_fact_that_there_was_one() {
-        // Thinking is shown as *that it happened*, never as what it said.
-        // The text is the model reasoning with itself, and this front end
-        // does not put prose on the screen; the promise is only worth
-        // anything if the words never leave the transport at all.
+        // Thinking is shown as *that it happened*, never as what it said:
+        // the promise is only worth anything if the words never leave the
+        // transport at all.
         let secret = "the person asking has misunderstood their own schema";
         let thought = format!(
             r#"{{"type":"assistant","message":{{"role":"assistant","content":[{{"type":"thinking","thinking":"{secret}","signature":"abc123"}}]}}}}"#
         );
-        let (agent, received) = listening(stand_in(&printing(&[thought.as_str(), PASS[3]])));
+        let (agent, received) = listening(stand_in(&printing(&[thought.as_str(), TURN[5]])));
 
-        let response = agent
-            .run(&agent::Request::new("anything", "."))
-            .expect("a pass that thought about it still writes its document");
+        let answer = agent
+            .turn("anything")
+            .expect("a turn that thought about it still answers");
 
-        assert_eq!(response.text(), DOCUMENT);
+        assert_eq!(answer, ANSWER);
         let activities = drained(&received);
         assert_eq!(
             activities,
-            vec![Activity::Thinking, Activity::Cost { usd: 0.0342 }]
+            vec![Activity::Thinking, Activity::Cost { usd: 0.0042 }]
         );
         let seen = format!("{activities:?}");
         assert!(!seen.contains("misunderstood"), "{seen}");
@@ -4039,158 +4047,25 @@ mod unix {
     }
 
     #[test]
-    fn what_the_pass_cost_comes_back_from_its_result_line() {
-        // The number the CLI totalled up, not one this crate works out:
-        // reported as it stands, after everything the pass did, because
-        // the result line is the last line there is.
-        let expensive = r##"{"type":"result","subtype":"success","result":"# module\n\nWhat it does.\n","total_cost_usd":1.25}"##;
-        let (agent, received) = listening(stand_in(&printing(&[PASS[1], expensive])));
-
-        let response = agent
-            .run(&agent::Request::new("anything", "."))
-            .expect("the canned pass exits cleanly");
-
-        assert_eq!(response.text(), DOCUMENT);
-        assert_eq!(
-            drained(&received),
-            vec![reported()[0].clone(), Activity::Cost { usd: 1.25 }]
-        );
-    }
-
-    #[test]
-    fn a_pass_nobody_listens_to_runs_exactly_as_it_did_before() {
-        // The port is a side channel and must stay one. Every kind of
-        // ending this transport has — a document, a refusal, a silence,
-        // a stream that never got to a result, a directory that is not
-        // there — run twice, once through an agent with a port attached
-        // and once through one without, and the two are compared. A
-        // difference either way would mean listening had changed the run.
-        let elsewhere = "/warlock/no/such/directory";
-        let passes = [
-            (printing(&PASS), "."),
-            ("echo boom >&2; exit 3".to_owned(), "."),
-            ("exit 0".to_owned(), "."),
-            (printing(&PASS[..3]), "."),
-            ("true".to_owned(), elsewhere),
-        ];
-
-        for (script, directory) in passes {
-            let deaf = stand_in(&script).run(&agent::Request::new("anything", directory));
-            let (agent, received) = listening(stand_in(&script));
-            let heard = agent.run(&agent::Request::new("anything", directory));
-
-            // `agent::Error` is not comparable — it carries an
-            // `io::Error` — so the two endings are compared as they are
-            // written down, which is what a caller would see of them.
-            assert_eq!(
-                format!("{deaf:?}"),
-                format!("{heard:?}"),
-                "`{script}` in {directory} ended differently with somebody listening"
-            );
-            // And the reporting itself still happened, so this is not
-            // passing because the port was quietly disconnected.
-            if script == printing(&PASS) {
-                assert_eq!(drained(&received), reported());
-            }
-        }
-    }
-
-    #[test]
-    fn the_pass_runs_in_the_directory_the_request_names() {
-        let directory = scratch("cwd");
-        fs::write(directory.join("marker.txt"), "here").expect("a file to look for");
-
-        // `ls`, wrapped in the result line a pass would have wrapped it in.
-        let response =
-            stand_in(r#"printf '{"type":"result","result":"%s"}\n' "$(ls | tr '\n' ' ')""#)
-                .run(&agent::Request::new("ignored", &directory))
-                .expect("ls exits cleanly and prints a name");
-
-        assert!(
-            response.text().contains("marker.txt"),
-            "the child ran somewhere else: {}",
-            response.text()
-        );
-        clean_up(&directory);
-    }
-
-    #[test]
-    fn a_non_zero_exit_carries_its_status_and_its_stderr() {
-        let error = stand_in("echo boom >&2; exit 3")
-            .run(&agent::Request::new("anything", "."))
-            .expect_err("this stand-in refuses");
-
-        match error {
-            agent::Error::Failed { code, stderr } => {
-                assert_eq!(code, Some(3));
-                assert_eq!(stderr.trim(), "boom", "stderr is captured, not dropped");
-            }
-            other => panic!("expected a non-zero exit, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn a_clean_run_that_says_nothing_is_empty_output() {
-        // Four ways to say nothing: no output at all, blank lines, a whole
-        // stream that never carried a result line, and a result line whose
-        // document is whitespace. The last two are new shapes of the same
-        // old answer — a document of blank lines is no document, and so is
-        // a pass that produced none.
-        let scripts = [
-            "exit 0".to_owned(),
-            "printf '\\n  \\n'".to_owned(),
-            printing(&PASS[..3]),
-            printing(&[r#"{"type":"result","result":"  \n\t"}"#]),
-        ];
-
-        for script in scripts {
-            let error = stand_in(&script)
-                .run(&agent::Request::new("anything", "."))
-                .expect_err("there is no document in silence");
-
-            assert!(
-                matches!(error, agent::Error::EmptyOutput),
-                "`{script}` gave {error:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn a_missing_directory_is_io_rather_than_a_missing_binary() {
-        // The syscall says `NotFound` for both; only one of them deserves
-        // the message telling the user to install `claude`.
-        let error = stand_in("true")
-            .run(&agent::Request::new(
-                "anything",
-                "/warlock/no/such/directory",
-            ))
-            .expect_err("nothing can run in a directory that is not there");
-
-        assert!(matches!(error, agent::Error::Io { .. }), "{error:?}");
-    }
-
-    #[test]
-    fn a_big_prompt_and_a_chatty_child_do_not_deadlock() {
-        // Both directions past a pipe buffer at once: the prompt is bigger
+    fn a_big_message_and_a_chatty_child_do_not_deadlock() {
+        // Both directions past a pipe buffer at once: the message is bigger
         // than one, and so is the stream. Reading on a thread is what makes
         // this return at all, and reading by line rather than to EOF must
         // not have quietly reintroduced the block — a reader that stopped
         // consuming would leave this child wedged on a full pipe forever.
-        let prompt = "x".repeat(200_000);
-        let chatter = PASS[2];
+        let message = "x".repeat(200_000);
+        let chatter = TURN[2];
         let script = format!(
             "cat > /dev/null; yes '{chatter}' | head -n 20000; {}",
-            printing(&PASS[3..])
+            printing(&TURN[5..])
         );
 
         let (agent, received) = listening(stand_in(&script));
-        let response = agent
-            .run(&agent::Request::new(prompt, "."))
+        let answer = agent
+            .turn(&message)
             .expect("a chatty stand-in still exits cleanly");
 
-        // Roughly two megabytes of stream, every line of it read and every
-        // thought in it reported, then the document at the end.
-        assert_eq!(response.text(), DOCUMENT);
+        assert_eq!(answer, ANSWER);
         let activities = drained(&received);
         assert_eq!(activities.len(), 20_001);
         assert!(
@@ -4198,97 +4073,7 @@ mod unix {
                 .iter()
                 .all(|activity| *activity == Activity::Thinking)
         );
-        assert_eq!(activities[20_000], Activity::Cost { usd: 0.0342 });
-    }
-
-    #[test]
-    fn a_hanging_pass_times_out_and_its_child_stops() {
-        let directory = scratch("hang");
-        let ticks = directory.join("ticks");
-        // Never exits on its own, and says so in a file: whether it is
-        // still running after the call is a question the test can ask.
-        let agent = stand_in("while :; do echo tick >> ticks; sleep 0.05; done")
-            .with_timeout(Duration::from_millis(250));
-
-        let started = Instant::now();
-        let error = agent
-            .run(&agent::Request::new("anything", &directory))
-            .expect_err("this stand-in never finishes");
-        let elapsed = started.elapsed();
-
-        match error {
-            agent::Error::TimedOut { after } => assert_eq!(after, Duration::from_millis(250)),
-            other => panic!("expected a timeout, got {other:?}"),
-        }
-        assert!(
-            elapsed < Duration::from_secs(10),
-            "the call waited {elapsed:?}, far past its timeout"
-        );
-
-        let before = fs::metadata(&ticks).map_or(0, |file| file.len());
-        thread::sleep(Duration::from_millis(300));
-        let after = fs::metadata(&ticks).map_or(0, |file| file.len());
-        assert_eq!(
-            before, after,
-            "the child outlived the call that gave up on it"
-        );
-        clean_up(&directory);
-    }
-
-    // The kill is only half of it — a child nobody waits on stays in the process
-    // table. `/proc` is where that is visible, so this test alone is Linux-only; the
-    // kill itself is covered on every Unix above.
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn a_timed_out_child_is_reaped_not_left_a_zombie() {
-        let directory = scratch("reap");
-        let agent = stand_in("echo $$ > pid; sleep 30").with_timeout(Duration::from_millis(250));
-
-        let started = Instant::now();
-        let error = agent
-            .run(&agent::Request::new("anything", &directory))
-            .expect_err("this stand-in sleeps far past its timeout");
-        let elapsed = started.elapsed();
-
-        assert!(matches!(error, agent::Error::TimedOut { .. }), "{error:?}");
-        assert!(
-            elapsed < Duration::from_secs(20),
-            "the call outlasted the sleep it was supposed to cut short: {elapsed:?}"
-        );
-
-        let pid = fs::read_to_string(directory.join("pid")).expect("the child wrote its pid");
-        let pid = pid.trim();
-        assert!(
-            !Path::new(&format!("/proc/{pid}")).exists(),
-            "process {pid} is still in the table: killed but never reaped"
-        );
-        clean_up(&directory);
-    }
-
-    #[test]
-    fn a_cancel_from_another_thread_ends_the_pass_promptly() {
-        let directory = scratch("cancel");
-        let pid_file = directory.join("pid");
-        let cancel = Cancel::new();
-        // The real five-minute timeout: the only thing that can end this
-        // call in time is the cancel.
-        let agent = stand_in("echo $$ > pid; sleep 30").with_cancel(cancel.clone());
-
-        let stopper = cancel_once_running(cancel, &pid_file);
-
-        let started = Instant::now();
-        let error = agent
-            .run(&agent::Request::new("anything", &directory))
-            .expect_err("a cancelled pass has no document");
-        let elapsed = started.elapsed();
-        stopper.join().expect("the cancelling thread ran");
-
-        assert!(is_cancelled(&error), "{error:?}");
-        assert!(
-            elapsed < Duration::from_secs(20),
-            "the call sat out the sleep it was told to cut short: {elapsed:?}"
-        );
-        clean_up(&directory);
+        assert_eq!(activities[20_000], Activity::Cost { usd: 0.0042 });
     }
 
     // `sh -c "echo $$ > pid; sleep 30"` is one process under a shell that execs its
@@ -4302,15 +4087,19 @@ mod unix {
         let pid_file = directory.join("pid");
         let survivor_file = directory.join("survivor");
         let cancel = Cancel::new();
-        let agent = stand_in("sleep 30 & echo $! > survivor; echo $$ > pid; wait")
-            .with_cancel(cancel.clone());
+        let agent = stand_in(&format!(
+            "sleep 30 & echo $! > '{}'; echo $$ > '{}'; wait",
+            survivor_file.display(),
+            pid_file.display()
+        ))
+        .with_cancel(cancel.clone());
 
         let stopper = cancel_once_running(cancel, &pid_file);
 
         let started = Instant::now();
         let error = agent
-            .run(&agent::Request::new("anything", &directory))
-            .expect_err("a cancelled pass has no document");
+            .turn("anything")
+            .expect_err("a cancelled turn has no answer");
         let elapsed = started.elapsed();
         stopper.join().expect("the cancelling thread ran");
 
@@ -4328,409 +4117,21 @@ mod unix {
         clean_up(&directory);
     }
 
-    #[cfg(target_os = "linux")]
     #[test]
-    fn a_cancelled_childs_process_is_gone_afterwards() {
-        let directory = scratch("cancel-reap");
-        let pid_file = directory.join("pid");
+    fn a_handle_nobody_cancels_leaves_the_turn_exactly_as_it_was() {
         let cancel = Cancel::new();
-        let agent = stand_in("echo $$ > pid; sleep 30").with_cancel(cancel.clone());
+        let agent = stand_in(&printing(&TURN)).with_cancel(cancel.clone());
 
-        let stopper = cancel_once_running(cancel, &pid_file);
+        let answer = agent
+            .turn("anything")
+            .expect("attaching a handle does not change a clean turn");
 
-        let error = agent
-            .run(&agent::Request::new("anything", &directory))
-            .expect_err("a cancelled pass has no document");
-        stopper.join().expect("the cancelling thread ran");
-
-        assert!(is_cancelled(&error), "{error:?}");
-        let pid = pid(&pid_file).expect("the child wrote its pid before it was stopped");
-        assert!(
-            !Path::new(&format!("/proc/{pid}")).exists(),
-            "process {pid} survived the cancel, or was killed and never reaped"
-        );
-        clean_up(&directory);
-    }
-
-    #[test]
-    fn a_pass_started_after_a_cancel_spawns_nothing_at_all() {
-        let directory = scratch("never-started");
-        let marker = directory.join("marker");
-        let cancel = Cancel::new();
-        cancel.cancel();
-        // Anything that ran would leave a file behind, and the call only
-        // returns once its child has exited — so a missing marker is a
-        // child that never existed, not one that has not got there yet.
-        let agent = stand_in("touch marker").with_cancel(cancel);
-
-        let error = agent
-            .run(&agent::Request::new("anything", &directory))
-            .expect_err("a cancelled agent runs nothing");
-
-        assert!(is_cancelled(&error), "{error:?}");
-        assert!(!marker.exists(), "a cancelled agent spawned a child anyway");
-        clean_up(&directory);
-    }
-
-    #[test]
-    fn a_handle_nobody_cancels_leaves_the_run_exactly_as_it_was() {
-        let cancel = Cancel::new();
-        let agent = stand_in(&printing(&PASS)).with_cancel(cancel.clone());
-
-        let response = agent
-            .run(&agent::Request::new("anything", "."))
-            .expect("attaching a handle does not change a clean run");
-
-        assert_eq!(response.text(), DOCUMENT);
-        // The pass is over and the handle knows it: this reaches for a
+        assert_eq!(answer, ANSWER);
+        // The turn is over and the handle knows it: this reaches for a
         // child that is no longer registered, and returns rather than
         // killing whatever came next.
         cancel.cancel();
         assert!(cancel.is_cancelled());
-    }
-
-    // A child module rather than a sibling so every stand-in above is reusable: the
-    // same machinery reached through a different door, and a second set of helpers
-    // would let the two drift. What differs is where a stand-in is pointed — a pass
-    // runs in the directory its request names, a turn wherever warlock does, which
-    // here is this source tree, so every script below names its files absolutely.
-    mod turns {
-        use std::sync::mpsc;
-        use std::time::{Duration, Instant};
-        use std::{fs, thread};
-
-        use warlock_engine::agent;
-
-        use super::super::NOT_A_PROGRAM;
-        use super::{cancel_once_running, clean_up, drained, is_cancelled, printing, scratch};
-        use crate::{Activities, Activity, Cancel, ChatAgent};
-
-        // [`PASS`](super::PASS)'s counterpart, deliberately not the same canned stream: a
-        // turn can call a tool, and it says one thing a toolless pass never does — the
-        // moment it stops thinking and starts writing.
-        const TURN: [&str; 6] = [
-            r#"{"type":"system","subtype":"init","tools":["Read","Grep","Glob"]}"#,
-            r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"Grep","input":{"pattern":"fn load"}}]}}"#,
-            r#"{"type":"system","subtype":"thinking_tokens","estimated_tokens":113,"estimated_tokens_delta":63}"#,
-            r#"{"type":"stream_event","event":{"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}}"#,
-            r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"The loader is in src/load.rs."}]}}"#,
-            r#"{"type":"result","subtype":"success","result":"The loader is in src/load.rs.","total_cost_usd":0.0042}"#,
-        ];
-
-        const ANSWER: &str = "The loader is in src/load.rs.";
-
-        fn reported() -> Vec<Activity> {
-            vec![
-                Activity::Tool {
-                    name: "Grep".to_owned(),
-                    detail: Some("fn load".to_owned()),
-                },
-                Activity::Thinking,
-                // Zero, and only zero: [`TURN`] opens a text block and
-                // never sends a delta, so the count begins and the answer
-                // arrives whole on the result line.
-                Activity::Writing { bytes: 0 },
-                Activity::Cost { usd: 0.0042 },
-            ]
-        }
-
-        fn stand_in(script: &str) -> ChatAgent {
-            ChatAgent::new()
-                .with_program("/bin/sh")
-                .with_args(["-c", script])
-        }
-
-        fn listening(agent: ChatAgent) -> (ChatAgent, mpsc::Receiver<Activity>) {
-            let (sender, received) = mpsc::channel();
-            let agent = agent.with_activities(Activities::new(move |activity| {
-                let _ = sender.send(activity);
-            }));
-            (agent, received)
-        }
-
-        #[test]
-        fn a_turns_stdin_is_the_message_and_not_one_byte_more() {
-            // The promise the whole thread card rests on: what reaches the
-            // model is the sentence somebody typed, with no tree dump, no
-            // repository contents and no transcript warlock appended. So
-            // the stand-in keeps its stdin instead of describing it, and
-            // the bytes are compared with the message as written —
-            // including the absence of a trailing newline, which is the
-            // easiest thing for a transport to add without meaning to.
-            let directory = scratch("turn-stdin");
-            let captured = directory.join("stdin");
-            let message = "where is the loader?\n\nand a second paragraph, with a 'quote' in it";
-            let script = format!("cat > '{}'; {}", captured.display(), printing(&TURN[5..]));
-
-            let answer = stand_in(&script)
-                .turn(message)
-                .expect("the stand-in exits cleanly and prints a result line");
-
-            assert_eq!(answer, ANSWER);
-            assert_eq!(
-                fs::read(&captured).expect("the stand-in kept its stdin"),
-                message.as_bytes(),
-                "something other than the message reached the child",
-            );
-
-            // And `cat` says the other half of it. It answers with what it
-            // was given and returns only at EOF, so a turn that comes back
-            // at all is a turn whose stdin was written *and closed* —
-            // without the close, this call would hang until the timeout.
-            let echoed = ChatAgent::new()
-                .with_program("cat")
-                .with_args(Vec::<&str>::new())
-                .turn(&format!("{}\n", TURN[5]))
-                .expect("cat exits cleanly once its stdin is closed");
-
-            assert_eq!(echoed, ANSWER);
-            clean_up(&directory);
-        }
-
-        #[test]
-        fn a_whole_turn_reports_what_it_did_and_returns_the_answer() {
-            // The four kinds of sign of life a turn gives, out of one
-            // canned stream and through a real pipe: the tool it reached
-            // for, that it thought, that it began writing, and what it
-            // cost.
-            let (agent, received) = listening(stand_in(&printing(&TURN)));
-
-            let answer = agent
-                .turn("where is the loader?")
-                .expect("the canned turn exits cleanly and prints an answer");
-
-            assert_eq!(answer, ANSWER);
-            let activities = drained(&received);
-            assert_eq!(activities, reported());
-            // The other half of the promise, and the one worth saying
-            // twice: the answer is the turn's return value, and no part of
-            // it went out over the port. A panel that showed the prose
-            // would be a viewer rather than a ledger.
-            let seen = format!("{activities:?}");
-            assert!(!seen.contains("The loader"), "{seen}");
-            assert!(!seen.contains("src/load.rs"), "{seen}");
-        }
-
-        #[test]
-        fn a_missing_binary_is_reported_by_name_not_as_an_errno() {
-            // No `claude` needed to test the no-`claude` case, which is the
-            // point: this is the state of every machine that has never
-            // installed it. And a turn names no directory of its own, so
-            // there is no second thing a `NotFound` could have been.
-            let error = ChatAgent::new()
-                .with_program(NOT_A_PROGRAM)
-                .turn("anything")
-                .expect_err("nothing by that name can be on PATH");
-
-            match error {
-                agent::Error::NotFound { program } => assert_eq!(program, NOT_A_PROGRAM),
-                other => panic!("expected a missing binary, got {other:?}"),
-            }
-        }
-
-        #[test]
-        fn a_turn_that_refuses_carries_its_status_and_its_stderr() {
-            let error = stand_in("echo boom >&2; exit 3")
-                .turn("anything")
-                .expect_err("this stand-in refuses");
-
-            match error {
-                agent::Error::Failed { code, stderr } => {
-                    assert_eq!(code, Some(3));
-                    assert_eq!(stderr.trim(), "boom", "stderr is captured, not dropped");
-                }
-                other => panic!("expected a non-zero exit, got {other:?}"),
-            }
-        }
-
-        #[test]
-        fn a_turn_that_says_nothing_is_empty_output() {
-            // The same four silences a pass has: nothing at all, blank
-            // lines, a stream that never reached a result line, and a
-            // result line whose answer is whitespace.
-            let scripts = [
-                "exit 0".to_owned(),
-                "printf '\\n  \\n'".to_owned(),
-                printing(&TURN[..5]),
-                printing(&[r#"{"type":"result","result":"  \n\t"}"#]),
-            ];
-
-            for script in scripts {
-                let error = stand_in(&script)
-                    .turn("anything")
-                    .expect_err("there is no answer in silence");
-
-                assert!(
-                    matches!(error, agent::Error::EmptyOutput),
-                    "`{script}` gave {error:?}"
-                );
-            }
-        }
-
-        #[test]
-        fn a_hanging_turn_times_out_and_its_child_stops() {
-            let directory = scratch("turn-hang");
-            let ticks = directory.join("ticks");
-            // Never exits on its own, and says so in a file: whether it is
-            // still running after the call is a question the test can ask.
-            let agent = stand_in(&format!(
-                "while :; do echo tick >> '{}'; sleep 0.05; done",
-                ticks.display()
-            ))
-            .with_timeout(Duration::from_millis(250));
-
-            let started = Instant::now();
-            let error = agent
-                .turn("anything")
-                .expect_err("this stand-in never finishes");
-            let elapsed = started.elapsed();
-
-            match error {
-                agent::Error::TimedOut { after } => {
-                    assert_eq!(after, Duration::from_millis(250));
-                }
-                other => panic!("expected a timeout, got {other:?}"),
-            }
-            assert!(
-                elapsed < Duration::from_secs(10),
-                "the call waited {elapsed:?}, far past its timeout"
-            );
-
-            let before = fs::metadata(&ticks).map_or(0, |file| file.len());
-            thread::sleep(Duration::from_millis(300));
-            let after = fs::metadata(&ticks).map_or(0, |file| file.len());
-            assert_eq!(
-                before, after,
-                "the child outlived the turn that gave up on it"
-            );
-            clean_up(&directory);
-        }
-
-        #[cfg(target_os = "linux")]
-        #[test]
-        fn a_timed_out_turns_child_is_reaped_not_left_a_zombie() {
-            let directory = scratch("turn-reap");
-            let pid_file = directory.join("pid");
-            let agent = stand_in(&format!("echo $$ > '{}'; sleep 30", pid_file.display()))
-                .with_timeout(Duration::from_millis(250));
-
-            let error = agent
-                .turn("anything")
-                .expect_err("this stand-in sleeps far past its timeout");
-
-            assert!(matches!(error, agent::Error::TimedOut { .. }), "{error:?}");
-            let pid = super::pid(&pid_file).expect("the child wrote its pid");
-            assert!(
-                !std::path::Path::new(&format!("/proc/{pid}")).exists(),
-                "process {pid} is still in the table: killed but never reaped"
-            );
-            clean_up(&directory);
-        }
-
-        #[test]
-        fn a_cancel_from_another_thread_ends_a_turn_promptly() {
-            let directory = scratch("turn-cancel");
-            let pid_file = directory.join("pid");
-            let cancel = Cancel::new();
-            // The real five-minute timeout: the only thing that can end
-            // this call in time is the cancel.
-            let agent = stand_in(&format!("echo $$ > '{}'; sleep 30", pid_file.display()))
-                .with_cancel(cancel.clone());
-
-            let stopper = cancel_once_running(cancel, &pid_file);
-
-            let started = Instant::now();
-            let error = agent
-                .turn("anything")
-                .expect_err("a cancelled turn has no answer");
-            let elapsed = started.elapsed();
-            stopper.join().expect("the cancelling thread ran");
-
-            assert!(is_cancelled(&error), "{error:?}");
-            assert!(
-                elapsed < Duration::from_secs(20),
-                "the call sat out the sleep it was told to cut short: {elapsed:?}"
-            );
-            clean_up(&directory);
-        }
-
-        #[cfg(target_os = "linux")]
-        #[test]
-        fn a_cancelled_turns_process_is_gone_afterwards() {
-            let directory = scratch("turn-cancel-reap");
-            let pid_file = directory.join("pid");
-            let cancel = Cancel::new();
-            let agent = stand_in(&format!("echo $$ > '{}'; sleep 30", pid_file.display()))
-                .with_cancel(cancel.clone());
-
-            let stopper = cancel_once_running(cancel, &pid_file);
-
-            let error = agent
-                .turn("anything")
-                .expect_err("a cancelled turn has no answer");
-            stopper.join().expect("the cancelling thread ran");
-
-            assert!(is_cancelled(&error), "{error:?}");
-            let pid = super::pid(&pid_file).expect("the child wrote its pid before it was stopped");
-            assert!(
-                !std::path::Path::new(&format!("/proc/{pid}")).exists(),
-                "process {pid} survived the cancel, or was killed and never reaped"
-            );
-            clean_up(&directory);
-        }
-
-        #[test]
-        fn a_turn_started_after_a_cancel_spawns_nothing_at_all() {
-            let directory = scratch("turn-never-started");
-            let marker = directory.join("marker");
-            let cancel = Cancel::new();
-            cancel.cancel();
-            // Anything that ran would leave a file behind, and a turn only
-            // returns once its child has exited — so a missing marker is a
-            // child that never existed, not one that has not got there yet.
-            let agent = stand_in(&format!("touch '{}'", marker.display())).with_cancel(cancel);
-
-            let error = agent
-                .turn("anything")
-                .expect_err("a cancelled agent takes no turns");
-
-            assert!(is_cancelled(&error), "{error:?}");
-            assert!(!marker.exists(), "a cancelled agent spawned a child anyway");
-            clean_up(&directory);
-        }
-
-        #[test]
-        fn a_turn_nobody_listens_to_runs_exactly_as_it_did_before() {
-            // The port is a side channel here too. Every kind of ending a
-            // turn has — an answer, a refusal, a silence, a stream that
-            // never reached its result line — run twice, once with a
-            // listener and once without, and compared as a caller would
-            // see them.
-            let endings = [
-                printing(&TURN),
-                "echo boom >&2; exit 3".to_owned(),
-                "exit 0".to_owned(),
-                printing(&TURN[..5]),
-            ];
-
-            for script in endings {
-                let deaf = stand_in(&script).turn("anything");
-                let (agent, received) = listening(stand_in(&script));
-                let heard = agent.turn("anything");
-
-                // `agent::Error` is not comparable — it carries an
-                // `io::Error` — so the two endings are compared as they are
-                // written down.
-                assert_eq!(
-                    format!("{deaf:?}"),
-                    format!("{heard:?}"),
-                    "`{script}` ended differently with somebody listening"
-                );
-                if script == printing(&TURN) {
-                    assert_eq!(drained(&received), reported());
-                }
-            }
-        }
     }
 
     // The one session that may change the tree, run through the plumbing at the
@@ -4738,8 +4139,8 @@ mod unix {
     // program in `claude`'s place that keeps its argv, its environment and its
     // stdin, and answers with a result line the way the real one does.
     //
-    // A child module for `turns`'s reason — the helpers above are reusable and
-    // a second copy of them would drift.
+    // A child module so the stand-in helpers above are shared rather than
+    // copied, where a second copy would drift.
     mod sub_task {
         use std::collections::HashMap;
         use std::io::Write as _;
@@ -4974,12 +4375,12 @@ mod unix {
 #[test]
 fn a_failure_arrives_quickly_rather_than_after_the_timeout() {
     // The timeout is a backstop, not a delay every failure pays.
-    let agent = ClaudeAgent::new()
+    let agent = ChatAgent::new()
         .with_program(NOT_A_PROGRAM)
         .with_timeout(INVOCATION_TIMEOUT);
 
     let started = Instant::now();
-    let _ = agent.run(&agent::Request::new("anything", "."));
+    let _ = agent.turn("anything");
 
     assert!(started.elapsed() < Duration::from_secs(5));
 }
@@ -5172,7 +4573,7 @@ mod against_the_real_cli {
 
 #[test]
 fn every_session_that_reads_the_repository_is_told_silence_is_not_absence() {
-    let said = "its silence is not a finding";
+    let said = "A search that comes back empty is not a finding";
     let sessions = [
         ("a panel turn", turn_args(&ChatAgent::new())),
         ("a drafting turn", turn_args(&ChatAgent::drafting())),
@@ -5185,9 +4586,6 @@ fn every_session_that_reads_the_repository_is_told_silence_is_not_absence() {
     }
     let working = working_system_prompt("data-plane", &["data-plane".to_owned()]);
     assert!(working.contains(said), "{working}");
-
-    // A pass reads only what its request carries, so the habit is nothing to it.
-    assert!(!SYSTEM_PROMPT.contains(said));
 }
 
 mod marker {

@@ -1,121 +1,87 @@
-//! Written out by hand rather than loaded: no directory is read, no file is
-//! opened and no staleness is computed, so the app and draw tests can assert
-//! exact lines without depending on whichever repository the test ran in. This
-//! is a fixture and nothing else — not a loader, not a fallback for a failed
-//! load. The shapes below are load-bearing: change them and the line-by-line
-//! assertions in `ui.rs` and the counts in `app.rs` change with them.
+//! Written out by hand rather than loaded: no directory is read and no file is
+//! opened, so the app and draw tests can assert exact lines without depending on
+//! whichever repository the test ran in. This is a fixture and nothing else —
+//! not a loader, not a fallback for a failed load. The shapes below are
+//! load-bearing: change them and the line-by-line assertions in `ui.rs` and the
+//! counts in `app.rs` change with them.
 
 use std::path::{Path, PathBuf};
 
-use warlock_engine::{Node, NodeState, Tree};
+use warlock_engine::{Node, Tree};
 
 /// ```text
-/// warlock                          document, pacted, stale
-/// │   README.md, .warlock.md
-/// ├── warlock/crates               no document yet, unpacted, no files of its own
-/// │   ├── warlock/crates/engine    document, pacted, fresh
-/// │   │       Cargo.toml, .warlock.md
-/// │   └── warlock/crates/tui       document, pacted, stale
-/// │           .warlock.md
-/// └── warlock/assets               document, unpacted
-///             .warlock.md, logo.svg
+/// warlock                          unscoped
+/// │   README.md
+/// ├── warlock/crates               scoped `platform`, no files of its own
+/// │   ├── warlock/crates/engine    scoped `data-plane`, nearer than `platform`
+/// │   │       Cargo.toml
+/// │   └── warlock/crates/tui       covered by `platform` from above
+/// │           Cargo.toml
+/// └── warlock/assets               unscoped
+///             logo.svg
 /// ```
 ///
 /// The listings follow the loader's own rules, so a view tested against this is
-/// tested against something a real load could produce: path order, no
-/// subdirectory — those are children — and a directory's own `.warlock.md` among
-/// them, since the loader lists what the walk saw rather than what the walk saw
-/// minus one special name. The paths are literals, related to this repository's
-/// layout only so a failing assertion reads like something recognisable.
+/// tested against something a real load could produce: path order, and no
+/// subdirectory — those are children. The paths are literals, related to this
+/// repository's layout only so a failing assertion reads like something
+/// recognisable.
 pub(crate) fn tree() -> Tree {
     Tree::new(
-        Node::new("warlock", "warlock/.warlock.md", NodeState::PactedStale)
-            .with_files(files("warlock", [".warlock.md", "README.md"]))
+        Node::new("warlock")
+            .with_files(files("warlock", ["README.md"]))
             .with_children([
-                // No document of its own yet, so `None` and unpacted, which is
-                // what the loader makes of such a directory.
-                Node::new("warlock/crates", None, NodeState::Unpacted).with_children([
-                    Node::new(
-                        "warlock/crates/engine",
-                        "warlock/crates/engine/.warlock.md",
-                        NodeState::PactedFresh,
-                    )
-                    .with_files(files(
-                        "warlock/crates/engine",
-                        [".warlock.md", "Cargo.toml"],
-                    )),
-                    Node::new(
-                        "warlock/crates/tui",
-                        "warlock/crates/tui/.warlock.md",
-                        NodeState::PactedStale,
-                    )
-                    .with_files(files("warlock/crates/tui", [".warlock.md"])),
-                ]),
-                Node::new(
-                    "warlock/assets",
-                    "warlock/assets/.warlock.md",
-                    NodeState::Unpacted,
-                )
-                .with_files(files("warlock/assets", [".warlock.md", "logo.svg"])),
+                Node::new("warlock/crates")
+                    .with_scope(Some("platform".to_owned()))
+                    .with_children([
+                        Node::new("warlock/crates/engine")
+                            .with_scope(Some("data-plane".to_owned()))
+                            .with_files(files("warlock/crates/engine", ["Cargo.toml"])),
+                        Node::new("warlock/crates/tui")
+                            .with_covering(Some("platform".to_owned()))
+                            .with_files(files("warlock/crates/tui", ["Cargo.toml"])),
+                    ]),
+                Node::new("warlock/assets").with_files(files("warlock/assets", ["logo.svg"])),
             ]),
     )
 }
 
 /// ```text
-/// warlock                          document, pacted, stale
-/// │   README.md, .warlock.md
-/// ├── warlock/crates               document now, pacted, fresh
-/// │   │   .warlock.md               <- what the run wrote
-/// │   ├── warlock/crates/engine    document, pacted, fresh
-/// │   │       Cargo.toml, .warlock.md
-/// │   └── warlock/crates/tui       document, pacted, stale
-/// │           .warlock.md
-/// └── warlock/assets               document, unpacted
-///             .warlock.md, logo.svg
+/// warlock                          unscoped
+/// │   README.md
+/// ├── warlock/crates               scoped `platform`, no files of its own
+/// │   ├── warlock/crates/engine    scoped `data-plane`
+/// │   │       Cargo.toml
+/// │   └── warlock/crates/tui       covered by `platform` from above
+/// │           Cargo.toml
+/// └── warlock/assets               scoped `assets` now   <- what was written
+///             logo.svg
 /// ```
 ///
-/// One directory differs, and only in the way a finished run makes one differ:
-/// a re-seat has to be shown carrying a view across a tree that has changed
-/// *somewhere*, not across a tree that has been replaced. Written out rather
-/// than derived from [`tree`] by mutation, because a fixture whose shape has to
-/// be worked out by reading a patch is one the assertions against it cannot be
-/// read beside.
-pub(crate) fn tree_after_a_run() -> Tree {
+/// One directory differs, and only in the way a scope written in another window
+/// makes one differ: a re-seat has to be shown carrying a view across a tree that
+/// has changed *somewhere*, not across a tree that has been replaced. Written out
+/// rather than derived from [`tree`] by mutation, because a fixture whose shape
+/// has to be worked out by reading a patch is one the assertions against it
+/// cannot be read beside.
+pub(crate) fn tree_after_a_rescope() -> Tree {
     Tree::new(
-        Node::new("warlock", "warlock/.warlock.md", NodeState::PactedStale)
-            .with_files(files("warlock", [".warlock.md", "README.md"]))
+        Node::new("warlock")
+            .with_files(files("warlock", ["README.md"]))
             .with_children([
-                // The run wrote this document and granted its hash, so the
-                // directory that was undocumented and unpacted is neither now.
-                Node::new(
-                    "warlock/crates",
-                    "warlock/crates/.warlock.md",
-                    NodeState::PactedFresh,
-                )
-                .with_files(files("warlock/crates", [".warlock.md"]))
-                .with_children([
-                    Node::new(
-                        "warlock/crates/engine",
-                        "warlock/crates/engine/.warlock.md",
-                        NodeState::PactedFresh,
-                    )
-                    .with_files(files(
-                        "warlock/crates/engine",
-                        [".warlock.md", "Cargo.toml"],
-                    )),
-                    Node::new(
-                        "warlock/crates/tui",
-                        "warlock/crates/tui/.warlock.md",
-                        NodeState::PactedStale,
-                    )
-                    .with_files(files("warlock/crates/tui", [".warlock.md"])),
-                ]),
-                Node::new(
-                    "warlock/assets",
-                    "warlock/assets/.warlock.md",
-                    NodeState::Unpacted,
-                )
-                .with_files(files("warlock/assets", [".warlock.md", "logo.svg"])),
+                Node::new("warlock/crates")
+                    .with_scope(Some("platform".to_owned()))
+                    .with_children([
+                        Node::new("warlock/crates/engine")
+                            .with_scope(Some("data-plane".to_owned()))
+                            .with_files(files("warlock/crates/engine", ["Cargo.toml"])),
+                        Node::new("warlock/crates/tui")
+                            .with_covering(Some("platform".to_owned()))
+                            .with_files(files("warlock/crates/tui", ["Cargo.toml"])),
+                    ]),
+                Node::new("warlock/assets")
+                    .with_scope(Some("assets".to_owned()))
+                    .with_files(files("warlock/assets", ["logo.svg"])),
             ]),
     )
 }

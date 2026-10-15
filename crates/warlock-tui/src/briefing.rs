@@ -53,9 +53,7 @@ use crate::writing::{Landed, landed, proposed_path};
 const PROMPT: &str = "> ";
 
 // Said once, before the first turn is sent, because the one thing a reader
-// cannot work out from a bare `> ` is what the conversation is for. Worded as
-// the panel's own note is — see `chatting::BRIEF_NOTE` — minus the way out: a
-// `/chat` that left brief mode would have nothing to leave it into.
+// cannot work out from a bare `> ` is what the conversation is for.
 const OPENING: &str = "brief mode — this conversation is converging on a document";
 
 // EOF, which is Ctrl-D at a terminal and an exhausted pipe everywhere else.

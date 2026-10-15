@@ -1,30 +1,24 @@
 use ratatui::style::Color;
-use warlock_engine::NodeState;
 
 use super::{CONVERSATION_COLOUR, FOCUS_COLOUR, GUIDE_COLOUR, SYSTEM_COLOUR, colour_for};
 
 #[test]
-fn unpacted_is_gray() {
-    assert_eq!(colour_for(NodeState::Unpacted), Color::Indexed(245));
+fn unscoped_is_gray() {
+    assert_eq!(colour_for(false), Color::Indexed(245));
 }
 
 #[test]
-fn pacted_stale_is_yellow() {
-    assert_eq!(colour_for(NodeState::PactedStale), Color::Indexed(214));
+fn scoped_is_green() {
+    assert_eq!(colour_for(true), Color::Indexed(71));
 }
 
 #[test]
-fn pacted_fresh_is_green() {
-    assert_eq!(colour_for(NodeState::PactedFresh), Color::Indexed(71));
-}
-
-#[test]
-fn the_focus_colour_is_no_states_colour() {
-    for state in NodeState::ALL {
+fn the_focus_colour_is_no_tree_colour() {
+    for covered in [true, false] {
         assert_ne!(
             FOCUS_COLOUR,
-            colour_for(state),
-            "the focused border shares {state:?}'s colour"
+            colour_for(covered),
+            "the focused border shares the colour of covered={covered}"
         );
     }
 }
@@ -40,12 +34,12 @@ fn the_guide_colour_is_a_flat_indexed_gray() {
 }
 
 #[test]
-fn the_guide_colour_is_no_states_colour() {
-    for state in NodeState::ALL {
+fn the_guide_colour_is_no_tree_colour() {
+    for covered in [true, false] {
         assert_ne!(
             GUIDE_COLOUR,
-            colour_for(state),
-            "the indent guides share {state:?}'s colour"
+            colour_for(covered),
+            "the indent guides share the colour of covered={covered}"
         );
     }
 }
@@ -64,12 +58,12 @@ fn the_conversation_colour_is_a_flat_indexed_mauve() {
 }
 
 #[test]
-fn the_conversation_colour_is_no_states_colour() {
-    for state in NodeState::ALL {
+fn the_conversation_colour_is_no_tree_colour() {
+    for covered in [true, false] {
         assert_ne!(
             CONVERSATION_COLOUR,
-            colour_for(state),
-            "the conversation card shares {state:?}'s colour"
+            colour_for(covered),
+            "the conversation card shares the colour of covered={covered}"
         );
     }
 }
@@ -99,12 +93,12 @@ fn the_system_colour_is_the_focus_colour() {
 }
 
 #[test]
-fn the_system_colour_is_no_states_colour() {
-    for state in NodeState::ALL {
+fn the_system_colour_is_no_tree_colour() {
+    for covered in [true, false] {
         assert_ne!(
             SYSTEM_COLOUR,
-            colour_for(state),
-            "warlock's own voice shares {state:?}'s colour"
+            colour_for(covered),
+            "warlock's own voice shares the colour of covered={covered}"
         );
     }
 }
@@ -118,14 +112,6 @@ fn the_system_colour_is_not_the_model_s_own_words() {
 }
 
 #[test]
-fn no_two_states_share_a_colour() {
-    for state in NodeState::ALL {
-        for other in NodeState::ALL {
-            assert_eq!(
-                state == other,
-                colour_for(state) == colour_for(other),
-                "{state:?} and {other:?} are drawn the same"
-            );
-        }
-    }
+fn scoped_and_unscoped_are_drawn_apart() {
+    assert_ne!(colour_for(true), colour_for(false));
 }

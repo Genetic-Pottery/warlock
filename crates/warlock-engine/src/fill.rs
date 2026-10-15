@@ -113,6 +113,14 @@ pub fn accept<F: DeserializeOwned, S>(
     }
 }
 
+// Two was the old number, on the reasoning that a model shown its own defects
+// either fixes the slot or cannot. It does not hold: the observed failure is a
+// model that overshoots in the other direction — a slot left empty, then
+// filled at 300 characters against a cap of 280 — and with two attempts that
+// oscillation ends in the mend, which keeps nothing the model wrote for the
+// slot.
+pub const ATTEMPTS: usize = 4;
+
 /// Which defects on an answer that parsed are worth another turn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Reask {

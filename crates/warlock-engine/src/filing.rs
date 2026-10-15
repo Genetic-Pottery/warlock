@@ -16,13 +16,13 @@ use crate::sigils::{self, held_sigils};
 
 /// ```
 /// use warlock_engine::{
-///     Manifest, PactEntry, ScopeRecord, filing, resolve_filing, save_key, save_key_binding,
+///     Manifest, ScopedDirectory, ScopeRecord, filing, resolve_filing, save_key, save_key_binding,
 ///     save_sigils,
 /// };
 ///
 /// let (home, root) = (tempfile::tempdir()?, tempfile::tempdir()?);
-/// let manifest = Manifest::with_entries([
-///     PactEntry::new(root.path(), "crates", "crates/.warlock.md")?.with_scope("data-plane"),
+/// let manifest = Manifest::with_directories([
+///     ScopedDirectory::new(root.path(), "crates", "data-plane")?,
 /// ])
 /// .with_scopes([
 ///     ScopeRecord::new("data-plane", "WAR", "In Review", "warlock"),
@@ -149,8 +149,8 @@ pub fn resolve_filing<'m>(
 
 // Four sentences rather than one "nothing to file to", because a repository
 // that records no scope at all, a machine holding nothing, a machine holding
-// something this repository has never heard of and a scope some pact carries
-// with no `[[scope]]` record are fixed in four different files by four
+// something this repository has never heard of and a scope some directory
+// carries with no `[[scope]]` record are fixed in four different files by four
 // different people.
 //
 // The repository is asked about first, before anything about this machine,
@@ -171,11 +171,12 @@ fn no_candidate(manifest: &Manifest, root: &Path, held: &[String]) -> Error {
         return Error::Unsigiled;
     }
 
-    // A held sigil whose scope some pact carries, with no `[[scope]]` record to
-    // say where that scope files: the manifest is one line short rather than the
-    // machine being wrong, which is the opposite fix to the one below.
+    // A held sigil whose scope some directory carries, with no `[[scope]]`
+    // record to say where that scope files: the manifest is one line short
+    // rather than the machine being wrong, which is the opposite fix to the one
+    // below.
     if let Some(scope) = manifest
-        .entries()
+        .directories()
         .iter()
         .filter_map(valid_scope)
         .find(|scope| scope_opens_to(Some(scope), held))

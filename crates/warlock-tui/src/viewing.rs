@@ -5,11 +5,11 @@
 //! and never a path.
 //!
 //! Two things here are choices rather than consequences. The press consults no
-//! run and no manifest, so `v` means the same thing during a pact as outside
-//! one: `p`, `r` and `s` refuse mid-run because a second run would race the
-//! first for the same documents and the same manifest, and a read races
-//! nothing. And nothing is cleared on the way in, so a read that fails costs
-//! one line on the footer rather than the document a reader was looking at.
+//! run and no manifest, so `v` means the same thing during a pull as outside
+//! one: `s` refuses mid-pull because a scope written under a session editing
+//! this tree would move its boundary, and a read moves nothing. And nothing is
+//! cleared on the way in, so a read that fails costs one line on the footer
+//! rather than the document a reader was looking at.
 
 use std::path::PathBuf;
 

@@ -8,7 +8,7 @@ use crate::fill::{self, Asking, Reask, fit, flattened, line, turned_down};
 
 // The drafting road asks again exactly as often as the document road does, and
 // a second bound would be a number to keep in step with this one for no gain.
-pub use crate::document::ATTEMPTS;
+pub use crate::fill::ATTEMPTS;
 
 pub const ASKING: Asking = Asking {
     attempts: ATTEMPTS,
@@ -97,7 +97,7 @@ pub fn is_identifier(text: &str) -> bool {
 
 // Answering a draft with a bare title rather than the object asked for is the
 // commonest shape a model gets wrong, and reading it strictly would answer that
-// slip with `document::Defect::NotJson` — the one defect with nothing to repair
+// slip with `fill::Defect::NotJson` — the one defect with nothing to repair
 // from, which throws the whole slice's answer away over one entry. Read
 // leniently and the same slip is a draft with an empty body, which the repair
 // road already handles: asked about once, and filled from the slice's own text
@@ -277,8 +277,8 @@ pub fn check(fill: &Fill) -> Vec<Defect> {
     // `Missing` rather than `Empty` for a slice nobody drafted, because
     // `#[serde(default)]` reads an absent `drafts` key and an empty array as the
     // same value and there is no way back to which was written. The repair has
-    // to build a draft either way, and `Missing` is what a slot with nothing in
-    // it to work from is called on the document road.
+    // to build a draft either way, and `Missing` is the slot with nothing in it
+    // to work from.
     if fill.drafts.is_empty() {
         defects.push(Defect::Missing {
             field: Slot::Drafts,
@@ -678,7 +678,7 @@ Write each ticket in its own voice: no first person, and nothing about this \
 request or about what you were or were not shown.";
 
 /// The drafting prompt with the brief, the one slice and the shape to fill
-/// appended, in the layout [`crate::document::synthesis_instructions`] uses.
+/// appended.
 ///
 /// The slice arrives as its plain title and prose, so nothing about where a
 /// slice came from or where its drafts are going reaches the engine.
@@ -714,8 +714,7 @@ pub fn drafting_instructions(brief: &str, title: &str, prose: &str, rejected: &[
     text
 }
 
-/// The answer a test double hands back for a drafting pass, as
-/// [`crate::document::stub_answer`] does for the document road.
+/// The answer a test double hands back for a drafting pass.
 ///
 /// The slice arrives as plain text and nothing else, so the stub is two drafts
 /// built out of that text: one blocking the other, both inside every cap, so a

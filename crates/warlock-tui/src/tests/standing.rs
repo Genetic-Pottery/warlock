@@ -26,7 +26,7 @@ fn an_absolute_argument_is_taken_as_it_was_typed() {
 }
 
 #[test]
-fn a_repository_that_never_pacted_anything_stands_on_an_empty_manifest() {
+fn a_repository_that_never_scoped_anything_stands_on_an_empty_manifest() {
     let dir = tempfile::tempdir().expect("a temporary directory");
 
     let manifest = standing(dir.path())
@@ -34,8 +34,8 @@ fn a_repository_that_never_pacted_anything_stands_on_an_empty_manifest() {
         .expect("a missing manifest reads as an empty one");
 
     assert!(
-        manifest.entries().is_empty(),
-        "nothing on disk and nothing pacted are the same thing to answer about"
+        manifest.directories().is_empty(),
+        "nothing on disk and nothing scoped are the same thing to answer about"
     );
 }
 
@@ -44,7 +44,11 @@ fn a_manifest_that_will_not_parse_is_an_error_rather_than_an_empty_start() {
     let dir = tempfile::tempdir().expect("a temporary directory");
     let warlock = dir.path().join(".warlock");
     std::fs::create_dir_all(&warlock).expect("the bookkeeping directory");
-    std::fs::write(warlock.join("pacts.toml"), "this is not toml {{{").expect("a broken file");
+    std::fs::write(
+        warlock_engine::manifest_path(dir.path()),
+        "this is not toml {{{",
+    )
+    .expect("a broken file");
 
     standing(dir.path())
         .manifest()
@@ -54,8 +58,7 @@ fn a_manifest_that_will_not_parse_is_an_error_rather_than_an_empty_start() {
 #[test]
 fn a_missing_repository_names_what_the_subcommand_wanted_one_for() {
     // `here` reads the process's own directory, so what is pinned here is
-    // the sentence rather than the walk: every tail is one of the nine
-    // above, and `NoRepository` carries the one it was given.
+    // the sentence rather than the walk.
     let error = Error::NoRepository {
         start: PathBuf::from("/tmp"),
         wanted: FOR_CHECK,

@@ -4,7 +4,8 @@ use std::time::Instant;
 
 use tempfile::TempDir;
 use warlock_engine::{
-    Manifest, PactEntry, ScopeRecord, from_manifest_path, save_key, save_key_binding, save_sigils,
+    Manifest, ScopeRecord, ScopedDirectory, from_manifest_path, save_key, save_key_binding,
+    save_sigils,
 };
 
 use super::{Pushes, Pushing};
@@ -67,9 +68,8 @@ fn a_record(name: &str, team: &str) -> ScopeRecord {
 // Both records, in every repository below: which of them is a candidate is the
 // machine's sigils' to say, which is the rule these tests are about.
 fn a_manifest() -> Manifest {
-    Manifest::with_entries([PactEntry::new(".", "docs", "docs/.warlock.md")
-        .expect("a relative module path is inside the root")
-        .with_scope(SCOPE)])
+    Manifest::with_directories([ScopedDirectory::new(".", "docs", SCOPE)
+        .expect("a relative module path is inside the root")])
     .with_scopes([a_record(SCOPE, TEAM), a_record(OTHER_SCOPE, OTHER_TEAM)])
 }
 

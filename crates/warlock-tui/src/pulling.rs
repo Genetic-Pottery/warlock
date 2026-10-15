@@ -47,10 +47,9 @@ use warlock_engine::{
 
 use crate::claude::{Activity, Sibling, Split, Worked, working_opening};
 use crate::crossings::{Crossing, crossings_after};
-use crate::freshness::{Freshened, Freshening, Freshens};
 use crate::git::{
-    Dirty, Error as GitError, Finished, Forge, Freshness, Head, LeftStale, PullRequest, Repository,
-    Touched, branch_name, commit_message, pull_request_body, pull_request_title,
+    Dirty, Error as GitError, Finished, Forge, Head, PullRequest, Repository, Touched, branch_name,
+    commit_message, pull_request_body, pull_request_title,
 };
 use crate::linear::{Board, Error as LinearError};
 use crate::queue::{IN_PROGRESS, same_name};
@@ -62,35 +61,22 @@ use crate::queue::{IN_PROGRESS, same_name};
 /// The board arrives opened, so no key value reaches this module and none can be
 /// printed from it.
 ///
-/// No `Debug`, for `running.rs`'s `Progress`'s reason: a sink is not a value to
-/// print, and the rest of this is paths and seams a failing assertion would dump
-/// a screenful of.
+/// No `Debug`: a sink is not a value to print, and the rest of this is paths and
+/// seams a failing assertion would dump a screenful of.
 pub(crate) struct Pulling<'a, B: Board, R: Repository, F: Forge, S: Splits, W: Works> {
     pub(crate) board: &'a B,
     pub(crate) repo: &'a R,
     pub(crate) forge: &'a F,
     pub(crate) split: &'a S,
     pub(crate) sessions: &'a W,
-    /// The refresh of what the branch made stale, run between the last sub-task's
-    /// commit and the push.
-    ///
-    /// A `&dyn` where its four neighbours are type parameters, and for the reason
-    /// [`Freshening`]'s own `repo` is one: this seam is a
-    /// single method taking one borrowed struct, and a sixth type parameter on
-    /// [`Pulling`] would follow it into
-    /// [`Ports`](crate::pull::Ports), into `pulled`'s signature and into every
-    /// test that builds either. Nothing is gained over a `&dyn` — there is no
-    /// generic method and no associated type to keep.
-    pub(crate) freshen: &'a dyn Freshens,
     /// The scope the ticket was pulled under, whole: the team to file against,
     /// the label the queue is read by, and the state a finished run moves the
     /// ticket to are all on it, and asking the manifest again here would be a
     /// second reading of a record the door already resolved.
     pub(crate) scope: &'a ScopeRecord,
     /// What the check after a session judges a changed path against, with
-    /// `held`. The manifest in hand rather than one loaded here, as
-    /// [`descend`](crate::descent::descend) takes one: reading it again could
-    /// disagree with the boundary the door already judged.
+    /// `held`. The manifest in hand rather than one loaded here: reading it
+    /// again could disagree with the boundary the door already judged.
     pub(crate) manifest: &'a Manifest,
     /// The flattened sigils this machine holds, as
     /// [`crossings_in`](crate::crossings::crossings_in) and
@@ -380,13 +366,12 @@ impl<B: Board, R: Repository, F: Forge, S: Splits, W: Works> Pulling<'_, B, R, F
         self.halt(ticket, &mut run, &comment, Pulled::halted(ticket))
     }
 
-    /// Everything after the last sub-task's commit: the refresh, the push, the
-    /// pull request, the URL on the ticket and in the record, and the ticket
-    /// moved to the scope's review state.
+    /// Everything after the last sub-task's commit: the push, the pull request,
+    /// the URL on the ticket and in the record, and the ticket moved to the
+    /// scope's review state.
     ///
     /// The order is the promise, and every step of it is one a later step reads:
-    /// the refresh writes onto the branch, the push publishes what the refresh
-    /// left, the pull request is opened from what was pushed, and the record is
+    /// the pull request is opened from what was pushed, and the record is
     /// written before the ticket is told anything. The board comes last for the
     /// reason [`halt`](Self::halt) puts it last — a ticket carrying a URL that
     /// `state.json` does not hold is a pull request the next invocation would
@@ -409,8 +394,7 @@ impl<B: Board, R: Repository, F: Forge, S: Splits, W: Works> Pulling<'_, B, R, F
 
         // Asked of the branch rather than of this invocation's sessions, so a
         // resumed run whose commits were made on an earlier day still counts
-        // them. Asked before the refresh, which would otherwise commit documents
-        // onto a branch that holds no work and open a pull request for them.
+        // them.
         if self
             .repo
             .changed_against(&base)
@@ -420,8 +404,6 @@ impl<B: Board, R: Repository, F: Forge, S: Splits, W: Works> Pulling<'_, B, R, F
             return self.unchanged(ticket, run, &base);
         }
 
-        let freshened = self.refresh_stale(ticket, &base)?;
-
         self.report(PullEvent::Heading(Heading::PullRequest {
             branch: run.branch().to_owned(),
         }));
@@ -429,17 +411,7 @@ impl<B: Board, R: Repository, F: Forge, S: Splits, W: Works> Pulling<'_, B, R, F
         self.repo.publish(run.branch()).map_err(Error::git)?;
 
         let title = pull_request_title(ticket.identifier, ticket.title);
-        let refreshed = refreshed_in(&freshened.refreshed);
-        let left_stale = stale_in(&freshened.left_stale);
-        let body = pull_request_body(
-            ticket.description,
-            &finished_in(&run),
-            &scopes_in(touched),
-            &Freshness {
-                refreshed: &refreshed,
-                left_stale: &left_stale,
-            },
-        );
+        let body = pull_request_body(ticket.description, &finished_in(&run), &scopes_in(touched));
         let opened = self
             .forge
             .open_pull_request(PullRequest {
@@ -497,37 +469,6 @@ impl<B: Board, R: Repository, F: Forge, S: Splits, W: Works> Pulling<'_, B, R, F
         Ok(Pulled::Unchanged {
             ticket: ticket.identifier.to_owned(),
         })
-    }
-
-    /// Every pacted directory the branch made stale, described again through the
-    /// freshness seam.
-    ///
-    /// The position is what this call is for, and it is the part that would be hard
-    /// to put back later: after the last sub-task's commit, so the pass reads a tree
-    /// that holds the whole change, and before the push, so what it writes is on the
-    /// branch the pull request is opened from.
-    ///
-    /// A closed scope and a pass that failed both come back on
-    /// [`Freshened::left_stale`] rather than as an error, so the only thing that
-    /// leaves here is the checkout's own failure — a `git` that cannot say what the
-    /// branch changed, or cannot make the commit, which is how every other step of
-    /// this loop fails.
-    ///
-    /// The loop hands the pass its own fields and two more: the ticket, which is
-    /// the first word of the refresh commit's message, and the base `finish`
-    /// resolved, so the paths judged stale are the ones changed against the branch
-    /// the pull request merges into.
-    fn refresh_stale(&mut self, ticket: &Ticket<'_>, base: &str) -> Result<Freshened, Error> {
-        self.freshen
-            .freshen(&Freshening {
-                ticket: ticket.identifier,
-                base,
-                repo: self.repo,
-                root: self.root,
-                manifest: self.manifest,
-                held: self.held,
-            })
-            .map_err(Error::git)
     }
 
     /// A run this checkout already holds, picked up where it was left: its own
@@ -688,20 +629,6 @@ pub(crate) enum Reached {
 pub(crate) struct TouchedScope {
     pub(crate) scope: String,
     pub(crate) paths: Vec<String>,
-}
-
-/// One pacted directory the branch made stale that the refresh did not put back,
-/// and why it did not.
-///
-/// The owned twin of [`LeftStale`], as [`TouchedScope`]
-/// is of [`Touched`]. The reason it is owned is the pass's: it builds both of
-/// these — a directory in the manifest's spelling, and a sentence about a boundary
-/// or a failure — and neither is borrowed from anything that outlives the pass, so
-/// the body borrows them back out of [`Freshened`] at the end.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct StaleDirectory {
-    pub(crate) directory: String,
-    pub(crate) reason: String,
 }
 
 /// The ticket one pull works, in what a run needs of it and nothing else.
@@ -914,9 +841,8 @@ impl Pulled {
 pub(crate) enum PullEvent {
     Heading(Heading),
     /// The session's own, carried rather than worded: two doors word one
-    /// differently — a line on a pipe and a
-    /// [`Section`](crate::account::Section) on the panel's account card — and a
-    /// line rendered in here would be the shell's wording sent to both.
+    /// differently — a line on a pipe and a work line on the panel's thread —
+    /// and a line rendered in here would be the shell's wording sent to both.
     Activity(Activity),
     /// One repair warlock made to what the split answered, in the engine's own
     /// words. Said rather than swallowed: the sub-tasks a run works are not quite
@@ -1015,24 +941,15 @@ fn project_review(board: &impl Board, issue: &str, review: &str) -> Option<Strin
 }
 
 /// The three sections a run has, and the whole of what opens one.
-///
-/// The refresh runs between the last sub-task and the pull request and opens no
-/// section of its own. What it did is reported where it is read — the refreshed
-/// directories and the ones left stale are named in the pull request body — and
-/// what it is seen doing arrives as [`Activity`] on the same port every other
-/// session reports through. A heading for it is a fourth variant every exhaustive
-/// match over this type would have to answer, bought for a pass that usually has
-/// nothing to say.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Heading {
     Split {
         ticket: String,
         title: String,
     },
-    /// The fraction is one-based and its denominator is the split's answer, as
-    /// [`Event::Starting`](warlock_engine::pact::Event::Starting)'s is: a sub-task that is
-    /// re-attempted does not move it, because the run's size is not a running
-    /// total.
+    /// The fraction is one-based and its denominator is the split's answer: a
+    /// sub-task that is re-attempted does not move it, because the run's size is
+    /// not a running total.
     Subtask {
         id: String,
         goal: String,
@@ -1153,20 +1070,20 @@ fn read(worked: Worked) -> (Option<String>, Option<SubtaskStatus>) {
 }
 
 /// What a `crossed` sub-task's reason says: every path the session wrote that
-/// this machine's sigils do not open, each with the scope that covers it.
+/// this machine's sigils do not open, each with the scope that covers it or the
+/// fact that none does.
 ///
 /// Every path and not the first, because the operator's next move is to look at
 /// all of them, and the scope on each because two crossed paths are commonly under
 /// two different scopes.
 fn crossed_reason(crossed: &[Crossing<'_>]) -> String {
     let mut reason =
-        String::from("wrote under a scope this machine does not hold, so nothing was committed:");
+        String::from("wrote outside the scopes this machine holds, so nothing was committed:");
     for crossing in crossed {
-        let _ = write!(
-            reason,
-            " `{}` is scoped `{}`;",
-            crossing.path, crossing.scope
-        );
+        let _ = match crossing.scope {
+            Some(scope) => write!(reason, " `{}` is scoped `{scope}`;", crossing.path),
+            None => write!(reason, " `{}` is under no scope;", crossing.path),
+        };
     }
     // The last separator is a full stop, so the reason reads as a sentence
     // wherever it is quoted — a halt comment, a manifest line, a `state.json`
@@ -1239,23 +1156,6 @@ fn scopes_in(touched: &[TouchedScope]) -> Vec<Touched<'_>> {
         .map(|held| Touched {
             scope: &held.scope,
             paths: held.paths.iter().map(String::as_str).collect(),
-        })
-        .collect()
-}
-
-// The refreshed directories borrowed back out of the outcome, in the order the
-// passes ran. The pass owns its strings — it built them out of the manifest — and
-// the body borrows, so the two lists the body reads are made the same way.
-fn refreshed_in(refreshed: &[String]) -> Vec<&str> {
-    refreshed.iter().map(String::as_str).collect()
-}
-
-fn stale_in(stale: &[StaleDirectory]) -> Vec<LeftStale<'_>> {
-    stale
-        .iter()
-        .map(|left| LeftStale {
-            directory: &left.directory,
-            reason: &left.reason,
         })
         .collect()
 }

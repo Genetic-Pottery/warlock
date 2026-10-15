@@ -29,10 +29,9 @@ use ratatui::crossterm::event::{self, Event};
 use warlock_tui::check::{self, check};
 use warlock_tui::planned;
 use warlock_tui::{
-    Error, Interactive, Listing, POLL_INTERVAL, RecordFields, branch_clear, branch_show,
-    branch_use, brief, key_add, key_forget, key_list, key_use, list, pact, pull, push, refresh,
-    resume, scope_add, scope_remove, sigil_add, sigil_clear, sigil_list, sigil_remove, status_for,
-    unpact,
+    Error, Interactive, POLL_INTERVAL, RecordFields, branch_clear, branch_show, branch_use, brief,
+    key_add, key_forget, key_list, key_use, pull, push, resume, scope_add, scope_remove, sigil_add,
+    sigil_clear, sigil_list, sigil_remove, status_for,
 };
 
 mod terminal;
@@ -46,7 +45,7 @@ use terminal::{TerminalGuard, install_panic_hook};
 #[command(
     name = "warlock",
     version,
-    about = "A freshness ledger for a repository's documentation.",
+    about = "Scopes over a repository: where AI may work, and which board its work goes to.",
     long_about = None
 )]
 struct Cli {
@@ -55,11 +54,6 @@ struct Cli {
 }
 
 /// Everything warlock does without opening the tree.
-///
-/// `Stale` and `Fresh` are one shape twice over rather than one variant
-/// carrying a state: what a reader types is the whole difference between them,
-/// and a `List { state }` would be a variant nobody finds by grepping for the
-/// word they typed. What they *do* is one function taking a [`Listing`].
 #[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
 enum Command {
     #[command(
@@ -71,30 +65,6 @@ enum Command {
         // bare `/sigil` does in the chat bar.
         #[command(subcommand)]
         command: Option<SigilCommand>,
-    },
-    #[command(
-        about = "List the pacted directories that are stale.",
-        long_about = None
-    )]
-    Stale {
-        /// Where to answer about; the repository root when it is left off.
-        #[arg(value_name = "PATH")]
-        path: Option<PathBuf>,
-        /// Answer as one JSON object instead of one path per line.
-        #[arg(long)]
-        json: bool,
-    },
-    #[command(
-        about = "List the pacted directories that are fresh.",
-        long_about = None
-    )]
-    Fresh {
-        /// Where to answer about; the repository root when it is left off.
-        #[arg(value_name = "PATH")]
-        path: Option<PathBuf>,
-        /// Answer as one JSON object instead of one path per line.
-        #[arg(long)]
-        json: bool,
     },
     #[command(
         about = "Say which scope covers a path and whether this machine's sigils open it.",
@@ -126,43 +96,7 @@ enum Command {
         gate: bool,
     },
     #[command(
-        about = "Drop the pact on a directory and every pact below it.",
-        long_about = None
-    )]
-    Unpact {
-        // Required, like the check's and for the same reason: the whole-manifest
-        // answer is `warlock unpact .`, which somebody has to have typed. An
-        // omitted path defaulting to the repository root would make the largest
-        // edit warlock can make the one that is easiest to make by accident.
-        /// Which directory to un-pact, with everything below it.
-        #[arg(value_name = "PATH")]
-        path: PathBuf,
-    },
-    #[command(
-        about = "Describe a directory and everything below it, writing a .warlock.md for each.",
-        long_about = None
-    )]
-    Pact {
-        // Required, like the un-pact's and for the same reason turned the other
-        // way up: a run is minutes of model passes over whatever it is pointed
-        // at, and the largest one warlock can start must not be the one an
-        // omitted argument starts by itself. `warlock pact .` is somebody
-        // saying so.
-        /// Which directory to describe, with everything below it.
-        #[arg(value_name = "PATH")]
-        path: PathBuf,
-    },
-    #[command(
-        about = "Describe the stale directories at or below one, leaving the fresh ones alone.",
-        long_about = None
-    )]
-    Refresh {
-        /// Which directory to refresh, with everything below it.
-        #[arg(value_name = "PATH")]
-        path: PathBuf,
-    },
-    #[command(
-        about = "Set or clear the scope on a pacted directory.",
+        about = "Set or clear the scope on a directory.",
         long_about = None
     )]
     Scope {
@@ -291,7 +225,7 @@ enum Command {
 #[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
 enum ScopeCommand {
     #[command(
-        about = "Write a scope onto a pacted directory.",
+        about = "Write a scope onto a directory.",
         long_about = None
     )]
     Add {
@@ -308,7 +242,7 @@ enum ScopeCommand {
         // Optional to clap and required by warlock, because which it is
         // depends on whether the manifest already records the name: a
         // `required = true` here would refuse the flagless run that writes an
-        // already-recorded scope, and clap has not read `.warlock/pacts.toml`.
+        // already-recorded scope, and clap has not read `.warlock/scopes.toml`.
         // Judged in [`mod@edits`], past the boundary, where what the manifest
         // holds may be looked at. Values are stored exactly as typed — what a
         // team key, a review state or a label may be belongs to somebody
@@ -324,7 +258,7 @@ enum ScopeCommand {
         label: Option<String>,
     },
     #[command(
-        about = "Clear the scope on a pacted directory.",
+        about = "Clear the scope on a directory.",
         long_about = None
     )]
     Remove {
@@ -443,12 +377,10 @@ fn main() -> ExitCode {
     // could not parse is clap's: its wording, its usage line, its exit status of
     // 2. Anything warlock itself could not do is warlock's: the `warlock: `
     // prefix below and exit status 1. The split is load-bearing rather than
-    // cosmetic, and the listings are what it is for: `warlock stale` refuses a
-    // path with no repository-relative spelling with a 1, and a script has to
-    // be able to tell that refusal from a typo by the exit status alone,
-    // without reading a word of either message. A 0 means the question was
-    // answered whatever the answer was — including an empty answer, which is
-    // "nothing is stale" and not the absence of one.
+    // cosmetic: `warlock check` refuses a path with no repository-relative
+    // spelling with a 1, and a script has to be able to tell that refusal from
+    // a typo by the exit status alone, without reading a word of either
+    // message. A 0 means the question was answered whatever the answer was.
     //
     // The writes below add a third register, which is warlock's too and is not
     // a failure at all: a boundary this machine's sigils do not open is refused
@@ -468,13 +400,12 @@ fn main() -> ExitCode {
             Some(SigilCommand::Remove { names }) => sigil_remove(&names),
             Some(SigilCommand::Clear) => sigil_clear(),
         },
-        Some(Command::Stale { path, json }) => list(Listing::Stale, path, json),
-        Some(Command::Fresh { path, json }) => list(Listing::Fresh, path, json),
         // A plain check exits 0 for a closed scope: the closed boundary is its
         // answer, not a failure to reach one, which leaves `jq -e '.opens'` to
         // spend the non-zero status on the verdict. `--gate` spends it instead:
-        // nothing on stdout, and a closed scope is the boundary's **3** through
-        // `Error::ClosedScope`, the register the writes already refuse in.
+        // nothing on stdout, and a closed or unscoped path is the boundary's
+        // **3** through `Error::ClosedScope` or `Error::Unscoped`, the register
+        // the writes already refuse in.
         //
         // The pathless `None` is the `PreToolUse` hook form, which clap only lets
         // through for `--gate`'s sake: the path arrives in a payload on stdin
@@ -487,9 +418,6 @@ fn main() -> ExitCode {
             (Some(path), true) => check::gate(path),
             (None, _) => check::hook(),
         },
-        Some(Command::Unpact { path }) => unpact(&path),
-        Some(Command::Pact { path }) => pact(&path),
-        Some(Command::Refresh { path }) => refresh(&path),
         Some(Command::Scope { command }) => match command {
             ScopeCommand::Add {
                 path,
@@ -571,14 +499,14 @@ fn run() -> Result<(), Error> {
 
         // Waited on rather than blocked on. Nothing is drawn while this thread
         // sits here, so the wait has to end whether or not anybody presses
-        // anything: a pact reports its progress over a channel that only the
-        // bottom of this loop reads, and a progress line that waits for a
-        // keystroke to appear is worse than none at all.
+        // anything: a pull or a turn reports its progress over a channel that
+        // only the bottom of this loop reads, and a progress line that waits for
+        // a keystroke to appear is worse than none at all.
         if event::poll(POLL_INTERVAL)? {
             // The instant the event arrived, read once and here: it is the
-            // instant anything this key starts is as old as, so a turn and a
-            // pass are both clocked from the keystroke that asked for them
-            // rather than from the first thing the model got round to saying.
+            // instant anything this key starts is as old as, so a turn is
+            // clocked from the keystroke that asked for it rather than from the
+            // first thing the model got round to saying.
             let now = Instant::now();
             match event::read()? {
                 Event::Key(key) => {
