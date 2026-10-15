@@ -31,6 +31,18 @@
 //! latches it — quitting the panel drops the run, and dropping the run kills the
 //! `claude` a sub-task is running.
 //!
+//! One question comes before the queue, for [`mod@crate::pushing`]'s reason and
+//! ported from it. [`prepare`] is also what resolves the key, so a scope this
+//! checkout binds to nothing is a pull it can only refuse — and a reader who has
+//! just cloned the repository would be sent to a shell to find `warlock key
+//! use`. So the binding is asked for first, between the home and [`prepare`]:
+//! the key window goes up over the names this machine holds, the `/pull` waits
+//! in [`Parked`], and that answer decides whether there is a queue to read at
+//! all. The window is the one the `s` key puts up, held by the session —
+//! nothing here keeps a second copy of it — and nothing on the road reads a key:
+//! the question is about names, and the binding is written by
+//! [`mod@crate::scoping`].
+//!
 //! Nothing in the run asks the panel anything. A sub-task that needs a decision
 //! comes back `blocked`, the loop halts on it, and the reason is a line on the
 //! thread: there is no relay into a session that is editing the tree.
@@ -42,7 +54,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use warlock_engine::{Manifest, PullRun, ScopeRecord};
+use warlock_engine::{Manifest, PullRun, ScopeRecord, load_key_binding};
 
 use crate::app::App;
 use crate::claude::{
@@ -58,6 +70,7 @@ use crate::linear::{
     NamedIssue, NewIssue, NewProject, Opener as LinearOpener, Opens, Project as LinearProject,
     Queue,
 };
+use crate::prompt::KeyPrompt;
 use crate::pull::{
     Prepared, clean, nothing_ready, number_in, opened, passed_over, prepare, selection, unchanged,
 };
@@ -95,6 +108,10 @@ pub(crate) struct Puller<O: Opens, R: Repository, F: Forge, M: Raises> {
     /// here: see [`Raises`].
     raises: M,
     home: Option<PathBuf>,
+    /// The `/pull` waiting on a binding, if one is. Never more than one: a key
+    /// window takes every keystroke while it is up, so no second `/pull` can be
+    /// typed behind this one.
+    parked: Option<Parked>,
     /// The queue being read, which is its own say-no to a second `/pull` for as
     /// long as it lasts.
     choosing: Option<Choosing>,
@@ -114,6 +131,32 @@ pub(crate) struct Puller<O: Opens, R: Repository, F: Forge, M: Raises> {
     /// happens is reading somebody else's half-finished edit.
     underway: Option<Underway>,
     workers: Workers,
+}
+
+/// A `/pull` waiting on a binding: the scope it named and the ticket it named,
+/// if it named one, exactly as that command spelled them.
+///
+/// Parked rather than read again when the window is answered, for the reason the
+/// dialog holds its [`Ready`]: a second reading of the command could name
+/// another scope, or another ticket, from the one the question was asked about.
+/// And those two names only — no key, no binding and nothing off the store —
+/// because the window the reader is looking at is what holds the choice.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Parked {
+    scope: String,
+    /// `None` takes the queue's own choice, exactly as [`Work::named`] does.
+    ticket: Option<String>,
+}
+
+impl Parked {
+    // The command as it was typed, handed back whole to the one road that reads
+    // a queue: what was parked is what is picked up.
+    fn taking(self) -> Taking {
+        Taking {
+            scope: self.scope,
+            ticket: self.ticket,
+        }
+    }
 }
 
 // The selection worker, and the handle that is the whole of how it is stopped.
@@ -279,6 +322,7 @@ where
             forge,
             raises,
             home,
+            parked: None,
             choosing: None,
             confirm: PullConfirm::Closed,
             ready: None,
@@ -367,6 +411,13 @@ where
     /// fact about a request that is not going to be made anyway; and the three
     /// [`prepare`] asks are the ones `warlock pull` asks, in its order and its
     /// words, so a reader who has met one at a shell meets the same sentence here.
+    ///
+    /// The key is the one of the three asked ahead of [`prepare`] rather than by
+    /// it: a scope this checkout binds to nothing is a question somebody looking
+    /// at the panel can answer. What comes back is the key window the session is
+    /// to put up, which is [`KeyPrompt::Closed`] on every road but that one —
+    /// the session holds the window, and this value holds the `/pull` waiting
+    /// behind it.
     pub(crate) fn press(
         &mut self,
         app: &mut App,
@@ -374,22 +425,140 @@ where
         repo_root: &Path,
         taking: &Taking,
         now: Instant,
-    ) {
+    ) -> KeyPrompt {
+        // Whatever an earlier `/pull` parked goes here: this command says which
+        // scope and which ticket the next question is about. Nothing can be
+        // parked in practice — a key window up takes every keystroke, so no
+        // `/pull` reaches the composer behind one — and it is dropped anyway,
+        // because a pull that outlived its own window would read a queue on an
+        // Enter meant for another one.
+        self.parked = None;
         if let Some(line) = self.in_flight() {
             app.panel_mut().note(refused(&line), now);
-            return;
+            return KeyPrompt::Closed;
         }
         // `Standing::home`'s own sentence, asked of the error that words it
         // rather than written again here.
         let Some(home) = self.home.clone() else {
             app.panel_mut().note(one_line(Error::NoHome), now);
+            return KeyPrompt::Closed;
+        };
+
+        // After the home, which is where the config sits, and before
+        // `prepare`, which is what resolves the key: a scope bound to nothing
+        // gets the question rather than the refusal.
+        match load_key_binding(&home, repo_root, &taking.scope) {
+            // Bound, which is every `/pull` that worked before this question
+            // existed: on to `prepare`, the reading line and the queue. The
+            // name is not kept — what the run opens the board with comes back
+            // from `prepare`, and this read is only whether there is one.
+            Ok(Some(_)) => {}
+            // Bound to nothing, so nothing on this machine could read this
+            // scope's queue: the window, and the pull parked behind it. No
+            // reading line either, because nothing is being read.
+            Ok(None) => return self.binding(app, &home, taking, now),
+            // A checkout nobody has configured, and a config that will not
+            // read. The engine's own sentence on the thread, as every other
+            // `/pull` refusal is, and no window: the answer would be written
+            // into the very file that could not be read.
+            Err(source) => {
+                app.panel_mut()
+                    .note(one_line(Error::Sigils { source }), now);
+                return KeyPrompt::Closed;
+            }
+        }
+
+        self.choose(app, manifest, repo_root, &home, taking, now);
+        KeyPrompt::Closed
+    }
+
+    /// The parked `/pull` picked up over the binding the key window has just
+    /// written: straight to [`prepare`], which is the road a `/pull` with a key
+    /// bound takes on the round it is typed — the reading line on the thread,
+    /// the choice on a worker, and the dialog on the round the queue answers.
+    ///
+    /// Taken rather than read and then cleared, so one question leads to one
+    /// reading and no later Enter at the key window — from the `s` key's road,
+    /// or from a session with no home — can pick this pull up a second time.
+    /// Does nothing at all when no `/pull` is waiting, which is every other way
+    /// that window is answered.
+    ///
+    /// A binding the submit could not write is not asked about again:
+    /// [`prepare`] refuses an unbound scope in the engine's own words, and that
+    /// line on the thread is the answer rather than a second window.
+    pub(crate) fn bound(
+        &mut self,
+        app: &mut App,
+        manifest: &Manifest,
+        repo_root: &Path,
+        now: Instant,
+    ) {
+        let Some(parked) = self.parked.take() else {
             return;
         };
-        let prepared = match prepare(manifest, repo_root, &home, &taking.scope) {
+        // The home this value was built with, as the press that parked the pull
+        // read it: a home cannot move under a running warlock, and this is the
+        // one it was resolved against.
+        let Some(home) = self.home.clone() else {
+            app.panel_mut().note(one_line(Error::NoHome), now);
+            return;
+        };
+
+        self.choose(app, manifest, repo_root, &home, &parked.taking(), now);
+    }
+
+    /// The key window abandoned, and the `/pull` that was waiting on it with
+    /// it: nothing is prepared, no queue is read, no worker starts and no dialog
+    /// opens.
+    ///
+    /// The binding is the window's own to not write — Esc never opens the config
+    /// — so this is the whole of what an Esc costs on this side.
+    pub(crate) fn put_down(&mut self) {
+        self.parked = None;
+    }
+
+    // The key window over this machine's key names, with the pull parked behind
+    // it.
+    //
+    // Names and no values, which is [`KeyPrompt::open`]'s whole shape: it lists
+    // the store through `load_key_names`, exactly as the `s` key's own road
+    // does, and there is no field on it a value could sit in.
+    fn binding(&mut self, app: &mut App, home: &Path, taking: &Taking, now: Instant) -> KeyPrompt {
+        match KeyPrompt::open(home, &taking.scope) {
+            Ok(prompt) => {
+                self.parked = Some(Parked {
+                    scope: taking.scope.clone(),
+                    ticket: taking.ticket.clone(),
+                });
+                prompt
+            }
+            // A store that will not read, in the engine's own sentence on the
+            // thread: there is nothing to pick from, so no window goes up and
+            // no pull waits for one.
+            Err(source) => {
+                app.panel_mut().note(one_line(Error::Keys { source }), now);
+                KeyPrompt::Closed
+            }
+        }
+    }
+
+    // Where both roads to a reading end: the `/pull` typed over a scope with a
+    // key bound, and the one picked up behind the key window.
+    fn choose(
+        &mut self,
+        app: &mut App,
+        manifest: &Manifest,
+        repo_root: &Path,
+        home: &Path,
+        taking: &Taking,
+        now: Instant,
+    ) {
+        let prepared = match prepare(manifest, repo_root, home, &taking.scope) {
             Ok(prepared) => prepared,
             // The scope no `[[scope]]` record holds, the scope this machine's
-            // sigils do not open, and the checkout with no key bound, each in
-            // `error.rs`'s words and flattened as the thread takes a line.
+            // sigils do not open, and the checkout the key window could not
+            // bind, each in `error.rs`'s words and flattened as the thread
+            // takes a line.
             Err(error) => {
                 app.panel_mut().note(one_line(error), now);
                 return;
@@ -403,7 +572,8 @@ where
         };
         // Before the worker starts, so the thread says which queue is being read
         // from the instant it is: the answer is a request away and a reader who
-        // has just typed the command is looking at the conversation.
+        // has just typed the command, or just bound the scope, is looking at the
+        // conversation.
         app.panel_mut()
             .note(reading_line(&taking.scope, taking.ticket.as_deref()), now);
         let cancel = CancelGuard::new();
