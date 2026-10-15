@@ -379,7 +379,7 @@ fn next_number(directory: &Path) -> u32 {
     };
     let highest = entries
         .flatten()
-        .filter_map(|entry| highest_number_in(&entry.file_name().to_string_lossy()))
+        .filter_map(|entry| number_of(&entry.file_name().to_string_lossy()))
         .max()
         .unwrap_or(0);
     // Saturating rather than wrapping, so a directory holding a name with four
@@ -392,10 +392,12 @@ fn spelled(number: u32) -> String {
     format!("{number:02}")
 }
 
-fn highest_number_in(name: &str) -> Option<u32> {
+// The first number and never the largest: the slug after a brief's number is
+// its title, and a title says `cyan-45` or `version-2` often enough that the
+// largest number in `brief-27-from-cyan-45` proposes 46.
+fn number_of(name: &str) -> Option<u32> {
     name.split(|character: char| !character.is_ascii_digit())
-        .filter_map(|run| run.parse::<u32>().ok())
-        .max()
+        .find_map(|run| run.parse::<u32>().ok())
 }
 
 fn slugged(title: &str) -> String {

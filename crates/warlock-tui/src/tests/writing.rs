@@ -230,7 +230,18 @@ fn an_empty_or_absent_directory_proposes_01() {
 }
 
 #[test]
-fn a_number_counts_wherever_in_the_name_it_sits() {
+fn a_number_in_the_title_after_the_brief_s_own_is_not_counted() {
+    let repo = a_repo();
+    docs_holding(
+        repo.path(),
+        &["warlock-brief-27-move-warlock-s-own-colour-from-cyan-45-to-green-42.md"],
+    );
+
+    assert_eq!(next_number(&repo.path().join("docs")), 28);
+}
+
+#[test]
+fn a_name_s_first_number_counts_whatever_it_numbers() {
     let repo = a_repo();
     // Named for what this costs as much as for what it buys: a year in a
     // filename is a number in a filename, and the answer lands in an
