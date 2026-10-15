@@ -135,15 +135,6 @@ pub enum Error {
         what: String,
         saw: String,
     },
-    /// The call named nothing to act on, and was refused here rather than run.
-    /// The one thing it is raised for is [`Repository::commit_paths`] with an
-    /// empty list: `git commit -m <message> --` with no pathspec after it is
-    /// not a commit of nothing, it is a commit of whatever the index happens to
-    /// hold — which is exactly how code gets swept into a documents-only
-    /// commit.
-    Empty {
-        what: String,
-    },
 }
 
 impl fmt::Display for Error {
@@ -163,7 +154,6 @@ impl fmt::Display for Error {
                 write!(f, "`{command}` exited with {code}: {message}")
             }
             Self::Unreadable { what, saw } => write!(f, "{what} could not be read: {saw}"),
-            Self::Empty { what } => write!(f, "{what} named no path"),
         }
     }
 }
@@ -175,8 +165,7 @@ impl std::error::Error for Error {
             Self::NotFound { .. }
             | Self::TimedOut { .. }
             | Self::Refused { .. }
-            | Self::Unreadable { .. }
-            | Self::Empty { .. } => None,
+            | Self::Unreadable { .. } => None,
         }
     }
 }
@@ -520,16 +509,6 @@ pub trait Repository {
     /// exactly `message`.
     fn commit_all(&self, message: &str) -> Result<(), Error>;
 
-    /// Stage exactly `paths` and make one commit of exactly them, carrying
-    /// exactly `message`.
-    ///
-    /// Beside [`commit_all`](Repository::commit_all) rather than instead of it,
-    /// and the two are not the same call with an argument. A sub-task's work is
-    /// whatever it left in the tree, so it is committed whole; a refresh's work
-    /// is a known list of documents and `.warlock/pacts.toml`, and committing
-    /// that with `commit_all` would sweep in any code beside it.
-    fn commit_paths(&self, message: &str, paths: &[String]) -> Result<(), Error>;
-
     /// Push `branch` to the remote and set it as the upstream.
     fn publish(&self, branch: &str) -> Result<(), Error>;
 }
@@ -701,8 +680,8 @@ impl<R: Runs> Repository for Git<R> {
     /// paths. With rename detection on — and it is on by default, and a
     /// repository's own config can turn it on harder — `--name-only` prints the
     /// new path alone, so the directory the file left would look untouched and
-    /// the document that still names the file there would never be refreshed.
-    /// Told apart as a delete and an add, both directories are named.
+    /// a scope it sits under would never be named. Told apart as a delete and an
+    /// add, both directories are named.
     ///
     /// `base` is the *local* base branch, because that is where the branch was
     /// cut from: a pull fast-forwards the local base and cuts from it, so it is
@@ -736,39 +715,6 @@ impl<R: Runs> Repository for Git<R> {
         Ok(())
     }
 
-    /// `git add -- <paths>` and then `git commit -m <message> -- <paths>`.
-    ///
-    /// Both calls name the paths, and the pathspec on the commit is what makes
-    /// this a commit of exactly them: whatever else is staged in the index — a
-    /// session that ran `git add` on its own, a half-staged edit — stays where
-    /// it is rather than riding along.
-    ///
-    /// The `add` is not redundant beside it. A `git commit` with a pathspec
-    /// takes the working tree's version of paths `git` already knows, and
-    /// refuses outright on one it does not: a directory pacted for the first
-    /// time has a `.warlock.md` that is untracked, and without the `add` the
-    /// whole commit would fail on it.
-    ///
-    /// `--` on both, so a document path is never read as a revision.
-    fn commit_paths(&self, message: &str, paths: &[String]) -> Result<(), Error> {
-        if paths.is_empty() {
-            return Err(Error::Empty {
-                what: "the commit of named paths".to_owned(),
-            });
-        }
-
-        let mut add = vec!["add", "--"];
-        add.extend(paths.iter().map(String::as_str));
-        self.done(&add)?;
-
-        // The message as its own argument for the reason `commit_all` gives,
-        // and before the `--`: everything after it is a path.
-        let mut commit = vec!["commit", "-m", message, "--"];
-        commit.extend(paths.iter().map(String::as_str));
-        self.done(&commit)?;
-        Ok(())
-    }
-
     fn publish(&self, branch: &str) -> Result<(), Error> {
         // `--set-upstream` every time rather than only the first: a resumed run
         // pushes a branch that already has one, and setting it again to the
@@ -782,7 +728,7 @@ impl<R: Runs> Repository for Git<R> {
 /// The branch a pull's work goes on: the ticket, lowercased, then the title.
 ///
 /// The team key is a parameter because it belongs to the scope record in
-/// `.warlock/pacts.toml`, and nothing in this module reads a file.
+/// `.warlock/scopes.toml`, and nothing in this module reads a file.
 ///
 /// ```
 /// use warlock_tui::branch_name;
@@ -1000,15 +946,6 @@ pub const HUMAN_GATE: &str = "The pull request and the ticket's review state are
 // the work reached past the one scope it was pulled under.
 const TOUCHED_NOTE: &str = "Held on this machine, and not the scope this ticket was pulled under.";
 
-// The refreshed list says what warlock rewrote in the reviewer's own repository,
-// so it is owed a sentence saying why: these documents are in the diff because
-// the branch made them wrong, not because the work was about them. Nothing is
-// claimed about the commit — a pass that rewrote a document into exactly what
-// was already there leaves nothing to commit and is still a directory described
-// again.
-const REFRESHED_NOTE: &str = "Left stale by this branch's own changes and described again, so the map in review matches the \
-     code in review.";
-
 /// A sub-task the run finished, as the body names it.
 ///
 /// Borrowed and flat on purpose. The run record is another ticket's to own, and a
@@ -1027,36 +964,6 @@ pub struct Finished<'a> {
 pub struct Touched<'a> {
     pub scope: &'a str,
     pub paths: Vec<&'a str>,
-}
-
-/// A pacted directory the branch made stale that the refresh did not put back,
-/// and why it did not.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct LeftStale<'a> {
-    pub directory: &'a str,
-    pub reason: &'a str,
-}
-
-/// What the refresh before the pull request came to: the directories whose
-/// documents it put back, and the ones it did not with the reason it did not.
-///
-/// One value rather than two more parameters on
-/// [`pull_request_body`], because the two lists are one
-/// finding — every directory the branch made stale is in exactly one of them —
-/// and because two slices of directories side by side is a call that swaps them
-/// and still compiles.
-///
-/// [`Default`] is the ordinary run: a branch that left nothing stale, which
-/// renders as neither heading.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct Freshness<'a> {
-    /// The directories described again, in the order the passes ran: children
-    /// before parents, because a parent's document is written from its
-    /// children's.
-    pub refreshed: &'a [&'a str],
-    /// The rest, each with its reason: a scope this machine does not hold, or a
-    /// pass that failed.
-    pub left_stale: &'a [LeftStale<'a>],
 }
 
 /// ```
@@ -1079,15 +986,14 @@ pub fn pull_request_title(ticket: &str, title: &str) -> String {
 /// is no `gh` to open one — so it stands alone, with no pull request around it.
 ///
 /// A section with nothing in it is absent rather than an empty heading: a run
-/// that crossed nothing, refreshed nothing and left nothing stale is the ordinary
-/// run, and four bare headings saying so would be the bulk of its body.
+/// that crossed nothing is the ordinary run, and bare headings saying so would
+/// be the bulk of its body.
 ///
 /// ```
-/// use warlock_tui::{Freshness, HUMAN_GATE, pull_request_body};
+/// use warlock_tui::{HUMAN_GATE, pull_request_body};
 ///
-/// // The emptiest run there is: no description, no sub-task, nothing crossed,
-/// // nothing refreshed and nothing stale.
-/// let body = pull_request_body("", &[], &[], &Freshness::default());
+/// // The emptiest run there is: no description, no sub-task, nothing crossed.
+/// let body = pull_request_body("", &[], &[]);
 ///
 /// assert_eq!(body, format!("{HUMAN_GATE}\n"));
 /// ```
@@ -1096,7 +1002,6 @@ pub fn pull_request_body(
     description: &str,
     finished: &[Finished<'_>],
     touched: &[Touched<'_>],
-    freshness: &Freshness<'_>,
 ) -> String {
     let mut blocks: Vec<String> = Vec::new();
 
@@ -1131,30 +1036,6 @@ pub fn pull_request_body(
                     let _ = write!(block, "\n- `{}`", path.trim());
                 }
             }
-        }
-        blocks.push(block);
-    }
-
-    // The refreshed directories before the ones left stale, because that is the
-    // order the reviewer reads them in: what warlock put back, and then what it
-    // could not.
-    if !freshness.refreshed.is_empty() {
-        let mut block = format!("## Documents refreshed\n\n{REFRESHED_NOTE}\n");
-        for directory in freshness.refreshed {
-            let _ = write!(block, "\n- `{}`", directory.trim());
-        }
-        blocks.push(block);
-    }
-
-    if !freshness.left_stale.is_empty() {
-        let mut block = String::from("## Directories left stale\n");
-        for directory in freshness.left_stale {
-            let _ = write!(
-                block,
-                "\n- `{}` — {}",
-                directory.directory.trim(),
-                directory.reason.trim()
-            );
         }
         blocks.push(block);
     }

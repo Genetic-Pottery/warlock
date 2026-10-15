@@ -24,7 +24,7 @@ const MIN_REPRESENTABLE: i64 = -62_167_219_200;
 const MAX_REPRESENTABLE: i64 = 253_402_300_799;
 
 /// Infallible by decision. The one thing that can go wrong — a system clock set
-/// before 1970 — is not a failure a caller can act on: refusing to grant a pact
+/// before 1970 — is not a failure a caller can act on: refusing to record a run
 /// because a laptop came back from a dead battery at 1969 is a worse answer
 /// than writing `1969-12-31T23:59:59Z` into a field nothing parses.
 ///

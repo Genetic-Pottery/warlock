@@ -1,28 +1,25 @@
 use std::fs;
 use std::path::Path;
 
-use warlock_engine::{Manifest, PactEntry, ScopeRecord, route_facts, scope, validate_scope};
+use warlock_engine::{Manifest, ScopeRecord, ScopedDirectory, route_facts, scope, validate_scope};
 
 use super::{RecordFields, Rescoped, ScopeRefusal, records_scope, rescope};
 use crate::prompt::RecordField;
 
-const HASH: &str = "d0f5a1";
-
-const AT: &str = "2026-08-19T07:32:00Z";
-
-fn entry(module: &str) -> PactEntry {
-    PactEntry::new(".", module, format!("{module}/.warlock.md"))
-        .expect("a relative module path is inside the root")
-        .with_grant(HASH, AT)
+fn row(module: &str, scope: &str) -> ScopedDirectory {
+    ScopedDirectory::new(".", module, scope).expect("a relative module path is inside the root")
 }
 
-/// Three `[[pact]]` rows and three `[[scope]]` records, more than any one
-/// write below is allowed to reach.
+fn scope_at<'a>(manifest: &'a Manifest, module: &str) -> Option<&'a str> {
+    manifest.directory(module).map(ScopedDirectory::scope)
+}
+
+/// Two `[[directory]]` rows and three `[[scope]]` records, more than any one
+/// write below is allowed to reach. `crates/tui` has no row.
 fn recorded() -> Manifest {
-    Manifest::with_entries([
-        entry("crates/engine").with_scope("data-plane"),
-        entry("crates/tui"),
-        entry("docs").with_scope("third-party"),
+    Manifest::with_directories([
+        row("crates/engine", "data-plane"),
+        row("docs", "third-party"),
     ])
     .with_scopes([
         ScopeRecord::new("data-plane", "Data Plane", "In Review", "area/data-plane"),
@@ -78,39 +75,18 @@ fn what_was_typed_is_folded_and_then_judged_by_the_engine() {
 
     let rescoped = written("docs", Some("Data-Plane"), RecordFields::default());
     assert_eq!(rescoped.scope.as_deref(), Some("data-plane"));
-    assert_eq!(
-        rescoped.manifest.entry("docs").and_then(PactEntry::scope),
-        Some("data-plane")
-    );
+    assert_eq!(scope_at(&rescoped.manifest, "docs"), Some("data-plane"));
 }
 
 #[test]
-fn a_directory_with_no_entry_is_refused_for_a_set_and_a_clear() {
-    for scope in [Some("billing"), None] {
-        assert_eq!(
-            refused("docs/adr", scope, a_record()),
-            ScopeRefusal::NoPact {
-                module: "docs/adr".to_owned()
-            },
-            "{scope:?}"
-        );
-    }
-    assert_eq!(
-        ScopeRefusal::NoPact {
-            module: "crates/engine".to_owned(),
-        }
-        .to_string(),
-        "`crates/engine` is not in the manifest, so there is no pact to carry a \
-         scope; pact it in warlock first, with `p`"
-    );
-}
+fn a_directory_with_no_row_gains_one_for_a_set_and_stays_without_for_a_clear() {
+    let set = written("docs/adr", Some("third-party"), RecordFields::default());
+    assert_eq!(scope_at(&set.manifest, "docs/adr"), Some("third-party"));
+    assert_eq!(set.was, None);
 
-#[test]
-fn the_scope_is_judged_before_the_entry_is_looked_for() {
-    assert!(matches!(
-        refused("docs/adr", Some("Not A Scope!"), a_record()),
-        ScopeRefusal::Rule { .. }
-    ));
+    let cleared = written("docs/adr", None, RecordFields::default());
+    assert_eq!(cleared.manifest, recorded());
+    assert_eq!(cleared.was, None);
 }
 
 #[test]
@@ -243,12 +219,12 @@ fn the_shell_adds_its_flag_advice_to_a_recorded_refusal_and_the_panel_does_not()
 
     assert_eq!(
         refusal.to_string(),
-        "`data-plane` already has a record in `.warlock/pacts.toml`, and warlock does not \
+        "`data-plane` already has a record in `.warlock/scopes.toml`, and warlock does not \
          rewrite one"
     );
     assert_eq!(
         crate::error::Error::Scope { refusal }.to_string(),
-        "`data-plane` already has a record in `.warlock/pacts.toml`, and warlock does not \
+        "`data-plane` already has a record in `.warlock/scopes.toml`, and warlock does not \
          rewrite one: run without `--team-key`, `--review-state` and `--label` to write \
          the scope, or edit the file to change the record"
     );
@@ -260,10 +236,7 @@ fn a_name_something_records_is_written_with_no_second_record() {
 
     assert_eq!(rescoped.manifest.scopes(), recorded().scopes());
     assert_eq!(
-        rescoped
-            .manifest
-            .entry("crates/tui")
-            .and_then(PactEntry::scope),
+        scope_at(&rescoped.manifest, "crates/tui"),
         Some("data-plane")
     );
     assert_eq!(rescoped.was, None);
@@ -292,16 +265,10 @@ fn a_new_record_is_stored_as_given_after_the_ones_already_there() {
     assert_eq!(record.review_state(), "In Review");
     assert_eq!(record.label(), "Area/Billing");
 
-    let tui = manifest
-        .entry("crates/tui")
-        .expect("the entry is still there");
-    assert_eq!(tui.scope(), Some(record.name()));
-    assert_eq!(tui.document(), "crates/tui/.warlock.md");
-    assert_eq!(tui.granted_hash(), Some(HASH));
-    assert_eq!(tui.granted_at(), Some(AT));
+    assert_eq!(scope_at(&manifest, "crates/tui"), Some(record.name()));
     assert_eq!(
-        manifest.entry("crates/engine"),
-        recorded().entry("crates/engine")
+        manifest.directory("crates/engine"),
+        recorded().directory("crates/engine")
     );
 }
 
@@ -310,7 +277,7 @@ fn a_new_record_is_stored_as_given_after_the_ones_already_there() {
 /// dropped by a rebuild are invisible in a value compared against the value
 /// that dropped them.
 fn blocks_apart_from(root: &Path, written: &[&str]) -> Vec<String> {
-    fs::read_to_string(root.join(".warlock").join("pacts.toml"))
+    fs::read_to_string(root.join(".warlock").join("scopes.toml"))
         .expect("the manifest was saved")
         .trim_end_matches('\n')
         .split("\n\n")
@@ -335,7 +302,7 @@ fn recording_a_scope_leaves_every_row_and_record_it_did_not_touch_byte_identical
 
     let after = blocks_apart_from(repo.path(), &touched);
     assert_eq!(after, before);
-    // The version header, two pact rows and three records.
+    // The version header, two directory rows and three records.
     assert_eq!(after.len(), 6, "{after:#?}");
 }
 
@@ -345,10 +312,7 @@ fn a_clear_reports_the_scope_it_took_away() {
 
     assert_eq!(rescoped.scope, None);
     assert_eq!(rescoped.was.as_deref(), Some("third-party"));
-    assert_eq!(
-        rescoped.manifest.entry("docs").and_then(PactEntry::scope),
-        None
-    );
+    assert_eq!(scope_at(&rescoped.manifest, "docs"), None);
     assert_eq!(rescoped.manifest.scopes(), recorded().scopes());
 }
 
@@ -356,10 +320,10 @@ fn a_clear_reports_the_scope_it_took_away() {
 fn the_lookup_and_the_router_agree_about_which_names_are_recorded() {
     // `third-party` is recorded only under a capitalised spelling — a
     // different name to the router, which compares byte for byte.
-    let manifest = Manifest::with_entries([
-        entry("crates/engine").with_scope("data-plane"),
-        entry("crates/tui").with_scope("billing"),
-        entry("docs").with_scope("third-party"),
+    let manifest = Manifest::with_directories([
+        row("crates/engine", "data-plane"),
+        row("crates/tui", "billing"),
+        row("docs", "third-party"),
     ])
     .with_scopes([
         ScopeRecord::new("data-plane", "Data Plane", "In Review", "area/data-plane"),

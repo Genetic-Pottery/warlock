@@ -1,4 +1,3 @@
-use std::collections::BTreeMap;
 use std::fmt;
 use std::fs;
 use std::io::Write as _;
@@ -10,7 +9,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 use crate::scope::{Rule, validate_scope};
 use crate::walk::MANIFEST_DIR;
 
-const MANIFEST_FILE: &str = "pacts.toml";
+const MANIFEST_FILE: &str = "scopes.toml";
 
 pub(crate) const ROOT_MODULE: &str = ".";
 
@@ -25,12 +24,12 @@ pub const SCHEMA_VERSION: u32 = 1;
 pub struct Manifest {
     #[serde(deserialize_with = "deserialize_version")]
     version: u32,
-    #[serde(rename = "pact", default, skip_serializing_if = "Vec::is_empty")]
-    entries: Vec<PactEntry>,
-    // After `entries` so the `[[scope]]` tables follow the `[[pact]]` rows, and
-    // both after `version`: TOML puts every scalar before the first table, so a
-    // field declared above `version` would move the version line into whichever
-    // table happened to come first.
+    #[serde(rename = "directory", default, skip_serializing_if = "Vec::is_empty")]
+    directories: Vec<ScopedDirectory>,
+    // After `directories` so the `[[scope]]` tables follow the `[[directory]]`
+    // rows, and both after `version`: TOML puts every scalar before the first
+    // table, so a field declared above `version` would move the version line
+    // into whichever table happened to come first.
     #[serde(rename = "scope", default, skip_serializing_if = "Vec::is_empty")]
     scopes: Vec<ScopeRecord>,
 }
@@ -40,48 +39,87 @@ impl Manifest {
     pub fn new() -> Self {
         Self {
             version: SCHEMA_VERSION,
-            entries: Vec::new(),
+            directories: Vec::new(),
             scopes: Vec::new(),
         }
     }
 
     #[must_use]
-    pub fn with_entries(entries: impl IntoIterator<Item = PactEntry>) -> Self {
+    pub fn with_directories(directories: impl IntoIterator<Item = ScopedDirectory>) -> Self {
         Self {
             version: SCHEMA_VERSION,
-            entries: entries.into_iter().collect(),
+            directories: directories.into_iter().collect(),
             scopes: Vec::new(),
         }
     }
 
-    /// Rebuild around a new set of `[[pact]]` rows, carrying the `[[scope]]`
-    /// records across as they stand.
+    /// Rebuild around a new set of `[[directory]]` rows, carrying the
+    /// `[[scope]]` records across as they stand.
     ///
     /// ```
-    /// use warlock_engine::{Manifest, PactEntry, ScopeRecord};
+    /// use warlock_engine::{Manifest, ScopedDirectory, ScopeRecord};
     ///
-    /// let manifest = Manifest::with_entries([PactEntry::new(".", "crates/engine", "crates/engine/.warlock.md")?])
+    /// let manifest = Manifest::with_directories([ScopedDirectory::new(".", "crates/engine", "data-plane")?])
     ///     .with_scopes([ScopeRecord::new("data-plane", "WAR", "In Review", "area/data-plane")]);
     ///
-    /// // Every pact gone, and the record that no pact now names is still there.
+    /// // Every scoped directory gone, and the record no row now names is still there.
     /// let emptied = manifest.rebuilt_with([]);
-    /// assert!(emptied.entries().is_empty());
+    /// assert!(emptied.directories().is_empty());
     /// assert_eq!(emptied.scopes(), manifest.scopes());
     /// # Ok::<(), warlock_engine::manifest::Error>(())
     /// ```
-    // The counterpart to `with_entries` for every caller that has a manifest in
-    // hand: that one is an associated function with nothing to copy from, so a
-    // rebuild written through it silently drops the records. Records are not
-    // pruned to what the new entries name — a record outlives the pacts that
-    // spelled its scope by design, and un-pacting the last directory under a
-    // scope would otherwise delete where that work is filed.
+    // The counterpart to `with_directories` for every caller that has a
+    // manifest in hand: that one is an associated function with nothing to copy
+    // from, so a rebuild written through it silently drops the records. Records
+    // are not pruned to what the rows name — unscoping the last directory under
+    // a scope would otherwise delete where that work is filed.
     #[must_use]
-    pub fn rebuilt_with(&self, entries: impl IntoIterator<Item = PactEntry>) -> Self {
+    pub fn rebuilt_with(&self, directories: impl IntoIterator<Item = ScopedDirectory>) -> Self {
         Self {
             version: self.version,
-            entries: entries.into_iter().collect(),
+            directories: directories.into_iter().collect(),
             scopes: self.scopes.clone(),
         }
+    }
+
+    /// The same manifest with the directory at `path` scoped `scope`, or
+    /// unscoped for `None`. `path` is a stored path, as
+    /// [`to_manifest_path`] spells it.
+    ///
+    /// ```
+    /// use warlock_engine::{Manifest, ScopedDirectory};
+    ///
+    /// let manifest = Manifest::with_directories([ScopedDirectory::new(".", "crates", "platform")?]);
+    ///
+    /// let scoped = manifest.rescoped("crates/engine", Some("data-plane"));
+    /// assert_eq!(scoped.directory("crates/engine").map(ScopedDirectory::scope), Some("data-plane"));
+    /// assert_eq!(scoped.rescoped("crates", None).directories().len(), 1);
+    /// # Ok::<(), warlock_engine::manifest::Error>(())
+    /// ```
+    // Every other row keeps its place, so a saved file differs from the one on
+    // disk in one place; a directory scoped for the first time goes on the end.
+    #[must_use]
+    pub fn rescoped(&self, path: &str, scope: Option<&str>) -> Self {
+        let mut directories: Vec<ScopedDirectory> = Vec::with_capacity(self.directories.len() + 1);
+        let mut placed = false;
+        for directory in &self.directories {
+            if directory.path != path {
+                directories.push(directory.clone());
+            } else if let Some(scope) = scope {
+                directories.push(ScopedDirectory {
+                    path: path.to_owned(),
+                    scope: scope.to_owned(),
+                });
+                placed = true;
+            }
+        }
+        if let (false, Some(scope)) = (placed, scope) {
+            directories.push(ScopedDirectory {
+                path: path.to_owned(),
+                scope: scope.to_owned(),
+            });
+        }
+        self.rebuilt_with(directories)
     }
 
     #[must_use]
@@ -96,8 +134,8 @@ impl Manifest {
     }
 
     #[must_use]
-    pub fn entries(&self) -> &[PactEntry] {
-        &self.entries
+    pub fn directories(&self) -> &[ScopedDirectory] {
+        &self.directories
     }
 
     #[must_use]
@@ -105,19 +143,15 @@ impl Manifest {
         &self.scopes
     }
 
-    pub fn push(&mut self, entry: PactEntry) {
-        self.entries.push(entry);
+    pub fn push(&mut self, directory: ScopedDirectory) {
+        self.directories.push(directory);
     }
 
     #[must_use]
-    pub fn entry(&self, module: &str) -> Option<&PactEntry> {
-        self.entries.iter().find(|entry| entry.module == module)
-    }
-
-    pub(crate) fn entry_at(&self, root: &Path, path: &Path) -> Option<&PactEntry> {
-        to_manifest_path(root, path)
-            .ok()
-            .and_then(|module| self.entry(&module))
+    pub fn directory(&self, path: &str) -> Option<&ScopedDirectory> {
+        self.directories
+            .iter()
+            .find(|directory| directory.path == path)
     }
 
     // Exact, and the one comparison every caller looks a scope up by: a lookup
@@ -130,15 +164,13 @@ impl Manifest {
     }
 
     /// ```
-    /// use warlock_engine::{Manifest, PactEntry};
+    /// use warlock_engine::{Manifest, ScopedDirectory};
     ///
-    /// let entry = PactEntry::new(".", "crates/engine", "crates/engine/.warlock.md")?;
-    /// let toml = Manifest::with_entries([entry]).to_toml_string()?;
+    /// let directory = ScopedDirectory::new(".", "crates/engine", "data-plane")?;
+    /// let toml = Manifest::with_directories([directory]).to_toml_string()?;
     ///
     /// assert!(toml.starts_with("version = 1\n"));
-    /// assert!(toml.contains("[[pact]]"));
-    /// // Never judged, so the grant keys are simply not there.
-    /// assert!(!toml.contains("granted_hash"));
+    /// assert!(toml.contains("[[directory]]"));
     /// # Ok::<(), warlock_engine::manifest::Error>(())
     /// ```
     pub fn to_toml_string(&self) -> Result<String, Error> {
@@ -164,22 +196,22 @@ impl Manifest {
             });
         }
 
-        let entries = raw
-            .pact
+        let directories = raw
+            .directory
             .into_iter()
             .enumerate()
             .map(|(index, value)| {
-                // Read the module path out of the raw table first: if the entry
-                // fails to parse, this is what makes the error nameable.
-                let module = value
-                    .get("module")
+                // Read the path out of the raw table first: if the row fails to
+                // parse, this is what makes the error nameable.
+                let path = value
+                    .get("path")
                     .and_then(toml::Value::as_str)
                     .map(ToOwned::to_owned);
                 value
-                    .try_into::<PactEntry>()
-                    .map_err(|source| Error::Entry {
+                    .try_into::<ScopedDirectory>()
+                    .map_err(|source| Error::Directory {
                         index,
-                        module,
+                        path,
                         source,
                     })
             })
@@ -187,7 +219,7 @@ impl Manifest {
 
         let mut scopes: Vec<ScopeRecord> = Vec::new();
         for (index, value) in raw.scope.into_iter().enumerate() {
-            // Same reason as the module above: read the name out of the raw
+            // Same reason as the path above: read the name out of the raw
             // table first, so a record that will not parse is still nameable by
             // the name it did spell.
             let named = value
@@ -220,17 +252,17 @@ impl Manifest {
 
         Ok(Self {
             version: SCHEMA_VERSION,
-            entries,
+            directories,
             scopes,
         })
     }
 
     /// ```
-    /// use warlock_engine::{Manifest, PactEntry};
+    /// use warlock_engine::{Manifest, ScopedDirectory};
     ///
     /// let root = tempfile::tempdir()?;
-    /// let entry = PactEntry::new(root.path(), "crates/engine", "crates/engine/.warlock.md")?;
-    /// let manifest = Manifest::with_entries([entry]);
+    /// let directory = ScopedDirectory::new(root.path(), "crates/engine", "data-plane")?;
+    /// let manifest = Manifest::with_directories([directory]);
     ///
     /// manifest.save(root.path())?;
     /// assert_eq!(Manifest::load(root.path())?, manifest);
@@ -264,8 +296,8 @@ impl Manifest {
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
     // Absent is not empty. Answering `Ok(Manifest::new())` for a missing file
-    // was the rejected alternative: "this repository has never pacted anything"
-    // and "this repository pacted nothing" are different facts, and only the
+    // was the rejected alternative: "this repository has never scoped anything"
+    // and "this repository scoped nothing" are different facts, and only the
     // caller knows which one it means to act on. The doctest above is the
     // caller that wants them to be the same fact, written out.
     pub fn load(root: impl AsRef<Path>) -> Result<Self, Error> {
@@ -288,234 +320,51 @@ impl Default for Manifest {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct PactEntry {
-    module: String,
-    document: String,
+pub struct ScopedDirectory {
+    path: String,
     // Read back exactly as written, never validated or folded here. These bytes
     // are committed, so normalising a hand-edited scope on the way through would
     // put a line in somebody's diff on a save they only asked for because they
-    // pacted something else. `validate_scope` is where a caller asks.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    scope: Option<String>,
-    // The absent key is the whole representation of "never judged" — no sentinel
-    // hash, no empty string, no `judged = false`. An entry with no grant
-    // round-trips with the keys still missing, and unjudged is already stale, so
-    // nothing is lost by saying nothing.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    granted_hash: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    granted_at: Option<String>,
-    // Safety-critical rather than a cache: a run reads it to decide it need not
-    // pay for a pass, so an answer that said "unchanged" when the inputs had
-    // moved would grant freshness no pass earned. It lives beside the grant so
-    // the same atomic save writes both and they cannot drift. Absent means no
-    // shortcut and the pass runs, which is why every pre-carry-hash entry is
-    // safe to read.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    carry_hash: Option<String>,
-    // One hash per file the document holds a line for, so a run can re-ask
-    // about the files that moved and keep the lines of the files that did not.
-    // Absent is "no lines recorded", which is every entry written before
-    // per-file granularity and every entry a whole-directory pass writes:
-    // nothing is reusable, so the pass runs, exactly as `carry_hash` reads when
-    // it is missing.
-    //
-    // In the entry rather than in a store of its own because a line and its
-    // grant have to be written by the same atomic save. Two files would drift,
-    // and a line believed current against a hash from another save is worse
-    // than no shortcut at all.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    lines: Option<BTreeMap<String, String>>,
+    // scoped something else. `validate_scope` is where a caller asks.
+    scope: String,
 }
 
-// `carry` is `None` where the digest could not be taken, rather than the grant
-// being dropped: no shortcut next time, but still a grant.
-#[derive(Debug)]
-pub(crate) struct Grant {
-    pub(crate) hash: String,
-    pub(crate) at: String,
-    pub(crate) carry: Option<String>,
-    // What each file hashed to as its line was settled. Written with the grant
-    // by the same save, so a line believed current can never be judged against
-    // a hash from another one.
-    pub(crate) lines: BTreeMap<String, String>,
-}
-
-impl PactEntry {
+impl ScopedDirectory {
     /// ```
-    /// use warlock_engine::PactEntry;
+    /// use warlock_engine::ScopedDirectory;
     ///
-    /// let under_a = PactEntry::new("/tmp/a", "/tmp/a/crates/engine", "/tmp/a/crates/engine/.warlock.md")?;
-    /// let under_b = PactEntry::new("/tmp/b", "/tmp/b/crates/engine", "/tmp/b/crates/engine/.warlock.md")?;
+    /// let under_a = ScopedDirectory::new("/tmp/a", "/tmp/a/crates/engine", "data-plane")?;
+    /// let under_b = ScopedDirectory::new("/tmp/b", "/tmp/b/crates/engine", "data-plane")?;
     ///
-    /// assert_eq!(under_a.module(), "crates/engine");
+    /// assert_eq!(under_a.path(), "crates/engine");
+    /// assert_eq!(under_a.scope(), "data-plane");
     /// assert_eq!(under_a, under_b);
-    /// assert_eq!(under_a.granted_hash(), None);
     /// # Ok::<(), warlock_engine::manifest::Error>(())
     /// ```
     pub fn new(
         root: impl AsRef<Path>,
-        module: impl AsRef<Path>,
-        document: impl AsRef<Path>,
+        path: impl AsRef<Path>,
+        scope: impl Into<String>,
     ) -> Result<Self, Error> {
-        let root = root.as_ref();
-        Ok(Self::stored(
-            to_manifest_path(root, module)?,
-            to_manifest_path(root, document)?,
-        ))
+        Ok(Self {
+            path: to_manifest_path(root, path)?,
+            scope: scope.into(),
+        })
     }
 
     #[must_use]
-    pub fn with_grant(
-        mut self,
-        granted_hash: impl Into<String>,
-        granted_at: impl Into<String>,
-    ) -> Self {
-        self.granted_hash = Some(granted_hash.into());
-        self.granted_at = Some(granted_at.into());
-        self
+    pub fn path(&self) -> &str {
+        &self.path
     }
 
     #[must_use]
-    pub fn with_carry_hash(mut self, carry_hash: impl Into<String>) -> Self {
-        self.carry_hash = Some(carry_hash.into());
-        self
+    pub fn scope(&self) -> &str {
+        &self.scope
     }
 
     #[must_use]
-    pub fn without_grant(mut self) -> Self {
-        self.granted_hash = None;
-        self.granted_at = None;
-        self.carry_hash = None;
-        self
-    }
-
-    /// ```
-    /// use warlock_engine::PactEntry;
-    ///
-    /// let entry = PactEntry::new(".", "crates/engine", "crates/engine/.warlock.md")?
-    ///     .with_grant("d0f5a1", "2026-08-19T07:32:00Z")
-    ///     .with_scope("data-plane");
-    ///
-    /// assert_eq!(entry.scope(), Some("data-plane"));
-    /// assert_eq!(entry.granted_hash(), Some("d0f5a1"));
-    /// assert_eq!(entry.clone().without_scope().scope(), None);
-    /// assert_eq!(entry.without_scope().granted_hash(), Some("d0f5a1"));
-    /// # Ok::<(), warlock_engine::manifest::Error>(())
-    /// ```
-    #[must_use]
-    pub fn with_scope(mut self, scope: impl Into<String>) -> Self {
-        self.scope = Some(scope.into());
-        self
-    }
-
-    #[must_use]
-    pub fn without_scope(mut self) -> Self {
-        self.scope = None;
-        self
-    }
-
-    pub(crate) fn stored(module: String, document: String) -> Self {
-        Self {
-            module,
-            document,
-            scope: None,
-            granted_hash: None,
-            granted_at: None,
-            carry_hash: None,
-            lines: None,
-        }
-    }
-
-    // A mutation rather than a fresh entry to swap in, so that a field a person
-    // owns survives every pact and refresh without anyone remembering to carry
-    // it across: `scope` is not a parameter and is not assigned below, so no run
-    // can write one and no run can clear one. The grant travels as one value
-    // for the same reason — a carry digest left behind by a cleared grant is a
-    // stale answer that could later skip a pass that was owed.
-    //
-    // The run wrote the document, so whatever lines were recorded against the
-    // last one describe a file that is no longer on the page. A run that
-    // granted nothing, or recorded no lines, leaves the entry saying nothing is
-    // reusable, which is the only honest thing it can say.
-    pub(crate) fn overwrite_run_fields(
-        &mut self,
-        module: String,
-        document: String,
-        grant: Option<Grant>,
-    ) {
-        let (granted_hash, granted_at, carry_hash, lines) = match grant {
-            Some(Grant {
-                hash,
-                at,
-                carry,
-                lines,
-            }) => (
-                Some(hash),
-                Some(at),
-                carry,
-                Some(lines).filter(|lines| !lines.is_empty()),
-            ),
-            None => (None, None, None, None),
-        };
-        self.module = module;
-        self.document = document;
-        self.granted_hash = granted_hash;
-        self.granted_at = granted_at;
-        self.carry_hash = carry_hash;
-        self.lines = lines;
-    }
-
-    #[must_use]
-    pub fn module(&self) -> &str {
-        &self.module
-    }
-
-    #[must_use]
-    pub fn document(&self) -> &str {
-        &self.document
-    }
-
-    #[must_use]
-    pub fn scope(&self) -> Option<&str> {
-        self.scope.as_deref()
-    }
-
-    #[must_use]
-    pub fn module_path(&self, root: impl AsRef<Path>) -> PathBuf {
-        from_manifest_path(root, &self.module)
-    }
-
-    #[must_use]
-    pub fn document_path(&self, root: impl AsRef<Path>) -> PathBuf {
-        from_manifest_path(root, &self.document)
-    }
-
-    #[must_use]
-    pub fn granted_hash(&self) -> Option<&str> {
-        self.granted_hash.as_deref()
-    }
-
-    #[must_use]
-    pub fn carry_hash(&self) -> Option<&str> {
-        self.carry_hash.as_deref()
-    }
-
-    /// The hash each file had when its line was last written, or `None` where
-    /// no line was ever recorded against a file.
-    #[must_use]
-    pub fn lines(&self) -> Option<&BTreeMap<String, String>> {
-        self.lines.as_ref()
-    }
-
-    #[must_use]
-    pub fn granted_at(&self) -> Option<&str> {
-        self.granted_at.as_deref()
-    }
-
-    #[must_use]
-    pub fn is_judged(&self) -> bool {
-        self.granted_hash.is_some()
+    pub fn path_on_disk(&self, root: impl AsRef<Path>) -> PathBuf {
+        from_manifest_path(root, &self.path)
     }
 }
 
@@ -523,18 +372,18 @@ impl PactEntry {
 #[serde(deny_unknown_fields)]
 pub struct ScopeRecord {
     // All four are read back exactly as written, for the reason on
-    // `PactEntry::scope`: these bytes are committed and hand-edited, so folding
-    // one on the way through would put a line in the diff of somebody who only
-    // asked to pact something else. `name` is judged by `validate_scope` when
+    // `ScopedDirectory::scope`: these bytes are committed and hand-edited, so
+    // folding one on the way through would put a line in the diff of somebody
+    // who only asked to scope something else. `name` is judged by `validate_scope` when
     // the manifest is read and never repaired; the other three are not judged at
     // all, because what a team key, a review state or a label may contain is
     // the tracker's business and not this crate's.
     name: String,
     // The field says what the value is — a Linear team key, `WAR` — and the
-    // TOML key cannot follow it: `team` is what every committed
-    // `.warlock/pacts.toml` already spells, those bytes are hand-edited, and
-    // `deny_unknown_fields` above turns a renamed key into a refusal to read a
-    // manifest that was valid yesterday.
+    // TOML key cannot follow it: `team` is what every committed manifest
+    // already spells, those bytes are hand-edited, and `deny_unknown_fields`
+    // above turns a renamed key into a refusal to read a manifest that was valid
+    // yesterday.
     #[serde(rename = "team")]
     team_key: String,
     review_state: String,
@@ -633,7 +482,7 @@ pub fn to_manifest_path(root: impl AsRef<Path>, path: impl AsRef<Path>) -> Resul
     }
 
     if parts.is_empty() {
-        // `root` itself: the repository root can be a pacted module too.
+        // `root` itself: the repository root can be scoped too.
         return Ok(ROOT_MODULE.to_owned());
     }
     Ok(parts.join("/"))
@@ -664,7 +513,7 @@ pub fn from_manifest_path(root: impl AsRef<Path>, stored: &str) -> PathBuf {
 ///
 /// assert_eq!(
 ///     manifest_path("/repo"),
-///     Path::new("/repo").join(".warlock").join("pacts.toml"),
+///     Path::new("/repo").join(".warlock").join("scopes.toml"),
 /// );
 /// ```
 #[must_use]
@@ -672,10 +521,9 @@ pub fn manifest_path(root: impl AsRef<Path>) -> PathBuf {
     root.as_ref().join(MANIFEST_DIR).join(MANIFEST_FILE)
 }
 
-// The leading dot is load-bearing, not cosmetic: the `ignore` walks the rest of
-// the crate is built on skip hidden entries, so a temporary sitting in a module
-// directory cannot reach a tree, a subtree hash or a pact request while it
-// exists. Naming it without the dot would let a half-written file be hashed.
+// The leading dot is load-bearing, not cosmetic: the tree's walk skips hidden
+// entries, so a temporary written beside its target never shows in the tree
+// while it exists.
 fn temp_file_name(target: &str) -> String {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -739,9 +587,9 @@ pub enum Error {
         found: i64,
         supported: u32,
     },
-    Entry {
+    Directory {
         index: usize,
-        module: Option<String>,
+        path: Option<String>,
         source: toml::de::Error,
     },
     Scope {
@@ -771,26 +619,29 @@ impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::NotFound { path } => {
-                write!(f, "no pact manifest at `{}`", path.display())
+                write!(f, "no scope manifest at `{}`", path.display())
             }
             Self::Io { path, source } => {
                 write!(f, "could not read or write `{}`: {source}", path.display())
             }
-            Self::Syntax { source } => write!(f, "malformed pact manifest: {source}"),
+            Self::Syntax { source } => write!(f, "malformed scope manifest: {source}"),
             Self::UnsupportedVersion { found, supported } => write!(
                 f,
-                "pact manifest schema version {found} is not supported; this build reads version {supported}"
+                "scope manifest schema version {found} is not supported; this build reads version {supported}"
             ),
-            Self::Entry {
+            Self::Directory {
                 index,
-                module: Some(module),
+                path: Some(path),
                 source,
-            } => write!(f, "pact entry {index} (`{module}`) is malformed: {source}"),
-            Self::Entry {
+            } => write!(
+                f,
+                "scoped directory {index} (`{path}`) is malformed: {source}"
+            ),
+            Self::Directory {
                 index,
-                module: None,
+                path: None,
                 source,
-            } => write!(f, "pact entry {index} is malformed: {source}"),
+            } => write!(f, "scoped directory {index} is malformed: {source}"),
             Self::Scope {
                 path,
                 index,
@@ -814,7 +665,7 @@ impl fmt::Display for Error {
                 write!(f, " repeats the name `{name}`")
             }
             Self::Serialize { source } => {
-                write!(f, "could not write the pact manifest as TOML: {source}")
+                write!(f, "could not write the scope manifest as TOML: {source}")
             }
             Self::PathOutsideRoot { root, path } => write!(
                 f,
@@ -835,7 +686,7 @@ impl std::error::Error for Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Io { source, .. } => Some(source),
-            Self::Syntax { source } | Self::Entry { source, .. } => Some(source),
+            Self::Syntax { source } | Self::Directory { source, .. } => Some(source),
             Self::Scope { source, .. } => Some(source),
             Self::Serialize { source } => Some(source),
             Self::NotFound { .. }
@@ -857,7 +708,8 @@ pub enum ScopeFault {
     // Boxed because `toml::de::Error` is 88 bytes on its own, and this variant
     // also carries a path and a name: inline it and `manifest::Error` grows past
     // the size at which every `Result` in the workspace that can fail this way
-    // is paying for the failure. `Error::Entry` sits right at that line already.
+    // is paying for the failure. `Error::Directory` sits right at that line
+    // already.
     Malformed(Box<toml::de::Error>),
     Refused(Rule),
 }
@@ -881,16 +733,16 @@ impl std::error::Error for ScopeFault {
 }
 
 // Reading in two passes — the version as whatever integer the file says, the
-// pact entries and scope records still raw — is what buys the error variants
-// that name something: the version before it is trusted, and each entry or
-// record by its index and by the name it did spell. Deserialising straight into
+// directories and scope records still raw — is what buys the error variants
+// that name something: the version before it is trusted, and each row or record
+// by its index and by the name it did spell. Deserialising straight into
 // `Manifest` instead would give one blanket "this file is wrong".
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawManifest {
     version: i64,
     #[serde(default)]
-    pact: Vec<toml::Value>,
+    directory: Vec<toml::Value>,
     #[serde(default)]
     scope: Vec<toml::Value>,
 }
@@ -904,7 +756,7 @@ fn deserialize_version<'de, D: Deserializer<'de>>(deserializer: D) -> Result<u32
         Ok(version)
     } else {
         Err(serde::de::Error::custom(format!(
-            "pact manifest schema version {version} is not supported; this build reads version {SCHEMA_VERSION}"
+            "scope manifest schema version {version} is not supported; this build reads version {SCHEMA_VERSION}"
         )))
     }
 }

@@ -7,20 +7,18 @@ use std::time::Duration;
 
 use serde_json::Value;
 use warlock_engine::splitting::Numbered;
-use warlock_engine::{Agent, agent, drafting, stub_answer, working};
+use warlock_engine::{agent, drafting, working};
 
 use crate::asking::Asks;
 use crate::claude::{Activities, Activity, Cancel, Converses, Split, Stopped, Wired, Worked};
 use crate::clipboard::Clip;
 use crate::error::Error;
-use crate::freshness::{Freshened, Freshening, Freshens};
 use crate::git::{Commit, Dirty, Error as GitError, Forge, Opened, PullRequest, Repository};
-use crate::inflight::Port;
 use crate::linear::{
     Board, Error as LinearError, FetchedProject, Issue as LinearIssue, IssueProject, Listing,
     NamedIssue, NewIssue, NewProject, Opens, Posts, Project as LinearProject, Queue,
 };
-use crate::puller::{Raised, Raises, Raising, Step, Stopping, activity_port};
+use crate::puller::{Raised, Raises, Raising, Stopping, activity_port};
 use crate::pulling::{Splits, Works};
 
 // A clipboard nothing on the machine has to provide. The refusal is kept as the
@@ -114,27 +112,6 @@ impl Asks for Typing {
 
     fn discard_typed_ahead(&mut self) {
         self.discards += 1;
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct Passing;
-
-impl Passing {
-    pub(crate) fn filling() -> Self {
-        Self
-    }
-}
-
-impl Agent for Passing {
-    fn run(&self, request: &agent::Request) -> Result<agent::Response, agent::Error> {
-        Ok(agent::Response::new(stub_answer(request)))
-    }
-}
-
-impl Wired for Passing {
-    fn wired(&self, _cancel: Cancel, _activities: Activities) -> Self {
-        *self
     }
 }
 
@@ -1093,7 +1070,6 @@ pub(crate) enum GitCall {
     Head,
     ChangedAgainst(String),
     CommitAll(String),
-    CommitPaths { message: String, paths: Vec<String> },
     Publish(String),
 }
 
@@ -1127,8 +1103,8 @@ impl Checkout {
     }
 
     /// What the branch is to be found to have changed against the default branch,
-    /// one answer per call, the last repeating: the paths a freshness pass decides
-    /// which pacted directories to refresh from.
+    /// one answer per call, the last repeating: what decides whether a finished run
+    /// has anything to open a pull request for.
     pub(crate) fn changed(mut self, changed: impl IntoIterator<Item = Vec<&'static str>>) -> Self {
         self.changed = changed
             .into_iter()
@@ -1147,16 +1123,11 @@ impl Checkout {
 
     /// Every commit message this checkout was asked to make, in order: what a halt
     /// is asserted to have left empty.
-    ///
-    /// Both kinds of commit, because the question this answers is whether anything
-    /// was committed at all: a refresh commit of named paths is as much a commit as
-    /// a sub-task's, and one kind missing here would make "nothing was committed"
-    /// true of a run that committed.
     pub(crate) fn commits(&self) -> Vec<String> {
         self.calls()
             .into_iter()
             .filter_map(|call| match call {
-                GitCall::CommitAll(message) | GitCall::CommitPaths { message, .. } => Some(message),
+                GitCall::CommitAll(message) => Some(message),
                 _ => None,
             })
             .collect()
@@ -1220,21 +1191,6 @@ impl Repository for Checkout {
 
     fn commit_all(&self, message: &str) -> Result<(), GitError> {
         self.note(GitCall::CommitAll(message.to_owned()));
-        Ok(())
-    }
-
-    // The empty list is refused here as it is by `Git`, so a caller that reached
-    // this with nothing to commit fails in a test rather than passing one.
-    fn commit_paths(&self, message: &str, paths: &[String]) -> Result<(), GitError> {
-        if paths.is_empty() {
-            return Err(GitError::Empty {
-                what: "the commit of named paths".to_owned(),
-            });
-        }
-        self.note(GitCall::CommitPaths {
-            message: message.to_owned(),
-            paths: paths.to_vec(),
-        });
         Ok(())
     }
 
@@ -1451,139 +1407,30 @@ impl Works for Sessions {
     }
 }
 
-/// The freshness pass, written down before the run starts: one outcome, and what
-/// the loop asked it about kept.
-///
-/// One answer and not a sequence, [`Slicing`]'s reason: a run refreshes once,
-/// between the last sub-task's commit and the push, and a second answer would be a
-/// promise about a road nothing takes. Spends no session and runs no `git` — which
-/// is the whole point of the seam being here, since the real pass does both.
-#[derive(Debug, Clone)]
-pub(crate) struct Refreshing {
-    log: Arc<Mutex<Vec<FreshenAsked>>>,
-    answer: Freshened,
-    /// A checkout that could not be asked what the branch changed, which is the one
-    /// failure the pass hands back as an error rather than reporting. Not a
-    /// `GitError` held ready, because that type is not `Clone`: this says which one
-    /// to build, so a stand-in that failed once cannot silently succeed after.
-    refusing: bool,
-    /// The refresh commit to make through the checkout before answering, for the
-    /// tests that are about where in the finish the pass ran.
-    commit: Option<(String, Vec<String>)>,
-}
-
-/// What the loop handed the pass, in the spellings a test can write down.
-///
-/// The manifest arrives as the modules it records rather than as itself: what a
-/// test needs to know is that the pass was given the run's own manifest, and a
-/// `Manifest` in a failing assertion is a screenful.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct FreshenAsked {
-    pub(crate) ticket: String,
-    pub(crate) root: PathBuf,
-    pub(crate) held: Vec<String>,
-    pub(crate) pacted: Vec<String>,
-}
-
-impl Refreshing {
-    /// The ordinary branch: nothing was left stale, so nothing was refreshed.
-    pub(crate) fn quiet() -> Self {
-        Self::answering(Freshened::default())
-    }
-
-    pub(crate) fn answering(answer: Freshened) -> Self {
-        Self {
-            log: Arc::default(),
-            answer,
-            refusing: false,
-            commit: None,
-        }
-    }
-
-    /// A pass that could not run at all because `git` could not be asked, which is
-    /// the only thing that leaves the pass as an error.
-    pub(crate) fn refusing() -> Self {
-        Self {
-            refusing: true,
-            ..Self::answering(Freshened::default())
-        }
-    }
-
-    /// The same outcome, with the documents committed through the checkout it was
-    /// handed first, as the real pass commits them.
-    ///
-    /// The one way a test can say *where in the finish* the refresh happened: the
-    /// commit lands in the checkout's own log, between the last sub-task's commit
-    /// and the reading of the branch to push against.
-    pub(crate) fn committing(mut self, message: &str, paths: &[&str]) -> Self {
-        self.commit = Some((
-            message.to_owned(),
-            paths.iter().map(|path| (*path).to_owned()).collect(),
-        ));
-        self
-    }
-
-    /// Every asking, in order: how a test says the pass was reached once, and with
-    /// the ticket, the root, the sigils and the manifest the run itself was holding.
-    pub(crate) fn asked(&self) -> Vec<FreshenAsked> {
-        locked(&self.log).clone()
-    }
-}
-
-impl Freshens for Refreshing {
-    fn freshen(&self, asked: &Freshening<'_>) -> Result<Freshened, GitError> {
-        locked(&self.log).push(FreshenAsked {
-            ticket: asked.ticket.to_owned(),
-            root: asked.root.to_path_buf(),
-            held: asked.held.to_vec(),
-            pacted: asked
-                .manifest
-                .entries()
-                .iter()
-                .map(|entry| entry.module().to_owned())
-                .collect(),
-        });
-        if self.refusing {
-            return Err(GitError::NotFound {
-                program: "git".to_owned(),
-            });
-        }
-        if let Some((message, paths)) = &self.commit {
-            asked.repo.commit_paths(message, paths)?;
-        }
-        Ok(self.answer.clone())
-    }
-}
-
 /// The three sessions one pull on the panel spends, written down before the run
 /// starts, and the seam the panel's own runner takes.
 ///
 /// The sub-task sessions are handed this run's own activity port, which is the one
 /// thing a test cannot write down in advance: what a session is seen doing has to
-/// arrive over the same channel the headings do, or the account card is being
-/// asserted about something the panel does not do.
+/// arrive over the same channel the headings do, or the thread is being asserted
+/// about something the panel does not do.
 #[derive(Clone)]
 pub(crate) struct Written {
     split: Slicing,
     sessions: Sessions,
-    freshen: Refreshing,
     doing: Vec<Activity>,
-    refreshing: Vec<String>,
     waiting: bool,
     raised: Arc<Mutex<Vec<String>>>,
 }
 
 impl Written {
-    /// A run over the three stand-ins, reporting nothing and refreshing nowhere:
-    /// what a session is seen doing and which directories the pass reaches are
-    /// said by the two builders below, because most tests are about neither.
-    pub(crate) fn of(split: Slicing, sessions: Sessions, freshen: Refreshing) -> Self {
+    /// A run over the two stand-ins, reporting nothing: what a session is seen
+    /// doing is said by the builder below, because most tests are not about it.
+    pub(crate) fn of(split: Slicing, sessions: Sessions) -> Self {
         Self {
             split,
             sessions,
-            freshen,
             doing: Vec::new(),
-            refreshing: Vec::new(),
             waiting: false,
             raised: Arc::default(),
         }
@@ -1599,26 +1446,9 @@ impl Written {
         self
     }
 
-    pub(crate) fn freshening(mut self, freshen: Refreshing) -> Self {
-        self.freshen = freshen;
-        self
-    }
-
     /// What every sub-task session reports before it answers.
     pub(crate) fn doing(mut self, doing: impl IntoIterator<Item = Activity>) -> Self {
         self.doing = doing.into_iter().collect();
-        self
-    }
-
-    /// The directories the refresh pass is to be seen reaching, in the manifest's
-    /// own spelling, which the stand-in has no way to say for itself: the real one
-    /// reports them out of the descent under it, and [`Refreshes`] says them onto
-    /// the same channel before it answers.
-    pub(crate) fn refreshing(mut self, directories: &[&str]) -> Self {
-        self.refreshing = directories
-            .iter()
-            .map(|directory| (*directory).to_owned())
-            .collect();
         self
     }
 
@@ -1640,9 +1470,8 @@ impl Written {
 impl Raises for Written {
     type Split = Slicing;
     type Sessions = Publishing;
-    type Freshen = Refreshes;
 
-    fn raise(&self, asked: Raising<'_>) -> Raised<Slicing, Publishing, Refreshes> {
+    fn raise(&self, asked: Raising<'_>) -> Raised<Slicing, Publishing> {
         let activities = activity_port(&asked.events);
         Raised {
             split: self.split.clone(),
@@ -1654,11 +1483,6 @@ impl Raises for Written {
                 stopping: asked.stopping,
                 waiting: self.waiting,
                 raised: Arc::clone(&self.raised),
-            },
-            freshen: Refreshes {
-                inner: self.freshen.clone(),
-                events: asked.events,
-                directories: self.refreshing.clone(),
             },
         }
     }
@@ -1694,24 +1518,6 @@ impl Works for Publishing {
             return Worked::Halted(Stopped::Cancelled);
         }
         self.inner.work(opening)
-    }
-}
-
-/// The freshness pass as the panel wires it: the stand-in that answers, with the
-/// per-directory events the real pass's descent reports said onto the run's own
-/// channel first.
-pub(crate) struct Refreshes {
-    inner: Refreshing,
-    events: Port<Step>,
-    directories: Vec<String>,
-}
-
-impl Freshens for Refreshes {
-    fn freshen(&self, asked: &Freshening<'_>) -> Result<Freshened, GitError> {
-        for directory in &self.directories {
-            self.events.send(Step::Refreshing(directory.clone()));
-        }
-        self.inner.freshen(asked)
     }
 }
 

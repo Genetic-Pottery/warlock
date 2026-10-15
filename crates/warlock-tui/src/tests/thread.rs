@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 use warlock_engine::agent;
 
 use super::{Ending, Thread, Turn, ending_for};
-use crate::account::{Account, Line, Outcome};
+use crate::account::Line;
 use crate::claude::Activity;
 
 fn at(base: Instant, seconds: u64) -> Instant {
@@ -22,15 +22,10 @@ fn said(thread: &Thread, now: Instant) -> Vec<String> {
         .lines(now)
         .into_iter()
         .map(|line| match line {
-            // Never a directory heading, which is an account's row: it is
-            // here so this helper words every row of the panel and not
-            // most of them.
-            Line::Directory { path } => path.display().to_string(),
             Line::Clocked { clock, text } => format!("{clock} {text}"),
             // A thread holds a conversation, not rows: a wrapped row is
             // made on the way to a panel of some width.
-            Line::Summary { text }
-            | Line::Text { text }
+            Line::Text { text }
             | Line::Said { text }
             | Line::Note { text }
             | Line::Wrapped { text, .. } => text,
@@ -297,42 +292,8 @@ fn no_money_reaches_this_card_however_much_a_turn_reports() {
     thread.record(&Activity::Cost { usd: 0.21 }, at(base, 1));
     thread.answer("that much.", at(base, 2));
 
-    // The same twenty-one cents on an account, which is the card money is
-    // said on: what a pass produced and what it cost, totalled.
-    let mut account = Account::new(base);
-    account.open_section("crates/engine", base);
-    account.record(&Activity::Cost { usd: 0.21 }, at(base, 1));
-    account.close_section(
-        &Outcome::Wrote {
-            document: "crates/engine/.warlock.md".into(),
-            bytes: 2341,
-        },
-        at(base, 2),
-    );
-    account.finish(at(base, 3));
-
     let asked = said(&thread, at(base, 4));
-    let pact_money: Vec<String> = account
-        .lines(at(base, 4))
-        .into_iter()
-        .filter_map(|line| match line {
-            Line::Clocked { text, .. } | Line::Summary { text } => {
-                text.contains("$0.21").then_some(text)
-            }
-            _ => None,
-        })
-        .collect();
 
-    // The account says what a pass produced and totals those; the question
-    // says nothing about money at all, so there are not two numbers on one
-    // screen for a reader to add up.
-    assert_eq!(
-        pact_money,
-        vec![
-            "wrote crates/engine/.warlock.md — 2341 bytes, $0.21".to_owned(),
-            "pact finished — 1 directory, 0:03, $0.21".to_owned(),
-        ],
-    );
     assert_eq!(
         asked,
         vec![
@@ -606,47 +567,6 @@ fn a_window_gives_back_what_is_there_rather_than_what_was_asked_for() {
     );
     assert_eq!(thread.window(0, 99, at(base, 4)).len(), 6);
     assert_eq!(thread.window(99, 4, at(base, 4)), Vec::new());
-}
-
-#[test]
-fn a_run_is_no_part_of_this_card_however_it_is_driven() {
-    // The account is the run's card and this one has no idea it exists:
-    // nothing here opens, feeds or closes a run, and there is no call that
-    // could. What the conversation holds is what was typed into it.
-    let base = Instant::now();
-    let mut thread = Thread::new();
-
-    thread.ask("what is in crates?", base);
-    thread.record(&Activity::Thinking, at(base, 1));
-    thread.answer("The engine and the front end.", at(base, 2));
-
-    let mut account = Account::new(base);
-    account.open_section("crates/engine", base);
-    account.record(&Activity::Thinking, at(base, 2));
-    account.close_section(
-        &Outcome::Wrote {
-            document: "crates/engine/.warlock.md".into(),
-            bytes: 2341,
-        },
-        at(base, 3),
-    );
-    account.finish(at(base, 4));
-
-    // A whole run happened beside the conversation, and the conversation is
-    // the one turn somebody asked for.
-    assert_eq!(thread.turns().len(), 1);
-    assert_eq!(
-        said(&thread, at(base, 900)),
-        vec![
-            "what is in crates?".to_owned(),
-            "0:02 thinking".to_owned(),
-            "The engine and the front end.".to_owned(),
-        ],
-    );
-    assert!(
-        thread.in_flight().is_none(),
-        "a run cannot mute a conversation it is no part of"
-    );
 }
 
 #[test]

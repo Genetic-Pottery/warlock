@@ -217,7 +217,7 @@ fn a_repository_that_has_written_no_template_gets_the_built_in_one() {
 #[test]
 fn a_warlock_directory_with_no_template_in_it_is_still_absent() {
     // The manifest's directory exists in every repository warlock has ever
-    // pacted anything in; only the file is missing.
+    // scoped anything in; only the file is missing.
     let root = a_root();
     fs::create_dir_all(root.path().join(".warlock")).expect("a `.warlock` directory");
 

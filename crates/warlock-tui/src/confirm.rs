@@ -1,6 +1,5 @@
 //! The accident that costs a session is the reflex second Esc — the first
-//! cancels a pact, the run is still tidying up, and the next press lands in a
-//! shell nobody meant to be in. Which is why Esc answers No here: the key that
+//! closes a window, and the next press lands in a shell nobody meant to be in. Which is why Esc answers No here: the key that
 //! means "not this" cannot also be the key that leaves. For the same reason the
 //! mode is a value of its own and *not* a field on `App`, so an app compared
 //! before opening and after closing is equal because nothing about it was

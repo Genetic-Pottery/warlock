@@ -6,11 +6,11 @@ use std::time::{Duration, Instant};
 
 use ratatui::crossterm::event::{KeyEvent, MouseEvent};
 use ratatui::layout::Size;
-use warlock_engine::{Agent, Manifest};
+use warlock_engine::Manifest;
 
-use crate::app::{App, Focus, Run, Working};
+use crate::app::{App, Focus, Working};
 use crate::chatting::Chat;
-use crate::claude::{ChatAgent, ClaudeAgent, Converses, Wired};
+use crate::claude::{ChatAgent, Converses};
 use crate::clipboard::{self, Clip, Clipboard};
 use crate::composer::{Composed, Composer, paste_for};
 use crate::confirm::QuitConfirm;
@@ -25,7 +25,6 @@ use crate::input::{
 };
 use crate::linear::{Opener as LinearOpener, Opens};
 use crate::modal::{Modal, Modals};
-use crate::pacting::{Pact, Reloaded};
 use crate::planned::edited_drafts;
 use crate::prompt::{RecordPrompt, ScopePrompt};
 use crate::puller::{Claudes, Puller, Raises};
@@ -34,7 +33,7 @@ use crate::resume::resume_press;
 use crate::scoping::{record_edit, scope_edit, scope_press};
 use crate::screen::Screen;
 use crate::selection::{Cell, Position, copied_text, position_at};
-use crate::session::{Scope, Watched, load_app, start_watching};
+use crate::session::{Scope, Watched, load_app, reload, start_watching};
 use crate::settings::Said;
 use crate::submission::{ToPush, Wanted};
 use crate::ui::{Reach, Shape, draw, help_most_scroll, panel_width};
@@ -42,9 +41,9 @@ use crate::viewing::view_press;
 
 /// How long the loop waits for a keystroke before going round anyway.
 ///
-/// The ceiling on how stale the footer's clock and a run's header can get, and
-/// the reason an idle warlock redraws ten times a second rather than sleeping:
-/// the worker threads have no way to wake this one.
+/// The ceiling on how stale the footer's clock and the thread's clocks can get,
+/// and the reason an idle warlock redraws ten times a second rather than
+/// sleeping: the worker threads have no way to wake this one.
 pub const POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 /// How long the footer keeps what it was told.
@@ -93,12 +92,10 @@ impl<S: Screen> Interactive<S> {
             // text it put on an X11 selection. See `mod@clipboard`.
             clipboard: Clipboard::open(),
             // Built once, and cheap to build: an agent is a command line and a
-            // timeout, so no `claude` exists until a key asks for a pass or a turn.
-            pact: Pact::new(),
+            // timeout, so no `claude` exists until a key asks for a turn.
             chat: Chat::new(scope.repo_root.clone()),
-            // Built once, for `Pact::new`'s reason and with none of its cost: the
-            // seam is a unit value and no socket exists until a confirmed dialog
-            // asks for one. The home under which the sigils, the binding and the
+            // Built once, and cheaper still: the seam is a unit value and no
+            // socket exists until a confirmed dialog asks for one. The home under which the sigils, the binding and the
             // key store sit is read here as well, once for the session.
             pushes: Pushes::new(),
             // The same two facts, read a second time rather than shared with the
@@ -185,14 +182,14 @@ where
     }
 }
 
-/// The six impure things a session is built over — the screen, the model, the
-/// conversation's model, the clipboard, the Linear a push files to and the model
-/// a cut drafts a slice with — named once, so a test can press keys at a whole
+/// The impure things a session is built over — the screen, the conversation's
+/// model, the clipboard, the Linear a push files to, the model a cut drafts a
+/// slice with and what a pull runs — named once, so a test can press keys at a whole
 /// session with no terminal attached, no `claude` installed, no display and no
 /// socket. `warlock` itself only ever uses [`Live`].
 ///
-/// Associated types rather than six parameters on [`Session`], so a seventh seam
-/// is a line here and in each implementation rather than a parameter threaded
+/// Associated types rather than parameters on [`Session`], so another seam is a
+/// line here and in each implementation rather than a parameter threaded
 /// through every signature that names a session.
 ///
 /// The two models are two types because they are two conversations: the panel's
@@ -201,7 +198,6 @@ where
 /// path needs.
 trait Seams {
     type Screen: Screen;
-    type Pass: Wired + Agent;
     type Talk: Converses;
     type Clip: Clip;
     type Board: Opens;
@@ -215,7 +211,6 @@ struct Live<S>(PhantomData<S>);
 
 impl<S: Screen> Seams for Live<S> {
     type Screen = S;
-    type Pass = ClaudeAgent;
     type Talk = ChatAgent;
     type Clip = Clipboard;
     type Board = LinearOpener;
@@ -231,7 +226,6 @@ impl<S: Screen> Seams for Live<S> {
 struct Parts<K: Seams> {
     screen: K::Screen,
     clipboard: K::Clip,
-    pact: Pact<K::Pass>,
     chat: Chat<K::Talk>,
     pushes: Pushes<K::Board>,
     cutter: Cutter<K::Board, K::Draft>,
@@ -244,7 +238,6 @@ struct Session<K: Seams> {
     screen: K::Screen,
     scope: Scope,
     manifest: Manifest,
-    pact: Pact<K::Pass>,
     chat: Chat<K::Talk>,
     /// The session's one clipboard handle, opened in [`Interactive::open`] and
     /// held for as long as the session is, because a copy does not outlive the
@@ -263,8 +256,8 @@ struct Session<K: Seams> {
     cutter: Cutter<K::Board, K::Draft>,
     /// The same for a `/pull`, whose run is a say-no to much more than a second
     /// pull: while it is underway a session is editing this working tree, so
-    /// `p`, `r`, `s`, `/draft`, `/resume` and the composer are all refused with
-    /// the line [`Puller::in_flight`] words. See [`Puller`].
+    /// `s`, `/draft`, `/resume` and the composer are all refused with the line
+    /// [`Puller::in_flight`] words. See [`Puller`].
     puller: Puller<K::Board, K::Repo, K::Forge, K::Raise>,
     prompt: ScopePrompt,
     /// The second window the `s` key puts up, over a scope name no `[[scope]]`
@@ -299,7 +292,6 @@ impl<K: Seams> Session<K> {
         let Parts {
             screen,
             clipboard,
-            pact,
             chat,
             pushes,
             cutter,
@@ -310,7 +302,6 @@ impl<K: Seams> Session<K> {
             screen,
             scope,
             manifest,
-            pact,
             chat,
             clipboard,
             confirm: QuitConfirm::default(),
@@ -478,8 +469,8 @@ impl<K: Seams> Session<K> {
         };
         // A key pressed with the button still down can put another card in the
         // panel, and the drag outlives it: without this the held pointer would
-        // go on scrolling, now through the account or the document, neither of
-        // which a drag has ever been able to move.
+        // go on scrolling, now through the document, which a drag has never
+        // been able to move.
         if !self.app.panel().showing_thread() {
             return;
         }
@@ -535,7 +526,7 @@ impl<K: Seams> Session<K> {
     /// that ends the event loop in `main.rs`.
     ///
     /// `now` is the instant the event arrived, read once by the caller: a turn
-    /// and a pass are clocked from the keystroke that asked for them rather
+    /// is clocked from the keystroke that asked for them rather
     /// than from the first thing the model got round to saying.
     ///
     /// Every arm below is one key. Nothing here re-gates what the module it
@@ -547,17 +538,10 @@ impl<K: Seams> Session<K> {
     #[allow(clippy::too_many_lines)]
     fn press(&mut self, key: KeyEvent, now: Instant) -> Result<bool, Error> {
         let typing = self.typing();
-        let running = self.pact.running();
         let pulling = self.puller.in_flight();
-        let pressed = press_for(key, self.modal(), typing, running, self.chat.answering());
+        let pressed = press_for(key, self.modal(), typing, self.chat.answering());
 
         match pressed {
-            // Enough even with a pact in flight: `pact` drops on the way out,
-            // which cancels the run and kills the `claude` it was waiting on (see
-            // [`Running`]), and the guard drops after it and puts the terminal
-            // back. Nothing joins the worker: it has written whole documents or
-            // none, and the manifest it never got to rewrite still says what it
-            // said before.
             Pressed::Leave => return Ok(false),
             Pressed::Confirm(next) => self.confirm = next,
             Pressed::Help(next) => self.help = next,
@@ -589,15 +573,9 @@ impl<K: Seams> Session<K> {
             Pressed::Carry(answered) => self.cutter.carried(&mut self.app, answered, now),
             Pressed::WriteBrief(answered) => self.chat.offered(&mut self.app, answered, now),
             Pressed::Pull(answered) => self.puller.answered(&mut self.app, answered, now),
-            // The pact is deliberately *not* taken down here. The worker is still
-            // going to hash what it wrote, save the manifest and report, and all
-            // of that arrives at the bottom of the loop like any other outcome;
-            // forgetting about it now would leave the run header up for a run
-            // nobody was listening to any more.
-            Pressed::Act(Action::CancelPact) => self.pact.stop(),
-            // The turn is deliberately *not* taken down here, exactly as a
-            // cancelled pact is not: the worker still has one thing to say, and it
-            // says it at the bottom of the loop like any other ending. That is
+            // The turn is deliberately *not* taken down here: the worker still has
+            // one thing to say, and it says it at the bottom of the loop like any
+            // other ending. That is
             // what puts the cancelled line under whatever work had already arrived
             // and gives the field the keyboard back — a turn forgotten here would
             // leave the composer muted for the rest of the session.
@@ -610,32 +588,8 @@ impl<K: Seams> Session<K> {
             Pressed::Act(Action::SelectFirst) => self.app.select_first(),
             Pressed::Act(Action::SelectLast) => self.app.select_last(),
             Pressed::Act(Action::ToggleCollapsed) => self.app.toggle_collapsed(),
-            Pressed::Act(Action::TogglePactedOnly) => self.app.toggle_pacted_only(),
+            Pressed::Act(Action::ToggleScopedOnly) => self.app.toggle_scoped_only(),
             Pressed::Act(Action::ToggleFiles) => self.app.toggle_files(),
-            // Two arms rather than one dispatching on a computed [`Run`], because
-            // the list of keys is what this function is for and a key dispatching
-            // on a value computed elsewhere would be a key a reader could not
-            // find here.
-            Pressed::Act(Action::TogglePact) => {
-                self.pact.press(
-                    Run::Pact,
-                    &mut self.app,
-                    &self.manifest,
-                    &self.scope,
-                    pulling.as_deref(),
-                    now,
-                );
-            }
-            Pressed::Act(Action::Refresh) => {
-                self.pact.press(
-                    Run::Refresh,
-                    &mut self.app,
-                    &self.manifest,
-                    &self.scope,
-                    pulling.as_deref(),
-                    now,
-                );
-            }
             // A press that read nothing leaves the card holding what it held, so
             // a `None` keeps the file remembered before rather than clearing it:
             // the edit key re-reads the card only when the file it edited is
@@ -656,7 +610,6 @@ impl<K: Seams> Session<K> {
                     &mut self.manifest,
                     self.document.as_deref(),
                     self.mouse_captured,
-                    running,
                 )?;
             }
             Pressed::Act(Action::SwapCard) => self.app.swap_card(),
@@ -675,7 +628,6 @@ impl<K: Seams> Session<K> {
                     &self.manifest,
                     &self.scope.repo_root,
                     self.scope.chrome.sigils(),
-                    running,
                     pulling.as_deref(),
                     now,
                 );
@@ -686,6 +638,7 @@ impl<K: Seams> Session<K> {
                 self.record = RecordPrompt::Closed;
             }
             Pressed::Scope(edited) => {
+                let before = self.manifest.clone();
                 let windows = scope_edit(
                     &mut self.app,
                     &mut self.manifest,
@@ -695,8 +648,10 @@ impl<K: Seams> Session<K> {
                 );
                 self.prompt = windows.scope;
                 self.record = windows.record;
+                self.recolour(&before, now);
             }
             Pressed::Record(edited) => {
+                let before = self.manifest.clone();
                 self.record = record_edit(
                     &mut self.app,
                     &mut self.manifest,
@@ -704,6 +659,7 @@ impl<K: Seams> Session<K> {
                     &self.record,
                     edited,
                 );
+                self.recolour(&before, now);
             }
             Pressed::Write(edited) => {
                 self.chat.write(&mut self.app, edited, now);
@@ -883,28 +839,23 @@ impl<K: Seams> Session<K> {
         }
     }
 
+    // A saved scope changes which rows are covered, and the rows are only
+    // coloured by a load: waiting for the watcher would leave the row grey for a
+    // quiet period, and for good with the watcher off. The reload is handed to
+    // the watcher as caught up, so the save's own file event costs no second walk.
+    fn recolour(&mut self, before: &Manifest, now: Instant) {
+        if self.manifest == *before {
+            return;
+        }
+        let tree = reload(&mut self.app, &self.scope, &mut self.manifest);
+        self.watched.caught_up(tree.as_ref(), now);
+    }
+
     fn keep_up(&mut self) {
         let now = Instant::now();
         self.forget_stale_message(now);
-        // The one round in a run's life the watcher has to hear about, and it says
-        // so itself: a `Reloaded` comes back on the round the run ended and on no
-        // other, carrying the tree that reload read. This loop used to work that
-        // edge out by reading `is_some()` either side of the drain and comparing —
-        // a detector kept by hand over a fact the run already knew. See
-        // [`Reloaded`].
-        if let Some(Reloaded(tree)) =
-            self.pact
-                .keep_up(&mut self.app, &mut self.manifest, &self.scope, now)
-        {
-            self.watched.caught_up(tree.as_ref(), now);
-        }
-        self.watched.round(
-            &mut self.app,
-            &self.scope,
-            &mut self.manifest,
-            self.pact.running(),
-            now,
-        );
+        self.watched
+            .round(&mut self.app, &self.scope, &mut self.manifest, now);
         // And the conversation's own bottom end. Nothing comes back: a ready
         // brief's question and a write turn's path prompt are the
         // conversation's windows, so they are opened in there rather than here
@@ -926,9 +877,9 @@ impl<K: Seams> Session<K> {
         if let Some(proposal) = self.cutter.keep_up(&mut self.app, now) {
             self.chat.suggest(&proposal);
         }
-        // And a ticket being chosen, asked about, or worked: the account's
-        // sections and the thread's milestones, drained so the frames keep coming
-        // while a run that takes an hour runs. See [`Puller::keep_up`].
+        // And a ticket being chosen, asked about, or worked: the thread's work
+        // lines and milestones, drained so the frames keep coming while a run
+        // that takes an hour runs. See [`Puller::keep_up`].
         self.puller.keep_up(&mut self.app, now);
     }
 }

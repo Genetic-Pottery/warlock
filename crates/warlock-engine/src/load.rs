@@ -1,43 +1,47 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::fmt;
 use std::path::{Component, Path, PathBuf};
 
-use crate::walk::{self, DOCUMENT_FILE};
+use crate::walk;
 use crate::{
-    Manifest, Node, NodeState, PactEntry, Tree, decide_state, hash, ignores, manifest, scope,
-    subtree_hash, to_manifest_path, validate_scope,
+    Manifest, Node, ScopedDirectory, Tree, manifest, scope, scope_covering, to_manifest_path,
+    validate_scope,
 };
 
 const GIT_DIR: &str = ".git";
 
 /// ```
 /// use std::fs;
-/// use warlock_engine::{Loaded, NodeState, load_tree};
+/// use warlock_engine::{Loaded, Manifest, ScopedDirectory, load_tree};
 ///
 /// let repo = tempfile::tempdir()?;
 /// fs::create_dir(repo.path().join(".git"))?;
 /// fs::create_dir_all(repo.path().join("crates/engine/src"))?;
-/// fs::write(repo.path().join("crates/engine/.warlock.md"), "# engine\n")?;
+/// fs::write(repo.path().join("crates/engine/lib.rs"), "")?;
+/// Manifest::with_directories([ScopedDirectory::new(repo.path(), "crates/engine", "data-plane")?])
+///     .save(repo.path())?;
 ///
 /// let Loaded { tree, problems, .. } = load_tree(repo.path())?;
 /// let paths: Vec<_> = tree.walk().map(|(node, _)| node.path.clone()).collect();
 ///
-/// // Every directory the walk reached is a node, documented or not.
+/// // Every directory the walk reached is a node, scoped or not.
 /// assert_eq!(paths, [
 ///     repo.path().to_path_buf(),
 ///     repo.path().join("crates"),
 ///     repo.path().join("crates/engine"),
 ///     repo.path().join("crates/engine/src"),
 /// ]);
-/// // Only `crates/engine` has a document; the others simply have none yet.
-/// let src = tree.find(repo.path().join("crates/engine/src")).unwrap();
-/// assert_eq!(src.document, None);
-/// // Files ride along on the directory holding them, that document included.
+/// // `crates/engine` carries the scope, and `src` below it is covered by it.
 /// let engine = tree.find(repo.path().join("crates/engine")).unwrap();
-/// assert_eq!(engine.files, [repo.path().join("crates/engine/.warlock.md")]);
+/// assert_eq!(engine.scope.as_deref(), Some("data-plane"));
+/// let src = tree.find(repo.path().join("crates/engine/src")).unwrap();
+/// assert_eq!(src.scope, None);
+/// assert_eq!(src.covering.as_deref(), Some("data-plane"));
+/// // Nothing above it is scoped, so the root is covered by nothing.
+/// assert_eq!(tree.root.covering, None);
+/// // Files ride along on the directory holding them.
+/// assert_eq!(engine.files, [repo.path().join("crates/engine/lib.rs")]);
 /// assert!(src.files.is_empty(), "an empty directory lists nothing");
-/// // Nothing is pacted, so nothing was hashed and nothing could go wrong.
-/// assert_eq!(tree.root.state, NodeState::Unpacted);
 /// assert!(problems.is_empty());
 /// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
@@ -47,24 +51,32 @@ pub fn load_tree(working_dir: impl AsRef<Path>) -> Result<Loaded, Error> {
         start: working_dir.clone(),
     })?;
 
-    // A repository that has never pacted anything is a repository where every
-    // node is unpacted, which is exactly an empty manifest. A corrupt one is a
+    // A repository that has never scoped anything is a repository where every
+    // node is unscoped, which is exactly an empty manifest. A corrupt one is a
     // different fact and is not swallowed here.
     let manifest = match Manifest::load(&repo_root) {
         Err(manifest::Error::NotFound { .. }) => Manifest::new(),
         other => other.map_err(|source| Error::Manifest { source })?,
     };
 
+    // What covers the working directory from above it: a tree opened below the
+    // repository root still sits inside whatever scope its ancestors drew.
+    let above = working_dir
+        .parent()
+        .filter(|parent| parent.starts_with(&repo_root))
+        .and_then(|parent| scope_covering(parent, &repo_root, &manifest).ok().flatten())
+        .map(ToOwned::to_owned);
+
     let mut builder = Builder {
         directories: walk(&working_dir)?,
         repo_root,
-        entries: BTreeMap::new(),
+        rows: BTreeMap::new(),
     };
-    for entry in manifest.entries() {
-        builder.entries.entry(entry.module()).or_insert(entry);
+    for row in manifest.directories() {
+        builder.rows.entry(row.path()).or_insert(row);
     }
     let mut problems = Vec::new();
-    let root = builder.node(&working_dir, &mut problems);
+    let root = builder.node(&working_dir, above, &mut problems);
     Ok(Loaded {
         tree: Tree::new(root),
         manifest,
@@ -76,8 +88,8 @@ pub fn load_tree(working_dir: impl AsRef<Path>) -> Result<Loaded, Error> {
 pub struct Loaded {
     pub tree: Tree,
     // The manifest the tree was coloured from, from the same read. A front end
-    // that kept a copy of its own from another read would judge boundaries and
-    // save runs against entries the screen is not showing.
+    // that kept a copy of its own from another read would judge boundaries
+    // against rows the screen is not showing.
     pub manifest: Manifest,
     pub problems: Vec<Problem>,
 }
@@ -91,19 +103,12 @@ pub struct Problem {
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum ProblemCause {
-    Hash(hash::Error),
     Scope { scope: String, rule: scope::Rule },
 }
 
 impl fmt::Display for Problem {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match &self.cause {
-            ProblemCause::Hash(cause) => write!(
-                f,
-                "`{}` could not be hashed and is stale: {}",
-                self.path.display(),
-                cause
-            ),
             ProblemCause::Scope { scope, rule } => write!(
                 f,
                 "`{}` carries `{scope}`, which is not a scope, so it reads as \
@@ -117,16 +122,15 @@ impl fmt::Display for Problem {
 impl std::error::Error for Problem {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match &self.cause {
-            ProblemCause::Hash(cause) => Some(cause),
             ProblemCause::Scope { rule, .. } => Some(rule),
         }
     }
 }
 
 // The anchor is `.git/` rather than `.warlock/`, because a repository nobody has
-// pacted yet is the normal way to meet warlock: it opens as a tree of unpacted
-// modules and the manifest appears under this root the first time something is
-// pacted.
+// scoped yet is the normal way to meet warlock: it opens as a tree of unscoped
+// directories and the manifest appears under this root the first time something
+// is scoped.
 #[must_use]
 pub fn repository_root(start: impl AsRef<Path>) -> Option<PathBuf> {
     start
@@ -138,8 +142,8 @@ pub fn repository_root(start: impl AsRef<Path>) -> Option<PathBuf> {
         .map(Path::to_path_buf)
 }
 
-fn walk(root: &Path) -> Result<BTreeMap<PathBuf, Directory>, Error> {
-    let mut directories: BTreeMap<PathBuf, Directory> = BTreeMap::new();
+fn walk(root: &Path) -> Result<BTreeMap<PathBuf, Vec<PathBuf>>, Error> {
+    let mut directories: BTreeMap<PathBuf, Vec<PathBuf>> = BTreeMap::new();
     for entry in walk::listing(root).build() {
         let entry = entry.map_err(|source| Error::Walk { source })?;
         let Some(file_type) = entry.file_type() else {
@@ -147,112 +151,56 @@ fn walk(root: &Path) -> Result<BTreeMap<PathBuf, Directory>, Error> {
         };
         let path = entry.into_path();
         if file_type.is_dir() {
-            // Asked for directly rather than inferred from the walk's file
-            // entries: a document is what makes a module, so an ignore rule
-            // that happens to cover it should not quietly unmake one.
-            let has_document = path.join(DOCUMENT_FILE).is_file();
             // An entry rather than an insert: a file inside this directory may
             // have arrived first and already opened the record, and overwriting
             // it here would drop the listing.
-            directories.entry(path).or_default().has_document = has_document;
+            directories.entry(path).or_default();
         } else if file_type.is_file() {
             // Regular files only, so a symlink is neither descended into nor
             // listed. Widening this to "not a directory" would put links back in
             // the listing that `follow_links(false)` above keeps out of the
             // tree.
             if let Some(parent) = path.parent().map(Path::to_path_buf) {
-                directories.entry(parent).or_default().files.push(path);
+                directories.entry(parent).or_default().push(path);
             }
         }
     }
-    for directory in directories.values_mut() {
-        directory.files.sort();
+    for files in directories.values_mut() {
+        files.sort();
     }
-    mark_excluded(root, &mut directories)?;
     Ok(directories)
-}
-
-// `.warlockignore` marks directories here and prunes none of them, which is the
-// one place in the crate where those rules do not remove content. Registering
-// the file on the walk above — the obvious simplification — was rejected: it
-// would take the excluded directory off the screen, and a reader who cannot see
-// the folder of images cannot see that warlock is right not to cover it.
-// Silence would look like a bug.
-//
-// The mark comes from running the same walk again with the file registered,
-// rather than from a second matcher, so this file still keeps no skip list of
-// its own: a directory the first pass found and this one did not is excluded.
-fn mark_excluded(root: &Path, directories: &mut BTreeMap<PathBuf, Directory>) -> Result<(), Error> {
-    // A walker applies no rule to the root it is handed, so a load rooted
-    // inside excluded content would otherwise mark nothing at all. Everything
-    // under it goes with it: gitignore semantics do not let a rule re-include
-    // content below an excluded directory.
-    if ignores::is_ignored(root).map_err(|source| Error::Walk { source })? {
-        for directory in directories.values_mut() {
-            directory.ignored = true;
-        }
-        return Ok(());
-    }
-
-    let mut kept: BTreeSet<PathBuf> = BTreeSet::new();
-    for entry in walk::honouring_ignores(root).build() {
-        let entry = entry.map_err(|source| Error::Walk { source })?;
-        if entry.file_type().is_some_and(|kind| kind.is_dir()) {
-            kept.insert(entry.into_path());
-        }
-    }
-    for (path, directory) in directories.iter_mut() {
-        directory.ignored = !kept.contains(path);
-    }
-    Ok(())
-}
-
-#[derive(Debug, Default)]
-struct Directory {
-    has_document: bool,
-    files: Vec<PathBuf>,
-    ignored: bool,
 }
 
 #[derive(Debug)]
 struct Builder<'m> {
-    directories: BTreeMap<PathBuf, Directory>,
+    directories: BTreeMap<PathBuf, Vec<PathBuf>>,
     repo_root: PathBuf,
-    entries: BTreeMap<&'m str, &'m PactEntry>,
+    rows: BTreeMap<&'m str, &'m ScopedDirectory>,
 }
 
 impl Builder<'_> {
-    fn node(&mut self, dir: &Path, problems: &mut Vec<Problem>) -> Node {
+    fn node(&mut self, dir: &Path, above: Option<String>, problems: &mut Vec<Problem>) -> Node {
+        // A path with no manifest form — not valid UTF-8, say — can match no
+        // row, so it is unscoped rather than an error: an oddly named directory
+        // should not fail the load.
+        let row = to_manifest_path(&self.repo_root, dir)
+            .ok()
+            .and_then(|key| self.rows.get(key.as_str()).copied());
+        let scope = scope_of(dir, row, problems);
+        let covering = scope.clone().or(above);
+
         let below: Vec<PathBuf> = self.children_of(dir).map(Path::to_path_buf).collect();
         let children: Vec<Node> = below
             .iter()
-            .map(|child| self.node(child, problems))
+            .map(|child| self.node(child, covering.clone(), problems))
             .collect();
+        let files = self.directories.remove(dir).unwrap_or_default();
 
-        let (document, files, ignored) = match self.directories.remove(dir) {
-            Some(directory) => (
-                directory.has_document.then(|| dir.join(DOCUMENT_FILE)),
-                directory.files,
-                directory.ignored,
-            ),
-            None => (None, Vec::new(), false),
-        };
-
-        // A path with no manifest form — not valid UTF-8, say — can match no
-        // entry, so it is unpacted rather than an error: an oddly named
-        // directory should not fail the load, and it is nobody's problem to
-        // report because nobody pacted it.
-        let entry = to_manifest_path(&self.repo_root, dir)
-            .ok()
-            .and_then(|key| self.entries.get(key.as_str()).copied());
-        let state = state_of(dir, entry, ignored, problems);
-        let scope = scope_of(dir, entry, problems);
-
-        Node::new(dir, document, state)
+        Node::new(dir)
             .with_children(children)
             .with_files(files)
-            .with_ignored(ignored)
             .with_scope(scope)
+            .with_covering(covering)
     }
 
     fn children_of<'a>(&'a self, dir: &'a Path) -> impl Iterator<Item = &'a Path> {
@@ -268,52 +216,14 @@ impl Builder<'_> {
     }
 }
 
-// The manifest is consulted before anything is hashed, and that ordering is
-// the whole of the "hash only pacted subtrees" rule: an unpacted node is
-// unpacted whatever is under it, so reading those bytes would buy nothing.
-fn state_of(
-    dir: &Path,
-    entry: Option<&PactEntry>,
-    ignored: bool,
-    problems: &mut Vec<Problem>,
-) -> NodeState {
-    // Before the entry is consulted, so that an entry left over from before
-    // the rule was written cannot send an excluded directory to
-    // `subtree_hash`. That hash skips excluded content, so it could never
-    // match the grant again: the row would be yellow for good, and the only
-    // repair would be hand-editing the file this tree exists to replace.
-    if ignored {
-        return NodeState::Unpacted;
-    }
-    let Some(entry) = entry else {
-        return NodeState::Unpacted;
-    };
-
-    // `dir` itself, not the manifest-relative key: a pact is granted
-    // against the content of its own module, so the same module hashes the
-    // same wherever the repository is checked out to.
-    match subtree_hash(dir) {
-        Ok(hash) => decide_state(Some(entry), &hash),
-        Err(cause) => {
-            // Stale, and no digest of any kind reaches `decide_state`:
-            // hashing the error text or the bytes that were read would give
-            // a comparison that looks like it happened, and one that could
-            // match. Content that cannot be read cannot be vouched for, and
-            // one such file is one node's problem rather than the tree's.
-            problems.push(Problem {
-                path: dir.to_path_buf(),
-                cause: ProblemCause::Hash(cause),
-            });
-            NodeState::PactedStale
-        }
-    }
-}
-
 // `dir`'s own scope and never an ancestor's: a node says which boundary
-// starts at it, and `scope_covering` answers the other question by walking
-// up. So a directory nobody pacted has no scope here whatever sits above it.
-fn scope_of(dir: &Path, entry: Option<&PactEntry>, problems: &mut Vec<Problem>) -> Option<String> {
-    let stored = entry?.scope()?;
+// starts at it, and `covering` answers the other question.
+fn scope_of(
+    dir: &Path,
+    row: Option<&ScopedDirectory>,
+    problems: &mut Vec<Problem>,
+) -> Option<String> {
+    let stored = row?.scope();
 
     match validate_scope(stored) {
         Ok(()) => Some(stored.to_owned()),
@@ -321,8 +231,8 @@ fn scope_of(dir: &Path, entry: Option<&PactEntry>, problems: &mut Vec<Problem>) 
             // Reported, not corrected and not fatal. Rewriting the string
             // into something valid was rejected: those bytes are committed,
             // so the next save would put a line in a diff nobody authored.
-            // Failing the load was too, since a scope gates nothing on its
-            // own and one typo would take a whole tree gray.
+            // Failing the load was too, since one typo would take a whole
+            // tree gray.
             problems.push(Problem {
                 path: dir.to_path_buf(),
                 cause: ProblemCause::Scope {
@@ -387,7 +297,7 @@ impl fmt::Display for Error {
             Self::Io { path, source } => {
                 write!(f, "could not resolve `{}`: {source}", path.display())
             }
-            Self::Manifest { source } => write!(f, "could not read the pact manifest: {source}"),
+            Self::Manifest { source } => write!(f, "could not read the scope manifest: {source}"),
             Self::Walk { source } => write!(f, "could not walk the project tree: {source}"),
         }
     }

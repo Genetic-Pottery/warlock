@@ -1,28 +1,28 @@
 //! One frame, drawn from the arguments and nothing else.
 //!
-//! Nothing here reads a clock, a terminal or a global: the instant a pulse is
-//! measured against arrives as a parameter, so a frame can be asserted against
-//! an in-memory buffer with no tty attached.
+//! Nothing here reads a clock, a terminal or a global: the instant a frame is
+//! drawn at arrives as a parameter, so a frame can be asserted against an
+//! in-memory buffer with no tty attached.
 //!
 //! Every size the app asks for, every hit test and [`draw`] itself read one
 //! [`Cut`], made from a [`Shape`]. A second copy of the layout arithmetic here
 //! would answer for a screen that was never drawn.
 
 use std::fmt::Display;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Position, Rect, Size};
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, List, ListItem, ListState, Padding, Paragraph};
-use warlock_engine::{NodeState, scope};
+use warlock_engine::scope;
 
 // Renamed on the way in: `Line` here is ratatui's, the thing a row is drawn as,
-// and the account's `Line` is what a row says. Both names are right where they
-// live, and this module is the one place both are in scope.
-use crate::account::{Account, Line as Entry, Voice};
-use crate::app::{App, Chrome, Focus, Row, RunHeader, Sigils, Target, Working};
+// and `crate::account::Line` is what a row says. Both names are right where
+// they live, and this module is the one place both are in scope.
+use crate::account::{Line as Entry, Voice};
+use crate::app::{App, Chrome, Focus, Row, Sigils, Target, Working};
 use crate::colour::{CONVERSATION_COLOUR, FOCUS_COLOUR, GUIDE_COLOUR, SYSTEM_COLOUR, colour_for};
 use crate::composer::Composer;
 use crate::confirm::{Answer, Carry, Choice, Cutting, Filing, Review, Undertaking};
@@ -68,25 +68,6 @@ const MARK_MARGIN: u16 = 2;
 
 const MARK_MARGIN_ROWS: u16 = 1;
 
-const RUN_HEADER_HEIGHT: u16 = 2;
-
-pub(crate) const PACTING_RUN: &str = "pacting";
-
-pub(crate) const REFRESHING_RUN: &str = "refreshing";
-
-const BAR_FILLED: &str = "█";
-
-const BAR_EMPTY: &str = "░";
-
-const BAR_GAP: &str = " ";
-
-const BAR_MIN_WIDTH: usize = 4;
-
-/// Columns kept for the percentage beside the bar, which is `{:>3}%` — so the
-/// bar is the same width at 7% as at 100% instead of shrinking by a column
-/// twice on the way up.
-const PERCENT_WIDTH: usize = 4;
-
 pub(crate) const PANEL_INDENT: &str = "  ";
 
 const THREAD_TITLE: &str = " thread ";
@@ -109,10 +90,9 @@ const KEYS: &[&str] = &[HELP_KEY, QUIT_KEY];
 
 const KEY_GAP: &str = "    ";
 
-// The order either footer gives keys up in as the terminal narrows. A key not
-// named here survives every width: the way out, because a reader who cannot see
-// how to leave has no way to find out, and during a run the cancel key, for
-// `PACTING_KEYS`' reason. Everything else is on the help sheet.
+// The order the footer gives keys up in as the terminal narrows. A key not named
+// here survives every width: the way out, because a reader who cannot see how
+// to leave has no way to find out. Everything else is on the help sheet.
 const DROP_ORDER: &[&str] = &[HELP_KEY];
 
 fn laid_out_keys(width: usize, pieces: &[&str]) -> String {
@@ -157,19 +137,6 @@ fn keys_line(width: usize) -> String {
     laid_out_keys(width, KEYS)
 }
 
-// Esc is on the footer during a run because it stops meaning quit for as long as
-// the run lasts, and `q` drops the question, so neither can be left to the help
-// sheet to say.
-const PACTING_KEYS: &[&str] = &[HELP_KEY, CANCEL_KEY, PACTING_QUIT_KEY];
-
-const CANCEL_KEY: &str = "Esc: cancel";
-
-const PACTING_QUIT_KEY: &str = "q/Ctrl-C: quit";
-
-fn pacting_keys_line(width: usize) -> String {
-    laid_out_keys(width, PACTING_KEYS)
-}
-
 const FOOTER_HEIGHT: u16 = 3;
 
 const TREE_PERCENT: u16 = 30;
@@ -177,8 +144,6 @@ const TREE_PERCENT: u16 = 30;
 const TREE_MIN_WIDTH: u16 = 30;
 
 const BORDER_THICKNESS: u16 = 1;
-
-const PULSE_PHASE: Duration = Duration::from_millis(500);
 
 const CONFIRM_QUESTION: &str = "Leave warlock?";
 
@@ -209,10 +174,8 @@ const HELP_SECTIONS: &[(&str, Rows)] = &[
     (
         "The tree",
         Rows::Keys(&[
-            ("o", "show only pacted directories"),
+            ("o", "show only scoped directories"),
             ("f", "show files too"),
-            ("p", "pact or un-pact the directory"),
-            ("r", "refresh its stale documents"),
             ("s", "set its scope"),
             ("v", "read the file in the panel"),
             ("e", "open the file in $EDITOR"),
@@ -234,7 +197,6 @@ const HELP_SECTIONS: &[(&str, Rows)] = &[
     (
         "Stopping",
         Rows::Keys(&[
-            ("Esc", "cancel a pact or refresh"),
             ("Ctrl-C", "cancel a chat turn"),
             ("q / Esc / Ctrl-C", "ask whether to quit"),
         ]),
@@ -356,9 +318,7 @@ pub(crate) fn draw(
 ) {
     let screen = frame.area();
     debug_assert_eq!(cut.screen, screen, "the cut was measured for another frame");
-    let header = app.run_header();
-
-    draw_panel(frame, cut, app, header.as_ref(), now);
+    draw_panel(frame, cut, app, now);
     if let (Some(area), Some(composer)) = (cut.composer, composer) {
         // Two things have to be true for the field to be drawn as the place the
         // next character lands: the keys have to be pointed at it, and it has to
@@ -374,7 +334,7 @@ pub(crate) fn draw(
         let strip = workflow_line(app.panel().mode(), app.working());
         draw_composer(frame, area, composer, live, strip);
     }
-    draw_tree_pane(frame, cut, app, chrome, now);
+    draw_tree_pane(frame, cut, app, chrome);
     if let Some(area) = cut.sigils {
         draw_sigils(frame, area, chrome.sigils());
     }
@@ -398,7 +358,6 @@ static NO_SIGILS: Sigils = Sigils::Nothing;
 pub(crate) struct Shape<'a> {
     size: Size,
     composer: Option<&'a Composer>,
-    run_header: bool,
     sigils: &'a Sigils,
 }
 
@@ -413,7 +372,6 @@ impl<'a> Shape<'a> {
         Self {
             size,
             composer: composer.and_then(|field| composer_on_screen(app, field)),
-            run_header: app.has_run(),
             sigils,
         }
     }
@@ -424,7 +382,6 @@ impl<'a> Shape<'a> {
         Self {
             size,
             composer: None,
-            run_header: false,
             sigils: &NO_SIGILS,
         }
     }
@@ -433,12 +390,6 @@ impl<'a> Shape<'a> {
     #[cfg(test)]
     pub(crate) fn composer(self, composer: Option<&'a Composer>) -> Self {
         Self { composer, ..self }
-    }
-
-    #[must_use]
-    #[cfg(test)]
-    pub(crate) fn header(self, run_header: bool) -> Self {
-        Self { run_header, ..self }
     }
 
     #[must_use]
@@ -456,13 +407,12 @@ impl<'a> Shape<'a> {
             footer,
         } = Columns::of(self.size);
         let (panel, composer) = split_column(panel, self.composer);
-        let (run_header, panel_rows) = panel_split(panel, self.run_header);
+        let panel_rows = pane_inner(panel);
         let (tree, sigils) = tree_column(column, self.sigils);
 
         Cut {
             screen,
             panel,
-            run_header,
             panel_rows,
             composer,
             tree,
@@ -478,12 +428,11 @@ impl<'a> Shape<'a> {
 /// Made again from the current inputs every time it is asked for, and never
 /// kept from the frame before: a click is answered against the screen the
 /// reader is looking at, and a cut remembered from drawing goes stale the
-/// moment the terminal, the draft or the run header changes under it.
+/// moment the terminal or the draft changes under it.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct Cut {
     screen: Rect,
     panel: Rect,
-    run_header: Option<Rect>,
     panel_rows: Rect,
     composer: Option<Rect>,
     tree: Rect,
@@ -576,21 +525,6 @@ fn pane_inner(area: Rect) -> Rect {
     inner
 }
 
-fn panel_split(panel: Rect, header: bool) -> (Option<Rect>, Rect) {
-    let inner = pane_inner(panel);
-    // A panel with no room to spare loses the run header whole rather than
-    // sharing: `Length` would take its rows anyway and leave the account with
-    // none, so the reader would watch a progress bar over an empty pane.
-    if !header || inner.height <= RUN_HEADER_HEIGHT {
-        return (None, inner);
-    }
-
-    let [header, rows] =
-        Layout::vertical([Constraint::Length(RUN_HEADER_HEIGHT), Constraint::Min(0)]).areas(inner);
-
-    (Some(header), rows)
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Hit {
     Offscreen,
@@ -598,7 +532,6 @@ pub(crate) enum Hit {
     Border,
     TreeRow { offset: u16 },
     TreeBelowRows,
-    PanelHeader,
     PanelLine { offset: u16, column: u16 },
     Composer,
 }
@@ -645,9 +578,6 @@ impl Cut {
 
         if pane_inner(self.panel).contains(point) {
             let rows = self.panel_rows;
-            if row < rows.y {
-                return Hit::PanelHeader;
-            }
             return Hit::PanelLine {
                 offset: row.saturating_sub(rows.y),
                 column: column.saturating_sub(rows.x),
@@ -680,9 +610,9 @@ impl Cut {
     /// A pointer held past the card arrives as [`Hit::Footer`],
     /// [`Hit::Border`], [`Hit::Composer`] or [`Hit::Offscreen`], none of which
     /// says which way it left or by how much, so this answers the question
-    /// [`Hit`] cannot. The row is counted against the rows area alone: the run
-    /// header and the composer are not in it, so a point on either is past an
-    /// edge here even though it is inside the panel's column.
+    /// [`Hit`] cannot. The row is counted against the rows area alone: the
+    /// composer is not in it, so a point on it is past an edge here even though
+    /// it is inside the panel's column.
     ///
     /// `column` is clamped into the rows area rather than refused, so a pointer
     /// that wandered sideways — onto the border, the tree, past the right edge
@@ -724,13 +654,7 @@ fn pane_block(focused: bool) -> Block<'static> {
     Block::bordered().border_style(style)
 }
 
-fn draw_panel(
-    frame: &mut Frame<'_>,
-    cut: &Cut,
-    app: &App,
-    header: Option<&RunHeader>,
-    now: Instant,
-) {
+fn draw_panel(frame: &mut Frame<'_>, cut: &Cut, app: &App, now: Instant) {
     let (area, inner) = (cut.panel, cut.panel_rows);
     let panel = app.panel();
     let view = panel.frame(now);
@@ -746,10 +670,6 @@ fn draw_panel(
 
     frame.render_widget(block, area);
 
-    if let (Some(area), Some(header)) = (cut.run_header, header) {
-        draw_run_header(frame, area, header);
-    }
-
     if !panel.has_content() {
         draw_mark(frame, inner);
         return;
@@ -763,9 +683,9 @@ fn draw_panel(
     frame.render_widget(Paragraph::new(rows), inner);
 
     // Only the conversation is selectable, so only the conversation is drawn
-    // with a highlight: the account and the document are read past, not copied
-    // out of, and a highlight measured against the thread would sit over
-    // whatever text took its place.
+    // with a highlight: the document is read past, not copied out of, and a
+    // highlight measured against the thread would sit over whatever text took
+    // its place.
     if conversation {
         draw_highlight(frame, inner, app, view.offset, now);
     }
@@ -814,97 +734,6 @@ fn highlighted(rows: Rect, span: Selected) -> Rect {
 /// pane there could be, and the intersection above drops it either way.
 fn cells(count: usize) -> u16 {
     u16::try_from(count).unwrap_or(u16::MAX)
-}
-
-fn draw_run_header(frame: &mut Frame<'_>, area: Rect, header: &RunHeader) {
-    // Into the whole of the area it was given, which is the line's row and the
-    // blank one under it (see [`RUN_HEADER_HEIGHT`]): one line drawn into two
-    // rows leaves the second one as the border cleared it, which is the gap.
-    frame.render_widget(
-        Paragraph::new(
-            Line::from(run_header_line(header, usize::from(area.width)))
-                .bold()
-                .fg(SYSTEM_COLOUR),
-        ),
-        area,
-    );
-}
-
-fn run_header_line(header: &RunHeader, width: usize) -> String {
-    let words = header.words();
-
-    let room = width
-        .saturating_sub(display_width(&words))
-        .saturating_sub(display_width(BAR_GAP) * 2)
-        .saturating_sub(PERCENT_WIDTH);
-    if room < BAR_MIN_WIDTH {
-        return truncated(&words, width);
-    }
-
-    let (done, total) = fraction(header);
-    truncated(
-        &format!(
-            "{words}{BAR_GAP}{}{BAR_GAP}{:>3}%",
-            bar(done, total, room),
-            share(done, total, 100),
-        ),
-        width,
-    )
-}
-
-/// How far through the run the bar and the percentage both are, in whatever
-/// unit is the finest the run has reported.
-///
-/// Directories while a directory is all the engine has said, and files once it
-/// has: a run of five directories working the second of them, describing the
-/// fourth file of eight, is `1 * 8 + 3` of `5 * 8`. Scaling the whole run by
-/// *this* directory's file count is deliberate and is why the denominator moves
-/// — the alternative is knowing every directory's file count before the run
-/// starts, which costs a walk of the whole subtree to answer a question about a
-/// progress bar. The bar advances inside a directory and never goes backwards
-/// past a boundary: the last file of a directory leaves it one file short of
-/// the next directory's start, and the start moves it forward.
-///
-/// Both counts are what the run has finished, not what it has started. The
-/// engine's `Describing` is sent before its file's pass, as `position` is the
-/// directory being worked (see [`RunHeader::completed`]), so each is one less
-/// than the number reported. Counting the one in flight is what drew a full bar
-/// over a single-file refresh that had finished nothing.
-///
-/// Saturating rather than checked because the products are small — a run is
-/// directories times files, both of them counts of things on a disk — and a
-/// saturated total still divides.
-fn fraction(header: &RunHeader) -> (usize, usize) {
-    match header.files() {
-        Some((position, total)) if total > 0 => (
-            header
-                .completed()
-                .saturating_mul(total)
-                .saturating_add(position.saturating_sub(1)),
-            header.total().saturating_mul(total),
-        ),
-        _ => (header.completed(), header.total()),
-    }
-}
-
-/// `done / total` of `whole`, floored, and never past `whole`. The guard is the
-/// division: a run counted at zero nodes has nothing to divide by, and the
-/// count is a caller's to report, past `total` included.
-fn share(done: usize, total: usize, whole: usize) -> usize {
-    done.saturating_mul(whole)
-        .checked_div(total)
-        .unwrap_or(0)
-        .min(whole)
-}
-
-fn bar(done: usize, total: usize, columns: usize) -> String {
-    let filled = share(done, total, columns);
-
-    format!(
-        "{}{}",
-        BAR_FILLED.repeat(filled),
-        BAR_EMPTY.repeat(columns - filled)
-    )
 }
 
 fn draw_mark(frame: &mut Frame<'_>, inner: Rect) {
@@ -1114,7 +943,7 @@ pub(crate) fn display_width(text: &str) -> usize {
     Span::raw(text).width()
 }
 
-fn draw_tree_pane(frame: &mut Frame<'_>, cut: &Cut, app: &App, chrome: &Chrome, now: Instant) {
+fn draw_tree_pane(frame: &mut Frame<'_>, cut: &Cut, app: &App, chrome: &Chrome) {
     let area = cut.tree;
     let room = usize::from(area.width.saturating_sub(2 * BORDER_THICKNESS));
     let title = target_title(chrome.target(), room);
@@ -1124,7 +953,7 @@ fn draw_tree_pane(frame: &mut Frame<'_>, cut: &Cut, app: &App, chrome: &Chrome, 
     }
     frame.render_widget(block, area);
 
-    draw_tree(frame, cut.tree_rows, app, now);
+    draw_tree(frame, cut.tree_rows, app);
 }
 
 // Fewer columns than this and the tree's own path is not drawn at all: a path
@@ -1230,10 +1059,9 @@ fn draw_sigils(frame: &mut Frame<'_>, area: Rect, sigils: &Sigils) {
     frame.render_widget(Paragraph::new(lines).block(block), area);
 }
 
-fn draw_tree(frame: &mut Frame<'_>, area: Rect, app: &App, now: Instant) {
+fn draw_tree(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let first = app.scroll_offset().min(app.rows().len());
     let height = usize::from(area.height);
-    let pulse = pulse_colour(app, now);
     let guides = guide_prefixes(app.rows(), first, height);
 
     // The columns a row's own text has to fit a scope label into: the drawn
@@ -1257,7 +1085,6 @@ fn draw_tree(frame: &mut Frame<'_>, area: Rect, app: &App, now: Instant) {
                 &guides[offset],
                 app.can_collapse(first + offset),
                 app.is_collapsed(&row.path),
-                pulse.filter(|_| app.in_flight_covers(row)),
                 text_width,
             ))
         })
@@ -1284,7 +1111,6 @@ fn line(
     guides: &str,
     collapsible: bool,
     collapsed: bool,
-    pulse: Option<Color>,
     width: usize,
 ) -> Line<'static> {
     let name = row
@@ -1308,7 +1134,7 @@ fn line(
 
     Line::from(vec![
         Span::styled(guides.to_owned(), GUIDE_COLOUR),
-        Span::styled(text, pulse.unwrap_or(colour_for(row.state))),
+        Span::styled(text, colour_for(row.covered)),
     ])
 }
 
@@ -1372,55 +1198,17 @@ fn guide_prefixes(all: &[Row], first: usize, height: usize) -> Vec<String> {
     prefixes
 }
 
-fn pulse_colour(app: &App, now: Instant) -> Option<Color> {
-    if !app.is_pacting() {
-        return None;
-    }
-
-    let fresh = app
-        .panel()
-        .account()
-        .and_then(Account::open_section_started)
-        .is_some_and(|started| {
-            let phases =
-                now.saturating_duration_since(started).as_millis() / PULSE_PHASE.as_millis();
-            phases % 2 == 1
-        });
-
-    Some(colour_for(if fresh {
-        NodeState::PactedFresh
-    } else {
-        NodeState::PactedStale
-    }))
-}
-
 fn draw_footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let area = footer_text_area(area);
-    let counts = app.counts();
-    let mut tally = Vec::new();
-    for state in NodeState::ALL {
-        if !tally.is_empty() {
-            tally.push(Span::raw("  "));
-        }
-        tally.push(Span::styled(
-            format!("{} {}", counts.get(state), noun(state)),
-            colour_for(state),
-        ));
-    }
+    let (scoped, unscoped) = app.coverage();
+    let tally = vec![
+        Span::styled(format!("{scoped} scoped"), colour_for(true)),
+        Span::raw("  "),
+        Span::styled(format!("{unscoped} unscoped"), colour_for(false)),
+    ];
 
-    let width = usize::from(area.width);
-    let keys = Line::from(if app.is_pacting() {
-        pacting_keys_line(width)
-    } else {
-        keys_line(width)
-    })
-    .dim();
-
-    let message = Line::from(
-        app.refused_line()
-            .unwrap_or_else(|| app.message().unwrap_or_default().to_owned()),
-    )
-    .dim();
+    let keys = Line::from(keys_line(usize::from(area.width))).dim();
+    let message = Line::from(app.message().unwrap_or_default().to_owned()).dim();
     frame.render_widget(Paragraph::new(vec![Line::from(tally), keys, message]), area);
 }
 
@@ -1429,14 +1217,6 @@ fn footer_text_area(footer: Rect) -> Rect {
         x: footer.x + BORDER_THICKNESS,
         width: footer.width.saturating_sub(2 * BORDER_THICKNESS),
         ..footer
-    }
-}
-
-const fn noun(state: NodeState) -> &'static str {
-    match state {
-        NodeState::Unpacted => "unpacted",
-        NodeState::PactedStale => "stale",
-        NodeState::PactedFresh => "fresh",
     }
 }
 

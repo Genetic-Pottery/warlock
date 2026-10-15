@@ -3,16 +3,15 @@
 //! and the window a written brief opens in.
 //!
 //! The register the conversation is in is deliberately not held here. It lives
-//! on the panel, the one part of the app a failed pact restores untouched, so a
-//! copy would be a second answer to which mode the reader is in. Nothing here
+//! on the panel, so a copy would be a second answer to which mode the reader is
+//! in. Nothing here
 //! returns an error either: a missing `claude`, a non-zero exit, a timeout, an
 //! empty answer and a Ctrl-C are five facts and one consequence, because an
 //! event loop a bad answer could end would take the tree down with it.
 //!
 //! [`Chat::compose`] reads both of `/brief`'s files before it touches the mode,
 //! so a file that cannot be read is a command that does not happen rather than a
-//! register entered by a refusal. The mode is then set before the turn is sent,
-//! because [`asking`] reads it off the app at the moment the worker starts.
+//! register entered by a refusal.
 
 use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
@@ -23,7 +22,7 @@ use warlock_engine::{DEFAULT_BRIEF_DIRECTORY, briefs, load_briefs};
 use crate::app::{App, Focus};
 use crate::claude::{
     Activities, Activity, BRIEF_EFFORT, BRIEF_MODEL, CHAT_INSTRUCTION, Cancel, CancelGuard,
-    ChatAgent, Converses, WRITE_INSTRUCTION, brief_instruction, without_marker,
+    ChatAgent, Converses, WRITE_INSTRUCTION, brief_mode_instruction, without_marker,
 };
 use crate::composer::{Composed, Composer, Pasted};
 use crate::confirm::{Answer, Answered};
@@ -31,7 +30,7 @@ use crate::error::one_line;
 use crate::inflight::{Lost, Port, Stream, Workers, settled};
 use crate::panel::Mode;
 use crate::prompt::{Edited, ScopePrompt};
-use crate::submission::{BRIEF, CHAT, Submitted, Wanted, submitted_for};
+use crate::submission::{Submitted, Wanted, submitted_for};
 use crate::template::{Error as TemplateError, brief_template};
 use crate::thread::{Ending, ending_for};
 use crate::writing::{write_edit, write_opened};
@@ -40,17 +39,12 @@ use crate::writing::{write_edit, write_opened};
 // than as a sentence of its own, so the line reads like every other failed turn.
 const TURN_LOST: &str = "it stopped without saying how it went";
 
-// Said on a *change* of register only, so a `/brief` typed in brief mode costs a
-// turn and no line. Each names the way out, because that is the one thing a
-// reader in a mode cannot work out from the screen.
-const BRIEF_NOTE: &str =
-    "brief mode — this conversation is now converging on a document. /chat leaves it.";
+const BRIEF_NOTE: &str = "Entered brief mode";
 
-pub(crate) const CHAT_NOTE: &str =
-    "chat mode — the brief is over and nothing is being converged on.";
+pub(crate) const CHAT_NOTE: &str = "Entered chat mode";
 
-// A line and no turn: telling the model it is where it already is would be a
-// question nobody asked and money nobody meant to spend.
+const ALREADY_BRIEFING: &str = "already in brief mode — /chat leaves it.";
+
 const ALREADY_CHATTING: &str = "already in chat mode — /brief is what changes that.";
 
 // What the card shows as the reader's turn when they answer Yes: the model is
@@ -65,7 +59,7 @@ fn unreadable_template(error: &TemplateError) -> String {
 }
 
 fn brief_asking(root: &Path) -> Result<String, TemplateError> {
-    brief_template(root).map(|template| brief_instruction(&template))
+    brief_template(root).map(|template| brief_mode_instruction(&template))
 }
 
 // Flattened where `unreadable_template` is not, because the material differs: a
@@ -98,10 +92,6 @@ pub(crate) struct Chat<C> {
     agent: C,
     turn: Option<Chatting>,
     root: PathBuf,
-    // Here rather than on the `App` for the reason it was a loop local before: a
-    // pact that ends with nothing recorded puts a copy of the app taken before
-    // it back over the live one, so a draft stored there would be a draft a run
-    // could swallow half a sentence into. Nothing a run does can reach this.
     composer: Composer,
     // Where a written brief in this conversation would be proposed to go.
     // Written at every `/brief` and read when the document comes back, which is
@@ -112,6 +102,10 @@ pub(crate) struct Chat<C> {
     // up on no keystroke, and a write is the most expensive turn there is.
     offer: Option<Answer>,
     prompt: ScopePrompt,
+    // A mode change sends no turn of its own: a turn with nothing of the
+    // reader's in it gets a reply to nothing ("Understood. Waiting for the
+    // question."). The instruction rides on the reader's next message instead.
+    carried: Option<String>,
 }
 
 impl Chat<ChatAgent> {
@@ -133,6 +127,7 @@ impl<C: Converses> Chat<C> {
             directory: DEFAULT_BRIEF_DIRECTORY.to_owned(),
             offer: None,
             prompt: ScopePrompt::default(),
+            carried: None,
         }
     }
 
@@ -221,7 +216,11 @@ impl<C: Converses> Chat<C> {
     }
 
     pub(crate) fn ask(&mut self, app: &mut App, message: &str, now: Instant) {
-        self.say(app, message, message, Asked::Answer, now);
+        let sent = match self.carried.take() {
+            Some(instruction) => format!("{instruction}\n\n{message}"),
+            None => message.to_owned(),
+        };
+        self.say(app, message, &sent, Asked::Answer, now);
     }
 
     // `shown` and `sent` are two strings rather than one so a synthesized turn
@@ -259,10 +258,6 @@ impl<C: Converses> Chat<C> {
     // thing that ends one. A turn ends five ways and all five arrive in
     // `keep_up`, so "however it ends, the field comes back" is one line here
     // rather than a flag five endings have to remember to unset.
-    //
-    // A pact is deliberately not a reason to mute. The two workers share nothing,
-    // and a reader watching a long run is exactly who most wants to ask something
-    // about the repository it is walking.
     fn settle_field(&mut self) {
         self.composer.set_muted(self.turn.is_some());
     }
@@ -299,19 +294,20 @@ impl<C: Converses> Chat<C> {
 
         match submitted_for(&draft) {
             Submitted::Message => self.ask(app, &draft, now),
-            // The load, then the mode, then the turn. Both files are read before
-            // the mode is touched so a refusal cannot leave the conversation in a
-            // register it never entered; the mode is set before the turn is sent
-            // so the instruction that enters brief mode is asked at brief mode's
-            // level. The note is on the *change*, so a second `/brief` costs a
-            // turn and no line.
+            // Both files are read before the mode is touched so a refusal
+            // cannot leave the conversation in a register it never entered. A
+            // second `/brief` still re-reads them, so an edited template takes
+            // effect on the next message.
             Submitted::Brief => match brief_reading(&self.root) {
                 Ok((instruction, directory)) => {
                     self.directory = directory;
-                    if app.panel_mut().set_mode(Mode::Brief) {
-                        app.panel_mut().note(BRIEF_NOTE, now);
-                    }
-                    self.say(app, BRIEF, &instruction, Asked::Answer, now);
+                    let note = if app.panel_mut().set_mode(Mode::Brief) {
+                        BRIEF_NOTE
+                    } else {
+                        ALREADY_BRIEFING
+                    };
+                    app.panel_mut().note(note, now);
+                    self.carried = Some(instruction);
                 }
                 Err(line) => app.panel_mut().note(line, now),
             },
@@ -371,15 +367,19 @@ impl<C: Converses> Chat<C> {
         }
         self.offer = None;
         app.panel_mut().note(CHAT_NOTE, now);
-        self.say(app, CHAT, CHAT_INSTRUCTION, Asked::Answer, now);
+        // A brief instruction still waiting was never sent, so the model was
+        // never told about a brief and has none to be told is over.
+        self.carried = match self.carried.take() {
+            Some(_) => None,
+            None => Some(CHAT_INSTRUCTION.to_owned()),
+        };
         true
     }
 }
 
 // A turn from the point of view of the thread drawing the screen: what the
-// worker has to say, and how to tell it to stop. No join handle — `Running`
-// keeps the app as it stood before the keystroke so a failed pact can put it
-// back, and a turn needs no such thing because it changes no row and no file.
+// worker has to say, and how to tell it to stop. No join handle, because a turn
+// changes no row and no file.
 pub(crate) struct Chatting {
     pub(crate) events: Stream<TurnEvent>,
     pub(crate) cancel: CancelGuard,

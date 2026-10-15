@@ -2,11 +2,6 @@
 //! and the screen taken back afterwards. Not one byte of the file passes
 //! through warlock — the child opens it and the child saves it.
 //!
-//! Editing a `.warlock.md` restales the directory it describes, because the
-//! document is an ordinary file in the walk
-//! [`subtree_hash`](warlock_engine::subtree_hash) makes; [`came_back`] reloads
-//! the tree so the row says so at once rather than at the next keystroke.
-//!
 //! `$EDITOR` is split on whitespace and never handed to `sh -c`. A shell in the
 //! middle would make warlock's behaviour depend on which `/bin/sh` a machine
 //! has, turn a path with a space in it into two arguments, and make a `$EDITOR`
@@ -16,7 +11,7 @@
 //! footer saying what to set.
 
 use std::ffi::OsStr;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 use std::{env, io};
 
@@ -45,11 +40,10 @@ pub(crate) struct Editor {
     args: Vec<String>,
 }
 
-// The three refusals in the order that costs the reader least: a run in flight
-// first, because it is true of the session rather than of the row; then the row,
-// in `App::view_target`'s words, which are `v`'s words; then `$EDITOR`, so a
-// press already refused for its row is not also judged on a variable it never
-// got as far as needing.
+// The two refusals in the order that costs the reader least: the row, in
+// `App::view_target`'s words, which are `v`'s words; then `$EDITOR`, so a press
+// already refused for its row is not also judged on a variable it never got as
+// far as needing.
 //
 // The child is waited on inside the suspension, which makes the whole editing
 // session one turn of the event loop: no frame is drawn behind it and no
@@ -69,9 +63,8 @@ pub(crate) fn edit_press(
     manifest: &mut Manifest,
     showing: Option<&Path>,
     mouse: bool,
-    in_flight: bool,
 ) -> io::Result<()> {
-    let Some(path) = edit_target(app, in_flight) else {
+    let Some(path) = app.view_target() else {
         return Ok(());
     };
     // Read once, and only once the press is known to be worth reading it for.
@@ -105,8 +98,7 @@ pub(crate) fn edit_press(
 // The watcher is not told. The editor's write set off events that sat in
 // `Watched`'s channel while this thread was blocked, so the loop may walk the
 // repository once more a round later; that is a harmless price for this function
-// not reaching into the watcher. Compare `watched.caught_up`, which is how a run
-// discharges the same debt from inside the loop.
+// not reaching into the watcher.
 fn came_back(
     app: &mut App,
     scope: &Scope,
@@ -127,22 +119,6 @@ fn came_back(
         // flattens it — the same failure, reached without a keystroke of its own.
         Err(error) => note(app, one_line(error)),
     }
-}
-
-// The run is asked first, so a mid-run press over a directory says the thing
-// that is true of the whole session rather than the thing that is true of the
-// row. Neither refusal is worded here: `App::view_target` refuses a row that is
-// not a file in the words `v` uses.
-fn edit_target(app: &mut App, in_flight: bool) -> Option<PathBuf> {
-    if in_flight {
-        // The whole of the refusal is a flag the footer words. Setting it again
-        // says the same thing, so a reader leaning on the key changes nothing
-        // after the first press — and nothing is suspended, so the run goes on
-        // drawing on a screen it still owns.
-        app.set_pact_refused();
-        return None;
-    }
-    app.view_target()
 }
 
 /// `$EDITOR`, read and split, or `None` for [`NO_EDITOR`]'s four cases.

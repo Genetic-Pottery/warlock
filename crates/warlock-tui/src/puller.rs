@@ -22,8 +22,7 @@
 //!
 //! Two things a shell never needs are bought here. A commit is a milestone and the
 //! loop reports none, so the checkout the run is given is wrapped
-//! ([`Committing`]): every commit it makes — a sub-task's and the refresh's alike —
-//! says so on its way through, which is the one place both kinds pass. And a
+//! ([`Committing`]): every commit it makes says so on its way through. And a
 //! session in flight has to be stoppable from the thread that quits, which the
 //! agents cannot carry: [`Working::on`] and [`Splitting::for_ticket`] each mint a
 //! [`Cancel`] of their own and re-wire the agent to it, so a handle attached before
@@ -43,17 +42,15 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use warlock_engine::pact::Event;
 use warlock_engine::{Manifest, PullRun, ScopeRecord};
 
 use crate::app::App;
 use crate::claude::{
-    Activities, Activity, Cancel, CancelGuard, ChatAgent, ClaudeAgent, Split, Splitting, Worked,
-    Working, working_system_prompt,
+    Activities, Activity, Cancel, CancelGuard, ChatAgent, Split, Splitting, Worked, Working,
+    working_system_prompt,
 };
 use crate::confirm::{PullAnswered, PullConfirm, Undertaking};
 use crate::error::{Error, one_line};
-use crate::freshness::{Freshened, Freshening, Freshens, freshened};
 use crate::git::{Commit, Dirty, Error as GitError, Forge, Gh, Git, Repository, branch_name};
 use crate::inflight::{Lost, Once, Port, Stream, Workers, settled};
 use crate::linear::{
@@ -167,7 +164,7 @@ struct Underway {
 /// Everything one pull is allowed to know, owned, because all of it crosses onto
 /// a worker.
 ///
-/// The manifest is cloned as a pact's is. The scope record is the one
+/// The manifest is cloned rather than shared. The scope record is the one
 /// [`Prepared`] cloned rather than one asked of the manifest again on the
 /// worker, which could disagree with the boundary the reader was shown.
 #[derive(Clone)]
@@ -233,15 +230,8 @@ type Landing = Result<Chose, String>;
 /// tool call under the section before it.
 pub(crate) enum Step {
     Pull(PullEvent),
-    /// One directory the refresh pass has started on, in the manifest's own
-    /// spelling. The loop cannot report it — the pass keeps its per-directory
-    /// events to itself (see [`Freshens`]) — and these are what the account's
-    /// refresh sections are.
-    Refreshing(String),
     /// One commit, as the checkout was asked to make it. Reported here rather
-    /// than by the loop because the loop reports none, and because this is the
-    /// one place both kinds pass — a sub-task's whole tree and the refresh's
-    /// named documents.
+    /// than by the loop because the loop reports none.
     Committed(String),
     Finished(Result<Pulled, String>),
 }
@@ -433,8 +423,8 @@ where
     /// What the pull has said since the last round: what selection chose, and
     /// whatever the run in flight has done.
     ///
-    /// Drained rather than received, for [`crate::pacting`]'s reason: nothing here
-    /// blocks, so frames keep being drawn, the tree keeps scrolling and the
+    /// Drained rather than received: nothing here blocks, so frames keep being
+    /// drawn, the tree keeps scrolling and the
     /// conversation stays readable while a run that takes an hour runs.
     pub(crate) fn keep_up(&mut self, app: &mut App, now: Instant) {
         self.chosen(app, now);
@@ -478,16 +468,6 @@ where
             underway.events.drained(|step| {
                 match step {
                     Step::Pull(event) => said(app, event, now),
-                    // A phase of its own per directory, opened as the pass
-                    // reaches it: the pass is one `claude` per directory, and its
-                    // activities belong under the directory they were spent on.
-                    Step::Refreshing(directory) => {
-                        phase(
-                            app,
-                            &format!("{directory} — refreshing its .warlock.md"),
-                            now,
-                        );
-                    }
                     Step::Committed(message) => {
                         app.panel_mut().note(committed_line(&message), now);
                     }
@@ -583,9 +563,8 @@ where
 pub(crate) trait Raises {
     type Split: Splits + Send + 'static;
     type Sessions: Works + Send + 'static;
-    type Freshen: Freshens + Send + 'static;
 
-    fn raise(&self, asked: Raising<'_>) -> Raised<Self::Split, Self::Sessions, Self::Freshen>;
+    fn raise(&self, asked: Raising<'_>) -> Raised<Self::Split, Self::Sessions>;
 }
 
 /// Everything the sessions of one run are built from.
@@ -594,43 +573,33 @@ pub(crate) struct Raising<'a> {
     pub(crate) scope: &'a str,
     /// And the sigils this machine holds, which it names beside it.
     pub(crate) held: &'a [String],
-    /// Where everything a session is seen doing goes, and where the refresh pass
-    /// says which directory it has reached.
+    /// Where everything a session is seen doing goes.
     pub(crate) events: Port<Step>,
-    /// The run's say-when, which the freshness pass's agent and the descent under
-    /// it both answer. The sessions' own handles cannot be this one — see
+    /// The sessions' own handles, published as each is raised — see
     /// [`Stopping`].
-    pub(crate) cancel: Cancel,
     pub(crate) stopping: Stopping,
 }
 
 /// What [`Raises::raise`] answers with.
-pub(crate) struct Raised<S: Splits, W: Works, X: Freshens> {
+pub(crate) struct Raised<S: Splits, W: Works> {
     pub(crate) split: S,
     pub(crate) sessions: W,
-    pub(crate) freshen: X,
 }
 
-/// The sessions on the real road: a splitting pass, one sub-task session per
-/// sub-task, and the freshness pass, each off `claude`.
+/// The sessions on the real road: a splitting pass and one sub-task session per
+/// sub-task, each off `claude`.
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct Claudes;
 
 impl Raises for Claudes {
     type Split = Splitter;
     type Sessions = Worker;
-    type Freshen = Freshener;
 
-    fn raise(&self, asked: Raising<'_>) -> Raised<Splitter, Worker, Freshener> {
+    fn raise(&self, asked: Raising<'_>) -> Raised<Splitter, Worker> {
         let activities = activity_port(&asked.events);
         Raised {
             split: Splitter::new(activities.clone(), asked.stopping.clone()),
-            sessions: Worker::new(asked.scope, asked.held, activities.clone(), asked.stopping),
-            freshen: Freshener {
-                agent: ClaudeAgent::freshening(asked.cancel.clone(), activities),
-                cancel: asked.cancel,
-                events: asked.events,
-            },
+            sessions: Worker::new(asked.scope, asked.held, activities, asked.stopping),
         }
     }
 }
@@ -699,31 +668,6 @@ impl Works for Worker {
         // say-when is not the flag this child answers.
         self.stopping.raising(session.cancel());
         session.run()
-    }
-}
-
-/// The freshness pass on the real road, with its per-directory events kept rather
-/// than dropped: they are the account's refresh sections, and the panel is the one
-/// door that has somewhere to put them.
-pub(crate) struct Freshener {
-    agent: ClaudeAgent,
-    /// The one handle the agent and the descent under it both answer, so a stop is
-    /// honoured in both.
-    cancel: Cancel,
-    events: Port<Step>,
-}
-
-impl Freshens for Freshener {
-    fn freshen(&self, asked: &Freshening<'_>) -> Result<Freshened, GitError> {
-        freshened(asked, &self.agent, &self.cancel, &mut |event| {
-            // The one event of the descent's that is a section: everything else
-            // it says about a directory arrives as an [`Activity`] on the port
-            // above, which is where every other session reports.
-            if let Event::Starting { directory, .. } = event {
-                let heading = crate::freshness::named(asked.root, &directory);
-                self.events.send(Step::Refreshing(heading));
-            }
-        })
     }
 }
 
@@ -799,9 +743,7 @@ struct Spending<O: Opens, R: Repository, F: Forge, M: Raises> {
 /// A wrapper rather than an event on [`PullEvent`], and the reason is which door
 /// wants it: the shell's account of a run is its headings, where a commit is
 /// implied by the sub-task that ends in one, and the panel's thread is a list of
-/// milestones where it is not. This is also the one place both kinds of commit
-/// pass — a sub-task's whole tree and the refresh's named documents — so there is
-/// one line to keep true rather than two.
+/// milestones where it is not.
 struct Committing<R: Repository> {
     inner: R,
     events: Port<Step>,
@@ -842,16 +784,10 @@ impl<R: Repository> Repository for Committing<R> {
         self.inner.changed_against(base)
     }
 
-    // The two that are reported, and only after the commit is made: a commit that
-    // `git` refused is not a milestone.
+    // Reported only after the commit is made: a commit that `git` refused is not
+    // a milestone.
     fn commit_all(&self, message: &str) -> Result<(), GitError> {
         self.inner.commit_all(message)?;
-        self.said(message);
-        Ok(())
-    }
-
-    fn commit_paths(&self, message: &str, paths: &[String]) -> Result<(), GitError> {
-        self.inner.commit_paths(message, paths)?;
         self.said(message);
         Ok(())
     }
@@ -1107,7 +1043,6 @@ where
                 scope: work.prepared.record().name(),
                 held: work.prepared.held(),
                 events: events.clone(),
-                cancel: cancel.clone(),
                 stopping,
             });
             // Opened over here, which is what keeps the panel drawing while Linear is
@@ -1130,7 +1065,6 @@ where
                 forge: &spending.forge,
                 split: &raised.split,
                 sessions: &raised.sessions,
-                freshen: &raised.freshen,
                 scope: work.prepared.record(),
                 manifest: &work.manifest,
                 held: work.prepared.held(),

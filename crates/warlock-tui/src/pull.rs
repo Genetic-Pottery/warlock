@@ -38,10 +38,9 @@ use warlock_engine::{
 };
 
 use crate::account::{THINKING, WRITING, tool_line};
-use crate::claude::{Activities, Activity, Cancel, ClaudeAgent};
+use crate::claude::{Activities, Activity};
 use crate::error::{Error, one_line, say};
-use crate::freshness::{Freshened, Freshening, Freshens, freshened};
-use crate::git::{Error as GitError, Forge, Gh, Git, Repository};
+use crate::git::{Forge, Gh, Git, Repository};
 use crate::linear::{Board, Key, Opener as LinearOpener, Opens, QueuedIssue};
 use crate::puller::{Splitter, Stopping, Worker};
 use crate::pulling::{Heading, PullEvent, Pulled, Pulling, Splits, Ticket, Works};
@@ -95,7 +94,6 @@ pub fn pull(scope: &str, ticket: Option<&str>, dry_run: bool) -> Result<(), Erro
                 watching(&progress),
                 Stopping::default(),
             ),
-            freshen: &Freshener::new(watching(&progress)),
         },
         &progress,
     )
@@ -114,11 +112,6 @@ pub(crate) struct Ports<'a, O: Opens, R: Repository, F: Forge, S: Splits, W: Wor
     pub(crate) forge: &'a F,
     pub(crate) split: &'a S,
     pub(crate) sessions: &'a W,
-    /// The refresh of the documents the branch made stale, for the reason
-    /// [`Pulling`]'s own field is a `&dyn`: one method taking one borrowed struct
-    /// buys nothing from a sixth type parameter that would have to be written out
-    /// here, on [`pulled`] and in every test that builds either.
-    pub(crate) freshen: &'a dyn Freshens,
 }
 
 /// The whole subcommand, less the environment: the two directories arrive on the
@@ -191,7 +184,6 @@ pub(crate) fn pulled<O: Opens, R: Repository, F: Forge, S: Splits, W: Works, P: 
             forge: ports.forge,
             split: ports.split,
             sessions: ports.sessions,
-            freshen: ports.freshen,
             scope: record,
             manifest,
             held: prepared.held(),
@@ -632,9 +624,9 @@ impl<W: Write> Progress<W> {
 /// One activity as a line, or nothing for the one that is not something a session
 /// did.
 ///
-/// A cost is no line at all, following the panel's account card: it is a fact
-/// about the pass rather than an action, and a run that printed one per report
-/// would be a column of money in the middle of the work.
+/// A cost is no line at all: it is a fact about the pass rather than an action,
+/// and a run that printed one per report would be a column of money in the
+/// middle of the work.
 fn activity_line(activity: &Activity) -> Option<String> {
     match activity {
         Activity::Tool { name, detail } => Some(tool_line(name, detail.as_ref())),
@@ -666,46 +658,6 @@ impl Watched {
         }
         self.said = Some(line.clone());
         Some(line)
-    }
-}
-
-/// The freshness pass on the real road: the document agent `warlock refresh`
-/// spends, and the one [`Cancel`] it and the descent under it both answer to.
-///
-/// A [`ClaudeAgent`] and not the [`ChatAgent`](crate::claude::ChatAgent) the
-/// split and the sub-tasks hold, because a document pass is not a conversation:
-/// it is the agent [`descend`](crate::descent::descend) is given everywhere
-/// else, asked for on the terms a pact names rather than the reader's own model.
-struct Freshener {
-    agent: ClaudeAgent,
-    /// Nothing latches this today — no `Ctrl-C` handler is installed on this road,
-    /// so a pull is stopped by the shell killing it. It is held anyway because the
-    /// agent and the descent have to answer the *same* handle for a stop to be
-    /// honoured in both, and building one here is what makes installing a handler
-    /// later a line rather than a rethread.
-    cancel: Cancel,
-}
-
-impl Freshener {
-    fn new(activities: Activities) -> Self {
-        let cancel = Cancel::new();
-        Self {
-            agent: ClaudeAgent::freshening(cancel.clone(), activities),
-            cancel,
-        }
-    }
-}
-
-impl Freshens for Freshener {
-    /// The pass, with its per-directory events dropped.
-    ///
-    /// Dropped rather than printed: what the run is seen doing arrives on the
-    /// activity port the agent above was handed, which is the port every other
-    /// session in this door reports through, and a second stream of lines worded
-    /// here would be the refresh announcing itself twice. The headings a `warlock
-    /// refresh` prints from these events belong to that command's own progress.
-    fn freshen(&self, asked: &Freshening<'_>) -> Result<Freshened, GitError> {
-        freshened(asked, &self.agent, &self.cancel, &mut |_event| ())
     }
 }
 

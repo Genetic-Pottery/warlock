@@ -1,4 +1,4 @@
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use super::{Mode, Panel, Showing};
 use crate::account::Line;
@@ -20,7 +20,6 @@ fn a_fresh_panel_opens_on_the_conversation_with_nothing_in_it() {
 
     assert_eq!(panel.showing(), Showing::Thread);
     assert_eq!(panel.mode(), Mode::Chat);
-    assert!(!panel.has_account());
     assert!(!panel.has_thread());
     assert!(!panel.has_document());
     assert!(
@@ -39,34 +38,31 @@ fn the_swap_key_has_nowhere_to_go_until_something_else_has_anything_in_it() {
         "a panel holding only an empty conversation has nowhere to swap to"
     );
 
-    panel.open_account(base());
+    panel.show_document(["a line of a file"], false);
+    panel.show(Showing::Thread);
 
     assert_eq!(
         panel.next_card(),
-        Some(Showing::Account),
-        "a run has happened and the swap key should reach it"
+        Some(Showing::Document),
+        "a file has been read and the swap key should reach it"
     );
 }
 
 #[test]
-fn the_swap_key_steps_over_the_card_with_nothing_in_it() {
+fn the_swap_key_always_reaches_the_conversation_even_with_nothing_in_it() {
     let mut panel = sized();
     panel.show_document(["a line of a file"], false);
 
-    // Showing the document, with no account ever started: the only other
-    // card worth stopping on is the conversation.
+    assert!(!panel.has_thread());
     assert_eq!(panel.showing(), Showing::Document);
     assert_eq!(panel.next_card(), Some(Showing::Thread));
 }
 
 #[test]
 fn each_card_keeps_its_own_place_while_another_one_is_showing() {
-    let mut panel = sized();
-    panel.open_account(base());
+    let mut panel = talked_at();
     panel.show_document((0..40).map(|n| format!("line {n}")), false);
 
-    // The document is showing and scrolled off its own tail; the account
-    // behind it is untouched and still following.
     panel.scroll_to(3);
 
     assert_eq!(panel.window_of(Showing::Document).0, 3);
@@ -75,7 +71,7 @@ fn each_card_keeps_its_own_place_while_another_one_is_showing() {
         "a card scrolled by hand stops following its own newest line"
     );
     assert!(
-        panel.window_of(Showing::Account).1,
+        panel.window_of(Showing::Thread).1,
         "the card nobody touched stopped following"
     );
 }
@@ -120,25 +116,6 @@ fn a_mode_change_is_reported_only_when_it_changes_something() {
     assert!(
         !panel.set_mode(Mode::Brief),
         "brief to brief is not a change and must not be announced as one"
-    );
-}
-
-#[test]
-fn a_run_opens_a_fresh_account_over_whatever_the_last_one_left() {
-    let mut panel = sized();
-    // Showing it as well as opening it: `open_account` places the card, and
-    // putting it on screen is the app's own step (see `App::start_account`).
-    panel.show(Showing::Account);
-    panel.open_account(base());
-    panel.write_run(|account| account.open_section("crates", base()));
-    let first = panel.window(base()).len();
-
-    panel.open_account(base() + Duration::from_secs(1));
-
-    assert!(first > 0, "the first run wrote nothing to begin with");
-    assert!(
-        panel.window(base() + Duration::from_secs(1)).len() < first,
-        "the new run inherited the old one's lines"
     );
 }
 

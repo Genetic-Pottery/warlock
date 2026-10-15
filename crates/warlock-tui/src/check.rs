@@ -6,7 +6,7 @@
 //! reporting form, and whether this machine opens that scope is one
 //! [`scope_opens_to`] call; neither is re-implemented here. That is the point
 //! of the subcommand: the alternative for a script is walking
-//! `.warlock/pacts.toml` upwards by hand, which is the boundary rule and the
+//! `.warlock/scopes.toml` upwards by hand, which is the boundary rule and the
 //! `[[scope]]` lookup written a second time somewhere they will drift from the
 //! first. Only the *name* a key is stored under is ever read, so there is no
 //! key value in this module to print.
@@ -26,8 +26,9 @@
 //! asks the same question and spends the status on the verdict itself, because a
 //! shell or a `PreToolUse` hook stopping a write cannot read five lines of prose
 //! and has nothing but the status to stop on. It prints nothing, it invents no
-//! status — a closed scope is `Error::ClosedScope` and the **3** the headless
-//! writes already refuse with — and it is the same [`checked`] answer underneath,
+//! status — a closed scope is `Error::ClosedScope`, an unscoped path is
+//! `Error::Unscoped`, and both are the **3** the headless writes already refuse
+//! with — and it is the same [`checked`] answer underneath,
 //! so a gate that refuses and a check that says "closed" can never disagree.
 //!
 //! With no path at all, `--gate` is the same question asked by a Claude Code
@@ -44,7 +45,7 @@ use serde_json::{Value, json};
 use warlock_engine::{Manifest, route_facts, scope_opens_to};
 
 use crate::app::Sigils;
-use crate::boundary::closed_scope_message;
+use crate::boundary::{closed_scope_message, unscoped_message};
 use crate::error::Error;
 use crate::query::{envelope, spelled, write_object};
 use crate::settings::{Settings, sigils_line};
@@ -174,8 +175,8 @@ fn checked_onto<W: Write>(
 }
 
 // A missing manifest is an empty one and not a failure: a repository that has
-// never pacted anything has never scoped anything either, and "nothing covers
-// this path" is the answer rather than the absence of one.
+// never scoped anything has a definite answer, "nothing covers this path",
+// rather than no answer.
 fn checked_at(standing: &Standing, home: Option<&Path>, path: PathBuf) -> Result<Checked, Error> {
     let manifest = standing.manifest()?;
 
@@ -218,8 +219,7 @@ fn checked(
     let settings = Settings::at(home.map(Path::to_path_buf), repo_root);
     let sigils = settings.sigils_or_unknown();
     // `Nothing` and `Unknown` are both the empty slice on the way in
-    // (`Sigils::as_slice`), which is what makes `opens` false for both over a
-    // scoped path and true for both over an unscoped one.
+    // (`Sigils::as_slice`), which is what makes `opens` false for both.
     let opens = scope_opens_to(facts.scope(), sigils.as_slice());
     let record = facts.record();
 
@@ -244,9 +244,9 @@ fn checked(
 // on stderr, and the open case says nothing because there is nothing to say
 // about a write that may proceed.
 //
-// The refusal travels through `Error::ClosedScope`, which is the register the
-// headless writes already refuse in: one line, exit **3**, and re-running will
-// never work. No new status and no `--force`.
+// The refusal travels through `Error::ClosedScope` or `Error::Unscoped`, which
+// is the register the headless writes already refuse in: one line, exit **3**,
+// and re-running will never work. No new status and no `--force`.
 pub fn gate(path: PathBuf) -> Result<(), Error> {
     gated_onto(
         &Standing::here(FOR_CHECK)?,
@@ -274,17 +274,19 @@ fn gated_onto(standing: &Standing, home: Option<&Path>, path: PathBuf) -> Result
 // [`checked`], which is what the refusal wants: an absolute machine path in a
 // line a hook shows somebody names their home directory back at them.
 //
-// Matched on the scope rather than on `opens` alone, for `boundary::permits`'s
-// reason: an unscoped path is open (`scope_opens_to(None, ..)` is `true`), so a
-// refusal is always in some named scope's name and this arm can never invent
-// one to refuse in.
+// Matched on the scope as well as on `opens`, because the two refusals want
+// different fixes: a closed scope is a sigil to hold, and an unscoped path is a
+// scope to draw.
 fn gated(checked: &Checked) -> Result<(), Error> {
     match (checked.scope.as_deref(), checked.opens) {
+        (_, true) => Ok(()),
         (Some(scope), false) => Err(Error::ClosedScope {
             path: checked.path.clone(),
             scope: scope.to_owned(),
         }),
-        _ => Ok(()),
+        (None, false) => Err(Error::Unscoped {
+            path: checked.path.clone(),
+        }),
     }
 }
 
@@ -354,16 +356,24 @@ fn hooked_onto<W: Write>(
     };
 
     match gated(&checked) {
-        // An open scope, or a path no scope covers: nothing is written at all.
-        // Silence is how a `PreToolUse` hook permits, and an empty stdout is
+        // An open scope: nothing is written at all. Silence is how a
+        // `PreToolUse` hook permits, and an empty stdout is
         // also what a shell wrapping this wants — there is no envelope for it
         // to have to parse before it learns nothing was refused.
         Ok(()) => Ok(()),
         Err(Error::ClosedScope { path, scope }) => {
-            write_object(out, &denial(&path, &scope));
+            write_object(
+                out,
+                &denial(&closed_scope_message(&format!("`{path}`"), &scope)),
+            );
             Ok(())
         }
-        // Unreachable: `gated` refuses with `ClosedScope` and with nothing else.
+        Err(Error::Unscoped { path }) => {
+            write_object(out, &denial(&unscoped_message(&format!("`{path}`"))));
+            Ok(())
+        }
+        // Unreachable: `gated` refuses with `ClosedScope`, `Unscoped` and with
+        // nothing else.
         // Written out rather than folded into the quiet arm above so that a
         // second refusal added there is a **1** somebody sees, and not a write
         // this hook silently permits.
@@ -392,33 +402,23 @@ fn wanted(payload: &[u8]) -> Option<PathBuf> {
 // exactly-one-compact-object-on-one-line promise the `--json` answers make, and
 // the one a hook's stdout parser wants even more. Field order is insertion order
 // — see `preserve_order` in the workspace manifest.
-fn denial(path: &str, scope: &str) -> Value {
+//
+// The reason is the boundary's own sentence, and deliberately not a wording of
+// its own: the same fact refused at a keystroke, at a shell prompt and at a hook
+// says the same thing. The `warlock: ` prefix is `main`'s, carried into the JSON
+// because the status line a hook shows says only that permission was denied:
+// without it the reason arrives as a sentence from nowhere, and warlock is the
+// program to go and argue with. The path is backticked by the caller rather than
+// in the message, for `Verdict::message`'s reason — a panel spells a directory
+// the way the tree does.
+fn denial(sentence: &str) -> Value {
     json!({
         HOOK_OUTPUT: {
             HOOK_EVENT_NAME: PRE_TOOL_USE,
             PERMISSION_DECISION: DENY,
-            PERMISSION_REASON: reason(path, scope),
+            PERMISSION_REASON: format!("warlock: {sentence}"),
         }
     })
-}
-
-// The boundary's own sentence, and deliberately not a wording of its own: the
-// same fact refused at a keystroke, at a shell prompt and at a hook says the same
-// thing, names the same scope and points at the same `warlock sigil add`. A sigil
-// and the scope it opens share a name, so naming the scope is naming the sigil
-// this write wants — which is why "hold that sigil" needs nothing added to it.
-//
-// The `warlock: ` prefix is `main`'s, carried into the JSON because the status
-// line a hook shows says only that permission was denied: without it the reason
-// arrives as a sentence from nowhere, and warlock is the program to go and argue
-// with. The path is backticked here rather than in the message, which is the
-// caller's job for `Verdict::message`'s reason — a panel spells a directory the
-// way the tree does.
-fn reason(path: &str, scope: &str) -> String {
-    format!(
-        "warlock: {}",
-        closed_scope_message(&format!("`{path}`"), scope)
-    )
 }
 
 // One line per fact rather than a paragraph, because a reader looking for one
@@ -477,8 +477,9 @@ fn covering_line(path: &str, scope: Option<&str>) -> String {
 // "no record" than print a line that names two thirds of a route.
 //
 // Neither absent case names a command that writes a record, because there is
-// none: `warlock scope add` puts a scope *name* on a pacted directory, and the
-// `[[scope]]` record it routes with is hand-written in the manifest.
+// none here to name: a scope with no record is fixed by `warlock scope add`
+// with its `--team-key`, `--review-state` and `--label`, or by hand in the
+// manifest.
 fn route_line(
     scope: Option<&str>,
     team: Option<&str>,
@@ -494,7 +495,7 @@ fn route_line(
         }
         (Some(scope), ..) => format!(
             "`{scope}` has no `[[scope]]` record, so there is nothing to route to: a record \
-             in `.warlock/pacts.toml` is what would fix it"
+             in `.warlock/scopes.toml` is what would fix it"
         ),
         (None, ..) => "there is nothing to route to: a scope covering this path is what would \
              fix it, with `warlock scope add`"
@@ -502,13 +503,12 @@ fn route_line(
     }
 }
 
-// The unscoped case is stated as the permissive default it comes from rather
-// than as a bare "open": a reader just told nothing scopes the path should not
-// be left wondering which sigil did it. The closed line ends with the command
-// that holds the sigil it wants.
+// The unscoped case names why it is closed rather than a bare "closed": a reader
+// just told nothing scopes the path should not go looking for a sigil to hold.
+// The closed line ends with the command that holds the sigil it wants.
 fn verdict_line(scope: Option<&str>, opens: bool) -> String {
     match scope {
-        None => "an unscoped path is open to anyone, so this machine may work here".to_owned(),
+        None => "an unscoped path is closed to everyone, so no AI may work here".to_owned(),
         Some(scope) if opens => format!("`{scope}` is open to this machine"),
         Some(scope) => format!(
             "`{scope}` is closed to this machine — hold that sigil to work here, \

@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::json;
 use warlock_engine::{
-    Manifest, PactEntry, ScopeRecord, save_key, save_key_binding, save_sigils, sigils_path,
+    Manifest, ScopeRecord, ScopedDirectory, save_key, save_key_binding, save_sigils, sigils_path,
 };
 
 use super::{Checked, checked, checked_onto, gated_onto, hooked_onto, object, prose};
@@ -40,11 +40,11 @@ fn the_composition_answers_about_a_path_the_manifest_has_never_heard_of() {
 
     assert!(
         line.contains("nothing scopes `src`"),
-        "a repository that never pacted anything covers nothing: {line}"
+        "a repository that never scoped anything covers nothing: {line}"
     );
     assert!(
-        line.contains("open to anyone"),
-        "an unscoped path is open, and the answer should say so: {line}"
+        line.contains("an unscoped path is closed to everyone"),
+        "an unscoped path is closed, and the answer should say so: {line}"
     );
     assert!(line.ends_with('\n'), "the answer is terminated: {line:?}");
 }
@@ -52,9 +52,8 @@ fn the_composition_answers_about_a_path_the_manifest_has_never_heard_of() {
 #[test]
 fn the_composition_reads_the_scope_the_manifest_holds() {
     let (repo, home) = (a_dir(), a_dir());
-    Manifest::with_entries([PactEntry::new(".", "src", "src/.warlock.md")
-        .expect("a relative module path is inside the root")
-        .with_scope("data-plane")])
+    Manifest::with_directories([ScopedDirectory::new(".", "src", "data-plane")
+        .expect("a relative module path is inside the root")])
     .save(repo.path())
     .expect("a manifest that saves");
 
@@ -83,7 +82,7 @@ fn a_missing_manifest_answers_and_an_unparsable_one_refuses() {
     // There and broken: a failure, and not one word printed first.
     let warlock = repo.path().join(".warlock");
     fs::create_dir_all(&warlock).expect("the bookkeeping directory");
-    fs::write(warlock.join("pacts.toml"), "not toml {{{").expect("a broken manifest");
+    fs::write(warlock.join("scopes.toml"), "not toml {{{").expect("a broken manifest");
 
     let mut out = Vec::new();
     let error = checked_onto(
@@ -127,20 +126,18 @@ fn a_dir() -> tempfile::TempDir {
     tempfile::tempdir().expect("a temporary directory")
 }
 
-fn entry(module: &str) -> PactEntry {
-    PactEntry::new(".", module, format!("{module}/.warlock.md"))
-        .expect("a relative module path is inside the root")
+fn entry(module: &str, scope: &str) -> ScopedDirectory {
+    ScopedDirectory::new(".", module, scope).expect("a relative module path is inside the root")
 }
 
 // `data-plane` has a `[[scope]]` record and `platform` deliberately has none:
-// a scope somebody pacted before anybody filed a routing record for it is the
+// a scope somebody drew before anybody filed a routing record for it is the
 // ordinary half-finished state, and every test below can reach both from one
 // manifest.
 fn a_manifest() -> Manifest {
-    Manifest::with_entries([
-        entry("crates").with_scope("platform"),
-        entry("crates/engine").with_scope("data-plane"),
-        entry("docs"),
+    Manifest::with_directories([
+        entry("crates", "platform"),
+        entry("crates/engine", "data-plane"),
     ])
     .with_scopes([ScopeRecord::new(
         "data-plane",
@@ -222,12 +219,13 @@ fn a_covered_path_is_named_by_the_nearest_scope_above_it() {
 fn a_path_nothing_covers_says_so_rather_than_naming_a_scope() {
     let home = a_dir();
 
-    // Pacted and unscoped is not covered, and neither is the root itself.
     assert_eq!(answer(home.path(), "docs/adr").scope, None);
     assert_eq!(answer(home.path(), ".").scope, None);
-    // And an unscoped path is open to a machine holding nothing at all:
-    // the permissive default is on the directory and only there.
-    assert!(answer(home.path(), "docs/adr").opens);
+    // Work happens only inside a scope, so an unscoped path is closed even to
+    // a machine holding the wildcard.
+    assert!(!answer(home.path(), "docs/adr").opens);
+    holding(home.path(), &["*"]);
+    assert!(!answer(home.path(), "docs/adr").opens);
 }
 
 #[test]
@@ -338,8 +336,7 @@ fn a_missing_home_is_nothing_held_rather_than_a_config_that_would_not_read() {
 #[test]
 fn a_path_outside_the_repository_is_refused_rather_than_reported_as_unscoped() {
     // `scope_covering`'s own doc: such a path is not unscoped, it is one
-    // this manifest has nothing whatever to say about. Answering
-    // `scope: null` would tell a script it is open to anyone.
+    // this manifest has nothing whatever to say about.
     let home = a_dir();
 
     for outside in [
@@ -378,7 +375,7 @@ fn nothing_covering_the_path_is_a_null_scope_rather_than_a_missing_field() {
 
     assert_eq!(
         object(&answer(home.path(), "docs/adr")).to_string(),
-        r#"{"command":"check","path":"docs/adr","scope":null,"sigils":[],"opens":true,"team":null,"review_state":null,"label":null,"key":null,"key_found":false}"#
+        r#"{"command":"check","path":"docs/adr","scope":null,"sigils":[],"opens":false,"team":null,"review_state":null,"label":null,"key":null,"key_found":false}"#
     );
 }
 
@@ -562,7 +559,7 @@ fn a_path_no_scope_covers_says_there_is_nothing_to_route_to() {
          there is nothing to route to: a scope covering this path is what would fix it, \
          with `warlock scope add`\n\
          holding nothing\n\
-         an unscoped path is open to anyone, so this machine may work here\n\
+         an unscoped path is closed to everyone, so no AI may work here\n\
          no key is bound to this checkout: `warlock key use <name>` binds a name this \
          machine stores, and `warlock key add <name>` stores a new one"
     );
@@ -581,7 +578,7 @@ fn a_covering_scope_nobody_recorded_says_which_scope_is_missing_a_record() {
         prose(&answer(home.path(), "crates/tui/src")),
         "`crates/tui/src` is scoped `platform`\n\
          `platform` has no `[[scope]]` record, so there is nothing to route to: a record \
-         in `.warlock/pacts.toml` is what would fix it\n\
+         in `.warlock/scopes.toml` is what would fix it\n\
          holding nothing\n\
          `platform` is closed to this machine — hold that sigil to work here, \
          with `warlock sigil add platform`\n\
@@ -678,28 +675,39 @@ fn a_gate_over_a_closed_scope_is_the_boundarys_three_and_names_the_scope() {
 }
 
 #[test]
-fn a_gate_over_an_open_scope_an_unscoped_path_or_an_unpacted_one_is_a_zero() {
-    // The three open readings, and the same 0 for all of them: an unscoped path
-    // is open by the boundary's own permissive default (`scope_opens_to(None,
-    // ..)`), and so is one in a directory nobody has pacted, so a gate refuses
-    // only where a named scope says to. Nothing is printed for any of them —
-    // there is no writer to print through — so a hook's stdout stays empty and a
-    // shell gets no envelope it would have to parse.
+fn a_gate_over_an_open_scope_is_a_zero() {
+    // Nothing is printed — there is no writer to print through — so a hook's
+    // stdout stays empty and a shell gets no envelope it would have to parse.
     let (repo, home) = (a_dir(), a_dir());
     holding_in(home.path(), repo.path(), &["data-plane"]);
 
-    for path in [
-        // Open: the held sigil matches the covering scope.
-        "crates/engine",
-        "crates/engine/src/lib.rs",
-        // Pacted and unscoped, under a scope this machine does not hold.
-        "docs/adr",
-        // A directory the manifest has never heard of, which nothing covers.
-        "vendor/thing/file.rs",
-    ] {
+    for path in ["crates/engine", "crates/engine/src/lib.rs"] {
         let gated = gating(repo.path(), home.path(), path);
         assert_eq!(status_for(&gated), 0, "{path}");
         gated.unwrap_or_else(|error| panic!("{path} is open: {error}"));
+    }
+}
+
+#[test]
+fn a_gate_over_an_unscoped_path_is_the_boundarys_three_and_says_to_draw_a_scope() {
+    // The wildcard opens every scope and still not a path under none: work
+    // happens only inside a scope.
+    let (repo, home) = (a_dir(), a_dir());
+    holding_in(home.path(), repo.path(), &["*"]);
+
+    for path in ["docs/adr", "vendor/thing/file.rs"] {
+        let refused = gating(repo.path(), home.path(), path);
+
+        assert_eq!(status_for(&refused), 3, "{path}");
+        let error = refused.expect_err("an unscoped path is closed to everyone");
+        assert!(
+            matches!(&error, Error::Unscoped { path: refused } if refused == path),
+            "{error:?}"
+        );
+        assert!(
+            error.to_string().contains("warlock scope add"),
+            "the way out is drawing a scope: {error}"
+        );
     }
 }
 
@@ -811,25 +819,41 @@ fn a_hook_over_a_closed_scope_writes_the_deny_object_and_still_exits_zero() {
 }
 
 #[test]
-fn a_hook_over_an_open_scope_an_unscoped_path_or_an_unpacted_one_writes_nothing() {
-    // The gate form's three open readings, and the same silence for all of them:
-    // saying nothing is how a `PreToolUse` hook permits, and a stdout with an
+fn a_hook_over_an_open_scope_writes_nothing() {
+    // Saying nothing is how a `PreToolUse` hook permits, and a stdout with an
     // object of any kind on it is a write stopped.
     let (repo, home) = (a_dir(), a_dir());
     holding_in(home.path(), repo.path(), &["data-plane"]);
 
-    for path in [
-        "crates/engine",
-        "crates/engine/src/lib.rs",
-        "docs/adr",
-        "vendor/thing/file.rs",
-    ] {
+    for path in ["crates/engine", "crates/engine/src/lib.rs"] {
         let (written, outcome) = hooking(repo.path(), home.path(), &a_payload(repo.path(), path));
 
         assert!(written.is_empty(), "{path} was refused: {written}");
         assert_eq!(status_for(&outcome), 0, "{path}");
         outcome.unwrap_or_else(|error| panic!("{path} is open: {error}"));
     }
+}
+
+#[test]
+fn a_hook_over_an_unscoped_path_writes_the_deny_object_that_says_to_draw_a_scope() {
+    let (repo, home) = (a_dir(), a_dir());
+    holding_in(home.path(), repo.path(), &["*"]);
+
+    let (written, outcome) = hooking(
+        repo.path(),
+        home.path(),
+        &a_payload(repo.path(), "docs/adr/0001.md"),
+    );
+
+    assert_eq!(
+        written,
+        "{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\
+         \"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"warlock: \
+         nothing scopes `docs/adr/0001.md`, so no AI may work there — draw a scope with \
+         `warlock scope add`\"}}\n"
+    );
+    assert_eq!(status_for(&outcome), 0);
+    outcome.expect("a hook denies by writing, not by failing");
 }
 
 #[test]
@@ -870,7 +894,7 @@ fn an_empty_file_path_is_not_a_write_to_the_repository_root() {
     // scope this machine does not hold. A read that let the empty string through
     // would deny a write nobody can find.
     let (repo, home) = (a_dir(), a_dir());
-    Manifest::with_entries([entry(".").with_scope("warlock-team")])
+    Manifest::with_directories([entry(".", "warlock-team")])
         .save(repo.path())
         .expect("a manifest that saves");
 
@@ -887,7 +911,7 @@ fn an_empty_file_path_is_not_a_write_to_the_repository_root() {
     assert!(out.is_empty(), "the root was refused: {out:?}");
 
     // And the same repository denies a path it can name, so the silence above is
-    // the empty string's doing rather than a root nothing scopes.
+    // the empty string's doing.
     let named =
         json!({ "tool_input": { "file_path": repo.path().join("src/lib.rs") } }).to_string();
     let mut out = Vec::new();
@@ -911,7 +935,7 @@ fn an_empty_file_path_is_not_a_write_to_the_repository_root() {
 fn a_write_warlock_cannot_name_a_scope_for_writes_nothing() {
     // The two absences that are not the payload's: a path outside the repository
     // the hook is standing in, which has no repository-relative spelling at all,
-    // and a manifest that will not parse, which is a repository whose pacts are
+    // and a manifest that will not parse, which is a repository whose scopes are
     // unknown. `warlock check` refuses the second with a **1**; a hook has no
     // status to refuse with and nowhere to put a sentence, and a gate that cannot
     // name the scope covering a write cannot refuse it either.
@@ -923,7 +947,7 @@ fn a_write_warlock_cannot_name_a_scope_for_writes_nothing() {
     outcome.expect("a path outside the repository permits");
 
     let warlock = repo.path().join(".warlock");
-    fs::write(warlock.join("pacts.toml"), "not toml {{{").expect("a broken manifest");
+    fs::write(warlock.join("scopes.toml"), "not toml {{{").expect("a broken manifest");
 
     let mut out = Vec::new();
     hooked_onto(

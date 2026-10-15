@@ -495,7 +495,7 @@ mod named {
     // takes.
     const ME: &str = "user-viewer";
 
-    // The scope record in `.warlock/pacts.toml`: the team it routes to, the state
+    // The scope record in `.warlock/scopes.toml`: the team it routes to, the state
     // it reserves for review, and the label that says a ticket is its work.
     fn record() -> ScopeRecord {
         ScopeRecord::new("warlock-team", "WAR", "In Review", "warlock")

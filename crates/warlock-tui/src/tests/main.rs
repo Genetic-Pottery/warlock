@@ -86,68 +86,11 @@ fn config_is_gone() {
 }
 
 #[test]
-fn a_listing_with_no_path_asks_about_the_whole_repository() {
-    // `None` and not the working directory: what an omitted path means is
-    // `query::list`'s to decide, and it decides on the repository root, so
-    // the parser hands over the absence rather than filling it in.
-    assert_eq!(
-        parse(&["stale"]).unwrap().command,
-        Some(Command::Stale {
-            path: None,
-            json: false
-        })
-    );
-    assert_eq!(
-        parse(&["fresh"]).unwrap().command,
-        Some(Command::Fresh {
-            path: None,
-            json: false
-        })
-    );
-}
-
-#[test]
-fn a_listing_takes_a_path_and_a_json_flag_in_either_order() {
-    assert_eq!(
-        parse(&["stale", "crates"]).unwrap().command,
-        Some(Command::Stale {
-            path: Some(PathBuf::from("crates")),
-            json: false
-        })
-    );
-    for args in [["stale", "crates", "--json"], ["stale", "--json", "crates"]] {
-        assert_eq!(
-            parse(&args).unwrap().command,
-            Some(Command::Stale {
-                path: Some(PathBuf::from("crates")),
-                json: true
-            }),
-            "{args:?}"
-        );
-    }
-    assert_eq!(
-        parse(&["fresh", "--json"]).unwrap().command,
-        Some(Command::Fresh {
-            path: None,
-            json: true
-        })
-    );
-}
-
-#[test]
-fn a_listing_answers_about_one_path_rather_than_a_list_of_them() {
-    // `warlock stale a b` is somebody expecting one of two things warlock
-    // does not do — several paths, or a second flag spelled as a word — and
-    // either way an answer about `a` alone would be an answer to a question
-    // nobody asked. Clap's refusal, so it is a 2 and not a 1.
-    for args in [
-        ["stale", "a", "b"].as_slice(),
-        ["fresh", "a", "b"].as_slice(),
-        ["stale", "--jsonn"].as_slice(),
-    ] {
-        let error = parse(args).unwrap_err();
-        assert!(error.use_stderr(), "{args:?}");
-        assert_eq!(error.exit_code(), 2, "{args:?}");
+fn the_words_for_documents_and_their_freshness_are_gone() {
+    for word in ["pact", "refresh", "unpact", "stale", "fresh"] {
+        let error = parse(&[word, "crates"]).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::InvalidSubcommand, "{word}");
+        assert_eq!(error.exit_code(), 2, "{word}");
     }
 }
 
@@ -212,8 +155,7 @@ fn a_gate_takes_the_path_in_either_order_and_takes_no_json() {
 
 #[test]
 fn a_check_with_no_path_is_a_malformed_invocation_rather_than_a_whole_repository_answer() {
-    // Unlike the two listings, whose omitted path means the repository
-    // root: a check is a walk up from one place, so there is no
+    // A check is a walk up from one place, so there is no
     // whole-repository answer for an absence to mean. Clap's refusal, so it
     // is a 2 and not warlock answering about something nobody named. The path
     // being an `Option` to clap is `--gate`'s doing and changes none of this:
@@ -231,108 +173,13 @@ fn a_check_with_no_path_is_a_malformed_invocation_rather_than_a_whole_repository
 }
 
 #[test]
-fn an_unpact_takes_the_one_directory_it_un_pacts_and_takes_it_from_the_reader() {
-    assert_eq!(
-        parse(&["unpact", "crates/engine"]).unwrap().command,
-        Some(Command::Unpact {
-            path: PathBuf::from("crates/engine")
-        })
-    );
-    // The whole-manifest edit is a path somebody typed, and it is spelled
-    // like any other: the parser has no default standing behind it, so the
-    // largest edit warlock can make is never the one a missing argument
-    // makes by itself.
-    assert_eq!(
-        parse(&["unpact", "."]).unwrap().command,
-        Some(Command::Unpact {
-            path: PathBuf::from(".")
-        })
-    );
-}
-
-#[test]
-fn an_unpact_with_no_path_or_with_two_is_a_malformed_invocation() {
-    // An omitted path is not the repository root here, unlike the two
-    // listings: it is clap's 2, for the reason above.
-    let malformed: [&[&str]; 3] = [
-        &["unpact"],
-        &["unpact", "a", "b"],
-        &["unpact", "--nonsense"],
-    ];
-
-    for args in malformed {
-        let error = parse(args).unwrap_err();
-        assert!(error.use_stderr(), "{args:?}");
-        assert_eq!(error.exit_code(), 2, "{args:?}");
-    }
-}
-
-#[test]
-fn the_two_runs_take_the_one_subtree_they_descend_and_take_it_from_the_reader() {
-    assert_eq!(
-        parse(&["pact", "crates/engine"]).unwrap().command,
-        Some(Command::Pact {
-            path: PathBuf::from("crates/engine")
-        })
-    );
-    assert_eq!(
-        parse(&["refresh", "crates/engine"]).unwrap().command,
-        Some(Command::Refresh {
-            path: PathBuf::from("crates/engine")
-        })
-    );
-    // The whole repository, spelled by somebody who meant it. The largest
-    // run warlock can start — minutes of passes over every directory there
-    // is — is never the one an omitted argument starts by itself.
-    assert_eq!(
-        parse(&["pact", "."]).unwrap().command,
-        Some(Command::Pact {
-            path: PathBuf::from(".")
-        })
-    );
-}
-
-#[test]
-fn a_run_with_no_path_or_with_two_is_a_malformed_invocation() {
-    // Clap's 2, for the un-pact's reason with the money on it: a run that
-    // guessed at what to descend would have spent the tokens before anybody
-    // could say it guessed wrong.
-    let malformed: [&[&str]; 6] = [
-        &["pact"],
-        &["pact", "a", "b"],
-        &["pact", "--nonsense"],
-        &["refresh"],
-        &["refresh", "a", "b"],
-        &["refresh", "--nonsense"],
-    ];
-
-    for args in malformed {
-        let error = parse(args).unwrap_err();
-        assert!(error.use_stderr(), "{args:?}");
-        assert_eq!(error.exit_code(), 2, "{args:?}");
-    }
-}
-
-#[test]
-fn no_flag_on_a_write_or_a_run_gets_past_the_boundary_or_asks_for_an_object() {
+fn no_flag_on_a_scope_write_gets_past_the_boundary_or_asks_for_an_object() {
     // Two absences, pinned where they are decided. There is no `--force`,
     // `--yes` or any other word that skips the scope check — `warlock
     // sigil add` is the one road past a boundary, and a flag that existed
-    // would be a second. And there is no `--json`: the three questions
-    // answer in objects because something reads their answers, while these
-    // five say what they did as they do it and spend the status on whether
-    // it happened. The two runs are here for the stronger form of the first
-    // reason: a flag past their boundary would spend somebody's tokens
-    // rewriting somebody else's documents.
-    let refused: [&[&str]; 14] = [
-        &["pact", "crates", "--force"],
-        &["pact", "--force", "crates"],
-        &["pact", "crates", "--json"],
-        &["refresh", "crates", "--force"],
-        &["refresh", "crates", "--json"],
-        &["unpact", "crates", "--force"],
-        &["unpact", "--force", "crates"],
-        &["unpact", "crates", "--json"],
+    // would be a second. And there is no `--json`: a write says what it did
+    // as it does it and spends the status on whether it happened.
+    let refused: [&[&str]; 6] = [
         &["scope", "add", "crates", "web", "--force"],
         &["scope", "add", "crates", "web", "--yes"],
         &["scope", "add", "crates", "web", "--json"],
@@ -463,7 +310,7 @@ fn the_three_record_flags_reach_the_add_exactly_as_they_were_typed() {
         Some(added(Some("  "), Some(""), Some(" area/data-plane ")))
     );
     // And a subset parses, because whether the three are required depends on
-    // what `.warlock/pacts.toml` already records and clap has not read it. A
+    // what `.warlock/scopes.toml` already records and clap has not read it. A
     // `required = true` here would refuse the flagless run that writes an
     // already-recorded scope.
     assert_eq!(
@@ -899,15 +746,7 @@ fn per_subcommand_help_is_a_help_exit_too() {
     for args in [
         ["sigil", "--help"].as_slice(),
         ["sigil", "add", "--help"].as_slice(),
-        ["stale", "--help"].as_slice(),
-        ["fresh", "--help"].as_slice(),
         ["check", "--help"].as_slice(),
-        ["unpact", "--help"].as_slice(),
-        // The two runs: the help for a command that spends minutes and
-        // tokens is the one a reader is likeliest to ask for before typing
-        // it for real.
-        ["pact", "--help"].as_slice(),
-        ["refresh", "--help"].as_slice(),
         // The nested pair, asked for at both depths: `warlock scope --help`
         // is the noun's two verbs, and each verb has a help of its own.
         ["scope", "--help"].as_slice(),
@@ -938,15 +777,7 @@ fn each_subcommands_help_says_what_that_subcommand_does() {
     // the name back, which is not what a reader asked for.
     for (name, said) in [
         ("sigil", "sigils"),
-        ("stale", "stale"),
-        ("fresh", "fresh"),
         ("check", "scope"),
-        ("unpact", "pact"),
-        // The two runs say what they leave behind and which directories
-        // they spend a pass on, because that is the difference somebody
-        // typing one of them is choosing between.
-        ("pact", ".warlock.md"),
-        ("refresh", "stale"),
         ("scope", "scope"),
         ("key", "Linear"),
         // The two that reach a board say which direction they go in, because
@@ -966,8 +797,8 @@ fn each_subcommands_help_says_what_that_subcommand_does() {
         assert!(help.lines().count() < 20, "{name}: {help}");
         // The doc comment above each variant is the command in backticks
         // and nothing an `about` here writes is, so a backtick in the help
-        // is a doc comment clap lifted — which for `stale` would be the
-        // name back rather than what it does.
+        // is a doc comment clap lifted — the name back rather than what it
+        // does.
         assert!(!help.contains('`'), "{name}: {help}");
     }
 }
@@ -1016,8 +847,7 @@ fn help_prints_a_few_lines_rather_than_this_file() {
     // essays above; without it clap lifts the doc comments wholesale.
     let help = Cli::command().render_long_help().to_string();
     for subcommand in [
-        "sigil", "stale", "fresh", "check", "unpact", "pact", "refresh", "scope", "key", "brief",
-        "push", "draft", "pull", "resume",
+        "sigil", "check", "scope", "key", "branch", "brief", "push", "draft", "pull", "resume",
     ] {
         assert!(help.contains(subcommand), "{subcommand}: {help}");
     }
@@ -1025,7 +855,7 @@ fn help_prints_a_few_lines_rather_than_this_file() {
     // A row per subcommand plus the usage and options chrome: the ceiling is
     // what stops an `about` becoming a paragraph, so it moves by one when a
     // subcommand is added and never to make room for prose.
-    assert!(help.lines().count() < 29, "{help}");
+    assert!(help.lines().count() < 24, "{help}");
     // Every doc comment on `Cli` and its variants spells the command in
     // backticks, and no `about` above does, so a backtick reaching the help
     // is a doc comment that got lifted into it.
@@ -1033,15 +863,14 @@ fn help_prints_a_few_lines_rather_than_this_file() {
 }
 
 #[test]
-fn the_six_statuses_a_write_can_leave_are_all_different_numbers() {
+fn the_five_statuses_a_write_can_leave_are_all_different_numbers() {
     // The vocabulary, held together in one place so that a script reading
     // only the status can tell them apart: a write that happened, one
     // warlock could not finish, one refused at the boundary with nothing
-    // spent, a command line that was never a request, a run that descended a
-    // subtree and came back with some of its directories failed, and a run
-    // somebody stopped with Ctrl-C. Each is taken from the thing that really
-    // produces it — `status_for` for warlock's own five, clap for the sixth
-    // — rather than written down as a number.
+    // spent, a command line that was never a request, and a run somebody
+    // stopped with Ctrl-C. Each is taken from the thing that really produces
+    // it — `status_for` for warlock's own four, clap for the fifth — rather
+    // than written down as a number.
     let completed = i32::from(status_for(&Ok(())));
     let could_not = i32::from(status_for(&Err(Error::NoRepository {
         start: PathBuf::from("/nowhere"),
@@ -1050,14 +879,6 @@ fn the_six_statuses_a_write_can_leave_are_all_different_numbers() {
     let refused = i32::from(status_for(&Err(Error::ClosedScope {
         path: "crates/engine".to_owned(),
         scope: "data-plane".to_owned(),
-    })));
-    // The half-worked run: the manifest is saved and the documents that
-    // could be written are written, so this is neither the 0 of a run with
-    // nothing wrong with it nor the 1 of a warlock that could not do the
-    // thing.
-    let with_failures = i32::from(status_for(&Err(Error::Failures {
-        failed: 3,
-        total: 12,
     })));
     // The run somebody stopped: neither warlock's inability nor its verdict
     // on anything, and the one number here a shell already has a meaning
@@ -1069,15 +890,8 @@ fn the_six_statuses_a_write_can_leave_are_all_different_numbers() {
         .expect_err("a scope write with the scope missing is clap's")
         .exit_code();
 
-    let vocabulary = [
-        completed,
-        could_not,
-        refused,
-        malformed,
-        with_failures,
-        cancelled,
-    ];
-    assert_eq!(vocabulary, [0, 1, 3, 2, 4, 130]);
+    let vocabulary = [completed, could_not, refused, malformed, cancelled];
+    assert_eq!(vocabulary, [0, 1, 3, 2, 130]);
     for (first, one) in vocabulary.iter().enumerate() {
         for (second, other) in vocabulary.iter().enumerate() {
             assert!(
@@ -1098,12 +912,7 @@ fn no_argument_the_parser_accepts_gets_a_write_past_the_boundary() {
     // scope's issues go; none of them reaches the boundary, which is asked
     // and answered before any of them is read. The one road past it is
     // `warlock sigil add`, and an option here would be a second one.
-    for names in [
-        vec!["unpact"],
-        vec!["scope"],
-        vec!["scope", "add"],
-        vec!["scope", "remove"],
-    ] {
+    for names in [vec!["scope"], vec!["scope", "add"], vec!["scope", "remove"]] {
         let allowed: &[&str] = if names == ["scope", "add"] {
             &["help", "team-key", "review-state", "label"]
         } else {
@@ -1131,16 +940,13 @@ fn no_argument_the_parser_accepts_gets_a_write_past_the_boundary() {
 }
 
 #[test]
-fn a_malformed_invocation_is_clap_s_two_across_all_three_questions() {
-    // The third status, and the one warlock never produces itself: clap
-    // exits the process with it before `main` has anything to map. Held
-    // here over each of the three so that a script can tell a typo from a
-    // refusal by the status alone, without reading a word of either.
-    let malformed: [&[&str]; 6] = [
-        &["stale", "--nonsense"],
-        &["stale", "here", "there"],
-        &["fresh", "--json=yes"],
+fn a_malformed_check_is_clap_s_two() {
+    // The status warlock never produces itself: clap exits the process with
+    // it before `main` has anything to map, so a script can tell a typo from
+    // a refusal by the status alone, without reading a word of either.
+    let malformed: [&[&str]; 4] = [
         &["check"],
+        &["check", "--json=yes", "here"],
         &["check", "here", "there"],
         &["check", "--nonsense", "here"],
     ];

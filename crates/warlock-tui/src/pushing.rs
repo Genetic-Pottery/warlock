@@ -5,8 +5,7 @@
 //! two frames and opens no socket at all: [`prepare`] is a manifest, a sigil
 //! file, a key store and the brief, all of them local. The
 //! answer is the one thing that leaves the machine, and it leaves on a worker
-//! thread — see [`Pushes`], which is [`crate::pacting::Pact`]'s shape for a
-//! request instead of a pass: a channel per run, drained at the bottom of the
+//! thread — see [`Pushes`]: a channel per run, drained at the bottom of the
 //! loop, and the `Option` holding it is itself the say-no to a second one.
 //!
 //! What this file adds to [`mod@crate::push`] is the asking: the dialog over
@@ -84,8 +83,7 @@ type Landing = Result<String, String>;
 /// [`crate::cutting::Cutter`]'s reason: it is a state of the push, and every
 /// answer to it is this value's to act on.
 ///
-/// [`crate::pacting::Pact`]'s shape: the seam is held for the life of the
-/// process, the run is an [`Option`] that is its own one-at-a-time guard, and
+/// The seam is held for the life of the process, the run is an [`Option`] that is its own one-at-a-time guard, and
 /// everything the run has to say arrives through [`Pushes::keep_up`] at the
 /// bottom of the event loop.
 ///
@@ -239,8 +237,7 @@ impl<O: Opens> Pushes<O> {
     /// What the push has said since the last round, which is one thing at most
     /// and ends the run either way.
     ///
-    /// Drained rather than received, for [`crate::pacting`]'s reason: nothing
-    /// here blocks, so frames keep being drawn, the tree keeps scrolling and the
+    /// Drained rather than received: nothing here blocks, so frames keep being drawn, the tree keeps scrolling and the
     /// clocks keep ticking while the request is in flight.
     pub(crate) fn keep_up(&mut self, app: &mut App, now: Instant) {
         let Some((sending, landing)) =

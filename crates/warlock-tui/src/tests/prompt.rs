@@ -35,8 +35,8 @@ const BINDINGS: [KeyCode; 17] = [
     KeyCode::Char(' '),
     KeyCode::Char('o'),
     KeyCode::Char('f'),
-    KeyCode::Char('p'),
-    KeyCode::Char('r'),
+    KeyCode::Char('v'),
+    KeyCode::Char('e'),
     KeyCode::Char('m'),
     KeyCode::Char('s'),
     KeyCode::Tab,
@@ -194,7 +194,7 @@ fn an_edit_clears_the_rule_line_and_a_non_edit_leaves_it() {
 #[test]
 fn every_tree_binding_is_swallowed_as_text_or_as_nothing() {
     // Asserted over the whole list because "nothing reaches the app" is the
-    // promise: a stray `p` that pacted something behind the prompt, or a
+    // promise: a stray `e` that opened an editor behind the prompt, or a
     // `j` that moved a selection nobody can see, would be the same accident
     // by two routes.
     for code in BINDINGS {
@@ -733,7 +733,7 @@ fn releases_and_repeats_change_nothing_in_the_record() {
 #[test]
 fn no_key_ever_changes_the_path_or_the_scope_being_recorded() {
     // Both are settled by the prompt that came before this one: the record
-    // written from here has to be the one the pact names.
+    // written from here has to be for the scope that prompt drew.
     let before = form().refused(RecordField::TeamKey, "a team key cannot be blank");
 
     for code in BINDINGS.into_iter().chain([

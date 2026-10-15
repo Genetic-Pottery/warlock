@@ -1,5 +1,5 @@
-//! The headless writes — `warlock unpact`, `warlock scope add` and `warlock
-//! scope remove` — and the boundary all three are asked over.
+//! The headless writes — `warlock scope add` and `warlock scope remove` — and
+//! the boundary both are asked over.
 //!
 //! [`Opened`] cannot be built without that question having been asked, which is
 //! how the ordering is kept, and first means first: before the spelling, before
@@ -15,24 +15,20 @@
 
 use std::path::{Path, PathBuf};
 
-use warlock_engine::{Manifest, PactEntry, unpact_subtree};
+use warlock_engine::Manifest;
 
-use crate::account::plural;
-use crate::boundary::{Operation, Verdict, permits};
+use crate::boundary::{Verdict, permits};
 use crate::error::Error;
 use crate::query::spelled;
 use crate::rescope::{RecordFields, rescope};
 use crate::settings::Settings;
-use crate::standing::{FOR_SCOPE_ADD, FOR_SCOPE_REMOVE, FOR_UNPACT, Standing};
+use crate::standing::{FOR_SCOPE_ADD, FOR_SCOPE_REMOVE, Standing};
 
 // The type is the gate: the fields are private to this module and the only
 // constructor asks the boundary, so possessing an `Opened` is proof that this
-// machine's sigils open the scope covering the path inside it. A later
-// subcommand that wants to edit the manifest from a shell asks for one and
-// inherits the check rather than remembering to repeat it — `running.rs` is the
-// first, and the one it matters most for, because `warlock pact` spends model
-// passes and rewrites documents, so a boundary asked after the descent had
-// started would already have cost somebody's tokens and somebody else's prose.
+// machine may redraw the boundary at the path inside it. A later subcommand
+// that wants to edit the manifest from a shell asks for one and inherits the
+// check rather than remembering to repeat it.
 #[derive(Debug)]
 pub(crate) struct Opened {
     repo_root: PathBuf,
@@ -59,7 +55,6 @@ impl Opened {
         home: Option<&Path>,
         manifest: Manifest,
         target: PathBuf,
-        operation: Operation,
     ) -> Result<Self, Error> {
         // Resolved here rather than by the caller, so that the one thing this
         // check reads from disk is read inside the check. A home that cannot be
@@ -69,25 +64,16 @@ impl Opened {
         // fact the gate takes, and the third state is a line only the header
         // and `warlock check` ever print. See `boundary::permits`.
         let held = Settings::at(home.map(Path::to_path_buf), &repo_root).sigils_or_unknown();
-        let verdict = permits(operation, &target, &repo_root, &manifest, held.as_slice());
+        let verdict = permits(&target, &repo_root, &manifest, held.as_slice());
         // Refused paths are spellable by construction: a path with no manifest
-        // form has no coverage and nothing below it, so it did not reach here.
+        // form has no coverage, so it did not reach here.
         // The `?` keeps the fallible call honest rather than being a second
         // refusal.
-        match verdict {
-            Verdict::Open => {}
-            Verdict::Closed { scope } => {
-                return Err(Error::ClosedScope {
-                    path: spelled(&repo_root, &target)?,
-                    scope,
-                });
-            }
-            Verdict::ClosedBelow { scopes } => {
-                return Err(Error::ClosedScopeBelow {
-                    path: spelled(&repo_root, &target)?,
-                    scopes,
-                });
-            }
+        if let Verdict::Closed { scope } = verdict {
+            return Err(Error::ClosedScope {
+                path: spelled(&repo_root, &target)?,
+                scope,
+            });
         }
 
         Ok(Self {
@@ -95,65 +81,6 @@ impl Opened {
             manifest,
             target,
         })
-    }
-
-    // Getters rather than public fields because the fields being private is the
-    // gate: a caller may look at what an open boundary gave it and may not
-    // assemble one of these out of parts it found lying around.
-    pub(crate) fn repo_root(&self) -> &Path {
-        &self.repo_root
-    }
-
-    pub(crate) const fn manifest(&self) -> &Manifest {
-        &self.manifest
-    }
-
-    pub(crate) fn target(&self) -> &Path {
-        &self.target
-    }
-
-    // Three engine calls and nothing else: no walk, no hash, no pass, and not a
-    // single `.warlock.md` touched. Un-pacting is warlock forgetting it ever
-    // promised to keep a document current; the documents are the repository's,
-    // and deleting somebody's prose because they stopped tracking its freshness
-    // is not a thing warlock gets to do.
-    //
-    // Reached only through an `Opened` built for `Operation::Unpact`, which is
-    // what asked about the boundaries below the path as well as the one over
-    // it: this call drops every entry underneath, and an entry is the only home
-    // a scope has.
-    //
-    // The dropped entries are worked out by difference rather than by asking the
-    // engine twice: whatever `unpact_subtree` kept is what remains. That keeps
-    // the count and the names honest against the engine's rule about what "below"
-    // means — including that `crates/engine` does not swallow
-    // `crates/engine-tools` — without this file holding an opinion about it.
-    //
-    // The line comes back rather than being printed here, so the sentence a
-    // reader sees is a value a test can assert about.
-    fn unpacted(&self) -> Result<String, Error> {
-        // Spelled before the edit, because it is the name the answer is about
-        // and because it is this command's refusal of a path from outside the
-        // repository. `unpact_subtree` refuses the same path on the same grounds
-        // a line later; asking here means the refusal happens before a manifest
-        // is rebuilt rather than after.
-        let path = spelled(&self.repo_root, &self.target)?;
-        let remaining = unpact_subtree(&self.target, &self.repo_root, &self.manifest)
-            // The engine's own case, rewrapped as the spelling refusal it is:
-            // this agrees with the line above by construction, since both are
-            // `to_manifest_path`.
-            .map_err(|source| Error::Unspellable { source })?;
-
-        let dropped: Vec<&PactEntry> = self
-            .manifest
-            .entries()
-            .iter()
-            .filter(|entry| remaining.entry(entry.module()).is_none())
-            .collect();
-
-        self.saved(&remaining)?;
-
-        Ok(unpacted_line(&path, &dropped))
     }
 
     // The path is spelled first because the ordering rule stops at the boundary
@@ -201,17 +128,11 @@ impl Opened {
 // manifest's stored paths and never a walk of the filesystem.
 //
 // `wanted` is the tail of the sentence a missing repository is refused with, so
-// each subcommand says what *it* could not do. Shared with `running.rs` rather
-// than copied there: a second function doing this would be a second order for
-// these steps to be in.
+// each subcommand says what *it* could not do.
 //
 // A sigil config that will not read is deliberately not a failure here: it is a
 // state of the answer — nothing held, so nothing scoped is open.
-pub(crate) fn opened(
-    wanted: &'static str,
-    operation: Operation,
-    path: &Path,
-) -> Result<Opened, Error> {
+pub(crate) fn opened(wanted: &'static str, path: &Path) -> Result<Opened, Error> {
     let standing = Standing::here(wanted)?;
     let manifest = standing.manifest()?;
     let home = Standing::home().ok();
@@ -222,76 +143,29 @@ pub(crate) fn opened(
         home.as_deref(),
         manifest,
         target,
-        operation,
     )
 }
 
 // Two lines, because the halves are elsewhere on purpose: `opened` is the
-// boundary and the resolution, `Opened::unpacted` is the edit and the sentence,
+// boundary and the resolution, `Opened::scoped` is the edit and the sentence,
 // and this is the subcommand. `main` prints a refusal on stderr and takes the
 // status from the error — a 3 for a closed boundary, a 1 for everything else.
-pub fn unpact(path: &Path) -> Result<(), Error> {
-    println!(
-        "warlock: {}",
-        opened(FOR_UNPACT, Operation::Unpact, path)?.unpacted()?
-    );
-    Ok(())
-}
-
 pub fn scope_add(path: &Path, scope: &str, flags: RecordFields<'_>) -> Result<(), Error> {
     println!(
         "warlock: {}",
-        opened(FOR_SCOPE_ADD, Operation::Scope, path)?.scoped(scope, flags)?
+        opened(FOR_SCOPE_ADD, path)?.scoped(scope, flags)?
     );
     Ok(())
 }
 
 pub fn scope_remove(path: &Path) -> Result<(), Error> {
-    println!(
-        "warlock: {}",
-        opened(FOR_SCOPE_REMOVE, Operation::Scope, path)?.unscoped()?
-    );
+    println!("warlock: {}", opened(FOR_SCOPE_REMOVE, path)?.unscoped()?);
     Ok(())
 }
 
-// The success line is the mitigation for the blast radius, not decoration. In
-// the panel you navigate to a visible row with the subtree under the cursor;
-// from a shell this is one line in a script that scrolls past. So the count
-// comes first — `warlock unpact .` in a repository of forty pacted directories
-// says `40 entries dropped`, which is a number a reader notices — and then the
-// scopes, and only the scopes. Naming all forty paths would be a paragraph on a
-// line that has to stay one line; naming the scoped ones is the half that
-// matters, because a scope is somebody else's boundary. Nothing scoped drops the
-// clause rather than reporting `0 scoped`: a clause that is almost always "and
-// none" trains a reader to stop reading the line.
-//
-// A dropped entry's scope is named exactly as it is written down, including one
-// `validate_scope` would refuse. Coverage ignores such a scope, so it never
-// closed this boundary — but it is a word somebody wrote in the file, and
-// omitting it would be warlock deciding on a reader's behalf that what they
-// wrote did not count.
-fn unpacted_line(path: &str, dropped: &[&PactEntry]) -> String {
-    let scoped: Vec<String> = dropped
-        .iter()
-        .filter_map(|entry| {
-            entry
-                .scope()
-                .map(|scope| format!("{}: {scope}", entry.module()))
-        })
-        .collect();
-    let taken = if scoped.is_empty() {
-        String::new()
-    } else {
-        format!(", {} scoped ({})", scoped.len(), scoped.join(", "))
-    };
-    let entries = plural(dropped.len(), "entry", "entries");
-
-    format!("unpacted {path} — {entries} dropped{taken}")
-}
-
 // The scope that was there before is named only when there was a different one:
-// moving somebody's boundary is worth saying out loud, for `unpacted_line`'s
-// reason, while re-writing the scope a directory already carried is a no-op
+// moving somebody's boundary is worth saying out loud, because a scope is
+// somebody else's boundary, while re-writing the scope a directory already carried is a no-op
 // nobody needs a clause about.
 fn scoped_line(module: &str, scope: &str, was: Option<&str>) -> String {
     match was {

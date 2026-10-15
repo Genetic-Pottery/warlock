@@ -1,12 +1,11 @@
 use super::{
-    MAXIMUM_CHARACTERS, RULES, Rule, at_or_above, closed_scopes_at_or_below, is_scope_character,
-    scope_covering, scope_opens_to, validate_scope, validate_sigil,
+    MAXIMUM_CHARACTERS, RULES, Rule, at_or_above, is_scope_character, scope_covering,
+    scope_opens_to, validate_scope, validate_sigil,
 };
-use crate::{Manifest, PactEntry, manifest, unpact_subtree};
+use crate::{Manifest, ScopedDirectory};
 
-fn entry(module: &str) -> PactEntry {
-    PactEntry::new(".", module, format!("{module}/.warlock.md"))
-        .expect("a relative module path is inside the root")
+fn scoped(path: &str, scope: &str) -> ScopedDirectory {
+    ScopedDirectory::new(".", path, scope).expect("a relative path is inside the root")
 }
 
 fn covering<'manifest>(path: &str, manifest: &'manifest Manifest) -> Option<&'manifest str> {
@@ -183,9 +182,9 @@ fn every_rule_renders_as_one_line() {
 
 #[test]
 fn an_inner_scope_overrides_the_one_above_it() {
-    let manifest = Manifest::with_entries([
-        entry("crates").with_scope("platform"),
-        entry("crates/engine").with_scope("data-plane"),
+    let manifest = Manifest::with_directories([
+        scoped("crates", "platform"),
+        scoped("crates/engine", "data-plane"),
     ]);
 
     // Nearest wins: the outer scope is a default for what has said nothing,
@@ -200,14 +199,14 @@ fn an_inner_scope_overrides_the_one_above_it() {
 
 #[test]
 fn a_directory_answers_with_its_own_scope() {
-    let manifest = Manifest::with_entries([entry("crates/engine").with_scope("data-plane")]);
+    let manifest = Manifest::with_directories([scoped("crates/engine", "data-plane")]);
 
     assert_eq!(covering("crates/engine", &manifest), Some("data-plane"));
 }
 
 #[test]
 fn a_path_nothing_covers_has_no_scope() {
-    let manifest = Manifest::with_entries([entry("crates/engine").with_scope("data-plane")]);
+    let manifest = Manifest::with_directories([scoped("crates/engine", "data-plane")]);
 
     assert_eq!(covering("docs/adr/0001.md", &manifest), None);
     assert_eq!(covering("docs", &manifest), None);
@@ -215,18 +214,6 @@ fn a_path_nothing_covers_has_no_scope() {
     // An empty manifest covers nothing, including the root itself.
     assert_eq!(covering("crates/engine", &Manifest::new()), None);
     assert_eq!(covering(".", &Manifest::new()), None);
-}
-
-#[test]
-fn an_unscoped_entry_in_the_way_is_walked_straight_past() {
-    let manifest = Manifest::with_entries([
-        entry("crates").with_scope("platform"),
-        entry("crates/engine"),
-    ]);
-
-    // A pacted directory with no scope is not a boundary of its own, so the
-    // answer comes from above it.
-    assert_eq!(covering("crates/engine/src", &manifest), Some("platform"));
 }
 
 #[test]
@@ -240,9 +227,9 @@ fn an_invalid_scope_is_stepped_over_for_the_next_valid_ancestor() {
         "données",
         &of_length(25),
     ] {
-        let manifest = Manifest::with_entries([
-            entry("crates").with_scope("platform"),
-            entry("crates/engine").with_scope(invalid),
+        let manifest = Manifest::with_directories([
+            scoped("crates", "platform"),
+            scoped("crates/engine", invalid),
         ]);
 
         assert_eq!(
@@ -260,9 +247,9 @@ fn an_invalid_scope_is_stepped_over_for_the_next_valid_ancestor() {
 
 #[test]
 fn an_invalid_scope_with_nothing_valid_above_it_covers_nothing() {
-    let manifest = Manifest::with_entries([
-        entry("crates").with_scope("Platform"),
-        entry("crates/engine").with_scope("data-"),
+    let manifest = Manifest::with_directories([
+        scoped("crates", "Platform"),
+        scoped("crates/engine", "data-"),
     ]);
 
     // Two typos and no valid scope anywhere above: unscoped, and never one
@@ -273,10 +260,7 @@ fn an_invalid_scope_with_nothing_valid_above_it_covers_nothing() {
 
 #[test]
 fn a_sibling_that_shares_a_prefix_is_not_covered() {
-    let manifest = Manifest::with_entries([
-        entry("crates/engine").with_scope("data-plane"),
-        entry("crates/engine-tools"),
-    ]);
+    let manifest = Manifest::with_directories([scoped("crates/engine", "data-plane")]);
 
     // Textual prefix matching would hand `data-plane` to both of these.
     assert_eq!(covering("crates/engine-tools", &manifest), None);
@@ -286,9 +270,9 @@ fn a_sibling_that_shares_a_prefix_is_not_covered() {
 
 #[test]
 fn a_scope_on_the_root_covers_everything_below_it() {
-    let manifest = Manifest::with_entries([
-        entry(".").with_scope("whole-repo"),
-        entry("crates/engine").with_scope("data-plane"),
+    let manifest = Manifest::with_directories([
+        scoped(".", "whole-repo"),
+        scoped("crates/engine", "data-plane"),
     ]);
 
     assert_eq!(covering(".", &manifest), Some("whole-repo"));
@@ -298,7 +282,7 @@ fn a_scope_on_the_root_covers_everything_below_it() {
 
 #[test]
 fn an_absolute_path_under_the_root_answers_the_same_as_a_relative_one() {
-    let manifest = Manifest::with_entries([entry("crates/engine").with_scope("data-plane")]);
+    let manifest = Manifest::with_directories([scoped("crates/engine", "data-plane")]);
     let root = std::path::Path::new("/repo");
 
     let covered = scope_covering(
@@ -312,7 +296,7 @@ fn an_absolute_path_under_the_root_answers_the_same_as_a_relative_one() {
 
 #[test]
 fn a_path_outside_the_root_is_an_error_rather_than_unscoped() {
-    let manifest = Manifest::with_entries([entry(".").with_scope("whole-repo")]);
+    let manifest = Manifest::with_directories([scoped(".", "whole-repo")]);
 
     // Not "open to anyone": this manifest has nothing to say about it.
     assert!(scope_covering("../elsewhere", ".", &manifest).is_err());
@@ -364,26 +348,28 @@ fn held(sigils: &[&str]) -> Vec<String> {
 }
 
 #[test]
-fn a_directory_nobody_scoped_is_open_to_everyone() {
-    assert!(scope_opens_to(None, &held(&["web"])));
-    assert!(scope_opens_to(None, &[]));
-    assert!(
-        scope_opens_to(None, &held(&["data-plane"])),
-        "no scope is not a locked scope: there is no boundary to be outside of"
-    );
+fn a_directory_nobody_scoped_is_closed_to_everyone() {
+    assert!(!scope_opens_to(None, &held(&["web"])));
+    assert!(!scope_opens_to(None, &[]));
+    assert!(!scope_opens_to(None, &held(&["data-plane"])));
 }
 
 #[test]
-fn holding_nothing_opens_nothing_that_is_scoped() {
+fn the_wildcard_does_not_open_a_directory_nobody_scoped() {
+    assert!(
+        !scope_opens_to(None, &held(&["*"])),
+        "the wildcard opens every scope, and an unscoped directory has none to open"
+    );
+    assert!(!scope_opens_to(None, &held(&["web", "*"])));
+}
+
+#[test]
+fn holding_nothing_opens_nothing() {
     assert!(
         !scope_opens_to(Some("data-plane"), &[]),
         "a sigil is what opens a scope, so holding none opens none"
     );
-    assert!(
-        scope_opens_to(None, &[]),
-        "but an unscoped directory is open to a machine holding nothing: the \
-             permissive default is on the directory and only there"
-    );
+    assert!(!scope_opens_to(None, &[]));
 }
 
 #[test]
@@ -454,10 +440,9 @@ fn a_near_miss_wildcard_opens_nothing() {
 
 #[test]
 fn coverage_and_opening_compose_into_the_whole_question() {
-    let manifest = Manifest::with_entries([
-        entry("crates").with_scope("platform"),
-        entry("crates/engine").with_scope("data-plane"),
-        entry("docs"),
+    let manifest = Manifest::with_directories([
+        scoped("crates", "platform"),
+        scoped("crates/engine", "data-plane"),
     ]);
     let sigils = held(&["platform"]);
 
@@ -475,171 +460,7 @@ fn coverage_and_opening_compose_into_the_whole_question() {
              never a second gate that holding `platform` could satisfy on its behalf"
     );
     assert!(
-        scope_opens_to(covering("docs"), &sigils),
-        "nothing at or above `docs` carries a scope"
+        !scope_opens_to(covering("docs"), &held(&["*"])),
+        "nothing at or above `docs` carries a scope, so not even the wildcard opens it"
     );
-}
-
-fn scoped(modules: &[(&str, Option<&str>)]) -> Manifest {
-    Manifest::with_entries(modules.iter().map(|(module, scope)| {
-        let entry = PactEntry::new(".", module, format!("{module}/.warlock.md"))
-            .expect("a relative path inside the root is storable");
-        match scope {
-            Some(scope) => entry.with_scope(*scope),
-            None => entry,
-        }
-    }))
-}
-
-#[test]
-fn a_scoped_descendant_this_machine_does_not_open_blocks() {
-    // The case the whole question is about: the target says nothing, so
-    // coverage on the target alone answers "open", and the boundary is one
-    // directory down.
-    let manifest = scoped(&[
-        ("crates", None),
-        ("crates/engine", Some("data-plane")),
-        ("crates/tui", None),
-    ]);
-
-    assert_eq!(
-        closed_scopes_at_or_below("crates", ".", &manifest, &held(&["web"]))
-            .expect("a path inside the root"),
-        ["data-plane"],
-    );
-    // And the entry carrying it is exactly one an un-pact would drop.
-    assert!(
-        unpact_subtree("crates", ".", &manifest)
-            .expect("un-pacts")
-            .entry("crates/engine")
-            .is_none(),
-    );
-}
-
-#[test]
-fn a_scoped_descendant_this_machine_opens_does_not_block() {
-    let manifest = scoped(&[("crates", None), ("crates/engine", Some("data-plane"))]);
-
-    for sigils in [
-        held(&["data-plane"]),
-        held(&["web", "data-plane"]),
-        held(&["*"]),
-    ] {
-        assert!(
-            closed_scopes_at_or_below("crates", ".", &manifest, &sigils)
-                .expect("a path inside the root")
-                .is_empty(),
-            "{sigils:?} opens it",
-        );
-    }
-}
-
-#[test]
-fn the_target_s_own_scope_is_asked_about_too_and_does_not_license_what_is_below() {
-    let manifest = scoped(&[
-        ("crates", Some("platform")),
-        ("crates/engine", Some("data-plane")),
-    ]);
-
-    // Holding the target's own scope is not permission over the boundary
-    // inside it: these are two questions, not one.
-    assert_eq!(
-        closed_scopes_at_or_below("crates", ".", &manifest, &held(&["platform"]))
-            .expect("a path inside the root"),
-        ["data-plane"],
-    );
-    // "At or below" is at, too: the target's own closed scope is blocking.
-    assert_eq!(
-        closed_scopes_at_or_below("crates", ".", &manifest, &held(&["data-plane"]))
-            .expect("a path inside the root"),
-        ["platform"],
-    );
-}
-
-#[test]
-fn an_unscoped_root_buys_nothing_over_the_scopes_below_it() {
-    // `unpact .` drops every entry there is, so it is asked about every
-    // entry there is — the root's silence is the absence of a statement,
-    // not permission over the statements under it.
-    let manifest = scoped(&[
-        (".", None),
-        ("crates/engine", Some("data-plane")),
-        ("docs", None),
-    ]);
-
-    for directory in [".", "/repo"] {
-        assert_eq!(
-            closed_scopes_at_or_below(directory, "/repo", &manifest, &held(&["web"]))
-                .expect("a path inside the root"),
-            ["data-plane"],
-            "{directory}",
-        );
-    }
-    // Nothing scoped below, or all of it held, and the root un-pact is the
-    // ordinary one it has always been.
-    assert!(
-        closed_scopes_at_or_below(".", "/repo", &manifest, &held(&["data-plane"]))
-            .expect("a path inside the root")
-            .is_empty(),
-    );
-    assert!(
-        closed_scopes_at_or_below(".", "/repo", &scoped(&[(".", None), ("crates", None)]), &[])
-            .expect("a path inside the root")
-            .is_empty(),
-    );
-}
-
-#[test]
-fn a_sibling_that_shares_a_prefix_carries_no_blocking_scope() {
-    // The same segment-wise match `unpact_subtree` uses: what is not
-    // dropped cannot block.
-    let manifest = scoped(&[
-        ("crates/engine", None),
-        ("crates/engine-tools", Some("tooling")),
-        ("crates/engineering", Some("estimates")),
-    ]);
-
-    assert!(
-        closed_scopes_at_or_below("crates/engine", ".", &manifest, &[])
-            .expect("a path inside the root")
-            .is_empty(),
-    );
-    assert_eq!(
-        closed_scopes_at_or_below("crates/engine-tools", ".", &manifest, &[])
-            .expect("a path inside the root"),
-        ["tooling"],
-    );
-}
-
-#[test]
-fn a_descendant_scope_that_is_not_a_scope_does_not_block() {
-    // Read as no scope, exactly as `scope_covering` reads it: one rule for
-    // what a boundary is, not two. A valid one beside it still blocks, and
-    // the string that is not a scope is not named in the answer.
-    let manifest = scoped(&[
-        ("crates", None),
-        ("crates/engine", Some("Data Plane!")),
-        ("crates/tui", Some("")),
-        ("crates/store", Some("data-plane")),
-    ]);
-
-    assert_eq!(
-        closed_scopes_at_or_below("crates", ".", &manifest, &[]).expect("a path inside the root"),
-        ["data-plane"],
-    );
-    assert!(
-        closed_scopes_at_or_below("crates/engine", ".", &manifest, &[])
-            .expect("a path inside the root")
-            .is_empty(),
-    );
-}
-
-#[test]
-fn a_path_with_no_manifest_relative_form_is_the_same_error_an_un_pact_gives() {
-    let manifest = scoped(&[("crates/engine", Some("data-plane"))]);
-
-    assert!(matches!(
-        closed_scopes_at_or_below("/elsewhere/crates", "/repo", &manifest, &[]),
-        Err(manifest::Error::PathOutsideRoot { .. })
-    ));
 }

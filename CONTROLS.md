@@ -18,32 +18,30 @@ or `?` closes it. In the chat bar, `?` is typed as text.
 | `G` | Go to the last row, or the bottom of the panel — this is what returns a scrolled-back panel to the newest line |
 | `Space` | Fold the subtree under the selected row, or unfold it again |
 | `Tab` | Move the focus on one place: tree → panel → composer → tree, skipping the composer when it is not on screen |
-| `Shift-Tab` | Show the panel's other card: the document if the account is up, the account if the document is |
+| `Shift-Tab` | Show the panel's other card: the document if the conversation is up, the conversation if the document is |
 
 ## Changing what the tree shows
 
 | Key | What it does |
 | --- | --- |
-| `o` | Show only what warlock is managing — pacted directories, nothing else |
+| `o` | Show only scoped directories, and the directories above them |
 | `f` | Show the files inside each directory as well as the directories |
 
 ## Doing something
 
 | Key | What it does | Scoped |
 | --- | --- | --- |
-| `p` | Pact the selected directory, over its whole subtree — or un-pact it if it is already pacted, which is a manifest edit only and leaves the documents on disk | yes |
-| `r` | Refresh: run a pass over just the stale directories of an already-pacted subtree | yes |
-| `s` | Open the scope prompt on a pacted directory | yes |
+| `s` | Open the scope prompt on the selected directory | yes |
 | `v` | Read the selected file into the panel's document card | no |
 | `e` | Open the selected file in `$EDITOR`, handing the terminal over and taking it back afterwards | no |
 | `m` | Stop the terminal reporting its mouse, or ask it to start again — with capture off, dragging over the screen selects text the way it does in any other program | no |
 
-`p`, `r`, `s` and `e` are refused while a run is already going: one run at a
-time, and the terminal cannot be handed to an editor from under a pass still
-drawing on it. `v` and `Shift-Tab` are never refused — they race nothing.
+`s` is refused while a pull is running, because a session is editing the tree and
+a scope written under it would move the boundary that session is judged against.
+`v` and `Shift-Tab` are never refused.
 
 **The scoped column** is the boundary. A directory's scope is the one written on
-the nearest pacted directory at or above it — nearest wins outright, so an outer
+the nearest scoped directory at or above it — nearest wins outright, so an outer
 scope is a default for whatever said nothing below it rather than a second gate
 to also satisfy — and a key marked *yes* is refused there unless this machine
 holds a sigil matching it. The footer names the scope wanted. The sigils box
@@ -51,21 +49,17 @@ under the tree lists what this machine holds. To change it, use `/sigil` in the
 chat bar or [`warlock sigil`](#the-headless-cli); a sigil of `*` opens
 everything.
 
-The permissive default is on the **directory** and only there: a directory nobody
-scoped is open to anyone, which is why a repository that has never drawn a
-boundary is unaffected by any of this. It is not mirrored on the sigil side. A
-sigil is what opens a scope, so a machine holding none opens none — running
+A directory no scope covers is closed to every AI session: no pull works there,
+and `warlock check --gate` refuses it. Anyone may draw the first scope on such a
+directory with `s`, because otherwise no repository could ever be set up. Once a
+scope covers a directory, you must hold that scope's sigil to redraw it — a
+boundary anybody may retype is not a boundary.
+
+A sigil is what opens a scope, so a machine holding none opens none. Running
 warlock in a scoped repository without recording what you hold gets you refused,
 in the same words as holding the wrong sigil. That is the onboarding this
 vocabulary was designed around: you are handed your scopes the way you are handed
 any other credential, and you record them once.
-
-`s` is on that list because you must hold a boundary in order to redraw it —
-otherwise the one key whose entire purpose is to move a scope would be the one
-key no scope covered. `p` is on it in **both** directions, and the un-pact
-direction is the reason the list exists: un-pacting drops the scope along with
-the pact, so a mis-aimed `p` on somebody else's subtree costs a full model pass
-to put back and does not restore the boundary when it returns.
 
 ## Leaving
 
@@ -76,17 +70,6 @@ to put back and does not restore the boundary when it returns.
 Ctrl-C asks rather than quits because it's the copy key in most other programs.
 To copy text, select it with the mouse instead. Ctrl-C asks over any other
 window, and pressing it again at the quit question leaves the question up.
-
-## While a run is going
-
-| Key | What it does |
-| --- | --- |
-| `Esc` | Cancel the run — *not* quit, for as long as there is a run to stop |
-| `q` | Quit outright, with no confirmation |
-| `Ctrl-C` | Ask whether to quit |
-
-Every other key means exactly what it means the rest of the time. The tree stays
-usable while a pact or a refresh works.
 
 ## In the chat bar
 
@@ -107,7 +90,7 @@ running, it is the only stage lit.
 | `Esc` | Hand the keyboard back and keep the draft exactly as it was |
 | `Tab` | Move the focus on — the one key the composer does not take |
 | `Ctrl-C` | Cancel the turn if one is being answered; otherwise ask whether to quit |
-| `/brief` | Enter brief mode: the same conversation is now converging on a document, sent the instruction the brief template describes. When the model has enough, a window asks **Write the brief?** Yes asks for the document, then opens an editable path prompt already holding a proposal like `docs/warlock-brief-13-scopes-and-sigils.md`; writing the file returns to chat mode. No keeps talking; ask for the document in your own words and the question comes back |
+| `/brief` | Enter brief mode: the same conversation is now converging on a document. Your next message carries the instruction the brief template describes. When the model has enough, a window asks **Write the brief?** Yes asks for the document, then opens an editable path prompt already holding a proposal like `docs/warlock-brief-13-scopes-and-sigils.md`; writing the file returns to chat mode. No keeps talking; ask for the document in your own words and the question comes back |
 | `/chat` | Leave brief mode, writing nothing — back to answering questions as they come |
 | `/push <SCOPE> <PATH>` | File the brief at `PATH` to the scope's Linear team as a project, after a Yes/No question |
 | `/draft <SCOPE>` | List the scope's planned projects, one per line, slug first |

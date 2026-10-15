@@ -4,7 +4,7 @@
 
 <h1 align="center">warlock</h1>
 
-<p align="center"><strong>See your codebase the way your AI does. A TUI where documentation is the interface.</strong></p>
+<p align="center"><strong>A TUI where AI works only inside the scopes your team draws.</strong></p>
 
 <p align="center">
   <a href="https://github.com/Genetic-Pottery/warlock/blob/main/LICENSE"><img src="https://img.shields.io/github/license/Genetic-Pottery/warlock" alt="License"></a>
@@ -26,8 +26,7 @@ AI is the star of the show and looking at code is not the primary concern.
 ## What you get
 
 Text User Interface (TUI)
-- pacts: A directory under the control of warlock, it scans the directory and creates an artifact to help itself reason about the code.
-- scope: Pair a directory with a Linear team, this is what is checked when an AI does work to ensure changes are scoped.
+- scope: Pair a directory with a Linear team. A scoped directory is one warlock may work in, and its work goes to that team's board. An unscoped directory is closed to every AI session.
 - sigil: A local per-user array of string which allow you and your AI to access a specific repos scope.
 
 Workflow
@@ -39,7 +38,7 @@ Workflow
 
 ### File tree navigation
 ![file tree demo](./assets/file-tree.gif)
-> move up / down, collapse directories, show / hide only pacted directories, show / hide files
+> move up / down, collapse directories, show / hide only scoped directories, show / hide files
 
 ### Brief creation
 ![brief creation demo](./assets/brief.gif)
@@ -112,14 +111,13 @@ A whole industry using AI while performing restraint, which means using it poorl
 No structure, no shared context, no record. The pretending is the waste.
 
 Warlock admits what the game is. 
-The interface is your project rendered as the AI understands it.
-A tree of directories, coloured by whether that understanding is still true. 
+The interface is your project as a tree of directories, coloured by whether AI may work there.
 You can still open files and read them. That is no longer the main event.
 
 ## What it promises
 
-- **Documentation that is actually current.** The document the AI use to reason about the code
-  turn stale as soon as the code refernced in the document changes. Your documents are always up to date.
+- **Boundaries that hold.** AI works only inside a scope, and only for someone holding that
+  scope's sigil. A session that writes outside its scopes stops with nothing committed.
 - **A record that survives you.** Every change lands in the ticket tracker of youre choice.
   Or is commited within the repo. Everything is visible.
 - **Process artifacts as a byproduct.** Most teams LARP process: the ticket
@@ -142,9 +140,8 @@ You can still open files and read them. That is no longer the main event.
   feature, and it does not manufacture thought. A lazy one-liner inflated into a
   beautifully formatted page is still a lazy one-liner, now with better
   typography.
-- **Not an editor.** You can hand-edit anything, and the next refresh will
-  notice and reconcile. But the tool is not optimised for code editing, and
-  anyone who wants to is not the customer.
+- **Not an editor.** You can hand-edit anything, but the tool is not optimised
+  for code editing, and anyone who wants to is not the customer.
 
 ## Install
 

@@ -8,7 +8,9 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use tempfile::TempDir;
-use warlock_engine::{Manifest, PactEntry, ScopeRecord, save_key, save_key_binding, save_sigils};
+use warlock_engine::{
+    Manifest, ScopeRecord, ScopedDirectory, save_key, save_key_binding, save_sigils,
+};
 
 use super::{ALREADY_CUTTING, Cutter};
 use crate::account::Line;
@@ -92,9 +94,8 @@ fn a_dir() -> TempDir {
 }
 
 fn a_manifest() -> Manifest {
-    Manifest::with_entries([PactEntry::new(".", "docs", "docs/.warlock.md")
-        .expect("a relative module path is inside the root")
-        .with_scope(SCOPE)])
+    Manifest::with_directories([ScopedDirectory::new(".", "docs", SCOPE)
+        .expect("a relative module path is inside the root")])
     .with_scopes([ScopeRecord::new(SCOPE, TEAM, "In Review", LABEL)])
 }
 

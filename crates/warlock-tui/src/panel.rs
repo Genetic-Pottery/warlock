@@ -1,49 +1,31 @@
 use std::time::Instant;
 
-use crate::account::{Account, Line};
+use crate::account::Line;
 use crate::app::cut_at_cap_message;
 use crate::claude::Activity;
 use crate::thread::{Ending, Thread};
 use crate::wrap;
 
-/// The group that survives everything. A reload carries it, because the tree is
-/// read again *because* a run finished and dropping it would wipe the record at
-/// the moment the reader turned to read it; a run that ends with nothing
-/// recorded carries it too, because an account is not a claim about the tree.
+/// A filled card stays filled: reading a file does not empty the conversation,
+/// and a message does not throw the document away. The thread accumulates — one
+/// session is one conversation — while each read replaces the document whole.
+/// See `Card::accrue`.
 ///
-/// A filled card stays filled: reading a file does not throw the account away, a
-/// pact starting does not throw the document away, and neither empties the
-/// conversation. A run is written to its own card however many of the three are
-/// filled and whichever one the reader is looking at — a card swapped away under
-/// the reader would be worse than a run they have to swap to see.
-///
-/// A card being filled is not the same as it having lines: an app that has never
-/// run a pact draws nothing at all, while an account that has recorded nothing
-/// yet is a run under way. A second pact starts a second account; the thread is
-/// the one card that is the other way round, since one session is one
-/// conversation. See `Card::accrue`.
-///
-/// `showing` moves for exactly three reasons: the view key, a message submitted
-/// below, and the swap key. Not for a run, not for
-/// [`Panel::refill_document`], and not for anything a turn already under way
-/// reports.
+/// `showing` moves for the view key, the swap key, and anything put on the
+/// thread ([`Panel::start_turn`], [`Panel::note`], [`Panel::start_work`],
+/// [`Panel::say`]). Not for [`Panel::refill_document`], and not for anything a
+/// turn already under way reports.
 ///
 /// Each card carries its own `offset` and `follows`, which is what lets the
-/// account go on following the newest line while the document is up. `height`
+/// thread go on following the newest line while the document is up. `height`
 /// and `width` are shared, because there is one panel. While a card is
 /// following, `offset` is not read at all: the offset is worked out from the
 /// line count at the moment it is asked for, so appending a line moves the
 /// window without anybody having to tell the window that a line was appended.
 /// [`Panel::hold_thread`] is the one thing that suspends that, for the length of
 /// a drag.
-///
-/// `mode` is here rather than beside `focus` because it too has to survive a run
-/// that ended with nothing recorded: a reader who has spent ten turns converging
-/// on a brief and then pacts a clean directory should not find the conversation
-/// back in chat mode because a *pact* rolled back.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub(crate) struct Panel {
-    account: Card<Account>,
     thread: Card<Thread>,
     document: Card<Vec<Line>>,
     showing: Showing,
@@ -52,27 +34,23 @@ pub(crate) struct Panel {
     width: usize,
 }
 
-/// Three variants and no fourth, for [`Focus`](crate::app::Focus)'s reason: the panel
-/// holds three named things, not an index into a list somebody could grow. There
+/// Two variants and no third, for [`Focus`](crate::app::Focus)'s reason: the panel
+/// holds two named things, not an index into a list somebody could grow. There
 /// is no `Nothing` — an empty card showing draws warlock's mark, which is a fact
-/// about the card rather than a fourth thing to be showing.
+/// about the card rather than a third thing to be showing.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub(crate) enum Showing {
-    Account,
     #[default]
     Thread,
     Document,
 }
 
 impl Showing {
-    /// An arm per card rather than an index step, so a fourth card is a compile
-    /// error here rather than a swap that quietly went nowhere. The order is the
-    /// order the reader comes to them in: the conversation they start on, the
-    /// run they asked for, then the file it wrote.
+    /// An arm per card rather than an index step, so a third card is a compile
+    /// error here rather than a swap that quietly went nowhere.
     const fn next(self) -> Self {
         match self {
-            Self::Thread => Self::Account,
-            Self::Account => Self::Document,
+            Self::Thread => Self::Document,
             Self::Document => Self::Thread,
         }
     }
@@ -82,10 +60,11 @@ impl Showing {
 /// conversation converging on a document.
 ///
 /// A mode is not a second system prompt and not a second session — it is this
-/// word plus one ordinary turn sent into the conversation already in progress
-/// (see [`brief_instruction`](crate::brief_instruction) and
+/// word plus an instruction carried on the reader's next message in the
+/// conversation already in progress (see
+/// [`brief_mode_instruction`](crate::claude::brief_mode_instruction) and
 /// [`CHAT_INSTRUCTION`](crate::claude::CHAT_INSTRUCTION)) — so everything the word
-/// changes is said out loud somewhere else: which instruction a command sends,
+/// changes is said out loud somewhere else: which instruction a command carries,
 /// how hard the turn is asked to think, and which model is asked.
 ///
 /// It changes nothing on the card. Nothing on the thread is cleared, hidden or
@@ -93,9 +72,8 @@ impl Showing {
 /// byte-identical.
 ///
 /// Drawn in exactly one place, the workflow strip on the chat bar's top border.
-/// Not on the run header's row, which a pact takes over and which a brief
-/// started mid-run would collide with, and not on a row of the card, which would
-/// spend a row of the conversation saying what the border says for nothing.
+/// Not on a row of the card, which would spend a row of the conversation saying
+/// what the border says for nothing.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub(crate) enum Mode {
     #[default]
@@ -114,12 +92,12 @@ pub(crate) struct View {
 
 /// Generic over what is on the card because the window rule is not: an offset, a
 /// follow flag and a height decide where a list of lines is cut, whether that
-/// list is an account being written or a file that was read once. What differs
-/// is how the lines are counted and produced, which is [`Shown`].
+/// list is a conversation being written or a file that was read once. What
+/// differs is how the lines are counted and produced, which is [`Shown`].
 ///
 /// `held` is `None` for a card nothing has filled yet, which is not the same as
 /// a card holding an empty list: an unfilled card is a panel with nothing to
-/// say, and an empty account is something having happened. See
+/// say, and an empty document is a file that was read. See
 /// [`Panel::has_content`].
 #[derive(Debug, Clone, PartialEq)]
 struct Card<T> {
@@ -129,9 +107,6 @@ struct Card<T> {
     paused: bool,
 }
 
-/// Written out rather than derived, because a derived `Default` would demand one
-/// of `T` as well and [`Account`] has none: an account is a run that started at
-/// some instant, and there is no default instant.
 impl<T> Default for Card<T> {
     fn default() -> Self {
         Self {
@@ -144,8 +119,8 @@ impl<T> Default for Card<T> {
 }
 
 impl<T: Shown> Card<T> {
-    /// Whatever the card was holding goes: one pact is one account, and one press
-    /// of the view key is one document.
+    /// Whatever the card was holding goes: one press of the view key is one
+    /// document.
     fn place(&mut self, held: T, follows: bool) {
         self.held = Some(held);
         self.offset = 0;
@@ -153,8 +128,8 @@ impl<T: Shown> Card<T> {
     }
 
     /// The append path, and deliberately not a second [`Card::place`]: `place`
-    /// drops what the card held, which is right for a run and for a read and
-    /// wrong for a conversation. One session is one thread, so a question asked
+    /// drops what the card held, which is right for a read and wrong for a
+    /// conversation. One session is one thread, so a question asked
     /// ten minutes in goes under the nine before it.
     ///
     /// It follows, every time it can. Somebody who has just asked something is
@@ -244,31 +219,13 @@ impl<T: Shown> Card<T> {
     }
 }
 
-/// The three implementations are the three cards: an [`Account`], which words its
-/// own lines and has clocks in them, a [`Thread`], which has both clocks and
-/// prose, and a document, which is the lines themselves. A document has no
-/// clock, so `now` reaches only the other two.
+/// The two implementations are the two cards: a [`Thread`], which has both
+/// clocks and prose, and a document, which is the lines themselves. A document
+/// has no clock, so `now` reaches only the thread.
 trait Shown {
     fn line_count(&self, width: usize) -> usize;
 
     fn window(&self, offset: usize, height: usize, width: usize, now: Instant) -> Vec<Line>;
-}
-
-/// The count is taken from the account's own start, which is the one instant an
-/// account that has rows can always name. `now` decides what a clock *says*
-/// rather than whether it is a row — with the one exception that a clock going
-/// from `9:59` to `10:00` takes a column off the line beside it, which can push
-/// a line that was exactly one column inside the width onto a second row. That
-/// costs one row of scrollback being a frame behind, which the next frame
-/// settles.
-impl Shown for Account {
-    fn line_count(&self, width: usize) -> usize {
-        row_count(&self.lines(self.started()), width)
-    }
-
-    fn window(&self, offset: usize, height: usize, width: usize, now: Instant) -> Vec<Line> {
-        row_window(&self.lines(now), offset, height, width)
-    }
 }
 
 impl Shown for Thread {
@@ -323,7 +280,6 @@ impl Panel {
     #[must_use]
     pub(crate) fn scroll_offset(&self) -> usize {
         match self.showing {
-            Showing::Account => self.account.scroll_offset(self.height, self.width),
             Showing::Thread => self.thread.scroll_offset(self.height, self.width),
             Showing::Document => self.document.scroll_offset(self.height, self.width),
         }
@@ -335,7 +291,6 @@ impl Panel {
     pub(crate) fn frame(&self, now: Instant) -> View {
         let (height, width) = (self.height, self.width);
         match self.showing {
-            Showing::Account => self.account.view(height, width, now),
             Showing::Thread => self.thread.view(height, width, now),
             Showing::Document => self.document.view(height, width, now),
         }
@@ -351,7 +306,6 @@ impl Panel {
     #[must_use]
     pub(crate) fn lines_below(&self) -> usize {
         match self.showing {
-            Showing::Account => self.account.lines_below(self.height, self.width),
             Showing::Thread => self.thread.lines_below(self.height, self.width),
             Showing::Document => self.document.lines_below(self.height, self.width),
         }
@@ -371,7 +325,6 @@ impl Panel {
     pub(crate) fn scroll_to(&mut self, offset: usize) {
         let (height, width) = (self.height, self.width);
         match self.showing {
-            Showing::Account => self.account.scroll_to(offset, height, width),
             Showing::Thread => self.thread.scroll_to(offset, height, width),
             Showing::Document => self.document.scroll_to(offset, height, width),
         }
@@ -414,18 +367,14 @@ impl Panel {
 
     /// About the card rather than about the panel, which is the point:
     /// [`Panel::scroll_offset`] answers for the one showing, and what a reader
-    /// needs to know is that the other two kept their place while it was not.
+    /// needs to know is that the other one kept its place while it was not.
     #[cfg(test)]
     #[must_use]
     pub(crate) fn window_of(&self, card: Showing) -> (usize, bool) {
-        // An arm each rather than one over a borrowed card, because the three
-        // hold different things and so are three different types. The shape is
-        // the same in all three, which is what `Shown` is for.
+        // An arm each rather than one over a borrowed card, because the two
+        // hold different things and so are two different types. The shape is
+        // the same in both, which is what `Shown` is for.
         match card {
-            Showing::Account => (
-                self.account.scroll_offset(self.height, self.width),
-                self.account.follows,
-            ),
             Showing::Thread => (
                 self.thread.scroll_offset(self.height, self.width),
                 self.thread.follows,
@@ -447,10 +396,6 @@ impl Panel {
         self.showing = card;
     }
 
-    pub(crate) fn open_account(&mut self, at: Instant) {
-        self.account.place(Account::new(at), true);
-    }
-
     /// One operation rather than two, because a document nobody was shown is a
     /// file read for nothing: every caller that refills wants it up.
     pub(crate) fn show_document(
@@ -465,7 +410,6 @@ impl Panel {
     #[must_use]
     pub(crate) const fn has_content(&self) -> bool {
         match self.showing {
-            Showing::Account => self.has_account(),
             Showing::Thread => self.has_thread(),
             Showing::Document => self.has_document(),
         }
@@ -473,47 +417,27 @@ impl Panel {
 
     /// The conversation is always somewhere to be — empty, it draws warlock's
     /// mark over a field with nothing typed in it — so a swap can always get back
-    /// to it. The other two are reached only once there is a run to read or a
-    /// file to look at.
+    /// to it. The document is reached only once there is a file to look at.
     const fn stops_on(&self, card: Showing) -> bool {
         match card {
-            Showing::Account => self.has_account(),
             Showing::Thread => true,
             Showing::Document => self.has_document(),
         }
     }
 
-    /// Two steps at most, because there are three cards and the one showing is
-    /// not a candidate. `None` is the key having done nothing, which the caller
-    /// says out loud.
+    /// `None` is the key having done nothing, which the caller says out loud.
     #[must_use]
     pub(crate) fn next_card(&self) -> Option<Showing> {
         let next = self.showing.next();
-        [next, next.next()]
-            .into_iter()
-            .find(|&card| self.stops_on(card))
-    }
-    /// The one way a run's events reach the panel. A closure rather than the
-    /// event, because [`Account`] already knows how to word every line a run will
-    /// ever have and a method here per kind of event would be a second place a
-    /// run's line could come to be spelled.
-    ///
-    /// Does nothing when there is no account to write to, which is a run nobody
-    /// started through
-    /// [`App::start_account`](crate::app::App::start_account) — a test driving events
-    /// straight down the channel. Dropping the line is the honest way to fail.
-    pub(crate) fn write_run(&mut self, write: impl FnOnce(&mut Account)) {
-        if let Some(account) = self.account.held.as_mut() {
-            write(account);
-        }
+        self.stops_on(next).then_some(next)
     }
 
     /// [`App::show_document`](crate::app::App::show_document) without the one thing
     /// the view key does. `v` is a reader asking to look at a file, so it brings
     /// the file to the front; this is the file somebody has just edited being
     /// read again underneath them, and a panel that flipped to the document
-    /// because a `.warlock.md` was saved would take the account of a run out of
-    /// the reader's hands without their having pressed anything.
+    /// because the file was saved would take the conversation out of the
+    /// reader's hands without their having pressed anything.
     ///
     /// The window goes back to the top and follows nothing. The reader's line is
     /// deliberately not kept: the file has been rewritten under them, so line
@@ -536,9 +460,9 @@ impl Panel {
         self.document.place(lines, false);
     }
 
-    /// The only way an app comes to have a turn in its thread at all, and one of
-    /// the three things that decide which card is drawn: somebody who has just
-    /// asked a question is looking for the answer. The card accumulates rather
+    /// The only way an app comes to have a turn in its thread at all, and it
+    /// brings the thread to the front: somebody who has just asked a question is
+    /// looking for the answer. The card accumulates rather
     /// than being replaced — one session, one conversation — which is
     /// `Card::accrue`'s whole reason for existing beside `Card::place`.
     ///
@@ -607,11 +531,6 @@ impl Panel {
     }
 
     #[must_use]
-    pub(crate) const fn has_account(&self) -> bool {
-        self.account.held.is_some()
-    }
-
-    #[must_use]
     pub(crate) const fn has_thread(&self) -> bool {
         self.thread.held.is_some()
     }
@@ -632,27 +551,16 @@ impl Panel {
     }
 
     /// The answer is what a caller needs and cannot easily get back afterwards: a
-    /// mode *change* is worth one note in the thread, where `/brief` typed in
-    /// brief mode is a re-send with nothing new to say about the register. So the
-    /// comparison happens here, once, rather than in each caller against a copy
-    /// of [`Panel::mode`] it had to remember to take first.
+    /// mode *change* is noted differently from a command that left the mode where
+    /// it was. So the comparison happens here, once, rather than in each caller
+    /// against a copy of [`Panel::mode`] it had to remember to take first.
     ///
     /// It sets one word and touches nothing else: the card showing does not move,
-    /// no turn is started or ended, and the run header is not consulted.
+    /// and no turn is started or ended.
     pub(crate) fn set_mode(&mut self, mode: Mode) -> bool {
         let changed = self.mode != mode;
         self.mode = mode;
         changed
-    }
-
-    #[must_use]
-    pub(crate) const fn account(&self) -> Option<&Account> {
-        self.account.held.as_ref()
-    }
-
-    #[cfg(test)]
-    pub(crate) const fn account_mut(&mut self) -> Option<&mut Account> {
-        self.account.held.as_mut()
     }
 
     #[must_use]
@@ -696,7 +604,7 @@ impl Panel {
     /// newest line to be pinned to.
     ///
     /// The card that is not showing keeps its own answer, which is what puts the
-    /// newest line of a run on screen when the reader swaps back to it.
+    /// newest line of the thread on screen when the reader swaps back to it.
     ///
     /// A thread card held by [`Panel::hold_thread`] still answers `true`: this is
     /// the flag the card was left with, and a hold suspends it for the length of
@@ -707,7 +615,6 @@ impl Panel {
     #[cfg(test)]
     pub(crate) const fn follows(&self) -> bool {
         match self.showing {
-            Showing::Account => self.account.follows,
             Showing::Thread => self.thread.follows,
             Showing::Document => self.document.follows,
         }
@@ -722,15 +629,14 @@ impl Panel {
     /// them.
     ///
     /// The thread and nothing else: the field writes into the conversation, so a
-    /// document showing gives those rows back to the file and an account showing
-    /// gives them back to the run. The rule is about the *card*, not about the
-    /// draft: a composer holding nothing is still showable, and a draft somebody
-    /// typed is not thrown away by the card that hides it.
+    /// document showing gives those rows back to the file. The rule is about the
+    /// *card*, not about the draft: a composer holding nothing is still showable,
+    /// and a draft somebody typed is not thrown away by the card that hides it.
     #[must_use]
     pub(crate) const fn composer_showable(&self) -> bool {
         match self.showing {
             Showing::Thread => true,
-            Showing::Account | Showing::Document => false,
+            Showing::Document => false,
         }
     }
 

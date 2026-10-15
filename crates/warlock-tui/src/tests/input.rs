@@ -8,62 +8,9 @@ fn press(code: KeyCode) -> KeyEvent {
 }
 
 #[test]
-fn q_and_esc_quit_with_no_pact_running() {
-    assert_eq!(
-        action_for(press(KeyCode::Char('q')), false),
-        Some(Action::Quit)
-    );
-    assert_eq!(action_for(press(KeyCode::Esc), false), Some(Action::Quit));
-}
-
-#[test]
-fn esc_cancels_the_pact_in_flight_while_q_still_quits() {
-    assert_eq!(
-        action_for(press(KeyCode::Esc), true),
-        Some(Action::CancelPact),
-        "Esc during a pact stops the pact, not warlock"
-    );
-    assert_eq!(
-        action_for(press(KeyCode::Char('q')), true),
-        Some(Action::Quit),
-        "and the way out is still the way out"
-    );
-}
-
-#[test]
-fn esc_is_the_only_key_a_pact_in_flight_changes_the_meaning_of() {
-    // Everything else the tree answers to keeps working while a run works,
-    // which is the point of running it on a thread at all.
-    let codes = [
-        KeyCode::Char('q'),
-        KeyCode::Up,
-        KeyCode::Down,
-        KeyCode::Char('k'),
-        KeyCode::Char('j'),
-        KeyCode::PageUp,
-        KeyCode::PageDown,
-        KeyCode::Char('g'),
-        KeyCode::Char('G'),
-        KeyCode::Char(' '),
-        KeyCode::Char('o'),
-        KeyCode::Char('f'),
-        KeyCode::Char('p'),
-        KeyCode::Char('r'),
-        KeyCode::Char('s'),
-        KeyCode::Char('v'),
-        KeyCode::Char('e'),
-        KeyCode::Tab,
-        KeyCode::BackTab,
-        KeyCode::Char('x'),
-    ];
-
-    for code in codes {
-        assert_eq!(
-            action_for(press(code), true),
-            action_for(press(code), false),
-            "{code:?} means something different mid-pact"
-        );
-    }
+fn q_and_esc_quit() {
+    assert_eq!(action_for(press(KeyCode::Char('q'))), Some(Action::Quit));
+    assert_eq!(action_for(press(KeyCode::Esc)), Some(Action::Quit));
 }
 
 #[test]
@@ -76,29 +23,14 @@ fn ctrl_c_asks_to_quit_with_caps_lock_or_shift_held() {
     );
 
     assert_eq!(
-        press_for(ctrl_shift_c, None, None, false, false),
+        press_for(ctrl_shift_c, None, None, false),
         Pressed::Confirm(QuitConfirm::open())
     );
 }
 
 #[test]
 fn tab_moves_the_keys_to_the_other_pane() {
-    assert_eq!(
-        action_for(press(KeyCode::Tab), false),
-        Some(Action::ToggleFocus)
-    );
-}
-
-#[test]
-fn tab_means_the_same_thing_during_a_pact() {
-    // Esc is the one key a run in flight re-reads, and focus is nothing to
-    // do with a run: the tree stays drivable while a pact works
-    // (WAR-21.05), so the key that says which pane is being driven has to
-    // work then too.
-    assert_eq!(
-        action_for(press(KeyCode::Tab), true),
-        Some(Action::ToggleFocus)
-    );
+    assert_eq!(action_for(press(KeyCode::Tab)), Some(Action::ToggleFocus));
 }
 
 #[test]
@@ -115,7 +47,7 @@ fn releases_and_repeats_of_tab_move_no_focus() {
         );
 
         assert_eq!(
-            action_for(event, false),
+            action_for(event),
             None,
             "{kind:?} of Tab should not move focus"
         );
@@ -135,41 +67,29 @@ fn tab_is_the_only_key_that_moves_focus() {
         KeyCode::Char(' '),
         KeyCode::Enter,
         KeyCode::Up,
-        KeyCode::Char('p'),
     ] {
         assert_ne!(
-            action_for(press(code), false),
+            action_for(press(code)),
             Some(Action::ToggleFocus),
             "{code:?} should not move focus"
-        );
-        assert_ne!(
-            action_for(press(code), true),
-            Some(Action::ToggleFocus),
-            "{code:?} should not move focus mid-pact"
         );
     }
 }
 
 #[test]
 fn up_and_k_move_the_selection_up() {
+    assert_eq!(action_for(press(KeyCode::Up)), Some(Action::SelectPrevious));
     assert_eq!(
-        action_for(press(KeyCode::Up), false),
-        Some(Action::SelectPrevious)
-    );
-    assert_eq!(
-        action_for(press(KeyCode::Char('k')), false),
+        action_for(press(KeyCode::Char('k'))),
         Some(Action::SelectPrevious)
     );
 }
 
 #[test]
 fn down_and_j_move_the_selection_down() {
+    assert_eq!(action_for(press(KeyCode::Down)), Some(Action::SelectNext));
     assert_eq!(
-        action_for(press(KeyCode::Down), false),
-        Some(Action::SelectNext)
-    );
-    assert_eq!(
-        action_for(press(KeyCode::Char('j')), false),
+        action_for(press(KeyCode::Char('j'))),
         Some(Action::SelectNext)
     );
 }
@@ -177,11 +97,11 @@ fn down_and_j_move_the_selection_down() {
 #[test]
 fn page_up_and_page_down_move_the_selection_by_a_screenful() {
     assert_eq!(
-        action_for(press(KeyCode::PageUp), false),
+        action_for(press(KeyCode::PageUp)),
         Some(Action::SelectPageUp)
     );
     assert_eq!(
-        action_for(press(KeyCode::PageDown), false),
+        action_for(press(KeyCode::PageDown)),
         Some(Action::SelectPageDown)
     );
 }
@@ -189,11 +109,11 @@ fn page_up_and_page_down_move_the_selection_by_a_screenful() {
 #[test]
 fn lower_g_jumps_to_the_first_row_and_upper_g_to_the_last() {
     assert_eq!(
-        action_for(press(KeyCode::Char('g')), false),
+        action_for(press(KeyCode::Char('g'))),
         Some(Action::SelectFirst)
     );
     assert_eq!(
-        action_for(press(KeyCode::Char('G')), false),
+        action_for(press(KeyCode::Char('G'))),
         Some(Action::SelectLast)
     );
 }
@@ -204,7 +124,7 @@ fn upper_g_still_jumps_to_the_last_row_with_shift_reported() {
     // upper-case letter; both spellings are the same keystroke.
     let shift_g = KeyEvent::new(KeyCode::Char('G'), KeyModifiers::SHIFT);
 
-    assert_eq!(action_for(shift_g, false), Some(Action::SelectLast));
+    assert_eq!(action_for(shift_g), Some(Action::SelectLast));
 }
 
 #[test]
@@ -226,7 +146,7 @@ fn releases_and_repeats_of_the_new_movement_keys_move_nothing() {
             );
 
             assert_eq!(
-                action_for(event, false),
+                action_for(event),
                 None,
                 "{kind:?} of {code:?} should not move anything"
             );
@@ -237,7 +157,7 @@ fn releases_and_repeats_of_the_new_movement_keys_move_nothing() {
 #[test]
 fn space_toggles_the_collapse_of_the_selected_directory() {
     assert_eq!(
-        action_for(press(KeyCode::Char(' ')), false),
+        action_for(press(KeyCode::Char(' '))),
         Some(Action::ToggleCollapsed)
     );
 }
@@ -256,7 +176,7 @@ fn releases_and_repeats_of_space_collapse_nothing() {
         );
 
         assert_eq!(
-            action_for(event, false),
+            action_for(event),
             None,
             "{kind:?} of space should not collapse anything"
         );
@@ -271,11 +191,11 @@ fn space_is_the_only_key_that_collapses() {
         KeyCode::Enter,
         KeyCode::Tab,
         KeyCode::Char('s'),
-        KeyCode::Char('p'),
+        KeyCode::Char('o'),
         KeyCode::Char('g'),
     ] {
         assert_ne!(
-            action_for(press(code), false),
+            action_for(press(code)),
             Some(Action::ToggleCollapsed),
             "{code:?} should not collapse anything"
         );
@@ -283,10 +203,10 @@ fn space_is_the_only_key_that_collapses() {
 }
 
 #[test]
-fn o_toggles_the_pacted_only_filter() {
+fn o_toggles_the_scoped_only_filter() {
     assert_eq!(
-        action_for(press(KeyCode::Char('o')), false),
-        Some(Action::TogglePactedOnly)
+        action_for(press(KeyCode::Char('o'))),
+        Some(Action::ToggleScopedOnly)
     );
 }
 
@@ -304,7 +224,7 @@ fn releases_and_repeats_of_o_filter_nothing() {
         );
 
         assert_eq!(
-            action_for(event, false),
+            action_for(event),
             None,
             "{kind:?} of o should not filter anything"
         );
@@ -322,12 +242,12 @@ fn o_is_the_only_key_that_filters() {
         KeyCode::Char('k'),
         KeyCode::Char('l'),
         KeyCode::Char('O'),
-        KeyCode::Char('r'),
+        KeyCode::Char('f'),
         KeyCode::Char(' '),
     ] {
         assert_ne!(
-            action_for(press(code), false),
-            Some(Action::TogglePactedOnly),
+            action_for(press(code)),
+            Some(Action::ToggleScopedOnly),
             "{code:?} should not filter anything"
         );
     }
@@ -336,7 +256,7 @@ fn o_is_the_only_key_that_filters() {
 #[test]
 fn f_toggles_the_files_inside_each_directory() {
     assert_eq!(
-        action_for(press(KeyCode::Char('f')), false),
+        action_for(press(KeyCode::Char('f'))),
         Some(Action::ToggleFiles)
     );
 }
@@ -355,7 +275,7 @@ fn releases_and_repeats_of_f_show_nothing() {
         );
 
         assert_eq!(
-            action_for(event, false),
+            action_for(event),
             None,
             "{kind:?} of f should not show anything"
         );
@@ -372,12 +292,12 @@ fn f_is_the_only_key_that_shows_files() {
         KeyCode::Char('g'),
         KeyCode::Char('r'),
         KeyCode::Char('o'),
-        KeyCode::Char('p'),
+        KeyCode::Char('s'),
         KeyCode::Char('F'),
         KeyCode::Char(' '),
     ] {
         assert_ne!(
-            action_for(press(code), false),
+            action_for(press(code)),
             Some(Action::ToggleFiles),
             "{code:?} should not show any files"
         );
@@ -385,139 +305,28 @@ fn f_is_the_only_key_that_shows_files() {
 }
 
 #[test]
-fn p_toggles_the_pact_on_the_selected_node() {
+fn s_asks_for_the_scope_prompt() {
     assert_eq!(
-        action_for(press(KeyCode::Char('p')), false),
-        Some(Action::TogglePact)
+        action_for(press(KeyCode::Char('s'))),
+        Some(Action::OpenScope)
     );
 }
 
 #[test]
-fn releases_and_repeats_of_p_write_nothing() {
-    // The same rule as for movement, and it matters more here: a release
-    // acted on would undo the pact the press had just written, and a held
-    // key would rewrite the manifest as fast as the terminal repeats.
-    for kind in [KeyEventKind::Release, KeyEventKind::Repeat] {
-        let event = KeyEvent::new_with_kind_and_state(
-            KeyCode::Char('p'),
-            KeyModifiers::NONE,
-            kind,
-            KeyEventState::NONE,
-        );
-
-        assert_eq!(
-            action_for(event, false),
-            None,
-            "{kind:?} should not write anything"
-        );
-    }
-}
-
-#[test]
-fn r_asks_for_a_refresh_with_a_run_in_flight_or_without_one() {
-    // Like every key but Esc, `r` means one thing in both situations: what
-    // a refresh does about a run already working is the app's answer to
-    // give, and a second `p` is refused in exactly the same place.
-    for in_flight in [false, true] {
-        assert_eq!(
-            action_for(press(KeyCode::Char('r')), in_flight),
-            Some(Action::Refresh),
-            "r should ask for a refresh with a run in flight = {in_flight}"
-        );
-    }
-}
-
-#[test]
-fn upper_r_asks_for_nothing() {
-    // Lower case only, like `o`, `f`, `p` and `m`: the upper-case letter is
-    // a different keystroke, and leaving it unbound keeps it free for a
-    // later one.
-    for in_flight in [false, true] {
-        assert_eq!(action_for(press(KeyCode::Char('R')), in_flight), None);
-    }
-}
-
-#[test]
-fn releases_and_repeats_of_r_start_nothing() {
-    // The same rule as `p`, and it matters for the same reason: a release
-    // acted on would ask for a second run on the heels of the one the press
-    // started, and a held key would ask as fast as the terminal repeats.
-    for kind in [KeyEventKind::Release, KeyEventKind::Repeat] {
-        let event = KeyEvent::new_with_kind_and_state(
-            KeyCode::Char('r'),
-            KeyModifiers::NONE,
-            kind,
-            KeyEventState::NONE,
-        );
-
-        assert_eq!(
-            action_for(event, false),
-            None,
-            "{kind:?} of r should not start anything"
-        );
-    }
-}
-
-#[test]
-fn r_is_the_only_key_that_refreshes() {
-    // Its neighbours on the keyboard, the keys it sits beside in the match
-    // arms above, and its upper-case self, which this binding does not
-    // answer to.
-    for code in [
-        KeyCode::Char('e'),
-        KeyCode::Char('t'),
-        KeyCode::Char('f'),
-        KeyCode::Char('p'),
-        KeyCode::Char('m'),
-        KeyCode::Char('R'),
-        KeyCode::Char(' '),
-        KeyCode::Enter,
-    ] {
-        assert_ne!(
-            action_for(press(code), false),
-            Some(Action::Refresh),
-            "{code:?} should not refresh anything"
-        );
-        assert_ne!(
-            action_for(press(code), true),
-            Some(Action::Refresh),
-            "{code:?} should not refresh anything mid-run"
-        );
-    }
-}
-
-#[test]
-fn s_asks_for_the_scope_prompt_with_a_run_in_flight_or_without_one() {
-    // Like `p` and `r`, and like every key but Esc, `s` means one thing in
-    // both situations: a run in flight is a reason to refuse the prompt,
-    // and refusing is the loop's answer to give rather than this
-    // function's.
-    for in_flight in [false, true] {
-        assert_eq!(
-            action_for(press(KeyCode::Char('s')), in_flight),
-            Some(Action::OpenScope),
-            "s should ask for the prompt with a run in flight = {in_flight}"
-        );
-    }
-}
-
-#[test]
 fn upper_s_asks_for_nothing() {
-    // Lower case only, like `o`, `f`, `p`, `r` and `m`: the upper-case
-    // letter is a different keystroke, and leaving it unbound keeps it free
-    // for a later one.
-    for in_flight in [false, true] {
-        assert_eq!(action_for(press(KeyCode::Char('S')), in_flight), None);
-    }
+    // Lower case only, like `o`, `f` and `m`: the upper-case letter is a
+    // different keystroke, and leaving it unbound keeps it free for a later
+    // one.
+    assert_eq!(action_for(press(KeyCode::Char('S'))), None);
 }
 
 #[test]
 fn releases_and_repeats_of_s_open_nothing() {
-    // The same rule as `p` and `r`, and here it decides whether the prompt
-    // can be typed into at all: acting on a release would reopen the prompt
-    // on the release of the very key that opened it, and a held `s` would
-    // reopen it — losing whatever had been typed — as fast as the terminal
-    // repeats.
+    // The same rule as the keys above, and here it decides whether the
+    // prompt can be typed into at all: acting on a release would reopen the
+    // prompt on the release of the very key that opened it, and a held `s`
+    // would reopen it — losing whatever had been typed — as fast as the
+    // terminal repeats.
     for kind in [KeyEventKind::Release, KeyEventKind::Repeat] {
         let event = KeyEvent::new_with_kind_and_state(
             KeyCode::Char('s'),
@@ -526,11 +335,7 @@ fn releases_and_repeats_of_s_open_nothing() {
             KeyEventState::NONE,
         );
 
-        assert_eq!(
-            action_for(event, false),
-            None,
-            "{kind:?} of s should open nothing"
-        );
+        assert_eq!(action_for(event), None, "{kind:?} of s should open nothing");
     }
 }
 
@@ -543,49 +348,34 @@ fn s_is_the_only_key_that_scopes() {
         KeyCode::Char('a'),
         KeyCode::Char('d'),
         KeyCode::Char('w'),
-        KeyCode::Char('p'),
-        KeyCode::Char('r'),
-        KeyCode::Char('m'),
+        KeyCode::Char('f'),
+        KeyCode::Char('v'),
         KeyCode::Char('S'),
         KeyCode::Char(' '),
         KeyCode::Enter,
     ] {
         assert_ne!(
-            action_for(press(code), false),
+            action_for(press(code)),
             Some(Action::OpenScope),
             "{code:?} should not ask for a scope"
-        );
-        assert_ne!(
-            action_for(press(code), true),
-            Some(Action::OpenScope),
-            "{code:?} should not ask for a scope mid-run"
         );
     }
 }
 
 #[test]
-fn v_asks_to_read_the_selected_file_with_a_run_in_flight_or_without_one() {
-    // Like `p`, `r` and `s`, and like every key but Esc, `v` means one
-    // thing in both situations — and here the mode has nothing it could
-    // change even in principle: a read is not a run, so there is no second
-    // run for it to be refused as.
-    for in_flight in [false, true] {
-        assert_eq!(
-            action_for(press(KeyCode::Char('v')), in_flight),
-            Some(Action::ViewFile),
-            "v should ask for the file with a run in flight = {in_flight}"
-        );
-    }
+fn v_asks_to_read_the_selected_file() {
+    assert_eq!(
+        action_for(press(KeyCode::Char('v'))),
+        Some(Action::ViewFile)
+    );
 }
 
 #[test]
 fn upper_v_asks_for_nothing() {
-    // Lower case only, like `o`, `f`, `p`, `r`, `s` and `m`: the upper-case
-    // letter is a different keystroke, and leaving it unbound keeps it free
-    // for a later one.
-    for in_flight in [false, true] {
-        assert_eq!(action_for(press(KeyCode::Char('V')), in_flight), None);
-    }
+    // Lower case only, like `o`, `f`, `s` and `m`: the upper-case letter is
+    // a different keystroke, and leaving it unbound keeps it free for a
+    // later one.
+    assert_eq!(action_for(press(KeyCode::Char('V'))), None);
 }
 
 #[test]
@@ -602,11 +392,7 @@ fn releases_and_repeats_of_v_read_nothing() {
             KeyEventState::NONE,
         );
 
-        assert_eq!(
-            action_for(event, false),
-            None,
-            "{kind:?} of v should read nothing"
-        );
+        assert_eq!(action_for(event), None, "{kind:?} of v should read nothing");
     }
 }
 
@@ -618,59 +404,41 @@ fn v_is_the_only_key_that_reads_a_file() {
     for code in [
         KeyCode::Char('c'),
         KeyCode::Char('b'),
-        KeyCode::Char('p'),
-        KeyCode::Char('r'),
         KeyCode::Char('s'),
-        KeyCode::Char('m'),
+        KeyCode::Char('e'),
         KeyCode::Char('V'),
         KeyCode::Char(' '),
         KeyCode::Enter,
     ] {
         assert_ne!(
-            action_for(press(code), false),
+            action_for(press(code)),
             Some(Action::ViewFile),
             "{code:?} should not read a file"
-        );
-        assert_ne!(
-            action_for(press(code), true),
-            Some(Action::ViewFile),
-            "{code:?} should not read a file mid-run"
         );
     }
 }
 
 #[test]
-fn e_asks_to_edit_the_selected_file_with_a_run_in_flight_or_without_one() {
-    // Like `p`, `r`, `s` and `v`, and like every key but Esc, `e` means one
-    // thing in both situations. A run in flight is a reason to refuse the
-    // editor — the terminal cannot be handed to a child while a pass is
-    // still drawing on it — but refusing is the loop's answer to give, in
-    // the same place a second `p` is refused, and not this function's.
-    for in_flight in [false, true] {
-        assert_eq!(
-            action_for(press(KeyCode::Char('e')), in_flight),
-            Some(Action::EditFile),
-            "e should ask for the editor with a run in flight = {in_flight}"
-        );
-    }
+fn e_asks_to_edit_the_selected_file() {
+    assert_eq!(
+        action_for(press(KeyCode::Char('e'))),
+        Some(Action::EditFile)
+    );
 }
 
 #[test]
 fn upper_e_asks_for_nothing() {
-    // Lower case only, like `o`, `f`, `p`, `r`, `s`, `v` and `m`: the
-    // upper-case letter is a different keystroke, and leaving it unbound
-    // keeps it free for a later one.
-    for in_flight in [false, true] {
-        assert_eq!(action_for(press(KeyCode::Char('E')), in_flight), None);
-    }
+    // Lower case only, like `o`, `f`, `s`, `v` and `m`: the upper-case
+    // letter is a different keystroke, and leaving it unbound keeps it free
+    // for a later one.
+    assert_eq!(action_for(press(KeyCode::Char('E'))), None);
 }
 
 #[test]
 fn releases_and_repeats_of_e_start_nothing() {
-    // The same rule as the keys above, and it matters here as much as it
-    // does for `p`: a release acted on would hand the terminal to a second
-    // editor the moment the first one was asked for, and a held `e` would
-    // suspend warlock as fast as the terminal repeats.
+    // The same rule as the keys above: a release acted on would hand the
+    // terminal to a second editor the moment the first one was asked for,
+    // and a held `e` would suspend warlock as fast as the terminal repeats.
     for kind in [KeyEventKind::Release, KeyEventKind::Repeat] {
         let event = KeyEvent::new_with_kind_and_state(
             KeyCode::Char('e'),
@@ -680,7 +448,7 @@ fn releases_and_repeats_of_e_start_nothing() {
         );
 
         assert_eq!(
-            action_for(event, false),
+            action_for(event),
             None,
             "{kind:?} of e should start nothing"
         );
@@ -697,41 +465,23 @@ fn e_is_the_only_key_that_edits_a_file() {
         KeyCode::Char('v'),
         KeyCode::Char('w'),
         KeyCode::Char('r'),
-        KeyCode::Char('p'),
-        KeyCode::Char('s'),
+        KeyCode::Char('d'),
         KeyCode::Char('m'),
         KeyCode::Char('E'),
         KeyCode::Char(' '),
         KeyCode::Enter,
     ] {
         assert_ne!(
-            action_for(press(code), false),
+            action_for(press(code)),
             Some(Action::EditFile),
             "{code:?} should not edit a file"
-        );
-        assert_ne!(
-            action_for(press(code), true),
-            Some(Action::EditFile),
-            "{code:?} should not edit a file mid-run"
         );
     }
 }
 
 #[test]
-fn shift_tab_swaps_the_panel_card_with_a_run_in_flight_or_without_one() {
-    // Crossterm spells Shift-Tab `BackTab`, and like every key but Esc it
-    // means one thing in both situations — here there is nothing the mode
-    // could change even in principle: both cards are already in the app, so
-    // a swap races nothing and there is no run for it to be refused as. A
-    // run that could take a document off the screen is the whole thing this
-    // binding exists to prevent.
-    for in_flight in [false, true] {
-        assert_eq!(
-            action_for(press(KeyCode::BackTab), in_flight),
-            Some(Action::SwapCard),
-            "Shift-Tab should swap the card with a run in flight = {in_flight}"
-        );
-    }
+fn shift_tab_swaps_the_panel_card() {
+    assert_eq!(action_for(press(KeyCode::BackTab)), Some(Action::SwapCard));
 }
 
 #[test]
@@ -748,7 +498,7 @@ fn releases_and_repeats_of_shift_tab_swap_nothing() {
         );
 
         assert_eq!(
-            action_for(event, false),
+            action_for(event),
             None,
             "{kind:?} of Shift-Tab should swap nothing"
         );
@@ -769,65 +519,47 @@ fn shift_tab_is_the_only_key_that_swaps_the_card() {
         KeyCode::Char(' '),
     ] {
         assert_ne!(
-            action_for(press(code), false),
+            action_for(press(code)),
             Some(Action::SwapCard),
             "{code:?} should not swap the panel's card"
-        );
-        assert_ne!(
-            action_for(press(code), true),
-            Some(Action::SwapCard),
-            "{code:?} should not swap the panel's card mid-run"
         );
     }
 }
 
 #[test]
-fn m_toggles_the_mouse_with_a_pact_in_flight_or_without_one() {
-    // The one key here that is about the terminal rather than the tree, and
-    // it reads the same way in both situations — like everything but Esc.
-    // Mid-run is in fact when a reader most wants it: the panel is filling
-    // up with output worth copying, and copying it means handing the pointer
-    // back to the terminal for a moment.
-    for in_flight in [false, true] {
-        assert_eq!(
-            action_for(press(KeyCode::Char('m')), in_flight),
-            Some(Action::ToggleMouseCapture),
-            "m should toggle capture with a pact in flight = {in_flight}"
-        );
-    }
+fn m_toggles_the_mouse() {
+    assert_eq!(
+        action_for(press(KeyCode::Char('m'))),
+        Some(Action::ToggleMouseCapture)
+    );
 }
 
 #[test]
 fn the_mouse_key_neither_quits_nor_moves_anything() {
     // Said against every other action by name, because what the key must not
-    // do is the interesting half of it: it does not leave, it does not stop a
-    // run, it does not move the keys to the other pane and it does not touch
-    // a row. One variant is all it can come to, and the list below is the
-    // rest of them.
-    for in_flight in [false, true] {
-        let action = action_for(press(KeyCode::Char('m')), in_flight);
-        for other in [
-            Action::Quit,
-            Action::CancelPact,
-            Action::ToggleFocus,
-            Action::SelectPrevious,
-            Action::SelectNext,
-            Action::SelectPageUp,
-            Action::SelectPageDown,
-            Action::SelectFirst,
-            Action::SelectLast,
-            Action::ToggleCollapsed,
-            Action::TogglePactedOnly,
-            Action::ToggleFiles,
-            Action::TogglePact,
-            Action::Refresh,
-            Action::OpenScope,
-            Action::ViewFile,
-            Action::EditFile,
-            Action::SwapCard,
-        ] {
-            assert_ne!(action, Some(other), "m should not mean {other:?}");
-        }
+    // do is the interesting half of it: it does not leave, it does not move
+    // the keys to the other pane and it does not touch a row. One variant is
+    // all it can come to, and the list below is the rest of them.
+    let action = action_for(press(KeyCode::Char('m')));
+    for other in [
+        Action::Quit,
+        Action::ToggleFocus,
+        Action::SelectPrevious,
+        Action::SelectNext,
+        Action::SelectPageUp,
+        Action::SelectPageDown,
+        Action::SelectFirst,
+        Action::SelectLast,
+        Action::ToggleCollapsed,
+        Action::ToggleScopedOnly,
+        Action::ToggleFiles,
+        Action::OpenScope,
+        Action::ViewFile,
+        Action::EditFile,
+        Action::SwapCard,
+        Action::Help,
+    ] {
+        assert_ne!(action, Some(other), "m should not mean {other:?}");
     }
 }
 
@@ -835,19 +567,18 @@ fn the_mouse_key_neither_quits_nor_moves_anything() {
 fn m_is_the_only_key_that_touches_the_mouse() {
     // Its neighbours in the match arms above, the letter beside it on the
     // keyboard, and its upper-case self, which this binding does not answer
-    // to any more than `o`, `f` and `p` answer to theirs.
+    // to any more than `o` and `f` answer to theirs.
     for code in [
         KeyCode::Char('n'),
         KeyCode::Char('o'),
         KeyCode::Char('f'),
-        KeyCode::Char('p'),
-        KeyCode::Char('r'),
+        KeyCode::Char('e'),
         KeyCode::Char('M'),
         KeyCode::Char(' '),
         KeyCode::Enter,
     ] {
         assert_ne!(
-            action_for(press(code), false),
+            action_for(press(code)),
             Some(Action::ToggleMouseCapture),
             "{code:?} should not touch the mouse"
         );
@@ -869,7 +600,7 @@ fn releases_and_repeats_of_m_toggle_nothing() {
         );
 
         assert_eq!(
-            action_for(event, false),
+            action_for(event),
             None,
             "{kind:?} of m should not toggle anything"
         );
@@ -878,9 +609,19 @@ fn releases_and_repeats_of_m_toggle_nothing() {
 
 #[test]
 fn keys_with_no_meaning_here_are_ignored() {
-    assert_eq!(action_for(press(KeyCode::Char('x')), false), None);
-    assert_eq!(action_for(press(KeyCode::Enter), false), None);
-    assert_eq!(action_for(press(KeyCode::Left), false), None);
+    for code in [
+        KeyCode::Char('x'),
+        KeyCode::Char('p'),
+        KeyCode::Char('r'),
+        KeyCode::Enter,
+        KeyCode::Left,
+    ] {
+        assert_eq!(
+            action_for(press(code)),
+            None,
+            "{code:?} should mean nothing"
+        );
+    }
 }
 
 #[test]
@@ -893,20 +634,12 @@ fn releases_and_repeats_are_ignored_so_one_keystroke_moves_one_row() {
             KeyEventState::NONE,
         );
 
-        assert_eq!(
-            action_for(event, false),
-            None,
-            "{kind:?} should not move anything"
-        );
+        assert_eq!(action_for(event), None, "{kind:?} should not move anything");
     }
 }
 
 mod gate {
     use std::time::Instant;
-
-    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
-    use ratatui::layout::Size;
-    use warlock_engine::NodeState;
 
     use super::super::{Action, Pressed, action_for, press_for};
     use crate::app::{App, Focus, Row};
@@ -918,6 +651,8 @@ mod gate {
     use crate::modal::Modals;
     use crate::prompt::{Edited, RecordPrompt, ScopeField, ScopePrompt, edit_for};
     use crate::ui::Shape;
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
+    use ratatui::layout::Size;
 
     const SIZE: Size = Size {
         width: 80,
@@ -926,7 +661,7 @@ mod gate {
 
     const DIRECTORY: &str = "crates/warlock-engine";
 
-    const INERT: [KeyCode; 19] = [
+    const INERT: [KeyCode; 18] = [
         KeyCode::Char('j'),
         KeyCode::Char('k'),
         KeyCode::Char('g'),
@@ -934,8 +669,7 @@ mod gate {
         KeyCode::Char(' '),
         KeyCode::Char('o'),
         KeyCode::Char('f'),
-        KeyCode::Char('p'),
-        KeyCode::Char('r'),
+        KeyCode::Char('e'),
         KeyCode::Char('s'),
         KeyCode::Char('v'),
         KeyCode::Char('m'),
@@ -963,21 +697,12 @@ mod gate {
     }
 
     fn app_on_screen() -> App {
-        let mut rows = vec![Row::new(
-            0,
-            "/repo",
-            "/repo/.warlock.md",
-            NodeState::PactedStale,
-        )];
+        let mut rows = vec![Row::new(0, "/repo", false)];
         for n in 0..12 {
             let directory = format!("/repo/d{n:02}");
-            let state = if n % 2 == 0 {
-                NodeState::PactedFresh
-            } else {
-                NodeState::Unpacted
-            };
-            rows.push(Row::new(1, directory.clone(), None, state));
-            rows.push(Row::file(2, format!("{directory}/lib.rs"), state));
+            let covered = n % 2 == 0;
+            rows.push(Row::new(1, directory.clone(), covered));
+            rows.push(Row::file(2, format!("{directory}/lib.rs"), covered));
         }
         let mut app = App::from_rows(rows);
         let cut = Shape::new(SIZE).cut();
@@ -989,20 +714,17 @@ mod gate {
     fn app_in_use() -> App {
         let mut app = app_on_screen();
         app.toggle_files();
-        app.toggle_pacted_only();
+        app.toggle_scoped_only();
         app.select_row(9);
         app.toggle_collapsed();
         app.select_previous();
         // A panel with more in it than its window holds, so that scrolling
-        // it back is a real offset rather than a no-op: an app with no
-        // account has exactly one place its window can be, and a field that
-        // cannot move cannot catch a key that moved it.
+        // it back is a real offset rather than a no-op: an empty panel has
+        // exactly one place its window can be, and a field that cannot move
+        // cannot catch a key that moved it.
         let started = Instant::now();
-        app.start_account(started);
-        if let Some(account) = app.panel_mut().account_mut() {
-            for n in 0..40 {
-                account.open_section(format!("/repo/d{n:02}"), started);
-            }
+        for n in 0..40 {
+            app.panel_mut().note(format!("/repo/d{n:02}"), started);
         }
         app.scroll_panel_up(5);
         app.set_focus(Focus::Panel);
@@ -1034,21 +756,6 @@ mod gate {
         composer: &mut Composer,
         key: KeyEvent,
     ) -> Round {
-        // Two falses, and they are the two situations this round is never
-        // in: no run in flight — the question cannot be up during one — and
-        // no turn being answered, which is what the tests further down that
-        // *are* about a turn hand in for themselves.
-        round_running(app, confirm, prompt, composer, key, false)
-    }
-
-    fn round_running(
-        app: &mut App,
-        confirm: &mut QuitConfirm,
-        prompt: &mut ScopePrompt,
-        composer: &mut Composer,
-        key: KeyEvent,
-        in_flight: bool,
-    ) -> Round {
         match press_for(
             key,
             Modals {
@@ -1058,7 +765,6 @@ mod gate {
             }
             .current(),
             offered(app, composer),
-            in_flight,
             false,
         ) {
             Pressed::Leave | Pressed::Act(Action::Quit) => return Round::Left,
@@ -1143,7 +849,7 @@ mod gate {
             Pressed::Act(Action::SelectFirst) => app.select_first(),
             Pressed::Act(Action::SelectLast) => app.select_last(),
             Pressed::Act(Action::ToggleCollapsed) => app.toggle_collapsed(),
-            Pressed::Act(Action::TogglePactedOnly) => app.toggle_pacted_only(),
+            Pressed::Act(Action::ToggleScopedOnly) => app.toggle_scoped_only(),
             Pressed::Act(Action::ToggleFiles) => app.toggle_files(),
             // With the plain arms rather than the panicking ones below: a
             // swap is answered by the app between two frames, like a
@@ -1154,10 +860,7 @@ mod gate {
             // `app == before` assertions are watching for.
             Pressed::Act(Action::SwapCard) => app.swap_card(),
             Pressed::Act(
-                action @ (Action::CancelPact
-                | Action::TogglePact
-                | Action::Refresh
-                | Action::OpenScope
+                action @ (Action::OpenScope
                 | Action::ViewFile
                 | Action::EditFile
                 | Action::ToggleMouseCapture
@@ -1181,7 +884,7 @@ mod gate {
         let fresh = app_on_screen();
 
         assert!(app.show_files(), "the file filter is on");
-        assert!(app.pacted_only(), "and so is the pacted-only filter");
+        assert!(app.scoped_only(), "and so is the scoped-only filter");
         assert_ne!(app.selected(), fresh.selected(), "the selection has moved");
         assert_ne!(
             app.panel().scroll_offset(),
@@ -1241,7 +944,6 @@ mod gate {
                         }
                         .current(),
                         None,
-                        false,
                         false
                     ),
                     Pressed::Confirm(QuitConfirm::Open(lit)),
@@ -1278,7 +980,6 @@ mod gate {
                     }
                     .current(),
                     None,
-                    false,
                     false
                 ),
                 Pressed::Leave
@@ -1366,24 +1067,20 @@ mod gate {
             ),
         ] {
             for composer in [None, Some(&draft)] {
-                for in_flight in [false, true] {
-                    assert_eq!(
-                        press_for(
-                            ctrl_c(),
-                            Modals {
-                                quit: confirm,
-                                ..Modals::default()
-                            }
-                            .current(),
-                            composer,
-                            in_flight,
-                            false
-                        ),
-                        Pressed::Confirm(expected),
-                        "Ctrl-C should ask with {confirm:?}, {composer:?} and a run in \
-                             flight = {in_flight}"
-                    );
-                }
+                assert_eq!(
+                    press_for(
+                        ctrl_c(),
+                        Modals {
+                            quit: confirm,
+                            ..Modals::default()
+                        }
+                        .current(),
+                        composer,
+                        false
+                    ),
+                    Pressed::Confirm(expected),
+                    "Ctrl-C should ask with {confirm:?} and {composer:?}"
+                );
             }
         }
 
@@ -1406,8 +1103,8 @@ mod gate {
         // can take back.
         //
         // The same matrix the answer above is pinned across, because the
-        // reading must not depend on any of it: the question up or down, the
-        // keyboard in the field or not, a run in flight or not. A Ctrl-C that
+        // reading must not depend on any of it: the question up or down, and
+        // the keyboard in the field or not. A Ctrl-C that
         // stopped the turn with one window up and not with another would be
         // the cancel behaving differently depending on what is on screen.
         let draft = Composer::new("web");
@@ -1417,24 +1114,20 @@ mod gate {
             QuitConfirm::Open(Answer::Yes),
         ] {
             for composer in [None, Some(&draft)] {
-                for in_flight in [false, true] {
-                    assert_eq!(
-                        press_for(
-                            ctrl_c(),
-                            Modals {
-                                quit: confirm,
-                                ..Modals::default()
-                            }
-                            .current(),
-                            composer,
-                            in_flight,
-                            true
-                        ),
-                        Pressed::CancelTurn,
-                        "Ctrl-C should stop the turn with {confirm:?}, {composer:?} and a run \
-                             in flight = {in_flight}"
-                    );
-                }
+                assert_eq!(
+                    press_for(
+                        ctrl_c(),
+                        Modals {
+                            quit: confirm,
+                            ..Modals::default()
+                        }
+                        .current(),
+                        composer,
+                        true
+                    ),
+                    Pressed::CancelTurn,
+                    "Ctrl-C should stop the turn with {confirm:?} and {composer:?}"
+                );
             }
         }
 
@@ -1448,7 +1141,6 @@ mod gate {
                 }
                 .current(),
                 None,
-                false,
                 true
             ),
             Pressed::CancelTurn
@@ -1458,88 +1150,43 @@ mod gate {
         // answered: the reader who presses it twice gets the cancel and then
         // the quit question, never the way out unasked.
         assert_eq!(
-            press_for(ctrl_c(), None, None, false, false),
+            press_for(ctrl_c(), None, None, false),
             Pressed::Confirm(QuitConfirm::open())
         );
     }
 
     #[test]
     fn a_turn_being_answered_changes_no_other_key_at_all() {
-        // Ctrl-C is the only key a turn is allowed to re-read. `q` still
-        // asks the question it has always asked and Esc still means what the
-        // run in flight says it means, because a turn is not a run: it
-        // writes nothing, so there is nothing for the keys that guard a
-        // pact to guard.
-        for in_flight in [false, true] {
-            for code in INERT {
-                assert_eq!(
-                    press_for(press(code), None, None, in_flight, true),
-                    press_for(press(code), None, None, in_flight, false),
-                    "{code:?} read differently with a turn being answered"
-                );
-            }
-
-            for code in [KeyCode::Char('q'), KeyCode::Esc] {
-                assert_eq!(
-                    press_for(press(code), None, None, in_flight, true),
-                    press_for(press(code), None, None, in_flight, false),
-                    "{code:?} read differently with a turn being answered"
-                );
-            }
+        // Ctrl-C is the only key a turn is allowed to re-read: `q` and Esc
+        // still ask the question they have always asked.
+        for code in INERT.into_iter().chain([KeyCode::Char('q'), KeyCode::Esc]) {
+            assert_eq!(
+                press_for(press(code), None, None, true),
+                press_for(press(code), None, None, false),
+                "{code:?} read differently with a turn being answered"
+            );
         }
 
-        // Said plainly as well as by comparison, because it is the promise:
-        // `q` with a turn out and nothing running still asks first, and `q`
-        // with a run in flight still leaves outright.
-        assert_eq!(
-            press_for(press(KeyCode::Char('q')), None, None, false, true),
-            Pressed::Confirm(QuitConfirm::open())
-        );
-        assert_eq!(
-            press_for(press(KeyCode::Char('q')), None, None, true, true),
-            Pressed::Leave
-        );
-    }
-
-    #[test]
-    fn a_run_in_flight_puts_no_question_in_front_of_anybody() {
-        // Esc still cancels the run and `q` still leaves, pinned at both
-        // settings of the flag: the gate is for the twitch that follows a
-        // cancel, and during a run Esc already means cancel.
-        assert_eq!(
-            press_for(press(KeyCode::Esc), None, None, true, false),
-            Pressed::Act(Action::CancelPact),
-        );
-        assert_eq!(
-            press_for(press(KeyCode::Char('q')), None, None, true, false),
-            Pressed::Leave,
-        );
-
-        // And the same two keys with nothing running, which is the only
-        // difference the flag makes here.
-        assert_eq!(
-            press_for(press(KeyCode::Esc), None, None, false, false),
-            Pressed::Confirm(QuitConfirm::open()),
-        );
-        assert_eq!(
-            press_for(press(KeyCode::Char('q')), None, None, false, false),
-            Pressed::Confirm(QuitConfirm::open()),
-        );
+        // Said plainly as well as by comparison, because it is the promise.
+        for code in [KeyCode::Char('q'), KeyCode::Esc] {
+            assert_eq!(
+                press_for(press(code), None, None, true),
+                Pressed::Confirm(QuitConfirm::open()),
+                "{code:?} with a turn out should still ask first"
+            );
+        }
     }
 
     #[test]
     fn every_other_key_still_means_what_it_always_meant() {
         // The gate is one question in front of two keys and nothing else:
-        // with it closed, every binding reaches the app as before, at both
-        // settings of the flag.
-        for in_flight in [false, true] {
-            for code in INERT {
-                assert_eq!(
-                    press_for(press(code), None, None, in_flight, false),
-                    action_for(press(code), in_flight).map_or(Pressed::Nothing, Pressed::Act),
-                    "{code:?} should read as it always has, in flight = {in_flight}"
-                );
-            }
+        // with it closed, every binding reaches the app as before.
+        for code in INERT {
+            assert_eq!(
+                press_for(press(code), None, None, false),
+                action_for(press(code)).map_or(Pressed::Nothing, Pressed::Act),
+                "{code:?} should read as it always has"
+            );
         }
     }
 
@@ -1559,7 +1206,7 @@ mod gate {
                 );
 
                 assert_eq!(
-                    press_for(key, None, None, false, false),
+                    press_for(key, None, None, false),
                     Pressed::Nothing,
                     "{kind:?} of {code:?} should open nothing"
                 );
@@ -1572,7 +1219,6 @@ mod gate {
                         }
                         .current(),
                         None,
-                        false,
                         false
                     ),
                     Pressed::Confirm(QuitConfirm::open()),
@@ -1586,7 +1232,7 @@ mod gate {
     fn the_scope_prompt_swallows_every_key_the_tree_answers_to() {
         // The confirmation's rule, said again for the other window: while
         // somebody is typing a scope, `j`, `k`, `g`, `G`, space, `o`, `f`,
-        // `p`, `r`, `s`, `m`, Tab and the page keys are letters going into a
+        // `e`, `s`, `v`, `m`, Tab and the page keys are letters going into a
         // field or keystrokes that mean nothing, and `action_for` is not
         // consulted at all. Both layers: the key comes back as the prompt's
         // own answer and never as an `Action`, and the app behind the window
@@ -1612,7 +1258,6 @@ mod gate {
                     }
                     .current(),
                     None,
-                    false,
                     false,
                 );
 
@@ -1656,7 +1301,6 @@ mod gate {
                 }
                 .current(),
                 None,
-                false,
                 false
             ),
             Pressed::Scope(Edited::Open(ScopeField::new(DIRECTORY, "webq"))),
@@ -1671,7 +1315,6 @@ mod gate {
                 }
                 .current(),
                 None,
-                false,
                 false
             ),
             Pressed::Scope(Edited::Close),
@@ -1699,29 +1342,26 @@ mod gate {
         // Answered before either window is consulted, and for the reason it
         // is answered before the question: through `edit_for` it is a `c`
         // wearing a modifier, i.e. one of the keys that change nothing, and
-        // the field would swallow it. Pinned with an empty field, with
-        // something typed, and at both settings of the run flag.
+        // the field would swallow it. Pinned with an empty field and with
+        // something typed.
         for prompt in [
             ScopePrompt::open(DIRECTORY, ""),
             ScopePrompt::open(DIRECTORY, "data-plane"),
         ] {
-            for in_flight in [false, true] {
-                assert_eq!(
-                    press_for(
-                        ctrl_c(),
-                        Modals {
-                            scope: &prompt,
-                            ..Modals::default()
-                        }
-                        .current(),
-                        None,
-                        in_flight,
-                        false
-                    ),
-                    Pressed::Confirm(QuitConfirm::open()),
-                    "Ctrl-C should ask with {prompt:?} up and a run in flight = {in_flight}"
-                );
-            }
+            assert_eq!(
+                press_for(
+                    ctrl_c(),
+                    Modals {
+                        scope: &prompt,
+                        ..Modals::default()
+                    }
+                    .current(),
+                    None,
+                    false
+                ),
+                Pressed::Confirm(QuitConfirm::open()),
+                "Ctrl-C should ask with {prompt:?} up"
+            );
         }
 
         let mut app = app_in_use();
@@ -1765,7 +1405,6 @@ mod gate {
                 }
                 .current(),
                 Some(&draft),
-                false,
                 false
             ),
             Pressed::Confirm(question)
@@ -1779,7 +1418,6 @@ mod gate {
                 }
                 .current(),
                 Some(&draft),
-                false,
                 false
             ),
             Pressed::Confirm(QuitConfirm::open())
@@ -1797,7 +1435,6 @@ mod gate {
                 }
                 .current(),
                 Some(&draft),
-                false,
                 false
             ),
             Pressed::Confirm(question)
@@ -1812,7 +1449,6 @@ mod gate {
                 }
                 .current(),
                 Some(&draft),
-                false,
                 false
             ),
             Pressed::Scope(edit_for(key, prompt.field().expect("the prompt is up")))
@@ -1820,12 +1456,12 @@ mod gate {
         // Then the composer, over the keys: this is where `j` stops being a
         // movement and becomes the letter j.
         assert_eq!(
-            press_for(key, None, Some(&draft), false, false),
+            press_for(key, None, Some(&draft), false),
             Pressed::Compose(Composed::Typing(Composer::new("webj")))
         );
         // And then the keys, as they have always been read.
         assert_eq!(
-            press_for(key, None, None, false, false),
+            press_for(key, None, None, false),
             Pressed::Act(Action::SelectNext)
         );
     }
@@ -1858,17 +1494,16 @@ mod gate {
                 .current(),
                 None,
                 false,
-                false,
             )
         }
 
         #[test]
         fn every_binding_goes_into_the_field_and_none_of_them_reaches_the_app() {
             // The promise, over the whole list: while a path is being typed
-            // there is no `p` that pacts, no `j` that moves a selection
-            // nobody can see and no Tab that hands the keyboard somewhere
-            // else — every one of them is `edit_for`'s answer and nothing
-            // else's.
+            // there is no `e` that hands the terminal to an editor, no `j`
+            // that moves a selection nobody can see and no Tab that hands the
+            // keyboard somewhere else — every one of them is `edit_for`'s
+            // answer and nothing else's.
             let write = open();
             let field = field();
 
@@ -1924,7 +1559,6 @@ mod gate {
                     }
                     .current(),
                     None,
-                    false,
                     true
                 ),
                 Pressed::CancelTurn
@@ -1953,7 +1587,6 @@ mod gate {
                         }
                         .current(),
                         Some(&draft),
-                        false,
                         false
                     ),
                     Pressed::Write(edit_for(key, &field())),
@@ -1988,7 +1621,6 @@ mod gate {
                         }
                         .current(),
                         None,
-                        false,
                         false
                     ),
                     Pressed::Scope(edit_for(key, &scope_field)),
@@ -2008,7 +1640,7 @@ mod gate {
             // been, straight out of the function that has always decided it.
             for code in INERT {
                 let key = press(code);
-                let expected = match action_for(key, false) {
+                let expected = match action_for(key) {
                     Some(Action::Quit) => Pressed::Confirm(QuitConfirm::open()),
                     Some(action) => Pressed::Act(action),
                     None => Pressed::Nothing,
@@ -2038,7 +1670,6 @@ mod gate {
                 }
                 .current(),
                 composer,
-                false,
                 false,
             )
         }
@@ -2132,7 +1763,6 @@ mod gate {
                 .current(),
                 composer,
                 false,
-                false,
             )
         }
 
@@ -2141,8 +1771,8 @@ mod gate {
             // The same promise the other two windows make, and the one that
             // matters most here because `s` is on the list: while a record is
             // being filled in there is no `s` that reopens the window over the
-            // scope it is already recording, no `p` that pacts and no `j` that
-            // moves a selection nobody can see.
+            // scope it is already recording, no `e` that hands the terminal to
+            // an editor and no `j` that moves a selection nobody can see.
             let record = open();
             let form = form();
 
@@ -2203,7 +1833,6 @@ mod gate {
                     }
                     .current(),
                     None,
-                    false,
                     true
                 ),
                 Pressed::CancelTurn
@@ -2228,7 +1857,6 @@ mod gate {
                     }
                     .current(),
                     None,
-                    false,
                     false
                 ),
                 Pressed::Leave
@@ -2264,7 +1892,7 @@ mod gate {
 
                 assert_eq!(
                     asked(key, &RecordPrompt::Closed),
-                    press_for(key, None, None, false, false),
+                    press_for(key, None, None, false),
                     "{code:?} was answered by a window that is not up"
                 );
             }
@@ -2304,7 +1932,6 @@ mod gate {
                 }
                 .current(),
                 composer,
-                false,
                 answered,
             )
         }
@@ -2319,8 +1946,9 @@ mod gate {
         #[test]
         fn every_tree_binding_is_the_dialogs_and_none_of_them_reaches_the_app() {
             // The promise over the whole list: while the question is up there
-            // is no `p` that pacts, no `j` that moves a selection under the
-            // dialog and no `r` that starts a refresh nobody asked for.
+            // is no `s` that opens a scope prompt under it, no `j` that moves a
+            // selection under the dialog and no `e` that hands the terminal to
+            // an editor nobody asked for.
             let push = open();
 
             for code in INERT {
@@ -2404,7 +2032,6 @@ mod gate {
                         }
                         .current(),
                         None,
-                        false,
                         false
                     ),
                     answered(key, &push),
@@ -2436,7 +2063,6 @@ mod gate {
                     }
                     .current(),
                     None,
-                    false,
                     false
                 ),
                 Pressed::Confirm(QuitConfirm::Closed)
@@ -2452,7 +2078,7 @@ mod gate {
 
                 assert_eq!(
                     asked(key, &PushConfirm::Closed),
-                    press_for(key, None, None, false, false),
+                    press_for(key, None, None, false),
                     "{code:?} was answered by a window that is not up"
                 );
             }
@@ -2495,7 +2121,6 @@ mod gate {
                 }
                 .current(),
                 composer,
-                false,
                 answered,
             )
         }
@@ -2512,8 +2137,9 @@ mod gate {
         #[test]
         fn every_tree_binding_is_the_dialogs_and_none_of_them_reaches_the_app() {
             // The promise over the whole list, as for the push dialog: while
-            // the question is up there is no `p` that pacts, no `j` that moves
-            // a selection under it and no `r` that starts a refresh.
+            // the question is up there is no `s` that opens a scope prompt, no
+            // `j` that moves a selection under it and no `e` that opens an
+            // editor.
             let cut = open();
 
             for code in INERT {
@@ -2590,7 +2216,6 @@ mod gate {
                         }
                         .current(),
                         None,
-                        false,
                         false
                     ),
                     answered(key, &cut),
@@ -2620,7 +2245,6 @@ mod gate {
                     }
                     .current(),
                     None,
-                    false,
                     false
                 ),
                 Pressed::Confirm(QuitConfirm::Closed)
@@ -2650,7 +2274,6 @@ mod gate {
                     }
                     .current(),
                     None,
-                    false,
                     false
                 ),
                 Pressed::Push(_)
@@ -2666,7 +2289,7 @@ mod gate {
 
                 assert_eq!(
                     asked(key, &CutConfirm::Closed),
-                    press_for(key, None, None, false, false),
+                    press_for(key, None, None, false),
                     "{code:?} was answered by a window that is not up"
                 );
             }
@@ -2713,7 +2336,6 @@ mod gate {
                 }
                 .current(),
                 composer,
-                false,
                 answered,
             )
         }
@@ -2728,8 +2350,9 @@ mod gate {
 
         #[test]
         fn every_tree_binding_is_the_dialogs_and_none_of_them_reaches_the_app() {
-            // While the question is up there is no `p` that pacts, no `j` that
-            // moves a selection under it and no `r` that starts a refresh.
+            // While the question is up there is no `s` that opens a scope
+            // prompt, no `j` that moves a selection under it and no `e` that
+            // opens an editor.
             let pull = open();
 
             for code in INERT {
@@ -2809,7 +2432,6 @@ mod gate {
                         }
                         .current(),
                         None,
-                        false,
                         false
                     ),
                     answered(key, &pull),
@@ -2843,7 +2465,6 @@ mod gate {
                     }
                     .current(),
                     None,
-                    false,
                     false
                 ),
                 Pressed::Confirm(QuitConfirm::Closed)
@@ -2858,7 +2479,6 @@ mod gate {
                     }
                     .current(),
                     None,
-                    false,
                     false
                 ),
                 Pressed::Push(_)
@@ -2873,7 +2493,6 @@ mod gate {
                     }
                     .current(),
                     None,
-                    false,
                     false
                 ),
                 Pressed::Cut(_)
@@ -2889,7 +2508,7 @@ mod gate {
 
                 assert_eq!(
                     asked(key, &PullConfirm::Closed),
-                    press_for(key, None, None, false, false),
+                    press_for(key, None, None, false),
                     "{code:?} was answered by a window that is not up"
                 );
             }
@@ -2938,15 +2557,15 @@ mod gate {
                 }
                 .current(),
                 composer,
-                false,
                 answered,
             )
         }
 
         #[test]
         fn every_tree_binding_is_the_review_windows_and_none_of_them_reaches_the_app() {
-            // While drafts are waiting to be answered about there is no `p`
-            // that pacts, no `j` that moves a selection behind the window and
+            // While drafts are waiting to be answered about there is no `s`
+            // that opens a scope prompt, no `j` that moves a selection behind
+            // the window and
             // no `q` that puts the quit question up under it. The keys that
             // move through a page scroll the drafts on the panel instead.
             let drafts = review();
@@ -3040,7 +2659,6 @@ mod gate {
                     }
                     .current(),
                     None,
-                    false,
                     false
                 ),
                 Pressed::Confirm(QuitConfirm::Closed)
@@ -3055,7 +2673,6 @@ mod gate {
                     }
                     .current(),
                     None,
-                    false,
                     false
                 ),
                 Pressed::Cut(_)
@@ -3107,7 +2724,7 @@ mod gate {
 
                 assert_eq!(
                     asking(key, None, None, None, false),
-                    press_for(key, None, None, false, false),
+                    press_for(key, None, None, false),
                     "{code:?} was answered by a window that is not up"
                 );
             }
@@ -3148,7 +2765,7 @@ mod gate {
             let typed = Composer::new(format!("{TYPED}{code}"));
 
             assert_eq!(
-                press_for(key, None, Some(&before), false, false),
+                press_for(key, None, Some(&before), false),
                 Pressed::Compose(Composed::Typing(typed.clone())),
                 "{code} should be a letter while the composer has the keyboard"
             );
@@ -3179,7 +2796,7 @@ mod gate {
                 app.set_focus(focus);
 
                 assert_eq!(
-                    press_for(key, None, offered(&app, &composer), false, false),
+                    press_for(key, None, offered(&app, &composer), false),
                     Pressed::Act(action),
                     "{code} should mean {action:?} again with the keys at {focus:?}"
                 );
@@ -3190,29 +2807,6 @@ mod gate {
                 Composer::new(TYPED),
                 "{code} should have typed nothing anywhere"
             );
-        }
-
-        #[test]
-        fn p_is_the_letter_p_while_the_composer_has_the_keyboard() {
-            // The key the whole arrangement is for: `p` writes a manifest,
-            // so a letter that pacted a directory would be the one typo that
-            // costs somebody minutes of model time.
-            types('p');
-        }
-
-        #[test]
-        fn p_pacts_again_once_the_composer_has_let_go() {
-            acts('p', Action::TogglePact);
-        }
-
-        #[test]
-        fn r_is_the_letter_r_while_the_composer_has_the_keyboard() {
-            types('r');
-        }
-
-        #[test]
-        fn r_refreshes_again_once_the_composer_has_let_go() {
-            acts('r', Action::Refresh);
         }
 
         #[test]
@@ -3316,7 +2910,7 @@ mod gate {
             let mut prompt = ScopePrompt::Closed;
 
             for code in INERT.into_iter().filter(|code| *code != KeyCode::Tab) {
-                let pressed = press_for(press(code), None, Some(&composer), false, false);
+                let pressed = press_for(press(code), None, Some(&composer), false);
 
                 assert!(
                     matches!(pressed, Pressed::Compose(_)),
@@ -3344,9 +2938,10 @@ mod gate {
             // One question at a time, and the half of it that has teeth: a
             // muted field is one whose last question is still being
             // answered, and a letter pressed at it must not fall through to
-            // the tree's bindings. A `p` that did would start a pact over
-            // whatever row happened to be selected — the very accident the
-            // field was built to stop, arriving by the other road.
+            // the tree's bindings. An `e` that did would hand the terminal to
+            // an editor over whatever row happened to be selected — the very
+            // accident the field was built to stop, arriving by the other
+            // road.
             let mut muted = Composer::new(TYPED);
             muted.set_muted(true);
 
@@ -3370,14 +2965,14 @@ mod gate {
                 let mut composer = muted.clone();
 
                 assert_eq!(
-                    press_for(press(code), None, Some(&composer), false, true),
+                    press_for(press(code), None, Some(&composer), true),
                     Pressed::Nothing,
                     "{code:?} did something at a muted field"
                 );
-                // And through the loop's own round, which panics on the
-                // four keys that start a run or open a window: a `p` that
-                // leaked past the muting would be caught there rather than
-                // quietly passing here.
+                // And through the loop's own round, which panics on the keys
+                // that open a window, a file or an editor: an `s` that leaked
+                // past the muting would be caught there rather than quietly
+                // passing here.
                 assert_eq!(
                     round_composing(
                         &mut app,
@@ -3409,79 +3004,12 @@ mod gate {
             muted.set_muted(true);
 
             assert_eq!(
-                press_for(press(KeyCode::Tab), None, Some(&muted), false, true),
+                press_for(press(KeyCode::Tab), None, Some(&muted), true),
                 Pressed::Act(Action::ToggleFocus),
             );
             assert_eq!(
-                press_for(ctrl_c(), None, Some(&muted), false, true),
+                press_for(ctrl_c(), None, Some(&muted), true),
                 Pressed::CancelTurn,
-            );
-        }
-
-        #[test]
-        fn a_run_started_while_the_thread_shows_leaves_the_field_typing() {
-            // What used to be the second thing that muted the field, and is
-            // not any more. A pact or a refresh started from the tree fills
-            // the card behind the conversation, and the two never wait on
-            // each other: a reader watching a long run is exactly who most
-            // wants to ask something about the repository it is walking. So
-            // `in_flight` changes nothing about what a key at a live field
-            // does — including `p`, which is a letter here and the pact key
-            // only at the tree.
-            let mut app = app_composing();
-            app.panel_mut()
-                .start_turn("what does the engine do?", Instant::now());
-            app.set_pact_in_flight("/repo/crates/engine", 3, 12);
-            assert!(
-                app.panel().showing_thread(),
-                "the thread is the card on screen"
-            );
-            assert_eq!(app.focus(), Focus::Composer, "the field has the keyboard");
-
-            let live = Composer::new(TYPED);
-            for code in ['p', 'r', 'e', 'v', 'q'] {
-                let key = press(KeyCode::Char(code));
-                let typed = Composer::new(format!("{TYPED}{code}"));
-
-                assert_eq!(
-                    press_for(key, None, Some(&live), true, false),
-                    Pressed::Compose(Composed::Typing(typed)),
-                    "{code} did not reach a field with a run in flight"
-                );
-            }
-        }
-
-        #[test]
-        fn the_field_types_again_the_moment_the_run_ends() {
-            // The muting's other half over a run rather than a turn: what
-            // the loop hands the field is worked out from the run being in
-            // flight, so the round after it ends — however it ended — is the
-            // round the same draft types in again.
-            let mut composer = Composer::new(TYPED);
-            composer.set_muted(true);
-
-            assert_eq!(
-                press_for(
-                    press(KeyCode::Char('p')),
-                    None,
-                    Some(&composer),
-                    true,
-                    false
-                ),
-                Pressed::Nothing,
-            );
-
-            composer.set_muted(false);
-
-            assert_eq!(
-                press_for(
-                    press(KeyCode::Char('p')),
-                    None,
-                    Some(&composer),
-                    false,
-                    false
-                ),
-                Pressed::Compose(Composed::Typing(Composer::new(format!("{TYPED}p")))),
             );
         }
 
@@ -3496,26 +3024,14 @@ mod gate {
             composer.set_muted(true);
 
             assert_eq!(
-                press_for(
-                    press(KeyCode::Char('p')),
-                    None,
-                    Some(&composer),
-                    false,
-                    true
-                ),
+                press_for(press(KeyCode::Char('p')), None, Some(&composer), true),
                 Pressed::Nothing,
             );
 
             composer.set_muted(false);
 
             assert_eq!(
-                press_for(
-                    press(KeyCode::Char('p')),
-                    None,
-                    Some(&composer),
-                    false,
-                    false
-                ),
+                press_for(press(KeyCode::Char('p')), None, Some(&composer), false),
                 Pressed::Compose(Composed::Typing(Composer::new(format!("{TYPED}p")))),
             );
         }
@@ -3528,7 +3044,7 @@ mod gate {
             let composer = Composer::new(TYPED);
 
             assert_eq!(
-                press_for(press(KeyCode::Tab), None, Some(&composer), false, false),
+                press_for(press(KeyCode::Tab), None, Some(&composer), false),
                 Pressed::Act(Action::ToggleFocus)
             );
 
@@ -3556,7 +3072,7 @@ mod gate {
             let composer = Composer::new(TYPED);
 
             assert_eq!(
-                press_for(press(KeyCode::Esc), None, Some(&composer), false, false),
+                press_for(press(KeyCode::Esc), None, Some(&composer), false),
                 Pressed::Compose(Composed::Leave),
                 "Esc belongs to the field rather than to the gate on the way out"
             );
@@ -3585,20 +3101,20 @@ mod gate {
         }
 
         #[test]
-        fn esc_at_the_composer_leaves_a_run_alone_and_the_next_one_cancels_it() {
-            // Deliberate, and the same rule the scope prompt keeps: the Esc
-            // pressed while a field has the keyboard is answered by that
-            // field, and the press after it — with the keyboard back on the
-            // panel — is the one that stops the run.
+        fn esc_at_the_composer_hands_the_keyboard_back_and_the_next_one_asks_to_quit() {
+            // The same rule the scope prompt keeps: the Esc pressed while a
+            // field has the keyboard is answered by that field, and only the
+            // press after it — with the keyboard back on the panel — reaches
+            // the quit question.
             let composer = Composer::new(TYPED);
 
             assert_eq!(
-                press_for(press(KeyCode::Esc), None, Some(&composer), true, false),
+                press_for(press(KeyCode::Esc), None, Some(&composer), false),
                 Pressed::Compose(Composed::Leave)
             );
             assert_eq!(
-                press_for(press(KeyCode::Esc), None, None, true, false),
-                Pressed::Act(Action::CancelPact)
+                press_for(press(KeyCode::Esc), None, None, false),
+                Pressed::Confirm(QuitConfirm::open())
             );
         }
 
@@ -3612,7 +3128,7 @@ mod gate {
             let composer = Composer::new("why nine passes");
 
             assert_eq!(
-                press_for(press(KeyCode::Enter), None, Some(&composer), false, false),
+                press_for(press(KeyCode::Enter), None, Some(&composer), false),
                 Pressed::Compose(Composed::Submit)
             );
 
@@ -3686,13 +3202,11 @@ mod gate {
             for draft in ["", TYPED] {
                 let composer = Composer::new(draft);
 
-                for in_flight in [false, true] {
-                    assert_eq!(
-                        press_for(ctrl_c(), None, Some(&composer), in_flight, false),
-                        Pressed::Confirm(QuitConfirm::open()),
-                        "Ctrl-C should ask from {draft:?} with a run in flight = {in_flight}"
-                    );
-                }
+                assert_eq!(
+                    press_for(ctrl_c(), None, Some(&composer), false),
+                    Pressed::Confirm(QuitConfirm::open()),
+                    "Ctrl-C should ask from {draft:?}"
+                );
             }
 
             let mut app = app_composing();
@@ -3709,15 +3223,7 @@ mod gate {
         }
 
         #[test]
-        fn the_draft_survives_esc_the_focus_cycle_and_a_run_that_started_and_ended() {
-            // Where the draft is kept, said as a fact about a session rather
-            // than as a rule somebody follows: it is a local of the event
-            // loop, so nothing that happens to the `App` can reach it. The
-            // run is the case that decides it — a pact or a refresh that
-            // recorded nothing puts the copy taken before it back over the
-            // live app and keeps only the panel (`App::restore_from`), so a
-            // draft stored there would be a draft a run swallowed half a
-            // sentence into.
+        fn the_draft_survives_esc_and_the_focus_cycle() {
             let mut app = app_composing();
             let mut composer = Composer::default();
             let mut confirm = QuitConfirm::Closed;
@@ -3744,17 +3250,6 @@ mod gate {
             );
             assert_eq!(app.focus(), Focus::Panel);
             assert_eq!(composer.draft(), "why nine", "Esc threw the draft away");
-
-            // A run that started and ended with nothing recorded, which is
-            // the one move that replaces the whole app.
-            let before = app.clone();
-            app.start_account(Instant::now());
-            app.restore_from(before);
-            assert_eq!(
-                composer.draft(),
-                "why nine",
-                "a run that ended took the draft with it"
-            );
 
             // And the focus all the way round the cycle: panel, composer,
             // tree, panel.
@@ -3795,7 +3290,6 @@ mod pointer {
 
     use ratatui::crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
     use ratatui::layout::Size;
-    use warlock_engine::NodeState;
 
     use super::super::{MouseAction, WHEEL_NOTCH, mouse_action};
     use crate::app::{App, Focus, Row};
@@ -3899,23 +3393,14 @@ mod pointer {
     }
 
     fn rows() -> Vec<Row> {
-        let mut rows = vec![Row::new(
-            0,
-            "/repo",
-            "/repo/.warlock.md",
-            NodeState::PactedStale,
-        )];
+        let mut rows = vec![Row::new(0, "/repo", false)];
         for n in 0..24 {
             let directory = format!("/repo/d{n:02}");
             // The row under each of these is the file below. What makes them
             // collapsible is the file toggle being on, which is
             // `App::can_collapse`'s answer and not the tree's.
-            rows.push(Row::new(1, directory.clone(), None, NodeState::Unpacted));
-            rows.push(Row::file(
-                2,
-                format!("{directory}/lib.rs"),
-                NodeState::Unpacted,
-            ));
+            rows.push(Row::new(1, directory.clone(), false));
+            rows.push(Row::file(2, format!("{directory}/lib.rs"), false));
         }
         rows
     }
@@ -3955,15 +3440,11 @@ mod pointer {
     }
 
     fn asks_under(mouse: MouseEvent, app: &App, modal: Option<Modal<'_>>) -> Option<MouseAction> {
-        let header = app.run_header();
-        mouse_action(mouse, Shape::new(SIZE).header(header.is_some()), app, modal)
+        mouse_action(mouse, Shape::new(SIZE), app, modal)
     }
 
     fn asks_composing(mouse: MouseEvent, app: &App, composer: &Composer) -> Option<MouseAction> {
-        let header = app.run_header();
-        let shape = Shape::new(SIZE)
-            .composer(Some(composer))
-            .header(header.is_some());
+        let shape = Shape::new(SIZE).composer(Some(composer));
         mouse_action(mouse, shape, app, None)
     }
 
@@ -4017,7 +3498,7 @@ mod pointer {
         assert_eq!(
             usize::from(Shape::new(SIZE).cut().panel_height()),
             19,
-            "nineteen lines of panel: no header of its own"
+            "nineteen lines of panel"
         );
     }
 
@@ -4378,34 +3859,28 @@ mod pointer {
     }
 
     #[test]
-    fn the_other_two_cards_take_no_selection_either() {
-        // Selection is the conversation's alone: the account is a record of a
-        // run and the document is a file that was read, and neither is
-        // highlighted by this gesture. The conversation underneath is the one
-        // the fixture recorded, so this is the same app that *would* answer
-        // with the other card showing.
-        fn plain_focus(app: &App) {
-            assert!(!app.panel().showing_thread());
-            assert_eq!(
-                asks(left_click(IN_PANEL, FIRST_PANEL_LINE + 2), app),
-                Some(MouseAction::Focus(Focus::Panel)),
-                "a press on this card is the focus it always was"
-            );
-            assert_eq!(asks(drag(IN_PANEL, FIRST_PANEL_LINE + 2), app), None);
-            assert_eq!(asks(release(IN_PANEL, FIRST_PANEL_LINE + 2), app), None);
-        }
-
+    fn the_document_card_takes_no_selection_either() {
+        // Selection is the conversation's alone: the document is a file that
+        // was read, and it is not highlighted by this gesture. The
+        // conversation underneath is the one the fixture recorded, so this is
+        // the same app that *would* answer with the other card showing.
         let mut app = app_talking();
-        app.start_account(Instant::now());
         app.show_document(["a line of a file that was read"], false);
 
-        // The file, which is the card `show_document` leaves showing, then
-        // round past the conversation to the account.
-        plain_focus(&app);
+        assert!(!app.panel().showing_thread());
+        assert_eq!(
+            asks(left_click(IN_PANEL, FIRST_PANEL_LINE + 2), &app),
+            Some(MouseAction::Focus(Focus::Panel)),
+            "a press on this card is the focus it always was"
+        );
+        assert_eq!(asks(drag(IN_PANEL, FIRST_PANEL_LINE + 2), &app), None);
+        assert_eq!(asks(release(IN_PANEL, FIRST_PANEL_LINE + 2), &app), None);
+
         app.swap_card();
-        assert!(app.panel().showing_thread());
-        app.swap_card();
-        plain_focus(&app);
+        assert!(
+            app.panel().showing_thread(),
+            "the conversation is the other card"
+        );
     }
 
     #[test]
@@ -4547,8 +4022,8 @@ mod pointer {
     #[test]
     fn a_drag_past_the_edge_of_a_card_with_no_text_on_it_still_means_nothing() {
         // The refusal `cell_under` makes is the refusal the edge makes: the
-        // account and the document are read past rather than copied out of,
-        // and an empty thread card has nothing to scroll a selection through.
+        // document is read past rather than copied out of, and an empty
+        // thread card has nothing to scroll a selection through.
         let app = app_on_screen();
         assert!(app.panel().showing_thread() && !app.panel().has_thread());
         for row in [0, 20, FOOTER] {
@@ -4557,26 +4032,15 @@ mod pointer {
         }
 
         let mut app = app_talking();
-        app.start_account(Instant::now());
         app.show_document(["a line of a file that was read"], false);
-        for card in 0..2 {
-            assert!(!app.panel().showing_thread(), "card {card}");
-            for row in [0, 20, FOOTER] {
-                assert_eq!(
-                    asks(drag(IN_PANEL, row), &app),
-                    None,
-                    "card {card}, row {row}"
-                );
-                assert_eq!(
-                    asks(release(IN_PANEL, row), &app),
-                    None,
-                    "card {card}, row {row}"
-                );
-            }
-            // The file first, which is the card `show_document` leaves
-            // showing, then round past the conversation to the account.
-            app.swap_card();
-            app.swap_card();
+        assert!(!app.panel().showing_thread());
+        for row in [0, 20, FOOTER] {
+            assert_eq!(asks(drag(IN_PANEL, row), &app), None, "document, row {row}");
+            assert_eq!(
+                asks(release(IN_PANEL, row), &app),
+                None,
+                "document, row {row}"
+            );
         }
     }
 
@@ -4662,57 +4126,6 @@ mod pointer {
             Some(MouseAction::ExtendPastEdge(Reach::Below {
                 rows: 1,
                 column: IN_PANEL - 1,
-            })),
-        );
-    }
-
-    #[test]
-    fn a_press_on_the_run_header_still_takes_the_keys_and_no_more() {
-        // The header takes the top of the panel while a run is out, so the
-        // rows of the card move down under it: a press on the header is the
-        // focus a press in the panel has always been, and it anchors nothing
-        // because the header is not the reader's text.
-        //
-        // A drag onto it is a drag above the card's rows — two rows above,
-        // since the header is that tall — for the reason a drag onto the
-        // composer is a drag below them.
-        let mut app = app_talking();
-        app.set_pact_in_flight("/repo/d00", 0, 24);
-        let header = app.run_header();
-        app.panel_mut().set_height(
-            Shape::new(SIZE)
-                .header(header.is_some())
-                .cut()
-                .panel_height(),
-        );
-        let past = Reach::Above {
-            rows: 2,
-            column: IN_PANEL - 1,
-        };
-
-        assert_eq!(
-            asks(left_click(IN_PANEL, FIRST_PANEL_LINE), &app),
-            Some(MouseAction::Focus(Focus::Panel)),
-        );
-        assert_eq!(
-            asks(drag(IN_PANEL, FIRST_PANEL_LINE), &app),
-            Some(MouseAction::ExtendPastEdge(past)),
-        );
-        assert_eq!(
-            asks(release(IN_PANEL, FIRST_PANEL_LINE), &app),
-            Some(MouseAction::EndPastEdge(past)),
-        );
-
-        // And the first row of the card, which the header has pushed two rows
-        // down: it is row zero of the rows area all the same, because the
-        // cell is counted from where the card was drawn.
-        assert_eq!(
-            asks(left_click(IN_PANEL, FIRST_PANEL_LINE + 2), &app),
-            Some(MouseAction::StartSelection(Cell {
-                column: 9,
-                row: 0,
-                scroll: 0,
-                width: panel_cells(),
             })),
         );
     }
@@ -4909,12 +4322,7 @@ mod pointer {
         // rows of blank pane under it, which is a click in the pane and no
         // more. The app is asked rather than the layout, because only the
         // app knows how many rows it has.
-        let mut app = App::from_rows(vec![Row::new(
-            0,
-            "/repo",
-            "/repo/.warlock.md",
-            NodeState::PactedStale,
-        )]);
+        let mut app = App::from_rows(vec![Row::new(0, "/repo", false)]);
         app.set_viewport_height(Shape::new(SIZE).cut().tree_height());
         app.set_focus(Focus::Panel);
 
@@ -5308,21 +4716,18 @@ mod help {
     }
 
     #[test]
-    fn a_question_mark_opens_the_sheet_with_a_run_in_flight_or_not() {
-        for in_flight in [false, true] {
-            assert_eq!(
-                press_for(press(KeyCode::Char('?')), None, None, in_flight, false),
-                Pressed::Help(HelpSheet::open()),
-                "in flight = {in_flight}"
-            );
-        }
+    fn a_question_mark_opens_the_sheet() {
+        assert_eq!(
+            press_for(press(KeyCode::Char('?')), None, None, false),
+            Pressed::Help(HelpSheet::open())
+        );
     }
 
     #[test]
     fn a_question_mark_in_the_chat_bar_is_text() {
         let draft = Composer::new("web");
         assert!(matches!(
-            press_for(press(KeyCode::Char('?')), None, Some(&draft), false, false),
+            press_for(press(KeyCode::Char('?')), None, Some(&draft), false),
             Pressed::Compose(Composed::Typing(_))
         ));
     }
@@ -5330,27 +4735,15 @@ mod help {
     #[test]
     fn the_sheet_takes_the_keys_and_lets_none_through_to_the_tree() {
         assert_eq!(
-            press_for(
-                press(KeyCode::Char('p')),
-                up(2).current(),
-                None,
-                false,
-                false
-            ),
+            press_for(press(KeyCode::Char('s')), up(2).current(), None, false),
             Pressed::Help(HelpSheet::Open(2))
         );
         assert_eq!(
-            press_for(
-                press(KeyCode::Char('j')),
-                up(2).current(),
-                None,
-                false,
-                false
-            ),
+            press_for(press(KeyCode::Char('j')), up(2).current(), None, false),
             Pressed::Help(HelpSheet::Open(3))
         );
         assert_eq!(
-            press_for(press(KeyCode::Esc), up(2).current(), None, false, false),
+            press_for(press(KeyCode::Esc), up(2).current(), None, false),
             Pressed::Help(HelpSheet::Closed)
         );
     }
@@ -5359,7 +4752,7 @@ mod help {
     fn ctrl_c_asks_to_quit_over_the_sheet() {
         let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
         assert_eq!(
-            press_for(ctrl_c, up(2).current(), None, false, false),
+            press_for(ctrl_c, up(2).current(), None, false),
             Pressed::Confirm(QuitConfirm::open())
         );
     }

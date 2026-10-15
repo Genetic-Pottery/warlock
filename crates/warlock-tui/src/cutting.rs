@@ -200,7 +200,7 @@ pub(crate) struct Cutter<O: Opens, A: Converses> {
 // The channel, and the handle that is the whole of how a cut is stopped.
 //
 // Dropping the session drops this, which cancels: no exit path has to remember
-// to stop a cut, exactly as none has to remember to stop a pact. What a cancel
+// to stop a cut. What a cancel
 // can reach is either side of the request rather than the request itself —
 // there is one request, one timeout and no retry (see `linear.rs`), and nothing
 // on this side can interrupt a socket that is already waiting.
@@ -307,8 +307,8 @@ struct Waiting<A> {
 
 // One slice's session, from the panel's side: what the worker will say, and the
 // handle that stops the turn it is in. What it is seen doing on the way arrives
-// on the same stream, so a turn that takes minutes is a section on the account
-// with a clock running rather than one line on the thread and nothing after it.
+// on the same stream, so a turn that takes minutes is work lines on the thread
+// with a clock running rather than one line and nothing after it.
 //
 // The handle is the session's own — see [`CancelGuard::over`] — because the
 // session wired its agent to it before the turn started, so this is the flag the
@@ -460,8 +460,7 @@ impl<O: Opens, A: Converses> Cutter<O, A> {
     /// What the cut has said since the last round: what the board answered, or
     /// what the slice being drafted came to.
     ///
-    /// Drained rather than received, for [`crate::pacting`]'s reason: nothing
-    /// here blocks, so frames keep being drawn, the tree keeps scrolling and the
+    /// Drained rather than received: nothing here blocks, so frames keep being drawn, the tree keeps scrolling and the
     /// composer stays usable while a request is in flight and while a slice is
     /// being drafted — which for a slice is minutes rather than seconds.
     ///
@@ -1287,8 +1286,8 @@ fn unfiled_line(slice: &Slice, why: &str) -> String {
 }
 
 // Everything the fetch's worker owns, and the whole of what crosses the thread
-// boundary beside the seam: the manifest is cloned as a pact's is, because the
-// board is resolved over there.
+// boundary beside the seam: the manifest is cloned rather than shared, because
+// the board is resolved over there.
 #[derive(Debug)]
 struct Work {
     manifest: Manifest,

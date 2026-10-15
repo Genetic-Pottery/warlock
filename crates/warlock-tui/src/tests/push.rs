@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use tempfile::TempDir;
 use warlock_engine::{
-    Destination, Manifest, PactEntry, ScopeRecord, keys_path, manifest_path, route, save_key,
+    Destination, Manifest, ScopeRecord, ScopedDirectory, keys_path, manifest_path, route, save_key,
     save_key_binding, save_sigils, sigils_path,
 };
 
@@ -55,9 +55,8 @@ fn a_dir() -> TempDir {
 }
 
 fn a_manifest(scopes: impl IntoIterator<Item = ScopeRecord>) -> Manifest {
-    Manifest::with_entries([PactEntry::new(".", "docs", "docs/.warlock.md")
-        .expect("a relative module path is inside the root")
-        .with_scope(SCOPE)])
+    Manifest::with_directories([ScopedDirectory::new(".", "docs", SCOPE)
+        .expect("a relative module path is inside the root")])
     .with_scopes(scopes)
 }
 
@@ -447,7 +446,7 @@ fn filing_a_prepared_push_hands_back_the_address_it_created() {
 fn a_machine_with_no_board_to_file_to_is_refused() {
     // The three ways there is no candidate, which are fixed in three different
     // places: the machine holds nothing, it holds a sigil this repository has
-    // never recorded, and it holds one a pact carries with no `[[scope]]`
+    // never recorded, and it holds one a row carries with no `[[scope]]`
     // record behind it.
     let holds_nothing = a_repository();
     let nothing = a_dir();

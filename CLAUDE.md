@@ -24,10 +24,9 @@ tree. Read the whole output, or redirect it to a file and read the file.
 
 Every line here was written by a model and will be read by one. A comment that
 describes what the code does is a second copy of the code that drifts out of
-date, and there is no human reader it is buying anything for. It also costs
-money: `fitting.rs` sends each file's bytes into a pass, so a stale paragraph
-is evidence in front of the model writing a `.warlock.md`, and the falsehood
-ends up in the document.
+date, and there is no human reader it is buying anything for. A stale paragraph
+is also evidence in front of the next model that reads the file, and it acts on
+the falsehood.
 
 Roughly 3,700 such lines were deleted on purpose. Do not write them back.
 
@@ -39,8 +38,8 @@ obvious control flow. Do not add one while doing unrelated work.
 
 - Its absence would let a plausible, correct-looking edit break something.
 - It names an alternative that was considered and rejected, and why.
-- It records a constraint invisible from the code — a wire format, or a version
-  string whose bump restales every repository in existence.
+- It records a constraint invisible from the code — a wire format, or a schema
+  version whose bump makes every committed manifest unreadable.
 
 A comment that survives this test is a guardrail, not documentation. Long is
 fine when it is one of these; the length was never the problem.

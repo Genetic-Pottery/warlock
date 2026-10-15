@@ -13,13 +13,13 @@ use crate::sigils::{self, held_sigils, load_key_binding, sigils_path};
 
 /// ```
 /// use warlock_engine::{
-///     Manifest, PactEntry, ScopeRecord, resolve_route, route, save_key, save_key_binding,
+///     Manifest, ScopedDirectory, ScopeRecord, resolve_route, route, save_key, save_key_binding,
 ///     save_sigils,
 /// };
 ///
 /// let (home, root) = (tempfile::tempdir()?, tempfile::tempdir()?);
-/// let manifest = Manifest::with_entries([
-///     PactEntry::new(root.path(), "crates", "crates/.warlock.md")?.with_scope("data-plane"),
+/// let manifest = Manifest::with_directories([
+///     ScopedDirectory::new(root.path(), "crates", "data-plane")?,
 /// ])
 /// .with_scopes([ScopeRecord::new("data-plane", "WAR", "In Review", "area/data-plane")]);
 ///
@@ -141,11 +141,11 @@ fn is_stored(home: &Path, name: &str) -> Result<bool, Error> {
 }
 
 /// ```
-/// use warlock_engine::{Manifest, PactEntry, route_facts, save_key_binding};
+/// use warlock_engine::{Manifest, ScopedDirectory, route_facts, save_key_binding};
 ///
 /// let (home, root) = (tempfile::tempdir()?, tempfile::tempdir()?);
-/// let manifest = Manifest::with_entries([
-///     PactEntry::new(root.path(), "crates", "crates/.warlock.md")?.with_scope("data-plane"),
+/// let manifest = Manifest::with_directories([
+///     ScopedDirectory::new(root.path(), "crates", "data-plane")?,
 /// ]);
 /// save_key_binding(home.path(), root.path(), "work")?;
 ///
@@ -269,7 +269,7 @@ impl<'m> Route<'m> {
 }
 
 // Every field is an absence a person fixes somewhere different — a scope on a
-// pact, a `[[scope]]` record, `warlock key use`, `warlock key add` — which is
+// directory, a `[[scope]]` record, `warlock key use`, `warlock key add` — which is
 // why they are four values and not one "routable" boolean: a caller that only
 // learns the answer is no cannot say which file to go to.
 //
@@ -326,7 +326,7 @@ impl fmt::Display for Error {
         match self {
             Self::Unscoped { path } => write!(
                 f,
-                "no scope covers `{}`: pact a directory at or above it and give it a scope",
+                "no scope covers `{}`: scope a directory at or above it",
                 path.display()
             ),
             Self::Unrecorded { scope, path } => write!(

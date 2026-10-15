@@ -28,20 +28,10 @@ pub(crate) struct Shape {
 #[must_use]
 pub(crate) fn shape(line: &Line) -> Shape {
     match line {
-        Line::Directory { path } => Shape {
-            prefix: String::new(),
-            text: path.display().to_string(),
-            heading: true,
-        },
         Line::Clocked { clock, text } => Shape {
             prefix: format!("{PANEL_INDENT}{clock} "),
             text: text.clone(),
             heading: false,
-        },
-        Line::Summary { text } => Shape {
-            prefix: String::new(),
-            text: text.clone(),
-            heading: true,
         },
         Line::Text { text } => Shape {
             prefix: String::new(),
@@ -113,15 +103,11 @@ fn continued(line: &Line, first: &str, shape: &Shape) -> Line {
         Line::Note { .. } => Line::Note {
             text: first.to_owned(),
         },
-        Line::Summary { .. } => Line::Summary {
-            text: first.to_owned(),
-        },
         Line::Text { .. } => Line::Text {
             text: first.to_owned(),
         },
-        // A path fragment is not a path, and a row already composed has no
-        // variant of its own to go back to.
-        Line::Directory { .. } | Line::Wrapped { .. } => Line::Wrapped {
+        // A row already composed has no variant of its own to go back to.
+        Line::Wrapped { .. } => Line::Wrapped {
             text: first.to_owned(),
             heading: shape.heading,
             voice: line.voice(),

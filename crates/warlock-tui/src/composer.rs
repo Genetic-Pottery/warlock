@@ -17,8 +17,8 @@ use crate::ui::display_width;
 use crate::wrap::folded;
 
 /// A cap rather than a field, because the panel above loses exactly the rows the
-/// composer takes: a draft allowed to grow without limit would eat the account
-/// it is being typed next to. Past it the draft scrolls within the rows it has.
+/// composer takes: a draft allowed to grow without limit would eat the
+/// conversation it is being typed next to. Past it the draft scrolls within the rows it has.
 pub(crate) const COMPOSER_MAX_ROWS: u16 = 6;
 
 // How many rows the window keeps above the cursor's row while it can. Two rather

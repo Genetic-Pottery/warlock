@@ -1,10 +1,16 @@
 use std::ffi::OsStr;
+use std::io;
 use std::path::{Path, PathBuf};
 
-use warlock_engine::{Node, NodeState, Tree};
+use ratatui::Frame;
+use ratatui::layout::Size;
+use warlock_engine::{Manifest, Node, Tree};
 
-use super::{Editor, NO_EDITOR, came_back, edit_target, editor_command, run_editor};
-use crate::app::App;
+use super::{Editor, NO_EDITOR, came_back, edit_press, editor_command, run_editor};
+use crate::app::{App, Chrome};
+use crate::screen::Screen;
+use crate::session::Scope;
+use crate::settings::Settings;
 
 // The line the last keystroke left on the footer, so "the refusal did not go
 // through the message line" is an assertion about a line that is really there.
@@ -13,23 +19,18 @@ const LAST_KEY: &str = "something the last key said";
 // A program no machine has, for the spawn that fails.
 const NOT_A_PROGRAM: &str = "warlock-test-no-such-editor-4c19be";
 
-// One documented directory holding a file each test presses on, and one
-// directory with no document at all, which is the other half of what a directory
-// row can be refused with.
-//
-//     <root>                          pacted, stale, documented
-//     └── crates                      unpacted, no document
-//         └── crates/engine           pacted, fresh, documented
-//             .warlock.md
+//     <root>                          unscoped
+//     └── crates                      scoped `platform`
+//         └── crates/engine           covered by `platform`
+//             lib.rs
 fn tree(root: &Path) -> Tree {
     let engine = root.join("crates/engine");
     Tree::new(
-        Node::new(root, root.join(".warlock.md"), NodeState::PactedStale).with_children([
-            Node::new(root.join("crates"), None::<PathBuf>, NodeState::Unpacted).with_children([
-                Node::new(&engine, engine.join(".warlock.md"), NodeState::PactedFresh)
-                    .with_files([engine.join(".warlock.md")]),
-            ]),
-        ]),
+        Node::new(root).with_children([Node::new(root.join("crates"))
+            .with_scope(Some("platform".to_owned()))
+            .with_children([Node::new(&engine)
+                .with_covering(Some("platform".to_owned()))
+                .with_files([engine.join("lib.rs")])])]),
     )
 }
 
@@ -53,6 +54,41 @@ fn app_on(path: &Path) -> App {
     // message down.
     app.set_message(LAST_KEY);
     app
+}
+
+// A screen that records whether it was given up and draws nothing: a refused
+// press must never reach `suspended`.
+#[derive(Default)]
+struct Untouched {
+    suspensions: usize,
+}
+
+impl Screen for Untouched {
+    fn size(&self) -> io::Result<Size> {
+        Ok(Size::new(80, 24))
+    }
+
+    fn draw<F: FnOnce(&mut Frame<'_>)>(&mut self, _render: F) -> io::Result<()> {
+        Ok(())
+    }
+
+    fn suspended<T, F: FnOnce() -> T>(&mut self, _mouse: bool, body: F) -> io::Result<T> {
+        self.suspensions += 1;
+        Ok(body())
+    }
+
+    fn report_mouse(&mut self, _on: bool) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+fn scope() -> Scope {
+    Scope {
+        chrome: Chrome::of(root(), root()),
+        root: root(),
+        settings: Settings::at(None, root()),
+        repo_root: root(),
+    }
 }
 
 fn split(value: &str) -> Option<Editor> {
@@ -128,71 +164,6 @@ fn the_refusal_names_the_variable_and_says_how_to_set_it() {
     assert!(!NO_EDITOR.contains("`vi`"), "{NO_EDITOR}");
 }
 
-#[test]
-fn a_file_row_hands_back_that_file_and_says_nothing() {
-    let path = root().join("crates/engine/.warlock.md");
-    let mut app = app_on(&path);
-    let before = app.clone();
-
-    assert_eq!(edit_target(&mut app, false), Some(path));
-    assert_eq!(app, before, "resolving the row moved something");
-    assert_eq!(app.message(), Some(LAST_KEY));
-}
-
-#[test]
-fn a_press_while_a_run_is_in_flight_suspends_nothing_and_says_so_on_the_progress_line() {
-    let mut app = app_on(&root().join("crates/engine/.warlock.md"));
-    // The run the press is going to bounce off, as the event loop would have
-    // told the app about it.
-    app.set_pact_in_flight(root().join("crates/tui"), 3, 12);
-    let before = app.clone();
-
-    assert_eq!(edit_target(&mut app, true), None, "a run was interrupted");
-
-    // Saying so is the whole of it: the same app with the flag set and
-    // nothing else moved, exactly as a second `p` and an `s` leave it.
-    let refused = {
-        let mut refused = before.clone();
-        refused.set_pact_refused();
-        refused
-    };
-    assert_eq!(app, refused, "the press did more than say so");
-    assert_eq!(
-        app.refused_line().as_deref(),
-        Some("pacting crates/tui — already running")
-    );
-    assert_eq!(
-        app.message(),
-        Some(LAST_KEY),
-        "the refusal did not go through the message"
-    );
-}
-
-#[test]
-fn leaning_on_the_edit_key_during_a_run_changes_nothing_further() {
-    let mut app = app_on(&root().join("crates/engine/.warlock.md"));
-    app.set_pact_in_flight(root().join("crates/tui"), 3, 12);
-
-    assert_eq!(edit_target(&mut app, true), None);
-    let after_one = app.clone();
-
-    assert_eq!(edit_target(&mut app, true), None);
-    assert_eq!(app, after_one, "pressing again changed something");
-}
-
-#[test]
-fn a_run_in_flight_is_answered_before_the_row_is_even_looked_at() {
-    // The selection is on a directory, which `v` would refuse in its own
-    // words. Mid-run it is the run that is answered: what is true of the
-    // whole session outranks what is true of the row.
-    let mut app = app_on(&root().join("crates"));
-    app.set_pact_in_flight(root().join("crates/tui"), 3, 12);
-
-    assert_eq!(edit_target(&mut app, true), None);
-
-    assert_eq!(app.message(), Some(LAST_KEY), "the row was worded as well");
-}
-
 // Asked of the very method `e` asks, which is the assertion that there is one
 // wording and not two.
 fn what_v_says(path: &Path) -> String {
@@ -204,12 +175,22 @@ fn what_v_says(path: &Path) -> String {
 }
 
 #[test]
-fn a_documented_directory_is_refused_in_the_words_v_uses() {
+fn a_directory_is_refused_in_the_words_v_uses_and_the_screen_is_never_given_up() {
     let directory = root().join("crates/engine");
     let mut app = app_on(&directory);
+    let mut screen = Untouched::default();
 
-    assert_eq!(edit_target(&mut app, false), None, "a directory was opened");
+    edit_press(
+        &mut app,
+        &mut screen,
+        &scope(),
+        &mut Manifest::new(),
+        None,
+        false,
+    )
+    .expect("a refusal never touches the terminal");
 
+    assert_eq!(screen.suspensions, 0, "a directory was opened");
     let message = app.message().expect("a directory row is refused");
     assert_eq!(
         message,
@@ -217,27 +198,6 @@ fn a_documented_directory_is_refused_in_the_words_v_uses() {
         "the edit key spelled a refusal of its own"
     );
     assert!(message.contains("is a directory"), "{message}");
-    // One keystroke away from what the reader wanted, so the refusal names
-    // the document row beneath the directory.
-    assert!(message.contains(".warlock.md"), "{message}");
-}
-
-#[test]
-fn an_undocumented_directory_is_refused_in_the_same_words_and_names_the_pact_key() {
-    let directory = root().join("crates");
-    let mut app = app_on(&directory);
-
-    assert_eq!(edit_target(&mut app, false), None, "a directory was opened");
-
-    let message = app.message().expect("a directory row is refused");
-    assert_eq!(
-        message,
-        what_v_says(&directory),
-        "the edit key spelled a refusal of its own"
-    );
-    // Nothing to point at, so it points at the key that would make something
-    // to point at.
-    assert!(message.contains("press p to pact it"), "{message}");
 }
 
 // Unix only, because `/bin/sh` is where a program that exits how it is told to
@@ -251,7 +211,7 @@ mod outcomes {
     use super::{Editor, NOT_A_PROGRAM, editor, run_editor};
 
     fn file() -> &'static Path {
-        Path::new("/repo/crates/engine/.warlock.md")
+        Path::new("/repo/crates/engine/lib.rs")
     }
 
     // A `/bin/sh` that does `script` and nothing else.
@@ -284,24 +244,21 @@ mod outcomes {
 }
 
 // Driven over a repository of the test's own, because `came_back` is the half
-// that touches disk: the files are really written, the manifest really saved,
-// the subtree really hashed and the tree really walked again. The edit is made
-// by this thread rather than by a child, which stands in for nothing — what
-// these tests are about is the state of the disk when warlock takes the terminal
-// back, and by then the editor has exited.
+// that touches disk: the files are really written and the tree really walked
+// again. The edit is made by this thread rather than by a child, which stands in
+// for nothing — what these tests are about is the state of the disk when warlock
+// takes the terminal back, and by then the editor has exited.
 mod back {
     use std::fs;
-    use std::path::Path;
     use std::time::Instant;
 
     use tempfile::TempDir;
-    use warlock_engine::{
-        Loaded, Manifest, NodeState, PactEntry, load_tree, repository_root, subtree_hash,
-    };
+    use warlock_engine::{Loaded, Manifest, load_tree, repository_root};
 
     use super::came_back;
     use crate::account::Line;
     use crate::app::{App, Chrome};
+    use crate::panel::Showing;
     use crate::session::Scope;
     use crate::settings::Settings;
 
@@ -310,43 +267,27 @@ mod back {
     // park in.
     const PANEL: u16 = 400;
 
-    const DOCUMENT: &str = "# The engine\n\nIt walks the tree and writes what it finds.\n";
+    const SOURCE: &str = "//! The engine\n\npub fn walk() {}\n";
 
-    // The same document as an editor left it: different bytes, so the subtree hashes
-    // differently and the lines on a card differ too.
-    const REWRITTEN: &str = "# The engine\n\nRewritten in somebody else's editor.\n";
+    // The same file as an editor left it: different bytes, so the lines on a card
+    // differ too.
+    const REWRITTEN: &str = "//! The engine\n\nRewritten in somebody else's editor.\n";
 
     // A plain file beside it that nothing below ever edits — the other file a
     // document card can be holding when `e` is pressed.
     const NOTES: &str = "one\ntwo\nthree\n";
 
-    // Nothing here reads it — freshness is the hash — and it is written because a
-    // grant is a hash *and* a time.
-    const GRANTED_AT: &str = "2026-08-19T07:32:00Z";
-
-    // One documented directory holding the document and one plain file, and a
-    // manifest granting that directory over the bytes just written, so the directory
-    // loads fresh and an edit under it has something to cost.
     fn a_repo() -> TempDir {
         let repo = tempfile::tempdir().expect("a temporary directory");
         let engine = repo.path().join("crates/engine");
         fs::create_dir_all(&engine).expect("the fixture's directories");
-        fs::write(engine.join(".warlock.md"), DOCUMENT).expect("the document");
+        fs::write(engine.join("lib.rs"), SOURCE).expect("the source file");
         fs::write(engine.join("notes.txt"), NOTES).expect("a plain file");
         // A load walks up looking for a `.git/` and refuses without one.
         // Nothing inside it is ever read: the walk skips hidden
         // directories, this one and `.warlock/` alike.
         fs::create_dir_all(repo.path().join(".git")).expect("the repository marker");
         fs::write(repo.path().join(".git/HEAD"), "ref: refs/heads/main\n").expect("a HEAD");
-
-        let hash = subtree_hash(&engine).expect("a directory just written hashes");
-        Manifest::with_entries([
-            PactEntry::new(repo.path(), &engine, engine.join(".warlock.md"))
-                .expect("a module inside the root")
-                .with_grant(hash, GRANTED_AT),
-        ])
-        .save(repo.path())
-        .expect("a manifest that writes");
         repo
     }
 
@@ -367,22 +308,13 @@ mod back {
         (app, scope)
     }
 
-    fn state_of(app: &App, path: &Path) -> Option<NodeState> {
-        app.rows()
-            .iter()
-            .find(|row| row.path == path)
-            .map(|row| row.state)
-    }
-
     fn shown(app: &App, now: Instant) -> Vec<String> {
         app.panel()
             .window(now)
             .into_iter()
             .map(|line| match line {
-                Line::Directory { path } => path.display().to_string(),
                 Line::Clocked { clock, text } => format!("{clock} {text}"),
-                Line::Summary { text }
-                | Line::Text { text }
+                Line::Text { text }
                 | Line::Said { text }
                 | Line::Note { text }
                 | Line::Wrapped { text, .. } => text,
@@ -390,42 +322,36 @@ mod back {
             .collect()
     }
 
-    fn is_document(app: &App, now: Instant) -> bool {
-        matches!(app.panel().window(now).first(), Some(Line::Text { .. }))
+    fn is_document(app: &App) -> bool {
+        app.panel().showing() == Showing::Document
     }
 
     fn lines_of(text: &str) -> Vec<String> {
         text.lines().map(str::to_owned).collect()
     }
 
-    fn with_an_account(app: &mut App, at: Instant) {
-        app.start_account(at);
-        app.panel_mut()
-            .account_mut()
-            .expect("the press that started the run opened one")
-            .open_section("crates/engine", at);
-    }
-
     #[test]
-    fn an_edit_that_changed_a_file_leaves_the_directory_yellow_with_no_further_keystroke() {
+    fn a_file_the_editor_wrote_beside_the_edited_one_is_on_the_tree_with_no_further_keystroke() {
         let repo = a_repo();
         let (mut app, scope) = loaded(&repo);
+        app.toggle_files();
         let engine = repo.path().join("crates/engine");
-        let edited = engine.join(".warlock.md");
-        assert_eq!(
-            state_of(&app, &engine),
-            Some(NodeState::PactedFresh),
-            "the fixture does not start green"
+        let edited = engine.join("lib.rs");
+        let written = engine.join("lib.rs.orig");
+        assert!(
+            app.rows().iter().all(|row| row.path != written),
+            "the fixture already lists the new file"
         );
 
         // What the editor did while warlock had no screen.
-        fs::write(&edited, REWRITTEN).expect("the document rewrites");
+        fs::write(&written, SOURCE).expect("a backup the editor left");
         came_back(&mut app, &scope, &mut Manifest::new(), &edited, None);
 
-        // The tree was read again on the way in: the subtree hashes
-        // differently now, so the row says so without the reader having to
-        // press anything for it.
-        assert_eq!(state_of(&app, &engine), Some(NodeState::PactedStale));
+        // The tree was read again on the way in.
+        assert!(
+            app.rows().iter().any(|row| row.path == written),
+            "the reload missed what the editor wrote"
+        );
     }
 
     #[test]
@@ -433,15 +359,15 @@ mod back {
         let repo = a_repo();
         let (mut app, scope) = loaded(&repo);
         let now = Instant::now();
-        let edited = repo.path().join("crates/engine/.warlock.md");
-        // A run behind the document, so that "the document is still
-        // showing" is a claim about two cards rather than about the only
-        // one there is.
-        with_an_account(&mut app, now);
-        app.show_document(lines_of(DOCUMENT), false);
-        assert!(is_document(&app, now), "the fixture is not on the document");
+        let edited = repo.path().join("crates/engine/lib.rs");
+        // A line on the thread behind the document, so that "the document is
+        // still showing" is a claim about two cards rather than about the only
+        // one with anything on it.
+        app.panel_mut().note("a note on the thread", now);
+        app.show_document(lines_of(SOURCE), false);
+        assert!(is_document(&app), "the fixture is not on the document");
 
-        fs::write(&edited, REWRITTEN).expect("the document rewrites");
+        fs::write(&edited, REWRITTEN).expect("the file rewrites");
         came_back(
             &mut app,
             &scope,
@@ -451,7 +377,7 @@ mod back {
         );
 
         assert!(
-            is_document(&app, now),
+            is_document(&app),
             "the re-read took the reader off the document"
         );
         assert_eq!(
@@ -462,20 +388,18 @@ mod back {
     }
 
     #[test]
-    fn a_re_read_under_the_account_fills_the_card_behind_it_and_leaves_the_run_showing() {
+    fn a_re_read_under_the_thread_fills_the_card_behind_it_and_leaves_the_thread_showing() {
         let repo = a_repo();
         let (mut app, scope) = loaded(&repo);
         let now = Instant::now();
-        let edited = repo.path().join("crates/engine/.warlock.md");
-        with_an_account(&mut app, now);
-        app.show_document(lines_of(DOCUMENT), false);
-        // Round to the run, past the conversation the field is drawn under.
+        let edited = repo.path().join("crates/engine/lib.rs");
+        app.panel_mut().note("a note on the thread", now);
+        app.show_document(lines_of(SOURCE), false);
         app.swap_card();
-        app.swap_card();
-        let account = shown(&app, now);
-        assert!(!is_document(&app, now), "the fixture is not on the run");
+        let thread = shown(&app, now);
+        assert!(!is_document(&app), "the fixture is not on the thread");
 
-        fs::write(&edited, REWRITTEN).expect("the document rewrites");
+        fs::write(&edited, REWRITTEN).expect("the file rewrites");
         came_back(
             &mut app,
             &scope,
@@ -484,13 +408,12 @@ mod back {
             Some(&edited),
         );
 
-        // The panel is exactly where the reader left it: a file being
-        // saved in an editor is not a reason to take a run off the screen.
-        assert!(!is_document(&app, now), "the re-read flipped the panel");
-        assert_eq!(shown(&app, now), account);
-        // And the new lines are on the card behind it, waiting for the
-        // swap the reader will ask for themselves — the file is the very
-        // next card round from the run.
+        // The panel is exactly where the reader left it: a file being saved in
+        // an editor is not a reason to take the thread off the screen.
+        assert!(!is_document(&app), "the re-read flipped the panel");
+        assert_eq!(shown(&app, now), thread);
+        // And the new lines are on the card behind it, waiting for the swap
+        // the reader will ask for themselves.
         app.swap_card();
         assert_eq!(shown(&app, now), lines_of(REWRITTEN));
     }
@@ -500,7 +423,7 @@ mod back {
         let repo = a_repo();
         let (mut app, scope) = loaded(&repo);
         let now = Instant::now();
-        let edited = repo.path().join("crates/engine/.warlock.md");
+        let edited = repo.path().join("crates/engine/lib.rs");
         let notes = repo.path().join("crates/engine/notes.txt");
         // A panel small enough to have a window to park, and a reader who
         // has parked it: a card read again for no reason would put them
@@ -511,7 +434,7 @@ mod back {
         let before = shown(&app, now);
         let parked = app.panel().scroll_offset();
 
-        fs::write(&edited, REWRITTEN).expect("the document rewrites");
+        fs::write(&edited, REWRITTEN).expect("the file rewrites");
         came_back(
             &mut app,
             &scope,
@@ -520,7 +443,7 @@ mod back {
             Some(&notes),
         );
 
-        assert!(is_document(&app, now), "the re-read flipped the panel");
+        assert!(is_document(&app), "the re-read flipped the panel");
         assert_eq!(
             shown(&app, now),
             before,
@@ -541,9 +464,9 @@ mod back {
         let repo = a_repo();
         let (mut app, scope) = loaded(&repo);
         let now = Instant::now();
-        let edited = repo.path().join("crates/engine/.warlock.md");
+        let edited = repo.path().join("crates/engine/lib.rs");
 
-        fs::write(&edited, REWRITTEN).expect("the document rewrites");
+        fs::write(&edited, REWRITTEN).expect("the file rewrites");
         came_back(&mut app, &scope, &mut Manifest::new(), &edited, None);
 
         assert!(
@@ -559,12 +482,12 @@ mod back {
         let repo = a_repo();
         let (mut app, scope) = loaded(&repo);
         let now = Instant::now();
-        let edited = repo.path().join("crates/engine/.warlock.md");
-        app.show_document(lines_of(DOCUMENT), false);
+        let edited = repo.path().join("crates/engine/lib.rs");
+        app.show_document(lines_of(SOURCE), false);
 
         // An editor that took the file with it, which is the same failure
         // a `v` over a vanished path meets.
-        fs::remove_file(&edited).expect("the document goes");
+        fs::remove_file(&edited).expect("the file goes");
         came_back(
             &mut app,
             &scope,
@@ -575,11 +498,11 @@ mod back {
 
         assert_eq!(
             shown(&app, now),
-            lines_of(DOCUMENT),
+            lines_of(SOURCE),
             "the card that could not be read was emptied"
         );
         let message = app.message().expect("a read that failed says so");
-        assert!(message.contains(".warlock.md"), "{message}");
+        assert!(message.contains("lib.rs"), "{message}");
         assert!(!message.contains('\n'), "the footer is one line: {message}");
     }
 }

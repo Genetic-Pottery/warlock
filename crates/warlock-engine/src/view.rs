@@ -4,7 +4,11 @@ use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::str::Utf8Error;
 
-use crate::fitting::{PER_FILE_BYTE_CAP, byte_count};
+pub const PER_FILE_BYTE_CAP: u64 = 1024 * 1024;
+
+fn byte_count(bytes: usize) -> u64 {
+    u64::try_from(bytes).unwrap_or(u64::MAX)
+}
 
 /// ```
 /// use std::fs;

@@ -1,11 +1,10 @@
-//! The `s` key, from the press to the saved `.warlock/pacts.toml`.
+//! The `s` key, from the press to the saved `.warlock/scopes.toml`.
 //!
-//! Unlike a pact — the sibling to read this against, in [`mod@crate::pacting`] —
-//! nothing here is a run. A scope is one string written into one entry of a file
+//! Nothing here is a run. A scope is one string written into one row of a file
 //! already in this thread's hand, so [`scope_submit`] writes on the event loop's
-//! own thread between two frames. It reloads nothing either: a scope changes no
-//! directory's state and no row's colour, so re-reading the tree would walk the
-//! whole repository to arrive at the tree already on screen.
+//! own thread between two frames. Nothing here reloads the tree: the session
+//! does that after a save, because it holds the watcher the reload is reported
+//! to.
 //!
 //! A successful write says nothing at all and leaves the message line as it
 //! found it, across both a set and a clear. Every rule a scope write follows is
@@ -16,10 +15,9 @@
 use std::path::Path;
 use std::time::Instant;
 
-use warlock_engine::{Manifest, PactEntry, to_manifest_path};
+use warlock_engine::{Manifest, ScopedDirectory, to_manifest_path};
 
 use crate::app::{App, Sigils};
-use crate::boundary::Operation;
 use crate::error::Error;
 use crate::prompt::{
     Edited, RecordEdited, RecordField, RecordForm, RecordPrompt, ScopeField, ScopePrompt,
@@ -27,11 +25,10 @@ use crate::prompt::{
 use crate::rescope::{RecordFields, ScopeRefusal, rescope};
 use crate::session::closed_scope;
 
-// The four refusals are ordered deliberately, matching
-// [`pact_press`](crate::pacting::pact_press): a pull in flight, a run in flight,
-// then the boundary, then whatever the app makes of the row. A refusal during a
-// pull goes on the thread, because it has to name the ticket whose session is
-// editing this tree.
+// The three refusals are ordered deliberately: a pull in flight, then the
+// boundary, then whatever the app makes of the row. A refusal during a pull goes
+// on the thread, because it has to name the ticket whose session is editing this
+// tree.
 //
 // The field opens on the scope read out of the manifest, never off a
 // [`Row`](crate::app::Row): a fourth row field holding this string would be a
@@ -41,32 +38,20 @@ pub(crate) fn scope_press(
     manifest: &Manifest,
     repo_root: &Path,
     sigils: &Sigils,
-    in_flight: bool,
     pulling: Option<&str>,
     now: Instant,
 ) -> ScopePrompt {
-    // Asked before the run of this machine's own and before the boundary,
-    // because a pull is a session editing this working tree and a scope written
-    // under it would move the boundary that run's own crossing check is about to
-    // be judged against.
+    // Asked before the boundary, because a pull is a session editing this
+    // working tree and a scope written under it would move the boundary that
+    // run's own crossing check is about to be judged against.
     if let Some(pulling) = pulling {
         app.panel_mut().note(refused(pulling), now);
         return ScopePrompt::Closed;
     }
-    if in_flight {
-        // The whole of the refusal: a bit of wording on a line that is already
-        // on screen. Setting it again says the same thing, so a reader leaning
-        // on the key changes nothing after the first press.
-        app.set_pact_refused();
-        return ScopePrompt::Closed;
-    }
-    // The third refusal, and the sharpest of the three this key can meet: you
-    // must hold a boundary to redraw it. Without this, the one key whose whole
-    // purpose is to move a scope would be the one key a scope did not cover, and
-    // a boundary anybody may retype is not a boundary. Before `scope_target` for
-    // the reason `pact_press` puts it before the toggle — whether this operator
-    // may act here is settled ahead of what the key would have done.
-    if closed_scope(app, Operation::Scope, manifest, repo_root, sigils) {
+    // You must hold a boundary to redraw it. Before `scope_target`, because
+    // whether this operator may act here is settled ahead of what the key would
+    // have done.
+    if closed_scope(app, manifest, repo_root, sigils) {
         return ScopePrompt::Closed;
     }
     // Every row-level refusal leaves through here as `None`, having already put
@@ -87,8 +72,8 @@ pub(crate) fn scope_press(
     };
 
     let scope = manifest
-        .entry(&module)
-        .and_then(PactEntry::scope)
+        .directory(&module)
+        .map(ScopedDirectory::scope)
         .unwrap_or_default();
     ScopePrompt::open(module, scope)
 }
@@ -173,8 +158,8 @@ pub(crate) fn scope_submit(
     let scope = (!typed.is_empty()).then_some(typed);
 
     // The directory the window has been naming all along, which is the manifest
-    // path `scope_press` read the entry by: one copy of it, so the entry that is
-    // written cannot be a different one from the entry that was read.
+    // path `scope_press` read the row by: one copy of it, so the row that is
+    // written cannot be a different one from the row that was read.
     let module = field.directory();
     match rescope(manifest, module, scope, RecordFields::default()) {
         Ok(rescoped) => {
@@ -228,7 +213,7 @@ pub(crate) fn record_edit(
 }
 
 // The other half of a submit that named a scope nothing records: three values
-// and one save, of the pact's scope and the record together.
+// and one save, of the directory's scope and the record together.
 //
 // A form with two fields blank is refused under the upper one, which is where
 // the reader is already looking.

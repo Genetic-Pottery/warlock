@@ -1,8 +1,7 @@
 //! Everything about the situation arrives as a parameter rather than being
 //! looked up, which is what keeps [`action_for`], [`press_for`] and
-//! [`mouse_action`] pure functions and every rule below one assertion. Two of
-//! those parameters are read in exactly one arm each: `in_flight` re-reads Esc
-//! in [`action_for`] and `q` in [`press_for`], and `answered` re-reads Ctrl-C —
+//! [`mouse_action`] pure functions and every rule below one assertion. One of
+//! those parameters is read in exactly one arm: `answered` re-reads Ctrl-C —
 //! which [`press_for`] takes at the top, before [`action_for`] is ever asked.
 //! Which window is up is not decided here: it arrives as the one
 //! [`Modal`] that `Modals::current` picked, the same one the frame draws.
@@ -27,7 +26,6 @@ use crate::ui::{Cut, Hit, Reach, Shape};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Action {
     Quit,
-    CancelPact,
     ToggleFocus,
     SelectPrevious,
     SelectNext,
@@ -36,10 +34,8 @@ pub(crate) enum Action {
     SelectFirst,
     SelectLast,
     ToggleCollapsed,
-    TogglePactedOnly,
+    ToggleScopedOnly,
     ToggleFiles,
-    TogglePact,
-    Refresh,
     OpenScope,
     ViewFile,
     EditFile,
@@ -48,22 +44,18 @@ pub(crate) enum Action {
     Help,
 }
 
-pub(crate) fn action_for(key: KeyEvent, in_flight: bool) -> Option<Action> {
+pub(crate) fn action_for(key: KeyEvent) -> Option<Action> {
     // Presses only. Crossterm reports releases and auto-repeats on Windows and
     // on terminals speaking the Kitty protocol, and not on the rest, so a
     // release acted on would move the selection twice per keystroke on some
-    // machines and once on others — and would toggle `p`'s pact straight back
+    // machines and once on others — and would toggle a filter straight back
     // off again on the way up.
     if key.kind != KeyEventKind::Press {
         return None;
     }
 
     match key.code {
-        // Before the quit arm below, and the only arm the mode touches: Esc
-        // stops being a way out for as long as there is a run to stop, while
-        // `q` — the key a reader reaches for deliberately — goes on meaning
-        // quit. Ctrl-C never arrives here: `press_for` takes it first.
-        KeyCode::Esc if in_flight => Some(Action::CancelPact),
+        // Ctrl-C never arrives here: `press_for` takes it first.
         KeyCode::Char('q') | KeyCode::Esc => Some(Action::Quit),
         KeyCode::Tab => Some(Action::ToggleFocus),
         // Shift-Tab is a keystroke of its own: the terminal sends a code for it
@@ -84,13 +76,11 @@ pub(crate) fn action_for(key: KeyEvent, in_flight: bool) -> Option<Action> {
         // ordinary character.
         KeyCode::Char(' ') => Some(Action::ToggleCollapsed),
         // The letters are lower case only, `g`/`G` above excepted: `O`, `F`,
-        // `P`, `R`, `S`, `V`, `E` and `M` are keystrokes of their own that mean
+        // `S`, `V`, `E` and `M` are keystrokes of their own that mean
         // nothing here rather than second spellings of these, which leaves them
         // free for later bindings.
-        KeyCode::Char('o') => Some(Action::TogglePactedOnly),
+        KeyCode::Char('o') => Some(Action::ToggleScopedOnly),
         KeyCode::Char('f') => Some(Action::ToggleFiles),
-        KeyCode::Char('p') => Some(Action::TogglePact),
-        KeyCode::Char('r') => Some(Action::Refresh),
         KeyCode::Char('s') => Some(Action::OpenScope),
         KeyCode::Char('v') => Some(Action::ViewFile),
         KeyCode::Char('e') => Some(Action::EditFile),
@@ -212,7 +202,6 @@ pub(crate) fn press_for(
     key: KeyEvent,
     modal: Option<Modal<'_>>,
     composer: Option<&Composer>,
-    in_flight: bool,
     answered: bool,
 ) -> Pressed {
     if is_ctrl_c(key) {
@@ -255,9 +244,9 @@ pub(crate) fn press_for(
     if let Some(draft) = composer
         && !is_tab(key)
     {
-        // A muted field takes no keys and hands none on either: a `p` that fell
+        // A muted field takes no keys and hands none on either: an `s` that fell
         // through a dead field to `action_for` would arrive at the tree as the
-        // pact key. Nothing is said about it — the dim border says it once,
+        // scope key. Nothing is said about it — the dim border says it once,
         // rather than the footer saying it per keystroke.
         if draft.is_muted() {
             return Pressed::Nothing;
@@ -265,15 +254,10 @@ pub(crate) fn press_for(
         return Pressed::Compose(compose_for(key, draft));
     }
 
-    match action_for(key, in_flight) {
-        // The gate, in two arms, and the only use `in_flight` is put to here.
-        // With a run out, `q` leaves outright rather than asking: the confirm
-        // is for the reflex second Esc after a cancel, not for a reader who has
-        // decided, and Esc during a run is the cancel anyway (see
-        // `action_for`). Ctrl-C never reaches this arm — it is taken at the top
-        // of this function, where `answered` decides what it means.
-        Some(Action::Quit) if !in_flight => Pressed::Confirm(QuitConfirm::open()),
-        Some(Action::Quit) => Pressed::Leave,
+    match action_for(key) {
+        // Ctrl-C never reaches this arm — it is taken at the top of this
+        // function, where `answered` decides what it means.
+        Some(Action::Quit) => Pressed::Confirm(QuitConfirm::open()),
         Some(Action::Help) => Pressed::Help(HelpSheet::open()),
         Some(action) => Pressed::Act(action),
         None => Pressed::Nothing,
@@ -355,7 +339,7 @@ pub(crate) fn mouse_action(
     let cut = shape.cut();
     let hit = cut.hit(mouse.column, mouse.row);
     match mouse.kind {
-        // Down the tree and down the account are the same direction, so one
+        // Down the tree and down the panel are the same direction, so one
         // notch reads the same way over either pane.
         MouseEventKind::ScrollDown => wheel(
             hit,
@@ -421,9 +405,9 @@ pub(crate) fn drag_after(
         // drag left standing under a button that is up would hold the
         // conversation still long after the hand came off it.
         _ if released => None,
-        // A press on the tree, the composer, the panel's header, one of the
-        // other two cards, the footer, the border, off the screen: whatever it
-        // begins, it is not a drag over the conversation's text.
+        // A press on the tree, the composer, the panel's header, the document
+        // card, the footer, the border, off the screen: whatever it begins, it
+        // is not a drag over the conversation's text.
         _ if pressed => None,
         // The wheel and every other button, none of which lets go of the left
         // one.
@@ -432,15 +416,15 @@ pub(crate) fn drag_after(
 }
 
 // The wheel drives whichever pane the pointer is over, focus notwithstanding,
-// and every part of a pane's inside answers for it — the run header included,
-// because a notch that did nothing on one line of a pane reads as a wheel that
-// sticks. The composer answers nothing: it scrolls itself as somebody
-// types, and scrolling the account because the pointer was resting on the field
-// would move the half of the screen the reader is not pointing at.
+// and every part of a pane's inside answers for it, because a notch that did
+// nothing on one line of a pane reads as a wheel that sticks. The composer
+// answers nothing: it scrolls itself as somebody types, and scrolling the panel
+// because the pointer was resting on the field would move the half of the screen
+// the reader is not pointing at.
 fn wheel(hit: Hit, tree: MouseAction, panel: MouseAction) -> Option<MouseAction> {
     match hit {
         Hit::TreeRow { .. } | Hit::TreeBelowRows => Some(tree),
-        Hit::PanelHeader | Hit::PanelLine { .. } => Some(panel),
+        Hit::PanelLine { .. } => Some(panel),
         Hit::Composer | Hit::Footer | Hit::Border | Hit::Offscreen => None,
     }
 }
@@ -468,11 +452,11 @@ fn click(hit: Hit, app: &App) -> Option<MouseAction> {
         }
         Hit::TreeBelowRows => Some(MouseAction::Focus(Focus::Tree)),
         // Over a conversation the press anchors a selection, and that action
-        // takes the keys too: everywhere else in the panel — its header, either
-        // of the other two cards, a thread card with nothing on it yet — there is
-        // no text to anchor in, so the press is the plain focus it has always
+        // takes the keys too: everywhere else in the panel — either of the other
+        // two cards, a thread card with nothing on it yet — there is no text to
+        // anchor in, so the press is the plain focus it has always
         // been.
-        Hit::PanelHeader | Hit::PanelLine { .. } => Some(cell_under(hit, app).map_or(
+        Hit::PanelLine { .. } => Some(cell_under(hit, app).map_or(
             MouseAction::Focus(Focus::Panel),
             MouseAction::StartSelection,
         )),
@@ -514,9 +498,9 @@ fn cell_under(hit: Hit, app: &App) -> Option<Cell> {
 // one that is still level with them.
 //
 // Gated on the very question `cell_under` is gated on, because it is the same
-// refusal: the account and the document are read past, not copied out of, and a
-// pointer dragged off the bottom of either has to go on meaning what it meant
-// before a drag off the thread card meant anything.
+// refusal: the document is read past, not copied out of, and a pointer dragged
+// off the bottom of it has to go on meaning what it meant before a drag off the
+// thread card meant anything.
 fn past_rows(mouse: MouseEvent, cut: &Cut, app: &App) -> Option<Reach> {
     if !selectable(app) {
         return None;

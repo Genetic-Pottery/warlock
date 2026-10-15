@@ -6,7 +6,8 @@ use std::sync::{Arc, Mutex};
 use tempfile::TempDir;
 use warlock_engine::drafting::{Draft, stub_answer};
 use warlock_engine::{
-    Destination, Manifest, PactEntry, ScopeRecord, agent, save_key, save_key_binding, save_sigils,
+    Destination, Manifest, ScopeRecord, ScopedDirectory, agent, save_key, save_key_binding,
+    save_sigils,
 };
 
 use super::{Planned, Settled, cut_with, listing, listing_lines, prepare};
@@ -251,13 +252,12 @@ fn a_manifest(scopes: impl IntoIterator<Item = ScopeRecord>) -> Manifest {
     Manifest::new().with_scopes(scopes)
 }
 
-// A manifest whose pact carries a scope with no `[[scope]]` record behind it,
+// A manifest whose row carries a scope with no `[[scope]]` record behind it,
 // which is the third way there is no board: the manifest is one line short
 // rather than the machine being wrong.
-fn a_pacted_manifest() -> Manifest {
-    Manifest::with_entries([PactEntry::new(".", "docs", "docs/.warlock.md")
-        .expect("a relative module path is inside the root")
-        .with_scope(SCOPE)])
+fn an_unrecorded_manifest() -> Manifest {
+    Manifest::with_directories([ScopedDirectory::new(".", "docs", SCOPE)
+        .expect("a relative module path is inside the root")])
 }
 
 fn a_record(name: &str, team: &str) -> ScopeRecord {
@@ -880,7 +880,7 @@ mod preparing {
         holding(elsewhere.path(), unmatched.path(), &["billing"]);
 
         let unrecorded = a_repository();
-        saving(unrecorded.path(), &a_pacted_manifest());
+        saving(unrecorded.path(), &an_unrecorded_manifest());
         let no_record = a_dir();
         holding(no_record.path(), unrecorded.path(), &[SCOPE]);
 

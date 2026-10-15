@@ -121,7 +121,7 @@ pub fn state_path(home: impl AsRef<Path>, root: impl AsRef<Path>, ticket: &str) 
 }
 
 /// The run's rendered manifest — not [`crate::manifest::manifest_path`], which is
-/// the repository's `pacts.toml`.
+/// the repository's `scopes.toml`.
 ///
 /// ```
 /// use warlock_engine::{run_dir, run_manifest_path};

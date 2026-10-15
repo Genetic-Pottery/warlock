@@ -49,9 +49,6 @@ pub enum ScopeRefusal {
     Rule {
         rule: scope::Rule,
     },
-    NoPact {
-        module: String,
-    },
     // Every missing field rather than the first one noticed: the shell's fix is
     // to retype the command, and a refusal naming a field at a time is three
     // runs. The panel reads this as the cue to put the record window up.
@@ -72,12 +69,10 @@ pub enum ScopeRefusal {
 }
 
 // The order is load-bearing, and both doors depend on it. The scope is judged
-// before the entry is looked for, so a run with two things wrong answers about
-// what was typed. The pact comes next and above everything about the record,
-// because three values for a directory nobody has pacted would never have been
-// written whatever they said. And what the file already records is asked before
-// any value is judged blank: a value handed to a record that exists is refused
-// for being there at all, not for its spelling.
+// before anything about the record, so a run with two things wrong answers about
+// what was typed. And what the file already records is asked before any value
+// is judged blank: a value handed to a record that exists is refused for being
+// there at all, not for its spelling.
 //
 // Fold, then judge, and nothing else is done to what was typed: `Data-Plane`
 // and `data-plane` are one boundary, while nothing is trimmed, split on a comma
@@ -103,16 +98,12 @@ pub(crate) fn rescope(
     };
 
     let was = manifest
-        .entry(module)
-        .ok_or_else(|| ScopeRefusal::NoPact {
-            module: module.to_owned(),
-        })?
-        .scope()
-        .map(str::to_owned);
+        .directory(module)
+        .map(|directory| directory.scope().to_owned());
 
     let Some(scope) = scope else {
         return Ok(Rescoped {
-            manifest: with_scope_on(manifest, module, None),
+            manifest: manifest.rescoped(module, None),
             scope: None,
             was,
         });
@@ -124,7 +115,7 @@ pub(crate) fn rescope(
         if record.given().iter().any(|(_, value)| value.is_some()) {
             return Err(ScopeRefusal::Recorded { scope });
         }
-        with_scope_on(manifest, module, Some(&scope))
+        manifest.rescoped(module, Some(&scope))
     } else {
         let (Some(team_key), Some(review_state), Some(label)) =
             (record.team_key, record.review_state, record.label)
@@ -155,27 +146,7 @@ pub(crate) fn records_scope(manifest: &Manifest, name: &str) -> bool {
     manifest.scope_record(name).is_some()
 }
 
-// A rebuild rather than a mutation, because [`Manifest`] has no mutating scope
-// setter and should not grow one for this. [`Manifest::rebuilt_with`] and not
-// `Manifest::with_entries`: that one starts from an empty manifest and would
-// drop the `[[scope]]` records out of the file. Every other entry is cloned as
-// it stands and the map preserves order, so the saved file differs from the one
-// on disk in one place; the edited entry keeps its document, granted hash and
-// granted timestamp, none of which are this edit's to move.
-fn with_scope_on(manifest: &Manifest, module: &str, scope: Option<&str>) -> Manifest {
-    manifest.rebuilt_with(manifest.entries().iter().map(|entry| {
-        let entry = entry.clone();
-        if entry.module() != module {
-            return entry;
-        }
-        match scope {
-            Some(scope) => entry.with_scope(scope),
-            None => entry.without_scope(),
-        }
-    }))
-}
-
-// `scope` is written in both places from the one string, so the pact cannot come
+// `scope` is written in both places from the one string, so the row cannot come
 // to name a record spelled differently from the one this call created, and both
 // halves are one returned `Manifest` so the caller saves once: a scope on disk
 // whose record failed to write is the half-state this exists to make
@@ -196,7 +167,7 @@ fn with_scope_recorded(
         label,
     )]);
 
-    with_scope_on(manifest, module, Some(scope)).with_scopes(recorded)
+    manifest.rescoped(module, Some(scope)).with_scopes(recorded)
 }
 
 const fn flag(field: RecordField) -> &'static str {
@@ -227,11 +198,6 @@ impl fmt::Display for ScopeRefusal {
             // The engine's sentence about the one rule that was broken, alone:
             // it is already the whole answer and the whole fix.
             Self::Rule { rule } => write!(f, "{rule}"),
-            Self::NoPact { module } => write!(
-                f,
-                "`{module}` is not in the manifest, so there is no pact to carry a \
-                 scope; pact it in warlock first, with `p`"
-            ),
             Self::NeedsRecord { scope, missing } => write!(
                 f,
                 "nothing records `{scope}` yet, so nothing was written: writing a scope by that \
@@ -247,7 +213,7 @@ impl fmt::Display for ScopeRefusal {
             // shell appends its flag advice in `Error`'s `Display`.
             Self::Recorded { scope } => write!(
                 f,
-                "`{scope}` already has a record in `.warlock/pacts.toml`, and warlock does not \
+                "`{scope}` already has a record in `.warlock/scopes.toml`, and warlock does not \
                  rewrite one"
             ),
         }
@@ -258,10 +224,7 @@ impl std::error::Error for ScopeRefusal {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Rule { rule } => Some(rule),
-            Self::NoPact { .. }
-            | Self::NeedsRecord { .. }
-            | Self::BlankRecord { .. }
-            | Self::Recorded { .. } => None,
+            Self::NeedsRecord { .. } | Self::BlankRecord { .. } | Self::Recorded { .. } => None,
         }
     }
 }

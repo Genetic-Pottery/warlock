@@ -1,0 +1,11 @@
+version = 1
+
+[[directory]]
+path = "."
+scope = "warlock-team"
+
+[[scope]]
+name = "warlock-team"
+team = "WAR"
+review_state = "In Review"
+label = "warlock"

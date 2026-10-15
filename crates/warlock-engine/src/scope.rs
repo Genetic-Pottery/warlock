@@ -1,7 +1,7 @@
 use std::fmt;
 use std::path::Path;
 
-use crate::manifest::{self, Manifest, PactEntry, ROOT_MODULE, to_manifest_path};
+use crate::manifest::{self, Manifest, ROOT_MODULE, ScopedDirectory, to_manifest_path};
 
 pub const MAXIMUM_CHARACTERS: usize = 24;
 
@@ -99,10 +99,10 @@ pub fn validate_scope(scope: &str) -> Result<(), Rule> {
 
 // The wildcard is spellable on the sigil side and refused on the scope side, and
 // the asymmetry is the design. A person holding nothing and a person holding
-// everything are different claims. On a directory `*` would mean "open to
-// anyone", which having no scope already means, and two spellings of one meaning
-// is how a vocabulary rots. Everything else defers to `validate_scope`, so there
-// is still exactly one character class in the workspace.
+// everything are different claims. On a directory a scope names the board its
+// work is filed to, and `*` names no board. Everything else defers to
+// `validate_scope`, so there is still exactly one character class in the
+// workspace.
 pub fn validate_sigil(sigil: &str) -> Result<(), Rule> {
     if sigil == WILDCARD {
         return Ok(());
@@ -112,12 +112,11 @@ pub fn validate_sigil(sigil: &str) -> Result<(), Rule> {
 }
 
 /// ```
-/// use warlock_engine::{Manifest, PactEntry, scope_covering};
+/// use warlock_engine::{Manifest, ScopedDirectory, scope_covering};
 ///
-/// let manifest = Manifest::with_entries([
-///     PactEntry::new(".", "crates", "crates/.warlock.md")?.with_scope("platform"),
-///     PactEntry::new(".", "crates/engine", "crates/engine/.warlock.md")?.with_scope("data-plane"),
-///     PactEntry::new(".", "crates/engine-tools", "crates/engine-tools/.warlock.md")?,
+/// let manifest = Manifest::with_directories([
+///     ScopedDirectory::new(".", "crates", "platform")?,
+///     ScopedDirectory::new(".", "crates/engine", "data-plane")?,
 /// ]);
 ///
 /// // The nearest scoped ancestor wins, and a directory answers with its own.
@@ -140,17 +139,17 @@ pub fn scope_covering(
     manifest: &Manifest,
 ) -> Result<Option<&str>, manifest::Error> {
     let stored = to_manifest_path(root, path)?;
-    Ok(at_or_above(&stored).find_map(|module| valid_scope(manifest.entry(module)?)))
+    Ok(at_or_above(&stored).find_map(|module| valid_scope(manifest.directory(module)?)))
 }
 
 // A scope the validator refuses reads as no scope, indistinguishable from an
 // absent one to every caller: one typo in a hand-edited manifest widens the
 // boundary to its parent's rather than inventing a boundary nobody wrote, and
 // this never hands back a string that is not a scope. Crate-visible so that a
-// caller walking the entries itself calls this rule rather than writing a second
+// caller walking the rows itself calls this rule rather than writing a second
 // copy of it.
-pub(crate) fn valid_scope(entry: &PactEntry) -> Option<&str> {
-    entry.scope().filter(|scope| validate_scope(scope).is_ok())
+pub(crate) fn valid_scope(directory: &ScopedDirectory) -> Option<&str> {
+    Some(directory.scope()).filter(|scope| validate_scope(scope).is_ok())
 }
 
 // Segments cut at `/`, which is what keeps the walk segment-wise rather than
@@ -174,33 +173,34 @@ pub(crate) fn at_or_above(stored: &str) -> impl Iterator<Item = &str> {
 ///
 /// let held = ["web".to_owned(), "billing".to_owned()];
 ///
-/// // A directory nobody has scoped is open to anyone.
-/// assert!(scope_opens_to(None, &held));
+/// // A directory nobody has scoped is closed to everyone.
+/// assert!(!scope_opens_to(None, &held));
+/// assert!(!scope_opens_to(None, &["*".to_owned()]));
 /// // Any one held sigil opens the scope it matches.
 /// assert!(scope_opens_to(Some("billing"), &held));
 /// // A scope none of them matches is closed.
 /// assert!(!scope_opens_to(Some("data-plane"), &held));
-/// // Holding nothing opens nothing that is scoped.
+/// // Holding nothing opens nothing.
 /// assert!(!scope_opens_to(Some("data-plane"), &[]));
-/// // But an unscoped directory is still open to a machine holding nothing.
-/// assert!(scope_opens_to(None, &[]));
-/// // The wildcard sigil opens everything.
+/// // The wildcard sigil opens every scope.
 /// assert!(scope_opens_to(Some("data-plane"), &["*".to_owned()]));
 /// ```
 #[must_use]
 pub fn scope_opens_to(covering: Option<&str>, held: &[String]) -> bool {
+    // Unscoped is closed, even to the wildcard: a scope is what says warlock
+    // may work somewhere and which board the work goes to, so a directory with
+    // none has no board to file to and nobody's AI belongs in it.
     let Some(scope) = covering else {
-        // Nobody drew a boundary here, so there is none to be outside of.
-        return true;
+        return false;
     };
 
     // No special case for an empty `held`, deliberately. It falls through to the
     // membership test and matches nothing, which is the answer: a sigil is what
     // opens a scope, so holding none opens none. Reading the empty set as
-    // unrestricted — the symmetrical-looking counterpart to the `None` above —
-    // would make the default state of every machine a universal bypass, and the
-    // boundary would then hold only for people who had already opted into being
-    // bound by it. Onboarding is where this is paid for instead.
+    // unrestricted would make the default state of every machine a universal
+    // bypass, and the boundary would then hold only for people who had already
+    // opted into being bound by it. Onboarding is where this is paid for
+    // instead.
     held.iter().any(|sigil| sigil == WILDCARD || sigil == scope)
 }
 
@@ -210,68 +210,6 @@ fn is_scope_character(character: char) -> bool {
 
 fn is_separator(character: char) -> bool {
     character == '-' || character == '_'
-}
-
-// String work on the manifest's own stored paths, never a question for the
-// filesystem, so an entry whose directory is gone still answers.
-pub(crate) fn at_or_below(module: &str, selected: &str) -> bool {
-    // The repository root is above everything, itself included.
-    selected == ROOT_MODULE
-        || module == selected
-        // The `/` is what makes this segment-wise. A plain `starts_with` would
-        // have `crates/engine` swallow `crates/engine-tools`.
-        || module
-            .strip_prefix(selected)
-            .is_some_and(|below| below.starts_with('/'))
-}
-
-// The downward question — what does an un-pact reach — and not
-// `scope_covering`/`scope_opens_to`, which walk up. Not interchangeable here:
-// coverage reads an unscoped `crates` as the absence of a statement, which
-// would let somebody standing above a boundary destroy it by aiming at its
-// parent.
-/// ```
-/// use warlock_engine::{Manifest, PactEntry, closed_scopes_at_or_below};
-///
-/// let entry = |module: &str| PactEntry::new(".", module, format!("{module}/.warlock.md"));
-/// let manifest = Manifest::with_entries([
-///     entry("crates")?,
-///     entry("crates/engine")?.with_scope("data-plane"),
-///     entry("crates/engine-tools")?.with_scope("tooling"),
-/// ]);
-/// let held = ["tooling".to_owned()];
-///
-/// // `crates` is unscoped, so its own boundary opens — but the un-pact reaches
-/// // one this machine is outside of.
-/// let blocking = closed_scopes_at_or_below("crates", ".", &manifest, &held)?;
-/// assert_eq!(blocking, ["data-plane"]);
-///
-/// // A sibling that merely shares a prefix is not below, and its own scope is
-/// // held.
-/// let blocking = closed_scopes_at_or_below("crates/engine-tools", ".", &manifest, &held)?;
-/// assert!(blocking.is_empty());
-/// # Ok::<(), warlock_engine::manifest::Error>(())
-/// ```
-pub fn closed_scopes_at_or_below<'manifest>(
-    directory: impl AsRef<Path>,
-    root: impl AsRef<Path>,
-    manifest: &'manifest Manifest,
-    held: &[String],
-) -> Result<Vec<&'manifest str>, manifest::Error> {
-    let selected = to_manifest_path(root, directory)?;
-
-    let mut blocking: Vec<&str> = Vec::new();
-    let below = manifest
-        .entries()
-        .iter()
-        .filter(|entry| at_or_below(entry.module(), &selected))
-        .filter_map(valid_scope);
-    for scope in below {
-        if !scope_opens_to(Some(scope), held) && !blocking.contains(&scope) {
-            blocking.push(scope);
-        }
-    }
-    Ok(blocking)
 }
 
 #[cfg(test)]

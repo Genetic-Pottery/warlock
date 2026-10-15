@@ -1,9 +1,9 @@
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::Instant;
 
 use tempfile::TempDir;
-use warlock_engine::{Node, NodeState, Tree, manifest_path, to_manifest_path};
+use warlock_engine::{Node, Tree, manifest_path, to_manifest_path};
 
 use super::NO_PATH;
 use crate::account::Line;
@@ -32,11 +32,7 @@ fn now() -> Instant {
 // The reply goes on the card and nowhere else, because the card is where the
 // write reads it back from.
 fn app_answering(root: &Path, reply: &str) -> App {
-    let mut app = App::from_tree(&Tree::new(Node::new(
-        root,
-        None::<PathBuf>,
-        NodeState::Unpacted,
-    )));
+    let mut app = App::from_tree(&Tree::new(Node::new(root)));
     app.panel_mut().start_turn("write the brief", now());
     app.panel_mut().answer_turn(reply, now());
     app.set_message(LAST_KEY);
@@ -155,11 +151,9 @@ fn enter_writes_the_document_and_says_what_landed() {
         "the bytes on disk are not the reply on the card"
     );
     assert_eq!(notes(&app), [format!("wrote {BRIEF} — 1.8 KB")]);
-    // That one line is the whole of what a write says. The footer is the
-    // last keystroke's, and nothing about the run state moved.
+    // That one line is the whole of what a write says: the footer is still
+    // the last keystroke's.
     assert_eq!(app.message(), Some(LAST_KEY));
-    assert!(!app.is_pacting());
-    assert_eq!(app.run_header().map(|header| header.words()), None);
 }
 
 #[test]
@@ -466,11 +460,7 @@ fn a_conversation_with_no_answer_on_it_writes_nothing_and_says_so() {
     // The road the loop cannot take — the prompt opens over an answer that
     // has landed — answered rather than left to be discovered.
     let repo = a_repo();
-    let mut app = App::from_tree(&Tree::new(Node::new(
-        repo.path(),
-        None::<PathBuf>,
-        NodeState::Unpacted,
-    )));
+    let mut app = App::from_tree(&Tree::new(Node::new(repo.path())));
 
     let prompt = write_submit(&mut app, repo.path(), &field(BRIEF), now());
 
@@ -899,9 +889,7 @@ mod whole {
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
     use super::super::WRITE_HEADING;
-    use super::{
-        App, Instant, Node, NodeState, PathBuf, Tree, a_repo, everything_under, fs, notes, now,
-    };
+    use super::{App, Instant, Node, Tree, a_repo, everything_under, fs, notes, now};
     use crate::account::Line;
     use crate::chatting::CHAT_NOTE;
     use crate::chatting::Chat;
@@ -941,19 +929,20 @@ mod whole {
     fn a_yes_to_the_offer_ends_as_a_document_on_disk() {
         let repo = a_repo();
         let base = now();
-        let mut app = App::from_tree(&Tree::new(Node::new(
-            repo.path(),
-            None::<PathBuf>,
-            NodeState::Unpacted,
-        )));
+        let mut app = App::from_tree(&Tree::new(Node::new(repo.path())));
         let model = Scripted::saying([
             Answering::says("Every section is settled.\n[ready to write]"),
             Answering::says(DOCUMENT),
-            Answering::says("Back to talking."),
         ]);
         let mut chat = Chat::with_agent(repo.path(), model.clone());
 
         chat.compose(&mut app, Composed::Typing(Composer::new("/brief")), base);
+        chat.compose(&mut app, Composed::Submit, base);
+        chat.compose(
+            &mut app,
+            Composed::Typing(Composer::new("add a flag")),
+            base,
+        );
         chat.compose(&mut app, Composed::Submit, base);
         rounds_until_answered(&mut chat, &mut app, base);
         assert_eq!(chat.write_offer(), Some(Answer::No), "nothing was offered");
@@ -1017,7 +1006,8 @@ mod whole {
             fs::read_to_string(repo.path().join(PROPOSED)).expect("the artifact reads back");
         assert_eq!(written, DOCUMENT, "the bytes are not the document answered");
         // The brief is on disk, so the conversation leaves brief mode the way
-        // `/chat` does: the note, the mode, and a turn telling the model.
+        // `/chat` does: the note and the mode, with the model told on the
+        // next message rather than in a turn of its own.
         assert_eq!(
             notes(&app)[1..],
             [
@@ -1026,7 +1016,7 @@ mod whole {
             ]
         );
         assert_eq!(app.panel().mode(), Mode::Chat);
-        assert!(chat.answering(), "the model was not told the brief is over");
+        assert!(!chat.answering(), "leaving brief mode started a turn");
         // The whole repository, after the whole path: the output directory
         // and the one file in it. No transcript, no draft of the brief, and
         // nothing warlock authored under `.warlock/` — the turn wrote
