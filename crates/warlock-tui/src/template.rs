@@ -58,7 +58,9 @@ line reading `depends_on: [<the numbers it needs first>]`, then the slice in \
 paragraphs: what exists now, naming the files and functions it touches; what \
 changes and why this shape rather than the alternatives the conversation \
 weighed; and what a later edit must not break. A slice is a piece of work that \
-lands on its own; the dependencies say what order they can land in.";
+lands on its own; the dependencies say what order they can land in. Nothing \
+follows the last slice: record the remaining uncertainty under Out of scope or \
+in the Constraints.";
 
 // Built from `manifest_path` rather than by joining `.warlock` here, because the
 // name of that directory is the engine's to spell and a second copy of the
