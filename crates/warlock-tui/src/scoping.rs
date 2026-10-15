@@ -279,16 +279,6 @@ fn blank_message(which: RecordField) -> String {
 // The `None` arm is unreachable for [`scope_edit`]'s reason: `press_for` only
 // consults [`key_edit_for`](crate::prompt::key_edit_for) while this window is
 // up.
-//
-// Dead in the library until the wiring arm in `interactive.rs` calls it, as the
-// prompt's own half of this window is.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "no keystroke reaches this window until it is wired into the loop"
-    )
-)]
 pub(crate) fn key_edit(
     app: &mut App,
     home: &Path,
@@ -326,13 +316,6 @@ pub(crate) fn key_edit(
 //
 // The `None` arm cannot be reached either: `key_edit_for` only answers `Submit`
 // while a row is lit, which is what keeps a submit off an empty window.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "no keystroke reaches this window until it is wired into the loop"
-    )
-)]
 pub(crate) fn key_submit(app: &mut App, home: &Path, root: &Path, choice: &KeyChoice) -> KeyPrompt {
     let Some(name) = choice.highlighted() else {
         return KeyPrompt::Closed;

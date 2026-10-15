@@ -26,11 +26,11 @@ use crate::input::{
 use crate::linear::{Opener as LinearOpener, Opens};
 use crate::modal::{Modal, Modals};
 use crate::planned::edited_drafts;
-use crate::prompt::{RecordPrompt, ScopePrompt};
+use crate::prompt::{KeyPrompt, RecordPrompt, ScopePrompt};
 use crate::puller::{Claudes, Puller, Raises};
 use crate::pushing::Pushes;
 use crate::resume::resume_press;
-use crate::scoping::{record_edit, scope_edit, scope_press};
+use crate::scoping::{key_edit, record_edit, scope_edit, scope_press};
 use crate::screen::Screen;
 use crate::selection::{Cell, Position, copied_text, position_at};
 use crate::session::{Scope, Watched, load_app, reload, start_watching};
@@ -151,6 +151,7 @@ fn modals<'a, C, O, A, R, F, M>(
     help: HelpSheet,
     scope: &'a ScopePrompt,
     record: &'a RecordPrompt,
+    key: &'a KeyPrompt,
     pushes: &'a Pushes<O>,
     cutter: &'a Cutter<O, A>,
     puller: &'a Puller<O, R, F, M>,
@@ -178,6 +179,7 @@ where
         write_brief: chat.write_offer(),
         scope,
         record,
+        key,
         write: chat.write_prompt(),
     }
 }
@@ -265,6 +267,11 @@ struct Session<K: Seams> {
     /// down as the other comes up, in the one
     /// [`scoping::Windows`](crate::scoping::Windows) a submit hands back.
     record: RecordPrompt,
+    /// The window that binds one of this machine's stored keys to a scope.
+    /// Starts closed and stays closed: the keys, the frame and the write all
+    /// reach it, and nothing in the session opens it yet — which flow asks, and
+    /// when, is a decision of its own. See [`KeyPrompt`].
+    key: KeyPrompt,
     /// The left button held down over the conversation, if it is: the one piece
     /// of a gesture that outlives the event carrying it, because the rounds
     /// between one drag event and the next are what [`Session::drag_scroll`]
@@ -311,6 +318,7 @@ impl<K: Seams> Session<K> {
             puller,
             prompt: ScopePrompt::default(),
             record: RecordPrompt::default(),
+            key: KeyPrompt::default(),
             drag: None,
             document: None,
             said: None,
@@ -331,6 +339,7 @@ impl<K: Seams> Session<K> {
             self.help,
             &self.prompt,
             &self.record,
+            &self.key,
             &self.pushes,
             &self.cutter,
             &self.puller,
@@ -394,6 +403,7 @@ impl<K: Seams> Session<K> {
             self.help,
             &self.prompt,
             &self.record,
+            &self.key,
             &self.pushes,
             &self.cutter,
             &self.puller,
@@ -660,6 +670,32 @@ impl<K: Seams> Session<K> {
                     edited,
                 );
                 self.recolour(&before, now);
+            }
+            // No `recolour` and no reload beside it: a binding is a fact about
+            // this machine written into this checkout's config, so no row of
+            // the tree changes colour and the manifest is not opened at all.
+            //
+            // Nothing in this loop opens the window, so nothing reaches this
+            // arm yet; it is here because the gate's answer is exhaustive, and
+            // it is the one caller of the pair in [`mod@crate::scoping`] that
+            // writes a binding. The home and the root are the session's own,
+            // resolved once in `load_app` — and the file a binding lands in is
+            // the very file those settings read the sigils out of.
+            Pressed::Key(edited) => {
+                self.key = match self.scope.settings.home() {
+                    Some(home) => key_edit(
+                        &mut self.app,
+                        home,
+                        &self.scope.repo_root,
+                        &self.key,
+                        edited,
+                    ),
+                    // A machine with no home has no config to write a binding
+                    // into and no store for this window to have listed, so a
+                    // window could not have come up over one: the window goes
+                    // down and nothing is written.
+                    None => KeyPrompt::Closed,
+                };
             }
             Pressed::Write(edited) => {
                 self.chat.write(&mut self.app, edited, now);

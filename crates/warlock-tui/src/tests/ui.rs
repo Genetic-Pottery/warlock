@@ -34,7 +34,7 @@ use crate::composer::COMPOSER_MAX_ROWS;
 use crate::composer::Composer;
 use crate::confirm::{Answer, Choice, CutConfirm, PullConfirm, PushConfirm, QuitConfirm};
 use crate::fixture;
-use crate::modal::Modals;
+use crate::modal::{Modal, Modals};
 use crate::panel::Mode;
 use crate::prompt::{
     KeyChoice, KeyPrompt, RecordField, RecordForm, RecordPrompt, ScopeField, ScopePrompt,
@@ -6489,23 +6489,24 @@ fn a_key_choice(names: &[&str]) -> KeyChoice {
         .clone()
 }
 
-// Drawn from the constructor rather than through `Modals::current` as every
-// window above is: nothing opens this one yet, so there is no `Modal` to put it
-// up with.
+// Through `Dialog::of` and the `Modal` the precedence hands it, as the windows
+// above are, but over a bare screen rather than a whole frame: nothing in the
+// loop opens this one, so there is no app to put it up over and the lines are
+// the whole of what these tests are about.
 fn render_key(choice: &KeyChoice, width: u16, height: u16) -> Buffer {
     let mut terminal =
         Terminal::new(TestBackend::new(width, height)).expect("test backend never fails");
     terminal
         .draw(|frame| {
             let screen = frame.area();
-            Dialog::key(choice).draw(frame, screen);
+            Dialog::of(Modal::Key(choice)).draw(frame, screen);
         })
         .expect("test backend never fails");
     terminal.backend().buffer().clone()
 }
 
 fn key_rect(buffer: &Buffer, choice: &KeyChoice) -> Rect {
-    Dialog::key(choice).area(buffer.area)
+    Dialog::of(Modal::Key(choice)).area(buffer.area)
 }
 
 fn key_rows(buffer: &Buffer, choice: &KeyChoice) -> Vec<String> {

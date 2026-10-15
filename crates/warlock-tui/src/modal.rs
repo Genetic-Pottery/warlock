@@ -3,7 +3,7 @@ use crate::confirm::{
     Undertaking,
 };
 use crate::help::HelpSheet;
-use crate::prompt::{RecordForm, RecordPrompt, ScopeField, ScopePrompt};
+use crate::prompt::{KeyChoice, KeyPrompt, RecordForm, RecordPrompt, ScopeField, ScopePrompt};
 
 // Two variants over `ScopeField` rather than one carrying a tag, so the field
 // a key is typed into and the heading it is drawn under cannot come from two
@@ -21,6 +21,7 @@ pub(crate) enum Modal<'a> {
     WriteBrief(Answer),
     Scope(&'a ScopeField),
     Record(&'a RecordForm),
+    Key(&'a KeyChoice),
     Write(&'a ScopeField),
 }
 
@@ -43,6 +44,7 @@ pub(crate) struct Modals<'a> {
     pub write_brief: Option<Answer>,
     pub scope: &'a ScopePrompt,
     pub record: &'a RecordPrompt,
+    pub key: &'a KeyPrompt,
     pub write: &'a ScopePrompt,
 }
 
@@ -59,6 +61,7 @@ impl Default for Modals<'_> {
             write_brief: None,
             scope: &ScopePrompt::Closed,
             record: &RecordPrompt::Closed,
+            key: &KeyPrompt::Closed,
             write: &ScopePrompt::Closed,
         }
     }
@@ -79,25 +82,36 @@ impl<'a> Modals<'a> {
     // else, so a window that comes up on no keystroke does not take the keys
     // from a sheet somebody opened and is reading.
     //
-    // The push, cut, pull, review, carry and write questions before the
-    // fields, for the same reason one step down: a field can come up under one
-    // of them on no keystroke, and the question is the window somebody is
-    // looking at. Among those six the order is a statement rather than a
-    // choice: a `/push`, `/draft` or `/pull` is typed into the composer, which
-    // takes no keys while any of them is up; a slice is being reviewed, or
-    // asking whether to carry on, or neither; and the write question goes last
-    // because nothing is waiting on it, where a run is waiting on the review
-    // and carry questions.
+    // The push, cut, pull, review, carry and write questions before the four
+    // windows under them, for the same reason one step down: one of those four
+    // can come up under a question on no keystroke, and the question is the
+    // window somebody is looking at. Among those six the order is a statement
+    // rather than a choice: a `/push`, `/draft` or `/pull` is typed into the
+    // composer, which takes no keys while any of them is up; a slice is being
+    // reviewed, or asking whether to carry on, or neither; and the write
+    // question goes last because nothing is waiting on it, where a run is
+    // waiting on the review and carry questions.
     //
     // The pull question sits with the other two the composer opens rather than
     // with the two a run puts up, because that is what it is: it is asked once,
     // before anything is checked out, and nothing it starts asks anything else.
     //
-    // The two windows the `s` key puts up before the write prompt, because
-    // either can be up with it — `s` opens one from the tree while a write
-    // turn is out, and that turn's answer opens the other — and the `s` window
-    // is the one somebody is typing in. The scope and record windows are never
-    // both up: one opens exactly as the other closes.
+    // Then the four windows a scope, a record, a binding and a path are
+    // settled in, in that order, and the order among them is which of them
+    // somebody has just acted in. The two the `s` key puts up come first,
+    // because either can be up with the write prompt — `s` opens one from the
+    // tree while a write turn is out, and that turn's answer opens the other —
+    // and the `s` window is the one somebody is typing in; the scope and record
+    // windows are never both up, since one opens exactly as the other closes.
+    // The key-binding window comes after those two because a submit of the
+    // record form is one of the things that can put it up, so a binding asked
+    // for over a record being filled in cannot take the keys from the fields it
+    // came out of; and before the write prompt because it is opened by a
+    // keystroke or a typed command, where a path prompt comes up on a turn's
+    // answer with nobody pressing anything. It is under all six questions
+    // above with nothing said about it that is not said about the other three:
+    // a push, cut or pull dialog already up keeps the keys, and a binding asked
+    // about underneath one waits there until that question is answered.
     #[must_use]
     pub(crate) fn current(self) -> Option<Modal<'a>> {
         self.quit
@@ -112,6 +126,7 @@ impl<'a> Modals<'a> {
             .or_else(|| self.write_brief.map(Modal::WriteBrief))
             .or_else(|| self.scope.field().map(Modal::Scope))
             .or_else(|| self.record.form().map(Modal::Record))
+            .or_else(|| self.key.choice().map(Modal::Key))
             .or_else(|| self.write.field().map(Modal::Write))
     }
 }

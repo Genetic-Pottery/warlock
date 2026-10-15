@@ -1259,6 +1259,7 @@ impl<'a> Dialog<'a> {
             Modal::WriteBrief(highlighted) => Self::write_brief(highlighted),
             Modal::Scope(field) => Self::scope(field, SCOPE_HEADING, scope::RULES),
             Modal::Record(form) => Self::record(form),
+            Modal::Key(choice) => Self::key(choice),
             Modal::Write(field) => Self::scope(field, PATH_HEADING, PATH_RULES),
         }
     }
@@ -1475,13 +1476,6 @@ impl<'a> Dialog<'a> {
     //
     // A key value is never drawn here because there is none to draw: a
     // `KeyChoice` holds names, and this is every line the window has.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "nothing puts this window up until `Dialog::of` gains its arm"
-        )
-    )]
     fn key(choice: &'a KeyChoice) -> Self {
         let mut lines = vec![
             Line::from(vec![
@@ -1610,13 +1604,6 @@ fn review_read_line(review: &Review) -> String {
     format!("{count} {noun}{REVIEW_READ}")
 }
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "read by the window `Dialog::of` cannot put up yet"
-    )
-)]
 fn key_none_line(scope: &str) -> String {
     format!("{KEY_NONE}{scope}{KEY_NONE_BINDS}")
 }
