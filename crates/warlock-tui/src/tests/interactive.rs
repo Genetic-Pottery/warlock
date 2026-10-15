@@ -1890,6 +1890,10 @@ mod filing {
     // Where the brief sits, and so what a `/push` names.
     const PATH: &str = "docs/a-brief.md";
 
+    // What a `/draft` names a project by: the tail of its URL, as the thread
+    // lists them.
+    const SLUG: &str = "a7c31f04d2e8";
+
     // Every section the built-in shape asks for, so the document the push files
     // is one `brief_at` reads.
     const BRIEF: &str = "# Push a brief to the board\n\n\
@@ -1899,6 +1903,10 @@ mod filing {
                          ## Constraints\n\nNo new dependency.\n\n\
                          ## Out of scope\n\nPulling anything back.\n\n\
                          ## Scope\n\n### 1. Read the file\n\ndepends_on: []\n";
+
+    // What the project a `/draft` reads back is called, which is the brief's own
+    // heading: the document on the board is the one a `/push` filed there.
+    const PLANNED: &str = "Push a brief to the board";
 
     fn a_manifest() -> Manifest {
         Manifest::with_directories([ScopedDirectory::new(".", "docs", SCOPE)
@@ -1929,6 +1937,13 @@ mod filing {
         let home = an_unbound_home(root);
         save_key_binding(home.path(), root, SCOPE, KEY_NAME).expect("a binding that writes");
         home
+    }
+
+    // The board a `/draft` of this scope reads: one planned project, carrying
+    // the brief as its description, which is where the scope block a cut is made
+    // over lives.
+    fn a_planned_project() -> Boarding {
+        Boarding::holding(PLANNED, Some("Planned"), BRIEF)
     }
 
     // The same home with the scope bound to nothing: the checkout somebody has
@@ -2428,6 +2443,147 @@ mod filing {
             notes(&driven)
         );
         assert!(!driven.pushes.sending(), "a push was started");
+        // And the session goes on: the Esc answered the window rather than
+        // reaching the quit question underneath it.
+        assert!(
+            pressed(&mut driven, key(KeyCode::Char('j'))),
+            "the keyboard stopped working"
+        );
+    }
+
+    #[test]
+    fn a_draft_of_an_unbound_scope_opens_the_key_window_and_reads_nothing() {
+        // The same three roads as the `/push` above, driven through the
+        // keyboard: the command, the window it comes to, and what the two keys
+        // that answer it lead to. Here the sigil says this machine may read the
+        // scope's board and nothing says which key it reads with, so the window
+        // goes up and no worker starts — and the board panics if it is opened at
+        // all, which is the whole of "nothing was read".
+        let repo = a_repository();
+        let home = an_unbound_home(repo.path());
+        let mut driven = filing_session(repo.path(), home.path(), &Boarding::unopened());
+
+        typing(&mut driven, &format!("/draft {SCOPE} {SLUG}"));
+        round(&mut driven);
+
+        let choice = driven.key.choice().expect("the key window is up");
+        assert_eq!(choice.scope(), SCOPE, "the window names another scope");
+        assert_eq!(choice.names(), [KEY_NAME], "the rows are not this store's");
+        assert!(!driven.cutter.fetching(), "a worker was started");
+        assert!(
+            !driven.cutter.confirm().is_open(),
+            "the cut dialog came up as well: {:?}",
+            notes(&driven)
+        );
+        // No reading line either, because nothing is being read.
+        assert!(notes(&driven).is_empty(), "{:?}", notes(&driven));
+        assert_eq!(
+            bound(home.path(), repo.path()),
+            None,
+            "a binding was written"
+        );
+    }
+
+    #[test]
+    fn an_enter_at_the_key_window_binds_the_scope_and_goes_on_with_the_draft() {
+        // The whole road, driven by the keys a reader presses: the command, the
+        // one row this store holds, and the Enter that binds it. What the
+        // binding leads to is the `/draft` that was parked behind the window and
+        // nothing else — the reading line, the worker, and the cut dialog over
+        // the project the command named on the round the board answers.
+        let repo = a_repository();
+        let home = an_unbound_home(repo.path());
+        let linear = a_planned_project();
+        let mut driven = filing_session(repo.path(), home.path(), &linear);
+        typing(&mut driven, &format!("/draft {SCOPE} {SLUG}"));
+        assert!(driven.key.is_open(), "{:?}", notes(&driven));
+
+        assert!(pressed(&mut driven, key(KeyCode::Enter)));
+
+        assert_eq!(
+            bound(home.path(), repo.path()).as_deref(),
+            Some(KEY_NAME),
+            "the Enter wrote no binding: {:?}",
+            notes(&driven)
+        );
+        assert!(!driven.key.is_open(), "the key window is still up");
+        // Said on the round the binding was written, before any of it came
+        // back: the reader has just answered a question and is looking at the
+        // conversation.
+        assert!(
+            said(&driven, &format!("reading the project `{SLUG}`")),
+            "the thread does not say what is being read: {:?}",
+            notes(&driven)
+        );
+        assert!(driven.cutter.fetching(), "the binding started no worker");
+        let waited = Instant::now();
+        while driven.cutter.fetching() && waited.elapsed() < AT_MOST {
+            round(&mut driven);
+        }
+
+        assert!(!driven.cutter.fetching(), "the draft never reported");
+        let cutting = driven
+            .cutter
+            .confirm()
+            .cutting()
+            .expect("the cut dialog the binding led to");
+        assert_eq!(cutting.project(), PLANNED);
+        assert_eq!(cutting.slices(), 1);
+        assert_eq!(cutting.team(), TEAM);
+        // The key by name, and nowhere for its bytes.
+        assert_eq!(cutting.key(), KEY_NAME);
+        assert_eq!(cutting.answer(), Answer::No, "the dialog opened on Yes");
+        // The window this `/draft` opened resumed this `/draft`: the push and
+        // the pull parked nothing, so neither of them went anywhere.
+        assert!(!driven.pushes.sending(), "a push was started");
+        assert!(
+            !driven.pushes.window().confirm.is_open(),
+            "the push dialog came up: {:?}",
+            notes(&driven)
+        );
+        assert!(!driven.puller.pulling(), "a pull was started");
+        // And no key value on the road the binding opened: not on the thread,
+        // not in the flow that read it, not in the window that named it.
+        for note in notes(&driven) {
+            assert!(!note.contains(NOT_A_KEY), "{note} carries the key");
+        }
+        assert!(
+            !format!("{:?}", driven.cutter).contains(NOT_A_KEY),
+            "the session's cut state carries the key"
+        );
+        assert!(
+            !format!("{:?}", driven.key).contains(NOT_A_KEY),
+            "the window carries the key"
+        );
+    }
+
+    #[test]
+    fn an_esc_at_the_key_window_puts_the_whole_draft_down() {
+        let repo = a_repository();
+        let home = an_unbound_home(repo.path());
+        let mut driven = filing_session(repo.path(), home.path(), &Boarding::unopened());
+        typing(&mut driven, &format!("/draft {SCOPE} {SLUG}"));
+        assert!(driven.key.is_open(), "{:?}", notes(&driven));
+
+        assert!(
+            pressed(&mut driven, key(KeyCode::Esc)),
+            "the Esc ended the session"
+        );
+        round(&mut driven);
+
+        assert_eq!(
+            bound(home.path(), repo.path()),
+            None,
+            "an abandoned question bound the scope"
+        );
+        assert!(!driven.key.is_open(), "the key window is still up");
+        assert!(!driven.cutter.fetching(), "a worker was started");
+        assert!(
+            !driven.cutter.confirm().is_open(),
+            "the cut dialog came up: {:?}",
+            notes(&driven)
+        );
+        assert!(!driven.cutter.drafting(), "a run started");
         // And the session goes on: the Esc answered the window rather than
         // reaching the quit question underneath it.
         assert!(

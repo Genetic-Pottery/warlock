@@ -270,11 +270,11 @@ struct Session<K: Seams> {
     /// The window that binds one of this machine's stored keys to a scope, and
     /// the session's one copy of it: the record form's submit puts it up over
     /// the scope it just recorded — a created scope nothing on this machine
-    /// could push into is the thing it is there to prevent — and a `/push` of a
-    /// scope bound to nothing puts it up in front of the push, which waits in
-    /// [`Pushes`] for the answer. Never up at the same time as either window
-    /// above, for [`Session::record`]'s reason and out of the same value. See
-    /// [`KeyPrompt`].
+    /// could push into is the thing it is there to prevent — and a `/push` or a
+    /// `/draft` of a scope bound to nothing puts it up in front of the command,
+    /// which waits in [`Pushes`] or [`Cutter`] for the answer. Never up at the
+    /// same time as either window above, for [`Session::record`]'s reason and
+    /// out of the same value. See [`KeyPrompt`].
     key: KeyPrompt,
     /// The left button held down over the conversation, if it is: the one piece
     /// of a gesture that outlives the event carrying it, because the rounds
@@ -696,9 +696,10 @@ impl<K: Seams> Session<K> {
             Pressed::Key(edited) => {
                 // Which of the window's three roads this press is on, read
                 // before it is answered because answering takes it. It is also
-                // what happens to a `/push` parked behind the window: a submit
-                // has written the binding that push was waiting on, an Esc puts
-                // it down, and a move of the highlight leaves it waiting.
+                // what happens to a `/push` or a `/draft` parked behind the
+                // window: a submit has written the binding that command was
+                // waiting on, an Esc puts it down, and a move of the highlight
+                // leaves it waiting.
                 let (wrote, abandoned) = (
                     matches!(edited, KeyEdited::Submit),
                     matches!(edited, KeyEdited::Close),
@@ -717,17 +718,23 @@ impl<K: Seams> Session<K> {
                     // down and nothing is written.
                     None => KeyPrompt::Closed,
                 };
-                // The push the window was opened in front of, if it was opened
-                // in front of one: on to `prepare` over the scope and the brief
-                // it parked, which is the road a `/push` with a key bound takes
-                // on the round it is typed. Nothing at all happens here when
-                // the window came up over a scope just recorded by the `s` key,
-                // which parks no push.
+                // The command the window was opened in front of, if it was
+                // opened in front of one: on to `prepare` over the scope and
+                // the brief a `/push` parked, or onto the worker over the scope
+                // and the slug a `/draft` did, which is the road either takes
+                // with a key bound on the round it is typed. At most one of the
+                // two is ever waiting — a key window takes every keystroke, so
+                // nothing can be typed behind one — and each does nothing at
+                // all when it is not the one, which is also every window the
+                // `s` key puts up: that road parks neither.
                 if wrote {
                     self.pushes
                         .bound(&mut self.app, &self.manifest, &self.scope.repo_root, now);
+                    self.cutter
+                        .bound(&mut self.app, &self.manifest, &self.scope.repo_root, now);
                 } else if abandoned {
                     self.pushes.put_down();
+                    self.cutter.put_down();
                 }
             }
             Pressed::Write(edited) => {
@@ -812,8 +819,11 @@ impl<K: Seams> Session<K> {
                     self.pushes
                         .press(&mut self.app, &self.manifest, root, &scope, &path, now);
             }
+            // And the same window ahead of a `/draft`, for the same reason: both
+            // roads the fetch takes resolve the key, so a scope bound to nothing
+            // is asked about here rather than refused a round trip later.
             Wanted::Draft(drafting) => {
-                self.cutter.press(
+                self.key = self.cutter.press(
                     &mut self.app,
                     &self.manifest,
                     root,
