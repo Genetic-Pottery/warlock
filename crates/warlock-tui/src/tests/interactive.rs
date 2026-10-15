@@ -3250,13 +3250,14 @@ mod pulling {
     use tempfile::TempDir;
     use warlock_engine::{
         Manifest, PullRun, PullSubtask, RunStatus, ScopeRecord, ScopedDirectory, SubtaskStatus,
-        save_key, save_key_binding, save_sigils, state_path,
+        load_key_binding, save_key, save_key_binding, save_sigils, state_path,
     };
 
     use super::{AT_MOST, Session, Stubbed, key, session_reading};
     use crate::account::Line;
     use crate::app::Focus;
     use crate::claude::Activity;
+    use crate::confirm::Answer;
     use crate::cutting::Cutter;
     use crate::git::Dirty;
     use crate::linear::{Assignee, NamedIssue, Priority, Queue, QueuedIssue, StateType};
@@ -3358,6 +3359,23 @@ mod pulling {
         save_key_binding(home.path(), root, SCOPE, KEY_NAME).expect("a binding that writes");
         save_key(home.path(), KEY_NAME, NOT_A_KEY).expect("a key store that writes");
         home
+    }
+
+    // The same home with the scope bound to nothing: the checkout somebody has
+    // just cloned, where a `/pull` is asked which key the queue is read with
+    // before anything is prepared.
+    fn an_unbound_home(root: &Path) -> TempDir {
+        let home = tempfile::tempdir().expect("a temporary directory");
+        save_sigils(home.path(), root, &[SCOPE.to_owned()]).expect("a config that writes");
+        save_key(home.path(), KEY_NAME, NOT_A_KEY).expect("a key store that writes");
+        home
+    }
+
+    // The name `SCOPE` is bound to in this checkout's config under `home`, which
+    // the config holds because every home here writes a sigil into it: unbound is
+    // `None`, and a config that will not read is this test's own failure.
+    fn bound(home: &Path, repo: &Path) -> Option<String> {
+        load_key_binding(home, repo, SCOPE).expect("the config this test wrote still reads")
     }
 
     type Pulls = Session<Stubbed<Boarding, Scripted, Written>>;
@@ -4124,6 +4142,183 @@ mod pulling {
             !linear.ops().contains(&Op::IssueComment),
             "a cancelled run commented on the ticket: {:?}",
             linear.ops()
+        );
+    }
+
+    #[test]
+    fn a_pull_of_an_unbound_scope_opens_the_key_window_and_reads_nothing() {
+        // A checkout somebody has just cloned, driven through the keyboard: the
+        // sigil says this machine may pull the scope and nothing says which key
+        // the queue is read with, so the window goes up and no queue is read.
+        // The board panics if it is opened at all, which is the whole of
+        // "nothing was read".
+        let repo = a_repository();
+        let home = an_unbound_home(repo.path());
+        let repository = checkout();
+        let mut driven = pulling_session(
+            repo.path(),
+            home.path(),
+            Boarding::unopened(),
+            repository.clone(),
+            working(),
+        );
+
+        typing(&mut driven, &format!("/pull {SCOPE}"));
+        round(&mut driven);
+
+        let choice = driven.key.choice().expect("the key window is up");
+        assert_eq!(choice.scope(), SCOPE, "the window names another scope");
+        assert_eq!(choice.names(), [KEY_NAME], "the rows are not this store's");
+        assert!(!driven.puller.choosing(), "a queue was read");
+        assert!(!driven.puller.pulling(), "a run was started");
+        assert!(
+            !driven.puller.confirm().is_open(),
+            "the pull dialog came up as well: {:?}",
+            notes(&driven)
+        );
+        assert!(repository.calls().is_empty(), "the question ran `git`");
+        // No reading line either, because nothing is being read.
+        assert!(notes(&driven).is_empty(), "{:?}", notes(&driven));
+        assert_eq!(
+            bound(home.path(), repo.path()),
+            None,
+            "a binding was written"
+        );
+    }
+
+    #[test]
+    fn an_enter_at_the_key_window_binds_the_scope_and_goes_on_with_the_pull() {
+        // The whole road, driven by the keys a reader presses: the command, the
+        // one row this store holds, and the Enter that binds it. What the
+        // binding leads to is the `/pull` that was parked behind the window and
+        // nothing else — the reading line, the choice on a worker, and the pull
+        // dialog over the ticket the queue gave up.
+        let repo = a_repository();
+        let home = an_unbound_home(repo.path());
+        let linear = board();
+        let raises = working();
+        let mut driven = pulling_session(
+            repo.path(),
+            home.path(),
+            linear.clone(),
+            checkout(),
+            raises.clone(),
+        );
+        typing(&mut driven, &format!("/pull {SCOPE}"));
+        assert!(driven.key.is_open(), "{:?}", notes(&driven));
+
+        assert!(pressed(&mut driven, KeyCode::Enter));
+
+        assert_eq!(
+            bound(home.path(), repo.path()).as_deref(),
+            Some(KEY_NAME),
+            "the Enter wrote no binding: {:?}",
+            notes(&driven)
+        );
+        assert!(!driven.key.is_open(), "the key window is still up");
+        // Said on the round the binding was written, before the queue came
+        // back: the reader has just answered a question and is looking at the
+        // conversation.
+        assert!(
+            notes(&driven)
+                .first()
+                .is_some_and(|line| line.contains(SCOPE)),
+            "the thread does not say what is being read: {:?}",
+            notes(&driven)
+        );
+        assert!(driven.puller.choosing(), "the binding read no queue");
+        let waited = Instant::now();
+        while driven.puller.choosing() && waited.elapsed() < AT_MOST {
+            round(&mut driven);
+        }
+
+        let undertaking = driven
+            .puller
+            .confirm()
+            .undertaking()
+            .expect("the dialog the binding led to")
+            .clone();
+        assert_eq!(undertaking.ticket(), TICKET);
+        assert_eq!(undertaking.title(), TITLE);
+        assert_eq!(undertaking.scope(), SCOPE);
+        assert_eq!(undertaking.answer(), Answer::No, "the dialog opened on Yes");
+        assert!(
+            !driven.puller.pulling(),
+            "the dialog started a run before it was answered"
+        );
+        assert!(raises.raised().is_empty(), "a session was raised");
+        // The window this `/pull` opened resumed this `/pull`: the push and the
+        // cut parked nothing, so neither of them went anywhere.
+        assert!(!driven.pushes.sending(), "a push was sent");
+        assert!(
+            !driven.pushes.window().confirm.is_open(),
+            "the push dialog came up: {:?}",
+            notes(&driven)
+        );
+        assert!(!driven.cutter.fetching(), "a draft was read");
+        assert!(
+            !driven.cutter.confirm().is_open(),
+            "the cut dialog came up: {:?}",
+            notes(&driven)
+        );
+        // And no key value on the road the binding opened: not on the thread,
+        // not in the dialog the pull put up, not in the window that named it.
+        // The flow itself has no `Debug` at all, which is the stronger half of
+        // the same promise.
+        for note in notes(&driven) {
+            assert!(!note.contains(NOT_A_KEY), "{note} carries the key");
+        }
+        assert!(
+            !format!("{:?}", driven.puller.confirm()).contains(NOT_A_KEY),
+            "the pull dialog carries the key"
+        );
+        assert!(
+            !format!("{:?}", driven.key).contains(NOT_A_KEY),
+            "the window carries the key"
+        );
+    }
+
+    #[test]
+    fn an_esc_at_the_key_window_puts_the_whole_pull_down() {
+        let repo = a_repository();
+        let home = an_unbound_home(repo.path());
+        let repository = checkout();
+        let mut driven = pulling_session(
+            repo.path(),
+            home.path(),
+            Boarding::unopened(),
+            repository.clone(),
+            working(),
+        );
+        typing(&mut driven, &format!("/pull {SCOPE}"));
+        assert!(driven.key.is_open(), "{:?}", notes(&driven));
+
+        assert!(
+            pressed(&mut driven, KeyCode::Esc),
+            "the Esc ended the session"
+        );
+        round(&mut driven);
+
+        assert_eq!(
+            bound(home.path(), repo.path()),
+            None,
+            "an abandoned question bound the scope"
+        );
+        assert!(!driven.key.is_open(), "the key window is still up");
+        assert!(!driven.puller.choosing(), "a queue was read");
+        assert!(
+            !driven.puller.confirm().is_open(),
+            "the pull dialog came up: {:?}",
+            notes(&driven)
+        );
+        assert!(!driven.puller.pulling(), "a run was started");
+        assert!(repository.calls().is_empty(), "an abandoned pull ran `git`");
+        assert!(notes(&driven).is_empty(), "{:?}", notes(&driven));
+        // And the session goes on: the Esc answered the window rather than
+        // reaching the quit question underneath it.
+        assert!(
+            pressed(&mut driven, KeyCode::Char('j')),
+            "the keyboard stopped working"
         );
     }
 }

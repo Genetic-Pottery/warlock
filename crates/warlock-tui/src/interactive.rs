@@ -696,10 +696,10 @@ impl<K: Seams> Session<K> {
             Pressed::Key(edited) => {
                 // Which of the window's three roads this press is on, read
                 // before it is answered because answering takes it. It is also
-                // what happens to a `/push` or a `/draft` parked behind the
-                // window: a submit has written the binding that command was
-                // waiting on, an Esc puts it down, and a move of the highlight
-                // leaves it waiting.
+                // what happens to a `/push`, a `/draft` or a `/pull` parked
+                // behind the window: a submit has written the binding that
+                // command was waiting on, an Esc puts it down, and a move of
+                // the highlight leaves it waiting.
                 let (wrote, abandoned) = (
                     matches!(edited, KeyEdited::Submit),
                     matches!(edited, KeyEdited::Close),
@@ -720,21 +720,25 @@ impl<K: Seams> Session<K> {
                 };
                 // The command the window was opened in front of, if it was
                 // opened in front of one: on to `prepare` over the scope and
-                // the brief a `/push` parked, or onto the worker over the scope
-                // and the slug a `/draft` did, which is the road either takes
-                // with a key bound on the round it is typed. At most one of the
-                // two is ever waiting — a key window takes every keystroke, so
-                // nothing can be typed behind one — and each does nothing at
-                // all when it is not the one, which is also every window the
-                // `s` key puts up: that road parks neither.
+                // the brief a `/push` parked, onto the worker over the scope
+                // and the slug a `/draft` did, or on to the queue of the scope
+                // a `/pull` did, which is the road each takes with a key bound
+                // on the round it is typed. At most one of the three is ever
+                // waiting — a key window takes every keystroke, so nothing can
+                // be typed behind one — and each does nothing at all when it is
+                // not the one, which is also every window the `s` key puts up:
+                // that road parks none of them.
                 if wrote {
                     self.pushes
                         .bound(&mut self.app, &self.manifest, &self.scope.repo_root, now);
                     self.cutter
                         .bound(&mut self.app, &self.manifest, &self.scope.repo_root, now);
+                    self.puller
+                        .bound(&mut self.app, &self.manifest, &self.scope.repo_root, now);
                 } else if abandoned {
                     self.pushes.put_down();
                     self.cutter.put_down();
+                    self.puller.put_down();
                 }
             }
             Pressed::Write(edited) => {
@@ -832,8 +836,13 @@ impl<K: Seams> Session<K> {
                     now,
                 );
             }
+            // And the same window ahead of a `/pull`, for the same reason:
+            // `prepare` resolves the key here too, so a scope bound to nothing
+            // is asked about before a queue is read rather than refused on the
+            // thread.
             Wanted::Pull(Some(taking)) => {
-                self.puller
+                self.key = self
+                    .puller
                     .press(&mut self.app, &self.manifest, root, &taking, now);
             }
             // Answered from a file under the home and nothing else: no board is

@@ -21,6 +21,7 @@ use crate::confirm::{Answer, PullAnswered};
 use crate::error::{Error, NO_QUEUE, one_line};
 use crate::git::Dirty;
 use crate::linear::{Assignee, NamedIssue, Priority, Queue, QueuedIssue, StateType};
+use crate::prompt::KeyPrompt;
 use crate::stubs::{Boarding, Checkout, Forging, Op, Sessions, Slicing, VIEWER, Written, said};
 use crate::submission::Taking;
 
@@ -206,9 +207,12 @@ fn puller(
 
 type Panel = Puller<Boarding, Checkout, Forging, Written>;
 
-// A `/pull <SCOPE>` pressed at the value the loop holds.
+// A `/pull <SCOPE>` pressed at the value the loop holds, over a scope with a key
+// bound: every test that goes through here is one of those, and the key window
+// that comes back is the assertion that none of them was asked for a binding
+// instead.
 fn press(app: &mut App, puller: &mut Panel, ground: &Ground, ticket: Option<&str>) {
-    puller.press(
+    let prompt = puller.press(
         app,
         &ground.manifest,
         ground.root.path(),
@@ -217,6 +221,11 @@ fn press(app: &mut App, puller: &mut Panel, ground: &Ground, ticket: Option<&str
             ticket: ticket.map(str::to_owned),
         },
         now(),
+    );
+    assert_eq!(
+        prompt,
+        KeyPrompt::Closed,
+        "a bound scope was asked for a binding"
     );
 }
 
@@ -340,27 +349,28 @@ fn a_scope_no_record_holds_and_one_this_machine_does_not_hold_are_prepare_s_refu
         unasked(),
     );
     let mut app = App::default();
+    // Both scopes are bound, and that is what these two refusals are about: an
+    // unbound one is the question asked ahead of `prepare` rather than one of
+    // its refusals, so the binding is written for each so that the `/pull`
+    // reaches `prepare` to be told what is wrong with the scope itself.
+    for scope in ["billing", CLOSED] {
+        save_key_binding(ground.home.path(), ground.root.path(), scope, KEY_NAME)
+            .expect("a binding that writes");
+    }
 
-    puller.press(
-        &mut app,
-        &ground.manifest,
-        ground.root.path(),
-        &Taking {
-            scope: "billing".to_owned(),
-            ticket: None,
-        },
-        now(),
-    );
-    puller.press(
-        &mut app,
-        &ground.manifest,
-        ground.root.path(),
-        &Taking {
-            scope: CLOSED.to_owned(),
-            ticket: None,
-        },
-        now(),
-    );
+    for scope in ["billing", CLOSED] {
+        let prompt = puller.press(
+            &mut app,
+            &ground.manifest,
+            ground.root.path(),
+            &Taking {
+                scope: scope.to_owned(),
+                ticket: None,
+            },
+            now(),
+        );
+        assert_eq!(prompt, KeyPrompt::Closed, "a refusal put a window up");
+    }
 
     let said = notes(&app);
     assert_eq!(
@@ -711,6 +721,196 @@ fn a_queue_with_nothing_ready_is_an_answer_and_asks_nothing() {
         "an empty queue opened the dialog"
     );
     assert!(!puller.pulling(), "an empty queue started a run");
+}
+
+// The question asked ahead of `prepare`, over a temporary repository and a
+// temporary home of each test's own: the binding this checkout holds for the
+// scope typed is read out of the config under that home and nowhere else. Ported
+// from `tests/pushing.rs` and `tests/cutting.rs`, which ask the same question in
+// the same place — the difference being what the answer leads to, which here is
+// the queue.
+mod binding {
+    use std::path::Path;
+
+    use tempfile::TempDir;
+    use warlock_engine::{load_key_binding, save_key, save_key_binding, save_sigils};
+
+    use super::{
+        Answer, App, Boarding, Checkout, Forging, KEY_NAME, KeyPrompt, NOT_A_KEY, Panel,
+        PullAnswered, Puller, SCOPE, TICKET, TITLE, Taking, URL, a_dir, a_manifest, board,
+        checkout, notes, now, queue, ready, unasked,
+    };
+    use crate::error::{Error, one_line};
+
+    // A home with the sigil and a key in the store, and no binding for any
+    // scope: the checkout somebody has just cloned, which is the road this
+    // question exists for.
+    fn an_unbound_home(root: &Path) -> TempDir {
+        let home = a_dir();
+        save_sigils(home.path(), root, &[SCOPE.to_owned()]).expect("a config that writes");
+        save_key(home.path(), KEY_NAME, NOT_A_KEY).expect("a key store that writes");
+        home
+    }
+
+    // The value the loop holds over the board and the checkout handed in, with
+    // the workers inline and a model no run may reach: every test here is
+    // decided before a session is raised.
+    fn puller(linear: Boarding, repo: Checkout, home: &Path) -> Panel {
+        Puller::with_seams(
+            linear,
+            repo,
+            Forging::opening(URL),
+            unasked(),
+            Some(home.to_path_buf()),
+        )
+        .inline()
+    }
+
+    // `/pull <SCOPE>` pressed, and the key window it came to.
+    fn asking(app: &mut App, puller: &mut Panel, root: &Path) -> KeyPrompt {
+        puller.press(
+            app,
+            &a_manifest(),
+            root,
+            &Taking {
+                scope: SCOPE.to_owned(),
+                ticket: None,
+            },
+            now(),
+        )
+    }
+
+    #[test]
+    fn a_pull_of_a_scope_bound_to_nothing_asks_for_the_key_and_reads_nothing() {
+        let root = a_dir();
+        let home = an_unbound_home(root.path());
+        let repo = checkout();
+        let mut puller = puller(Boarding::unopened(), repo.clone(), home.path());
+        let mut app = App::default();
+
+        let prompt = asking(&mut app, &mut puller, root.path());
+
+        let choice = prompt.choice().expect("the key window is up");
+        assert_eq!(
+            choice.scope(),
+            SCOPE,
+            "the window names a scope the command never did"
+        );
+        assert_eq!(
+            choice.names(),
+            [KEY_NAME],
+            "the rows are not this home's key store"
+        );
+        assert!(!puller.choosing(), "the question read a queue");
+        assert!(!puller.pulling(), "the question started a run");
+        assert!(
+            !puller.confirm().is_open(),
+            "the question put the pull dialog up as well"
+        );
+        assert!(repo.calls().is_empty(), "the question ran `git`");
+        // No reading line either: nothing is being read, so saying so would be a
+        // line about a request that was never made. The board panics if it is
+        // opened, so nothing being asked of Linear is the stand-in's own
+        // assertion.
+        assert!(notes(&app).is_empty(), "{:?}", notes(&app));
+    }
+
+    #[test]
+    fn the_binding_written_reads_the_queue_and_puts_the_pull_dialog_up() {
+        // What the key window's Enter does, in the engine's own call, and then
+        // the `/pull` picked up behind it: the reading line, the choice on a
+        // worker, and the dialog over the ticket the queue gave up.
+        let root = a_dir();
+        let home = an_unbound_home(root.path());
+        let linear = board(queue([ready()]));
+        let mut puller = puller(linear, checkout(), home.path());
+        let mut app = App::default();
+        let prompt = asking(&mut app, &mut puller, root.path());
+        assert!(prompt.is_open(), "{:?}", notes(&app));
+        save_key_binding(home.path(), root.path(), SCOPE, KEY_NAME).expect("a binding that writes");
+
+        puller.bound(&mut app, &a_manifest(), root.path(), now());
+
+        let said = notes(&app);
+        assert!(
+            said.first().is_some_and(|line| line.contains(SCOPE)),
+            "the pick-up did not say what it was reading: {said:?}"
+        );
+        assert!(puller.choosing(), "the binding read no queue");
+        puller.keep_up(&mut app, now());
+        let undertaking = puller
+            .confirm()
+            .undertaking()
+            .expect("the dialog the binding led to")
+            .clone();
+        assert_eq!(undertaking.ticket(), TICKET);
+        assert_eq!(undertaking.title(), TITLE);
+        assert_eq!(undertaking.scope(), SCOPE);
+        assert_eq!(undertaking.answer(), Answer::No, "the dialog opened on Yes");
+        for line in notes(&app) {
+            assert!(!line.contains(NOT_A_KEY), "{line} carries the key");
+        }
+
+        // And the `/pull` is picked up once: the question is not waiting to be
+        // asked again, so a second Enter at a window somebody else's road put up
+        // reads nothing.
+        puller.answered(&mut app, PullAnswered::Cancel, now());
+        puller.bound(&mut app, &a_manifest(), root.path(), now());
+
+        assert!(!puller.choosing(), "the queue was read twice");
+        assert!(!puller.confirm().is_open(), "a second dialog came up");
+    }
+
+    #[test]
+    fn an_abandoned_question_puts_the_whole_pull_down_and_writes_no_binding() {
+        // Esc on the key window: the window is the one that writes, and it never
+        // opens the config, so what is asserted here is the other half — nothing
+        // is read, no dialog opens and the scope is still bound to nothing.
+        let root = a_dir();
+        let home = an_unbound_home(root.path());
+        let repo = checkout();
+        let mut puller = puller(Boarding::unopened(), repo.clone(), home.path());
+        let mut app = App::default();
+        let prompt = asking(&mut app, &mut puller, root.path());
+        assert!(prompt.is_open(), "{:?}", notes(&app));
+
+        puller.put_down();
+        // The press that answers the window is answered by the flow either way,
+        // so an Esc followed by an Enter at a later window cannot pick this pull
+        // up.
+        puller.bound(&mut app, &a_manifest(), root.path(), now());
+
+        assert!(!puller.choosing(), "a queue was read");
+        assert!(!puller.confirm().is_open(), "a dialog came up");
+        assert!(!puller.pulling(), "a run started");
+        assert!(repo.calls().is_empty(), "an abandoned pull ran `git`");
+        assert_eq!(
+            load_key_binding(home.path(), root.path(), SCOPE).expect("the config still reads"),
+            None,
+            "the scope was bound by an abandoned question"
+        );
+        assert!(notes(&app).is_empty(), "{:?}", notes(&app));
+    }
+
+    #[test]
+    fn a_checkout_with_no_config_at_all_is_one_line_on_the_thread_and_no_question() {
+        // The other answer `load_key_binding` has, and the reason the question
+        // is only asked on `Ok(None)`: there is no config to write a binding
+        // into, so the engine's own sentence about that goes on the thread and
+        // nothing comes up.
+        let root = a_dir();
+        let home = a_dir();
+        let mut puller = puller(Boarding::unopened(), checkout(), home.path());
+        let mut app = App::default();
+
+        let prompt = asking(&mut app, &mut puller, root.path());
+
+        let source = load_key_binding(home.path(), root.path(), SCOPE)
+            .expect_err("a checkout nobody configured");
+        assert_eq!(notes(&app), vec![one_line(Error::Sigils { source })]);
+        assert_eq!(prompt, KeyPrompt::Closed, "a question was asked anyway");
+        assert!(!puller.choosing(), "a refusal read a queue");
+    }
 }
 
 #[test]
