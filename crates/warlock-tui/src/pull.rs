@@ -39,7 +39,7 @@ use warlock_engine::{
 
 use crate::account::{THINKING, WRITING, tool_line};
 use crate::claude::{Activities, Activity};
-use crate::error::{Error, one_line, say};
+use crate::error::{Error, NO_QUEUE, one_line, say};
 use crate::git::{Forge, Gh, Git, Repository};
 use crate::linear::{Board, Key, Opener as LinearOpener, Opens, QueuedIssue};
 use crate::puller::{Splitter, Stopping, Worker};
@@ -279,14 +279,7 @@ pub(crate) fn prepare(
     scope: &str,
 ) -> Result<Prepared, Error> {
     let Some(record) = manifest.scope_record(scope) else {
-        return Err(Error::UnrecordedScope {
-            scope: scope.to_owned(),
-            recorded: manifest
-                .scopes()
-                .iter()
-                .map(|record| record.name().to_owned())
-                .collect(),
-        });
+        return Err(Error::unrecorded(manifest, scope, NO_QUEUE));
     };
 
     let settings = Settings::at(Some(home.to_path_buf()), root);

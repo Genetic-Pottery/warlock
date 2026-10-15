@@ -18,7 +18,7 @@ use crate::account::Line;
 use crate::app::App;
 use crate::claude::Activity;
 use crate::confirm::{Answer, PullAnswered};
-use crate::error::{Error, one_line};
+use crate::error::{Error, NO_QUEUE, one_line};
 use crate::git::Dirty;
 use crate::linear::{Assignee, NamedIssue, Priority, Queue, QueuedIssue, StateType};
 use crate::stubs::{Boarding, Checkout, Forging, Op, Sessions, Slicing, VIEWER, Written, said};
@@ -369,6 +369,7 @@ fn a_scope_no_record_holds_and_one_this_machine_does_not_hold_are_prepare_s_refu
             refusal(&Error::UnrecordedScope {
                 scope: "billing".to_owned(),
                 recorded: vec![SCOPE.to_owned(), CLOSED.to_owned()],
+                cost: NO_QUEUE,
             }),
             refusal(&Error::UnheldScope {
                 scope: CLOSED.to_owned(),

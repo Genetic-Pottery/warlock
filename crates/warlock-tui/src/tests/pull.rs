@@ -9,8 +9,8 @@ use warlock_engine::{
 
 use super::{Ports, Prepared, Progress, Shared, held, prepare, pulled, shared};
 use crate::claude::Activity;
-use crate::error::Error;
 use crate::error::status_for;
+use crate::error::{Error, NO_QUEUE};
 use crate::git::{Dirty, Opened};
 use crate::linear::{Assignee, Blocker, NamedIssue, Priority, Queue, QueuedIssue, StateType};
 use crate::pulling::Pulled;
@@ -260,8 +260,10 @@ fn a_scope_no_record_holds_is_refused_and_the_recorded_scopes_are_named() {
     .expect_err("nothing records `billing`");
 
     assert!(
-        matches!(&error, Error::UnrecordedScope { scope, recorded }
-            if scope == "billing" && recorded == &[SCOPE.to_owned(), CLOSED.to_owned()]),
+        matches!(&error, Error::UnrecordedScope { scope, recorded, cost }
+            if scope == "billing"
+                && recorded == &[SCOPE.to_owned(), CLOSED.to_owned()]
+                && *cost == NO_QUEUE),
         "{error:?}"
     );
     let said = error.to_string();

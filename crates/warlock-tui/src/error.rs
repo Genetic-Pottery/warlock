@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::{fmt, io};
 
 use warlock_engine::{
-    RunStatus, briefs, filing, keys, load, manifest, pulls, route, scope, sigils,
+    Manifest, RunStatus, briefs, filing, keys, load, manifest, pulls, route, scope, sigils,
 };
 
 use crate::boundary::{closed_scope_message, unscoped_message};
@@ -20,6 +20,14 @@ use crate::pulling;
 use crate::queue::Refusal;
 use crate::rescope::ScopeRefusal;
 use crate::template::Error as TemplateError;
+
+// The two tails of `Error::UnrecordedScope`'s sentence, spelled here beside the
+// variant rather than beside the two verbs that raise it: `Standing`'s `FOR_*`
+// tails were re-typed as literals in this file's own tests once, where rewording
+// the original failed nothing.
+pub(crate) const NO_QUEUE: &str = "there is no queue to read";
+
+pub(crate) const NOT_BOUND: &str = "nothing was written";
 
 // One vocabulary for the panel and every subcommand rather than one enum
 // each: they fail in the same ways and are printed by the same line of `main`,
@@ -216,13 +224,18 @@ pub enum Error {
     NoBacklog {
         team: String,
     },
-    // A scope `warlock pull` was given that no `[[scope]]` record in this
-    // repository holds. The recorded names are carried because the usual cause is
-    // a near miss against one of them, and they are the answer either way: a
-    // machine cannot pull under a scope this repository has never written down.
+    // A scope `warlock pull` or `warlock key use` was given that no `[[scope]]`
+    // record in this repository holds. The recorded names are carried because the
+    // usual cause is a near miss against one of them, and they are the answer
+    // either way: a machine can neither pull nor bind a key under a scope this
+    // repository has never written down. `cost` is one of [`NO_QUEUE`] and
+    // [`NOT_BOUND`], following `UnknownKey`'s `wanted` — one fact costing the two
+    // verbs different things — and it carries the whole clause rather than a verb
+    // because the two costs are not the same shape of phrase.
     UnrecordedScope {
         scope: String,
         recorded: Vec<String>,
+        cost: &'static str,
     },
     // The same question one file along, and the boundary's **3** rather than the
     // ordinary **1**: the scope is recorded and this machine's sigils do not open
@@ -333,6 +346,22 @@ impl Error {
             rest: problems.len() - 1,
         })
     }
+
+    // The recorded names are read off the manifest here rather than at the two
+    // doors that raise this, so a pull and a `key use` cannot grow two different
+    // ideas of what "recorded" means — and so the refusal cannot be built
+    // without one of the two tails above.
+    pub(crate) fn unrecorded(manifest: &Manifest, scope: &str, cost: &'static str) -> Self {
+        Self::UnrecordedScope {
+            scope: scope.to_owned(),
+            recorded: manifest
+                .scopes()
+                .iter()
+                .map(|record| record.name().to_owned())
+                .collect(),
+            cost,
+        }
+    }
 }
 
 // A failed write is dropped on purpose: `warlock pull … | head -1` is a closed
@@ -442,6 +471,7 @@ fn unrecorded_scope_message(
     f: &mut fmt::Formatter<'_>,
     scope: &str,
     recorded: &[String],
+    cost: &str,
 ) -> fmt::Result {
     let named = if recorded.is_empty() {
         "no `[[scope]]` record at all".to_owned()
@@ -450,8 +480,8 @@ fn unrecorded_scope_message(
     };
     write!(
         f,
-        "nothing in `.warlock/scopes.toml` records the scope `{scope}`, so there is no queue to \
-         read: this repository {named}"
+        "nothing in `.warlock/scopes.toml` records the scope `{scope}`, so {cost}: this \
+         repository {named}"
     )
 }
 
@@ -724,9 +754,11 @@ impl fmt::Display for Error {
                  the next draft offers it again: {}",
                 one_line(source)
             ),
-            Self::UnrecordedScope { scope, recorded } => {
-                unrecorded_scope_message(f, scope, recorded)
-            }
+            Self::UnrecordedScope {
+                scope,
+                recorded,
+                cost,
+            } => unrecorded_scope_message(f, scope, recorded, cost),
             Self::UnheldScope { scope, held } => unheld_scope_message(f, scope, held),
             Self::DirtyTree { dirty } => dirty_tree_message(f, dirty),
             Self::Halted { ticket } => halted_message(f, ticket),

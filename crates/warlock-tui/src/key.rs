@@ -29,12 +29,12 @@ use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, Ke
 use ratatui::crossterm::terminal::enable_raw_mode;
 use serde_json::Value;
 use warlock_engine::{
-    Forgotten, forget_key, keys, keys_path, load_key_names, save_key, save_key_binding,
+    Forgotten, Manifest, forget_key, keys, keys_path, load_key_names, save_key, save_key_binding,
     scopes_bound_to, sigils_path, validate_scope,
 };
 
 use crate::asking::{self, Asks, Cooked, ERASE};
-use crate::error::{Error, one_line, say};
+use crate::error::{Error, NOT_BOUND, one_line, say};
 use crate::query::{envelope, write_object};
 use crate::standing::{FOR_KEY, Standing};
 use crate::writing::listing;
@@ -87,8 +87,9 @@ pub fn key_list(json: bool) -> Result<(), Error> {
 
 // These two do stand in one, because a binding belongs to a checkout: `use`
 // writes into this checkout's config and `forget` can only say what it did to
-// this checkout by reading it. Both resolutions happen here and are passed down
-// as parameters, so nothing below reads `HOME` or the working directory.
+// this checkout by reading it. Every resolution happens here — the home, the
+// root, and for `use` the manifest its scope is checked against — and is passed
+// down as a parameter, so nothing below reads `HOME` or the working directory.
 //
 // `use` takes the scope as well, because the config holds a name per scope: a
 // repository whose scopes file into two Linear workspaces needs two keys, and
@@ -97,8 +98,16 @@ pub fn key_list(json: bool) -> Result<(), Error> {
 pub fn key_use(scope: &str, name: &str) -> Result<(), Error> {
     let standing = Standing::here(FOR_KEY)?;
     let home = Standing::home()?;
+    let manifest = standing.manifest()?;
 
-    bound(&home, standing.repo_root(), scope, name, &mut io::stdout())
+    bound(
+        &home,
+        standing.repo_root(),
+        &manifest,
+        scope,
+        name,
+        &mut io::stdout(),
+    )
 }
 
 pub fn key_forget(name: &str) -> Result<(), Error> {
@@ -298,24 +307,31 @@ fn object(names: &[String]) -> Value {
 }
 
 // Split from `key_use` for `listed`'s reason: `out` is what a test reads back,
-// and the home and the root arrive as parameters rather than being asked of the
-// environment down here.
+// and the home, the root and the manifest arrive as parameters rather than being
+// asked of the environment down here.
 fn bound<W: Write>(
     home: &Path,
     root: &Path,
+    manifest: &Manifest,
     scope: &str,
     name: &str,
     out: &mut W,
 ) -> Result<(), Error> {
-    // The store is asked before the config is opened, and that ordering is the
-    // whole of the refusal: `save_key_binding` judges the *shape* of a name, so
-    // without this a typo would be written into the config and the scope would
-    // look bound and fail at the API instead. It is the only refusal here —
-    // whether the scope is one this repository records is `scopes.toml`'s
-    // question, and a binding written before the scope exists is a checkout
-    // made ready rather than a mistake. What the save does with the other
+    // Both refusals are decided before the config is opened, and that ordering
+    // is the whole of them: `save_key_binding` judges the *shape* of a scope and
+    // of a name, so without these a typo in either would be written into the
+    // config, where it reads as a binding — one covering nothing, or naming a
+    // key this machine does not hold — and the push it was meant to enable
+    // fails later somewhere else, over something other than the typo. The
+    // record goes first because a scope the manifest does not record is one
+    // line missing from a file in this repository, which is the order
+    // `pull::prepare` asks in as well. What the save does with the other
     // bindings, the sigils and the branch already in the config is its own
     // business: it reads them first and writes them back.
+    if manifest.scope_record(scope).is_none() {
+        return Err(Error::unrecorded(manifest, scope, NOT_BOUND));
+    }
+
     if !names(home)?.iter().any(|stored| stored == name) {
         return Err(Error::UnknownKey {
             name: name.to_owned(),
