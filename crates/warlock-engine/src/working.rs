@@ -360,8 +360,11 @@ message, with no code fence and nothing after it:
 outside your reach stopped it, \"failed\" if you could not finish it for any \
 other reason. These three and no others.
 
-\"summary\": what you did, in a few sentences. Facts, not intentions: what \
-changed, and what you left alone.
+\"summary\": what changed, for the person reviewing the pull request, in \
+at most three short sentences. Facts, not intentions. Name the behaviour or \
+the types that changed, not the steps you took: no test counts, no commands \
+you ran and no account of how you checked. If nothing needed changing, say \
+so in one sentence.
 
 \"blocked_reason\": the reason, when the status is \"blocked\" — one sentence \
 naming what stopped you. A \"blocked\" with no reason is read as a failure. \

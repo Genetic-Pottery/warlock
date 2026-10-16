@@ -930,16 +930,6 @@ fn complaint(ran: &Ran) -> String {
     ran.stdout_text().trim().to_owned()
 }
 
-/// The last line of every body, and the only claim in it warlock makes about
-/// itself.
-///
-/// One line and not a wrapped paragraph: with no `gh` on the machine this body
-/// is commented on the ticket instead, and Linear's editor reads a single
-/// newline inside a paragraph as a line break — the reason
-/// `brief::for_the_board` exists — so a sentence hard wrapped at this file's
-/// column width arrives ragged on a page with a width of its own.
-pub const HUMAN_GATE: &str = "The pull request and the ticket's review state are the human gate: warlock merges nothing, closes nothing and moves nothing past review.";
-
 // Named under the heading rather than left to the reader, because a list of
 // scopes with no sentence over it reads as a confession: these are directories
 // this machine was entitled to edit, and the section exists so a reviewer sees
@@ -983,32 +973,29 @@ pub fn pull_request_title(ticket: &str, title: &str) -> String {
 }
 
 /// What the pull request says, and what gets commented on the ticket when there
-/// is no `gh` to open one — so it stands alone, with no pull request around it.
+/// is no `gh` to open one.
+///
+/// The ticket's description is not copied in: the title carries the identifier,
+/// which the board links back to, and a reviewer scrolling past the whole ticket
+/// to reach what changed is what copying it cost.
 ///
 /// A section with nothing in it is absent rather than an empty heading: a run
 /// that crossed nothing is the ordinary run, and bare headings saying so would
 /// be the bulk of its body.
 ///
 /// ```
-/// use warlock_tui::{HUMAN_GATE, pull_request_body};
+/// use warlock_tui::{Finished, pull_request_body};
 ///
-/// // The emptiest run there is: no description, no sub-task, nothing crossed.
-/// let body = pull_request_body("", &[], &[]);
+/// let body = pull_request_body(
+///     &[Finished { id: "WAR-131.01", goal: "Add the issues query", summary: "Added it." }],
+///     &[],
+/// );
 ///
-/// assert_eq!(body, format!("{HUMAN_GATE}\n"));
+/// assert_eq!(body, "## Sub-tasks\n\n### WAR-131.01 Add the issues query\n\nAdded it.\n");
 /// ```
 #[must_use]
-pub fn pull_request_body(
-    description: &str,
-    finished: &[Finished<'_>],
-    touched: &[Touched<'_>],
-) -> String {
+pub fn pull_request_body(finished: &[Finished<'_>], touched: &[Touched<'_>]) -> String {
     let mut blocks: Vec<String> = Vec::new();
-
-    let description = description.trim();
-    if !description.is_empty() {
-        blocks.push(description.to_owned());
-    }
 
     if !finished.is_empty() {
         let mut block = String::from("## Sub-tasks");
@@ -1039,8 +1026,6 @@ pub fn pull_request_body(
         }
         blocks.push(block);
     }
-
-    blocks.push(HUMAN_GATE.to_owned());
 
     let mut body = blocks.join("\n\n");
     body.push('\n');
@@ -1112,8 +1097,8 @@ impl Opened {
 ///
 /// Opening a pull request is the whole of it. There is no merge, no approval,
 /// no close and no auto-merge, because the pull request is where warlock stops:
-/// a `gh pr merge` added here would take a run past the human gate its own body
-/// promises is there.
+/// a `gh pr merge` added here would take a run past the human review that is
+/// the only gate between a session's work and the base branch.
 ///
 /// Its own trait beside [`Repository`] rather than a method on it, because the
 /// two are answered by different programs and only one of them may be missing:

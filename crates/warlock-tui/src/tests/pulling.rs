@@ -12,8 +12,7 @@ use super::{
 };
 use crate::claude::{Split, Stopped, Unsplit, Worked};
 use crate::git::{
-    Dirty, Finished, HUMAN_GATE, Repository, Touched, commit_message, pull_request_body,
-    pull_request_title,
+    Dirty, Finished, Repository, Touched, commit_message, pull_request_body, pull_request_title,
 };
 use crate::linear::IssueProject;
 use crate::stubs::{Boarding, Call, Checkout, Forging, GitCall, Op, Sessions, Slicing, said};
@@ -1091,7 +1090,6 @@ fn two_sub_tasks() -> (Checkout, Slicing, Sessions) {
 /// builds it.
 fn expected_body() -> String {
     pull_request_body(
-        DESCRIPTION,
         &[
             Finished {
                 id: "WAR-140.01",
@@ -1140,7 +1138,7 @@ fn a_finished_run_pushes_opens_the_pull_request_comments_and_moves_the_ticket() 
     assert_eq!(asked[0].head, branch());
     assert_eq!(asked[0].title, pull_request_title(TICKET, TITLE));
     assert_eq!(asked[0].body, expected_body());
-    assert!(asked[0].body.contains(HUMAN_GATE));
+    assert!(!asked[0].body.contains(DESCRIPTION));
     assert!(asked[0].body.contains(OTHER));
 
     // The last sub-task's commit, then the push, and nothing between them but the

@@ -416,7 +416,7 @@ impl<B: Board, R: Repository, F: Forge, S: Splits, W: Works> Pulling<'_, B, R, F
         self.repo.publish(run.branch()).map_err(Error::git)?;
 
         let title = pull_request_title(ticket.identifier, ticket.title);
-        let body = pull_request_body(ticket.description, &finished_in(&run), &scopes_in(touched));
+        let body = pull_request_body(&finished_in(&run), &scopes_in(touched));
         let opened = self
             .forge
             .open_pull_request(PullRequest {
