@@ -173,6 +173,8 @@ fn with_scope_recorded(
 const fn flag(field: RecordField) -> &'static str {
     match field {
         RecordField::TeamKey => "--team-key",
+        RecordField::BaseUrl => "--base-url",
+        RecordField::ProjectKey => "--project-key",
         RecordField::ReviewState => "--review-state",
         RecordField::Label => "--label",
     }
