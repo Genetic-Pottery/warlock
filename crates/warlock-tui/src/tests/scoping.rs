@@ -2041,40 +2041,111 @@ fn the_whole_path_from_the_press_to_the_key_window_is_one_key_at_a_time() {
 const JIRA_SCOPE: &str = "payments";
 
 #[test]
-fn the_jira_row_of_the_picker_ends_as_a_jira_record_with_the_key_window_over_it() {
-    // One Down and an Enter on the picker, which is the only road in the panel
-    // to a Jira record: the four values go in as typed, the file names the
-    // tracker they file to, and the key window comes up over the scope just
-    // recorded as it does for a Linear one.
+fn the_whole_path_from_the_press_to_a_saved_jira_record_is_one_key_at_a_time() {
+    // The event loop's own arms over all four windows on the road the panel has
+    // to a Jira record, in the order a reader presses them: `s`, a name nothing
+    // records, Enter, a Down off the row the picker opens lit, Enter, the four
+    // values with a Tab between them, Enter. Nothing here is a terminal, a
+    // worker or a `claude` — the whole path is these six functions over a
+    // repository and a home of this test's own.
     let repo = a_repo();
     let home = a_home();
     let mut app = app_on(repo.path(), TUI_ROW);
     let mut manifest = recorded();
 
-    let form = asked_for(
-        &mut app,
-        &mut manifest,
-        repo.path(),
-        "crates/tui",
-        "Payments",
-        RecordTracker::Jira,
-    );
-    assert_eq!(saved(repo.path()), None, "the two questions wrote to disk");
+    let mut prompt = scope_press(&mut app, &manifest, repo.path());
+    assert_eq!(prompt, ScopePrompt::open("crates/tui", ""));
 
-    let windows = record_submit(
-        &mut app,
-        &mut manifest,
-        repo.path(),
-        Some(home.path()),
-        &filled(&form, [JIRA_SITE, "PAY", "In Review", "area/payments"]),
-    );
+    let mut tracker = TrackerPrompt::Closed;
+    for code in "Payments"
+        .chars()
+        .map(KeyCode::Char)
+        .chain([KeyCode::Enter])
+    {
+        let edited = {
+            let field = prompt.field().expect("the first window is still up");
+            edit_for(press(code), field)
+        };
+        let windows = scope_edit(&mut app, &mut manifest, repo.path(), &prompt, edited);
+        // Neither of the later windows out of this one, whatever it hands on
+        // to: no form until a tracker is chosen, and nothing recorded yet to
+        // bind a key to.
+        assert_eq!(
+            windows.record,
+            RecordPrompt::Closed,
+            "{code:?} opened a form"
+        );
+        assert_eq!(windows.key, KeyPrompt::Closed, "{code:?} asked for a key");
+        prompt = windows.scope;
+        tracker = windows.tracker;
+    }
 
+    // The first window down and the picker up over the folded name, out of the
+    // one Enter, and nothing written by it.
+    assert_eq!(prompt, ScopePrompt::Closed);
+    assert_eq!(tracker, TrackerPrompt::open("crates/tui", JIRA_SCOPE));
+    assert_eq!(saved(repo.path()), None, "the first Enter wrote to disk");
+    assert_eq!(manifest, recorded(), "the first Enter edited the manifest");
+
+    // One Down off Linear, then Enter: the Jira row is reached by the keys
+    // rather than by reaching into the choice.
+    let mut record = RecordPrompt::Closed;
+    for code in [KeyCode::Down, KeyCode::Enter] {
+        let edited = {
+            let choice = tracker.choice().expect("the picker is still up");
+            tracker_edit_for(press(code), choice)
+        };
+        let windows = tracker_edit(&tracker, edited);
+        assert_eq!(windows.key, KeyPrompt::Closed, "{code:?} asked for a key");
+        assert_eq!(saved(repo.path()), None, "{code:?} wrote to disk");
+        tracker = windows.tracker;
+        record = windows.record;
+    }
+
+    // Four fields and not three, which is the Down having landed on Jira.
+    assert_eq!(tracker, TrackerPrompt::Closed);
     assert_eq!(
-        windows.key,
+        record,
+        RecordPrompt::open(RecordTracker::Jira, "crates/tui", JIRA_SCOPE)
+    );
+
+    let mut key = KeyPrompt::Closed;
+    for code in [JIRA_SITE, "PAY", "In Review", "area/payments"]
+        .into_iter()
+        .flat_map(|value| value.chars().map(KeyCode::Char).chain([KeyCode::Tab]))
+        .chain([KeyCode::Enter])
+    {
+        assert_eq!(saved(repo.path()), None, "{code:?} wrote before the submit");
+        let edited = {
+            let form = record.form().expect("the record window is still up");
+            record_edit_for(press(code), form)
+        };
+        let windows = record_edit(
+            &mut app,
+            &mut manifest,
+            repo.path(),
+            Some(home.path()),
+            &record,
+            edited,
+        );
+        record = windows.record;
+        key = windows.key;
+    }
+
+    // The form down and the key window up out of the one Enter, over the scope
+    // that was just recorded and over the names this machine stores — as it
+    // comes up for a Linear record.
+    assert_eq!(record, RecordPrompt::Closed, "Enter left the window up");
+    assert_eq!(
+        key,
         KeyPrompt::Open(a_choice(home.path(), JIRA_SCOPE)),
         "the save did not end with the key window over the scope just recorded",
     );
     let written = saved(repo.path()).expect("the keys wrote the manifest");
+    assert_eq!(
+        written, manifest,
+        "what is on disk is what the loop believes"
+    );
     assert_eq!(scope_on(&written, "crates/tui"), Some(JIRA_SCOPE));
     let record = written.scopes().last().expect("the record was written");
     assert_eq!(
@@ -2087,6 +2158,14 @@ fn the_jira_row_of_the_picker_ends_as_a_jira_record_with_the_key_window_over_it(
         .expect("the manifest reads back");
     assert!(text.contains("tracker = \"jira\""), "{text}");
     assert!(text.contains(JIRA_SITE), "{text}");
+    // And asking is not binding: nothing reached this machine's config, and the
+    // message line came through the whole of it untouched.
+    assert_eq!(
+        config(home.path(), repo.path()),
+        None,
+        "the question wrote the config",
+    );
+    assert_eq!(app.message(), Some(LAST_KEY));
 }
 
 #[test]
