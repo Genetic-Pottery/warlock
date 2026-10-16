@@ -6,7 +6,8 @@ use warlock_engine::{keys, keys_path, load_key, save_key};
 
 use super::{
     Edited, FIELD_CHARS, KeyChoice, KeyEdited, KeyPrompt, RecordEdited, RecordField, RecordForm,
-    RecordPrompt, RecordTracker, ScopeField, ScopePrompt, edit_for, key_edit_for, record_edit_for,
+    RecordPrompt, RecordTracker, ScopeField, ScopePrompt, TRACKERS, TrackerChoice, TrackerEdited,
+    TrackerPrompt, edit_for, key_edit_for, record_edit_for, tracker_edit_for,
 };
 
 // Every field below is opened over this, so a test that meant to change the
@@ -894,6 +895,178 @@ fn the_scope_prompt_stops_at_the_engines_ceiling_and_the_path_window_does_not() 
 fn a_field_taken_out_of_a_form_still_takes_typing() {
     let taken = ScopeField::default();
     assert_eq!(after(press(KeyCode::Char('x')), &taken).text(), "x");
+}
+
+fn picked() -> TrackerChoice {
+    TrackerPrompt::open(DIRECTORY, SCOPE)
+        .choice()
+        .expect("an open picker holds its choice")
+        .clone()
+}
+
+fn after_tracker(key: KeyEvent, choice: &TrackerChoice) -> TrackerChoice {
+    match tracker_edit_for(key, choice) {
+        TrackerEdited::Open(next) => next,
+        other => panic!("{key:?} should have left the picker open, and gave {other:?}"),
+    }
+}
+
+#[test]
+fn a_fresh_tracker_picker_is_up_over_the_path_and_the_scope_with_the_first_row_lit() {
+    let prompt = TrackerPrompt::open(DIRECTORY, SCOPE);
+
+    assert!(prompt.is_open());
+    assert_eq!(prompt, TrackerPrompt::Open(picked()));
+    let choice = picked();
+    assert_eq!(choice.path(), DIRECTORY);
+    assert_eq!(choice.scope(), SCOPE);
+    assert_eq!(
+        choice.highlighted(),
+        RecordTracker::Linear,
+        "the first row opens lit, so one Enter opens a form"
+    );
+    // Two rows and these two, in this order: the list the window draws and the
+    // one its highlight walks.
+    assert_eq!(TRACKERS, [RecordTracker::Linear, RecordTracker::Jira]);
+    assert_eq!(
+        TRACKERS.map(RecordTracker::name),
+        ["Linear", "Jira"],
+        "the rows are the boards' own names"
+    );
+}
+
+#[test]
+fn a_closed_tracker_picker_is_the_default_and_holds_no_choice() {
+    assert_eq!(TrackerPrompt::default(), TrackerPrompt::Closed);
+    assert!(!TrackerPrompt::Closed.is_open());
+    assert_eq!(TrackerPrompt::Closed.choice(), None);
+}
+
+#[test]
+fn the_tracker_highlight_walks_the_rows_and_stops_at_both_ends() {
+    let top = picked();
+
+    // One press past either end is a key that changes nothing, as it is in the
+    // key window: a Down that wrapped would file the next Enter to whichever
+    // board is first.
+    assert_eq!(
+        tracker_edit_for(press(KeyCode::Up), &top),
+        TrackerEdited::Open(top.clone()),
+        "Up on the first row has nowhere to go"
+    );
+
+    let bottom = after_tracker(press(KeyCode::Down), &top);
+    assert_eq!(bottom.highlighted(), RecordTracker::Jira);
+    assert_eq!(
+        tracker_edit_for(press(KeyCode::Down), &bottom),
+        TrackerEdited::Open(bottom.clone()),
+        "Down on the last row has nowhere to go"
+    );
+
+    let back = after_tracker(press(KeyCode::Up), &bottom);
+    assert_eq!(back, top, "walked down the list and back to where it was");
+}
+
+#[test]
+fn no_key_ever_changes_the_path_or_the_scope_being_picked_for() {
+    // Both are settled by the window before this one: the record form this
+    // opens has to be over the directory and the name that submit settled on.
+    let mut current = picked();
+
+    for code in BINDINGS.into_iter().chain([KeyCode::Backspace]) {
+        current = after_tracker(press(code), &current);
+
+        assert_eq!(current.path(), DIRECTORY);
+        assert_eq!(current.scope(), SCOPE);
+    }
+}
+
+#[test]
+fn enter_submits_and_the_picked_tracker_is_the_row_that_is_lit() {
+    let first = picked();
+
+    assert_eq!(
+        tracker_edit_for(press(KeyCode::Enter), &first),
+        TrackerEdited::Submit
+    );
+
+    // The submit carries nothing, so the caller reads the tracker off the
+    // choice it already holds — the only copy of the pick there is.
+    let moved = after_tracker(press(KeyCode::Down), &first);
+    assert_eq!(moved.highlighted(), RecordTracker::Jira);
+    assert_eq!(
+        tracker_edit_for(press(KeyCode::Enter), &moved),
+        TrackerEdited::Submit
+    );
+}
+
+#[test]
+fn esc_closes_the_picker_from_either_row() {
+    let mut current = picked();
+
+    for _ in TRACKERS {
+        assert_eq!(
+            tracker_edit_for(press(KeyCode::Esc), &current),
+            TrackerEdited::Close
+        );
+        current = after_tracker(press(KeyCode::Down), &current);
+    }
+}
+
+#[test]
+fn nothing_but_enter_submits_and_nothing_but_esc_closes_in_the_picker() {
+    let lit = picked();
+
+    for code in BINDINGS.into_iter().chain([
+        KeyCode::Backspace,
+        KeyCode::Delete,
+        KeyCode::BackTab,
+        KeyCode::Left,
+        KeyCode::Right,
+        KeyCode::Home,
+        KeyCode::End,
+        KeyCode::Insert,
+    ]) {
+        let outcome = tracker_edit_for(press(code), &lit);
+
+        assert_ne!(outcome, TrackerEdited::Submit, "{code:?} should not submit");
+        assert_ne!(outcome, TrackerEdited::Close, "{code:?} should not close");
+        if !matches!(code, KeyCode::Up | KeyCode::Down) {
+            assert_eq!(
+                outcome,
+                TrackerEdited::Open(lit.clone()),
+                "{code:?} is not a key this window has"
+            );
+        }
+    }
+}
+
+#[test]
+fn releases_and_repeats_change_nothing_in_the_picker() {
+    let before = after_tracker(press(KeyCode::Down), &picked());
+
+    for code in [
+        KeyCode::Up,
+        KeyCode::Down,
+        KeyCode::Enter,
+        KeyCode::Esc,
+        KeyCode::Char('k'),
+    ] {
+        for kind in [KeyEventKind::Release, KeyEventKind::Repeat] {
+            let event = KeyEvent::new_with_kind_and_state(
+                code,
+                KeyModifiers::NONE,
+                kind,
+                KeyEventState::NONE,
+            );
+
+            assert_eq!(
+                tracker_edit_for(event, &before),
+                TrackerEdited::Open(before.clone()),
+                "{kind:?} of {code:?} should do nothing"
+            );
+        }
+    }
 }
 
 // Stored under every name below, so "no part of this window holds a key" has one

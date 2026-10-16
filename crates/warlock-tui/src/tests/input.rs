@@ -794,6 +794,9 @@ mod gate {
             Pressed::Write(edited) => {
                 panic!("{edited:?} came from a write prompt that is not up")
             }
+            Pressed::Tracker(edited) => {
+                panic!("{edited:?} came from a tracker picker that is not up")
+            }
             Pressed::Record(edited) => {
                 panic!("{edited:?} came from a record window that is not up")
             }
@@ -1904,11 +1907,152 @@ mod gate {
         }
     }
 
-    // The fifth window: one row per key this machine holds, and Enter over the
-    // lit one binds it to a scope. Nothing in the loop opens it yet, which
-    // changes nothing about the gate — what is asserted here is that a key
-    // pressed while it is current is `key_edit_for`'s answer and nobody
-    // else's.
+    // The window between the scope window and the record form: two rows, and
+    // Enter over the lit one opens that tracker's form. What is asserted here
+    // is only the gate's half — a key pressed while it is current is
+    // `tracker_edit_for`'s answer and nobody else's.
+    mod picking {
+        use super::{
+            Composer, INERT, KeyCode, KeyEvent, Modals, Pressed, QuitConfirm, ctrl_c, press,
+            press_for,
+        };
+        use crate::prompt::{TrackerChoice, TrackerEdited, TrackerPrompt, tracker_edit_for};
+
+        const DIRECTORY: &str = "crates/warlock-engine";
+
+        const SCOPE: &str = "data-plane";
+
+        fn a_window() -> (TrackerPrompt, TrackerChoice) {
+            let prompt = TrackerPrompt::open(DIRECTORY, SCOPE);
+            let choice = prompt.choice().expect("the window is up").clone();
+            (prompt, choice)
+        }
+
+        // The gate with this window up and every other one down, which is the
+        // only way it is ever up in a session: it opens exactly as the scope
+        // window closes and closes exactly as the record form opens, out of the
+        // one `Windows` a submit hands back.
+        fn asked(key: KeyEvent, prompt: &TrackerPrompt) -> Pressed {
+            asked_composing(key, prompt, None)
+        }
+
+        fn asked_composing(
+            key: KeyEvent,
+            prompt: &TrackerPrompt,
+            composer: Option<&Composer>,
+        ) -> Pressed {
+            press_for(
+                key,
+                Modals {
+                    tracker: prompt,
+                    ..Modals::default()
+                }
+                .current(),
+                composer,
+                false,
+            )
+        }
+
+        #[test]
+        fn every_binding_goes_to_the_rows_and_none_of_them_reaches_the_app() {
+            // The promise every window here makes: while the tracker is being
+            // picked there is no `s` that reopens the scope window over the
+            // name being recorded, no `e` that hands the terminal to an editor
+            // and no `j` that moves a selection nobody can see.
+            let (prompt, lit) = a_window();
+
+            for code in INERT {
+                let key = press(code);
+
+                assert_eq!(
+                    asked(key, &prompt),
+                    Pressed::Tracker(tracker_edit_for(key, &lit)),
+                    "{code:?} should have gone to the rows"
+                );
+            }
+        }
+
+        #[test]
+        fn enter_submits_and_esc_closes_and_nothing_else_does_either() {
+            let (prompt, _) = a_window();
+
+            assert_eq!(
+                asked(press(KeyCode::Enter), &prompt),
+                Pressed::Tracker(TrackerEdited::Submit)
+            );
+            assert_eq!(
+                asked(press(KeyCode::Esc), &prompt),
+                Pressed::Tracker(TrackerEdited::Close)
+            );
+            for code in INERT {
+                let pressed = asked(press(code), &prompt);
+
+                assert_ne!(pressed, Pressed::Tracker(TrackerEdited::Submit), "{code:?}");
+                assert_ne!(pressed, Pressed::Tracker(TrackerEdited::Close), "{code:?}");
+            }
+        }
+
+        #[test]
+        fn ctrl_c_is_still_answered_before_the_rows() {
+            let (prompt, _) = a_window();
+
+            assert_eq!(
+                asked(ctrl_c(), &prompt),
+                Pressed::Confirm(QuitConfirm::open())
+            );
+            assert_eq!(
+                press_for(
+                    ctrl_c(),
+                    Modals {
+                        tracker: &prompt,
+                        ..Modals::default()
+                    }
+                    .current(),
+                    None,
+                    true
+                ),
+                Pressed::CancelTurn
+            );
+        }
+
+        #[test]
+        fn the_composer_is_not_consulted_while_the_window_is_up() {
+            // The window is drawn over the draft at the foot of the panel, so a
+            // key cannot be both a row being picked and a character typed into
+            // a draft.
+            let (prompt, lit) = a_window();
+            let draft = Composer::new("web");
+
+            for code in [KeyCode::Char('j'), KeyCode::Tab, KeyCode::Enter] {
+                let key = press(code);
+
+                assert_eq!(
+                    asked_composing(key, &prompt, Some(&draft)),
+                    Pressed::Tracker(tracker_edit_for(key, &lit)),
+                    "{code:?} reached the draft from behind the window"
+                );
+            }
+        }
+
+        #[test]
+        fn the_window_being_down_leaves_every_key_to_the_tree() {
+            for code in INERT {
+                let key = press(code);
+
+                assert_eq!(
+                    asked(key, &TrackerPrompt::Closed),
+                    press_for(key, None, None, false),
+                    "{code:?} was answered by a window that is not up"
+                );
+            }
+        }
+    }
+
+    // One row per key this machine holds, and Enter over the lit one binds it
+    // to a scope. The last of the windows the `s` key can walk a reader
+    // through, and the only one of them that writes this machine's own config:
+    // what is asserted here is that a key pressed while it is current is
+    // `key_edit_for`'s answer and nobody else's.
     mod binding {
         use super::{
             Composer, CutConfirm, INERT, KeyCode, KeyEvent, Modals, Pressed, PullConfirm,
@@ -1966,7 +2110,7 @@ mod gate {
 
         #[test]
         fn every_binding_goes_to_the_rows_and_none_of_them_reaches_the_app() {
-            // The same promise the four windows above make, over the whole
+            // The same promise the five windows above make, over the whole
             // list: while a binding is being picked there is no `s` that opens
             // the scope window under it, no `e` that hands the terminal to an
             // editor and no `j` that moves a selection nobody can see. `j` and
@@ -3604,7 +3748,7 @@ mod pointer {
     use crate::composer::Composer;
     use crate::confirm::{Carry, CutConfirm, PushConfirm, QuitConfirm, Review};
     use crate::modal::{Modal, Modals};
-    use crate::prompt::{RecordPrompt, RecordTracker, ScopePrompt};
+    use crate::prompt::{RecordPrompt, RecordTracker, ScopePrompt, TrackerPrompt};
     use crate::selection::Cell;
     use crate::ui::{Reach, Shape, panel_width};
 
@@ -4473,30 +4617,42 @@ mod pointer {
         // halves would otherwise mean something.
         let app = app_talking();
         let open = ScopePrompt::open("crates/warlock-engine", "data-plane");
+        let picking = TrackerPrompt::open("crates/warlock-engine", "data-plane");
         let recording =
             RecordPrompt::open(RecordTracker::Linear, "crates/warlock-engine", "data-plane");
-        for (confirm, scope, record, write) in [
+        for (confirm, scope, tracker, record, write) in [
             (
                 QuitConfirm::open(),
                 &ScopePrompt::Closed,
+                &TrackerPrompt::Closed,
                 &RecordPrompt::Closed,
                 &ScopePrompt::Closed,
             ),
             (
                 QuitConfirm::Closed,
                 &open,
+                &TrackerPrompt::Closed,
                 &RecordPrompt::Closed,
                 &ScopePrompt::Closed,
             ),
             (
                 QuitConfirm::Closed,
                 &ScopePrompt::Closed,
+                &picking,
+                &RecordPrompt::Closed,
+                &ScopePrompt::Closed,
+            ),
+            (
+                QuitConfirm::Closed,
+                &ScopePrompt::Closed,
+                &TrackerPrompt::Closed,
                 &recording,
                 &ScopePrompt::Closed,
             ),
             (
                 QuitConfirm::Closed,
                 &ScopePrompt::Closed,
+                &TrackerPrompt::Closed,
                 &RecordPrompt::Closed,
                 &open,
             ),
@@ -4513,6 +4669,7 @@ mod pointer {
                         Modals {
                             quit: confirm,
                             scope,
+                            tracker,
                             record,
                             write,
                             ..Modals::default()
@@ -4875,6 +5032,48 @@ mod pointer {
                 &mut app,
                 Modals {
                     record: &record,
+                    ..Modals::default()
+                }
+                .current(),
+                mouse,
+            );
+        }
+
+        assert_eq!(app, before, "the pointer moved nothing behind the window");
+    }
+
+    #[test]
+    fn the_pointer_is_read_and_dropped_while_the_tracker_picker_is_up() {
+        // The window between those two, and the same rule: two rows picked
+        // between with the keyboard, nothing clickable in either, and a tree
+        // underneath that a click would silently move while the reader is
+        // deciding which board the scope files to.
+        let mut app = app_on_screen();
+        app.toggle_files();
+        app.select_row(9);
+        app.scroll_panel_down(4);
+        app.set_focus(Focus::Panel);
+        let before = app.clone();
+        let tracker = TrackerPrompt::open("crates/warlock-engine", "data-plane");
+
+        for mouse in whole_pointer() {
+            assert_eq!(
+                asks_under(
+                    mouse,
+                    &app,
+                    Modals {
+                        tracker: &tracker,
+                        ..Modals::default()
+                    }
+                    .current()
+                ),
+                None,
+                "{mouse:?} should mean nothing while the picker is up"
+            );
+            round_under(
+                &mut app,
+                Modals {
+                    tracker: &tracker,
                     ..Modals::default()
                 }
                 .current(),

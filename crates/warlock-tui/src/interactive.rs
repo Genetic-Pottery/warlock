@@ -27,11 +27,11 @@ use crate::key::{bound_name, names_line};
 use crate::linear::{Opener as LinearOpener, Opens};
 use crate::modal::{Modal, Modals};
 use crate::planned::edited_drafts;
-use crate::prompt::{KeyEdited, KeyPrompt, RecordPrompt, ScopePrompt};
+use crate::prompt::{KeyEdited, KeyPrompt, RecordPrompt, ScopePrompt, TrackerPrompt};
 use crate::puller::{Claudes, Puller, Raises};
 use crate::pushing::Pushes;
 use crate::resume::resume_press;
-use crate::scoping::{Windows, key_edit, record_edit, scope_edit, scope_press};
+use crate::scoping::{Windows, key_edit, record_edit, scope_edit, scope_press, tracker_edit};
 use crate::screen::Screen;
 use crate::selection::{Cell, Position, copied_text, position_at};
 use crate::session::{Scope, Watched, load_app, reload, start_watching};
@@ -152,6 +152,7 @@ fn modals<'a, C, O, A, R, F, M>(
     quit: QuitConfirm,
     help: HelpSheet,
     scope: &'a ScopePrompt,
+    tracker: &'a TrackerPrompt,
     record: &'a RecordPrompt,
     key: &'a KeyPrompt,
     pushes: &'a Pushes<O>,
@@ -180,6 +181,7 @@ where
         carry: cutter.carrying(),
         write_brief: chat.write_offer(),
         scope,
+        tracker,
         record,
         key,
         write: chat.write_prompt(),
@@ -265,8 +267,12 @@ struct Session<K: Seams> {
     puller: Puller<K::Board, K::Repo, K::Forge, K::Raise>,
     prompt: ScopePrompt,
     /// The second window the `s` key puts up, over a scope name no `[[scope]]`
-    /// record claims. Never up at the same time as [`Session::prompt`]: one goes
-    /// down as the other comes up, in the one
+    /// record claims: which tracker that name files to, and so which form comes
+    /// next. Nothing is written while it is up.
+    tracker: TrackerPrompt,
+    /// The third, over the tracker that picker settled on. Never up at the same
+    /// time as either window above, or they as each other: each goes down as
+    /// the next comes up, in the one
     /// [`scoping::Windows`](crate::scoping::Windows) a submit hands back.
     record: RecordPrompt,
     /// The window that binds one of this machine's stored keys to a scope, and
@@ -323,6 +329,7 @@ impl<K: Seams> Session<K> {
             cutter,
             puller,
             prompt: ScopePrompt::default(),
+            tracker: TrackerPrompt::default(),
             record: RecordPrompt::default(),
             key: KeyPrompt::default(),
             drag: None,
@@ -344,6 +351,7 @@ impl<K: Seams> Session<K> {
             self.confirm,
             self.help,
             &self.prompt,
+            &self.tracker,
             &self.record,
             &self.key,
             &self.pushes,
@@ -408,6 +416,7 @@ impl<K: Seams> Session<K> {
             self.confirm,
             self.help,
             &self.prompt,
+            &self.tracker,
             &self.record,
             &self.key,
             &self.pushes,
@@ -647,12 +656,13 @@ impl<K: Seams> Session<K> {
                     pulling.as_deref(),
                     now,
                 );
-                // Both of the later windows put down rather than left as they
-                // were, though `press_for` only lets this key through with all
-                // of them already down: a record window that outlived the press
-                // it belonged to would be three values filed under a scope name
-                // from an earlier one, and a key window that did would bind a
-                // key to it.
+                // All three of the later windows put down rather than left as
+                // they were, though `press_for` only lets this key through with
+                // all of them already down: a picker or a record window that
+                // outlived the press it belonged to would be a tracker and a
+                // set of values filed under a scope name from an earlier one,
+                // and a key window that did would bind a key to it.
+                self.tracker = TrackerPrompt::Closed;
                 self.record = RecordPrompt::Closed;
                 self.key = KeyPrompt::Closed;
             }
@@ -667,6 +677,14 @@ impl<K: Seams> Session<K> {
                 );
                 self.apply_windows(windows);
                 self.recolour(&before, now);
+            }
+            // No manifest, no root and no home, and no `recolour` after it: the
+            // picker writes nothing, so there is nothing for a row of the tree
+            // to have changed colour about. What a submit here does is open the
+            // record form, which is where the writing starts.
+            Pressed::Tracker(edited) => {
+                let windows = tracker_edit(&self.tracker, edited);
+                self.apply_windows(windows);
             }
             // The home is handed over from the settings this session was loaded
             // under, as the key arm below hands it over: a submit that saves a
@@ -755,13 +773,19 @@ impl<K: Seams> Session<K> {
         Ok(true)
     }
 
-    // Destructured rather than read field by field, so a fourth window added to
+    // Destructured rather than read field by field, so a fifth window added to
     // [`Windows`] fails to compile here instead of being silently left down:
     // every one of them is put up or down together, which is what keeps a submit
     // from being applied by halves.
     fn apply_windows(&mut self, windows: Windows) {
-        let Windows { scope, record, key } = windows;
+        let Windows {
+            scope,
+            tracker,
+            record,
+            key,
+        } = windows;
         self.prompt = scope;
+        self.tracker = tracker;
         self.record = record;
         self.key = key;
     }

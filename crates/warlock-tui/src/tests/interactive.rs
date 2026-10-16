@@ -18,7 +18,7 @@ use crate::claude::Converses;
 use crate::confirm::QuitConfirm;
 use crate::cutting::Cutter;
 use crate::linear::Opens;
-use crate::prompt::{RecordPrompt, RecordTracker, ScopePrompt};
+use crate::prompt::{RecordPrompt, RecordTracker, ScopePrompt, TrackerPrompt};
 use crate::puller::{Claudes, Puller, Raises};
 use crate::pushing::Pushes;
 use crate::screen::Screen;
@@ -517,9 +517,55 @@ fn a_key_the_window_does_not_want_puts_it_down_and_starts_nothing() {
 }
 
 #[test]
+fn the_tracker_picker_swallows_the_scope_key_and_opens_a_form_on_enter() {
+    // `s` while the picker is up is a key the picker has nothing to do with,
+    // so it leaves every window exactly where it was rather than reopening the
+    // first one over the name being recorded. Enter is the one key that moves
+    // the session on, and what it moves it on to is the lit tracker's form.
+    let mut driven = session(vec![directory("/repo/crates")]);
+    driven.tracker = TrackerPrompt::open("crates", "billing");
+    let before = driven.tracker.clone();
+
+    assert!(pressed(&mut driven, key(KeyCode::Char('s'))));
+    assert_eq!(driven.prompt, ScopePrompt::Closed);
+    assert_eq!(driven.tracker, before, "`s` moved the picker");
+    assert_eq!(driven.record, RecordPrompt::Closed);
+
+    assert!(pressed(&mut driven, key(KeyCode::Enter)));
+    assert_eq!(
+        driven.tracker,
+        TrackerPrompt::Closed,
+        "the picker stayed up"
+    );
+    assert_eq!(
+        driven.record,
+        RecordPrompt::open(RecordTracker::Linear, "crates", "billing"),
+    );
+    // Nothing reached the disk on either key: the record form's own submit is
+    // the one road to a write, and the repository root these tests run over
+    // does not exist, so a write would have failed loudly.
+    assert_eq!(driven.manifest, Manifest::new());
+}
+
+#[test]
+fn esc_puts_the_tracker_picker_down_and_writes_nothing() {
+    let mut driven = session(vec![directory("/repo/crates")]);
+    driven.tracker = TrackerPrompt::open("crates", "billing");
+
+    assert!(pressed(&mut driven, key(KeyCode::Esc)));
+    assert_eq!(
+        driven.tracker,
+        TrackerPrompt::Closed,
+        "Esc closes the picker rather than quitting warlock"
+    );
+    assert_eq!(driven.record, RecordPrompt::Closed, "Esc opened a form");
+    assert_eq!(driven.manifest, Manifest::new());
+}
+
+#[test]
 fn the_record_window_swallows_the_scope_key_itself() {
     // The one key that could reopen a window over the very scope being
-    // recorded, and it does not: with the second window up `s` is a letter in
+    // recorded, and it does not: with the record form up `s` is a letter in
     // the focused field, like every other binding the loop would otherwise
     // answer.
     let mut driven = session(vec![directory("/repo/crates")]);
