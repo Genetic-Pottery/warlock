@@ -28,7 +28,7 @@ plain line and the terminal is never touched.
 | `warlock branch use <BRANCH>` | Make this checkout's pulls start from `BRANCH` and open pull requests against it | one config write |
 | `warlock branch clear` | Go back to the remote's default branch | one config write |
 | `warlock check <path>` | Say which scope covers `path`, where work under it is filed, which scopes are open on this machine, and whether the two meet — or, with `--gate`, refuse a closed or unscoped path instead of describing it | nothing |
-| `warlock scope add <path> <scope>` | Write a scope onto a directory, and — `--team-key`, `--review-state`, `--label` — the `[[scope]]` record routing it, when nothing records the name yet | one manifest write |
+| `warlock scope add <path> <scope> [tracker]` | Write a scope onto a directory, and — `linear` with `--team-key`, or `jira` with `--base-url` and `--project-key`, either of them with `--review-state` and `--label` — the `[[scope]]` record routing it, when nothing records the name yet | one manifest write |
 | `warlock scope remove <path>` | Clear the scope on a directory | one manifest write |
 | `warlock brief` | Argue a brief in one conversation at the shell, and write it where `briefs.toml` says | a turn per blank line that nothing is waiting behind, one more for each yes to the write question, and the document it writes |
 | `warlock push <SCOPE> <PATH>` | File the brief at `PATH` as a project on the board `SCOPE` files to | one project on somebody's board |
@@ -360,25 +360,71 @@ A directory nothing covers is open to anyone for this one purpose. An unscoped
 path is closed to every AI session, but if drawing the first scope needed an
 open scope, no repository could ever be set up.
 
-`scope add` has two refusals of its own beside the boundary's, both of them
-about the `[[scope]]` record rather than the place. `--team-key`,
-`--review-state` and `--label` are that record's three values, and whether
-they are required is a fact about the manifest rather than about the command
-line: a scope name nothing records yet is written with all three or not at all,
-and a name that already has a record takes none of them. Both refusals are an
-ordinary **1** and both leave the file byte-identical — not the 3, which is the
-scope boundary's alone and would send a script to `warlock open` over a
-missing `--team-key`.
+`scope add`'s refusals of its own, beside the boundary's, are all about the
+`[[scope]]` record rather than the place. The third positional names
+the tracker that record files to, spelled `linear` or `jira`, and which flags
+the record takes follows from that word: `--team-key` only after `linear`,
+`--base-url` and `--project-key` only after `jira`, `--review-state` and
+`--label` after either. Whether any of them is required is a fact about the
+manifest rather than about the command line: a scope name nothing records yet is
+written with a tracker and all of that tracker's values or not at all, and a
+name that already has a record takes none of them, the tracker word included.
+Every refusal below is an ordinary **1** and leaves the file byte-identical —
+not the 3, which is the scope boundary's alone and would send a script to
+`warlock open` over a missing `--team-key`.
+
+The tracker is optional to clap and judged where the record values are judged,
+past the boundary: a run aimed at a closed scope answers with the boundary's
+refusal and its **3** whatever word sits in that third place.
 
 A new name with a record is one manifest write and not two. The directory's
 row and the `[[scope]]` record are built together and saved once, so no run
 leaves a name on a directory with nothing to route it, and there is nothing to undo
-when the second half is the half that fails. The refusal names every flag that
-was left out, so the command is retyped once rather than three times:
+when the second half is the half that fails.
+
+A new name with no tracker is one sentence rather than two runs. Without the
+word there is no saying whether this record wants a team key or a base URL, so
+the refusal spells the whole command instead of listing what is missing from
+one:
 
 ```sh
 $ warlock scope add src platform --team-key 'Platform'
-warlock: nothing records `platform` yet, so nothing was written: writing a scope by that name needs a team, a review state and a label, given as `--review-state` and `--label`
+warlock: nothing records `platform` yet and no tracker was named, so nothing was written: writing a scope by that name takes `linear` or `jira` after it — `linear` with `--team-key`, `jira` with `--base-url` and `--project-key` — beside `--review-state` and `--label`
+$ echo $?
+1
+```
+
+A word that is neither `linear` nor `jira` names the value that was typed, in
+warlock's own sentence and with the ordinary 1 rather than clap's **2**. The
+manifest reader's parser is what reads it, so the words a record may spell at a
+shell cannot drift from the words it may spell in the file:
+
+```sh
+$ warlock scope add src platform gitlab --review-state 'In Review' --label 'area/platform'
+warlock: `gitlab` is not a tracker warlock knows; a record files to `linear` or `jira`, and nothing was written
+```
+
+A flag the named tracker has no use for is refused by its flag name, and a run
+that handed over several of them names all of them. This is asked before
+anything about a value being missing, because a run that handed Jira's values to
+`linear` is a tracker typed wrong far more often than a pair of flags typed by
+mistake:
+
+```sh
+$ warlock scope add src platform jira --team-key 'Platform' --review-state 'In Review' --label 'area/platform'
+warlock: a `jira` record has no use for `--team-key`, so nothing was written
+
+$ warlock scope add src platform linear --base-url 'https://acme.atlassian.net' --project-key 'PLAT' --review-state 'In Review' --label 'area/platform'
+warlock: a `linear` record has no use for `--base-url` and `--project-key`, so nothing was written
+```
+
+A flag the named tracker needs and did not get is refused by its flag name
+too, and the refusal names every value that was left out, so the command is
+retyped once rather than three times:
+
+```sh
+$ warlock scope add src platform jira --base-url 'https://acme.atlassian.net' --review-state 'In Review' --label 'area/platform'
+warlock: nothing records `platform` yet, so nothing was written: writing a scope by that name needs a project key, given as `--project-key`
 ```
 
 The same refusal, worded for what actually happened, when a flag was given a
@@ -387,30 +433,50 @@ different mistakes, and one sentence for both would send somebody looking for a
 shell problem they do not have.
 
 ```sh
-$ warlock scope add src platform --team-key ' ' --review-state 'In Review' --label ''
-warlock: `--team-key` and `--label` cannot be blank, so nothing was written
+$ warlock scope add src platform jira --base-url ' ' --project-key '' --review-state 'In Review' --label 'area/platform'
+warlock: `--base-url` and `--project-key` cannot be blank, so nothing was written
 ```
 
-Not blank is the whole rule. A team, a review state and a label belong to
-somebody else's tracker, so warlock judges blankness on a trimmed copy and
-stores the string exactly as it was typed — nothing is trimmed, folded or
-checked against a list of review states warlock does not have. Only the scope
-*name* is lower-cased and judged, by the same rule the panel's `s` key uses, and
-the record is filed under that folded name.
+Not blank is the whole rule. A team key, a site, a project key, a review state
+and a label belong to somebody else's tracker, so warlock judges blankness on a
+trimmed copy and stores the string exactly as it was typed — nothing is
+trimmed, folded or checked against a list of review states warlock does not
+have, and a base URL keeps its scheme, its case and its trailing slash or its
+absence of one. Only the scope *name* is lower-cased and judged, by the same
+rule the panel's `s` key uses, and the record is filed under that folded name:
 
-The other way round, a name the file already records is the flagless run and
-only that:
+```sh
+$ warlock scope add src platform jira --base-url 'https://acme.atlassian.net/' --project-key 'PLAT' --review-state 'In Review' --label 'area/platform'
+warlock: src is scoped `platform`
+```
+
+That one write leaves the directory's row and this record behind in
+`.warlock/scopes.toml`:
+
+```toml
+[[scope]]
+name = "platform"
+tracker = "jira"
+base_url = "https://acme.atlassian.net/"
+project_key = "PLAT"
+review_state = "In Review"
+label = "area/platform"
+```
+
+The other way round, a name the file already records is the two-argument run and
+only that — no tracker and no flag:
 
 ```sh
 $ warlock scope add src data-plane
 warlock: src is scoped `data-plane`
 
-$ warlock scope add src data-plane --team-key 'Data Plane'
-warlock: `data-plane` already has a record in `.warlock/scopes.toml`, and warlock does not rewrite one: run without `--team-key`, `--review-state` and `--label` to write the scope, or edit the file to change the record
+$ warlock scope add docs data-plane jira
+warlock: `data-plane` already has a record in `.warlock/scopes.toml`, and warlock does not rewrite one: run with the path and the scope alone — no tracker, no `--team-key`, `--review-state` or `--label` — to write the scope, or edit the file to change the record
 ```
 
 A value handed to a name that already routes would be a value dropped on the
-floor, which is why it is refused rather than ignored. Warlock does not rewrite,
+floor, which is why it is refused rather than ignored, and a board named for
+that record is as dropped as a team key would be. Warlock does not rewrite,
 merge or delete a record from here at all: the file is the road to changing one.
 A scope name already in use with no record stays legal and stays unrouted —
 `scope add` offers nothing about the names it did not just create.
@@ -1319,7 +1385,7 @@ start the ticket over.
 | Status | What it means |
 | --- | --- |
 | `0` | Completed. The question was answered or the write happened, whatever the answer turned out to be — a queue with nothing ready to pull, and a scope closed to this machine included |
-| `1` | Warlock could not do it, or would not: the repository will not resolve, the manifest will not parse or will not save, the path has no repository-relative spelling, a scope name nothing records yet was given without all three record flags or with a blank one, a name that already has a record was given any of them, a brief's template or `briefs.toml` will not read, a push or draft names a scope that is not a board here, the brief is not one or a project of its name is already filed, a draft's slug is one Linear does not know or its project is not `Planned`, the scope block will not cut or has nothing left to cut, the team has no `Backlog` state, a pull's scope is one nothing records, the working tree is dirty, a named ticket is one the queue's rules turn down, a run halted, a resume was asked for a ticket this machine holds no run for or a run with nothing to put back, or Linear refused what was sent. The line on stderr is the thing to go and read |
+| `1` | Warlock could not do it, or would not: the repository will not resolve, the manifest will not parse or will not save, the path has no repository-relative spelling, a scope name nothing records yet was given no tracker, a tracker word that is neither `linear` nor `jira`, a flag that tracker has no use for, or its values short one or blank, a name that already has a record was given a tracker or a flag, a brief's template or `briefs.toml` will not read, a push or draft names a scope that is not a board here, the brief is not one or a project of its name is already filed, a draft's slug is one Linear does not know or its project is not `Planned`, the scope block will not cut or has nothing left to cut, the team has no `Backlog` state, a pull's scope is one nothing records, the working tree is dirty, a named ticket is one the queue's rules turn down, a run halted, a resume was asked for a ticket this machine holds no run for or a run with nothing to put back, or Linear refused what was sent. The line on stderr is the thing to go and read |
 | `2` | The command line was never a request. Clap's status and its wording, for a word warlock has no place for |
 | `3` | The scope boundary, in the four places it is reached: the scope covering the path is closed on this machine, no scope covers the path, the scope a pull was asked for is closed — all three refused with nothing spent — or a pull's sub-task wrote under a closed scope or under no scope, which stops the run with nothing committed and the tree as that session left it. Retrying changes nothing. The road out is `warlock open` for a closed scope and `warlock scope add` for an unscoped path |
 | `130` | Cancelled: somebody stopped a run, and what it had finished by then is recorded. 128 plus SIGINT, so a shell, `make` and CI read it as interrupted without being told anything about warlock |

@@ -3,8 +3,8 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use warlock_engine::{
-    LinearScope, Manifest, Node, ScopeRecord, ScopedDirectory, Tree, manifest_path, route_facts,
-    save_open_scopes, validate_scope,
+    LinearScope, Manifest, Node, ScopeRecord, ScopedDirectory, TrackerName, Tree, manifest_path,
+    route_facts, save_open_scopes, validate_scope,
 };
 
 use super::{Opened, scoped_line, unscoped_line};
@@ -17,7 +17,7 @@ use crate::boundary::closed_scope_message;
 use crate::error::Error;
 use crate::error::status_for;
 use crate::prompt::ScopePrompt;
-use crate::rescope::{RecordFields, TrackerFields};
+use crate::rescope::{Record, ScopeRefusal, TypedRecord};
 // The other door onto the boundary, pressed here so that the two are held to
 // one answer in one place.
 use crate::scoping::scope_press;
@@ -83,25 +83,39 @@ fn open(repo_root: &Path, home: &Path, path: &str) -> Result<Opened, Error> {
     )
 }
 
-fn scope_add(
+fn scope_add<'a>(
     repo_root: &Path,
     home: &Path,
     path: &str,
     scope: &str,
-    flags: RecordFields<'_>,
+    record: impl Into<Record<'a>>,
 ) -> Result<String, Error> {
-    open(repo_root, home, path)?.scoped(scope, flags)
+    open(repo_root, home, path)?.scoped(scope, record)
 }
 
-// The three flags a name nothing records has to be given, as one value, so a
-// test about something else says what it is about rather than filling a form.
-fn a_record() -> RecordFields<'static> {
-    RecordFields {
-        tracker: TrackerFields::Linear {
-            team_key: Some("Billing"),
-        },
+// The tracker and the flags a name nothing records has to be given, in the
+// shape `warlock scope add` hands them over and as one value, so a test about
+// something else says what it is about rather than filling a form.
+fn a_record() -> TypedRecord<'static> {
+    TypedRecord {
+        tracker: Some("linear"),
+        team_key: Some("Billing"),
         review_state: Some("In Review"),
         label: Some("area/billing"),
+        ..TypedRecord::default()
+    }
+}
+
+// The same for Jira, which is the other road through the same write: a site and
+// a project key where Linear has a team key.
+fn a_jira_record() -> TypedRecord<'static> {
+    TypedRecord {
+        tracker: Some("jira"),
+        base_url: Some(SITE),
+        project_key: Some("PAY"),
+        review_state: Some("In Review"),
+        label: Some("area/pay"),
+        ..TypedRecord::default()
     }
 }
 
@@ -306,7 +320,7 @@ fn both_scope_writes_leave_the_records_where_they_found_them() {
         home.path(),
         "docs",
         "data-plane",
-        RecordFields::default(),
+        TypedRecord::default(),
     )
     .expect("nothing scopes `docs`");
     assert_eq!(
@@ -337,6 +351,11 @@ fn both_scope_writes_leave_the_records_where_they_found_them() {
 // somebody's tracker is written back exactly.
 const TEAM: &str = " Billing Team ";
 
+// A site as somebody typed it, trailing slash and all: nothing here parses,
+// normalises or judges a URL, so the scheme, the case and the slash are stored
+// exactly as they arrived.
+const SITE: &str = "https://ACME.atlassian.net/";
+
 #[test]
 fn every_scope_refusal_is_one_line_a_1_and_nothing_written() {
     // The rules are `rescope`'s and tested there; what the shell adds is that
@@ -360,17 +379,15 @@ fn every_scope_refusal_is_one_line_a_1_and_nothing_written() {
             home.path(),
             "docs",
             "billing",
-            RecordFields::default(),
+            TypedRecord::default(),
         ),
         scope_add(
             repo.path(),
             home.path(),
             "docs",
             "billing",
-            RecordFields {
-                tracker: TrackerFields::Linear {
-                    team_key: Some(" "),
-                },
+            TypedRecord {
+                team_key: Some(" "),
                 ..a_record()
             },
         ),
@@ -402,12 +419,9 @@ fn a_name_nothing_records_gets_its_scope_and_its_record_from_one_write() {
         home.path(),
         "docs",
         "billing",
-        RecordFields {
-            tracker: TrackerFields::Linear {
-                team_key: Some(TEAM),
-            },
-            review_state: Some("In Review"),
-            label: Some("area/billing"),
+        TypedRecord {
+            team_key: Some(TEAM),
+            ..a_record()
         },
     )
     .expect("nothing records `billing`");
@@ -464,7 +478,7 @@ fn a_name_something_records_is_written_flagless_and_gains_no_second_record() {
         home.path(),
         "docs",
         "data-plane",
-        RecordFields::default(),
+        TypedRecord::default(),
     )
     .expect("`data-plane` already has a record");
 
@@ -491,7 +505,7 @@ fn a_name_something_records_is_written_flagless_and_gains_no_second_record() {
             home.path(),
             "docs",
             "Data-Plane",
-            RecordFields::default(),
+            TypedRecord::default(),
         )
         .expect("`data-plane` is the same name folded"),
         "docs is scoped `data-plane`"
@@ -525,7 +539,7 @@ fn a_scope_that_files_to_jira_is_written_onto_a_directory_like_any_other() {
         home.path(),
         "docs",
         "payments",
-        RecordFields::default(),
+        TypedRecord::default(),
     )
     .expect("a recorded scope asks for no flags whatever it files to");
 
@@ -540,26 +554,254 @@ fn a_scope_that_files_to_jira_is_written_onto_a_directory_like_any_other() {
 }
 
 #[test]
+fn a_tracker_of_jira_writes_a_jira_record_and_its_row_in_one_manifest_write() {
+    // The other tracker over the same door, from the words a person types: the
+    // site and the project key are stored exactly as they arrived — scheme,
+    // case and trailing slash — because warlock does not call that URL and is
+    // in no position to correct it.
+    let repo = a_repository_of_records();
+    let home = a_dir();
+    let before = record_bytes(repo.path());
+
+    let said = scope_add(
+        repo.path(),
+        home.path(),
+        "docs",
+        "payments",
+        a_jira_record(),
+    )
+    .expect("nothing records `payments`");
+
+    assert_eq!(said, "docs is scoped `payments`");
+    assert_eq!(status_for(&Ok(())), 0);
+    // Both halves out of the one file that was written, read back the way
+    // every other reader reads it.
+    let after = load_manifest(repo.path()).expect("a manifest that reads");
+    assert_eq!(
+        after.directory("docs").map(ScopedDirectory::scope),
+        Some("payments")
+    );
+    assert_eq!(
+        after.scopes(),
+        [
+            records(),
+            vec![ScopeRecord::jira(
+                "payments",
+                SITE,
+                "PAY",
+                "In Review",
+                "area/pay"
+            )]
+        ]
+        .concat()
+    );
+    let written = after.scopes().last().expect("the record was added");
+    assert!(
+        LinearScope::of(written).is_err(),
+        "the tracker word wrote a Linear record"
+    );
+    // And through the file as well as the value, because which board a record
+    // names is a key somebody reads and hand-edits.
+    for line in [
+        "tracker = \"jira\"",
+        "base_url = \"https://ACME.atlassian.net/\"",
+        "project_key = \"PAY\"",
+    ] {
+        assert!(
+            record_bytes(repo.path()).contains(line),
+            "no `{line}` in {}",
+            record_bytes(repo.path())
+        );
+    }
+    assert!(
+        record_bytes(repo.path()).starts_with(&before),
+        "a record that was there moved or changed"
+    );
+}
+
+#[test]
+fn a_tracker_at_a_name_something_already_records_is_refused_and_two_words_write() {
+    // A directory pointed at a boundary somebody else set up stays a
+    // two-argument command: the tracker is a value like the flags, and a value
+    // handed to a record warlock will not rewrite is a value dropped on the
+    // floor.
+    let repo = a_repository_of_records();
+    let home = a_dir();
+    let before = manifest_bytes(repo.path()).expect("a manifest on disk");
+
+    let error = scope_add(
+        repo.path(),
+        home.path(),
+        "docs",
+        "data-plane",
+        TypedRecord {
+            tracker: Some("linear"),
+            ..TypedRecord::default()
+        },
+    )
+    .expect_err("`data-plane` already has a record");
+
+    assert!(
+        matches!(
+            error,
+            Error::Scope {
+                refusal: ScopeRefusal::Recorded { .. }
+            }
+        ),
+        "{error:?}"
+    );
+    // The shell's own advice, which now has the tracker in it.
+    assert!(
+        error.to_string().contains("no tracker"),
+        "the advice does not name the tracker: {error}"
+    );
+    assert_eq!(status_for(&Err(error)), 1);
+    assert_eq!(manifest_bytes(repo.path()).as_deref(), Some(&before[..]));
+
+    assert_eq!(
+        scope_add(
+            repo.path(),
+            home.path(),
+            "docs",
+            "data-plane",
+            TypedRecord::default()
+        )
+        .expect("the same run without the tracker writes"),
+        "docs is scoped `data-plane`"
+    );
+}
+
+#[test]
+fn every_tracker_refusal_names_the_word_or_the_flag_and_writes_nothing() {
+    // One sentence each, and each of them the whole of what to retype: the
+    // tracker that was not named, the word that is no tracker, the flags this
+    // tracker has no use for, the ones it needs and did not get, and the one
+    // that arrived blank. Each is the ordinary 1, and the file is untouched
+    // after all of them.
+    let repo = a_repository_of_records();
+    let home = a_dir();
+    let before = manifest_bytes(repo.path()).expect("a manifest on disk");
+    // The engine's own sentence about the word, asked of the parser the
+    // manifest reader uses rather than retyped here.
+    let unknown = TrackerName::parse("gitlab")
+        .expect_err("`gitlab` is no tracker")
+        .to_string();
+
+    for (record, says) in [
+        (
+            TypedRecord {
+                tracker: None,
+                ..a_record()
+            },
+            "nothing records `billing` yet and no tracker was named, so nothing was written: \
+             writing a scope by that name takes `linear` or `jira` after it — `linear` with \
+             `--team-key`, `jira` with `--base-url` and `--project-key` — beside \
+             `--review-state` and `--label`"
+                .to_owned(),
+        ),
+        (
+            TypedRecord {
+                tracker: Some("gitlab"),
+                ..a_record()
+            },
+            format!("{unknown}, and nothing was written"),
+        ),
+        // The word the manifest spells, capitalised: one tracker is one
+        // spelling, here as in the file.
+        (
+            TypedRecord {
+                tracker: Some("Linear"),
+                ..a_record()
+            },
+            format!(
+                "{}, and nothing was written",
+                TrackerName::parse("Linear").expect_err("`Linear` is not how a record spells it")
+            ),
+        ),
+        (
+            TypedRecord {
+                base_url: Some("https://acme.atlassian.net"),
+                project_key: Some("PAY"),
+                ..a_record()
+            },
+            "a `linear` record has no use for `--base-url` and `--project-key`, so nothing was \
+             written"
+                .to_owned(),
+        ),
+        (
+            TypedRecord {
+                team_key: Some("Billing"),
+                ..a_jira_record()
+            },
+            "a `jira` record has no use for `--team-key`, so nothing was written".to_owned(),
+        ),
+        (
+            TypedRecord {
+                base_url: None,
+                ..a_jira_record()
+            },
+            "nothing records `billing` yet, so nothing was written: writing a scope by that name \
+             needs a base URL, given as `--base-url`"
+                .to_owned(),
+        ),
+        (
+            TypedRecord {
+                project_key: Some("  "),
+                ..a_jira_record()
+            },
+            "`--project-key` cannot be blank, so nothing was written".to_owned(),
+        ),
+    ] {
+        let error = scope_add(repo.path(), home.path(), "docs", "billing", record)
+            .expect_err("each of these is refused");
+
+        assert!(
+            matches!(error, Error::Scope { .. }),
+            "{record:?}: {error:?}"
+        );
+        assert_eq!(error.to_string(), says, "{record:?}");
+        assert!(!error.to_string().contains('\n'), "`main` prints one line");
+        assert_eq!(status_for(&Err(error)), 1, "{record:?}");
+    }
+
+    assert_eq!(manifest_bytes(repo.path()).as_deref(), Some(&before[..]));
+}
+
+#[test]
 fn a_closed_boundary_answers_before_a_single_flag_is_looked_at() {
-    // Whatever the flags said, a scope closed on this machine is the same
-    // refusal. The four shapes below are the four different answers the record
-    // checks give, none of which is reached from out here — a refusal naming a
-    // record would be a fact about the inside of a manifest the reader has just
-    // been told they may not work in.
+    // Whatever the tracker and the flags said, a scope closed on this machine
+    // is the same refusal. The shapes below are the different answers the
+    // tracker and the record checks give, none of which is reached from out
+    // here — a refusal naming a record, or naming the word that was typed where
+    // a tracker goes, would be a fact about the inside of a manifest the reader
+    // has just been told they may not work in.
     let repo = a_repository_of_records();
     let home = a_dir();
     opening(home.path(), repo.path(), &["platform"]);
     let before = manifest_bytes(repo.path()).expect("a manifest on disk");
 
     for (scope, flags) in [
-        ("billing", RecordFields::default()),
+        ("billing", TypedRecord::default()),
         ("billing", a_record()),
+        ("billing", a_jira_record()),
         (
             "billing",
-            RecordFields {
-                tracker: TrackerFields::Linear {
-                    team_key: Some("  "),
-                },
+            TypedRecord {
+                team_key: Some("  "),
+                ..a_record()
+            },
+        ),
+        (
+            "billing",
+            TypedRecord {
+                tracker: Some("gitlab"),
+                ..a_record()
+            },
+        ),
+        (
+            "billing",
+            TypedRecord {
+                base_url: Some("https://acme.atlassian.net"),
                 ..a_record()
             },
         ),

@@ -200,10 +200,13 @@ fn the_two_scope_writes_are_a_noun_and_a_verb_rather_than_two_words_run_together
             command: ScopeCommand::Add {
                 path: PathBuf::from("crates/engine"),
                 scope: "data-plane".to_owned(),
-                // Absent is what clap hands over for a flag nobody passed;
-                // whether that is legal is the manifest's answer and is asked
-                // past the boundary, not here.
+                // Absent is what clap hands over for a tracker nobody named and
+                // a flag nobody passed; whether either is legal is the
+                // manifest's answer and is asked past the boundary, not here.
+                tracker: None,
                 team_key: None,
+                base_url: None,
+                project_key: None,
                 review_state: None,
                 label: None,
             }
@@ -221,15 +224,26 @@ fn the_two_scope_writes_are_a_noun_and_a_verb_rather_than_two_words_run_together
     );
 }
 
-// `warlock scope add crates/engine data-plane` with whichever of the three
-// record flags a case is about, so each assertion below reads as the flags and
-// not as the two positionals under them.
-fn added(team_key: Option<&str>, review_state: Option<&str>, label: Option<&str>) -> Command {
+// `warlock scope add crates/engine data-plane` with whichever tracker word and
+// record flags a case is about, in the order the fields are declared in, so each
+// assertion below reads as the words that change and not as the two positionals
+// under them.
+fn added(
+    tracker: Option<&str>,
+    team_key: Option<&str>,
+    base_url: Option<&str>,
+    project_key: Option<&str>,
+    review_state: Option<&str>,
+    label: Option<&str>,
+) -> Command {
     Command::Scope {
         command: ScopeCommand::Add {
             path: PathBuf::from("crates/engine"),
             scope: "data-plane".to_owned(),
+            tracker: tracker.map(str::to_owned),
             team_key: team_key.map(str::to_owned),
+            base_url: base_url.map(str::to_owned),
+            project_key: project_key.map(str::to_owned),
             review_state: review_state.map(str::to_owned),
             label: label.map(str::to_owned),
         },
@@ -237,13 +251,14 @@ fn added(team_key: Option<&str>, review_state: Option<&str>, label: Option<&str>
 }
 
 #[test]
-fn the_three_record_flags_reach_the_add_exactly_as_they_were_typed() {
+fn the_tracker_and_the_record_flags_reach_the_add_exactly_as_they_were_typed() {
     assert_eq!(
         parse(&[
             "scope",
             "add",
             "crates/engine",
             "data-plane",
+            "linear",
             "--team-key",
             "Data Plane",
             "--review-state",
@@ -254,14 +269,48 @@ fn the_three_record_flags_reach_the_add_exactly_as_they_were_typed() {
         .unwrap()
         .command,
         Some(added(
+            Some("linear"),
             Some("Data Plane"),
+            None,
+            None,
+            Some("In Review"),
+            Some("area/data-plane")
+        ))
+    );
+    // Jira's two flags are the same kind of word on the same command, so the
+    // other tracker is a third positional and two more values rather than
+    // another subcommand.
+    assert_eq!(
+        parse(&[
+            "scope",
+            "add",
+            "crates/engine",
+            "data-plane",
+            "jira",
+            "--base-url",
+            "https://acme.atlassian.net/",
+            "--project-key",
+            "DP",
+            "--review-state",
+            "In Review",
+            "--label",
+            "area/data-plane",
+        ])
+        .unwrap()
+        .command,
+        Some(added(
+            Some("jira"),
+            None,
+            Some("https://acme.atlassian.net/"),
+            Some("DP"),
             Some("In Review"),
             Some("area/data-plane")
         ))
     );
     // The same invocation with the flags ahead of the positionals, because a
     // person retyping the command from the refusal that named them will put
-    // them wherever the cursor was.
+    // them wherever the cursor was. The tracker is still the third word of the
+    // three that are not flags.
     assert_eq!(
         parse(&[
             "scope",
@@ -274,25 +323,35 @@ fn the_three_record_flags_reach_the_add_exactly_as_they_were_typed() {
             "Data Plane",
             "crates/engine",
             "data-plane",
+            "linear",
         ])
         .unwrap()
         .command,
         Some(added(
+            Some("linear"),
             Some("Data Plane"),
+            None,
+            None,
             Some("In Review"),
             Some("area/data-plane")
         ))
     );
+}
+
+#[test]
+fn clap_judges_none_of_the_tracker_and_the_record_flags_and_requires_none_of_them() {
     // Nothing is trimmed and nothing is judged here, for the scope
-    // positional's reason: a team, a review state and a label belong to
-    // somebody else's tracker, and blank is warlock's refusal to word, past
-    // the boundary, with the file untouched.
+    // positional's reason: a team, a site, a review state and a label belong to
+    // somebody else's tracker, and a word that is no tracker at all — like
+    // blank — is warlock's refusal to word, past the boundary, with the file
+    // untouched.
     assert_eq!(
         parse(&[
             "scope",
             "add",
             "crates/engine",
             "data-plane",
+            "Linear",
             "--team-key",
             "  ",
             "--review-state",
@@ -302,12 +361,19 @@ fn the_three_record_flags_reach_the_add_exactly_as_they_were_typed() {
         ])
         .unwrap()
         .command,
-        Some(added(Some("  "), Some(""), Some(" area/data-plane ")))
+        Some(added(
+            Some("Linear"),
+            Some("  "),
+            None,
+            None,
+            Some(""),
+            Some(" area/data-plane ")
+        ))
     );
-    // And a subset parses, because whether the three are required depends on
-    // what `.warlock/scopes.toml` already records and clap has not read it. A
-    // `required = true` here would refuse the flagless run that writes an
-    // already-recorded scope.
+    // And a subset parses, the tracker included, because whether any of them is
+    // required depends on what `.warlock/scopes.toml` already records and clap
+    // has not read it. A `required = true` here would refuse the two-argument
+    // run that writes an already-recorded scope.
     assert_eq!(
         parse(&[
             "scope",
@@ -319,25 +385,34 @@ fn the_three_record_flags_reach_the_add_exactly_as_they_were_typed() {
         ])
         .unwrap()
         .command,
-        Some(added(Some("Data Plane"), None, None))
+        Some(added(None, Some("Data Plane"), None, None, None, None))
+    );
+    assert_eq!(
+        parse(&["scope", "add", "crates/engine", "data-plane", "jira"])
+            .unwrap()
+            .command,
+        Some(added(Some("jira"), None, None, None, None, None))
     );
 }
 
 #[test]
 fn a_record_flag_wants_a_value_on_an_add_and_buys_no_other_word() {
-    // Each of the three takes a value, so the flag on its own is a value that
+    // Each of the five takes a value, so the flag on its own is a value that
     // went missing rather than a switch; the key is asked for by its key's
     // spelling and `--team` is not a word the add has, so a team name typed
     // where a key goes is refused here rather than recorded; a clear records
     // nothing, so none of them is a word `remove` knows; and having passed
     // them buys nothing at the boundary — `--force`, `--yes` and `--json` are
     // refused beside a filled-in record exactly as they are without one.
-    let malformed: [&[&str]; 6] = [
+    let malformed: [&[&str]; 9] = [
         &["scope", "add", "crates", "web", "--team-key"],
+        &["scope", "add", "crates", "web", "--base-url"],
+        &["scope", "add", "crates", "web", "--project-key"],
         &["scope", "add", "crates", "web", "--review-state"],
         &["scope", "add", "crates", "web", "--label"],
         &["scope", "add", "crates", "web", "--team", "Web"],
         &["scope", "remove", "crates", "--team-key", "WAR"],
+        &["scope", "remove", "crates", "--base-url", "https://acme"],
         &["scope", "remove", "crates", "--review-state", "In Review"],
     ];
 
@@ -365,19 +440,26 @@ fn a_record_flag_wants_a_value_on_an_add_and_buys_no_other_word() {
 }
 
 #[test]
-fn the_add_help_asks_for_a_team_key_and_says_whose_it_is() {
+fn the_add_help_asks_for_a_tracker_and_a_team_key_and_says_whose_each_is() {
     // The help a reader meets without opening `linear.rs`, read off the
     // parser: the value is the key Linear's own `teams(filter: { key: ... })`
     // matches, so the prose names it a Linear team key and the placeholder is
     // spelled `TEAM_KEY`. A team name typed here resolves to nothing, and the
     // mistake surfaces at a push against a live workspace rather than at the
-    // parse, which is why this surface says which of the two it wants. The
-    // other two flags are asserted beside it unchanged, so the wording of the
-    // first cannot be spread across all three.
+    // parse, which is why this surface says which of the two it wants. Each
+    // other value is asserted beside it, so the wording of one cannot be spread
+    // across the rest — and the two words a tracker may be are in the help,
+    // because `TRACKER` alone says nothing about which ones they are.
     let help = subcommand(&["scope", "add"]).render_long_help().to_string();
     for said in [
+        "[TRACKER]",
+        "Which board a new scope's record files to: linear or jira",
         "The Linear team key a new scope's issues are filed to",
         "--team-key <TEAM_KEY>",
+        "The Jira site a new scope's issues are filed to",
+        "--base-url <BASE_URL>",
+        "The Jira project key a new scope's issues are filed under",
+        "--project-key <PROJECT_KEY>",
         "The review state a new scope's issues are routed to",
         "--review-state <REVIEW_STATE>",
         "The label a new scope's issues carry",
@@ -406,7 +488,10 @@ fn a_scope_is_taken_as_it_was_typed_and_judged_by_the_engine_rather_than_by_clap
                 command: ScopeCommand::Add {
                     path: PathBuf::from("crates"),
                     scope: typed.to_owned(),
+                    tracker: None,
                     team_key: None,
+                    base_url: None,
+                    project_key: None,
                     review_state: None,
                     label: None,
                 }
@@ -420,13 +505,15 @@ fn a_scope_is_taken_as_it_was_typed_and_judged_by_the_engine_rather_than_by_clap
 fn a_scope_write_with_a_piece_missing_is_a_malformed_invocation() {
     // A bare `warlock scope` is a noun with nothing done to it, an `add`
     // with one argument is a scope that went missing rather than a clear —
-    // clearing is `scope remove` — and a third argument is somebody
-    // expecting something warlock does not do. All three are clap's 2.
+    // clearing is `scope remove` — and a fourth argument is somebody
+    // expecting something warlock does not do: the add's positionals are the
+    // path, the scope and the tracker, and there is no fourth for a word to
+    // land in. All of them are clap's 2.
     let malformed: [&[&str]; 6] = [
         &["scope"],
         &["scope", "add"],
         &["scope", "add", "crates"],
-        &["scope", "add", "crates", "web", "extra"],
+        &["scope", "add", "crates", "web", "linear", "extra"],
         &["scope", "remove"],
         &["scope", "remove", "crates", "web"],
     ];
@@ -899,20 +986,27 @@ fn no_argument_the_parser_accepts_gets_a_write_past_the_boundary() {
     // The absence stated over the parser itself rather than over a list of
     // spellings somebody thought of: `--force` is refused in the test above,
     // and this says there is no word at all — however spelled — that a write
-    // takes besides its positionals, clap's own `--help`, and the three an
-    // `add` writes a `[[scope]]` record from. Those three say where a new
+    // takes besides its positionals, clap's own `--help`, and the five an
+    // `add` writes a `[[scope]]` record from. Those five say where a new
     // scope's issues go; none of them reaches the boundary, which is asked
     // and answered before any of them is read. The one road past it is
     // `warlock open`, and an option here would be a second one.
     for names in [vec!["scope"], vec!["scope", "add"], vec!["scope", "remove"]] {
         let allowed: &[&str] = if names == ["scope", "add"] {
-            &["help", "team-key", "review-state", "label"]
+            &[
+                "help",
+                "team-key",
+                "base-url",
+                "project-key",
+                "review-state",
+                "label",
+            ]
         } else {
             &["help"]
         };
         let mut command = subcommand(&names);
-        // The positionals are the path, and the scope on an `add`; every
-        // other argument a write accepts has to be one of those.
+        // The positionals are the path, and the scope and the tracker on an
+        // `add`; every other argument a write accepts has to be one of those.
         for argument in command.get_arguments().filter(|a| !a.is_positional()) {
             let long = argument.get_long().unwrap_or_default();
             assert!(

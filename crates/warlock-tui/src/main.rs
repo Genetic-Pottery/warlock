@@ -29,9 +29,9 @@ use ratatui::crossterm::event::{self, Event};
 use warlock_tui::check::{self, check};
 use warlock_tui::planned;
 use warlock_tui::{
-    Error, Interactive, POLL_INTERVAL, RecordFields, TrackerFields, branch_clear, branch_show,
-    branch_use, brief, close_scopes, key_add, key_forget, key_list, key_show, key_use, open_list,
-    open_scopes, pull, push, resume, scope_add, scope_remove, status_for,
+    Error, Interactive, POLL_INTERVAL, TypedRecord, branch_clear, branch_show, branch_use, brief,
+    close_scopes, key_add, key_forget, key_list, key_show, key_use, open_list, open_scopes, pull,
+    push, resume, scope_add, scope_remove, status_for,
 };
 
 mod terminal;
@@ -259,17 +259,32 @@ enum ScopeCommand {
         /// The scope to write, lower-cased before it is judged.
         #[arg(value_name = "SCOPE")]
         scope: String,
-        // Optional to clap and required by warlock, because which it is
-        // depends on whether the manifest already records the name: a
-        // `required = true` here would refuse the flagless run that writes an
-        // already-recorded scope, and clap has not read `.warlock/scopes.toml`.
-        // Judged in [`mod@edits`], past the boundary, where what the manifest
-        // holds may be looked at. Values are stored exactly as typed — what a
-        // team key, a review state or a label may be belongs to somebody
-        // else's tracker.
+        // The tracker and the five record values are all optional to clap and
+        // all required by warlock in the cases that need them, because which
+        // cases those are depends on what the manifest already records and on
+        // which tracker was named: a `required = true` on any of them would
+        // refuse the two-argument run that points a directory at a scope
+        // something already records, and clap has read neither
+        // `.warlock/scopes.toml` nor the word beside it. A `value_parser` on
+        // the tracker would be the same mistake one step smaller — clap's exit
+        // status of 2 spent on a rule warlock words itself.
+        //
+        // All six are judged in [`mod@edits`], past the boundary, where what
+        // the manifest holds may be looked at, and stored exactly as typed:
+        // what a team key, a site, a project key, a review state or a label may
+        // be belongs to somebody else's tracker.
+        /// Which board a new scope's record files to: linear or jira.
+        #[arg(value_name = "TRACKER")]
+        tracker: Option<String>,
         /// The Linear team key a new scope's issues are filed to.
         #[arg(long, value_name = "TEAM_KEY")]
         team_key: Option<String>,
+        /// The Jira site a new scope's issues are filed to.
+        #[arg(long, value_name = "BASE_URL")]
+        base_url: Option<String>,
+        /// The Jira project key a new scope's issues are filed under.
+        #[arg(long, value_name = "PROJECT_KEY")]
+        project_key: Option<String>,
         /// The review state a new scope's issues are routed to.
         #[arg(long, value_name = "REVIEW_STATE")]
         review_state: Option<String>,
@@ -432,18 +447,23 @@ fn main() -> ExitCode {
             ScopeCommand::Add {
                 path,
                 scope,
+                tracker,
                 team_key,
+                base_url,
+                project_key,
                 review_state,
                 label,
             } => scope_add(
                 &path,
                 &scope,
-                RecordFields {
-                    // Linear-shaped, because `scope add`'s flags are: there is
-                    // no tracker argument and no Jira flag to fill in.
-                    tracker: TrackerFields::Linear {
-                        team_key: team_key.as_deref(),
-                    },
+                // Handed over flat and whole, the tracker word among the rest:
+                // which of these a record is made of, and whether this run
+                // needed any of them, is settled past the boundary and not here.
+                TypedRecord {
+                    tracker: tracker.as_deref(),
+                    team_key: team_key.as_deref(),
+                    base_url: base_url.as_deref(),
+                    project_key: project_key.as_deref(),
                     review_state: review_state.as_deref(),
                     label: label.as_deref(),
                 },
