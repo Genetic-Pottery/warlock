@@ -1103,6 +1103,7 @@ fn expected_body() -> String {
                 summary: "Added the reader.",
                 tested: None,
                 review_notes: None,
+                wrote: true,
             },
             Finished {
                 id: "WAR-140.02",
@@ -1110,6 +1111,7 @@ fn expected_body() -> String {
                 summary: "Used the reader.",
                 tested: None,
                 review_notes: None,
+                wrote: true,
             },
         ],
         &[Touched {
@@ -1145,6 +1147,42 @@ fn what_a_session_tested_and_flagged_reaches_the_pull_request() {
         body.contains("## Review notes\n\n- The reader panics on a file it cannot open.\n"),
         "{body}"
     );
+}
+
+#[test]
+fn a_note_a_later_session_resolves_and_a_sub_task_that_wrote_nothing_stay_out_of_the_body() {
+    let ground = Ground::new();
+    let board = Boarding::filing("");
+    let forge = Forging::opening(URL);
+    let repo = Checkout::clean(DEFAULT).trees([wrote("crates/engine/src/read.rs"), Vec::new()]);
+    let split = Slicing::into_chain(TICKET, &["Add the reader", "Use the reader"]);
+    let first = format!("{TICKET}.01");
+    let sessions = Sessions::answering([
+        Worked::Answered(working::accept(&working::stub_reviewed(
+            "Added the reader.",
+            None,
+            Some("Nothing calls the reader yet."),
+        ))),
+        Worked::Answered(working::accept(&working::stub_resolving(
+            "The callers already used the reader.",
+            &[&first],
+        ))),
+    ]);
+
+    let (pulled, _) = pull(&ground, &board, &repo, &forge, &split, &sessions);
+
+    assert!(pulled.is_ok(), "{pulled:?}");
+    assert!(
+        sessions.openings()[1].contains("Nothing calls the reader yet."),
+        "the second session is shown the note it might resolve"
+    );
+    let body = &forge.asked()[0].body;
+    assert!(
+        body.contains("## Changes\n\n- Added the reader.\n"),
+        "{body}"
+    );
+    assert!(!body.contains("already used the reader"), "{body}");
+    assert!(!body.contains("## Review notes"), "{body}");
 }
 
 #[test]

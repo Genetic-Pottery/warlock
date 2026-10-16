@@ -1185,7 +1185,13 @@ fn the_sub_task_session_runs_under_the_prompt_that_names_its_boundary() {
 
 #[test]
 fn the_sub_task_opening_carries_the_brief_and_the_ticket_as_context() {
-    let opening = working_opening(A_SUB_TASK_BRIEF, A_TICKET_TITLE, A_TICKET_DESCRIPTION, &[]);
+    let opening = working_opening(
+        A_SUB_TASK_BRIEF,
+        A_TICKET_TITLE,
+        A_TICKET_DESCRIPTION,
+        &[],
+        &[],
+    );
 
     // The sub-task's own brief, whole, and said to be the whole of the work.
     assert!(opening.contains("Read the queue's own ordering in the panel."));
@@ -1214,7 +1220,13 @@ fn the_sub_task_opening_carries_the_brief_and_the_ticket_as_context() {
 
 #[test]
 fn the_sub_task_opening_appends_the_engines_contract_rather_than_restating_it() {
-    let opening = working_opening(A_SUB_TASK_BRIEF, A_TICKET_TITLE, A_TICKET_DESCRIPTION, &[]);
+    let opening = working_opening(
+        A_SUB_TASK_BRIEF,
+        A_TICKET_TITLE,
+        A_TICKET_DESCRIPTION,
+        &[],
+        &[],
+    );
 
     // Last words said, and exactly once.
     assert!(opening.ends_with(working::RESULT_PROMPT));
@@ -1246,6 +1258,7 @@ fn the_sub_task_opening_carries_what_the_finished_siblings_said() {
         A_TICKET_TITLE,
         A_TICKET_DESCRIPTION,
         &finished,
+        &[],
     );
 
     for (id, summary) in finished {
@@ -1274,13 +1287,39 @@ fn the_sub_task_opening_carries_what_the_finished_siblings_said() {
 }
 
 #[test]
+fn a_sub_task_opening_shows_the_review_notes_finished_siblings_left() {
+    let opening = working_opening(
+        A_SUB_TASK_BRIEF,
+        A_TICKET_TITLE,
+        A_TICKET_DESCRIPTION,
+        &[("WAR-140.01", "Added the issues query.")],
+        &[("WAR-140.01", "The query panics on a page with no cursor.")],
+    );
+
+    assert!(opening.contains("The query panics on a page with no cursor."));
+    assert!(opening.contains("\"resolved_notes\""));
+    assert!(
+        opening.find("Added the issues query.") < opening.find("The query panics"),
+        "the notes follow the summaries they belong to"
+    );
+    assert!(opening.ends_with(working::RESULT_PROMPT));
+}
+
+#[test]
 fn a_sub_task_opening_with_no_finished_siblings_has_no_section_for_them() {
-    let alone = working_opening(A_SUB_TASK_BRIEF, A_TICKET_TITLE, A_TICKET_DESCRIPTION, &[]);
+    let alone = working_opening(
+        A_SUB_TASK_BRIEF,
+        A_TICKET_TITLE,
+        A_TICKET_DESCRIPTION,
+        &[],
+        &[],
+    );
     let with = working_opening(
         A_SUB_TASK_BRIEF,
         A_TICKET_TITLE,
         A_TICKET_DESCRIPTION,
         &[("WAR-140.01", "Added the issues query.")],
+        &[],
     );
 
     // Not a heading over nothing: a session shown "sub-tasks that have already
@@ -1304,7 +1343,13 @@ fn a_sub_task_opening_with_no_finished_siblings_has_no_section_for_them() {
 
 #[test]
 fn a_sub_task_retry_runs_in_the_tree_the_failed_attempt_left() {
-    let opening = working_opening(A_SUB_TASK_BRIEF, A_TICKET_TITLE, A_TICKET_DESCRIPTION, &[]);
+    let opening = working_opening(
+        A_SUB_TASK_BRIEF,
+        A_TICKET_TITLE,
+        A_TICKET_DESCRIPTION,
+        &[],
+        &[],
+    );
     let again = working_retry(&opening, "  the tests would not build  ");
 
     // What went wrong last time, trimmed and in the failed attempt's own words.
@@ -2870,7 +2915,7 @@ const ITS_TICKET: &str = "The knife is blunt";
 const ITS_DESCRIPTION: &str = "Two people have cut themselves sawing with it.";
 
 fn an_opening() -> String {
-    working_opening(A_SUB_TASK, ITS_TICKET, ITS_DESCRIPTION, &[])
+    working_opening(A_SUB_TASK, ITS_TICKET, ITS_DESCRIPTION, &[], &[])
 }
 
 fn a_session(agent: &Attempting) -> Working<Attempting> {
@@ -2927,6 +2972,59 @@ fn a_sub_task_that_finishes_is_one_attempt_and_the_summary_the_session_gave() {
         vec![an_opening()],
         "the first attempt is the opening, verbatim and alone",
     );
+}
+
+#[test]
+fn a_summary_past_the_cap_is_asked_for_again_and_only_the_summary_is_taken() {
+    let long = "x".repeat(working::SUMMARY_CHARS + 1);
+    let agent = Attempting::taking([
+        Attempt::Says(working::stub_reviewed(
+            &long,
+            Some("Tests."),
+            Some("Look here."),
+        )),
+        Attempt::Says(working::stub_answer("Sharpened it.")),
+    ]);
+    let mut session = a_session(&agent);
+
+    let worked = session.run();
+
+    let accepted = told(&worked);
+    assert_eq!(accepted.summary(), "Sharpened it.");
+    assert_eq!(accepted.tested(), Some("Tests."));
+    assert_eq!(accepted.review_notes(), Some("Look here."));
+    assert_eq!(session.attempts(), 1, "shortening is not another attempt");
+    assert_eq!(
+        agent.sent()[1],
+        working::shorten_summary(working::SUMMARY_CHARS + 1)
+    );
+}
+
+#[test]
+fn a_shortening_turn_that_does_not_answer_done_leaves_the_first_answer() {
+    let long = "x".repeat(working::SUMMARY_CHARS + 1);
+    let agent = Attempting::taking([
+        Attempt::Says(working::stub_answer(&long)),
+        Attempt::Says("I would rather not.".to_owned()),
+    ]);
+    let mut session = a_session(&agent);
+
+    let worked = session.run();
+
+    assert_eq!(told(&worked).reported(), &working::Reported::Done);
+    assert_eq!(told(&worked).summary(), long);
+}
+
+#[test]
+fn a_summary_within_the_cap_is_not_asked_about() {
+    let agent = Attempting::taking([Attempt::Says(working::stub_answer(
+        &"x".repeat(working::SUMMARY_CHARS),
+    ))]);
+    let mut session = a_session(&agent);
+
+    session.run();
+
+    assert_eq!(agent.turns(), 1);
 }
 
 #[test]
@@ -4213,6 +4311,7 @@ mod unix {
                 "The knife is blunt",
                 "Two people have cut themselves sawing with it.",
                 &[],
+                &[],
             );
 
             let worked = Working::on(&agent, &opening).run();
@@ -4304,7 +4403,8 @@ mod unix {
             );
 
             let agent = ChatAgent::working("sharpen the knife").with_program(&stand_in);
-            let opening = working_opening("## Goal\nSharpen it.", "Blunt", "It is blunt.", &[]);
+            let opening =
+                working_opening("## Goal\nSharpen it.", "Blunt", "It is blunt.", &[], &[]);
 
             let mut session = Working::on(&agent, &opening);
             let worked = session.run();

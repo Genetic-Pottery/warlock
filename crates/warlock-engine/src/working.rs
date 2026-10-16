@@ -82,6 +82,7 @@ pub struct Accepted {
     summary: String,
     tested: Option<String>,
     review_notes: Option<String>,
+    resolved_notes: Vec<String>,
     reply: String,
     unreadable: Option<Unreadable>,
 }
@@ -107,6 +108,23 @@ impl Accepted {
     #[must_use]
     pub fn review_notes(&self) -> Option<&str> {
         self.review_notes.as_deref()
+    }
+
+    /// The sub-task identifiers whose review notes this session says its work
+    /// made untrue.
+    #[must_use]
+    pub fn resolved_notes(&self) -> &[String] {
+        &self.resolved_notes
+    }
+
+    /// This answer with another summary, for a session asked to shorten the
+    /// one it gave. Everything else stays as first answered.
+    #[must_use]
+    pub fn with_summary(self, summary: &str) -> Self {
+        Self {
+            summary: summary.trim().to_owned(),
+            ..self
+        }
     }
 
     /// The session's last message, exactly as it arrived.
@@ -168,6 +186,11 @@ impl fmt::Display for Unreadable {
 // the sub-task instructions, so changing one of these strings is changing an
 // agreement and not a name.
 const DONE: &str = "done";
+
+/// The longest summary a sub-task's answer keeps without being asked to
+/// shorten it. Written into [`RESULT_PROMPT`] as a number, and the tests read
+/// this constant to hold the two together.
+pub const SUMMARY_CHARS: usize = 240;
 const BLOCKED: &str = "blocked";
 const FAILED: &str = "failed";
 
@@ -219,6 +242,24 @@ struct Stated {
     tested: Option<String>,
     #[serde(default)]
     review_notes: Option<String>,
+    // A `Value` rather than a list, so a bare string or a stray `null` is read
+    // as what it plainly means instead of failing the whole answer over a key
+    // the run can do without.
+    #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
+    resolved_notes: serde_json::Value,
+}
+
+fn listed(value: &serde_json::Value) -> Vec<String> {
+    let strings: Vec<&serde_json::Value> = match value {
+        serde_json::Value::Array(entries) => entries.iter().collect(),
+        serde_json::Value::String(_) => vec![value],
+        _ => Vec::new(),
+    };
+    strings
+        .into_iter()
+        .filter_map(serde_json::Value::as_str)
+        .filter_map(|entry| said(Some(entry)))
+        .collect()
 }
 
 // Blank is how a session says it has nothing, the same as `null`.
@@ -281,6 +322,7 @@ impl Stated {
             summary,
             tested: said(self.tested.as_deref()),
             review_notes: said(self.review_notes.as_deref()),
+            resolved_notes: listed(&self.resolved_notes),
             reply: reply.to_owned(),
             unreadable: None,
         }
@@ -293,6 +335,7 @@ fn accept_unreadable(reply: &str, unreadable: Unreadable) -> Accepted {
         summary: UNREAD_SUMMARY.to_owned(),
         tested: None,
         review_notes: None,
+        resolved_notes: Vec::new(),
         reply: reply.to_owned(),
         unreadable: Some(unreadable),
     }
@@ -383,16 +426,16 @@ When you are finished, output one JSON object as the whole of your last \
 message, with no code fence and nothing after it:
 {\"status\": \"done\" | \"blocked\" | \"failed\", \"summary\": \"...\", \
 \"tested\": null | \"...\", \"review_notes\": null | \"...\", \
-\"blocked_reason\": null | \"...\"}
+\"resolved_notes\": [...], \"blocked_reason\": null | \"...\"}
 
 \"status\": \"done\" if the sub-task is finished, \"blocked\" if something \
 outside your reach stopped it, \"failed\" if you could not finish it for any \
 other reason. These three and no others.
 
 \"summary\": what changed, as one bullet in the pull request's list of \
-changes: one or two short sentences naming the behaviour or the types that \
-changed. Facts, not intentions, and not the steps you took. If nothing needed \
-changing, say so.
+changes: one short sentence, at most 240 characters, naming the behaviour or \
+the types that changed. Facts, not intentions, and not the steps you took. If \
+nothing needed changing, say so.
 
 \"tested\": the tests you added or changed and what they cover, in one \
 sentence, or null if you added none. No test counts and no commands.
@@ -402,12 +445,26 @@ or null when there is nothing: a panic or unwrap a later change could reach, \
 a changed file format or schema version, a behaviour a caller might not \
 expect, or a shortcut you took on purpose. Do not restate the summary.
 
+\"resolved_notes\": the ids of earlier sub-tasks whose review notes, shown \
+above if there are any, your work made untrue. Empty otherwise.
+
 \"blocked_reason\": the reason, when the status is \"blocked\" — one sentence \
 naming what stopped you. A \"blocked\" with no reason is read as a failure. \
 Otherwise null.
 
 If your last message is not this object, warlock records the sub-task as \
 failed and keeps your message as it stands.";
+
+/// The turn that asks a session to shorten a summary longer than
+/// [`SUMMARY_CHARS`], given how long it was.
+#[must_use]
+pub fn shorten_summary(chars: usize) -> String {
+    format!(
+        "Your summary is {chars} characters, and the contract allows {SUMMARY_CHARS}. Answer \
+         with the same object again, changing nothing but the summary: what changed, in one \
+         short sentence. Do not change the working tree."
+    )
+}
 
 /// The last message a test double hands back for a sub-task session, as
 /// [`crate::drafting::stub_answer`] does for a drafting pass. It exists so the
@@ -429,6 +486,22 @@ pub fn stub_reviewed(summary: &str, tested: Option<&str>, review_notes: Option<&
         blocked_reason: None,
         tested: tested.map(str::to_owned),
         review_notes: review_notes.map(str::to_owned),
+        resolved_notes: serde_json::Value::Null,
+    })
+    .expect("a stated result is plain strings")
+}
+
+/// [`stub_answer`] from a session that says its work made earlier sub-tasks'
+/// review notes untrue.
+#[must_use]
+pub fn stub_resolving(summary: &str, resolved: &[&str]) -> String {
+    serde_json::to_string_pretty(&Stated {
+        status: DONE.to_owned(),
+        summary: summary.trim().to_owned(),
+        blocked_reason: None,
+        tested: None,
+        review_notes: None,
+        resolved_notes: serde_json::json!(resolved),
     })
     .expect("a stated result is plain strings")
 }
@@ -445,6 +518,7 @@ pub fn stub_reply(status: &str, summary: &str, reason: Option<&str>) -> String {
         blocked_reason: reason.map(str::to_owned),
         tested: None,
         review_notes: None,
+        resolved_notes: serde_json::Value::Null,
     })
     .expect("a stated result is three plain strings")
 }

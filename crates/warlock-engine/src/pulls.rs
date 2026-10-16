@@ -869,6 +869,11 @@ pub struct PullSubtask {
     log: Option<String>,
     tested: Option<String>,
     review_notes: Option<String>,
+    // Set when the sub-task finished without writing anything, so the pull
+    // request lists no change for it. False, not unknown, in a record written
+    // before it existed: a sub-task that is listed wrongly costs a line, and one
+    // left out wrongly hides a commit.
+    wrote_nothing: bool,
     started_at: Option<String>,
     finished_at: Option<String>,
     // Set through `set_session_id` and `set_cost_usd` whatever the outcome, not
@@ -898,6 +903,7 @@ impl PullSubtask {
             log: None,
             tested: None,
             review_notes: None,
+            wrote_nothing: false,
             started_at: None,
             finished_at: None,
             session_id: None,
@@ -1044,6 +1050,19 @@ impl PullSubtask {
 
     pub fn set_review_notes(&mut self, notes: impl Into<String>) {
         self.review_notes = Some(notes.into());
+    }
+
+    pub fn clear_review_notes(&mut self) {
+        self.review_notes = None;
+    }
+
+    #[must_use]
+    pub const fn wrote_nothing(&self) -> bool {
+        self.wrote_nothing
+    }
+
+    pub const fn set_wrote_nothing(&mut self) {
+        self.wrote_nothing = true;
     }
 
     pub fn set_started_at(&mut self, at: impl Into<String>) {
@@ -1418,6 +1437,8 @@ struct WireSubtask {
     tested: Option<String>,
     #[serde(default)]
     review_notes: Option<String>,
+    #[serde(default)]
+    wrote_nothing: bool,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -1463,6 +1484,7 @@ impl From<PullSubtask> for WireSubtask {
             log: subtask.log,
             tested: subtask.tested,
             review_notes: subtask.review_notes,
+            wrote_nothing: subtask.wrote_nothing,
             started_at: subtask.started_at,
             finished_at: subtask.finished_at,
             session_id: subtask.session_id,
@@ -1488,6 +1510,7 @@ impl TryFrom<WireSubtask> for PullSubtask {
             log,
             tested,
             review_notes,
+            wrote_nothing,
             started_at,
             finished_at,
             session_id,
@@ -1536,6 +1559,7 @@ impl TryFrom<WireSubtask> for PullSubtask {
             log,
             tested,
             review_notes,
+            wrote_nothing,
             started_at,
             finished_at,
             session_id,

@@ -404,6 +404,7 @@ mod rendering {
             summary,
             tested,
             review_notes,
+            wrote: true,
         }
     }
 
@@ -467,6 +468,36 @@ mod rendering {
         );
 
         assert_eq!(body, "## Changes\n\n- Added the query.\n");
+    }
+
+    #[test]
+    fn a_sub_task_that_wrote_nothing_lists_no_change_but_keeps_its_notes() {
+        let body = pull_request_body(
+            "",
+            &[
+                finished("Added the query.", None, None),
+                Finished {
+                    wrote: false,
+                    ..finished(
+                        "Nothing needed changing.",
+                        None,
+                        Some("The cursor is unchecked."),
+                    )
+                },
+            ],
+            &[],
+        );
+
+        assert_eq!(
+            body,
+            "## Changes\n\
+             \n\
+             - Added the query.\n\
+             \n\
+             ## Review notes\n\
+             \n\
+             - The cursor is unchecked.\n"
+        );
     }
 
     #[test]

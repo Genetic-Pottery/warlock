@@ -241,6 +241,7 @@ fn the_wire_keys_are_the_ones_a_forman_state_file_spells() {
             "notes",
             "tested",
             "review_notes",
+            "wrote_nothing",
         ],
     );
 }

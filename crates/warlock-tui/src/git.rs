@@ -948,6 +948,9 @@ pub struct Finished<'a> {
     pub summary: &'a str,
     pub tested: Option<&'a str>,
     pub review_notes: Option<&'a str>,
+    /// Whether the sub-task left anything in the tree. One that wrote nothing
+    /// has no change to list.
+    pub wrote: bool,
 }
 
 /// A scope open on this machine that the run edited under, other than the one
@@ -998,6 +1001,7 @@ pub fn pull_request_title(ticket: &str, title: &str) -> String {
 ///         summary: "Added it.",
 ///         tested: None,
 ///         review_notes: None,
+///         wrote: true,
 ///     }],
 ///     &[],
 /// );
@@ -1018,12 +1022,12 @@ pub fn pull_request_body(
     }
 
     // The goal stands in for a summary the session left blank, so every
-    // sub-task the run finished is still a line: a change with no line under
-    // it is a commit the reviewer goes looking for.
+    // sub-task that wrote something is still a line: a change with no line
+    // under it is a commit the reviewer goes looking for.
     listed(
         &mut blocks,
         "## Changes",
-        finished.iter().map(|task| {
+        finished.iter().filter(|task| task.wrote).map(|task| {
             if task.summary.trim().is_empty() {
                 task.goal
             } else {

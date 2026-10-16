@@ -1,7 +1,8 @@
 use crate::pulls::SubtaskStatus;
 
 use super::{
-    Accepted, RESULT_PROMPT, Reported, Unreadable, accept, objects, stub_answer, stub_reply,
+    Accepted, RESULT_PROMPT, Reported, SUMMARY_CHARS, Unreadable, accept, objects, shorten_summary,
+    stub_answer, stub_reply, stub_reviewed,
 };
 
 const SUMMARY: &str = "Added the result contract beside drafting.rs and its tests. Left the \
@@ -290,6 +291,7 @@ fn every_status_and_key_the_contract_names_is_in_the_prompt() {
         "\"blocked_reason\"",
         "\"tested\"",
         "\"review_notes\"",
+        "\"resolved_notes\"",
         "\"done\"",
         "\"blocked\"",
         "\"failed\"",
@@ -311,6 +313,7 @@ fn the_shape_the_prompt_states_is_the_shape_the_parser_reads() {
             object
                 .replace("\"done\" | \"blocked\" | \"failed\"", "\"done\"")
                 .replace("null | \"...\"", "\"...\"")
+                .replace("[...]", "[\"WAR-1.01\"]")
         })
         .expect("the prompt shows the object it asks for");
 
@@ -319,6 +322,48 @@ fn the_shape_the_prompt_states_is_the_shape_the_parser_reads() {
     assert_eq!(accepted.reported(), &Reported::Done);
     assert_eq!(accepted.tested(), Some("..."));
     assert_eq!(accepted.review_notes(), Some("..."));
+    assert_eq!(accepted.resolved_notes(), ["WAR-1.01"]);
+}
+
+#[test]
+fn the_summary_cap_the_prompt_states_is_the_one_warlock_holds_it_to() {
+    assert!(
+        RESULT_PROMPT.contains(&format!("at most {SUMMARY_CHARS} characters")),
+        "{RESULT_PROMPT}"
+    );
+    assert!(shorten_summary(300).contains(&SUMMARY_CHARS.to_string()));
+}
+
+#[test]
+fn resolved_notes_are_read_leniently_rather_than_failing_the_answer() {
+    for (resolved, expected) in [
+        (
+            r#"["WAR-1.01", " ", "WAR-1.02"]"#,
+            vec!["WAR-1.01", "WAR-1.02"],
+        ),
+        (r#""WAR-1.01""#, vec!["WAR-1.01"]),
+        ("null", vec![]),
+        ("3", vec![]),
+    ] {
+        let accepted = done(&format!(
+            r#"{{"status": "done", "summary": "Added it.", "resolved_notes": {resolved}}}"#
+        ));
+        assert_eq!(accepted.resolved_notes(), expected, "{resolved}");
+    }
+}
+
+#[test]
+fn a_shortened_summary_keeps_everything_else_the_session_answered() {
+    let accepted = done(&stub_reviewed(
+        "A long account.",
+        Some("Tests."),
+        Some("Look here."),
+    ))
+    .with_summary("  Short.  ");
+
+    assert_eq!(accepted.summary(), "Short.");
+    assert_eq!(accepted.tested(), Some("Tests."));
+    assert_eq!(accepted.review_notes(), Some("Look here."));
 }
 
 #[test]

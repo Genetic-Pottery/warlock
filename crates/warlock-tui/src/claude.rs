@@ -659,7 +659,9 @@ pub(crate) type Sibling<'summary> = (&'summary str, &'summary str);
 ///
 /// `finished` may be empty, and an empty list is no section at all rather than a
 /// heading over nothing: a session shown "finished sub-tasks:" followed by
-/// silence reads it as siblings that finished and said nothing.
+/// silence reads it as siblings that finished and said nothing. `notes` is the
+/// same: the review notes finished siblings left, shown so a session whose work
+/// makes one untrue can say so, and absent when there are none.
 ///
 /// ```
 /// use warlock_tui::working_opening;
@@ -669,16 +671,19 @@ pub(crate) type Sibling<'summary> = (&'summary str, &'summary str);
 ///     "Read the file once, not twice",
 ///     "Two callers read it, and they disagree.",
 ///     &[("WAR-1.01", "Added the reader.")],
+///     &[("WAR-1.01", "The reader panics on a missing file.")],
 /// );
 ///
 /// assert!(opening.contains("Read the file once."));
 /// assert!(opening.contains("Two callers read it"));
 /// assert!(opening.contains("WAR-1.01"));
+/// assert!(opening.contains("The reader panics on a missing file."));
 /// assert!(opening.ends_with(warlock_engine::working::RESULT_PROMPT));
 ///
 /// // No siblings, no section.
-/// let alone = working_opening("## Goal\nRead it once.", "Read it once", "Because.", &[]);
+/// let alone = working_opening("## Goal\nRead it once.", "Read it once", "Because.", &[], &[]);
 /// assert!(!alone.contains("already finished"));
+/// assert!(!alone.contains("Review notes"));
 /// ```
 #[must_use]
 pub fn working_opening(
@@ -686,6 +691,7 @@ pub fn working_opening(
     title: &str,
     description: &str,
     finished: &[Sibling<'_>],
+    notes: &[Sibling<'_>],
 ) -> String {
     use std::fmt::Write as _;
 
@@ -721,6 +727,18 @@ pub fn working_opening(
         text.push_str("\n\n---");
     }
 
+    if !notes.is_empty() {
+        text.push_str(
+            "\n\nReview notes those sub-tasks left for the person reviewing the pull \
+             request, each one's id and then the note. Where your work makes one of \
+             them untrue, name its id in \"resolved_notes\".\n\n---",
+        );
+        for (id, note) in notes {
+            let _ = write!(text, "\n\n{}\n\n{}", id.trim(), note.trim());
+        }
+        text.push_str("\n\n---");
+    }
+
     let _ = write!(text, "\n\n{}", working::RESULT_PROMPT);
     text
 }
@@ -742,7 +760,7 @@ pub fn working_opening(
 /// ```
 /// use warlock_tui::{working_opening, working_retry};
 ///
-/// let opening = working_opening("## Goal\nRead it once.", "Read it once", "Because.", &[]);
+/// let opening = working_opening("## Goal\nRead it once.", "Read it once", "Because.", &[], &[]);
 /// let again = working_retry(&opening, "the tests would not build");
 ///
 /// assert!(again.contains("the tests would not build"));
@@ -2924,7 +2942,7 @@ pub enum Worked {
 ///
 /// let held = ["src".to_owned()];
 /// let agent = ChatAgent::working(&working_system_prompt("src/**", &held));
-/// let opening = working_opening("## Goal\nRead it once.", "Read it once", "Because.", &[]);
+/// let opening = working_opening("## Goal\nRead it once.", "Read it once", "Because.", &[], &[]);
 /// let session = Working::on(&agent, &opening);
 ///
 /// // Nothing is spawned until it is run, and whoever holds the session can
@@ -2982,8 +3000,8 @@ impl<C: Bounded> Working<C> {
         self.attempts
     }
 
-    /// Run the sub-task: the opening, then a retry for as long as the last
-    /// attempt earned one.
+    /// Run the sub-task: the opening, a retry for as long as the last attempt
+    /// earned one, then a turn to shorten a summary past the cap.
     ///
     /// No `Result`. By the time anything here has gone wrong a session with
     /// writing tools has already been in the tree, so there is no error to hand
@@ -2998,9 +3016,33 @@ impl<C: Bounded> Working<C> {
                 Err(error) => Worked::Halted(stopped_by(&error)),
             };
             let Some(failure) = self.again(&worked) else {
-                return worked;
+                return self.shortened(worked);
             };
             message = working_retry(&self.opening, &failure);
+        }
+    }
+
+    // One more turn in the same conversation when a finished sub-task's summary
+    // runs past the cap, taking only the new summary from it. Not counted as an
+    // attempt, because the work is done. A turn that fails, or answers anything
+    // but a `done` with a summary, leaves the first answer standing: a long line
+    // in the pull request is worth less than a sub-task recorded as failed.
+    fn shortened(&mut self, worked: Worked) -> Worked {
+        let Worked::Answered(accepted) = worked else {
+            return worked;
+        };
+        let chars = accepted.summary().chars().count();
+        if *accepted.reported() != working::Reported::Done || chars <= working::SUMMARY_CHARS {
+            return Worked::Answered(accepted);
+        }
+        let Ok(reply) = self.conversation.turn(&working::shorten_summary(chars)) else {
+            return Worked::Answered(accepted);
+        };
+        let again = working::accept(&reply);
+        if *again.reported() == working::Reported::Done && !again.summary().is_empty() {
+            Worked::Answered(accepted.with_summary(again.summary()))
+        } else {
+            Worked::Answered(accepted)
         }
     }
 

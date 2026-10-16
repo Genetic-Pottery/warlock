@@ -274,16 +274,11 @@ impl<B: Board, R: Repository, F: Forge, S: Splits, W: Works> Pulling<'_, B, R, F
             let after = self.repo.head().map_err(Error::git)?;
             let (answer, stopped) = read(worked);
 
-            let subtask = run.subtask_mut(&id).expect(IN_THE_RUN);
-            subtask.set_finished_at(now_rfc3339());
-            if let Some(answer) = answer {
-                subtask.set_log(answer.summary());
-                if let Some(tested) = answer.tested() {
-                    subtask.set_tested(tested);
-                }
-                if let Some(notes) = answer.review_notes() {
-                    subtask.set_review_notes(notes);
-                }
+            run.subtask_mut(&id)
+                .expect(IN_THE_RUN)
+                .set_finished_at(now_rfc3339());
+            if let Some(answer) = &answer {
+                record_answer(&mut run, &id, answer);
             }
 
             // `HEAD` before the tree, because a session that committed has moved
@@ -351,13 +346,14 @@ impl<B: Board, R: Repository, F: Forge, S: Splits, W: Works> Pulling<'_, B, R, F
                 // work is already there — and `git commit` with nothing staged
                 // refuses, so a commit here would end a run over an empty diff.
                 None => {
+                    let subtask = run.subtask_mut(&id).expect(IN_THE_RUN);
                     if wrote {
                         let message = commit_message(ticket.identifier, &id, &goal);
                         self.repo.commit_all(&message).map_err(Error::git)?;
+                    } else {
+                        subtask.set_wrote_nothing();
                     }
-                    run.subtask_mut(&id)
-                        .expect(IN_THE_RUN)
-                        .set_status(SubtaskStatus::Done);
+                    subtask.set_status(SubtaskStatus::Done);
                 }
                 // Nothing is committed and nothing is undone. The next sibling
                 // runs in the tree this one left, which is what
@@ -1063,7 +1059,34 @@ fn opening_for(run: &PullRun, ticket: &Ticket<'_>, id: &str) -> String {
         .filter(|sibling| *sibling.status() == SubtaskStatus::Done)
         .filter_map(|sibling| Some((sibling.id(), sibling.log()?)))
         .collect();
-    working_opening(&brief, ticket.title, ticket.description, &finished)
+    let notes: Vec<Sibling<'_>> = run
+        .subtasks()
+        .iter()
+        .filter(|sibling| *sibling.status() == SubtaskStatus::Done)
+        .filter_map(|sibling| Some((sibling.id(), sibling.review_notes()?)))
+        .collect();
+    working_opening(&brief, ticket.title, ticket.description, &finished, &notes)
+}
+
+fn record_answer(run: &mut PullRun, id: &str, answer: &Accepted) {
+    let subtask = run.subtask_mut(id).expect(IN_THE_RUN);
+    subtask.set_log(answer.summary());
+    if let Some(tested) = answer.tested() {
+        subtask.set_tested(tested);
+    }
+    if let Some(notes) = answer.review_notes() {
+        subtask.set_review_notes(notes);
+    }
+    // Only a finished sibling's note, and never this sub-task's own: the notes
+    // on offer were the ones the opening showed.
+    for resolved in answer.resolved_notes() {
+        if let Some(sibling) = run.subtask_mut(resolved)
+            && resolved != id
+            && *sibling.status() == SubtaskStatus::Done
+        {
+            sibling.clear_review_notes();
+        }
+    }
 }
 
 /// One session's outcome as the record takes it: its answer, to log, and the
@@ -1170,6 +1193,7 @@ fn finished_in(run: &PullRun) -> Vec<Finished<'_>> {
             summary: subtask.log().unwrap_or_default(),
             tested: subtask.tested(),
             review_notes: subtask.review_notes(),
+            wrote: !subtask.wrote_nothing(),
         })
         .collect()
 }
