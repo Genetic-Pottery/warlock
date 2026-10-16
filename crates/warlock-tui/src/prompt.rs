@@ -358,6 +358,13 @@ pub(crate) struct RecordForm {
     // directory's row names, and a second read of the first prompt could
     // disagree.
     scope: String,
+    // Which tracker this form is collecting for, kept because `fields` cannot
+    // be read backwards into one: a submit has to build that tracker's own
+    // shape — `TrackerFields::Linear` or `TrackerFields::Jira` — and deciding
+    // it from which fields came back `Some` would make a form missing a value
+    // indistinguishable from a form that files to the other board. Set once by
+    // `new`, which derives `fields` from it, so the two cannot disagree.
+    tracker: RecordTracker,
     // The tracker's own fields in its order, which every answer below reads off:
     // the field set, the focus walk and what the frame draws are one source.
     fields: Vec<(RecordField, ScopeField)>,
@@ -388,6 +395,7 @@ impl RecordForm {
                 .map(|which| (*which, empty.clone()))
                 .collect(),
             focus: 0,
+            tracker,
             path,
         }
     }
@@ -395,6 +403,11 @@ impl RecordForm {
     #[must_use]
     pub(crate) fn path(&self) -> &str {
         &self.path
+    }
+
+    #[must_use]
+    pub(crate) const fn tracker(&self) -> RecordTracker {
+        self.tracker
     }
 
     #[must_use]
