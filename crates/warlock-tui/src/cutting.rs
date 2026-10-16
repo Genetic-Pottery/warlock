@@ -83,7 +83,7 @@ use crate::confirm::{
     Answer, Carry, CarryAnswered, Choice, CutAnswered, CutConfirm, Review, Reviewed,
 };
 use crate::cut::{Cut, listed};
-use crate::error::{Error, one_line};
+use crate::error::{Error, files_to_linear, one_line};
 use crate::inflight::{Lost, Once, Stream, Workers, settled};
 use crate::linear::{Opener as LinearOpener, Opens};
 // The lines about a relayed question come from there rather than from here, as
@@ -437,14 +437,16 @@ impl<O: Opens, A: Converses> Cutter<O, A> {
     /// `/draft <SCOPE> [SLUG]` typed into the composer: the planned projects
     /// listed without a slug, and that one project read back with one.
     ///
-    /// The three refusals are asked in the order they have to be: a pull in
-    /// flight is answered before anything else, because a run editing this
-    /// working tree is the loudest fact about the keystroke; a cut already
-    /// running comes next, because a machine with no home is a fact about a
-    /// request that is not going to be made anyway. Past them one question is
-    /// asked on this thread — the binding, read out of the config under the
-    /// home — and everything past that is the worker's, so this returns having
-    /// read nothing else but the clock.
+    /// The refusals are asked in the order they have to be: a pull in flight is
+    /// answered before anything else, because a run editing this working tree is
+    /// the loudest fact about the keystroke; a cut already running comes next,
+    /// because a machine with no home is a fact about a request that is not
+    /// going to be made anyway; and a scope whose board warlock cannot read is
+    /// answered off the manifest, ahead of the binding, so nothing is asked
+    /// about a key that could not be used. Past them one question is asked on
+    /// this thread — the binding, read out of the config under the home — and
+    /// everything past that is the worker's, so this returns having read nothing
+    /// else but the clock.
     ///
     /// What comes back is the key window the session is to put up, which is
     /// [`KeyPrompt::Closed`] on every road but the one an unbound scope takes:
@@ -486,6 +488,15 @@ impl<O: Opens, A: Converses> Cutter<O, A> {
             app.panel_mut().note(one_line(Error::NoHome), now);
             return KeyPrompt::Closed;
         };
+
+        // Before the binding is read and before anything is parked behind the
+        // key window: a scope whose board warlock cannot read is a line on the
+        // thread, and asking somebody to bind a key for a `/draft` that can only
+        // be refused would be a window spent on a question that does not matter.
+        if let Err(error) = files_to_linear(manifest, scope) {
+            app.panel_mut().note(one_line(error), now);
+            return KeyPrompt::Closed;
+        }
 
         // After the home, which is where the config sits, and before the
         // worker, which is where both roads resolve the key: a scope bound to

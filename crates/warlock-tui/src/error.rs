@@ -382,6 +382,32 @@ impl Error {
     }
 }
 
+/// The one question every door to a board asks first: does the scope it was
+/// given file somewhere warlock can file to.
+///
+/// Written once here rather than at each of the doors — `push`, `draft` and
+/// `pull`, at the shell and at the panel — because a tracker read a second way
+/// is the reading that would let one of them through. Every one of them calls it
+/// before it reads a key, opens a client or parks anything behind a window, so a
+/// Jira scope costs a manifest lookup and nothing else, which is what the
+/// refusal's own "nothing was sent" is promising.
+///
+/// A scope no `[[scope]]` record holds is `Ok` here and not this refusal: there
+/// is no tracker to read off a record that is not there, and the door behind
+/// this has the sentence that names the recorded scopes. Nothing reaches a board
+/// on that road either.
+pub(crate) fn files_to_linear(manifest: &Manifest, scope: &str) -> Result<(), Error> {
+    match manifest.scope_record(scope) {
+        // The engine's view is the only reader of a record's tracker, so this is
+        // the same answer the flows past it get — and its refusal is the
+        // engine's sentence, carried by `Error::NotLinear` and not reworded.
+        Some(record) => manifest::LinearScope::of(record)
+            .map(drop)
+            .map_err(Error::from),
+        None => Ok(()),
+    }
+}
+
 // A failed write is dropped on purpose: `warlock pull … | head -1` is a closed
 // stdout, and a run of sessions lost over the state of a pipe spends somebody's
 // tokens for nothing.

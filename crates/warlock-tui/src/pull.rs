@@ -39,7 +39,7 @@ use warlock_engine::{
 
 use crate::account::{THINKING, WRITING, tool_line};
 use crate::claude::{Activities, Activity};
-use crate::error::{Error, NO_QUEUE, one_line, say};
+use crate::error::{Error, NO_QUEUE, files_to_linear, one_line, say};
 use crate::git::{Forge, Gh, Git, Repository};
 use crate::linear::{Board, Key, Opener as LinearOpener, Opens, QueuedIssue};
 use crate::puller::{Splitter, Stopping, Worker};
@@ -265,14 +265,17 @@ impl Prepared {
     }
 }
 
-/// The three questions a pull answers before it asks the world anything, in the
+/// The four questions a pull answers before it asks the world anything, in the
 /// order the answers are worth having.
 ///
 /// The record first, because a scope no `[[scope]]` record holds is a manifest
 /// one line short and the fix is in this repository. Open second, because a
-/// recorded scope closed on this machine is a boundary and its own status.
-/// The key last, through the very [`resolve_filing`] a push and a draft go
-/// through, so an unbound checkout is told the same sentence by all three verbs.
+/// recorded scope closed on this machine is a boundary and its own status. The
+/// tracker third, because a scope that files to Jira is a pull warlock can only
+/// refuse, and refusing it before the key is read is what makes "nothing was
+/// sent" true of it. The key last, through the very [`resolve_filing`] a push
+/// and a draft go through, so an unbound checkout is told the same sentence by
+/// all three verbs.
 pub(crate) fn prepare(
     manifest: &Manifest,
     root: &Path,
@@ -296,8 +299,14 @@ pub(crate) fn prepare(
         });
     }
 
-    // Reached only with the two questions above already answered, so the board
-    // refusals it can raise cannot fire: the name is a candidate by construction.
+    // Above `resolve_filing`, which loads the key value: a scope warlock cannot
+    // file to is refused with no key read, no `git` run and no client built.
+    // `pulled` reads the same record through the same view a moment later, so
+    // this is where that refusal is asked rather than a second rule.
+    files_to_linear(manifest, scope)?;
+
+    // Reached only with the record and open questions above already answered, so
+    // the board refusals it can raise cannot fire: the name is a candidate by construction.
     // What is left of it is the key half, which is why it is asked at all.
     let target = resolve_filing(manifest, root, home, Some(scope))
         .map_err(|source| Error::Filing { source })?;

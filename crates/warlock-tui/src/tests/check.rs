@@ -148,6 +148,23 @@ fn a_manifest() -> Manifest {
     )])
 }
 
+// The same manifest with the recorded scope filing to Jira: a check reports and
+// never refuses, so what the tracker changes is the one field read off the
+// Linear view and nothing else.
+fn a_jira_manifest() -> Manifest {
+    Manifest::with_directories([
+        entry("crates", "platform"),
+        entry("crates/engine", "data-plane"),
+    ])
+    .with_scopes([ScopeRecord::jira(
+        "data-plane",
+        "https://acme.atlassian.net",
+        "PAY",
+        "In Review",
+        "area/data-plane",
+    )])
+}
+
 // Not a key, and named so nothing reading this file mistakes it for one. It is
 // written only so a bound name can be made to resolve, and the tests below
 // assert it is nowhere in what warlock prints.
@@ -450,6 +467,46 @@ fn the_whole_answer_for_a_scoped_recorded_and_bound_checkout_is_one_flat_object(
     // the one answer that had to read the store to say `true`, because that is
     // the answer a leak could come through.
     assert!(!printed.contains(NOT_A_KEY), "{printed}");
+}
+
+#[test]
+fn a_jira_record_answers_with_every_field_but_the_team_and_exits_as_a_linear_one_does() {
+    // A check reports, so the scope warlock cannot file to is a `team` of null
+    // here rather than a refusal: the review state, the label and the key are
+    // all still said, and the status is the 0 a recorded scope always answers
+    // with. `tracker`, `base_url` and `project_key` are deliberately not in the
+    // envelope.
+    let home = a_dir();
+    opening(home.path(), &["data-plane"]);
+    bound(home.path(), "data-plane", "work");
+    keeping(home.path(), "work");
+    let path = Path::new(REPO).join("crates/engine/src");
+
+    let answered = checked(
+        Path::new(REPO),
+        Some(home.path()),
+        &a_jira_manifest(),
+        &path,
+    )
+    .expect("a path inside the repository has a manifest form");
+
+    assert_eq!(
+        object(&answered).to_string(),
+        r#"{"command":"check","path":"crates/engine/src","scope":"data-plane","open":["data-plane"],"opens":true,"team":null,"review_state":"In Review","label":"area/data-plane","key":"work","key_found":true}"#
+    );
+    assert_eq!(
+        status_for(
+            &checked(
+                Path::new(REPO),
+                Some(home.path()),
+                &a_jira_manifest(),
+                &path
+            )
+            .map(|_| ())
+        ),
+        0,
+        "a check of a Jira scope refused instead of reporting"
+    );
 }
 
 #[test]

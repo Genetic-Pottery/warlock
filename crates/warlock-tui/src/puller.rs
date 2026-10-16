@@ -62,7 +62,7 @@ use crate::claude::{
     working_system_prompt,
 };
 use crate::confirm::{PullAnswered, PullConfirm, Undertaking};
-use crate::error::{Error, one_line};
+use crate::error::{Error, files_to_linear, one_line};
 use crate::git::{Commit, Dirty, Error as GitError, Forge, Gh, Git, Repository, branch_name};
 use crate::inflight::{Lost, Once, Port, Stream, Workers, settled};
 use crate::linear::{
@@ -408,16 +408,18 @@ where
     ///
     /// The refusals are asked in the order they have to be. A pull already
     /// in flight is answered before anything is read; a machine with no home is a
-    /// fact about a request that is not going to be made anyway; and the three
+    /// fact about a request that is not going to be made anyway; and the four
     /// [`prepare`] asks are the ones `warlock pull` asks, in its order and its
     /// words, so a reader who has met one at a shell meets the same sentence here.
     ///
-    /// The key is the one of the three asked ahead of [`prepare`] rather than by
-    /// it: a scope this checkout binds to nothing is a question somebody looking
-    /// at the panel can answer. What comes back is the key window the session is
-    /// to put up, which is [`KeyPrompt::Closed`] on every road but that one —
-    /// the session holds the window, and this value holds the `/pull` waiting
-    /// behind it.
+    /// Two of the four are asked ahead of [`prepare`] rather than by it. The
+    /// tracker, off the manifest, because a scope whose queue warlock cannot
+    /// read must not cost a key read or a window; and the key, because a scope
+    /// this checkout binds to nothing is a question somebody looking at the
+    /// panel can answer. What comes back is the key window the session is to put
+    /// up, which is [`KeyPrompt::Closed`] on every road but that one — the
+    /// session holds the window, and this value holds the `/pull` waiting behind
+    /// it.
     pub(crate) fn press(
         &mut self,
         app: &mut App,
@@ -443,6 +445,16 @@ where
             app.panel_mut().note(one_line(Error::NoHome), now);
             return KeyPrompt::Closed;
         };
+
+        // Before the binding is read and before anything is parked behind the
+        // key window: a scope whose queue warlock cannot read is a line on the
+        // thread, and asking somebody to bind a key for a `/pull` that can only
+        // be refused would be a window spent on a question that does not matter.
+        // `prepare` asks the same question again on the road past here.
+        if let Err(error) = files_to_linear(manifest, &taking.scope) {
+            app.panel_mut().note(one_line(error), now);
+            return KeyPrompt::Closed;
+        }
 
         // After the home, which is where the config sits, and before
         // `prepare`, which is what resolves the key: a scope bound to nothing

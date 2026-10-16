@@ -494,6 +494,46 @@ fn a_name_something_records_is_written_flagless_and_gains_no_second_record() {
 }
 
 #[test]
+fn a_scope_that_files_to_jira_is_written_onto_a_directory_like_any_other() {
+    // A scope write is about the boundary and never about the board: the record
+    // question asked here is whether there is one, so a scope warlock cannot
+    // file to is written flagless like any other and its record is left
+    // byte-identical. The refusal belongs to the verbs that reach a board.
+    let repo = a_dir();
+    let home = a_dir();
+    let jira = ScopeRecord::jira(
+        "payments",
+        "https://acme.atlassian.net",
+        "PAY",
+        "In Review",
+        "area/pay",
+    );
+    a_manifest()
+        .with_scopes([jira.clone()])
+        .save(repo.path())
+        .expect("a manifest that saves");
+    let before = record_bytes(repo.path());
+
+    let said = scope_add(
+        repo.path(),
+        home.path(),
+        "docs",
+        "payments",
+        RecordFields::default(),
+    )
+    .expect("a recorded scope asks for no flags whatever it files to");
+
+    assert_eq!(said, "docs is scoped `payments`");
+    let after = load_manifest(repo.path()).expect("a manifest that reads");
+    assert_eq!(
+        after.directory("docs").map(ScopedDirectory::scope),
+        Some("payments")
+    );
+    assert_eq!(after.scopes(), [jira]);
+    assert_eq!(record_bytes(repo.path()), before);
+}
+
+#[test]
 fn a_closed_boundary_answers_before_a_single_flag_is_looked_at() {
     // Whatever the flags said, a scope closed on this machine is the same
     // refusal. The four shapes below are the four different answers the record

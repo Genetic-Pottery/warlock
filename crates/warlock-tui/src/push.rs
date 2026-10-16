@@ -22,7 +22,7 @@ use warlock_engine::{Destination, Manifest, manifest_path, resolve_filing};
 
 use crate::account::size;
 use crate::brief::{Brief, brief_at};
-use crate::error::{Error, say};
+use crate::error::{Error, files_to_linear, say};
 use crate::linear::{Board, Key, NewProject, Opener as LinearOpener, Opens};
 use crate::standing::{FOR_PUSH, Standing};
 
@@ -108,6 +108,13 @@ pub(crate) fn prepare(
     scope: &str,
     path: &Path,
 ) -> Result<Prepared, Error> {
+    // Above `resolve_filing`, which loads the key *value*: a scope warlock
+    // cannot file to is refused with no key read, no client built and no brief
+    // opened, which is the whole of what the sentence it refuses with promises.
+    // The destination below reads the same record through the same view, so this
+    // is the ordering and not a second rule.
+    files_to_linear(manifest, scope)?;
+
     let target = resolve_filing(manifest, root, home, Some(scope))
         .map_err(|source| Error::Filing { source })?;
 

@@ -54,7 +54,7 @@ use crate::linear::{
 // and `cut::Slice` is one slice's drafts on their way to a board.
 use crate::cut::{self, Cut, fold_title, listed};
 use crate::editing::{self, NO_EDITOR, run_editor};
-use crate::error::{Error, one_line, say};
+use crate::error::{Error, files_to_linear, one_line, say};
 use crate::pull::Watched;
 use crate::standing::{FOR_CUT, Standing};
 
@@ -284,6 +284,11 @@ pub(crate) fn listing<O: Opens>(
     scope: &str,
     open: &O,
 ) -> Result<(Destination, Listing), Error> {
+    // Above `resolve_filing`, which loads the key value: a scope warlock cannot
+    // read a board for is refused with no key read and no client built, which is
+    // what the destination below would otherwise refuse one step too late.
+    files_to_linear(manifest, scope)?;
+
     let target = resolve_filing(manifest, root, home, Some(scope))
         .map_err(|source| Error::Filing { source })?;
     let destination = target.destination()?;
@@ -686,10 +691,14 @@ pub(crate) fn prepare<O: Opens>(
     slug: &str,
     open: &O,
 ) -> Result<Planned, Error> {
+    // Above `resolve_filing`, which loads the key value: a scope warlock cannot
+    // file to is refused with no key read, no client built and nothing asked.
+    files_to_linear(manifest, scope)?;
+
     let target = resolve_filing(manifest, root, home, Some(scope))
         .map_err(|source| Error::Filing { source })?;
-    // Before the board is opened, so a scope warlock cannot file to is refused
-    // with no client built and nothing asked.
+    // The same record through the same view, which is how the team key is come
+    // by: the refusal it can raise has been asked above.
     let destination = target.destination()?;
 
     let board = open.open(target.value());

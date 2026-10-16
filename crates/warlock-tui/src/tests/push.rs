@@ -64,6 +64,27 @@ fn a_record(name: &str, team: &str) -> ScopeRecord {
     ScopeRecord::new(name, team, "In Review", LABEL)
 }
 
+// A record of the one shape warlock cannot file to, under the name the
+// repository above records as a Linear one: the tracker is the only thing that
+// differs, so the refusal is about that and not about a scope spelled
+// differently or a key nobody bound.
+fn a_jira_record(name: &str) -> ScopeRecord {
+    ScopeRecord::jira(
+        name,
+        "https://acme.atlassian.net",
+        "PAY",
+        "In Review",
+        LABEL,
+    )
+}
+
+// The sentence `warlock-engine` words for a record that files somewhere else,
+// spelled out because nothing outside that crate can build the refusal to ask
+// it: this is the line somebody at a shell reads.
+fn not_linear(scope: &str) -> String {
+    format!("`{scope}` files to Jira, and warlock can only file to Linear, so nothing was sent")
+}
+
 // A repository holding one recorded scope and one brief: the ordinary finished
 // setup, which each refusal below then takes one piece out of.
 fn a_repository() -> TempDir {
@@ -406,6 +427,56 @@ fn every_refusal_prepare_raises_is_the_ordinary_status_with_nothing_printed_or_s
     ] {
         refusal(repo.path(), home.path(), scope);
     }
+}
+
+#[test]
+fn a_push_to_a_jira_scope_is_refused_with_no_key_read_and_nothing_created() {
+    // The board warlock cannot file to, refused by the subcommand and by
+    // `prepare` under it: the client panics if it is opened at all, so the key
+    // store being read and a socket being asked for are the failure here rather
+    // than something asserted after the fact.
+    let repo = a_repository();
+    saving(repo.path(), &a_manifest([a_jira_record(SCOPE)]));
+    let home = a_home(repo.path());
+    let linear = Boarding::unopened();
+
+    let (outcome, printed) = push_to(repo.path(), home.path(), SCOPE, BRIEF_PATH, false, &linear);
+
+    assert_eq!(status_for(&outcome), 1, "a push refusal is the ordinary 1");
+    let error = outcome.expect_err("a scope that files to Jira");
+    assert!(matches!(error, Error::NotLinear { .. }), "{error:?}");
+    assert_eq!(said(&error), not_linear(SCOPE));
+    assert!(printed.is_empty(), "a refusal printed something: {printed}");
+    assert!(
+        linear.projects_created().is_empty(),
+        "a refused push created a project"
+    );
+    assert!(linear.calls().is_empty(), "{:?}", linear.calls());
+}
+
+#[test]
+fn a_dry_run_of_a_jira_scope_is_the_same_refusal_rather_than_a_would_line() {
+    let repo = a_repository();
+    saving(repo.path(), &a_manifest([a_jira_record(SCOPE)]));
+    let home = a_home(repo.path());
+
+    let (outcome, printed) = push_to(
+        repo.path(),
+        home.path(),
+        SCOPE,
+        BRIEF_PATH,
+        true,
+        &Boarding::unopened(),
+    );
+
+    assert_eq!(
+        said(&outcome.expect_err("a scope that files to Jira")),
+        not_linear(SCOPE)
+    );
+    assert!(
+        printed.is_empty(),
+        "a refusal printed a would line: {printed}"
+    );
 }
 
 #[test]
