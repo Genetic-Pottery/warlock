@@ -31,7 +31,8 @@ Text User Interface (TUI)
 
 Workflow
 - brief: The ability to talk to the AI and discuss large feature of work you wish to create, you will have you assumptions pushed up against and at the end of the conversation you can write a document to the repo.
-- draft: The ability to turn a brief into multiple tickets with dependency graph relationships.
+- push: Take a written brief and push it to Linear as a Project.
+- draft: The ability to turn a Linear Project into multiple tickets with dependency graph relationships.
 - pull: Warlock will pull the next available ticket, cut it into sub-tickets locally and work within your allowed scope. There is local state and ability to recover from going over limits or crashes.
 
 ## Walk through
@@ -43,10 +44,6 @@ Workflow
 ### Brief creation
 ![brief creation demo](./assets/brief.gif)
 > type /brief and begin a conversation defining a large scope of work where the AI challenges you for more details of the scope
-
-### Writing a brief
-![writing a brief demo](./assets/write.gif)
-> once the AI has enough it asks whether to write the brief; say yes and a document is written which eventually will be turned into tickets, or say no and ask for it later in your own words
 
 ### Pushing a brief
 ![pushing a brief demo](./assets/push.gif)
