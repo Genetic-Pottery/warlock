@@ -2536,6 +2536,9 @@ pub enum Split {
     Subtasks {
         subtasks: Vec<splitting::Numbered>,
         repairs: Vec<String>,
+        /// What the whole ticket changes, for the top of the pull request.
+        /// Empty when the split had nothing to say.
+        summary: String,
     },
     /// No sub-tasks, and why — in the words that go on the ticket.
     Halted(Unsplit),
@@ -2723,6 +2726,7 @@ impl<C: Converses> Splitting<C> {
             Ok(subtasks) => Split::Subtasks {
                 subtasks,
                 repairs: mends.iter().map(ToString::to_string).collect(),
+                summary: fill.summary.trim().to_owned(),
             },
             Err(cycle) => Split::Halted(Unsplit::Circle(cycle)),
         }

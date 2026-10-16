@@ -393,20 +393,35 @@ mod rendering {
         );
     }
 
+    fn finished<'a>(
+        summary: &'a str,
+        tested: Option<&'a str>,
+        review_notes: Option<&'a str>,
+    ) -> Finished<'a> {
+        Finished {
+            id: "WAR-131.01",
+            goal: "Add the issues query beside fetch_project",
+            summary,
+            tested,
+            review_notes,
+        }
+    }
+
     #[test]
-    fn a_body_gives_the_sub_tasks_and_the_scopes_touched() {
+    fn a_body_gives_the_summary_changes_testing_review_notes_and_scopes() {
         let body = pull_request_body(
+            "The queue query, ordered oldest first, so a pull picks the next ticket.",
             &[
-                Finished {
-                    id: "WAR-131.01",
-                    goal: "Add the issues query beside fetch_project",
-                    summary: "`issues` sends one query and parses the blockers.",
-                },
-                Finished {
-                    id: "WAR-131.02",
-                    goal: "Pick the next ticket from the queue",
-                    summary: "The oldest unblocked ticket wins; the rest are named with what holds them.",
-                },
+                finished(
+                    "`issues` sends one query and parses the blockers.",
+                    Some("A stubbed board covers paging and the blocker parse."),
+                    Some("`issues` panics on a page with no cursor."),
+                ),
+                finished(
+                    "The oldest unblocked ticket wins.",
+                    Some("Queue tests cover ties and a blocked head."),
+                    None,
+                ),
             ],
             &[Touched {
                 scope: "control-plane",
@@ -416,15 +431,21 @@ mod rendering {
 
         assert_eq!(
             body,
-            "## Sub-tasks\n\
+            "The queue query, ordered oldest first, so a pull picks the next ticket.\n\
              \n\
-             ### WAR-131.01 Add the issues query beside fetch_project\n\
+             ## Changes\n\
              \n\
-             `issues` sends one query and parses the blockers.\n\
+             - `issues` sends one query and parses the blockers.\n\
+             - The oldest unblocked ticket wins.\n\
              \n\
-             ### WAR-131.02 Pick the next ticket from the queue\n\
+             ## Testing\n\
              \n\
-             The oldest unblocked ticket wins; the rest are named with what holds them.\n\
+             - A stubbed board covers paging and the blocker parse.\n\
+             - Queue tests cover ties and a blocked head.\n\
+             \n\
+             ## Review notes\n\
+             \n\
+             - `issues` panics on a page with no cursor.\n\
              \n\
              ## Scopes touched\n\
              \n\
@@ -438,48 +459,54 @@ mod rendering {
     }
 
     #[test]
-    fn a_run_that_touched_no_other_scope_has_no_heading_for_it() {
+    fn a_run_with_nothing_to_flag_has_no_empty_headings() {
         let body = pull_request_body(
-            &[Finished {
-                id: "WAR-131.01",
-                goal: "Add the issues query beside fetch_project",
-                summary: "`issues` sends one query and parses the blockers.",
-            }],
+            "  ",
+            &[finished("Added the query.", Some("   "), None)],
             &[],
         );
 
+        assert_eq!(body, "## Changes\n\n- Added the query.\n");
+    }
+
+    #[test]
+    fn a_sub_task_with_no_summary_is_named_by_its_goal() {
+        let body = pull_request_body("", &[finished("   ", None, None)], &[]);
+
         assert_eq!(
             body,
-            "## Sub-tasks\n\
-             \n\
-             ### WAR-131.01 Add the issues query beside fetch_project\n\
-             \n\
-             `issues` sends one query and parses the blockers.\n"
+            "## Changes\n\n- Add the issues query beside fetch_project\n"
         );
     }
 
     #[test]
-    fn a_sub_task_with_no_summary_keeps_its_heading_and_gains_no_blank_paragraph() {
+    fn an_entry_written_over_several_lines_stays_one_bullet() {
         let body = pull_request_body(
-            &[Finished {
-                id: "WAR-131.01",
-                goal: "Add the issues query beside fetch_project",
-                summary: "   ",
-            }],
+            "",
+            &[finished(
+                "Added the query.\n\nIt pages.",
+                None,
+                Some("Look at\nthe cursor."),
+            )],
             &[],
         );
 
         assert_eq!(
             body,
-            "## Sub-tasks\n\
+            "## Changes\n\
              \n\
-             ### WAR-131.01 Add the issues query beside fetch_project\n"
+             - Added the query. It pages.\n\
+             \n\
+             ## Review notes\n\
+             \n\
+             - Look at the cursor.\n"
         );
     }
 
     #[test]
     fn several_scopes_each_get_their_own_list() {
         let body = pull_request_body(
+            "",
             &[],
             &[
                 Touched {

@@ -87,6 +87,7 @@ fn a_split() -> Vec<PullSubtask> {
                 notes: "The queue order is settled; do not re-sort it.".to_owned(),
             },
         ],
+        ..splitting::Fill::default()
     })
 }
 
@@ -207,6 +208,7 @@ fn the_wire_keys_are_the_ones_a_forman_state_file_spells() {
             "branch",
             "pulled_at",
             "pr_url",
+            "summary",
             "subtasks",
         ],
     );
@@ -217,9 +219,9 @@ fn the_wire_keys_are_the_ones_a_forman_state_file_spells() {
         .keys()
         .map(String::as_str)
         .collect();
-    // The brief's four keys come last, after every key a record written before
-    // they existed holds — `WAR_124` above is one, and it read — so the diff
-    // between the two is four added lines and nothing moved.
+    // Each key added after records were already being written goes last, after
+    // every key an older record holds — `WAR_124` above is one, and it read — so
+    // the diff between the two is added lines and nothing moved.
     assert_eq!(
         subtask_keys,
         [
@@ -237,6 +239,8 @@ fn the_wire_keys_are_the_ones_a_forman_state_file_spells() {
             "likely_files",
             "test_plan",
             "notes",
+            "tested",
+            "review_notes",
         ],
     );
 }
@@ -1126,6 +1130,7 @@ fn a_slot_the_split_left_empty_is_no_heading_rather_than_an_empty_one() {
             test_plan: "   \n ".to_owned(),
             ..splitting::Subtask::default()
         }],
+        ..splitting::Fill::default()
     };
     let subtask = subtasks(&fill).pop().expect("one sub-task");
 

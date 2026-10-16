@@ -17,7 +17,10 @@ const DESCRIPTION: &str = "A pulled ticket is one description, and the run needs
                            of small sub-tasks.";
 
 fn split(subtasks: Vec<Subtask>) -> Fill {
-    Fill { subtasks }
+    Fill {
+        subtasks,
+        ..Fill::default()
+    }
 }
 
 fn sound(which: usize) -> Subtask {
@@ -437,7 +440,7 @@ fn the_instructions_carry_the_ticket_and_the_shape() {
     assert!(
         text.ends_with(
             "{\"subtasks\":[{\"goal\":\"\",\"depends_on\":[],\"definition_of_done\":[],\
-             \"likely_files\":[],\"test_plan\":\"\",\"notes\":\"\"}]}"
+             \"likely_files\":[],\"test_plan\":\"\",\"notes\":\"\"}],\"summary\":\"\"}"
         ),
         "{text}"
     );

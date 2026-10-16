@@ -940,12 +940,14 @@ const TOUCHED_NOTE: &str = "Open on this machine, and not the scope this ticket 
 ///
 /// Borrowed and flat on purpose. The run record is another ticket's to own, and a
 /// body that took its types would make rendering wait on them; mapping a record
-/// into these three strings is a line at the call site.
+/// into these strings is a line at the call site.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Finished<'a> {
     pub id: &'a str,
     pub goal: &'a str,
     pub summary: &'a str,
+    pub tested: Option<&'a str>,
+    pub review_notes: Option<&'a str>,
 }
 
 /// A scope open on this machine that the run edited under, other than the one
@@ -973,41 +975,72 @@ pub fn pull_request_title(ticket: &str, title: &str) -> String {
 }
 
 /// What the pull request says, and what gets commented on the ticket when there
-/// is no `gh` to open one.
+/// is no `gh` to open one: the split's summary, then what changed, how it was
+/// tested, what to review, and any scope the work reached outside its own.
 ///
-/// The ticket's description is not copied in: the title carries the identifier,
-/// which the board links back to, and a reviewer scrolling past the whole ticket
-/// to reach what changed is what copying it cost.
+/// Sub-task identifiers and goals are left out. They are warlock's plan for the
+/// work, a reviewer reads the change, and the commits already carry one
+/// identifier each for anybody who wants the plan. The ticket's description is
+/// left out too: the title carries the identifier the board links back to.
 ///
 /// A section with nothing in it is absent rather than an empty heading: a run
-/// that crossed nothing is the ordinary run, and bare headings saying so would
+/// with nothing to flag is the ordinary run, and bare headings saying so would
 /// be the bulk of its body.
 ///
 /// ```
 /// use warlock_tui::{Finished, pull_request_body};
 ///
 /// let body = pull_request_body(
-///     &[Finished { id: "WAR-131.01", goal: "Add the issues query", summary: "Added it." }],
+///     "Adds the issues query.",
+///     &[Finished {
+///         id: "WAR-131.01",
+///         goal: "Add the issues query",
+///         summary: "Added it.",
+///         tested: None,
+///         review_notes: None,
+///     }],
 ///     &[],
 /// );
 ///
-/// assert_eq!(body, "## Sub-tasks\n\n### WAR-131.01 Add the issues query\n\nAdded it.\n");
+/// assert_eq!(body, "Adds the issues query.\n\n## Changes\n\n- Added it.\n");
 /// ```
 #[must_use]
-pub fn pull_request_body(finished: &[Finished<'_>], touched: &[Touched<'_>]) -> String {
+pub fn pull_request_body(
+    summary: &str,
+    finished: &[Finished<'_>],
+    touched: &[Touched<'_>],
+) -> String {
     let mut blocks: Vec<String> = Vec::new();
 
-    if !finished.is_empty() {
-        let mut block = String::from("## Sub-tasks");
-        for task in finished {
-            let _ = write!(block, "\n\n### {} {}", task.id.trim(), task.goal.trim());
-            let summary = task.summary.trim();
-            if !summary.is_empty() {
-                let _ = write!(block, "\n\n{summary}");
-            }
-        }
-        blocks.push(block);
+    let summary = summary.trim();
+    if !summary.is_empty() {
+        blocks.push(summary.to_owned());
     }
+
+    // The goal stands in for a summary the session left blank, so every
+    // sub-task the run finished is still a line: a change with no line under
+    // it is a commit the reviewer goes looking for.
+    listed(
+        &mut blocks,
+        "## Changes",
+        finished.iter().map(|task| {
+            if task.summary.trim().is_empty() {
+                task.goal
+            } else {
+                task.summary
+            }
+        }),
+    );
+    listed(
+        &mut blocks,
+        "## Testing",
+        finished.iter().filter_map(|task| task.tested),
+    );
+    listed(
+        &mut blocks,
+        "## Review notes",
+        finished.iter().filter_map(|task| task.review_notes),
+    );
 
     if !touched.is_empty() {
         let mut block = format!("## Scopes touched\n\n{TOUCHED_NOTE}");
@@ -1030,6 +1063,20 @@ pub fn pull_request_body(finished: &[Finished<'_>], touched: &[Touched<'_>]) -> 
     let mut body = blocks.join("\n\n");
     body.push('\n');
     body
+}
+
+// Each entry folded onto one line, because a newline inside a bullet ends the
+// list in GitHub's renderer and in Linear's, and the rest of the entry lands
+// as a paragraph under it.
+fn listed<'a>(blocks: &mut Vec<String>, heading: &str, entries: impl Iterator<Item = &'a str>) {
+    let lines: Vec<String> = entries
+        .map(|entry| entry.split_whitespace().collect::<Vec<_>>().join(" "))
+        .filter(|entry| !entry.is_empty())
+        .map(|entry| format!("- {entry}"))
+        .collect();
+    if !lines.is_empty() {
+        blocks.push(format!("{heading}\n\n{}", lines.join("\n")));
+    }
 }
 
 /// The program the pull request goes through, and the only one this half runs.

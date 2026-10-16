@@ -268,20 +268,29 @@ pub(crate) fn edit_for(key: KeyEvent, field: &ScopeField) -> Edited {
     }
 }
 
-/// Which of the record's three values is being typed in.
+/// One value of a `[[scope]]` record, named: what a refusal about it says, and
+/// — for the ones the record window draws — which value is being typed in.
 ///
-/// The order is the order [`ScopeRecord::new`](warlock_engine::ScopeRecord::new)
-/// takes them and the order the frame draws them, so a reader tabbing down the
-/// window is filling the record top to bottom.
+/// Every tracker's own values are here beside the two that every record
+/// carries: `TeamKey` is Linear's, `BaseUrl` and `ProjectKey` are Jira's. Only
+/// [`ALL`](Self::ALL) is the window's, and it is Linear's three in the order
+/// [`ScopeRecord::new`](warlock_engine::ScopeRecord::new) takes them and the
+/// order the frame draws them, so a reader tabbing down the window is filling
+/// the record top to bottom.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub enum RecordField {
     #[default]
     TeamKey,
+    BaseUrl,
+    ProjectKey,
     ReviewState,
     Label,
 }
 
 impl RecordField {
+    /// The fields of the Linear form the record window draws, in its order.
+    /// Jira's two are deliberately absent: the panel opens a Linear form, and a
+    /// longer list here would be two more rows in the frame.
     pub const ALL: [Self; 3] = [Self::TeamKey, Self::ReviewState, Self::Label];
 
     /// What the frame prints beside the field, and what a refusal about it
@@ -290,6 +299,8 @@ impl RecordField {
     pub const fn name(self) -> &'static str {
         match self {
             Self::TeamKey => "team key",
+            Self::BaseUrl => "base URL",
+            Self::ProjectKey => "project key",
             Self::ReviewState => "review state",
             Self::Label => "label",
         }
@@ -297,13 +308,17 @@ impl RecordField {
 
     // Wrapping rather than stopping at the ends: there is no submit button to
     // fall off the bottom onto, so the only thing past the last field is the
-    // first one.
+    // first one. The walk is `ALL`'s, so Jira's two — which no window draws —
+    // stay where they are rather than dropping the cursor into a row that is
+    // not on screen.
     #[must_use]
     pub const fn next(self) -> Self {
         match self {
             Self::TeamKey => Self::ReviewState,
             Self::ReviewState => Self::Label,
             Self::Label => Self::TeamKey,
+            Self::BaseUrl => Self::BaseUrl,
+            Self::ProjectKey => Self::ProjectKey,
         }
     }
 
@@ -313,6 +328,8 @@ impl RecordField {
             Self::TeamKey => Self::Label,
             Self::ReviewState => Self::TeamKey,
             Self::Label => Self::ReviewState,
+            Self::BaseUrl => Self::BaseUrl,
+            Self::ProjectKey => Self::ProjectKey,
         }
     }
 }
@@ -366,12 +383,18 @@ impl RecordForm {
         self.focus
     }
 
+    // Only `RecordField::ALL` has a slot here, because this form is Linear's
+    // three fields: Jira's two name a refusal the shell printed and are never
+    // asked of the form.
     #[must_use]
     pub(crate) const fn field(&self, which: RecordField) -> &ScopeField {
         match which {
             RecordField::TeamKey => &self.team,
             RecordField::ReviewState => &self.review_state,
             RecordField::Label => &self.label,
+            RecordField::BaseUrl | RecordField::ProjectKey => {
+                panic!("the record window's form holds Linear's three fields")
+            }
         }
     }
 
@@ -396,6 +419,9 @@ impl RecordForm {
             RecordField::TeamKey => &mut self.team,
             RecordField::ReviewState => &mut self.review_state,
             RecordField::Label => &mut self.label,
+            RecordField::BaseUrl | RecordField::ProjectKey => {
+                panic!("the record window's form holds Linear's three fields")
+            }
         }
     }
 }

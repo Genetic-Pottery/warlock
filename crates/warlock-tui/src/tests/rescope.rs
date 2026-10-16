@@ -5,7 +5,7 @@ use warlock_engine::{
     LinearScope, Manifest, ScopeRecord, ScopedDirectory, route_facts, scope, validate_scope,
 };
 
-use super::{RecordFields, Rescoped, ScopeRefusal, records_scope, rescope};
+use super::{RecordFields, Rescoped, ScopeRefusal, TrackerFields, records_scope, rescope};
 use crate::prompt::RecordField;
 
 // The team key is read through the view, which is the only way there is to
@@ -40,7 +40,9 @@ fn recorded() -> Manifest {
 
 fn a_record() -> RecordFields<'static> {
     RecordFields {
-        team_key: Some("Billing"),
+        tracker: TrackerFields::Linear {
+            team_key: Some("Billing"),
+        },
         review_state: Some("In Review"),
         label: Some("area/billing"),
     }
@@ -120,10 +122,38 @@ fn a_name_nothing_records_names_every_field_that_was_not_given() {
         ),
         (
             RecordFields {
-                team_key: None,
+                tracker: TrackerFields::Linear { team_key: None },
                 ..a_record()
             },
             vec![RecordField::TeamKey],
+        ),
+        // The tracker it was handed decides which fields a refusal can name
+        // and the order it names them in: Jira's two, in the order
+        // `ScopeRecord::jira` takes them, and no team key.
+        (
+            RecordFields {
+                tracker: TrackerFields::Jira {
+                    base_url: None,
+                    project_key: Some("PAY"),
+                },
+                ..a_record()
+            },
+            vec![RecordField::BaseUrl],
+        ),
+        (
+            RecordFields {
+                tracker: TrackerFields::Jira {
+                    base_url: None,
+                    project_key: None,
+                },
+                label: None,
+                ..a_record()
+            },
+            vec![
+                RecordField::BaseUrl,
+                RecordField::ProjectKey,
+                RecordField::Label,
+            ],
         ),
     ] {
         assert_eq!(
@@ -157,7 +187,7 @@ fn a_blank_value_is_refused_rather_than_trimmed_into_acceptability() {
     for (record, blank) in [
         (
             RecordFields {
-                team_key: Some(""),
+                tracker: TrackerFields::Linear { team_key: Some("") },
                 ..a_record()
             },
             vec![RecordField::TeamKey],
@@ -171,7 +201,9 @@ fn a_blank_value_is_refused_rather_than_trimmed_into_acceptability() {
         ),
         (
             RecordFields {
-                team_key: Some(" "),
+                tracker: TrackerFields::Linear {
+                    team_key: Some(" "),
+                },
                 review_state: Some(""),
                 label: Some("\t "),
             },
@@ -207,7 +239,7 @@ fn a_value_at_a_name_something_already_records_is_refused_before_it_is_judged_bl
             ..RecordFields::default()
         },
         RecordFields {
-            team_key: Some(""),
+            tracker: TrackerFields::Linear { team_key: Some("") },
             ..RecordFields::default()
         },
     ] {
@@ -261,7 +293,9 @@ fn a_new_record_is_stored_as_given_after_the_ones_already_there() {
         "crates/tui",
         Some("billing"),
         RecordFields {
-            team_key: Some(" Billing Squad "),
+            tracker: TrackerFields::Linear {
+                team_key: Some(" Billing Squad "),
+            },
             review_state: Some("In Review"),
             label: Some("Area/Billing"),
         },
@@ -280,6 +314,56 @@ fn a_new_record_is_stored_as_given_after_the_ones_already_there() {
         manifest.directory("crates/engine"),
         recorded().directory("crates/engine")
     );
+}
+
+#[test]
+fn jira_fields_are_written_as_a_jira_record_with_both_values_as_given() {
+    // The trailing slash and the spaces around the project key are somebody's
+    // site and somebody's project as they typed them, so they are handed on
+    // untouched for the reason the Linear write above is.
+    let rescoped = written(
+        "crates/tui",
+        Some("payments"),
+        RecordFields {
+            tracker: TrackerFields::Jira {
+                base_url: Some("https://acme.atlassian.net/"),
+                project_key: Some(" PAY "),
+            },
+            review_state: Some("In Review"),
+            label: Some("area/pay"),
+        },
+    );
+    let manifest = rescoped.manifest;
+
+    assert_eq!(manifest.scopes()[..3], recorded().scopes()[..]);
+    let record = manifest.scopes().last().expect("the record was added");
+    assert_eq!(
+        record,
+        &ScopeRecord::jira(
+            "payments",
+            "https://acme.atlassian.net/",
+            " PAY ",
+            "In Review",
+            "area/pay",
+        ),
+        "the record written is the one `ScopeRecord::jira` builds from the same values"
+    );
+    assert!(
+        LinearScope::of(record).is_err(),
+        "a Jira record is not a Linear scope, which is the whole of what the tracker decides"
+    );
+    assert_eq!(scope_at(&manifest, "crates/tui"), Some("payments"));
+
+    // Through the file as well as the value: which board a record names is a
+    // key somebody reads and hand-edits.
+    let text = manifest.to_toml_string().expect("the manifest serialises");
+    for line in [
+        "tracker = \"jira\"",
+        "base_url = \"https://acme.atlassian.net/\"",
+        "project_key = \" PAY \"",
+    ] {
+        assert!(text.contains(line), "no `{line}` in {text}");
+    }
 }
 
 /// Every `\n\n`-separated block of the saved file that mentions none of

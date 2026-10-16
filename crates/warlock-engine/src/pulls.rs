@@ -192,6 +192,11 @@ pub struct PullRun {
     // halfway through a run is a diff nobody can read, and `state.json` is
     // rewritten before and after every sub-task.
     pr_url: Option<String>,
+    // The split's account of the whole ticket, for the top of the pull
+    // request. Held here because the split is one session at the start of the
+    // run, and a run resumed on another day finishes without asking it again.
+    #[serde(default)]
+    summary: Option<String>,
     subtasks: Vec<PullSubtask>,
 }
 
@@ -212,6 +217,7 @@ impl PullRun {
             branch: branch.into(),
             pulled_at: pulled_at.into(),
             pr_url: None,
+            summary: None,
             subtasks: Vec::new(),
         }
     }
@@ -258,6 +264,11 @@ impl PullRun {
     }
 
     #[must_use]
+    pub fn summary(&self) -> Option<&str> {
+        self.summary.as_deref()
+    }
+
+    #[must_use]
     pub fn subtasks(&self) -> &[PullSubtask] {
         &self.subtasks
     }
@@ -268,6 +279,10 @@ impl PullRun {
 
     pub fn set_pr_url(&mut self, url: impl Into<String>) {
         self.pr_url = Some(url.into());
+    }
+
+    pub fn set_summary(&mut self, summary: impl Into<String>) {
+        self.summary = Some(summary.into());
     }
 
     pub fn push_subtask(&mut self, subtask: PullSubtask) {
@@ -852,6 +867,8 @@ pub struct PullSubtask {
     test_plan: Option<String>,
     notes: Option<String>,
     log: Option<String>,
+    tested: Option<String>,
+    review_notes: Option<String>,
     started_at: Option<String>,
     finished_at: Option<String>,
     // Set through `set_session_id` and `set_cost_usd` whatever the outcome, not
@@ -879,6 +896,8 @@ impl PullSubtask {
             test_plan: None,
             notes: None,
             log: None,
+            tested: None,
+            review_notes: None,
             started_at: None,
             finished_at: None,
             session_id: None,
@@ -982,6 +1001,16 @@ impl PullSubtask {
     }
 
     #[must_use]
+    pub fn tested(&self) -> Option<&str> {
+        self.tested.as_deref()
+    }
+
+    #[must_use]
+    pub fn review_notes(&self) -> Option<&str> {
+        self.review_notes.as_deref()
+    }
+
+    #[must_use]
     pub fn started_at(&self) -> Option<&str> {
         self.started_at.as_deref()
     }
@@ -1007,6 +1036,14 @@ impl PullSubtask {
 
     pub fn set_log(&mut self, log: impl Into<String>) {
         self.log = Some(log.into());
+    }
+
+    pub fn set_tested(&mut self, tested: impl Into<String>) {
+        self.tested = Some(tested.into());
+    }
+
+    pub fn set_review_notes(&mut self, notes: impl Into<String>) {
+        self.review_notes = Some(notes.into());
     }
 
     pub fn set_started_at(&mut self, at: impl Into<String>) {
@@ -1161,6 +1198,7 @@ fn said(value: String) -> Option<String> {
 ///         test_plan: "cargo test -p warlock-linear".to_owned(),
 ///         ..Subtask::default()
 ///     }],
+///     ..Fill::default()
 /// };
 /// let numbered = number(&fill, "WAR-140").expect("nothing here waits on itself");
 ///
@@ -1376,6 +1414,10 @@ struct WireSubtask {
     test_plan: Option<String>,
     #[serde(default)]
     notes: Option<String>,
+    #[serde(default)]
+    tested: Option<String>,
+    #[serde(default)]
+    review_notes: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -1419,6 +1461,8 @@ impl From<PullSubtask> for WireSubtask {
             depends_on: subtask.depends_on,
             blocked_reason,
             log: subtask.log,
+            tested: subtask.tested,
+            review_notes: subtask.review_notes,
             started_at: subtask.started_at,
             finished_at: subtask.finished_at,
             session_id: subtask.session_id,
@@ -1442,6 +1486,8 @@ impl TryFrom<WireSubtask> for PullSubtask {
             depends_on,
             blocked_reason,
             log,
+            tested,
+            review_notes,
             started_at,
             finished_at,
             session_id,
@@ -1488,6 +1534,8 @@ impl TryFrom<WireSubtask> for PullSubtask {
             test_plan: test_plan.and_then(said),
             notes: notes.and_then(said),
             log,
+            tested,
+            review_notes,
             started_at,
             finished_at,
             session_id,

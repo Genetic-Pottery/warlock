@@ -29,9 +29,9 @@ use ratatui::crossterm::event::{self, Event};
 use warlock_tui::check::{self, check};
 use warlock_tui::planned;
 use warlock_tui::{
-    Error, Interactive, POLL_INTERVAL, RecordFields, branch_clear, branch_show, branch_use, brief,
-    close_scopes, key_add, key_forget, key_list, key_show, key_use, open_list, open_scopes, pull,
-    push, resume, scope_add, scope_remove, status_for,
+    Error, Interactive, POLL_INTERVAL, RecordFields, TrackerFields, branch_clear, branch_show,
+    branch_use, brief, close_scopes, key_add, key_forget, key_list, key_show, key_use, open_list,
+    open_scopes, pull, push, resume, scope_add, scope_remove, status_for,
 };
 
 mod terminal;
@@ -439,7 +439,11 @@ fn main() -> ExitCode {
                 &path,
                 &scope,
                 RecordFields {
-                    team_key: team_key.as_deref(),
+                    // Linear-shaped, because `scope add`'s flags are: there is
+                    // no tracker argument and no Jira flag to fill in.
+                    tracker: TrackerFields::Linear {
+                        team_key: team_key.as_deref(),
+                    },
                     review_state: review_state.as_deref(),
                     label: label.as_deref(),
                 },

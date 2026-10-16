@@ -5,26 +5,70 @@ use warlock_engine::{Manifest, ScopeRecord, scope, validate_scope};
 use crate::prompt::RecordField;
 use crate::writing::listing;
 
-// The three values of a `[[scope]]` record exactly as a door was handed them:
-// absent, or a value with nothing done to it. Whether they are required,
-// forbidden or blank is a fact about what the manifest already records, so it
-// is judged inside [`rescope`] and never before it.
+// The values of a `[[scope]]` record exactly as a door was handed them: absent,
+// or a value with nothing done to it. Whether they are required, forbidden or
+// blank is a fact about what the manifest already records, so it is judged
+// inside [`rescope`] and never before it.
+//
+// Tracker-shaped for the reason [`Tracker`](warlock_engine::Tracker) is: a flat
+// `team_key` beside the other two is a Linear field every set of fields carries,
+// and a door filling one in for Jira had nowhere to put a base URL. The shape
+// here is what decides which [`ScopeRecord`] constructor the write goes through.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct RecordFields<'a> {
-    pub team_key: Option<&'a str>,
+    pub tracker: TrackerFields<'a>,
     pub review_state: Option<&'a str>,
     pub label: Option<&'a str>,
 }
 
+/// The values that address one board, as a door was handed them.
+///
+/// Linear by default, because that is the shape both of today's doors fill in:
+/// the record window draws Linear's one field and `warlock scope add` takes
+/// Linear's one flag.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrackerFields<'a> {
+    Linear {
+        team_key: Option<&'a str>,
+    },
+    Jira {
+        base_url: Option<&'a str>,
+        project_key: Option<&'a str>,
+    },
+}
+
+impl Default for TrackerFields<'_> {
+    fn default() -> Self {
+        Self::Linear { team_key: None }
+    }
+}
+
+impl<'a> TrackerFields<'a> {
+    // In the order the tracker's own constructor takes them, which for Linear
+    // is also the record window's field order.
+    fn given(self) -> Vec<(RecordField, Option<&'a str>)> {
+        match self {
+            Self::Linear { team_key } => vec![(RecordField::TeamKey, team_key)],
+            Self::Jira {
+                base_url,
+                project_key,
+            } => vec![
+                (RecordField::BaseUrl, base_url),
+                (RecordField::ProjectKey, project_key),
+            ],
+        }
+    }
+}
+
 impl<'a> RecordFields<'a> {
-    // In the record window's field order, so a refusal naming several of them
-    // names them in the order a reader meets them in either door.
-    const fn given(self) -> [(RecordField, Option<&'a str>); 3] {
-        [
-            (RecordField::TeamKey, self.team_key),
-            (RecordField::ReviewState, self.review_state),
-            (RecordField::Label, self.label),
-        ]
+    // The tracker's own values first and then the two every record carries, so
+    // a refusal naming several of them names them in the order a reader meets
+    // them in the door they came from.
+    fn given(self) -> Vec<(RecordField, Option<&'a str>)> {
+        let mut given = self.tracker.given();
+        given.push((RecordField::ReviewState, self.review_state));
+        given.push((RecordField::Label, self.label));
+        given
     }
 
     fn named(self, wrong: impl Fn(Option<&str>) -> bool) -> Vec<RecordField> {
@@ -33,6 +77,24 @@ impl<'a> RecordFields<'a> {
             .filter(|(_, value)| wrong(*value))
             .map(|(field, _)| field)
             .collect()
+    }
+
+    // `None` for any field this shape needs and was not handed, which is what
+    // [`rescope`] reads as the cue to refuse rather than write. The one place a
+    // record is built out of these fields, so the written record's tracker is
+    // the shape the door filled in and cannot be anything else.
+    fn recorded(self, scope: &str) -> Option<ScopeRecord> {
+        let review_state = self.review_state?;
+        let label = self.label?;
+        Some(match self.tracker {
+            TrackerFields::Linear { team_key } => {
+                ScopeRecord::new(scope, team_key?, review_state, label)
+            }
+            TrackerFields::Jira {
+                base_url,
+                project_key,
+            } => ScopeRecord::jira(scope, base_url?, project_key?, review_state, label),
+        })
     }
 }
 
@@ -117,22 +179,21 @@ pub(crate) fn rescope(
         }
         manifest.rescoped(module, Some(&scope))
     } else {
-        let (Some(team_key), Some(review_state), Some(label)) =
-            (record.team_key, record.review_state, record.label)
-        else {
+        let Some(written) = record.recorded(&scope) else {
             return Err(ScopeRefusal::NeedsRecord {
                 missing: record.named(|value| value.is_none()),
                 scope,
             });
         };
         // Judged on a trimmed copy while the untrimmed string is what gets
-        // stored: a team, a review state and a label belong to somebody's
-        // tracker, and warlock is in no position to correct their spelling.
+        // stored: a team, a base URL, a project key, a review state and a label
+        // belong to somebody's tracker, and warlock is in no position to
+        // correct their spelling.
         let blank = record.named(|value| value.is_some_and(|value| value.trim().is_empty()));
         if !blank.is_empty() {
             return Err(ScopeRefusal::BlankRecord { fields: blank });
         }
-        with_scope_recorded(manifest, module, &scope, team_key, review_state, label)
+        with_scope_recorded(manifest, module, &scope, written)
     };
 
     Ok(Rescoped {
@@ -150,22 +211,15 @@ pub(crate) fn records_scope(manifest: &Manifest, name: &str) -> bool {
 // to name a record spelled differently from the one this call created, and both
 // halves are one returned `Manifest` so the caller saves once: a scope on disk
 // whose record failed to write is the half-state this exists to make
-// impossible. The three record values go to `ScopeRecord::new` exactly as
-// given, which is what its own comment requires.
+// impossible. The record arrives built, out of the values it was handed exactly
+// as given, which is what `ScopeRecord`'s own comment requires.
 fn with_scope_recorded(
     manifest: &Manifest,
     module: &str,
     scope: &str,
-    team_key: &str,
-    review_state: &str,
-    label: &str,
+    record: ScopeRecord,
 ) -> Manifest {
-    let recorded = manifest.scopes().iter().cloned().chain([ScopeRecord::new(
-        scope,
-        team_key,
-        review_state,
-        label,
-    )]);
+    let recorded = manifest.scopes().iter().cloned().chain([record]);
 
     manifest.rescoped(module, Some(scope)).with_scopes(recorded)
 }
@@ -173,6 +227,8 @@ fn with_scope_recorded(
 const fn flag(field: RecordField) -> &'static str {
     match field {
         RecordField::TeamKey => "--team-key",
+        RecordField::BaseUrl => "--base-url",
+        RecordField::ProjectKey => "--project-key",
         RecordField::ReviewState => "--review-state",
         RecordField::Label => "--label",
     }

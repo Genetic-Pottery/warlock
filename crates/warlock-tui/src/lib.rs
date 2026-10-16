@@ -149,6 +149,7 @@ pub use pull::pull;
 pub use push::push;
 pub use queue::choose;
 pub use rescope::RecordFields;
+pub use rescope::TrackerFields;
 pub use resume::resume;
 pub use screen::Screen;
 pub use template::DEFAULT_TEMPLATE;

@@ -2,6 +2,7 @@ use std::path::Path;
 
 use tempfile::TempDir;
 use warlock_engine::splitting::{Caught, Cycle, Numbered};
+use warlock_engine::working;
 use warlock_engine::{
     LinearScope, Manifest, PullRun, PullSubtask, RunStatus, ScopeRecord, ScopedDirectory,
     SubtaskStatus, state_path,
@@ -391,7 +392,11 @@ fn numbered(id: &str, goal: &str, depends_on: &[&str]) -> Numbered {
 }
 
 fn sliced(subtasks: Vec<Numbered>, repairs: Vec<String>) -> Slicing {
-    Slicing::answering(Split::Subtasks { subtasks, repairs })
+    Slicing::answering(Split::Subtasks {
+        subtasks,
+        repairs,
+        summary: String::new(),
+    })
 }
 
 /// One whole pull, over the seams, with the progress it printed.
@@ -1090,16 +1095,21 @@ fn two_sub_tasks() -> (Checkout, Slicing, Sessions) {
 /// builds it.
 fn expected_body() -> String {
     pull_request_body(
+        &format!("What {TICKET} changes, in one sentence."),
         &[
             Finished {
                 id: "WAR-140.01",
                 goal: "Add the reader",
                 summary: "Added the reader.",
+                tested: None,
+                review_notes: None,
             },
             Finished {
                 id: "WAR-140.02",
                 goal: "Use the reader",
                 summary: "Used the reader.",
+                tested: None,
+                review_notes: None,
             },
         ],
         &[Touched {
@@ -1107,6 +1117,34 @@ fn expected_body() -> String {
             paths: vec!["docs/route.md"],
         }],
     )
+}
+
+#[test]
+fn what_a_session_tested_and_flagged_reaches_the_pull_request() {
+    let ground = Ground::new();
+    let board = Boarding::filing("");
+    let forge = Forging::opening(URL);
+    let repo = Checkout::clean(DEFAULT).trees([wrote("crates/engine/src/read.rs")]);
+    let split = Slicing::into_chain(TICKET, &["Add the reader"]);
+    let sessions =
+        Sessions::answering([Worked::Answered(working::accept(&working::stub_reviewed(
+            "Added the reader.",
+            Some("Reader tests cover an empty file."),
+            Some("The reader panics on a file it cannot open."),
+        )))]);
+
+    let (pulled, _) = pull(&ground, &board, &repo, &forge, &split, &sessions);
+
+    assert!(pulled.is_ok(), "{pulled:?}");
+    let body = &forge.asked()[0].body;
+    assert!(
+        body.contains("## Testing\n\n- Reader tests cover an empty file.\n"),
+        "{body}"
+    );
+    assert!(
+        body.contains("## Review notes\n\n- The reader panics on a file it cannot open.\n"),
+        "{body}"
+    );
 }
 
 #[test]
