@@ -2,8 +2,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use super::{
-    Error, MANIFEST_FILE, Manifest, SCHEMA_VERSION, ScopeFault, ScopeRecord, ScopedDirectory,
-    from_manifest_path, manifest_path, to_manifest_path,
+    Error, LinearScope, MANIFEST_FILE, Manifest, NotLinear, SCHEMA_VERSION, ScopeFault,
+    ScopeRecord, ScopedDirectory, from_manifest_path, manifest_path, to_manifest_path,
 };
 
 fn engine() -> ScopedDirectory {
@@ -215,6 +215,33 @@ fn a_scope_record_round_trips_byte_for_byte() {
         fs::read_to_string(manifest_path(root.path())).expect("reads"),
         original,
         "a load-then-save is a no-op on the bytes of a record too"
+    );
+}
+
+#[test]
+fn a_record_read_as_a_linear_scope_carries_its_values_as_spelled() {
+    let record = ScopeRecord::new("data-plane", " War ", "In Review", "area/Data_Plane");
+    let linear = LinearScope::of(&record).expect("every record files to Linear");
+
+    assert_eq!(linear.name(), "data-plane");
+    assert_eq!(linear.team_key(), " War ", "neither trimmed nor folded");
+    assert_eq!(linear.review_state(), "In Review", "not folded");
+    assert_eq!(linear.label(), "area/Data_Plane", "not folded either");
+}
+
+// Built here rather than asked of `LinearScope::of`, which answers `Ok` for
+// every record `ScopeRecord` can hold: the sentence is what a scope filing
+// somewhere warlock cannot file to will say, and it is fixed before any record
+// can be one.
+#[test]
+fn a_scope_that_files_elsewhere_is_refused_by_name_with_nothing_sent() {
+    let refusal = NotLinear {
+        scope: "payments".to_owned(),
+    };
+
+    assert_eq!(
+        refusal.to_string(),
+        "`payments` files to Jira, and warlock can only file to Linear, so nothing was sent"
     );
 }
 

@@ -33,7 +33,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use warlock_engine::{
-    Manifest, PullRun, ScopeRecord, brief_path, held_runs, resolve_filing, scope_opens_to,
+    LinearScope, Manifest, PullRun, ScopeRecord, brief_path, held_runs, resolve_filing,
+    scope_opens_to,
 };
 
 use crate::account::{THINKING, WRITING, tool_line};
@@ -135,8 +136,9 @@ pub(crate) fn pulled<O: Opens, R: Repository, F: Forge, S: Splits, W: Works, P: 
     progress: &Shared<P>,
 ) -> Result<(), Error> {
     let (root, home) = (prepared.root(), prepared.home());
-    let record = prepared.record();
-    let scope = record.name();
+    // Before the tree is read and before the board is opened: a scope warlock
+    // cannot file to is refused with nothing run and no client built.
+    let scope = LinearScope::of(prepared.record())?;
 
     // Before the board is opened and before the queue is read: what a dirty tree
     // costs is a run that would fold somebody's uncommitted edit into a sub-task's
@@ -146,12 +148,12 @@ pub(crate) fn pulled<O: Opens, R: Repository, F: Forge, S: Splits, W: Works, P: 
     }
 
     let board = ports.open.open(prepared.value());
-    let selected = selection(&board, record, home, root, named, &mut |line| {
+    let selected = selection(&board, scope, home, root, named, &mut |line| {
         tell(progress, &line);
     })?;
 
     if dry_run {
-        for line in would(scope, named, &selected) {
+        for line in would(scope.name(), named, &selected) {
             tell(progress, &line);
         }
         return Ok(());
@@ -162,7 +164,7 @@ pub(crate) fn pulled<O: Opens, R: Repository, F: Forge, S: Splits, W: Works, P: 
     }
 
     let Some(issue) = selected.issue(named)? else {
-        tell(progress, &nothing_ready(scope));
+        tell(progress, &nothing_ready(scope.name()));
         return Ok(());
     };
 
@@ -183,7 +185,7 @@ pub(crate) fn pulled<O: Opens, R: Repository, F: Forge, S: Splits, W: Works, P: 
             forge: ports.forge,
             split: ports.split,
             sessions: ports.sessions,
-            scope: record,
+            scope,
             manifest,
             held: prepared.held(),
             base: prepared.base(),
@@ -330,32 +332,32 @@ pub(crate) fn clean<R: Repository>(repo: &R) -> Result<(), Error> {
 /// board does not swallow it.
 pub(crate) fn selection(
     board: &impl Board,
-    record: &ScopeRecord,
+    scope: LinearScope<'_>,
     home: &Path,
     root: &Path,
     named: Option<&str>,
     unreadable: &mut dyn FnMut(String),
 ) -> Result<Selected, Error> {
     let assignee = board.viewer()?;
-    let runs = held_runs(home, root, record.name()).map_err(|source| Error::Runs { source })?;
+    let runs = held_runs(home, root, scope.name()).map_err(|source| Error::Runs { source })?;
     for record in runs.unreadable() {
         unreadable(one_line(record));
     }
-    select(board, record, &assignee, named, runs.runs())
+    select(board, scope, &assignee, named, runs.runs())
 }
 
 fn select(
     board: &impl Board,
-    record: &ScopeRecord,
+    scope: LinearScope<'_>,
     assignee: &str,
     named: Option<&str>,
     runs: &[PullRun],
 ) -> Result<Selected, Error> {
     Ok(match named {
-        Some(ticket) => Selected::Named(take_named(board, record, assignee, ticket, runs)?),
+        Some(ticket) => Selected::Named(take_named(board, scope, assignee, ticket, runs)?),
         None => Selected::Chosen(choose(
-            &board.scope_queue(record.team_key(), record.label(), assignee)?,
-            record.review_state(),
+            &board.scope_queue(scope.team_key(), scope.label(), assignee)?,
+            scope.review_state(),
             runs,
         )),
     })

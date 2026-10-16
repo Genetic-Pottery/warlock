@@ -161,6 +161,13 @@ pub enum Error {
     Filing {
         source: filing::Error,
     },
+    // A scope whose record files somewhere warlock cannot file to, carried
+    // rather than reworded: the engine's sentence already names the scope and
+    // ends in nothing having been sent, which is the whole of what a caller on
+    // its way to a board has to say.
+    NotLinear {
+        source: manifest::NotLinear,
+    },
     // A file that is not a brief: absent, unreadable, untitled, or missing a
     // section of the repository's shape. Raised before a socket is opened, like
     // every other refusal a push has.
@@ -747,6 +754,10 @@ impl fmt::Display for Error {
             // Flattened because the key store and the manifest underneath can
             // carry a parser's diagnostic.
             Self::Filing { source } => write!(f, "{}", one_line(source)),
+            // The engine's sentence to the letter, for `Filing`'s reason: it
+            // names the scope and what it cost, and a second wording here would
+            // be a second answer to one question.
+            Self::NotLinear { source } => write!(f, "{source}"),
             // The reader's own sentence about the document, which already ends
             // in what it cost — nothing was pushed.
             Self::Brief { source } => write!(f, "{source}"),
@@ -831,6 +842,7 @@ impl std::error::Error for Error {
             Self::Keys { source } => Some(source),
             Self::Route { source } => Some(source),
             Self::Filing { source } => Some(source),
+            Self::NotLinear { source } => Some(source),
             Self::Brief { source } => Some(source),
             Self::Template { source } => Some(source),
             Self::Briefs { source } => Some(source),
@@ -897,6 +909,15 @@ impl std::error::Error for Error {
 impl From<LinearError> for Error {
     fn from(source: LinearError) -> Self {
         Self::Linear { source }
+    }
+}
+
+// A `From` rather than a `map_err` at each site, because every caller that asks
+// a record for its Linear view is one `?` away from this and the refusal has
+// nothing to be told at any of them.
+impl From<manifest::NotLinear> for Error {
+    fn from(source: manifest::NotLinear) -> Self {
+        Self::NotLinear { source }
     }
 }
 

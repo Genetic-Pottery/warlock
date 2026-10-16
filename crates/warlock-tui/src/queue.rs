@@ -24,7 +24,7 @@ use std::cmp::Reverse;
 use std::collections::HashMap;
 use std::fmt;
 
-use warlock_engine::{PullRun, RunStatus, ScopeRecord};
+use warlock_engine::{LinearScope, PullRun, RunStatus};
 
 use crate::linear::{Assignee, Blocker, Board, Error as LinearError, Priority, Queue, QueuedIssue};
 
@@ -421,7 +421,7 @@ impl fmt::Display for Refusal {
 /// by id against the user the key belongs to, and nothing takes a flag past it.
 pub(crate) fn take_named(
     board: &impl Board,
-    record: &ScopeRecord,
+    scope: LinearScope<'_>,
     assignee: &str,
     ticket: &str,
     runs: &[PullRun],
@@ -438,9 +438,9 @@ pub(crate) fn take_named(
         }));
     };
 
-    if !same_name(found.team(), record.team_key()) {
+    if !same_name(found.team(), scope.team_key()) {
         return Ok(Named::Refused(Refusal::NotOnTeam {
-            team: record.team_key().to_owned(),
+            team: scope.team_key().to_owned(),
             found: found.team().to_owned(),
         }));
     }
@@ -448,10 +448,10 @@ pub(crate) fn take_named(
     if !found
         .labels()
         .iter()
-        .any(|label| same_name(label, record.label()))
+        .any(|label| same_name(label, scope.label()))
     {
         return Ok(Named::Refused(Refusal::Unlabelled {
-            label: record.label().to_owned(),
+            label: scope.label().to_owned(),
             carried: found.labels().to_vec(),
         }));
     }
@@ -473,7 +473,7 @@ pub(crate) fn take_named(
 
     let status = run_for(runs, found.issue().identifier()).map(PullRun::status);
 
-    if let Some(reason) = unavailable(found.issue(), record.review_state(), status) {
+    if let Some(reason) = unavailable(found.issue(), scope.review_state(), status) {
         return Ok(Named::Refused(Refusal::NotReady(reason)));
     }
 

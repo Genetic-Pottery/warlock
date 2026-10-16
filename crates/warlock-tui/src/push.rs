@@ -116,7 +116,7 @@ pub(crate) fn prepare(
     Ok(Prepared {
         root: root.to_path_buf(),
         brief,
-        destination: target.destination(),
+        destination: target.destination()?,
         value: Key::new(target.value()),
     })
 }

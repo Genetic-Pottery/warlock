@@ -54,7 +54,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use warlock_engine::{Manifest, PullRun, ScopeRecord, load_key_binding};
+use warlock_engine::{LinearScope, Manifest, PullRun, load_key_binding};
 
 use crate::app::App;
 use crate::claude::{
@@ -624,7 +624,16 @@ where
         // The question goes up over the lines that report the reading: what a
         // reader is being asked to confirm is what they have just read.
         if let Some(undertook) = chose.undertook {
-            self.confirm = asking(&undertook, choosing.work.prepared.record());
+            match LinearScope::of(choosing.work.prepared.record()) {
+                Ok(scope) => self.confirm = asking(&undertook, scope),
+                // The reading that got this far was made through the same view,
+                // so nothing reaches this arm today. It is a line and not an
+                // unwrap because a panic here takes the terminal with it.
+                Err(refusal) => {
+                    app.panel_mut().note(one_line(refusal), now);
+                    return;
+                }
+            }
             self.ready = Some(Ready {
                 work: choosing.work,
                 undertook,
@@ -1120,13 +1129,16 @@ fn chose<O: Opens, R: Repository>(
     if cancel.is_cancelled() {
         return Err(Error::Cancelled);
     }
+    // Before the tree is read and before the board is opened, as the headless
+    // door has it: a scope warlock cannot file to is refused having run nothing.
+    let scope = LinearScope::of(work.prepared.record())?;
     clean(repo)?;
 
     let board = open.open(work.prepared.value());
     let mut lines = Vec::new();
     let selected = selection(
         &board,
-        work.prepared.record(),
+        scope,
         work.prepared.home(),
         work.prepared.root(),
         work.named.as_deref(),
@@ -1137,7 +1149,7 @@ fn chose<O: Opens, R: Repository>(
     }
 
     let Some(issue) = selected.issue(work.named.as_deref())? else {
-        lines.push(nothing_ready(work.prepared.record().name()));
+        lines.push(nothing_ready(scope.name()));
         return Ok(Chose {
             lines,
             undertook: None,
@@ -1172,11 +1184,7 @@ fn chose<O: Opens, R: Repository>(
             next_runnable(run).map(|next| next.id().to_owned()),
         ),
         None => (
-            branch_name(
-                work.prepared.record().team_key(),
-                ticket.number,
-                &ticket.title,
-            ),
+            branch_name(scope.team_key(), ticket.number, &ticket.title),
             None,
         ),
     };
@@ -1209,8 +1217,19 @@ where
     workers.stream(|events| {
         move || {
             let Ready { work, undertook } = ready;
+            // Before a session is raised and before the board is opened: a
+            // scope warlock cannot file to ends the run here, with nothing
+            // spent and the line the panel prints for every other way a run
+            // stops.
+            let scope = match LinearScope::of(work.prepared.record()) {
+                Ok(scope) => scope,
+                Err(refusal) => {
+                    events.send(Step::Finished(Err(one_line(refusal))));
+                    return;
+                }
+            };
             let raised = spending.raises.raise(Raising {
-                scope: work.prepared.record().name(),
+                scope: scope.name(),
                 held: work.prepared.held(),
                 events: events.clone(),
                 stopping,
@@ -1235,7 +1254,7 @@ where
                 forge: &spending.forge,
                 split: &raised.split,
                 sessions: &raised.sessions,
-                scope: work.prepared.record(),
+                scope,
                 manifest: &work.manifest,
                 held: work.prepared.held(),
                 base: work.prepared.base(),
@@ -1282,7 +1301,7 @@ fn phase(app: &mut App, heading: &str, now: Instant) {
     app.panel_mut().start_work(now);
 }
 
-fn asking(undertook: &Undertook, record: &ScopeRecord) -> PullConfirm {
+fn asking(undertook: &Undertook, scope: LinearScope<'_>) -> PullConfirm {
     let Undertook {
         ticket,
         branch,
@@ -1295,16 +1314,16 @@ fn asking(undertook: &Undertook, record: &ScopeRecord) -> PullConfirm {
         Some(subtask) => PullConfirm::resuming(
             &ticket.identifier,
             &ticket.title,
-            record.name(),
-            record.team_key(),
+            scope.name(),
+            scope.team_key(),
             branch,
             subtask,
         ),
         None => PullConfirm::open(
             &ticket.identifier,
             &ticket.title,
-            record.name(),
-            record.team_key(),
+            scope.name(),
+            scope.team_key(),
             branch,
         ),
     }

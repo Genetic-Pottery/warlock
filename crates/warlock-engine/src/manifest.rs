@@ -438,6 +438,90 @@ impl ScopeRecord {
     }
 }
 
+/// One `[[scope]]` record read as a scope that files to Linear.
+///
+/// ```
+/// use warlock_engine::{LinearScope, ScopeRecord};
+///
+/// let record = ScopeRecord::new("data-plane", "WAR", "In Review", "area/data");
+/// let linear = LinearScope::of(&record)?;
+///
+/// assert_eq!(linear.name(), "data-plane");
+/// assert_eq!(linear.team_key(), "WAR");
+/// assert_eq!(linear.review_state(), "In Review");
+/// assert_eq!(linear.label(), "area/data");
+/// # Ok::<(), warlock_engine::manifest::NotLinear>(())
+/// ```
+// Borrowed and with private fields, so [`of`](Self::of) is the only way to hold
+// one: a `From`, a public field or a second constructor would let a caller
+// assert a record files to Linear without that having been read off the record,
+// which is the whole of what every flow taking this type is relying on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct LinearScope<'r> {
+    name: &'r str,
+    team_key: &'r str,
+    review_state: &'r str,
+    label: &'r str,
+}
+
+impl<'r> LinearScope<'r> {
+    /// The record seen as a Linear scope, or a refusal naming it.
+    // Fallible with nothing here that can refuse, on purpose: every record is a
+    // Linear one until `ScopeRecord` carries a tracker, and this is the one
+    // place that will answer `Err` when one does. An infallible signature now is
+    // a signature every caller would have to be rewritten against then, and the
+    // sentence `NotLinear` prints is fixed from here.
+    pub fn of(record: &'r ScopeRecord) -> Result<Self, NotLinear> {
+        Ok(Self {
+            name: &record.name,
+            team_key: &record.team_key,
+            review_state: &record.review_state,
+            label: &record.label,
+        })
+    }
+
+    #[must_use]
+    pub const fn name(&self) -> &'r str {
+        self.name
+    }
+
+    #[must_use]
+    pub const fn team_key(&self) -> &'r str {
+        self.team_key
+    }
+
+    #[must_use]
+    pub const fn review_state(&self) -> &'r str {
+        self.review_state
+    }
+
+    #[must_use]
+    pub const fn label(&self) -> &'r str {
+        self.label
+    }
+}
+
+/// A scope whose record does not file to Linear, which is the only board
+/// warlock can file to.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct NotLinear {
+    scope: String,
+}
+
+// Ends in what it cost, because every caller of `LinearScope::of` is on its way
+// to a board and this is the sentence that arrives instead: nothing was sent.
+impl fmt::Display for NotLinear {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "`{}` files to Jira, and warlock can only file to Linear, so nothing was sent",
+            self.scope
+        )
+    }
+}
+
+impl std::error::Error for NotLinear {}
+
 /// ```
 /// use std::path::Path;
 /// use warlock_engine::to_manifest_path;

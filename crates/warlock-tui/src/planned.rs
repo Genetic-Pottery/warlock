@@ -286,7 +286,7 @@ pub(crate) fn listing<O: Opens>(
 ) -> Result<(Destination, Listing), Error> {
     let target = resolve_filing(manifest, root, home, Some(scope))
         .map_err(|source| Error::Filing { source })?;
-    let destination = target.destination();
+    let destination = target.destination()?;
     let listing = open
         .open(target.value())
         .planned_projects(destination.team_key(), destination.label())?;
@@ -688,6 +688,9 @@ pub(crate) fn prepare<O: Opens>(
 ) -> Result<Planned, Error> {
     let target = resolve_filing(manifest, root, home, Some(scope))
         .map_err(|source| Error::Filing { source })?;
+    // Before the board is opened, so a scope warlock cannot file to is refused
+    // with no client built and nothing asked.
+    let destination = target.destination()?;
 
     let board = open.open(target.value());
     // Once for the run, here rather than in `cut::cut`, which is called per
@@ -739,11 +742,7 @@ pub(crate) fn prepare<O: Opens>(
     // the assignee, so a draft can wait on one by identifier. A queue that
     // cannot be read is not worth failing a draft over.
     let open = board
-        .scope_queue(
-            target.destination().team_key(),
-            target.destination().label(),
-            &assignee,
-        )
+        .scope_queue(destination.team_key(), destination.label(), &assignee)
         .map(|queue| queue.issues().to_vec())
         .unwrap_or_default();
 
@@ -760,7 +759,7 @@ pub(crate) fn prepare<O: Opens>(
         name: project.name().to_owned(),
         status: status.to_owned(),
         brief: block.brief().to_owned(),
-        destination: target.destination(),
+        destination,
         value: Key::new(target.value()),
         assignee,
         slices: ordered.into_iter().cloned().collect(),

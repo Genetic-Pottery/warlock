@@ -3,8 +3,8 @@ use std::path::Path;
 use tempfile::TempDir;
 use warlock_engine::splitting::{Caught, Cycle, Numbered};
 use warlock_engine::{
-    Manifest, PullRun, PullSubtask, RunStatus, ScopeRecord, ScopedDirectory, SubtaskStatus,
-    state_path,
+    LinearScope, Manifest, PullRun, PullSubtask, RunStatus, ScopeRecord, ScopedDirectory,
+    SubtaskStatus, state_path,
 };
 
 use super::{
@@ -338,6 +338,12 @@ impl Ground {
         }
     }
 
+    /// The record as the door hands it to the loop: a scope that files to
+    /// Linear, which is the only kind a `Pulling` can be built over.
+    fn linear(&self) -> LinearScope<'_> {
+        LinearScope::of(&self.scope).expect("every record files to Linear")
+    }
+
     /// The record as it is on disk, which is the only copy the next invocation of
     /// `warlock pull` will ever see.
     fn saved(&self) -> PullRun {
@@ -411,7 +417,7 @@ fn work(
             forge: &forge,
             split,
             sessions,
-            scope: &ground.scope,
+            scope: ground.linear(),
             manifest: &ground.manifest,
             held: &ground.held,
             base: ground.base.as_deref(),
@@ -447,7 +453,7 @@ fn pull(
             forge,
             split,
             sessions,
-            scope: &ground.scope,
+            scope: ground.linear(),
             manifest: &ground.manifest,
             held: &ground.held,
             base: ground.base.as_deref(),
