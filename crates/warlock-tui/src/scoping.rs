@@ -39,7 +39,7 @@ use crate::prompt::{
     Edited, KeyChoice, KeyEdited, KeyPrompt, RecordEdited, RecordField, RecordForm, RecordPrompt,
     ScopeField, ScopePrompt,
 };
-use crate::rescope::{RecordFields, ScopeRefusal, rescope};
+use crate::rescope::{RecordFields, ScopeRefusal, TrackerFields, rescope};
 use crate::session::closed_scope;
 
 // The three refusals are ordered deliberately: a pull in flight, then the
@@ -299,8 +299,12 @@ pub(crate) fn record_submit(
     home: Option<&Path>,
     form: &RecordForm,
 ) -> Windows {
+    // Linear-shaped, because the record window is: it draws Linear's three
+    // fields and has no base URL or project key to hand over.
     let record = RecordFields {
-        team_key: Some(form.field(RecordField::TeamKey).text()),
+        tracker: TrackerFields::Linear {
+            team_key: Some(form.field(RecordField::TeamKey).text()),
+        },
         review_state: Some(form.field(RecordField::ReviewState).text()),
         label: Some(form.field(RecordField::Label).text()),
     };

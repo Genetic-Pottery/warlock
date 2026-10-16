@@ -17,7 +17,7 @@ use crate::boundary::closed_scope_message;
 use crate::error::Error;
 use crate::error::status_for;
 use crate::prompt::ScopePrompt;
-use crate::rescope::RecordFields;
+use crate::rescope::{RecordFields, TrackerFields};
 // The other door onto the boundary, pressed here so that the two are held to
 // one answer in one place.
 use crate::scoping::scope_press;
@@ -97,7 +97,9 @@ fn scope_add(
 // test about something else says what it is about rather than filling a form.
 fn a_record() -> RecordFields<'static> {
     RecordFields {
-        team_key: Some("Billing"),
+        tracker: TrackerFields::Linear {
+            team_key: Some("Billing"),
+        },
         review_state: Some("In Review"),
         label: Some("area/billing"),
     }
@@ -366,7 +368,9 @@ fn every_scope_refusal_is_one_line_a_1_and_nothing_written() {
             "docs",
             "billing",
             RecordFields {
-                team_key: Some(" "),
+                tracker: TrackerFields::Linear {
+                    team_key: Some(" "),
+                },
                 ..a_record()
             },
         ),
@@ -399,7 +403,9 @@ fn a_name_nothing_records_gets_its_scope_and_its_record_from_one_write() {
         "docs",
         "billing",
         RecordFields {
-            team_key: Some(TEAM),
+            tracker: TrackerFields::Linear {
+                team_key: Some(TEAM),
+            },
             review_state: Some("In Review"),
             label: Some("area/billing"),
         },
@@ -551,7 +557,9 @@ fn a_closed_boundary_answers_before_a_single_flag_is_looked_at() {
         (
             "billing",
             RecordFields {
-                team_key: Some("  "),
+                tracker: TrackerFields::Linear {
+                    team_key: Some("  "),
+                },
                 ..a_record()
             },
         ),
