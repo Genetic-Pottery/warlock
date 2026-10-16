@@ -3228,7 +3228,9 @@ fn splitting_with<C: Converses>(agent: &C) -> Splitting<C> {
 // which other ending arrived.
 fn subtasks(split: Split) -> (Vec<splitting::Numbered>, Vec<String>) {
     match split {
-        Split::Subtasks { subtasks, repairs } => (subtasks, repairs),
+        Split::Subtasks {
+            subtasks, repairs, ..
+        } => (subtasks, repairs),
         Split::Halted(unsplit) => panic!("nothing was split: {unsplit}"),
     }
 }

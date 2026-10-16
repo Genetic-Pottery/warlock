@@ -44,10 +44,21 @@ pub const TEST_PLAN_CHARS: usize = 600;
 
 pub const NOTES_CHARS: usize = 1200;
 
+pub const SUMMARY_CHARS: usize = 400;
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Fill {
     #[serde(default)]
     pub subtasks: Vec<Subtask>,
+    // Read through `nullable` because a model with nothing to say here writes
+    // `null`, and a strict read of that throws the whole split away as
+    // `NotJson` over the one field the run can do without.
+    #[serde(default, deserialize_with = "nullable")]
+    pub summary: String,
+}
+
+fn nullable<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<String, D::Error> {
+    Ok(Option::<String>::deserialize(deserializer)?.unwrap_or_default())
 }
 
 /// One sub-task of a split. Only [`Self::goal`] is required: a sub-task with
@@ -171,6 +182,7 @@ pub type Defect = fill::Defect<Slot>;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Slot {
     Subtasks,
+    Summary,
     Goal(usize),
     DependsOn(usize),
     Done(usize, Option<usize>),
@@ -183,6 +195,7 @@ impl fmt::Display for Slot {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let (index, name, entry) = match *self {
             Self::Subtasks => return f.write_str("subtasks"),
+            Self::Summary => return f.write_str("summary"),
             Self::Goal(index) => (index, "goal", None),
             Self::DependsOn(index) => (index, "depends_on", None),
             Self::Done(index, entry) => (index, "definition_of_done", entry),
@@ -245,6 +258,8 @@ pub fn check(fill: &Fill) -> Vec<Defect> {
             cap: SUBTASKS_PER_TICKET,
         });
     }
+
+    prose(Slot::Summary, &fill.summary, SUMMARY_CHARS, &mut defects);
 
     for (index, subtask) in fill.subtasks.iter().enumerate() {
         line(
@@ -528,6 +543,7 @@ impl fill::Schema for Mending<'_> {
                 .subtasks
                 .get_mut(index)
                 .map(|subtask| &mut subtask.notes),
+            Slot::Summary => Some(&mut fill.summary),
             Slot::Subtasks | Slot::DependsOn(_) | Slot::Done(_, None) | Slot::Files(_, None) => {
                 None
             }
@@ -596,6 +612,7 @@ impl Plan {
             Slot::Done(index, None) => !self.cut_off(index) && self.cut_done.insert(index),
             Slot::Files(index, None) => !self.cut_off(index) && self.cut_files.insert(index),
             Slot::Subtasks
+            | Slot::Summary
             | Slot::Goal(_)
             | Slot::Done(_, Some(_))
             | Slot::Files(_, Some(_))
@@ -635,6 +652,7 @@ impl Plan {
                 !self.dropped_file(index, entry) && self.blank_files.insert((index, entry)),
             ),
             Slot::Subtasks
+            | Slot::Summary
             | Slot::DependsOn(_)
             | Slot::Done(_, None)
             | Slot::Files(_, None)
@@ -652,6 +670,7 @@ impl Plan {
     fn covers(&self, slot: Slot) -> bool {
         match slot {
             Slot::Subtasks => self.subtasks,
+            Slot::Summary => false,
             Slot::Goal(index) => self.cut_off(index) || self.filled_goals.contains(&index),
             Slot::Done(index, Some(entry)) => {
                 self.dropped_done(index, entry) || self.blank_done.contains(&(index, entry))
@@ -851,6 +870,7 @@ fn named(items: &[String]) -> String {
 ///         Subtask { goal: "Write the briefs".to_owned(), depends_on: vec![2], ..Subtask::default() },
 ///         Subtask { goal: "Split the ticket".to_owned(), ..Subtask::default() },
 ///     ],
+///     ..Fill::default()
 /// };
 ///
 /// let numbered = number(&fill, "WAR-138").expect("nothing here waits on itself");
@@ -1075,6 +1095,10 @@ characters.
 follow, a file to read first, a decision already taken. At most 1200 \
 characters.
 
+\"summary\": the top of the pull request this ticket becomes: one or two \
+sentences saying what the ticket changes and why, for a reviewer who has not \
+read it. At most 400 characters.
+
 Only \"goal\" is required. Leave a field empty where there is nothing to put in \
 it rather than padding it out.
 
@@ -1112,6 +1136,7 @@ pub fn split_instructions(title: &str, description: &str, rejected: &[Defect]) -
             "test_plan": "",
             "notes": "",
         }],
+        "summary": "",
     });
     let _ = write!(
         text,
@@ -1169,6 +1194,12 @@ pub fn stub_answer(ticket: &str) -> String {
                 notes: NOTES.to_owned(),
             },
         ],
+        summary: fit(
+            &format!("A stand-in summary of {named}."),
+            "(stand-in)",
+            0,
+            SUMMARY_CHARS,
+        ),
     }
     .to_json()
 }

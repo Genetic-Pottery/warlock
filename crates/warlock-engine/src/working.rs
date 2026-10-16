@@ -80,6 +80,8 @@ impl From<Reported> for SubtaskStatus {
 pub struct Accepted {
     reported: Reported,
     summary: String,
+    tested: Option<String>,
+    review_notes: Option<String>,
     reply: String,
     unreadable: Option<Unreadable>,
 }
@@ -95,6 +97,16 @@ impl Accepted {
     #[must_use]
     pub fn summary(&self) -> &str {
         &self.summary
+    }
+
+    #[must_use]
+    pub fn tested(&self) -> Option<&str> {
+        self.tested.as_deref()
+    }
+
+    #[must_use]
+    pub fn review_notes(&self) -> Option<&str> {
+        self.review_notes.as_deref()
     }
 
     /// The session's last message, exactly as it arrived.
@@ -203,6 +215,18 @@ struct Stated {
     summary: String,
     #[serde(default)]
     blocked_reason: Option<String>,
+    #[serde(default)]
+    tested: Option<String>,
+    #[serde(default)]
+    review_notes: Option<String>,
+}
+
+// Blank is how a session says it has nothing, the same as `null`.
+fn said(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
 }
 
 impl Stated {
@@ -255,6 +279,8 @@ impl Stated {
         Accepted {
             reported,
             summary,
+            tested: said(self.tested.as_deref()),
+            review_notes: said(self.review_notes.as_deref()),
             reply: reply.to_owned(),
             unreadable: None,
         }
@@ -265,6 +291,8 @@ fn accept_unreadable(reply: &str, unreadable: Unreadable) -> Accepted {
     Accepted {
         reported: Reported::Failed(unreadable.to_string()),
         summary: UNREAD_SUMMARY.to_owned(),
+        tested: None,
+        review_notes: None,
         reply: reply.to_owned(),
         unreadable: Some(unreadable),
     }
@@ -354,17 +382,25 @@ pub const RESULT_PROMPT: &str = "\
 When you are finished, output one JSON object as the whole of your last \
 message, with no code fence and nothing after it:
 {\"status\": \"done\" | \"blocked\" | \"failed\", \"summary\": \"...\", \
+\"tested\": null | \"...\", \"review_notes\": null | \"...\", \
 \"blocked_reason\": null | \"...\"}
 
 \"status\": \"done\" if the sub-task is finished, \"blocked\" if something \
 outside your reach stopped it, \"failed\" if you could not finish it for any \
 other reason. These three and no others.
 
-\"summary\": what changed, for the person reviewing the pull request, in \
-at most three short sentences. Facts, not intentions. Name the behaviour or \
-the types that changed, not the steps you took: no test counts, no commands \
-you ran and no account of how you checked. If nothing needed changing, say \
-so in one sentence.
+\"summary\": what changed, as one bullet in the pull request's list of \
+changes: one or two short sentences naming the behaviour or the types that \
+changed. Facts, not intentions, and not the steps you took. If nothing needed \
+changing, say so.
+
+\"tested\": the tests you added or changed and what they cover, in one \
+sentence, or null if you added none. No test counts and no commands.
+
+\"review_notes\": what the reviewer must look at, in one or two sentences, \
+or null when there is nothing: a panic or unwrap a later change could reach, \
+a changed file format or schema version, a behaviour a caller might not \
+expect, or a shortcut you took on purpose. Do not restate the summary.
 
 \"blocked_reason\": the reason, when the status is \"blocked\" — one sentence \
 naming what stopped you. A \"blocked\" with no reason is read as a failure. \
@@ -383,6 +419,20 @@ pub fn stub_answer(summary: &str) -> String {
     stub_reply(DONE, summary, None)
 }
 
+/// [`stub_answer`] with what the session tested and what it wants a reviewer
+/// to look at.
+#[must_use]
+pub fn stub_reviewed(summary: &str, tested: Option<&str>, review_notes: Option<&str>) -> String {
+    serde_json::to_string_pretty(&Stated {
+        status: DONE.to_owned(),
+        summary: summary.trim().to_owned(),
+        blocked_reason: None,
+        tested: tested.map(str::to_owned),
+        review_notes: review_notes.map(str::to_owned),
+    })
+    .expect("a stated result is plain strings")
+}
+
 /// [`stub_answer`] for the other two statuses. `status` and `reason` are passed
 /// as written so a double can hand back a shape this module refuses — an
 /// unknown status, a `blocked` with no reason — without spelling the object out
@@ -393,6 +443,8 @@ pub fn stub_reply(status: &str, summary: &str, reason: Option<&str>) -> String {
         status: status.to_owned(),
         summary: summary.trim().to_owned(),
         blocked_reason: reason.map(str::to_owned),
+        tested: None,
+        review_notes: None,
     })
     .expect("a stated result is three plain strings")
 }

@@ -288,6 +288,8 @@ fn every_status_and_key_the_contract_names_is_in_the_prompt() {
         "\"status\"",
         "\"summary\"",
         "\"blocked_reason\"",
+        "\"tested\"",
+        "\"review_notes\"",
         "\"done\"",
         "\"blocked\"",
         "\"failed\"",
@@ -308,13 +310,27 @@ fn the_shape_the_prompt_states_is_the_shape_the_parser_reads() {
         .map(|object| {
             object
                 .replace("\"done\" | \"blocked\" | \"failed\"", "\"done\"")
-                .replace("null | \"...\"", "null")
+                .replace("null | \"...\"", "\"...\"")
         })
         .expect("the prompt shows the object it asks for");
 
     let accepted = done(&stated);
 
     assert_eq!(accepted.reported(), &Reported::Done);
+    assert_eq!(accepted.tested(), Some("..."));
+    assert_eq!(accepted.review_notes(), Some("..."));
+}
+
+#[test]
+fn a_blank_or_absent_tested_and_review_notes_read_as_nothing() {
+    let blank =
+        done(r#"{"status": "done", "summary": "Added it.", "tested": "  ", "review_notes": null}"#);
+    let absent = done(r#"{"status": "done", "summary": "Added it."}"#);
+
+    for accepted in [blank, absent] {
+        assert_eq!(accepted.tested(), None);
+        assert_eq!(accepted.review_notes(), None);
+    }
 }
 
 #[test]

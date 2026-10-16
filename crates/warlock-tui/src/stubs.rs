@@ -1317,6 +1317,7 @@ impl Slicing {
         Self::answering(Split::Subtasks {
             subtasks,
             repairs: Vec::new(),
+            summary: format!("What {ticket} changes, in one sentence."),
         })
     }
 

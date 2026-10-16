@@ -40,7 +40,7 @@ use std::fmt;
 use std::fmt::Write as _;
 use std::path::Path;
 
-use warlock_engine::working::Reported;
+use warlock_engine::working::{Accepted, Reported};
 use warlock_engine::{
     LinearScope, Manifest, PullRun, PullSubtask, RunStatus, SubtaskStatus, now_rfc3339, pulls,
 };
@@ -210,9 +210,16 @@ impl<B: Board, R: Repository, F: Forge, S: Splits, W: Works> Pulling<'_, B, R, F
             .split
             .split(ticket.identifier, ticket.title, ticket.description)
         {
-            Split::Subtasks { subtasks, repairs } => {
+            Split::Subtasks {
+                subtasks,
+                repairs,
+                summary,
+            } => {
                 for note in repairs {
                     self.report(PullEvent::Repair { note });
+                }
+                if !summary.is_empty() {
+                    run.set_summary(summary);
                 }
                 for subtask in subtasks {
                     run.push_subtask(PullSubtask::from(subtask));
@@ -265,12 +272,18 @@ impl<B: Board, R: Repository, F: Forge, S: Splits, W: Works> Pulling<'_, B, R, F
             let before = self.repo.head().map_err(Error::git)?;
             let worked = self.sessions.work(&opening);
             let after = self.repo.head().map_err(Error::git)?;
-            let (log, stopped) = read(worked);
+            let (answer, stopped) = read(worked);
 
             let subtask = run.subtask_mut(&id).expect(IN_THE_RUN);
             subtask.set_finished_at(now_rfc3339());
-            if let Some(log) = log {
-                subtask.set_log(log);
+            if let Some(answer) = answer {
+                subtask.set_log(answer.summary());
+                if let Some(tested) = answer.tested() {
+                    subtask.set_tested(tested);
+                }
+                if let Some(notes) = answer.review_notes() {
+                    subtask.set_review_notes(notes);
+                }
             }
 
             // `HEAD` before the tree, because a session that committed has moved
@@ -416,7 +429,11 @@ impl<B: Board, R: Repository, F: Forge, S: Splits, W: Works> Pulling<'_, B, R, F
         self.repo.publish(run.branch()).map_err(Error::git)?;
 
         let title = pull_request_title(ticket.identifier, ticket.title);
-        let body = pull_request_body(&finished_in(&run), &scopes_in(touched));
+        let body = pull_request_body(
+            run.summary().unwrap_or_default(),
+            &finished_in(&run),
+            &scopes_in(touched),
+        );
         let opened = self
             .forge
             .open_pull_request(PullRequest {
@@ -1049,8 +1066,8 @@ fn opening_for(run: &PullRun, ticket: &Ticket<'_>, id: &str) -> String {
     working_opening(&brief, ticket.title, ticket.description, &finished)
 }
 
-/// One session's outcome as the record takes it: what to log, and the status to
-/// set — where `None` is a session that reported itself done.
+/// One session's outcome as the record takes it: its answer, to log, and the
+/// status to set — where `None` is a session that reported itself done.
 ///
 /// `None` is not "no status": it is the one claim the session does not get to
 /// settle. What the working tree holds decides a `done`, so the status for it is
@@ -1060,7 +1077,7 @@ fn opening_for(run: &PullRun, ticket: &Ticket<'_>, id: &str) -> String {
 /// retried here — [`Works`] has spent every attempt by the time this is read, and
 /// a second policy on top of that one would be warlock asking twice as patiently
 /// as it decided to.
-fn read(worked: Worked) -> (Option<String>, Option<SubtaskStatus>) {
+fn read(worked: Worked) -> (Option<Accepted>, Option<SubtaskStatus>) {
     match worked {
         Worked::Answered(accepted) => {
             let stopped = match accepted.reported() {
@@ -1068,7 +1085,7 @@ fn read(worked: Worked) -> (Option<String>, Option<SubtaskStatus>) {
                 Reported::Blocked(reason) => Some(SubtaskStatus::Blocked(reason.to_owned())),
                 Reported::Failed(reason) => Some(SubtaskStatus::Failed(reason.to_owned())),
             };
-            (Some(accepted.summary().to_owned()), stopped)
+            (Some(accepted), stopped)
         }
         Worked::Halted(why) => (None, Some(SubtaskStatus::Failed(why.to_string()))),
     }
@@ -1151,6 +1168,8 @@ fn finished_in(run: &PullRun) -> Vec<Finished<'_>> {
             id: subtask.id(),
             goal: subtask.goal(),
             summary: subtask.log().unwrap_or_default(),
+            tested: subtask.tested(),
+            review_notes: subtask.review_notes(),
         })
         .collect()
 }
