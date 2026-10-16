@@ -198,6 +198,19 @@ See [CONTROLS.md](CONTROLS.md)
 
 See [HEADLESS-CLI.md](HEADLESS-CLI.md)
 
+## FAQ
+**Why not just use Claude directly and skip all of this?**
+
+Because then you have no process, you're likely making tens of thousands of line changes with no reproducible structure.
+And also each person on your team will be doing their own process differently.
+Almost any consistent and shared AI process beats none.
+I'm giving you the tools to do it - better ones may exist or be created.
+
+**Can't I just have Claude drive the CLI and sidestep the human gates?**
+
+Yes.
+I build tools to help you do the right thing not to stop you from doing the wrong thing.
+
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md).
