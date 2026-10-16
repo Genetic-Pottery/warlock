@@ -2,7 +2,7 @@
   <img src="./assets/warlock-logo.png" alt="Warlock" width="260">
 </p>
 
-<p align="center"><strong>A TUI where AI works only inside the scopes your team draws.</strong></p>
+<p align="center"><strong>AI works only inside the scopes your team draws.</strong></p>
 
 <p align="center">
   <a href="https://github.com/Genetic-Pottery/warlock/actions/workflows/ci.yml"><img src="https://github.com/Genetic-Pottery/warlock/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI"></a>
@@ -19,7 +19,7 @@
 
 ## What this is
 
-AI tool which medium to large sized companies could use as a team effectively.
+An AI tool which medium to large sized companies could use as a team effectively.
 I imagined what would an IDE look like 20-30 years from now and came up with this.
 AI is the star of the show and looking at code is not the primary concern.
 
