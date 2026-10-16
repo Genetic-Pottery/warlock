@@ -443,7 +443,8 @@ sentence, or null if you added none. No test counts and no commands.
 \"review_notes\": what the reviewer must look at, in one or two sentences, \
 or null when there is nothing: a panic or unwrap a later change could reach, \
 a changed file format or schema version, a behaviour a caller might not \
-expect, or a shortcut you took on purpose. Do not restate the summary.
+expect, or a shortcut you took on purpose. Not how you checked the work or \
+where an example came from. Do not restate the summary.
 
 \"resolved_notes\": the ids of earlier sub-tasks whose review notes, shown \
 above if there are any, your work made untrue. Empty otherwise.
