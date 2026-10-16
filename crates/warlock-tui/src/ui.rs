@@ -1431,8 +1431,11 @@ impl<'a> Dialog<'a> {
     }
 
     // Its own constructor rather than a third heading-and-rules argument to
-    // `scope`: three fields, three refusal rows and a column of labels is a
-    // different shape of window.
+    // `scope`: a field each with a refusal row under it and a column of labels
+    // is a different shape of window.
+    //
+    // The form's own fields and not every `RecordField` there is: a window that
+    // drew all of them would ask a Linear record for a base URL.
     fn record(form: &'a RecordForm) -> Self {
         let mut lines = vec![
             Line::from(vec![
@@ -1442,12 +1445,12 @@ impl<'a> Dialog<'a> {
             Line::from(form.path()).dim(),
             Line::default(),
         ];
-        for which in RecordField::ALL {
-            let field = form.field(which);
-            let mut spans = vec![Span::raw(label_column(which)).dim()];
-            // The caret goes in the focused field and nowhere else: three carets
-            // would say three fields were taking the next character.
-            if which == form.focus() {
+        let width = label_width(form);
+        for (which, field) in form.fields() {
+            let mut spans = vec![Span::raw(label_column(*which, width)).dim()];
+            // The caret goes in the focused field and nowhere else: a caret per
+            // field would say every one of them was taking the next character.
+            if *which == form.focus() {
                 spans.extend(typed_spans(field));
             } else {
                 spans.push(Span::raw(field.text()));
@@ -1459,10 +1462,11 @@ impl<'a> Dialog<'a> {
 
         // Every field is measured with a caret column, focused or not, so that
         // tabbing between them moves nothing sideways.
-        let label = label_width() + display_width(RECORD_LABEL_GAP);
-        let floor = RecordField::ALL
-            .into_iter()
-            .map(|which| label + display_width(form.field(which).text()))
+        let label = width + display_width(RECORD_LABEL_GAP);
+        let floor = form
+            .fields()
+            .iter()
+            .map(|(_, field)| label + display_width(field.text()))
             .max()
             .unwrap_or(0)
             + display_width(SCOPE_CURSOR);
@@ -1666,16 +1670,17 @@ fn typed_spans(field: &ScopeField) -> Vec<Span<'_>> {
     ]
 }
 
-fn label_column(which: RecordField) -> String {
-    let width = label_width();
-
+fn label_column(which: RecordField, width: usize) -> String {
     format!("{:<width$}{RECORD_LABEL_GAP}", which.name())
 }
 
-fn label_width() -> usize {
-    RecordField::ALL
-        .into_iter()
-        .map(|which| display_width(which.name()))
+// Measured over the fields on screen and not over every `RecordField` there is,
+// which is what keeps the column from being sized for a label this window does
+// not draw.
+fn label_width(form: &RecordForm) -> usize {
+    form.fields()
+        .iter()
+        .map(|(which, _)| display_width(which.name()))
         .max()
         .unwrap_or(0)
 }

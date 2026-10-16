@@ -649,7 +649,7 @@ mod gate {
         push_answer_for,
     };
     use crate::modal::Modals;
-    use crate::prompt::{Edited, RecordPrompt, ScopeField, ScopePrompt, edit_for};
+    use crate::prompt::{Edited, RecordPrompt, RecordTracker, ScopeField, ScopePrompt, edit_for};
     use crate::ui::Shape;
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
     use ratatui::layout::Size;
@@ -1730,14 +1730,16 @@ mod gate {
             Composer, INERT, KeyCode, KeyEvent, Modals, Pressed, QuitConfirm, ctrl_c, press,
             press_for,
         };
-        use crate::prompt::{RecordEdited, RecordForm, RecordPrompt, record_edit_for};
+        use crate::prompt::{
+            RecordEdited, RecordForm, RecordPrompt, RecordTracker, record_edit_for,
+        };
 
         const DIRECTORY: &str = "crates/warlock-engine";
 
         const SCOPE: &str = "data-plane";
 
         fn open() -> RecordPrompt {
-            RecordPrompt::open(DIRECTORY, SCOPE)
+            RecordPrompt::open(RecordTracker::Linear, DIRECTORY, SCOPE)
         }
 
         fn form() -> RecordForm {
@@ -2204,7 +2206,7 @@ mod gate {
     mod pushing {
         use super::{
             Composer, INERT, KeyCode, KeyEvent, Modals, Pressed, PushConfirm, QuitConfirm,
-            RecordPrompt, ScopePrompt, ctrl_c, press, press_for, push_answer_for,
+            RecordPrompt, RecordTracker, ScopePrompt, ctrl_c, press, press_for, push_answer_for,
         };
 
         fn open() -> PushConfirm {
@@ -2316,7 +2318,8 @@ mod gate {
             // under this dialog does not get to take the keys off it.
             let push = open();
             let scope = ScopePrompt::open("crates/warlock-engine", "data-plane");
-            let record = RecordPrompt::open("crates/warlock-engine", "data-plane");
+            let record =
+                RecordPrompt::open(RecordTracker::Linear, "crates/warlock-engine", "data-plane");
             let write = ScopePrompt::open("Write the brief to", "docs/brief.md");
 
             for code in INERT.into_iter().chain([KeyCode::Enter, KeyCode::Esc]) {
@@ -2390,7 +2393,8 @@ mod gate {
     mod cutting {
         use super::{
             Composer, CutConfirm, INERT, KeyCode, KeyEvent, Modals, Pressed, PushConfirm,
-            QuitConfirm, RecordPrompt, ScopePrompt, ctrl_c, cut_answer_for, press, press_for,
+            QuitConfirm, RecordPrompt, RecordTracker, ScopePrompt, ctrl_c, cut_answer_for, press,
+            press_for,
         };
 
         fn open() -> CutConfirm {
@@ -2500,7 +2504,8 @@ mod gate {
             // under this dialog does not get to take the keys off it.
             let cut = open();
             let scope = ScopePrompt::open("crates/warlock-engine", "data-plane");
-            let record = RecordPrompt::open("crates/warlock-engine", "data-plane");
+            let record =
+                RecordPrompt::open(RecordTracker::Linear, "crates/warlock-engine", "data-plane");
             let write = ScopePrompt::open("Write the brief to", "docs/brief.md");
 
             for code in INERT.into_iter().chain([KeyCode::Enter, KeyCode::Esc]) {
@@ -2604,8 +2609,8 @@ mod gate {
     mod pulling {
         use super::{
             Composer, CutConfirm, INERT, KeyCode, KeyEvent, Modals, Pressed, PullConfirm,
-            PushConfirm, QuitConfirm, RecordPrompt, ScopePrompt, ctrl_c, press, press_for,
-            pull_answer_for,
+            PushConfirm, QuitConfirm, RecordPrompt, RecordTracker, ScopePrompt, ctrl_c, press,
+            press_for, pull_answer_for,
         };
 
         fn open() -> PullConfirm {
@@ -2716,7 +2721,8 @@ mod gate {
             // under this dialog does not get to take the keys off it.
             let pull = open();
             let scope = ScopePrompt::open("crates/warlock-engine", "data-plane");
-            let record = RecordPrompt::open("crates/warlock-engine", "data-plane");
+            let record =
+                RecordPrompt::open(RecordTracker::Linear, "crates/warlock-engine", "data-plane");
             let write = ScopePrompt::open("Write the brief to", "docs/brief.md");
 
             for code in INERT.into_iter().chain([KeyCode::Enter, KeyCode::Esc]) {
@@ -3598,7 +3604,7 @@ mod pointer {
     use crate::composer::Composer;
     use crate::confirm::{Carry, CutConfirm, PushConfirm, QuitConfirm, Review};
     use crate::modal::{Modal, Modals};
-    use crate::prompt::{RecordPrompt, ScopePrompt};
+    use crate::prompt::{RecordPrompt, RecordTracker, ScopePrompt};
     use crate::selection::Cell;
     use crate::ui::{Reach, Shape, panel_width};
 
@@ -4467,7 +4473,8 @@ mod pointer {
         // halves would otherwise mean something.
         let app = app_talking();
         let open = ScopePrompt::open("crates/warlock-engine", "data-plane");
-        let recording = RecordPrompt::open("crates/warlock-engine", "data-plane");
+        let recording =
+            RecordPrompt::open(RecordTracker::Linear, "crates/warlock-engine", "data-plane");
         for (confirm, scope, record, write) in [
             (
                 QuitConfirm::open(),
@@ -4847,7 +4854,8 @@ mod pointer {
         app.scroll_panel_down(4);
         app.set_focus(Focus::Panel);
         let before = app.clone();
-        let record = RecordPrompt::open("crates/warlock-engine", "data-plane");
+        let record =
+            RecordPrompt::open(RecordTracker::Linear, "crates/warlock-engine", "data-plane");
 
         for mouse in whole_pointer() {
             assert_eq!(

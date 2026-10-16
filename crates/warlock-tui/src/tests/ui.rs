@@ -37,7 +37,8 @@ use crate::fixture;
 use crate::modal::{Modal, Modals};
 use crate::panel::Mode;
 use crate::prompt::{
-    KeyChoice, KeyPrompt, RecordField, RecordForm, RecordPrompt, ScopeField, ScopePrompt,
+    KeyChoice, KeyPrompt, RecordField, RecordForm, RecordPrompt, RecordTracker, ScopeField,
+    ScopePrompt,
 };
 // Renamed because `Position` in here is ratatui's point on the screen, and a
 // selection's is a byte of the thread's text.
@@ -5996,13 +5997,14 @@ const RECORDED: &str = "control-plane";
 
 const RECORD_VALUES: [&str; 3] = ["data-plane", "in review", "WAR-105"];
 
-// Three fields, and no setter on the form: a value gets into one the way the
-// reader puts it there, a character at a time through `record_edit_for`, so
-// nothing here can type into a field the keys cannot reach.
-fn filled(path: &str, scope: &str, values: [&str; 3]) -> RecordForm {
+// No setter on the form: a value gets into a field the way the reader puts it
+// there, a character at a time through `record_edit_for`, so nothing here can
+// type into a field the keys cannot reach. One value per field the tracker has,
+// in its order.
+fn filled(tracker: RecordTracker, path: &str, scope: &str, values: &[&str]) -> RecordForm {
     use ratatui::crossterm::event::KeyCode;
 
-    let mut form = RecordForm::new(path, scope);
+    let mut form = RecordForm::new(tracker, path, scope);
     for value in values {
         for character in value.chars() {
             form = record_pressed(&form, KeyCode::Char(character));
@@ -6037,23 +6039,32 @@ fn record_rows(buffer: &Buffer, form: &RecordForm) -> Vec<String> {
 // Heading, directory and the blank under them.
 const RECORD_FIELD_LINE: u16 = 3;
 
-fn field_row(which: RecordField) -> usize {
-    let index = RecordField::ALL
+fn field_row(form: &RecordForm, which: RecordField) -> usize {
+    let index = fields_of(form)
         .into_iter()
         .position(|field| field == which)
-        .expect("every field is in ALL");
+        .expect("the form holds this field");
 
     usize::from(BORDER_THICKNESS + DIALOG_MARGIN_ROWS + RECORD_FIELD_LINE) + 2 * index
+}
+
+fn fields_of(form: &RecordForm) -> Vec<RecordField> {
+    form.fields().iter().map(|(which, _)| *which).collect()
+}
+
+fn held(form: &RecordForm, which: RecordField) -> &ScopeField {
+    form.field(which)
+        .unwrap_or_else(|| panic!("this form holds no {}", which.name()))
 }
 
 fn record_caret(buffer: &Buffer, form: &RecordForm) -> Position {
     let area = record_rect(buffer, form);
     let field = form.focused();
-    let typed = label_width()
+    let typed = label_width(form)
         + display_width(RECORD_LABEL_GAP)
         + display_width(&field.text()[..field.cursor()]);
     let typed = u16::try_from(typed).expect("a short line");
-    let row = u16::try_from(field_row(form.focus())).expect("a short window");
+    let row = u16::try_from(field_row(form, form.focus())).expect("a short window");
 
     Position::new(
         area.x + BORDER_THICKNESS + DIALOG_MARGIN + typed,
@@ -6078,24 +6089,24 @@ fn reversed_cells(buffer: &Buffer, form: &RecordForm) -> Vec<Position> {
 
 #[test]
 fn the_record_window_is_sized_by_what_it_says_plus_its_margins_and_its_border() {
-    let refused = filled(SCOPED, RECORDED, RECORD_VALUES).refused(
+    let refused = filled(RecordTracker::Linear, SCOPED, RECORDED, &RECORD_VALUES).refused(
         RecordField::ReviewState,
         "a review state cannot be blank, and this sentence is a long one",
     );
     for form in [
-        RecordForm::new(SCOPED, RECORDED),
-        filled(SCOPED, RECORDED, RECORD_VALUES),
-        filled("a", "b", ["c", "d", "e"]),
+        RecordForm::new(RecordTracker::Linear, SCOPED, RECORDED),
+        filled(RecordTracker::Linear, SCOPED, RECORDED, &RECORD_VALUES),
+        filled(RecordTracker::Linear, "a", "b", &["c", "d", "e"]),
         refused,
     ] {
         let Size { width, height } = Dialog::record(&form).size();
-        let label = label_width() + display_width(RECORD_LABEL_GAP);
-        let widest = RecordField::ALL.into_iter().fold(
+        let label = label_width(&form) + display_width(RECORD_LABEL_GAP);
+        let widest = fields_of(&form).into_iter().fold(
             (display_width(RECORD_HEADING) + display_width(form.scope()))
                 .max(display_width(form.path()))
                 .max(display_width(RECORD_RULES)),
             |widest, which| {
-                let field = form.field(which);
+                let field = held(&form, which);
                 widest
                     .max(label + display_width(field.text()) + display_width(SCOPE_CURSOR))
                     .max(field.rule().map_or(0, display_width))
@@ -6121,7 +6132,7 @@ fn the_record_window_is_sized_by_what_it_says_plus_its_margins_and_its_border() 
 fn the_record_window_holds_its_width_as_the_cursor_and_the_focus_move() {
     use ratatui::crossterm::event::KeyCode;
 
-    let form = filled(SCOPED, RECORDED, RECORD_VALUES);
+    let form = filled(RecordTracker::Linear, SCOPED, RECORDED, &RECORD_VALUES);
     let width = Dialog::record(&form).size().width;
 
     // Left along a field and Tab between them: what the window measures is the
@@ -6132,8 +6143,8 @@ fn the_record_window_holds_its_width_as_the_cursor_and_the_focus_move() {
         walked = record_pressed(&walked, KeyCode::Left);
         assert_eq!(Dialog::record(&walked).size().width, width, "{walked:?}");
     }
-    let mut tabbed = form;
-    for _ in 0..RecordField::ALL.len() {
+    let mut tabbed = form.clone();
+    for _ in 0..form.fields().len() {
         tabbed = record_pressed(&tabbed, KeyCode::Tab);
         assert_eq!(Dialog::record(&tabbed).size().width, width, "{tabbed:?}");
     }
@@ -6143,7 +6154,7 @@ fn the_record_window_holds_its_width_as_the_cursor_and_the_focus_move() {
 fn the_record_window_names_the_directory_the_scope_and_its_three_fields() {
     let base = Instant::now();
     let app = busy_app(base, WIDTH, FIXTURE_HEIGHT);
-    let form = filled(SCOPED, RECORDED, RECORD_VALUES);
+    let form = filled(RecordTracker::Linear, SCOPED, RECORDED, &RECORD_VALUES);
 
     let buffer = render_record(
         &app,
@@ -6173,23 +6184,23 @@ fn the_record_window_names_the_directory_the_scope_and_its_three_fields() {
     assert_eq!(inside_the_border(&rows[heading + 1]), SCOPED, "{rows:?}");
 
     // Then the three fields, each labelled and holding what was typed into it,
-    // in the order `RecordField::ALL` has them.
-    for (which, value) in RecordField::ALL.into_iter().zip(RECORD_VALUES) {
-        let row = &rows[field_row(which)];
+    // in the order the form holds them.
+    for (which, value) in fields_of(&form).into_iter().zip(RECORD_VALUES) {
+        let row = &rows[field_row(&form, which)];
         assert!(row.contains(which.name()), "{which:?}: {rows:?}");
         assert!(row.contains(value), "{which:?}: {rows:?}");
         // Nothing is said about a field nobody has broken a rule about.
         assert_eq!(
-            rows[field_row(which) + 1].trim_matches('│').trim(),
+            rows[field_row(&form, which) + 1].trim_matches('│').trim(),
             "",
             "{which:?}: {rows:?}"
         );
     }
     // The labels are one column, so the three values start together.
-    let columns: Vec<usize> = RecordField::ALL
+    let columns: Vec<usize> = fields_of(&form)
         .into_iter()
         .zip(RECORD_VALUES)
-        .map(|(which, value)| column_of(&rows[field_row(which)], value))
+        .map(|(which, value)| column_of(&rows[field_row(&form, which)], value))
         .collect();
     assert!(
         columns.iter().all(|column| *column == columns[0]),
@@ -6217,7 +6228,7 @@ fn the_record_window_labels_its_first_field_team_key_without_moving_the_column()
     let app = busy_app(base, WIDTH, FIXTURE_HEIGHT);
     // A scope being recorded for the first time, with nothing typed into it:
     // the three labels are the whole of what is drawn beside the fields.
-    let form = RecordForm::new(SCOPED, RECORDED);
+    let form = RecordForm::new(RecordTracker::Linear, SCOPED, RECORDED);
 
     let buffer = render_record(
         &app,
@@ -6231,12 +6242,12 @@ fn the_record_window_labels_its_first_field_team_key_without_moving_the_column()
     // the label says so: `team` reads as a team's name, which resolves to
     // nothing.
     let rows = record_rows(&buffer, &form);
-    for (which, label) in RecordField::ALL
+    for (which, label) in fields_of(&form)
         .into_iter()
         .zip(["team key", "review state", "label"])
     {
         assert_eq!(
-            inside_the_border(&rows[field_row(which)]).trim_end(),
+            inside_the_border(&rows[field_row(&form, which)]).trim_end(),
             label,
             "{which:?}: {rows:?}"
         );
@@ -6247,7 +6258,7 @@ fn the_record_window_labels_its_first_field_team_key_without_moving_the_column()
     // widest of the three. The drawn caret sits in the column that measurement
     // puts it in, and the window is wide enough for it.
     assert_eq!(
-        label_width(),
+        label_width(&form),
         display_width(RecordField::ReviewState.name())
     );
     assert_eq!(
@@ -6255,10 +6266,69 @@ fn the_record_window_labels_its_first_field_team_key_without_moving_the_column()
         vec![record_caret(&buffer, &form)],
         "{rows:?}"
     );
-    let label = label_width() + display_width(RECORD_LABEL_GAP) + display_width(SCOPE_CURSOR);
+    let label = label_width(&form) + display_width(RECORD_LABEL_GAP) + display_width(SCOPE_CURSOR);
     assert!(
         usize::from(Dialog::record(&form).size().width)
             >= label + usize::from(2 * DIALOG_MARGIN + 2 * BORDER_THICKNESS),
+        "{rows:?}"
+    );
+}
+
+#[test]
+fn a_jira_form_draws_its_own_four_fields_and_no_team_key() {
+    let base = Instant::now();
+    let app = busy_app(base, WIDTH, FIXTURE_HEIGHT);
+    let form = filled(
+        RecordTracker::Jira,
+        SCOPED,
+        RECORDED,
+        &["https://acme.atlassian.net", "WAR", "In Review", "WAR-105"],
+    );
+
+    let buffer = render_record(
+        &app,
+        WIDTH,
+        FIXTURE_HEIGHT,
+        base,
+        &RecordPrompt::Open(form.clone()),
+    );
+
+    // Four rows, each labelled and holding what was typed into it, with a
+    // refusal row under each: the window draws the form's fields and no
+    // others, so Linear's team key is nowhere on it.
+    let rows = record_rows(&buffer, &form);
+    for (which, value) in fields_of(&form).into_iter().zip([
+        "https://acme.atlassian.net",
+        "WAR",
+        "In Review",
+        "WAR-105",
+    ]) {
+        let row = &rows[field_row(&form, which)];
+        assert!(row.contains(which.name()), "{which:?}: {rows:?}");
+        assert!(row.contains(value), "{which:?}: {rows:?}");
+        assert_eq!(
+            rows[field_row(&form, which) + 1].trim_matches('│').trim(),
+            "",
+            "{which:?}: {rows:?}"
+        );
+    }
+    for row in &rows {
+        assert!(!row.contains(RecordField::TeamKey.name()), "{rows:?}");
+    }
+    // One column for four labels rather than three, so the values still line
+    // up under each other.
+    let columns: Vec<usize> = fields_of(&form)
+        .into_iter()
+        .zip(["https://acme.atlassian.net", "WAR", "In Review", "WAR-105"])
+        .map(|(which, value)| column_of(&rows[field_row(&form, which)], value))
+        .collect();
+    assert!(
+        columns.iter().all(|column| *column == columns[0]),
+        "the values do not line up: {rows:?}"
+    );
+    assert_eq!(
+        reversed_cells(&buffer, &form),
+        vec![record_caret(&buffer, &form)],
         "{rows:?}"
     );
 }
@@ -6269,9 +6339,9 @@ fn the_caret_is_in_the_focused_field_and_in_no_other() {
 
     let base = Instant::now();
     let app = busy_app(base, WIDTH, FIXTURE_HEIGHT);
-    let mut form = filled(SCOPED, RECORDED, RECORD_VALUES);
+    let mut form = filled(RecordTracker::Linear, SCOPED, RECORDED, &RECORD_VALUES);
 
-    for which in RecordField::ALL {
+    for which in fields_of(&form) {
         assert_eq!(form.focus(), which);
 
         let buffer = render_record(
@@ -6293,7 +6363,7 @@ fn the_caret_is_in_the_focused_field_and_in_no_other() {
         );
         assert_eq!(
             usize::from(caret.y - record_rect(&buffer, &form).y),
-            field_row(which)
+            field_row(&form, which)
         );
         let before = Position::new(caret.x - 1, caret.y);
         let value = form.focused().text();
@@ -6310,8 +6380,13 @@ fn a_broken_rule_is_drawn_under_the_field_it_was_broken_in() {
     // Worded by whoever refused — `record_submit`, in the loop — and printed
     // here without being read: this window judges no value of its own.
     let broken = "a review state cannot be blank";
-    let form = filled(SCOPED, RECORDED, ["data-plane", "   ", "WAR-105"])
-        .refused(RecordField::ReviewState, broken);
+    let form = filled(
+        RecordTracker::Linear,
+        SCOPED,
+        RECORDED,
+        &["data-plane", "   ", "WAR-105"],
+    )
+    .refused(RecordField::ReviewState, broken);
 
     let buffer = render_record(
         &app,
@@ -6324,11 +6399,11 @@ fn a_broken_rule_is_drawn_under_the_field_it_was_broken_in() {
     let rows = record_rows(&buffer, &form);
     // Under the field that broke it and under no other, with every field still
     // holding what was typed into it.
-    for (which, value) in RecordField::ALL
+    for (which, value) in fields_of(&form)
         .into_iter()
         .zip(["data-plane", "", "WAR-105"])
     {
-        let said = rows[field_row(which) + 1]
+        let said = rows[field_row(&form, which) + 1]
             .trim_matches('│')
             .trim()
             .to_owned();
@@ -6342,7 +6417,7 @@ fn a_broken_rule_is_drawn_under_the_field_it_was_broken_in() {
             "{which:?}: {rows:?}"
         );
         assert!(
-            rows[field_row(which)].contains(value),
+            rows[field_row(&form, which)].contains(value),
             "{which:?}: {rows:?}"
         );
     }
@@ -6382,7 +6457,7 @@ fn a_closed_record_prompt_leaves_no_trace_of_itself_on_the_frame() {
 fn nothing_from_the_frame_underneath_shows_through_the_record_window() {
     let base = Instant::now();
     let app = busy_app(base, WIDTH, FIXTURE_HEIGHT);
-    let form = filled(SCOPED, RECORDED, RECORD_VALUES);
+    let form = filled(RecordTracker::Linear, SCOPED, RECORDED, &RECORD_VALUES);
 
     let closed = render_record(&app, WIDTH, FIXTURE_HEIGHT, base, &RecordPrompt::Closed);
     let open = render_record(
@@ -6430,7 +6505,7 @@ fn nothing_from_the_frame_underneath_shows_through_the_record_window() {
 #[test]
 fn a_terminal_too_small_for_the_record_window_clamps_it_and_still_shows_it() {
     let base = Instant::now();
-    let form = filled(SCOPED, RECORDED, RECORD_VALUES);
+    let form = filled(RecordTracker::Linear, SCOPED, RECORDED, &RECORD_VALUES);
 
     // Down to one cell, for the reason the scope window clamps: a window that
     // declined to draw would leave the reader typing into one they cannot see.

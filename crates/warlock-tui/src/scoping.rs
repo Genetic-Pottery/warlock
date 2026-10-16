@@ -37,7 +37,7 @@ use crate::app::{App, OpenScopes};
 use crate::error::Error;
 use crate::prompt::{
     Edited, KeyChoice, KeyEdited, KeyPrompt, RecordEdited, RecordField, RecordForm, RecordPrompt,
-    ScopeField, ScopePrompt,
+    RecordTracker, ScopeField, ScopePrompt,
 };
 use crate::rescope::{RecordFields, ScopeRefusal, TrackerFields, rescope};
 use crate::session::closed_scope;
@@ -133,7 +133,7 @@ impl Windows {
     fn recording(module: &str, scope: &str) -> Self {
         Self {
             scope: ScopePrompt::Closed,
-            record: RecordPrompt::open(module, scope),
+            record: RecordPrompt::open(RecordTracker::Linear, module, scope),
             key: KeyPrompt::Closed,
         }
     }
@@ -299,14 +299,16 @@ pub(crate) fn record_submit(
     home: Option<&Path>,
     form: &RecordForm,
 ) -> Windows {
-    // Linear-shaped, because the record window is: it draws Linear's three
-    // fields and has no base URL or project key to hand over.
+    // Linear-shaped, because the only form the panel opens is: a Jira form's
+    // base URL and project key have nowhere to go here yet, so one submitted
+    // through this would hand over a `None` team key and be refused for a value
+    // it was never asked for.
     let record = RecordFields {
         tracker: TrackerFields::Linear {
-            team_key: Some(form.field(RecordField::TeamKey).text()),
+            team_key: form.field(RecordField::TeamKey).map(ScopeField::text),
         },
-        review_state: Some(form.field(RecordField::ReviewState).text()),
-        label: Some(form.field(RecordField::Label).text()),
+        review_state: form.field(RecordField::ReviewState).map(ScopeField::text),
+        label: form.field(RecordField::Label).map(ScopeField::text),
     };
 
     let next = match rescope(manifest, form.path(), Some(form.scope()), record) {

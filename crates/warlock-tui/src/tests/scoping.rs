@@ -13,7 +13,7 @@ use super::{Windows, key_edit, key_submit, record_edit, record_submit, scope_edi
 use crate::app::{App, OpenScopes};
 use crate::prompt::{
     Edited, KeyChoice, KeyEdited, KeyPrompt, RecordEdited, RecordField, RecordForm, RecordPrompt,
-    ScopeField, ScopePrompt, edit_for, key_edit_for, record_edit_for,
+    RecordTracker, ScopeField, ScopePrompt, edit_for, key_edit_for, record_edit_for,
 };
 
 // `super::scope_press` with no boundary in the way, so these tests are about
@@ -931,7 +931,7 @@ fn a_name_no_record_claims_puts_the_second_window_up_and_writes_nothing() {
         windows,
         Windows {
             scope: ScopePrompt::Closed,
-            record: RecordPrompt::open("crates/tui", "billing"),
+            record: RecordPrompt::open(RecordTracker::Linear, "crates/tui", "billing"),
             key: KeyPrompt::Closed,
         },
     );
@@ -1008,7 +1008,10 @@ fn a_blank_value_is_refused_under_its_own_field_and_writes_nothing() {
         let mut app = app_on(repo.path(), TUI_ROW);
         let mut manifest = scoped();
         let before = app.clone();
-        let typed = filled(&RecordForm::new("crates/tui", "billing"), values);
+        let typed = filled(
+            &RecordForm::new(RecordTracker::Linear, "crates/tui", "billing"),
+            values,
+        );
 
         let windows = record_submit(&mut app, &mut manifest, repo.path(), NO_HOME, &typed);
 
@@ -1018,7 +1021,7 @@ fn a_blank_value_is_refused_under_its_own_field_and_writes_nothing() {
             .unwrap_or_else(|| panic!("a blank {} closed the window", which.name()));
         let rule = form
             .field(which)
-            .rule()
+            .and_then(ScopeField::rule)
             .unwrap_or_else(|| panic!("nothing was said under the {}", which.name()))
             .to_owned();
         assert!(
@@ -1043,7 +1046,7 @@ fn a_blank_team_key_is_refused_in_the_words_the_field_is_labelled_in() {
     let mut app = app_on(repo.path(), TUI_ROW);
     let mut manifest = scoped();
     let typed = filled(
-        &RecordForm::new("crates/tui", "billing"),
+        &RecordForm::new(RecordTracker::Linear, "crates/tui", "billing"),
         ["", "In Review", "area/billing"],
     );
 
@@ -1057,7 +1060,7 @@ fn a_blank_team_key_is_refused_in_the_words_the_field_is_labelled_in() {
         .form()
         .expect("a blank team key closed the window");
     assert_eq!(
-        form.field(RecordField::TeamKey).rule(),
+        form.field(RecordField::TeamKey).and_then(ScopeField::rule),
         Some("a team key cannot be blank"),
     );
 }
@@ -1197,7 +1200,7 @@ fn a_name_recorded_since_the_window_opened_is_not_rewritten() {
     let mut app = app_on(repo.path(), TUI_ROW);
     let mut manifest = recorded();
     let form = filled(
-        &RecordForm::new("crates/tui", "data-plane"),
+        &RecordForm::new(RecordTracker::Linear, "crates/tui", "data-plane"),
         ["Someone Else", "Done", "area/other"],
     );
 
@@ -1225,7 +1228,7 @@ fn a_record_that_will_not_save_puts_its_reason_on_the_message_line() {
     let mut app = app_on(repo.path(), TUI_ROW);
     let mut manifest = scoped();
     let form = filled(
-        &RecordForm::new("crates/tui", "billing"),
+        &RecordForm::new(RecordTracker::Linear, "crates/tui", "billing"),
         ["Billing", "In Review", "area/billing"],
     );
 
@@ -1268,7 +1271,10 @@ fn the_whole_path_through_both_windows_is_one_key_at_a_time() {
     // The first window down and the second up, out of the one Enter: a name
     // nothing records is not written by that key at all.
     assert_eq!(prompt, ScopePrompt::Closed);
-    assert_eq!(record, RecordPrompt::open("crates/tui", "billing"));
+    assert_eq!(
+        record,
+        RecordPrompt::open(RecordTracker::Linear, "crates/tui", "billing")
+    );
     assert_eq!(saved(repo.path()), None, "the first Enter wrote to disk");
     assert_eq!(manifest, recorded(), "the first Enter edited the manifest");
 
@@ -1639,7 +1645,10 @@ fn the_whole_path_from_the_press_to_the_key_window_is_one_key_at_a_time() {
     }
 
     assert_eq!(prompt, ScopePrompt::Closed);
-    assert_eq!(record, RecordPrompt::open("crates/tui", NEW_SCOPE));
+    assert_eq!(
+        record,
+        RecordPrompt::open(RecordTracker::Linear, "crates/tui", NEW_SCOPE)
+    );
 
     let mut key = KeyPrompt::Closed;
     for code in ["Billing Squad", "In Review", "area/billing"]
@@ -1790,7 +1799,7 @@ fn a_record_that_will_not_save_asks_for_no_key_on_a_machine_holding_three() {
     let mut app = app_on(repo.path(), TUI_ROW);
     let mut manifest = scoped();
     let form = filled(
-        &RecordForm::new("crates/tui", NEW_SCOPE),
+        &RecordForm::new(RecordTracker::Linear, "crates/tui", NEW_SCOPE),
         ["Billing", "In Review", "area/billing"],
     );
 

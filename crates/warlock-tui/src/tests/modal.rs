@@ -5,7 +5,7 @@ use warlock_engine::Destination;
 use super::{Modal, Modals};
 use crate::confirm::{Answer, Carry, CutConfirm, PullConfirm, PushConfirm, QuitConfirm, Review};
 use crate::help::HelpSheet;
-use crate::prompt::{KeyPrompt, RecordPrompt, ScopePrompt};
+use crate::prompt::{KeyPrompt, RecordPrompt, RecordTracker, ScopePrompt};
 
 // A home nothing has ever written, which is a key window with no rows: what the
 // precedence is about is which window takes the keys, and a window with no rows
@@ -35,7 +35,7 @@ fn the_precedence_is_quit_help_the_six_questions_then_the_four_windows_under_the
     let review = Review::open("slice 1", vec!["A draft".to_owned()]);
     let carry = Carry::open("2 slices");
     let scope = ScopePrompt::open("crates/warlock-engine", "data-plane");
-    let record = RecordPrompt::open("crates/warlock-engine", "data-plane");
+    let record = RecordPrompt::open(RecordTracker::Linear, "crates/warlock-engine", "data-plane");
     let key = KeyPrompt::open(Path::new(NO_HOME), "data-plane")
         .expect("a home with no store opens a window with no rows");
     let write = ScopePrompt::open("Write the brief to", "docs/brief.md");

@@ -1,9 +1,9 @@
 //! The prompts the panel puts up over the tree: the scope itself — the directory
 //! being scoped, the text typed into the field, and the one line under it saying
 //! why the last submit was refused — the record it routes to when that name is
-//! new, which is three of those fields and a cursor saying which one is being
-//! typed in, and the key binding, which is the one window here that is a list of
-//! choices rather than something to type into.
+//! new, which is one of those fields per value the record's tracker needs and a
+//! cursor saying which one is being typed in, and the key binding, which is the
+//! one window here that is a list of choices rather than something to type into.
 //!
 //! [`ScopePrompt`], [`RecordPrompt`] and [`KeyPrompt`] are values of their own
 //! and *not* fields on [`App`](crate::app::App), because Esc has to leave the
@@ -269,14 +269,13 @@ pub(crate) fn edit_for(key: KeyEvent, field: &ScopeField) -> Edited {
 }
 
 /// One value of a `[[scope]]` record, named: what a refusal about it says, and
-/// — for the ones the record window draws — which value is being typed in.
+/// — for the form that collects it — which value is being typed in.
 ///
 /// Every tracker's own values are here beside the two that every record
-/// carries: `TeamKey` is Linear's, `BaseUrl` and `ProjectKey` are Jira's. Only
-/// [`ALL`](Self::ALL) is the window's, and it is Linear's three in the order
-/// [`ScopeRecord::new`](warlock_engine::ScopeRecord::new) takes them and the
-/// order the frame draws them, so a reader tabbing down the window is filling
-/// the record top to bottom.
+/// carries: `TeamKey` is Linear's, `BaseUrl` and `ProjectKey` are Jira's. Which
+/// of them a window draws is no fact about this type: that is
+/// [`RecordTracker::fields`], and a form holds one field per name it answers
+/// with.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub enum RecordField {
     #[default]
@@ -288,11 +287,6 @@ pub enum RecordField {
 }
 
 impl RecordField {
-    /// The fields of the Linear form the record window draws, in its order.
-    /// Jira's two are deliberately absent: the panel opens a Linear form, and a
-    /// longer list here would be two more rows in the frame.
-    pub const ALL: [Self; 3] = [Self::TeamKey, Self::ReviewState, Self::Label];
-
     /// What the frame prints beside the field, and what a refusal about it
     /// names.
     #[must_use]
@@ -305,39 +299,58 @@ impl RecordField {
             Self::Label => "label",
         }
     }
+}
 
-    // Wrapping rather than stopping at the ends: there is no submit button to
-    // fall off the bottom onto, so the only thing past the last field is the
-    // first one. The walk is `ALL`'s, so Jira's two — which no window draws —
-    // stay where they are rather than dropping the cursor into a row that is
-    // not on screen.
-    #[must_use]
-    pub const fn next(self) -> Self {
-        match self {
-            Self::TeamKey => Self::ReviewState,
-            Self::ReviewState => Self::Label,
-            Self::Label => Self::TeamKey,
-            Self::BaseUrl => Self::BaseUrl,
-            Self::ProjectKey => Self::ProjectKey,
-        }
-    }
+/// Which tracker a [`RecordForm`] is collecting a record for.
+///
+/// A kind and no values, which is why it is here rather than
+/// [`Tracker`](warlock_engine::Tracker) or
+/// [`TrackerFields`](crate::rescope::TrackerFields): both of those carry the
+/// values, and the values are exactly what the form is collecting, so a form
+/// built around either would hold every one of them twice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum RecordTracker {
+    Linear,
+    // Nothing in the panel builds one yet: the window that asks which tracker a
+    // record is for is still to be written, and until it is, the one road to a
+    // form — a `NeedsRecord` refusal in `scoping.rs` — opens Linear's. The
+    // allow is what keeps that unbuilt variant from failing the build, and goes
+    // when that window hands this to `RecordForm::new`.
+    #[allow(dead_code)]
+    Jira,
+}
 
-    #[must_use]
-    pub const fn previous(self) -> Self {
+impl RecordTracker {
+    /// The fields a record filed to this tracker is made of, in the order its
+    /// own [`ScopeRecord`](warlock_engine::ScopeRecord) constructor takes them,
+    /// which is the order a form walks them and the frame draws them in — so a
+    /// reader tabbing down the window is filling the record top to bottom.
+    ///
+    /// Never empty, which [`RecordForm`]'s focus depends on.
+    const fn fields(self) -> &'static [RecordField] {
         match self {
-            Self::TeamKey => Self::Label,
-            Self::ReviewState => Self::TeamKey,
-            Self::Label => Self::ReviewState,
-            Self::BaseUrl => Self::BaseUrl,
-            Self::ProjectKey => Self::ProjectKey,
+            Self::Linear => &[
+                RecordField::TeamKey,
+                RecordField::ReviewState,
+                RecordField::Label,
+            ],
+            Self::Jira => &[
+                RecordField::BaseUrl,
+                RecordField::ProjectKey,
+                RecordField::ReviewState,
+                RecordField::Label,
+            ],
         }
     }
 }
 
-// Three [`ScopeField`]s and not three bare strings: the cursor, the character
-// boundaries and the rule line are the same problem three times over, and
-// reusing the field is what keeps one set of answers to it.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
+// One list and not a member per value: which fields there are is a fact about
+// the tracker, so a named member each would be a Linear form holding Jira's two
+// as empty strings something could read back as values somebody left blank.
+// [`ScopeField`]s rather than bare strings, because the cursor, the character
+// boundaries and the rule line are the same problem once per field, and reusing
+// the field is what keeps one set of answers to it.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct RecordForm {
     path: String,
     // Already folded by the caller, and stored so the window can show which name
@@ -345,25 +358,36 @@ pub(crate) struct RecordForm {
     // directory's row names, and a second read of the first prompt could
     // disagree.
     scope: String,
-    team: ScopeField,
-    review_state: ScopeField,
-    label: ScopeField,
-    focus: RecordField,
+    // The tracker's own fields in its order, which every answer below reads off:
+    // the field set, the focus walk and what the frame draws are one source.
+    fields: Vec<(RecordField, ScopeField)>,
+    // An index into `fields` rather than a `RecordField`, which is what keeps
+    // the focus on a field this form has — there is no name here that could
+    // address one its tracker does not need. In range because `new` starts it
+    // at a field, `forward`, `backward` and `refused` are the only moves, and
+    // `fields` is never empty.
+    focus: usize,
 }
 
 impl RecordForm {
     // Empty fields, not defaults: nothing here is guessable from the scope name,
     // and a pre-filled team would be somebody else's team saved by an Enter.
     #[must_use]
-    pub(crate) fn new(path: impl Into<String>, scope: impl Into<String>) -> Self {
+    pub(crate) fn new(
+        tracker: RecordTracker,
+        path: impl Into<String>,
+        scope: impl Into<String>,
+    ) -> Self {
         let path = path.into();
         let empty = ScopeField::new(path.as_str(), "");
         Self {
             scope: scope.into(),
-            team: empty.clone(),
-            review_state: empty.clone(),
-            label: empty,
-            focus: RecordField::TeamKey,
+            fields: tracker
+                .fields()
+                .iter()
+                .map(|which| (*which, empty.clone()))
+                .collect(),
+            focus: 0,
             path,
         }
     }
@@ -378,51 +402,77 @@ impl RecordForm {
         &self.scope
     }
 
+    /// Every field this form holds and no others, in its tracker's order.
     #[must_use]
-    pub(crate) const fn focus(&self) -> RecordField {
-        self.focus
-    }
-
-    // Only `RecordField::ALL` has a slot here, because this form is Linear's
-    // three fields: Jira's two name a refusal the shell printed and are never
-    // asked of the form.
-    #[must_use]
-    pub(crate) const fn field(&self, which: RecordField) -> &ScopeField {
-        match which {
-            RecordField::TeamKey => &self.team,
-            RecordField::ReviewState => &self.review_state,
-            RecordField::Label => &self.label,
-            RecordField::BaseUrl | RecordField::ProjectKey => {
-                panic!("the record window's form holds Linear's three fields")
-            }
-        }
+    pub(crate) fn fields(&self) -> &[(RecordField, ScopeField)] {
+        &self.fields
     }
 
     #[must_use]
-    pub(crate) const fn focused(&self) -> &ScopeField {
-        self.field(self.focus)
+    pub(crate) fn focus(&self) -> RecordField {
+        self.fields[self.focus].0
+    }
+
+    #[must_use]
+    pub(crate) fn focused(&self) -> &ScopeField {
+        &self.fields[self.focus].1
+    }
+
+    /// The field, or `None` when this form's tracker does not need it: a Linear
+    /// form has no base URL or project key to report and a Jira one no team
+    /// key, as a blank field or as anything else.
+    #[must_use]
+    pub(crate) fn field(&self, which: RecordField) -> Option<&ScopeField> {
+        self.index(which).map(|index| &self.fields[index].1)
+    }
+
+    // Wrapping rather than stopping at the ends: there is no submit button to
+    // fall off the bottom onto, so the only thing past the last field is the
+    // first one.
+    #[must_use]
+    pub(crate) fn forward(self) -> Self {
+        let last = self.fields.len().saturating_sub(1);
+        let focus = if self.focus < last { self.focus + 1 } else { 0 };
+        Self { focus, ..self }
+    }
+
+    #[must_use]
+    pub(crate) fn backward(self) -> Self {
+        let focus = self
+            .focus
+            .checked_sub(1)
+            .unwrap_or_else(|| self.fields.len().saturating_sub(1));
+        Self { focus, ..self }
     }
 
     // The cursor moves to the field complained about, so the first keystroke
     // after a refusal fixes the thing that was refused rather than editing
-    // whichever field the reader happened to leave it in.
+    // whichever field the reader happened to leave it in. A field this tracker
+    // does not need takes neither the line nor the focus: the only refusals
+    // that get here name fields this form handed over.
     #[must_use]
     pub(crate) fn refused(mut self, which: RecordField, rule: impl Into<String>) -> Self {
-        let field = std::mem::take(self.slot(which)).refused(rule);
-        *self.slot(which) = field;
-        self.focus = which;
+        let Some(index) = self.index(which) else {
+            return self;
+        };
+        let field = std::mem::take(&mut self.fields[index].1).refused(rule);
+        self.fields[index].1 = field;
+        self.focus = index;
         self
     }
 
-    const fn slot(&mut self, which: RecordField) -> &mut ScopeField {
-        match which {
-            RecordField::TeamKey => &mut self.team,
-            RecordField::ReviewState => &mut self.review_state,
-            RecordField::Label => &mut self.label,
-            RecordField::BaseUrl | RecordField::ProjectKey => {
-                panic!("the record window's form holds Linear's three fields")
-            }
-        }
+    // Into the focused field by the index the walk maintains, and so into no
+    // other: nothing here names a field, so there is no road by which a
+    // keystroke lands somewhere the caret is not.
+    #[must_use]
+    fn typed(mut self, field: ScopeField) -> Self {
+        let focus = self.focus;
+        self.fields[focus].1 = field;
+        self
+    }
+
+    fn index(&self, which: RecordField) -> Option<usize> {
+        self.fields.iter().position(|(field, _)| *field == which)
     }
 }
 
@@ -441,8 +491,12 @@ pub(crate) enum RecordPrompt {
 
 impl RecordPrompt {
     #[must_use]
-    pub(crate) fn open(path: impl Into<String>, scope: impl Into<String>) -> Self {
-        Self::Open(RecordForm::new(path, scope))
+    pub(crate) fn open(
+        tracker: RecordTracker,
+        path: impl Into<String>,
+        scope: impl Into<String>,
+    ) -> Self {
+        Self::Open(RecordForm::new(tracker, path, scope))
     }
 
     #[must_use]
@@ -463,9 +517,9 @@ impl RecordPrompt {
 /// What a keystroke comes to while the record prompt is open.
 ///
 /// [`RecordEdited::Submit`] carries no text for the reason [`Edited::Submit`]
-/// does not: the caller reads the three fields off the form it already holds, so
-/// there is no second copy of them to disagree with it. Whether any of them is
-/// blank is the caller's refusal to make, through [`RecordForm::refused`].
+/// does not: the caller reads the fields off the form it already holds, so there
+/// is no second copy of them to disagree with it. Whether any of them is blank
+/// is the caller's refusal to make, through [`RecordForm::refused`].
 // Unboxed for the reason given over `RecordPrompt`, and this one is shorter
 // lived still: it is read by the caller that asked for it and dropped.
 #[allow(clippy::large_enum_variant)]
@@ -479,11 +533,12 @@ pub(crate) enum RecordEdited {
 /// What `key` does to a prompt open over `form`.
 ///
 /// Every key that is text, a cursor move or a delete is [`edit_for`]'s answer
-/// about the focused field, so the three fields here type exactly as the scope
-/// field does and cannot drift from it. Tab and Down go to the next field, and
+/// about the focused field, so every field here types exactly as the scope field
+/// does and cannot drift from it. Tab and Down go to the next field, and
 /// `BackTab` and Up to the previous one: none of the four is text in `edit_for`,
 /// which is what lets the record be filled in without a keystroke that could
-/// have been a letter.
+/// have been a letter. The walk is the form's own, so it visits the fields that
+/// form's tracker needs and never a row that is not on screen.
 ///
 /// Changing field is a move and not an edit, so the rule line under the field
 /// being left stays up — it names something wrong with text that has not
@@ -494,24 +549,13 @@ pub(crate) fn record_edit_for(key: KeyEvent, form: &RecordForm) -> RecordEdited 
         return RecordEdited::Open(form.clone());
     }
 
-    let refocused = |focus: RecordField| {
-        RecordEdited::Open(RecordForm {
-            focus,
-            ..form.clone()
-        })
-    };
-
     match key.code {
-        KeyCode::Tab | KeyCode::Down => refocused(form.focus.next()),
-        KeyCode::BackTab | KeyCode::Up => refocused(form.focus.previous()),
+        KeyCode::Tab | KeyCode::Down => RecordEdited::Open(form.clone().forward()),
+        KeyCode::BackTab | KeyCode::Up => RecordEdited::Open(form.clone().backward()),
         _ => match edit_for(key, form.focused()) {
             Edited::Close => RecordEdited::Close,
             Edited::Submit => RecordEdited::Submit,
-            Edited::Open(field) => {
-                let mut next = form.clone();
-                *next.slot(form.focus) = field;
-                RecordEdited::Open(next)
-            }
+            Edited::Open(field) => RecordEdited::Open(form.clone().typed(field)),
         },
     }
 }
