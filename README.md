@@ -9,6 +9,7 @@
 <p align="center">
   <a href="https://github.com/Genetic-Pottery/warlock/blob/main/LICENSE"><img src="https://img.shields.io/github/license/Genetic-Pottery/warlock" alt="License"></a>
   <a href="https://github.com/Genetic-Pottery/warlock/releases/latest"><img src="https://img.shields.io/github/v/release/Genetic-Pottery/warlock" alt="Release"></a>
+  <a href="https://github.com/Genetic-Pottery/homebrew-tap"><img src="https://img.shields.io/badge/homebrew-genetic--pottery%2Ftap-orange?logo=homebrew" alt="Homebrew tap"></a>
 </p>
 
 ---
