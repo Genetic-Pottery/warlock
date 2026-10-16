@@ -13,7 +13,7 @@ use super::{Windows, key_edit, key_submit, record_edit, record_submit, scope_edi
 use crate::app::{App, OpenScopes};
 use crate::prompt::{
     Edited, KeyChoice, KeyEdited, KeyPrompt, RecordEdited, RecordField, RecordForm, RecordPrompt,
-    ScopeField, ScopePrompt, edit_for, key_edit_for, record_edit_for,
+    RecordTracker, ScopeField, ScopePrompt, edit_for, key_edit_for, record_edit_for,
 };
 
 // `super::scope_press` with no boundary in the way, so these tests are about
@@ -34,6 +34,11 @@ fn scope_press(app: &mut App, manifest: &Manifest, repo_root: &Path) -> ScopePro
 
 // What no press of `s` and no Enter in its window is allowed to spend.
 const LAST_KEY: &str = "something the last key said";
+
+// A Jira site as somebody would type it, trailing slash and all: nothing on
+// this path parses, normalises or judges one, so it is written back the way it
+// was typed.
+const JIRA_SITE: &str = "https://acme.atlassian.net/";
 
 // The team key is read through the view, which is the only way there is to
 // read one off a record.
@@ -860,10 +865,13 @@ fn routes_to_a_record(manifest: &Manifest, module: &str) -> bool {
         .is_some()
 }
 
-/// `form` with `values` typed into its three fields, through the same keys a
-/// reader presses: Tab between them, so the text lands where the focus is
-/// rather than being put into the form behind the prompt's back.
-fn filled(form: &RecordForm, values: [&str; 3]) -> RecordForm {
+/// `form` with `values` typed into its fields, through the same keys a reader
+/// presses: Tab between them, so the text lands where the focus is rather than
+/// being put into the form behind the prompt's back.
+///
+/// As many values as the form has fields — three for a Linear form and four for
+/// a Jira one.
+fn filled<const N: usize>(form: &RecordForm, values: [&str; N]) -> RecordForm {
     let mut form = form.clone();
     for value in values {
         for character in value.chars() {
@@ -931,7 +939,7 @@ fn a_name_no_record_claims_puts_the_second_window_up_and_writes_nothing() {
         windows,
         Windows {
             scope: ScopePrompt::Closed,
-            record: RecordPrompt::open("crates/tui", "billing"),
+            record: RecordPrompt::open(RecordTracker::Linear, "crates/tui", "billing"),
             key: KeyPrompt::Closed,
         },
     );
@@ -1008,7 +1016,10 @@ fn a_blank_value_is_refused_under_its_own_field_and_writes_nothing() {
         let mut app = app_on(repo.path(), TUI_ROW);
         let mut manifest = scoped();
         let before = app.clone();
-        let typed = filled(&RecordForm::new("crates/tui", "billing"), values);
+        let typed = filled(
+            &RecordForm::new(RecordTracker::Linear, "crates/tui", "billing"),
+            values,
+        );
 
         let windows = record_submit(&mut app, &mut manifest, repo.path(), NO_HOME, &typed);
 
@@ -1018,7 +1029,7 @@ fn a_blank_value_is_refused_under_its_own_field_and_writes_nothing() {
             .unwrap_or_else(|| panic!("a blank {} closed the window", which.name()));
         let rule = form
             .field(which)
-            .rule()
+            .and_then(ScopeField::rule)
             .unwrap_or_else(|| panic!("nothing was said under the {}", which.name()))
             .to_owned();
         assert!(
@@ -1043,7 +1054,7 @@ fn a_blank_team_key_is_refused_in_the_words_the_field_is_labelled_in() {
     let mut app = app_on(repo.path(), TUI_ROW);
     let mut manifest = scoped();
     let typed = filled(
-        &RecordForm::new("crates/tui", "billing"),
+        &RecordForm::new(RecordTracker::Linear, "crates/tui", "billing"),
         ["", "In Review", "area/billing"],
     );
 
@@ -1057,8 +1068,139 @@ fn a_blank_team_key_is_refused_in_the_words_the_field_is_labelled_in() {
         .form()
         .expect("a blank team key closed the window");
     assert_eq!(
-        form.field(RecordField::TeamKey).rule(),
+        form.field(RecordField::TeamKey).and_then(ScopeField::rule),
         Some("a team key cannot be blank"),
+    );
+}
+
+#[test]
+fn a_blank_jira_value_is_refused_under_its_own_field_and_writes_nothing() {
+    let repo = a_repo();
+
+    for (which, values) in [
+        (
+            RecordField::BaseUrl,
+            ["", "PAY", "In Review", "area/payments"],
+        ),
+        (
+            RecordField::ProjectKey,
+            [JIRA_SITE, "  ", "In Review", "area/payments"],
+        ),
+        (
+            RecordField::ReviewState,
+            [JIRA_SITE, "PAY", "", "area/payments"],
+        ),
+        (RecordField::Label, [JIRA_SITE, "PAY", "In Review", ""]),
+    ] {
+        let mut app = app_on(repo.path(), TUI_ROW);
+        let mut manifest = scoped();
+        let typed = filled(
+            &RecordForm::new(RecordTracker::Jira, "crates/tui", "payments"),
+            values,
+        );
+
+        let windows = record_submit(&mut app, &mut manifest, repo.path(), NO_HOME, &typed);
+
+        let form = windows
+            .record
+            .form()
+            .unwrap_or_else(|| panic!("a blank {} closed the window", which.name()));
+        let rule = form
+            .field(which)
+            .and_then(ScopeField::rule)
+            .unwrap_or_else(|| panic!("nothing was said under the {}", which.name()));
+        assert_eq!(rule, format!("a {} cannot be blank", which.name()));
+        assert_eq!(saved(repo.path()), None, "a refusal wrote to disk");
+        assert_eq!(manifest, scoped(), "a refusal edited the manifest");
+    }
+}
+
+#[test]
+fn two_blank_fields_are_refused_under_the_upper_one_in_either_form() {
+    // Where the reader is already looking, which is the field the form's own
+    // order puts first: Jira's base URL above its review state, and Linear's
+    // team key above its label.
+    let repo = a_repo();
+
+    for (form, upper, lower) in [
+        (
+            filled(
+                &RecordForm::new(RecordTracker::Jira, "crates/tui", "payments"),
+                ["", "PAY", "   ", "area/payments"],
+            ),
+            RecordField::BaseUrl,
+            RecordField::ReviewState,
+        ),
+        (
+            filled(
+                &RecordForm::new(RecordTracker::Linear, "crates/tui", "billing"),
+                ["", "In Review", "  "],
+            ),
+            RecordField::TeamKey,
+            RecordField::Label,
+        ),
+    ] {
+        let mut app = app_on(repo.path(), TUI_ROW);
+        let mut manifest = scoped();
+
+        let windows = record_submit(&mut app, &mut manifest, repo.path(), NO_HOME, &form);
+
+        let refused = windows
+            .record
+            .form()
+            .expect("two blank fields closed the window")
+            .clone();
+        assert_eq!(
+            refused.field(upper).and_then(ScopeField::rule),
+            Some(format!("a {} cannot be blank", upper.name()).as_str()),
+        );
+        assert_eq!(
+            refused.field(lower).and_then(ScopeField::rule),
+            None,
+            "the lower blank field was complained about too",
+        );
+        assert_eq!(
+            refused.focus(),
+            upper,
+            "the cursor is not in the field that was refused",
+        );
+    }
+}
+
+#[test]
+fn a_jira_form_writes_the_record_its_own_four_fields_describe() {
+    // The Jira road through the same submit: the four values the form holds go
+    // in as typed, and what lands is the record `ScopeRecord::jira` builds out
+    // of them rather than a Linear one missing a team.
+    let repo = a_repo();
+    let mut app = app_on(repo.path(), TUI_ROW);
+    let mut manifest = scoped();
+    let form = filled(
+        &RecordForm::new(RecordTracker::Jira, "crates/tui", "payments"),
+        [JIRA_SITE, "PAY", "In Review", "area/payments"],
+    );
+
+    let windows = record_submit(&mut app, &mut manifest, repo.path(), NO_HOME, &form);
+
+    assert_eq!(
+        windows.record,
+        RecordPrompt::Closed,
+        "the window is answered"
+    );
+    let written = saved(repo.path()).expect("the submit wrote the manifest");
+    assert_eq!(
+        written, manifest,
+        "what is on disk is what this thread believes"
+    );
+    assert_eq!(scope_on(&written, "crates/tui"), Some("payments"));
+    let record = written.scopes().last().expect("the record was written");
+    assert_eq!(
+        record,
+        &ScopeRecord::jira("payments", JIRA_SITE, "PAY", "In Review", "area/payments"),
+    );
+    assert!(
+        LinearScope::of(record).is_err(),
+        "a Jira form wrote a Linear record",
     );
 }
 
@@ -1197,7 +1339,7 @@ fn a_name_recorded_since_the_window_opened_is_not_rewritten() {
     let mut app = app_on(repo.path(), TUI_ROW);
     let mut manifest = recorded();
     let form = filled(
-        &RecordForm::new("crates/tui", "data-plane"),
+        &RecordForm::new(RecordTracker::Linear, "crates/tui", "data-plane"),
         ["Someone Else", "Done", "area/other"],
     );
 
@@ -1225,7 +1367,7 @@ fn a_record_that_will_not_save_puts_its_reason_on_the_message_line() {
     let mut app = app_on(repo.path(), TUI_ROW);
     let mut manifest = scoped();
     let form = filled(
-        &RecordForm::new("crates/tui", "billing"),
+        &RecordForm::new(RecordTracker::Linear, "crates/tui", "billing"),
         ["Billing", "In Review", "area/billing"],
     );
 
@@ -1268,7 +1410,10 @@ fn the_whole_path_through_both_windows_is_one_key_at_a_time() {
     // The first window down and the second up, out of the one Enter: a name
     // nothing records is not written by that key at all.
     assert_eq!(prompt, ScopePrompt::Closed);
-    assert_eq!(record, RecordPrompt::open("crates/tui", "billing"));
+    assert_eq!(
+        record,
+        RecordPrompt::open(RecordTracker::Linear, "crates/tui", "billing")
+    );
     assert_eq!(saved(repo.path()), None, "the first Enter wrote to disk");
     assert_eq!(manifest, recorded(), "the first Enter edited the manifest");
 
@@ -1639,7 +1784,10 @@ fn the_whole_path_from_the_press_to_the_key_window_is_one_key_at_a_time() {
     }
 
     assert_eq!(prompt, ScopePrompt::Closed);
-    assert_eq!(record, RecordPrompt::open("crates/tui", NEW_SCOPE));
+    assert_eq!(
+        record,
+        RecordPrompt::open(RecordTracker::Linear, "crates/tui", NEW_SCOPE)
+    );
 
     let mut key = KeyPrompt::Closed;
     for code in ["Billing Squad", "In Review", "area/billing"]
@@ -1790,7 +1938,7 @@ fn a_record_that_will_not_save_asks_for_no_key_on_a_machine_holding_three() {
     let mut app = app_on(repo.path(), TUI_ROW);
     let mut manifest = scoped();
     let form = filled(
-        &RecordForm::new("crates/tui", NEW_SCOPE),
+        &RecordForm::new(RecordTracker::Linear, "crates/tui", NEW_SCOPE),
         ["Billing", "In Review", "area/billing"],
     );
 

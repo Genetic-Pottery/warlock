@@ -37,7 +37,7 @@ use crate::app::{App, OpenScopes};
 use crate::error::Error;
 use crate::prompt::{
     Edited, KeyChoice, KeyEdited, KeyPrompt, RecordEdited, RecordField, RecordForm, RecordPrompt,
-    ScopeField, ScopePrompt,
+    RecordTracker, ScopeField, ScopePrompt,
 };
 use crate::rescope::{RecordFields, ScopeRefusal, TrackerFields, rescope};
 use crate::session::closed_scope;
@@ -133,7 +133,7 @@ impl Windows {
     fn recording(module: &str, scope: &str) -> Self {
         Self {
             scope: ScopePrompt::Closed,
-            record: RecordPrompt::open(module, scope),
+            record: RecordPrompt::open(RecordTracker::Linear, module, scope),
             key: KeyPrompt::Closed,
         }
     }
@@ -274,8 +274,9 @@ pub(crate) fn record_edit(
     }
 }
 
-// The other half of a submit that named a scope nothing records: three values
-// and one save, of the directory's scope and the record together.
+// The other half of a submit that named a scope nothing records: the values the
+// form holds — Linear's three or Jira's four — and one save, of the directory's
+// scope and the record together.
 //
 // A form with two fields blank is refused under the upper one, which is where
 // the reader is already looking.
@@ -299,14 +300,10 @@ pub(crate) fn record_submit(
     home: Option<&Path>,
     form: &RecordForm,
 ) -> Windows {
-    // Linear-shaped, because the record window is: it draws Linear's three
-    // fields and has no base URL or project key to hand over.
     let record = RecordFields {
-        tracker: TrackerFields::Linear {
-            team_key: Some(form.field(RecordField::TeamKey).text()),
-        },
-        review_state: Some(form.field(RecordField::ReviewState).text()),
-        label: Some(form.field(RecordField::Label).text()),
+        tracker: tracker_fields(form),
+        review_state: form.field(RecordField::ReviewState).map(ScopeField::text),
+        label: form.field(RecordField::Label).map(ScopeField::text),
     };
 
     let next = match rescope(manifest, form.path(), Some(form.scope()), record) {
@@ -327,6 +324,23 @@ pub(crate) fn record_submit(
         return Windows::default();
     }
     Windows::binding(asked_for_a_key(app, home, form.scope()))
+}
+
+// Off the form's own tracker, so the only fields read are the ones that tracker
+// has: a `None` out of `field` means this form never asked for the value, and
+// handing one over as absent would be refused — or, for a shape decided by
+// which fields answered, written to the wrong board — for a value nobody was
+// shown a line for.
+fn tracker_fields(form: &RecordForm) -> TrackerFields<'_> {
+    match form.tracker() {
+        RecordTracker::Linear => TrackerFields::Linear {
+            team_key: form.field(RecordField::TeamKey).map(ScopeField::text),
+        },
+        RecordTracker::Jira => TrackerFields::Jira {
+            base_url: form.field(RecordField::BaseUrl).map(ScopeField::text),
+            project_key: form.field(RecordField::ProjectKey).map(ScopeField::text),
+        },
+    }
 }
 
 // The scope the window is opened over is the folded name off the form that was

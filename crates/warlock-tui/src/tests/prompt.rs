@@ -6,7 +6,7 @@ use warlock_engine::{keys, keys_path, load_key, save_key};
 
 use super::{
     Edited, FIELD_CHARS, KeyChoice, KeyEdited, KeyPrompt, RecordEdited, RecordField, RecordForm,
-    RecordPrompt, ScopeField, ScopePrompt, edit_for, key_edit_for, record_edit_for,
+    RecordPrompt, RecordTracker, ScopeField, ScopePrompt, edit_for, key_edit_for, record_edit_for,
 };
 
 // Every field below is opened over this, so a test that meant to change the
@@ -452,7 +452,26 @@ fn a_move_leaves_the_rule_line_up_and_an_edit_takes_it_down() {
 const SCOPE: &str = "data-plane";
 
 fn form() -> RecordForm {
-    RecordForm::new(DIRECTORY, SCOPE)
+    RecordForm::new(RecordTracker::Linear, DIRECTORY, SCOPE)
+}
+
+// The Linear form's fields, in the order it holds them, which is what the tests
+// below walk and type into.
+const LINEAR: [RecordField; 3] = [
+    RecordField::TeamKey,
+    RecordField::ReviewState,
+    RecordField::Label,
+];
+
+// A field the form is known to hold, so a test about its text or its rule line
+// fails loudly rather than reading `None` as the answer it was looking for.
+fn held(form: &RecordForm, which: RecordField) -> &ScopeField {
+    form.field(which)
+        .unwrap_or_else(|| panic!("this form holds no {}", which.name()))
+}
+
+fn names(form: &RecordForm) -> Vec<RecordField> {
+    form.fields().iter().map(|(which, _)| *which).collect()
 }
 
 fn after_record(key: KeyEvent, form: &RecordForm) -> RecordForm {
@@ -468,13 +487,16 @@ fn typed_into(form: &RecordForm, text: &str) -> RecordForm {
     })
 }
 
-fn texts(form: &RecordForm) -> [&str; 3] {
-    RecordField::ALL.map(|which| form.field(which).text())
+fn texts(form: &RecordForm) -> Vec<&str> {
+    form.fields()
+        .iter()
+        .map(|(_, field)| field.text())
+        .collect()
 }
 
 #[test]
 fn a_fresh_record_is_up_over_the_path_and_the_scope_with_three_empty_fields() {
-    let prompt = RecordPrompt::open(DIRECTORY, SCOPE);
+    let prompt = RecordPrompt::open(RecordTracker::Linear, DIRECTORY, SCOPE);
 
     assert!(prompt.is_open());
     assert_eq!(prompt.form(), Some(&form()));
@@ -484,9 +506,80 @@ fn a_fresh_record_is_up_over_the_path_and_the_scope_with_three_empty_fields() {
     assert_eq!(form().focus(), RecordField::TeamKey);
     // Nothing is guessable from the scope name, so no field opens complaining
     // about text nobody has typed yet.
-    for which in RecordField::ALL {
-        assert_eq!(form().field(which).rule(), None);
+    for which in LINEAR {
+        assert_eq!(held(&form(), which).rule(), None);
     }
+}
+
+#[test]
+fn a_form_holds_its_own_tracker_s_fields_and_no_others() {
+    // Linear's team key where Jira's two are, and the two every record carries
+    // under both, each in the order that tracker's record is written in.
+    assert_eq!(names(&form()), LINEAR);
+    assert_eq!(
+        names(&RecordForm::new(RecordTracker::Jira, DIRECTORY, SCOPE)),
+        [
+            RecordField::BaseUrl,
+            RecordField::ProjectKey,
+            RecordField::ReviewState,
+            RecordField::Label,
+        ]
+    );
+
+    // And a field the tracker does not need is not an empty one: there is no
+    // answer about it at all, so nothing can read a blank out of a form that
+    // was never going to be asked for it.
+    for which in [RecordField::BaseUrl, RecordField::ProjectKey] {
+        assert_eq!(form().field(which), None, "{which:?}");
+    }
+    let jira = RecordForm::new(RecordTracker::Jira, DIRECTORY, SCOPE);
+    assert_eq!(jira.field(RecordField::TeamKey), None);
+    assert_eq!(texts(&jira), ["", "", "", ""]);
+    assert_eq!(jira.focus(), RecordField::BaseUrl);
+}
+
+#[test]
+fn a_refusal_about_a_field_the_tracker_does_not_need_changes_nothing() {
+    // The fields a refusal can name are the ones the form handed over, so this
+    // is a road nothing takes; what it must not do is move the focus onto a
+    // field that is not on screen or hang a rule line on one.
+    let before = typed_into(&form(), "platform");
+
+    for which in [RecordField::BaseUrl, RecordField::ProjectKey] {
+        let after = before.clone().refused(which, "a base URL cannot be blank");
+
+        assert_eq!(after, before, "{which:?}");
+        assert_eq!(after.focus(), RecordField::TeamKey);
+    }
+}
+
+#[test]
+fn tab_walks_a_jira_form_through_its_four_fields_and_wraps() {
+    let jira = RecordForm::new(RecordTracker::Jira, DIRECTORY, SCOPE);
+    let mut current = jira.clone();
+
+    for expected in [
+        RecordField::ProjectKey,
+        RecordField::ReviewState,
+        RecordField::Label,
+        // Wrapped, and onto its own first field rather than Linear's.
+        RecordField::BaseUrl,
+    ] {
+        current = after_record(press(KeyCode::Tab), &current);
+        assert_eq!(current.focus(), expected);
+    }
+
+    current = after_record(press(KeyCode::Up), &jira);
+    assert_eq!(current.focus(), RecordField::Label);
+    // Nothing on the walk is Linear's, and typing follows the focus: the team
+    // key is not a field this form has to type into.
+    let typed = typed_into(&jira, "https://acme.atlassian.net");
+    assert_eq!(
+        texts(&typed),
+        ["https://acme.atlassian.net", "", "", ""],
+        "the first field a Jira form offers is its base URL"
+    );
+    assert_eq!(typed.field(RecordField::TeamKey), None);
 }
 
 #[test]
@@ -558,7 +651,7 @@ fn moving_between_fields_types_nothing_and_edits_nothing() {
             ["platform", "", ""],
             "{code:?} typed something"
         );
-        assert_eq!(next.field(RecordField::TeamKey).cursor(), 8);
+        assert_eq!(held(&next, RecordField::TeamKey).cursor(), 8);
     }
 }
 
@@ -569,10 +662,10 @@ fn a_refusal_names_the_field_it_is_about_and_puts_the_cursor_in_it() {
 
     assert_eq!(refused.focus(), RecordField::Label);
     assert_eq!(
-        refused.field(RecordField::Label).rule(),
+        held(&refused, RecordField::Label).rule(),
         Some("a label cannot be blank")
     );
-    assert_eq!(refused.field(RecordField::TeamKey).rule(), None);
+    assert_eq!(held(&refused, RecordField::TeamKey).rule(), None);
     assert_eq!(
         texts(&refused),
         ["platform", "", ""],
@@ -586,32 +679,34 @@ fn a_rule_line_survives_a_move_and_goes_down_on_an_edit_to_that_field() {
 
     let walked = after_record(press(KeyCode::Tab), &refused);
     assert_eq!(
-        walked.field(RecordField::TeamKey).rule(),
+        held(&walked, RecordField::TeamKey).rule(),
         Some("a team key cannot be blank"),
         "walking off the field left the text just as blank"
     );
 
     let back = after_record(press(KeyCode::BackTab), &walked);
     assert_eq!(
-        back.field(RecordField::TeamKey).rule(),
+        held(&back, RecordField::TeamKey).rule(),
         Some("a team key cannot be blank")
     );
     assert_eq!(
-        after_record(press(KeyCode::Home), &back)
-            .field(RecordField::TeamKey)
-            .rule(),
+        held(
+            &after_record(press(KeyCode::Home), &back),
+            RecordField::TeamKey
+        )
+        .rule(),
         Some("a team key cannot be blank"),
         "a cursor move inside the field is not an edit either"
     );
 
     let edited = after_record(press(KeyCode::Char('p')), &back);
-    assert_eq!(edited.field(RecordField::TeamKey).rule(), None);
+    assert_eq!(held(&edited, RecordField::TeamKey).rule(), None);
     // Only the field that was typed into: a complaint about the label is about
     // text nobody has touched.
     let elsewhere = form().refused(RecordField::Label, "a label cannot be blank");
     let elsewhere = typed_into(&after_record(press(KeyCode::Tab), &elsewhere), "x");
     assert_eq!(
-        elsewhere.field(RecordField::Label).rule(),
+        held(&elsewhere, RecordField::Label).rule(),
         Some("a label cannot be blank")
     );
 }
@@ -633,14 +728,14 @@ fn the_focused_field_edits_exactly_as_the_scope_field_does() {
     .fold(typed, |current, code| after_record(press(*code), &current));
 
     assert_eq!(texts(&fixed), ["platform!", "", ""]);
-    assert_eq!(fixed.field(RecordField::TeamKey).cursor(), 9);
+    assert_eq!(held(&fixed, RecordField::TeamKey).cursor(), 9);
 }
 
 #[test]
 fn esc_closes_and_enter_submits_from_whichever_field_is_focused() {
     let mut current = typed_into(&form(), "platform");
 
-    for _ in RecordField::ALL {
+    for _ in LINEAR {
         assert_eq!(
             record_edit_for(press(KeyCode::Esc), &current),
             RecordEdited::Close
@@ -695,11 +790,13 @@ fn a_chord_or_a_control_character_is_not_text_in_the_record_either() {
         RecordEdited::Open(before.clone())
     );
     assert_eq!(
-        after_record(
-            KeyEvent::new(KeyCode::Char('W'), KeyModifiers::SHIFT),
-            &before
+        held(
+            &after_record(
+                KeyEvent::new(KeyCode::Char('W'), KeyModifiers::SHIFT),
+                &before
+            ),
+            RecordField::TeamKey
         )
-        .field(RecordField::TeamKey)
         .text(),
         "platformW",
         "shift still types"

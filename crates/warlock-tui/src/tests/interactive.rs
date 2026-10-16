@@ -18,7 +18,7 @@ use crate::claude::Converses;
 use crate::confirm::QuitConfirm;
 use crate::cutting::Cutter;
 use crate::linear::Opens;
-use crate::prompt::{RecordPrompt, ScopePrompt};
+use crate::prompt::{RecordPrompt, RecordTracker, ScopePrompt};
 use crate::puller::{Claudes, Puller, Raises};
 use crate::pushing::Pushes;
 use crate::screen::Screen;
@@ -523,7 +523,7 @@ fn the_record_window_swallows_the_scope_key_itself() {
     // the focused field, like every other binding the loop would otherwise
     // answer.
     let mut driven = session(vec![directory("/repo/crates")]);
-    driven.record = RecordPrompt::open("crates", "billing");
+    driven.record = RecordPrompt::open(RecordTracker::Linear, "crates", "billing");
 
     assert!(pressed(&mut driven, key(KeyCode::Char('s'))));
     assert_eq!(
@@ -541,7 +541,7 @@ fn the_record_window_swallows_the_scope_key_itself() {
 #[test]
 fn esc_puts_the_record_window_down_and_writes_nothing() {
     let mut driven = session(vec![directory("/repo/crates")]);
-    driven.record = RecordPrompt::open("crates", "billing");
+    driven.record = RecordPrompt::open(RecordTracker::Linear, "crates", "billing");
 
     assert!(pressed(&mut driven, key(KeyCode::Esc)));
     assert_eq!(
