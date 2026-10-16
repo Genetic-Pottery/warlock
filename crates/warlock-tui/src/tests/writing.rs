@@ -35,7 +35,7 @@ fn a_title_is_lowercased_and_hyphenated_at_every_run_of_anything_else() {
         // Runs collapse to one hyphen however long they are, and whatever
         // they are made of.
         ("# Read   what  it wrote", "read-what-it-wrote"),
-        ("# Scopes & sigils", "scopes-sigils"),
+        ("# Scopes & boards", "scopes-boards"),
         ("# back  --  to  green", "back-to-green"),
         // Both ends trimmed, so no filename starts or ends in a separator.
         ("# --Big files!--", "big-files"),
@@ -157,9 +157,9 @@ fn the_title_is_looked_for_after_the_unwrap() {
         proposed_path(
             repo.path(),
             DOCS,
-            "```markdown\n# Scopes and sigils\n\nProse.\n```\n"
+            "```markdown\n# Scopes and boards\n\nProse.\n```\n"
         ),
-        "docs/warlock-brief-01-scopes-and-sigils.md"
+        "docs/warlock-brief-01-scopes-and-boards.md"
     );
 }
 
@@ -196,15 +196,15 @@ fn the_number_is_one_above_the_highest_in_any_name_in_the_directory() {
         &[
             "red-brief-01-foundations.md",
             "red-brief-12-the-brief-workflow.md",
-            "red-brief-09-scopes-and-sigils.md",
+            "red-brief-09-scopes-and-boards.md",
             "warlock-design-doc.md",
         ],
     );
 
     assert_eq!(next_number(&repo.path().join("docs")), 13);
     assert_eq!(
-        proposed_path(repo.path(), DOCS, &titled("# Scopes and sigils")),
-        "docs/warlock-brief-13-scopes-and-sigils.md"
+        proposed_path(repo.path(), DOCS, &titled("# Scopes and boards")),
+        "docs/warlock-brief-13-scopes-and-boards.md"
     );
 }
 
@@ -286,8 +286,8 @@ fn the_directory_handed_in_is_both_the_path_and_what_the_number_is_counted_in() 
     holding(repo.path(), "plans", &["warlock-brief-08-x.md"]);
 
     assert_eq!(
-        proposed_path(repo.path(), "plans", &titled("# Scopes and sigils")),
-        "plans/warlock-brief-09-scopes-and-sigils.md"
+        proposed_path(repo.path(), "plans", &titled("# Scopes and boards")),
+        "plans/warlock-brief-09-scopes-and-boards.md"
     );
     // And a directory that is not there at all is the empty one's answer,
     // wherever it is: nothing about the default is special.

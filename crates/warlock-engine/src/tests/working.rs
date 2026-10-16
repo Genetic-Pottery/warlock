@@ -7,8 +7,8 @@ use super::{
 const SUMMARY: &str = "Added the result contract beside drafting.rs and its tests. Left the \
                        session plumbing alone.";
 
-const REASON: &str = "`crates/control` is scoped control-plane and this machine holds no sigil \
-                      for it";
+const REASON: &str = "`crates/control` is scoped control-plane, and that scope is not open on \
+                      this machine";
 
 fn done(reply: &str) -> Accepted {
     let accepted = accept(reply);

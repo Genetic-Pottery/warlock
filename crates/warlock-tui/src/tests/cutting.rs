@@ -1,7 +1,7 @@
 //! Every test here drives [`Cutter`] over a temporary repository and a temporary
 //! home, through the seam the event loop uses: a stand-in Linear handed in as
-//! the [`Opens`] the value was built with. Nothing below reads the sigils, the
-//! binding or the key store of the machine the suite runs on, and the one key
+//! the [`Opens`] the value was built with. Nothing below reads the open scopes,
+//! the binding or the key store of the machine the suite runs on, and the one key
 //! any of it stores is not one.
 
 use std::path::Path;
@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use tempfile::TempDir;
 use warlock_engine::{
-    Manifest, ScopeRecord, ScopedDirectory, save_key, save_key_binding, save_sigils,
+    Manifest, ScopeRecord, ScopedDirectory, save_key, save_key_binding, save_open_scopes,
 };
 
 use super::{ALREADY_CUTTING, Cutter};
@@ -110,12 +110,12 @@ fn a_repository() -> TempDir {
     repo
 }
 
-// A home of this test's own: the sigils that pick the board, the binding and
-// the key store all sit under it, and the value under test is only ever handed
+// A home of this test's own: the open scopes, the binding and the key store
+// all sit under it, and the value under test is only ever handed
 // the one built here.
 fn a_home(root: &Path) -> TempDir {
     let home = a_dir();
-    save_sigils(home.path(), root, &[SCOPE.to_owned()]).expect("a config that writes");
+    save_open_scopes(home.path(), root, &[SCOPE.to_owned()]).expect("a config that writes");
     save_key_binding(home.path(), root, SCOPE, KEY_NAME).expect("a binding that writes");
     save_key(home.path(), KEY_NAME, NOT_A_KEY).expect("a key store that writes");
     home
@@ -411,7 +411,7 @@ fn a_project_that_is_not_planned_is_one_line_with_nothing_torn_down() {
 #[test]
 fn a_machine_with_no_home_is_refused_before_anything_is_read() {
     // The one refusal this value answers itself, in `Standing::home`'s own
-    // words: with no home there are no sigils, no binding and no key store, so
+    // words: with no home there are no open scopes, no binding and no key store, so
     // there is nothing to ask which key this scope files with, no board to
     // resolve and nothing to read the record for.
     let repo = a_repository();
@@ -568,7 +568,7 @@ mod binding {
     use std::path::Path;
 
     use tempfile::TempDir;
-    use warlock_engine::{load_key_binding, save_key, save_key_binding, save_sigils};
+    use warlock_engine::{load_key_binding, save_key, save_key_binding, save_open_scopes};
 
     use super::{
         App, Boarding, Cutter, KEY_NAME, KeyPrompt, NAME, NOT_A_KEY, PREPARED, SCOPE, SLUG,
@@ -580,12 +580,12 @@ mod binding {
     use crate::linear::Listing;
     use crate::submission::ToDraft;
 
-    // A home with the sigil and a key in the store, and no binding for any
+    // A home with the scope open and a key in the store, and no binding for any
     // scope: the checkout somebody has just cloned, which is the road this
     // question exists for.
     fn an_unbound_home(root: &Path) -> TempDir {
         let home = a_dir();
-        save_sigils(home.path(), root, &[SCOPE.to_owned()]).expect("a config that writes");
+        save_open_scopes(home.path(), root, &[SCOPE.to_owned()]).expect("a config that writes");
         save_key(home.path(), KEY_NAME, NOT_A_KEY).expect("a key store that writes");
         home
     }
@@ -616,8 +616,8 @@ mod binding {
         }
     }
 
-    // The name `SCOPE` is bound to in this checkout's config, which the config
-    // holds because every home here writes a sigil into it: unbound is `None`,
+    // The name `SCOPE` is bound to in this checkout's config, which is on disk
+    // because every home here writes its open scope into it: unbound is `None`,
     // and a config that will not read is this test's own failure.
     fn bound(home: &Path, repo: &Path) -> Option<String> {
         load_key_binding(home, repo, SCOPE).expect("the config this test wrote still reads")
@@ -799,7 +799,7 @@ mod binding {
 
         let source = load_key_binding(home.path(), repo.path(), SCOPE)
             .expect_err("a checkout nobody configured");
-        assert_eq!(notes(&app), vec![one_line(Error::Sigils { source })]);
+        assert_eq!(notes(&app), vec![one_line(Error::Config { source })]);
         assert_eq!(prompt, KeyPrompt::Closed, "a question was asked anyway");
         assert!(!cutter.fetching(), "a refusal started a worker");
     }

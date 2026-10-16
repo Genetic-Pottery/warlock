@@ -4,7 +4,7 @@ use std::path::Path;
 use tempfile::TempDir;
 use warlock_engine::{
     Manifest, PullRun, RunStatus, ScopeRecord, ScopedDirectory, brief_path, pulls_dir, save_key,
-    save_key_binding, save_sigils, state_path,
+    save_key_binding, save_open_scopes, state_path,
 };
 
 use super::{Ports, Prepared, Progress, Shared, held, prepare, pulled, shared};
@@ -25,7 +25,7 @@ const KEY_NAME: &str = "work";
 
 const SCOPE: &str = "warlock-team";
 
-// A scope this repository records that the machine below does not hold.
+// A scope this repository records that is closed on the machine below.
 const CLOSED: &str = "control-plane";
 
 // A Linear team *key*, which is what a `[[scope]]` record's `team` is.
@@ -50,7 +50,7 @@ fn a_dir() -> TempDir {
 }
 
 // Two recorded scopes, one scoped directory under each, so a crossing and a
-// held-but-foreign path are both reachable from one manifest.
+// open-but-foreign path are both reachable from one manifest.
 fn a_manifest() -> Manifest {
     Manifest::with_directories([
         scoped("crates/engine", SCOPE),
@@ -66,19 +66,18 @@ fn scoped(directory: &str, scope: &str) -> ScopedDirectory {
     ScopedDirectory::new(".", directory, scope).expect("a relative module path is inside the root")
 }
 
-/// The home of a machine holding the scope's sigil, with a name bound for each
-/// of the manifest's two recorded scopes and a key stored under it: everything a
-/// pull needs, under a directory of this test's own.
+/// The home of a machine with the scope open, with a name bound for each of the
+/// manifest's two recorded scopes and a key stored under it: everything a pull
+/// needs, under a directory of this test's own.
 ///
 /// Both scopes are bound, to the one name, because the config holds a key name
-/// per scope and the sigil wildcard gains no meaning for keys: the test that
-/// pulls under `CLOSED` on a wildcard machine is about which sigils open a
-/// scope, and leaving that scope unbound would refuse it for a reason that test
-/// is not about. Only one sigil is held, because that is the fact those tests
-/// vary.
+/// per scope and the `*` wildcard gains no meaning for keys: the test that pulls
+/// under `CLOSED` on a wildcard machine is about which scopes are open, and
+/// leaving that scope unbound would refuse it for a reason that test is not
+/// about. Only one scope is open, because that is the fact those tests vary.
 fn a_home(root: &Path) -> TempDir {
     let home = a_dir();
-    holding(home.path(), root, &[SCOPE]);
+    opening(home.path(), root, &[SCOPE]);
     for scope in [SCOPE, CLOSED] {
         save_key_binding(home.path(), root, scope, KEY_NAME).expect("a binding that writes");
     }
@@ -86,9 +85,9 @@ fn a_home(root: &Path) -> TempDir {
     home
 }
 
-fn holding(home: &Path, root: &Path, sigils: &[&str]) {
-    let sigils: Vec<String> = sigils.iter().map(|sigil| (*sigil).to_owned()).collect();
-    save_sigils(home, root, &sigils).expect("a config that writes");
+fn opening(home: &Path, root: &Path, open: &[&str]) {
+    let open: Vec<String> = open.iter().map(|scope| (*scope).to_owned()).collect();
+    save_open_scopes(home, root, &open).expect("a config that writes");
 }
 
 /// The ground every test below stands on: the two temporary directories and the
@@ -112,7 +111,7 @@ impl Ground {
 
     fn prepared(&self) -> Prepared {
         prepare(&self.manifest, self.root.path(), self.home.path(), SCOPE)
-            .expect("the scope is recorded, held, and has a key bound")
+            .expect("the scope is recorded, open, and has a key bound")
     }
 
     fn saved(&self) -> PullRun {
@@ -290,7 +289,7 @@ fn a_recorded_scope_with_no_record_of_any_kind_says_so_in_words() {
 }
 
 #[test]
-fn a_scope_this_machine_does_not_hold_is_the_boundary_s_status() {
+fn a_scope_closed_on_this_machine_is_the_boundary_s_status() {
     let ground = Ground::new();
 
     let error = prepare(
@@ -299,7 +298,7 @@ fn a_scope_this_machine_does_not_hold_is_the_boundary_s_status() {
         ground.home.path(),
         CLOSED,
     )
-    .expect_err("this machine holds no `control-plane` sigil");
+    .expect_err("`control-plane` is closed on this machine");
 
     assert!(
         matches!(&error, Error::UnheldScope { scope, held }
@@ -307,11 +306,11 @@ fn a_scope_this_machine_does_not_hold_is_the_boundary_s_status() {
         "{error:?}"
     );
     let said = error.to_string();
-    // The scope wanted and the sigils held, because the usual cause of this is a
-    // typo against a sigil this machine already has.
+    // The scope wanted and the scopes open, because the usual cause of this is
+    // a typo against a scope this machine already has open.
     assert!(said.contains("`control-plane`"), "{said}");
     assert!(said.contains("`warlock-team`"), "{said}");
-    assert!(said.contains("warlock sigil add control-plane"), "{said}");
+    assert!(said.contains("warlock open control-plane"), "{said}");
     // The register the writes already refuse in, and the reason the record
     // question is asked separately from this one: `resolve_filing` would have
     // answered "no such candidate" and spent a 1 on a boundary.
@@ -319,9 +318,9 @@ fn a_scope_this_machine_does_not_hold_is_the_boundary_s_status() {
 }
 
 #[test]
-fn a_machine_holding_the_wildcard_may_pull_under_any_recorded_scope() {
+fn a_machine_with_the_wildcard_open_may_pull_under_any_recorded_scope() {
     let ground = Ground::new();
-    holding(ground.home.path(), ground.root.path(), &["*"]);
+    opening(ground.home.path(), ground.root.path(), &["*"]);
 
     // `scope_opens_to` and nothing written in `pull.rs`, which is what makes the
     // wildcard work here without being spelled out again.
@@ -331,7 +330,7 @@ fn a_machine_holding_the_wildcard_may_pull_under_any_recorded_scope() {
         ground.home.path(),
         CLOSED,
     )
-    .expect("the wildcard holds every recorded scope");
+    .expect("the wildcard opens every recorded scope");
 
     assert_eq!(prepared.record().name(), CLOSED);
 }
@@ -340,7 +339,7 @@ fn a_machine_holding_the_wildcard_may_pull_under_any_recorded_scope() {
 fn a_checkout_with_no_key_bound_is_refused_the_way_a_push_and_a_draft_are() {
     let root = a_dir();
     let home = a_dir();
-    holding(home.path(), root.path(), &[SCOPE]);
+    opening(home.path(), root.path(), &[SCOPE]);
     let manifest = a_manifest();
 
     let error =
@@ -812,7 +811,7 @@ fn a_finished_pull_on_a_machine_with_no_gh_says_where_the_body_went() {
 fn a_crossed_sub_task_is_the_boundary_s_status_and_the_loop_and_the_shell_agree() {
     let ground = Ground::new();
     let prepared = ground.prepared();
-    // The session wrote under the scope this machine does not hold.
+    // The session wrote under the scope closed on this machine.
     let repo = Checkout::clean(DEFAULT).trees([Vec::new(), wrote("crates/control/src/lib.rs")]);
     let forge = Forging::opening(URL);
 
@@ -839,7 +838,7 @@ fn a_crossed_sub_task_is_the_boundary_s_status_and_the_loop_and_the_shell_agree(
     let said = error.to_string();
     assert!(said.contains("`WAR-140.01`"), "{said}");
     assert!(
-        said.contains("wrote outside the scopes this machine holds"),
+        said.contains("wrote outside the scopes open on this machine"),
         "{said}"
     );
 
@@ -886,7 +885,7 @@ fn a_crossed_sub_task_is_the_boundary_s_status_and_the_loop_and_the_shell_agree(
 #[test]
 fn a_sub_task_that_wrote_under_no_scope_is_a_crossing_too() {
     // An unscoped path is closed to everyone, so a write there stops the run
-    // exactly as a write under a scope this machine does not hold does.
+    // exactly as a write under a scope closed on this machine does.
     let ground = Ground::new();
     let prepared = ground.prepared();
     let repo = Checkout::clean(DEFAULT).trees([Vec::new(), wrote("docs/notes.md")]);

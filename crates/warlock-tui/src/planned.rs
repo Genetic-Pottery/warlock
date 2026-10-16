@@ -97,9 +97,9 @@ fn natural(identifier: &str) -> (String, u64) {
 pub fn cut(scope: &str, project: Option<&str>, dry_run: bool) -> Result<(), Error> {
     let standing = Standing::here(FOR_CUT)?;
     // The error rather than `check`'s `.ok()`, for [`mod@crate::push`]'s reason:
-    // the sigils under the home pick the board and the key store beside them is
-    // what reads it back, so a machine with no home has nothing to cut with
-    // rather than an answer of "nothing held".
+    // the config under the home says whether the scope is open, and the key
+    // store beside it is what reads the board back, so a machine with no home
+    // has nothing to cut with rather than an answer of "no scope open".
     let home = Standing::home()?;
 
     let Some(project) = project else {
@@ -157,7 +157,7 @@ fn printing() -> Activities {
 }
 
 // Split from `cut` the way `pushed` is split from `push`: the environment — the
-// working directory, the repository root, the home the sigils and the key store
+// working directory, the repository root, the home the config and the key store
 // sit under — is three parameters rather than three reads, so every refusal can
 // be run against a temporary repository and a temporary home, and no test in
 // this crate can reach the developer's real key store by standing in the wrong

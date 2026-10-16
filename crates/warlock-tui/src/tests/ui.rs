@@ -15,19 +15,19 @@ use super::{
     CUT_STATUS, Carry, Cut, DIALOG_MARGIN, DIALOG_MARGIN_ROWS, DROP_ORDER, Dialog, ELLIPSIS,
     FOOTER_HEIGHT, GUIDE, GUIDE_BRANCH, GUIDE_LAST, HELP_KEY, Hit, IDENTITY_MIN_WIDTH, INDENT,
     KEY_GAP, KEY_HEADING, KEY_RULES, KEYS, LIVE_KEY, MARK, MARK_MARGIN, MARK_MARGIN_ROWS,
-    NO_MARKER, NOTE_MARKER, PANEL_INDENT, PATH_HEADING, PATH_RULES, PULL_BRANCH, PULL_FROM,
-    PULL_QUESTION, PULL_RESUME_QUESTION, PULL_SCOPE, PUSH_KEY, PUSH_QUESTION, PUSH_TEAM, QUIT_KEY,
-    RECORD_HEADING, RECORD_LABEL_GAP, RECORD_RULES, REVIEW_ANSWER_GAP, REVIEW_CREATE, REVIEW_EDIT,
-    REVIEW_FEEDBACK, REVIEW_QUESTION, REVIEW_READ, REVIEW_SKIP, Reach, Review, SAID_MARKER,
-    SCOPE_CURSOR, SCOPE_HEADING, SCROLLBACK_ARROW, SELECTED, SELECTION_MARKER, SIGILS_MOST_LINES,
-    SIGILS_TITLE, Shape, THREAD_TITLE, TREE_MIN_ROWS, TREE_MIN_WIDTH, TREE_PERCENT, WILDCARD,
-    WORKFLOW_LIT, composer_on_screen, display_width, draw, footer_text_area, guide_prefixes,
-    help_most_scroll, identity_title, key_none_line, keys_line, label_width, mark_area, pane_inner,
-    panel_row, panel_width, sigil_line_count, sigil_lines, target_title, tree_column, tree_width,
-    truncated, workflow_line,
+    NO_MARKER, NOTE_MARKER, OPEN_MOST_LINES, OPEN_TITLE, PANEL_INDENT, PATH_HEADING, PATH_RULES,
+    PULL_BRANCH, PULL_FROM, PULL_QUESTION, PULL_RESUME_QUESTION, PULL_SCOPE, PUSH_KEY,
+    PUSH_QUESTION, PUSH_TEAM, QUIT_KEY, RECORD_HEADING, RECORD_LABEL_GAP, RECORD_RULES,
+    REVIEW_ANSWER_GAP, REVIEW_CREATE, REVIEW_EDIT, REVIEW_FEEDBACK, REVIEW_QUESTION, REVIEW_READ,
+    REVIEW_SKIP, Reach, Review, SAID_MARKER, SCOPE_CURSOR, SCOPE_HEADING, SCROLLBACK_ARROW,
+    SELECTED, SELECTION_MARKER, Shape, THREAD_TITLE, TREE_MIN_ROWS, TREE_MIN_WIDTH, TREE_PERCENT,
+    WILDCARD, WORKFLOW_LIT, composer_on_screen, display_width, draw, footer_text_area,
+    guide_prefixes, help_most_scroll, identity_title, key_none_line, keys_line, label_width,
+    mark_area, open_line_count, open_lines, pane_inner, panel_row, panel_width, target_title,
+    tree_column, tree_width, truncated, workflow_line,
 };
 use crate::account::Line as Entry;
-use crate::app::{App, Chrome, Focus, Held, Row, Sigils, Working};
+use crate::app::{App, Chrome, Focus, Held, OpenScopes, Row, Working};
 use crate::claude::Activity;
 use crate::colour::{CONVERSATION_COLOUR, FOCUS_COLOUR, GUIDE_COLOUR, SYSTEM_COLOUR, colour_for};
 use crate::composer::COMPOSER_MAX_ROWS;
@@ -81,7 +81,7 @@ const MARK_ROOM_HEIGHT: u16 = 20;
 
 const STANDARD_WIDTH: u16 = 80;
 
-const HELD_WIDTH: u16 = 160;
+const OPEN_WIDTH: u16 = 160;
 
 const NARROW_WIDTH: u16 = 40;
 
@@ -213,11 +213,8 @@ fn rows_area(buffer: &Buffer) -> Rect {
     Shape::new(buffer.area.as_size()).cut().tree_rows
 }
 
-fn sigils_box(buffer: &Buffer, sigils: &Sigils) -> Option<Rect> {
-    Shape::new(buffer.area.as_size())
-        .sigils(sigils)
-        .cut()
-        .sigils
+fn open_box(buffer: &Buffer, open: &OpenScopes) -> Option<Rect> {
+    Shape::new(buffer.area.as_size()).open(open).cut().open
 }
 
 fn tree_rows(buffer: &Buffer) -> Vec<String> {
@@ -232,15 +229,15 @@ fn tree_row(buffer: &Buffer, index: u16) -> String {
 
 fn dev() -> Held {
     Held {
-        sigils: Sigils::Nothing,
+        open: OpenScopes::Nothing,
         base: Some("dev".to_owned()),
     }
 }
 
 // A short base, so the target title leaves the tree's path room on the border.
-fn held_chrome(sigils: Sigils) -> Chrome {
+fn open_chrome(open: OpenScopes) -> Chrome {
     Chrome::of("/repo", "/repo/crates").with_held(Held {
-        sigils,
+        open,
         base: Some("dev".to_owned()),
     })
 }
@@ -266,7 +263,7 @@ fn tree_border_titles(buffer: &Buffer) -> Vec<String> {
 }
 
 // The tree pane's bottom border is the first row under its top one that opens
-// with a bottom corner; the sigils box under it opens with a top corner.
+// with a bottom corner; the "AI can work in" box under it opens with a top corner.
 fn header_text(buffer: &Buffer) -> String {
     let tree = whole_tree_column(Shape::new(buffer.area.as_size()).cut());
     let bottom = (tree.y + 1..tree.bottom())
@@ -436,7 +433,7 @@ fn render_every(
 ) -> Buffer {
     let mut terminal =
         Terminal::new(TestBackend::new(width, height)).expect("test backend never fails");
-    let cut = Shape::of(Size::new(width, height), app, composer, chrome.sigils()).cut();
+    let cut = Shape::of(Size::new(width, height), app, composer, chrome.open()).cut();
     terminal
         .draw(|frame| {
             draw(frame, &cut, app, chrome, now, modals.current(), composer);
@@ -446,7 +443,7 @@ fn render_every(
 }
 
 fn whole_tree_column(cut: Cut) -> Rect {
-    cut.sigils.map_or(cut.tree, |sigils| cut.tree.union(sigils))
+    cut.open.map_or(cut.tree, |open| cut.tree.union(open))
 }
 
 fn row_text(buffer: &Buffer, y: u16) -> String {
@@ -1221,7 +1218,7 @@ fn the_height_the_app_is_told_is_the_height_the_frame_gives_the_tree() {
         let buffer = render(&app, WIDTH, height);
 
         // The footer and the pane's border top and bottom come off the
-        // terminal's height, and the sigils box's three rows come off too
+        // terminal's height, and the "AI can work in" box's three rows come off too
         // wherever the tree keeps its floor without them.
         let bare = height - CHROME_HEIGHT;
         let boxed = 1 + 2 * BORDER_THICKNESS;
@@ -1614,7 +1611,7 @@ fn the_header_names_the_root_relative_to_the_repository_root() {
     )
     .with_held(dev());
 
-    let wide = render_chrome(&header_app(), &chrome, HELD_WIDTH, HEIGHT);
+    let wide = render_chrome(&header_app(), &chrome, OPEN_WIDTH, HEIGHT);
 
     // Forward slashes whatever the platform's separator is, because this
     // is the engine's manifest spelling of a module.
@@ -1631,18 +1628,18 @@ fn a_tree_rooted_at_the_repository_root_names_no_path_on_the_border() {
 }
 
 #[test]
-fn the_header_names_only_the_tree_and_the_box_under_it_lists_what_is_held() {
-    let sigils = Sigils::held(["billing", "web"]);
+fn the_header_names_only_the_tree_and_the_box_under_it_lists_what_is_open() {
+    let open = OpenScopes::named(["billing", "web"]);
     let buffer = render_chrome(
         &header_app(),
-        &held_chrome(sigils.clone()),
-        HELD_WIDTH,
+        &open_chrome(open.clone()),
+        OPEN_WIDTH,
         FILES_HEIGHT,
     );
 
     assert_eq!(header_text(&buffer), "crates");
-    let area = sigils_box(&buffer, &sigils).expect("the box has room");
-    assert!(text_in(&buffer, area, area.y).contains(SIGILS_TITLE.trim()));
+    let area = open_box(&buffer, &open).expect("the box has room");
+    assert!(text_in(&buffer, area, area.y).contains(OPEN_TITLE.trim()));
     assert_eq!(rows_in(&buffer, pane_inner(area)), ["billing", "web"]);
     assert_eq!(
         area.y + area.height,
@@ -1651,46 +1648,39 @@ fn the_header_names_only_the_tree_and_the_box_under_it_lists_what_is_held() {
 }
 
 #[test]
-fn sigil_lines_name_each_sigil_leave_nothing_blank_and_say_unreadable_out_loud() {
-    assert_eq!(sigil_lines(&Sigils::Nothing), [""]);
-    assert_eq!(sigil_lines(&Sigils::Unknown), ["can't read the config"]);
+fn open_lines_name_each_open_scope_leave_nothing_blank_and_say_unreadable_out_loud() {
+    assert_eq!(open_lines(&OpenScopes::Nothing), [""]);
+    assert_eq!(open_lines(&OpenScopes::Unknown), ["can't read the config"]);
     assert_eq!(
-        sigil_lines(&Sigils::held(["billing", WILDCARD])),
+        open_lines(&OpenScopes::named(["billing", WILDCARD])),
         ["billing".to_owned(), format!("{WILDCARD}  (every scope)")]
     );
 }
 
 #[test]
 fn past_the_most_lines_the_box_names_four_and_counts_the_rest() {
-    let held: Vec<String> = (0..8).map(|index| format!("scope-{index}")).collect();
-    let lines = sigil_lines(&Sigils::held(held.clone()));
+    let scopes: Vec<String> = (0..8).map(|index| format!("scope-{index}")).collect();
+    let lines = open_lines(&OpenScopes::named(scopes.clone()));
 
-    assert_eq!(lines.len(), SIGILS_MOST_LINES);
-    assert_eq!(
-        lines[..SIGILS_MOST_LINES - 1],
-        held[..SIGILS_MOST_LINES - 1]
-    );
-    assert_eq!(lines[SIGILS_MOST_LINES - 1], "+4 more");
+    assert_eq!(lines.len(), OPEN_MOST_LINES);
+    assert_eq!(lines[..OPEN_MOST_LINES - 1], scopes[..OPEN_MOST_LINES - 1]);
+    assert_eq!(lines[OPEN_MOST_LINES - 1], "+4 more");
 
-    let exactly: Vec<String> = held[..SIGILS_MOST_LINES].to_vec();
-    assert_eq!(sigil_lines(&Sigils::held(exactly.clone())), exactly);
+    let exactly: Vec<String> = scopes[..OPEN_MOST_LINES].to_vec();
+    assert_eq!(open_lines(&OpenScopes::named(exactly.clone())), exactly);
 }
 
 #[test]
 fn the_box_is_cut_for_as_many_lines_as_it_is_filled_with() {
-    let held = |count: usize| Sigils::held((0..count).map(|index| format!("scope-{index}")));
-    for sigils in [
-        Sigils::Nothing,
-        Sigils::Unknown,
-        held(1),
-        held(SIGILS_MOST_LINES),
-        held(9),
+    let named = |count: usize| OpenScopes::named((0..count).map(|index| format!("scope-{index}")));
+    for open in [
+        OpenScopes::Nothing,
+        OpenScopes::Unknown,
+        named(1),
+        named(OPEN_MOST_LINES),
+        named(9),
     ] {
-        assert_eq!(
-            sigil_line_count(&sigils),
-            sigil_lines(&sigils).len(),
-            "{sigils:?}"
-        );
+        assert_eq!(open_line_count(&open), open_lines(&open).len(), "{open:?}");
     }
 }
 
@@ -1698,12 +1688,12 @@ fn the_box_is_cut_for_as_many_lines_as_it_is_filled_with() {
 fn a_config_that_would_not_read_says_so_in_the_box_rather_than_going_quiet() {
     let buffer = render_chrome(
         &header_app(),
-        &held_chrome(Sigils::Unknown),
-        HELD_WIDTH,
+        &open_chrome(OpenScopes::Unknown),
+        OPEN_WIDTH,
         FILES_HEIGHT,
     );
 
-    let area = sigils_box(&buffer, &Sigils::Unknown).expect("the box has room");
+    let area = open_box(&buffer, &OpenScopes::Unknown).expect("the box has room");
     assert_eq!(
         rows_in(&buffer, pane_inner(area)),
         ["can't read the config"]
@@ -1716,49 +1706,49 @@ fn the_box_takes_its_rows_off_the_tree() {
     let size = Size::new(WIDTH, FILES_HEIGHT);
     let bare = pane_inner(whole_tree_column(Shape::new(size).cut())).height;
 
-    for sigils in [
-        Sigils::Nothing,
-        Sigils::held(["billing", "web", "docs"]),
-        Sigils::held((0..9).map(|index| format!("scope-{index}"))),
+    for open in [
+        OpenScopes::Nothing,
+        OpenScopes::named(["billing", "web", "docs"]),
+        OpenScopes::named((0..9).map(|index| format!("scope-{index}"))),
     ] {
-        let lines = u16::try_from(sigil_lines(&sigils).len()).expect("a few lines");
+        let lines = u16::try_from(open_lines(&open).len()).expect("a few lines");
         assert_eq!(
-            Shape::new(size).sigils(&sigils).cut().tree_height(),
+            Shape::new(size).open(&open).cut().tree_height(),
             bare - lines - 2 * BORDER_THICKNESS,
-            "{sigils:?}"
+            "{open:?}"
         );
     }
 }
 
 #[test]
 fn a_column_too_short_to_keep_the_trees_rows_drops_the_box_whole() {
-    let sigils = Sigils::held(["billing", "web"]);
+    let open = OpenScopes::named(["billing", "web"]);
     let floor = 2 * BORDER_THICKNESS + TREE_MIN_ROWS;
     let rows = 2 + 2 * BORDER_THICKNESS;
 
     let fits = Rect::new(0, 0, 30, floor + rows);
-    assert!(tree_column(fits, &sigils).1.is_some());
+    assert!(tree_column(fits, &open).1.is_some());
     let short = Rect::new(0, 0, 30, floor + rows - 1);
-    assert_eq!(tree_column(short, &sigils), (short, None));
+    assert_eq!(tree_column(short, &open), (short, None));
 }
 
 #[test]
 fn a_click_on_the_box_is_not_a_tree_row() {
     let size = Size::new(WIDTH, FILES_HEIGHT);
-    let sigils = Sigils::held(["billing"]);
-    let cut = Shape::new(size).sigils(&sigils).cut();
-    let inside = pane_inner(cut.sigils.expect("the box has room"));
+    let open = OpenScopes::named(["billing"]);
+    let cut = Shape::new(size).open(&open).cut();
+    let inside = pane_inner(cut.open.expect("the box has room"));
 
     assert!(!matches!(cut.hit(inside.x, inside.y), Hit::TreeRow { .. }));
 }
 
 #[test]
-fn every_spelling_of_holding_nothing_draws_the_same_frame() {
+fn every_spelling_of_no_scope_open_draws_the_same_frame() {
     let app = header_app();
     let never_told = Chrome::of("/repo", "/repo/crates").with_held(dev());
 
-    for width in [HELD_WIDTH, NARROW_WIDTH] {
-        let drawn = render_chrome(&app, &held_chrome(Sigils::Nothing), width, HEIGHT);
+    for width in [OPEN_WIDTH, NARROW_WIDTH] {
+        let drawn = render_chrome(&app, &open_chrome(OpenScopes::Nothing), width, HEIGHT);
 
         assert_eq!(
             header_text(&drawn),
@@ -1774,7 +1764,7 @@ fn every_spelling_of_holding_nothing_draws_the_same_frame() {
             rows_text(&drawn),
             rows_text(&render_chrome(
                 &app,
-                &held_chrome(Sigils::held(Vec::<String>::new())),
+                &open_chrome(OpenScopes::named(Vec::<String>::new())),
                 width,
                 HEIGHT
             )),
@@ -5916,7 +5906,7 @@ fn a_terminal_too_small_for_the_scope_window_clamps_it_and_still_shows_it() {
 
 const HEADED: &str = "Write the brief to";
 
-const PROPOSED: &str = "docs/warlock-brief-13-scopes-and-sigils.md";
+const PROPOSED: &str = "docs/warlock-brief-13-scopes-and-boards.md";
 
 #[test]
 fn the_path_window_heads_itself_holds_the_proposal_and_takes_a_refusal_under_it() {
@@ -5925,7 +5915,7 @@ fn the_path_window_heads_itself_holds_the_proposal_and_takes_a_refusal_under_it(
     // Worded by whoever refused — the write, in the loop — and printed here
     // without being read, the way a broken scope rule is: this window judges
     // no path either.
-    let broken = "docs/warlock-brief-13-scopes-and-sigils.md is already there";
+    let broken = "docs/warlock-brief-13-scopes-and-boards.md is already there";
     let field = ScopeField::new(HEADED, PROPOSED);
     let refused = field.clone().refused(broken);
 

@@ -91,17 +91,19 @@ const COMMANDS: &[Command] = &[
         ],
     },
     Command {
-        word: "/sigil",
-        read: read_sigil,
-        takes: Some(
-            "`add <NAME>...`, `remove <NAME>...` or `clear` for /sigil, which on its own names the sigils held",
-        ),
+        word: "/open",
+        read: read_open,
+        takes: Some("scopes for /open, which on its own names the scopes AI can work in"),
         help: &[
-            ("/sigil", "name the sigils held"),
-            ("/sigil add NAME...", "hold these sigils too"),
-            ("/sigil remove NAME...", "stop holding these"),
-            ("/sigil clear", "hold no sigils"),
+            ("/open", "name the scopes AI can work in"),
+            ("/open SCOPE...", "let AI work in these scopes"),
         ],
+    },
+    Command {
+        word: "/close",
+        read: read_close,
+        takes: Some("scopes for /close"),
+        help: &[("/close SCOPE...", "stop AI working in these scopes")],
     },
 ];
 
@@ -168,11 +170,10 @@ pub(crate) enum Keying {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub(crate) enum Sigiling {
+pub(crate) enum Opening {
     Show,
-    Add(Vec<String>),
-    Remove(Vec<String>),
-    Clear,
+    Open(Vec<String>),
+    Close(Vec<String>),
 }
 
 // Without a slug, the planned projects are listed instead.
@@ -190,7 +191,7 @@ pub(crate) enum Wanted {
     Push(ToPush),
     Draft(ToDraft),
     // `None` is `/pull` on its own, which is the one command word that is worth
-    // more than a refusal without its argument: the scopes this machine holds
+    // more than a refusal without its argument: the scopes open on this machine
     // are the answer to it, this module cannot ask for them, so a bare `/pull`
     // goes up to be answered with them named rather than with the list of
     // commands.
@@ -200,7 +201,7 @@ pub(crate) enum Wanted {
     Resume(String),
     Branch(Branching),
     Key(Keying),
-    Sigil(Sigiling),
+    Open(Opening),
 }
 
 // No variant for "empty", because an empty draft never gets here —
@@ -289,7 +290,7 @@ fn read_push(after: &str) -> Option<Submitted> {
 }
 
 // The commands whose arguments are names rather than paths: a scope, a slug, a
-// ticket identifier, a branch and a sigil are single words, so they are read as
+// ticket identifier and a branch are single words, so they are read as
 // words and a word too many is a refusal rather than the tail of the one before.
 // Reading them the way a path is read would make `/pull warlock-team WAR-1` one
 // scope called `warlock-team WAR-1`, which exists nowhere and would be refused a
@@ -360,15 +361,26 @@ fn read_key(after: &str) -> Option<Submitted> {
     Some(Submitted::Wanted(Wanted::Key(keying)))
 }
 
-fn read_sigil(after: &str) -> Option<Submitted> {
-    let sigiling = match words(after).as_slice() {
-        [] => Sigiling::Show,
-        ["add", names @ ..] if !names.is_empty() => Sigiling::Add(owned(names)),
-        ["remove", names @ ..] if !names.is_empty() => Sigiling::Remove(owned(names)),
-        ["clear"] => Sigiling::Clear,
-        _ => return None,
+// Never refuses, and still an `Option`: every reader in [`COMMANDS`] has the one
+// signature the table's `read` field takes.
+#[allow(clippy::unnecessary_wraps)]
+fn read_open(after: &str) -> Option<Submitted> {
+    let opening = match words(after).as_slice() {
+        [] => Opening::Show,
+        names => Opening::Open(owned(names)),
     };
-    Some(Submitted::Wanted(Wanted::Sigil(sigiling)))
+    Some(Submitted::Wanted(Wanted::Open(opening)))
+}
+
+// No bare `/close`: closing every scope at once takes a typed list of them,
+// never a word that closes them all by accident.
+fn read_close(after: &str) -> Option<Submitted> {
+    match words(after).as_slice() {
+        [] => None,
+        names => Some(Submitted::Wanted(Wanted::Open(Opening::Close(owned(
+            names,
+        ))))),
+    }
 }
 
 #[cfg(test)]

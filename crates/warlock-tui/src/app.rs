@@ -127,43 +127,41 @@ impl Focus {
     }
 }
 
-/// Which sigils the machine holds.
-///
 /// `Nothing` and `Unknown` are not the same answer and must not be merged:
-/// one is a config that holds nothing, the other a config that would not read,
-/// and drawing broken as absent tells a reader they hold nothing when warlock
-/// could not find out. [`Sigils::held`] folds an empty list into `Nothing`, so
-/// `Held` is never empty.
+/// one is a config that opens no scope, the other a config that would not read,
+/// and drawing broken as empty tells a reader no scope is open when warlock
+/// could not find out. [`OpenScopes::named`] folds an empty list into `Nothing`, so
+/// `Named` is never empty.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
-pub(crate) enum Sigils {
+pub(crate) enum OpenScopes {
     #[default]
     Nothing,
-    Held(Vec<String>),
+    Named(Vec<String>),
     Unknown,
 }
 
-impl Sigils {
+impl OpenScopes {
     #[must_use]
-    pub(crate) fn held(sigils: impl IntoIterator<Item = impl Into<String>>) -> Self {
-        let sigils: Vec<String> = sigils.into_iter().map(Into::into).collect();
-        if sigils.is_empty() {
+    pub(crate) fn named(open: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        let open: Vec<String> = open.into_iter().map(Into::into).collect();
+        if open.is_empty() {
             return Self::Nothing;
         }
-        Self::Held(sigils)
+        Self::Named(open)
     }
 
     #[must_use]
     pub(crate) fn as_slice(&self) -> &[String] {
         match self {
             Self::Nothing | Self::Unknown => &[],
-            Self::Held(sigils) => sigils,
+            Self::Named(open) => open,
         }
     }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
 pub(crate) struct Held {
-    pub(crate) sigils: Sigils,
+    pub(crate) open: OpenScopes,
     pub(crate) base: Option<String>,
 }
 
@@ -208,8 +206,8 @@ impl Chrome {
     }
 
     #[must_use]
-    pub(crate) const fn sigils(&self) -> &Sigils {
-        &self.held.sigils
+    pub(crate) const fn open(&self) -> &OpenScopes {
+        &self.held.open
     }
 
     #[must_use]

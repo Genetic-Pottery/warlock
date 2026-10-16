@@ -4,21 +4,22 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use warlock_engine::{
-    held_base_branch, held_sigils, save_base_branch, save_sigils, sigils_path, validate_sigil,
+    config_path, held_base_branch, open_scopes, save_base_branch, save_open_scopes,
+    validate_open_scope,
 };
 
-use crate::app::{Held, Sigils, Target};
+use crate::app::{Held, OpenScopes, Target};
 use crate::cut::listed;
 use crate::error::{Error, say};
 use crate::standing::Standing;
-use crate::submission::{Branching, Sigiling};
+use crate::submission::{Branching, Opening};
 
-/// This checkout's settings on this machine: the sigils held and the branch
+/// This checkout's settings on this machine: the open scopes and the branch
 /// pulls start from, both in the one config file under the home.
 ///
-/// The CLI's `warlock sigil` and `warlock branch` and the chat bar's `/sigil`
-/// and `/branch` all go through here, so the two doors read, write and word
-/// the setting the same way.
+/// The CLI's `warlock open`, `warlock close` and `warlock branch` and the chat
+/// bar's `/open`, `/close` and `/branch` all go through here, so the two doors
+/// read, write and word the setting the same way.
 pub(crate) struct Settings {
     home: Option<PathBuf>,
     root: PathBuf,
@@ -38,11 +39,11 @@ enum Stamp {
 }
 
 impl Settings {
-    // No home is nothing held rather than a failure: a reader of the tree has no
+    // No home opens no scope rather than failing: a reader of the tree has no
     // use for one, and the writes refuse with `Error::NoHome` when asked for.
     pub(crate) fn at(home: Option<PathBuf>, root: impl Into<PathBuf>) -> Self {
         let root = root.into();
-        let config = home.as_deref().map(|home| sigils_path(home, &root));
+        let config = home.as_deref().map(|home| config_path(home, &root));
         Self {
             home,
             root,
@@ -79,7 +80,7 @@ impl Settings {
     pub(crate) fn snapshot(&mut self) -> Held {
         self.stamp = Stamp::Read(self.modified());
         Held {
-            sigils: self.sigils_or_unknown(),
+            open: self.open_or_unknown(),
             base: self
                 .home()
                 .and_then(|home| held_base_branch(home, &self.root).ok().flatten()),
@@ -88,7 +89,7 @@ impl Settings {
 
     // A stat each round rather than a read: the file is opened only when its
     // modification time has moved since the last read, which is how a `warlock
-    // sigil` run in another shell reaches a warlock already open.
+    // open` run in another shell reaches a warlock already running.
     pub(crate) fn changed(&mut self) -> Option<Held> {
         if self.stamp == Stamp::Read(self.modified()) {
             return None;
@@ -104,49 +105,49 @@ impl Settings {
     }
 
     /// Read for acting on rather than for drawing: a config that will not read
-    /// is refused here rather than taken for holding nothing.
-    pub(crate) fn sigils(&self) -> Result<Vec<String>, Error> {
+    /// is refused here rather than taken for opening no scope.
+    pub(crate) fn open_scopes(&self) -> Result<Vec<String>, Error> {
         let home = self.home().ok_or(Error::NoHome)?;
-        held_sigils(home, &self.root).map_err(|source| Error::Sigils { source })
+        open_scopes(home, &self.root).map_err(|source| Error::Config { source })
     }
 
     pub(crate) fn base(&self) -> Result<Option<String>, Error> {
         let Some(home) = self.home() else {
             return Ok(None);
         };
-        held_base_branch(home, &self.root).map_err(|source| Error::Sigils { source })
+        held_base_branch(home, &self.root).map_err(|source| Error::Config { source })
     }
 
     // Every name is judged before anything is written, so a typo in the third
-    // name of an `add` leaves the first two unwritten too rather than half done.
-    // A config that will not read is refused rather than written over: `add` and
-    // `remove` are edits of what is there, and there is no telling what is there.
-    pub(crate) fn sigil(&self, sigiling: &Sigiling) -> Result<Said, Error> {
-        let mut held = self.sigils()?;
-        match sigiling {
-            Sigiling::Show => return Ok(Said::Shown(sigils_line(&Sigils::held(held), None))),
-            Sigiling::Add(names) => {
+    // name of an `open` leaves the first two unwritten too rather than half done.
+    // A config that will not read is refused rather than written over: `open`
+    // and `close` are edits of what is there, and there is no telling what is
+    // there.
+    pub(crate) fn open(&self, opening: &Opening) -> Result<Said, Error> {
+        let mut open = self.open_scopes()?;
+        match opening {
+            Opening::Show => return Ok(Said::Shown(open_line(&OpenScopes::named(open), None))),
+            Opening::Open(names) => {
                 for name in names {
-                    let sigil = folded(name)?;
-                    if !held.contains(&sigil) {
-                        held.push(sigil);
+                    let scope = folded(name)?;
+                    if !open.contains(&scope) {
+                        open.push(scope);
                     }
                 }
             }
-            Sigiling::Remove(names) => {
+            Opening::Close(names) => {
                 for name in names {
-                    let sigil = folded(name)?;
-                    let Some(at) = held.iter().position(|kept| *kept == sigil) else {
-                        return Err(Error::UnheldSigil { sigil });
+                    let scope = folded(name)?;
+                    let Some(at) = open.iter().position(|kept| *kept == scope) else {
+                        return Err(Error::NotOpen { scope });
                     };
-                    held.remove(at);
+                    open.remove(at);
                 }
             }
-            Sigiling::Clear => held.clear(),
         }
         let home = self.home().ok_or(Error::NoHome)?;
-        save_sigils(home, &self.root, &held).map_err(|source| Error::Sigils { source })?;
-        Ok(Said::Wrote(sigils_line(&Sigils::held(held), None)))
+        save_open_scopes(home, &self.root, &open).map_err(|source| Error::Config { source })?;
+        Ok(Said::Wrote(open_line(&OpenScopes::named(open), None)))
     }
 
     /// `remote_head` is only named in the line, never resolved here.
@@ -170,7 +171,7 @@ impl Settings {
 
     fn set_base(&self, base: Option<&str>) -> Result<Option<String>, Error> {
         let home = self.home().ok_or(Error::NoHome)?;
-        save_base_branch(home, &self.root, base).map_err(|source| Error::Sigils { source })?;
+        save_base_branch(home, &self.root, base).map_err(|source| Error::Config { source })?;
         Ok(base.map(ToOwned::to_owned))
     }
 
@@ -193,35 +194,35 @@ impl Settings {
     }
 
     pub(crate) fn pull_line(&self) -> Result<String, Error> {
-        let held = self.sigils()?;
+        let held = self.open_scopes()?;
         if held.is_empty() {
             return Ok(
-                "`/pull` takes a scope, and this machine holds no sigil at all — \
-                       `/sigil add` holds one"
+                "`/pull` takes a scope, and AI can work in no scope on this machine — \
+                       `/open <scope>` lets it work in one"
                     .to_owned(),
             );
         }
         Ok(format!(
-            "`/pull` takes a scope: this machine holds {}",
+            "`/pull` takes a scope: AI can work in {}",
             listed(&held)
         ))
     }
 
-    // Never an error: what a machine holds is a line on a header, and warlock is
-    // a way of reading a tree. A config that will not parse becomes
-    // `Sigils::Unknown` — said out loud, so that broken is never drawn as absent
-    // — and nothing here can return upwards to end the event loop.
-    // [`Settings::sigils`], and the engine's filing and routing through
-    // `held_sigils`, read the same file and refuse instead; the difference is
+    // Never an error: the open scopes are a line in a box, and warlock is a way
+    // of reading a tree. A config that will not read becomes
+    // `OpenScopes::Unknown` — said out loud, so that broken is never drawn as
+    // empty — and nothing here can return upwards to end the event loop.
+    // [`Settings::open_scopes`], and the engine's filing and routing through
+    // `open_scopes`, read the same file and refuse instead; the difference is
     // theirs to keep.
     //
-    // No home reads as nothing held rather than as a config that would not read:
+    // No home reads as no scope open rather than as a config that would not read:
     // there is no file in that case and no path to name one by, so
-    // `Sigils::Unknown` would be claiming something on disk is broken when
+    // `OpenScopes::Unknown` would be claiming something on disk is broken when
     // nothing on disk was ever looked at.
-    pub(crate) fn sigils_or_unknown(&self) -> Sigils {
-        self.home().map_or(Sigils::Nothing, |home| {
-            held_sigils(home, &self.root).map_or(Sigils::Unknown, Sigils::held)
+    pub(crate) fn open_or_unknown(&self) -> OpenScopes {
+        self.home().map_or(OpenScopes::Nothing, |home| {
+            open_scopes(home, &self.root).map_or(OpenScopes::Unknown, OpenScopes::named)
         })
     }
 }
@@ -240,37 +241,40 @@ impl Said {
     }
 }
 
-/// What is held, as one line: the one wording for the panel, `warlock sigil`
+/// The open scopes as one line: the one wording for `/open`, `warlock open`
 /// and `warlock check`. `config` is named only when the file would not read.
-pub(crate) fn sigils_line(sigils: &Sigils, config: Option<&Path>) -> String {
-    match (sigils, config) {
-        (Sigils::Held(held), _) => format!("holding {}", holding(held)),
-        (Sigils::Nothing, _) => "holding nothing".to_owned(),
-        (Sigils::Unknown, Some(path)) => {
-            format!("holding unknown: `{}` could not be read", path.display())
+pub(crate) fn open_line(open: &OpenScopes, config: Option<&Path>) -> String {
+    match (open, config) {
+        (OpenScopes::Named(held), _) => format!("AI can work in {}", holding(held)),
+        (OpenScopes::Nothing, _) => "AI can work in no scope".to_owned(),
+        (OpenScopes::Unknown, Some(path)) => {
+            format!(
+                "where AI can work is unknown: `{}` could not be read",
+                path.display()
+            )
         }
-        (Sigils::Unknown, None) => "holding unknown".to_owned(),
+        (OpenScopes::Unknown, None) => "where AI can work is unknown".to_owned(),
     }
 }
 
-fn holding(sigils: &[String]) -> String {
-    if sigils.is_empty() {
-        return "nothing".to_owned();
+fn holding(open: &[String]) -> String {
+    if open.is_empty() {
+        return "no scope".to_owned();
     }
-    listed(sigils)
+    listed(open)
 }
 
 // `to_ascii_lowercase` rather than `to_lowercase`, because the character class
-// a sigil is drawn from is ASCII: folding a non-ASCII capital would produce a
+// a scope name is drawn from is ASCII: folding a non-ASCII capital would produce a
 // character that is refused anyway, and this way the word refused is the word
 // typed.
 fn folded(name: &str) -> Result<String, Error> {
-    let sigil = name.to_ascii_lowercase();
-    validate_sigil(&sigil).map_err(|rule| Error::Sigil {
+    let scope = name.to_ascii_lowercase();
+    validate_open_scope(&scope).map_err(|rule| Error::ScopeName {
         entered: name.to_owned(),
         rule,
     })?;
-    Ok(sigil)
+    Ok(scope)
 }
 
 #[cfg(test)]

@@ -4,7 +4,7 @@ use clap::error::ErrorKind;
 use clap::{CommandFactory, Parser};
 use warlock_tui::{Error, status_for};
 
-use super::{Cli, Command, ScopeCommand, SigilCommand};
+use super::{Cli, Command, ScopeCommand};
 
 // `try_parse_from` wants argv as the process gets it, program name and all,
 // so the name is put back here and every test below reads as the words a
@@ -49,33 +49,28 @@ fn no_arguments_opens_the_tree() {
 }
 
 #[test]
-fn sigil_is_a_noun_with_a_bare_listing_and_three_verbs() {
+fn open_takes_scopes_or_none_and_close_takes_at_least_one() {
     let names = |names: &[&str]| names.iter().map(|name| (*name).to_owned()).collect();
     assert_eq!(
-        parse(&["sigil"]).unwrap().command,
-        Some(Command::Sigil { command: None })
+        parse(&["open"]).unwrap().command,
+        Some(Command::Open { scopes: vec![] })
     );
     assert_eq!(
-        parse(&["sigil", "add", "a", "b"]).unwrap().command,
-        Some(Command::Sigil {
-            command: Some(SigilCommand::Add {
-                names: names(&["a", "b"])
-            })
+        parse(&["open", "a", "b"]).unwrap().command,
+        Some(Command::Open {
+            scopes: names(&["a", "b"])
         })
     );
     assert_eq!(
-        parse(&["sigil", "remove", "a"]).unwrap().command,
-        Some(Command::Sigil {
-            command: Some(SigilCommand::Remove {
-                names: names(&["a"])
-            })
+        parse(&["close", "a"]).unwrap().command,
+        Some(Command::Close {
+            scopes: names(&["a"])
         })
     );
+    assert_eq!(parse(&["close"]).unwrap_err().exit_code(), 2);
     assert_eq!(
-        parse(&["sigil", "clear"]).unwrap().command,
-        Some(Command::Sigil {
-            command: Some(SigilCommand::Clear)
-        })
+        parse(&["sigil"]).unwrap_err().kind(),
+        ErrorKind::InvalidSubcommand
     );
 }
 
@@ -176,7 +171,7 @@ fn a_check_with_no_path_is_a_malformed_invocation_rather_than_a_whole_repository
 fn no_flag_on_a_scope_write_gets_past_the_boundary_or_asks_for_an_object() {
     // Two absences, pinned where they are decided. There is no `--force`,
     // `--yes` or any other word that skips the scope check — `warlock
-    // sigil add` is the one road past a boundary, and a flag that existed
+    // open` is the one road past a boundary, and a flag that existed
     // would be a second. And there is no `--json`: a write says what it did
     // as it does it and spends the status on whether it happened.
     let refused: [&[&str]; 6] = [
@@ -744,8 +739,8 @@ fn both_spellings_of_version_print_the_crate_version_and_succeed() {
 #[test]
 fn per_subcommand_help_is_a_help_exit_too() {
     for args in [
-        ["sigil", "--help"].as_slice(),
-        ["sigil", "add", "--help"].as_slice(),
+        ["open", "--help"].as_slice(),
+        ["close", "--help"].as_slice(),
         ["check", "--help"].as_slice(),
         // The nested pair, asked for at both depths: `warlock scope --help`
         // is the noun's two verbs, and each verb has a help of its own.
@@ -773,10 +768,11 @@ fn per_subcommand_help_is_a_help_exit_too() {
 fn each_subcommands_help_says_what_that_subcommand_does() {
     // The same `about` and `long_about = None` pair as on `Cli`, pinned one
     // subcommand at a time: without the `about` clap falls back to the doc
-    // comment, and `warlock sigil --help` would answer with the doc comment —
+    // comment, and `warlock open --help` would answer with the doc comment —
     // the name back, which is not what a reader asked for.
     for (name, said) in [
-        ("sigil", "sigils"),
+        ("open", "AI"),
+        ("close", "AI"),
         ("check", "scope"),
         ("scope", "scope"),
         ("key", "Linear"),
@@ -816,16 +812,11 @@ fn a_word_warlock_does_not_have_is_refused_rather_than_opening_the_tree() {
 
 #[test]
 fn a_trailing_argument_is_refused_and_never_quietly_dropped() {
-    // `warlock sigil clear extra` typed by somebody who meant something by
-    // `extra` must not run a `clear` that silently ignored it. A bare name
-    // after `sigil` is refused too: adding takes `add`, so a name alone is not
-    // read as one.
-    let refused: [&[&str]; 4] = [
-        &["sigil", "clear", "extra"],
-        &["sigil", "data-plane"],
-        &["sigil", "add"],
-        &["sigil", "remove"],
-    ];
+    // `warlock branch clear extra` typed by somebody who meant something by
+    // `extra` must not run a `clear` that silently ignored it. A bare `close`
+    // is refused too: it names no scope, and closing nothing is not an answer
+    // to anything a person typed it for.
+    let refused: [&[&str]; 2] = [&["branch", "clear", "extra"], &["close"]];
     for args in refused {
         let error = parse(args).unwrap_err();
         assert!(error.use_stderr(), "{args:?}");
@@ -847,7 +838,8 @@ fn help_prints_a_few_lines_rather_than_this_file() {
     // essays above; without it clap lifts the doc comments wholesale.
     let help = Cli::command().render_long_help().to_string();
     for subcommand in [
-        "sigil", "check", "scope", "key", "branch", "brief", "push", "draft", "pull", "resume",
+        "open", "close", "check", "scope", "key", "branch", "brief", "push", "draft", "pull",
+        "resume",
     ] {
         assert!(help.contains(subcommand), "{subcommand}: {help}");
     }
@@ -855,7 +847,7 @@ fn help_prints_a_few_lines_rather_than_this_file() {
     // A row per subcommand plus the usage and options chrome: the ceiling is
     // what stops an `about` becoming a paragraph, so it moves by one when a
     // subcommand is added and never to make room for prose.
-    assert!(help.lines().count() < 24, "{help}");
+    assert!(help.lines().count() < 25, "{help}");
     // Every doc comment on `Cli` and its variants spells the command in
     // backticks, and no `about` above does, so a backtick reaching the help
     // is a doc comment that got lifted into it.
@@ -874,7 +866,7 @@ fn the_five_statuses_a_write_can_leave_are_all_different_numbers() {
     let completed = i32::from(status_for(&Ok(())));
     let could_not = i32::from(status_for(&Err(Error::NoRepository {
         start: PathBuf::from("/nowhere"),
-        wanted: "hold sigils for",
+        wanted: "open scopes in",
     })));
     let refused = i32::from(status_for(&Err(Error::ClosedScope {
         path: "crates/engine".to_owned(),
@@ -911,7 +903,7 @@ fn no_argument_the_parser_accepts_gets_a_write_past_the_boundary() {
     // `add` writes a `[[scope]]` record from. Those three say where a new
     // scope's issues go; none of them reaches the boundary, which is asked
     // and answered before any of them is read. The one road past it is
-    // `warlock sigil add`, and an option here would be a second one.
+    // `warlock open`, and an option here would be a second one.
     for names in [vec!["scope"], vec!["scope", "add"], vec!["scope", "remove"]] {
         let allowed: &[&str] = if names == ["scope", "add"] {
             &["help", "team-key", "review-state", "label"]
@@ -966,7 +958,7 @@ fn a_malformed_check_is_clap_s_two() {
             error.exit_code(),
             i32::from(status_for(&Err(Error::NoRepository {
                 start: PathBuf::from("/nowhere"),
-                wanted: "hold sigils for",
+                wanted: "open scopes in",
             }))),
             "{args:?}"
         );

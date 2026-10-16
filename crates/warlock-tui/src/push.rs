@@ -28,10 +28,10 @@ use crate::standing::{FOR_PUSH, Standing};
 
 pub fn push(scope: &str, path: &Path, dry_run: bool) -> Result<(), Error> {
     let standing = Standing::here(FOR_PUSH)?;
-    // The error rather than `check`'s `.ok()`: the sigils under the home pick
-    // the board and the key store beside them is what files to it, so a machine
-    // with no home has nothing to push with rather than an answer of "nothing
-    // held".
+    // The error rather than `check`'s `.ok()`: the config under the home says
+    // whether the scope is open, and the key store beside it is what files to
+    // the board, so a machine with no home has nothing to push with rather than
+    // an answer of "no scope open".
     let home = Standing::home()?;
 
     pushed(
@@ -46,7 +46,7 @@ pub fn push(scope: &str, path: &Path, dry_run: bool) -> Result<(), Error> {
 }
 
 // Split from `push` so that the environment — the working directory, the
-// repository root, the home the sigils and the key store sit under — is three
+// repository root, the home the config and the key store sit under — is three
 // parameters rather than three reads, the way `check` splits `checked_onto`:
 // the whole command can then be run against a temporary repository and a
 // temporary home, and no test in this crate can reach the developer's real key

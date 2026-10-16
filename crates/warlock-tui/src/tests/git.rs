@@ -433,7 +433,7 @@ mod rendering {
              \n\
              ## Scopes touched\n\
              \n\
-             Held on this machine, and not the scope this ticket was pulled under.\n\
+             Open on this machine, and not the scope this ticket was pulled under.\n\
              \n\
              ### control-plane\n\
              \n\
@@ -527,7 +527,7 @@ mod rendering {
             format!(
                 "## Scopes touched\n\
                  \n\
-                 Held on this machine, and not the scope this ticket was pulled under.\n\
+                 Open on this machine, and not the scope this ticket was pulled under.\n\
                  \n\
                  ### control-plane\n\
                  \n\

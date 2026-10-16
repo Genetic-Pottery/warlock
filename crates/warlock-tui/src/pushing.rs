@@ -2,8 +2,8 @@
 //! project on the board.
 //!
 //! Everything up to that answer happens on the event loop's own thread between
-//! two frames and opens no socket at all: [`prepare`] is a manifest, a sigil
-//! file, a key store and the brief, all of them local. The
+//! two frames and opens no socket at all: [`prepare`] is a manifest, the
+//! config, a key store and the brief, all of them local. The
 //! answer is the one thing that leaves the machine, and it leaves on a worker
 //! thread — see [`Pushes`]: a channel per run, drained at the bottom of the
 //! loop, and the `Option` holding it is itself the say-no to a second one.
@@ -99,8 +99,8 @@ type Landing = Result<String, String>;
 /// everything the run has to say arrives through [`Pushes::keep_up`] at the
 /// bottom of the event loop.
 ///
-/// The home is here for the reason the header's sigils are resolved once in
-/// `session::load_app`: a home cannot move under a running warlock, and a second
+/// The home is here for the reason `session::load_app` resolves it once for the
+/// panel's open scopes: a home cannot move under a running warlock, and a second
 /// reading per keystroke would be a second answer. It is also what keeps every
 /// test in this crate off the developer's own — a `Pushes` is built with the home
 /// it is to use, so nothing below this line asks the environment.
@@ -283,7 +283,7 @@ impl<O: Opens> Pushes<O> {
             // `/push` refusal is, and no window: the answer would be written
             // into the very file that could not be read.
             Err(source) => {
-                return Next::Window(saying(app, one_line(Error::Sigils { source }), now));
+                return Next::Window(saying(app, one_line(Error::Config { source }), now));
             }
         }
 
@@ -451,7 +451,7 @@ fn saying(app: &mut App, line: impl Into<String>, now: Instant) -> Pushing {
 
 // A machine with no home is a line and no window, rather than an error out of
 // the event loop: warlock is running, the brief is still on disk, and what is
-// missing is the directory the sigils and the key store sit under.
+// missing is the directory the config and the key store sit under.
 //
 // `Standing::home`'s own sentence, asked of the one thing that reading can say
 // rather than worded again here — the session holds the answer to it (see
@@ -462,7 +462,7 @@ fn no_home(app: &mut App, now: Instant) -> Pushing {
 
 // Every test drives a temporary repository and a temporary home, through the
 // half of this module that takes both as parameters: nothing in the suite can
-// read the sigils, the binding or the key store of the machine it runs on.
+// read the config or the key store of the machine it runs on.
 #[cfg(test)]
 #[path = "tests/pushing.rs"]
 mod tests;

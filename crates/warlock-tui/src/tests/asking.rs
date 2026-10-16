@@ -29,7 +29,7 @@ fn a_typed_line_comes_back_exactly_as_it_was_typed() {
         Some("data-plane web\n".to_owned())
     );
     // The newline is kept rather than trimmed here: what a trailing newline means
-    // is the caller's — sigils are words on a line, a key is the line trimmed.
+    // is the caller's to decide.
     assert_eq!(
         read(b"lin_api_x").expect("a line"),
         Some("lin_api_x".to_owned())

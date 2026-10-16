@@ -14,7 +14,7 @@
 //! with one difference: the board is resolved on the worker rather than on the
 //! event loop's thread. A push resolves it first because a dialog is about to
 //! name the team it found; a cut has nothing to put up until the board has
-//! answered, so the sequence from the sigils to the slice count is one thing
+//! answered, so the sequence from the open scopes to the slice count is one thing
 //! that fails in one place.
 //!
 //! The run a Yes starts is one [`Drafting`] session per uncut slice, in cut
@@ -506,7 +506,7 @@ impl<O: Opens, A: Converses> Cutter<O, A> {
             // into the very file that could not be read.
             Err(source) => {
                 app.panel_mut()
-                    .note(one_line(Error::Sigils { source }), now);
+                    .note(one_line(Error::Config { source }), now);
                 return KeyPrompt::Closed;
             }
         }
@@ -1571,7 +1571,7 @@ fn refused(pulling: &str) -> String {
 
 // Every test drives a temporary repository and a temporary home, through the
 // half of this module that takes both as parameters: nothing in the suite can
-// read the sigils, the binding or the key store of the machine it runs on.
+// read the config or the key store of the machine it runs on.
 #[cfg(test)]
 #[path = "tests/cutting.rs"]
 mod tests;

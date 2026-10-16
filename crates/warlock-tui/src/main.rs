@@ -30,8 +30,8 @@ use warlock_tui::check::{self, check};
 use warlock_tui::planned;
 use warlock_tui::{
     Error, Interactive, POLL_INTERVAL, RecordFields, branch_clear, branch_show, branch_use, brief,
-    key_add, key_forget, key_list, key_show, key_use, pull, push, resume, scope_add, scope_remove,
-    sigil_add, sigil_clear, sigil_list, sigil_remove, status_for,
+    close_scopes, key_add, key_forget, key_list, key_show, key_use, open_list, open_scopes, pull,
+    push, resume, scope_add, scope_remove, status_for,
 };
 
 mod terminal;
@@ -57,17 +57,27 @@ struct Cli {
 #[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
 enum Command {
     #[command(
-        about = "List, add and remove the sigils this machine holds for this repository.",
+        about = "Let AI work in these scopes of this repository on this machine, or name the ones it can.",
         long_about = None
     )]
-    Sigil {
-        // Optional, so a bare `warlock sigil` lists what is held, the way a
-        // bare `/sigil` does in the chat bar.
-        #[command(subcommand)]
-        command: Option<SigilCommand>,
+    Open {
+        // Optional, so a bare `warlock open` names the open scopes, the way a
+        // bare `/open` does in the chat bar.
+        /// Scope names, or * for every scope.
+        #[arg(value_name = "SCOPE")]
+        scopes: Vec<String>,
     },
     #[command(
-        about = "Say which scope covers a path and whether this machine's sigils open it.",
+        about = "Stop AI working in these scopes of this repository on this machine.",
+        long_about = None
+    )]
+    Close {
+        /// Scopes open on this machine.
+        #[arg(value_name = "SCOPE", required = true)]
+        scopes: Vec<String>,
+    },
+    #[command(
+        about = "Say which scope covers a path and whether AI can work in it on this machine.",
         long_about = None
     )]
     Check {
@@ -145,7 +155,7 @@ enum Command {
         long_about = None
     )]
     Push {
-        // Both required, and the scope never inferred from the sigils held: a
+        // Both required, and the scope never inferred from the open scopes: a
         // project filed to the wrong board is one nothing here can take back.
         // A `String` and not a validated type, for the reason a scope is one on
         // `scope add`.
@@ -186,7 +196,7 @@ enum Command {
     Pull {
         // Required, like the push's path and for its reason: a pull is about one
         // scope's queue, and there is no whole-repository answer for an omitted
-        // scope to mean — a machine holding two sigils would have to guess which
+        // scope to mean — a machine with two scopes open would have to guess which
         // board's work to start. A `String` and not a validated type, as a scope
         // is everywhere else: what a scope may be is the engine's to say.
         /// Which scope's queue to take a ticket from.
@@ -350,24 +360,6 @@ enum KeyCommand {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
-enum SigilCommand {
-    #[command(about = "Hold these sigils as well as the ones already held.", long_about = None)]
-    Add {
-        /// Scope names, or `*` for every scope.
-        #[arg(value_name = "NAME", required = true)]
-        names: Vec<String>,
-    },
-    #[command(about = "Stop holding these sigils.", long_about = None)]
-    Remove {
-        /// Sigils this machine holds.
-        #[arg(value_name = "NAME", required = true)]
-        names: Vec<String>,
-    },
-    #[command(about = "Stop holding every sigil.", long_about = None)]
-    Clear,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
 enum BranchCommand {
     #[command(
         about = "Pull from and open pull requests against this branch.",
@@ -404,7 +396,7 @@ fn main() -> ExitCode {
     // message. A 0 means the question was answered whatever the answer was.
     //
     // The writes below add a third register, which is warlock's too and is not
-    // a failure at all: a boundary this machine's sigils do not open is refused
+    // a failure at all: a boundary closed on this machine is refused
     // with nothing spent, and that is a 3. See `status_for`.
     let cli = Cli::parse();
 
@@ -415,12 +407,9 @@ fn main() -> ExitCode {
             install_panic_hook();
             run()
         }
-        Some(Command::Sigil { command }) => match command {
-            None => sigil_list(),
-            Some(SigilCommand::Add { names }) => sigil_add(&names),
-            Some(SigilCommand::Remove { names }) => sigil_remove(&names),
-            Some(SigilCommand::Clear) => sigil_clear(),
-        },
+        Some(Command::Open { scopes }) if scopes.is_empty() => open_list(),
+        Some(Command::Open { scopes }) => open_scopes(&scopes),
+        Some(Command::Close { scopes }) => close_scopes(&scopes),
         // A plain check exits 0 for a closed scope: the closed boundary is its
         // answer, not a failure to reach one, which leaves `jq -e '.opens'` to
         // spend the non-zero status on the verdict. `--gate` spends it instead:

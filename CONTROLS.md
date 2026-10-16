@@ -43,23 +43,24 @@ a scope written under it would move the boundary that session is judged against.
 **The scoped column** is the boundary. A directory's scope is the one written on
 the nearest scoped directory at or above it — nearest wins outright, so an outer
 scope is a default for whatever said nothing below it rather than a second gate
-to also satisfy — and a key marked *yes* is refused there unless this machine
-holds a sigil matching it. The footer names the scope wanted. The sigils box
-under the tree lists what this machine holds. To change it, use `/sigil` in the
-chat bar or [`warlock sigil`](#the-headless-cli); a sigil of `*` opens
+to also satisfy — and a key marked *yes* is refused there unless that scope is
+open on this machine. The footer names the scope wanted. The **AI can work in**
+box under the tree lists the scopes open on this machine. To change it, use
+`/open` and `/close` in the chat bar or
+[`warlock open` and `warlock close`](#the-headless-cli); opening `*` opens
 everything.
 
 A directory no scope covers is closed to every AI session: no pull works there,
 and `warlock check --gate` refuses it. Anyone may draw the first scope on such a
 directory with `s`, because otherwise no repository could ever be set up. Once a
-scope covers a directory, you must hold that scope's sigil to redraw it — a
-boundary anybody may retype is not a boundary.
+scope covers a directory, that scope must be open on this machine to redraw it
+— a boundary anybody may retype is not a boundary.
 
-A sigil is what opens a scope, so a machine holding none opens none. Running
-warlock in a scoped repository without recording what you hold gets you refused,
-in the same words as holding the wrong sigil. That is the onboarding this
-vocabulary was designed around: you are handed your scopes the way you are handed
-any other credential, and you record them once.
+Every scope starts closed, so a machine that has opened none lets AI work in
+none. Running warlock in a scoped repository without opening your scopes gets
+you refused, in the same words as working in a scope you have not opened. That
+is the onboarding this vocabulary was designed around: you are handed your
+scopes the way you are handed any other credential, and you open them once.
 
 ## Leaving
 
@@ -90,22 +91,23 @@ running, it is the only stage lit.
 | `Esc` | Hand the keyboard back and keep the draft exactly as it was |
 | `Tab` | Move the focus on — the one key the composer does not take |
 | `Ctrl-C` | Cancel the turn if one is being answered; otherwise ask whether to quit |
-| `/brief` | Enter brief mode: the same conversation is now converging on a document. Your next message carries the instruction the brief template describes. When the model has enough, a window asks **Write the brief?** Yes asks for the document, then opens an editable path prompt already holding a proposal like `docs/warlock-brief-13-scopes-and-sigils.md`; writing the file returns to chat mode. No keeps talking; ask for the document in your own words and the question comes back |
+| `/brief` | Enter brief mode: the same conversation is now converging on a document. Your next message carries the instruction the brief template describes. When the model has enough, a window asks **Write the brief?** Yes asks for the document, then opens an editable path prompt already holding a proposal like `docs/warlock-brief-13-open-and-closed-scopes.md`; writing the file returns to chat mode. No keeps talking; ask for the document in your own words and the question comes back |
 | `/chat` | Leave brief mode, writing nothing — back to answering questions as they come |
 | `/push <SCOPE> <PATH>` | File the brief at `PATH` to the scope's Linear team as a project, after a Yes/No question |
 | `/draft <SCOPE>` | List the scope's planned projects, one per line, slug first |
 | `/draft <SCOPE> <SLUG>` | Cut that project into Linear issues, one slice at a time |
-| `/pull` | Name the scopes this machine holds a sigil for |
+| `/pull` | Name the scopes AI can work in on this machine |
 | `/pull <SCOPE>` | Work the next ready ticket in the scope's queue to a pull request |
 | `/pull <SCOPE> <TICKET>` | Work the named ticket, for example `WAR-123`, instead of the next one |
 | `/resume <TICKET>` | Mark the sub-tasks a halted pull stopped on as pending again, and put `/pull <SCOPE> <TICKET>` in the chat bar to send |
 | `/branch` | Name the branch pulls start from and open pull requests against |
 | `/branch use <BRANCH>` | Make pulls start from and open pull requests against `BRANCH`, the same as `warlock branch use` |
 | `/branch clear` | Go back to the remote's default branch, the same as `warlock branch clear` |
-| `/sigil` | Name the sigils this machine holds for this repository |
-| `/sigil add <NAME>...` | Hold these sigils as well, the same as `warlock sigil add` |
-| `/sigil remove <NAME>...` | Stop holding these sigils, the same as `warlock sigil remove` |
-| `/sigil clear` | Stop holding every sigil, the same as `warlock sigil clear` |
+| `/key <SCOPE>` | Name the key the scope is bound to, the same as `warlock key <scope>` |
+| `/key list` | Name the keys this machine stores, the same as `warlock key list` |
+| `/open` | Name the scopes AI can work in on this machine for this repository |
+| `/open <SCOPE>...` | Let AI work in these scopes as well, the same as `warlock open` |
+| `/close <SCOPE>...` | Stop AI working in these scopes, the same as `warlock close` |
 
 Commands are case-sensitive and take their arguments on the same line. A
 mistyped command is refused with a line listing every command, and nothing is

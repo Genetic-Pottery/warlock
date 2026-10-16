@@ -9,7 +9,7 @@
 // A run record lives under the home directory and never inside the repository:
 // the work in progress is a branch and a tree, and a file recording how far a
 // pull got would otherwise turn up in the diff of the very commit it is
-// describing. The home is a parameter for the reason `sigils.rs` opens with —
+// describing. The home is a parameter for the reason `config.rs` opens with —
 // resolving `HOME` here would let a test in this crate write the developer's
 // real home.
 
@@ -20,8 +20,8 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::config::project_dir;
 use crate::manifest::write_atomically;
-use crate::sigils::project_dir;
 use crate::splitting::Numbered;
 
 const PULLS_DIR: &str = "pulls";
@@ -554,7 +554,7 @@ impl PullRun {
     /// ));
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
-    // Absent is `NotFound`, following `Manifest::load` and `load_sigils`. An
+    // Absent is `NotFound`, following `Manifest::load` and `load_open_scopes`. An
     // empty record was rejected outright here, and more firmly than in those
     // two: a default `PullRun` would have to invent a ticket, a scope, a
     // branch and a start time, and a caller that took it for a run would

@@ -302,15 +302,15 @@ const DESCRIPTION: &str =
 // assuming it.
 const DEFAULT: &str = "main";
 
-// A scope in the manifest that this machine's sigils do not open.
+// A scope in the manifest that is closed on this machine.
 const CLOSED: &str = "control-plane";
 
-// A scope this machine holds that is not the one the ticket was pulled under: a
+// A scope open on this machine that is not the one the ticket was pulled under: a
 // path under it is not a crossing, and the pull request names it.
 const OTHER: &str = "docs-team";
 
 /// The ground a pull stands on that is not a fake: the two directories, and the
-/// scope, manifest and sigils the door resolved before any of this ran.
+/// scope, manifest and open scopes the door resolved before any of this ran.
 struct Ground {
     home: TempDir,
     root: TempDir,
@@ -539,7 +539,7 @@ fn a_run_cuts_the_branch_moves_the_ticket_splits_it_and_commits_every_sub_task()
         run.subtask("WAR-140.01").and_then(PullSubtask::log),
         Some("Added the reader.")
     );
-    // The held scope the ticket was not pulled under, kept across the sessions:
+    // The open scope the ticket was not pulled under, kept across the sessions:
     // the commit that ended the second one emptied the tree it was read from.
     assert_eq!(touched.len(), 1);
     assert_eq!(touched[0].scope, OTHER);
@@ -690,7 +690,7 @@ fn a_write_under_no_scope_is_a_crossing_and_the_reason_says_so() {
     assert_eq!(
         crossed.reason(),
         Some(
-            "wrote outside the scopes this machine holds, so nothing was committed: \
+            "wrote outside the scopes open on this machine, so nothing was committed: \
              `scripts/release.sh` is under no scope."
         )
     );
@@ -1056,7 +1056,7 @@ const URL: &str = "https://github.com/team/repo/pull/12";
 const REVIEW: &str = "In Review";
 
 /// The run every finish test below works: two sub-tasks, the second of which
-/// also writes under a held scope the ticket was not pulled under.
+/// also writes under an open scope the ticket was not pulled under.
 fn two_sub_tasks() -> (Checkout, Slicing, Sessions) {
     let repo = Checkout::clean(DEFAULT).trees([
         wrote("crates/engine/src/read.rs"),

@@ -22,7 +22,7 @@ use warlock_engine::scope;
 // and `crate::account::Line` is what a row says. Both names are right where
 // they live, and this module is the one place both are in scope.
 use crate::account::{Line as Entry, Voice};
-use crate::app::{App, Chrome, Focus, Row, Sigils, Target, Working};
+use crate::app::{App, Chrome, Focus, OpenScopes, Row, Target, Working};
 use crate::colour::{CONVERSATION_COLOUR, FOCUS_COLOUR, GUIDE_COLOUR, SYSTEM_COLOUR, colour_for};
 use crate::composer::Composer;
 use crate::confirm::{Answer, Carry, Choice, Cutting, Filing, Review, Undertaking};
@@ -349,8 +349,8 @@ pub(crate) fn draw(
         draw_composer(frame, area, composer, live, strip);
     }
     draw_tree_pane(frame, cut, app, chrome);
-    if let Some(area) = cut.sigils {
-        draw_sigils(frame, area, chrome.sigils());
+    if let Some(area) = cut.open {
+        draw_open(frame, area, chrome.open());
     }
     draw_footer(frame, cut.footer, app);
 
@@ -363,7 +363,7 @@ pub(crate) fn draw(
 }
 
 #[cfg(test)]
-static NO_SIGILS: Sigils = Sigils::Nothing;
+static NOTHING_OPEN: OpenScopes = OpenScopes::Nothing;
 
 /// Everything the layout depends on, and nothing else. A field added here is
 /// read by the frame and by every measurement at once; an input passed to one
@@ -372,7 +372,7 @@ static NO_SIGILS: Sigils = Sigils::Nothing;
 pub(crate) struct Shape<'a> {
     size: Size,
     composer: Option<&'a Composer>,
-    sigils: &'a Sigils,
+    open: &'a OpenScopes,
 }
 
 impl<'a> Shape<'a> {
@@ -381,12 +381,12 @@ impl<'a> Shape<'a> {
         size: Size,
         app: &App,
         composer: Option<&'a Composer>,
-        sigils: &'a Sigils,
+        open: &'a OpenScopes,
     ) -> Self {
         Self {
             size,
             composer: composer.and_then(|field| composer_on_screen(app, field)),
-            sigils,
+            open,
         }
     }
 
@@ -396,7 +396,7 @@ impl<'a> Shape<'a> {
         Self {
             size,
             composer: None,
-            sigils: &NO_SIGILS,
+            open: &NOTHING_OPEN,
         }
     }
 
@@ -408,8 +408,8 @@ impl<'a> Shape<'a> {
 
     #[must_use]
     #[cfg(test)]
-    pub(crate) fn sigils(self, sigils: &'a Sigils) -> Self {
-        Self { sigils, ..self }
+    pub(crate) fn open(self, open: &'a OpenScopes) -> Self {
+        Self { open, ..self }
     }
 
     #[must_use]
@@ -422,7 +422,7 @@ impl<'a> Shape<'a> {
         } = Columns::of(self.size);
         let (panel, composer) = split_column(panel, self.composer);
         let panel_rows = pane_inner(panel);
-        let (tree, sigils) = tree_column(column, self.sigils);
+        let (tree, open) = tree_column(column, self.open);
 
         Cut {
             screen,
@@ -431,7 +431,7 @@ impl<'a> Shape<'a> {
             composer,
             tree,
             tree_rows: pane_inner(tree),
-            sigils,
+            open,
             footer,
         }
     }
@@ -451,7 +451,7 @@ pub(crate) struct Cut {
     composer: Option<Rect>,
     tree: Rect,
     tree_rows: Rect,
-    sigils: Option<Rect>,
+    open: Option<Rect>,
     footer: Rect,
 }
 
@@ -1000,11 +1000,11 @@ pub(crate) fn target_title(target: Target<'_>, width: usize) -> String {
     format!("{TARGET_LABEL}{} ", truncated(&name, room))
 }
 
-const SIGILS_TITLE: &str = " sigils ";
+const OPEN_TITLE: &str = " AI can work in ";
 
-const SIGILS_MOST_LINES: usize = 5;
+const OPEN_MOST_LINES: usize = 5;
 
-// Rows the tree keeps before the sigils box gives way to it: below this the box
+// Rows the tree keeps before the "AI can work in" box gives way to it: below this the box
 // is not drawn at all, because a tree of one or two rows is no tree to read.
 const TREE_MIN_ROWS: u16 = 3;
 
@@ -1012,25 +1012,28 @@ const WILDCARD: &str = "*";
 
 const UNREADABLE: &str = "can't read the config";
 
-// A name is never cut: a sigil is at most 24 characters and the column is at
-// least `TREE_MIN_WIDTH`, so the box only ever has to drop whole lines, and it
-// says how many it dropped. Holding nothing is a blank line rather than a word,
-// because any one word could be a sigil somebody holds. The unreadable line has
-// spaces in it for the same reason: no sigil can, so it never reads as one.
-pub(crate) fn sigil_lines(sigils: &Sigils) -> Vec<String> {
-    let named = |sigil: &String| {
-        if sigil == WILDCARD {
+// A name is never cut: a scope name is at most 24 characters and the column is
+// at least `TREE_MIN_WIDTH`, so the box only ever has to drop whole lines, and it
+// says how many it dropped. No scope open is a blank line rather than a word,
+// because any one word could be the name of an open scope. The unreadable line
+// has spaces in it for the same reason: no scope name can, so it never reads as
+// one.
+pub(crate) fn open_lines(open: &OpenScopes) -> Vec<String> {
+    let named = |scope: &String| {
+        if scope == WILDCARD {
             format!("{WILDCARD}  (every scope)")
         } else {
-            sigil.clone()
+            scope.clone()
         }
     };
-    match sigils {
-        Sigils::Nothing => vec![String::new()],
-        Sigils::Unknown => vec![UNREADABLE.to_owned()],
-        Sigils::Held(held) if held.len() <= SIGILS_MOST_LINES => held.iter().map(named).collect(),
-        Sigils::Held(held) => {
-            let shown = SIGILS_MOST_LINES - 1;
+    match open {
+        OpenScopes::Nothing => vec![String::new()],
+        OpenScopes::Unknown => vec![UNREADABLE.to_owned()],
+        OpenScopes::Named(held) if held.len() <= OPEN_MOST_LINES => {
+            held.iter().map(named).collect()
+        }
+        OpenScopes::Named(held) => {
+            let shown = OPEN_MOST_LINES - 1;
             let mut lines: Vec<String> = held[..shown].iter().map(named).collect();
             lines.push(format!("+{} more", held.len() - shown));
             lines
@@ -1038,35 +1041,34 @@ pub(crate) fn sigil_lines(sigils: &Sigils) -> Vec<String> {
     }
 }
 
-// The length of `sigil_lines` without building them, for a layout cut on every
+// The length of `open_lines` without building them, for a layout cut on every
 // round and every mouse motion. The two must agree, or the box is cut for one
 // count of lines and filled with another.
-fn sigil_line_count(sigils: &Sigils) -> usize {
-    match sigils {
-        Sigils::Held(held) => held.len().min(SIGILS_MOST_LINES),
-        Sigils::Nothing | Sigils::Unknown => 1,
+fn open_line_count(open: &OpenScopes) -> usize {
+    match open {
+        OpenScopes::Named(held) => held.len().min(OPEN_MOST_LINES),
+        OpenScopes::Nothing | OpenScopes::Unknown => 1,
     }
 }
 
-fn tree_column(tree: Rect, sigils: &Sigils) -> (Rect, Option<Rect>) {
-    let lines = u16::try_from(sigil_line_count(sigils)).unwrap_or(u16::MAX);
+fn tree_column(tree: Rect, open: &OpenScopes) -> (Rect, Option<Rect>) {
+    let lines = u16::try_from(open_line_count(open)).unwrap_or(u16::MAX);
     let rows = lines.saturating_add(2 * BORDER_THICKNESS);
     let floor = 2 * BORDER_THICKNESS + TREE_MIN_ROWS;
     if tree.height < rows.saturating_add(floor) {
         return (tree, None);
     }
-    let [tree, sigils] =
-        Layout::vertical([Constraint::Min(0), Constraint::Length(rows)]).areas(tree);
-    (tree, Some(sigils))
+    let [tree, open] = Layout::vertical([Constraint::Min(0), Constraint::Length(rows)]).areas(tree);
+    (tree, Some(open))
 }
 
-fn draw_sigils(frame: &mut Frame<'_>, area: Rect, sigils: &Sigils) {
-    let block = pane_block(false).title_top(Line::from(SIGILS_TITLE).bold());
-    let style = match sigils {
-        Sigils::Held(_) => Style::new(),
-        Sigils::Nothing | Sigils::Unknown => Style::new().dim(),
+fn draw_open(frame: &mut Frame<'_>, area: Rect, open: &OpenScopes) {
+    let block = pane_block(false).title_top(Line::from(OPEN_TITLE).bold());
+    let style = match open {
+        OpenScopes::Named(_) => Style::new(),
+        OpenScopes::Nothing | OpenScopes::Unknown => Style::new().dim(),
     };
-    let lines: Vec<Line<'_>> = sigil_lines(sigils)
+    let lines: Vec<Line<'_>> = open_lines(open)
         .into_iter()
         .map(|line| Line::styled(line, style))
         .collect();

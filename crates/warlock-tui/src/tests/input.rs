@@ -1475,7 +1475,7 @@ mod gate {
             ScopeField, ScopePrompt, action_for, ctrl_c, edit_for, press, press_for,
         };
 
-        const PROPOSED: &str = "docs/warlock-brief-13-scopes-and-sigils.md";
+        const PROPOSED: &str = "docs/warlock-brief-13-scopes-and-boards.md";
 
         const HEADING: &str = "Write the brief to";
 
@@ -3614,7 +3614,7 @@ mod pointer {
     //    ...     │  ...                  ││  ...                  │
     //   row 16   │ panel line 15         ││ tree row 15           │
     //   row 17   │ panel line 16         │└───────────────────────┘
-    //   row 18   │ panel line 17         │┌ sigils ───────────────┐
+    //   row 18   │ panel line 17         │┌ AI can work in ───────┐
     //   row 19   │ panel line 18         ││                       │
     //   row 20   └───────────────────────┘└───────────────────────┘
     //   rows 21-23                     the footer

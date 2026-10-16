@@ -34,8 +34,8 @@ fn a_dir() -> TempDir {
 }
 
 /// A temporary home and a temporary checkout, and nothing else: a resume opens no
-/// socket, runs no subprocess and reads no manifest, so there is no sigil, no key
-/// and no `[[scope]]` record to write here. Every test that succeeds below is a
+/// socket, runs no subprocess and reads no manifest, so there is no open scope, no
+/// key and no `[[scope]]` record to write here. Every test that succeeds below is a
 /// test that a scope was never asked about.
 struct Ground {
     home: TempDir,

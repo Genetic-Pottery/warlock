@@ -396,15 +396,15 @@ fn the_other_savers_write_the_files_they_always_wrote() {
     fs::write(&control, "x").expect("writes");
     let ordinary = fs::metadata(&control).expect("reads").permissions().mode() & 0o777;
 
-    crate::sigils::save_sigils(home.path(), &root, &["web".to_owned()]).expect("saves");
+    crate::config::save_open_scopes(home.path(), &root, &["web".to_owned()]).expect("saves");
     assert_eq!(
-        fs::metadata(crate::sigils::sigils_path(home.path(), &root))
+        fs::metadata(crate::config::config_path(home.path(), &root))
             .expect("the config")
             .permissions()
             .mode()
             & 0o777,
         ordinary,
-        "the sigil config goes through the same `write_and_sync`, and this \
+        "the config goes through the same `write_and_sync`, and this \
          module's mode is not applied to it"
     );
 

@@ -1,14 +1,14 @@
-//! What a session actually wrote, judged against what this machine holds.
+//! What a session actually wrote, judged against the scopes open on this machine.
 //!
 //! The diff of the working tree is the authority on that, and nothing a session
 //! says about itself is. The `PreToolUse` gate hook sees `Edit` and `Write` and
 //! never sees a `sed`, a `python -c` or a heredoc inside `Bash`, so a pass can
-//! leave changes outside the scopes this machine holds without any refusal
+//! leave changes outside the scopes open on this machine without any refusal
 //! having been available to give. Reading `git status` after the session is the
 //! only check that covers every way a byte can reach the tree.
 //!
 //! [`crossings_in`] is a function over values: the parsed status entries, the
-//! manifest and the flattened held sigils go in, and the two lists come out with
+//! manifest and the flattened open scopes go in, and the two lists come out with
 //! no repository, no filesystem and no `git` anywhere on the path. The
 //! classification itself is [`scope_covering`] and [`scope_opens_to`] — the same
 //! pair the gate asks — so there is one nearest-scope walk and one membership
@@ -30,8 +30,8 @@ use warlock_engine::{Manifest, scope_covering, scope_opens_to};
 
 use crate::git::{Dirty, Error, Repository, Touched};
 
-/// One changed path this machine may not write: the scope covering it that no
-/// held sigil opens, or `None` for a path no scope covers, which is closed to
+/// One changed path this machine may not write: the scope covering it, which is
+/// closed on this machine, or `None` for a path no scope covers, which is closed to
 /// everyone.
 ///
 /// The scope is named on every path rather than the paths being grouped under
@@ -49,10 +49,10 @@ pub struct Crossing<'a> {
 /// appears in neither. Empty on both counts is the ordinary session.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Crossings<'a> {
-    /// Every path under a scope no held sigil opens, or under no scope at all.
+    /// Every path under a scope closed on this machine, or under no scope at all.
     /// What a `crossed` halt names.
     pub crossed: Vec<Crossing<'a>>,
-    /// Scopes this machine does hold, other than the one the ticket was pulled
+    /// Scopes open on this machine, other than the one the ticket was pulled
     /// under, with the paths written under them — already the shape
     /// [`pull_request_body`](crate::pull_request_body) takes.
     pub touched: Vec<Touched<'a>>,
@@ -92,9 +92,9 @@ impl Crossings<'_> {
 /// # Ok::<(), warlock_engine::manifest::Error>(())
 /// ```
 ///
-/// `held` is the flattened list of sigils rather than the header's
-/// [`Sigils`](crate::app::Sigils), for the same reason `boundary::permits` takes a
-/// slice: a config that would not parse is a thing to say and not a third answer
+/// `held` is the flattened list of open scopes rather than the panel's
+/// [`OpenScopes`](crate::app::OpenScopes), for the same reason `boundary::permits` takes a
+/// slice: a config that would not read is a thing to say and not a third answer
 /// to give here.
 #[must_use]
 pub fn crossings_in<'a>(
@@ -160,8 +160,8 @@ pub fn crossings_in<'a>(
     Crossings { crossed, touched }
 }
 
-/// What the working tree shows after a session, judged against what this machine
-/// holds.
+/// What the working tree shows after a session, judged against the scopes open
+/// on this machine.
 ///
 /// The one call is [`Repository::dirty`], which already runs
 /// `git status --porcelain=v1 -z --untracked-files=all` and parses it; there is no

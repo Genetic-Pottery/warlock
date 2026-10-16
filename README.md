@@ -27,7 +27,7 @@ AI is the star of the show and looking at code is not the primary concern.
 
 Text User Interface (TUI)
 - scope: Pair a directory with a Linear team. A scoped directory is one warlock may work in, and its work goes to that team's board. An unscoped directory is closed to every AI session.
-- sigil: A local per-user array of string which allow you and your AI to access a specific repos scope.
+- open and close: A local per-user list of the scopes you let your AI work in. `warlock open <scope>` opens one on your machine, and `warlock close <scope>` closes it again.
 
 Workflow
 - brief: The ability to talk to the AI and discuss large feature of work you wish to create, you will have you assumptions pushed up against and at the end of the conversation you can write a document to the repo.
@@ -116,8 +116,8 @@ You can still open files and read them. That is no longer the main event.
 
 ## What it promises
 
-- **Boundaries that hold.** AI works only inside a scope, and only for someone holding that
-  scope's sigil. A session that writes outside its scopes stops with nothing committed.
+- **Boundaries that hold.** AI works only inside a scope, and only on a machine where that
+  scope is open. A session that writes outside its scopes stops with nothing committed.
 - **A record that survives you.** Every change lands in the ticket tracker of youre choice.
   Or is commited within the repo. Everything is visible.
 - **Process artifacts as a byproduct.** Most teams LARP process: the ticket

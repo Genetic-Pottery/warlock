@@ -26,8 +26,8 @@ use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, Ke
 use ratatui::crossterm::terminal::enable_raw_mode;
 use serde_json::Value;
 use warlock_engine::{
-    Forgotten, Manifest, forget_key, keys, keys_path, load_key_binding, load_key_names, save_key,
-    save_key_binding, scopes_bound_to, sigils, sigils_path, validate_scope,
+    Forgotten, Manifest, config, config_path, forget_key, keys, keys_path, load_key_binding,
+    load_key_names, save_key, save_key_binding, scopes_bound_to, validate_scope,
 };
 
 use crate::asking::{self, Asks, Cooked, ERASE};
@@ -335,8 +335,8 @@ pub(crate) fn bound_name(
     }
 
     let bound = match load_key_binding(home, root, scope) {
-        Err(sigils::Error::NotFound { .. }) => None,
-        other => other.map_err(|source| Error::Sigils { source })?,
+        Err(config::Error::NotFound { .. }) => None,
+        other => other.map_err(|source| Error::Config { source })?,
     };
     let Some(name) = bound else {
         return Err(Error::NoBinding {
@@ -387,7 +387,7 @@ fn bound<W: Write>(
     // record goes first because a scope the manifest does not record is one
     // line missing from a file in this repository, which is the order
     // `pull::prepare` asks in as well. What the save does with the other
-    // bindings, the sigils and the branch already in the config is its own
+    // bindings, the open scopes and the branch already in the config is its own
     // business: it reads them first and writes them back.
     if manifest.scope_record(scope).is_none() {
         return Err(Error::unrecorded(manifest, scope, NOT_BOUND));
@@ -400,13 +400,13 @@ fn bound<W: Write>(
         });
     }
 
-    save_key_binding(home, root, scope, name).map_err(|source| Error::Sigils { source })?;
+    save_key_binding(home, root, scope, name).map_err(|source| Error::Config { source })?;
     say(
         out,
         &format!(
             "the scope `{scope}` in `{}` is bound to the key `{name}`, written to `{}`",
             root.display(),
-            sigils_path(home, root).display()
+            config_path(home, root).display()
         ),
     );
     Ok(())

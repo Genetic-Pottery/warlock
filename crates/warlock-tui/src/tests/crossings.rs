@@ -19,8 +19,8 @@ fn root() -> PathBuf {
     PathBuf::from(ROOT)
 }
 
-fn held(sigils: &[&str]) -> Vec<String> {
-    sigils.iter().map(|sigil| (*sigil).to_owned()).collect()
+fn opened(open: &[&str]) -> Vec<String> {
+    open.iter().map(|scope| (*scope).to_owned()).collect()
 }
 
 fn dirty(code: &str, path: &str) -> Dirty {
@@ -44,7 +44,7 @@ fn a_rename_out_of_a_closed_scope_crosses_on_the_side_that_left() {
         &changed,
         &root(),
         &manifest,
-        &held(["web"].as_slice()),
+        &opened(["web"].as_slice()),
         Some("web"),
     );
 
@@ -64,7 +64,7 @@ fn an_untracked_file_under_a_closed_scope_crosses() {
     let manifest = scoped(&[("crates/engine", "data-plane")]);
     let changed = [dirty("??", "crates/engine/src/new.rs")];
 
-    let crossings = crossings_in(&changed, &root(), &manifest, &held(&[]), Some("web"));
+    let crossings = crossings_in(&changed, &root(), &manifest, &opened(&[]), Some("web"));
 
     assert_eq!(
         crossings.crossed,
@@ -86,7 +86,7 @@ fn a_path_holding_a_quote_or_a_backslash_is_classified_as_written() {
     let payload = b"?? crates/engine/say \"hi\".rs\0 M crates/engine/back\\slash.rs\0";
 
     let changed = dirty_in(&payload[..]);
-    let crossings = crossings_in(&changed, &root(), &manifest, &held(&[]), None);
+    let crossings = crossings_in(&changed, &root(), &manifest, &opened(&[]), None);
 
     assert_eq!(
         crossings.crossed,
@@ -114,7 +114,7 @@ fn a_non_ascii_path_keeps_its_bytes_and_a_non_utf8_one_arrives_replaced() {
     payload.extend_from_slice(b"bad\xffname.rs\0");
 
     let changed = dirty_in(&payload);
-    let crossings = crossings_in(&changed, &root(), &manifest, &held(&[]), None);
+    let crossings = crossings_in(&changed, &root(), &manifest, &opened(&[]), None);
 
     assert_eq!(
         crossings.crossed,
@@ -144,7 +144,7 @@ fn a_path_under_no_scope_crosses_without_a_scope_to_name() {
         &changed,
         &root(),
         &manifest,
-        &held(["data-plane"].as_slice()),
+        &opened(["data-plane"].as_slice()),
         Some("data-plane"),
     );
 
@@ -170,7 +170,13 @@ fn the_wildcard_does_not_open_a_path_under_no_scope() {
     let manifest = scoped(&[("crates/engine", "data-plane")]);
     let changed = [dirty(" M", "docs/adr/0001.md")];
 
-    let crossings = crossings_in(&changed, &root(), &manifest, &held(["*"].as_slice()), None);
+    let crossings = crossings_in(
+        &changed,
+        &root(),
+        &manifest,
+        &opened(["*"].as_slice()),
+        None,
+    );
 
     assert_eq!(
         crossings.crossed,
@@ -183,7 +189,7 @@ fn the_wildcard_does_not_open_a_path_under_no_scope() {
 }
 
 #[test]
-fn a_held_scope_that_is_not_the_pulled_one_is_touched_and_never_crossed() {
+fn an_open_scope_that_is_not_the_pulled_one_is_touched_and_never_crossed() {
     let manifest = scoped(&[
         ("crates/engine", "data-plane"),
         ("crates/web", "web"),
@@ -200,7 +206,7 @@ fn a_held_scope_that_is_not_the_pulled_one_is_touched_and_never_crossed() {
         &changed,
         &root(),
         &manifest,
-        &held(["web", "billing"].as_slice()),
+        &opened(["web", "billing"].as_slice()),
         Some("web"),
     );
 
@@ -210,7 +216,7 @@ fn a_held_scope_that_is_not_the_pulled_one_is_touched_and_never_crossed() {
             scope: "billing",
             paths: vec!["crates/billing/src/invoice.rs", "crates/billing/src/tax.rs"],
         }],
-        "the scope pulled under is not reported, and a held scope groups its paths once"
+        "the scope pulled under is not reported, and an open scope groups its paths once"
     );
     assert_eq!(
         crossings.crossed,
@@ -218,7 +224,7 @@ fn a_held_scope_that_is_not_the_pulled_one_is_touched_and_never_crossed() {
             path: "crates/engine/src/lib.rs",
             scope: Some("data-plane"),
         }],
-        "holding two sigils says nothing about a third scope"
+        "two open scopes say nothing about a third scope"
     );
 }
 
@@ -231,7 +237,7 @@ fn the_wildcard_opens_a_foreign_scope_without_making_it_the_pulled_one() {
         &changed,
         &root(),
         &manifest,
-        &held(["*"].as_slice()),
+        &opened(["*"].as_slice()),
         Some("web"),
     );
 
@@ -242,12 +248,12 @@ fn the_wildcard_opens_a_foreign_scope_without_making_it_the_pulled_one() {
             scope: "data-plane",
             paths: vec!["crates/engine/src/lib.rs"],
         }],
-        "a machine holding everything still reached past the scope it was pulled under"
+        "a machine with every scope open still reached past the scope it was pulled under"
     );
 }
 
 #[test]
-fn a_machine_holding_nothing_crosses_every_scope() {
+fn a_machine_with_no_scope_open_crosses_every_scope() {
     let manifest = scoped(&[("crates/engine", "data-plane"), ("crates/web", "web")]);
     let changed = [
         dirty(" M", "crates/web/src/page.rs"),
@@ -255,7 +261,7 @@ fn a_machine_holding_nothing_crosses_every_scope() {
         dirty(" M", "docs/adr/0002.md"),
     ];
 
-    let crossings = crossings_in(&changed, &root(), &manifest, &held(&[]), None);
+    let crossings = crossings_in(&changed, &root(), &manifest, &opened(&[]), None);
 
     assert_eq!(
         crossings.crossed,
@@ -273,7 +279,7 @@ fn a_machine_holding_nothing_crosses_every_scope() {
                 scope: None,
             },
         ],
-        "a sigil is what opens a scope, so holding none opens none"
+        "no scope is open, so every scope is crossed"
     );
     assert!(crossings.touched.is_empty(), "{:?}", crossings.touched);
 }
@@ -293,7 +299,7 @@ fn the_same_path_named_twice_is_reported_once_and_in_the_order_git_gave() {
         dirty(" M", "crates/engine/a.rs"),
     ];
 
-    let crossings = crossings_in(&changed, &root(), &manifest, &held(&[]), None);
+    let crossings = crossings_in(&changed, &root(), &manifest, &opened(&[]), None);
 
     assert_eq!(
         crossings
@@ -314,7 +320,7 @@ fn a_path_reaching_outside_the_root_reads_as_under_no_scope() {
         &changed,
         Path::new(ROOT),
         &manifest,
-        &held(["data-plane"].as_slice()),
+        &opened(["data-plane"].as_slice()),
         Some("data-plane"),
     );
 
@@ -337,7 +343,7 @@ mod after {
     use std::sync::{Arc, Mutex};
 
     use super::super::crossings_after;
-    use super::{Crossing, ROOT, held, root, scoped};
+    use super::{Crossing, ROOT, opened, root, scoped};
     use crate::git::{Dirty, Error, Git, Ran, Runs, Touched};
 
     struct Shared {
@@ -401,9 +407,9 @@ mod after {
     #[test]
     fn the_tree_is_read_with_one_status_call_and_judged_on_what_it_said() {
         // The bytes a real `git status --porcelain=v1 -z --untracked-files=all`
-        // prints: a file moved out of a scope this machine does not hold, an
-        // untracked file under one it holds but did not pull under, and an edit
-        // under the pulled scope itself.
+        // prints: a file moved out of a scope that is closed on this machine, an
+        // untracked file under one that is open but was not pulled under, and an
+        // edit under the pulled scope itself.
         let scripted = Scripted::says(
             &b"R  crates/web/src/route.rs\0crates/engine/src/route.rs\0\
 ?? crates/cli/src/new.rs\0 M crates/web/src/page.rs\0"[..],
@@ -421,7 +427,7 @@ mod after {
             &mut changed,
             &root(),
             &manifest,
-            &held(["web", "cli"].as_slice()),
+            &opened(["web", "cli"].as_slice()),
             Some("web"),
         )
         .expect("the scripted status");
@@ -464,7 +470,7 @@ mod after {
             &mut changed,
             &root(),
             &manifest,
-            &held(["docs"].as_slice()),
+            &opened(["docs"].as_slice()),
             Some("docs"),
         )
         .expect("the scripted status");
@@ -495,7 +501,7 @@ mod after {
             &mut changed,
             &root(),
             &manifest,
-            &held(&[]),
+            &opened(&[]),
             None,
         )
         .expect_err("a refused status is not an answer about the tree");

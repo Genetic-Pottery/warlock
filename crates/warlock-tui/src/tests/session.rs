@@ -5,7 +5,7 @@ use std::{env, fs, process};
 use warlock_engine::{Manifest, Node, ScopedDirectory, Tree, manifest_path};
 
 use super::{Scope, closed_scope, load_app_in, load_manifest, reload};
-use crate::app::{App, Chrome, Held, Sigils};
+use crate::app::{App, Chrome, Held, OpenScopes};
 use crate::boundary::closed_scope_message;
 use crate::error::Error;
 use crate::settings::Settings;
@@ -14,9 +14,9 @@ use crate::settings::Settings;
 fn what_is_held_survives_a_reload_because_a_reload_never_touches_it() {
     // The claim this used to make about `App`, made where it now lives. The
     // config is read once, before the loop starts, and a reload is a tree
-    // being read again rather than a machine changing what it holds — so a
-    // header that stopped stating a holding after a run would read as one
-    // dropped.
+    // being read again rather than a machine changing which scopes are open —
+    // so a header that stopped stating them after a run would read as them
+    // being closed.
     //
     // What changed is how it is kept true. It used to be `reseat_on`
     // remembering to carry two more fields; it is now that the fact is not
@@ -26,7 +26,7 @@ fn what_is_held_survives_a_reload_because_a_reload_never_touches_it() {
         root: PathBuf::from("/repo/crates"),
         repo_root: PathBuf::from("/repo"),
         chrome: Chrome::of("/repo", "/repo/crates").with_held(Held {
-            sigils: Sigils::held(["billing", "web"]),
+            open: OpenScopes::named(["billing", "web"]),
             base: None,
         }),
         settings: Settings::at(None, "/repo"),
@@ -40,8 +40,8 @@ fn what_is_held_survives_a_reload_because_a_reload_never_touches_it() {
 
     assert_eq!(scope.chrome.header(), "crates");
     assert_eq!(
-        scope.chrome.sigils(),
-        &Sigils::Held(vec!["billing".to_owned(), "web".to_owned()])
+        scope.chrome.open(),
+        &OpenScopes::Named(vec!["billing".to_owned(), "web".to_owned()])
     );
 }
 
@@ -268,13 +268,13 @@ fn an_unscoped_directory_is_open_to_s_so_the_first_scope_can_be_drawn() {
         &mut app,
         &manifest,
         PathBuf::from(ROOT).as_path(),
-        &Sigils::held(Vec::<String>::new()),
+        &OpenScopes::named(Vec::<String>::new()),
     ));
     assert_eq!(app.message(), None, "an open boundary said something");
 }
 
 #[test]
-fn a_directory_under_a_scope_this_machine_does_not_hold_is_refused_in_the_boundarys_words() {
+fn a_directory_under_a_scope_closed_on_this_machine_is_refused_in_the_boundarys_words() {
     let (mut app, manifest) = boundary_app();
     select(&mut app, "crates/engine");
 
@@ -282,7 +282,7 @@ fn a_directory_under_a_scope_this_machine_does_not_hold_is_refused_in_the_bounda
         &mut app,
         &manifest,
         PathBuf::from(ROOT).as_path(),
-        &Sigils::held(["data-plane"]),
+        &OpenScopes::named(["data-plane"]),
     ));
     assert_eq!(
         app.message(),
@@ -291,7 +291,7 @@ fn a_directory_under_a_scope_this_machine_does_not_hold_is_refused_in_the_bounda
 }
 
 #[test]
-fn a_directory_under_a_held_scope_is_open() {
+fn a_directory_under_an_open_scope_is_open() {
     let (mut app, manifest) = boundary_app();
     select(&mut app, "crates/engine");
 
@@ -299,7 +299,7 @@ fn a_directory_under_a_held_scope_is_open() {
         &mut app,
         &manifest,
         PathBuf::from(ROOT).as_path(),
-        &Sigils::held(["platform"]),
+        &OpenScopes::named(["platform"]),
     ));
     assert_eq!(app.message(), None);
 }
@@ -313,7 +313,7 @@ fn a_file_row_is_left_for_s_to_refuse_in_its_own_words() {
         &mut app,
         &manifest,
         PathBuf::from(ROOT).as_path(),
-        &Sigils::held(Vec::<String>::new()),
+        &OpenScopes::named(Vec::<String>::new()),
     ));
     assert_eq!(app.message(), None);
 }

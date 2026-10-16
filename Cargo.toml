@@ -73,8 +73,8 @@ serde = { version = "1", features = ["derive"] }
 # `preserve_order` because the objects `--json` prints are a shell contract:
 # `command` first and then what that command has to say, in the order the
 # subcommand wrote them. Without it a `Map` is a `BTreeMap` and the keys come
-# out alphabetically, which would print a check's answer as `command`, `opens`,
-# `path`, `scope`, `sigils` — readable, but not the shape the CLI promises. The
+# out alphabetically, which would print a check's answer as `command`, `open`,
+# `opens`, `path`, `scope` — readable, but not the shape the CLI promises. The
 # feature costs no new crate in the tree: it swaps that `BTreeMap` for
 # `indexmap`, which `toml` already brings in.
 serde_json = { version = "1", features = ["preserve_order"] }
@@ -94,7 +94,7 @@ ratatui = { version = "0.30" }
 ignore = { version = "0.4" }
 # The digest that names a checkout's directory under `~/.warlock/`: stable and
 # well-specified, so the same repository path gives the same directory on any
-# build, which is what a sigil list kept across upgrades needs.
+# build, which is what a list of open scopes kept across upgrades needs.
 blake3 = { version = "1" }
 # Filesystem watching, which is a different API on every operating system —
 # inotify on Linux, FSEvents on macOS, ReadDirectoryChangesW on Windows — and no

@@ -8,7 +8,7 @@
 //! The tree check is deliberately not a seam of its own. What a session wrote is
 //! read through [`Repository::dirty`] — already a seam — and judged by
 //! [`crossings_in`], which is a function over values; what the loop cannot read
-//! for itself is the manifest and the sigils this machine holds, so those arrive
+//! for itself is the manifest and the scopes open on this machine, so those arrive
 //! as fields beside the rest. A trait wrapping the pair was the alternative, and
 //! it would have had to answer with an owned mirror of [`Crossings`]: a second
 //! record of one finding, which [`pull_request_body`] then wants borrowed again.
@@ -78,10 +78,10 @@ pub(crate) struct Pulling<'a, B: Board, R: Repository, F: Forge, S: Splits, W: W
     /// `held`. The manifest in hand rather than one loaded here: reading it
     /// again could disagree with the boundary the door already judged.
     pub(crate) manifest: &'a Manifest,
-    /// The flattened sigils this machine holds, as
+    /// The flattened open scopes, as
     /// [`crossings_in`](crate::crossings::crossings_in) and
     /// [`permits`](crate::boundary::permits) take them — a config that would not
-    /// parse is the door's to say and not a third answer to give in here.
+    /// read is the door's to say and not a third answer to give in here.
     pub(crate) held: &'a [String],
     /// The branch this checkout set with `warlock branch use`. `None` is the
     /// remote's default, detected at each point it is needed.
@@ -605,7 +605,7 @@ pub(crate) enum Reached {
     /// pull request.
     Worked {
         run: PullRun,
-        /// The scopes this machine holds that the sessions wrote under, other
+        /// The open scopes the sessions wrote under, other
         /// than the one the ticket was pulled under — which the pull request body
         /// names. Owned and accumulated as the run went, because each commit
         /// empties the tree the paths were read from.
@@ -617,7 +617,7 @@ pub(crate) enum Reached {
     Stopped(Pulled),
 }
 
-/// One scope a session wrote under and this machine holds, with the paths written
+/// One open scope a session wrote under, with the paths written
 /// under it.
 ///
 /// The owned twin of [`Touched`], which borrows the `git
@@ -780,7 +780,7 @@ pub(crate) enum Pulled {
     /// Nothing was runnable, and the ticket already carries
     /// [`halt_comment`]'s account of why.
     Halted { ticket: String },
-    /// A session wrote under a scope this machine does not hold. Named apart
+    /// A session wrote under a scope closed on this machine. Named apart
     /// from a halt because the tree still holds that work uncommitted, and
     /// because it is the one halt that is a boundary rather than a failure.
     Crossed { ticket: String, subtask: String },
@@ -791,7 +791,7 @@ impl Pulled {
     ///
     /// The numbers are [`status_for`](crate::error::status_for)'s and mean what
     /// they mean there: **0** the question was answered, **1** warlock could not
-    /// do it, **3** a boundary this machine's sigils do not open. A crossing is a
+    /// do it, **3** a boundary closed on this machine. A crossing is a
     /// **3** for that last reason and not because it is worse than a halt.
     ///
     /// Read by the tests rather than by the door, and deliberately so: `main.rs`
@@ -1069,16 +1069,16 @@ fn read(worked: Worked) -> (Option<String>, Option<SubtaskStatus>) {
     }
 }
 
-/// What a `crossed` sub-task's reason says: every path the session wrote that
-/// this machine's sigils do not open, each with the scope that covers it or the
-/// fact that none does.
+/// What a `crossed` sub-task's reason says: every path the session wrote under
+/// a scope closed on this machine or under no scope, each with the scope that
+/// covers it or the fact that none does.
 ///
 /// Every path and not the first, because the operator's next move is to look at
 /// all of them, and the scope on each because two crossed paths are commonly under
 /// two different scopes.
 fn crossed_reason(crossed: &[Crossing<'_>]) -> String {
     let mut reason =
-        String::from("wrote outside the scopes this machine holds, so nothing was committed:");
+        String::from("wrote outside the scopes open on this machine, so nothing was committed:");
     for crossing in crossed {
         let _ = match crossing.scope {
             Some(scope) => write!(reason, " `{}` is scoped `{scope}`;", crossing.path),
@@ -1095,7 +1095,7 @@ fn crossed_reason(crossed: &[Crossing<'_>]) -> String {
     reason
 }
 
-/// Fold one session's held-but-foreign scopes into what the run has seen, with no
+/// Fold one session's open-but-foreign scopes into what the run has seen, with no
 /// scope and no path said twice.
 ///
 /// Two sessions touching one scope is one entry in the pull request body and not

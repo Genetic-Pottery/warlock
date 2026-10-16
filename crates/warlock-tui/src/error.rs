@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::{fmt, io};
 
 use warlock_engine::{
-    Manifest, RunStatus, briefs, filing, keys, load, manifest, pulls, route, scope, sigils,
+    Manifest, RunStatus, briefs, config, filing, keys, load, manifest, pulls, route, scope,
 };
 
 use crate::boundary::{closed_scope_message, unscoped_message};
@@ -66,7 +66,7 @@ pub enum Error {
         scope: String,
     },
     // `ClosedScope` with no scope to name: a path nothing covers is closed to
-    // every machine, so the fix is drawing a scope rather than holding a sigil.
+    // every machine, so the fix is drawing a scope rather than opening one.
     Unscoped {
         path: String,
     },
@@ -91,15 +91,15 @@ pub enum Error {
     Prompt {
         source: io::Error,
     },
-    Sigil {
+    ScopeName {
         entered: String,
         rule: scope::Rule,
     },
-    Sigils {
-        source: sigils::Error,
+    Config {
+        source: config::Error,
     },
-    UnheldSigil {
-        sigil: String,
+    NotOpen {
+        scope: String,
     },
     // The name a key is stored under, judged before anything is read — so this
     // is the one key failure raised with no line typed. It carries the name and
@@ -152,7 +152,7 @@ pub enum Error {
         source: route::Error,
     },
     // Which board a push files to, and every way that question has no single
-    // answer: nothing held, nothing recorded, several candidates, a name that
+    // answer: no scope open, nothing recorded, several candidates, a name that
     // is not one of them, an unbound checkout, a bound name the store has never
     // heard of. One variant for all of them because the engine has already
     // worded them and this carries the sentence rather than re-writing it —
@@ -249,11 +249,11 @@ pub enum Error {
         cost: &'static str,
     },
     // The same question one file along, and the boundary's **3** rather than the
-    // ordinary **1**: the scope is recorded and this machine's sigils do not open
-    // it. Kept apart from `ClosedScope`, which is about a directory that is
-    // scoped — here the scope *is* what was named, so that sentence would say it
-    // twice — and it carries the sigils held, because the fix is a sigil and the
-    // usual cause is a typo against one this machine already has.
+    // ordinary **1**: the scope is recorded and is closed on this machine. Kept
+    // apart from `ClosedScope`, which is about a directory that is scoped — here
+    // the scope *is* what was named, so that sentence would say it twice — and it
+    // carries the open scopes, because the usual cause is a typo against one
+    // this machine already has open.
     UnheldScope {
         scope: String,
         held: Vec<String>,
@@ -282,7 +282,7 @@ pub enum Error {
         ticket: String,
     },
     // The one halt that is a boundary and so the one that spends the **3**: a
-    // session wrote outside the scopes this machine holds, nothing was
+    // session wrote outside the scopes open on this machine, nothing was
     // committed, and the tree was left exactly as the session left it.
     Crossed {
         ticket: String,
@@ -496,19 +496,19 @@ fn unrecorded_scope_message(
     )
 }
 
-// Names the scope wanted and the sigils held, and ends where
-// `closed_scope_message` ends — at `warlock sigil add` — because the fix is the
-// same one: the boundary is a sigil, and holding it is what opens the work.
+// Names the scope wanted and the open scopes, and ends where
+// `closed_scope_message` ends — at `warlock open` — because the fix is the same
+// one: opening the scope is what opens the work.
 fn unheld_scope_message(f: &mut fmt::Formatter<'_>, scope: &str, held: &[String]) -> fmt::Result {
     let holding = if held.is_empty() {
-        "this machine holds no sigil at all".to_owned()
+        "AI can work in no scope on this machine".to_owned()
     } else {
-        format!("this machine holds {}", listed(held))
+        format!("AI can work in {} on this machine", listed(held))
     };
     write!(
         f,
-        "the scope `{scope}` is not one this machine's sigils open, so nothing was pulled: \
-         {holding} — hold that sigil with `warlock sigil add {scope}`"
+        "the scope `{scope}` is closed on this machine, so nothing was pulled: {holding} — \
+         `warlock open {scope}` lets AI work there"
     )
 }
 
@@ -541,7 +541,7 @@ fn halted_message(f: &mut fmt::Formatter<'_>, ticket: &str) -> fmt::Result {
 fn crossed_message(f: &mut fmt::Formatter<'_>, ticket: &str, subtask: &str) -> fmt::Result {
     write!(
         f,
-        "`{subtask}` wrote outside the scopes this machine holds, so the run for `{ticket}` \
+        "`{subtask}` wrote outside the scopes open on this machine, so the run for `{ticket}` \
          stopped with nothing committed: the working tree is exactly as that session left it, and \
          the ticket's comment names the paths"
     )
@@ -648,7 +648,7 @@ impl fmt::Display for Error {
             }
             // The footer's own sentence, to the letter: the same fact refused
             // at a keystroke and at a shell prompt says the same thing, names
-            // the same scope and points at the same `warlock sigil add`.
+            // the same scope and points at the same `warlock open`.
             Self::ClosedScope { path, scope } => {
                 write!(f, "{}", closed_scope_message(path, scope))
             }
@@ -678,7 +678,7 @@ impl fmt::Display for Error {
             Self::NoHome => write!(
                 f,
                 "neither `HOME` nor `USERPROFILE` is set, so there is no home \
-                 directory to keep the sigils for this repository under: set \
+                 directory to keep the settings for this repository under: set \
                  `HOME` and run the command again"
             ),
             Self::Prompt { source } => {
@@ -687,18 +687,18 @@ impl fmt::Display for Error {
             // The rule is a sentence of its own, so this says what it is about
             // and, because the reader has just typed a whole line, that the rest
             // of that line has not been written either.
-            Self::Sigil { entered, rule } => write!(
+            Self::ScopeName { entered, rule } => write!(
                 f,
-                "`{entered}` is not a sigil, so nothing was written: {rule}"
+                "`{entered}` is not a scope name, so nothing was written: {rule}"
             ),
             // Flattened like the manifest's, and for the same reason: a config
             // that will not parse carries the TOML parser's diagnostic.
-            Self::Sigils { source } => write!(f, "{}", one_line(source)),
-            Self::UnheldSigil { sigil } => write!(
+            Self::Config { source } => write!(f, "{}", one_line(source)),
+            Self::NotOpen { scope } => write!(
                 f,
-                "this machine does not hold `{sigil}`, so nothing was written"
+                "`{scope}` is not open on this machine, so nothing was written"
             ),
-            // `Sigil`'s shape, with the other half of what a reader needs on the
+            // `ScopeName`'s shape, with the other half of what a reader needs on the
             // end: the rule is a sentence of its own, and what is worth adding
             // to it is that the prompt never happened, so no key is anywhere.
             Self::KeyName { name, rule } => {
@@ -733,7 +733,7 @@ impl fmt::Display for Error {
                 "the scope `{scope}` is bound to the key `{key}`, which this machine does not \
                  store: `warlock key add {key}` stores it"
             ),
-            // Flattened like the sigil config's: a store that will not parse
+            // Flattened like the config's: a store that will not parse
             // carries a position rather than the parser's own diagnostic, and
             // the rest is the filesystem's, which can still run to two lines.
             Self::Keys { source } => write!(f, "{}", one_line(source)),
@@ -821,13 +821,13 @@ impl std::error::Error for Error {
             | Self::Prompt { source } => Some(source),
             Self::Load { source } => Some(source),
             Self::Manifest { source } | Self::Unspellable { source } => Some(source),
-            Self::Sigil { rule, .. } | Self::KeyName { rule, .. } => Some(rule),
+            Self::ScopeName { rule, .. } | Self::KeyName { rule, .. } => Some(rule),
             // The refusal's own cause rather than the refusal, which is the
             // rule for a scope the engine refuses and nothing for the others:
             // the refusal's sentence is this error's sentence, so naming it as
             // the cause would print it twice.
             Self::Scope { refusal } => std::error::Error::source(refusal),
-            Self::Sigils { source } => Some(source),
+            Self::Config { source } => Some(source),
             Self::Keys { source } => Some(source),
             Self::Route { source } => Some(source),
             Self::Filing { source } => Some(source),
@@ -841,8 +841,8 @@ impl std::error::Error for Error {
             Self::Git { source } => Some(source),
             Self::Pull { source } => Some(source.as_ref()),
             Self::Clipboard { source } => Some(source),
-            // No source, and there is none to have: a boundary this machine
-            // does not hold is a fact about two files agreeing rather than a
+            // No source, and there is none to have: a boundary closed on this
+            // machine is a fact about two files agreeing rather than a
             // failure anything underneath reported.
             Self::Problems { .. }
             | Self::NoRepository { .. }
@@ -854,7 +854,7 @@ impl std::error::Error for Error {
             | Self::NoKey { .. }
             | Self::UnknownKey { .. }
             | Self::NoBinding { .. }
-            | Self::UnheldSigil { .. }
+            | Self::NotOpen { .. }
             // Nor here: a brief the board already holds, and a team key Linear
             // does not know, are a disagreement rather than a failure
             // underneath. The Linear calls that answered both worked.
@@ -871,7 +871,7 @@ impl std::error::Error for Error {
             | Self::NoBacklog { .. }
             | Self::AllCut { .. }
             // Nor here, and for that reason once more: a scope no record holds, a
-            // scope no sigil opens and a ticket the queue's rules turn down are
+            // scope closed on this machine and a ticket the queue's rules turn down are
             // facts about files agreeing, and a dirty tree is a person's own work.
             // A halt and a crossing have no cause underneath either — the run did
             // what it could, and what stopped it is on the ticket.
@@ -914,7 +914,7 @@ impl From<io::Error> for Error {
 /// Three non-zero registers of warlock's own, kept distinct so a script can
 /// tell them apart without reading a word of the message, beside clap's **2**
 /// for a command line it could not parse: **1** is warlock could not do it;
-/// **3** is a boundary this machine's sigils do not open, refused with nothing
+/// **3** is a boundary closed on this machine, refused with nothing
 /// spent; and [`CANCELLED`] is a run somebody stopped.
 ///
 /// **0** means the question was answered whatever the answer was — a closed
@@ -924,9 +924,9 @@ pub const fn status_for(outcome: &Result<(), Error>) -> u8 {
     match outcome {
         Ok(()) => 0,
         // The boundary's refusals spend the same register and nothing else does:
-        // a scope this machine's sigils do not open or a path no scope covers,
-        // refused before a request with nothing spent, and a session that wrote
-        // outside the scopes it holds, which is a run that stopped with nothing
+        // a scope closed on this machine or a path no scope covers, refused
+        // before a request with nothing spent, and a session that wrote outside
+        // the open scopes, which is a run that stopped with nothing
         // committed and the tree left as it was. The numbers here and
         // `Pulled::status`'s are one decision, asserted against each other in
         // the tests.
@@ -946,9 +946,9 @@ pub const fn status_for(outcome: &Result<(), Error>) -> u8 {
         // flags a run needs depends on what the manifest already records, so
         // the rule is warlock's to word rather than a command line clap could
         // have parsed, and a scope name the engine refuses already spends this
-        // register. Not a **3** either — that one is the sigil boundary's
-        // alone, and a script reading it as "ask for a sigil" would be sent to
-        // `warlock sigil add` over a missing `--team-key`.
+        // register. Not a **3** either — that one is the boundary's alone, and
+        // a script reading it as "open a scope" would be sent to `warlock open`
+        // over a missing `--team-key`.
         Err(_) => 1,
     }
 }

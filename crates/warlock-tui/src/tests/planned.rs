@@ -7,7 +7,7 @@ use tempfile::TempDir;
 use warlock_engine::drafting::{Draft, stub_answer};
 use warlock_engine::{
     Destination, Manifest, ScopeRecord, ScopedDirectory, agent, save_key, save_key_binding,
-    save_sigils,
+    save_open_scopes,
 };
 
 use super::{Planned, Settled, cut_with, listing, listing_lines, prepare};
@@ -268,35 +268,33 @@ fn saving(root: &Path, manifest: &Manifest) {
     manifest.save(root).expect("a manifest that saves");
 }
 
-// The home of a machine that holds the sigil, has bound a name and stores a key
+// The home of a machine that has the scope open, has bound a name and stores a key
 // under it: everything a cut needs, under a directory of this test's own, so
 // that nothing here can reach the developer's real key store.
 fn a_home(root: &Path) -> TempDir {
-    a_home_holding(root, &[SCOPE])
+    a_home_opening(root, &[SCOPE])
 }
 
-// The same machine holding whichever sigils a test names, which is how a
+// The same machine with whichever scopes a test names open, which is how a
 // checkout standing at two boards is built: that is the ambiguity `--scope`
 // settles, and it is a fact about the home rather than about the repository.
 //
 // Each of those scopes is bound, to the one name, because the config holds a
 // key name per scope: a checkout standing at two boards that had bound only
 // one of them would refuse the second cut for a reason no test here is about.
-// Every sigil these tests name is a scope name, so the two lists are the same
-// words.
-fn a_home_holding(root: &Path, sigils: &[&str]) -> TempDir {
+fn a_home_opening(root: &Path, open: &[&str]) -> TempDir {
     let home = a_dir();
-    holding(home.path(), root, sigils);
-    for scope in sigils {
+    opening(home.path(), root, open);
+    for scope in open {
         save_key_binding(home.path(), root, scope, KEY_NAME).expect("a binding that writes");
     }
     save_key(home.path(), KEY_NAME, NOT_A_KEY).expect("a key store that writes");
     home
 }
 
-fn holding(home: &Path, root: &Path, sigils: &[&str]) {
-    let sigils: Vec<String> = sigils.iter().map(|sigil| (*sigil).to_owned()).collect();
-    save_sigils(home, root, &sigils).expect("a config that writes");
+fn opening(home: &Path, root: &Path, open: &[&str]) {
+    let open: Vec<String> = open.iter().map(|scope| (*scope).to_owned()).collect();
+    save_open_scopes(home, root, &open).expect("a config that writes");
 }
 
 // A note as a cut leaves it on the project, which is the whole of what makes a
@@ -880,20 +878,20 @@ mod preparing {
         // The three ways there is no candidate, which `push` refuses in the
         // same three sentences: this asserts they are that command's words and
         // not a second set worded here.
-        let holds_nothing = a_scoped_repository();
+        let opens_nothing = a_scoped_repository();
         let nothing = a_dir();
 
         let unmatched = a_scoped_repository();
         let elsewhere = a_dir();
-        holding(elsewhere.path(), unmatched.path(), &["billing"]);
+        opening(elsewhere.path(), unmatched.path(), &["billing"]);
 
         let unrecorded = a_repository();
         saving(unrecorded.path(), &an_unrecorded_manifest());
         let no_record = a_dir();
-        holding(no_record.path(), unrecorded.path(), &[SCOPE]);
+        opening(no_record.path(), unrecorded.path(), &[SCOPE]);
 
         for (repo, home, expected) in [
-            (&holds_nothing, &nothing, "warlock sigil add"),
+            (&opens_nothing, &nothing, "warlock open <scope>"),
             (&unmatched, &elsewhere, "billing"),
             (&unrecorded, &no_record, "[[scope]]"),
         ] {
@@ -911,7 +909,7 @@ mod preparing {
             repo.path(),
             &a_manifest([a_record(SCOPE, TEAM), a_record("web", "WEB")]),
         );
-        let home = a_home_holding(repo.path(), &[SCOPE, "web"]);
+        let home = a_home_opening(repo.path(), &[SCOPE, "web"]);
 
         let planned = preparing(
             repo.path(),
@@ -1340,7 +1338,7 @@ mod headless {
             repo.path(),
             &a_manifest([a_record(SCOPE, TEAM), a_record("web", "WEB")]),
         );
-        let home = a_home_holding(repo.path(), &[SCOPE, "web"]);
+        let home = a_home_opening(repo.path(), &[SCOPE, "web"]);
         let linear = a_sliced_project(SLICED);
 
         let (outcome, printed) = cut_to(repo.path(), home.path(), SLUG, Some("web"), true, &linear);

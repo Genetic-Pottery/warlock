@@ -17,7 +17,7 @@ fn write_submit(app: &mut App, root: &Path, field: &ScopeField, now: Instant) ->
     super::write_submit(app, root, field, now).prompt
 }
 
-const BRIEF: &str = "docs/warlock-brief-13-scopes-and-sigils.md";
+const BRIEF: &str = "docs/warlock-brief-13-scopes-and-boards.md";
 
 const LAST_KEY: &str = "something the last key said";
 
@@ -79,7 +79,7 @@ fn everything_under(root: &Path) -> Vec<String> {
 // does not is refused before it reaches the disk. The padding is the problem
 // prose, which is where a brief's unheaded text belongs anyway.
 fn document_of(bytes: usize) -> String {
-    let opening = "# Scopes and sigils\n\n";
+    let opening = "# Scopes and boards\n\n";
     let shape = "\n\n## Outcome\n\n## Success criteria\n\n## Constraints\n\n\
                      ## Out of scope\n\n## Scope\n";
     let prose = bytes - opening.len() - shape.len();
@@ -109,7 +109,7 @@ fn what_was_written_is_handed_back_and_a_second_write_replaces_it() {
     // manifest-relative, because that is the spelling the ledger stores and
     // the one `from_manifest_path` reads back.
     let repo = a_repo();
-    let second = "docs/warlock-brief-14-sigils.md";
+    let second = "docs/warlock-brief-14-boards.md";
     let mut app = app_answering(repo.path(), WHOLE);
 
     let wrote = super::write_submit(&mut app, repo.path(), &field(&format!("./{BRIEF}")), now());
@@ -620,7 +620,7 @@ mod without_a_screen {
 
         // And the same document against a shape asking for what the template
         // asks for: refused, with the template untouched either way.
-        let second = "docs/warlock-brief-14-sigils.md";
+        let second = "docs/warlock-brief-14-boards.md";
         let answer = landed(repo.path(), second, "# A title\n\n## Rollout\n", WHOLE);
 
         assert_eq!(
@@ -693,13 +693,13 @@ mod rounds {
     use crate::panel::Mode;
     use crate::prompt::{ScopePrompt, edit_for};
 
-    const REPLY: &str = "# Scopes and sigils\n\nA boundary somebody drew.\n\n\
+    const REPLY: &str = "# Scopes and boards\n\nA boundary somebody drew.\n\n\
                              ## Outcome\n\n## Success criteria\n\n## Constraints\n\n\
                              ## Out of scope\n\n## Scope\n";
 
     const DIRECTORY: &str = DEFAULT_BRIEF_DIRECTORY;
 
-    const PROPOSED: &str = "docs/warlock-brief-01-scopes-and-sigils.md";
+    const PROPOSED: &str = "docs/warlock-brief-01-scopes-and-boards.md";
 
     fn press(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
@@ -760,7 +760,7 @@ mod rounds {
             prompt = round(&mut app, &repo, &prompt, code, now());
         }
 
-        let written = "docs/warlock-brief-01-scopes-and-sigils.txt";
+        let written = "docs/warlock-brief-01-scopes-and-boards.txt";
         assert_eq!(prompt, ScopePrompt::Closed, "Enter left the window up");
         assert_eq!(
             fs::read_to_string(repo.path().join(written)).expect("the artifact reads back"),
@@ -842,7 +842,7 @@ mod rounds {
         assert_eq!(
             fs::read_to_string(
                 repo.path()
-                    .join("docs/warlock-brief-01-scopes-and-sigils-2.md")
+                    .join("docs/warlock-brief-01-scopes-and-boards-2.md")
             )
             .expect("the second path reads back"),
             REPLY
@@ -902,11 +902,11 @@ mod whole {
 
     const AT_MOST: Duration = Duration::from_secs(5);
 
-    const DOCUMENT: &str = "# Scopes and sigils\n\nA boundary somebody drew, and the reason \
+    const DOCUMENT: &str = "# Scopes and boards\n\nA boundary somebody drew, and the reason \
                                 it is there.\n\n## Outcome\n\n## Success criteria\n\n\
                                 ## Constraints\n\n## Out of scope\n\n## Scope\n";
 
-    const PROPOSED: &str = "docs/warlock-brief-01-scopes-and-sigils.md";
+    const PROPOSED: &str = "docs/warlock-brief-01-scopes-and-boards.md";
 
     // `Chat::keep_up` and nothing else, which is what the event loop's own
     // `keep_up` calls: nothing here waits on the worker, joins a thread or
@@ -987,7 +987,7 @@ mod whole {
         assert!(
             rows.iter().any(|line| *line
                 == Line::Text {
-                    text: "# Scopes and sigils".to_owned()
+                    text: "# Scopes and boards".to_owned()
                 }),
             "the answer is not on the card: {rows:?}"
         );

@@ -5,7 +5,7 @@ use std::time::Instant;
 use tempfile::TempDir;
 use warlock_engine::{
     Manifest, ScopeRecord, ScopedDirectory, from_manifest_path, load_key_binding, save_key,
-    save_key_binding, save_sigils,
+    save_key_binding, save_open_scopes,
 };
 
 use super::{Pushes, Pushing};
@@ -67,7 +67,7 @@ fn a_record(name: &str, team: &str) -> ScopeRecord {
 }
 
 // Both records, in every repository below: which of them is a candidate is the
-// machine's sigils' to say, which is the rule these tests are about.
+// machine's open scopes to say, which is the rule these tests are about.
 fn a_manifest() -> Manifest {
     Manifest::with_directories([ScopedDirectory::new(".", "docs", SCOPE)
         .expect("a relative module path is inside the root")])
@@ -86,18 +86,18 @@ fn a_repository() -> TempDir {
     repo
 }
 
-// A home of this test's own, every time: the sigils that pick the board, the
-// bindings and the key store are all under it, and the module under test is
+// A home of this test's own, every time: the open scopes, the bindings and the
+// key store are all under it, and the module under test is
 // only ever asked about the one handed in below. Nothing here reads `HOME`.
 //
 // Both of the manifest's scopes are bound, to the one name, because the config
 // holds a key name per scope and a test that files into `OTHER_SCOPE` needs
 // that scope's binding as much as `SCOPE`'s. Which of the two is a candidate
-// stays the sigils' question, which is the rule these tests are about.
-fn a_home(root: &Path, sigils: &[&str]) -> TempDir {
+// stays the open scopes' question, which is the rule these tests are about.
+fn a_home(root: &Path, open: &[&str]) -> TempDir {
     let home = a_dir();
-    let held: Vec<String> = sigils.iter().map(|sigil| (*sigil).to_owned()).collect();
-    save_sigils(home.path(), root, &held).expect("a config that writes");
+    let open: Vec<String> = open.iter().map(|scope| (*scope).to_owned()).collect();
+    save_open_scopes(home.path(), root, &open).expect("a config that writes");
     for scope in [SCOPE, OTHER_SCOPE] {
         save_key_binding(home.path(), root, scope, KEY_NAME).expect("a binding that writes");
     }
@@ -149,12 +149,12 @@ fn asking(app: &mut App, repo: &Path, home: &Path, scope: &str) -> (Pushes<Board
     (pushes, prompt)
 }
 
-// A home with the sigil and a key in the store, and no binding for any scope:
+// A home with the scope open and a key in the store, and no binding for any scope:
 // the checkout somebody has just cloned, which is the road this question
 // exists for.
 fn an_unbound_home(root: &Path) -> TempDir {
     let home = a_dir();
-    save_sigils(home.path(), root, &[SCOPE.to_owned()]).expect("a config that writes");
+    save_open_scopes(home.path(), root, &[SCOPE.to_owned()]).expect("a config that writes");
     save_key(home.path(), KEY_NAME, NOT_A_KEY).expect("a key store that writes");
     home
 }
@@ -234,37 +234,39 @@ fn a_machine_that_could_file_to_either_board_files_to_the_scope_typed() {
 #[test]
 fn every_refusal_is_push_rs_own_line_on_the_thread_with_no_window_up() {
     // What the panel adds to `prepare`'s refusals: one line on the thread, in
-    // `push.rs`'s words, and no window. One of each kind — a machine holding
-    // no sigil, a bound name the key store no longer holds, a scope that is no
+    // `push.rs`'s words, and no window. One of each kind — a machine with no
+    // scope open, a bound name the key store no longer holds, a scope that is no
     // candidate, and a brief that is gone. Every home here binds the scope the
     // command names, because an unbound one is the question asked ahead of
     // `prepare` rather than one of its refusals.
     let repo = a_repository();
 
-    let unsigiled = a_dir();
-    save_key_binding(unsigiled.path(), repo.path(), SCOPE, KEY_NAME)
+    let nothing_open = a_dir();
+    save_key_binding(nothing_open.path(), repo.path(), SCOPE, KEY_NAME)
         .expect("a binding that writes");
-    save_key(unsigiled.path(), KEY_NAME, NOT_A_KEY).expect("a key store that writes");
+    save_key(nothing_open.path(), KEY_NAME, NOT_A_KEY).expect("a key store that writes");
 
     let dangling = a_dir();
-    save_sigils(dangling.path(), repo.path(), &[SCOPE.to_owned()]).expect("a config that writes");
+    save_open_scopes(dangling.path(), repo.path(), &[SCOPE.to_owned()])
+        .expect("a config that writes");
     save_key_binding(dangling.path(), repo.path(), SCOPE, KEY_NAME).expect("a binding that writes");
 
-    let held = a_home(repo.path(), &[SCOPE]);
+    let opened = a_home(repo.path(), &[SCOPE]);
     // `billing` is no candidate here, and that is the refusal this case is
     // about: the binding is written so the push reaches `prepare` to be told
     // so, rather than being asked which key a scope nothing records files
     // with.
-    save_key_binding(held.path(), repo.path(), "billing", KEY_NAME).expect("a binding that writes");
+    save_key_binding(opened.path(), repo.path(), "billing", KEY_NAME)
+        .expect("a binding that writes");
 
     let missing = a_repository();
     let missing_home = a_home(missing.path(), &[SCOPE]);
     fs::remove_file(missing.path().join(WRITTEN)).expect("the brief this test wrote");
 
     for (repo, home, scope) in [
-        (&repo, &unsigiled, SCOPE),
+        (&repo, &nothing_open, SCOPE),
         (&repo, &dangling, SCOPE),
-        (&repo, &held, "billing"),
+        (&repo, &opened, "billing"),
         (&missing, &missing_home, SCOPE),
     ] {
         let mut app = App::default();
@@ -299,7 +301,7 @@ fn the_brief_is_read_from_the_repository_root_rather_than_the_working_directory(
 
 #[test]
 fn a_yes_files_what_the_dialog_was_drawn_from_without_resolving_it_again() {
-    // The sigils are taken away while the dialog is up. The push the reader
+    // Every scope is closed while the dialog is up. The push the reader
     // said yes to was resolved when the dialog opened, and that is what is
     // filed: the board the dialog named, with the key it was resolved with.
     let repo = a_repository();
@@ -309,7 +311,7 @@ fn a_yes_files_what_the_dialog_was_drawn_from_without_resolving_it_again() {
     let mut pushes = Pushes::with_client(linear.clone(), Some(home.path().to_path_buf())).inline();
     pushes.press(&mut app, &a_manifest(), repo.path(), SCOPE, WRITTEN, now());
     assert!(pushes.window.confirm.is_open(), "{:?}", notes(&app));
-    save_sigils(home.path(), repo.path(), &[]).expect("a config that writes");
+    save_open_scopes(home.path(), repo.path(), &[]).expect("a config that writes");
 
     pushes.answer(&mut app, PushAnswered::Send, now());
     pushes.keep_up(&mut app, now());
@@ -462,7 +464,7 @@ fn a_checkout_with_no_config_at_all_is_one_line_on_the_thread_and_no_question() 
 
     let source = load_key_binding(home.path(), repo.path(), SCOPE)
         .expect_err("a checkout nobody configured");
-    assert_eq!(notes(&app), vec![one_line(Error::Sigils { source })]);
+    assert_eq!(notes(&app), vec![one_line(Error::Config { source })]);
     assert_eq!(prompt, KeyPrompt::Closed, "a question was asked anyway");
     assert_eq!(pushes.window, Pushing::closed(), "a dialog came up");
 }

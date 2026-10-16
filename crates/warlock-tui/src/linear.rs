@@ -61,7 +61,7 @@ pub trait Posts {
 /// A client for one workspace, holding the key it authenticates with.
 ///
 /// The key is a constructor parameter, as the home directory is a parameter
-/// through `sigils.rs` and `keys.rs`: nothing in this module reads an
+/// through `config.rs` and `keys.rs`: nothing in this module reads an
 /// environment variable, a file or the key store, so no test in this crate can
 /// reach the developer's real credentials by accident.
 ///

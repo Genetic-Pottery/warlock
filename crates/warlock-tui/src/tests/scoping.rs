@@ -5,12 +5,12 @@ use std::{fs, io};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use tempfile::TempDir;
 use warlock_engine::{
-    Manifest, Node, ScopeRecord, ScopedDirectory, Tree, load_key_binding, manifest, route_facts,
-    save_key, save_key_binding, sigils, sigils_path, validate_scope,
+    Manifest, Node, ScopeRecord, ScopedDirectory, Tree, config, config_path, load_key_binding,
+    manifest, route_facts, save_key, save_key_binding, validate_scope,
 };
 
 use super::{Windows, key_edit, key_submit, record_edit, record_submit, scope_edit, scope_submit};
-use crate::app::{App, Sigils};
+use crate::app::{App, OpenScopes};
 use crate::prompt::{
     Edited, KeyChoice, KeyEdited, KeyPrompt, RecordEdited, RecordField, RecordForm, RecordPrompt,
     ScopeField, ScopePrompt, edit_for, key_edit_for, record_edit_for,
@@ -18,15 +18,15 @@ use crate::prompt::{
 
 // `super::scope_press` with no boundary in the way, so these tests are about
 // the prompt rather than about being refused. The wildcard rather than
-// `Sigils::Nothing` because the fixture manifest *does* scope
-// `crates/engine`, and holding nothing opens nothing that is scoped. Tests
+// `OpenScopes::Nothing` because the fixture manifest *does* scope
+// `crates/engine`, and AI can work in no scope opens nothing that is scoped. Tests
 // that are about the boundary call `super::scope_press` directly.
 fn scope_press(app: &mut App, manifest: &Manifest, repo_root: &Path) -> ScopePrompt {
     super::scope_press(
         app,
         manifest,
         repo_root,
-        &Sigils::held(["*"]),
+        &OpenScopes::named(["*"]),
         None,
         Instant::now(),
     )
@@ -106,7 +106,7 @@ fn saved(root: &Path) -> Option<Manifest> {
     }
 }
 
-/// A field over `module` holding `text`, as the window would be by the time
+/// A field over `module` AI can work in `text`, as the window would be by the time
 /// Enter is pressed.
 fn field(module: &str, text: &str) -> ScopeField {
     ScopeField::new(module, text)
@@ -128,10 +128,10 @@ fn press(code: KeyCode) -> KeyEvent {
 
 /// What the footer says when the boundary turns `s` down over
 /// `crates/engine`, which the fixture scopes `data-plane`.
-const CLOSED: &str = "crates/engine is scoped `data-plane` — hold that sigil to work here, with `warlock sigil add data-plane`";
+const CLOSED: &str = "crates/engine is scoped `data-plane`, which is closed on this machine — `warlock open data-plane` lets AI work here";
 
 #[test]
-fn s_is_refused_on_a_directory_whose_scope_this_machine_does_not_hold() {
+fn s_is_refused_on_a_directory_whose_scope_is_closed_on_this_machine() {
     let repo = a_repo();
     let mut app = app_on(repo.path(), ENGINE_ROW);
     let before = app.clone();
@@ -140,19 +140,19 @@ fn s_is_refused_on_a_directory_whose_scope_this_machine_does_not_hold() {
         &mut app,
         &scoped(),
         repo.path(),
-        &Sigils::held(["web"]),
+        &OpenScopes::named(["web"]),
         None,
         Instant::now(),
     );
 
-    // You must hold a boundary to redraw it. Without this the one key whose
+    // A boundary must be open to redraw it. Without this the one key whose
     // whole purpose is to move a scope would be the one key a scope did not
     // cover.
     assert_eq!(prompt, ScopePrompt::Closed, "the window must not open");
     assert_eq!(
         app.message(),
         Some(CLOSED),
-        "the refusal names the scope wanted and where a sigil is recorded"
+        "the refusal names the scope wanted and how to open it"
     );
     // Saying so is the whole of it: the same app with the new line on it and
     // nothing else moved — no colour and no selection.
@@ -165,13 +165,13 @@ fn s_is_refused_on_a_directory_whose_scope_this_machine_does_not_hold() {
 }
 
 #[test]
-fn holding_a_matching_sigil_opens_the_prompt() {
+fn a_matching_open_scope_opens_the_prompt() {
     let repo = a_repo();
 
-    for sigils in [
-        Sigils::held(["data-plane"]),
-        Sigils::held(["web", "data-plane"]),
-        Sigils::held(["*"]),
+    for open in [
+        OpenScopes::named(["data-plane"]),
+        OpenScopes::named(["web", "data-plane"]),
+        OpenScopes::named(["*"]),
     ] {
         let mut app = app_on(repo.path(), ENGINE_ROW);
 
@@ -179,7 +179,7 @@ fn holding_a_matching_sigil_opens_the_prompt() {
             &mut app,
             &scoped(),
             repo.path(),
-            &sigils,
+            &open,
             None,
             Instant::now(),
         );
@@ -187,26 +187,25 @@ fn holding_a_matching_sigil_opens_the_prompt() {
         assert_eq!(
             prompt,
             ScopePrompt::open("crates/engine", "data-plane"),
-            "{sigils:?} opens `data-plane`"
+            "{open:?} opens `data-plane`"
         );
-        assert_eq!(app.message(), Some(LAST_KEY), "{sigils:?} said something");
+        assert_eq!(app.message(), Some(LAST_KEY), "{open:?} said something");
     }
 }
 
 #[test]
-fn a_machine_that_holds_no_sigil_is_refused_by_a_scoped_directory() {
+fn a_machine_with_no_scope_open_is_refused_by_a_scoped_directory() {
     let repo = a_repo();
 
-    for sigils in [
-        // Nobody has run `warlock sigil add` here. A sigil is what opens a
-        // scope, so holding none opens none — the empty set is not a
-        // universal bypass, or the boundary would hold for exactly those
-        // people who had already opted into being bound by it.
-        Sigils::Nothing,
+    for open in [
+        // Nobody has run `warlock open` here, so no scope is open — the empty
+        // set is not a universal bypass, or the boundary would hold for exactly
+        // those people who had already opted into being bound by it.
+        OpenScopes::Nothing,
         // And a config that will not parse cannot establish that anything is
-        // held, which is the same answer. The header says `holding unknown`
-        // for as long as it lasts, so the two are told apart on screen.
-        Sigils::Unknown,
+        // open, which is the same answer. The header says `where AI can work is
+        // unknown` for as long as it lasts, so the two are told apart on screen.
+        OpenScopes::Unknown,
     ] {
         let mut app = app_on(repo.path(), ENGINE_ROW);
 
@@ -214,26 +213,18 @@ fn a_machine_that_holds_no_sigil_is_refused_by_a_scoped_directory() {
             &mut app,
             &scoped(),
             repo.path(),
-            &sigils,
+            &open,
             None,
             Instant::now(),
         );
 
-        assert_eq!(
-            prompt,
-            ScopePrompt::Closed,
-            "{sigils:?} opened `data-plane`"
-        );
-        assert_eq!(
-            app.message(),
-            Some(CLOSED),
-            "{sigils:?} said the wrong thing"
-        );
+        assert_eq!(prompt, ScopePrompt::Closed, "{open:?} opened `data-plane`");
+        assert_eq!(app.message(), Some(CLOSED), "{open:?} said the wrong thing");
     }
 }
 
 #[test]
-fn an_unscoped_directory_stays_open_to_a_machine_holding_nothing() {
+fn an_unscoped_directory_stays_open_to_a_machine_with_no_scope_open() {
     let repo = a_repo();
     let mut app = app_on(repo.path(), TUI_ROW);
 
@@ -244,7 +235,7 @@ fn an_unscoped_directory_stays_open_to_a_machine_holding_nothing() {
         &mut app,
         &scoped(),
         repo.path(),
-        &Sigils::Nothing,
+        &OpenScopes::Nothing,
         None,
         Instant::now(),
     );
@@ -253,7 +244,7 @@ fn an_unscoped_directory_stays_open_to_a_machine_holding_nothing() {
 }
 
 #[test]
-fn a_directory_no_scope_covers_is_open_to_a_machine_holding_something_else() {
+fn a_directory_no_scope_covers_is_open_to_a_machine_with_another_scope_open() {
     let repo = a_repo();
     let mut app = app_on(repo.path(), TUI_ROW);
 
@@ -263,7 +254,7 @@ fn a_directory_no_scope_covers_is_open_to_a_machine_holding_something_else() {
         &mut app,
         &scoped(),
         repo.path(),
-        &Sigils::held(["data-plane"]),
+        &OpenScopes::named(["data-plane"]),
         None,
         Instant::now(),
     );
@@ -277,7 +268,7 @@ fn an_inner_scope_replaces_the_outer_one_rather_than_adding_to_it() {
     let manifest =
         Manifest::with_directories([row("crates/engine", "data-plane"), row(".", "platform")]);
 
-    // Holding the outer scope alone does not reach the inner one: an outer
+    // The outer scope open alone does not reach the inner one: an outer
     // scope is a default for what said nothing below it, never a second gate
     // that `platform` could satisfy on `data-plane`'s behalf.
     let mut app = app_on(repo.path(), ENGINE_ROW);
@@ -286,7 +277,7 @@ fn an_inner_scope_replaces_the_outer_one_rather_than_adding_to_it() {
             &mut app,
             &manifest,
             repo.path(),
-            &Sigils::held(["platform"]),
+            &OpenScopes::named(["platform"]),
             None,
             Instant::now()
         ),
@@ -300,7 +291,7 @@ fn an_inner_scope_replaces_the_outer_one_rather_than_adding_to_it() {
             &mut app,
             &manifest,
             repo.path(),
-            &Sigils::held(["platform"]),
+            &OpenScopes::named(["platform"]),
             None,
             Instant::now()
         ),
@@ -1322,7 +1313,7 @@ fn a_pull_in_flight_turns_s_down_on_the_thread_and_opens_no_window() {
         &mut app,
         &scoped(),
         repo.path(),
-        &Sigils::held(["*"]),
+        &OpenScopes::named(["*"]),
         Some("`WAR-140` is being pulled"),
         Instant::now(),
     );
@@ -1351,7 +1342,7 @@ fn a_pull_in_flight_is_answered_before_the_boundary_is() {
         &mut app,
         &scoped(),
         repo.path(),
-        &Sigils::held(["web"]),
+        &OpenScopes::named(["web"]),
         Some("`WAR-140` is being pulled"),
         Instant::now(),
     );
@@ -1407,7 +1398,7 @@ fn a_choice(home: &Path, scope: &str) -> KeyChoice {
 fn bound(home: &Path, root: &Path, scope: &str) -> Option<String> {
     match load_key_binding(home, root, scope) {
         Ok(name) => name,
-        Err(sigils::Error::NotFound { .. }) => None,
+        Err(config::Error::NotFound { .. }) => None,
         Err(error) => panic!("the config could not be read: {error}"),
     }
 }
@@ -1415,7 +1406,7 @@ fn bound(home: &Path, root: &Path, scope: &str) -> Option<String> {
 /// The config file byte for byte, or `None` when none was ever written for this
 /// checkout — which is what an Esc over an unconfigured one has to leave.
 fn config(home: &Path, root: &Path) -> Option<Vec<u8>> {
-    let path = sigils_path(home, root);
+    let path = config_path(home, root);
     match fs::read(&path) {
         Ok(bytes) => Some(bytes),
         Err(error) if error.kind() == io::ErrorKind::NotFound => None,
@@ -1556,7 +1547,7 @@ fn a_binding_the_engine_refuses_says_so_on_the_message_line_and_takes_the_window
     // will not take the write.
     let repo = a_repo();
     let home = a_home();
-    let directory = sigils_path(home.path(), repo.path())
+    let directory = config_path(home.path(), repo.path())
         .parent()
         .expect("the config sits in a project directory")
         .to_path_buf();

@@ -1024,7 +1024,7 @@ fn the_sub_task_session_is_its_own_conversation_at_the_briefs_register() {
 
     // Its own id, and the prompt it was handed rather than one of warlock's:
     // what this session is told is the caller's to say, because it names the
-    // scope the ticket was pulled under and the sigils this machine holds.
+    // scope the ticket was pulled under and the scopes open on this machine.
     let session = value_of(&vector, "--session-id").expect("a sub-task opens a conversation");
     assert!(is_uuid_shaped(session), "not UUID-shaped: {session}");
     for other in [
@@ -1087,27 +1087,26 @@ const A_TICKET_DESCRIPTION: &str = "## Problem\nThe panel offers a scope with no
                                     ticket's.";
 
 #[test]
-fn the_sub_task_system_prompt_names_the_scope_and_the_sigils_this_machine_holds() {
+fn the_sub_task_system_prompt_names_the_scope_and_the_scopes_open_on_this_machine() {
     let held = ["data-plane".to_owned(), "web".to_owned()];
     let prompt = working_system_prompt("data-plane", &held);
 
-    // The scope the ticket was pulled under, and every sigil this machine
-    // holds: the two halves of where this session's boundary is.
+    // The scope the ticket was pulled under, and every scope open on this
+    // machine: the two halves of where this session's boundary is.
     assert!(prompt.contains("scope `data-plane`"), "{prompt}");
     assert!(
-        prompt.contains("the sigils `data-plane`, `web`"),
+        prompt.contains("AI can work in `data-plane`, `web` on this machine"),
         "{prompt}"
     );
 
-    // One sigil is not a list, and none is a sentence rather than an empty one:
-    // a session shown "holds the sigils " with nothing after it reads it as a
-    // prompt that was built wrong, and guesses which way.
-    assert!(working_system_prompt("web", &held[1..]).contains("the sigil `web`"));
-    assert!(working_system_prompt("web", &[]).contains("no sigils at all"));
+    // None is a sentence rather than an empty list: a session shown "AI can
+    // work in  on this machine" reads it as a prompt that was built wrong, and
+    // guesses which way.
+    assert!(working_system_prompt("web", &[]).contains("AI can work in no scope"));
 
-    // And the sigils are listed rather than judged: which scopes they open is
-    // the gate's answer at every write, so this prompt states what is held and
-    // that the gate decides — never a second copy of the rule.
+    // And the open scopes are listed rather than judged: what they let through
+    // is the gate's answer at every write, so this prompt states what is open
+    // and that the gate decides — never a second copy of the rule.
     assert!(prompt.contains("warlock gates every edit and every new file"));
 }
 
@@ -1125,7 +1124,7 @@ fn the_sub_task_system_prompt_makes_a_refused_write_the_end_of_the_sub_task() {
         "Routing around it is not an option",
         "not with a shell command",
         "not by writing somewhere else",
-        "not by editing a scope, a sigil or warlock's own configuration",
+        "not by editing a scope, opening one or editing warlock's own configuration",
     ] {
         assert!(prompt.contains(said), "{said:?} is not said: {prompt}");
     }

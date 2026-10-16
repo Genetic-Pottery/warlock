@@ -2,10 +2,10 @@ use std::mem::discriminant;
 use std::path::Path;
 
 use super::{Destination, Error, resolve_filing};
+use crate::config::{config_path, save_key_binding, save_open_scopes};
 use crate::keys::save_key;
 use crate::manifest::{Manifest, ScopeRecord, ScopedDirectory, manifest_path};
 use crate::route::{self, resolve_route};
-use crate::sigils::{save_key_binding, save_sigils, sigils_path};
 
 // A plausible Linear key rather than the word "secret", so a test that looks for
 // it proves the redaction and not an unlucky choice of needle.
@@ -41,12 +41,12 @@ fn a_manifest(scopes: &[&str]) -> Manifest {
     )
 }
 
-fn owned(sigils: &[&str]) -> Vec<String> {
-    sigils.iter().map(|sigil| (*sigil).to_owned()).collect()
+fn owned(open: &[&str]) -> Vec<String> {
+    open.iter().map(|scope| (*scope).to_owned()).collect()
 }
 
-fn holds(home: &Path, root: &Path, sigils: &[&str]) {
-    save_sigils(home, root, &owned(sigils)).expect("records what this machine holds");
+fn opens(home: &Path, root: &Path, open: &[&str]) {
+    save_open_scopes(home, root, &owned(open)).expect("records what this machine opens");
 }
 
 // The two scopes these fixtures can file to, each bound to a key this machine
@@ -65,11 +65,11 @@ fn bound(home: &Path, root: &Path) {
 fn one_candidate_is_the_board_and_carries_the_key() {
     let (home, root) = (a_dir(), a_dir());
     bound(home.path(), root.path());
-    holds(home.path(), root.path(), &["data-plane"]);
+    opens(home.path(), root.path(), &["data-plane"]);
 
     let manifest = a_manifest(&["data-plane", "web"]);
     let target = resolve_filing(&manifest, root.path(), home.path(), None)
-        .expect("one held sigil with one record of that name is one board");
+        .expect("one open scope with one record of that name is one board");
 
     assert_eq!(target.scope(), "data-plane");
     assert_eq!(target.record().name(), "data-plane");
@@ -91,7 +91,7 @@ fn one_candidate_is_the_board_and_carries_the_key() {
 fn a_destination_is_the_target_by_name_with_no_key_value_in_it() {
     let (home, root) = (a_dir(), a_dir());
     bound(home.path(), root.path());
-    holds(home.path(), root.path(), &["data-plane"]);
+    opens(home.path(), root.path(), &["data-plane"]);
 
     let manifest = a_manifest(&["data-plane", "web"]);
     let destination = resolve_filing(&manifest, root.path(), home.path(), None)
@@ -112,7 +112,7 @@ fn a_destination_is_the_target_by_name_with_no_key_value_in_it() {
 fn several_candidates_name_every_one_of_them_and_the_way_to_pick() {
     let (home, root) = (a_dir(), a_dir());
     bound(home.path(), root.path());
-    holds(home.path(), root.path(), &["data-plane", "web"]);
+    opens(home.path(), root.path(), &["data-plane", "web"]);
 
     let error = resolve_filing(
         &a_manifest(&["data-plane", "web"]),
@@ -135,11 +135,11 @@ fn several_candidates_name_every_one_of_them_and_the_way_to_pick() {
 #[test]
 fn the_wildcard_is_every_recorded_scope() {
     // One record and the wildcard is one candidate, and a second record turns the
-    // same held set into the several-candidates refusal: the boundary rule is
+    // same open set into the several-candidates refusal: the boundary rule is
     // `scope_opens_to`'s, so `*` is never a name to compare against.
     let (home, root) = (a_dir(), a_dir());
     bound(home.path(), root.path());
-    holds(home.path(), root.path(), &["*"]);
+    opens(home.path(), root.path(), &["*"]);
 
     let one = a_manifest(&["data-plane"]);
     let target = resolve_filing(&one, root.path(), home.path(), None)
@@ -160,7 +160,7 @@ fn the_wildcard_is_every_recorded_scope() {
 fn a_name_among_the_candidates_picks_that_board() {
     let (home, root) = (a_dir(), a_dir());
     bound(home.path(), root.path());
-    holds(home.path(), root.path(), &["*"]);
+    opens(home.path(), root.path(), &["*"]);
 
     let manifest = a_manifest(&["data-plane", "web"]);
     let target = resolve_filing(&manifest, root.path(), home.path(), Some("web"))
@@ -180,9 +180,9 @@ fn a_name_among_the_candidates_picks_that_board() {
 fn a_name_that_is_not_a_candidate_is_refused_with_every_candidate_named() {
     let (home, root) = (a_dir(), a_dir());
     bound(home.path(), root.path());
-    holds(home.path(), root.path(), &["data-plane"]);
+    opens(home.path(), root.path(), &["data-plane"]);
 
-    // `web` is recorded here and held by nobody: a name this repository knows is
+    // `web` is recorded here and open to nobody: a name this repository knows is
     // still not a board this machine can file to, which is the case a check
     // against the records alone would let through.
     let error = resolve_filing(
@@ -191,7 +191,7 @@ fn a_name_that_is_not_a_candidate_is_refused_with_every_candidate_named() {
         home.path(),
         Some("web"),
     )
-    .expect_err("a recorded scope this machine holds no sigil for is not a candidate");
+    .expect_err("a recorded scope that is not open on this machine is not a candidate");
 
     assert!(
         matches!(&error, Error::Unknown { name, .. } if name == "web"),
@@ -210,21 +210,21 @@ fn the_four_ways_to_have_no_candidate_are_four_different_refusals() {
     let manifest = a_manifest(&["data-plane"]);
 
     // A repository that records no scope, asked before anything about this
-    // machine: the candidates come from the records alone, so no sigil held here
-    // would make a board and the fix is a line in the manifest. Held nothing,
-    // held one name and held the wildcard all land on this one sentence, because
-    // all three are the same repository.
+    // machine: the candidates come from the records alone, so no scope opened
+    // here would make a board and the fix is a line in the manifest. Opening
+    // nothing, opening one name and opening the wildcard all land on this one
+    // sentence, because all three are the same repository.
     let (empty_home, empty_root) = (a_dir(), a_dir());
     bound(empty_home.path(), empty_root.path());
     let recordless = Manifest::with_directories([scoped("crates", "data-plane")]);
     let mut boardless = Vec::new();
-    for sigils in [&[][..], &["data-plane"][..], &["*"][..]] {
-        holds(empty_home.path(), empty_root.path(), sigils);
+    for open in [&[][..], &["data-plane"][..], &["*"][..]] {
+        opens(empty_home.path(), empty_root.path(), open);
         let error = resolve_filing(&recordless, empty_root.path(), empty_home.path(), None)
-            .expect_err("no `[[scope]]` record is nowhere to file, whatever is held");
+            .expect_err("no `[[scope]]` record is nowhere to file, whatever is open");
         assert!(
             matches!(error, Error::Boardless { .. }),
-            "holding {sigils:?}: {error:?}"
+            "opening {open:?}: {error:?}"
         );
         let text = error.to_string();
         assert!(
@@ -233,23 +233,26 @@ fn the_four_ways_to_have_no_candidate_are_four_different_refusals() {
             "the refusal names the file to go and fix: {text}"
         );
         assert!(
-            !text.contains("sigil"),
+            !text.contains("warlock open"),
             "the fix is in the repository, not on this machine: {text}"
         );
         boardless.push(error);
     }
 
-    // Nothing held at all, and a machine nobody has configured for this checkout:
-    // `load_sigils` saying NotFound is a machine that holds nothing here.
+    // Nothing open at all, and a machine nobody has configured for this checkout:
+    // `load_open_scopes` saying NotFound is a machine that opens nothing here.
     let (home, root) = (a_dir(), a_dir());
     bound(home.path(), root.path());
-    holds(home.path(), root.path(), &[]);
-    let unsigiled = resolve_filing(&manifest, root.path(), home.path(), None)
-        .expect_err("a machine holding nothing files to nothing");
-    assert!(matches!(unsigiled, Error::Unsigiled), "{unsigiled:?}");
+    opens(home.path(), root.path(), &[]);
+    let nothing_open = resolve_filing(&manifest, root.path(), home.path(), None)
+        .expect_err("a machine that opens nothing files to nothing");
     assert!(
-        unsigiled.to_string().contains("warlock sigil add"),
-        "{unsigiled}"
+        matches!(nothing_open, Error::NothingOpen),
+        "{nothing_open:?}"
+    );
+    assert!(
+        nothing_open.to_string().contains("warlock open <scope>"),
+        "{nothing_open}"
     );
 
     let (fresh_home, fresh_root) = (a_dir(), a_dir());
@@ -257,16 +260,16 @@ fn the_four_ways_to_have_no_candidate_are_four_different_refusals() {
         .expect_err("no config for this checkout at all");
     assert_eq!(
         discriminant(&never_configured),
-        discriminant(&unsigiled),
+        discriminant(&nothing_open),
         "{never_configured:?}"
     );
 
-    // Held sigils this repository records no scope for: the machine is pointed at
+    // Open scopes this repository records no scope for: the machine is pointed at
     // the wrong repository, which is a different fix to the one below.
-    let (held_home, held_root) = (a_dir(), a_dir());
-    bound(held_home.path(), held_root.path());
-    holds(held_home.path(), held_root.path(), &["billing", "web"]);
-    let unmatched = resolve_filing(&manifest, held_root.path(), held_home.path(), None)
+    let (open_home, open_root) = (a_dir(), a_dir());
+    bound(open_home.path(), open_root.path());
+    opens(open_home.path(), open_root.path(), &["billing", "web"]);
+    let unmatched = resolve_filing(&manifest, open_root.path(), open_home.path(), None)
         .expect_err("nothing here is named `billing` or `web`");
     assert!(
         matches!(unmatched, Error::Unmatched { .. }),
@@ -278,11 +281,11 @@ fn the_four_ways_to_have_no_candidate_are_four_different_refusals() {
         "{text}"
     );
     assert!(
-        text.contains(&manifest_path(held_root.path()).display().to_string()),
+        text.contains(&manifest_path(open_root.path()).display().to_string()),
         "{text}"
     );
 
-    // And a held sigil some directory carries with no `[[scope]]` record: the
+    // And an open scope some directory carries with no `[[scope]]` record: the
     // manifest is one line short rather than the machine being wrong. It records
     // `web`, because a manifest recording nothing at all is the refusal above
     // rather than this one — this is a file one line short, not a file nobody
@@ -291,7 +294,7 @@ fn the_four_ways_to_have_no_candidate_are_four_different_refusals() {
         .with_scopes([ScopeRecord::new("web", "Team web", "In Review", "warlock")]);
     let (bare_home, bare_root) = (a_dir(), a_dir());
     bound(bare_home.path(), bare_root.path());
-    holds(bare_home.path(), bare_root.path(), &["data-plane"]);
+    opens(bare_home.path(), bare_root.path(), &["data-plane"]);
     let unrecorded = resolve_filing(
         &unrecorded_manifest,
         bare_root.path(),
@@ -311,7 +314,7 @@ fn the_four_ways_to_have_no_candidate_are_four_different_refusals() {
         "the refusal names the file to go and fix: {text}"
     );
 
-    let refusals = [&boardless[0], &unsigiled, &unmatched, &unrecorded];
+    let refusals = [&boardless[0], &nothing_open, &unmatched, &unrecorded];
     for (index, one) in refusals.iter().enumerate() {
         for other in &refusals[index + 1..] {
             assert_ne!(
@@ -331,7 +334,7 @@ fn a_recorded_scope_no_directory_carries_is_still_a_board() {
     // written against the rows would have made this a refusal.
     let (home, root) = (a_dir(), a_dir());
     bound(home.path(), root.path());
-    holds(home.path(), root.path(), &["data-plane"]);
+    opens(home.path(), root.path(), &["data-plane"]);
 
     let manifest = Manifest::new().with_scopes([ScopeRecord::new(
         "data-plane",
@@ -340,7 +343,7 @@ fn a_recorded_scope_no_directory_carries_is_still_a_board() {
         "warlock",
     )]);
     let target = resolve_filing(&manifest, root.path(), home.path(), None)
-        .expect("one record of the held name is one board, carried by a directory or not");
+        .expect("one record of the open name is one board, carried by a directory or not");
 
     assert_eq!(target.scope(), "data-plane");
     assert_eq!(target.record().team_key(), "WAR");
@@ -351,7 +354,7 @@ fn a_checkout_that_is_both_ambiguous_and_unbound_is_told_about_the_board() {
     // Two things to fix, and `--scope` is the one that is about this push: the
     // board refusals are decided before the key store is touched.
     let (home, root) = (a_dir(), a_dir());
-    holds(home.path(), root.path(), &["*"]);
+    opens(home.path(), root.path(), &["*"]);
 
     let error = resolve_filing(
         &a_manifest(&["data-plane", "web"]),
@@ -375,7 +378,7 @@ fn the_unbound_and_dangling_refusals_are_route_s_own_sentences() {
     // against a copy of the wording: a person meets these two from `warlock
     // check` first, and one refusal worded twice is one of them going stale.
     let (unbound_home, unbound_root) = (a_dir(), a_dir());
-    holds(unbound_home.path(), unbound_root.path(), &["data-plane"]);
+    opens(unbound_home.path(), unbound_root.path(), &["data-plane"]);
     let unbound = resolve_filing(&manifest, unbound_root.path(), unbound_home.path(), None)
         .expect_err("the scope this files to is bound to no key");
     assert!(
@@ -400,7 +403,7 @@ fn the_unbound_and_dangling_refusals_are_route_s_own_sentences() {
     );
     assert!(
         unbound.to_string().contains(
-            &sigils_path(unbound_home.path(), unbound_root.path())
+            &config_path(unbound_home.path(), unbound_root.path())
                 .display()
                 .to_string()
         ),
@@ -408,7 +411,7 @@ fn the_unbound_and_dangling_refusals_are_route_s_own_sentences() {
     );
 
     let (dangling_home, dangling_root) = (a_dir(), a_dir());
-    holds(dangling_home.path(), dangling_root.path(), &["data-plane"]);
+    opens(dangling_home.path(), dangling_root.path(), &["data-plane"]);
     save_key_binding(
         dangling_home.path(),
         dangling_root.path(),

@@ -100,12 +100,12 @@ fn driving(app: App, scope: Scope, tree: &Tree) -> Driven {
         tree,
         // No home, so a `/push` in any test but the ones in `filing` below is
         // refused before a board is resolved and no test in this file can read
-        // the sigils of the machine it runs on. The tests that do push replace
+        // the open scopes of the machine it runs on. The tests that do push replace
         // this whole value with one over a temporary home.
         Pushes::with_client(Boarding::filing(""), None),
         // And the same for a `/draft`, for the same reason: with no home there
         // is nothing for one to resolve a board under, so no test in this file
-        // can read the machine's own sigils by typing the command.
+        // can read the machine's own open scopes by typing the command.
         Cutter::with_client(
             Boarding::filing(""),
             None,
@@ -244,7 +244,7 @@ fn a_round_tells_the_app_the_size_the_frame_is_being_cut_at() {
         driven.app.viewport_height(),
         usize::from(
             Shape::new(size)
-                .sigils(driven.scope.chrome.sigils())
+                .open(driven.scope.chrome.open())
                 .cut()
                 .tree_height()
         ),
@@ -1721,11 +1721,11 @@ mod pasting {
         driven.app.set_focus(Focus::Composer);
 
         // The block that used to send line one and lose the other two.
-        driven.paste("what is a scope?\nand what is a sigil?\nand a board?");
+        driven.paste("what is a scope?\nand what is a key?\nand a board?");
 
         assert_eq!(
             driven.chat.composer().draft(),
-            "what is a scope?\nand what is a sigil?\nand a board?",
+            "what is a scope?\nand what is a key?\nand a board?",
             "the pasted lines did not all reach the draft"
         );
         assert!(
@@ -1840,7 +1840,7 @@ mod offering {
 // A `/push` driven the whole way through a session — `/push <scope> <path>`,
 // Left, Enter — over a Linear that answers out of memory and a home this module
 // made. Nothing here opens a socket, reads a real credential or looks at the
-// machine's own sigils, binding or key store.
+// machine's own open scopes, binding or key store.
 mod filing {
     use std::fs;
     use std::path::Path;
@@ -1850,7 +1850,7 @@ mod filing {
     use tempfile::TempDir;
     use warlock_engine::{
         Manifest, ScopeRecord, ScopedDirectory, load_key_binding, save_key, save_key_binding,
-        save_sigils,
+        save_open_scopes,
     };
 
     use super::{AT_MOST, Driven, key, pressed, session_over};
@@ -1929,7 +1929,7 @@ mod filing {
         repo
     }
 
-    // One sigil and one record of that name, so nothing is ambiguous and the
+    // One open scope and one record of that name, so nothing is ambiguous and the
     // dialog comes straight up. The binding is written here as well, so the
     // question that comes before the dialog is already answered for every test
     // but the three that drive it.
@@ -1951,7 +1951,7 @@ mod filing {
     // anything is prepared.
     fn an_unbound_home(root: &Path) -> TempDir {
         let home = tempfile::tempdir().expect("a temporary directory");
-        save_sigils(home.path(), root, &[SCOPE.to_owned()]).expect("a config that writes");
+        save_open_scopes(home.path(), root, &[SCOPE.to_owned()]).expect("a config that writes");
         save_key(home.path(), KEY_NAME, NOT_A_KEY).expect("a key store that writes");
         home
     }
@@ -1969,7 +1969,7 @@ mod filing {
         // of, and `loading` leaves this with no home at all.
         driven.scope.settings = Settings::at(Some(home.to_path_buf()), repo);
         // The same home for a `/draft`, so the command reaches the board through
-        // this test's sigils rather than being refused for want of one. The
+        // this test's open scope rather than being refused for want of one. The
         // client is the same stand-in because the session opens both through
         // one seam; the cut below is refused before a run starts.
         driven.cutter = Cutter::with_client(
@@ -2339,7 +2339,7 @@ mod filing {
     }
 
     // The name `SCOPE` is bound to in this checkout's config under `home`, which
-    // the config holds because every home here writes a sigil into it: unbound
+    // is on disk because every home here writes its open scope into it: unbound
     // is `None`, and a config that will not read is this test's own failure.
     fn bound(home: &Path, repo: &Path) -> Option<String> {
         load_key_binding(home, repo, SCOPE).expect("the config this test wrote still reads")
@@ -2347,8 +2347,8 @@ mod filing {
 
     #[test]
     fn a_push_of_an_unbound_scope_opens_the_key_window_and_sends_nothing() {
-        // A checkout somebody has just cloned: the sigil says this machine may
-        // file the scope, and nothing says which key it files with. The board
+        // A checkout somebody has just cloned: the scope is open, so this
+        // machine may file it, and nothing says which key it files with. The board
         // panics if it is opened at all, which is the whole of "nothing was
         // sent".
         let repo = a_repository();
@@ -2455,8 +2455,8 @@ mod filing {
     fn a_draft_of_an_unbound_scope_opens_the_key_window_and_reads_nothing() {
         // The same three roads as the `/push` above, driven through the
         // keyboard: the command, the window it comes to, and what the two keys
-        // that answer it lead to. Here the sigil says this machine may read the
-        // scope's board and nothing says which key it reads with, so the window
+        // that answer it lead to. Here the scope is open, so this machine may read
+        // the scope's board, and nothing says which key it reads with, so the window
         // goes up and no worker starts — and the board panics if it is opened at
         // all, which is the whole of "nothing was read".
         let repo = a_repository();
@@ -2597,7 +2597,7 @@ mod filing {
 // Yes, a slice that asks something, and the keys that edit and send the answer —
 // over a Linear that answers one project out of memory and a home this module
 // made. Nothing here opens a socket, reads a real credential or looks at the
-// machine's own sigils, binding or key store.
+// machine's own open scopes, binding or key store.
 //
 // What is asserted is the routing, which is the half `tests/cutting.rs` cannot
 // see: that the field is the composer's own value, that an Enter in it while a
@@ -2611,7 +2611,7 @@ mod cutting {
     use ratatui::crossterm::event::KeyCode;
     use tempfile::TempDir;
     use warlock_engine::{
-        Manifest, ScopeRecord, ScopedDirectory, save_key, save_key_binding, save_sigils,
+        Manifest, ScopeRecord, ScopedDirectory, save_key, save_key_binding, save_open_scopes,
     };
 
     use super::{AT_MOST, Driven, key, session_reading};
@@ -2677,11 +2677,11 @@ mod cutting {
         repo
     }
 
-    // A home of this test's own: the sigils that pick the board, the binding and
-    // the key store all sit under it.
+    // A home of this test's own: the open scope, the binding and the key store
+    // all sit under it.
     fn a_home(root: &Path) -> TempDir {
         let home = tempfile::tempdir().expect("a temporary directory");
-        save_sigils(home.path(), root, &[SCOPE.to_owned()]).expect("a config that writes");
+        save_open_scopes(home.path(), root, &[SCOPE.to_owned()]).expect("a config that writes");
         save_key_binding(home.path(), root, SCOPE, KEY_NAME).expect("a binding that writes");
         save_key(home.path(), KEY_NAME, NOT_A_KEY).expect("a key store that writes");
         home
@@ -3236,7 +3236,7 @@ mod cutting {
 /// while it is in flight.
 ///
 /// Nothing here opens a socket, runs a `git`, raises a `claude` or reads the
-/// sigils, the binding or the key store of the machine the suite runs on. The
+/// open scopes, the binding or the key store of the machine the suite runs on. The
 /// board, the checkout, the forge and the three sessions one pull spends are all
 /// stand-ins, and every test builds a temporary home of its own — a session built
 /// with none is refused before anything under `~` is read, which is why `driving`
@@ -3250,7 +3250,7 @@ mod pulling {
     use tempfile::TempDir;
     use warlock_engine::{
         Manifest, PullRun, PullSubtask, RunStatus, ScopeRecord, ScopedDirectory, SubtaskStatus,
-        load_key_binding, save_key, save_key_binding, save_sigils, state_path,
+        load_key_binding, save_key, save_key_binding, save_open_scopes, state_path,
     };
 
     use super::{AT_MOST, Session, Stubbed, key, session_reading};
@@ -3278,7 +3278,7 @@ mod pulling {
 
     const SCOPE: &str = "warlock-team";
 
-    // A scope this repository records that the home below does not hold, which is
+    // A scope this repository records that is closed in the home below, which is
     // what a sub-task writing under it is a crossing of.
     const CLOSED: &str = "control-plane";
 
@@ -3351,11 +3351,11 @@ mod pulling {
         repo
     }
 
-    // A home of this test's own: the sigils that decide which scopes may be
+    // A home of this test's own: the open scopes that decide which scopes may be
     // pulled, the binding, the key store and the run records all sit under it.
     fn a_home(root: &Path) -> TempDir {
         let home = tempfile::tempdir().expect("a temporary directory");
-        save_sigils(home.path(), root, &[SCOPE.to_owned()]).expect("a config that writes");
+        save_open_scopes(home.path(), root, &[SCOPE.to_owned()]).expect("a config that writes");
         save_key_binding(home.path(), root, SCOPE, KEY_NAME).expect("a binding that writes");
         save_key(home.path(), KEY_NAME, NOT_A_KEY).expect("a key store that writes");
         home
@@ -3366,13 +3366,13 @@ mod pulling {
     // before anything is prepared.
     fn an_unbound_home(root: &Path) -> TempDir {
         let home = tempfile::tempdir().expect("a temporary directory");
-        save_sigils(home.path(), root, &[SCOPE.to_owned()]).expect("a config that writes");
+        save_open_scopes(home.path(), root, &[SCOPE.to_owned()]).expect("a config that writes");
         save_key(home.path(), KEY_NAME, NOT_A_KEY).expect("a key store that writes");
         home
     }
 
     // The name `SCOPE` is bound to in this checkout's config under `home`, which
-    // the config holds because every home here writes a sigil into it: unbound is
+    // is on disk because every home here writes its open scope into it: unbound is
     // `None`, and a config that will not read is this test's own failure.
     fn bound(home: &Path, repo: &Path) -> Option<String> {
         load_key_binding(home, repo, SCOPE).expect("the config this test wrote still reads")
@@ -3791,7 +3791,7 @@ mod pulling {
     fn a_crossing_names_the_sub_task_that_wrote_past_the_boundary() {
         let repo = a_repository();
         let home = a_home(repo.path());
-        // The session left a file under the scope this machine does not hold,
+        // The session left a file under the scope closed on this machine,
         // which is what the check after it is about.
         let repository =
             Checkout::clean(DEFAULT).trees([Vec::new(), wrote("crates/control/src/lib.rs")]);
@@ -3867,49 +3867,49 @@ mod pulling {
     }
 
     #[test]
-    fn sigil_add_writes_the_config_and_moves_the_box() {
+    fn open_writes_the_config_and_moves_the_box() {
         let repo = a_repository();
         let home = a_home(repo.path());
         let mut driven = pulling_session(repo.path(), home.path(), board(), checkout(), working());
 
-        typing(&mut driven, "/sigil add Docs");
+        typing(&mut driven, "/open Docs");
 
         let wanted = vec![SCOPE.to_owned(), "docs".to_owned()];
         assert_eq!(
-            warlock_engine::held_sigils(home.path(), repo.path()).expect("the config reads"),
+            warlock_engine::open_scopes(home.path(), repo.path()).expect("the config reads"),
             wanted
         );
         assert_eq!(
-            driven.scope.chrome.sigils(),
-            &crate::app::Sigils::held(wanted)
+            driven.scope.chrome.open(),
+            &crate::app::OpenScopes::named(wanted)
         );
         let said = notes(&driven);
         assert!(
             said.last().is_some_and(|line| line.contains("`docs`")),
             "{said:?}"
         );
-        assert!(!driven.chat.answering(), "a `/sigil` opened a turn");
+        assert!(!driven.chat.answering(), "an `/open` opened a turn");
     }
 
     #[test]
-    fn removing_a_sigil_not_held_says_so_and_writes_nothing() {
+    fn closing_a_scope_not_open_says_so_and_writes_nothing() {
         let repo = a_repository();
         let home = a_home(repo.path());
         let mut driven = pulling_session(repo.path(), home.path(), board(), checkout(), working());
         round(&mut driven);
-        let before = driven.scope.chrome.sigils().clone();
+        let before = driven.scope.chrome.open().clone();
 
-        typing(&mut driven, "/sigil remove elsewhere");
+        typing(&mut driven, "/close elsewhere");
 
         assert_eq!(
-            warlock_engine::held_sigils(home.path(), repo.path()).expect("the config reads"),
+            warlock_engine::open_scopes(home.path(), repo.path()).expect("the config reads"),
             vec![SCOPE.to_owned()]
         );
-        assert_eq!(driven.scope.chrome.sigils(), &before);
+        assert_eq!(driven.scope.chrome.open(), &before);
         let said = notes(&driven);
         assert!(
             said.last()
-                .is_some_and(|line| line.contains("does not hold `elsewhere`")),
+                .is_some_and(|line| line.contains("`elsewhere` is not open on this machine")),
             "{said:?}"
         );
     }
@@ -3921,26 +3921,27 @@ mod pulling {
         let mut driven = pulling_session(repo.path(), home.path(), board(), checkout(), working());
         round(&mut driven);
         assert_eq!(
-            driven.scope.chrome.sigils(),
-            &crate::app::Sigils::held([SCOPE])
+            driven.scope.chrome.open(),
+            &crate::app::OpenScopes::named([SCOPE])
         );
 
-        save_sigils(home.path(), repo.path(), &["other".to_owned()]).expect("a config that writes");
+        save_open_scopes(home.path(), repo.path(), &["other".to_owned()])
+            .expect("a config that writes");
         warlock_engine::save_base_branch(home.path(), repo.path(), Some("dev"))
             .expect("a config that writes");
         // Pushed forward so a filesystem with a coarse clock still sees the
         // write as a change.
         fs::File::options()
             .write(true)
-            .open(warlock_engine::sigils_path(home.path(), repo.path()))
+            .open(warlock_engine::config_path(home.path(), repo.path()))
             .expect("the config is there")
             .set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(10))
             .expect("the mtime sets");
         round(&mut driven);
 
         assert_eq!(
-            driven.scope.chrome.sigils(),
-            &crate::app::Sigils::held(["other"])
+            driven.scope.chrome.open(),
+            &crate::app::OpenScopes::named(["other"])
         );
         assert_eq!(driven.scope.chrome.target(), crate::app::Target::Set("dev"));
     }
@@ -3988,7 +3989,7 @@ mod pulling {
         warlock_engine::save_base_branch(home.path(), repo.path(), Some("dev"))
             .expect("a config that writes");
         let mut driven = pulling_session(repo.path(), home.path(), board(), checkout(), working());
-        let before = fs::read(warlock_engine::sigils_path(home.path(), repo.path()))
+        let before = fs::read(warlock_engine::config_path(home.path(), repo.path()))
             .expect("the config is there");
 
         typing(&mut driven, "/branch");
@@ -3998,14 +3999,14 @@ mod pulling {
             "{said:?}"
         );
         assert_eq!(
-            fs::read(warlock_engine::sigils_path(home.path(), repo.path()))
+            fs::read(warlock_engine::config_path(home.path(), repo.path()))
                 .expect("the config is there"),
             before
         );
     }
 
     #[test]
-    fn a_bare_pull_names_the_scopes_held_and_reads_nothing_else() {
+    fn a_bare_pull_names_the_open_scopes_and_reads_nothing_else() {
         let repo = a_repository();
         let home = a_home(repo.path());
         let linear = board();
@@ -4148,7 +4149,7 @@ mod pulling {
     #[test]
     fn a_pull_of_an_unbound_scope_opens_the_key_window_and_reads_nothing() {
         // A checkout somebody has just cloned, driven through the keyboard: the
-        // sigil says this machine may pull the scope and nothing says which key
+        // scope is open, so this machine may pull it, and nothing says which key
         // the queue is read with, so the window goes up and no queue is read.
         // The board panics if it is opened at all, which is the whole of
         // "nothing was read".

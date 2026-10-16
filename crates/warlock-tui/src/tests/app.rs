@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 use warlock_engine::{Node, Tree};
 
 use super::{
-    App, Chrome, Focus, Held, Row, Sigils, cut_at_cap_message, no_document_message, reseat_on,
+    App, Chrome, Focus, Held, OpenScopes, Row, cut_at_cap_message, no_document_message, reseat_on,
     scroll_offset_for,
 };
 use crate::account::Line;
@@ -265,8 +265,8 @@ fn a_root_outside_the_repository_falls_back_to_printing_itself() {
     );
 }
 
-fn held(sigils: Sigils) -> Held {
-    Held { sigils, base: None }
+fn held(open: OpenScopes) -> Held {
+    Held { open, base: None }
 }
 
 #[test]
@@ -274,7 +274,7 @@ fn a_chrome_nobody_built_states_nothing_at_all() {
     let chrome = Chrome::default();
 
     assert_eq!(chrome.header(), "");
-    assert_eq!(chrome.sigils(), &Sigils::Nothing);
+    assert_eq!(chrome.open(), &OpenScopes::Nothing);
 }
 
 #[test]
@@ -285,41 +285,45 @@ fn the_header_is_not_app_state_and_no_app_carries_one() {
     // on every reload has no business holding either. What is left to check
     // is that building one costs an app nothing — a `Chrome` is a function
     // of two paths and a config, and there is no `App` anywhere in it.
-    let chrome = Chrome::of("/repo", "/repo/crates").with_held(held(Sigils::held(["billing"])));
+    let chrome =
+        Chrome::of("/repo", "/repo/crates").with_held(held(OpenScopes::named(["billing"])));
 
     assert_eq!(chrome.header(), "crates");
-    assert_eq!(chrome.sigils(), &Sigils::Held(vec!["billing".to_owned()]));
+    assert_eq!(
+        chrome.open(),
+        &OpenScopes::Named(vec!["billing".to_owned()])
+    );
 }
 
 #[test]
-fn a_chrome_that_was_never_told_what_is_held_states_nothing() {
+fn a_chrome_that_was_never_told_what_is_open_states_nothing() {
     // The default, and the state a reader who has never run `warlock
-    // config` is in: there is no wording for it at all, so there is nothing
+    // open` is in: there is no wording for it at all, so there is nothing
     // for the header to join onto the line it already had.
     let chrome = Chrome::of("/repo", "/repo/crates");
 
-    assert_eq!(chrome.sigils(), &Sigils::Nothing);
+    assert_eq!(chrome.open(), &OpenScopes::Nothing);
 }
 
 #[test]
-fn the_sigils_held_are_listed_in_the_order_the_config_has_them() {
-    let chrome = Chrome::default().with_held(held(Sigils::held(["billing", "web"])));
+fn the_open_scopes_are_listed_in_the_order_the_config_has_them() {
+    let chrome = Chrome::default().with_held(held(OpenScopes::named(["billing", "web"])));
 
     assert_eq!(
-        chrome.sigils(),
-        &Sigils::Held(vec!["billing".to_owned(), "web".to_owned()])
+        chrome.open(),
+        &OpenScopes::Named(vec!["billing".to_owned(), "web".to_owned()])
     );
 }
 
 #[test]
 fn a_missing_config_and_an_empty_set_are_the_same_nothing() {
-    // Two ways of holding nothing, and the header must not tell them apart:
-    // a machine that cleared its sigils and one that never had any hold the
-    // same nothing.
+    // Two ways for AI to work in no scope, and the header must not tell them
+    // apart: a machine that closed every scope and one that never opened any
+    // have the same nothing.
     let empty: [String; 0] = [];
 
-    assert_eq!(Sigils::held(empty), Sigils::Nothing);
-    assert_eq!(Sigils::held(Vec::<String>::new()), Sigils::Nothing);
+    assert_eq!(OpenScopes::named(empty), OpenScopes::Nothing);
+    assert_eq!(OpenScopes::named(Vec::<String>::new()), OpenScopes::Nothing);
 }
 
 #[test]
@@ -327,39 +331,41 @@ fn a_config_that_would_not_read_is_said_out_loud_rather_than_looking_absent() {
     // The whole of why this is not an `Option<Vec<String>>`: broken and
     // absent mean opposite things about what is on disk, so they must not
     // draw the same line.
-    let unknown = Sigils::Unknown;
+    let unknown = OpenScopes::Unknown;
 
-    assert_ne!(unknown, Sigils::Nothing);
-    assert_ne!(unknown, Sigils::held(["billing"]));
+    assert_ne!(unknown, OpenScopes::Nothing);
+    assert_ne!(unknown, OpenScopes::named(["billing"]));
     assert!(unknown.as_slice().is_empty());
 }
 
 #[test]
-fn holding_nothing_leaves_the_header_byte_for_byte_what_it_was() {
-    // Holding nothing, in either spelling of nothing, leaves the header
-    // exactly as it was and gives no holding line.
+fn no_scope_open_leaves_the_header_byte_for_byte_what_it_was() {
+    // No scope open, in either spelling of nothing, leaves the header
+    // exactly as it was and gives no line of open scopes.
     let told = Chrome::of("/repo", "/repo/crates/engine");
     let before = told.header().to_owned();
 
-    for nothing in [Sigils::Nothing, Sigils::held(Vec::<String>::new())] {
+    for nothing in [OpenScopes::Nothing, OpenScopes::named(Vec::<String>::new())] {
         let chrome = told.clone().with_held(held(nothing));
 
         assert_eq!(chrome.header(), before);
-        assert_eq!(chrome.sigils(), &Sigils::Nothing);
+        assert_eq!(chrome.open(), &OpenScopes::Nothing);
     }
 }
 
 #[test]
-fn what_is_held_changes_nothing_but_what_the_header_states() {
-    // The identity half of the header is not touched by a holding. That no
+fn what_is_open_changes_nothing_but_what_the_header_states() {
+    // The identity half of the header is not touched by the open scopes. That no
     // *row* is coloured, filtered, sorted or re-ordered by one used to be
     // asserted here too, over an `App`; it is now true by construction,
     // because a `Chrome` has no rows to reach.
     let chrome = Chrome::of("/repo", "/repo/crates");
 
-    let holding = chrome.clone().with_held(held(Sigils::held(["billing"])));
+    let opened = chrome
+        .clone()
+        .with_held(held(OpenScopes::named(["billing"])));
 
-    assert_eq!(holding.header(), chrome.header());
+    assert_eq!(opened.header(), chrome.header());
 }
 
 #[test]

@@ -1,5 +1,5 @@
 use super::{
-    Branching, COMMANDS, Keying, Sigiling, Submitted, Taking, ToDraft, ToPush, Wanted, help_rows,
+    Branching, COMMANDS, Keying, Opening, Submitted, Taking, ToDraft, ToPush, Wanted, help_rows,
     submitted_for,
 };
 
@@ -28,8 +28,8 @@ fn branch(branching: Branching) -> Submitted {
     Submitted::Wanted(Wanted::Branch(branching))
 }
 
-fn sigil(sigiling: Sigiling) -> Submitted {
-    Submitted::Wanted(Wanted::Sigil(sigiling))
+fn opening(opening: Opening) -> Submitted {
+    Submitted::Wanted(Wanted::Open(opening))
 }
 
 fn names(names: &[&str]) -> Vec<String> {
@@ -41,7 +41,7 @@ fn each_command_word_is_its_own_command() {
     assert_eq!(submitted_for("/brief"), Submitted::Brief);
     assert_eq!(submitted_for("/chat"), Submitted::Chat);
     // The one command word that is worth passing up without its argument: only
-    // the panel knows which scopes this machine holds, so a bare `/pull` is
+    // the panel knows which scopes are open on this machine, so a bare `/pull` is
     // answered with them rather than with the list of commands.
     assert_eq!(submitted_for("/pull"), pull(None));
     assert_eq!(submitted_for("  /pull  "), pull(None));
@@ -324,8 +324,8 @@ fn every_refusal_is_the_same_one_line() {
         "/resume WAR-143 WAR-144",
         "/pull warlock-team\nand a thought",
         "/branch dev",
+        "/close",
         "/sigil docs",
-        "/sigil add",
     ];
 
     for draft in refusals {
@@ -335,11 +335,12 @@ fn every_refusal_is_the_same_one_line() {
 
         assert!(!line.contains('\n'), "{draft:?} gave more than one line");
         for command in [
-            "/brief", "/chat", "/push", "/draft", "/pull", "/resume", "/branch", "/sigil",
+            "/brief", "/chat", "/push", "/draft", "/pull", "/resume", "/branch", "/key", "/open",
+            "/close",
         ] {
             assert!(
                 line.contains(command),
-                "{draft:?} did not name {command}, one of warlock's eight commands"
+                "{draft:?} did not name {command}, one of warlock's commands"
             );
         }
         assert!(
@@ -354,7 +355,9 @@ fn every_refusal_is_the_same_one_line() {
             "a scope and optionally a ticket for /pull",
             "a ticket for /resume",
             "`use <BRANCH>` or `clear` for /branch",
-            "`add <NAME>...`, `remove <NAME>...` or `clear` for /sigil",
+            "`list` or a scope for /key",
+            "scopes for /open",
+            "scopes for /close",
         ] {
             assert!(
                 line.contains(said),
@@ -417,24 +420,21 @@ fn branch_reads_its_three_spellings_and_refuses_the_rest() {
 }
 
 #[test]
-fn sigil_reads_its_four_spellings_and_refuses_the_rest() {
-    assert_eq!(submitted_for("/sigil"), sigil(Sigiling::Show));
+fn open_and_close_read_scope_lists_and_close_needs_one() {
+    assert_eq!(submitted_for("/open"), opening(Opening::Show));
     assert_eq!(
-        submitted_for("/sigil add a  b "),
-        sigil(Sigiling::Add(names(&["a", "b"])))
+        submitted_for("/open a  b "),
+        opening(Opening::Open(names(&["a", "b"])))
     );
     assert_eq!(
-        submitted_for("/sigil remove a"),
-        sigil(Sigiling::Remove(names(&["a"])))
+        submitted_for("/close a"),
+        opening(Opening::Close(names(&["a"])))
     );
-    assert_eq!(submitted_for("/sigil clear"), sigil(Sigiling::Clear));
     for draft in [
-        "/sigil add",
-        "/sigil remove ",
-        "/sigil clear x",
-        "/sigil hold a",
-        "/sigil a",
-        "/sigil add a\nand a thought",
+        "/close",
+        "/close ",
+        "/open a
+and a thought",
     ] {
         assert_eq!(submitted_for(draft), Submitted::Refused, "{draft:?}");
     }

@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use warlock_engine::{Manifest, briefs, manifest, manifest_path, resolve_filing, scope, sigils};
+use warlock_engine::{Manifest, briefs, config, manifest, manifest_path, resolve_filing, scope};
 
 use super::{Error, one_line, status_for};
 use crate::boundary::unscoped_message;
@@ -12,7 +12,7 @@ use crate::template::Error as TemplateError;
 // The tails themselves, not copies of them: these used to be re-typed here
 // as literals, so rewording either original left this suite passing on a
 // sentence nothing said any more.
-use crate::standing::{FOR_CUT, FOR_SIGILS};
+use crate::standing::{FOR_CUT, FOR_OPEN};
 
 const PROBLEM: &str = "`/repo/crates/engine` carries `Data Plane`, which is not a scope, so \
                        it reads as unscoped: a scope holds only lowercase letters, digits, \
@@ -130,17 +130,17 @@ fn every_message_quoting_another_error_is_one_line_so_it_prints_as_one() {
         Error::Prompt {
             source: std::io::Error::other("boom"),
         },
-        Error::Sigil {
+        Error::ScopeName {
             entered: "Data Plane!".to_owned(),
             rule: scope::Rule::Character { character: '!' },
         },
-        Error::Sigils {
-            source: sigils::Error::NotFound {
+        Error::Config {
+            source: config::Error::NotFound {
                 path: PathBuf::from("/home/someone/.warlock/repo-abc/config.toml"),
             },
         },
-        Error::Sigils {
-            source: sigils::Error::Io {
+        Error::Config {
+            source: config::Error::Io {
                 path: PathBuf::from("/home/someone/.warlock/repo-abc/config.toml"),
                 source: std::io::Error::other("boom"),
             },
@@ -188,7 +188,7 @@ fn every_message_warlock_words_itself_is_one_line_so_it_prints_as_one() {
         },
         Error::NoRepository {
             start: PathBuf::from("/elsewhere"),
-            wanted: FOR_SIGILS,
+            wanted: FOR_OPEN,
         },
         Error::NoHome,
         Error::NoKey {
@@ -348,7 +348,7 @@ fn a_brief_the_board_already_holds_leads_with_its_address() {
 
 // Both of the refusals added for a cut, held to the register every other one
 // of its refusals takes: the ordinary 1, and never the boundary's 3 — a script
-// reading one of these as "ask for a sigil" would be sent to `warlock sigil add`
+// reading one of these as "open the scope" would be sent to `warlock open`
 // over a brief with no `## Scope` heading.
 #[test]
 fn neither_new_cut_refusal_spends_the_boundarys_status() {
@@ -426,18 +426,18 @@ fn a_path_with_no_repository_relative_form_says_which_root_it_is_not_inside() {
 }
 
 #[test]
-fn config_outside_a_repository_says_the_same_thing_about_sigils() {
+fn config_outside_a_repository_says_the_same_thing_about_open_scopes() {
     // One fact about `.git`, worded once, with what the reader asked for on
     // the end of it.
     let error = Error::NoRepository {
         start: PathBuf::from("/elsewhere"),
-        wanted: FOR_SIGILS,
+        wanted: FOR_OPEN,
     };
 
     assert_eq!(
         error.to_string(),
         "no `.git` directory in `/elsewhere` or any of its parents, so there is \
-             no repository root to hold sigils for"
+             no repository root to open scopes in"
     );
 }
 
@@ -459,15 +459,15 @@ fn cut_outside_a_repository_says_the_same_thing_about_cutting_a_brief() {
 }
 
 #[test]
-fn a_string_that_is_not_a_sigil_names_itself_and_the_rule_it_broke() {
-    let error = Error::Sigil {
+fn a_string_that_is_not_a_scope_name_names_itself_and_the_rule_it_broke() {
+    let error = Error::ScopeName {
         entered: "Data-Plane!".to_owned(),
         rule: scope::Rule::Character { character: '!' },
     };
 
     assert_eq!(
         error.to_string(),
-        "`Data-Plane!` is not a sigil, so nothing was written: a scope holds \
+        "`Data-Plane!` is not a scope name, so nothing was written: a scope holds \
              only lowercase letters, digits, `-` and `_`, and this one holds `!`"
     );
 }
@@ -503,15 +503,15 @@ fn no_home_says_which_variables_were_looked_at_and_what_to_do() {
     assert_eq!(
         Error::NoHome.to_string(),
         "neither `HOME` nor `USERPROFILE` is set, so there is no home directory \
-             to keep the sigils for this repository under: set `HOME` and run \
+             to keep the settings for this repository under: set `HOME` and run \
              the command again"
     );
 }
 
 #[test]
-fn a_sigil_config_that_cannot_be_read_says_so_in_the_engines_words() {
-    let error = Error::Sigils {
-        source: sigils::Error::Io {
+fn a_config_that_cannot_be_read_says_so_in_the_engines_words() {
+    let error = Error::Config {
+        source: config::Error::Io {
             path: PathBuf::from("/home/someone/.warlock/repo-abc/config.toml"),
             source: std::io::Error::other("permission denied"),
         },
@@ -543,7 +543,7 @@ fn a_question_warlock_could_not_answer_is_a_one_and_never_a_two() {
     let refusals = [
         Error::NoRepository {
             start: PathBuf::from("/nowhere"),
-            wanted: FOR_SIGILS,
+            wanted: FOR_OPEN,
         },
         Error::Problems {
             first: PROBLEM.to_owned(),
@@ -563,7 +563,7 @@ fn a_question_warlock_could_not_answer_is_a_one_and_never_a_two() {
 }
 
 #[test]
-fn a_boundary_this_machine_does_not_hold_is_a_three_and_nothing_else_is() {
+fn a_boundary_closed_on_this_machine_is_a_three_and_nothing_else_is() {
     // The write half of the contract, and the only verdict of warlock's own
     // that is neither a 0 nor a 1: nothing was spent, so it is not a
     // failure, and re-running it will never work, so it is not something to
@@ -575,7 +575,7 @@ fn a_boundary_this_machine_does_not_hold_is_a_three_and_nothing_else_is() {
     assert_eq!(status_for(&Err(refusal)), 3);
 
     // A path nothing covers is closed to every machine, so it spends the same
-    // register as a scope this machine does not hold.
+    // register as a scope closed on this machine.
     let unscoped = Error::Unscoped {
         path: "assets".to_owned(),
     };
@@ -585,7 +585,7 @@ fn a_boundary_this_machine_does_not_hold_is_a_three_and_nothing_else_is() {
     assert_eq!(
         status_for(&Err(Error::NoRepository {
             start: PathBuf::from("/nowhere"),
-            wanted: FOR_SIGILS,
+            wanted: FOR_OPEN,
         })),
         1
     );
@@ -601,7 +601,7 @@ fn the_statuses_already_sorted_stay_where_they_are() {
         (
             Err(Error::NoRepository {
                 start: PathBuf::from("/nowhere"),
-                wanted: FOR_SIGILS,
+                wanted: FOR_OPEN,
             }),
             1,
         ),
@@ -653,7 +653,7 @@ fn the_statuses_already_sorted_stay_where_they_are() {
 fn every_refusal_a_push_has_is_the_ordinary_one_and_never_the_boundarys_three() {
     // The one subcommand that sends anything anywhere, and none of what it
     // refuses is the boundary's **3**: the scope picks a board rather than
-    // opening a directory, so a script reading a 3 as "ask for a sigil" must
+    // opening a directory, so a script reading a 3 as "open the scope" must
     // never be sent there by a brief that would not parse or a team key Linear
     // does not know. Each of these is built by the thing that really produces
     // it where that is cheap, so a re-wrapping in `push.rs` would fail this.

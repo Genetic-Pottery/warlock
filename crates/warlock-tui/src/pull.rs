@@ -8,12 +8,11 @@
 //! came out of it reaches [`Pulling`].
 //!
 //! The order of the four refusals is the promise rather than an arrangement, and
-//! the reason the record question and the sigil question are asked separately
-//! here is the register they answer in.
-//! [`resolve_filing`] filters the recorded scopes by
-//! the held sigils before it looks for the name, so a scope this repository
-//! records and this machine does not hold comes back from it as "no such
-//! candidate" — an ordinary **1** — where the honest answer is the boundary's
+//! the reason the record question and the open question are asked separately
+//! here is the register they answer in. [`resolve_filing`] filters the recorded
+//! scopes by the open ones before it looks for the name, so a scope this
+//! repository records that is closed on this machine comes back from it as "no
+//! such candidate" — an ordinary **1** — where the honest answer is the boundary's
 //! **3**. Asked in this order the closed scope keeps its own status, and
 //! `resolve_filing` is still what answers the key question, so an unbound
 //! checkout is refused in the very words `push` and `draft` refuse it in.
@@ -56,15 +55,15 @@ use crate::standing::{FOR_PULL, Standing};
 /// temporary home with no board, no `git` and no `claude` on the machine.
 ///
 /// [`prepare`] is called up here rather than inside [`pulled`] for one reason: the
-/// sigils it answers with are what the sub-task sessions' system prompt is built
-/// from, and reading them a second time to build it could disagree with the
+/// open scopes it answers with are what the sub-task sessions' system prompt is
+/// built from, and reading them a second time to build it could disagree with the
 /// boundary this run was allowed through on.
 pub fn pull(scope: &str, ticket: Option<&str>, dry_run: bool) -> Result<(), Error> {
     let standing = Standing::here(FOR_PULL)?;
     // The error rather than `check`'s `.ok()`, for [`mod@crate::push`]'s reason:
-    // the sigils under the home say whether this scope is this machine's to work
-    // and the key store beside them is what reads the queue, so a machine with no
-    // home has nothing to pull with rather than an answer of "nothing held".
+    // the config under the home says whether this scope is open on this machine
+    // and the key store beside it is what reads the queue, so a machine with no
+    // home has nothing to pull with rather than an answer of "no scope open".
     let home = Standing::home()?;
     let root = standing.repo_root().to_path_buf();
 
@@ -216,7 +215,7 @@ pub(crate) fn pulled<O: Opens, R: Repository, F: Forge, S: Splits, W: Works, P: 
 }
 
 /// A pull with every refusal that costs nothing already asked: the scope found in
-/// a `[[scope]]` record, the sigil for it held, and a key bound to this checkout.
+/// a `[[scope]]` record, open on this machine, and a key bound to this checkout.
 #[derive(Debug, Clone)]
 pub(crate) struct Prepared {
     /// The repository the run commits in, and what the run record's directory is
@@ -225,7 +224,7 @@ pub(crate) struct Prepared {
     /// Where that record goes, never under [`root`](Self::root).
     home: PathBuf,
     record: ScopeRecord,
-    /// The flattened sigils this machine holds, which the crossing check after
+    /// The flattened open scopes, which the crossing check after
     /// every session is judged against and the session's own system prompt names.
     held: Vec<String>,
     /// The branch this checkout set with `warlock branch use`, or `None` for the
@@ -268,8 +267,8 @@ impl Prepared {
 /// order the answers are worth having.
 ///
 /// The record first, because a scope no `[[scope]]` record holds is a manifest
-/// one line short and the fix is in this repository. The sigil second, because a
-/// recorded scope this machine does not hold is a boundary and its own status.
+/// one line short and the fix is in this repository. Open second, because a
+/// recorded scope closed on this machine is a boundary and its own status.
 /// The key last, through the very [`resolve_filing`] a push and a draft go
 /// through, so an unbound checkout is told the same sentence by all three verbs.
 pub(crate) fn prepare(
@@ -283,7 +282,7 @@ pub(crate) fn prepare(
     };
 
     let settings = Settings::at(Some(home.to_path_buf()), root);
-    let held = settings.sigils()?;
+    let held = settings.open_scopes()?;
     // `scope_opens_to` and nothing written here, so the wildcard is honoured by
     // the one function that knows about it: a comparison of this module's own
     // would be a second copy of the boundary rule, and it is the copy that would

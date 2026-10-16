@@ -1,6 +1,6 @@
 //! `warlock check <path>`: which boundary a path sits inside, where work under
-//! it is filed, what this machine holds, and whether the two meet — printed,
-//! and nothing written anywhere.
+//! it is filed, which scopes are open on this machine, and whether the two
+//! meet — printed, and nothing written anywhere.
 //!
 //! The covering scope and the route are one [`route_facts`] call in its
 //! reporting form, and whether this machine opens that scope is one
@@ -18,9 +18,9 @@
 //! scope nobody recorded, nothing bound, a bound name the store has never heard
 //! of — so `warlock check <path> --json | jq -e '.opens and .key_found'` is the
 //! recipe for "may work here and can file the ticket", again on `jq`'s status
-//! and not warlock's. So is a config that will not read — `sigils` is
+//! and not warlock's. So is a config that will not read — `open` is
 //! three-valued for that reason, because printing `[]` would tell an operator
-//! they hold nothing when the truth is warlock could not read what they hold.
+//! no scope is open when the truth is warlock could not read which are.
 //!
 //! `--gate` is the one exception and the reason the rest of it is the rule: it
 //! asks the same question and spends the status on the verdict itself, because a
@@ -44,11 +44,11 @@ use std::path::{Path, PathBuf};
 use serde_json::{Value, json};
 use warlock_engine::{Manifest, route_facts, scope_opens_to};
 
-use crate::app::Sigils;
+use crate::app::OpenScopes;
 use crate::boundary::{closed_scope_message, unscoped_message};
 use crate::error::Error;
 use crate::query::{envelope, spelled, write_object};
-use crate::settings::{Settings, sigils_line};
+use crate::settings::{Settings, open_line};
 use crate::standing::{FOR_CHECK, Standing};
 
 const CHECK: &str = "check";
@@ -57,7 +57,7 @@ const PATH: &str = "path";
 
 const SCOPE: &str = "scope";
 
-const SIGILS: &str = "sigils";
+const OPEN: &str = "open";
 
 const OPENS: &str = "opens";
 
@@ -106,8 +106,8 @@ struct Checked {
     // diffable across machines.
     path: String,
     scope: Option<String>,
-    sigils: Sigils,
-    // Named in the prose for `Sigils::Unknown` and unused otherwise: a file
+    open: OpenScopes,
+    // Named in the prose for `OpenScopes::Unknown` and unused otherwise: a file
     // that would not read is only useful to a reader told which file it is.
     config: Option<PathBuf>,
     opens: bool,
@@ -137,8 +137,8 @@ struct Checked {
 // one as it stands, and a `..` that climbs out of the repository is refused by
 // the spelling below rather than resolved into something inside it.
 pub fn check(path: PathBuf, json: bool) -> Result<(), Error> {
-    // A home that cannot be resolved is `None` and reads as nothing held — see
-    // `Settings::sigils_or_unknown` for why it is not `Unknown`.
+    // A home that cannot be resolved is `None` and reads as no scope open — see
+    // `Settings::open_or_unknown` for why it is not `Unknown`.
     checked_onto(
         &Standing::here(FOR_CHECK)?,
         Standing::home().ok().as_deref(),
@@ -155,8 +155,8 @@ pub fn check(path: PathBuf, json: bool) -> Result<(), Error> {
 // that will not *parse* is a failure.
 //
 // The home is a parameter for the working directory's reason: resolved in here,
-// a test running against a scratch repository would read the sigil store of the
-// machine it runs on, and `check` is the one caller no test has.
+// a test running against a scratch repository would read the config and key
+// store of the machine it runs on, and `check` is the one caller no test has.
 fn checked_onto<W: Write>(
     standing: &Standing,
     home: Option<&Path>,
@@ -189,8 +189,8 @@ fn checked_at(standing: &Standing, home: Option<&Path>, path: PathBuf) -> Result
 }
 
 // Every input is a parameter — the manifest in hand, the home the caller
-// resolved, the path it joined — so the one thing read from disk here is the
-// sigil config, under the home handed in. That is what keeps the tests off the
+// resolved, the path it joined — so everything read off the machine here, the
+// config and the key store, is read under the home handed in. That is what keeps the tests off the
 // developer's real home.
 //
 // The path is spelled *before* the route is asked for, and both refusals are
@@ -209,7 +209,7 @@ fn checked(
     // absence `resolve_route` refuses on — an unscoped path, a scope with no
     // record, nothing bound, a name the store has never heard of — arrives here
     // as a value, which is what keeps a check's exit status 0 whatever it finds.
-    // The alternative was reading `manifest.scopes()` and the sigil config for
+    // The alternative was reading `manifest.scopes()` and the config for
     // the binding here, which is the `[[scope]]` lookup written a second time
     // somewhere it can disagree with the first. Its scope is `scope_covering`'s
     // answer, so there is no second coverage walk here either.
@@ -217,16 +217,16 @@ fn checked(
         route_facts(target, repo_root, manifest, home).map_err(|source| Error::Route { source })?;
     let scope = facts.scope().map(str::to_owned);
     let settings = Settings::at(home.map(Path::to_path_buf), repo_root);
-    let sigils = settings.sigils_or_unknown();
+    let open = settings.open_or_unknown();
     // `Nothing` and `Unknown` are both the empty slice on the way in
-    // (`Sigils::as_slice`), which is what makes `opens` false for both.
-    let opens = scope_opens_to(facts.scope(), sigils.as_slice());
+    // (`OpenScopes::as_slice`), which is what makes `opens` false for both.
+    let opens = scope_opens_to(facts.scope(), open.as_slice());
     let record = facts.record();
 
     Ok(Checked {
         path,
         scope,
-        sigils,
+        open,
         config: settings.config().map(Path::to_path_buf),
         opens,
         team: record.map(|record| record.team_key().to_owned()),
@@ -275,7 +275,7 @@ fn gated_onto(standing: &Standing, home: Option<&Path>, path: PathBuf) -> Result
 // line a hook shows somebody names their home directory back at them.
 //
 // Matched on the scope as well as on `opens`, because the two refusals want
-// different fixes: a closed scope is a sigil to hold, and an unscoped path is a
+// different fixes: a closed scope is a scope to open, and an unscoped path is a
 // scope to draw.
 fn gated(checked: &Checked) -> Result<(), Error> {
     match (checked.scope.as_deref(), checked.opens) {
@@ -428,8 +428,8 @@ fn denial(sentence: &str) -> Value {
 // to say about an absence.
 //
 // The repository's two facts lead — what covers the path and where work under
-// it is filed are true for anyone who clones this — then what this machine
-// holds, then the verdict where those two meet, then the key the covering scope
+// it is filed are true for anyone who clones this — then the scopes open on
+// this machine, then the verdict where those two meet, then the key the covering scope
 // is bound to here.
 //
 // Every line is composed from the same `Checked` the object is rendered from,
@@ -445,7 +445,7 @@ fn prose(checked: &Checked) -> String {
             checked.review_state.as_deref(),
             checked.label.as_deref(),
         ),
-        sigils_line(&checked.sigils, checked.config.as_deref()),
+        open_line(&checked.open, checked.config.as_deref()),
         verdict_line(checked.scope.as_deref(), checked.opens),
         key_line(
             checked.scope.as_deref(),
@@ -467,8 +467,8 @@ fn covering_line(path: &str, scope: Option<&str>) -> String {
     }
 }
 
-// `opens` is deliberately not a parameter: a scope this machine holds no sigil
-// for still files where it files, and blanking the route for a closed one would
+// `opens` is deliberately not a parameter: a scope closed on this machine still
+// files where it files, and blanking the route for a closed one would
 // leave somebody covering for a colleague with a verdict and nowhere to file.
 // The closed line below sits beside this one instead.
 //
@@ -505,15 +505,14 @@ fn route_line(
 }
 
 // The unscoped case names why it is closed rather than a bare "closed": a reader
-// just told nothing scopes the path should not go looking for a sigil to hold.
-// The closed line ends with the command that holds the sigil it wants.
+// just told nothing scopes the path should not go looking for a scope to open.
+// The closed line ends with the command that opens the scope it names.
 fn verdict_line(scope: Option<&str>, opens: bool) -> String {
     match scope {
         None => "an unscoped path is closed to everyone, so no AI may work here".to_owned(),
-        Some(scope) if opens => format!("`{scope}` is open to this machine"),
+        Some(scope) if opens => format!("`{scope}` is open on this machine"),
         Some(scope) => format!(
-            "`{scope}` is closed to this machine — hold that sigil to work here, \
-             with `warlock sigil add {scope}`"
+            "`{scope}` is closed on this machine — `warlock open {scope}` lets AI work here"
         ),
     }
 }
@@ -579,7 +578,7 @@ fn object(checked: &Checked) -> Value {
         [
             (PATH, Value::String(checked.path.clone())),
             (SCOPE, text(checked.scope.as_deref())),
-            (SIGILS, sigils_value(&checked.sigils)),
+            (OPEN, open_value(&checked.open)),
             (OPENS, Value::Bool(checked.opens)),
             (TEAM, text(checked.team.as_deref())),
             (REVIEW_STATE, text(checked.review_state.as_deref())),
@@ -598,16 +597,16 @@ fn text(value: Option<&str>) -> Value {
     value.map_or(Value::Null, |value| Value::String(value.to_owned()))
 }
 
-// The three-valuedness is the whole point. `[]` for `Sigils::Unknown` would tell
-// an operator they hold nothing when warlock could not read what they hold, and
+// The three-valuedness is the whole point. `[]` for `OpenScopes::Unknown` would tell
+// an operator no scope is open when warlock could not read which are, and
 // those mean opposite things about what is on disk — so the broken case is
 // `null`, which a consumer has to handle deliberately rather than iterate over
 // by accident. Total, so a fourth state breaks this at compile time.
-fn sigils_value(sigils: &Sigils) -> Value {
-    match sigils {
-        Sigils::Held(held) => Value::Array(held.iter().cloned().map(Value::String).collect()),
-        Sigils::Nothing => Value::Array(Vec::new()),
-        Sigils::Unknown => Value::Null,
+fn open_value(open: &OpenScopes) -> Value {
+    match open {
+        OpenScopes::Named(held) => Value::Array(held.iter().cloned().map(Value::String).collect()),
+        OpenScopes::Nothing => Value::Array(Vec::new()),
+        OpenScopes::Unknown => Value::Null,
     }
 }
 

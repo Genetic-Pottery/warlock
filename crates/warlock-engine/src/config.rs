@@ -16,10 +16,10 @@ use crate::scope::{Rule, validate_scope};
 
 pub(crate) const HOME_DIR: &str = ".warlock";
 
-const SIGIL_FILE: &str = "config.toml";
+const CONFIG_FILE: &str = "config.toml";
 
 // These four decide the derived directory name, so changing any of them is the
-// day everybody's sigils appear to vanish. Move `PROJECT_CONTEXT` only when a
+// day every scope opened on every machine appears to close. Move `PROJECT_CONTEXT` only when a
 // repository that moved nowhere would derive a different directory anyway;
 // there is no migration and there is not meant to be one.
 const PROJECT_CONTEXT: &str = "warlock project directory v1 2026-08-28";
@@ -58,11 +58,11 @@ pub fn project_directory(root: impl AsRef<Path>) -> String {
 }
 
 /// ```
-/// use warlock_engine::{project_directory, sigils_path};
+/// use warlock_engine::{project_directory, config_path};
 ///
 /// let (home, root) = (tempfile::tempdir()?, tempfile::tempdir()?);
 /// assert_eq!(
-///     sigils_path(home.path(), root.path()),
+///     config_path(home.path(), root.path()),
 ///     home.path()
 ///         .join(".warlock")
 ///         .join(project_directory(root.path()))
@@ -71,59 +71,62 @@ pub fn project_directory(root: impl AsRef<Path>) -> String {
 /// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
 #[must_use]
-pub fn sigils_path(home: impl AsRef<Path>, root: impl AsRef<Path>) -> PathBuf {
-    project_dir(home.as_ref(), root.as_ref()).join(SIGIL_FILE)
+pub fn config_path(home: impl AsRef<Path>, root: impl AsRef<Path>) -> PathBuf {
+    project_dir(home.as_ref(), root.as_ref()).join(CONFIG_FILE)
 }
 
 // `pub(crate)` so `pulls.rs` derives its run directory from this one join rather
 // than repeating `.warlock/<project>` itself: the two would then be free to
 // disagree, and the day they did every run record on the machine would appear to
-// vanish while the sigils beside them still read.
+// vanish while the config beside them still reads.
 pub(crate) fn project_dir(home: &Path, root: &Path) -> PathBuf {
     home.join(HOME_DIR).join(project_directory(root))
 }
 
 /// ```
-/// use warlock_engine::{sigils, load_sigils};
+/// use warlock_engine::{config, load_open_scopes};
 ///
 /// let (home, root) = (tempfile::tempdir()?, tempfile::tempdir()?);
-/// let held = match load_sigils(home.path(), root.path()) {
-///     Err(sigils::Error::NotFound { .. }) => Vec::new(),
+/// let open = match load_open_scopes(home.path(), root.path()) {
+///     Err(config::Error::NotFound { .. }) => Vec::new(),
 ///     other => other?,
 /// };
 ///
-/// assert!(held.is_empty());
+/// assert!(open.is_empty());
 /// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
 // Absent is `NotFound`, following `Manifest::load`. Returning an empty set for
-// a missing file was rejected: "never configured for this checkout" and "holds
-// no sigils" are different facts, and only the caller knows which it is acting
+// a missing file was rejected: "never configured for this checkout" and "opens
+// no scope" are different facts, and only the caller knows which it is acting
 // on. Unreadable and unparseable stay named for the same reason — broken must
-// never be indistinguishable from holds-nothing.
-pub fn load_sigils(home: impl AsRef<Path>, root: impl AsRef<Path>) -> Result<Vec<String>, Error> {
-    read(home.as_ref(), root.as_ref()).map(|config| config.sigils)
+// never be indistinguishable from opens-nothing.
+pub fn load_open_scopes(
+    home: impl AsRef<Path>,
+    root: impl AsRef<Path>,
+) -> Result<Vec<String>, Error> {
+    read(home.as_ref(), root.as_ref()).map(|config| config.open)
 }
 
-// Every door that acts on what is held reads it through this, so they agree
-// that a checkout nobody configured holds nothing. What a config that is there
+// Every door that acts on the open scopes reads them through this, so they agree
+// that a checkout nobody configured opens nothing. What a config that is there
 // and will not read means stays each door's call — the panel and `warlock
 // check` print it as unknown and carry on, filing and routing refuse — which is
 // why it comes back as an error rather than being folded here too.
-pub fn held_sigils(home: impl AsRef<Path>, root: impl AsRef<Path>) -> Result<Vec<String>, Error> {
-    match load_sigils(home, root) {
+pub fn open_scopes(home: impl AsRef<Path>, root: impl AsRef<Path>) -> Result<Vec<String>, Error> {
+    match load_open_scopes(home, root) {
         Err(Error::NotFound { .. }) => Ok(Vec::new()),
         other => other,
     }
 }
 
 /// ```
-/// use warlock_engine::{sigils, load_key_binding, save_key_binding};
+/// use warlock_engine::{config, load_key_binding, save_key_binding};
 ///
 /// let (home, root) = (tempfile::tempdir()?, tempfile::tempdir()?);
 /// // A checkout nobody has configured has no config to be bound by.
 /// assert!(matches!(
 ///     load_key_binding(home.path(), root.path(), "data-plane"),
-///     Err(sigils::Error::NotFound { .. })
+///     Err(config::Error::NotFound { .. })
 /// ));
 ///
 /// save_key_binding(home.path(), root.path(), "data-plane", "work")?;
@@ -182,7 +185,7 @@ pub fn load_key_binding(
 // Absent is an empty answer rather than `NotFound`, unlike `load_key_binding`:
 // every caller asks this *about a name it is acting on*, and a checkout with no
 // config bound that name in no scope. A config that is there and will not read
-// stays an error, for `load_sigils`'s reason.
+// stays an error, for `load_open_scopes`'s reason.
 pub fn scopes_bound_to(
     home: impl AsRef<Path>,
     root: impl AsRef<Path>,
@@ -201,15 +204,15 @@ pub fn scopes_bound_to(
 }
 
 /// ```
-/// use warlock_engine::{load_key_binding, load_sigils, save_key_binding, save_sigils};
+/// use warlock_engine::{load_key_binding, load_open_scopes, save_key_binding, save_open_scopes};
 ///
 /// let (home, root) = (tempfile::tempdir()?, tempfile::tempdir()?);
-/// save_sigils(home.path(), root.path(), &["data-plane".to_owned()])?;
+/// save_open_scopes(home.path(), root.path(), &["data-plane".to_owned()])?;
 /// save_key_binding(home.path(), root.path(), "data-plane", "work")?;
 /// save_key_binding(home.path(), root.path(), "web", "personal")?;
 ///
-/// // Each binding is written beside the others, and beside the sigils.
-/// assert_eq!(load_sigils(home.path(), root.path())?, ["data-plane"]);
+/// // Each binding is written beside the others, and beside the open scopes.
+/// assert_eq!(load_open_scopes(home.path(), root.path())?, ["data-plane"]);
 /// assert_eq!(
 ///     load_key_binding(home.path(), root.path(), "data-plane")?.as_deref(),
 ///     Some("work"),
@@ -219,14 +222,14 @@ pub fn scopes_bound_to(
 /// assert!(save_key_binding(home.path(), root.path(), "Web!", "work").is_err());
 /// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
-// Both names are judged by `validate_scope`, so a key name, a scope and a sigil
-// are one character class across the workspace rather than three that drift. A
+// Both names are judged by `validate_scope`, so a key name, a scope and an open
+// scope are one character class across the workspace rather than three that drift. A
 // looser rule of its own for key names was rejected: the name is typed at a
 // prompt and read back off a config line, which is exactly what that class is
 // for. Both are judged before the file is read, so a refusal writes nothing.
 //
 // One scope's entry is replaced and the rest of the map is carried through
-// `held`, along with the sigils and the base branch: binding a second workspace
+// `held`, along with the open scopes and the base branch: binding a second workspace
 // must not be the way a person loses the first one.
 pub fn save_key_binding(
     home: impl AsRef<Path>,
@@ -263,7 +266,7 @@ pub fn save_key_binding(
 // Absent and unconfigured are one answer here, unlike the key binding: both mean
 // "use the remote's default", and no caller sends a person anywhere different
 // for one than for the other. A config that is there and will not read stays an
-// error, for `load_sigils`'s reason.
+// error, for `load_open_scopes`'s reason.
 pub fn held_base_branch(
     home: impl AsRef<Path>,
     root: impl AsRef<Path>,
@@ -304,26 +307,26 @@ pub fn save_base_branch(
 }
 
 /// ```
-/// use warlock_engine::{load_sigils, save_sigils};
+/// use warlock_engine::{load_open_scopes, save_open_scopes};
 ///
 /// let (home, root) = (tempfile::tempdir()?, tempfile::tempdir()?);
-/// save_sigils(home.path(), root.path(), &["data-plane".to_owned()])?;
+/// save_open_scopes(home.path(), root.path(), &["data-plane".to_owned()])?;
 ///
-/// assert_eq!(load_sigils(home.path(), root.path())?, ["data-plane"]);
+/// assert_eq!(load_open_scopes(home.path(), root.path())?, ["data-plane"]);
 /// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
-pub fn save_sigils(
+pub fn save_open_scopes(
     home: impl AsRef<Path>,
     root: impl AsRef<Path>,
-    sigils: &[String],
+    open: &[String],
 ) -> Result<(), Error> {
     let mut config = held(home.as_ref(), root.as_ref());
-    config.sigils = sigils.to_vec();
+    config.open = open.to_vec();
     write(home.as_ref(), root.as_ref(), &config)
 }
 
 fn read(home: &Path, root: &Path) -> Result<Config, Error> {
-    let path = sigils_path(home, root);
+    let path = config_path(home, root);
     let text = match fs::read_to_string(&path) {
         Ok(text) => text,
         Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
@@ -337,7 +340,7 @@ fn read(home: &Path, root: &Path) -> Result<Config, Error> {
 
 // What a save must carry forward: the fields it was not asked to change. A file
 // that will not read or will not parse yields the default rather than an error,
-// so saving sigils onto a config broken by hand still works — refusing it was
+// so saving open scopes onto a config broken by hand still works — refusing it was
 // rejected, because there is no binding recoverable from bytes that do not
 // parse, and refusing would leave a person with a file warlock can neither read
 // nor replace.
@@ -356,7 +359,7 @@ fn write(home: &Path, root: &Path, config: &Config) -> Result<(), Error> {
         source,
     })?;
 
-    write_atomically(&dir, SIGIL_FILE, text.as_bytes())
+    write_atomically(&dir, CONFIG_FILE, text.as_bytes())
         .map_err(|(path, source)| Error::Io { path, source })
 }
 
@@ -378,13 +381,13 @@ fn readable_name(canonical: &Path) -> String {
 }
 
 // `deny_unknown_fields` rather than a lenient read: this file is short,
-// hand-editable and has no version key, so a misspelled `sigil = [...]` would
-// otherwise parse as a valid config holding nothing.
+// hand-editable and has no version key, so a misspelled `opens = [...]` would
+// otherwise parse as a valid config that opens nothing.
 #[derive(Debug, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Config {
     #[serde(default)]
-    sigils: Vec<String>,
+    open: Vec<String>,
     // Skipped when unset rather than letting `Option`'s serialiser write it:
     // serde writes `None` as a TOML value, so without this a config nobody has
     // set a branch on would gain a line it cannot read back.
@@ -437,18 +440,16 @@ impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::NotFound { path } => {
-                write!(f, "no sigil config at `{}`", path.display())
+                write!(f, "no config at `{}`", path.display())
             }
             Self::Io { path, source } => {
                 write!(f, "could not read or write `{}`: {source}", path.display())
             }
-            Self::Syntax { path, source } => write!(
-                f,
-                "malformed sigil config at `{}`: {source}",
-                path.display()
-            ),
+            Self::Syntax { path, source } => {
+                write!(f, "malformed config at `{}`: {source}", path.display())
+            }
             Self::Serialize { source } => {
-                write!(f, "could not write the sigil config as TOML: {source}")
+                write!(f, "could not write the config as TOML: {source}")
             }
             // One sentence for both of `save_key_binding`'s names, because one
             // rule judges both: a second variant would have to be told apart by
@@ -479,5 +480,5 @@ impl std::error::Error for Error {
 }
 
 #[cfg(test)]
-#[path = "tests/sigils.rs"]
+#[path = "tests/config.rs"]
 mod tests;

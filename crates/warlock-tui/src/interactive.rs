@@ -96,8 +96,9 @@ impl<S: Screen> Interactive<S> {
             // timeout, so no `claude` exists until a key asks for a turn.
             chat: Chat::new(scope.repo_root.clone()),
             // Built once, and cheaper still: the seam is a unit value and no
-            // socket exists until a confirmed dialog asks for one. The home under which the sigils, the binding and the
-            // key store sit is read here as well, once for the session.
+            // socket exists until a confirmed dialog asks for one. The home under
+            // which the config and the key store sit is read here as well, once
+            // for the session.
             pushes: Pushes::new(),
             // The same two facts, read a second time rather than shared with the
             // value above: a cut opens its own client on its own worker, and a
@@ -395,7 +396,7 @@ impl<K: Seams> Session<K> {
             size,
             &self.app,
             Some(self.chat.composer()),
-            self.scope.chrome.sigils(),
+            self.scope.chrome.open(),
         )
         .cut();
         self.app.set_viewport_height(cut.tree_height());
@@ -427,7 +428,7 @@ impl<K: Seams> Session<K> {
             let cut = if frame.area() == cut.screen() {
                 cut
             } else {
-                Shape::of(frame.area().as_size(), app, Some(field), chrome.sigils()).cut()
+                Shape::of(frame.area().as_size(), app, Some(field), chrome.open()).cut()
             };
             draw(frame, &cut, app, chrome, Instant::now(), modal, Some(field));
         })
@@ -450,7 +451,7 @@ impl<K: Seams> Session<K> {
             size,
             &self.app,
             Some(self.chat.composer()),
-            self.scope.chrome.sigils(),
+            self.scope.chrome.open(),
         );
         let action = mouse_action(mouse, shape, &self.app, self.modal());
         // Before the action is acted on, because this is bookkeeping about the
@@ -642,7 +643,7 @@ impl<K: Seams> Session<K> {
                     &mut self.app,
                     &self.manifest,
                     &self.scope.repo_root,
-                    self.scope.chrome.sigils(),
+                    self.scope.chrome.open(),
                     pulling.as_deref(),
                     now,
                 );
@@ -693,7 +694,7 @@ impl<K: Seams> Session<K> {
             // binding, reached by the keys pressed at the window a record
             // submit put up. The home and the root are the session's own,
             // resolved once in `load_app` — and the file a binding lands in is
-            // the very file those settings read the sigils out of.
+            // the very file those settings read the open scopes out of.
             Pressed::Key(edited) => {
                 // Which of the window's three roads this press is on, read
                 // before it is answered because answering takes it. It is also
@@ -875,8 +876,8 @@ impl<K: Seams> Session<K> {
                 };
                 self.say(said, now);
             }
-            Wanted::Sigil(sigiling) => {
-                let said = self.scope.settings.sigil(&sigiling);
+            Wanted::Open(opening) => {
+                let said = self.scope.settings.open(&opening);
                 self.settled(said, now);
             }
             Wanted::Resume(ticket) => {

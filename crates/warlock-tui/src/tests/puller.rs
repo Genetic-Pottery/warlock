@@ -1,7 +1,7 @@
 //! Every test here drives [`Puller`] over a temporary repository and a temporary
 //! home, through the seams the event loop hands it: a stand-in board, checkout,
 //! forge and three stand-in sessions. Nothing below opens a socket, runs a `git`,
-//! raises a `claude` or reads the sigils, the binding or the key store of the
+//! raises a `claude` or reads the open scopes, the binding or the key store of the
 //! machine the suite runs on, and the one key any of it stores is not one.
 
 use std::path::Path;
@@ -10,7 +10,7 @@ use std::time::Instant;
 use tempfile::TempDir;
 use warlock_engine::{
     Manifest, PullRun, RunStatus, ScopeRecord, ScopedDirectory, save_key, save_key_binding,
-    save_sigils,
+    save_open_scopes,
 };
 
 use super::Puller;
@@ -33,7 +33,7 @@ const KEY_NAME: &str = "this-tests-own-name";
 
 const SCOPE: &str = "warlock-team";
 
-// A scope this repository records that the machine below does not hold.
+// A scope this repository records that is closed on the machine below.
 const CLOSED: &str = "control-plane";
 
 const TEAM: &str = "WAR";
@@ -79,11 +79,11 @@ fn scoped(directory: &str, scope: &str) -> ScopedDirectory {
     ScopedDirectory::new(".", directory, scope).expect("a relative module path is inside the root")
 }
 
-// A home of this test's own: the sigils that pick the board, the binding, the key
-// store and the run records all sit under it.
+// A home of this test's own: the open scopes, the binding, the key store and the
+// run records all sit under it.
 fn a_home(root: &Path) -> TempDir {
     let home = a_dir();
-    save_sigils(home.path(), root, &[SCOPE.to_owned()]).expect("a config that writes");
+    save_open_scopes(home.path(), root, &[SCOPE.to_owned()]).expect("a config that writes");
     save_key_binding(home.path(), root, SCOPE, KEY_NAME).expect("a binding that writes");
     save_key(home.path(), KEY_NAME, NOT_A_KEY).expect("a key store that writes");
     home
@@ -338,7 +338,7 @@ fn a_machine_with_no_home_is_refused_in_standing_s_own_words() {
 }
 
 #[test]
-fn a_scope_no_record_holds_and_one_this_machine_does_not_hold_are_prepare_s_refusals() {
+fn a_scope_no_record_holds_and_one_closed_on_this_machine_are_prepare_s_refusals() {
     let ground = Ground::new();
     let repo = checkout();
     let mut puller = puller(
@@ -733,7 +733,7 @@ mod binding {
     use std::path::Path;
 
     use tempfile::TempDir;
-    use warlock_engine::{load_key_binding, save_key, save_key_binding, save_sigils};
+    use warlock_engine::{load_key_binding, save_key, save_key_binding, save_open_scopes};
 
     use super::{
         Answer, App, Boarding, Checkout, Forging, KEY_NAME, KeyPrompt, NOT_A_KEY, Panel,
@@ -742,12 +742,12 @@ mod binding {
     };
     use crate::error::{Error, one_line};
 
-    // A home with the sigil and a key in the store, and no binding for any
+    // A home with the scope open and a key in the store, and no binding for any
     // scope: the checkout somebody has just cloned, which is the road this
     // question exists for.
     fn an_unbound_home(root: &Path) -> TempDir {
         let home = a_dir();
-        save_sigils(home.path(), root, &[SCOPE.to_owned()]).expect("a config that writes");
+        save_open_scopes(home.path(), root, &[SCOPE.to_owned()]).expect("a config that writes");
         save_key(home.path(), KEY_NAME, NOT_A_KEY).expect("a key store that writes");
         home
     }
@@ -907,7 +907,7 @@ mod binding {
 
         let source = load_key_binding(home.path(), root.path(), SCOPE)
             .expect_err("a checkout nobody configured");
-        assert_eq!(notes(&app), vec![one_line(Error::Sigils { source })]);
+        assert_eq!(notes(&app), vec![one_line(Error::Config { source })]);
         assert_eq!(prompt, KeyPrompt::Closed, "a question was asked anyway");
         assert!(!puller.choosing(), "a refusal read a queue");
     }

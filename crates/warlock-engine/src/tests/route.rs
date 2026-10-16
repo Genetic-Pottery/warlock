@@ -3,10 +3,10 @@ use std::mem::discriminant;
 use std::path::Path;
 
 use super::{Error, resolve_route, route_facts};
+use crate::config::{config_path, save_key_binding, save_open_scopes};
 use crate::keys::{keys_path, save_key};
 use crate::manifest::{Manifest, ScopeRecord, ScopedDirectory, manifest_path};
 use crate::scope::scope_opens_to;
-use crate::sigils::{save_key_binding, save_sigils, sigils_path};
 
 // The string every test that must not see a key looks for. It is a plausible
 // Linear key rather than the word "secret", so a test that passes proves the
@@ -38,8 +38,8 @@ fn bound(home: &Path, root: &Path) {
     save_key(home, "work", KEY).expect("stores that key on this machine");
 }
 
-fn owned(sigils: &[&str]) -> Vec<String> {
-    sigils.iter().map(|sigil| (*sigil).to_owned()).collect()
+fn owned(open: &[&str]) -> Vec<String> {
+    open.iter().map(|scope| (*scope).to_owned()).collect()
 }
 
 fn rendered(error: &Error) -> String {
@@ -56,14 +56,14 @@ fn rendered(error: &Error) -> String {
 }
 
 #[test]
-fn a_scope_this_machine_holds_no_sigil_for_still_routes() {
+fn a_scope_that_is_not_open_on_this_machine_still_routes() {
     let (home, root) = (a_dir(), a_dir());
     bound(home.path(), root.path());
-    save_sigils(home.path(), root.path(), &[]).expect("records an empty sigil set");
+    save_open_scopes(home.path(), root.path(), &[]).expect("records an empty set of open scopes");
     let manifest = a_manifest();
 
     let route = resolve_route("crates/engine/src", root.path(), &manifest, home.path())
-        .expect("a scoped path on a bound checkout resolves, held or not");
+        .expect("a scoped path on a bound checkout resolves, open or not");
 
     assert_eq!(route.scope(), "data-plane");
     assert_eq!(route.record().name(), "data-plane");
@@ -73,7 +73,7 @@ fn a_scope_this_machine_holds_no_sigil_for_still_routes() {
     assert_eq!(route.key(), "work");
     assert!(
         !route.opens(),
-        "holding nothing opens nothing that is scoped, and that is a fact \
+        "opening nothing opens nothing that is scoped, and that is a fact \
          beside the route rather than a refusal"
     );
     assert_eq!(route.opens(), scope_opens_to(Some("data-plane"), &[]));
@@ -84,10 +84,10 @@ fn a_scope_this_machine_holds_no_sigil_for_still_routes() {
 }
 
 #[test]
-fn the_sigil_fact_is_scope_opens_to_and_never_changes_the_route() {
+fn the_open_fact_is_scope_opens_to_and_never_changes_the_route() {
     let manifest = a_manifest();
 
-    for held in [
+    for open in [
         owned(&[]),
         owned(&["web"]),
         owned(&["data-plane"]),
@@ -97,47 +97,47 @@ fn the_sigil_fact_is_scope_opens_to_and_never_changes_the_route() {
     ] {
         let (home, root) = (a_dir(), a_dir());
         bound(home.path(), root.path());
-        save_sigils(home.path(), root.path(), &held).expect("records what this machine holds");
+        save_open_scopes(home.path(), root.path(), &open).expect("records what this machine opens");
 
         let route = resolve_route("crates/engine", root.path(), &manifest, home.path())
-            .expect("a scoped path routes whatever this machine holds");
+            .expect("a scoped path routes whatever this machine opens");
 
         assert_eq!(
             route.opens(),
-            scope_opens_to(Some("data-plane"), &held),
-            "the fact is the rule's answer and not a second copy of it: {held:?}"
+            scope_opens_to(Some("data-plane"), &open),
+            "the fact is the rule's answer and not a second copy of it: {open:?}"
         );
-        assert_eq!(route.scope(), "data-plane", "{held:?}");
-        assert_eq!(route.record().team_key(), "Data Plane", "{held:?}");
-        assert_eq!(route.record().review_state(), "In Review", "{held:?}");
-        assert_eq!(route.record().label(), "area/data-plane", "{held:?}");
+        assert_eq!(route.scope(), "data-plane", "{open:?}");
+        assert_eq!(route.record().team_key(), "Data Plane", "{open:?}");
+        assert_eq!(route.record().review_state(), "In Review", "{open:?}");
+        assert_eq!(route.record().label(), "area/data-plane", "{open:?}");
         assert_eq!(
             route.key(),
             "work",
             "a closed scope files against the same team, state and label as an \
-             open one: {held:?}"
+             open one: {open:?}"
         );
     }
 }
 
 #[test]
-fn an_unscoped_path_is_refused_by_name_whatever_this_machine_holds() {
-    // Work with nowhere to be filed: a machine holding the wildcard is turned
-    // down in the same words as one holding nothing, because an unscoped
-    // directory is closed to every sigil and has no board either way.
-    for held in [owned(&[]), owned(&["*"]), owned(&["data-plane"])] {
-        assert!(!scope_opens_to(None, &held), "{held:?}");
+fn an_unscoped_path_is_refused_by_name_whatever_this_machine_opens() {
+    // Work with nowhere to be filed: a machine that opens the wildcard is turned
+    // down in the same words as one that opens nothing, because an unscoped
+    // directory is closed even to the wildcard and has no board either way.
+    for open in [owned(&[]), owned(&["*"]), owned(&["data-plane"])] {
+        assert!(!scope_opens_to(None, &open), "{open:?}");
 
         let (home, root) = (a_dir(), a_dir());
         bound(home.path(), root.path());
-        save_sigils(home.path(), root.path(), &held).expect("records what this machine holds");
+        save_open_scopes(home.path(), root.path(), &open).expect("records what this machine opens");
 
         let error = resolve_route("docs/adr", root.path(), &a_manifest(), home.path())
             .expect_err("nothing at or above `docs/adr` carries a scope");
 
         assert!(
             matches!(&error, Error::Unscoped { path } if path == Path::new("docs/adr")),
-            "{error:?} for {held:?}"
+            "{error:?} for {open:?}"
         );
         assert!(error.to_string().contains("docs/adr"), "{error}");
     }
@@ -174,7 +174,7 @@ fn the_four_refusals_are_four_different_variants() {
     );
 
     let (unbound_home, unbound_root) = (a_dir(), a_dir());
-    save_sigils(
+    save_open_scopes(
         unbound_home.path(),
         unbound_root.path(),
         &owned(&["data-plane"]),
@@ -192,15 +192,15 @@ fn the_four_refusals_are_four_different_variants() {
         "{unbound:?}"
     );
     let text = unbound.to_string();
-    let config = sigils_path(unbound_home.path(), unbound_root.path());
+    let config = config_path(unbound_home.path(), unbound_root.path());
     assert!(
         text.contains(&config.display().to_string()) && text.contains("warlock key use data-plane"),
         "the fix is one line for one scope in that file: {text}"
     );
 
     // A checkout nobody has configured at all is the same refusal, against the
-    // config file that would hold the binding: `load_sigils` saying NotFound is
-    // a machine that holds nothing, and it never becomes a different answer.
+    // config file that would hold the binding: a missing config is a checkout
+    // bound to nothing, and it never becomes a different answer.
     let (fresh_home, fresh_root) = (a_dir(), a_dir());
     let never_configured = resolve_route(
         "crates/engine",
@@ -265,7 +265,7 @@ fn a_path_outside_the_root_is_not_a_path_nothing_scopes() {
 fn a_recorded_scope_and_a_stored_key_report_every_fact() {
     let (home, root) = (a_dir(), a_dir());
     bound(home.path(), root.path());
-    save_sigils(home.path(), root.path(), &owned(&["data-plane"])).expect("records a sigil");
+    save_open_scopes(home.path(), root.path(), &owned(&["data-plane"])).expect("opens a scope");
     let manifest = a_manifest();
 
     let facts = route_facts(
@@ -392,7 +392,7 @@ fn two_scopes_in_one_repository_route_to_two_different_keys() {
 #[test]
 fn a_checkout_bound_to_nothing_reports_no_key() {
     let (home, root) = (a_dir(), a_dir());
-    save_sigils(home.path(), root.path(), &owned(&["data-plane"]))
+    save_open_scopes(home.path(), root.path(), &owned(&["data-plane"]))
         .expect("a configured checkout that is bound to nothing");
     save_key(home.path(), "work", KEY).expect("a key this machine holds, bound to no checkout");
     let manifest = a_manifest();

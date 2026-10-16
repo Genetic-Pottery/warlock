@@ -501,7 +501,7 @@ mod named {
         ScopeRecord::new("warlock-team", "WAR", "In Review", "warlock")
     }
 
-    // A board holding that one ticket, and one holding nothing.
+    // A board holding that one ticket, and one AI can work in no scope.
     fn holding(node: &Value) -> Posting {
         Posting::answering([Ok(json!({ "issues": { "nodes": [node] } }))])
     }

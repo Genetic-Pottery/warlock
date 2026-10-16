@@ -1,6 +1,6 @@
 use super::{
     MAXIMUM_CHARACTERS, RULES, Rule, at_or_above, is_scope_character, scope_covering,
-    scope_opens_to, validate_scope, validate_sigil,
+    scope_opens_to, validate_open_scope, validate_scope,
 };
 use crate::{Manifest, ScopedDirectory};
 
@@ -135,13 +135,13 @@ fn a_scope_is_never_trimmed_before_judging() {
 }
 
 #[test]
-fn the_wildcard_is_a_sigil_and_only_a_sigil() {
-    assert_eq!(validate_sigil("*"), Ok(()));
+fn the_wildcard_is_an_open_scope_and_never_a_directory_scope() {
+    assert_eq!(validate_open_scope("*"), Ok(()));
     assert!(validate_scope("*").is_err());
 }
 
 #[test]
-fn a_sigil_is_otherwise_judged_exactly_as_a_scope_is() {
+fn an_open_scope_is_otherwise_judged_exactly_as_a_scope_is() {
     for candidate in [
         "data-plane",
         "a",
@@ -154,7 +154,7 @@ fn a_sigil_is_otherwise_judged_exactly_as_a_scope_is() {
         "*.rs",
     ] {
         assert_eq!(
-            validate_sigil(candidate),
+            validate_open_scope(candidate),
             validate_scope(candidate),
             "`{candidate}` should read the same on both sides"
         );
@@ -343,97 +343,97 @@ fn the_rules_line_states_the_rules_it_is_about() {
     );
 }
 
-fn held(sigils: &[&str]) -> Vec<String> {
-    sigils.iter().map(|sigil| (*sigil).to_owned()).collect()
+fn opened(open: &[&str]) -> Vec<String> {
+    open.iter().map(|scope| (*scope).to_owned()).collect()
 }
 
 #[test]
 fn a_directory_nobody_scoped_is_closed_to_everyone() {
-    assert!(!scope_opens_to(None, &held(&["web"])));
+    assert!(!scope_opens_to(None, &opened(&["web"])));
     assert!(!scope_opens_to(None, &[]));
-    assert!(!scope_opens_to(None, &held(&["data-plane"])));
+    assert!(!scope_opens_to(None, &opened(&["data-plane"])));
 }
 
 #[test]
 fn the_wildcard_does_not_open_a_directory_nobody_scoped() {
     assert!(
-        !scope_opens_to(None, &held(&["*"])),
+        !scope_opens_to(None, &opened(&["*"])),
         "the wildcard opens every scope, and an unscoped directory has none to open"
     );
-    assert!(!scope_opens_to(None, &held(&["web", "*"])));
+    assert!(!scope_opens_to(None, &opened(&["web", "*"])));
 }
 
 #[test]
-fn holding_nothing_opens_nothing() {
+fn opening_nothing_opens_nothing() {
     assert!(
         !scope_opens_to(Some("data-plane"), &[]),
-        "a sigil is what opens a scope, so holding none opens none"
+        "only an open scope opens a scope, so an empty list opens none"
     );
     assert!(!scope_opens_to(None, &[]));
 }
 
 #[test]
-fn the_empty_set_is_refused_exactly_as_a_wrong_sigil_is() {
-    // "Nobody told me what you hold" and "what you hold does not match" are
+fn the_empty_set_is_refused_exactly_as_a_wrong_open_scope_is() {
+    // "Nobody told me what you open" and "what you open does not match" are
     // the same answer to the only question asked here. If they differed, the
     // default state of every machine would be a universal bypass.
     assert_eq!(
         scope_opens_to(Some("data-plane"), &[]),
-        scope_opens_to(Some("data-plane"), &held(&["web"]))
+        scope_opens_to(Some("data-plane"), &opened(&["web"]))
     );
 }
 
 #[test]
-fn any_one_held_sigil_opens_the_scope_it_matches() {
-    let sigils = held(&["web", "billing", "data-plane"]);
+fn any_one_open_scope_opens_the_scope_it_matches() {
+    let open = opened(&["web", "billing", "data-plane"]);
 
     for scope in ["web", "billing", "data-plane"] {
         assert!(
-            scope_opens_to(Some(scope), &sigils),
-            "`{scope}` is held, so it opens: this is membership, not an expression"
+            scope_opens_to(Some(scope), &open),
+            "`{scope}` is in the list, so it opens: this is membership, not an expression"
         );
     }
 }
 
 #[test]
-fn a_scope_none_of_the_held_sigils_match_is_closed() {
+fn a_scope_none_of_the_open_scopes_match_is_closed() {
     assert!(!scope_opens_to(
         Some("data-plane"),
-        &held(&["web", "billing"])
+        &opened(&["web", "billing"])
     ));
 }
 
 #[test]
-fn the_wildcard_sigil_opens_every_scope() {
-    assert!(scope_opens_to(Some("data-plane"), &held(&["*"])));
+fn the_wildcard_opens_every_scope() {
+    assert!(scope_opens_to(Some("data-plane"), &opened(&["*"])));
     assert!(
-        scope_opens_to(Some("billing"), &held(&["web", "*"])),
-        "the wildcard opens alongside ordinary sigils, not only alone"
+        scope_opens_to(Some("billing"), &opened(&["web", "*"])),
+        "the wildcard opens alongside ordinary open scopes, not only alone"
     );
 }
 
 #[test]
 fn matching_is_byte_for_byte_and_never_partial() {
     assert!(
-        !scope_opens_to(Some("data-plane"), &held(&["data"])),
-        "a prefix is a different sigil"
+        !scope_opens_to(Some("data-plane"), &opened(&["data"])),
+        "a prefix is a different scope"
     );
     assert!(
-        !scope_opens_to(Some("data"), &held(&["data-plane"])),
+        !scope_opens_to(Some("data"), &opened(&["data-plane"])),
         "and so is an extension of one"
     );
     assert!(
-        !scope_opens_to(Some("web"), &held(&["Web"])),
+        !scope_opens_to(Some("web"), &opened(&["Web"])),
         "case is not folded here: folding belongs where a person supplies the string"
     );
 }
 
 #[test]
 fn a_near_miss_wildcard_opens_nothing() {
-    for sigil in ["**", "*.rs", "?"] {
+    for scope in ["**", "*.rs", "?"] {
         assert!(
-            !scope_opens_to(Some("web"), &held(&[sigil])),
-            "`{sigil}` is not the wildcard, and `validate_sigil` refuses it anyway"
+            !scope_opens_to(Some("web"), &opened(&[scope])),
+            "`{scope}` is not the wildcard, and `validate_open_scope` refuses it anyway"
         );
     }
 }
@@ -444,23 +444,23 @@ fn coverage_and_opening_compose_into_the_whole_question() {
         scoped("crates", "platform"),
         scoped("crates/engine", "data-plane"),
     ]);
-    let sigils = held(&["platform"]);
+    let open = opened(&["platform"]);
 
     let covering = |path| {
         scope_covering(path, ".", &manifest).expect("a path under the root has a stored form")
     };
 
     assert!(
-        scope_opens_to(covering("crates/tui/src"), &sigils),
-        "the nearest scope is `platform`, which is held"
+        scope_opens_to(covering("crates/tui/src"), &open),
+        "the nearest scope is `platform`, which is open"
     );
     assert!(
-        !scope_opens_to(covering("crates/engine/src"), &sigils),
+        !scope_opens_to(covering("crates/engine/src"), &open),
         "the nearer scope replaces the outer one outright: an outer scope is a default, \
-             never a second gate that holding `platform` could satisfy on its behalf"
+             never a second gate that opening `platform` could satisfy on its behalf"
     );
     assert!(
-        !scope_opens_to(covering("docs"), &held(&["*"])),
+        !scope_opens_to(covering("docs"), &opened(&["*"])),
         "nothing at or above `docs` carries a scope, so not even the wildcard opens it"
     );
 }

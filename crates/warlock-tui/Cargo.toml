@@ -39,7 +39,7 @@ ureq = { workspace = true }
 warlock-engine = { path = "../warlock-engine" }
 
 # Tests only, and already a workspace dependency rather than a new one: the
-# `warlock sigil` tests write a real config file, and a throwaway home
+# `warlock open` and `warlock close` tests write a real config file, and a throwaway home
 # directory is what keeps them off the developer's real one — which is the
 # promise the engine's explicit home parameter exists to make keepable.
 [dev-dependencies]

@@ -1,5 +1,5 @@
 // The home directory is a parameter here and is never read from the
-// environment, for the reason it is a parameter in `sigils.rs` and for one more
+// environment, for the reason it is a parameter in `config.rs` and for one more
 // that holds only here: this file is where a person's Linear API keys live, so
 // a module that resolved `HOME` itself could let a test in this crate read — or
 // overwrite — the developer's real key store.
@@ -11,9 +11,9 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::config::HOME_DIR;
 use crate::manifest::write_atomically_with;
 use crate::scope::{Rule, validate_scope};
-use crate::sigils::HOME_DIR;
 
 const KEY_FILE: &str = "keys.toml";
 
@@ -90,7 +90,7 @@ pub fn load_key(home: impl AsRef<Path>, name: &str) -> Result<Option<String>, Er
 /// assert!(save_key(home.path(), "Work!", "lin_api_example").is_err());
 /// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
-// Judged by `validate_scope`, so a key name, a scope and a sigil are one
+// Judged by `validate_scope`, so a key name, a scope and an open scope are one
 // character class across the workspace rather than three that drift. The key
 // itself is judged by nothing: this is the store, and a key warlock refused to
 // hold because it did not look like one is a key a person cannot use warlock
@@ -138,11 +138,10 @@ pub enum Forgotten {
     Nothing,
 }
 
-// What a save must carry forward. Unlike `sigils::held`, an unreadable or
+// What a save must carry forward. Unlike `config::held`, an unreadable or
 // unparseable store is an error here rather than a fresh empty one: replacing a
-// sigil config nobody can parse costs a person a list they can retype, and
-// replacing a key store costs them credentials that exist nowhere else on the
-// machine. Only absence reads as nothing held, because that is the first save.
+// config nobody can parse costs a person settings they can retype, and replacing
+// a key store costs them credentials that exist nowhere else on the machine. Only absence reads as nothing held, because that is the first save.
 fn held(home: &Path) -> Result<Config, Error> {
     match read(home) {
         Err(Error::NotFound { .. }) => Ok(Config::default()),
@@ -238,7 +237,7 @@ pub enum Error {
         path: PathBuf,
         source: Unparseable,
     },
-    // No source, unlike `sigils::Error::Serialize`. A `toml::ser::Error` can
+    // No source, unlike `config::Error::Serialize`. A `toml::ser::Error` can
     // carry the value it choked on, and here the values are the keys; a store
     // of `String` to `String` has nothing in it that TOML cannot write, so what
     // is discarded is a message no caller can ever be shown.
@@ -278,7 +277,7 @@ impl std::error::Error for Error {
 
 // `toml::de::Error` renders the line it choked on, and in this file that line
 // reads `name = "<a Linear API key>"`. Carrying the parse error as the source,
-// the way `sigils::Error` can afford to, would put a key into anything that
+// the way `config::Error` can afford to, would put a key into anything that
 // prints an error chain or `Debug`s one. It is reduced to a position on the way
 // in instead: that is what sends someone to the right line, and it is all of
 // the parse error that is safe to keep.

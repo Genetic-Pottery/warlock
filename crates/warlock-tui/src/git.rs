@@ -944,7 +944,7 @@ pub const HUMAN_GATE: &str = "The pull request and the ticket's review state are
 // scopes with no sentence over it reads as a confession: these are directories
 // this machine was entitled to edit, and the section exists so a reviewer sees
 // the work reached past the one scope it was pulled under.
-const TOUCHED_NOTE: &str = "Held on this machine, and not the scope this ticket was pulled under.";
+const TOUCHED_NOTE: &str = "Open on this machine, and not the scope this ticket was pulled under.";
 
 /// A sub-task the run finished, as the body names it.
 ///
@@ -958,8 +958,8 @@ pub struct Finished<'a> {
     pub summary: &'a str,
 }
 
-/// A scope the run edited under while holding it, other than the one the ticket
-/// was pulled under, and the paths it touched there.
+/// A scope open on this machine that the run edited under, other than the one
+/// the ticket was pulled under, and the paths it touched there.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Touched<'a> {
     pub scope: &'a str,

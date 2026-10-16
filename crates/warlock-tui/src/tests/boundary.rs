@@ -19,9 +19,9 @@ fn at(module: &str) -> PathBuf {
     PathBuf::from(ROOT).join(module)
 }
 
-fn asked(manifest: &Manifest, module: &str, sigils: &[&str]) -> Verdict {
-    let held: Vec<String> = sigils.iter().map(|sigil| (*sigil).to_owned()).collect();
-    permits(&at(module), &PathBuf::from(ROOT), manifest, &held)
+fn asked(manifest: &Manifest, module: &str, open: &[&str]) -> Verdict {
+    let open: Vec<String> = open.iter().map(|scope| (*scope).to_owned()).collect();
+    permits(&at(module), &PathBuf::from(ROOT), manifest, &open)
 }
 
 #[test]
@@ -36,7 +36,7 @@ fn a_directory_nothing_covers_is_open_to_anyone() {
 }
 
 #[test]
-fn a_scope_no_held_sigil_opens_closes_the_directory() {
+fn a_scope_this_machine_has_not_opened_closes_the_directory() {
     let manifest = scoped(&[("crates", "platform")]);
 
     assert_eq!(
@@ -44,19 +44,19 @@ fn a_scope_no_held_sigil_opens_closes_the_directory() {
         Verdict::Closed {
             scope: "platform".to_owned()
         },
-        "holding the wrong sigil is refused"
+        "another scope being open is refused"
     );
     assert_eq!(
         asked(&manifest, "crates", &[]),
         Verdict::Closed {
             scope: "platform".to_owned()
         },
-        "and so is holding none at all"
+        "and so is no scope being open at all"
     );
     assert_eq!(
         asked(&manifest, "crates", &["platform"]),
         Verdict::Open,
-        "the sigil that names the scope opens it"
+        "the scope being open opens the directory"
     );
 }
 
@@ -93,7 +93,7 @@ fn the_nearest_scope_answers_over_the_one_above_it() {
         Verdict::Closed {
             scope: "data-plane".to_owned()
         },
-        "holding the outer scope does not open a directory scoped inside it"
+        "the outer scope being open does not open a directory scoped inside it"
     );
     assert_eq!(
         asked(&manifest, "crates/engine", &["data-plane"]),

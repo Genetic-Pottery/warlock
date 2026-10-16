@@ -2,8 +2,8 @@ use std::fs;
 use std::path::Path;
 
 use warlock_engine::{
-    Manifest, ScopeRecord, keys_path, load_key, load_key_binding, load_key_names, load_sigils,
-    save_key, save_key_binding, save_sigils, sigils_path,
+    Manifest, ScopeRecord, config_path, keys_path, load_key, load_key_binding, load_key_names,
+    load_open_scopes, save_key, save_key_binding, save_open_scopes,
 };
 
 use ratatui::crossterm::event::{KeyCode, KeyModifiers};
@@ -355,7 +355,7 @@ fn binding_a_scope_no_record_holds_is_refused_and_the_recorded_scopes_are_named(
 fn binding_a_scope_no_record_holds_writes_no_byte() {
     let (home, repo) = (a_dir(), a_dir());
     save_key(home.path(), "acme", SECRET).expect("a store that saves");
-    let path = sigils_path(home.path(), repo.path());
+    let path = config_path(home.path(), repo.path());
     let unrecorded = recording(&["web"]);
 
     assert!(
@@ -366,7 +366,8 @@ fn binding_a_scope_no_record_holds_writes_no_byte() {
     assert!(!path.exists(), "a missing config was created by a refusal");
 
     // And an existing one is byte for byte what it was.
-    save_sigils(home.path(), repo.path(), &["billing".to_owned()]).expect("a config that saves");
+    save_open_scopes(home.path(), repo.path(), &["billing".to_owned()])
+        .expect("a config that saves");
     let before = fs::read(&path).expect("the config just written reads");
     assert!(
         bind_against(home.path(), repo.path(), &unrecorded, "billing", "acme")
@@ -380,7 +381,7 @@ fn binding_a_scope_no_record_holds_writes_no_byte() {
 fn binding_a_name_the_store_has_never_heard_of_writes_no_byte() {
     let (home, repo) = (a_dir(), a_dir());
     save_key(home.path(), "acme", SECRET).expect("a store that saves");
-    let path = sigils_path(home.path(), repo.path());
+    let path = config_path(home.path(), repo.path());
 
     let (outcome, said) = bind(home.path(), repo.path(), "billing", "acne");
 
@@ -393,17 +394,18 @@ fn binding_a_name_the_store_has_never_heard_of_writes_no_byte() {
     assert!(!path.exists(), "a missing config was created by a refusal");
 
     // And an existing one is byte for byte what it was.
-    save_sigils(home.path(), repo.path(), &["billing".to_owned()]).expect("a config that saves");
+    save_open_scopes(home.path(), repo.path(), &["billing".to_owned()])
+        .expect("a config that saves");
     let before = fs::read(&path).expect("the config just written reads");
     assert!(bind(home.path(), repo.path(), "billing", "acne").0.is_err());
     assert_eq!(fs::read(&path).expect("reads"), before);
 }
 
 #[test]
-fn binding_keeps_the_sigils_the_config_already_held() {
+fn binding_keeps_the_scopes_the_config_already_had_open() {
     let (home, repo) = (a_dir(), a_dir());
     save_key(home.path(), "acme", SECRET).expect("a store that saves");
-    save_sigils(
+    save_open_scopes(
         home.path(),
         repo.path(),
         &["billing".to_owned(), "web".to_owned()],
@@ -414,9 +416,9 @@ fn binding_keeps_the_sigils_the_config_already_held() {
 
     outcome.expect("a stored name binds");
     assert_eq!(
-        load_sigils(home.path(), repo.path()).expect("the config still loads"),
+        load_open_scopes(home.path(), repo.path()).expect("the config still loads"),
         ["billing", "web"],
-        "binding a key cost this checkout its sigils"
+        "binding a key cost this checkout its open scopes"
     );
     assert_eq!(
         load_key_binding(home.path(), repo.path(), "billing").expect("the config still loads"),
@@ -433,7 +435,7 @@ fn binding_keeps_the_sigils_the_config_already_held() {
         "the confirmation does not name the scope it bound: {said}"
     );
     assert!(
-        said.contains(&sigils_path(home.path(), repo.path()).display().to_string()),
+        said.contains(&config_path(home.path(), repo.path()).display().to_string()),
         "the confirmation does not name the file it wrote: {said}"
     );
     assert!(!said.contains(SECRET), "the key reached the screen: {said}");

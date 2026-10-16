@@ -24,7 +24,7 @@ const USERPROFILE: &str = "USERPROFILE";
 // a repository to *…*" — together because they are one vocabulary. They used to
 // sit beside their own subcommands, and two were re-typed as literals inside
 // `error.rs`'s tests, where rewording the original failed nothing.
-pub(crate) const FOR_SIGILS: &str = "hold sigils for";
+pub(crate) const FOR_OPEN: &str = "open scopes in";
 
 // One tail for `key use` and `key forget` rather than one each. Both stand here
 // for the same reason — a binding belongs to a checkout and neither verb can
@@ -139,9 +139,9 @@ impl Standing {
     // `/.warlock/...`.
     //
     // Callers that can do without one say `.ok()`: a home that will not resolve
-    // means nothing is held, which is a state of the answer rather than a
-    // failure to reach one. `warlock sigil` takes the error, because a home is
-    // the thing it was asked to write under.
+    // means no scope is open, which is a state of the answer rather than a
+    // failure to reach one. `warlock open` and `warlock close` take the error,
+    // because a home is the thing they were asked to write under.
     pub(crate) fn home() -> Result<PathBuf, Error> {
         [HOME, USERPROFILE]
             .into_iter()

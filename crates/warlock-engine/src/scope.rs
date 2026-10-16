@@ -59,8 +59,8 @@ impl std::error::Error for Rule {}
 // no repaired scope anywhere in this crate to be confused with the one somebody
 // wrote. Folding case here — the obvious kindness — would put the manifest
 // reader in the business of correcting committed bytes. It belongs instead at
-// the places a person supplies the string, the scope prompt and the sigil
-// commands, which lower-case and *then* ask.
+// the places a person supplies the string, the scope prompt and `warlock open`
+// and `warlock close`, which lower-case and *then* ask.
 pub fn validate_scope(scope: &str) -> Result<(), Rule> {
     // Taking the two end characters here is also the emptiness check: a string
     // with no first character is the empty one.
@@ -97,18 +97,18 @@ pub fn validate_scope(scope: &str) -> Result<(), Rule> {
     Ok(())
 }
 
-// The wildcard is spellable on the sigil side and refused on the scope side, and
-// the asymmetry is the design. A person holding nothing and a person holding
-// everything are different claims. On a directory a scope names the board its
-// work is filed to, and `*` names no board. Everything else defers to
+// The wildcard is spellable as an open scope and refused as a directory's scope,
+// and the asymmetry is the design. A machine that opens nothing and a machine
+// that opens everything are different claims. On a directory a scope names the
+// board its work is filed to, and `*` names no board. Everything else defers to
 // `validate_scope`, so there is still exactly one character class in the
 // workspace.
-pub fn validate_sigil(sigil: &str) -> Result<(), Rule> {
-    if sigil == WILDCARD {
+pub fn validate_open_scope(scope: &str) -> Result<(), Rule> {
+    if scope == WILDCARD {
         return Ok(());
     }
 
-    validate_scope(sigil)
+    validate_scope(scope)
 }
 
 /// ```
@@ -171,22 +171,22 @@ pub(crate) fn at_or_above(stored: &str) -> impl Iterator<Item = &str> {
 /// ```
 /// use warlock_engine::scope_opens_to;
 ///
-/// let held = ["web".to_owned(), "billing".to_owned()];
+/// let open = ["web".to_owned(), "billing".to_owned()];
 ///
 /// // A directory nobody has scoped is closed to everyone.
-/// assert!(!scope_opens_to(None, &held));
+/// assert!(!scope_opens_to(None, &open));
 /// assert!(!scope_opens_to(None, &["*".to_owned()]));
-/// // Any one held sigil opens the scope it matches.
-/// assert!(scope_opens_to(Some("billing"), &held));
+/// // Any one open scope that matches is enough.
+/// assert!(scope_opens_to(Some("billing"), &open));
 /// // A scope none of them matches is closed.
-/// assert!(!scope_opens_to(Some("data-plane"), &held));
-/// // Holding nothing opens nothing.
+/// assert!(!scope_opens_to(Some("data-plane"), &open));
+/// // Opening nothing opens nothing.
 /// assert!(!scope_opens_to(Some("data-plane"), &[]));
-/// // The wildcard sigil opens every scope.
+/// // The wildcard opens every scope.
 /// assert!(scope_opens_to(Some("data-plane"), &["*".to_owned()]));
 /// ```
 #[must_use]
-pub fn scope_opens_to(covering: Option<&str>, held: &[String]) -> bool {
+pub fn scope_opens_to(covering: Option<&str>, open: &[String]) -> bool {
     // Unscoped is closed, even to the wildcard: a scope is what says warlock
     // may work somewhere and which board the work goes to, so a directory with
     // none has no board to file to and nobody's AI belongs in it.
@@ -194,14 +194,14 @@ pub fn scope_opens_to(covering: Option<&str>, held: &[String]) -> bool {
         return false;
     };
 
-    // No special case for an empty `held`, deliberately. It falls through to the
-    // membership test and matches nothing, which is the answer: a sigil is what
-    // opens a scope, so holding none opens none. Reading the empty set as
+    // No special case for an empty `open`, deliberately. It falls through to the
+    // membership test and matches nothing, which is the answer: only an entry
+    // here opens a scope, so an empty list opens none. Reading the empty set as
     // unrestricted would make the default state of every machine a universal
     // bypass, and the boundary would then hold only for people who had already
     // opted into being bound by it. Onboarding is where this is paid for
     // instead.
-    held.iter().any(|sigil| sigil == WILDCARD || sigil == scope)
+    open.iter().any(|entry| entry == WILDCARD || entry == scope)
 }
 
 fn is_scope_character(character: char) -> bool {

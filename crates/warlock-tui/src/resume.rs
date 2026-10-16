@@ -9,7 +9,7 @@
 //! The one write is the machine-local run record, and that is why nothing here
 //! asks the boundary: no socket is opened, no `git`, `gh` or `claude` is run and
 //! no ticket moves, so there is nothing for a scope to gate. A ticket whose scope
-//! this machine does not hold resumes, and a dirty tree resumes — the pull that
+//! is closed on this machine resumes, and a dirty tree resumes — the pull that
 //! picks the run up is where both questions are asked, and it asks them of the
 //! checkout it is about to work in. Neither refusal below is the boundary's **3**.
 //!

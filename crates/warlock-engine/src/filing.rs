@@ -1,5 +1,5 @@
 // The home directory is a parameter here and is never read from the
-// environment, for the reason it is one in `sigils.rs`, `keys.rs` and
+// environment, for the reason it is one in `config.rs`, `keys.rs` and
 // `route.rs`, and for one more that holds here and nowhere else in this crate:
 // the target below carries the key *value*, so a module that resolved `HOME`
 // itself could let a test in this crate read the developer's real credentials
@@ -8,16 +8,16 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
 
+use crate::config::{self, open_scopes};
 use crate::keys::{keys_path, load_key};
 use crate::manifest::{Manifest, ScopeRecord, manifest_path};
 use crate::route::{self, bound_key};
 use crate::scope::{scope_opens_to, valid_scope};
-use crate::sigils::{self, held_sigils};
 
 /// ```
 /// use warlock_engine::{
 ///     Manifest, ScopedDirectory, ScopeRecord, filing, resolve_filing, save_key, save_key_binding,
-///     save_sigils,
+///     save_open_scopes,
 /// };
 ///
 /// let (home, root) = (tempfile::tempdir()?, tempfile::tempdir()?);
@@ -29,24 +29,24 @@ use crate::sigils::{self, held_sigils};
 ///     ScopeRecord::new("web", "WEB", "In Review", "warlock"),
 /// ]);
 ///
-/// save_sigils(home.path(), root.path(), &["data-plane".to_owned()])?;
+/// save_open_scopes(home.path(), root.path(), &["data-plane".to_owned()])?;
 /// save_key_binding(home.path(), root.path(), "data-plane", "work")?;
 /// save_key(home.path(), "work", "lin_api_example")?;
 /// // The other scope files to another workspace, under a key of its own.
 /// save_key_binding(home.path(), root.path(), "web", "personal")?;
 /// save_key(home.path(), "personal", "lin_api_other")?;
 ///
-/// // One sigil, one record of that name: one board, and no question to ask.
+/// // One open scope, one record of that name: one board, and no question to ask.
 /// let target = resolve_filing(&manifest, root.path(), home.path(), None)?;
 /// assert_eq!(target.scope(), "data-plane");
 /// assert_eq!(target.record().team_key(), "WAR");
 /// assert_eq!(target.key(), "work");
 /// assert_eq!(target.value(), "lin_api_example");
 ///
-/// // The wildcard holds every recorded scope, so this repository now has two
+/// // The wildcard opens every recorded scope, so this repository now has two
 /// // candidates and nothing to break the tie with: a brief is not about a
 /// // directory, so there is no path to walk up and no nearest scope to win.
-/// save_sigils(home.path(), root.path(), &["*".to_owned()])?;
+/// save_open_scopes(home.path(), root.path(), &["*".to_owned()])?;
 /// assert!(matches!(
 ///     resolve_filing(&manifest, root.path(), home.path(), None),
 ///     Err(filing::Error::Several { .. })
@@ -64,8 +64,8 @@ use crate::sigils::{self, held_sigils};
 /// ```
 // The repository-level counterpart to `resolve_route`, and the reason there are
 // two: that one answers for a path, by walking up to the nearest scope, and a
-// brief is not about a directory. There is nothing to walk here, so the sigil
-// is the whole statement of which board this is, and anything other than
+// brief is not about a directory. There is nothing to walk here, so the open
+// scope is the whole statement of which board this is, and anything other than
 // exactly one candidate refuses rather than picks — ambiguity resolved by
 // guessing is somebody's project on the wrong board, found out later by
 // somebody else.
@@ -82,8 +82,8 @@ pub fn resolve_filing<'m>(
     let (root, home) = (root.as_ref(), home.as_ref());
 
     // Before the key half below, so a broken config is reported as broken
-    // rather than as a checkout that holds nothing.
-    let held = held_sigils(home, root).map_err(|source| Error::Sigils { source })?;
+    // rather than as a checkout that opens nothing.
+    let held = open_scopes(home, root).map_err(|source| Error::Config { source })?;
 
     let candidates: Vec<&ScopeRecord> = manifest
         .scopes()
@@ -157,15 +157,15 @@ pub fn resolve_filing<'m>(
 }
 
 // Four sentences rather than one "nothing to file to", because a repository
-// that records no scope at all, a machine holding nothing, a machine holding
-// something this repository has never heard of and a scope some directory
-// carries with no `[[scope]]` record are fixed in four different files by four
-// different people.
+// that records no scope at all, a machine that opens nothing, a machine that
+// opens only scopes this repository has never heard of and a scope some
+// directory carries with no `[[scope]]` record are fixed in four different files
+// by four different people.
 //
 // The repository is asked about first, before anything about this machine,
 // because the candidates above are built from `scopes()` alone: with no record
-// there, no sigil this machine could hold would make a board, so the sentence
-// about holding one is advice that cannot work — the person holds a sigil,
+// there, no scope this machine could open would make a board, so the sentence
+// about opening one is advice that cannot work — the person opens a scope,
 // pushes again, and fails again on a different sentence. Each absence gets one
 // sentence naming one fix, so the order is which fix comes first and not which
 // absence is worse.
@@ -177,13 +177,12 @@ fn no_candidate(manifest: &Manifest, root: &Path, held: &[String]) -> Error {
     }
 
     if held.is_empty() {
-        return Error::Unsigiled;
+        return Error::NothingOpen;
     }
 
-    // A held sigil whose scope some directory carries, with no `[[scope]]`
-    // record to say where that scope files: the manifest is one line short
-    // rather than the machine being wrong, which is the opposite fix to the one
-    // below.
+    // An open scope that some directory carries, with no `[[scope]]` record to
+    // say where that scope files: the manifest is one line short rather than
+    // the machine being wrong, which is the opposite fix to the one below.
     if let Some(scope) = manifest
         .directories()
         .iter()
@@ -336,7 +335,7 @@ pub enum Error {
     Boardless {
         path: PathBuf,
     },
-    Unsigiled,
+    NothingOpen,
     Unmatched {
         held: Vec<String>,
         path: PathBuf,
@@ -355,35 +354,35 @@ pub enum Error {
     Key {
         source: route::Error,
     },
-    Sigils {
-        source: sigils::Error,
+    Config {
+        source: config::Error,
     },
 }
 
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            // No sigil named and no `warlock sigil add`: the fix is a line in the
-            // file this names, and a sentence about what the machine holds would
+            // No scope named and no `warlock open`: the fix is a line in the
+            // file this names, and a sentence about what the machine opens would
             // send the person to the other one of the two.
             Self::Boardless { path } => write!(
                 f,
                 "`{}` records no `[[scope]]` record, so there is nowhere to file: add one",
                 path.display()
             ),
-            Self::Unsigiled => write!(
+            Self::NothingOpen => write!(
                 f,
-                "this machine holds no sigil, so nothing says which board to file to: hold one with `warlock sigil add`"
+                "AI can work in no scope on this machine, so nothing says which board to file to: open one with `warlock open <scope>`"
             ),
             Self::Unmatched { held, path } => write!(
                 f,
-                "this machine holds {}, and `{}` records no scope of any of those names",
+                "AI can work in {} on this machine, and `{}` records no scope of any of those names",
                 listed(held),
                 path.display()
             ),
             Self::Unrecorded { scope, path } => write!(
                 f,
-                "this machine holds `{scope}`, and that scope has no `[[scope]]` record: add one to `{}`",
+                "`{scope}` is open on this machine, and that scope has no `[[scope]]` record: add one to `{}`",
                 path.display()
             ),
             Self::Several { candidates } => write!(
@@ -399,8 +398,11 @@ impl fmt::Display for Error {
             // Verbatim, because these are the two sentences `route.rs` already
             // words and a person meets them from `warlock check` first.
             Self::Key { source } => write!(f, "{source}"),
-            Self::Sigils { source } => {
-                write!(f, "could not read what this machine holds: {source}")
+            Self::Config { source } => {
+                write!(
+                    f,
+                    "could not read which scopes are open on this machine: {source}"
+                )
             }
         }
     }
@@ -410,9 +412,9 @@ impl std::error::Error for Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Key { source } => Some(source),
-            Self::Sigils { source } => Some(source),
+            Self::Config { source } => Some(source),
             Self::Boardless { .. }
-            | Self::Unsigiled
+            | Self::NothingOpen
             | Self::Unmatched { .. }
             | Self::Unrecorded { .. }
             | Self::Several { .. }

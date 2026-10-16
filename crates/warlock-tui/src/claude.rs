@@ -530,35 +530,31 @@ pub fn drafting_opening(brief: &str, title: &str, prose: &str, contract: &str) -
 }
 
 /// Where a sub-task session's boundary is and what happens when it meets one:
-/// the scope the ticket was pulled under, the sigils this machine holds, and the
-/// single thing to do about a write the gate refuses.
+/// the scope the ticket was pulled under, the scopes open on this machine, and
+/// the single thing to do about a write the gate refuses.
 ///
-/// The sigils are listed and not judged. Which scopes they open is
+/// The open scopes are listed and not judged. What they let through is
 /// [`scope_opens_to`](warlock_engine::scope_opens_to)'s answer and the gate hook
 /// asks it at every write, so a second copy of that rule written into prose here
 /// is a rule that can come to disagree with the one enforcing it — the prompt
-/// says what this machine holds and that the gate decides, which is true however
+/// says which scopes are open and that the gate decides, which is true however
 /// the rule changes.
-fn working_boundary(scope: &str, sigils: &[String]) -> String {
-    let holding = if sigils.is_empty() {
-        "this machine holds no sigils at all".to_owned()
+fn working_boundary(scope: &str, open: &[String]) -> String {
+    let holding = if open.is_empty() {
+        "AI can work in no scope on this machine".to_owned()
     } else {
-        format!(
-            "this machine holds the sigil{} {}",
-            if sigils.len() == 1 { "" } else { "s" },
-            listed(sigils),
-        )
+        format!("AI can work in {} on this machine", listed(open))
     };
     format!(
         "This ticket was pulled under the scope `{scope}`, and {holding}. A \
-         directory covered by a scope none of those sigils opens is closed to \
-         you: warlock gates every edit and every new file before it happens, \
+         directory covered by any other scope is closed to you: \
+         warlock gates every edit and every new file before it happens, \
          and a refusal names the path and the scope covering it. A refused \
          write is the end of the sub-task rather than an obstacle inside it — \
          stop there and report `blocked`, with the refusal's own words as the \
          reason. Routing around it is not an option: not with a shell command, \
          not by writing somewhere else that would do instead, and not by \
-         editing a scope, a sigil or warlock's own configuration. A sub-task \
+         editing a scope, opening one or editing warlock's own configuration. A sub-task \
          left unfinished at a boundary is the outcome warlock wants; one \
          finished by going around a boundary is worse than one that failed."
     )
@@ -569,8 +565,8 @@ fn working_boundary(scope: &str, sigils: &[String]) -> String {
 ///
 /// Built rather than written down as a constant beside
 /// [`DRAFTING_SYSTEM_PROMPT`], because two of the facts it has to state are not
-/// knowable here: the scope is the manifest's and the sigils are this machine's,
-/// both read at the moment the session is raised. That is also why
+/// knowable here: the scope is the manifest's and the open scopes are this
+/// machine's, both read at the moment the session is raised. That is also why
 /// [`working_args`] takes the prompt as a parameter rather than reaching for a
 /// constant.
 ///
@@ -590,15 +586,15 @@ fn working_boundary(scope: &str, sigils: &[String]) -> String {
 /// let prompt = working_system_prompt("data-plane", &["data-plane".to_owned()]);
 ///
 /// assert!(prompt.contains("scope `data-plane`"));
-/// assert!(prompt.contains("the sigil `data-plane`"));
+/// assert!(prompt.contains("AI can work in `data-plane` on this machine"));
 /// assert!(prompt.contains("report `blocked`"));
 ///
-/// // Holding nothing is said in words rather than left as an empty list.
+/// // No open scope is said in words rather than left as an empty list.
 /// let none = working_system_prompt("data-plane", &[]);
-/// assert!(none.contains("no sigils at all"));
+/// assert!(none.contains("AI can work in no scope"));
 /// ```
 #[must_use]
-pub fn working_system_prompt(scope: &str, sigils: &[String]) -> String {
+pub fn working_system_prompt(scope: &str, open: &[String]) -> String {
     format!(
         concat!(
             "You are working one sub-task of one ticket inside warlock, a \
@@ -626,7 +622,7 @@ pub fn working_system_prompt(scope: &str, sigils: &[String]) -> String {
              else a shell is for is yours: read, search, build, and run the tests \
              the sub-task asks for."
         ),
-        working_boundary(scope, sigils),
+        working_boundary(scope, open),
     )
 }
 
@@ -911,8 +907,8 @@ fn gate_settings() -> String {
 ///
 /// The system prompt is a parameter and not a constant beside the others,
 /// because what this session must be told is not knowable here: it names the
-/// scope the ticket was pulled under and the sigils this machine holds, and both
-/// are read at the moment the session is raised.
+/// scope the ticket was pulled under and the scopes open on this machine, and
+/// both are read at the moment the session is raised.
 ///
 /// Two things are kept out on purpose, beside the MCP servers every session is
 /// kept from (see `args_for`). `--setting-sources ""` refuses this machine's
@@ -1447,7 +1443,7 @@ impl ChatAgent {
     /// is deliberate. Exactly [`WORKING_TOOLS`], in `--tools` and in
     /// `--allowedTools`, so the grant is named rather than defaulted and nothing
     /// stops to ask a person who is not there. A `PreToolUse` hook running
-    /// `warlock check --gate`, so a write outside the scopes this machine holds
+    /// `warlock check --gate`, so a write outside the scopes open on this machine
     /// is refused where it is attempted rather than found afterwards. No
     /// settings sources and no MCP server, so the session is told what warlock
     /// told it and can reach nothing except through warlock. No clock and its

@@ -18,7 +18,7 @@ use std::time::Instant;
 
 use warlock_engine::{Loaded, Manifest, Tree, load_tree, manifest_path, repository_root};
 
-use crate::app::{App, Chrome, Sigils, reseat_on};
+use crate::app::{App, Chrome, OpenScopes, reseat_on};
 use crate::boundary::permits;
 use crate::error::{Error, one_line};
 use crate::git::Git;
@@ -221,7 +221,7 @@ pub(crate) fn closed_scope(
     app: &mut App,
     manifest: &Manifest,
     repo_root: &Path,
-    sigils: &Sigils,
+    open: &OpenScopes,
 ) -> bool {
     let Some(row) = app.selected_row() else {
         return false;
@@ -231,7 +231,7 @@ pub(crate) fn closed_scope(
     }
 
     let path = row.path.clone();
-    let verdict = permits(&path, repo_root, manifest, sigils.as_slice());
+    let verdict = permits(&path, repo_root, manifest, open.as_slice());
     let label = app.label_for(&path);
     let Some(line) = verdict.message(&label) else {
         return false;

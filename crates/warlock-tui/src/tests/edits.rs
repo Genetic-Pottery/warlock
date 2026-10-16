@@ -3,8 +3,8 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use warlock_engine::{
-    Manifest, Node, ScopeRecord, ScopedDirectory, Tree, manifest_path, route_facts, save_sigils,
-    validate_scope,
+    Manifest, Node, ScopeRecord, ScopedDirectory, Tree, manifest_path, route_facts,
+    save_open_scopes, validate_scope,
 };
 
 use super::{Opened, scoped_line, unscoped_line};
@@ -50,9 +50,9 @@ fn a_repository() -> tempfile::TempDir {
     repo
 }
 
-fn holding(home: &Path, repo_root: &Path, sigils: &[&str]) {
-    let sigils: Vec<String> = sigils.iter().map(|sigil| (*sigil).to_owned()).collect();
-    save_sigils(home, repo_root, &sigils).expect("a config that writes");
+fn opening(home: &Path, repo_root: &Path, open: &[&str]) {
+    let open: Vec<String> = open.iter().map(|scope| (*scope).to_owned()).collect();
+    save_open_scopes(home, repo_root, &open).expect("a config that writes");
 }
 
 // Bytes rather than a parsed `Manifest`, because what a refusal promises is
@@ -114,16 +114,16 @@ fn paths(manifest: &Manifest) -> Vec<&str> {
 }
 
 #[test]
-fn a_machine_holding_nothing_is_refused_by_every_scope_it_meets() {
+fn a_machine_with_no_scope_open_is_refused_by_every_scope_it_meets() {
     // No config at all: the ordinary state of a machine nobody has run
-    // `warlock sigil add` on, and the one an agent in a fresh checkout is in.
+    // `warlock open` on, and the one an agent in a fresh checkout is in.
     let repo = a_repository();
     let home = a_dir();
     let before = manifest_bytes(repo.path()).expect("a manifest on disk");
 
     for path in ["crates", "crates/engine", "crates/engine/src"] {
         let error = scope_remove(repo.path(), home.path(), path)
-            .expect_err("holding nothing opens nothing that is scoped");
+            .expect_err("AI can work in no scope opens nothing that is scoped");
         assert!(
             matches!(error, Error::ClosedScope { .. }),
             "{path}: {error:?}"
@@ -167,7 +167,7 @@ fn anyone_may_draw_the_first_scope_over_a_directory_nothing_covers() {
 fn a_scope_that_replaces_another_says_whose_boundary_it_moved() {
     let repo = a_repository();
     let home = a_dir();
-    holding(home.path(), repo.path(), &["data-plane"]);
+    opening(home.path(), repo.path(), &["data-plane"]);
 
     let said = scope_add(
         repo.path(),
@@ -176,7 +176,7 @@ fn a_scope_that_replaces_another_says_whose_boundary_it_moved() {
         "billing",
         a_record(),
     )
-    .expect("the machine holds the scope covering this directory");
+    .expect("the machine has opened the scope covering this directory");
 
     // A boundary that moved is named, because a script that quietly redrew
     // somebody else's says whose.
@@ -216,10 +216,10 @@ fn what_was_given_is_folded_before_it_is_judged_and_stored() {
 fn removing_a_scope_drops_its_row_and_leaves_the_one_above() {
     let repo = a_repository();
     let home = a_dir();
-    holding(home.path(), repo.path(), &["data-plane"]);
+    opening(home.path(), repo.path(), &["data-plane"]);
 
     let said = scope_remove(repo.path(), home.path(), "crates/engine")
-        .expect("the machine holds the scope covering this directory");
+        .expect("the machine has opened the scope covering this directory");
 
     assert_eq!(said, "crates/engine is no longer scoped — was `data-plane`");
     assert_eq!(status_for(&Ok(())), 0);
@@ -283,7 +283,7 @@ fn record_bytes(repo_root: &Path) -> String {
 fn both_scope_writes_leave_the_records_where_they_found_them() {
     let repo = a_repository_of_records();
     let home = a_dir();
-    holding(home.path(), repo.path(), &["platform", "data-plane"]);
+    opening(home.path(), repo.path(), &["platform", "data-plane"]);
     let before = record_bytes(repo.path());
     assert!(before.contains("third-party"), "the fixture has records");
 
@@ -304,8 +304,9 @@ fn both_scope_writes_leave_the_records_where_they_found_them() {
         "`scope add` moved a record"
     );
 
-    scope_remove(repo.path(), home.path(), "crates/engine").expect("the machine holds the scope");
-    scope_remove(repo.path(), home.path(), "docs").expect("the machine holds the scope");
+    scope_remove(repo.path(), home.path(), "crates/engine")
+        .expect("the machine has opened the scope");
+    scope_remove(repo.path(), home.path(), "docs").expect("the machine has opened the scope");
     assert_eq!(
         record_bytes(repo.path()),
         before,
@@ -464,11 +465,11 @@ fn a_name_something_records_is_written_flagless_and_gains_no_second_record() {
 
     // And the road is chosen by the folded name rather than by what was
     // typed, so a capital does not send an already-recorded scope down the
-    // recording road to be refused for flags it should not be asked for. The
-    // sigil is held now because the write above drew the boundary: `docs` is
-    // scoped `data-plane` from here on, and a second write at it is a write
-    // inside somebody's scope.
-    holding(home.path(), repo.path(), &["data-plane"]);
+    // recording road to be refused for flags it should not be asked for.
+    // `data-plane` is opened now because the write above drew the boundary:
+    // `docs` is scoped `data-plane` from here on, and a second write at it is a
+    // write inside somebody's scope.
+    opening(home.path(), repo.path(), &["data-plane"]);
     assert_eq!(
         scope_add(
             repo.path(),
@@ -485,14 +486,14 @@ fn a_name_something_records_is_written_flagless_and_gains_no_second_record() {
 
 #[test]
 fn a_closed_boundary_answers_before_a_single_flag_is_looked_at() {
-    // Whatever the flags said, a scope this machine does not hold is the same
+    // Whatever the flags said, a scope closed on this machine is the same
     // refusal. The four shapes below are the four different answers the record
     // checks give, none of which is reached from out here — a refusal naming a
     // record would be a fact about the inside of a manifest the reader has just
     // been told they may not work in.
     let repo = a_repository_of_records();
     let home = a_dir();
-    holding(home.path(), repo.path(), &["platform"]);
+    opening(home.path(), repo.path(), &["platform"]);
     let before = manifest_bytes(repo.path()).expect("a manifest on disk");
 
     for (scope, flags) in [
@@ -508,7 +509,7 @@ fn a_closed_boundary_answers_before_a_single_flag_is_looked_at() {
         ("data-plane", a_record()),
     ] {
         let error = scope_add(repo.path(), home.path(), "crates/engine", scope, flags)
-            .expect_err("a scope this machine does not hold refuses an add");
+            .expect_err("a scope closed on this machine refuses an add");
 
         assert!(
             matches!(error, Error::ClosedScope { .. }),
@@ -550,9 +551,9 @@ fn the_router_finds_the_team_review_state_and_label_the_flags_wrote() {
 fn a_closed_boundary_refuses_both_scope_writes_and_leaves_the_manifest_byte_identical() {
     let repo = a_repository();
     let home = a_dir();
-    // The nearest scope wins, so the machine holding the outer boundary is
+    // The nearest scope wins, so the machine with the outer scope open is
     // still outside the inner one.
-    holding(home.path(), repo.path(), &["platform"]);
+    opening(home.path(), repo.path(), &["platform"]);
     let before = manifest_bytes(repo.path()).expect("a manifest on disk");
 
     let refusals = [
@@ -563,7 +564,7 @@ fn a_closed_boundary_refuses_both_scope_writes_and_leaves_the_manifest_byte_iden
             "billing",
             a_record(),
         )
-        .expect_err("a scope this machine does not hold refuses an add"),
+        .expect_err("a scope closed on this machine refuses an add"),
         scope_remove(repo.path(), home.path(), "crates/engine").expect_err("and refuses a remove"),
     ];
 
@@ -605,7 +606,7 @@ fn the_boundary_is_asked_before_the_manifest_is_read_for_a_row() {
         ),
         scope_remove(repo.path(), home.path(), "crates/tui"),
     ] {
-        let error = refused.expect_err("holding nothing opens nothing that is scoped");
+        let error = refused.expect_err("AI can work in no scope opens nothing that is scoped");
         assert!(
             matches!(error, Error::ClosedScope { .. }),
             "the manifest's shape leaked past a closed boundary: {error:?}"
@@ -614,9 +615,9 @@ fn the_boundary_is_asked_before_the_manifest_is_read_for_a_row() {
     }
     assert_eq!(manifest_bytes(repo.path()).as_deref(), Some(&before[..]));
 
-    // And past the same boundary held, the clear says there was nothing to
+    // And with the same scope open, the clear says there was nothing to
     // take away and the add gives the directory a row of its own.
-    holding(home.path(), repo.path(), &["platform"]);
+    opening(home.path(), repo.path(), &["platform"]);
     assert_eq!(
         scope_remove(repo.path(), home.path(), "crates/tui")
             .expect("a directory with no row carries no scope"),
@@ -631,7 +632,7 @@ fn the_boundary_is_asked_before_the_manifest_is_read_for_a_row() {
             "billing",
             a_record()
         )
-        .expect("the machine holds the scope covering `crates/tui`"),
+        .expect("the machine has opened the scope covering `crates/tui`"),
         "crates/tui is scoped `billing`"
     );
     assert_eq!(
@@ -682,15 +683,15 @@ fn a_clear_that_took_a_boundary_away_names_it_and_one_that_took_nothing_says_so(
     assert_eq!(unscoped_line("docs", None), "docs carried no scope");
 }
 
-// The one sigil this machine holds, on both doors and in every case below.
-const HELD: &str = "platform";
+// The one scope open on this machine, on both doors and in every case below.
+const OPEN: &str = "platform";
 
-// The scope it does not, which is the one every refusal here is by.
+// The scope closed on this machine, which is the one every refusal here is by.
 const CLOSED: &str = "data-plane";
 
 // Every shape the two doors have to answer alike, in one manifest: an unscoped
-// root, a boundary this machine holds on `crates`, one it does not on
-// `crates/engine` below that, and an unscoped `docs` over a held `docs/api`.
+// root, a boundary open on this machine on `crates`, a closed one on
+// `crates/engine` below that, and an unscoped `docs` over an open `docs/api`.
 // One manifest rather than one per case, because a parity test over several
 // fixtures would be showing that the two doors agree about several different
 // repositories.
@@ -698,13 +699,13 @@ fn a_repository_of_boundaries() -> (tempfile::TempDir, tempfile::TempDir) {
     let repo = a_dir();
     let home = a_dir();
     Manifest::with_directories([
-        row("crates", HELD),
+        row("crates", OPEN),
         row("crates/engine", CLOSED),
-        row("docs/api", HELD),
+        row("docs/api", OPEN),
     ])
     .save(repo.path())
     .expect("a manifest that saves");
-    holding(home.path(), repo.path(), &[HELD]);
+    opening(home.path(), repo.path(), &[OPEN]);
 
     (repo, home)
 }
@@ -745,7 +746,7 @@ fn as_the_shell_says_it(sentence: &str, repo_root: &Path) -> String {
 
 fn panel_answer(repo_root: &Path, home: &Path, path: &str) -> Answer {
     let manifest = load_manifest(repo_root).expect("a manifest that reads");
-    let sigils = Settings::at(Some(home.to_path_buf()), repo_root).sigils_or_unknown();
+    let open = Settings::at(Some(home.to_path_buf()), repo_root).open_or_unknown();
     let mut app = a_panel_over(repo_root);
     let target = if path == "." {
         repo_root.to_path_buf()
@@ -759,14 +760,7 @@ fn panel_answer(repo_root: &Path, home: &Path, path: &str) -> Answer {
         .expect("the panel draws a row for this directory");
     app.select_row(index);
 
-    match scope_press(
-        &mut app,
-        &manifest,
-        repo_root,
-        &sigils,
-        None,
-        Instant::now(),
-    ) {
+    match scope_press(&mut app, &manifest, repo_root, &open, None, Instant::now()) {
         ScopePrompt::Open(_) => Answer::WentAhead,
         ScopePrompt::Closed => Answer::Refused(as_the_shell_says_it(
             app.message().expect("a refused press says why"),
@@ -785,7 +779,7 @@ fn shell_answer(repo_root: &Path, home: &Path, path: &str) -> Answer {
 #[test]
 fn a_key_press_and_a_shell_prompt_answer_the_same_scope_write_alike() {
     // There is no path by which one door refuses and the other permits. Both
-    // are pressed over one manifest, by one machine holding one sigil, and the
+    // are pressed over one manifest, by one machine with one scope open, and the
     // answers are held against each other *and* against what the answer is
     // supposed to be — so a change to either door alone fails here, and so
     // does a change to both that moves the rule.
@@ -793,7 +787,7 @@ fn a_key_press_and_a_shell_prompt_answer_the_same_scope_write_alike() {
 
     for (path, expected) in [
         ("crates/engine", Answer::Refused(refused_here)),
-        // Covered from above by the scope this machine does not hold.
+        // Covered from above by the scope closed on this machine.
         (
             "crates/engine/src",
             Answer::Refused(closed_scope_message("crates/engine/src", CLOSED)),

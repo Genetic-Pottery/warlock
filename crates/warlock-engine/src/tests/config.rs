@@ -2,9 +2,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use super::{
-    DIGEST_CHARACTERS, Error, MAXIMUM_NAME_CHARACTERS, SIGIL_FILE, held_base_branch, held_sigils,
-    load_key_binding, load_sigils, project_directory, save_base_branch, save_key_binding,
-    save_sigils, sigils_path,
+    CONFIG_FILE, DIGEST_CHARACTERS, Error, MAXIMUM_NAME_CHARACTERS, config_path, held_base_branch,
+    load_key_binding, load_open_scopes, open_scopes, project_directory, save_base_branch,
+    save_key_binding, save_open_scopes,
 };
 
 fn a_dir() -> tempfile::TempDir {
@@ -17,19 +17,19 @@ fn named(parent: &Path, name: &str) -> PathBuf {
     path
 }
 
-fn owned(sigils: &[&str]) -> Vec<String> {
-    sigils.iter().map(|sigil| (*sigil).to_owned()).collect()
+fn owned(open: &[&str]) -> Vec<String> {
+    open.iter().map(|scope| (*scope).to_owned()).collect()
 }
 
 fn hand_write(home: &Path, root: &Path, text: &str) {
-    let path = sigils_path(home, root);
+    let path = config_path(home, root);
     fs::create_dir_all(path.parent().expect("the config has a directory"))
         .expect("creates the project directory");
     fs::write(&path, text).expect("writes the config");
 }
 
 fn project_dir_listing(home: &Path, root: &Path) -> Vec<String> {
-    let dir = sigils_path(home, root);
+    let dir = config_path(home, root);
     let dir = dir.parent().expect("the config has a directory");
     let mut names: Vec<String> = fs::read_dir(dir)
         .expect("the directory a save just created")
@@ -84,9 +84,9 @@ fn two_checkouts_with_the_same_name_derive_different_directories() {
 
     // And the consequence that matters: neither can read the other's file.
     let home = a_dir();
-    save_sigils(home.path(), &here, &owned(&["data-plane"])).expect("saves");
+    save_open_scopes(home.path(), &here, &owned(&["data-plane"])).expect("saves");
     assert!(matches!(
-        load_sigils(home.path(), &there),
+        load_open_scopes(home.path(), &there),
         Err(Error::NotFound { .. })
     ));
 }
@@ -136,14 +136,14 @@ fn the_config_sits_under_the_home_it_was_given() {
     let root = named(elsewhere.path(), "warlock");
 
     assert_eq!(
-        sigils_path(home.path(), &root),
+        config_path(home.path(), &root),
         home.path()
             .join(".warlock")
             .join(project_directory(&root))
-            .join(SIGIL_FILE),
+            .join(CONFIG_FILE),
     );
     assert!(
-        sigils_path(home.path(), &root).starts_with(home.path()),
+        config_path(home.path(), &root).starts_with(home.path()),
         "the home is a parameter, and it is the only place written to"
     );
 }
@@ -154,30 +154,30 @@ fn saving_then_loading_gives_the_set_back() {
     let root = named(elsewhere.path(), "warlock");
 
     for set in [vec![], owned(&["data-plane"]), owned(&["billing", "web"])] {
-        save_sigils(home.path(), &root, &set).expect("saves");
+        save_open_scopes(home.path(), &root, &set).expect("saves");
         assert_eq!(
-            load_sigils(home.path(), &root).expect("loads"),
+            load_open_scopes(home.path(), &root).expect("loads"),
             set,
-            "a set replaces whatever was held, empty included"
+            "a set replaces whatever was open, empty included"
         );
     }
 }
 
 #[test]
-fn the_file_holds_a_sigils_key_and_nothing_else() {
+fn the_file_holds_an_open_key_and_nothing_else() {
     let (home, elsewhere) = (a_dir(), a_dir());
     let root = named(elsewhere.path(), "warlock");
 
-    save_sigils(home.path(), &root, &owned(&["billing", "web"])).expect("saves");
+    save_open_scopes(home.path(), &root, &owned(&["billing", "web"])).expect("saves");
     assert_eq!(
-        fs::read_to_string(sigils_path(home.path(), &root)).expect("reads"),
-        "sigils = [\"billing\", \"web\"]\n",
+        fs::read_to_string(config_path(home.path(), &root)).expect("reads"),
+        "open = [\"billing\", \"web\"]\n",
     );
 
-    save_sigils(home.path(), &root, &[]).expect("saves an empty set");
+    save_open_scopes(home.path(), &root, &[]).expect("saves an empty set");
     assert_eq!(
-        fs::read_to_string(sigils_path(home.path(), &root)).expect("reads"),
-        "sigils = []\n",
+        fs::read_to_string(config_path(home.path(), &root)).expect("reads"),
+        "open = []\n",
         "an empty set is written as one, not as an absent key or a deleted file"
     );
 }
@@ -188,13 +188,16 @@ fn saving_creates_the_directory_and_leaves_no_temporary_behind() {
     let root = named(elsewhere.path(), "warlock");
     assert!(!home.path().join(".warlock").exists(), "nothing there yet");
 
-    save_sigils(home.path(), &root, &owned(&["data-plane"])).expect("saves");
-    assert_eq!(project_dir_listing(home.path(), &root), [SIGIL_FILE]);
+    save_open_scopes(home.path(), &root, &owned(&["data-plane"])).expect("saves");
+    assert_eq!(project_dir_listing(home.path(), &root), [CONFIG_FILE]);
 
     // And a second save renames over the first rather than accumulating.
-    save_sigils(home.path(), &root, &owned(&["billing"])).expect("saves again");
-    assert_eq!(project_dir_listing(home.path(), &root), [SIGIL_FILE]);
-    assert_eq!(load_sigils(home.path(), &root).expect("loads"), ["billing"]);
+    save_open_scopes(home.path(), &root, &owned(&["billing"])).expect("saves again");
+    assert_eq!(project_dir_listing(home.path(), &root), [CONFIG_FILE]);
+    assert_eq!(
+        load_open_scopes(home.path(), &root).expect("loads"),
+        ["billing"]
+    );
 }
 
 #[test]
@@ -202,13 +205,13 @@ fn nothing_is_written_inside_the_repository() {
     let (home, elsewhere) = (a_dir(), a_dir());
     let root = named(elsewhere.path(), "warlock");
 
-    save_sigils(home.path(), &root, &owned(&["data-plane"])).expect("saves");
-    load_sigils(home.path(), &root).expect("loads");
+    save_open_scopes(home.path(), &root, &owned(&["data-plane"])).expect("saves");
+    load_open_scopes(home.path(), &root).expect("loads");
 
     assert_eq!(
         fs::read_dir(&root).expect("reads the repository").count(),
         0,
-        "a sigil is a fact about a machine, and never a file in a checkout"
+        "an open scope is a fact about a machine, and never a file in a checkout"
     );
 }
 
@@ -217,22 +220,22 @@ fn a_missing_config_is_not_found_rather_than_an_empty_set() {
     let (home, elsewhere) = (a_dir(), a_dir());
     let root = named(elsewhere.path(), "warlock");
 
-    match load_sigils(home.path(), &root) {
-        Err(Error::NotFound { path }) => assert_eq!(path, sigils_path(home.path(), &root)),
+    match load_open_scopes(home.path(), &root) {
+        Err(Error::NotFound { path }) => assert_eq!(path, config_path(home.path(), &root)),
         other => panic!("expected a not-found error, got {other:?}"),
     }
 
     // A home with no `.warlock` at all is the same answer, not an I/O error
     // about the missing parent.
     assert!(matches!(
-        load_sigils(home.path().join("nowhere"), &root),
+        load_open_scopes(home.path().join("nowhere"), &root),
         Err(Error::NotFound { .. })
     ));
 
     // And it stays distinguishable from the set that really is empty.
-    save_sigils(home.path(), &root, &[]).expect("saves");
+    save_open_scopes(home.path(), &root, &[]).expect("saves");
     assert_eq!(
-        load_sigils(home.path(), &root).expect("loads"),
+        load_open_scopes(home.path(), &root).expect("loads"),
         Vec::<String>::new()
     );
 }
@@ -244,16 +247,16 @@ fn a_malformed_config_is_an_error_and_never_a_panic() {
 
     for text in [
         "this is not toml\n",
-        "sigils = 7\n",
-        "sigils = [1, 2]\n",
+        "open = 7\n",
+        "open = [1, 2]\n",
         // The misspelling `deny_unknown_fields` exists to catch: read
-        // leniently, this would be a config holding nothing.
-        "sigil = [\"data-plane\"]\n",
+        // leniently, this would be a config that opens nothing.
+        "opens = [\"data-plane\"]\n",
     ] {
         hand_write(home.path(), &root, text);
-        match load_sigils(home.path(), &root) {
+        match load_open_scopes(home.path(), &root) {
             Err(error @ Error::Syntax { .. }) => assert!(
-                error.to_string().contains(SIGIL_FILE),
+                error.to_string().contains(CONFIG_FILE),
                 "the message names the file to go and fix: {error}"
             ),
             other => panic!("expected a syntax error for `{text}`, got {other:?}"),
@@ -261,35 +264,35 @@ fn a_malformed_config_is_an_error_and_never_a_panic() {
     }
 
     // Broken is never absent, and never an empty set either.
-    hand_write(home.path(), &root, "sigils = [\"data-plane\"]\n");
+    hand_write(home.path(), &root, "open = [\"data-plane\"]\n");
     assert_eq!(
-        load_sigils(home.path(), &root).expect("loads"),
+        load_open_scopes(home.path(), &root).expect("loads"),
         ["data-plane"]
     );
 }
 
 #[test]
-fn a_config_that_says_nothing_about_sigils_holds_none() {
+fn a_config_that_says_nothing_about_open_scopes_opens_none() {
     let (home, elsewhere) = (a_dir(), a_dir());
     let root = named(elsewhere.path(), "warlock");
     hand_write(home.path(), &root, "\n# nothing here yet\n");
 
     assert_eq!(
-        load_sigils(home.path(), &root).expect("loads"),
+        load_open_scopes(home.path(), &root).expect("loads"),
         Vec::<String>::new()
     );
 }
 
 #[test]
-fn sigils_are_stored_and_read_back_exactly_as_written() {
+fn open_scopes_are_stored_and_read_back_exactly_as_written() {
     // No folding, no trimming, no rejection, no de-duplication: this is the
-    // store, not the gate. `validate_sigil` is asked where a person types.
+    // store, not the gate. `validate_open_scope` is asked where a person types.
     let (home, elsewhere) = (a_dir(), a_dir());
     let root = named(elsewhere.path(), "warlock");
     let odd = owned(&["Data-Plane", " billing ", "*", "", "web", "web"]);
 
-    save_sigils(home.path(), &root, &odd).expect("saves");
-    assert_eq!(load_sigils(home.path(), &root).expect("loads"), odd);
+    save_open_scopes(home.path(), &root, &odd).expect("saves");
+    assert_eq!(load_open_scopes(home.path(), &root).expect("loads"), odd);
 }
 
 #[test]
@@ -297,9 +300,9 @@ fn a_config_written_before_bindings_existed_reads_as_unbound() {
     let (home, elsewhere) = (a_dir(), a_dir());
     let root = named(elsewhere.path(), "warlock");
 
-    hand_write(home.path(), &root, "sigils = [\"billing\", \"web\"]\n");
+    hand_write(home.path(), &root, "open = [\"billing\", \"web\"]\n");
     assert_eq!(
-        load_sigils(home.path(), &root).expect("loads"),
+        load_open_scopes(home.path(), &root).expect("loads"),
         ["billing", "web"],
         "the field is optional, so yesterday's file is still today's file"
     );
@@ -318,17 +321,17 @@ fn a_config_written_before_bindings_existed_reads_as_unbound() {
 }
 
 #[test]
-fn a_config_that_binds_a_scope_still_gives_its_sigils_back() {
+fn a_config_that_binds_a_scope_still_gives_its_open_scopes_back() {
     let (home, elsewhere) = (a_dir(), a_dir());
     let root = named(elsewhere.path(), "warlock");
     hand_write(
         home.path(),
         &root,
-        "sigils = [\"billing\", \"web\"]\n\n[keys]\nweb = \"work\"\n",
+        "open = [\"billing\", \"web\"]\n\n[keys]\nweb = \"work\"\n",
     );
 
     assert_eq!(
-        load_sigils(home.path(), &root).expect("loads"),
+        load_open_scopes(home.path(), &root).expect("loads"),
         ["billing", "web"]
     );
     assert_eq!(
@@ -350,44 +353,40 @@ fn the_single_key_line_a_checkout_used_to_carry_no_longer_parses() {
     // looks bound and files nowhere.
     let (home, elsewhere) = (a_dir(), a_dir());
     let root = named(elsewhere.path(), "warlock");
-    hand_write(
-        home.path(),
-        &root,
-        "sigils = [\"billing\"]\nkey = \"work\"\n",
-    );
+    hand_write(home.path(), &root, "open = [\"billing\"]\nkey = \"work\"\n");
 
     assert!(matches!(
         load_key_binding(home.path(), &root, "billing"),
         Err(Error::Syntax { .. })
     ));
     assert!(matches!(
-        load_sigils(home.path(), &root),
+        load_open_scopes(home.path(), &root),
         Err(Error::Syntax { .. })
     ));
 }
 
 #[test]
-fn a_binding_and_a_set_of_sigils_do_not_overwrite_each_other() {
+fn a_binding_and_a_set_of_open_scopes_do_not_overwrite_each_other() {
     let (home, elsewhere) = (a_dir(), a_dir());
     let root = named(elsewhere.path(), "warlock");
 
-    save_sigils(home.path(), &root, &owned(&["billing", "web"])).expect("saves");
+    save_open_scopes(home.path(), &root, &owned(&["billing", "web"])).expect("saves");
     save_key_binding(home.path(), &root, "web", "work").expect("binds");
     assert_eq!(
-        load_sigils(home.path(), &root).expect("loads"),
+        load_open_scopes(home.path(), &root).expect("loads"),
         ["billing", "web"],
-        "binding a key is not a way to lose the sigils already held"
+        "binding a key is not a way to lose the scopes already open"
     );
     assert_eq!(
-        fs::read_to_string(sigils_path(home.path(), &root)).expect("reads"),
-        "sigils = [\"billing\", \"web\"]\n\n[keys]\nweb = \"work\"\n",
+        fs::read_to_string(config_path(home.path(), &root)).expect("reads"),
+        "open = [\"billing\", \"web\"]\n\n[keys]\nweb = \"work\"\n",
     );
 
-    save_sigils(home.path(), &root, &owned(&["data-plane"])).expect("saves again");
+    save_open_scopes(home.path(), &root, &owned(&["data-plane"])).expect("saves again");
     assert_eq!(
         load_key_binding(home.path(), &root, "web").expect("loads"),
         Some("work".to_owned()),
-        "and changing the sigils is not a way to lose the binding"
+        "and changing the open scopes is not a way to lose the binding"
     );
 
     // A rebinding replaces the name rather than accumulating names or files.
@@ -396,18 +395,18 @@ fn a_binding_and_a_set_of_sigils_do_not_overwrite_each_other() {
         load_key_binding(home.path(), &root, "web").expect("loads"),
         Some("personal".to_owned())
     );
-    assert_eq!(project_dir_listing(home.path(), &root), [SIGIL_FILE]);
+    assert_eq!(project_dir_listing(home.path(), &root), [CONFIG_FILE]);
 }
 
 #[test]
 fn each_scope_is_bound_on_its_own_and_the_rest_of_the_file_is_carried() {
     // The whole point of the map: a repository whose scopes file to boards in
     // two Linear workspaces binds a key for each, and binding the second must
-    // not touch the first, the sigils or the base branch.
+    // not touch the first, the open scopes or the base branch.
     let (home, elsewhere) = (a_dir(), a_dir());
     let root = named(elsewhere.path(), "warlock");
 
-    save_sigils(home.path(), &root, &owned(&["data-plane", "web"])).expect("saves");
+    save_open_scopes(home.path(), &root, &owned(&["data-plane", "web"])).expect("saves");
     save_base_branch(home.path(), &root, Some("develop")).expect("saves a base branch");
     save_key_binding(home.path(), &root, "data-plane", "work").expect("binds the first scope");
     save_key_binding(home.path(), &root, "web", "personal").expect("binds the second");
@@ -422,7 +421,7 @@ fn each_scope_is_bound_on_its_own_and_the_rest_of_the_file_is_carried() {
         Some("personal".to_owned())
     );
     assert_eq!(
-        load_sigils(home.path(), &root).expect("loads"),
+        load_open_scopes(home.path(), &root).expect("loads"),
         ["data-plane", "web"]
     );
     assert_eq!(
@@ -430,10 +429,10 @@ fn each_scope_is_bound_on_its_own_and_the_rest_of_the_file_is_carried() {
         Some("develop".to_owned())
     );
     assert_eq!(
-        fs::read_to_string(sigils_path(home.path(), &root)).expect("reads"),
-        "sigils = [\"data-plane\", \"web\"]\nbranch = \"develop\"\n\n\
+        fs::read_to_string(config_path(home.path(), &root)).expect("reads"),
+        "open = [\"data-plane\", \"web\"]\nbranch = \"develop\"\n\n\
          [keys]\ndata-plane = \"work\"\nweb = \"personal\"\n",
-        "one file, with the sigils and the branch above a `[keys]` table \
+        "one file, with the open scopes and the branch above a `[keys]` table \
          holding one line per scope"
     );
 
@@ -471,7 +470,7 @@ fn binding_the_first_key_for_a_checkout_needs_no_config_to_already_exist() {
         Some("work".to_owned())
     );
     assert_eq!(
-        load_sigils(home.path(), &root).expect("loads"),
+        load_open_scopes(home.path(), &root).expect("loads"),
         Vec::<String>::new()
     );
 }
@@ -480,8 +479,8 @@ fn binding_the_first_key_for_a_checkout_needs_no_config_to_already_exist() {
 fn a_key_name_that_is_not_a_name_is_refused_and_nothing_is_written() {
     let (home, elsewhere) = (a_dir(), a_dir());
     let root = named(elsewhere.path(), "warlock");
-    save_sigils(home.path(), &root, &owned(&["web"])).expect("saves");
-    let before = fs::read_to_string(sigils_path(home.path(), &root)).expect("reads");
+    save_open_scopes(home.path(), &root, &owned(&["web"])).expect("saves");
+    let before = fs::read_to_string(config_path(home.path(), &root)).expect("reads");
 
     // Both arguments are judged, so a good scope cannot smuggle in a bad key
     // name and a good key name cannot smuggle in a scope nothing could match.
@@ -504,7 +503,7 @@ fn a_key_name_that_is_not_a_name_is_refused_and_nothing_is_written() {
     }
 
     assert_eq!(
-        fs::read_to_string(sigils_path(home.path(), &root)).expect("reads"),
+        fs::read_to_string(config_path(home.path(), &root)).expect("reads"),
         before,
         "a refused name never reaches the file"
     );
@@ -517,7 +516,7 @@ fn every_error_variant_says_what_happened_and_where() {
     };
     assert_eq!(
         not_found.to_string(),
-        "no sigil config at `/home/someone/.warlock/warlock-abc/config.toml`"
+        "no config at `/home/someone/.warlock/warlock-abc/config.toml`"
     );
 
     let io = Error::Io {
@@ -531,12 +530,12 @@ fn every_error_variant_says_what_happened_and_where() {
 
     let syntax = Error::Syntax {
         path: PathBuf::from("/home/someone/.warlock/warlock-abc/config.toml"),
-        source: toml::from_str::<super::Config>("sigils = 7").expect_err("a number is not a list"),
+        source: toml::from_str::<super::Config>("open = 7").expect_err("a number is not a list"),
     };
     assert!(
-        syntax.to_string().starts_with(
-            "malformed sigil config at `/home/someone/.warlock/warlock-abc/config.toml`: "
-        ),
+        syntax
+            .to_string()
+            .starts_with("malformed config at `/home/someone/.warlock/warlock-abc/config.toml`: "),
         "{syntax}"
     );
 
@@ -566,7 +565,7 @@ fn errors_expose_the_cause_they_wrap() {
     assert!(
         Error::Syntax {
             path: PathBuf::from("x"),
-            source: toml::from_str::<super::Config>("sigils = 7")
+            source: toml::from_str::<super::Config>("open = 7")
                 .expect_err("a number is not a list"),
         }
         .source()
@@ -603,9 +602,9 @@ fn a_save_that_fails_leaves_no_temporary_and_no_half_written_file() {
 
     let (home, elsewhere) = (a_dir(), a_dir());
     let root = named(elsewhere.path(), "warlock");
-    save_sigils(home.path(), &root, &owned(&["data-plane"])).expect("saves");
+    save_open_scopes(home.path(), &root, &owned(&["data-plane"])).expect("saves");
 
-    let config = sigils_path(home.path(), &root);
+    let config = config_path(home.path(), &root);
     let dir = config
         .parent()
         .expect("the config has a directory")
@@ -620,41 +619,41 @@ fn a_save_that_fails_leaves_no_temporary_and_no_half_written_file() {
     }
 
     let error =
-        save_sigils(home.path(), &root, &owned(&["billing"])).expect_err("cannot be written");
+        save_open_scopes(home.path(), &root, &owned(&["billing"])).expect_err("cannot be written");
     assert!(matches!(error, Error::Io { .. }), "{error:?}");
 
     fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).expect("chmods back");
     assert_eq!(
         project_dir_listing(home.path(), &root),
-        [SIGIL_FILE],
+        [CONFIG_FILE],
         "the temporary is cleaned up rather than left beside the config"
     );
     assert_eq!(
-        load_sigils(home.path(), &root).expect("loads"),
+        load_open_scopes(home.path(), &root).expect("loads"),
         ["data-plane"],
-        "and the set that was held is the set that is still held"
+        "and the set that was open is the set that is still open"
     );
 }
 
 #[test]
-fn held_sigils_reads_a_missing_config_as_nothing_held_and_a_broken_one_as_broken() {
+fn open_scopes_reads_a_missing_config_as_nothing_open_and_a_broken_one_as_broken() {
     let (home, elsewhere) = (a_dir(), a_dir());
     let root = named(elsewhere.path(), "warlock");
 
     assert_eq!(
-        held_sigils(home.path(), &root).expect("absent is an answer"),
+        open_scopes(home.path(), &root).expect("absent is an answer"),
         Vec::<String>::new()
     );
 
-    save_sigils(home.path(), &root, &["data-plane".to_owned()]).expect("saves");
+    save_open_scopes(home.path(), &root, &["data-plane".to_owned()]).expect("saves");
     assert_eq!(
-        held_sigils(home.path(), &root).expect("loads"),
+        open_scopes(home.path(), &root).expect("loads"),
         ["data-plane"]
     );
 
     hand_write(home.path(), &root, "this is not toml\n");
     assert!(matches!(
-        held_sigils(home.path(), &root),
+        open_scopes(home.path(), &root),
         Err(Error::Syntax { .. })
     ));
 }

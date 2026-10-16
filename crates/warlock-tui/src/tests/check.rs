@@ -3,11 +3,12 @@ use std::path::{Path, PathBuf};
 
 use serde_json::json;
 use warlock_engine::{
-    Manifest, ScopeRecord, ScopedDirectory, save_key, save_key_binding, save_sigils, sigils_path,
+    Manifest, ScopeRecord, ScopedDirectory, config_path, save_key, save_key_binding,
+    save_open_scopes,
 };
 
 use super::{Checked, checked, checked_onto, gated_onto, hooked_onto, object, prose};
-use crate::app::Sigils;
+use crate::app::OpenScopes;
 use crate::error::Error;
 use crate::error::status_for;
 use crate::standing::Standing;
@@ -17,7 +18,7 @@ fn standing_in(repo: &Path) -> Standing {
 }
 
 // The home is handed in for the same reason the repository is: the composition
-// reads the sigils under whatever home it is given, and one resolved in here
+// reads the config under whatever home it is given, and one resolved in here
 // would be the developer's own.
 fn said(repo: &Path, home: &Path, path: &str, json: bool) -> String {
     let mut out = Vec::new();
@@ -162,16 +163,16 @@ fn answer(home: &Path, path: &str) -> Checked {
     .expect("a path inside the repository has a manifest form")
 }
 
-fn holding(home: &Path, sigils: &[&str]) {
-    holding_in(home, Path::new(REPO), sigils);
+fn opening(home: &Path, open: &[&str]) {
+    opening_in(home, Path::new(REPO), open);
 }
 
 // The repository is a parameter as well as the home, because the config is keyed
 // by root: the gate tests below stand in a temporary repository on disk, and
-// sigils written against `REPO` would not be the ones they read.
-fn holding_in(home: &Path, repo: &Path, sigils: &[&str]) {
-    let sigils: Vec<String> = sigils.iter().map(|sigil| (*sigil).to_owned()).collect();
-    save_sigils(home, repo, &sigils).expect("a config that writes");
+// open scopes written against `REPO` would not be the ones they read.
+fn opening_in(home: &Path, repo: &Path, open: &[&str]) {
+    let open: Vec<String> = open.iter().map(|scope| (*scope).to_owned()).collect();
+    save_open_scopes(home, repo, &open).expect("a config that writes");
 }
 
 // The scope is a parameter because the config holds a key name per scope, and
@@ -187,7 +188,7 @@ fn keeping(home: &Path, name: &str) {
 }
 
 fn a_broken_config(home: &Path) {
-    let path = sigils_path(home, Path::new(REPO));
+    let path = config_path(home, Path::new(REPO));
     fs::create_dir_all(
         path.parent()
             .expect("the config lives in a project directory"),
@@ -226,24 +227,24 @@ fn a_path_nothing_covers_says_so_rather_than_naming_a_scope() {
     assert_eq!(answer(home.path(), "docs/adr").scope, None);
     assert_eq!(answer(home.path(), ".").scope, None);
     // Work happens only inside a scope, so an unscoped path is closed even to
-    // a machine holding the wildcard.
+    // a machine with the wildcard open.
     assert!(!answer(home.path(), "docs/adr").opens);
-    holding(home.path(), &["*"]);
+    opening(home.path(), &["*"]);
     assert!(!answer(home.path(), "docs/adr").opens);
 }
 
 #[test]
-fn a_held_sigil_opens_the_scope_it_matches_and_nothing_else() {
+fn an_open_scope_opens_the_scope_it_matches_and_nothing_else() {
     let home = a_dir();
-    holding(home.path(), &["platform"]);
+    opening(home.path(), &["platform"]);
 
     let open = answer(home.path(), "crates/tui/src");
-    assert_eq!(open.sigils, Sigils::Held(vec!["platform".to_owned()]));
+    assert_eq!(open.open, OpenScopes::Named(vec!["platform".to_owned()]));
     assert!(open.opens);
-    assert!(prose(&open).contains("`platform` is open to this machine"));
+    assert!(prose(&open).contains("`platform` is open on this machine"));
 
-    // The nearer scope replaces the outer one outright, so holding
-    // `platform` does not open what `data-plane` covers.
+    // The nearer scope replaces the outer one outright, so `platform` being
+    // open does not open what `data-plane` covers.
     let closed = answer(home.path(), "crates/engine");
     assert!(!closed.opens);
     // A closed scope is the answer and not a failure to reach one, so what
@@ -265,46 +266,42 @@ fn a_held_sigil_opens_the_scope_it_matches_and_nothing_else() {
         0
     );
     assert!(prose(&closed).contains(
-        "`data-plane` is closed to this machine — hold that sigil to work here, \
-         with `warlock sigil add data-plane`"
+        "`data-plane` is closed on this machine — `warlock open data-plane` lets AI work here"
     ));
 }
 
 #[test]
-fn a_machine_that_holds_nothing_is_closed_by_every_scope_and_still_answers() {
+fn a_machine_with_no_scope_open_is_closed_by_every_scope_and_still_answers() {
     // No config at all: the ordinary state of a machine nobody has run
-    // `warlock sigil add` on. It is an answer, not a failure.
+    // `warlock open` on. It is an answer, not a failure.
     let home = a_dir();
     let closed = answer(home.path(), "crates/engine");
 
-    assert_eq!(closed.sigils, Sigils::Nothing);
+    assert_eq!(closed.open, OpenScopes::Nothing);
     assert!(!closed.opens);
     assert_eq!(
         object(&closed).to_string(),
-        r#"{"command":"check","path":"crates/engine","scope":"data-plane","sigils":[],"opens":false,"team":"Data Plane","review_state":"In Review","label":"area/data-plane","key":null,"key_found":false}"#
+        r#"{"command":"check","path":"crates/engine","scope":"data-plane","open":[],"opens":false,"team":"Data Plane","review_state":"In Review","label":"area/data-plane","key":null,"key_found":false}"#
     );
 }
 
 #[test]
-fn a_config_that_will_not_parse_is_unknown_and_never_an_empty_holding() {
-    // The case `[]` would lie about: an operator told they hold nothing when
-    // the truth is that warlock could not read what they hold.
+fn a_config_that_will_not_parse_is_unknown_and_never_an_empty_open_list() {
+    // The case `[]` would lie about: an operator told no scope is open when
+    // the truth is that warlock could not read which ones are.
     let home = a_dir();
     a_broken_config(home.path());
     let unknown = answer(home.path(), "crates/engine");
 
-    assert_eq!(unknown.sigils, Sigils::Unknown);
-    assert!(
-        !unknown.opens,
-        "a holding warlock cannot read opens nothing"
-    );
+    assert_eq!(unknown.open, OpenScopes::Unknown);
+    assert!(!unknown.opens, "a config warlock cannot read opens nothing");
     assert_eq!(
         object(&unknown).to_string(),
-        r#"{"command":"check","path":"crates/engine","scope":"data-plane","sigils":null,"opens":false,"team":"Data Plane","review_state":"In Review","label":"area/data-plane","key":null,"key_found":false}"#
+        r#"{"command":"check","path":"crates/engine","scope":"data-plane","open":null,"opens":false,"team":"Data Plane","review_state":"In Review","label":"area/data-plane","key":null,"key_found":false}"#
     );
     // And the prose names the file, which is the one thing a reader needs
     // in order to fix it.
-    let path = sigils_path(home.path(), Path::new(REPO));
+    let path = config_path(home.path(), Path::new(REPO));
     assert!(
         prose(&unknown).contains(&format!("`{}` could not be read", path.display())),
         "the unreadable file is not named: {}",
@@ -313,7 +310,7 @@ fn a_config_that_will_not_parse_is_unknown_and_never_an_empty_holding() {
 }
 
 #[test]
-fn a_missing_home_is_nothing_held_rather_than_a_config_that_would_not_read() {
+fn a_missing_home_is_nothing_open_rather_than_a_config_that_would_not_read() {
     // `Unknown` claims a file on disk is broken. With no home there is no
     // file and no path to name one by, so there is nothing broken to report.
     let nowhere = checked(
@@ -324,10 +321,10 @@ fn a_missing_home_is_nothing_held_rather_than_a_config_that_would_not_read() {
     )
     .expect("a path inside the repository has a manifest form");
 
-    assert_eq!(nowhere.sigils, Sigils::Nothing);
+    assert_eq!(nowhere.open, OpenScopes::Nothing);
     assert_eq!(nowhere.config, None);
     assert!(!nowhere.opens);
-    assert!(prose(&nowhere).contains("holding nothing"));
+    assert!(prose(&nowhere).contains("AI can work in no scope"));
     // No home is nothing bound rather than unknown, for a reason of its own: a
     // machine with no home has no key store to bind a name to either, so
     // `warlock key use` is the fix here as it is for a home that simply has
@@ -365,11 +362,11 @@ fn a_path_outside_the_repository_is_refused_rather_than_reported_as_unscoped() {
 #[test]
 fn the_object_is_the_shape_a_consumer_was_promised() {
     let home = a_dir();
-    holding(home.path(), &["billing"]);
+    opening(home.path(), &["billing"]);
 
     assert_eq!(
         object(&answer(home.path(), "crates/engine")).to_string(),
-        r#"{"command":"check","path":"crates/engine","scope":"data-plane","sigils":["billing"],"opens":false,"team":"Data Plane","review_state":"In Review","label":"area/data-plane","key":null,"key_found":false}"#
+        r#"{"command":"check","path":"crates/engine","scope":"data-plane","open":["billing"],"opens":false,"team":"Data Plane","review_state":"In Review","label":"area/data-plane","key":null,"key_found":false}"#
     );
 }
 
@@ -379,7 +376,7 @@ fn nothing_covering_the_path_is_a_null_scope_rather_than_a_missing_field() {
 
     assert_eq!(
         object(&answer(home.path(), "docs/adr")).to_string(),
-        r#"{"command":"check","path":"docs/adr","scope":null,"sigils":[],"opens":false,"team":null,"review_state":null,"label":null,"key":null,"key_found":false}"#
+        r#"{"command":"check","path":"docs/adr","scope":null,"open":[],"opens":false,"team":null,"review_state":null,"label":null,"key":null,"key_found":false}"#
     );
 }
 
@@ -398,7 +395,7 @@ fn a_binding_on_another_scope_of_the_repository_is_not_reported_for_an_unscoped_
 
     assert_eq!(
         printed,
-        r#"{"command":"check","path":"docs/adr","scope":null,"sigils":[],"opens":false,"team":null,"review_state":null,"label":null,"key":null,"key_found":false}"#
+        r#"{"command":"check","path":"docs/adr","scope":null,"open":[],"opens":false,"team":null,"review_state":null,"label":null,"key":null,"key_found":false}"#
     );
     // Neither the name nor, ever, the value behind it.
     assert!(!printed.contains("work"), "{printed}");
@@ -411,7 +408,7 @@ fn no_object_carries_a_root_or_a_home() {
     // in a document meant to be diffable across machines. The home is worse
     // — it names a person.
     let home = a_dir();
-    holding(home.path(), &["billing"]);
+    opening(home.path(), &["billing"]);
     let printed = object(&answer(home.path(), "crates/engine")).to_string();
 
     assert!(!printed.contains("root"), "{printed}");
@@ -439,7 +436,7 @@ fn the_whole_answer_for_a_scoped_recorded_and_bound_checkout_is_one_flat_object(
     // first, with no nested object to reach through, and `review_state` is
     // spelled as the `[[scope]]` record spells it.
     let home = a_dir();
-    holding(home.path(), &["data-plane"]);
+    opening(home.path(), &["data-plane"]);
     bound(home.path(), "data-plane", "work");
     keeping(home.path(), "work");
 
@@ -447,7 +444,7 @@ fn the_whole_answer_for_a_scoped_recorded_and_bound_checkout_is_one_flat_object(
 
     assert_eq!(
         printed,
-        r#"{"command":"check","path":"crates/engine/src","scope":"data-plane","sigils":["data-plane"],"opens":true,"team":"Data Plane","review_state":"In Review","label":"area/data-plane","key":"work","key_found":true}"#
+        r#"{"command":"check","path":"crates/engine/src","scope":"data-plane","open":["data-plane"],"opens":true,"team":"Data Plane","review_state":"In Review","label":"area/data-plane","key":"work","key_found":true}"#
     );
     // The name is printed and the value it stands for never is. Asserted on
     // the one answer that had to read the store to say `true`, because that is
@@ -466,7 +463,7 @@ fn a_covering_scope_with_no_record_routes_to_null_rather_than_to_empty_strings()
 
     assert_eq!(
         object(&answer(home.path(), "crates/tui/src")).to_string(),
-        r#"{"command":"check","path":"crates/tui/src","scope":"platform","sigils":[],"opens":false,"team":null,"review_state":null,"label":null,"key":"work","key_found":true}"#
+        r#"{"command":"check","path":"crates/tui/src","scope":"platform","open":[],"opens":false,"team":null,"review_state":null,"label":null,"key":"work","key_found":true}"#
     );
 }
 
@@ -505,10 +502,10 @@ fn the_three_key_states_are_told_apart_by_the_name_and_never_by_the_boolean() {
 fn a_closed_scope_still_carries_the_whole_route_beside_the_closed_verdict() {
     // The decision this implements: warlock says what is being crossed and
     // goes on saying everything else it knows. Blanking the route because the
-    // machine holds no sigil for it would leave somebody covering for a
+    // scope is closed on this machine would leave somebody covering for a
     // colleague with a verdict and nowhere to file.
     let home = a_dir();
-    holding(home.path(), &["platform"]);
+    opening(home.path(), &["platform"]);
     bound(home.path(), "data-plane", "work");
     keeping(home.path(), "work");
 
@@ -529,7 +526,7 @@ fn a_closed_scope_still_carries_the_whole_route_beside_the_closed_verdict() {
 #[test]
 fn the_prose_for_a_scoped_recorded_and_bound_checkout_says_the_route_and_the_key() {
     let home = a_dir();
-    holding(home.path(), &["data-plane"]);
+    opening(home.path(), &["data-plane"]);
     bound(home.path(), "data-plane", "work");
     keeping(home.path(), "work");
 
@@ -540,8 +537,8 @@ fn the_prose_for_a_scoped_recorded_and_bound_checkout_says_the_route_and_the_key
         "`crates/engine/src` is scoped `data-plane`\n\
          work here is filed to `Data Plane`, labelled `area/data-plane`, and a finished pull \
          moves the ticket to `In Review`\n\
-         holding `data-plane`\n\
-         `data-plane` is open to this machine\n\
+         AI can work in `data-plane`\n\
+         `data-plane` is open on this machine\n\
          filing to `Data Plane` would use the key `work`, which this machine stores"
     );
     // The one answer that had to read the key store to say the name resolves,
@@ -559,7 +556,7 @@ fn a_closed_scope_keeps_its_whole_route_in_the_prose_beside_the_closed_line() {
     // never in place of it. Somebody covering for a colleague is told what they
     // would be crossing and still where the work files.
     let home = a_dir();
-    holding(home.path(), &["platform"]);
+    opening(home.path(), &["platform"]);
     bound(home.path(), "data-plane", "work");
     keeping(home.path(), "work");
 
@@ -568,9 +565,8 @@ fn a_closed_scope_keeps_its_whole_route_in_the_prose_beside_the_closed_line() {
         "`crates/engine` is scoped `data-plane`\n\
          work here is filed to `Data Plane`, labelled `area/data-plane`, and a finished pull \
          moves the ticket to `In Review`\n\
-         holding `platform`\n\
-         `data-plane` is closed to this machine — hold that sigil to work here, \
-         with `warlock sigil add data-plane`\n\
+         AI can work in `platform`\n\
+         `data-plane` is closed on this machine — `warlock open data-plane` lets AI work here\n\
          filing to `Data Plane` would use the key `work`, which this machine stores"
     );
 }
@@ -584,7 +580,7 @@ fn a_path_no_scope_covers_says_there_is_nothing_to_route_to() {
         "nothing scopes `docs/adr`\n\
          there is nothing to route to: a scope covering this path is what would fix it, \
          with `warlock scope add`\n\
-         holding nothing\n\
+         AI can work in no scope\n\
          an unscoped path is closed to everyone, so no AI may work here\n\
          a key is bound to a scope, so there is none to report and none to bind until a scope \
          covers this path"
@@ -609,9 +605,8 @@ fn a_covering_scope_nobody_recorded_says_which_scope_is_missing_a_record() {
         "`crates/tui/src` is scoped `platform`\n\
          `platform` has no `[[scope]]` record, so there is nothing to route to: a record \
          in `.warlock/scopes.toml` is what would fix it\n\
-         holding nothing\n\
-         `platform` is closed to this machine — hold that sigil to work here, \
-         with `warlock sigil add platform`\n\
+         AI can work in no scope\n\
+         `platform` is closed on this machine — `warlock open platform` lets AI work here\n\
          the key `work` is bound here and stored on this machine"
     );
 }
@@ -624,22 +619,22 @@ fn an_unbound_checkout_is_sent_to_key_use_and_key_add_and_a_dangling_name_to_key
     // route above them, and both name the covering scope — the binding is per
     // scope, so `warlock key use` is spelled with the scope it would bind.
     let unbound = a_dir();
-    holding(unbound.path(), &["data-plane"]);
+    opening(unbound.path(), &["data-plane"]);
 
     assert_eq!(
         prose(&answer(unbound.path(), "crates/engine")),
         "`crates/engine` is scoped `data-plane`\n\
          work here is filed to `Data Plane`, labelled `area/data-plane`, and a finished pull \
          moves the ticket to `In Review`\n\
-         holding `data-plane`\n\
-         `data-plane` is open to this machine\n\
+         AI can work in `data-plane`\n\
+         `data-plane` is open on this machine\n\
          no key is bound to the scope `data-plane`: `warlock key add <name>` stores a new key \
          on this machine, and a name it already stores is bound with `warlock key use \
          data-plane <name>`"
     );
 
     let dangling = a_dir();
-    holding(dangling.path(), &["data-plane"]);
+    opening(dangling.path(), &["data-plane"]);
     bound(dangling.path(), "data-plane", "work");
     keeping(dangling.path(), "personal");
 
@@ -648,8 +643,8 @@ fn an_unbound_checkout_is_sent_to_key_use_and_key_add_and_a_dangling_name_to_key
         "`crates/engine` is scoped `data-plane`\n\
          work here is filed to `Data Plane`, labelled `area/data-plane`, and a finished pull \
          moves the ticket to `In Review`\n\
-         holding `data-plane`\n\
-         `data-plane` is open to this machine\n\
+         AI can work in `data-plane`\n\
+         `data-plane` is open on this machine\n\
          the key `work` is bound to the scope `data-plane` and this machine has not stored it: \
          `warlock key add work` stores it, `warlock key use data-plane <name>` binds another"
     );
@@ -658,9 +653,9 @@ fn an_unbound_checkout_is_sent_to_key_use_and_key_add_and_a_dangling_name_to_key
 // The gate stands in a temporary repository on disk rather than at `REPO`,
 // because it loads the manifest itself: that is the composition under test —
 // root, home, manifest and joined path becoming parameters in one place — and a
-// gate that read the developer's own home would be answering about their sigils.
-// No socket is opened and no model is run; the manifest and one sigil config are
-// the whole of what is read.
+// gate that read the developer's own home would be answering about their open
+// scopes. No socket is opened and no model is run; the manifest and one config
+// are the whole of what is read.
 fn gating(repo: &Path, home: &Path, path: &str) -> Result<(), Error> {
     a_manifest().save(repo).expect("a manifest that saves");
     gated_onto(&standing_in(repo), Some(home), PathBuf::from(path))
@@ -668,17 +663,17 @@ fn gating(repo: &Path, home: &Path, path: &str) -> Result<(), Error> {
 
 #[test]
 fn a_gate_over_a_closed_scope_is_the_boundarys_three_and_names_the_scope() {
-    // A sigil that opens the outer scope and not the nearer one: the ordinary
-    // way to be closed while holding something.
+    // The outer scope open and not the nearer one: the ordinary way to be
+    // closed while something is open.
     let (repo, home) = (a_dir(), a_dir());
-    holding_in(home.path(), repo.path(), &["platform"]);
+    opening_in(home.path(), repo.path(), &["platform"]);
 
     let refused = gating(repo.path(), home.path(), "crates/engine/src/lib.rs");
 
     // The register the headless writes already refuse in, and no new status:
     // one line and a **3**, which re-running will never turn into a 0.
     assert_eq!(status_for(&refused), 3);
-    let error = refused.expect_err("a scope this machine holds no sigil for is closed");
+    let error = refused.expect_err("a scope closed on this machine is refused");
     assert!(
         matches!(
             &error,
@@ -697,8 +692,8 @@ fn a_gate_over_a_closed_scope_is_the_boundarys_three_and_names_the_scope() {
         "{error}"
     );
 
-    // And a machine that holds nothing at all, which is every machine nobody
-    // has run `warlock sigil add` on.
+    // And a machine with no scope open at all, which is every machine nobody
+    // has run `warlock open` on.
     let nothing = a_dir();
     assert_eq!(
         status_for(&gating(repo.path(), nothing.path(), "crates/engine")),
@@ -711,7 +706,7 @@ fn a_gate_over_an_open_scope_is_a_zero() {
     // Nothing is printed — there is no writer to print through — so a hook's
     // stdout stays empty and a shell gets no envelope it would have to parse.
     let (repo, home) = (a_dir(), a_dir());
-    holding_in(home.path(), repo.path(), &["data-plane"]);
+    opening_in(home.path(), repo.path(), &["data-plane"]);
 
     for path in ["crates/engine", "crates/engine/src/lib.rs"] {
         let gated = gating(repo.path(), home.path(), path);
@@ -725,7 +720,7 @@ fn a_gate_over_an_unscoped_path_is_the_boundarys_three_and_says_to_draw_a_scope(
     // The wildcard opens every scope and still not a path under none: work
     // happens only inside a scope.
     let (repo, home) = (a_dir(), a_dir());
-    holding_in(home.path(), repo.path(), &["*"]);
+    opening_in(home.path(), repo.path(), &["*"]);
 
     for path in ["docs/adr", "vendor/thing/file.rs"] {
         let refused = gating(repo.path(), home.path(), path);
@@ -747,10 +742,10 @@ fn a_gate_over_an_unscoped_path_is_the_boundarys_three_and_says_to_draw_a_scope(
 fn every_half_finished_route_is_still_a_zero() {
     // A check answers; it does not gate. The non-zero status is left for `jq
     // -e '.opens and .key_found'` to spend, so each of these four — a scope
-    // this machine does not hold, nothing bound, a name the store has never
+    // closed on this machine, nothing bound, a name the store has never
     // heard of, a path no scope covers — is output and a 0.
     let closed = a_dir();
-    holding(closed.path(), &["platform"]);
+    opening(closed.path(), &["platform"]);
 
     let dangling = a_dir();
     bound(dangling.path(), "data-plane", "work");
@@ -781,7 +776,7 @@ fn every_half_finished_route_is_still_a_zero() {
 // The hook form stands where the gate form stands and for the same reasons:
 // `hooked_onto` is what `check::hook` calls once it has read stdin, so a canned
 // payload here runs the code a `PreToolUse` hook runs. What is read is the
-// manifest in the temporary repository and one sigil config under the temporary
+// manifest in the temporary repository and one config under the temporary
 // home; no socket is opened, no model is run and no real home is touched.
 fn hooking(repo: &Path, home: &Path, payload: &str) -> (String, Result<(), Error>) {
     a_manifest().save(repo).expect("a manifest that saves");
@@ -815,10 +810,10 @@ fn a_payload(repo: &Path, path: &str) -> String {
 
 #[test]
 fn a_hook_over_a_closed_scope_writes_the_deny_object_and_still_exits_zero() {
-    // The gate form's closed case, asked the hook's way: a sigil that opens the
-    // outer scope and not the nearer one.
+    // The gate form's closed case, asked the hook's way: the outer scope open
+    // and not the nearer one.
     let (repo, home) = (a_dir(), a_dir());
-    holding_in(home.path(), repo.path(), &["platform"]);
+    opening_in(home.path(), repo.path(), &["platform"]);
 
     let (written, outcome) = hooking(
         repo.path(),
@@ -834,8 +829,8 @@ fn a_hook_over_a_closed_scope_writes_the_deny_object_and_still_exits_zero() {
         written,
         "{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\
          \"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"warlock: \
-         `crates/engine/src/lib.rs` is scoped `data-plane` — hold that sigil to work here, \
-         with `warlock sigil add data-plane`\"}}\n"
+         `crates/engine/src/lib.rs` is scoped `data-plane`, which is closed on this machine — \
+         `warlock open data-plane` lets AI work here\"}}\n"
     );
     // The reason names the path the repository's way and not the machine's: it
     // is shown to somebody, and the absolute one names their home back at them.
@@ -855,7 +850,7 @@ fn a_hook_over_an_open_scope_writes_nothing() {
     // Saying nothing is how a `PreToolUse` hook permits, and a stdout with an
     // object of any kind on it is a write stopped.
     let (repo, home) = (a_dir(), a_dir());
-    holding_in(home.path(), repo.path(), &["data-plane"]);
+    opening_in(home.path(), repo.path(), &["data-plane"]);
 
     for path in ["crates/engine", "crates/engine/src/lib.rs"] {
         let (written, outcome) = hooking(repo.path(), home.path(), &a_payload(repo.path(), path));
@@ -869,7 +864,7 @@ fn a_hook_over_an_open_scope_writes_nothing() {
 #[test]
 fn a_hook_over_an_unscoped_path_writes_the_deny_object_that_says_to_draw_a_scope() {
     let (repo, home) = (a_dir(), a_dir());
-    holding_in(home.path(), repo.path(), &["*"]);
+    opening_in(home.path(), repo.path(), &["*"]);
 
     let (written, outcome) = hooking(
         repo.path(),
@@ -890,7 +885,7 @@ fn a_hook_over_an_unscoped_path_writes_the_deny_object_that_says_to_draw_a_scope
 
 #[test]
 fn a_payload_with_no_path_in_it_writes_nothing_and_exits_zero() {
-    // Holding nothing, so every path in this manifest is closed: a payload the
+    // No scope open, so every path in this manifest is closed: a payload the
     // read *did* understand would deny, which is what leaves the read itself as
     // the only thing under test.
     let (repo, home) = (a_dir(), a_dir());
@@ -923,7 +918,7 @@ fn an_empty_file_path_is_not_a_write_to_the_repository_root() {
     // The one absence with a consequence of its own, so it gets a repository of
     // its own: the payload's path is joined onto the working directory, so an
     // empty one would be the directory itself, and here that directory carries a
-    // scope this machine does not hold. A read that let the empty string through
+    // scope closed on this machine. A read that let the empty string through
     // would deny a write nobody can find.
     let (repo, home) = (a_dir(), a_dir());
     Manifest::with_directories([entry(".", "warlock-team")])
@@ -959,7 +954,7 @@ fn an_empty_file_path_is_not_a_write_to_the_repository_root() {
         String::from_utf8(out)
             .expect("warlock writes its own text")
             .contains("\"permissionDecision\":\"deny\""),
-        "a scope this machine does not hold should have refused"
+        "a scope closed on this machine should have refused"
     );
 }
 

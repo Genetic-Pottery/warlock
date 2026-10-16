@@ -1579,7 +1579,7 @@ fn a_name_under_pulls_that_is_not_a_run_is_passed_over() {
     );
 }
 
-// The per-checkout separation `sigils.rs` gives every path here applies to the
+// The per-checkout separation `config.rs` gives every path here applies to the
 // lookups too: two checkouts of one repository do not see each other's runs.
 #[test]
 fn the_lookups_only_see_this_checkouts_runs() {

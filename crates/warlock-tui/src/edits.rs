@@ -58,12 +58,12 @@ impl Opened {
     ) -> Result<Self, Error> {
         // Resolved here rather than by the caller, so that the one thing this
         // check reads from disk is read inside the check. A home that cannot be
-        // resolved is nothing held rather than a config that would not read:
+        // resolved is no scope open rather than a config that would not read:
         // there is no file in that case, so there is nothing broken to report.
         // Flattened here, at the door: what the shell needs is the two-valued
-        // fact the gate takes, and the third state is a line only the header
-        // and `warlock check` ever print. See `boundary::permits`.
-        let held = Settings::at(home.map(Path::to_path_buf), &repo_root).sigils_or_unknown();
+        // fact the gate takes, and the third state is a line only the panel's
+        // "AI can work in" box and `warlock check` ever print. See `boundary::permits`.
+        let held = Settings::at(home.map(Path::to_path_buf), &repo_root).open_or_unknown();
         let verdict = permits(&target, &repo_root, &manifest, held.as_slice());
         // Refused paths are spellable by construction: a path with no manifest
         // form has no coverage, so it did not reach here.
@@ -130,8 +130,8 @@ impl Opened {
 // `wanted` is the tail of the sentence a missing repository is refused with, so
 // each subcommand says what *it* could not do.
 //
-// A sigil config that will not read is deliberately not a failure here: it is a
-// state of the answer — nothing held, so nothing scoped is open.
+// A config that will not read is deliberately not a failure here: it is a
+// state of the answer, and every scoped directory reads as closed.
 pub(crate) fn opened(wanted: &'static str, path: &Path) -> Result<Opened, Error> {
     let standing = Standing::here(wanted)?;
     let manifest = standing.manifest()?;

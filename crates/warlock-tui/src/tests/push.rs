@@ -3,8 +3,8 @@ use std::path::{Path, PathBuf};
 
 use tempfile::TempDir;
 use warlock_engine::{
-    Destination, Manifest, ScopeRecord, ScopedDirectory, keys_path, manifest_path, route, save_key,
-    save_key_binding, save_sigils, sigils_path,
+    Destination, Manifest, ScopeRecord, ScopedDirectory, config_path, keys_path, manifest_path,
+    route, save_key, save_key_binding, save_open_scopes,
 };
 
 use super::{Prepared, file, prepare, pushed, sent};
@@ -84,19 +84,19 @@ fn write_brief(root: &Path, document: &str) -> PathBuf {
     path
 }
 
-// The home of a machine that holds the sigil, has bound a name and stores a key
+// The home of a machine that has the scope open, has bound a name and stores a key
 // under it: everything a push needs, under a directory of this test's own.
 fn a_home(root: &Path) -> TempDir {
     let home = a_dir();
-    holding(home.path(), root, &[SCOPE]);
+    opening(home.path(), root, &[SCOPE]);
     bound(home.path(), root, SCOPE, KEY_NAME);
     keeping(home.path(), KEY_NAME);
     home
 }
 
-fn holding(home: &Path, root: &Path, sigils: &[&str]) {
-    let sigils: Vec<String> = sigils.iter().map(|sigil| (*sigil).to_owned()).collect();
-    save_sigils(home, root, &sigils).expect("a config that writes");
+fn opening(home: &Path, root: &Path, open: &[&str]) {
+    let open: Vec<String> = open.iter().map(|scope| (*scope).to_owned()).collect();
+    save_open_scopes(home, root, &open).expect("a config that writes");
 }
 
 // One scope's binding, because that is what the config holds: a test standing
@@ -381,14 +381,14 @@ fn every_refusal_prepare_raises_is_the_ordinary_status_with_nothing_printed_or_s
         &a_manifest([a_record(SCOPE, TEAM), a_record("web", "WEB")]),
     );
     let both = a_dir();
-    holding(both.path(), several.path(), &[SCOPE, "web"]);
+    opening(both.path(), several.path(), &[SCOPE, "web"]);
     bound(both.path(), several.path(), SCOPE, KEY_NAME);
     bound(both.path(), several.path(), "web", KEY_NAME);
     keeping(both.path(), KEY_NAME);
 
     let unbound_repo = a_repository();
     let unbound = a_dir();
-    holding(unbound.path(), unbound_repo.path(), &[SCOPE]);
+    opening(unbound.path(), unbound_repo.path(), &[SCOPE]);
     keeping(unbound.path(), KEY_NAME);
 
     let not_a_brief = a_repository();
@@ -449,24 +449,24 @@ fn filing_a_prepared_push_hands_back_the_address_it_created() {
 #[test]
 fn a_machine_with_no_board_to_file_to_is_refused() {
     // The three ways there is no candidate, which are fixed in three different
-    // places: the machine holds nothing, it holds a sigil this repository has
-    // never recorded, and it holds one a row carries with no `[[scope]]`
-    // record behind it.
-    let holds_nothing = a_repository();
+    // places: the machine has no scope open, the scope it has open was never
+    // recorded by this repository, and the scope it has open is one a row
+    // carries with no `[[scope]]` record behind it.
+    let opens_nothing = a_repository();
     let nothing = a_dir();
 
     let unmatched = a_repository();
     let elsewhere = a_dir();
-    holding(elsewhere.path(), unmatched.path(), &["billing"]);
+    opening(elsewhere.path(), unmatched.path(), &["billing"]);
 
     let unrecorded = a_dir();
     saving(unrecorded.path(), &a_manifest([]));
     write_brief(unrecorded.path(), BRIEF);
     let no_record = a_dir();
-    holding(no_record.path(), unrecorded.path(), &[SCOPE]);
+    opening(no_record.path(), unrecorded.path(), &[SCOPE]);
 
     for (repo, home, expected) in [
-        (&holds_nothing, &nothing, "warlock sigil add"),
+        (&opens_nothing, &nothing, "warlock open <scope>"),
         (&unmatched, &elsewhere, "billing"),
         (&unrecorded, &no_record, "[[scope]]"),
     ] {
@@ -485,7 +485,7 @@ fn the_scope_typed_picks_the_board_and_one_that_is_not_a_candidate_names_the_can
         &a_manifest([a_record(SCOPE, TEAM), a_record("web", "WEB")]),
     );
     let home = a_dir();
-    holding(home.path(), repo.path(), &[SCOPE, "web"]);
+    opening(home.path(), repo.path(), &[SCOPE, "web"]);
     bound(home.path(), repo.path(), SCOPE, KEY_NAME);
     bound(home.path(), repo.path(), "web", KEY_NAME);
     keeping(home.path(), KEY_NAME);
@@ -515,7 +515,7 @@ fn an_unbound_checkout_and_a_dangling_name_are_route_s_two_sentences_reached_thr
     let repo = a_repository();
 
     let unbound = a_dir();
-    holding(unbound.path(), repo.path(), &[SCOPE]);
+    opening(unbound.path(), repo.path(), &[SCOPE]);
     keeping(unbound.path(), KEY_NAME);
 
     let error = refused(repo.path(), unbound.path(), SCOPE);
@@ -523,13 +523,13 @@ fn an_unbound_checkout_and_a_dangling_name_are_route_s_two_sentences_reached_thr
         said(&error),
         route::Error::Unbound {
             scope: SCOPE.to_owned(),
-            path: sigils_path(unbound.path(), repo.path()),
+            path: config_path(unbound.path(), repo.path()),
         }
         .to_string()
     );
 
     let dangling = a_dir();
-    holding(dangling.path(), repo.path(), &[SCOPE]);
+    opening(dangling.path(), repo.path(), &[SCOPE]);
     bound(dangling.path(), repo.path(), SCOPE, KEY_NAME);
     keeping(dangling.path(), "personal");
 

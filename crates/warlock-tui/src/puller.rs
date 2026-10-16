@@ -4,7 +4,7 @@
 //! This is [`mod@crate::cutting`]'s shape with one more seam and one more worker.
 //! The refusals that cost nothing are asked on the event loop's thread —
 //! [`prepare`] opens no socket and runs no `git`, so a second pull, a machine with
-//! no home, an unrecorded scope and a scope this machine does not hold are each one
+//! no home, an unrecorded scope and a scope closed on this machine are each one
 //! line and no work at all. Selection is a worker of its own, because it reads a
 //! tree and a queue; the answer is what the dialog is opened about, and only a Yes
 //! starts the run.
@@ -286,7 +286,7 @@ impl Puller<LinearOpener, Git, Gh, Claudes> {
     /// Cheap to build and builds nothing: a checkout is a directory and a program
     /// name, an agent is a command line and a timeout, so no socket, no `git` and
     /// no `claude` exists until a confirmed question starts a run. The home under
-    /// which the sigils, the binding, the key store and the run records sit is
+    /// which the config, the key store and the run records sit is
     /// read here, once for the session.
     pub(crate) fn new(root: &Path) -> Self {
         Self::with_seams(
@@ -463,7 +463,7 @@ where
             // into the very file that could not be read.
             Err(source) => {
                 app.panel_mut()
-                    .note(one_line(Error::Sigils { source }), now);
+                    .note(one_line(Error::Config { source }), now);
                 return KeyPrompt::Closed;
             }
         }
@@ -555,8 +555,8 @@ where
     ) {
         let prepared = match prepare(manifest, repo_root, home, &taking.scope) {
             Ok(prepared) => prepared,
-            // The scope no `[[scope]]` record holds, the scope this machine's
-            // sigils do not open, and the checkout the key window could not
+            // The scope no `[[scope]]` record holds, the scope closed on this
+            // machine, and the checkout the key window could not
             // bind, each in `error.rs`'s words and flattened as the thread
             // takes a line.
             Err(error) => {
@@ -725,8 +725,8 @@ where
 /// A seam of its own rather than three values on the [`Puller`], because none of
 /// the three can be built before there is a run: the activity port is this run's
 /// channel, the say-when is this run's guard, and the sub-task sessions' system
-/// prompt names the scope the ticket was pulled under and the sigils this machine
-/// holds.
+/// prompt names the scope the ticket was pulled under and the scopes open on
+/// this machine.
 ///
 /// The associated types are the three seams [`Pulling`] takes, so a test hands in
 /// stand-ins that answer out of memory and a run spends no model pass at all.
@@ -741,7 +741,7 @@ pub(crate) trait Raises {
 pub(crate) struct Raising<'a> {
     /// The scope the ticket was pulled under, which the sub-task prompt names.
     pub(crate) scope: &'a str,
-    /// And the sigils this machine holds, which it names beside it.
+    /// And the open scopes, which it names beside it.
     pub(crate) held: &'a [String],
     /// Where everything a session is seen doing goes.
     pub(crate) events: Port<Step>,
@@ -803,11 +803,11 @@ impl Splits for Splitter {
     }
 }
 
-/// One sub-task session per call, at the system prompt the scope and the sigils
-/// make.
+/// One sub-task session per call, at the system prompt the scope and the open
+/// scopes make.
 ///
 /// The prompt is built once, because it says which scope the work is under and
-/// which sigils this machine holds, and neither moves for the length of a run.
+/// which scopes are open on this machine, and neither moves for the length of a run.
 pub(crate) struct Worker {
     agent: ChatAgent,
     activities: Activities,
@@ -1371,8 +1371,8 @@ fn refused(in_flight: &str) -> String {
 }
 
 // Every test drives a temporary repository and a temporary home, through the seams
-// this value is built with: nothing in the suite reads the sigils, the binding or
-// the key store of the machine it runs on, opens a socket, runs a `git` or raises
+// this value is built with: nothing in the suite reads the config or the key
+// store of the machine it runs on, opens a socket, runs a `git` or raises
 // a `claude`.
 #[cfg(test)]
 #[path = "tests/puller.rs"]

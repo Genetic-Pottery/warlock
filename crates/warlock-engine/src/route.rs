@@ -1,20 +1,20 @@
 // The home directory is a parameter here for the reason it is one in
-// `sigils.rs` and `keys.rs`: this function reads the machine's key store, and a
+// `config.rs` and `keys.rs`: this function reads the machine's key store, and a
 // module that resolved `HOME` itself could let a test in this crate read the
 // developer's real credentials.
 
 use std::fmt;
 use std::path::{Path, PathBuf};
 
+use crate::config::{self, config_path, load_key_binding, open_scopes};
 use crate::keys::{self, keys_path, load_key_names};
 use crate::manifest::{self, Manifest, ScopeRecord, manifest_path};
 use crate::scope::{scope_covering, scope_opens_to};
-use crate::sigils::{self, held_sigils, load_key_binding, sigils_path};
 
 /// ```
 /// use warlock_engine::{
 ///     Manifest, ScopedDirectory, ScopeRecord, resolve_route, route, save_key, save_key_binding,
-///     save_sigils,
+///     save_open_scopes,
 /// };
 ///
 /// let (home, root) = (tempfile::tempdir()?, tempfile::tempdir()?);
@@ -23,7 +23,7 @@ use crate::sigils::{self, held_sigils, load_key_binding, sigils_path};
 /// ])
 /// .with_scopes([ScopeRecord::new("data-plane", "WAR", "In Review", "area/data-plane")]);
 ///
-/// save_sigils(home.path(), root.path(), &["web".to_owned()])?;
+/// save_open_scopes(home.path(), root.path(), &["web".to_owned()])?;
 /// save_key_binding(home.path(), root.path(), "data-plane", "work")?;
 /// save_key(home.path(), "work", "lin_api_example")?;
 ///
@@ -32,7 +32,7 @@ use crate::sigils::{self, held_sigils, load_key_binding, sigils_path};
 /// assert_eq!(route.record().team_key(), "WAR");
 /// assert_eq!(route.record().review_state(), "In Review");
 /// assert_eq!(route.key(), "work");
-/// // This machine holds no sigil for that scope: a fact beside the route,
+/// // That scope is not open on this machine: a fact beside the route,
 /// // reported and never a refusal.
 /// assert!(!route.opens());
 ///
@@ -76,10 +76,10 @@ pub fn resolve_route(
     };
 
     // Before the two key refusals below, which is what keeps a config that
-    // will not parse a `Sigils` refusal here even though `route_facts` reads
+    // will not parse a `Config` refusal here even though `route_facts` reads
     // the same file forgivingly: the broken file is reported as broken rather
     // than as a checkout bound to nothing.
-    let held = held_sigils(home, root).map_err(|source| Error::Sigils { source })?;
+    let held = open_scopes(home, root).map_err(|source| Error::Config { source })?;
 
     // Both refusals name the covering scope, because that is the scope the
     // binding is read for and the word a person types back at `warlock key
@@ -90,7 +90,7 @@ pub fn resolve_route(
         (None, _) => {
             return Err(Error::Unbound {
                 scope: scope.to_owned(),
-                path: sigils_path(home, root),
+                path: config_path(home, root),
             });
         }
         (Some(key), false) => {
@@ -125,7 +125,7 @@ pub(crate) fn bound_key(home: &Path, root: &Path, scope: &str) -> Result<String,
     let Some(key) = load_key_binding(home, root, scope).unwrap_or_default() else {
         return Err(Error::Unbound {
             scope: scope.to_owned(),
-            path: sigils_path(home, root),
+            path: config_path(home, root),
         });
     };
 
@@ -190,10 +190,10 @@ fn is_stored(home: &Path, name: &str) -> Result<bool, Error> {
 // been paid for by every other caller: a `Route` in hand is a route that can
 // actually be filed, which is the whole guarantee `resolve_route` sells.
 //
-// No sigil is read here, deliberately. `held_sigils`, `scope_opens_to` and
+// No open scope is read here, deliberately. `open_scopes`, `scope_opens_to` and
 // `opens` stay in the wrapper because a config that will not parse is
-// `Sigils::Unknown` to `check` — an answer, printed, with exit 0 — and reading
-// the held set here would turn it into a failure.
+// `OpenScopes::Unknown` to `check` — an answer, printed, with exit 0 — and
+// reading the open scopes here would turn it into a failure.
 //
 // `home` is `None` for a caller that could not resolve one, and that reads as
 // no key bound: a machine with no home has no key store to bind to either, and
@@ -225,7 +225,7 @@ pub fn route_facts<'m>(
     // A config that is unreadable or will not parse reads as nothing bound,
     // unlike the key store below, where the same breakage is an error. The
     // asymmetry is the one thing here that is not obvious: the caller wanting
-    // these facts reads that same config for the held sigils and already
+    // these facts reads that same config for the open scopes and already
     // reports it as unknown, so a mangled config is visible either way, while a
     // mangled key store swallowed as "that name is not stored" would leave no
     // trace anywhere. Propagating it instead would make `warlock check` exit
@@ -249,8 +249,8 @@ pub fn route_facts<'m>(
     })
 }
 
-// `opens` is carried rather than checked: a scope this machine holds no sigil
-// for still resolves to its full route, because the decision this implements is
+// `opens` is carried rather than checked: a scope that is not open on this
+// machine still resolves to its full route, because the decision this implements is
 // that warlock says what is being crossed and continues. Refusing here would
 // brick the ordinary case of one person covering for another.
 //
@@ -351,8 +351,8 @@ pub enum Error {
     Path {
         source: manifest::Error,
     },
-    Sigils {
-        source: sigils::Error,
+    Config {
+        source: config::Error,
     },
     Keys {
         source: keys::Error,
@@ -388,8 +388,11 @@ impl fmt::Display for Error {
             Self::Path { source } => {
                 write!(f, "could not place the path in the repository: {source}")
             }
-            Self::Sigils { source } => {
-                write!(f, "could not read what this machine holds: {source}")
+            Self::Config { source } => {
+                write!(
+                    f,
+                    "could not read which scopes are open on this machine: {source}"
+                )
             }
             Self::Keys { source } => write!(f, "could not read the key store: {source}"),
         }
@@ -400,7 +403,7 @@ impl std::error::Error for Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Path { source } => Some(source),
-            Self::Sigils { source } => Some(source),
+            Self::Config { source } => Some(source),
             Self::Keys { source } => Some(source),
             Self::Unscoped { .. }
             | Self::Unrecorded { .. }

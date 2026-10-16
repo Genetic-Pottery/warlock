@@ -33,7 +33,7 @@ use std::time::Instant;
 
 use warlock_engine::{Manifest, ScopedDirectory, save_key_binding, to_manifest_path};
 
-use crate::app::{App, Sigils};
+use crate::app::{App, OpenScopes};
 use crate::error::Error;
 use crate::prompt::{
     Edited, KeyChoice, KeyEdited, KeyPrompt, RecordEdited, RecordField, RecordForm, RecordPrompt,
@@ -54,7 +54,7 @@ pub(crate) fn scope_press(
     app: &mut App,
     manifest: &Manifest,
     repo_root: &Path,
-    sigils: &Sigils,
+    open: &OpenScopes,
     pulling: Option<&str>,
     now: Instant,
 ) -> ScopePrompt {
@@ -65,10 +65,10 @@ pub(crate) fn scope_press(
         app.panel_mut().note(refused(pulling), now);
         return ScopePrompt::Closed;
     }
-    // You must hold a boundary to redraw it. Before `scope_target`, because
+    // A boundary is redrawn only where its scope is open. Before `scope_target`, because
     // whether this operator may act here is settled ahead of what the key would
     // have done.
-    if closed_scope(app, manifest, repo_root, sigils) {
+    if closed_scope(app, manifest, repo_root, open) {
         return ScopePrompt::Closed;
     }
     // Every row-level refusal leaves through here as `None`, having already put
@@ -404,7 +404,7 @@ pub(crate) fn key_edit(
 // the one outcome a reader cannot tell from success. Both roads to one are the
 // engine's — a scope or a name whose shape `validate_scope` turns down, and a
 // config this machine cannot write — and the sentence is the engine's too,
-// flattened by [`Error`]'s `Display` as every other sigils failure in this
+// flattened by [`Error`]'s `Display` as every other config failure in this
 // binary is.
 //
 // The `None` arm cannot be reached either: `key_edit_for` only answers `Submit`
@@ -415,7 +415,7 @@ pub(crate) fn key_submit(app: &mut App, home: &Path, root: &Path, choice: &KeyCh
     };
 
     if let Err(source) = save_key_binding(home, root, choice.scope(), name) {
-        app.set_message(Error::Sigils { source }.to_string());
+        app.set_message(Error::Config { source }.to_string());
     }
     KeyPrompt::Closed
 }
