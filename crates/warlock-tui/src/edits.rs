@@ -20,7 +20,7 @@ use warlock_engine::Manifest;
 use crate::boundary::{Verdict, permits};
 use crate::error::Error;
 use crate::query::spelled;
-use crate::rescope::{RecordFields, rescope};
+use crate::rescope::{Record, RecordFields, TypedRecord, rescope};
 use crate::settings::Settings;
 use crate::standing::{FOR_SCOPE_ADD, FOR_SCOPE_REMOVE, Standing};
 
@@ -86,9 +86,10 @@ impl Opened {
     // The path is spelled first because the ordering rule stops at the boundary
     // and not at the write: a path with no manifest form is this command's own
     // refusal, and asking first means a run with two things wrong with it answers
-    // about where it was pointed. Every rule after that is [`rescope`]'s, which
-    // the `s` key's two windows ask as well.
-    fn scoped(&self, scope: &str, record: RecordFields<'_>) -> Result<String, Error> {
+    // about where it was pointed. Every rule after that is [`rescope`]'s — the
+    // tracker word and which flags go with it included — which the `s` key's
+    // windows ask as well.
+    fn scoped<'a>(&self, scope: &str, record: impl Into<Record<'a>>) -> Result<String, Error> {
         let module = spelled(&self.repo_root, &self.target)?;
         let rescoped = rescope(&self.manifest, &module, Some(scope), record)
             .map_err(|refusal| Error::Scope { refusal })?;
@@ -150,10 +151,10 @@ pub(crate) fn opened(wanted: &'static str, path: &Path) -> Result<Opened, Error>
 // boundary and the resolution, `Opened::scoped` is the edit and the sentence,
 // and this is the subcommand. `main` prints a refusal on stderr and takes the
 // status from the error — a 3 for a closed boundary, a 1 for everything else.
-pub fn scope_add(path: &Path, scope: &str, flags: RecordFields<'_>) -> Result<(), Error> {
+pub fn scope_add(path: &Path, scope: &str, record: TypedRecord<'_>) -> Result<(), Error> {
     println!(
         "warlock: {}",
-        opened(FOR_SCOPE_ADD, path)?.scoped(scope, flags)?
+        opened(FOR_SCOPE_ADD, path)?.scoped(scope, record)?
     );
     Ok(())
 }

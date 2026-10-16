@@ -692,8 +692,9 @@ impl fmt::Display for Error {
                 refusal: refusal @ ScopeRefusal::Recorded { .. },
             } => write!(
                 f,
-                "{refusal}: run without `--team-key`, `--review-state` and `--label` to write the \
-                 scope, or edit the file to change the record"
+                "{refusal}: run with the path and the scope alone — no tracker, no `--team-key`, \
+                 `--review-state` or `--label` — to write the scope, or edit the file to change \
+                 the record"
             ),
             Self::Scope { refusal } => write!(f, "{refusal}"),
             // The engine's `.git` wording, with what it cost the caller on the
@@ -987,15 +988,16 @@ pub const fn status_for(outcome: &Result<(), Error>) -> u8 {
         // verdict on anything: it sits apart from the catch-all because it is
         // the number a shell already spells an interrupted process with.
         Err(Error::Cancelled) => CANCELLED,
-        // Everything else, and that includes `warlock scope add`'s three
-        // refusals about a `[[scope]]` record — deliberately, rather than for
-        // want of somewhere to put them. A **1** and not clap's **2**: which
-        // flags a run needs depends on what the manifest already records, so
-        // the rule is warlock's to word rather than a command line clap could
-        // have parsed, and a scope name the engine refuses already spends this
-        // register. Not a **3** either — that one is the boundary's alone, and
-        // a script reading it as "open a scope" would be sent to `warlock open`
-        // over a missing `--team-key`.
+        // Everything else, and that includes every refusal `warlock scope add`
+        // has about a `[[scope]]` record — the tracker word among them,
+        // deliberately, rather than for want of somewhere to put it. A **1**
+        // and not clap's **2**: which tracker and which flags a run needs
+        // depends on what the manifest already records, so the rule is
+        // warlock's to word rather than a command line clap could have parsed,
+        // and a scope name the engine refuses already spends this register. Not
+        // a **3** either — that one is the boundary's alone, and a script
+        // reading it as "open a scope" would be sent to `warlock open` over a
+        // missing `--team-key`.
         Err(_) => 1,
     }
 }
