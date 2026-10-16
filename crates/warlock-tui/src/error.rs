@@ -161,6 +161,13 @@ pub enum Error {
     Filing {
         source: filing::Error,
     },
+    // A scope whose record files somewhere warlock cannot file to, carried
+    // rather than reworded: the engine's sentence already names the scope and
+    // ends in nothing having been sent, which is the whole of what a caller on
+    // its way to a board has to say.
+    NotLinear {
+        source: manifest::NotLinear,
+    },
     // A file that is not a brief: absent, unreadable, untitled, or missing a
     // section of the repository's shape. Raised before a socket is opened, like
     // every other refusal a push has.
@@ -372,6 +379,32 @@ impl Error {
                 .collect(),
             cost,
         }
+    }
+}
+
+/// The one question every door to a board asks first: does the scope it was
+/// given file somewhere warlock can file to.
+///
+/// Written once here rather than at each of the doors — `push`, `draft` and
+/// `pull`, at the shell and at the panel — because a tracker read a second way
+/// is the reading that would let one of them through. Every one of them calls it
+/// before it reads a key, opens a client or parks anything behind a window, so a
+/// Jira scope costs a manifest lookup and nothing else, which is what the
+/// refusal's own "nothing was sent" is promising.
+///
+/// A scope no `[[scope]]` record holds is `Ok` here and not this refusal: there
+/// is no tracker to read off a record that is not there, and the door behind
+/// this has the sentence that names the recorded scopes. Nothing reaches a board
+/// on that road either.
+pub(crate) fn files_to_linear(manifest: &Manifest, scope: &str) -> Result<(), Error> {
+    match manifest.scope_record(scope) {
+        // The engine's view is the only reader of a record's tracker, so this is
+        // the same answer the flows past it get — and its refusal is the
+        // engine's sentence, carried by `Error::NotLinear` and not reworded.
+        Some(record) => manifest::LinearScope::of(record)
+            .map(drop)
+            .map_err(Error::from),
+        None => Ok(()),
     }
 }
 
@@ -747,6 +780,10 @@ impl fmt::Display for Error {
             // Flattened because the key store and the manifest underneath can
             // carry a parser's diagnostic.
             Self::Filing { source } => write!(f, "{}", one_line(source)),
+            // The engine's sentence to the letter, for `Filing`'s reason: it
+            // names the scope and what it cost, and a second wording here would
+            // be a second answer to one question.
+            Self::NotLinear { source } => write!(f, "{source}"),
             // The reader's own sentence about the document, which already ends
             // in what it cost — nothing was pushed.
             Self::Brief { source } => write!(f, "{source}"),
@@ -831,6 +868,7 @@ impl std::error::Error for Error {
             Self::Keys { source } => Some(source),
             Self::Route { source } => Some(source),
             Self::Filing { source } => Some(source),
+            Self::NotLinear { source } => Some(source),
             Self::Brief { source } => Some(source),
             Self::Template { source } => Some(source),
             Self::Briefs { source } => Some(source),
@@ -897,6 +935,15 @@ impl std::error::Error for Error {
 impl From<LinearError> for Error {
     fn from(source: LinearError) -> Self {
         Self::Linear { source }
+    }
+}
+
+// A `From` rather than a `map_err` at each site, because every caller that asks
+// a record for its Linear view is one `?` away from this and the refusal has
+// nothing to be told at any of them.
+impl From<manifest::NotLinear> for Error {
+    fn from(source: manifest::NotLinear) -> Self {
+        Self::NotLinear { source }
     }
 }
 

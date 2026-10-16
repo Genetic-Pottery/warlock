@@ -33,12 +33,13 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use warlock_engine::{
-    Manifest, PullRun, ScopeRecord, brief_path, held_runs, resolve_filing, scope_opens_to,
+    LinearScope, Manifest, PullRun, ScopeRecord, brief_path, held_runs, resolve_filing,
+    scope_opens_to,
 };
 
 use crate::account::{THINKING, WRITING, tool_line};
 use crate::claude::{Activities, Activity};
-use crate::error::{Error, NO_QUEUE, one_line, say};
+use crate::error::{Error, NO_QUEUE, files_to_linear, one_line, say};
 use crate::git::{Forge, Gh, Git, Repository};
 use crate::linear::{Board, Key, Opener as LinearOpener, Opens, QueuedIssue};
 use crate::puller::{Splitter, Stopping, Worker};
@@ -135,8 +136,9 @@ pub(crate) fn pulled<O: Opens, R: Repository, F: Forge, S: Splits, W: Works, P: 
     progress: &Shared<P>,
 ) -> Result<(), Error> {
     let (root, home) = (prepared.root(), prepared.home());
-    let record = prepared.record();
-    let scope = record.name();
+    // Before the tree is read and before the board is opened: a scope warlock
+    // cannot file to is refused with nothing run and no client built.
+    let scope = LinearScope::of(prepared.record())?;
 
     // Before the board is opened and before the queue is read: what a dirty tree
     // costs is a run that would fold somebody's uncommitted edit into a sub-task's
@@ -146,12 +148,12 @@ pub(crate) fn pulled<O: Opens, R: Repository, F: Forge, S: Splits, W: Works, P: 
     }
 
     let board = ports.open.open(prepared.value());
-    let selected = selection(&board, record, home, root, named, &mut |line| {
+    let selected = selection(&board, scope, home, root, named, &mut |line| {
         tell(progress, &line);
     })?;
 
     if dry_run {
-        for line in would(scope, named, &selected) {
+        for line in would(scope.name(), named, &selected) {
             tell(progress, &line);
         }
         return Ok(());
@@ -162,7 +164,7 @@ pub(crate) fn pulled<O: Opens, R: Repository, F: Forge, S: Splits, W: Works, P: 
     }
 
     let Some(issue) = selected.issue(named)? else {
-        tell(progress, &nothing_ready(scope));
+        tell(progress, &nothing_ready(scope.name()));
         return Ok(());
     };
 
@@ -183,7 +185,7 @@ pub(crate) fn pulled<O: Opens, R: Repository, F: Forge, S: Splits, W: Works, P: 
             forge: ports.forge,
             split: ports.split,
             sessions: ports.sessions,
-            scope: record,
+            scope,
             manifest,
             held: prepared.held(),
             base: prepared.base(),
@@ -263,14 +265,17 @@ impl Prepared {
     }
 }
 
-/// The three questions a pull answers before it asks the world anything, in the
+/// The four questions a pull answers before it asks the world anything, in the
 /// order the answers are worth having.
 ///
 /// The record first, because a scope no `[[scope]]` record holds is a manifest
 /// one line short and the fix is in this repository. Open second, because a
-/// recorded scope closed on this machine is a boundary and its own status.
-/// The key last, through the very [`resolve_filing`] a push and a draft go
-/// through, so an unbound checkout is told the same sentence by all three verbs.
+/// recorded scope closed on this machine is a boundary and its own status. The
+/// tracker third, because a scope that files to Jira is a pull warlock can only
+/// refuse, and refusing it before the key is read is what makes "nothing was
+/// sent" true of it. The key last, through the very [`resolve_filing`] a push
+/// and a draft go through, so an unbound checkout is told the same sentence by
+/// all three verbs.
 pub(crate) fn prepare(
     manifest: &Manifest,
     root: &Path,
@@ -294,8 +299,14 @@ pub(crate) fn prepare(
         });
     }
 
-    // Reached only with the two questions above already answered, so the board
-    // refusals it can raise cannot fire: the name is a candidate by construction.
+    // Above `resolve_filing`, which loads the key value: a scope warlock cannot
+    // file to is refused with no key read, no `git` run and no client built.
+    // `pulled` reads the same record through the same view a moment later, so
+    // this is where that refusal is asked rather than a second rule.
+    files_to_linear(manifest, scope)?;
+
+    // Reached only with the record and open questions above already answered, so
+    // the board refusals it can raise cannot fire: the name is a candidate by construction.
     // What is left of it is the key half, which is why it is asked at all.
     let target = resolve_filing(manifest, root, home, Some(scope))
         .map_err(|source| Error::Filing { source })?;
@@ -330,32 +341,32 @@ pub(crate) fn clean<R: Repository>(repo: &R) -> Result<(), Error> {
 /// board does not swallow it.
 pub(crate) fn selection(
     board: &impl Board,
-    record: &ScopeRecord,
+    scope: LinearScope<'_>,
     home: &Path,
     root: &Path,
     named: Option<&str>,
     unreadable: &mut dyn FnMut(String),
 ) -> Result<Selected, Error> {
     let assignee = board.viewer()?;
-    let runs = held_runs(home, root, record.name()).map_err(|source| Error::Runs { source })?;
+    let runs = held_runs(home, root, scope.name()).map_err(|source| Error::Runs { source })?;
     for record in runs.unreadable() {
         unreadable(one_line(record));
     }
-    select(board, record, &assignee, named, runs.runs())
+    select(board, scope, &assignee, named, runs.runs())
 }
 
 fn select(
     board: &impl Board,
-    record: &ScopeRecord,
+    scope: LinearScope<'_>,
     assignee: &str,
     named: Option<&str>,
     runs: &[PullRun],
 ) -> Result<Selected, Error> {
     Ok(match named {
-        Some(ticket) => Selected::Named(take_named(board, record, assignee, ticket, runs)?),
+        Some(ticket) => Selected::Named(take_named(board, scope, assignee, ticket, runs)?),
         None => Selected::Chosen(choose(
-            &board.scope_queue(record.team_key(), record.label(), assignee)?,
-            record.review_state(),
+            &board.scope_queue(scope.team_key(), scope.label(), assignee)?,
+            scope.review_state(),
             runs,
         )),
     })

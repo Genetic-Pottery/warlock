@@ -442,6 +442,32 @@ fn binding_keeps_the_scopes_the_config_already_had_open() {
 }
 
 #[test]
+fn binding_a_scope_that_files_to_jira_is_written_like_any_other() {
+    // A binding is a name in this checkout's config and says nothing about what
+    // the scope files to: the record question `bound` asks is whether there is
+    // one, so a scope warlock cannot file to still binds. The refusal belongs to
+    // the verbs that reach a board.
+    let (home, repo) = (a_dir(), a_dir());
+    save_key(home.path(), "acme", SECRET).expect("a store that saves");
+    let manifest = Manifest::new().with_scopes([ScopeRecord::jira(
+        "payments",
+        "https://acme.atlassian.net",
+        "PAY",
+        "In Review",
+        "area/pay",
+    )]);
+
+    let (outcome, said) = bind_against(home.path(), repo.path(), &manifest, "payments", "acme");
+
+    outcome.expect("a recorded scope binds whatever it files to");
+    assert_eq!(
+        load_key_binding(home.path(), repo.path(), "payments").expect("the config still loads"),
+        Some("acme".to_owned())
+    );
+    assert!(said.contains("payments"), "{said}");
+}
+
+#[test]
 fn forgetting_a_name_the_store_has_never_heard_of_removes_nothing() {
     let (home, repo) = (a_dir(), a_dir());
 

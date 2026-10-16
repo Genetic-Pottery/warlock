@@ -42,7 +42,7 @@ use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
-use warlock_engine::{Manifest, route_facts, scope_opens_to};
+use warlock_engine::{LinearScope, Manifest, route_facts, scope_opens_to};
 
 use crate::app::OpenScopes;
 use crate::boundary::{closed_scope_message, unscoped_message};
@@ -229,7 +229,12 @@ fn checked(
         open,
         config: settings.config().map(Path::to_path_buf),
         opens,
-        team: record.map(|record| record.team_key().to_owned()),
+        // A team only where there is one: a check reports and never refuses,
+        // so a scope that files somewhere else is a record with no team here
+        // rather than a failure, exactly as a path with no record is.
+        team: record
+            .and_then(|record| LinearScope::of(record).ok())
+            .map(|linear| linear.team_key().to_owned()),
         review_state: record.map(|record| record.review_state().to_owned()),
         label: record.map(|record| record.label().to_owned()),
         key: facts.key().map(str::to_owned),

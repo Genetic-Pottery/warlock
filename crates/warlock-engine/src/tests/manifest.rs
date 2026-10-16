@@ -2,8 +2,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use super::{
-    Error, MANIFEST_FILE, Manifest, SCHEMA_VERSION, ScopeFault, ScopeRecord, ScopedDirectory,
-    from_manifest_path, manifest_path, to_manifest_path,
+    Error, LinearScope, MANIFEST_FILE, Manifest, NotLinear, SCHEMA_VERSION, ScopeFault,
+    ScopeRecord, ScopedDirectory, from_manifest_path, manifest_path, to_manifest_path,
 };
 
 fn engine() -> ScopedDirectory {
@@ -39,6 +39,15 @@ fn warlock_dir_listing(root: &Path) -> Vec<String> {
     names
 }
 
+// The team key is read through the view and never off the record, which is the
+// only way there is to read one: a record is a name, a tracker, a review state
+// and a label.
+fn team_of(record: &ScopeRecord) -> &str {
+    LinearScope::of(record)
+        .expect("the fixture records a Linear scope")
+        .team_key()
+}
+
 fn hand_write(root: &Path, text: &str) {
     let path = manifest_path(root);
     fs::create_dir_all(path.parent().expect("the manifest has a directory"))
@@ -52,7 +61,7 @@ fn a_scoped_directory_round_trips_byte_for_byte() {
     // Hand-written, so this says where the keys sit in the file and not
     // merely that the serialiser agrees with itself.
     let original = concat!(
-        "version = 1\n\n",
+        "version = 2\n\n",
         "[[directory]]\n",
         "path = \"crates/warlock-engine\"\n",
         "scope = \"data-plane\"\n",
@@ -96,7 +105,7 @@ fn an_invalid_scope_loads_untouched_and_is_written_back_unchanged() {
         let root = a_root();
         let original = format!(
             concat!(
-                "version = 1\n\n",
+                "version = 2\n\n",
                 "[[directory]]\n",
                 "path = \"crates/warlock-engine\"\n",
                 "scope = \"{}\"\n",
@@ -142,7 +151,7 @@ fn a_directory_row_missing_either_key_is_refused() {
         "[[directory]]\npath = \"crates/warlock-engine\"\n",
         "[[directory]]\nscope = \"data-plane\"\n",
     ] {
-        let text = format!("version = 1\n\n{body}");
+        let text = format!("version = 2\n\n{body}");
         assert!(
             matches!(
                 Manifest::from_toml_str(&text),
@@ -156,7 +165,7 @@ fn a_directory_row_missing_either_key_is_refused() {
 #[test]
 fn a_directory_row_with_an_unknown_key_is_refused() {
     let text = concat!(
-        "version = 1\n\n",
+        "version = 2\n\n",
         "[[directory]]\n",
         "path = \"crates/warlock-engine\"\n",
         "scope = \"data-plane\"\n",
@@ -180,12 +189,13 @@ fn a_scope_record_round_trips_byte_for_byte() {
     // order its keys are written, not merely that the serialiser agrees with
     // itself.
     let original = concat!(
-        "version = 1\n\n",
+        "version = 2\n\n",
         "[[directory]]\n",
         "path = \"crates/warlock-engine\"\n",
         "scope = \"data-plane\"\n\n",
         "[[scope]]\n",
         "name = \"data-plane\"\n",
+        "tracker = \"linear\"\n",
         "team = \"War \"\n",
         "review_state = \"In Review\"\n",
         "label = \"area/Data_Plane\"\n",
@@ -206,7 +216,7 @@ fn a_scope_record_round_trips_byte_for_byte() {
 
     let record = &loaded.scopes()[0];
     assert_eq!(record.name(), "data-plane");
-    assert_eq!(record.team_key(), "War ", "neither trimmed nor folded");
+    assert_eq!(team_of(record), "War ", "neither trimmed nor folded");
     assert_eq!(record.review_state(), "In Review", "not folded");
     assert_eq!(record.label(), "area/Data_Plane", "not folded either");
 
@@ -219,12 +229,103 @@ fn a_scope_record_round_trips_byte_for_byte() {
 }
 
 #[test]
+fn a_jira_record_round_trips_byte_for_byte() {
+    let root = a_root();
+    // The second tracker, hand-written for the first one's reason: this says
+    // that `tracker` comes before the two keys it decides and that neither the
+    // URL's trailing slash nor the spaces around the project key are touched.
+    let original = concat!(
+        "version = 2\n\n",
+        "[[scope]]\n",
+        "name = \"payments\"\n",
+        "tracker = \"jira\"\n",
+        "base_url = \"https://acme.atlassian.net/\"\n",
+        "project_key = \" PAY \"\n",
+        "review_state = \"In Review\"\n",
+        "label = \"area/pay\"\n",
+    );
+    hand_write(root.path(), original);
+
+    let loaded = Manifest::load(root.path()).expect("loads");
+    assert_eq!(
+        loaded,
+        Manifest::new().with_scopes([ScopeRecord::jira(
+            "payments",
+            "https://acme.atlassian.net/",
+            " PAY ",
+            "In Review",
+            "area/pay",
+        )]),
+        "the file and the constructed manifest are the same manifest"
+    );
+    assert!(
+        matches!(LinearScope::of(&loaded.scopes()[0]), Err(NotLinear { .. })),
+        "a Jira record is not a Linear scope, which is the whole of what it records"
+    );
+
+    loaded.save(root.path()).expect("saves");
+    assert_eq!(
+        fs::read_to_string(manifest_path(root.path())).expect("reads"),
+        original,
+        "no scheme added, no slash dropped and no key trimmed on the way through"
+    );
+}
+
+#[test]
+fn a_manifest_of_either_tracker_round_trips_through_its_own_text() {
+    let manifest = Manifest::with_directories([engine(), tui()]).with_scopes([
+        ScopeRecord::new("data-plane", " War ", "In Review", "area/data"),
+        ScopeRecord::jira(
+            "payments",
+            "https://acme.atlassian.net/",
+            "PAY",
+            "Review ",
+            "area/pay",
+        ),
+    ]);
+
+    let text = manifest.to_toml_string().expect("serialises");
+    assert_eq!(
+        Manifest::from_toml_str(&text).expect("parses"),
+        manifest,
+        "both trackers survive a write and a read: {text}"
+    );
+}
+
+#[test]
+fn a_record_read_as_a_linear_scope_carries_its_values_as_spelled() {
+    let record = ScopeRecord::new("data-plane", " War ", "In Review", "area/Data_Plane");
+    let linear = LinearScope::of(&record).expect("every record files to Linear");
+
+    assert_eq!(linear.name(), "data-plane");
+    assert_eq!(linear.team_key(), " War ", "neither trimmed nor folded");
+    assert_eq!(linear.review_state(), "In Review", "not folded");
+    assert_eq!(linear.label(), "area/Data_Plane", "not folded either");
+}
+
+// Built here rather than asked of `LinearScope::of`, which answers `Ok` for
+// every record `ScopeRecord` can hold: the sentence is what a scope filing
+// somewhere warlock cannot file to will say, and it is fixed before any record
+// can be one.
+#[test]
+fn a_scope_that_files_elsewhere_is_refused_by_name_with_nothing_sent() {
+    let refusal = NotLinear {
+        scope: "payments".to_owned(),
+    };
+
+    assert_eq!(
+        refusal.to_string(),
+        "`payments` files to Jira, and warlock can only file to Linear, so nothing was sent"
+    );
+}
+
+#[test]
 fn a_scope_a_directory_names_and_no_record_declares_loads() {
     let root = a_root();
     // A reader that treated a scope with no record as a hole would refuse a
     // manifest that is only one `[[scope]]` table short of routing.
     let original = concat!(
-        "version = 1\n\n",
+        "version = 2\n\n",
         "[[directory]]\n",
         "path = \"crates/warlock-engine\"\n",
         "scope = \"data-plane\"\n\n",
@@ -265,12 +366,13 @@ fn a_record_no_directory_names_is_loaded_and_written_back_unchanged() {
     // scoped under it and outlives the last directory that named it, so
     // pruning it to what the rows happen to say would lose the only copy.
     let original = concat!(
-        "version = 1\n\n",
+        "version = 2\n\n",
         "[[directory]]\n",
         "path = \"crates/warlock-engine\"\n",
         "scope = \"data-plane\"\n\n",
         "[[scope]]\n",
         "name = \"third-party\"\n",
+        "tracker = \"linear\"\n",
         "team = \"Vendor\"\n",
         "review_state = \"Triage\"\n",
         "label = \"area/vendor\"\n",
@@ -323,7 +425,7 @@ fn a_manifest_with_no_records_writes_no_scope_table() {
         assert_eq!(
             text,
             concat!(
-                "version = 1\n\n",
+                "version = 2\n\n",
                 "[[directory]]\n",
                 "path = \"crates/warlock-engine\"\n",
                 "scope = \"data-plane\"\n\n",
@@ -342,20 +444,26 @@ fn a_malformed_record_is_named_rather_than_read_as_absent() {
     // A missing key, a wrong-typed value and a key nothing declares. Each one
     // is the record being wrong, never the record being missing: a reader that
     // skipped it would route work under `data-plane` nowhere and say nothing.
+    let linear = "[[scope]]\nname = \"data-plane\"\ntracker = \"linear\"\n";
     let bodies = [
-        "[[scope]]\nname = \"data-plane\"\nteam = \"Data Plane\"\nlabel = \"area\"\n",
-        "[[scope]]\nname = \"data-plane\"\nteam = 7\nreview_state = \"In Review\"\nlabel = \"area\"\n",
-        "[[scope]]\nname = \"data-plane\"\nteam = \"Data Plane\"\nreview_state = \"In Review\"\nlabel = \"area\"\nlead = \"someone\"\n",
+        format!("{linear}team = \"Data Plane\"\nlabel = \"area\"\n"),
+        format!("{linear}team = 7\nreview_state = \"In Review\"\nlabel = \"area\"\n"),
+        format!(
+            "{linear}team = \"Data Plane\"\nreview_state = \"In Review\"\nlabel = \"area\"\nlead = \"someone\"\n"
+        ),
     ];
 
     for body in bodies {
-        let text = format!("version = 1\n\n{body}");
+        let text = format!("version = 2\n\n{body}");
         match Manifest::from_toml_str(&text) {
             Err(Error::Scope {
                 path: None,
                 index: 0,
                 name: Some(name),
-                source: ScopeFault::Malformed(_),
+                source:
+                    ScopeFault::MissingKey { .. }
+                    | ScopeFault::NotAString { .. }
+                    | ScopeFault::UnexpectedKey { .. },
             }) => assert_eq!(name, "data-plane", "named by the name it did spell"),
             other => panic!("expected a malformed-record error for `{body}`, got {other:?}"),
         }
@@ -373,6 +481,75 @@ fn a_malformed_record_is_named_rather_than_read_as_absent() {
 }
 
 #[test]
+fn a_record_is_refused_by_the_key_at_fault_and_the_tracker_it_declared() {
+    // Every way one table can be wrong about its tracker, each answered by the
+    // key or the value a person has to go and edit. The version-1 shape is the
+    // first of them: a record with no `tracker` key is refused rather than read
+    // as the Linear one it used to be.
+    let cases: [(&str, &str); 7] = [
+        (
+            "name = \"data-plane\"\nteam = \"WAR\"\nreview_state = \"In Review\"\nlabel = \"area\"\n",
+            "the `tracker` key is missing",
+        ),
+        (
+            "name = \"data-plane\"\ntracker = \"github\"\nreview_state = \"In Review\"\nlabel = \"area\"\n",
+            "`github` is not a tracker warlock knows; a record files to `linear` or `jira`",
+        ),
+        (
+            "name = \"data-plane\"\ntracker = \"linear\"\nreview_state = \"In Review\"\nlabel = \"area\"\n",
+            "the `team` key is missing",
+        ),
+        (
+            "name = \"data-plane\"\ntracker = \"linear\"\nteam = \"WAR\"\nbase_url = \"https://acme.atlassian.net\"\nreview_state = \"In Review\"\nlabel = \"area\"\n",
+            "the `base_url` key is not one a `linear` record holds",
+        ),
+        (
+            "name = \"data-plane\"\ntracker = \"linear\"\nteam = \"WAR\"\nproject_key = \"PAY\"\nreview_state = \"In Review\"\nlabel = \"area\"\n",
+            "the `project_key` key is not one a `linear` record holds",
+        ),
+        (
+            "name = \"payments\"\ntracker = \"jira\"\nbase_url = \"https://acme.atlassian.net\"\nreview_state = \"In Review\"\nlabel = \"area\"\n",
+            "the `project_key` key is missing",
+        ),
+        (
+            "name = \"payments\"\ntracker = \"jira\"\nbase_url = \"https://acme.atlassian.net\"\nproject_key = \"PAY\"\nteam = \"WAR\"\nreview_state = \"In Review\"\nlabel = \"area\"\n",
+            "the `team` key is not one a `jira` record holds",
+        ),
+    ];
+
+    for (body, expected) in cases {
+        let text = format!("version = 2\n\n[[scope]]\n{body}");
+        match Manifest::from_toml_str(&text) {
+            Err(error @ Error::Scope { index: 0, .. }) => {
+                let message = error.to_string();
+                assert!(
+                    message.ends_with(expected),
+                    "expected `{expected}`, got `{message}`"
+                );
+                assert!(
+                    message.contains("scope record 0 (`"),
+                    "the index and the name it spelled: {message}"
+                );
+            }
+            other => panic!("expected `{body}` to be refused, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn a_scope_that_is_not_a_table_is_refused_rather_than_skipped() {
+    match Manifest::from_toml_str("version = 2\n\nscope = [7]\n") {
+        Err(Error::Scope {
+            index: 0,
+            name: None,
+            source: ScopeFault::NotATable,
+            ..
+        }) => {}
+        other => panic!("expected a not-a-table refusal, got {other:?}"),
+    }
+}
+
+#[test]
 fn a_record_name_the_scope_rule_refuses_is_named_rather_than_skipped() {
     // The same rule `validate_scope` applies everywhere else, asked here and
     // nowhere restated. A record is the one place a bad scope is fatal: a
@@ -381,7 +558,7 @@ fn a_record_name_the_scope_rule_refuses_is_named_rather_than_skipped() {
     // it.
     for name in ["", "Data-Plane", "data-", "*", "abcdefghijklmnopqrstuvwxy"] {
         let text = format!(
-            "version = 1\n\n[[scope]]\nname = \"{name}\"\nteam = \"Data Plane\"\nreview_state = \"In Review\"\nlabel = \"area\"\n"
+            "version = 2\n\n[[scope]]\nname = \"{name}\"\ntracker = \"linear\"\nteam = \"Data Plane\"\nreview_state = \"In Review\"\nlabel = \"area\"\n"
         );
         match Manifest::from_toml_str(&text) {
             Err(Error::Scope {
@@ -397,9 +574,9 @@ fn a_record_name_the_scope_rule_refuses_is_named_rather_than_skipped() {
 
 #[test]
 fn two_records_with_the_same_name_are_a_duplicate_error() {
-    let record = "team = \"Data Plane\"\nreview_state = \"In Review\"\nlabel = \"area\"\n";
+    let record = "tracker = \"linear\"\nteam = \"Data Plane\"\nreview_state = \"In Review\"\nlabel = \"area\"\n";
     let text = format!(
-        "version = 1\n\n[[scope]]\nname = \"data-plane\"\n{record}\n[[scope]]\nname = \"billing\"\n{record}\n[[scope]]\nname = \"data-plane\"\n{record}"
+        "version = 2\n\n[[scope]]\nname = \"data-plane\"\n{record}\n[[scope]]\nname = \"billing\"\n{record}\n[[scope]]\nname = \"data-plane\"\n{record}"
     );
 
     match Manifest::from_toml_str(&text) {
@@ -438,7 +615,7 @@ fn a_manifest_with_two_directories_round_trips() {
 #[test]
 fn an_empty_manifest_is_just_the_version() {
     let text = Manifest::new().to_toml_string().expect("serialises");
-    assert_eq!(text, "version = 1\n");
+    assert_eq!(text, "version = 2\n");
     assert_eq!(
         Manifest::from_toml_str(&text).expect("parses"),
         Manifest::default()
@@ -570,14 +747,55 @@ fn an_unrecognised_version_is_rejected_before_the_directories_are_read() {
         }
         other => panic!("expected an unsupported-version error, got {other:?}"),
     }
-    // The derived path refuses it too, rather than reading it as version 1.
+    // The derived path refuses it too, rather than reading it as this version.
     assert!(toml::from_str::<Manifest>(text).is_err());
+}
+
+#[test]
+fn a_version_one_manifest_is_refused_by_both_readers_naming_both_numbers() {
+    // The shape before the tracker, which nothing reads and nothing rewrites:
+    // this repository's own manifest was the one such file and was hand-edited
+    // to version 2. The sentence names both numbers, because the fix is to
+    // open the file and the person has to know what to write.
+    let text = concat!(
+        "version = 1\n\n",
+        "[[scope]]\n",
+        "name = \"data-plane\"\n",
+        "team = \"WAR\"\n",
+        "review_state = \"In Review\"\n",
+        "label = \"area\"\n",
+    );
+    let sentence = "scope manifest schema version 1 is not supported; this build reads version 2";
+
+    match Manifest::from_toml_str(text) {
+        Err(error @ Error::UnsupportedVersion { found: 1, .. }) => {
+            assert_eq!(error.to_string(), sentence);
+        }
+        other => panic!("expected an unsupported-version error, got {other:?}"),
+    }
+
+    // The derived path refuses the version too, through `deserialize_version`
+    // and in the same words. It is asked here with nothing else in the file to
+    // be wrong about, because serde reads the document's keys in its own order
+    // and a record would be refused first.
+    let derived =
+        toml::from_str::<Manifest>("version = 1\n").expect_err("the derived path refuses it too");
+    assert!(derived.to_string().contains(sentence), "{derived}");
+
+    let root = a_root();
+    hand_write(root.path(), text);
+    match Manifest::load(root.path()) {
+        Err(error @ Error::UnsupportedVersion { found: 1, .. }) => {
+            assert_eq!(error.to_string(), sentence);
+        }
+        other => panic!("expected an unsupported-version error, got {other:?}"),
+    }
 }
 
 #[test]
 fn a_malformed_directory_names_itself() {
     let text = concat!(
-        "version = 1\n\n",
+        "version = 2\n\n",
         "[[directory]]\npath = \"crates/warlock-engine\"\nscope = \"data-plane\"\n\n",
         "[[directory]]\npath = \"crates/warlock-tui\"\nscope = 7\n",
     );
@@ -622,7 +840,7 @@ fn every_error_variant_says_what_happened() {
                 found: 999,
                 supported: SCHEMA_VERSION,
             },
-            "scope manifest schema version 999 is not supported; this build reads version 1",
+            "scope manifest schema version 999 is not supported; this build reads version 2",
         ),
         (
             Error::Scope {
@@ -838,7 +1056,7 @@ fn saving_what_was_loaded_gives_the_file_back_byte_for_byte() {
     // statement about the file format and not about the serialiser
     // agreeing with itself.
     let original = concat!(
-        "version = 1\n\n",
+        "version = 2\n\n",
         "[[directory]]\n",
         "path = \"crates/warlock-engine\"\n",
         "scope = \"data-plane\"\n\n",
@@ -882,7 +1100,7 @@ fn loading_a_manifest_with_a_bad_directory_names_that_directory() {
     hand_write(
         root.path(),
         concat!(
-            "version = 1\n\n",
+            "version = 2\n\n",
             "[[directory]]\npath = \"crates/warlock-engine\"\nscope = \"data-plane\"\n\n",
             "[[directory]]\npath = \"crates/warlock-tui\"\nscope = 7\n",
         ),

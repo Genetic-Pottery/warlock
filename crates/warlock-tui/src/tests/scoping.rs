@@ -5,8 +5,8 @@ use std::{fs, io};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use tempfile::TempDir;
 use warlock_engine::{
-    Manifest, Node, ScopeRecord, ScopedDirectory, Tree, config, config_path, load_key_binding,
-    manifest, route_facts, save_key, save_key_binding, validate_scope,
+    LinearScope, Manifest, Node, ScopeRecord, ScopedDirectory, Tree, config, config_path,
+    load_key_binding, manifest, route_facts, save_key, save_key_binding, validate_scope,
 };
 
 use super::{Windows, key_edit, key_submit, record_edit, record_submit, scope_edit, scope_submit};
@@ -34,6 +34,14 @@ fn scope_press(app: &mut App, manifest: &Manifest, repo_root: &Path) -> ScopePro
 
 // What no press of `s` and no Enter in its window is allowed to spend.
 const LAST_KEY: &str = "something the last key said";
+
+// The team key is read through the view, which is the only way there is to
+// read one off a record.
+fn team_of(record: &ScopeRecord) -> &str {
+    LinearScope::of(record)
+        .expect("the record window writes a Linear scope")
+        .team_key()
+}
 
 // The tree below is written out by hand rather than loaded, so nothing is
 // inside this until a scope is saved.
@@ -1139,7 +1147,7 @@ fn the_record_submit_writes_the_scope_and_the_record_in_one_save() {
     // somebody's tracker.
     let record = written.scopes().last().expect("the record was written");
     assert_eq!(record.name(), "billing");
-    assert_eq!(record.team_key(), " Billing Squad ");
+    assert_eq!(team_of(record), " Billing Squad ");
     assert_eq!(record.review_state(), "In Review");
     assert_eq!(record.label(), "Area/Billing");
     assert_eq!(app, before, "the write moved the view");
@@ -1174,7 +1182,7 @@ fn the_router_finds_the_team_review_state_and_label_the_window_was_given() {
     let facts =
         route_facts("crates/tui", ".", &written, None).expect("the module path is inside the root");
     let record = facts.record().expect("the router found no record");
-    assert_eq!(record.team_key(), "Billing");
+    assert_eq!(team_of(record), "Billing");
     assert_eq!(record.review_state(), "In Review");
     assert_eq!(record.label(), "area/billing");
 }
@@ -1297,7 +1305,7 @@ fn the_whole_path_through_both_windows_is_one_key_at_a_time() {
     assert_eq!(scope_on(&written, "crates/tui"), Some("billing"));
     let record = written.scopes().last().expect("the record was written");
     assert_eq!(record.name(), "billing");
-    assert_eq!(record.team_key(), "Billing Squad");
+    assert_eq!(team_of(record), "Billing Squad");
     assert_eq!(record.review_state(), "In Review");
     assert_eq!(record.label(), "area/billing");
     // And the message line came through the whole of it untouched.
@@ -1678,7 +1686,7 @@ fn the_whole_path_from_the_press_to_the_key_window_is_one_key_at_a_time() {
     assert_eq!(scope_on(&written, "crates/tui"), Some(NEW_SCOPE));
     let record = written.scopes().last().expect("the record was written");
     assert_eq!(record.name(), NEW_SCOPE);
-    assert_eq!(record.team_key(), "Billing Squad");
+    assert_eq!(team_of(record), "Billing Squad");
     // And asking is not binding: nothing has reached this machine's config, and
     // the message line came through the whole of it untouched.
     assert_eq!(

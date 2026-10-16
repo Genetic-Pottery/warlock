@@ -3,8 +3,8 @@ use std::path::Path;
 use tempfile::TempDir;
 use warlock_engine::splitting::{Caught, Cycle, Numbered};
 use warlock_engine::{
-    Manifest, PullRun, PullSubtask, RunStatus, ScopeRecord, ScopedDirectory, SubtaskStatus,
-    state_path,
+    LinearScope, Manifest, PullRun, PullSubtask, RunStatus, ScopeRecord, ScopedDirectory,
+    SubtaskStatus, state_path,
 };
 
 use super::{
@@ -12,8 +12,7 @@ use super::{
 };
 use crate::claude::{Split, Stopped, Unsplit, Worked};
 use crate::git::{
-    Dirty, Finished, HUMAN_GATE, Repository, Touched, commit_message, pull_request_body,
-    pull_request_title,
+    Dirty, Finished, Repository, Touched, commit_message, pull_request_body, pull_request_title,
 };
 use crate::linear::IssueProject;
 use crate::stubs::{Boarding, Call, Checkout, Forging, GitCall, Op, Sessions, Slicing, said};
@@ -338,6 +337,12 @@ impl Ground {
         }
     }
 
+    /// The record as the door hands it to the loop: a scope that files to
+    /// Linear, which is the only kind a `Pulling` can be built over.
+    fn linear(&self) -> LinearScope<'_> {
+        LinearScope::of(&self.scope).expect("every record files to Linear")
+    }
+
     /// The record as it is on disk, which is the only copy the next invocation of
     /// `warlock pull` will ever see.
     fn saved(&self) -> PullRun {
@@ -411,7 +416,7 @@ fn work(
             forge: &forge,
             split,
             sessions,
-            scope: &ground.scope,
+            scope: ground.linear(),
             manifest: &ground.manifest,
             held: &ground.held,
             base: ground.base.as_deref(),
@@ -447,7 +452,7 @@ fn pull(
             forge,
             split,
             sessions,
-            scope: &ground.scope,
+            scope: ground.linear(),
             manifest: &ground.manifest,
             held: &ground.held,
             base: ground.base.as_deref(),
@@ -1085,7 +1090,6 @@ fn two_sub_tasks() -> (Checkout, Slicing, Sessions) {
 /// builds it.
 fn expected_body() -> String {
     pull_request_body(
-        DESCRIPTION,
         &[
             Finished {
                 id: "WAR-140.01",
@@ -1134,7 +1138,7 @@ fn a_finished_run_pushes_opens_the_pull_request_comments_and_moves_the_ticket() 
     assert_eq!(asked[0].head, branch());
     assert_eq!(asked[0].title, pull_request_title(TICKET, TITLE));
     assert_eq!(asked[0].body, expected_body());
-    assert!(asked[0].body.contains(HUMAN_GATE));
+    assert!(!asked[0].body.contains(DESCRIPTION));
     assert!(asked[0].body.contains(OTHER));
 
     // The last sub-task's commit, then the push, and nothing between them but the

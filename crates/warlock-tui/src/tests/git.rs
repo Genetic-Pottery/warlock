@@ -373,7 +373,7 @@ mod unix {
 }
 
 mod rendering {
-    use super::super::{Finished, HUMAN_GATE, Touched, pull_request_body, pull_request_title};
+    use super::super::{Finished, Touched, pull_request_body, pull_request_title};
 
     #[test]
     fn a_title_is_the_ticket_then_its_title() {
@@ -394,9 +394,8 @@ mod rendering {
     }
 
     #[test]
-    fn a_body_gives_the_ticket_the_sub_tasks_and_the_scopes_touched() {
+    fn a_body_gives_the_sub_tasks_and_the_scopes_touched() {
         let body = pull_request_body(
-            "The queue query, ordered oldest first.\n\nEvery skipped ticket names its blocker.\n",
             &[
                 Finished {
                     id: "WAR-131.01",
@@ -417,11 +416,7 @@ mod rendering {
 
         assert_eq!(
             body,
-            "The queue query, ordered oldest first.\n\
-             \n\
-             Every skipped ticket names its blocker.\n\
-             \n\
-             ## Sub-tasks\n\
+            "## Sub-tasks\n\
              \n\
              ### WAR-131.01 Add the issues query beside fetch_project\n\
              \n\
@@ -438,17 +433,13 @@ mod rendering {
              ### control-plane\n\
              \n\
              - `crates/control/src/lib.rs`\n\
-             - `crates/control/src/plane.rs`\n\
-             \n\
-             The pull request and the ticket's review state are the human gate: warlock merges nothing, closes nothing and moves nothing past review.\n"
+             - `crates/control/src/plane.rs`\n"
         );
-        assert!(body.contains(HUMAN_GATE));
     }
 
     #[test]
     fn a_run_that_touched_no_other_scope_has_no_heading_for_it() {
         let body = pull_request_body(
-            "The queue query, ordered oldest first.",
             &[Finished {
                 id: "WAR-131.01",
                 goal: "Add the issues query beside fetch_project",
@@ -459,32 +450,17 @@ mod rendering {
 
         assert_eq!(
             body,
-            "The queue query, ordered oldest first.\n\
-             \n\
-             ## Sub-tasks\n\
+            "## Sub-tasks\n\
              \n\
              ### WAR-131.01 Add the issues query beside fetch_project\n\
              \n\
-             `issues` sends one query and parses the blockers.\n\
-             \n\
-             The pull request and the ticket's review state are the human gate: warlock merges nothing, closes nothing and moves nothing past review.\n"
+             `issues` sends one query and parses the blockers.\n"
         );
-    }
-
-    #[test]
-    fn the_emptiest_run_still_says_where_the_human_gate_is() {
-        // What a comment on the ticket looks like with nothing to report: one
-        // sentence, and no blank lines or bare headings above it.
-        let body = pull_request_body("", &[], &[]);
-
-        assert_eq!(body, format!("{HUMAN_GATE}\n"));
-        assert!(body.contains(HUMAN_GATE));
     }
 
     #[test]
     fn a_sub_task_with_no_summary_keeps_its_heading_and_gains_no_blank_paragraph() {
         let body = pull_request_body(
-            "",
             &[Finished {
                 id: "WAR-131.01",
                 goal: "Add the issues query beside fetch_project",
@@ -495,20 +471,15 @@ mod rendering {
 
         assert_eq!(
             body,
-            format!(
-                "## Sub-tasks\n\
-                 \n\
-                 ### WAR-131.01 Add the issues query beside fetch_project\n\
-                 \n\
-                 {HUMAN_GATE}\n"
-            )
+            "## Sub-tasks\n\
+             \n\
+             ### WAR-131.01 Add the issues query beside fetch_project\n"
         );
     }
 
     #[test]
     fn several_scopes_each_get_their_own_list() {
         let body = pull_request_body(
-            "",
             &[],
             &[
                 Touched {
@@ -524,22 +495,18 @@ mod rendering {
 
         assert_eq!(
             body,
-            format!(
-                "## Scopes touched\n\
-                 \n\
-                 Open on this machine, and not the scope this ticket was pulled under.\n\
-                 \n\
-                 ### control-plane\n\
-                 \n\
-                 - `crates/control/src/lib.rs`\n\
-                 \n\
-                 ### web\n\
-                 \n\
-                 - `web/app.ts`\n\
-                 - `web/index.html`\n\
-                 \n\
-                 {HUMAN_GATE}\n"
-            )
+            "## Scopes touched\n\
+             \n\
+             Open on this machine, and not the scope this ticket was pulled under.\n\
+             \n\
+             ### control-plane\n\
+             \n\
+             - `crates/control/src/lib.rs`\n\
+             \n\
+             ### web\n\
+             \n\
+             - `web/app.ts`\n\
+             - `web/index.html`\n"
         );
     }
 }

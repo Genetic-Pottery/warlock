@@ -42,7 +42,7 @@ use std::path::Path;
 
 use warlock_engine::working::Reported;
 use warlock_engine::{
-    Manifest, PullRun, PullSubtask, RunStatus, ScopeRecord, SubtaskStatus, now_rfc3339, pulls,
+    LinearScope, Manifest, PullRun, PullSubtask, RunStatus, SubtaskStatus, now_rfc3339, pulls,
 };
 
 use crate::claude::{Activity, Sibling, Split, Worked, working_opening};
@@ -69,11 +69,16 @@ pub(crate) struct Pulling<'a, B: Board, R: Repository, F: Forge, S: Splits, W: W
     pub(crate) forge: &'a F,
     pub(crate) split: &'a S,
     pub(crate) sessions: &'a W,
-    /// The scope the ticket was pulled under, whole: the team to file against,
-    /// the label the queue is read by, and the state a finished run moves the
-    /// ticket to are all on it, and asking the manifest again here would be a
-    /// second reading of a record the door already resolved.
-    pub(crate) scope: &'a ScopeRecord,
+    /// The scope the ticket was pulled under, read as a Linear scope: the team
+    /// to file against, the label the queue is read by, and the state a finished
+    /// run moves the ticket to are all on it, and asking the manifest again here
+    /// would be a second reading of a record the door already resolved.
+    ///
+    /// The view and not the record, because a view can only be had from a record
+    /// that files to Linear: every board request below is made against a team
+    /// key, and this is what says the door answered that question before the
+    /// first one was sent.
+    pub(crate) scope: LinearScope<'a>,
     /// What the check after a session judges a changed path against, with
     /// `held`. The manifest in hand rather than one loaded here: reading it
     /// again could disagree with the boundary the door already judged.
@@ -411,7 +416,7 @@ impl<B: Board, R: Repository, F: Forge, S: Splits, W: Works> Pulling<'_, B, R, F
         self.repo.publish(run.branch()).map_err(Error::git)?;
 
         let title = pull_request_title(ticket.identifier, ticket.title);
-        let body = pull_request_body(ticket.description, &finished_in(&run), &scopes_in(touched));
+        let body = pull_request_body(&finished_in(&run), &scopes_in(touched));
         let opened = self
             .forge
             .open_pull_request(PullRequest {

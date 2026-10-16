@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use warlock_engine::{
-    Manifest, Node, ScopeRecord, ScopedDirectory, Tree, manifest_path, route_facts,
+    LinearScope, Manifest, Node, ScopeRecord, ScopedDirectory, Tree, manifest_path, route_facts,
     save_open_scopes, validate_scope,
 };
 
@@ -26,6 +26,15 @@ use crate::settings::Settings;
 
 // Every test here builds both its repository and its home out of one of
 // these, so nothing goes near the developer's real home.
+
+// The team key is read through the view, which is the only way there is to
+// read one off a record.
+fn team_of(record: &ScopeRecord) -> &str {
+    LinearScope::of(record)
+        .expect("the record was written as a Linear scope")
+        .team_key()
+}
+
 fn a_dir() -> tempfile::TempDir {
     tempfile::tempdir().expect("a temporary directory")
 }
@@ -485,6 +494,46 @@ fn a_name_something_records_is_written_flagless_and_gains_no_second_record() {
 }
 
 #[test]
+fn a_scope_that_files_to_jira_is_written_onto_a_directory_like_any_other() {
+    // A scope write is about the boundary and never about the board: the record
+    // question asked here is whether there is one, so a scope warlock cannot
+    // file to is written flagless like any other and its record is left
+    // byte-identical. The refusal belongs to the verbs that reach a board.
+    let repo = a_dir();
+    let home = a_dir();
+    let jira = ScopeRecord::jira(
+        "payments",
+        "https://acme.atlassian.net",
+        "PAY",
+        "In Review",
+        "area/pay",
+    );
+    a_manifest()
+        .with_scopes([jira.clone()])
+        .save(repo.path())
+        .expect("a manifest that saves");
+    let before = record_bytes(repo.path());
+
+    let said = scope_add(
+        repo.path(),
+        home.path(),
+        "docs",
+        "payments",
+        RecordFields::default(),
+    )
+    .expect("a recorded scope asks for no flags whatever it files to");
+
+    assert_eq!(said, "docs is scoped `payments`");
+    let after = load_manifest(repo.path()).expect("a manifest that reads");
+    assert_eq!(
+        after.directory("docs").map(ScopedDirectory::scope),
+        Some("payments")
+    );
+    assert_eq!(after.scopes(), [jira]);
+    assert_eq!(record_bytes(repo.path()), before);
+}
+
+#[test]
 fn a_closed_boundary_answers_before_a_single_flag_is_looked_at() {
     // Whatever the flags said, a scope closed on this machine is the same
     // refusal. The four shapes below are the four different answers the record
@@ -542,7 +591,7 @@ fn the_router_finds_the_team_review_state_and_label_the_flags_wrote() {
         .expect("the module path is inside the root");
     assert_eq!(facts.scope(), Some("billing"));
     let record = facts.record().expect("the router found no record");
-    assert_eq!(record.team_key(), "Billing");
+    assert_eq!(team_of(record), "Billing");
     assert_eq!(record.review_state(), "In Review");
     assert_eq!(record.label(), "area/billing");
 }

@@ -484,7 +484,7 @@ fn every_skip_in_a_queue_with_nothing_ready_is_reported_in_the_queues_order() {
 // than against a filter nobody can see the effect of.
 mod named {
     use serde_json::{Value, json};
-    use warlock_engine::ScopeRecord;
+    use warlock_engine::{LinearScope, ScopeRecord};
 
     use super::{PullRun, Reason, RunStatus, run};
     use crate::linear::{Error as LinearError, Linear};
@@ -499,6 +499,12 @@ mod named {
     // it reserves for review, and the label that says a ticket is its work.
     fn record() -> ScopeRecord {
         ScopeRecord::new("warlock-team", "WAR", "In Review", "warlock")
+    }
+
+    // That record read as a Linear scope, which is the only shape `take_named`
+    // can be handed.
+    fn linear(record: &ScopeRecord) -> LinearScope<'_> {
+        LinearScope::of(record).expect("every record files to Linear")
     }
 
     // A board holding that one ticket, and one AI can work in no scope.
@@ -539,8 +545,15 @@ mod named {
     }
 
     fn asked_for(posting: &Posting, ticket: &str, runs: &[PullRun]) -> Named {
-        take_named(&Linear::new(posting.clone()), &record(), ME, ticket, runs)
-            .expect("the stand-in answered")
+        let record = record();
+        take_named(
+            &Linear::new(posting.clone()),
+            linear(&record),
+            ME,
+            ticket,
+            runs,
+        )
+        .expect("the stand-in answered")
     }
 
     // The ticket that was taken, or `None` when it was refused.
@@ -827,8 +840,15 @@ mod named {
     fn a_board_that_could_not_be_reached_is_a_failure_and_not_a_refusal() {
         let posting = Posting::answering([Err(LinearError::Status { code: 500 })]);
 
-        let error = take_named(&Linear::new(posting.clone()), &record(), ME, "WAR-133", &[])
-            .expect_err("the stand-in refused");
+        let record = record();
+        let error = take_named(
+            &Linear::new(posting.clone()),
+            linear(&record),
+            ME,
+            "WAR-133",
+            &[],
+        )
+        .expect_err("the stand-in refused");
 
         // Nothing is said about the ticket: warlock does not know anything about
         // it yet, and a refusal would be an invented fact.

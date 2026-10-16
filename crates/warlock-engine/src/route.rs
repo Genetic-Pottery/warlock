@@ -13,8 +13,8 @@ use crate::scope::{scope_covering, scope_opens_to};
 
 /// ```
 /// use warlock_engine::{
-///     Manifest, ScopedDirectory, ScopeRecord, resolve_route, route, save_key, save_key_binding,
-///     save_open_scopes,
+///     LinearScope, Manifest, ScopedDirectory, ScopeRecord, resolve_route, route, save_key,
+///     save_key_binding, save_open_scopes,
 /// };
 ///
 /// let (home, root) = (tempfile::tempdir()?, tempfile::tempdir()?);
@@ -29,7 +29,7 @@ use crate::scope::{scope_covering, scope_opens_to};
 ///
 /// let route = resolve_route("crates/engine/src", root.path(), &manifest, home.path())?;
 /// assert_eq!(route.scope(), "data-plane");
-/// assert_eq!(route.record().team_key(), "WAR");
+/// assert_eq!(LinearScope::of(route.record())?.team_key(), "WAR");
 /// assert_eq!(route.record().review_state(), "In Review");
 /// assert_eq!(route.key(), "work");
 /// // That scope is not open on this machine: a fact beside the route,

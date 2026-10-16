@@ -1,10 +1,20 @@
 use std::fs;
 use std::path::Path;
 
-use warlock_engine::{Manifest, ScopeRecord, ScopedDirectory, route_facts, scope, validate_scope};
+use warlock_engine::{
+    LinearScope, Manifest, ScopeRecord, ScopedDirectory, route_facts, scope, validate_scope,
+};
 
 use super::{RecordFields, Rescoped, ScopeRefusal, records_scope, rescope};
 use crate::prompt::RecordField;
+
+// The team key is read through the view, which is the only way there is to
+// read one off a record.
+fn team_of(record: &ScopeRecord) -> &str {
+    LinearScope::of(record)
+        .expect("the record was written as a Linear scope")
+        .team_key()
+}
 
 fn row(module: &str, scope: &str) -> ScopedDirectory {
     ScopedDirectory::new(".", module, scope).expect("a relative module path is inside the root")
@@ -261,7 +271,7 @@ fn a_new_record_is_stored_as_given_after_the_ones_already_there() {
     assert_eq!(manifest.scopes()[..3], recorded().scopes()[..]);
     let record = manifest.scopes().last().expect("the record was added");
     assert_eq!(record.name(), "billing");
-    assert_eq!(record.team_key(), " Billing Squad ");
+    assert_eq!(team_of(record), " Billing Squad ");
     assert_eq!(record.review_state(), "In Review");
     assert_eq!(record.label(), "Area/Billing");
 

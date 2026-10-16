@@ -1,4 +1,4 @@
-version = 1
+version = 2
 
 [[directory]]
 path = "."
@@ -6,6 +6,7 @@ scope = "warlock-team"
 
 [[scope]]
 name = "warlock-team"
+tracker = "linear"
 team = "WAR"
 review_state = "In Review"
 label = "warlock"

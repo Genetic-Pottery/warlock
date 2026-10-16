@@ -10,14 +10,14 @@ use std::path::{Path, PathBuf};
 
 use crate::config::{self, open_scopes};
 use crate::keys::{keys_path, load_key};
-use crate::manifest::{Manifest, ScopeRecord, manifest_path};
+use crate::manifest::{LinearScope, Manifest, NotLinear, ScopeRecord, manifest_path};
 use crate::route::{self, bound_key};
 use crate::scope::{scope_opens_to, valid_scope};
 
 /// ```
 /// use warlock_engine::{
-///     Manifest, ScopedDirectory, ScopeRecord, filing, resolve_filing, save_key, save_key_binding,
-///     save_open_scopes,
+///     LinearScope, Manifest, ScopedDirectory, ScopeRecord, filing, resolve_filing, save_key,
+///     save_key_binding, save_open_scopes,
 /// };
 ///
 /// let (home, root) = (tempfile::tempdir()?, tempfile::tempdir()?);
@@ -39,7 +39,7 @@ use crate::scope::{scope_opens_to, valid_scope};
 /// // One open scope, one record of that name: one board, and no question to ask.
 /// let target = resolve_filing(&manifest, root.path(), home.path(), None)?;
 /// assert_eq!(target.scope(), "data-plane");
-/// assert_eq!(target.record().team_key(), "WAR");
+/// assert_eq!(LinearScope::of(target.record())?.team_key(), "WAR");
 /// assert_eq!(target.key(), "work");
 /// assert_eq!(target.value(), "lin_api_example");
 ///
@@ -54,7 +54,7 @@ use crate::scope::{scope_opens_to, valid_scope};
 ///
 /// // A name picks one of them, and a name that is not a candidate is refused.
 /// let target = resolve_filing(&manifest, root.path(), home.path(), Some("web"))?;
-/// assert_eq!(target.record().team_key(), "WEB");
+/// assert_eq!(LinearScope::of(target.record())?.team_key(), "WEB");
 /// assert_eq!(target.key(), "personal");
 /// assert!(matches!(
 ///     resolve_filing(&manifest, root.path(), home.path(), Some("billing")),
@@ -247,14 +247,14 @@ impl<'m> Target<'m> {
         &self.value
     }
 
-    #[must_use]
-    pub fn destination(&self) -> Destination {
-        Destination {
+    pub fn destination(&self) -> Result<Destination, NotLinear> {
+        let linear = LinearScope::of(self.record)?;
+        Ok(Destination {
             scope: self.scope.to_owned(),
-            team_key: self.record.team_key().to_owned(),
-            label: self.record.label().to_owned(),
+            team_key: linear.team_key().to_owned(),
+            label: linear.label().to_owned(),
             key: self.key.clone(),
-        }
+        })
     }
 }
 
