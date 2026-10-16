@@ -77,6 +77,9 @@ pub(crate) struct Typing {
     lines: VecDeque<String>,
     asked: Vec<String>,
     discards: usize,
+    // Whether the lines arrive together, as a paste or a script delivers them,
+    // rather than one Enter at a time.
+    together: bool,
 }
 
 impl Typing {
@@ -85,6 +88,16 @@ impl Typing {
             lines: lines.into_iter().map(Into::into).collect(),
             asked: Vec::new(),
             discards: 0,
+            together: false,
+        }
+    }
+
+    /// Lines that arrive all at once: every line read has the rest already
+    /// waiting behind it.
+    pub(crate) fn pasted<S: Into<String>>(lines: impl IntoIterator<Item = S>) -> Self {
+        Self {
+            together: true,
+            ..Self::lines(lines)
         }
     }
 
@@ -112,6 +125,10 @@ impl Asks for Typing {
 
     fn discard_typed_ahead(&mut self) {
         self.discards += 1;
+    }
+
+    fn waiting(&mut self) -> bool {
+        self.together && !self.lines.is_empty()
     }
 }
 

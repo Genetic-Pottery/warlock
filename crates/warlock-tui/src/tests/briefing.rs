@@ -47,9 +47,12 @@ struct Ran {
 }
 
 fn run(root: &Path, lines: &[&str], answers: Vec<Answering>) -> Ran {
+    run_typing(root, Typing::lines(lines.iter().copied()), answers)
+}
+
+fn run_typing(root: &Path, mut typing: Typing, answers: Vec<Answering>) -> Ran {
     let standing = Standing::at(root.to_path_buf(), root.to_path_buf());
     let agent = Scripted::saying(answers);
-    let mut typing = Typing::lines(lines.iter().copied());
     let mut out = Vec::new();
 
     let outcome = briefing(&standing, &agent, &mut typing, &mut out);
@@ -173,6 +176,29 @@ fn typed_lines_accumulate_and_an_empty_line_sends_them_as_one_turn() {
         "{}",
         ran.said
     );
+}
+
+// A pasted or piped message arrives whole, so its paragraph breaks have the
+// next paragraph already waiting behind them; only the blank line with nothing
+// behind it sends.
+#[test]
+fn a_blank_line_with_more_already_waiting_is_a_paragraph_break_and_not_a_send() {
+    let root = a_root();
+
+    let ran = run_typing(
+        root.path(),
+        Typing::pasted(["first paragraph\n", "\n", "second paragraph\n", "\n", "\n"]),
+        replying(&["asking", "one turn"]),
+    );
+
+    ran.outcome.expect("a turn sent and answered");
+    assert_eq!(
+        ran.turns.len(),
+        2,
+        "the paragraphs were sent as separate turns: {:?}",
+        ran.turns
+    );
+    assert_eq!(ran.turns[1], "first paragraph\n\nsecond paragraph");
 }
 
 #[test]
@@ -762,7 +788,7 @@ fn a_reply_ending_in_the_marker_is_printed_without_it_and_asks_the_question() {
 
 #[test]
 fn anything_but_yes_at_the_question_writes_nothing_and_the_cursor_comes_back() {
-    for answer in ["n", "", "maybe"] {
+    for answer in ["n", "", "No"] {
         let root = a_root();
 
         let ran = run(
@@ -793,6 +819,30 @@ fn anything_but_yes_at_the_question_writes_nothing_and_the_cursor_comes_back() {
             "{answer:?} wrote a file",
         );
     }
+}
+
+// Somebody who answers the question with a sentence is still talking, and a
+// script whose next paragraph lands on the question has not answered it at all:
+// either way the line is kept as the start of the next turn.
+#[test]
+fn prose_at_the_question_writes_nothing_and_starts_the_next_turn() {
+    let root = a_root();
+
+    let ran = run(
+        root.path(),
+        &["one correction first", "and then write it", ""],
+        replying(&[READY, "noted"]),
+    );
+
+    ran.outcome.expect("an EOF is not a failure");
+    assert!(ran.said.contains(NOT_WRITTEN), "{}", ran.said);
+    assert_eq!(
+        ran.turns.len(),
+        2,
+        "prose asked for the document: {:?}",
+        ran.turns
+    );
+    assert_eq!(ran.turns[1], "one correction first\nand then write it");
 }
 
 #[test]

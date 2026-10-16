@@ -30,7 +30,7 @@ plain line and the terminal is never touched.
 | `warlock check <path>` | Say which scope covers `path`, where work under it is filed, which scopes are open on this machine, and whether the two meet — or, with `--gate`, refuse a closed or unscoped path instead of describing it | nothing |
 | `warlock scope add <path> <scope>` | Write a scope onto a directory, and — `--team-key`, `--review-state`, `--label` — the `[[scope]]` record routing it, when nothing records the name yet | one manifest write |
 | `warlock scope remove <path>` | Clear the scope on a directory | one manifest write |
-| `warlock brief` | Argue a brief in one conversation at the shell, and write it where `briefs.toml` says | a turn per blank line, one more for each yes to the write question, and the document it writes |
+| `warlock brief` | Argue a brief in one conversation at the shell, and write it where `briefs.toml` says | a turn per blank line that nothing is waiting behind, one more for each yes to the write question, and the document it writes |
 | `warlock push <SCOPE> <PATH>` | File the brief at `PATH` as a project on the board `SCOPE` files to | one project on somebody's board |
 | `warlock draft <SCOPE> [SLUG]` | Without `SLUG`, list the scope's planned projects. With it, cut that project into issues | a list costs one read; a cut costs a drafting session per uncut slice with a turn for each answer or piece of feedback, a proposing pass per question, and for each settled slice its issues and one comment on the project |
 | `warlock pull <SCOPE>` | Work the next ready ticket in that scope's queue to an open pull request | a splitting pass, a model pass per sub-task, a commit each, a pushed branch, a pull request, and two moves on somebody's board |
@@ -448,10 +448,16 @@ warlock: What is the change?
 ```
 
 Typed lines accumulate at the `> ` cursor and a blank line sends them as one
-turn. A brief is argued in paragraphs and a terminal has no other way to say "I
-have not finished typing", so the cost is written down rather than hidden: a
-turn cannot itself contain a blank line. The end of a line is trimmed and the
-start of one is not, so an indented list reaches the model indented.
+turn — unless more input has already arrived behind that blank line, in which
+case it is a paragraph break inside the turn. A paste and a script deliver a
+whole message at once, while a person pressing Enter to send has nothing queued
+behind the key, so a multi-paragraph message sent either way reaches the model
+as one turn. The end of a line is trimmed and the start of one is not, so an
+indented list reaches the model indented.
+
+At the `write the brief? [y/N]` question, a line that is neither a yes nor a no
+is not taken as the default: nothing is written, and the line becomes the
+first line of the next turn.
 
 ```sh
 > the headless CLI cannot be spoken to

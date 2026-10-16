@@ -25,6 +25,9 @@
 
 use std::io::{self, BufRead, IsTerminal, Write};
 use std::process;
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+use std::sync::{Mutex, OnceLock};
+use std::thread;
 use std::time::Duration;
 
 use ratatui::crossterm::event::{
@@ -43,6 +46,13 @@ pub(crate) fn yes(answer: &str) -> bool {
     matches!(answer.trim().to_lowercase().as_str(), "y" | "yes")
 }
 
+// A spelled-out no, or Enter on the default. Asked apart from [`yes`] by the one
+// caller that has something better to do with a line that is neither: `warlock
+// brief`, where a line of prose arriving at its question is the next turn.
+pub(crate) fn no(answer: &str) -> bool {
+    matches!(answer.trim().to_lowercase().as_str(), "" | "n" | "no")
+}
+
 /// One question, asked and answered.
 ///
 /// `None` is EOF — Ctrl-D at a terminal, an empty or exhausted pipe everywhere
@@ -58,6 +68,16 @@ pub(crate) trait Asks {
     /// several times with no model between, as `warlock brief` does line by
     /// line, must keep what was typed between its questions.
     fn discard_typed_ahead(&mut self) {}
+
+    /// Whether another line had already arrived behind the one just read.
+    ///
+    /// A paste and a script both deliver their lines together, and a person
+    /// pressing Enter has nothing queued behind the key, so this is how a
+    /// blank line inside a pasted or piped paragraph is told apart from one
+    /// somebody typed to say they have finished. False when nothing can tell.
+    fn waiting(&mut self) -> bool {
+        false
+    }
 }
 
 /// The real one: the prompt on stdout, the line off stdin.
@@ -83,7 +103,17 @@ impl Asks for Stdin {
                 answer => answer.map_err(|source| Error::Prompt { source }),
             };
         }
-        line_in(&mut io::stdin().lock())
+        piped().lock().map_or_else(
+            |_| line_in(&mut io::stdin().lock()),
+            |mut piped| piped.next(),
+        )
+    }
+
+    // At a terminal a paste arrives whole through `edited`, so a line read
+    // there has nothing behind it this needs to see. From a pipe the reader
+    // thread is a few milliseconds ahead of whoever is asking.
+    fn waiting(&mut self) -> bool {
+        !at_terminal() && piped().lock().is_ok_and(|mut piped| piped.waiting())
     }
 
     // Whatever a person typed while a session was working sits in the terminal's
@@ -105,6 +135,66 @@ impl Asks for Stdin {
             }
         }
     }
+}
+
+// Stdin from a pipe, read by a thread of its own a line at a time. A thread and
+// not a poll of the descriptor: std has no poll, and the lines a cooked read has
+// already pulled into stdin's buffer are invisible to one anyway — which is
+// exactly where the rest of a pasted paragraph sits. Started on the first piped
+// read and never at a terminal, where raw mode owns the input.
+struct Piped {
+    lines: Receiver<Result<Option<String>, io::Error>>,
+    peeked: Option<Result<Option<String>, io::Error>>,
+}
+
+impl Piped {
+    fn next(&mut self) -> Result<Option<String>, Error> {
+        let read = match self.peeked.take() {
+            Some(read) => read,
+            // A reader that has stopped sent its EOF or its error first, so a
+            // closed channel is only ever asked again after the end.
+            None => self.lines.recv().unwrap_or(Ok(None)),
+        };
+        read.map_err(|source| Error::Prompt { source })
+    }
+
+    // EOF is not more input: a run whose last line is blank has nothing behind
+    // it, and must send what was typed rather than wait for a paragraph.
+    fn waiting(&mut self) -> bool {
+        if self.peeked.is_none() {
+            match self.lines.recv_timeout(PASTE_GAP) {
+                Ok(read) => self.peeked = Some(read),
+                Err(RecvTimeoutError::Timeout | RecvTimeoutError::Disconnected) => return false,
+            }
+        }
+        matches!(self.peeked, Some(Ok(Some(_))))
+    }
+}
+
+fn piped() -> &'static Mutex<Piped> {
+    static PIPED: OnceLock<Mutex<Piped>> = OnceLock::new();
+    PIPED.get_or_init(|| {
+        let (sender, lines) = mpsc::channel();
+        thread::spawn(move || {
+            let mut stdin = io::stdin().lock();
+            loop {
+                let mut line = String::new();
+                let read = match stdin.read_line(&mut line) {
+                    Ok(0) => Ok(None),
+                    Ok(_) => Ok(Some(line)),
+                    Err(error) => Err(error),
+                };
+                let last = !matches!(read, Ok(Some(_)));
+                if sender.send(read).is_err() || last {
+                    return;
+                }
+            }
+        });
+        Mutex::new(Piped {
+            lines,
+            peeked: None,
+        })
+    })
 }
 
 // The restore, as a `Drop` rather than a line after the raw work: a `Drop` also

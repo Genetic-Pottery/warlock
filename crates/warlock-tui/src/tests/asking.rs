@@ -1,6 +1,6 @@
 use std::io::{self, BufReader, Read};
 
-use super::{Asks, line_in};
+use super::{Asks, Piped, line_in};
 use crate::error::Error;
 use crate::stubs::Typing;
 
@@ -160,4 +160,45 @@ mod editing {
         );
         assert_eq!(step(&mut typed, &control('c'), false), Step::Interrupt);
     }
+}
+
+fn piped_from(reads: Vec<Result<Option<String>, std::io::Error>>) -> Piped {
+    let (sender, lines) = std::sync::mpsc::channel();
+    for read in reads {
+        sender.send(read).expect("the receiver is alive");
+    }
+    Piped {
+        lines,
+        peeked: None,
+    }
+}
+
+// The peek that answers `waiting` must not cost the line it peeked at: the next
+// read gets it back, in order.
+#[test]
+fn a_line_already_in_the_pipe_is_waiting_and_is_still_read_next() {
+    let mut piped = piped_from(vec![
+        Ok(Some("one\n".to_owned())),
+        Ok(Some("two\n".to_owned())),
+        Ok(None),
+    ]);
+
+    assert_eq!(piped.next().unwrap().as_deref(), Some("one\n"));
+    assert!(piped.waiting());
+    assert!(piped.waiting(), "asking twice peeks once");
+    assert_eq!(piped.next().unwrap().as_deref(), Some("two\n"));
+    assert!(!piped.waiting(), "EOF is not more input");
+    assert_eq!(piped.next().unwrap(), None);
+    assert_eq!(piped.next().unwrap(), None, "and stays the end");
+}
+
+#[test]
+fn an_empty_pipe_that_is_still_open_is_not_waiting() {
+    let (_sender, lines) = std::sync::mpsc::channel();
+    let mut piped = Piped {
+        lines,
+        peeked: None,
+    };
+
+    assert!(!piped.waiting());
 }

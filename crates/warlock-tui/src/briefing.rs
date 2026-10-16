@@ -123,10 +123,13 @@ fn briefing<C: Converses, K: Asks, W: Write>(
     let mut ready = conversed(&agent, &brief_instruction(&opening.shape), out);
     ask.discard_typed_ahead();
 
-    // Lines until a blank one, then those lines as one turn. Multi-line prose is
-    // what a brief is argued in, and a terminal has no other way to say "I have
-    // not finished typing" — the cost is that a turn cannot itself contain a
-    // blank line, which is written down as accepted in the brief.
+    // Lines until a blank one that nothing is waiting behind, then those lines as
+    // one turn. A blank line with more already arrived behind it is a paragraph
+    // break: a paste and a script deliver a whole message at once, and a person
+    // who pressed Enter to send has nothing queued behind the key. Sending on
+    // every blank line was the rule before, and it cut a three-paragraph message
+    // into three turns, the later ones answering a question the model had not
+    // yet asked.
     let mut typed: Vec<String> = Vec::new();
     // `?` and not a reported line: a stdin that cannot be read is not a fact
     // about this turn, and a conversation that carried on would be asking a
@@ -137,8 +140,14 @@ fn briefing<C: Converses, K: Asks, W: Write>(
             let Some(answer) = ask.ask(WRITE_PROMPT)? else {
                 break;
             };
+            // Neither a yes nor a no is somebody still talking: a line of prose
+            // that lands on the question is the first line of their next turn,
+            // and reading it as the default would throw it away.
             if !asking::yes(&answer) {
                 say(out, NOT_WRITTEN);
+                if !asking::no(&answer) {
+                    typed.push(answer.trim_end().to_owned());
+                }
                 continue;
             }
             match written(&agent, root, &opening, ask, out)? {
@@ -171,6 +180,13 @@ fn briefing<C: Converses, K: Asks, W: Write>(
                 // it would cost somebody money to be told so.
                 if typed.is_empty() {
                     continue;
+                }
+                if ask.waiting() {
+                    typed.push(String::new());
+                    continue;
+                }
+                while typed.last().is_some_and(String::is_empty) {
+                    typed.pop();
                 }
 
                 ready = conversed(&agent, &typed.join("\n"), out);
