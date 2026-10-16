@@ -60,6 +60,7 @@ pub use manifest::NotLinear;
 pub use manifest::SCHEMA_VERSION;
 pub use manifest::ScopeRecord;
 pub use manifest::ScopedDirectory;
+pub use manifest::TrackerName;
 pub use manifest::from_manifest_path;
 pub use manifest::manifest_path;
 pub use manifest::to_manifest_path;

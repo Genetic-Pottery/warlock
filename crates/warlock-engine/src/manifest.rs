@@ -437,6 +437,50 @@ pub enum Tracker {
     },
 }
 
+/// Which board a tracker word names, with none of that board's own values.
+///
+/// ```
+/// use warlock_engine::TrackerName;
+///
+/// assert_eq!(TrackerName::parse("jira")?, TrackerName::Jira);
+/// assert_eq!(TrackerName::Linear.word(), "linear");
+/// // The word is the one the manifest spells, and nothing else is it.
+/// assert!(TrackerName::parse("Linear").is_err());
+/// # Ok::<(), warlock_engine::manifest::ScopeFault>(())
+/// ```
+// Apart from [`Tracker`] because a word is all a caller has before it has the
+// values: the headless door is told which tracker to record one argument before
+// it knows whether it was given a team key or a base URL, and parsing the word
+// a second time on that side is how `linear` and `jira` end up meaning two
+// different sets of words in one binary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TrackerName {
+    Linear,
+    Jira,
+}
+
+impl TrackerName {
+    /// The board a tracker word names, or a refusal naming the word.
+    pub fn parse(word: &str) -> Result<Self, ScopeFault> {
+        match word {
+            LINEAR => Ok(Self::Linear),
+            JIRA => Ok(Self::Jira),
+            other => Err(ScopeFault::UnknownTracker {
+                value: other.to_owned(),
+            }),
+        }
+    }
+
+    /// The word a manifest spells this tracker as.
+    #[must_use]
+    pub const fn word(self) -> &'static str {
+        match self {
+            Self::Linear => LINEAR,
+            Self::Jira => JIRA,
+        }
+    }
+}
+
 impl ScopeRecord {
     /// A record that files to Linear.
     ///
@@ -584,25 +628,21 @@ fn read_record(value: &toml::Value) -> Result<ScopeRecord, ScopeFault> {
             .ok_or(ScopeFault::NotAString { key }),
     };
 
-    let (tracker, own): (Tracker, &[&str]) = match string(TRACKER)?.as_str() {
-        LINEAR => (
+    let named = TrackerName::parse(&string(TRACKER)?)?;
+    let (tracker, own): (Tracker, &[&str]) = match named {
+        TrackerName::Linear => (
             Tracker::Linear {
                 team_key: string(TEAM)?,
             },
             &[TEAM],
         ),
-        JIRA => (
+        TrackerName::Jira => (
             Tracker::Jira {
                 base_url: string(BASE_URL)?,
                 project_key: string(PROJECT_KEY)?,
             },
             &[BASE_URL, PROJECT_KEY],
         ),
-        other => {
-            return Err(ScopeFault::UnknownTracker {
-                value: other.to_owned(),
-            });
-        }
     };
 
     let record = ScopeRecord {
@@ -615,17 +655,13 @@ fn read_record(value: &toml::Value) -> Result<ScopeRecord, ScopeFault> {
     // `deny_unknown_fields` by hand, and it has to be by hand: the keys a
     // record may hold are the common four plus the ones its tracker names, and
     // the other tracker's keys are refused here rather than read and dropped.
-    let tracker_name = match &record.tracker {
-        Tracker::Linear { .. } => LINEAR,
-        Tracker::Jira { .. } => JIRA,
-    };
     for key in table.keys() {
         let known = [NAME, TRACKER, REVIEW_STATE, LABEL].contains(&key.as_str())
             || own.contains(&key.as_str());
         if !known {
             return Err(ScopeFault::UnexpectedKey {
                 key: key.clone(),
-                tracker: tracker_name,
+                tracker: named.word(),
             });
         }
     }

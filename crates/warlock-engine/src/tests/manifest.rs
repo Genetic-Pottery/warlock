@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use super::{
     Error, LinearScope, MANIFEST_FILE, Manifest, NotLinear, SCHEMA_VERSION, ScopeFault,
-    ScopeRecord, ScopedDirectory, from_manifest_path, manifest_path, to_manifest_path,
+    ScopeRecord, ScopedDirectory, TrackerName, from_manifest_path, manifest_path, to_manifest_path,
 };
 
 fn engine() -> ScopedDirectory {
@@ -532,6 +532,32 @@ fn a_record_is_refused_by_the_key_at_fault_and_the_tracker_it_declared() {
                 );
             }
             other => panic!("expected `{body}` to be refused, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn a_tracker_word_names_a_board_or_is_refused_by_the_word_that_was_typed() {
+    // The reader above and every other door read the word through this, so what
+    // a word means is settled once: the two words it answers to, the spelling a
+    // record serialises back to, and the sentence anything else is refused in.
+    for (word, named) in [("linear", TrackerName::Linear), ("jira", TrackerName::Jira)] {
+        assert_eq!(
+            TrackerName::parse(word).expect("a word a record spells"),
+            named
+        );
+        assert_eq!(named.word(), word);
+    }
+
+    for word in ["Linear", "JIRA", " jira", "github", ""] {
+        match TrackerName::parse(word) {
+            Err(fault @ ScopeFault::UnknownTracker { .. }) => assert_eq!(
+                fault.to_string(),
+                format!(
+                    "`{word}` is not a tracker warlock knows; a record files to `linear` or `jira`"
+                ),
+            ),
+            other => panic!("expected `{word}` to be refused, got {other:?}"),
         }
     }
 }
