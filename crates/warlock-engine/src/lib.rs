@@ -54,6 +54,7 @@ pub use keys::save_key;
 pub use load::Loaded;
 pub use load::load_tree;
 pub use load::repository_root;
+pub use manifest::FiledTo;
 pub use manifest::LinearScope;
 pub use manifest::Manifest;
 pub use manifest::NotLinear;

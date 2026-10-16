@@ -2,7 +2,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use super::{
-    Error, LinearScope, MANIFEST_FILE, Manifest, NotLinear, SCHEMA_VERSION, ScopeFault,
+    Error, FiledTo, LinearScope, MANIFEST_FILE, Manifest, NotLinear, SCHEMA_VERSION, ScopeFault,
     ScopeRecord, ScopedDirectory, TrackerName, from_manifest_path, manifest_path, to_manifest_path,
 };
 
@@ -301,6 +301,48 @@ fn a_record_read_as_a_linear_scope_carries_its_values_as_spelled() {
     assert_eq!(linear.team_key(), " War ", "neither trimmed nor folded");
     assert_eq!(linear.review_state(), "In Review", "not folded");
     assert_eq!(linear.label(), "area/Data_Plane", "not folded either");
+}
+
+// Read off records the file reader built, because the TUI reads what the
+// manifest holds and not what a constructor was handed: the word is the one
+// the file spells, and a Jira record's two values arrive with the spacing and
+// the trailing slash they were written with.
+#[test]
+fn a_loaded_record_says_which_board_it_files_to_in_the_word_the_file_spells() {
+    let text = concat!(
+        "version = 2\n\n",
+        "[[scope]]\n",
+        "name = \"data-plane\"\n",
+        "tracker = \"linear\"\n",
+        "team = \"WAR\"\n",
+        "review_state = \"In Review\"\n",
+        "label = \"area/data\"\n\n",
+        "[[scope]]\n",
+        "name = \"payments\"\n",
+        "tracker = \"jira\"\n",
+        "base_url = \"https://acme.atlassian.net/\"\n",
+        "project_key = \" PAY \"\n",
+        "review_state = \"In Review\"\n",
+        "label = \"area/pay\"\n",
+    );
+    let loaded = Manifest::from_toml_str(text).expect("parses");
+    let [linear, jira] = loaded.scopes() else {
+        panic!("the text records two scopes");
+    };
+
+    assert_eq!(linear.filed_to(), FiledTo::Linear);
+    assert_eq!(linear.filed_to().word(), "linear");
+    assert_eq!(team_of(linear), "WAR", "and the team is still the view's");
+
+    assert_eq!(jira.filed_to().word(), "jira");
+    assert_eq!(
+        jira.filed_to(),
+        FiledTo::Jira {
+            base_url: "https://acme.atlassian.net/",
+            project_key: " PAY ",
+        },
+        "neither trimmed nor parsed on the way out"
+    );
 }
 
 // Built here rather than asked of `LinearScope::of`, which answers `Ok` for
