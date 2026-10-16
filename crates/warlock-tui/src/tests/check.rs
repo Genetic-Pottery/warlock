@@ -7,7 +7,9 @@ use warlock_engine::{
     save_open_scopes,
 };
 
-use super::{Checked, checked, checked_onto, gated_onto, hooked_onto, object, prose};
+use super::{
+    Checked, Filed, Recorded, checked, checked_onto, gated_onto, hooked_onto, object, prose,
+};
 use crate::app::OpenScopes;
 use crate::error::Error;
 use crate::error::status_for;
@@ -149,8 +151,8 @@ fn a_manifest() -> Manifest {
 }
 
 // The same manifest with the recorded scope filing to Jira: a check reports and
-// never refuses, so what the tracker changes is the one field read off the
-// Linear view and nothing else.
+// never refuses, so the board changes which fields the route is said in and
+// nothing else about the answer.
 fn a_jira_manifest() -> Manifest {
     Manifest::with_directories([
         entry("crates", "platform"),
@@ -178,6 +180,43 @@ fn answer(home: &Path, path: &str) -> Checked {
         &Path::new(REPO).join(path),
     )
     .expect("a path inside the repository has a manifest form")
+}
+
+// `answer`'s twin against the Jira manifest, so the Jira cases below stand
+// beside the Linear ones they are read against.
+fn jira_answer(home: &Path, path: &str) -> Checked {
+    checked(
+        Path::new(REPO),
+        Some(home),
+        &a_jira_manifest(),
+        &Path::new(REPO).join(path),
+    )
+    .expect("a path inside the repository has a manifest form")
+}
+
+// The two manifests' `[[scope]]` records as `Checked` holds them: the board
+// carries its own addressing fields, so the Linear record has a team and no
+// site and the Jira one has a site and a project and no team. Neither can be
+// built half-filled, which is what the object's `null`s are rendered from.
+fn the_linear_record() -> Recorded {
+    Recorded {
+        filed: Filed::Linear {
+            team: "Data Plane".to_owned(),
+        },
+        review_state: "In Review".to_owned(),
+        label: "area/data-plane".to_owned(),
+    }
+}
+
+fn the_jira_record() -> Recorded {
+    Recorded {
+        filed: Filed::Jira {
+            base_url: "https://acme.atlassian.net".to_owned(),
+            project_key: "PAY".to_owned(),
+        },
+        review_state: "In Review".to_owned(),
+        label: "area/data-plane".to_owned(),
+    }
 }
 
 fn opening(home: &Path, open: &[&str]) {
@@ -298,7 +337,7 @@ fn a_machine_with_no_scope_open_is_closed_by_every_scope_and_still_answers() {
     assert!(!closed.opens);
     assert_eq!(
         object(&closed).to_string(),
-        r#"{"command":"check","path":"crates/engine","scope":"data-plane","open":[],"opens":false,"team":"Data Plane","review_state":"In Review","label":"area/data-plane","key":null,"key_found":false}"#
+        r#"{"command":"check","path":"crates/engine","scope":"data-plane","open":[],"opens":false,"tracker":"linear","team":"Data Plane","base_url":null,"project_key":null,"review_state":"In Review","label":"area/data-plane","key":null,"key_found":false}"#
     );
 }
 
@@ -314,7 +353,7 @@ fn a_config_that_will_not_parse_is_unknown_and_never_an_empty_open_list() {
     assert!(!unknown.opens, "a config warlock cannot read opens nothing");
     assert_eq!(
         object(&unknown).to_string(),
-        r#"{"command":"check","path":"crates/engine","scope":"data-plane","open":null,"opens":false,"team":"Data Plane","review_state":"In Review","label":"area/data-plane","key":null,"key_found":false}"#
+        r#"{"command":"check","path":"crates/engine","scope":"data-plane","open":null,"opens":false,"tracker":"linear","team":"Data Plane","base_url":null,"project_key":null,"review_state":"In Review","label":"area/data-plane","key":null,"key_found":false}"#
     );
     // And the prose names the file, which is the one thing a reader needs
     // in order to fix it.
@@ -348,7 +387,7 @@ fn a_missing_home_is_nothing_open_rather_than_a_config_that_would_not_read() {
     // no binding in it yet. The route the manifest knows is still answered.
     assert_eq!(nowhere.key, None);
     assert!(!nowhere.key_found);
-    assert_eq!(nowhere.team.as_deref(), Some("Data Plane"));
+    assert_eq!(nowhere.record, Some(the_linear_record()));
 }
 
 #[test]
@@ -383,7 +422,7 @@ fn the_object_is_the_shape_a_consumer_was_promised() {
 
     assert_eq!(
         object(&answer(home.path(), "crates/engine")).to_string(),
-        r#"{"command":"check","path":"crates/engine","scope":"data-plane","open":["billing"],"opens":false,"team":"Data Plane","review_state":"In Review","label":"area/data-plane","key":null,"key_found":false}"#
+        r#"{"command":"check","path":"crates/engine","scope":"data-plane","open":["billing"],"opens":false,"tracker":"linear","team":"Data Plane","base_url":null,"project_key":null,"review_state":"In Review","label":"area/data-plane","key":null,"key_found":false}"#
     );
 }
 
@@ -393,7 +432,7 @@ fn nothing_covering_the_path_is_a_null_scope_rather_than_a_missing_field() {
 
     assert_eq!(
         object(&answer(home.path(), "docs/adr")).to_string(),
-        r#"{"command":"check","path":"docs/adr","scope":null,"open":[],"opens":false,"team":null,"review_state":null,"label":null,"key":null,"key_found":false}"#
+        r#"{"command":"check","path":"docs/adr","scope":null,"open":[],"opens":false,"tracker":null,"team":null,"base_url":null,"project_key":null,"review_state":null,"label":null,"key":null,"key_found":false}"#
     );
 }
 
@@ -412,7 +451,7 @@ fn a_binding_on_another_scope_of_the_repository_is_not_reported_for_an_unscoped_
 
     assert_eq!(
         printed,
-        r#"{"command":"check","path":"docs/adr","scope":null,"open":[],"opens":false,"team":null,"review_state":null,"label":null,"key":null,"key_found":false}"#
+        r#"{"command":"check","path":"docs/adr","scope":null,"open":[],"opens":false,"tracker":null,"team":null,"base_url":null,"project_key":null,"review_state":null,"label":null,"key":null,"key_found":false}"#
     );
     // Neither the name nor, ever, the value behind it.
     assert!(!printed.contains("work"), "{printed}");
@@ -449,9 +488,11 @@ fn no_object_carries_a_root_or_a_home() {
 #[test]
 fn the_whole_answer_for_a_scoped_recorded_and_bound_checkout_is_one_flat_object() {
     // The shape a consumer is promised, asserted whole rather than field by
-    // field: the five route fields sit flat beside the four that were here
-    // first, with no nested object to reach through, and `review_state` is
-    // spelled as the `[[scope]]` record spells it.
+    // field: the six record fields and the two key ones sit flat beside the four
+    // that were here first, with no nested object to reach through, and
+    // `review_state` is spelled as the `[[scope]]` record spells it. The two
+    // fields a Linear record has no place for are `null` and not absent, so a
+    // script reads one shape whichever board answered.
     let home = a_dir();
     opening(home.path(), &["data-plane"]);
     bound(home.path(), "data-plane", "work");
@@ -461,7 +502,7 @@ fn the_whole_answer_for_a_scoped_recorded_and_bound_checkout_is_one_flat_object(
 
     assert_eq!(
         printed,
-        r#"{"command":"check","path":"crates/engine/src","scope":"data-plane","open":["data-plane"],"opens":true,"team":"Data Plane","review_state":"In Review","label":"area/data-plane","key":"work","key_found":true}"#
+        r#"{"command":"check","path":"crates/engine/src","scope":"data-plane","open":["data-plane"],"opens":true,"tracker":"linear","team":"Data Plane","base_url":null,"project_key":null,"review_state":"In Review","label":"area/data-plane","key":"work","key_found":true}"#
     );
     // The name is printed and the value it stands for never is. Asserted on
     // the one answer that had to read the store to say `true`, because that is
@@ -470,29 +511,24 @@ fn the_whole_answer_for_a_scoped_recorded_and_bound_checkout_is_one_flat_object(
 }
 
 #[test]
-fn a_jira_record_answers_with_every_field_but_the_team_and_exits_as_a_linear_one_does() {
-    // A check reports, so the scope warlock cannot file to is a `team` of null
-    // here rather than a refusal: the review state, the label and the key are
-    // all still said, and the status is the 0 a recorded scope always answers
-    // with. `tracker`, `base_url` and `project_key` are deliberately not in the
-    // envelope.
+fn a_jira_record_answers_in_its_own_fields_and_exits_as_a_linear_one_does() {
+    // A check reports, so the board warlock cannot file to is said in that
+    // board's own fields rather than refused: `tracker` names it, `base_url` and
+    // `project_key` carry it, `team` is the `null` of a key Jira has no place
+    // for, and the status is the 0 a recorded scope always answers with. The
+    // object is the Linear one's shape to the key and the order — only the
+    // values move.
     let home = a_dir();
     opening(home.path(), &["data-plane"]);
     bound(home.path(), "data-plane", "work");
     keeping(home.path(), "work");
-    let path = Path::new(REPO).join("crates/engine/src");
 
-    let answered = checked(
-        Path::new(REPO),
-        Some(home.path()),
-        &a_jira_manifest(),
-        &path,
-    )
-    .expect("a path inside the repository has a manifest form");
+    let answered = jira_answer(home.path(), "crates/engine/src");
 
+    assert_eq!(answered.record, Some(the_jira_record()));
     assert_eq!(
         object(&answered).to_string(),
-        r#"{"command":"check","path":"crates/engine/src","scope":"data-plane","open":["data-plane"],"opens":true,"team":null,"review_state":"In Review","label":"area/data-plane","key":"work","key_found":true}"#
+        r#"{"command":"check","path":"crates/engine/src","scope":"data-plane","open":["data-plane"],"opens":true,"tracker":"jira","team":null,"base_url":"https://acme.atlassian.net","project_key":"PAY","review_state":"In Review","label":"area/data-plane","key":"work","key_found":true}"#
     );
     assert_eq!(
         status_for(
@@ -500,7 +536,7 @@ fn a_jira_record_answers_with_every_field_but_the_team_and_exits_as_a_linear_one
                 Path::new(REPO),
                 Some(home.path()),
                 &a_jira_manifest(),
-                &path
+                &Path::new(REPO).join("crates/engine/src"),
             )
             .map(|_| ())
         ),
@@ -520,7 +556,7 @@ fn a_covering_scope_with_no_record_routes_to_null_rather_than_to_empty_strings()
 
     assert_eq!(
         object(&answer(home.path(), "crates/tui/src")).to_string(),
-        r#"{"command":"check","path":"crates/tui/src","scope":"platform","open":[],"opens":false,"team":null,"review_state":null,"label":null,"key":"work","key_found":true}"#
+        r#"{"command":"check","path":"crates/tui/src","scope":"platform","open":[],"opens":false,"tracker":null,"team":null,"base_url":null,"project_key":null,"review_state":null,"label":null,"key":"work","key_found":true}"#
     );
 }
 
@@ -569,14 +605,12 @@ fn a_closed_scope_still_carries_the_whole_route_beside_the_closed_verdict() {
     let closed = answer(home.path(), "crates/engine");
 
     assert!(!closed.opens);
-    assert_eq!(closed.team.as_deref(), Some("Data Plane"));
-    assert_eq!(closed.review_state.as_deref(), Some("In Review"));
-    assert_eq!(closed.label.as_deref(), Some("area/data-plane"));
+    assert_eq!(closed.record, Some(the_linear_record()));
     assert_eq!(closed.key.as_deref(), Some("work"));
     assert!(closed.key_found);
 }
 
-// The six prose cases below assert the whole answer rather than a line of it,
+// The seven prose cases below assert the whole answer rather than a line of it,
 // because the composition is the thing under test: five lines, always in that
 // order, with the repository's two facts above this checkout's two. A
 // `contains` would pass on an answer that had silently lost a line.
@@ -605,6 +639,35 @@ fn the_prose_for_a_scoped_recorded_and_bound_checkout_says_the_route_and_the_key
         "{}",
         prose(&answered)
     );
+}
+
+#[test]
+fn the_prose_for_a_jira_record_names_the_project_and_the_site_and_never_says_no_record() {
+    // The bug this fixes: a Jira record has no team, and a route line that
+    // matched the team as part of one group fell through to "`data-plane` has no
+    // `[[scope]]` record", which is false. The line names both halves of the
+    // address — one project key names a different project on every site — and
+    // the key line pairs the key with the project where the Linear case above
+    // pairs it with the team. The same five lines in the same order:
+    // nothing but the route line and the name on the key line differs.
+    let home = a_dir();
+    opening(home.path(), &["data-plane"]);
+    bound(home.path(), "data-plane", "work");
+    keeping(home.path(), "work");
+
+    let said = prose(&jira_answer(home.path(), "crates/engine/src"));
+
+    assert_eq!(
+        said,
+        "`crates/engine/src` is scoped `data-plane`\n\
+         work here is filed to `PAY` at `https://acme.atlassian.net`, labelled \
+         `area/data-plane`, and a finished pull moves the ticket to `In Review`\n\
+         AI can work in `data-plane`\n\
+         `data-plane` is open on this machine\n\
+         filing to `PAY` would use the key `work`, which this machine stores"
+    );
+    assert!(!said.contains("no `[[scope]]` record"), "{said}");
+    assert!(!said.contains(NOT_A_KEY), "{said}");
 }
 
 #[test]

@@ -566,6 +566,74 @@ impl ScopeRecord {
     pub fn label(&self) -> &str {
         &self.label
     }
+
+    /// Which board this record files to, with the fields that board is
+    /// addressed by and no team key.
+    ///
+    /// ```
+    /// use warlock_engine::{FiledTo, ScopeRecord};
+    ///
+    /// let linear = ScopeRecord::new("data-plane", "WAR", "In Review", "area/data");
+    /// let jira = ScopeRecord::jira(
+    ///     "payments",
+    ///     "https://acme.atlassian.net/",
+    ///     "PAY",
+    ///     "In Review",
+    ///     "area/pay",
+    /// );
+    ///
+    /// assert_eq!(linear.filed_to().word(), "linear");
+    /// assert_eq!(linear.filed_to(), FiledTo::Linear);
+    ///
+    /// assert_eq!(jira.filed_to().word(), "jira");
+    /// let FiledTo::Jira { base_url, project_key } = jira.filed_to() else {
+    ///     panic!("the record was written as a Jira one");
+    /// };
+    /// // Stored as spelled, slash and all.
+    /// assert_eq!(base_url, "https://acme.atlassian.net/");
+    /// assert_eq!(project_key, "PAY");
+    /// ```
+    #[must_use]
+    pub fn filed_to(&self) -> FiledTo<'_> {
+        match &self.tracker {
+            Tracker::Linear { .. } => FiledTo::Linear,
+            Tracker::Jira {
+                base_url,
+                project_key,
+            } => FiledTo::Jira {
+                base_url,
+                project_key,
+            },
+        }
+    }
+}
+
+/// Where a record files, read off the record and borrowed from it.
+// [`Tracker`] with the team key left out, rather than that enum handed over:
+// what a reader of a record wants is which board and, for Jira, the two values
+// that name a project on a site — and a team key is wanted by a flow on its way
+// to Linear, which gets there through [`LinearScope::of`] and the proof that
+// carries. Spelling the key here too would make that the second way to reach
+// it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum FiledTo<'r> {
+    Linear,
+    Jira {
+        base_url: &'r str,
+        project_key: &'r str,
+    },
+}
+
+impl FiledTo<'_> {
+    /// The word a manifest spells this board as.
+    #[must_use]
+    pub const fn word(self) -> &'static str {
+        match self {
+            Self::Linear => TrackerName::Linear,
+            Self::Jira { .. } => TrackerName::Jira,
+        }
+        .word()
+    }
 }
 
 // Hand-written for the order: `tracker` names the board, then that board's own
@@ -697,10 +765,11 @@ pub struct LinearScope<'r> {
 
 impl<'r> LinearScope<'r> {
     /// The record seen as a Linear scope, or a refusal naming it.
-    // The one place a tracker is read off a record, and the reason no caller
-    // has to: a flow that holds this type is holding proof that the record it
-    // came from files to Linear, rather than an assumption that every record
-    // does.
+    // The one way to a team key, and the reason no caller of one reads a
+    // tracker itself: a flow that holds this type is holding proof that the
+    // record it came from files to Linear, rather than an assumption that
+    // every record does. Which board a record names is
+    // [`ScopeRecord::filed_to`]'s answer, and it hands over no team.
     pub fn of(record: &'r ScopeRecord) -> Result<Self, NotLinear> {
         match &record.tracker {
             Tracker::Linear { team_key } => Ok(Self {

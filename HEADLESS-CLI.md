@@ -195,6 +195,20 @@ AI can work in `data-plane`
 filing to `Data Plane` would use the key `work`, which this machine stores
 ```
 
+A record that files to Jira answers in Jira's own fields, and `check` reports
+it rather than refusing it. The route line names the project key and the site
+it lives on, because one project key names a different project on every site,
+and the key line names the project key where the example above names the team:
+
+```sh
+$ warlock check crates/engine
+`crates/engine` is scoped `data-plane`
+work here is filed to `PAY` at `https://acme.atlassian.net`, labelled `area/data-plane`, and a finished pull moves the ticket to `In Review`
+AI can work in `data-plane`
+`data-plane` is open on this machine
+filing to `PAY` would use the key `work`, which this machine stores
+```
+
 The first two lines are the repository's and true for anyone who clones it; the
 last three are this machine's. All five print every time, so an answer with
 something missing is a line that says what is missing rather than one fewer
@@ -223,28 +237,42 @@ no key is bound to this checkout: `warlock key use <name>` binds a name this mac
 
 ```sh
 $ warlock check crates/engine --json
-{"command":"check","path":"crates/engine","scope":"data-plane","open":["data-plane"],"opens":true,"team":"Data Plane","review_state":"In Review","label":"area/data-plane","key":"work","key_found":true}
+{"command":"check","path":"crates/engine","scope":"data-plane","open":["data-plane"],"opens":true,"tracker":"linear","team":"Data Plane","base_url":null,"project_key":null,"review_state":"In Review","label":"area/data-plane","key":"work","key_found":true}
+```
+
+The same path under the Jira record above answers with the same keys in the
+same order, and only the values move:
+
+```sh
+$ warlock check crates/engine --json
+{"command":"check","path":"crates/engine","scope":"data-plane","open":["data-plane"],"opens":true,"tracker":"jira","team":null,"base_url":"https://acme.atlassian.net","project_key":"PAY","review_state":"In Review","label":"area/data-plane","key":"work","key_found":true}
 ```
 
 `path` is repository-root-relative, `scope` is the covering scope or `null`,
 `open` is the scopes open on this machine (`null`, and never `[]`, when the
 config would not read), and `opens` is whether the covering scope is one of
-them — `false` for a path no scope covers, whatever is open. The five beside them are
-the route and the key, flat in the same object rather than nested, so nothing
-has to know which half of the answer a field was added with:
+them — `false` for a path no scope covers, whatever is open. The six after them
+are the route, and the two after those are the key, flat in the same object
+rather than nested, so nothing has to know which half of the answer a field was
+added with:
 
 | Field | What it says | When it is `null` |
 | --- | --- | --- |
-| `team` | The team slug in the covering scope's `[[scope]]` record | No scope covers the path, or the covering scope has no record |
-| `review_state` | The review state that record files work in — spelled as the record spells it, never `state` | The same two cases |
-| `label` | The label that record puts on work | The same two cases |
+| `tracker` | Which tracker the covering scope's `[[scope]]` record files to, `linear` or `jira` | No scope covers the path, or the covering scope has no record |
+| `team` | The team slug a `linear` record files to | The same two cases, or the record is a `jira` one, which holds no team |
+| `base_url` | The site a `jira` record files to | The same two cases, or the record is a `linear` one, which holds no site |
+| `project_key` | The project key a `jira` record files to | The same two cases, or the record is a `linear` one, which holds no project |
+| `review_state` | The review state that record files work in — spelled as the record spells it, never `state` | The same two cases as `tracker` |
+| `label` | The label that record puts on work | The same two cases as `tracker` |
 | `key` | The name this checkout's key is bound to, never a key | Nothing is bound to this checkout |
 | `key_found` | Whether that name resolves in `~/.warlock/keys.toml` — a `bool`, never `null` | — |
 
-The three record fields are one record spread flat, so they are `null`
-together and never `""`: an empty string would tell a script it was filed to a
-team whose name is the empty string. `key` and `key_found` tell the two ways of
-having no usable key apart, because they are fixed in different places:
+The six record fields are one record spread flat, so a path no record routes
+has all six `null` together, and a field the record's tracker holds nothing for
+is `null` beside the ones it fills. None of the six is ever `""`: an empty
+string would tell a script it was filed to a team whose name is the empty
+string. `key` and `key_found` tell the two ways of having no usable key apart,
+because they are fixed in different places:
 `key: null, key_found: false` is nothing bound and `warlock key use` is the
 fix, while `key: "work", key_found: false` is a name this machine has never
 stored and `warlock key add work` is.

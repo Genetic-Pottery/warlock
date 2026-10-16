@@ -42,7 +42,7 @@ use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
-use warlock_engine::{LinearScope, Manifest, route_facts, scope_opens_to};
+use warlock_engine::{FiledTo, LinearScope, Manifest, route_facts, scope_opens_to};
 
 use crate::app::OpenScopes;
 use crate::boundary::{closed_scope_message, unscoped_message};
@@ -61,12 +61,22 @@ const OPEN: &str = "open";
 
 const OPENS: &str = "opens";
 
+// The six below are the TOML keys of the `[[scope]]` record, to the letter and
+// in the record's own order: a consumer reading the manifest and the object side
+// by side should not have to learn that two spellings are one field. `state`
+// would read better than `review_state` and would be exactly that second
+// spelling.
+//
+// All six are written every time, whichever board the record names, so the
+// object has one shape for a script to read — see [`object`].
+const TRACKER: &str = "tracker";
+
 const TEAM: &str = "team";
 
-// The TOML key in the `[[scope]]` record, to the letter. `state` would read
-// better and would be a second spelling of one field: a consumer reading the
-// manifest and the object side by side should not have to learn that they are
-// the same thing.
+const BASE_URL: &str = "base_url";
+
+const PROJECT_KEY: &str = "project_key";
+
 const REVIEW_STATE: &str = "review_state";
 
 const LABEL: &str = "label";
@@ -111,14 +121,17 @@ struct Checked {
     // that would not read is only useful to a reader told which file it is.
     config: Option<PathBuf>,
     opens: bool,
-    // The covering scope's `[[scope]]` record, spread flat rather than held as
-    // one `Option<ScopeRecord>`: a covered path whose scope nobody recorded is
-    // three `null`s here, and the object is the same shape either way. An
-    // absent record is not an empty one — `""` would tell a script it was
-    // filed to a team whose name is the empty string.
-    team: Option<String>,
-    review_state: Option<String>,
-    label: Option<String>,
+    // The covering scope's `[[scope]]` record, as much of it as there is: a
+    // covered path whose scope nobody recorded is `None` here, which the object
+    // renders as the six record keys `null` together and the prose as the
+    // no-record line. An absent record is not an empty one — `""` would tell a
+    // script the work was filed to a team whose name is the empty string.
+    //
+    // One `Option` rather than the fields spread flat, because the absences come
+    // in one piece: a record names a board and the board names which keys it is
+    // addressed by, so no half-filled combination can be built here and the
+    // prose below has no arm for one.
+    record: Option<Recorded>,
     // The *name* a key is stored under and never a key. Nothing in this module
     // reads a value, so there is none to leak into a `Debug`, a panic or an
     // error, and the never-print-a-secret rule costs no care below.
@@ -128,6 +141,78 @@ struct Checked {
     // heard of is `warlock key add`. `key_found` is false for both, so it is
     // never read on its own.
     key_found: bool,
+}
+
+// The covering scope's record, owned: `Checked` outlives the manifest it was
+// read from, which is borrowed inside `checked_at` and dropped there. The review
+// state and the label sit beside the board rather than inside it, because every
+// board is told both and neither is part of how a board is addressed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Recorded {
+    filed: Filed,
+    review_state: String,
+    label: String,
+}
+
+// [`FiledTo`] with the strings owned and Linear's team key in it: the view the
+// engine hands over deliberately carries no team, because a team key has one
+// road, `LinearScope::of`, and holding a `FiledTo::Linear` is not proof of
+// having taken it. Taken once in [`checked`] and kept here, so the renderings
+// below read a board that already names everything it is addressed by.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Filed {
+    Linear {
+        team: String,
+    },
+    Jira {
+        base_url: String,
+        project_key: String,
+    },
+}
+
+impl Filed {
+    // The manifest's own word for the board, through the engine's spelling and
+    // never a second one: `tracker` in the object and `tracker` in
+    // `.warlock/scopes.toml` are the same field, and a consumer reading the two
+    // side by side should find the same word in both.
+    fn word(&self) -> &'static str {
+        match self {
+            Self::Linear { .. } => FiledTo::Linear,
+            Self::Jira {
+                base_url,
+                project_key,
+            } => FiledTo::Jira {
+                base_url,
+                project_key,
+            },
+        }
+        .word()
+    }
+
+    // `team`, `base_url` and `project_key` at once and in the object's order,
+    // rather than three accessors: which keys a board is addressed by and which
+    // are `null` for it is one decision, and one `match` is where it can be read
+    // whole. Never an empty string for the absent ones — `""` would read as a
+    // base URL of nothing rather than as a key this board has no place for.
+    fn addressed(&self) -> (Option<&str>, Option<&str>, Option<&str>) {
+        match self {
+            Self::Linear { team } => (Some(team), None, None),
+            Self::Jira {
+                base_url,
+                project_key,
+            } => (None, Some(base_url), Some(project_key)),
+        }
+    }
+
+    // The one name the prose calls the place work goes: the team for Linear, the
+    // project for Jira. One per board, because the lines below pair it with a
+    // key or a label and a sentence naming two destinations names neither.
+    fn destination(&self) -> &str {
+        match self {
+            Self::Linear { team } => team,
+            Self::Jira { project_key, .. } => project_key,
+        }
+    }
 }
 
 // Nothing on disk has to exist for this to answer: coverage is a walk up the
@@ -229,14 +314,35 @@ fn checked(
         open,
         config: settings.config().map(Path::to_path_buf),
         opens,
-        // A team only where there is one: a check reports and never refuses,
-        // so a scope that files somewhere else is a record with no team here
-        // rather than a failure, exactly as a path with no record is.
-        team: record
-            .and_then(|record| LinearScope::of(record).ok())
-            .map(|linear| linear.team_key().to_owned()),
-        review_state: record.map(|record| record.review_state().to_owned()),
-        label: record.map(|record| record.label().to_owned()),
+        // Whichever board the record names, read and reported: a check reports
+        // and never refuses, so a scope that files somewhere warlock cannot file
+        // to is a record said in that board's own fields here rather than a
+        // failure, exactly as a path with no record is.
+        record: record.and_then(|record| {
+            Some(Recorded {
+                filed: match record.filed_to() {
+                    // The `?` cannot fire: `filed_to` and `LinearScope::of` read
+                    // the same field of the same record, so a record the first
+                    // calls Linear is one the second accepts. Written as an
+                    // absent record rather than as an `expect` because this is
+                    // reporting code — the shape is one the answer already has,
+                    // for a scope nobody recorded, and there is no team name
+                    // worth inventing to avoid it.
+                    FiledTo::Linear => Filed::Linear {
+                        team: LinearScope::of(record).ok()?.team_key().to_owned(),
+                    },
+                    FiledTo::Jira {
+                        base_url,
+                        project_key,
+                    } => Filed::Jira {
+                        base_url: base_url.to_owned(),
+                        project_key: project_key.to_owned(),
+                    },
+                },
+                review_state: record.review_state().to_owned(),
+                label: record.label().to_owned(),
+            })
+        }),
         key: facts.key().map(str::to_owned),
         key_found: facts.stored(),
     })
@@ -444,19 +550,14 @@ fn prose(checked: &Checked) -> String {
     format!(
         "{}\n{}\n{}\n{}\n{}",
         covering_line(&checked.path, checked.scope.as_deref()),
-        route_line(
-            checked.scope.as_deref(),
-            checked.team.as_deref(),
-            checked.review_state.as_deref(),
-            checked.label.as_deref(),
-        ),
+        route_line(checked.scope.as_deref(), checked.record.as_ref()),
         open_line(&checked.open, checked.config.as_deref()),
         verdict_line(checked.scope.as_deref(), checked.opens),
         key_line(
             checked.scope.as_deref(),
             checked.key.as_deref(),
             checked.key_found,
-            checked.team.as_deref(),
+            checked.record.as_ref(),
         ),
     )
 }
@@ -477,33 +578,57 @@ fn covering_line(path: &str, scope: Option<&str>) -> String {
 // leave somebody covering for a colleague with a verdict and nowhere to file.
 // The closed line below sits beside this one instead.
 //
-// The three record fields arrive as three `Option`s and are matched as one,
-// because they are one `[[scope]]` record spread flat by `Checked` — a partial
-// combination cannot be built, and the arms below would rather fall through to
-// "no record" than print a line that names two thirds of a route.
+// The record arrives whole and is matched on the board it names, which is what
+// keeps every board's line a line of its own: a Jira record says the project it
+// files to and the site that project is on, where a Linear one says the team.
+// Neither can fall through to the no-record line, because the only way to reach
+// that is an absent record — which is also the only thing `scope` is read for
+// here.
+//
+// Both halves of a Jira route are named because neither is the address on its
+// own: one project key names a different project on every site, and a reader
+// checking where work goes is checking both.
 //
 // Neither absent case names a command that writes a record, because there is
 // none here to name: a scope with no record is fixed by `warlock scope add`
-// with its `--team-key`, `--review-state` and `--label`, or by hand in the
+// with its `--review-state` and `--label` and whichever of `--team-key`,
+// `--base-url` and `--project-key` its tracker takes, or by hand in the
 // manifest.
-fn route_line(
-    scope: Option<&str>,
-    team: Option<&str>,
-    review_state: Option<&str>,
-    label: Option<&str>,
-) -> String {
-    match (scope, team, review_state, label) {
-        (_, Some(team), Some(review_state), Some(label)) => {
-            format!(
-                "work here is filed to `{team}`, labelled `{label}`, and a finished pull moves \
-                 the ticket to `{review_state}`"
-            )
-        }
-        (Some(scope), ..) => format!(
+fn route_line(scope: Option<&str>, record: Option<&Recorded>) -> String {
+    let Some(Recorded {
+        filed,
+        review_state,
+        label,
+    }) = record
+    else {
+        return no_route_line(scope);
+    };
+
+    match filed {
+        Filed::Linear { team } => format!(
+            "work here is filed to `{team}`, labelled `{label}`, and a finished pull moves the \
+             ticket to `{review_state}`"
+        ),
+        Filed::Jira {
+            base_url,
+            project_key,
+        } => format!(
+            "work here is filed to `{project_key}` at `{base_url}`, labelled `{label}`, and a \
+             finished pull moves the ticket to `{review_state}`"
+        ),
+    }
+}
+
+// Split out so the line above reads as one sentence per board: the two absences
+// are about the scope and not about any board, and the wording of both is what
+// it was before there was more than one.
+fn no_route_line(scope: Option<&str>) -> String {
+    match scope {
+        Some(scope) => format!(
             "`{scope}` has no `[[scope]]` record, so there is nothing to route to: a record \
              in `.warlock/scopes.toml` is what would fix it"
         ),
-        (None, ..) => "there is nothing to route to: a scope covering this path is what would \
+        None => "there is nothing to route to: a scope covering this path is what would \
              fix it, with `warlock scope add`"
             .to_owned(),
     }
@@ -546,12 +671,19 @@ fn verdict_line(scope: Option<&str>, opens: bool) -> String {
 // run, and the scope to draw first is `warlock scope add` on the route line
 // above.
 //
-// A bound name that resolves is said together with the team it would file to,
-// because that pairing is the question being asked: "where does work here go,
-// and can this checkout file it". Naming the key alone would answer half of it
-// on a line that looks like the whole answer. With no record there is no team
-// to pair it with, and the line says only what is true.
-fn key_line(scope: Option<&str>, key: Option<&str>, found: bool, team: Option<&str>) -> String {
+// A bound name that resolves is said together with where it would file —
+// the team for a Linear record and the project for a Jira one, which is
+// `Filed::destination` — because that pairing is the question being asked:
+// "where does work here go, and can this checkout file it". Naming the key
+// alone would answer half of it on a line that looks like the whole answer.
+// With no record there is nowhere to pair it with, and the line says only what
+// is true.
+fn key_line(
+    scope: Option<&str>,
+    key: Option<&str>,
+    found: bool,
+    record: Option<&Recorded>,
+) -> String {
     match (scope, key, found) {
         (None, ..) => "a key is bound to a scope, so there is none to report and none to bind \
              until a scope covers this path"
@@ -565,9 +697,10 @@ fn key_line(scope: Option<&str>, key: Option<&str>, found: bool, team: Option<&s
             "the key `{key}` is bound to the scope `{scope}` and this machine has not stored it: \
              `warlock key add {key}` stores it, `warlock key use {scope} <name>` binds another"
         ),
-        (Some(_), Some(key), true) => match team {
-            Some(team) => {
-                format!("filing to `{team}` would use the key `{key}`, which this machine stores")
+        (Some(_), Some(key), true) => match record {
+            Some(record) => {
+                let filing = record.filed.destination();
+                format!("filing to `{filing}` would use the key `{key}`, which this machine stores")
             }
             None => format!("the key `{key}` is bound here and stored on this machine"),
         },
@@ -577,7 +710,20 @@ fn key_line(scope: Option<&str>, key: Option<&str>, found: bool, team: Option<&s
 // The same envelope a listing prints, with this command's body in it. No `root`
 // field and no home, deliberately: an absolute machine path is not reproducible
 // across machines, and a home names a person.
+//
+// All six record keys are written whichever board answered, and the two or three
+// the board has no place for are `null` rather than left out: a script reading
+// `--json` gets one object shape from every tracker, so `.team` is a question it
+// can ask of any answer and `.tracker` is how it learns which keys to read. A
+// key dropped instead would make the absent and the inapplicable the same thing
+// to a consumer, and would make adding a board a change to the shape.
 fn object(checked: &Checked) -> Value {
+    let record = checked.record.as_ref();
+    let filed = record.map(|record| &record.filed);
+    // All three from one `match` on the board, so the object cannot say a
+    // Linear record has a base URL — see `Filed::addressed`.
+    let (team, base_url, project_key) = filed.map_or((None, None, None), Filed::addressed);
+
     envelope(
         CHECK,
         [
@@ -585,9 +731,15 @@ fn object(checked: &Checked) -> Value {
             (SCOPE, text(checked.scope.as_deref())),
             (OPEN, open_value(&checked.open)),
             (OPENS, Value::Bool(checked.opens)),
-            (TEAM, text(checked.team.as_deref())),
-            (REVIEW_STATE, text(checked.review_state.as_deref())),
-            (LABEL, text(checked.label.as_deref())),
+            (TRACKER, text(filed.map(Filed::word))),
+            (TEAM, text(team)),
+            (BASE_URL, text(base_url)),
+            (PROJECT_KEY, text(project_key)),
+            (
+                REVIEW_STATE,
+                text(record.map(|record| record.review_state.as_str())),
+            ),
+            (LABEL, text(record.map(|record| record.label.as_str()))),
             (KEY, text(checked.key.as_deref())),
             (KEY_FOUND, Value::Bool(checked.key_found)),
         ],
