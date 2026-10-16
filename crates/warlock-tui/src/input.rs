@@ -19,7 +19,10 @@ use crate::confirm::{
 };
 use crate::help::{HelpSheet, help_for};
 use crate::modal::Modal;
-use crate::prompt::{Edited, KeyEdited, RecordEdited, edit_for, key_edit_for, record_edit_for};
+use crate::prompt::{
+    Edited, KeyEdited, RecordEdited, TrackerEdited, edit_for, key_edit_for, record_edit_for,
+    tracker_edit_for,
+};
 use crate::selection::Cell;
 use crate::ui::{Cut, Hit, Reach, Shape};
 
@@ -133,11 +136,15 @@ pub(crate) enum Pressed {
     Carry(CarryAnswered),
     WriteBrief(Answered),
     Scope(Edited),
+    // The window between the scope and the record, and a `TrackerEdited` of its
+    // own for `Record`'s reason: there is no text in it, so a submit is the lit
+    // row and not a string, and the loop answers it by opening a form rather
+    // than by writing anything.
+    Tracker(TrackerEdited),
     Record(RecordEdited),
-    // The fourth window, and a `KeyEdited` of its own for `Record`'s reason:
-    // there is no text in it, so a submit is the lit row and not a string, and
-    // the loop answers it by writing this machine's config rather than the
-    // manifest the three above write.
+    // And a `KeyEdited` of its own for the same reason, with one more thing
+    // true of it: the loop answers this one by writing this machine's config
+    // rather than the manifest the windows above write.
     Key(KeyEdited),
     Write(Edited),
     Compose(Composed),
@@ -237,6 +244,7 @@ pub(crate) fn press_for(
             Modal::Carry(asked) => Pressed::Carry(carry_answer_for(key, asked.answer())),
             Modal::WriteBrief(highlighted) => Pressed::WriteBrief(answer_for(key, highlighted)),
             Modal::Scope(field) => Pressed::Scope(edit_for(key, field)),
+            Modal::Tracker(choice) => Pressed::Tracker(tracker_edit_for(key, choice)),
             Modal::Record(form) => Pressed::Record(record_edit_for(key, form)),
             Modal::Key(choice) => Pressed::Key(key_edit_for(key, choice)),
             Modal::Write(field) => Pressed::Write(edit_for(key, field)),

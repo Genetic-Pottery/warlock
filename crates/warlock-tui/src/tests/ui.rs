@@ -4,6 +4,7 @@ use std::time::{Duration, Instant};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::buffer::Buffer;
+use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::{Position, Rect, Size};
 use ratatui::style::{Color, Modifier};
 use ratatui::widgets::{Paragraph, Widget};
@@ -20,11 +21,11 @@ use super::{
     PUSH_QUESTION, PUSH_TEAM, QUIT_KEY, RECORD_HEADING, RECORD_LABEL_GAP, RECORD_RULES,
     REVIEW_ANSWER_GAP, REVIEW_CREATE, REVIEW_EDIT, REVIEW_FEEDBACK, REVIEW_QUESTION, REVIEW_READ,
     REVIEW_SKIP, Reach, Review, SAID_MARKER, SCOPE_CURSOR, SCOPE_HEADING, SCROLLBACK_ARROW,
-    SELECTED, SELECTION_MARKER, Shape, THREAD_TITLE, TREE_MIN_ROWS, TREE_MIN_WIDTH, TREE_PERCENT,
-    WILDCARD, WORKFLOW_LIT, composer_on_screen, display_width, draw, footer_text_area,
-    guide_prefixes, help_most_scroll, identity_title, key_none_line, keys_line, label_width,
-    mark_area, open_line_count, open_lines, pane_inner, panel_row, panel_width, target_title,
-    tree_column, tree_width, truncated, workflow_line,
+    SELECTED, SELECTION_MARKER, Shape, THREAD_TITLE, TRACKER_HEADING, TRACKER_RULES, TREE_MIN_ROWS,
+    TREE_MIN_WIDTH, TREE_PERCENT, WILDCARD, WORKFLOW_LIT, composer_on_screen, display_width, draw,
+    footer_text_area, guide_prefixes, help_most_scroll, identity_title, key_none_line, keys_line,
+    label_width, mark_area, open_line_count, open_lines, pane_inner, panel_row, panel_width,
+    target_title, tree_column, tree_width, truncated, workflow_line,
 };
 use crate::account::Line as Entry;
 use crate::app::{App, Chrome, Focus, Held, OpenScopes, Row, Working};
@@ -38,7 +39,7 @@ use crate::modal::{Modal, Modals};
 use crate::panel::Mode;
 use crate::prompt::{
     KeyChoice, KeyPrompt, RecordField, RecordForm, RecordPrompt, RecordTracker, ScopeField,
-    ScopePrompt,
+    ScopePrompt, TrackerChoice, TrackerEdited, TrackerPrompt, tracker_edit_for,
 };
 // Renamed because `Position` in here is ratatui's point on the screen, and a
 // selection's is a byte of the thread's text.
@@ -6596,8 +6597,9 @@ fn lit_rows(buffer: &Buffer, choice: &KeyChoice) -> Vec<u16> {
         .collect()
 }
 
-// Heading, rows, rules — everything inside the border and its margin row.
-fn key_said(rows: &[String]) -> Vec<String> {
+// Heading, rows, rules — everything inside the border and its margin row, for
+// either of the two list windows.
+fn listed(rows: &[String]) -> Vec<String> {
     let margin = usize::from(BORDER_THICKNESS + DIALOG_MARGIN_ROWS);
 
     rows[margin..rows.len() - margin]
@@ -6623,7 +6625,7 @@ fn the_key_window_names_the_scope_and_every_stored_name_with_one_of_them_lit() {
     // The scope it was opened for, a row for every name the store holds in the
     // order it listed them, and what the two keys do last.
     assert_eq!(
-        key_said(&rows),
+        listed(&rows),
         vec![
             format!("{KEY_HEADING}{KEY_SCOPE}"),
             String::new(),
@@ -6658,7 +6660,7 @@ fn a_key_window_with_no_names_draws_no_rows_and_says_how_to_store_one_and_bind_i
     let buffer = render_key(&choice, WIDTH, FIXTURE_HEIGHT);
 
     let rows = key_rows(&buffer, &choice);
-    let said = key_said(&rows);
+    let said = listed(&rows);
     assert_eq!(
         said,
         vec![
@@ -6683,6 +6685,108 @@ fn a_key_window_with_no_names_draws_no_rows_and_says_how_to_store_one_and_bind_i
 
     // Nothing is lit, because there is no row to light.
     assert!(lit_rows(&buffer, &choice).is_empty(), "{rows:?}");
+}
+
+// The picker as the precedence hands it over, drawn on a bare screen for
+// `render_key`'s reason: the lines are the whole of what these tests are about.
+fn render_tracker(choice: &TrackerChoice, width: u16, height: u16) -> Buffer {
+    let mut terminal =
+        Terminal::new(TestBackend::new(width, height)).expect("test backend never fails");
+    terminal
+        .draw(|frame| {
+            let screen = frame.area();
+            Dialog::of(Modal::Tracker(choice)).draw(frame, screen);
+        })
+        .expect("test backend never fails");
+    terminal.backend().buffer().clone()
+}
+
+fn tracker_rect(buffer: &Buffer, choice: &TrackerChoice) -> Rect {
+    Dialog::of(Modal::Tracker(choice)).area(buffer.area)
+}
+
+fn tracker_rows(buffer: &Buffer, choice: &TrackerChoice) -> Vec<String> {
+    let area = tracker_rect(buffer, choice);
+    (0..area.height)
+        .map(|index| text_in(buffer, area, area.y + index))
+        .collect()
+}
+
+// Which rows carry the highlight, counted from the top border, so a second lit
+// row fails rather than going unlooked at.
+fn lit_tracker_rows(buffer: &Buffer, choice: &TrackerChoice) -> Vec<u16> {
+    let area = tracker_rect(buffer, choice);
+    (0..area.height)
+        .filter(|index| {
+            (area.x..area.x + area.width).any(|x| {
+                buffer[(x, area.y + index)]
+                    .modifier
+                    .contains(SELECTED.add_modifier)
+            })
+        })
+        .collect()
+}
+
+fn a_tracker_choice() -> TrackerChoice {
+    TrackerPrompt::open(SCOPED, RECORDED)
+        .choice()
+        .expect("an open picker holds its choice")
+        .clone()
+}
+
+#[test]
+fn the_tracker_picker_names_the_scope_and_its_directory_and_lists_both_boards() {
+    let choice = a_tracker_choice();
+
+    let buffer = render_tracker(&choice, WIDTH, FIXTURE_HEIGHT);
+
+    let rows = tracker_rows(&buffer, &choice);
+    assert!(
+        rows[0].starts_with('┌') && rows[0].ends_with('┐'),
+        "{rows:?}"
+    );
+    let last = rows.last().expect("the window has rows");
+    assert!(last.starts_with('└') && last.ends_with('┘'), "{rows:?}");
+
+    // The name being recorded, the directory it is being recorded for, a row
+    // per tracker in the order the highlight walks them, and what the two keys
+    // do last.
+    assert_eq!(
+        listed(&rows),
+        vec![
+            format!("{TRACKER_HEADING}{RECORDED}"),
+            SCOPED.to_owned(),
+            String::new(),
+            "Linear".to_owned(),
+            "Jira".to_owned(),
+            String::new(),
+            TRACKER_RULES.to_owned(),
+        ],
+        "{rows:?}"
+    );
+
+    // One row is lit, and it is the one Enter would open a form for.
+    let first = BORDER_THICKNESS + DIALOG_MARGIN_ROWS + 3;
+    assert_eq!(choice.highlighted(), RecordTracker::Linear);
+    assert_eq!(lit_tracker_rows(&buffer, &choice), vec![first], "{rows:?}");
+}
+
+#[test]
+fn the_picker_lights_the_row_the_highlight_has_moved_to_and_no_other() {
+    let moved = match tracker_edit_for(
+        KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+        &a_tracker_choice(),
+    ) {
+        TrackerEdited::Open(choice) => choice,
+        other => panic!("Down should have left the picker open, and gave {other:?}"),
+    };
+
+    let buffer = render_tracker(&moved, WIDTH, FIXTURE_HEIGHT);
+
+    let rows = tracker_rows(&buffer, &moved);
+    assert_eq!(moved.highlighted(), RecordTracker::Jira);
+    let second = BORDER_THICKNESS + DIALOG_MARGIN_ROWS + 4;
+    assert_eq!(lit_tracker_rows(&buffer, &moved), vec![second], "{rows:?}");
 }
 
 mod help {

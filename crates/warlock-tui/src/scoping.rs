@@ -12,15 +12,19 @@
 //! adds is where each refusal lands on screen. An empty field clears the scope
 //! rather than being refused.
 //!
-//! The key window at the bottom of this file is the one thing here that does not
-//! write the manifest: a binding is a fact about this machine, so it lands in
-//! this checkout's config under the home directory and leaves
-//! `.warlock/scopes.toml` alone. [`record_submit`] is what puts it up, and only
-//! once the record it was asked for is on disk — the order is the record first
-//! and the key second, so an Esc on it leaves a scope recorded and unbound
-//! rather than rolling either half back. Everything else about it is
-//! [`record_submit`]'s shape — Esc writes nothing, Enter is the one road to
-//! disk, and a refusal is the engine's own sentence on the message line.
+//! The tracker picker and the key window are the two things here that write
+//! nothing. The picker stands between the scope window and the record form,
+//! over a name no `[[scope]]` record claims: it carries the manifest path and
+//! the folded name across and settles which form comes up, so an Esc on it
+//! leaves the directory exactly as unscoped as the press found it. A binding is
+//! a fact about this machine, so it lands in this checkout's config under the
+//! home directory and leaves `.warlock/scopes.toml` alone. [`record_submit`] is
+//! what puts it up, and only once the record it was asked for is on disk — the
+//! order is the record first and the key second, so an Esc on it leaves a
+//! scope recorded and unbound rather than rolling either half back. Everything
+//! else about it is [`record_submit`]'s shape — Esc writes nothing, Enter is
+//! the one road to disk, and a refusal is the engine's own sentence on the
+//! message line.
 //!
 //! The home all of that happens under is a parameter, resolved once by the loop
 //! when the session loaded. Nothing here reads the environment: a second
@@ -37,7 +41,7 @@ use crate::app::{App, OpenScopes};
 use crate::error::Error;
 use crate::prompt::{
     Edited, KeyChoice, KeyEdited, KeyPrompt, RecordEdited, RecordField, RecordForm, RecordPrompt,
-    RecordTracker, ScopeField, ScopePrompt,
+    RecordTracker, ScopeField, ScopePrompt, TrackerEdited, TrackerPrompt,
 };
 use crate::rescope::{RecordFields, ScopeRefusal, TrackerFields, rescope};
 use crate::session::closed_scope;
@@ -101,22 +105,23 @@ fn refused(pulling: &str) -> String {
     format!("{pulling}; no scope was written")
 }
 
-// All three windows the `s` key can have up, in one value rather than a return
+// All four windows the `s` key can have up, in one value rather than a return
 // each, because every submit on this path takes one down and may put the next
-// one up in the same breath: the scope window's submit opens the record form
-// over a name nothing records, and the record form's own submit opens the key
-// window over the scope it has just recorded. A return per window would let a
-// caller apply part of that and leave the reader looking at two of them, or at
-// none.
+// one up in the same breath: the scope window's submit opens the tracker picker
+// over a name nothing records, the picker's submit opens that tracker's record
+// form, and the record form's own submit opens the key window over the scope it
+// has just recorded. A return per window would let a caller apply part of that
+// and leave the reader looking at two of them, or at none.
 //
 // Never more than one is open at a time. Each constructor below writes all
-// three fields, so a window a submit said nothing about is `Closed` here rather
+// four fields, so a window a submit said nothing about is `Closed` here rather
 // than whatever the caller had before, and the precedence in
 // [`Modals::current`](crate::modal::Modals) is never asked to choose between
 // two of these.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct Windows {
     pub(crate) scope: ScopePrompt,
+    pub(crate) tracker: TrackerPrompt,
     pub(crate) record: RecordPrompt,
     pub(crate) key: KeyPrompt,
 }
@@ -125,15 +130,33 @@ impl Windows {
     fn asking(field: ScopeField) -> Self {
         Self {
             scope: ScopePrompt::Open(field),
+            tracker: TrackerPrompt::Closed,
             record: RecordPrompt::Closed,
             key: KeyPrompt::Closed,
         }
     }
 
-    fn recording(module: &str, scope: &str) -> Self {
+    // Over a window rather than over a choice, as `binding` is: the two roads
+    // here are a picker just opened over a name and one whose highlight has
+    // moved, and the one that builds a fresh choice is
+    // [`TrackerPrompt::open`](crate::prompt::TrackerPrompt::open).
+    fn choosing(tracker: TrackerPrompt) -> Self {
         Self {
             scope: ScopePrompt::Closed,
-            record: RecordPrompt::open(RecordTracker::Linear, module, scope),
+            tracker,
+            record: RecordPrompt::Closed,
+            key: KeyPrompt::Closed,
+        }
+    }
+
+    // The tracker comes from the picker's lit row rather than from here: which
+    // board a new scope files to is the reader's answer, and a default would
+    // record somebody's Jira scope as a Linear one.
+    fn recording(tracker: RecordTracker, module: &str, scope: &str) -> Self {
+        Self {
+            scope: ScopePrompt::Closed,
+            tracker: TrackerPrompt::Closed,
+            record: RecordPrompt::open(tracker, module, scope),
             key: KeyPrompt::Closed,
         }
     }
@@ -143,6 +166,7 @@ impl Windows {
     fn filling(form: RecordForm) -> Self {
         Self {
             scope: ScopePrompt::Closed,
+            tracker: TrackerPrompt::Closed,
             record: RecordPrompt::Open(form),
             key: KeyPrompt::Closed,
         }
@@ -151,6 +175,7 @@ impl Windows {
     fn binding(key: KeyPrompt) -> Self {
         Self {
             scope: ScopePrompt::Closed,
+            tracker: TrackerPrompt::Closed,
             record: RecordPrompt::Closed,
             key,
         }
@@ -185,9 +210,10 @@ pub(crate) fn scope_edit(
 // than a scope to judge.
 //
 // A name no `[[scope]]` record claims is not written here at all: it goes to the
-// record window, and `record_submit` writes the scope and the record together.
-// So this is the only place that decides which of the two roads a submit takes,
-// and by the time the record window is up the name is known to be unrecorded.
+// tracker picker, and `record_submit` — two windows on — writes the scope and
+// the record together. So this is the only place that decides which of the two
+// roads a submit takes, and by the time the picker is up the name is known to be
+// unrecorded.
 //
 // The manifest the loop holds is replaced only *after* the save succeeded, so
 // what this thread believes is what is on disk. A save that fails is a line on
@@ -222,7 +248,9 @@ pub(crate) fn scope_submit(
         Err(ScopeRefusal::Rule { rule }) => {
             Windows::asking(field.clone().refused(rule.to_string()))
         }
-        Err(ScopeRefusal::NeedsRecord { scope, .. }) => Windows::recording(module, &scope),
+        Err(ScopeRefusal::NeedsRecord { scope, .. }) => {
+            Windows::choosing(TrackerPrompt::open(module, scope))
+        }
         Err(refusal) => {
             app.set_message(refusal.to_string());
             Windows::default()
@@ -247,7 +275,31 @@ fn save(app: &mut App, manifest: &mut Manifest, repo_root: &Path, next: Manifest
     }
 }
 
-// [`scope_edit`]'s counterpart for the second window, and the same three roads:
+// [`scope_edit`]'s counterpart for the picker, and the same three roads: a move
+// of the highlight moves the window alone, Esc puts it down — the directory is
+// as unscoped as the press found it, because the scope window's submit wrote
+// nothing either — and Enter opens the record form for the lit row.
+//
+// No app, no manifest and no root, because this window writes nothing and has
+// nothing to refuse: the path and the name came out of the submit that opened
+// it, and the form it hands them to is where a reader's typing can first be
+// turned down.
+//
+// The `None` arm is unreachable for [`scope_edit`]'s reason: `press_for` only
+// consults [`tracker_edit_for`](crate::prompt::tracker_edit_for) while this
+// window is up.
+pub(crate) fn tracker_edit(prompt: &TrackerPrompt, edited: TrackerEdited) -> Windows {
+    match edited {
+        TrackerEdited::Open(choice) => Windows::choosing(TrackerPrompt::Open(choice)),
+        TrackerEdited::Close => Windows::default(),
+        TrackerEdited::Submit => match prompt.choice() {
+            Some(choice) => Windows::recording(choice.highlighted(), choice.path(), choice.scope()),
+            None => Windows::default(),
+        },
+    }
+}
+
+// [`scope_edit`]'s counterpart for the record form, and the same three roads:
 // typing and moving the focus move the window alone, Esc puts it down with
 // nothing written — the app was never told the first window was answered
 // either, so an abandoned record leaves no scope behind — and Enter is the one

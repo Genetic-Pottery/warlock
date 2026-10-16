@@ -1,19 +1,21 @@
 //! The prompts the panel puts up over the tree: the scope itself — the directory
 //! being scoped, the text typed into the field, and the one line under it saying
-//! why the last submit was refused — the record it routes to when that name is
-//! new, which is one of those fields per value the record's tracker needs and a
-//! cursor saying which one is being typed in, and the key binding, which is the
-//! one window here that is a list of choices rather than something to type into.
+//! why the last submit was refused — the tracker a name nothing records is filed
+//! to, the record that tracker needs, which is one of those fields per value it
+//! carries and a cursor saying which one is being typed in, and the key binding.
+//! The scope and the record are typed into; the tracker and the binding are
+//! lists of rows to pick from, with no text in them at all.
 //!
-//! [`ScopePrompt`], [`RecordPrompt`] and [`KeyPrompt`] are values of their own
-//! and *not* fields on [`App`](crate::app::App), because Esc has to leave the
-//! app exactly as it was and an app that never heard of the prompt is a cheaper
-//! guarantee of that than putting every field back. The cursor is a byte offset
-//! into that text and every key here keeps it on a character boundary, because
-//! the text is sliced at it — by the edits below and by the frame, which draws
-//! the caret on the character it names. Nothing here judges the text either —
-//! Enter comes back as [`Edited::Submit`] whatever has been typed, empty
-//! included, because that is how a scope is cleared.
+//! [`ScopePrompt`], [`TrackerPrompt`], [`RecordPrompt`] and [`KeyPrompt`] are
+//! values of their own and *not* fields on [`App`](crate::app::App), because
+//! Esc has to leave the app exactly as it was and an app that never heard of
+//! the prompt is a cheaper guarantee of that than putting every field back. The
+//! cursor is a byte offset into that text and every key here keeps it on a
+//! character boundary, because the text is sliced at it — by the edits below
+//! and by the frame, which draws the caret on the character it names. Nothing
+//! here judges the text either — Enter comes back as [`Edited::Submit`]
+//! whatever has been typed, empty included, because that is how a scope is
+//! cleared.
 //!
 //! Ctrl-C is deliberately not answered here. Raw mode is exactly the mode in
 //! which the terminal stops turning it into `SIGINT`, so the loop takes it
@@ -311,16 +313,20 @@ impl RecordField {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum RecordTracker {
     Linear,
-    // Nothing in the panel builds one yet: the window that asks which tracker a
-    // record is for is still to be written, and until it is, the one road to a
-    // form — a `NeedsRecord` refusal in `scoping.rs` — opens Linear's. The
-    // allow is what keeps that unbuilt variant from failing the build, and goes
-    // when that window hands this to `RecordForm::new`.
-    #[allow(dead_code)]
     Jira,
 }
 
 impl RecordTracker {
+    /// What the picker's row for this tracker says, which is the board's own
+    /// name for itself.
+    #[must_use]
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::Linear => "Linear",
+            Self::Jira => "Jira",
+        }
+    }
+
     /// The fields a record filed to this tracker is made of, in the order its
     /// own [`ScopeRecord`](warlock_engine::ScopeRecord) constructor takes them,
     /// which is the order a form walks them and the frame draws them in — so a
@@ -341,6 +347,145 @@ impl RecordTracker {
                 RecordField::Label,
             ],
         }
+    }
+}
+
+/// Every tracker a scope can be recorded against, in the order the picker lists
+/// them and so the order its highlight walks.
+///
+/// The one list there is: a variant added to [`RecordTracker`] and not to this
+/// is a tracker no window ever offers, and nothing else in the panel enumerates
+/// them.
+pub(crate) const TRACKERS: [RecordTracker; 2] = [RecordTracker::Linear, RecordTracker::Jira];
+
+/// The window that asks which tracker a new scope files to: the directory and
+/// the folded name the scope window was answered about, and which row is
+/// highlighted.
+///
+/// Both strings are carried through rather than read again, for the reason
+/// [`RecordForm`] carries them: the form this window opens has to be over the
+/// very directory and the very name that submit settled on, and a second read
+/// of the field could disagree.
+///
+/// Nothing here writes, and there is nothing to write with: no manifest, no
+/// path to a repository and no home. The question is which form comes up, and
+/// the form's own submit is still the one road to disk.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct TrackerChoice {
+    path: String,
+    scope: String,
+    // An index into `TRACKERS` rather than a `RecordTracker`, which is what
+    // makes "stop at both ends" the arithmetic below rather than a walk over
+    // the variants. Never past the end: `over` starts at the first row and both
+    // moves clamp to the last.
+    row: usize,
+}
+
+impl TrackerChoice {
+    fn over(path: impl Into<String>, scope: impl Into<String>) -> Self {
+        Self {
+            path: path.into(),
+            scope: scope.into(),
+            row: 0,
+        }
+    }
+
+    #[must_use]
+    pub(crate) fn path(&self) -> &str {
+        &self.path
+    }
+
+    #[must_use]
+    pub(crate) fn scope(&self) -> &str {
+        &self.scope
+    }
+
+    /// The tracker the record form would be opened for.
+    ///
+    /// Not an `Option`, where [`KeyChoice::highlighted`] is one: the rows here
+    /// are [`TRACKERS`] and not whatever a machine's store holds, so there is
+    /// no empty list to have nothing lit on. The clamp is what keeps that
+    /// promise total rather than leaving the index to panic a frame.
+    #[must_use]
+    pub(crate) fn highlighted(&self) -> RecordTracker {
+        TRACKERS[self.row.min(TRACKERS.len() - 1)]
+    }
+}
+
+// The choice lives inside `Open` for [`ScopePrompt`]'s reason: "closed, with a
+// tracker picked" is not a state that can be written down.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
+pub(crate) enum TrackerPrompt {
+    #[default]
+    Closed,
+    Open(TrackerChoice),
+}
+
+impl TrackerPrompt {
+    #[must_use]
+    pub(crate) fn open(path: impl Into<String>, scope: impl Into<String>) -> Self {
+        Self::Open(TrackerChoice::over(path, scope))
+    }
+
+    #[must_use]
+    #[cfg(test)]
+    pub(crate) const fn is_open(&self) -> bool {
+        matches!(self, Self::Open(_))
+    }
+
+    #[must_use]
+    pub(crate) const fn choice(&self) -> Option<&TrackerChoice> {
+        match self {
+            Self::Closed => None,
+            Self::Open(choice) => Some(choice),
+        }
+    }
+}
+
+/// What a keystroke comes to while the tracker picker is open.
+///
+/// [`TrackerEdited::Submit`] carries no tracker for the reason
+/// [`KeyEdited::Submit`] carries no name: the caller reads
+/// [`TrackerChoice::highlighted`] off the choice it already holds, so no submit
+/// can open a form for a tracker the window was not showing.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) enum TrackerEdited {
+    Open(TrackerChoice),
+    Close,
+    Submit,
+}
+
+/// What `key` does to a picker open over `choice`.
+///
+/// The key window's own rules, which this is a copy of: Up and Down walk the
+/// rows and stop at both ends rather than wrapping, Esc closes, Enter submits,
+/// and every other key leaves the choice byte for byte as it was — the tree's
+/// own bindings and `j`/`k` included. Only presses count, for [`edit_for`]'s
+/// reason.
+///
+/// There is no guard on Enter, where [`key_edit_for`] has one: [`TRACKERS`] is
+/// never empty, so a row is always lit.
+#[must_use]
+pub(crate) fn tracker_edit_for(key: KeyEvent, choice: &TrackerChoice) -> TrackerEdited {
+    if key.kind != KeyEventKind::Press {
+        return TrackerEdited::Open(choice.clone());
+    }
+
+    let unchanged = || TrackerEdited::Open(choice.clone());
+    let moved = |row: usize| {
+        TrackerEdited::Open(TrackerChoice {
+            row,
+            ..choice.clone()
+        })
+    };
+    let last = TRACKERS.len() - 1;
+
+    match key.code {
+        KeyCode::Enter => TrackerEdited::Submit,
+        KeyCode::Esc => TrackerEdited::Close,
+        KeyCode::Up => moved(choice.row.saturating_sub(1)),
+        KeyCode::Down => moved(choice.row.saturating_add(1).min(last)),
+        _ => unchanged(),
     }
 }
 

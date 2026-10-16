@@ -3,7 +3,10 @@ use crate::confirm::{
     Undertaking,
 };
 use crate::help::HelpSheet;
-use crate::prompt::{KeyChoice, KeyPrompt, RecordForm, RecordPrompt, ScopeField, ScopePrompt};
+use crate::prompt::{
+    KeyChoice, KeyPrompt, RecordForm, RecordPrompt, ScopeField, ScopePrompt, TrackerChoice,
+    TrackerPrompt,
+};
 
 // Two variants over `ScopeField` rather than one carrying a tag, so the field
 // a key is typed into and the heading it is drawn under cannot come from two
@@ -20,17 +23,19 @@ pub(crate) enum Modal<'a> {
     Carry(&'a Carry),
     WriteBrief(Answer),
     Scope(&'a ScopeField),
+    Tracker(&'a TrackerChoice),
     Record(&'a RecordForm),
     Key(&'a KeyChoice),
     Write(&'a ScopeField),
 }
 
-// Named fields rather than positional arguments: three of these are prompts of
-// one type, and handed in by position they could be swapped with nothing to
-// catch it. Each window's state stays with the flow that owns it — the cut
-// owns its three, the push its dialog, the chat its write prompt — and more than
-// one can be up at once, since a brief-mode turn, a write turn or a board's
-// answer opens its window with no keystroke. So this does not make two open impossible; it makes
+// Named fields rather than positional arguments: two of these are prompts of
+// the very same type — `scope` and `write` are both a [`ScopePrompt`] — and
+// handed in by position they could be swapped with nothing to catch it. Each
+// window's state stays with the flow that owns it — the cut owns its three, the
+// push its dialog, the chat its write prompt — and more than one can be up at
+// once, since a brief-mode turn, a write turn or a board's answer opens its
+// window with no keystroke. So this does not make two open impossible; it makes
 // [`Modals::current`] the one answer to which of them counts.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Modals<'a> {
@@ -43,6 +48,7 @@ pub(crate) struct Modals<'a> {
     pub carry: Option<&'a Carry>,
     pub write_brief: Option<Answer>,
     pub scope: &'a ScopePrompt,
+    pub tracker: &'a TrackerPrompt,
     pub record: &'a RecordPrompt,
     pub key: &'a KeyPrompt,
     pub write: &'a ScopePrompt,
@@ -60,6 +66,7 @@ impl Default for Modals<'_> {
             carry: None,
             write_brief: None,
             scope: &ScopePrompt::Closed,
+            tracker: &TrackerPrompt::Closed,
             record: &RecordPrompt::Closed,
             key: &KeyPrompt::Closed,
             write: &ScopePrompt::Closed,
@@ -82,8 +89,8 @@ impl<'a> Modals<'a> {
     // else, so a window that comes up on no keystroke does not take the keys
     // from a sheet somebody opened and is reading.
     //
-    // The push, cut, pull, review, carry and write questions before the four
-    // windows under them, for the same reason one step down: one of those four
+    // The push, cut, pull, review, carry and write questions before the five
+    // windows under them, for the same reason one step down: one of those five
     // can come up under a question on no keystroke, and the question is the
     // window somebody is looking at. Among those six the order is a statement
     // rather than a choice: a `/push`, `/draft` or `/pull` is typed into the
@@ -96,22 +103,24 @@ impl<'a> Modals<'a> {
     // with the two a run puts up, because that is what it is: it is asked once,
     // before anything is checked out, and nothing it starts asks anything else.
     //
-    // Then the four windows a scope, a record, a binding and a path are
-    // settled in, in that order, and the order among them is which of them
-    // somebody has just acted in. The two the `s` key puts up come first,
-    // because either can be up with the write prompt — `s` opens one from the
-    // tree while a write turn is out, and that turn's answer opens the other —
-    // and the `s` window is the one somebody is typing in; the scope and record
-    // windows are never both up, since one opens exactly as the other closes.
-    // The key-binding window comes after those two because a submit of the
-    // record form is one of the things that can put it up, so a binding asked
-    // for over a record being filled in cannot take the keys from the fields it
-    // came out of; and before the write prompt because it is opened by a
-    // keystroke or a typed command, where a path prompt comes up on a turn's
-    // answer with nobody pressing anything. It is under all six questions
-    // above with nothing said about it that is not said about the other three:
-    // a push, cut or pull dialog already up keeps the keys, and a binding asked
-    // about underneath one waits there until that question is answered.
+    // Then the five windows a scope, the tracker it files to, its record, a
+    // binding and a path are settled in, in that order, and the order among
+    // them is which of them somebody has just acted in. The three the `s` key
+    // puts up come first, because any of them can be up with the write prompt —
+    // `s` opens one from the tree while a write turn is out, and that turn's
+    // answer opens the path prompt — and the `s` window is the one somebody is
+    // answering; no two of those three are ever up together, since each opens
+    // exactly as the one before it closes, so the order among them is simply
+    // the order a reader meets them. The key-binding window comes after all
+    // three because a submit of the record form is one of the things that can
+    // put it up, so a binding asked for over a record being filled in cannot
+    // take the keys from the fields it came out of; and before the write prompt
+    // because it is opened by a keystroke or a typed command, where a path
+    // prompt comes up on a turn's answer with nobody pressing anything. It is
+    // under all six questions above with nothing said about it that is not said
+    // about the other four: a push, cut or pull dialog already up keeps the
+    // keys, and a binding asked about underneath one waits there until that
+    // question is answered.
     #[must_use]
     pub(crate) fn current(self) -> Option<Modal<'a>> {
         self.quit
@@ -125,6 +134,7 @@ impl<'a> Modals<'a> {
             .or_else(|| self.carry.map(Modal::Carry))
             .or_else(|| self.write_brief.map(Modal::WriteBrief))
             .or_else(|| self.scope.field().map(Modal::Scope))
+            .or_else(|| self.tracker.choice().map(Modal::Tracker))
             .or_else(|| self.record.form().map(Modal::Record))
             .or_else(|| self.key.choice().map(Modal::Key))
             .or_else(|| self.write.field().map(Modal::Write))

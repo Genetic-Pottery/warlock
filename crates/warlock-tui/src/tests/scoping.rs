@@ -9,11 +9,15 @@ use warlock_engine::{
     load_key_binding, manifest, route_facts, save_key, save_key_binding, validate_scope,
 };
 
-use super::{Windows, key_edit, key_submit, record_edit, record_submit, scope_edit, scope_submit};
+use super::{
+    Windows, key_edit, key_submit, record_edit, record_submit, scope_edit, scope_submit,
+    tracker_edit,
+};
 use crate::app::{App, OpenScopes};
 use crate::prompt::{
     Edited, KeyChoice, KeyEdited, KeyPrompt, RecordEdited, RecordField, RecordForm, RecordPrompt,
-    RecordTracker, ScopeField, ScopePrompt, edit_for, key_edit_for, record_edit_for,
+    RecordTracker, ScopeField, ScopePrompt, TrackerChoice, TrackerEdited, TrackerPrompt, edit_for,
+    key_edit_for, record_edit_for, tracker_edit_for,
 };
 
 // `super::scope_press` with no boundary in the way, so these tests are about
@@ -446,10 +450,10 @@ fn records() -> Vec<ScopeRecord> {
 
 /// [`scoped`] holding a record for every name the submits below write.
 ///
-/// A scope name no record claims puts the record window up instead of writing,
+/// A scope name no record claims puts the tracker picker up instead of writing,
 /// so a test about the write itself has to name one that is already recorded —
 /// which the fixture above does not, and deliberately: the tests that are about
-/// the second window need a name nothing claims.
+/// the windows that road leads to need a name nothing claims.
 fn known() -> Manifest {
     scoped().with_scopes(records().into_iter().chain([
         ScopeRecord::new("billing", "Billing", "In Review", "area/billing"),
@@ -896,14 +900,17 @@ fn opened(key: KeyEvent, form: &RecordForm) -> RecordForm {
 // directory of the test's own — see [`a_home`].
 const NO_HOME: Option<&Path> = None;
 
-/// The record window [`scope_submit`] puts up over `text`, panicking when the
-/// name took the write road instead.
+/// The record window a submit of `text` arrives at, with `tracker` picked on
+/// the window in between — the road a reader takes, so the form under test is
+/// the one the panel really hands them. Panics when the name took the write
+/// road instead, or when the picker never came up.
 fn asked_for(
     app: &mut App,
     manifest: &mut Manifest,
     root: &Path,
     module: &str,
     text: &str,
+    tracker: RecordTracker,
 ) -> RecordForm {
     let windows = scope_submit(app, manifest, root, &field(module, text));
     assert_eq!(
@@ -911,15 +918,45 @@ fn asked_for(
         ScopePrompt::Closed,
         "the first window stayed up over `{text}`"
     );
+    assert_eq!(
+        windows.record,
+        RecordPrompt::Closed,
+        "`{text}` reached the record form without being asked which tracker"
+    );
+    let picker = windows
+        .tracker
+        .choice()
+        .unwrap_or_else(|| panic!("`{text}` was written rather than asked about"))
+        .clone();
+
+    // Down until the row wanted is lit, then Enter: nothing here reaches into
+    // the choice, so the form that comes back is the one the keys chose.
+    let mut tracker_prompt = TrackerPrompt::Open(picker);
+    while lit(&tracker_prompt) != tracker {
+        let edited = tracker_edit_for(press(KeyCode::Down), choice_of(&tracker_prompt));
+        tracker_prompt = tracker_edit(&tracker_prompt, edited).tracker;
+    }
+    let windows = tracker_edit(
+        &tracker_prompt,
+        tracker_edit_for(press(KeyCode::Enter), choice_of(&tracker_prompt)),
+    );
     windows
         .record
         .form()
-        .unwrap_or_else(|| panic!("`{text}` was written rather than asked about"))
+        .unwrap_or_else(|| panic!("Enter on the picker opened no form for {tracker:?}"))
         .clone()
 }
 
+fn choice_of(prompt: &TrackerPrompt) -> &TrackerChoice {
+    prompt.choice().expect("the picker is still up")
+}
+
+fn lit(prompt: &TrackerPrompt) -> RecordTracker {
+    choice_of(prompt).highlighted()
+}
+
 #[test]
-fn a_name_no_record_claims_puts_the_second_window_up_and_writes_nothing() {
+fn a_name_no_record_claims_puts_the_tracker_picker_up_and_writes_nothing() {
     let repo = a_repo();
     let mut app = app_on(repo.path(), TUI_ROW);
     let mut manifest = scoped();
@@ -932,20 +969,142 @@ fn a_name_no_record_claims_puts_the_second_window_up_and_writes_nothing() {
         &field("crates/tui", "Billing"),
     );
 
-    // The first window down and the second one up over the folded name, which
-    // is the name the record will be filed under and the one the row will
-    // carry — a second fold or a second read of the field could disagree.
+    // The first window down and the picker up over the folded name, which is
+    // the name the record will be filed under and the one the row will carry —
+    // a second fold or a second read of the field could disagree. No form yet:
+    // which tracker it collects for is what this window is asked.
     assert_eq!(
         windows,
         Windows {
             scope: ScopePrompt::Closed,
-            record: RecordPrompt::open(RecordTracker::Linear, "crates/tui", "billing"),
+            tracker: TrackerPrompt::open("crates/tui", "billing"),
+            record: RecordPrompt::Closed,
             key: KeyPrompt::Closed,
         },
     );
     assert_eq!(saved(repo.path()), None, "the question wrote to disk");
     assert_eq!(manifest, scoped(), "the question edited the manifest");
     assert_eq!(app, before, "the question moved the view");
+}
+
+/// The fields a form holds, in its own order: what the picker's answer decides.
+fn asks_for(form: &RecordForm) -> Vec<RecordField> {
+    form.fields().iter().map(|(which, _)| *which).collect()
+}
+
+#[test]
+fn enter_on_the_picker_opens_the_lit_trackers_form_and_writes_nothing() {
+    let repo = a_repo();
+
+    for (tracker, fields) in [
+        (
+            RecordTracker::Linear,
+            vec![
+                RecordField::TeamKey,
+                RecordField::ReviewState,
+                RecordField::Label,
+            ],
+        ),
+        (
+            RecordTracker::Jira,
+            vec![
+                RecordField::BaseUrl,
+                RecordField::ProjectKey,
+                RecordField::ReviewState,
+                RecordField::Label,
+            ],
+        ),
+    ] {
+        let mut app = app_on(repo.path(), TUI_ROW);
+        let mut manifest = scoped();
+        let before = app.clone();
+
+        let form = asked_for(
+            &mut app,
+            &mut manifest,
+            repo.path(),
+            "crates/tui",
+            "Billing",
+            tracker,
+        );
+
+        // The form the lit row asks for, over the very path and the folded name
+        // the scope window submitted — not a second read of either.
+        assert_eq!(form.tracker(), tracker);
+        assert_eq!(asks_for(&form), fields, "{tracker:?}");
+        assert_eq!(form.path(), "crates/tui");
+        assert_eq!(form.scope(), "billing");
+        assert_eq!(saved(repo.path()), None, "the picker wrote to disk");
+        assert_eq!(manifest, scoped(), "the picker edited the manifest");
+        assert_eq!(app, before, "the picker moved the view");
+    }
+}
+
+#[test]
+fn esc_on_the_picker_leaves_the_file_byte_identical_and_the_directory_unscoped() {
+    let repo = a_repo();
+    let fixture = recorded();
+    fixture.save(repo.path()).expect("the fixture was written");
+    let path = repo.path().join(".warlock").join("scopes.toml");
+    let before = fs::read(&path).expect("the fixture reads back");
+    let mut app = app_on(repo.path(), TUI_ROW);
+    let mut manifest = fixture.clone();
+
+    let windows = scope_submit(
+        &mut app,
+        &mut manifest,
+        repo.path(),
+        &field("crates/tui", "Billing"),
+    );
+    let choice = windows
+        .tracker
+        .choice()
+        .expect("a name nothing records puts the picker up")
+        .clone();
+
+    // The loop's own Esc arm, through the pure function that decides it: every
+    // window comes down, and there is nothing to put back because nothing was
+    // written when either question was asked.
+    assert_eq!(
+        tracker_edit_for(press(KeyCode::Esc), &choice),
+        TrackerEdited::Close
+    );
+    assert_eq!(
+        tracker_edit(&windows.tracker, TrackerEdited::Close),
+        Windows::default()
+    );
+
+    assert_eq!(
+        fs::read(&path).expect("the manifest reads back"),
+        before,
+        "Esc moved a byte of the file",
+    );
+    assert_eq!(
+        manifest, fixture,
+        "Esc edited the manifest this thread holds"
+    );
+    assert_eq!(
+        scope_on(&manifest, "crates/tui"),
+        None,
+        "Esc scoped the directory"
+    );
+    assert!(
+        !manifest
+            .scopes()
+            .iter()
+            .any(|record| record.name() == "billing"),
+        "Esc left a record behind: {manifest:?}",
+    );
+}
+
+#[test]
+fn a_tracker_submit_with_no_picker_up_opens_no_form() {
+    // The road `press_for` cannot take — it only consults `tracker_edit_for`
+    // while the window is up — answered rather than left to be discovered.
+    assert_eq!(
+        tracker_edit(&TrackerPrompt::Closed, TrackerEdited::Submit),
+        Windows::default()
+    );
 }
 
 #[test]
@@ -979,9 +1138,9 @@ fn a_name_that_already_has_a_record_is_written_with_no_second_window() {
 
 #[test]
 fn an_empty_field_clears_the_scope_and_asks_for_no_record() {
-    // The clear is not a name, so there is nothing to record: the road to the
-    // second window is the one thing an empty field must not take, whatever
-    // the manifest records.
+    // The clear is not a name, so there is nothing to record and no tracker to
+    // ask about: the road to the picker is the one thing an empty field must
+    // not take, whatever the manifest records.
     let repo = a_repo();
     let mut app = app_on(repo.path(), ENGINE_ROW);
     let mut manifest = scoped();
@@ -1220,6 +1379,7 @@ fn esc_on_the_record_window_leaves_the_file_byte_identical() {
         repo.path(),
         "crates/tui",
         "billing",
+        RecordTracker::Linear,
     );
     // The loop's own Esc arm, through the pure function that decides it, over
     // a window with all three values in it: there is nothing to put back,
@@ -1264,6 +1424,7 @@ fn the_record_submit_writes_the_scope_and_the_record_in_one_save() {
         repo.path(),
         "crates/tui",
         "Billing",
+        RecordTracker::Linear,
     );
     assert_eq!(saved(repo.path()), None, "the question wrote to disk");
     let windows = record_submit(
@@ -1299,7 +1460,7 @@ fn the_record_submit_writes_the_scope_and_the_record_in_one_save() {
 fn the_router_finds_the_team_review_state_and_label_the_window_was_given() {
     // What `warlock check` prints for the directory just scoped, asked of the
     // router itself: a record filed under a name the row does not carry would
-    // route nowhere, which is the whole reason the second window exists.
+    // route nowhere, which is the whole reason the record form exists.
     let repo = a_repo();
     let mut app = app_on(repo.path(), TUI_ROW);
     let mut manifest = recorded();
@@ -1310,6 +1471,7 @@ fn the_router_finds_the_team_review_state_and_label_the_window_was_given() {
         repo.path(),
         "crates/tui",
         "Billing",
+        RecordTracker::Linear,
     );
     record_submit(
         &mut app,
@@ -1383,12 +1545,13 @@ fn a_record_that_will_not_save_puts_its_reason_on_the_message_line() {
 }
 
 #[test]
-fn the_whole_path_through_both_windows_is_one_key_at_a_time() {
-    // The event loop's own arms over both windows, in the order a reader
-    // presses them: `s`, a name nothing records, Enter, the three values with a
-    // Tab between them, Enter. Nothing here is a terminal, a worker or a
-    // `claude` — the whole path is these four functions over a directory of
-    // this test's own, and the two windows are never up together.
+fn the_whole_path_through_the_scope_picker_and_record_windows_is_one_key_at_a_time() {
+    // The event loop's own arms over all three windows, in the order a reader
+    // presses them: `s`, a name nothing records, Enter, Enter on the tracker
+    // row that opens lit, the three values with a Tab between them, Enter.
+    // Nothing here is a terminal, a worker or a `claude` — the whole path is
+    // these five functions over a directory of this test's own, and no two of
+    // the three windows are ever up together.
     let repo = a_repo();
     let mut app = app_on(repo.path(), TUI_ROW);
     let mut manifest = recorded();
@@ -1396,6 +1559,7 @@ fn the_whole_path_through_both_windows_is_one_key_at_a_time() {
     let mut prompt = scope_press(&mut app, &manifest, repo.path());
     assert_eq!(prompt, ScopePrompt::open("crates/tui", ""));
 
+    let mut tracker = TrackerPrompt::Closed;
     let mut record = RecordPrompt::Closed;
     for code in "billing".chars().map(KeyCode::Char).chain([KeyCode::Enter]) {
         let edited = {
@@ -1404,18 +1568,34 @@ fn the_whole_path_through_both_windows_is_one_key_at_a_time() {
         };
         let windows = scope_edit(&mut app, &mut manifest, repo.path(), &prompt, edited);
         prompt = windows.scope;
+        tracker = windows.tracker;
         record = windows.record;
     }
 
-    // The first window down and the second up, out of the one Enter: a name
-    // nothing records is not written by that key at all.
+    // The first window down and the picker up, out of the one Enter: a name
+    // nothing records is not written by that key at all, and no form is up
+    // until the tracker has been answered.
     assert_eq!(prompt, ScopePrompt::Closed);
+    assert_eq!(record, RecordPrompt::Closed);
+    assert_eq!(tracker, TrackerPrompt::open("crates/tui", "billing"));
+    assert_eq!(saved(repo.path()), None, "the first Enter wrote to disk");
+    assert_eq!(manifest, recorded(), "the first Enter edited the manifest");
+
+    // Enter on the row that opened lit, which is Linear's.
+    let windows = {
+        let choice = tracker.choice().expect("the picker is still up");
+        assert_eq!(choice.highlighted(), RecordTracker::Linear);
+        tracker_edit(&tracker, tracker_edit_for(press(KeyCode::Enter), choice))
+    };
+    tracker = windows.tracker;
+    record = windows.record;
+    assert_eq!(tracker, TrackerPrompt::Closed);
     assert_eq!(
         record,
         RecordPrompt::open(RecordTracker::Linear, "crates/tui", "billing")
     );
-    assert_eq!(saved(repo.path()), None, "the first Enter wrote to disk");
-    assert_eq!(manifest, recorded(), "the first Enter edited the manifest");
+    assert_eq!(saved(repo.path()), None, "the picker wrote to disk");
+    assert_eq!(manifest, recorded(), "the picker edited the manifest");
 
     for code in ["Billing Squad", "In Review", "area/billing"]
         .into_iter()
@@ -1424,7 +1604,7 @@ fn the_whole_path_through_both_windows_is_one_key_at_a_time() {
     {
         assert_eq!(saved(repo.path()), None, "{code:?} wrote before the submit");
         let edited = {
-            let form = record.form().expect("the second window is still up");
+            let form = record.form().expect("the record window is still up");
             record_edit_for(press(code), form)
         };
         record = record_edit(
@@ -1747,16 +1927,17 @@ fn a_key_submit_with_no_window_up_writes_nothing() {
 }
 
 /// The scope the chain below brings into being: a name [`recorded`] claims no
-/// record for, so the press takes the road through all three windows.
+/// record for, so the press takes the road through all four windows.
 const NEW_SCOPE: &str = "billing";
 
 #[test]
 fn the_whole_path_from_the_press_to_the_key_window_is_one_key_at_a_time() {
-    // The event loop's own arms over all three windows, in the order a reader
-    // presses them: `s`, a name nothing records, Enter, the three values with a
-    // Tab between them, Enter. Nothing here is a terminal, a worker or a
-    // `claude` — the whole path is these five functions over a repository and a
-    // home of this test's own, and the three windows are never up together.
+    // The event loop's own arms over all four windows, in the order a reader
+    // presses them: `s`, a name nothing records, Enter, Enter on the tracker,
+    // the three values with a Tab between them, Enter. Nothing here is a
+    // terminal, a worker or a `claude` — the whole path is these six functions
+    // over a repository and a home of this test's own, and no two of the four
+    // windows are ever up together.
     let repo = a_repo();
     let home = a_home();
     let mut app = app_on(repo.path(), TUI_ROW);
@@ -1765,7 +1946,7 @@ fn the_whole_path_from_the_press_to_the_key_window_is_one_key_at_a_time() {
     let mut prompt = scope_press(&mut app, &manifest, repo.path());
     assert_eq!(prompt, ScopePrompt::open("crates/tui", ""));
 
-    let mut record = RecordPrompt::Closed;
+    let mut tracker = TrackerPrompt::Closed;
     for code in NEW_SCOPE.chars().map(KeyCode::Char).chain([KeyCode::Enter]) {
         let edited = {
             let field = prompt.field().expect("the first window is still up");
@@ -1780,10 +1961,20 @@ fn the_whole_path_from_the_press_to_the_key_window_is_one_key_at_a_time() {
             "{code:?} on the first window asked for a key",
         );
         prompt = windows.scope;
-        record = windows.record;
+        tracker = windows.tracker;
     }
 
     assert_eq!(prompt, ScopePrompt::Closed);
+    assert_eq!(tracker, TrackerPrompt::open("crates/tui", NEW_SCOPE));
+
+    // The picker, answered on the row it opened lit, which asks for no key
+    // either: there is still nothing on disk to bind one to.
+    let windows = {
+        let choice = tracker.choice().expect("the picker is still up");
+        tracker_edit(&tracker, tracker_edit_for(press(KeyCode::Enter), choice))
+    };
+    assert_eq!(windows.key, KeyPrompt::Closed, "the picker asked for a key");
+    let mut record = windows.record;
     assert_eq!(
         record,
         RecordPrompt::open(RecordTracker::Linear, "crates/tui", NEW_SCOPE)
@@ -1801,7 +1992,7 @@ fn the_whole_path_from_the_press_to_the_key_window_is_one_key_at_a_time() {
             "{code:?} wrote the config before anything was recorded",
         );
         let edited = {
-            let form = record.form().expect("the second window is still up");
+            let form = record.form().expect("the record window is still up");
             record_edit_for(press(code), form)
         };
         let windows = record_edit(
@@ -1816,7 +2007,7 @@ fn the_whole_path_from_the_press_to_the_key_window_is_one_key_at_a_time() {
         key = windows.key;
     }
 
-    // The second window down and the third up out of the one Enter, over the
+    // The record form down and the key window up out of the one Enter, over the
     // scope that was just recorded and over the names this machine stores.
     assert_eq!(record, RecordPrompt::Closed, "Enter left the window up");
     assert_eq!(
@@ -1845,10 +2036,143 @@ fn the_whole_path_from_the_press_to_the_key_window_is_one_key_at_a_time() {
     assert_eq!(app.message(), Some(LAST_KEY));
 }
 
+/// The Jira scope the chain below brings into being, unrecorded in
+/// [`recorded`] exactly as [`NEW_SCOPE`] is.
+const JIRA_SCOPE: &str = "payments";
+
+#[test]
+fn the_whole_path_from_the_press_to_a_saved_jira_record_is_one_key_at_a_time() {
+    // The event loop's own arms over all four windows on the road the panel has
+    // to a Jira record, in the order a reader presses them: `s`, a name nothing
+    // records, Enter, a Down off the row the picker opens lit, Enter, the four
+    // values with a Tab between them, Enter. Nothing here is a terminal, a
+    // worker or a `claude` — the whole path is these six functions over a
+    // repository and a home of this test's own.
+    let repo = a_repo();
+    let home = a_home();
+    let mut app = app_on(repo.path(), TUI_ROW);
+    let mut manifest = recorded();
+
+    let mut prompt = scope_press(&mut app, &manifest, repo.path());
+    assert_eq!(prompt, ScopePrompt::open("crates/tui", ""));
+
+    let mut tracker = TrackerPrompt::Closed;
+    for code in "Payments"
+        .chars()
+        .map(KeyCode::Char)
+        .chain([KeyCode::Enter])
+    {
+        let edited = {
+            let field = prompt.field().expect("the first window is still up");
+            edit_for(press(code), field)
+        };
+        let windows = scope_edit(&mut app, &mut manifest, repo.path(), &prompt, edited);
+        // Neither of the later windows out of this one, whatever it hands on
+        // to: no form until a tracker is chosen, and nothing recorded yet to
+        // bind a key to.
+        assert_eq!(
+            windows.record,
+            RecordPrompt::Closed,
+            "{code:?} opened a form"
+        );
+        assert_eq!(windows.key, KeyPrompt::Closed, "{code:?} asked for a key");
+        prompt = windows.scope;
+        tracker = windows.tracker;
+    }
+
+    // The first window down and the picker up over the folded name, out of the
+    // one Enter, and nothing written by it.
+    assert_eq!(prompt, ScopePrompt::Closed);
+    assert_eq!(tracker, TrackerPrompt::open("crates/tui", JIRA_SCOPE));
+    assert_eq!(saved(repo.path()), None, "the first Enter wrote to disk");
+    assert_eq!(manifest, recorded(), "the first Enter edited the manifest");
+
+    // One Down off Linear, then Enter: the Jira row is reached by the keys
+    // rather than by reaching into the choice.
+    let mut record = RecordPrompt::Closed;
+    for code in [KeyCode::Down, KeyCode::Enter] {
+        let edited = {
+            let choice = tracker.choice().expect("the picker is still up");
+            tracker_edit_for(press(code), choice)
+        };
+        let windows = tracker_edit(&tracker, edited);
+        assert_eq!(windows.key, KeyPrompt::Closed, "{code:?} asked for a key");
+        assert_eq!(saved(repo.path()), None, "{code:?} wrote to disk");
+        tracker = windows.tracker;
+        record = windows.record;
+    }
+
+    // Four fields and not three, which is the Down having landed on Jira.
+    assert_eq!(tracker, TrackerPrompt::Closed);
+    assert_eq!(
+        record,
+        RecordPrompt::open(RecordTracker::Jira, "crates/tui", JIRA_SCOPE)
+    );
+
+    let mut key = KeyPrompt::Closed;
+    for code in [JIRA_SITE, "PAY", "In Review", "area/payments"]
+        .into_iter()
+        .flat_map(|value| value.chars().map(KeyCode::Char).chain([KeyCode::Tab]))
+        .chain([KeyCode::Enter])
+    {
+        assert_eq!(saved(repo.path()), None, "{code:?} wrote before the submit");
+        let edited = {
+            let form = record.form().expect("the record window is still up");
+            record_edit_for(press(code), form)
+        };
+        let windows = record_edit(
+            &mut app,
+            &mut manifest,
+            repo.path(),
+            Some(home.path()),
+            &record,
+            edited,
+        );
+        record = windows.record;
+        key = windows.key;
+    }
+
+    // The form down and the key window up out of the one Enter, over the scope
+    // that was just recorded and over the names this machine stores — as it
+    // comes up for a Linear record.
+    assert_eq!(record, RecordPrompt::Closed, "Enter left the window up");
+    assert_eq!(
+        key,
+        KeyPrompt::Open(a_choice(home.path(), JIRA_SCOPE)),
+        "the save did not end with the key window over the scope just recorded",
+    );
+    let written = saved(repo.path()).expect("the keys wrote the manifest");
+    assert_eq!(
+        written, manifest,
+        "what is on disk is what the loop believes"
+    );
+    assert_eq!(scope_on(&written, "crates/tui"), Some(JIRA_SCOPE));
+    let record = written.scopes().last().expect("the record was written");
+    assert_eq!(
+        record,
+        &ScopeRecord::jira(JIRA_SCOPE, JIRA_SITE, "PAY", "In Review", "area/payments"),
+    );
+    // Read as text as well as as a record: the tracker is named in the file,
+    // and the base URL is the string that was typed — trailing slash and all.
+    let text = fs::read_to_string(repo.path().join(".warlock").join("scopes.toml"))
+        .expect("the manifest reads back");
+    assert!(text.contains("tracker = \"jira\""), "{text}");
+    assert!(text.contains(JIRA_SITE), "{text}");
+    // And asking is not binding: nothing reached this machine's config, and the
+    // message line came through the whole of it untouched.
+    assert_eq!(
+        config(home.path(), repo.path()),
+        None,
+        "the question wrote the config",
+    );
+    assert_eq!(app.message(), Some(LAST_KEY));
+}
+
 #[test]
 fn an_abandoned_key_window_leaves_the_scope_recorded_and_unbound() {
-    // Esc on the third window, over a machine that holds keys and a scope whose
-    // record is already on disk: the one outcome the fixed order exists for.
+    // Esc on the last of the four windows, over a machine that holds keys and a
+    // scope whose record is already on disk: the one outcome the fixed order
+    // exists for.
     let repo = a_repo();
     let home = a_home();
     let mut app = app_on(repo.path(), TUI_ROW);
@@ -1860,6 +2184,7 @@ fn an_abandoned_key_window_leaves_the_scope_recorded_and_unbound() {
         repo.path(),
         "crates/tui",
         "Billing",
+        RecordTracker::Linear,
     );
     let windows = record_submit(
         &mut app,
@@ -1930,7 +2255,7 @@ fn an_abandoned_key_window_leaves_the_scope_recorded_and_unbound() {
 fn a_record_that_will_not_save_asks_for_no_key_on_a_machine_holding_three() {
     // The same disk that will not take a scope, with a store that would have
     // answered: the save is what decides whether the question is asked, so the
-    // chain ends on the message line and the third window stays down.
+    // chain ends on the message line and the key window stays down.
     let repo = a_repo();
     let home = a_home();
     fs::write(repo.path().join(".warlock"), "not a directory\n")

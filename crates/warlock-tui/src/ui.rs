@@ -28,7 +28,7 @@ use crate::composer::Composer;
 use crate::confirm::{Answer, Carry, Choice, Cutting, Filing, Review, Undertaking};
 use crate::modal::Modal;
 use crate::panel::Mode;
-use crate::prompt::{KeyChoice, RecordField, RecordForm, ScopeField};
+use crate::prompt::{KeyChoice, RecordField, RecordForm, ScopeField, TRACKERS, TrackerChoice};
 // Renamed for the reason `Entry` above is: `Span` here is ratatui's piece of a
 // drawn line, and the selection's is the cells of one row the highlight covers;
 // its `Window` is the panel's view of the card, which is neither of the
@@ -292,6 +292,11 @@ const RECORD_RULES: &str =
     "Tab moves to the next field, Enter writes the scope and record, Esc writes nothing";
 
 const RECORD_LABEL_GAP: &str = "  ";
+
+const TRACKER_HEADING: &str = "Tracker for ";
+
+const TRACKER_RULES: &str =
+    "Enter opens the record form for the highlighted tracker, Esc writes nothing";
 
 const KEY_HEADING: &str = "Key for ";
 
@@ -1260,6 +1265,7 @@ impl<'a> Dialog<'a> {
             Modal::Carry(carry) => Self::carry(carry),
             Modal::WriteBrief(highlighted) => Self::write_brief(highlighted),
             Modal::Scope(field) => Self::scope(field, SCOPE_HEADING, scope::RULES),
+            Modal::Tracker(choice) => Self::tracker(choice),
             Modal::Record(form) => Self::record(form),
             Modal::Key(choice) => Self::key(choice),
             Modal::Write(field) => Self::scope(field, PATH_HEADING, PATH_RULES),
@@ -1472,6 +1478,35 @@ impl<'a> Dialog<'a> {
             + display_width(SCOPE_CURSOR);
 
         Self::new(lines).at_least(floor)
+    }
+
+    // The key window's shape — rows to pick from, no caret and so no floor to
+    // hold a column for one — over the record form's two heading lines, because
+    // this window is asked about the same two things the form it opens is: the
+    // scope being recorded and the directory it is being recorded for.
+    //
+    // The rows are [`TRACKERS`] rather than anything the choice holds, which is
+    // what keeps "every tracker there is" one list; which of them is lit is the
+    // choice's own answer, compared by value as the key window compares by
+    // name.
+    fn tracker(choice: &'a TrackerChoice) -> Self {
+        let mut lines = vec![
+            Line::from(vec![
+                Span::raw(TRACKER_HEADING),
+                Span::raw(choice.scope()).bold(),
+            ]),
+            Line::from(choice.path()).dim(),
+            Line::default(),
+        ];
+        for tracker in TRACKERS {
+            let lit = tracker == choice.highlighted();
+            let style = if lit { SELECTED } else { Style::new() };
+            lines.push(Line::from(Span::styled(tracker.name(), style)));
+        }
+        lines.push(Line::default());
+        lines.push(Line::from(TRACKER_RULES).dim());
+
+        Self::new(lines)
     }
 
     // Rows to pick from rather than fields to type in, so neither `scope` nor
