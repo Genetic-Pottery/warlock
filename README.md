@@ -1,8 +1,6 @@
 <p align="center">
-  <img src="./assets/warlock-logo.png" alt="Warlock" width="200">
+  <img src="./assets/warlock-logo.png" alt="Warlock" width="260">
 </p>
-
-<h1 align="center">warlock</h1>
 
 <p align="center"><strong>A TUI where AI works only inside the scopes your team draws.</strong></p>
 
