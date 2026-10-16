@@ -424,7 +424,7 @@ fn a_corrupt_manifest_is_an_error_rather_than_an_empty_one() {
 #[test]
 fn a_manifest_of_an_unsupported_version_is_an_error() {
     let repo = fixture(&["docs"]);
-    write_file(&manifest_path(repo.path()), "version = 2\n");
+    write_file(&manifest_path(repo.path()), "version = 3\n");
 
     assert!(matches!(
         load_tree(repo.path()),

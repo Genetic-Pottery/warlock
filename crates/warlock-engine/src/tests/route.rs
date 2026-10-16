@@ -5,7 +5,7 @@ use std::path::Path;
 use super::{Error, resolve_route, route_facts};
 use crate::config::{config_path, save_key_binding, save_open_scopes};
 use crate::keys::{keys_path, save_key};
-use crate::manifest::{Manifest, ScopeRecord, ScopedDirectory, manifest_path};
+use crate::manifest::{LinearScope, Manifest, ScopeRecord, ScopedDirectory, manifest_path};
 use crate::scope::scope_opens_to;
 
 // The string every test that must not see a key looks for. It is a plausible
@@ -28,6 +28,14 @@ fn a_manifest() -> Manifest {
         "In Review",
         "area/data-plane",
     )])
+}
+
+// The team key is read through the view and never off the record, which is the
+// only way there is to read one.
+fn team_of(record: &ScopeRecord) -> &str {
+    LinearScope::of(record)
+        .expect("the fixture records a Linear scope")
+        .team_key()
 }
 
 // A checkout that is bound to a key this machine really holds: everything the
@@ -67,7 +75,7 @@ fn a_scope_that_is_not_open_on_this_machine_still_routes() {
 
     assert_eq!(route.scope(), "data-plane");
     assert_eq!(route.record().name(), "data-plane");
-    assert_eq!(route.record().team_key(), "Data Plane");
+    assert_eq!(team_of(route.record()), "Data Plane");
     assert_eq!(route.record().review_state(), "In Review");
     assert_eq!(route.record().label(), "area/data-plane");
     assert_eq!(route.key(), "work");
@@ -108,7 +116,7 @@ fn the_open_fact_is_scope_opens_to_and_never_changes_the_route() {
             "the fact is the rule's answer and not a second copy of it: {open:?}"
         );
         assert_eq!(route.scope(), "data-plane", "{open:?}");
-        assert_eq!(route.record().team_key(), "Data Plane", "{open:?}");
+        assert_eq!(team_of(route.record()), "Data Plane", "{open:?}");
         assert_eq!(route.record().review_state(), "In Review", "{open:?}");
         assert_eq!(route.record().label(), "area/data-plane", "{open:?}");
         assert_eq!(
@@ -280,7 +288,7 @@ fn a_recorded_scope_and_a_stored_key_report_every_fact() {
     let record = facts
         .record()
         .expect("the scope carries a `[[scope]]` record");
-    assert_eq!(record.team_key(), "Data Plane");
+    assert_eq!(team_of(record), "Data Plane");
     assert_eq!(record.review_state(), "In Review");
     assert_eq!(record.label(), "area/data-plane");
     assert_eq!(facts.key(), Some("work"));

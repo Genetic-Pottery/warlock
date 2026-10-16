@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use warlock_engine::{
-    Manifest, Node, ScopeRecord, ScopedDirectory, Tree, manifest_path, route_facts,
+    LinearScope, Manifest, Node, ScopeRecord, ScopedDirectory, Tree, manifest_path, route_facts,
     save_open_scopes, validate_scope,
 };
 
@@ -26,6 +26,15 @@ use crate::settings::Settings;
 
 // Every test here builds both its repository and its home out of one of
 // these, so nothing goes near the developer's real home.
+
+// The team key is read through the view, which is the only way there is to
+// read one off a record.
+fn team_of(record: &ScopeRecord) -> &str {
+    LinearScope::of(record)
+        .expect("the record was written as a Linear scope")
+        .team_key()
+}
+
 fn a_dir() -> tempfile::TempDir {
     tempfile::tempdir().expect("a temporary directory")
 }
@@ -542,7 +551,7 @@ fn the_router_finds_the_team_review_state_and_label_the_flags_wrote() {
         .expect("the module path is inside the root");
     assert_eq!(facts.scope(), Some("billing"));
     let record = facts.record().expect("the router found no record");
-    assert_eq!(record.team_key(), "Billing");
+    assert_eq!(team_of(record), "Billing");
     assert_eq!(record.review_state(), "In Review");
     assert_eq!(record.label(), "area/billing");
 }

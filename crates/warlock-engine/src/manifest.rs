@@ -17,7 +17,19 @@ pub(crate) const ROOT_MODULE: &str = ".";
 // were this one. The alternative — read it leniently and keep going — was
 // rejected: an old binary that guesses at a newer file rewrites it with less
 // than it came with.
-pub const SCHEMA_VERSION: u32 = 1;
+pub const SCHEMA_VERSION: u32 = 2;
+
+// The keys one `[[scope]]` table may hold, written once here because the reader
+// below asks for them by name and then refuses every key it did not ask for.
+const NAME: &str = "name";
+const TRACKER: &str = "tracker";
+const TEAM: &str = "team";
+const BASE_URL: &str = "base_url";
+const PROJECT_KEY: &str = "project_key";
+const REVIEW_STATE: &str = "review_state";
+const LABEL: &str = "label";
+const LINEAR: &str = "linear";
+const JIRA: &str = "jira";
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -169,7 +181,7 @@ impl Manifest {
     /// let directory = ScopedDirectory::new(".", "crates/engine", "data-plane")?;
     /// let toml = Manifest::with_directories([directory]).to_toml_string()?;
     ///
-    /// assert!(toml.starts_with("version = 1\n"));
+    /// assert!(toml.starts_with("version = 2\n"));
     /// assert!(toml.contains("[[directory]]"));
     /// # Ok::<(), warlock_engine::manifest::Error>(())
     /// ```
@@ -233,9 +245,12 @@ impl Manifest {
                 source,
             };
 
-            let record = value
-                .try_into::<ScopeRecord>()
-                .map_err(|source| refused(ScopeFault::Malformed(Box::new(source))))?;
+            // Read key by key rather than through `try_into::<ScopeRecord>()`:
+            // which keys a record may hold depends on the tracker it declares,
+            // which is a rule serde cannot state — a tagged enum behind
+            // `flatten` turns `deny_unknown_fields` off — and reading it here
+            // is also what lets each refusal name the key at fault.
+            let record = read_record(&value).map_err(refused)?;
             // The one rule, borrowed rather than restated: a record name is a
             // scope, so `validate_scope` judges it and nothing here does.
             validate_scope(&record.name).map_err(|rule| refused(ScopeFault::Refused(rule)))?;
@@ -368,40 +383,78 @@ impl ScopedDirectory {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ScopeRecord {
-    // All four are read back exactly as written, for the reason on
+    // Every value here is read back exactly as written, for the reason on
     // `ScopedDirectory::scope`: these bytes are committed and hand-edited, so
     // folding one on the way through would put a line in the diff of somebody
-    // who only asked to scope something else. `name` is judged by `validate_scope` when
-    // the manifest is read and never repaired; the other three are not judged at
-    // all, because what a team key, a review state or a label may contain is
-    // the tracker's business and not this crate's.
+    // who only asked to scope something else. `name` is judged by
+    // `validate_scope` when the manifest is read and never repaired; nothing
+    // else is judged at all, because what a team key, a base URL, a project
+    // key, a review state or a label may contain is the tracker's business and
+    // not this crate's.
     name: String,
-    // The field says what the value is — a Linear team key, `WAR` — and the
-    // TOML key cannot follow it: `team` is what every committed manifest
-    // already spells, those bytes are hand-edited, and `deny_unknown_fields`
-    // above turns a renamed key into a refusal to read a manifest that was valid
-    // yesterday.
-    #[serde(rename = "team")]
-    team_key: String,
+    // Which board this scope files to, and the only place a team key lives: a
+    // flat `team_key` beside the others would be a Linear field every record
+    // carries, which is exactly the shape that let a Jira scope travel as far
+    // as a team lookup before anything noticed.
+    tracker: Tracker,
     review_state: String,
     label: String,
 }
 
+/// The board a scope files to, and the fields that board is addressed by.
+///
+/// ```
+/// use warlock_engine::{LinearScope, ScopeRecord};
+///
+/// let linear = ScopeRecord::new("data-plane", "WAR", "In Review", "area/data");
+/// let jira =
+///     ScopeRecord::jira("payments", "https://acme.atlassian.net", "PAY", "In Review", "area/pay");
+///
+/// assert!(LinearScope::of(&linear).is_ok());
+/// assert!(LinearScope::of(&jira).is_err());
+/// ```
+// The two trackers' fields are held apart rather than merged into one
+// "identifier", because they address different things: a Linear team key picks
+// a team inside a workspace the key already names, and a Jira project key means
+// nothing without the site it is a project on.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum Tracker {
+    Linear {
+        // The field says what the value is — a Linear team key, `WAR` — where
+        // the TOML key stays `team`: that is what every committed manifest
+        // already spells, and those bytes are hand-edited.
+        team_key: String,
+    },
+    Jira {
+        // Stored as typed and never parsed, normalised or judged: a trailing
+        // slash, a missing scheme and a port are all somebody's site as they
+        // wrote it, and warlock is in no position to correct a URL it does not
+        // call.
+        base_url: String,
+        project_key: String,
+    },
+}
+
 impl ScopeRecord {
+    /// A record that files to Linear.
+    ///
     /// ```
-    /// use warlock_engine::ScopeRecord;
+    /// use warlock_engine::{LinearScope, ScopeRecord};
     ///
     /// let record = ScopeRecord::new("data-plane", "WAR", "In Review", "area/data");
     ///
     /// assert_eq!(record.name(), "data-plane");
-    /// // Stored as spelled: no folding, no trimming, no judgement.
-    /// assert_eq!(record.team_key(), "WAR");
     /// assert_eq!(record.review_state(), "In Review");
     /// assert_eq!(record.label(), "area/data");
+    /// // Stored as spelled: no folding, no trimming, no judgement.
+    /// assert_eq!(LinearScope::of(&record)?.team_key(), "WAR");
+    /// # Ok::<(), warlock_engine::manifest::NotLinear>(())
     /// ```
+    // Still `new`, and still Linear-shaped, with `jira` beside it: the Linear
+    // record is what every caller in this workspace writes, and renaming it
+    // would buy symmetry at the price of touching every one of them.
     #[must_use]
     pub fn new(
         name: impl Into<String>,
@@ -411,7 +464,45 @@ impl ScopeRecord {
     ) -> Self {
         Self {
             name: name.into(),
-            team_key: team_key.into(),
+            tracker: Tracker::Linear {
+                team_key: team_key.into(),
+            },
+            review_state: review_state.into(),
+            label: label.into(),
+        }
+    }
+
+    /// A record that files to Jira.
+    ///
+    /// ```
+    /// use warlock_engine::ScopeRecord;
+    ///
+    /// let record = ScopeRecord::jira(
+    ///     "payments",
+    ///     "https://acme.atlassian.net/",
+    ///     "PAY",
+    ///     "In Review",
+    ///     "area/pay",
+    /// );
+    ///
+    /// assert_eq!(record.name(), "payments");
+    /// assert_eq!(record.review_state(), "In Review");
+    /// assert_eq!(record.label(), "area/pay");
+    /// ```
+    #[must_use]
+    pub fn jira(
+        name: impl Into<String>,
+        base_url: impl Into<String>,
+        project_key: impl Into<String>,
+        review_state: impl Into<String>,
+        label: impl Into<String>,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            tracker: Tracker::Jira {
+                base_url: base_url.into(),
+                project_key: project_key.into(),
+            },
             review_state: review_state.into(),
             label: label.into(),
         }
@@ -423,11 +514,6 @@ impl ScopeRecord {
     }
 
     #[must_use]
-    pub fn team_key(&self) -> &str {
-        &self.team_key
-    }
-
-    #[must_use]
     pub fn review_state(&self) -> &str {
         &self.review_state
     }
@@ -436,6 +522,115 @@ impl ScopeRecord {
     pub fn label(&self) -> &str {
         &self.label
     }
+}
+
+// Hand-written for the order: `tracker` names the board, then that board's own
+// fields, then the two every record carries. A derived impl would write the
+// enum as a nested table, which is a shape nobody hand-editing this file would
+// write.
+impl Serialize for ScopeRecord {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct as _;
+
+        let fields = match &self.tracker {
+            Tracker::Linear { .. } => 5,
+            Tracker::Jira { .. } => 6,
+        };
+        let mut record = serializer.serialize_struct("ScopeRecord", fields)?;
+        record.serialize_field(NAME, &self.name)?;
+        match &self.tracker {
+            Tracker::Linear { team_key } => {
+                record.serialize_field(TRACKER, LINEAR)?;
+                record.serialize_field(TEAM, team_key)?;
+            }
+            Tracker::Jira {
+                base_url,
+                project_key,
+            } => {
+                record.serialize_field(TRACKER, JIRA)?;
+                record.serialize_field(BASE_URL, base_url)?;
+                record.serialize_field(PROJECT_KEY, project_key)?;
+            }
+        }
+        record.serialize_field(REVIEW_STATE, &self.review_state)?;
+        record.serialize_field(LABEL, &self.label)?;
+        record.end()
+    }
+}
+
+// The derived path, which is `toml::from_str::<Manifest>` and nothing else in
+// this workspace: it reads the same keys through the same function as
+// `Manifest::read`, so a record the file reader refuses is not quietly accepted
+// here. What it cannot carry is the index and the name, which is why
+// `Manifest::read` is the reader every door goes through.
+impl<'de> Deserialize<'de> for ScopeRecord {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = toml::Value::deserialize(deserializer)?;
+        read_record(&value).map_err(serde::de::Error::custom)
+    }
+}
+
+// One `[[scope]]` table, key by key. Order matters to what a reader is told
+// first: the tracker before anything else, because which keys belong here is
+// its answer, and the keys it does not know last, so a record missing `team` is
+// told that rather than being told `team` is unknown.
+fn read_record(value: &toml::Value) -> Result<ScopeRecord, ScopeFault> {
+    let table = value.as_table().ok_or(ScopeFault::NotATable)?;
+    let string = |key: &'static str| match table.get(key) {
+        None => Err(ScopeFault::MissingKey { key }),
+        Some(value) => value
+            .as_str()
+            .map(ToOwned::to_owned)
+            .ok_or(ScopeFault::NotAString { key }),
+    };
+
+    let (tracker, own): (Tracker, &[&str]) = match string(TRACKER)?.as_str() {
+        LINEAR => (
+            Tracker::Linear {
+                team_key: string(TEAM)?,
+            },
+            &[TEAM],
+        ),
+        JIRA => (
+            Tracker::Jira {
+                base_url: string(BASE_URL)?,
+                project_key: string(PROJECT_KEY)?,
+            },
+            &[BASE_URL, PROJECT_KEY],
+        ),
+        other => {
+            return Err(ScopeFault::UnknownTracker {
+                value: other.to_owned(),
+            });
+        }
+    };
+
+    let record = ScopeRecord {
+        name: string(NAME)?,
+        tracker,
+        review_state: string(REVIEW_STATE)?,
+        label: string(LABEL)?,
+    };
+
+    // `deny_unknown_fields` by hand, and it has to be by hand: the keys a
+    // record may hold are the common four plus the ones its tracker names, and
+    // the other tracker's keys are refused here rather than read and dropped.
+    let tracker_name = match &record.tracker {
+        Tracker::Linear { .. } => LINEAR,
+        Tracker::Jira { .. } => JIRA,
+    };
+    for key in table.keys() {
+        let known = [NAME, TRACKER, REVIEW_STATE, LABEL].contains(&key.as_str())
+            || own.contains(&key.as_str());
+        if !known {
+            return Err(ScopeFault::UnexpectedKey {
+                key: key.clone(),
+                tracker: tracker_name,
+            });
+        }
+    }
+
+    Ok(record)
 }
 
 /// One `[[scope]]` record read as a scope that files to Linear.
@@ -466,18 +661,22 @@ pub struct LinearScope<'r> {
 
 impl<'r> LinearScope<'r> {
     /// The record seen as a Linear scope, or a refusal naming it.
-    // Fallible with nothing here that can refuse, on purpose: every record is a
-    // Linear one until `ScopeRecord` carries a tracker, and this is the one
-    // place that will answer `Err` when one does. An infallible signature now is
-    // a signature every caller would have to be rewritten against then, and the
-    // sentence `NotLinear` prints is fixed from here.
+    // The one place a tracker is read off a record, and the reason no caller
+    // has to: a flow that holds this type is holding proof that the record it
+    // came from files to Linear, rather than an assumption that every record
+    // does.
     pub fn of(record: &'r ScopeRecord) -> Result<Self, NotLinear> {
-        Ok(Self {
-            name: &record.name,
-            team_key: &record.team_key,
-            review_state: &record.review_state,
-            label: &record.label,
-        })
+        match &record.tracker {
+            Tracker::Linear { team_key } => Ok(Self {
+                name: &record.name,
+                team_key,
+                review_state: &record.review_state,
+                label: &record.label,
+            }),
+            Tracker::Jira { .. } => Err(NotLinear {
+                scope: record.name.clone(),
+            }),
+        }
     }
 
     #[must_use]
@@ -782,10 +981,11 @@ impl std::error::Error for Error {
     }
 }
 
-// Two ways one record can be turned down, kept apart rather than flattened into
-// a string: a key that is missing or wrongly typed is the TOML reader's finding,
-// and a name the character rule refuses is `validate_scope`'s. A caller that
-// wants to tell them apart can, and neither has to be reconstructed by reading
+// The ways one record can be turned down, kept apart rather than flattened
+// into a string: a name the character rule refuses is `validate_scope`'s
+// finding, and each of the others names the key or the value at fault, so the
+// person hand-editing the file is told which line to go to. A caller that wants
+// to tell them apart can, and none of them has to be reconstructed by reading
 // the message.
 #[derive(Debug)]
 pub enum ScopeFault {
@@ -796,6 +996,11 @@ pub enum ScopeFault {
     // already.
     Malformed(Box<toml::de::Error>),
     Refused(Rule),
+    NotATable,
+    MissingKey { key: &'static str },
+    NotAString { key: &'static str },
+    UnexpectedKey { key: String, tracker: &'static str },
+    UnknownTracker { value: String },
 }
 
 impl fmt::Display for ScopeFault {
@@ -803,6 +1008,16 @@ impl fmt::Display for ScopeFault {
         match self {
             Self::Malformed(source) => write!(f, "{source}"),
             Self::Refused(rule) => write!(f, "{rule}"),
+            Self::NotATable => write!(f, "a scope record is a table of keys, and this is not one"),
+            Self::MissingKey { key } => write!(f, "the `{key}` key is missing"),
+            Self::NotAString { key } => write!(f, "the `{key}` key is not a string"),
+            Self::UnexpectedKey { key, tracker } => {
+                write!(f, "the `{key}` key is not one a `{tracker}` record holds")
+            }
+            Self::UnknownTracker { value } => write!(
+                f,
+                "`{value}` is not a tracker warlock knows; a record files to `{LINEAR}` or `{JIRA}`"
+            ),
         }
     }
 }
@@ -812,6 +1027,11 @@ impl std::error::Error for ScopeFault {
         match self {
             Self::Malformed(source) => Some(source),
             Self::Refused(rule) => Some(rule),
+            Self::NotATable
+            | Self::MissingKey { .. }
+            | Self::NotAString { .. }
+            | Self::UnexpectedKey { .. }
+            | Self::UnknownTracker { .. } => None,
         }
     }
 }

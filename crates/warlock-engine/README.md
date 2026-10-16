@@ -8,8 +8,9 @@ tests need no `claude`, no network and no terminal.
 The main pieces:
 
 - `manifest`: `.warlock/scopes.toml`. Each `[[directory]]` row gives a
-  directory a scope, and each `[[scope]]` record routes a scope to a Linear
-  team, review state and label.
+  directory a scope, and each `[[scope]]` record routes a scope to the tracker
+  it files to — a Linear `team`, or a Jira `base_url` and `project_key` — with
+  its review state and label.
 - `scope`: the boundary rules. `scope_covering` finds the nearest scoped
   directory at or above a path. `scope_opens_to` decides whether that scope is
   open on this machine. A path no scope covers is closed to everyone.
