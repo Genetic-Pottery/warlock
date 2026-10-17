@@ -198,6 +198,24 @@ fn the_terminal_preamble_says_nothing_is_shown_and_never_names_the_redirect() {
     );
 }
 
+// Neither read is the one that gets it: a Jira token pasted on its own is a key
+// the store takes and the site refuses, so the shape has to be on the screen
+// before the paste whatever stdin is.
+#[test]
+fn both_preambles_say_a_jira_key_is_typed_as_a_pair() {
+    for masked in [false, true] {
+        let home = a_dir();
+
+        let (outcome, said) = add_reading(home.path(), "acme", masked, Some(SECRET));
+
+        outcome.expect("a line holding a key is stored");
+        assert!(
+            said.contains("a Jira key is typed `email:token`"),
+            "masked {masked}: the preamble does not say how a Jira key is typed: {said}"
+        );
+    }
+}
+
 // The arm whose absence is silent: a chord the prompt does not name must not
 // arrive in the key as its bare letter. Ctrl-U is the one people actually press
 // — it is the line kill raw mode took away — and storing a `u` for it would

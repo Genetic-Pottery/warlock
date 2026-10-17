@@ -1,4 +1,4 @@
-//! The one module in this library that opens a socket, and the reason it is
+//! The first module in this library that opened a socket, and the reason it is
 //! `ureq` rather than `reqwest`: reqwest's blocking client runs a tokio runtime
 //! on a background thread, and a terminal program that links one has an
 //! executor it never asked for. No async runtime here either, for the reason
