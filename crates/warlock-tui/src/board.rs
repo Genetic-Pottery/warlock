@@ -41,8 +41,20 @@ pub(crate) trait Board {
     fn viewer(&self) -> Result<String, Error>;
     fn team_id(&self, key: &str) -> Result<Option<String>, Error>;
     fn backlog_status(&self) -> Result<Option<String>, Error>;
-    fn brief_status(&self, name: &str) -> Result<Option<String>, Error>;
-    fn move_brief(&self, project: &str, status: &str) -> Result<String, Error>;
+    /// The brief moved to the board's status of that name, and `true` when a
+    /// status of that name was there to move it to.
+    ///
+    /// The name and not an id, as [`move_ticket`](Self::move_ticket) takes one:
+    /// what a status is named is the only thing two boards agree on, so the
+    /// board is what turns a name into whatever its own move needs.
+    ///
+    /// `false` and not an error, because a workspace nobody has given a status
+    /// of that name is one warlock reports on and works past: a cut whose last
+    /// slice has just settled, and a pull whose ticket was the last one in
+    /// review, both say so in a line and carry on. An answer and not a silent
+    /// success, so a caller cannot mistake "no such status" for a move that
+    /// happened.
+    fn move_brief(&self, project: &str, status: &str) -> Result<bool, Error>;
     fn ticket_brief(&self, issue: &str) -> Result<Option<TicketBrief>, Error>;
     fn backlog_state(&self, team: &str) -> Result<Option<String>, Error>;
     /// The ticket moved to the board's status of that name, and `true` when a

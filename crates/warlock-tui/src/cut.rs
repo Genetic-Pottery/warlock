@@ -158,16 +158,11 @@ pub(crate) fn cut<W: Write>(
 /// issues exist whatever happens here, so a workspace with no such status or a
 /// move Linear turns down is reported rather than failed.
 pub(crate) fn finish(linear: &impl Board, project: &str) -> String {
-    let moved = linear.brief_status(IN_PROGRESS).and_then(|status| {
-        status
-            .map(|status| linear.move_brief(project, &status))
-            .transpose()
-    });
-    match moved {
-        Ok(Some(_)) => {
+    match linear.move_brief(project, IN_PROGRESS) {
+        Ok(true) => {
             format!("every slice is settled, so the project moved to `{IN_PROGRESS}`")
         }
-        Ok(None) => format!(
+        Ok(false) => format!(
             "every slice is settled, and the workspace has no project status called \
              `{IN_PROGRESS}`, so the project was not moved"
         ),

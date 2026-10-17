@@ -386,8 +386,13 @@ pub(crate) struct Boarding {
     viewer: String,
     team: Option<String>,
     status: Option<String>,
-    /// What [`Board::brief_status`] answers with, whatever name is asked.
-    moved_to: Option<String>,
+    /// Whether this workspace holds a brief status of whatever name a move asks
+    /// for, which is what [`Board::move_brief`] answers: a board built
+    /// [`without_brief_statuses`] holds none, so every brief move answers that
+    /// there is no status of that name and nothing is recorded.
+    ///
+    /// [`without_brief_statuses`]: Boarding::without_brief_statuses
+    brief_statuses: bool,
     /// What [`Board::ticket_brief`] answers with: `None`, a ticket in no brief,
     /// until a test says otherwise.
     ticket_brief: Option<TicketBrief>,
@@ -430,7 +435,6 @@ pub(crate) enum Call {
     Viewer,
     Team(String),
     BacklogStatus,
-    BriefStatus(String),
     MoveBrief { project: String, status: String },
     TicketBrief(String),
     BacklogState(String),
@@ -454,7 +458,6 @@ impl Call {
             Self::Viewer => Op::Viewer,
             Self::Team(_) => Op::Team,
             Self::BacklogStatus => Op::BacklogStatus,
-            Self::BriefStatus(_) => Op::BriefStatus,
             Self::MoveBrief { .. } => Op::MoveBrief,
             Self::TicketBrief(_) => Op::TicketBrief,
             Self::BacklogState(_) => Op::BacklogState,
@@ -479,7 +482,6 @@ pub(crate) enum Op {
     Viewer,
     Team,
     BacklogStatus,
-    BriefStatus,
     MoveBrief,
     TicketBrief,
     BacklogState,
@@ -541,7 +543,7 @@ impl Boarding {
             viewer: VIEWER.to_owned(),
             team: Some("team-1".to_owned()),
             status: Some("status-backlog".to_owned()),
-            moved_to: Some("status-in-progress".to_owned()),
+            brief_statuses: true,
             ticket_brief: None,
             state: Some("state-backlog".to_owned()),
             label: "label-held".to_owned(),
@@ -645,12 +647,15 @@ impl Boarding {
         self
     }
 
-    pub(crate) fn without_brief_status(mut self) -> Self {
-        self.moved_to = None;
+    /// A workspace with no brief status at all, whatever name a move asks for.
+    pub(crate) fn without_brief_statuses(mut self) -> Self {
+        self.brief_statuses = false;
         self
     }
 
-    /// Every brief move asked for, as the brief id and the status id.
+    /// Every brief move that happened, as the brief id and the status name it
+    /// was moved to: a move this workspace has no status for is never sent, so
+    /// it is not here either.
     pub(crate) fn moves(&self) -> Vec<(String, String)> {
         self.picked(|call| match call {
             Call::MoveBrief { project, status } => Some((project.clone(), status.clone())),
@@ -856,22 +861,24 @@ impl Board for Boarding {
         Ok(self.status.clone())
     }
 
-    fn brief_status(&self, name: &str) -> Result<Option<String>, BoardError> {
-        self.ask(Call::BriefStatus(name.to_owned()))?;
-        Ok(self.moved_to.clone())
-    }
-
     fn ticket_brief(&self, issue: &str) -> Result<Option<TicketBrief>, BoardError> {
         self.ask(Call::TicketBrief(issue.to_owned()))?;
         Ok(self.ticket_brief.clone())
     }
 
-    fn move_brief(&self, project: &str, status: &str) -> Result<String, BoardError> {
+    /// The move recorded under the status name it asked for, which is what
+    /// [`moves`](Boarding::moves) reads; a workspace holding no brief status
+    /// answers that there is none and records nothing, as a board that never
+    /// sends the mutation would.
+    fn move_brief(&self, project: &str, status: &str) -> Result<bool, BoardError> {
+        if !self.brief_statuses {
+            return Ok(false);
+        }
         self.ask(Call::MoveBrief {
             project: project.to_owned(),
             status: status.to_owned(),
         })?;
-        Ok(project.to_owned())
+        Ok(true)
     }
 
     fn backlog_state(&self, team: &str) -> Result<Option<String>, BoardError> {

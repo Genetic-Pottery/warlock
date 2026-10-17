@@ -183,12 +183,16 @@ impl<P: Posts> Board for Linear<P> {
         backlog_status(&self.posts)
     }
 
-    fn brief_status(&self, name: &str) -> Result<Option<String>, Error> {
-        project_status(&self.posts, name)
-    }
-
-    fn move_brief(&self, project: &str, status: &str) -> Result<String, Error> {
-        move_project(&self.posts, project, status)
+    /// The status resolved here rather than by the caller: the mutation writes a
+    /// project status id, so the name is matched among the workspace's own
+    /// statuses. A name no status carries is `false` with the mutation never
+    /// sent.
+    fn move_brief(&self, project: &str, status: &str) -> Result<bool, Error> {
+        let Some(status) = project_status(&self.posts, status)? else {
+            return Ok(false);
+        };
+        move_project(&self.posts, project, &status)?;
+        Ok(true)
     }
 
     fn ticket_brief(&self, issue: &str) -> Result<Option<TicketBrief>, Error> {

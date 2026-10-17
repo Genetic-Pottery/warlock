@@ -921,15 +921,10 @@ fn project_review(board: &impl Board, issue: &str, review: &str) -> Option<Strin
         return None;
     }
 
-    let moved = board.brief_status(review).and_then(|status| {
-        status
-            .map(|status| board.move_brief(project.id(), &status))
-            .transpose()
-    });
     let every = format!("every issue in `{name}` is in review or closed");
-    Some(match moved {
-        Ok(Some(_)) => format!("{every}, so the project moved to `{review}`"),
-        Ok(None) => format!(
+    Some(match board.move_brief(project.id(), review) {
+        Ok(true) => format!("{every}, so the project moved to `{review}`"),
+        Ok(false) => format!(
             "{every}, and the workspace has no project status called `{review}`, so the project \
              was not moved"
         ),

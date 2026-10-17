@@ -1030,11 +1030,7 @@ impl<B: Board> Board for Quiet<B> {
         self.asked(Board::backlog_status)
     }
 
-    fn brief_status(&self, name: &str) -> Result<Option<String>, BoardError> {
-        self.asked(|board| board.brief_status(name))
-    }
-
-    fn move_brief(&self, project: &str, status: &str) -> Result<String, BoardError> {
+    fn move_brief(&self, project: &str, status: &str) -> Result<bool, BoardError> {
         self.asked(|board| board.move_brief(project, status))
     }
 

@@ -1473,13 +1473,8 @@ fn the_last_ticket_of_a_drafted_project_into_review_moves_the_project() {
 
     assert_eq!(
         board.moves(),
-        [("project-1".to_owned(), "status-in-progress".to_owned())]
-    );
-    assert!(
-        board
-            .calls()
-            .contains(&Call::BriefStatus(REVIEW.to_owned())),
-        "the project status is the scope record's review state"
+        [("project-1".to_owned(), REVIEW.to_owned())],
+        "the status moved to is the scope record's review state, by name"
     );
     assert_eq!(
         events.last(),
@@ -1521,7 +1516,7 @@ fn a_workspace_with_no_review_project_status_is_a_line_and_the_pull_still_finish
     let ground = Ground::new();
     let board = Boarding::filing("")
         .in_brief(TicketBrief::new("In Progress", &[("In Review", "started")]))
-        .without_brief_status();
+        .without_brief_statuses();
     let forge = Forging::opening(URL);
     let (repo, split, sessions) = two_sub_tasks();
 

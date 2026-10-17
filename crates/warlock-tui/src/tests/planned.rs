@@ -1732,7 +1732,6 @@ mod headless {
                         | Op::CreateTicket
                         | Op::Relation
                         | Op::Comment
-                        | Op::BriefStatus
                         | Op::MoveBrief
                 ),
                 "a run asked for {op:?}"
@@ -1740,7 +1739,7 @@ mod headless {
         }
         assert_eq!(
             linear.moves(),
-            [(PROJECT_ID.to_owned(), "status-in-progress".to_owned())]
+            [(PROJECT_ID.to_owned(), "In Progress".to_owned())]
         );
     }
 
@@ -2766,7 +2765,7 @@ mod finishing {
         assert_eq!(said, [Some(MOVED.to_owned())]);
         assert_eq!(
             linear.moves(),
-            [(PROJECT_ID.to_owned(), "status-in-progress".to_owned())]
+            [(PROJECT_ID.to_owned(), "In Progress".to_owned())]
         );
     }
 
@@ -2791,7 +2790,7 @@ mod finishing {
         let repo = a_scoped_repository();
         let home = a_home(repo.path());
         let linear = a_noted_project(SLICED, [a_cut(FIRST, &["WAR-1"]), a_skip(SECOND)])
-            .without_brief_status();
+            .without_brief_statuses();
         let mut planned = prepared(repo.path(), home.path(), &linear);
 
         let said = skipping_each(&mut planned, &linear);

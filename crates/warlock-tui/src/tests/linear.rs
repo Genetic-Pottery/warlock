@@ -1552,9 +1552,8 @@ fn a_workspace_with_no_backlog_status_is_a_none_rather_than_an_error() {
     assert_eq!(status, None, "the caller creates with no status");
 }
 
-#[test]
-fn a_project_status_is_found_by_name_ignoring_case_and_spaces() {
-    let linear = Posting::answering([Ok(json!({
+fn project_statuses() -> Value {
+    json!({
         "projectStatuses": {
             "pageInfo": { "hasNextPage": false },
             "nodes": [
@@ -1562,7 +1561,12 @@ fn a_project_status_is_found_by_name_ignoring_case_and_spaces() {
                 { "id": "status-doing", "name": " in progress " },
             ],
         },
-    }))]);
+    })
+}
+
+#[test]
+fn a_project_status_is_found_by_name_ignoring_case_and_spaces() {
+    let linear = Posting::answering([Ok(project_statuses())]);
 
     let status = project_status(&linear, IN_PROGRESS).expect("the stand-in answered");
 
@@ -1595,6 +1599,52 @@ fn a_project_move_writes_the_status_and_nothing_else() {
     assert_eq!(
         linear.variables(),
         [json!({ "id": "project-1", "input": { "statusId": "status-doing" } })]
+    );
+}
+
+#[test]
+fn the_board_moves_a_brief_by_the_status_name_resolving_the_status_itself() {
+    // Through the board rather than the functions under it: the verb takes the
+    // name of the status, so the `statusId` the mutation writes can only have
+    // come from the status the board resolved under that name.
+    let board = Linear::new(
+        Posting::answering([
+            Ok(project_statuses()),
+            Ok(json!({ "projectUpdate": { "project": { "id": "project-1" } } })),
+        ]),
+        a_scope(),
+    );
+
+    let moved = board
+        .move_brief("project-1", IN_PROGRESS)
+        .expect("the stand-in answered");
+
+    assert!(moved, "the workspace has a status of that name");
+    assert_eq!(
+        board.posts.variables(),
+        [
+            json!({}),
+            json!({ "id": "project-1", "input": { "statusId": "status-doing" } }),
+        ]
+    );
+}
+
+#[test]
+fn a_workspace_with_no_brief_status_of_that_name_answers_so_and_sends_no_move() {
+    // The caller hears this as an answer and prints a line: the issues of a cut
+    // that has just settled exist whatever the project's column does.
+    let board = Linear::new(Posting::answering([Ok(project_statuses())]), a_scope());
+
+    let moved = board
+        .move_brief("project-1", "Shipped")
+        .expect("no such status is an answer");
+
+    assert!(!moved);
+    let documents = board.posts.documents();
+    assert_eq!(documents.len(), 1, "{documents:?}");
+    assert!(
+        !documents.iter().any(|sent| sent.contains("projectUpdate")),
+        "{documents:?}"
     );
 }
 
