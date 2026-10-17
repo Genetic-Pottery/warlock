@@ -435,8 +435,8 @@ pub(crate) enum Call {
     MoveTicket { issue: String, state: String },
     TicketLabel { name: String, team: String },
     FetchBrief(String),
-    PlannedBriefs { team: String, label: String },
-    BriefNamed { team: String, name: String },
+    PlannedBriefs,
+    BriefNamed(String),
     ScopeQueue(String),
     NamedTicket { team: String, number: u64 },
     CreateBrief(BriefAsked),
@@ -460,8 +460,8 @@ impl Call {
             Self::MoveTicket { .. } => Op::MoveTicket,
             Self::TicketLabel { .. } => Op::TicketLabel,
             Self::FetchBrief(_) => Op::FetchBrief,
-            Self::PlannedBriefs { .. } => Op::PlannedBriefs,
-            Self::BriefNamed { .. } => Op::BriefNamed,
+            Self::PlannedBriefs => Op::PlannedBriefs,
+            Self::BriefNamed(_) => Op::BriefNamed,
             Self::ScopeQueue(_) => Op::ScopeQueue,
             Self::NamedTicket { .. } => Op::NamedTicket,
             Self::CreateBrief(_) => Op::CreateBrief,
@@ -917,19 +917,18 @@ impl Board for Boarding {
         Ok(self.project.clone())
     }
 
-    fn planned_briefs(&self, team: &str, label: &str) -> Result<Listing, BoardError> {
-        self.ask(Call::PlannedBriefs {
-            team: team.to_owned(),
-            label: label.to_owned(),
-        })?;
+    /// Whatever listing the test wrote down, and the call recorded with nothing
+    /// in it: the verb is told nothing at all, because a real board reads the
+    /// team and the label it lists by off the record it was opened with.
+    fn planned_briefs(&self) -> Result<Listing, BoardError> {
+        self.ask(Call::PlannedBriefs)?;
         Ok(self.listing.clone())
     }
 
-    fn brief_named(&self, team: &str, name: &str) -> Result<Option<String>, BoardError> {
-        self.ask(Call::BriefNamed {
-            team: team.to_owned(),
-            name: name.to_owned(),
-        })?;
+    /// The name is the whole of the recorded call, for the same reason: the team
+    /// a brief of that name is looked for in is the record's.
+    fn brief_named(&self, name: &str) -> Result<Option<String>, BoardError> {
+        self.ask(Call::BriefNamed(name.to_owned()))?;
         Ok(self.same_name.clone())
     }
 

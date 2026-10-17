@@ -1062,12 +1062,12 @@ impl<B: Board> Board for Quiet<B> {
         self.asked(|board| board.fetch_brief(slug))
     }
 
-    fn planned_briefs(&self, team: &str, label: &str) -> Result<Listing, BoardError> {
-        self.asked(|board| board.planned_briefs(team, label))
+    fn planned_briefs(&self) -> Result<Listing, BoardError> {
+        self.asked(Board::planned_briefs)
     }
 
-    fn brief_named(&self, team: &str, name: &str) -> Result<Option<String>, BoardError> {
-        self.asked(|board| board.brief_named(team, name))
+    fn brief_named(&self, name: &str) -> Result<Option<String>, BoardError> {
+        self.asked(|board| board.brief_named(name))
     }
 
     fn scope_queue(&self, assignee: &str) -> Result<Queue, BoardError> {

@@ -215,12 +215,13 @@ impl<P: Posts> Board for Linear<P> {
         fetch_project(&self.posts, slug)
     }
 
-    fn planned_briefs(&self, team: &str, label: &str) -> Result<Listing, Error> {
-        planned_projects(&self.posts, team, label)
+    fn planned_briefs(&self) -> Result<Listing, Error> {
+        let scope = self.scope()?;
+        planned_projects(&self.posts, scope.team_key(), scope.label())
     }
 
-    fn brief_named(&self, team: &str, name: &str) -> Result<Option<String>, Error> {
-        project_named(&self.posts, team, name)
+    fn brief_named(&self, name: &str) -> Result<Option<String>, Error> {
+        project_named(&self.posts, self.scope()?.team_key(), name)
     }
 
     fn scope_queue(&self, assignee: &str) -> Result<Queue, Error> {

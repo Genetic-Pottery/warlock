@@ -180,7 +180,7 @@ pub(crate) fn sent<W: Write>(
             team: destination.team_key().to_owned(),
             path: manifest_path(root),
         })?;
-    if let Some(url) = linear.brief_named(destination.team_key(), brief.name())? {
+    if let Some(url) = linear.brief_named(brief.name())? {
         return Err(Error::AlreadyFiled {
             name: brief.name().to_owned(),
             url,

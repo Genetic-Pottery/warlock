@@ -49,8 +49,8 @@ pub(crate) trait Board {
     fn move_ticket(&self, issue: &str, state: &str) -> Result<String, Error>;
     fn ticket_label_id(&self, name: &str, team: &str) -> Result<String, Error>;
     fn fetch_brief(&self, slug: &str) -> Result<Option<FetchedBrief>, Error>;
-    fn planned_briefs(&self, team: &str, label: &str) -> Result<Listing, Error>;
-    fn brief_named(&self, team: &str, name: &str) -> Result<Option<String>, Error>;
+    fn planned_briefs(&self) -> Result<Listing, Error>;
+    fn brief_named(&self, name: &str) -> Result<Option<String>, Error>;
     fn scope_queue(&self, assignee: &str) -> Result<Queue, Error>;
     fn named_ticket(&self, team: &str, number: u64) -> Result<Option<NamedTicket>, Error>;
     fn create_brief(&self, project: &NewBrief<'_>) -> Result<FiledBrief, Error>;

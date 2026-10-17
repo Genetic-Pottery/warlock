@@ -2915,10 +2915,7 @@ mod cutting {
         );
         assert_eq!(
             linear.calls(),
-            [Call::PlannedBriefs {
-                team: TEAM.to_owned(),
-                label: "warlock".to_owned(),
-            }],
+            [Call::PlannedBriefs],
             "a listing read more than the list"
         );
     }

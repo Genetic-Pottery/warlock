@@ -292,7 +292,7 @@ pub(crate) fn listing<O: Opens>(
     let destination = target.destination()?;
     let listing = open
         .open(target.record(), target.value())
-        .planned_briefs(destination.team_key(), destination.label())?;
+        .planned_briefs()?;
 
     Ok((destination, listing))
 }

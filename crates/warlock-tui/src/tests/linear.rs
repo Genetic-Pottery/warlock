@@ -480,15 +480,21 @@ fn planned(nodes: &Value, after: Option<&str>) -> Value {
 
 #[test]
 fn planned_projects_are_the_teams_planned_and_labelled_ones_by_slug_and_name() {
-    let linear = Posting::answering([Ok(planned(
-        &json!([
-            { "slugId": "9e41c07a2b13", "name": "Draft from the board" },
-            { "slugId": "d1cb3521be71", "name": "Give the CLI a voice" },
-        ]),
-        None,
-    ))]);
+    // Through the board rather than the function under it: the verb takes no
+    // destination at all, so the team and the label on the wire can only have
+    // come off the record the board was opened for.
+    let board = Linear::new(
+        Posting::answering([Ok(planned(
+            &json!([
+                { "slugId": "9e41c07a2b13", "name": "Draft from the board" },
+                { "slugId": "d1cb3521be71", "name": "Give the CLI a voice" },
+            ]),
+            None,
+        ))]),
+        a_scope(),
+    );
 
-    let listing = planned_projects(&linear, "WAR", "warlock").expect("the stand-in answered");
+    let listing = board.planned_briefs().expect("the stand-in answered");
 
     assert_eq!(
         listing.projects(),
@@ -498,10 +504,10 @@ fn planned_projects_are_the_teams_planned_and_labelled_ones_by_slug_and_name() {
         ]
     );
     assert_eq!(
-        linear.variables(),
-        [json!({ "team": "WAR", "label": "warlock" })]
+        board.posts.variables(),
+        [json!({ "team": TEAM, "label": LABEL })]
     );
-    let asked = linear.documents().pop().expect("one request was made");
+    let asked = board.posts.documents().pop().expect("one request was made");
     assert!(asked.contains("key: { eq: $team }"), "{asked}");
     assert!(asked.contains(r#"eqIgnoreCase: "Planned""#), "{asked}");
     assert!(asked.contains("name: { eq: $label }"), "{asked}");
