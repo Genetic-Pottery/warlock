@@ -158,10 +158,10 @@ impl<P: Posts> Linear<P> {
     /// The tracker is read before the view is taken, and both halves are load
     /// bearing: a record that files to Jira has no team to send Linear, and the
     /// prefix this hands back is a team key only because that read came first.
-    /// Opening cannot fail, so the refusal arrives here instead — out of reach
-    /// through warlock's verbs, which each refuse such a scope before they open
-    /// anything, and a `Result` rather than a panic because this is a request
-    /// that was not made.
+    /// Opening cannot fail, so the refusal arrives here instead — reached only
+    /// by a board built for a record filing to Jira, which
+    /// [`Opener::open`](crate::board::Opener) does not build, and a `Result`
+    /// rather than a panic because this is a request that was not made.
     fn scope(&self) -> Result<BoardScope<'_>, Error> {
         self.record
             .files_to_linear()

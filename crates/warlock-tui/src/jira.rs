@@ -207,9 +207,10 @@ impl<C: Calls> Jira<C> {
     /// key means nothing without the site it is a key on.
     ///
     /// Opening cannot fail, so a record that files somewhere else is refused
-    /// here instead — out of reach through warlock's verbs, which each refuse
-    /// such a scope before they open anything, and a `Result` rather than a
-    /// panic because this is a request that was not made.
+    /// here instead — reached only by a board built for a record filing to
+    /// Linear, which [`Opener::open`](crate::board::Opener) does not build, and
+    /// a `Result` rather than a panic because this is a request that was not
+    /// made.
     fn site(&self) -> Result<(&str, &str), Error> {
         match self.record.filed_to() {
             FiledTo::Jira {

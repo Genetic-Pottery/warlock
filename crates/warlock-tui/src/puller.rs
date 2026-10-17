@@ -66,7 +66,7 @@ use crate::claude::{
     working_system_prompt,
 };
 use crate::confirm::{PullAnswered, PullConfirm, Undertaking};
-use crate::error::{Error, files_to_linear, one_line};
+use crate::error::{Error, one_line};
 use crate::git::{Commit, Dirty, Error as GitError, Forge, Gh, Git, Repository, branch_name};
 use crate::inflight::{Lost, Once, Port, Stream, Workers, settled};
 use crate::prompt::KeyPrompt;
@@ -407,18 +407,16 @@ where
     ///
     /// The refusals are asked in the order they have to be. A pull already
     /// in flight is answered before anything is read; a machine with no home is a
-    /// fact about a request that is not going to be made anyway; and the four
+    /// fact about a request that is not going to be made anyway; and the three
     /// [`prepare`] asks are the ones `warlock pull` asks, in its order and its
     /// words, so a reader who has met one at a shell meets the same sentence here.
     ///
-    /// Two of the four are asked ahead of [`prepare`] rather than by it. The
-    /// tracker, off the manifest, because a scope whose queue warlock cannot
-    /// read must not cost a key read or a window; and the key, because a scope
-    /// this checkout binds to nothing is a question somebody looking at the
-    /// panel can answer. What comes back is the key window the session is to put
-    /// up, which is [`KeyPrompt::Closed`] on every road but that one — the
-    /// session holds the window, and this value holds the `/pull` waiting behind
-    /// it.
+    /// One of the three is asked ahead of [`prepare`] rather than by it: the
+    /// key, because a scope this checkout binds to nothing is a question
+    /// somebody looking at the panel can answer. What comes back is the key
+    /// window the session is to put up, which is [`KeyPrompt::Closed`] on every
+    /// road but that one — the session holds the window, and this value holds
+    /// the `/pull` waiting behind it.
     pub(crate) fn press(
         &mut self,
         app: &mut App,
@@ -444,16 +442,6 @@ where
             app.panel_mut().note(one_line(Error::NoHome), now);
             return KeyPrompt::Closed;
         };
-
-        // Before the binding is read and before anything is parked behind the
-        // key window: a scope whose queue warlock cannot read is a line on the
-        // thread, and asking somebody to bind a key for a `/pull` that can only
-        // be refused would be a window spent on a question that does not matter.
-        // `prepare` asks the same question again on the road past here.
-        if let Err(error) = files_to_linear(manifest, &taking.scope) {
-            app.panel_mut().note(one_line(error), now);
-            return KeyPrompt::Closed;
-        }
 
         // After the home, which is where the config sits, and before
         // `prepare`, which is what resolves the key: a scope bound to nothing
@@ -636,16 +624,7 @@ where
         // reader is being asked to confirm is what they have just read.
         if let Some(undertook) = chose.undertook {
             let record = choosing.work.prepared.record();
-            match record.files_to_linear() {
-                Ok(()) => self.confirm = asking(&undertook, BoardScope::of(record)),
-                // The reading that got this far asked the same record the same
-                // question, so nothing reaches this arm today. It is a line and
-                // not an unwrap because a panic here takes the terminal with it.
-                Err(refusal) => {
-                    app.panel_mut().note(one_line(refusal), now);
-                    return;
-                }
-            }
+            self.confirm = asking(&undertook, BoardScope::of(record));
             self.ready = Some(Ready {
                 work: choosing.work,
                 undertook,
@@ -1132,9 +1111,6 @@ fn chose<O: Opens, R: Repository>(
     if cancel.is_cancelled() {
         return Err(Error::Cancelled);
     }
-    // Before the tree is read and before the board is opened, as the headless
-    // door has it: a scope warlock cannot file to is refused having run nothing.
-    work.prepared.record().files_to_linear()?;
     let scope = BoardScope::of(work.prepared.record());
     clean(repo)?;
 
@@ -1221,14 +1197,6 @@ where
     workers.stream(|events| {
         move || {
             let Ready { work, undertook } = ready;
-            // Before a session is raised and before the board is opened: a
-            // scope warlock cannot file to ends the run here, with nothing
-            // spent and the line the panel prints for every other way a run
-            // stops.
-            if let Err(refusal) = work.prepared.record().files_to_linear() {
-                events.send(Step::Finished(Err(one_line(refusal))));
-                return;
-            }
             let scope = BoardScope::of(work.prepared.record());
             let raised = spending.raises.raise(Raising {
                 scope: scope.name(),

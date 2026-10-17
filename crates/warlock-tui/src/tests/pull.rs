@@ -62,27 +62,6 @@ fn a_manifest() -> Manifest {
     ])
 }
 
-// The same two records with the open scope's one recording the board warlock
-// cannot pull from: the tracker is the only thing that differs, so the refusal
-// below is about that and not about a scope spelled differently.
-fn a_jira_manifest() -> Manifest {
-    Manifest::with_directories([
-        scoped("crates/engine", SCOPE),
-        scoped("crates/control", CLOSED),
-    ])
-    .with_scopes([
-        ScopeRecord::jira(SCOPE, "https://acme.atlassian.net", "PAY", REVIEW, LABEL),
-        ScopeRecord::new(CLOSED, "CTL", REVIEW, LABEL),
-    ])
-}
-
-// The sentence `warlock-engine` words for a record that files somewhere else,
-// spelled out because nothing outside that crate can build the refusal to ask
-// it: this is the line somebody at a shell reads.
-fn not_linear(scope: &str) -> String {
-    format!("`{scope}` files to Jira, and warlock can only file to Linear, so nothing was sent")
-}
-
 fn scoped(directory: &str, scope: &str) -> ScopedDirectory {
     ScopedDirectory::new(".", directory, scope).expect("a relative module path is inside the root")
 }
@@ -371,27 +350,6 @@ fn a_checkout_with_no_key_bound_is_refused_the_way_a_push_and_a_draft_are() {
     // fix is the same command, so the wording is not warlock's to say twice.
     let said = error.to_string();
     assert!(said.contains("warlock key use"), "{said}");
-    assert_eq!(status_for(&Err(error)), 1);
-}
-
-#[test]
-fn a_jira_scope_is_refused_before_the_key_is_read_and_no_pull_can_be_prepared() {
-    // The checkout binds nothing, so an unbound scope is what `resolve_filing`
-    // would refuse this with: the sentence below is the assertion that the
-    // tracker is read first, with no key value loaded and no `git` run. Nothing
-    // reaches a board on this road either — there is no `Prepared` to carry one,
-    // which is what `pulled` takes.
-    let root = a_dir();
-    let home = a_dir();
-    opening(home.path(), root.path(), &[SCOPE]);
-
-    let error = prepare(&a_jira_manifest(), root.path(), home.path(), SCOPE)
-        .expect_err("a scope that files to Jira");
-
-    assert!(matches!(error, Error::NotLinear { .. }), "{error:?}");
-    assert_eq!(error.to_string(), not_linear(SCOPE));
-    // The ordinary refusal and not the boundary's: the scope is open here, and
-    // what it files to is a line in this repository to fix.
     assert_eq!(status_for(&Err(error)), 1);
 }
 

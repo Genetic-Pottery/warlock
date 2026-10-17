@@ -264,34 +264,6 @@ fn a_record(name: &str, team: &str) -> ScopeRecord {
     ScopeRecord::new(name, team, "In Review", LABEL)
 }
 
-// A record of the one shape warlock cannot read a board for, under the name
-// every fixture above records as a Linear one: the tracker is the only thing
-// that differs, so the refusals below are about that and not about a scope
-// spelled differently or a key nobody bound.
-fn a_jira_record(name: &str) -> ScopeRecord {
-    ScopeRecord::jira(
-        name,
-        "https://acme.atlassian.net",
-        "PAY",
-        "In Review",
-        LABEL,
-    )
-}
-
-// `a_scoped_repository` with that record in place of the Linear one.
-fn a_jira_repository() -> TempDir {
-    let repo = a_repository();
-    saving(repo.path(), &a_manifest([a_jira_record(SCOPE)]));
-    repo
-}
-
-// The sentence `warlock-engine` words for a record that files somewhere else,
-// spelled out because nothing outside that crate can build the refusal to ask
-// it: this is the line somebody at a shell reads.
-fn not_linear(scope: &str) -> String {
-    format!("`{scope}` files to Jira, and warlock can only file to Linear, so nothing was sent")
-}
-
 fn saving(root: &Path, manifest: &Manifest) {
     manifest.save(root).expect("a manifest that saves");
 }
@@ -998,30 +970,6 @@ mod listing {
     }
 
     #[test]
-    fn a_jira_scope_is_refused_before_a_board_is_opened_and_lists_nothing() {
-        // The client panics if it is opened at all, so the key store being read
-        // and a listing being asked for are the failure here rather than
-        // something asserted afterwards.
-        let repo = a_jira_repository();
-        let home = a_home(repo.path());
-        let standing = Standing::at(repo.path().to_path_buf(), repo.path().to_path_buf());
-        let linear = Boarding::unopened();
-
-        let error = listing(
-            &standing.manifest().expect("a manifest"),
-            repo.path(),
-            home.path(),
-            SCOPE,
-            &linear,
-        )
-        .expect_err("a scope that files to Jira");
-
-        assert!(matches!(error, Error::NotLinear { .. }), "{error:?}");
-        assert_eq!(said(&error), not_linear(SCOPE));
-        assert!(linear.calls().is_empty(), "{:?}", linear.calls());
-    }
-
-    #[test]
     fn a_scope_this_machine_cannot_file_to_is_refused_before_a_board_is_opened() {
         let repo = a_scoped_repository();
         let home = a_home(repo.path());
@@ -1302,25 +1250,6 @@ mod headless {
         assert!(printed.is_empty(), "a refusal printed something: {printed}");
         let error = refusal(outcome);
         assert!(matches!(error, Error::NotPlanned { .. }), "{error:?}");
-    }
-
-    #[test]
-    fn a_draft_of_a_jira_scope_is_refused_with_no_key_read_and_nothing_created() {
-        let repo = a_jira_repository();
-        let home = a_home(repo.path());
-        let linear = Boarding::unopened();
-
-        let (outcome, printed) = cut_to(repo.path(), home.path(), SLUG, None, false, &linear);
-
-        assert!(printed.is_empty(), "a refusal printed something: {printed}");
-        let error = refusal(outcome);
-        assert!(matches!(error, Error::NotLinear { .. }), "{error:?}");
-        assert_eq!(said(&error), not_linear(SCOPE));
-        assert!(
-            linear.tickets_created().is_empty(),
-            "a refused draft created an issue"
-        );
-        assert!(linear.calls().is_empty(), "{:?}", linear.calls());
     }
 
     #[test]

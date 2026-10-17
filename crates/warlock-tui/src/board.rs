@@ -144,8 +144,7 @@ pub(crate) trait Board {
 /// caller resolved.
 ///
 /// Infallible, so a record naming a board this opener cannot speak to is a
-/// refusal a verb answers with rather than one open can raise. Every caller
-/// refuses such a scope before it opens anything.
+/// refusal a verb answers with rather than one open can raise.
 ///
 /// The bounds are what the panel's workers need. A board is built from a record
 /// and a key borrowed for as long as the target lives and is then owned by a
@@ -1090,10 +1089,12 @@ pub enum Error {
     /// none to read there. Warlock's own word, as [`Stopped`](Self::Stopped)
     /// is.
     ///
-    /// Out of reach through warlock's own verbs, each of which refuses a scope
-    /// it cannot file to before it opens anything. It is a refusal here and not
-    /// a panic because [`Opens::open`] cannot fail, so the check cannot live
-    /// where the board is built.
+    /// Out of reach through [`Opener`], which reads the record's tracker and
+    /// builds the variant it names, so the board and the record it holds agree
+    /// by construction. It is a refusal here and not a panic because
+    /// [`Opens::open`] cannot fail, so the check cannot live where the board is
+    /// built: the verb that goes to read the destination is the first thing
+    /// that could see a mismatch, and a request not made is worth a sentence.
     Elsewhere {
         board: &'static str,
         scope: String,

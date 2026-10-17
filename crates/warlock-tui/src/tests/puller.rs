@@ -75,27 +75,6 @@ fn a_manifest() -> Manifest {
     ])
 }
 
-// The same two records with the open scope's one recording the board warlock
-// cannot pull from: the tracker is the only thing that differs, so the refusal
-// is about that and not about a scope spelled differently or a key nobody bound.
-fn a_jira_manifest() -> Manifest {
-    Manifest::with_directories([
-        scoped("crates/engine", SCOPE),
-        scoped("crates/control", CLOSED),
-    ])
-    .with_scopes([
-        ScopeRecord::jira(SCOPE, "https://acme.atlassian.net", "PAY", REVIEW, LABEL),
-        ScopeRecord::new(CLOSED, "CTL", REVIEW, LABEL),
-    ])
-}
-
-// The sentence `warlock-engine` words for a record that files somewhere else,
-// spelled out because nothing outside that crate can build the refusal to ask
-// it: this is the line a reader sees on the thread.
-fn not_linear(scope: &str) -> String {
-    format!("`{scope}` files to Jira, and warlock can only file to Linear, so nothing was sent")
-}
-
 fn scoped(directory: &str, scope: &str) -> ScopedDirectory {
     ScopedDirectory::new(".", directory, scope).expect("a relative module path is inside the root")
 }
@@ -758,8 +737,8 @@ mod binding {
 
     use super::{
         Answer, App, Boarding, Checkout, Forging, KEY_NAME, KeyPrompt, NOT_A_KEY, Panel,
-        PullAnswered, Puller, SCOPE, TICKET, TITLE, Taking, URL, a_dir, a_jira_manifest,
-        a_manifest, board, checkout, not_linear, notes, now, queue, ready, unasked,
+        PullAnswered, Puller, SCOPE, TICKET, TITLE, Taking, URL, a_dir, a_manifest, board,
+        checkout, notes, now, queue, ready, unasked,
     };
     use crate::error::{Error, one_line};
 
@@ -911,43 +890,6 @@ mod binding {
             "the scope was bound by an abandoned question"
         );
         assert!(notes(&app).is_empty(), "{:?}", notes(&app));
-    }
-
-    #[test]
-    fn a_pull_of_a_jira_scope_is_one_line_with_no_question_asked_and_nothing_parked() {
-        // The home binds nothing, which is the road that would otherwise put the
-        // key window up and park the `/pull` behind it: the tracker is read
-        // before that, so what comes back is the refusal and no question at all.
-        // The board panics if it is opened, so reaching one is the failure rather
-        // than something asserted afterwards.
-        let root = a_dir();
-        let home = an_unbound_home(root.path());
-        let repo = checkout();
-        let linear = Boarding::unopened();
-        let mut puller = puller(linear.clone(), repo.clone(), home.path());
-        let mut app = App::default();
-
-        let prompt = puller.press(
-            &mut app,
-            &a_jira_manifest(),
-            root.path(),
-            &Taking {
-                scope: SCOPE.to_owned(),
-                ticket: None,
-            },
-            now(),
-        );
-
-        assert_eq!(notes(&app), vec![not_linear(SCOPE)]);
-        assert_eq!(prompt, KeyPrompt::Closed, "a refused pull asked for a key");
-        assert!(puller.parked.is_none(), "a refused pull was parked");
-        assert!(!puller.choosing(), "a refused pull read a queue");
-        assert!(!puller.pulling(), "a refused pull started a run");
-        assert!(repo.calls().is_empty(), "a refused `/pull` ran `git`");
-        assert!(
-            linear.tickets_created().is_empty(),
-            "a refused pull created an issue"
-        );
     }
 
     #[test]

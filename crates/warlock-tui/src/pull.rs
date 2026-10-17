@@ -40,7 +40,7 @@ use warlock_engine::{
 use crate::account::{THINKING, WRITING, tool_line};
 use crate::board::{Board, Key, Opener as LinearOpener, Opens, QueuedTicket};
 use crate::claude::{Activities, Activity};
-use crate::error::{Error, NO_QUEUE, files_to_linear, one_line, say};
+use crate::error::{Error, NO_QUEUE, one_line, say};
 use crate::git::{Forge, Gh, Git, Repository};
 use crate::puller::{Splitter, Stopping, Worker};
 use crate::pulling::{Heading, PullEvent, Pulled, Pulling, Splits, Ticket, Works};
@@ -136,9 +136,6 @@ pub(crate) fn pulled<O: Opens, R: Repository, F: Forge, S: Splits, W: Works, P: 
     progress: &Shared<P>,
 ) -> Result<(), Error> {
     let (root, home) = (prepared.root(), prepared.home());
-    // Before the tree is read and before the board is opened: a scope warlock
-    // cannot file to is refused with nothing run and no client built.
-    prepared.record().files_to_linear()?;
     let scope = BoardScope::of(prepared.record());
 
     // Before the board is opened and before the queue is read: what a dirty tree
@@ -266,17 +263,14 @@ impl Prepared {
     }
 }
 
-/// The four questions a pull answers before it asks the world anything, in the
+/// The three questions a pull answers before it asks the world anything, in the
 /// order the answers are worth having.
 ///
 /// The record first, because a scope no `[[scope]]` record holds is a manifest
 /// one line short and the fix is in this repository. Open second, because a
 /// recorded scope closed on this machine is a boundary and its own status. The
-/// tracker third, because a scope that files to Jira is a pull warlock can only
-/// refuse, and refusing it before the key is read is what makes "nothing was
-/// sent" true of it. The key last, through the very [`resolve_filing`] a push
-/// and a draft go through, so an unbound checkout is told the same sentence by
-/// all three verbs.
+/// key last, through the very [`resolve_filing`] a push and a draft go through,
+/// so an unbound checkout is told the same sentence by all three verbs.
 pub(crate) fn prepare(
     manifest: &Manifest,
     root: &Path,
@@ -299,12 +293,6 @@ pub(crate) fn prepare(
             held,
         });
     }
-
-    // Above `resolve_filing`, which loads the key value: a scope warlock cannot
-    // file to is refused with no key read, no `git` run and no client built.
-    // `pulled` reads the same record through the same view a moment later, so
-    // this is where that refusal is asked rather than a second rule.
-    files_to_linear(manifest, scope)?;
 
     // Reached only with the record and open questions above already answered, so
     // the board refusals it can raise cannot fire: the name is a candidate by construction.
