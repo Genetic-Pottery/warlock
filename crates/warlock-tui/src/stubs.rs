@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use serde_json::Value;
 use warlock_engine::splitting::Numbered;
-use warlock_engine::{agent, drafting, working};
+use warlock_engine::{ScopeRecord, agent, drafting, working};
 
 use crate::asking::Asks;
 use crate::board::{
@@ -435,10 +435,10 @@ pub(crate) enum Call {
     MoveTicket { issue: String, state: String },
     TicketLabel { name: String, team: String },
     FetchBrief(String),
-    PlannedBriefs { team: String, label: String },
-    BriefNamed { team: String, name: String },
-    ScopeQueue(QueueAsked),
-    NamedTicket { team: String, number: u64 },
+    PlannedBriefs,
+    BriefNamed(String),
+    ScopeQueue(String),
+    NamedTicket(u64),
     CreateBrief(BriefAsked),
     CreateTicket(TicketAsked),
     Relation { blocker: String, waiting: String },
@@ -460,10 +460,10 @@ impl Call {
             Self::MoveTicket { .. } => Op::MoveTicket,
             Self::TicketLabel { .. } => Op::TicketLabel,
             Self::FetchBrief(_) => Op::FetchBrief,
-            Self::PlannedBriefs { .. } => Op::PlannedBriefs,
-            Self::BriefNamed { .. } => Op::BriefNamed,
+            Self::PlannedBriefs => Op::PlannedBriefs,
+            Self::BriefNamed(_) => Op::BriefNamed,
             Self::ScopeQueue(_) => Op::ScopeQueue,
-            Self::NamedTicket { .. } => Op::NamedTicket,
+            Self::NamedTicket(_) => Op::NamedTicket,
             Self::CreateBrief(_) => Op::CreateBrief,
             Self::CreateTicket(_) => Op::CreateTicket,
             Self::Relation { .. } => Op::Relation,
@@ -495,13 +495,6 @@ pub(crate) enum Op {
     Relation,
     Comment,
     TicketComment,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct QueueAsked {
-    pub(crate) team: String,
-    pub(crate) label: String,
-    pub(crate) assignee: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -834,7 +827,11 @@ impl fmt::Debug for Boarding {
 impl Opens for Boarding {
     type Board = Self;
 
-    fn open(&self, key: &str) -> Self {
+    /// The key is written down and the record is not: this board answers every
+    /// verb out of memory, so it has no destination to read off a record. What
+    /// a test asserts here is that the key reached the one line that opens a
+    /// board — see [`opened_with`](Boarding::opened_with).
+    fn open(&self, _record: &ScopeRecord, key: &str) -> Self {
         assert!(!self.unopened, "the key was read and a board was opened");
         self.log().keys.push(key.to_owned());
         self.clone()
@@ -920,41 +917,37 @@ impl Board for Boarding {
         Ok(self.project.clone())
     }
 
-    fn planned_briefs(&self, team: &str, label: &str) -> Result<Listing, BoardError> {
-        self.ask(Call::PlannedBriefs {
-            team: team.to_owned(),
-            label: label.to_owned(),
-        })?;
+    /// Whatever listing the test wrote down, and the call recorded with nothing
+    /// in it: the verb is told nothing at all, because a real board reads the
+    /// team and the label it lists by off the record it was opened with.
+    fn planned_briefs(&self) -> Result<Listing, BoardError> {
+        self.ask(Call::PlannedBriefs)?;
         Ok(self.listing.clone())
     }
 
-    fn brief_named(&self, team: &str, name: &str) -> Result<Option<String>, BoardError> {
-        self.ask(Call::BriefNamed {
-            team: team.to_owned(),
-            name: name.to_owned(),
-        })?;
+    /// The name is the whole of the recorded call, for the same reason: the team
+    /// a brief of that name is looked for in is the record's.
+    fn brief_named(&self, name: &str) -> Result<Option<String>, BoardError> {
+        self.ask(Call::BriefNamed(name.to_owned()))?;
         Ok(self.same_name.clone())
     }
 
     /// Whatever queue the test wrote down, and the call recorded: the flows that
-    /// file and cut read none, so the default is an empty one.
-    fn scope_queue(&self, team: &str, label: &str, assignee: &str) -> Result<Queue, BoardError> {
-        self.ask(Call::ScopeQueue(QueueAsked {
-            team: team.to_owned(),
-            label: label.to_owned(),
-            assignee: assignee.to_owned(),
-        }))?;
+    /// file and cut read none, so the default is an empty one. The assignee is
+    /// the whole of the recorded call, because it is the whole of what the verb
+    /// is told — a real board reads its team and its label off the record it was
+    /// opened with.
+    fn scope_queue(&self, assignee: &str) -> Result<Queue, BoardError> {
+        self.ask(Call::ScopeQueue(assignee.to_owned()))?;
         Ok(self.queue.clone())
     }
 
     /// Whatever ticket the test wrote down — `None`, a board with no such ticket,
     /// being the default — and the call recorded, which is where a test reads the
-    /// team and number that were asked for.
-    fn named_ticket(&self, team: &str, number: u64) -> Result<Option<NamedTicket>, BoardError> {
-        self.ask(Call::NamedTicket {
-            team: team.to_owned(),
-            number,
-        })?;
+    /// number that was asked for. The number is the whole of it: the team the
+    /// ticket is looked for on is the record's, as the queue read's is.
+    fn named_ticket(&self, number: u64) -> Result<Option<NamedTicket>, BoardError> {
+        self.ask(Call::NamedTicket(number))?;
         Ok(self.named.clone())
     }
 

@@ -234,7 +234,9 @@ fn a_push_asks_for_the_team_then_the_name_then_the_status_before_it_creates_anyt
 }
 
 #[test]
-fn the_name_asked_about_is_the_brief_s_title_in_the_scope_s_team() {
+// The title is the whole of what the lookup is told: the team it is looked for
+// in is the record's, read where the board was opened.
+fn the_name_asked_about_is_the_brief_s_title_and_nothing_else() {
     let repo = a_repository();
     let home = a_home(repo.path());
     let linear = a_whole_push();
@@ -244,10 +246,7 @@ fn the_name_asked_about_is_the_brief_s_title_in_the_scope_s_team() {
         .expect("a push");
 
     assert!(
-        linear.calls().contains(&Call::BriefNamed {
-            team: TEAM.to_owned(),
-            name: TITLE.to_owned(),
-        }),
+        linear.calls().contains(&Call::BriefNamed(TITLE.to_owned())),
         "{:?}",
         linear.calls()
     );

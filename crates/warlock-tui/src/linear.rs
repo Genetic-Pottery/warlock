@@ -18,6 +18,7 @@ use serde_json::{Value, json};
 use ureq::Agent;
 use ureq::http::HeaderValue;
 use ureq::http::header::AUTHORIZATION;
+use warlock_engine::{LinearScope, ScopeRecord};
 
 use crate::board::{
     Assignee, Blocker, Board, CUT_NOTE, Category, Error, FetchedBrief, FiledBrief, FiledTicket,
@@ -133,15 +134,37 @@ impl Posts for Client {
 }
 
 /// The one [`Board`] that speaks GraphQL, over whatever [`Posts`] it holds.
+///
+/// The record it was opened for is held beside the transport, and it is the
+/// whole of what this board knows about where work goes: the team key and the
+/// label are read off it here, so no verb below [`Board`] is handed either.
+/// Owned rather than borrowed, because a board is opened on a panel worker and
+/// outlives the manifest read that produced the record.
 #[derive(Debug)]
 pub(crate) struct Linear<P = Client> {
     posts: P,
+    record: ScopeRecord,
 }
 
 impl<P: Posts> Linear<P> {
     #[must_use]
-    pub(crate) const fn new(posts: P) -> Self {
-        Self { posts }
+    pub(crate) const fn new(posts: P, record: ScopeRecord) -> Self {
+        Self { posts, record }
+    }
+
+    /// The record as the Linear scope it files to, which is where a verb's team
+    /// key and label come from.
+    ///
+    /// [`LinearScope::of`] is the only road to a team key, and it refuses a
+    /// record that files to Jira. Opening cannot fail, so that refusal arrives
+    /// here instead — out of reach through warlock's verbs, which each refuse
+    /// such a scope before they open anything, and a `Result` rather than a
+    /// panic because this is a request that was not made.
+    fn scope(&self) -> Result<LinearScope<'_>, Error> {
+        LinearScope::of(&self.record).map_err(|_| Error::Elsewhere {
+            board: LINEAR,
+            scope: self.record.name().to_owned(),
+        })
     }
 }
 
@@ -192,20 +215,22 @@ impl<P: Posts> Board for Linear<P> {
         fetch_project(&self.posts, slug)
     }
 
-    fn planned_briefs(&self, team: &str, label: &str) -> Result<Listing, Error> {
-        planned_projects(&self.posts, team, label)
+    fn planned_briefs(&self) -> Result<Listing, Error> {
+        let scope = self.scope()?;
+        planned_projects(&self.posts, scope.team_key(), scope.label())
     }
 
-    fn brief_named(&self, team: &str, name: &str) -> Result<Option<String>, Error> {
-        project_named(&self.posts, team, name)
+    fn brief_named(&self, name: &str) -> Result<Option<String>, Error> {
+        project_named(&self.posts, self.scope()?.team_key(), name)
     }
 
-    fn scope_queue(&self, team: &str, label: &str, assignee: &str) -> Result<Queue, Error> {
-        scope_queue(&self.posts, team, label, assignee)
+    fn scope_queue(&self, assignee: &str) -> Result<Queue, Error> {
+        let scope = self.scope()?;
+        scope_queue(&self.posts, scope.team_key(), scope.label(), assignee)
     }
 
-    fn named_ticket(&self, team: &str, number: u64) -> Result<Option<NamedTicket>, Error> {
-        named_issue(&self.posts, team, number)
+    fn named_ticket(&self, number: u64) -> Result<Option<NamedTicket>, Error> {
+        named_issue(&self.posts, self.scope()?.team_key(), number)
     }
 
     fn create_brief(&self, project: &NewBrief<'_>) -> Result<FiledBrief, Error> {
@@ -232,8 +257,11 @@ impl<P: Posts> Board for Linear<P> {
 impl Opens for Opener {
     type Board = Linear<Client>;
 
-    fn open(&self, key: &str) -> Linear<Client> {
-        Linear::new(Client::new(key))
+    /// The client from the key and the destination from the record, which is the
+    /// whole of what a board is built from: the record is cloned because the
+    /// board outlives the manifest it was read from.
+    fn open(&self, record: &ScopeRecord, key: &str) -> Linear<Client> {
+        Linear::new(Client::new(key), record.clone())
     }
 }
 
@@ -927,9 +955,10 @@ const LABELS_PAGE: usize = 50;
 ///
 /// Not by the identifier itself, because Linear's `IssueFilter` has no
 /// `identifier`: the identifier is a display name made of the team's key and the
-/// issue's number, and those two are what can be filtered on. Splitting it is the
-/// caller's, which is also where a string that is no identifier at all gets its
-/// own words rather than a request.
+/// issue's number, and those two are what can be filtered on. The team is the one
+/// the board was opened for and never a typed one: the caller splits the
+/// identifier, refuses a prefix naming another team, and is also where a string
+/// that is no identifier at all gets its own words rather than a request.
 ///
 /// The node selection is [`scope_queue`]'s — the ticket comes back as the same
 /// [`QueuedTicket`], parsed by the same function, so a named ticket and a chosen
@@ -967,8 +996,8 @@ fn named_issue(linear: &impl Posts, team: &str, number: u64) -> Result<Option<Na
     let data = linear.post(
         &document,
         json!({
-            // Upper cased because Linear's team keys are, and `WAR-133` is
-            // something a person types: `war-133` names the same ticket to
+            // Upper cased because Linear's team keys are, and a scope record's
+            // `team` is something a person typed: `war` names the same team to
             // everyone except an `eq` on the key.
             "team": team.trim().to_uppercase(),
             "number": number,

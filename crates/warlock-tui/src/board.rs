@@ -1,5 +1,7 @@
 use std::fmt;
 
+use warlock_engine::ScopeRecord;
+
 /// A key value held for a run that opens a board later, on a worker.
 ///
 /// `Debug` is hand-written rather than derived: the values holding one are kept
@@ -47,10 +49,10 @@ pub(crate) trait Board {
     fn move_ticket(&self, issue: &str, state: &str) -> Result<String, Error>;
     fn ticket_label_id(&self, name: &str, team: &str) -> Result<String, Error>;
     fn fetch_brief(&self, slug: &str) -> Result<Option<FetchedBrief>, Error>;
-    fn planned_briefs(&self, team: &str, label: &str) -> Result<Listing, Error>;
-    fn brief_named(&self, team: &str, name: &str) -> Result<Option<String>, Error>;
-    fn scope_queue(&self, team: &str, label: &str, assignee: &str) -> Result<Queue, Error>;
-    fn named_ticket(&self, team: &str, number: u64) -> Result<Option<NamedTicket>, Error>;
+    fn planned_briefs(&self) -> Result<Listing, Error>;
+    fn brief_named(&self, name: &str) -> Result<Option<String>, Error>;
+    fn scope_queue(&self, assignee: &str) -> Result<Queue, Error>;
+    fn named_ticket(&self, number: u64) -> Result<Option<NamedTicket>, Error>;
     fn create_brief(&self, project: &NewBrief<'_>) -> Result<FiledBrief, Error>;
     fn create_ticket(&self, issue: &NewTicket<'_>) -> Result<FiledTicket, Error>;
     fn create_relation(&self, blocker: &str, waiting: &str) -> Result<String, Error>;
@@ -58,23 +60,34 @@ pub(crate) trait Board {
     fn comment_on_ticket(&self, issue: &str, body: &str) -> Result<String, Error>;
 }
 
-/// Where a board comes from: a key in, a [`Board`] out, and the one seam both
-/// the headless verbs and the panel open theirs through.
+/// Where a board comes from: the scope's record and its key in, a [`Board`]
+/// out, and the one seam both the headless verbs and the panel open theirs
+/// through.
 ///
-/// The bounds are what the panel's workers need. A board is built from a key
-/// borrowed for as long as the target lives and is then owned by a thread that
-/// outlives the press, which is the associated type's side; and the opener
-/// itself crosses onto a thread, because the panel's cut resolves its board
-/// over there and so opens it there too.
+/// Both, because they answer different halves of "which board": the key says
+/// which workspace is being spoken to and the record says where in it the work
+/// goes. A board that captured its own destination when it was opened is what
+/// lets the destination leave every verb — nothing below this seam is told a
+/// team or a label.
+///
+/// Infallible, so a record naming a board this opener cannot speak to is a
+/// refusal a verb answers with rather than one open can raise. Every caller
+/// refuses such a scope before it opens anything.
+///
+/// The bounds are what the panel's workers need. A board is built from a record
+/// and a key borrowed for as long as the target lives and is then owned by a
+/// thread that outlives the press, which is the associated type's side; and the
+/// opener itself crosses onto a thread, because the panel's cut resolves its
+/// board over there and so opens it there too.
 pub(crate) trait Opens: Clone + Send + 'static {
     type Board: Board + Send + 'static;
 
-    fn open(&self, key: &str) -> Self::Board;
+    fn open(&self, record: &ScopeRecord, key: &str) -> Self::Board;
 }
 
 /// The one [`Opens`] that opens a socket, and the only value in warlock that
-/// does. Holds nothing: a board is built per request run, from a key read on
-/// one line and dropped with whatever used it.
+/// does. Holds nothing: a board is built per request run, from a record and a
+/// key read on one line and dropped with whatever used it.
 ///
 /// The impl is in `linear.rs`, beside the [`Board`] it answers with.
 #[derive(Debug, Clone, Copy, Default)]
@@ -830,6 +843,19 @@ pub enum Error {
     Stopped {
         board: &'static str,
     },
+    /// Nothing was sent, because the scope the board was opened for files
+    /// somewhere else: a verb that reads its destination off the record has
+    /// none to read there. Warlock's own word, as [`Stopped`](Self::Stopped)
+    /// is.
+    ///
+    /// Out of reach through warlock's own verbs, each of which refuses a scope
+    /// it cannot file to before it opens anything. It is a refusal here and not
+    /// a panic because [`Opens::open`] cannot fail, so the check cannot live
+    /// where the board is built.
+    Elsewhere {
+        board: &'static str,
+        scope: String,
+    },
     /// Type-erased rather than the HTTP client's own error, which is what keeps
     /// this module free of one: a board that speaks over a socket boxes whatever
     /// its transport failed with, and a second board's transport need not be the
@@ -867,6 +893,9 @@ impl fmt::Display for Error {
             Self::Stopped { board } => {
                 write!(f, "the run was stopped, so nothing was sent to {board}")
             }
+            Self::Elsewhere { board, scope } => {
+                write!(f, "`{scope}` does not file to {board}, so nothing was sent")
+            }
             Self::Transport { board, source } => write!(f, "could not reach {board}: {source}"),
             Self::Status { board, code } => write!(f, "{board} answered {code}"),
             Self::Malformed { board, detail } => {
@@ -885,6 +914,7 @@ impl std::error::Error for Error {
             Self::Transport { source, .. } => Some(&**source),
             Self::Key { .. }
             | Self::Stopped { .. }
+            | Self::Elsewhere { .. }
             | Self::Status { .. }
             | Self::Malformed { .. }
             | Self::Refused { .. } => None,

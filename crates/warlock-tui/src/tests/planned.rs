@@ -27,7 +27,7 @@ use crate::cut::noted;
 use crate::error::Error;
 use crate::error::status_for;
 use crate::standing::Standing;
-use crate::stubs::{Answering, Boarding, Call, Op, QueueAsked, Saying, Scripted, Typing, VIEWER};
+use crate::stubs::{Answering, Boarding, Call, Op, Saying, Scripted, Typing, VIEWER};
 
 // Not a key, and named so that nothing reading this file mistakes it for one.
 // It is stored only so that a bound name resolves and a cut can reach the
@@ -370,11 +370,7 @@ fn read_by_prepare() -> [Call; 3] {
     [
         Call::Viewer,
         Call::FetchBrief(SLUG.to_owned()),
-        Call::ScopeQueue(QueueAsked {
-            team: TEAM.to_owned(),
-            label: LABEL.to_owned(),
-            assignee: VIEWER.to_owned(),
-        }),
+        Call::ScopeQueue(VIEWER.to_owned()),
     ]
 }
 
@@ -978,7 +974,7 @@ mod listing {
     }
 
     #[test]
-    fn the_planned_projects_are_asked_of_the_scope_s_team_and_label() {
+    fn the_planned_projects_are_asked_for_with_no_destination_and_answer_the_scope_s() {
         let repo = a_scoped_repository();
         let home = a_home(repo.path());
         let linear = Boarding::filing("").listing(Listing::new(&[(SLUG, NAME)]));
@@ -995,13 +991,10 @@ mod listing {
 
         assert_eq!(destination.team_key(), TEAM);
         assert_eq!(listed, Listing::new(&[(SLUG, NAME)]));
-        assert_eq!(
-            linear.calls(),
-            [Call::PlannedBriefs {
-                team: TEAM.to_owned(),
-                label: LABEL.to_owned(),
-            }]
-        );
+        // The listing verb is told nothing: the team and the label it lists by
+        // are the record's, and the destination the caller hands back is what
+        // the printed lines name.
+        assert_eq!(linear.calls(), [Call::PlannedBriefs]);
     }
 
     #[test]

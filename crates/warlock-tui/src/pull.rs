@@ -147,7 +147,7 @@ pub(crate) fn pulled<O: Opens, R: Repository, F: Forge, S: Splits, W: Works, P: 
         clean(ports.repo)?;
     }
 
-    let board = ports.open.open(prepared.value());
+    let board = ports.open.open(prepared.record(), prepared.value());
     let selected = selection(&board, scope, home, root, named, &mut |line| {
         tell(progress, &line);
     })?;
@@ -365,7 +365,7 @@ fn select(
     Ok(match named {
         Some(ticket) => Selected::Named(take_named(board, scope, assignee, ticket, runs)?),
         None => Selected::Chosen(choose(
-            &board.scope_queue(scope.team_key(), scope.label(), assignee)?,
+            &board.scope_queue(assignee)?,
             scope.review_state(),
             runs,
         )),

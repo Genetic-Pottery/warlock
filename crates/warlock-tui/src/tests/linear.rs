@@ -2,6 +2,7 @@ use std::error::Error as _;
 use std::io;
 
 use serde_json::{Value, json};
+use warlock_engine::ScopeRecord;
 
 use super::{
     BACKLOG, BLOCKERS_PAGE, Client, ENDPOINT, LABELS_PAGE, LINEAR, Linear, Posts, QUEUE_PAGE,
@@ -24,6 +25,10 @@ const KEY: &str = "lin_api_a_key_nobody_holds_8f3a1c";
 fn variants() -> Vec<Error> {
     vec![
         Error::Key { board: LINEAR },
+        Error::Elsewhere {
+            board: LINEAR,
+            scope: "payments".to_owned(),
+        },
         Error::Transport {
             board: LINEAR,
             source: Box::new(ureq::Error::Io(io::Error::other(
@@ -475,15 +480,21 @@ fn planned(nodes: &Value, after: Option<&str>) -> Value {
 
 #[test]
 fn planned_projects_are_the_teams_planned_and_labelled_ones_by_slug_and_name() {
-    let linear = Posting::answering([Ok(planned(
-        &json!([
-            { "slugId": "9e41c07a2b13", "name": "Draft from the board" },
-            { "slugId": "d1cb3521be71", "name": "Give the CLI a voice" },
-        ]),
-        None,
-    ))]);
+    // Through the board rather than the function under it: the verb takes no
+    // destination at all, so the team and the label on the wire can only have
+    // come off the record the board was opened for.
+    let board = Linear::new(
+        Posting::answering([Ok(planned(
+            &json!([
+                { "slugId": "9e41c07a2b13", "name": "Draft from the board" },
+                { "slugId": "d1cb3521be71", "name": "Give the CLI a voice" },
+            ]),
+            None,
+        ))]),
+        a_scope(),
+    );
 
-    let listing = planned_projects(&linear, "WAR", "warlock").expect("the stand-in answered");
+    let listing = board.planned_briefs().expect("the stand-in answered");
 
     assert_eq!(
         listing.projects(),
@@ -493,10 +504,10 @@ fn planned_projects_are_the_teams_planned_and_labelled_ones_by_slug_and_name() {
         ]
     );
     assert_eq!(
-        linear.variables(),
-        [json!({ "team": "WAR", "label": "warlock" })]
+        board.posts.variables(),
+        [json!({ "team": TEAM, "label": LABEL })]
     );
-    let asked = linear.documents().pop().expect("one request was made");
+    let asked = board.posts.documents().pop().expect("one request was made");
     assert!(asked.contains("key: { eq: $team }"), "{asked}");
     assert!(asked.contains(r#"eqIgnoreCase: "Planned""#), "{asked}");
     assert!(asked.contains("name: { eq: $label }"), "{asked}");
@@ -580,6 +591,12 @@ fn a_project_of_the_same_name_is_answered_by_its_url_and_none_is_none() {
 const TEAM: &str = "team-1";
 const LABEL: &str = "warlock";
 const ME: &str = "user-viewer";
+
+// The record a board is opened for: a verb is told none of it, so the team key
+// and the label a request carries can only have come from here.
+fn a_scope() -> ScopeRecord {
+    ScopeRecord::new("warlock-team", TEAM, "In Review", LABEL)
+}
 
 fn a_queue_of(issues: &[Value], after: Option<&str>) -> Value {
     json!({
@@ -1030,14 +1047,14 @@ fn an_unassigned_issue_can_still_be_holding_one_up() {
 }
 
 #[test]
-fn the_board_hands_the_team_label_and_assignee_to_the_wire_in_that_order() {
-    // Three `&str` in a row: a swap between the trait and the operation under it
-    // compiles, and asks the board for somebody else's work.
-    let board = Linear::new(Posting::answering([Ok(a_queue_of(&[], None))]));
+fn the_board_reads_the_team_and_label_off_its_record_and_is_told_the_assignee() {
+    // The verb takes one argument, so the two facts about where the work lives
+    // cannot be handed to it in the wrong order: they are the record's, read
+    // where the board was opened, and the assignee is the whole of what the
+    // queue read is told.
+    let board = Linear::new(Posting::answering([Ok(a_queue_of(&[], None))]), a_scope());
 
-    board
-        .scope_queue(TEAM, LABEL, ME)
-        .expect("the stand-in answered");
+    board.scope_queue(ME).expect("the stand-in answered");
 
     assert_eq!(
         board.posts.variables().pop().expect("one request was made"),
@@ -1049,6 +1066,33 @@ fn the_board_hands_the_team_label_and_assignee_to_the_wire_in_that_order() {
             "blockers": BLOCKERS_PAGE,
         })
     );
+}
+
+#[test]
+fn a_board_opened_for_a_scope_that_files_elsewhere_sends_nothing() {
+    // Out of reach through warlock's own verbs, each of which refuses such a
+    // scope before it opens anything — but opening cannot fail, so the refusal
+    // has to be a verb's and it has to arrive with no request made.
+    let board = Linear::new(
+        Posting::answering([]),
+        ScopeRecord::jira(
+            "payments",
+            "https://acme.atlassian.net",
+            "PAY",
+            "In Review",
+            "area/pay",
+        ),
+    );
+
+    let error = board
+        .scope_queue(ME)
+        .expect_err("a Jira record names no Linear team");
+
+    assert!(
+        matches!(&error, Error::Elsewhere { scope, .. } if scope == "payments"),
+        "{error:?}"
+    );
+    assert!(board.posts.documents().is_empty(), "nothing was sent");
 }
 
 // One named ticket as the board answers it: the queue's own node, plus the three
@@ -1239,19 +1283,28 @@ fn a_named_answer_that_is_not_the_one_asked_for_is_malformed() {
 }
 
 #[test]
-fn the_board_hands_the_team_key_and_the_number_to_the_wire_in_that_order() {
-    let board = Linear::new(Posting::answering([Ok(a_named_ticket(&named_node()))]));
+fn the_board_reads_the_team_key_off_its_record_and_is_told_the_number() {
+    // The verb takes one argument, so the team and the number cannot be handed
+    // to it in the wrong order: the number is the whole of what it is told, and
+    // the key on the wire can only have come off the record.
+    let board = Linear::new(
+        Posting::answering([Ok(a_named_ticket(&named_node()))]),
+        a_scope(),
+    );
 
     let found = board
-        .named_ticket("WAR", 133)
+        .named_ticket(133)
         .expect("the stand-in answered")
         .expect("the stand-in answered with the ticket");
 
     assert_eq!(found.issue().identifier(), "WAR-133");
-    assert_eq!(
-        board.posts.variables().pop().expect("one request was made")["number"],
-        json!(133)
-    );
+
+    let asked = board.posts.variables().pop().expect("one request was made");
+
+    // Upper cased on the way out, because Linear's keys are and a record's
+    // `team` is something a person typed.
+    assert_eq!(asked["team"], json!(TEAM.to_uppercase()));
+    assert_eq!(asked["number"], json!(133));
 }
 
 fn issue_label_found() -> Value {
@@ -2057,7 +2110,7 @@ fn a_relation_is_one_blocking_edge_written_in_one_request() {
 fn the_board_hands_the_blocker_to_the_wire_first() {
     // The two ids are both `&str`, so a swap between the trait and the
     // operation under it compiles and inverts every dependency a cut writes.
-    let board = Linear::new(Posting::answering([Ok(relation_created())]));
+    let board = Linear::new(Posting::answering([Ok(relation_created())]), a_scope());
 
     board
         .create_relation("issue-first", "issue-second")

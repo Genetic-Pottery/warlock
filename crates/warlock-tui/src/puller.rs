@@ -1062,20 +1062,20 @@ impl<B: Board> Board for Quiet<B> {
         self.asked(|board| board.fetch_brief(slug))
     }
 
-    fn planned_briefs(&self, team: &str, label: &str) -> Result<Listing, BoardError> {
-        self.asked(|board| board.planned_briefs(team, label))
+    fn planned_briefs(&self) -> Result<Listing, BoardError> {
+        self.asked(Board::planned_briefs)
     }
 
-    fn brief_named(&self, team: &str, name: &str) -> Result<Option<String>, BoardError> {
-        self.asked(|board| board.brief_named(team, name))
+    fn brief_named(&self, name: &str) -> Result<Option<String>, BoardError> {
+        self.asked(|board| board.brief_named(name))
     }
 
-    fn scope_queue(&self, team: &str, label: &str, assignee: &str) -> Result<Queue, BoardError> {
-        self.asked(|board| board.scope_queue(team, label, assignee))
+    fn scope_queue(&self, assignee: &str) -> Result<Queue, BoardError> {
+        self.asked(|board| board.scope_queue(assignee))
     }
 
-    fn named_ticket(&self, team: &str, number: u64) -> Result<Option<NamedTicket>, BoardError> {
-        self.asked(|board| board.named_ticket(team, number))
+    fn named_ticket(&self, number: u64) -> Result<Option<NamedTicket>, BoardError> {
+        self.asked(|board| board.named_ticket(number))
     }
 
     fn create_brief(&self, project: &NewBrief<'_>) -> Result<FiledBrief, BoardError> {
@@ -1147,7 +1147,7 @@ fn chose<O: Opens, R: Repository>(
     let scope = LinearScope::of(work.prepared.record())?;
     clean(repo)?;
 
-    let board = open.open(work.prepared.value());
+    let board = open.open(work.prepared.record(), work.prepared.value());
     let mut lines = Vec::new();
     let selected = selection(
         &board,
@@ -1248,11 +1248,14 @@ where
                 stopping,
             });
             // Opened over here, which is what keeps the panel drawing while Linear is
-            // answering: the key crosses as a field of the work and is read on this
-            // one line. Wrapped in the run's own say-when, so a run stopped by the
-            // panel quitting tells the board nothing on its way out — see [`Quiet`].
+            // answering: the key and the scope record both cross as fields of the
+            // work and are read on this one line. Wrapped in the run's own say-when,
+            // so a run stopped by the panel quitting tells the board nothing on its
+            // way out — see [`Quiet`].
             let board = Quiet {
-                inner: spending.open.open(work.prepared.value()),
+                inner: spending
+                    .open
+                    .open(work.prepared.record(), work.prepared.value()),
                 cancel,
             };
             let repo = Committing {

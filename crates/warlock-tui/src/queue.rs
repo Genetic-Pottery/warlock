@@ -343,11 +343,12 @@ pub(crate) enum Named {
 pub enum Refusal {
     /// Not something a ticket could be called, so nothing was asked of the board.
     NotATicket { ticket: String },
-    /// The board has no ticket by that name: a team key nobody uses, or a number
-    /// that team has not reached.
+    /// The board has no ticket by that name: no team by the key the scope routes
+    /// to, or a number that team has not reached.
     Unknown { ticket: String },
-    /// On another team than the one the scope record routes to, which is the
-    /// record's `team` against the ticket's own team key.
+    /// On another team than the one the scope record routes to: the record's
+    /// `team` against the prefix that was typed, before the read, and then
+    /// against the team key the ticket itself came back with.
     NotOnTeam { team: String, found: String },
     /// On the right team without the record's `label`, so it is not this scope's
     /// work. Carries every label it does have: the usual cause is a ticket nobody
@@ -418,6 +419,12 @@ impl fmt::Display for Refusal {
 /// be carrying this team's label either, and naming the label would send somebody
 /// to fix the wrong thing.
 ///
+/// The team is checked twice and both are needed. The typed prefix is checked
+/// before the read, because the board is told only a number and reads its team off
+/// the record it was opened with: an `ENG-9` that went out unchecked would come
+/// back as this team's ninth ticket. The team the answer states is checked after
+/// it, because that is the fact rather than the request.
+///
 /// There is no way here to work somebody else's ticket. The assignee is checked
 /// by id against the user the key belongs to, and nothing takes a flag past it.
 pub(crate) fn take_named(
@@ -427,13 +434,22 @@ pub(crate) fn take_named(
     ticket: &str,
     runs: &[PullRun],
 ) -> Result<Named, BoardError> {
-    let Some((team, number)) = split(ticket) else {
+    let Some((typed, number)) = split(ticket) else {
         return Ok(Named::Refused(Refusal::NotATicket {
             ticket: ticket.to_owned(),
         }));
     };
 
-    let Some(found) = board.named_ticket(team, number)? else {
+    // The prefix that was typed, before anything is asked of a board that would
+    // answer about its own team whatever prefix came with the number.
+    if !same_name(typed, scope.team_key()) {
+        return Ok(Named::Refused(Refusal::NotOnTeam {
+            team: scope.team_key().to_owned(),
+            found: typed.to_owned(),
+        }));
+    }
+
+    let Some(found) = board.named_ticket(number)? else {
         return Ok(Named::Refused(Refusal::Unknown {
             ticket: ticket.to_owned(),
         }));
@@ -481,9 +497,10 @@ pub(crate) fn take_named(
     Ok(Named::Taken(found.into_issue()))
 }
 
-/// `WAR-133` as the team key and the number, which is the shape Linear can be
-/// asked for one ticket in: its `IssueFilter` has no `identifier`, because an
-/// identifier is a display name made of those two.
+/// `WAR-133` as the team key and the number, the two facts an identifier is a
+/// display name for: Linear's `IssueFilter` has no `identifier`, so the number is
+/// what one ticket can be asked for by, and the key is what the caller checks the
+/// scope against.
 ///
 /// `None` for anything that is not built that way, which is a refusal rather than
 /// a request: `banana` is not a ticket, and asking the board about it would only
