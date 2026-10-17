@@ -13,11 +13,11 @@ use warlock_engine::{
 
 use super::{Parts, Seams, Session};
 use crate::app::{App, Chrome, Focus, Row};
+use crate::board::Opens;
 use crate::chatting::Chat;
 use crate::claude::Converses;
 use crate::confirm::QuitConfirm;
 use crate::cutting::Cutter;
-use crate::linear::Opens;
 use crate::prompt::{RecordPrompt, RecordTracker, ScopePrompt, TrackerPrompt};
 use crate::puller::{Claudes, Puller, Raises};
 use crate::pushing::Pushes;

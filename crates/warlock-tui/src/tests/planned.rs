@@ -18,7 +18,7 @@ const ACCEPT: &str = "create";
 
 const SKIP: &str = "quit";
 use crate::asking::Asks;
-use crate::board::{FetchedProject, Listing};
+use crate::board::{FetchedProject, Listing, Opens};
 use crate::brief::ScopeBlockError;
 use crate::claude::{
     Activities, Cancel, Converses, DRAFTING_CONTRACT, DRAFTING_ROUNDS, NOTHING_SETTLES_IT, Wired,
@@ -26,7 +26,6 @@ use crate::claude::{
 use crate::cut::noted;
 use crate::error::Error;
 use crate::error::status_for;
-use crate::linear::Opens;
 use crate::standing::Standing;
 use crate::stubs::{Answering, Boarding, Call, Op, QueueAsked, Saying, Scripted, Typing, VIEWER};
 

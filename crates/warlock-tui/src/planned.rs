@@ -41,13 +41,14 @@ use warlock_engine::drafting::{self, Draft};
 use warlock_engine::{Destination, Manifest, agent, resolve_filing};
 
 use crate::asking::{self, Asks};
-use crate::board::{Issue as LinearIssue, Key, Listing, QueuedIssue};
+use crate::board::{
+    Board, Issue as LinearIssue, Key, Listing, Opener as LinearOpener, Opens, QueuedIssue,
+};
 use crate::brief::{Slice, scope_block_in};
 use crate::claude::{
     Activities, ChatAgent, Converses, Drafted, Drafting, NOTHING_SETTLES_IT, Replied,
     propose_answer,
 };
-use crate::linear::{Board, Opener as LinearOpener, Opens};
 // The module rather than its `cut` and `Slice`, which would both be a second
 // name for something this file already has: the slices here are the document's,
 // and `cut::Slice` is one slice's drafts on their way to a board.

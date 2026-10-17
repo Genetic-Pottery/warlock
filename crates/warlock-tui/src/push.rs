@@ -21,10 +21,9 @@ use std::path::{Path, PathBuf};
 use warlock_engine::{Destination, Manifest, manifest_path, resolve_filing};
 
 use crate::account::size;
-use crate::board::{Key, NewProject};
+use crate::board::{Board, Key, NewProject, Opener as LinearOpener, Opens};
 use crate::brief::{Brief, brief_at};
 use crate::error::{Error, files_to_linear, say};
-use crate::linear::{Board, Opener as LinearOpener, Opens};
 use crate::standing::{FOR_PUSH, Standing};
 
 pub fn push(scope: &str, path: &Path, dry_run: bool) -> Result<(), Error> {

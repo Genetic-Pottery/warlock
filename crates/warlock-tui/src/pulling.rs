@@ -45,14 +45,13 @@ use warlock_engine::{
     LinearScope, Manifest, PullRun, PullSubtask, RunStatus, SubtaskStatus, now_rfc3339, pulls,
 };
 
-use crate::board::Error as LinearError;
+use crate::board::{Board, Error as LinearError};
 use crate::claude::{Activity, Sibling, Split, Worked, working_opening};
 use crate::crossings::{Crossing, crossings_after};
 use crate::git::{
     Dirty, Error as GitError, Finished, Forge, Head, PullRequest, Repository, Touched, branch_name,
     commit_message, pull_request_body, pull_request_title,
 };
-use crate::linear::Board;
 use crate::queue::{IN_PROGRESS, same_name};
 
 /// Everything one pull is allowed to touch, built by whichever door is pulling.

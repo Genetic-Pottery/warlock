@@ -24,7 +24,58 @@ impl fmt::Debug for Key {
     }
 }
 
-/// What `Board::issue_project` answers: the project, and each of its issues'
+/// The operations warlock asks of a board, in the words of the board rather
+/// than of GraphQL.
+///
+/// The flows are written against this and not against `Posts`, so a flow's
+/// test fake answers operations instead of recognising query text: Linear's
+/// spelling is `Linear`'s business, checked in `linear.rs`'s own tests.
+pub(crate) trait Board {
+    fn viewer(&self) -> Result<String, Error>;
+    fn team_id(&self, key: &str) -> Result<Option<String>, Error>;
+    fn backlog_status(&self) -> Result<Option<String>, Error>;
+    fn project_status(&self, name: &str) -> Result<Option<String>, Error>;
+    fn move_project(&self, project: &str, status: &str) -> Result<String, Error>;
+    fn issue_project(&self, issue: &str) -> Result<Option<IssueProject>, Error>;
+    fn backlog_state(&self, team: &str) -> Result<Option<String>, Error>;
+    fn workflow_state(&self, team: &str, name: &str) -> Result<Option<String>, Error>;
+    fn move_issue(&self, issue: &str, state: &str) -> Result<String, Error>;
+    fn issue_label_id(&self, name: &str, team: &str) -> Result<String, Error>;
+    fn fetch_project(&self, slug: &str) -> Result<Option<FetchedProject>, Error>;
+    fn planned_projects(&self, team: &str, label: &str) -> Result<Listing, Error>;
+    fn project_named(&self, team: &str, name: &str) -> Result<Option<String>, Error>;
+    fn scope_queue(&self, team: &str, label: &str, assignee: &str) -> Result<Queue, Error>;
+    fn named_issue(&self, team: &str, number: u64) -> Result<Option<NamedIssue>, Error>;
+    fn create_project(&self, project: &NewProject<'_>) -> Result<Project, Error>;
+    fn create_issue(&self, issue: &NewIssue<'_>) -> Result<Issue, Error>;
+    fn create_relation(&self, blocker: &str, waiting: &str) -> Result<String, Error>;
+    fn comment_on_project(&self, project: &str, body: &str) -> Result<String, Error>;
+    fn comment_on_issue(&self, issue: &str, body: &str) -> Result<String, Error>;
+}
+
+/// Where a board comes from: a key in, a [`Board`] out, and the one seam both
+/// the headless verbs and the panel open theirs through.
+///
+/// The bounds are what the panel's workers need. A board is built from a key
+/// borrowed for as long as the target lives and is then owned by a thread that
+/// outlives the press, which is the associated type's side; and the opener
+/// itself crosses onto a thread, because the panel's cut resolves its board
+/// over there and so opens it there too.
+pub(crate) trait Opens: Clone + Send + 'static {
+    type Board: Board + Send + 'static;
+
+    fn open(&self, key: &str) -> Self::Board;
+}
+
+/// The one [`Opens`] that opens a socket, and the only value in warlock that
+/// does. Holds nothing: a board is built per request run, from a key read on
+/// one line and dropped with whatever used it.
+///
+/// The impl is in `linear.rs`, beside the [`Board`] it answers with.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct Opener;
+
+/// What [`Board::issue_project`] answers: the project, and each of its issues'
 /// workflow state by name and type.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct IssueProject {
@@ -76,7 +127,7 @@ impl IssueProject {
 pub(crate) const CUT_NOTE: &str = "Warlock cut slice ";
 pub(crate) const SKIP_NOTE: &str = "Warlock skipped slice ";
 
-/// A project as `Board::fetch_project` reads it back, which is not the
+/// A project as [`Board::fetch_project`] reads it back, which is not the
 /// [`Project`] a create answers with: what matters about a project that already
 /// exists is what is written on it, and what matters about one that has just
 /// been made is where to find it.
@@ -158,7 +209,7 @@ impl FetchedProject {
     }
 }
 
-/// What `Board::planned_projects` answers: slug and name, in Linear's order.
+/// What [`Board::planned_projects`] answers: slug and name, in Linear's order.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct Listing {
     pub(crate) projects: Vec<(String, String)>,
@@ -455,7 +506,7 @@ impl NamedIssue {
 /// Who holds a ticket: the id it is matched by and the name it is named by.
 ///
 /// Both, because one of each is needed and neither does the other's work. Ids are
-/// what `Board::viewer` answers and the only honest way to ask whether a ticket
+/// what [`Board::viewer`] answers and the only honest way to ask whether a ticket
 /// is yours — two people in a workspace can share a display name. The name is the
 /// half a person reads in a refusal.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -485,7 +536,7 @@ impl Assignee {
     }
 }
 
-/// What `Board::create_project` is asked for: the label is the name it goes by
+/// What [`Board::create_project`] is asked for: the label is the name it goes by
 /// in the workspace rather than an id, because the create path is what resolves
 /// it.
 #[derive(Debug, Clone, Copy)]
@@ -582,7 +633,7 @@ impl Project {
     }
 }
 
-/// What `Board::create_issue` is asked for, and the whole of it: every field
+/// What [`Board::create_issue`] is asked for, and the whole of it: every field
 /// here is an id the caller resolved, and priority, estimate, cycle and
 /// milestone stay unwritten. A draft says what the work is, and a field warlock
 /// would have to invent a value for is a decision taken away from the person who
@@ -595,8 +646,8 @@ impl Project {
 /// from. Handing work to a teammate stays a reassignment a human makes in
 /// Linear, which is why there is no way to name anybody else here.
 ///
-/// `state` is a *team workflow state* id from `Board::backlog_state` and
-/// `label` an *issue label* id from `Board::issue_label_id`; neither a project
+/// `state` is a *team workflow state* id from [`Board::backlog_state`] and
+/// `label` an *issue label* id from [`Board::issue_label_id`]; neither a project
 /// status nor a project label is usable here.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct NewIssue<'a> {

@@ -20,8 +20,9 @@ use ureq::http::HeaderValue;
 use ureq::http::header::AUTHORIZATION;
 
 use crate::board::{
-    Assignee, Blocker, CUT_NOTE, Error, FetchedProject, Issue, IssueProject, Listing, NamedIssue,
-    NewIssue, NewProject, Priority, Project, Queue, QueuedIssue, SKIP_NOTE, StateType,
+    Assignee, Blocker, Board, CUT_NOTE, Error, FetchedProject, Issue, IssueProject, Listing,
+    NamedIssue, NewIssue, NewProject, Opener, Opens, Priority, Project, Queue, QueuedIssue,
+    SKIP_NOTE, StateType,
 };
 use crate::queue::same_name;
 
@@ -126,35 +127,6 @@ impl Posts for Client {
     }
 }
 
-/// The operations warlock asks of a board, in the words of the board rather
-/// than of GraphQL.
-///
-/// The flows are written against this and not against [`Posts`], so a flow's
-/// test fake answers operations instead of recognising query text: Linear's
-/// spelling is [`Linear`]'s business, checked in this module's own tests.
-pub(crate) trait Board {
-    fn viewer(&self) -> Result<String, Error>;
-    fn team_id(&self, key: &str) -> Result<Option<String>, Error>;
-    fn backlog_status(&self) -> Result<Option<String>, Error>;
-    fn project_status(&self, name: &str) -> Result<Option<String>, Error>;
-    fn move_project(&self, project: &str, status: &str) -> Result<String, Error>;
-    fn issue_project(&self, issue: &str) -> Result<Option<IssueProject>, Error>;
-    fn backlog_state(&self, team: &str) -> Result<Option<String>, Error>;
-    fn workflow_state(&self, team: &str, name: &str) -> Result<Option<String>, Error>;
-    fn move_issue(&self, issue: &str, state: &str) -> Result<String, Error>;
-    fn issue_label_id(&self, name: &str, team: &str) -> Result<String, Error>;
-    fn fetch_project(&self, slug: &str) -> Result<Option<FetchedProject>, Error>;
-    fn planned_projects(&self, team: &str, label: &str) -> Result<Listing, Error>;
-    fn project_named(&self, team: &str, name: &str) -> Result<Option<String>, Error>;
-    fn scope_queue(&self, team: &str, label: &str, assignee: &str) -> Result<Queue, Error>;
-    fn named_issue(&self, team: &str, number: u64) -> Result<Option<NamedIssue>, Error>;
-    fn create_project(&self, project: &NewProject<'_>) -> Result<Project, Error>;
-    fn create_issue(&self, issue: &NewIssue<'_>) -> Result<Issue, Error>;
-    fn create_relation(&self, blocker: &str, waiting: &str) -> Result<String, Error>;
-    fn comment_on_project(&self, project: &str, body: &str) -> Result<String, Error>;
-    fn comment_on_issue(&self, issue: &str, body: &str) -> Result<String, Error>;
-}
-
 /// The one [`Board`] that speaks GraphQL, over whatever [`Posts`] it holds.
 #[derive(Debug)]
 pub(crate) struct Linear<P = Client> {
@@ -249,26 +221,6 @@ impl<P: Posts> Board for Linear<P> {
         comment_on_issue(&self.posts, issue, body)
     }
 }
-
-/// Where a board comes from: a key in, a [`Board`] out, and the one seam both
-/// the headless verbs and the panel open theirs through.
-///
-/// The bounds are what the panel's workers need. A board is built from a key
-/// borrowed for as long as the target lives and is then owned by a thread that
-/// outlives the press, which is the associated type's side; and the opener
-/// itself crosses onto a thread, because the panel's cut resolves its board
-/// over there and so opens it there too.
-pub(crate) trait Opens: Clone + Send + 'static {
-    type Board: Board + Send + 'static;
-
-    fn open(&self, key: &str) -> Self::Board;
-}
-
-/// The one [`Opens`] that opens a socket, and the only value in warlock that
-/// does. Holds nothing: a board is built per request run, from a key read on
-/// one line and dropped with whatever used it.
-#[derive(Debug, Clone, Copy, Default)]
-pub(crate) struct Opener;
 
 impl Opens for Opener {
     type Board = Linear<Client>;

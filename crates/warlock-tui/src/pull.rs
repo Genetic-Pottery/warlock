@@ -38,11 +38,10 @@ use warlock_engine::{
 };
 
 use crate::account::{THINKING, WRITING, tool_line};
-use crate::board::{Key, QueuedIssue};
+use crate::board::{Board, Key, Opener as LinearOpener, Opens, QueuedIssue};
 use crate::claude::{Activities, Activity};
 use crate::error::{Error, NO_QUEUE, files_to_linear, one_line, say};
 use crate::git::{Forge, Gh, Git, Repository};
-use crate::linear::{Board, Opener as LinearOpener, Opens};
 use crate::puller::{Splitter, Stopping, Worker};
 use crate::pulling::{Heading, PullEvent, Pulled, Pulling, Splits, Ticket, Works};
 use crate::queue::{Chosen, Named, Refusal, Skipped, choose, take_named};

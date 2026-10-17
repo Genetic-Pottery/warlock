@@ -35,10 +35,10 @@ use std::time::Instant;
 use warlock_engine::{Manifest, from_manifest_path, load_key_binding, to_manifest_path};
 
 use crate::app::App;
+use crate::board::{Opener as LinearOpener, Opens};
 use crate::confirm::{PushAnswered, PushConfirm};
 use crate::error::{Error, files_to_linear, one_line};
 use crate::inflight::{Lost, Once, Workers, settled};
-use crate::linear::{Opener as LinearOpener, Opens};
 use crate::prompt::KeyPrompt;
 use crate::push::{Prepared, file, prepare};
 use crate::standing::Standing;

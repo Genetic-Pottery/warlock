@@ -15,11 +15,10 @@ use warlock_engine::{
 use super::{ALREADY_CUTTING, Cutter};
 use crate::account::Line;
 use crate::app::App;
-use crate::board::FetchedProject;
+use crate::board::{FetchedProject, Opens};
 use crate::claude::Converses;
 use crate::error::{Error, one_line};
 use crate::inflight::Workers;
-use crate::linear::Opens;
 use crate::prompt::KeyPrompt;
 use crate::stubs::{Answering, Boarding, Gate, Scripted};
 use crate::submission::ToDraft;

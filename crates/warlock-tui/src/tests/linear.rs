@@ -4,7 +4,7 @@ use std::io;
 use serde_json::{Value, json};
 
 use super::{
-    BACKLOG, BLOCKERS_PAGE, Board, Client, ENDPOINT, LABELS_PAGE, Linear, Posts, QUEUE_PAGE,
+    BACKLOG, BLOCKERS_PAGE, Client, ENDPOINT, LABELS_PAGE, Linear, Posts, QUEUE_PAGE,
     REQUEST_TIMEOUT, answer, authorization, backlog_state, backlog_status, comment_on_issue,
     comment_on_project, create_issue, create_project, create_relation, fetch_project,
     issue_label_id, issue_project, label_id, move_issue, move_project, named_issue,
@@ -13,8 +13,8 @@ use super::{
 };
 
 use crate::board::{
-    Assignee, Blocker, CUT_NOTE, Error, NamedIssue, NewIssue, NewProject, Priority, QueuedIssue,
-    SKIP_NOTE, StateType,
+    Assignee, Blocker, Board, CUT_NOTE, Error, NamedIssue, NewIssue, NewProject, Priority,
+    QueuedIssue, SKIP_NOTE, StateType,
 };
 use crate::queue::IN_PROGRESS;
 use crate::stubs::Posting;

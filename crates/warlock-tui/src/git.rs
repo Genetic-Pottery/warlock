@@ -465,7 +465,7 @@ impl Head {
 /// rather than in `git`'s.
 ///
 /// [`Runs`] is the seam that starts a process; this is the seam the pull is
-/// written against, the way `Board` sits above `Posts` in `linear.rs`. A caller
+/// written against, the way `Board` sits above `linear.rs`'s `Posts`. A caller
 /// is driven in a test by a stand-in that records the argument vectors and
 /// scripts the answers, with no repository, no network and no `git` on the
 /// machine.
