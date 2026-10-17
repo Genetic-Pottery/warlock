@@ -40,7 +40,6 @@ pub(crate) trait Board {
 
     fn viewer(&self) -> Result<String, Error>;
     fn team_id(&self, key: &str) -> Result<Option<String>, Error>;
-    fn backlog_status(&self) -> Result<Option<String>, Error>;
     /// The brief moved to the board's status of that name, and `true` when a
     /// status of that name was there to move it to.
     ///
@@ -77,7 +76,20 @@ pub(crate) trait Board {
     fn brief_named(&self, name: &str) -> Result<Option<String>, Error>;
     fn scope_queue(&self, assignee: &str) -> Result<Queue, Error>;
     fn named_ticket(&self, number: u64) -> Result<Option<NamedTicket>, Error>;
-    fn create_brief(&self, project: &NewBrief<'_>) -> Result<FiledBrief, Error>;
+    /// The brief filed, or `None` when the board has nowhere to file it: the
+    /// record this board was opened for names a team the workspace does not
+    /// have.
+    ///
+    /// `None` rather than an error, as every other absence on this seam is: a
+    /// destination that is not there is worth words about the file that records
+    /// it, and nothing below here holds them. Nothing is created on the way to
+    /// that answer — the create was never sent.
+    ///
+    /// Whatever else the board needs is resolved inside here and not by the
+    /// caller: the label by the name [`NewBrief`] carries, and the status a
+    /// freshly filed brief sits in. A workspace with no status of that name
+    /// files the brief with no status at all.
+    fn create_brief(&self, project: &NewBrief<'_>) -> Result<Option<FiledBrief>, Error>;
     fn create_ticket(&self, issue: &NewTicket<'_>) -> Result<FiledTicket, Error>;
     fn create_relation(&self, blocker: &str, waiting: &str) -> Result<String, Error>;
     fn comment_on_brief(&self, project: &str, body: &str) -> Result<String, Error>;
@@ -583,39 +595,31 @@ impl Assignee {
     }
 }
 
-/// What [`Board::create_brief`] is asked for: the label is the name it goes by
-/// in the workspace rather than an id, because the create path is what resolves
+/// What [`Board::create_brief`] is asked for, and the whole of it: what the
+/// brief is called and what it says, and the label by the name it goes by in
+/// the workspace rather than as an id, because the create path is what resolves
 /// it.
+///
+/// No team and no status. The team is the one on the record the board was
+/// opened for, which is where every other verb's destination comes from too;
+/// the status a freshly filed brief sits in is the board's own word for
+/// "nobody has started this", and a caller that resolved one would be naming a
+/// Linear project status to a board that may have no such thing.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct NewBrief<'a> {
     pub(crate) name: &'a str,
     pub(crate) content: &'a str,
-    pub(crate) team: &'a str,
-    pub(crate) status: Option<&'a str>,
     pub(crate) label: &'a str,
 }
 
 impl<'a> NewBrief<'a> {
     #[must_use]
-    pub(crate) const fn new(
-        name: &'a str,
-        content: &'a str,
-        team: &'a str,
-        label: &'a str,
-    ) -> Self {
+    pub(crate) const fn new(name: &'a str, content: &'a str, label: &'a str) -> Self {
         Self {
             name,
             content,
-            team,
-            status: None,
             label,
         }
-    }
-
-    #[must_use]
-    pub(crate) const fn with_status(mut self, status: Option<&'a str>) -> Self {
-        self.status = status;
-        self
     }
 
     #[must_use]
@@ -628,18 +632,6 @@ impl<'a> NewBrief<'a> {
     #[cfg(test)]
     pub(crate) const fn content(&self) -> &'a str {
         self.content
-    }
-
-    #[must_use]
-    #[cfg(test)]
-    pub(crate) const fn team(&self) -> &'a str {
-        self.team
-    }
-
-    #[must_use]
-    #[cfg(test)]
-    pub(crate) const fn status(&self) -> Option<&'a str> {
-        self.status
     }
 
     #[must_use]

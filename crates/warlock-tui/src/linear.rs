@@ -179,10 +179,6 @@ impl<P: Posts> Board for Linear<P> {
         team_id(&self.posts, key)
     }
 
-    fn backlog_status(&self) -> Result<Option<String>, Error> {
-        backlog_status(&self.posts)
-    }
-
     /// The status resolved here rather than by the caller: the mutation writes a
     /// project status id, so the name is matched among the workspace's own
     /// statuses. A name no status carries is `false` with the mutation never
@@ -246,8 +242,12 @@ impl<P: Posts> Board for Linear<P> {
         named_issue(&self.posts, self.scope()?.team_key(), number)
     }
 
-    fn create_brief(&self, project: &NewBrief<'_>) -> Result<FiledBrief, Error> {
-        create_project(&self.posts, project)
+    /// The team read off the record, as [`planned_briefs`](Self::planned_briefs)
+    /// reads it: the mutation writes a team id, so the key the scope records is
+    /// resolved here and a key the workspace has no team for is the `None` this
+    /// answers.
+    fn create_brief(&self, project: &NewBrief<'_>) -> Result<Option<FiledBrief>, Error> {
+        create_project(&self.posts, self.scope()?.team_key(), project)
     }
 
     fn create_ticket(&self, issue: &NewTicket<'_>) -> Result<FiledTicket, Error> {
@@ -1109,27 +1109,41 @@ fn issue_label_id(linear: &impl Posts, name: &str, team: &str) -> Result<String,
     node_id(payload(&created, "issueLabelCreate", "issueLabel")?)
 }
 
-/// Create the project, with its label resolved first.
+/// Create the project in the team that key names, with its label resolved
+/// first, or `None` for a workspace with no team by that key.
 ///
-/// The order is the point and not an implementation detail: the label is the
+/// The label's place is the point and not an implementation detail: it is the
 /// only mark on a project saying warlock filed it, nothing here can take a
 /// project back, and a create that landed before a label that then failed is a
 /// project no cut will ever read. Resolving first means a project that exists
 /// is a project that carries the label.
-fn create_project(linear: &impl Posts, project: &NewBrief<'_>) -> Result<FiledBrief, Error> {
+///
+/// The team and the [`BACKLOG`] status are resolved after it and here rather
+/// than by the caller: `projectCreate` writes a team id and a project status
+/// id, and both are Linear's own kind of name. Neither costs a request the
+/// caller used to spend — it asked these two itself — and nothing is created
+/// once either has failed.
+fn create_project(
+    linear: &impl Posts,
+    key: &str,
+    project: &NewBrief<'_>,
+) -> Result<Option<FiledBrief>, Error> {
     let label = label_id(linear, project.label)?;
+    let Some(team) = team_id(linear, key)? else {
+        return Ok(None);
+    };
 
     let mut input = json!({
         "name": project.name,
         "content": project.content,
-        "teamIds": [project.team],
+        "teamIds": [team],
         "labelIds": [label],
     });
 
     // Absent rather than `null`: a status the workspace does not have is a
     // project filed with no status, and the field is left out entirely to say
     // that.
-    if let Some(status) = project.status
+    if let Some(status) = backlog_status(linear)?
         && let Some(fields) = input.as_object_mut()
     {
         fields.insert("statusId".to_owned(), json!(status));
@@ -1143,10 +1157,10 @@ fn create_project(linear: &impl Posts, project: &NewBrief<'_>) -> Result<FiledBr
     )?;
     let created = payload(&data, "projectCreate", "project")?;
 
-    Ok(FiledBrief {
+    Ok(Some(FiledBrief {
         id: node_id(created)?,
         url: text(created, "url")?,
-    })
+    }))
 }
 
 /// Create one issue, in the team, project, label and workflow state the caller

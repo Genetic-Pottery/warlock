@@ -384,8 +384,13 @@ impl Posts for Posting {
 pub(crate) struct Boarding {
     log: Arc<Mutex<Log>>,
     viewer: String,
+    /// The team this workspace holds, which is both what [`Board::team_id`]
+    /// answers with and whether a brief create has anywhere to file: a board
+    /// built [`without_team`] has none, so every create answers that the
+    /// destination is not there and nothing is recorded.
+    ///
+    /// [`without_team`]: Boarding::without_team
     team: Option<String>,
-    status: Option<String>,
     /// Whether this workspace holds a brief status of whatever name a move asks
     /// for, which is what [`Board::move_brief`] answers: a board built
     /// [`without_brief_statuses`] holds none, so every brief move answers that
@@ -434,7 +439,6 @@ struct Log {
 pub(crate) enum Call {
     Viewer,
     Team(String),
-    BacklogStatus,
     MoveBrief { project: String, status: String },
     TicketBrief(String),
     BacklogState(String),
@@ -457,7 +461,6 @@ impl Call {
         match self {
             Self::Viewer => Op::Viewer,
             Self::Team(_) => Op::Team,
-            Self::BacklogStatus => Op::BacklogStatus,
             Self::MoveBrief { .. } => Op::MoveBrief,
             Self::TicketBrief(_) => Op::TicketBrief,
             Self::BacklogState(_) => Op::BacklogState,
@@ -481,7 +484,6 @@ impl Call {
 pub(crate) enum Op {
     Viewer,
     Team,
-    BacklogStatus,
     MoveBrief,
     TicketBrief,
     BacklogState,
@@ -503,8 +505,6 @@ pub(crate) enum Op {
 pub(crate) struct BriefAsked {
     pub(crate) name: String,
     pub(crate) content: String,
-    pub(crate) team: String,
-    pub(crate) status: Option<String>,
     pub(crate) label: String,
 }
 
@@ -534,15 +534,14 @@ struct Refusal {
 pub(crate) const VIEWER: &str = "user-viewer";
 
 impl Boarding {
-    /// A workspace that has the team, both `Backlog`s and the label already,
-    /// creates the project at `url`, numbers issues from 1, and holds no project
-    /// to read back.
+    /// A workspace that has the team, its `Backlog` state, every brief status
+    /// and the label already, creates the project at `url`, numbers issues from
+    /// 1, and holds no project to read back.
     pub(crate) fn filing(url: impl Into<String>) -> Self {
         Self {
             log: Arc::default(),
             viewer: VIEWER.to_owned(),
             team: Some("team-1".to_owned()),
-            status: Some("status-backlog".to_owned()),
             brief_statuses: true,
             ticket_brief: None,
             state: Some("state-backlog".to_owned()),
@@ -663,6 +662,8 @@ impl Boarding {
         })
     }
 
+    /// A workspace with no team by whatever key is asked for, which is both a
+    /// `None` from [`Board::team_id`] and a brief create with nowhere to file.
     pub(crate) fn without_team(mut self) -> Self {
         self.team = None;
         self
@@ -856,11 +857,6 @@ impl Board for Boarding {
         Ok(self.team.clone())
     }
 
-    fn backlog_status(&self) -> Result<Option<String>, BoardError> {
-        self.ask(Call::BacklogStatus)?;
-        Ok(self.status.clone())
-    }
-
     fn ticket_brief(&self, issue: &str) -> Result<Option<TicketBrief>, BoardError> {
         self.ask(Call::TicketBrief(issue.to_owned()))?;
         Ok(self.ticket_brief.clone())
@@ -948,15 +944,22 @@ impl Board for Boarding {
         Ok(self.named.clone())
     }
 
-    fn create_brief(&self, project: &NewBrief<'_>) -> Result<FiledBrief, BoardError> {
+    /// The brief filed at whatever address the test wrote down, and nothing
+    /// recorded for a workspace holding no team: the create answers that the
+    /// destination is not there, as a board that never sends the mutation
+    /// would. The team and the status are in neither the call nor the answer
+    /// because the verb is told neither — the board reads its team off the
+    /// record it was opened with and the status is its own business.
+    fn create_brief(&self, project: &NewBrief<'_>) -> Result<Option<FiledBrief>, BoardError> {
+        if self.team.is_none() {
+            return Ok(None);
+        }
         self.ask(Call::CreateBrief(BriefAsked {
             name: project.name().to_owned(),
             content: project.content().to_owned(),
-            team: project.team().to_owned(),
-            status: project.status().map(ToOwned::to_owned),
             label: project.label().to_owned(),
         }))?;
-        Ok(self.created.clone())
+        Ok(Some(self.created.clone()))
     }
 
     fn create_ticket(&self, issue: &NewTicket<'_>) -> Result<FiledTicket, BoardError> {

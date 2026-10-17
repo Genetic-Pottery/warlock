@@ -214,7 +214,7 @@ fn refused(repo: &Path, home: &Path, scope: &str) -> Error {
 }
 
 #[test]
-fn a_push_asks_for_the_team_then_the_name_then_the_status_before_it_creates_anything() {
+fn a_push_asks_for_the_name_before_it_creates_anything() {
     let repo = a_repository();
     let home = a_home(repo.path());
     let linear = a_whole_push();
@@ -224,12 +224,11 @@ fn a_push_asks_for_the_team_then_the_name_then_the_status_before_it_creates_anyt
     outcome.expect("a repository, a board and a brief are a push");
     // The value out of the key store reached the one line that reads it.
     assert_eq!(linear.opened_with(), [NOT_A_KEY]);
-    // The label is `create_brief`'s own first request, so it is not asked for
-    // here: see `linear.rs`, whose tests hold the label ahead of the create.
-    assert_eq!(
-        linear.ops(),
-        [Op::Team, Op::BriefNamed, Op::BacklogStatus, Op::CreateBrief],
-    );
+    // Two requests and no resolve among them: the team, the label and the
+    // status a filed brief sits in are `create_brief`'s own business — see
+    // `linear.rs`, whose tests hold the label ahead of the create and the team
+    // read off the record.
+    assert_eq!(linear.ops(), [Op::BriefNamed, Op::CreateBrief]);
     assert!(printed.contains(URL), "{printed}");
 }
 
@@ -267,7 +266,7 @@ fn a_project_of_the_same_name_is_refused_with_its_url_and_nothing_is_created() {
         "{error:?}"
     );
     assert!(said(&error).contains(EARLIER), "{}", said(&error));
-    assert_eq!(linear.ops(), [Op::Team, Op::BriefNamed]);
+    assert_eq!(linear.ops(), [Op::BriefNamed]);
     assert!(linear.briefs_created().is_empty());
     assert!(printed.is_empty(), "{printed}");
 }
@@ -309,7 +308,7 @@ fn listing(root: &Path) -> Vec<PathBuf> {
 }
 
 #[test]
-fn the_create_carries_the_brief_the_team_and_the_status_that_were_resolved_for_it() {
+fn the_create_carries_the_brief_and_the_label_by_name_and_nothing_resolved() {
     let repo = a_repository();
     let home = a_home(repo.path());
     let linear = a_whole_push();
@@ -324,8 +323,8 @@ fn the_create_carries_the_brief_the_team_and_the_status_that_were_resolved_for_i
             name: TITLE.to_owned(),
             // The body is the file's own bytes.
             content: brief_here(repo.path()).content().to_owned(),
-            team: "team-1".to_owned(),
-            status: Some("status-backlog".to_owned()),
+            // The label by the name the record carries, and no team and no
+            // status at all: the board is told neither.
             label: LABEL.to_owned(),
         }]
     );
@@ -641,6 +640,10 @@ fn a_file_that_is_not_a_brief_is_refused() {
 
 #[test]
 fn a_team_key_linear_does_not_know_names_the_value_and_the_file_it_is_written_in() {
+    // Nothing here resolves the key: the create is what reaches the team, and
+    // a board with no team by the record's key answers that it filed nothing.
+    // The words about the file the key is written in are this module's, which
+    // is why the refusal is still this one.
     let repo = a_repository();
     let home = a_home(repo.path());
     let linear = a_whole_push().without_team();
@@ -659,9 +662,10 @@ fn a_team_key_linear_does_not_know_names_the_value_and_the_file_it_is_written_in
         message.contains(&manifest_path(repo.path()).display().to_string()),
         "the file the key is written in is not named: {message}"
     );
-    // Nothing was created and nothing was printed, because the refusal is the
-    // answer to the first request.
-    assert_eq!(linear.ops(), [Op::Team]);
+    // Nothing was created and nothing was printed: a board that has nowhere to
+    // file sends no create, so the name asked about is the whole conversation.
+    assert_eq!(linear.ops(), [Op::BriefNamed]);
+    assert!(linear.briefs_created().is_empty());
     assert!(printed.is_empty(), "{printed}");
 }
 

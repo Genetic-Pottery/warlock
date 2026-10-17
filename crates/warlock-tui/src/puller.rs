@@ -1026,10 +1026,6 @@ impl<B: Board> Board for Quiet<B> {
         self.asked(|board| board.team_id(key))
     }
 
-    fn backlog_status(&self) -> Result<Option<String>, BoardError> {
-        self.asked(Board::backlog_status)
-    }
-
     fn move_brief(&self, project: &str, status: &str) -> Result<bool, BoardError> {
         self.asked(|board| board.move_brief(project, status))
     }
@@ -1070,7 +1066,7 @@ impl<B: Board> Board for Quiet<B> {
         self.asked(|board| board.named_ticket(number))
     }
 
-    fn create_brief(&self, project: &NewBrief<'_>) -> Result<FiledBrief, BoardError> {
+    fn create_brief(&self, project: &NewBrief<'_>) -> Result<Option<FiledBrief>, BoardError> {
         self.asked(|board| board.create_brief(project))
     }
 
