@@ -18,7 +18,7 @@ use serde_json::{Value, json};
 use ureq::Agent;
 use ureq::http::HeaderValue;
 use ureq::http::header::AUTHORIZATION;
-use warlock_engine::{LinearScope, ScopeRecord};
+use warlock_engine::{BoardScope, ScopeRecord};
 
 use crate::board::{
     Assignee, Blocker, Board, CUT_NOTE, Category, Error, FetchedBrief, Filable, FiledBrief,
@@ -152,19 +152,24 @@ impl<P: Posts> Linear<P> {
         Self { posts, record }
     }
 
-    /// The record as the Linear scope it files to, which is where a verb's team
-    /// key and label come from.
+    /// The record as a scope of this board, which is where a verb's team key
+    /// and label come from.
     ///
-    /// [`LinearScope::of`] is the only road to a team key, and it refuses a
-    /// record that files to Jira. Opening cannot fail, so that refusal arrives
-    /// here instead — out of reach through warlock's verbs, which each refuse
-    /// such a scope before they open anything, and a `Result` rather than a
-    /// panic because this is a request that was not made.
-    fn scope(&self) -> Result<LinearScope<'_>, Error> {
-        LinearScope::of(&self.record).map_err(|_| Error::Elsewhere {
-            board: LINEAR,
-            scope: self.record.name().to_owned(),
-        })
+    /// The tracker is read before the view is taken, and both halves are load
+    /// bearing: a record that files to Jira has no team to send Linear, and the
+    /// prefix this hands back is a team key only because that read came first.
+    /// Opening cannot fail, so the refusal arrives here instead — out of reach
+    /// through warlock's verbs, which each refuse such a scope before they open
+    /// anything, and a `Result` rather than a panic because this is a request
+    /// that was not made.
+    fn scope(&self) -> Result<BoardScope<'_>, Error> {
+        self.record
+            .files_to_linear()
+            .map_err(|_| Error::Elsewhere {
+                board: LINEAR,
+                scope: self.record.name().to_owned(),
+            })?;
+        Ok(BoardScope::of(&self.record))
     }
 }
 
@@ -214,7 +219,7 @@ impl<P: Posts> Board for Linear<P> {
     /// carries, or a key the workspace has no team for, is `false` with the
     /// mutation never sent.
     fn move_ticket(&self, issue: &str, status: &str) -> Result<bool, Error> {
-        let Some(team) = team_id(&self.posts, self.scope()?.team_key())? else {
+        let Some(team) = team_id(&self.posts, self.scope()?.ticket_prefix())? else {
             return Ok(false);
         };
         let Some(state) = workflow_state(&self.posts, &team, status)? else {
@@ -230,20 +235,20 @@ impl<P: Posts> Board for Linear<P> {
 
     fn planned_briefs(&self) -> Result<Listing, Error> {
         let scope = self.scope()?;
-        planned_projects(&self.posts, scope.team_key(), scope.label())
+        planned_projects(&self.posts, scope.ticket_prefix(), scope.label())
     }
 
     fn brief_named(&self, name: &str) -> Result<Option<String>, Error> {
-        project_named(&self.posts, self.scope()?.team_key(), name)
+        project_named(&self.posts, self.scope()?.ticket_prefix(), name)
     }
 
     fn scope_queue(&self, assignee: &str) -> Result<Queue, Error> {
         let scope = self.scope()?;
-        scope_queue(&self.posts, scope.team_key(), scope.label(), assignee)
+        scope_queue(&self.posts, scope.ticket_prefix(), scope.label(), assignee)
     }
 
     fn named_ticket(&self, number: u64) -> Result<Option<NamedTicket>, Error> {
-        named_issue(&self.posts, self.scope()?.team_key(), number)
+        named_issue(&self.posts, self.scope()?.ticket_prefix(), number)
     }
 
     /// The team read off the record, as [`planned_briefs`](Self::planned_briefs)
@@ -251,7 +256,7 @@ impl<P: Posts> Board for Linear<P> {
     /// resolved here and a key the workspace has no team for is the `None` this
     /// answers.
     fn create_brief(&self, project: &NewBrief<'_>) -> Result<Option<FiledBrief>, Error> {
-        create_project(&self.posts, self.scope()?.team_key(), project)
+        create_project(&self.posts, self.scope()?.ticket_prefix(), project)
     }
 
     /// The two ids `issueCreate` writes that a draft says nothing about: the
@@ -264,7 +269,7 @@ impl<P: Posts> Board for Linear<P> {
     /// team with no `Backlog` is [`Filable::NoColumn`]. Neither sends a
     /// mutation.
     fn ticket_filing(&self) -> Result<Filable<Resolved>, Error> {
-        let Some(team) = team_id(&self.posts, self.scope()?.team_key())? else {
+        let Some(team) = team_id(&self.posts, self.scope()?.ticket_prefix())? else {
             return Ok(Filable::NoDestination);
         };
         let Some(state) = backlog_state(&self.posts, &team)? else {

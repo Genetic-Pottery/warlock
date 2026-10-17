@@ -42,7 +42,7 @@ use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
-use warlock_engine::{FiledTo, LinearScope, Manifest, route_facts, scope_opens_to};
+use warlock_engine::{BoardScope, FiledTo, Manifest, route_facts, scope_opens_to};
 
 use crate::app::OpenScopes;
 use crate::boundary::{closed_scope_message, unscoped_message};
@@ -155,10 +155,11 @@ struct Recorded {
 }
 
 // [`FiledTo`] with the strings owned and Linear's team key in it: the view the
-// engine hands over deliberately carries no team, because a team key has one
-// road, `LinearScope::of`, and holding a `FiledTo::Linear` is not proof of
-// having taken it. Taken once in [`checked`] and kept here, so the renderings
-// below read a board that already names everything it is addressed by.
+// engine hands over carries no team, because the one value both boards key
+// their tickets by is `BoardScope::ticket_prefix` and a team spelled beside it
+// would put that value in reach under two names. Filled once in [`checked`] and
+// kept here, so the renderings below read a board that already names everything
+// it is addressed by.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Filed {
     Linear {
@@ -318,30 +319,26 @@ fn checked(
         // and never refuses, so a scope that files somewhere warlock cannot file
         // to is a record said in that board's own fields here rather than a
         // failure, exactly as a path with no record is.
-        record: record.and_then(|record| {
-            Some(Recorded {
-                filed: match record.filed_to() {
-                    // The `?` cannot fire: `filed_to` and `LinearScope::of` read
-                    // the same field of the same record, so a record the first
-                    // calls Linear is one the second accepts. Written as an
-                    // absent record rather than as an `expect` because this is
-                    // reporting code — the shape is one the answer already has,
-                    // for a scope nobody recorded, and there is no team name
-                    // worth inventing to avoid it.
-                    FiledTo::Linear => Filed::Linear {
-                        team: LinearScope::of(record).ok()?.team_key().to_owned(),
-                    },
-                    FiledTo::Jira {
-                        base_url,
-                        project_key,
-                    } => Filed::Jira {
-                        base_url: base_url.to_owned(),
-                        project_key: project_key.to_owned(),
-                    },
+        record: record.map(|record| Recorded {
+            filed: match record.filed_to() {
+                // Read under this arm and nowhere else, because the prefix is
+                // the team key only for a record that files to Linear: the same
+                // accessor on a Jira record answers its project key, and
+                // reporting that as `team` would be the object saying a thing
+                // the manifest does not.
+                FiledTo::Linear => Filed::Linear {
+                    team: BoardScope::of(record).ticket_prefix().to_owned(),
                 },
-                review_state: record.review_state().to_owned(),
-                label: record.label().to_owned(),
-            })
+                FiledTo::Jira {
+                    base_url,
+                    project_key,
+                } => Filed::Jira {
+                    base_url: base_url.to_owned(),
+                    project_key: project_key.to_owned(),
+                },
+            },
+            review_state: record.review_state().to_owned(),
+            label: record.label().to_owned(),
         }),
         key: facts.key().map(str::to_owned),
         key_found: facts.stored(),

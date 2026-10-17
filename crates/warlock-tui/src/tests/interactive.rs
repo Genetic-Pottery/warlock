@@ -2441,7 +2441,7 @@ mod filing {
             .filing()
             .expect("the push dialog the binding led to");
         assert_eq!(filing.destination().scope(), SCOPE);
-        assert_eq!(filing.destination().team_key(), TEAM);
+        assert_eq!(filing.destination().ticket_prefix(), TEAM);
         assert_eq!(filing.destination().key(), KEY_NAME);
         assert_eq!(filing.answer(), Answer::No, "the dialog opened on Yes");
         assert!(

@@ -556,7 +556,7 @@ fn the_scope_typed_picks_the_board_and_one_that_is_not_a_candidate_names_the_can
 
     // A machine that could file to either board files to the one typed.
     let ready = preparing(repo.path(), home.path(), "web").expect("a named candidate");
-    assert_eq!(ready.destination().team_key(), "WEB");
+    assert_eq!(ready.destination().ticket_prefix(), "WEB");
     assert_eq!(ready.destination().scope(), "web");
 
     let error = refused(repo.path(), home.path(), "billing");

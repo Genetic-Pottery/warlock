@@ -489,7 +489,7 @@ fn every_skip_in_a_queue_with_nothing_ready_is_reported_in_the_queues_order() {
 // than against a filter nobody can see the effect of.
 mod named {
     use serde_json::{Value, json};
-    use warlock_engine::{LinearScope, ScopeRecord};
+    use warlock_engine::{BoardScope, ScopeRecord};
 
     use super::{PullRun, Reason, RunStatus, run};
     use crate::board::Error as BoardError;
@@ -507,10 +507,9 @@ mod named {
         ScopeRecord::new("warlock-team", "WAR", "In Review", "warlock")
     }
 
-    // That record read as a Linear scope, which is the only shape `take_named`
-    // can be handed.
-    fn linear(record: &ScopeRecord) -> LinearScope<'_> {
-        LinearScope::of(record).expect("every record files to Linear")
+    // The record as `take_named` is handed it, its prefix this team's key.
+    fn linear(record: &ScopeRecord) -> BoardScope<'_> {
+        BoardScope::of(record)
     }
 
     // A board holding that one ticket, and one AI can work in no scope.

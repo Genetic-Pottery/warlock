@@ -115,8 +115,9 @@ pub(crate) fn prepare(
     // Above `resolve_filing`, which loads the key *value*: a scope warlock
     // cannot file to is refused with no key read, no client built and no brief
     // opened, which is the whole of what the sentence it refuses with promises.
-    // The destination below reads the same record through the same view, so this
-    // is the ordering and not a second rule.
+    // It is also the only board refusal left on this road: the destination
+    // below carries whichever prefix the record names, Linear's or Jira's, and
+    // turns nothing away.
     files_to_linear(manifest, scope)?;
 
     let target = resolve_filing(manifest, root, home, Some(scope))
@@ -127,7 +128,7 @@ pub(crate) fn prepare(
     Ok(Prepared {
         root: root.to_path_buf(),
         brief,
-        destination: target.destination()?,
+        destination: target.destination(),
         record: target.record().clone(),
         value: Key::new(target.value()),
     })
@@ -191,7 +192,7 @@ pub(crate) fn sent<W: Write>(
             destination.label(),
         ))?
         .ok_or_else(|| Error::UnknownTeam {
-            team: destination.team_key().to_owned(),
+            team: destination.ticket_prefix().to_owned(),
             path: manifest_path(root),
         })?;
 
@@ -200,7 +201,7 @@ pub(crate) fn sent<W: Write>(
         &format!(
             "filed `{}` to `{}`, labelled `{}`: {}",
             brief.name(),
-            destination.team_key(),
+            destination.ticket_prefix(),
             destination.label(),
             project.url()
         ),
@@ -219,7 +220,7 @@ fn would(prepared: &Prepared) -> String {
         "warlock: would file `{}` to `{}`, under the scope `{}`, with the key `{}` — {} of \
          content, and nothing was sent",
         brief.name(),
-        destination.team_key(),
+        destination.ticket_prefix(),
         destination.scope(),
         destination.key(),
         size(bytes)

@@ -24,7 +24,7 @@ use std::cmp::Reverse;
 use std::collections::HashMap;
 use std::fmt;
 
-use warlock_engine::{LinearScope, PullRun, RunStatus};
+use warlock_engine::{BoardScope, PullRun, RunStatus};
 
 use crate::board::{
     Assignee, Blocker, Board, Category, Error as BoardError, Priority, Queue, QueuedTicket,
@@ -419,17 +419,17 @@ impl fmt::Display for Refusal {
 /// be carrying this team's label either, and naming the label would send somebody
 /// to fix the wrong thing.
 ///
-/// The team is checked twice and both are needed. The typed prefix is checked
-/// before the read, because the board is told only a number and reads its team off
-/// the record it was opened with: an `ENG-9` that went out unchecked would come
-/// back as this team's ninth ticket. The team the answer states is checked after
-/// it, because that is the fact rather than the request.
+/// The scope's prefix is checked twice and both are needed. What the person
+/// typed is checked before the read, because the board is told only a number and
+/// reads its team off the record it was opened with: an `ENG-9` that went out
+/// unchecked would come back as this team's ninth ticket. The team the answer
+/// states is checked after it, because that is the fact rather than the request.
 ///
 /// There is no way here to work somebody else's ticket. The assignee is checked
 /// by id against the user the key belongs to, and nothing takes a flag past it.
 pub(crate) fn take_named(
     board: &impl Board,
-    scope: LinearScope<'_>,
+    scope: BoardScope<'_>,
     assignee: &str,
     ticket: &str,
     runs: &[PullRun],
@@ -442,9 +442,9 @@ pub(crate) fn take_named(
 
     // The prefix that was typed, before anything is asked of a board that would
     // answer about its own team whatever prefix came with the number.
-    if !same_name(typed, scope.team_key()) {
+    if !same_name(typed, scope.ticket_prefix()) {
         return Ok(Named::Refused(Refusal::NotOnTeam {
-            team: scope.team_key().to_owned(),
+            team: scope.ticket_prefix().to_owned(),
             found: typed.to_owned(),
         }));
     }
@@ -455,9 +455,9 @@ pub(crate) fn take_named(
         }));
     };
 
-    if !same_name(found.team(), scope.team_key()) {
+    if !same_name(found.team(), scope.ticket_prefix()) {
         return Ok(Named::Refused(Refusal::NotOnTeam {
-            team: scope.team_key().to_owned(),
+            team: scope.ticket_prefix().to_owned(),
             found: found.team().to_owned(),
         }));
     }

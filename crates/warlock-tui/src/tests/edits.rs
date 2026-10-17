@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use warlock_engine::{
-    LinearScope, Manifest, Node, ScopeRecord, ScopedDirectory, TrackerName, Tree, manifest_path,
+    BoardScope, Manifest, Node, ScopeRecord, ScopedDirectory, TrackerName, Tree, manifest_path,
     route_facts, save_open_scopes, validate_scope,
 };
 
@@ -27,12 +27,10 @@ use crate::settings::Settings;
 // Every test here builds both its repository and its home out of one of
 // these, so nothing goes near the developer's real home.
 
-// The team key is read through the view, which is the only way there is to
-// read one off a record.
+// The prefix a record that files to Linear keys its tickets by is its team
+// key, which is what these tests name it.
 fn team_of(record: &ScopeRecord) -> &str {
-    LinearScope::of(record)
-        .expect("the record was written as a Linear scope")
-        .team_key()
+    BoardScope::of(record).ticket_prefix()
 }
 
 fn a_dir() -> tempfile::TempDir {
@@ -597,7 +595,7 @@ fn a_tracker_of_jira_writes_a_jira_record_and_its_row_in_one_manifest_write() {
     );
     let written = after.scopes().last().expect("the record was added");
     assert!(
-        LinearScope::of(written).is_err(),
+        written.files_to_linear().is_err(),
         "the tracker word wrote a Linear record"
     );
     // And through the file as well as the value, because which board a record

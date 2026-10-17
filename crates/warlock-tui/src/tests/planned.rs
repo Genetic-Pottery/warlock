@@ -668,7 +668,7 @@ mod preparing {
         assert_eq!(planned.status(), "Planned");
         assert_eq!(planned.total(), 3);
         assert_eq!(planned.left(), 3);
-        assert_eq!(planned.destination().team_key(), TEAM);
+        assert_eq!(planned.destination().ticket_prefix(), TEAM);
         // The slug as typed and no other selector, in one request, alongside
         // the one that resolved who the run files for.
         assert_eq!(linear.calls(), read_by_prepare());
@@ -943,7 +943,7 @@ mod preparing {
             &a_sliced_project(SLICED),
         )
         .expect("a named candidate is a board");
-        assert_eq!(planned.destination().team_key(), "WEB");
+        assert_eq!(planned.destination().ticket_prefix(), "WEB");
         assert_eq!(planned.destination().scope(), "web");
 
         // And a name that is not one of them is refused with both of them
@@ -989,7 +989,7 @@ mod listing {
         )
         .expect("a listing");
 
-        assert_eq!(destination.team_key(), TEAM);
+        assert_eq!(destination.ticket_prefix(), TEAM);
         assert_eq!(listed, Listing::new(&[(SLUG, NAME)]));
         // The listing verb is told nothing: the team and the label it lists by
         // are the record's, and the destination the caller hands back is what

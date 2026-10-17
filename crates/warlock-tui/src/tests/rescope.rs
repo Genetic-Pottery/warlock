@@ -2,18 +2,16 @@ use std::fs;
 use std::path::Path;
 
 use warlock_engine::{
-    LinearScope, Manifest, ScopeRecord, ScopedDirectory, route_facts, scope, validate_scope,
+    BoardScope, Manifest, ScopeRecord, ScopedDirectory, route_facts, scope, validate_scope,
 };
 
 use super::{RecordFields, Rescoped, ScopeRefusal, TrackerFields, records_scope, rescope};
 use crate::prompt::RecordField;
 
-// The team key is read through the view, which is the only way there is to
-// read one off a record.
+// The prefix a record that files to Linear keys its tickets by is its team
+// key, which is what these tests name it.
 fn team_of(record: &ScopeRecord) -> &str {
-    LinearScope::of(record)
-        .expect("the record was written as a Linear scope")
-        .team_key()
+    BoardScope::of(record).ticket_prefix()
 }
 
 fn row(module: &str, scope: &str) -> ScopedDirectory {
@@ -350,7 +348,7 @@ fn jira_fields_are_written_as_a_jira_record_with_both_values_as_given() {
         "the record written is the one `ScopeRecord::jira` builds from the same values"
     );
     assert!(
-        LinearScope::of(record).is_err(),
+        record.files_to_linear().is_err(),
         "a Jira record is not a Linear scope, which is the whole of what the tracker decides"
     );
     assert_eq!(scope_at(&manifest, "crates/tui"), Some("payments"));
