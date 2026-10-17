@@ -16,7 +16,7 @@ use crate::scope::{scope_opens_to, valid_scope};
 
 /// ```
 /// use warlock_engine::{
-///     LinearScope, Manifest, ScopedDirectory, ScopeRecord, filing, resolve_filing, save_key,
+///     BoardScope, Manifest, ScopedDirectory, ScopeRecord, filing, resolve_filing, save_key,
 ///     save_key_binding, save_open_scopes,
 /// };
 ///
@@ -39,7 +39,7 @@ use crate::scope::{scope_opens_to, valid_scope};
 /// // One open scope, one record of that name: one board, and no question to ask.
 /// let target = resolve_filing(&manifest, root.path(), home.path(), None)?;
 /// assert_eq!(target.scope(), "data-plane");
-/// assert_eq!(LinearScope::of(target.record())?.team_key(), "WAR");
+/// assert_eq!(BoardScope::of(target.record()).ticket_prefix(), "WAR");
 /// assert_eq!(target.key(), "work");
 /// assert_eq!(target.value(), "lin_api_example");
 ///
@@ -54,7 +54,7 @@ use crate::scope::{scope_opens_to, valid_scope};
 ///
 /// // A name picks one of them, and a name that is not a candidate is refused.
 /// let target = resolve_filing(&manifest, root.path(), home.path(), Some("web"))?;
-/// assert_eq!(LinearScope::of(target.record())?.team_key(), "WEB");
+/// assert_eq!(BoardScope::of(target.record()).ticket_prefix(), "WEB");
 /// assert_eq!(target.key(), "personal");
 /// assert!(matches!(
 ///     resolve_filing(&manifest, root.path(), home.path(), Some("billing")),

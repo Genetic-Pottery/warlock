@@ -2,9 +2,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use super::{
-    BoardScope, Error, FiledTo, LinearScope, MANIFEST_FILE, Manifest, NotLinear, SCHEMA_VERSION,
-    ScopeFault, ScopeRecord, ScopedDirectory, TrackerName, from_manifest_path, manifest_path,
-    to_manifest_path,
+    BoardScope, Error, FiledTo, MANIFEST_FILE, Manifest, NotLinear, SCHEMA_VERSION, ScopeFault,
+    ScopeRecord, ScopedDirectory, TrackerName, from_manifest_path, manifest_path, to_manifest_path,
 };
 
 fn engine() -> ScopedDirectory {
@@ -40,10 +39,8 @@ fn warlock_dir_listing(root: &Path) -> Vec<String> {
     names
 }
 
-fn team_of(record: &ScopeRecord) -> &str {
-    LinearScope::of(record)
-        .expect("the fixture records a Linear scope")
-        .team_key()
+fn prefix_of(record: &ScopeRecord) -> &str {
+    BoardScope::of(record).ticket_prefix()
 }
 
 fn hand_write(root: &Path, text: &str) {
@@ -214,7 +211,7 @@ fn a_scope_record_round_trips_byte_for_byte() {
 
     let record = &loaded.scopes()[0];
     assert_eq!(record.name(), "data-plane");
-    assert_eq!(team_of(record), "War ", "neither trimmed nor folded");
+    assert_eq!(prefix_of(record), "War ", "neither trimmed nor folded");
     assert_eq!(record.review_state(), "In Review", "not folded");
     assert_eq!(record.label(), "area/Data_Plane", "not folded either");
 
@@ -257,8 +254,8 @@ fn a_jira_record_round_trips_byte_for_byte() {
         "the file and the constructed manifest are the same manifest"
     );
     assert!(
-        matches!(LinearScope::of(&loaded.scopes()[0]), Err(NotLinear { .. })),
-        "a Jira record is not a Linear scope, which is the whole of what it records"
+        matches!(loaded.scopes()[0].files_to_linear(), Err(NotLinear { .. })),
+        "a Jira record files to Jira, which is the whole of what it records"
     );
 
     loaded.save(root.path()).expect("saves");
@@ -290,15 +287,18 @@ fn a_manifest_of_either_tracker_round_trips_through_its_own_text() {
     );
 }
 
+// The constructed record, where the test below reads ones the file reader
+// built: a constructor that folded a value on the way in would be a manifest
+// written with bytes nobody typed, and no reader could tell afterwards.
 #[test]
-fn a_record_read_as_a_linear_scope_carries_its_values_as_spelled() {
+fn a_constructed_record_read_as_a_scope_carries_its_values_as_spelled() {
     let record = ScopeRecord::new("data-plane", " War ", "In Review", "area/Data_Plane");
-    let linear = LinearScope::of(&record).expect("every record files to Linear");
+    let scope = BoardScope::of(&record);
 
-    assert_eq!(linear.name(), "data-plane");
-    assert_eq!(linear.team_key(), " War ", "neither trimmed nor folded");
-    assert_eq!(linear.review_state(), "In Review", "not folded");
-    assert_eq!(linear.label(), "area/Data_Plane", "not folded either");
+    assert_eq!(scope.name(), "data-plane");
+    assert_eq!(scope.ticket_prefix(), " War ", "neither trimmed nor folded");
+    assert_eq!(scope.review_state(), "In Review", "not folded");
+    assert_eq!(scope.label(), "area/Data_Plane", "not folded either");
 }
 
 // Read off records the file reader built, and with the spacing and the trailing
@@ -378,7 +378,11 @@ fn a_loaded_record_says_which_board_it_files_to_in_the_word_the_file_spells() {
 
     assert_eq!(linear.filed_to(), FiledTo::Linear);
     assert_eq!(linear.filed_to().word(), "linear");
-    assert_eq!(team_of(linear), "WAR", "and the team is still the view's");
+    assert_eq!(
+        prefix_of(linear),
+        "WAR",
+        "and the team key is still the view's and not this enum's"
+    );
 
     assert_eq!(jira.filed_to().word(), "jira");
     assert_eq!(
