@@ -6,6 +6,7 @@ use std::thread;
 use std::time::Duration;
 
 use serde_json::Value;
+use ureq::http::Method;
 use warlock_engine::splitting::Numbered;
 use warlock_engine::{ScopeRecord, agent, drafting, working};
 
@@ -18,6 +19,7 @@ use crate::claude::{Activities, Activity, Cancel, Converses, Split, Stopped, Wir
 use crate::clipboard::Clip;
 use crate::error::Error;
 use crate::git::{Commit, Dirty, Error as GitError, Forge, Opened, PullRequest, Repository};
+use crate::jira::Calls;
 use crate::linear::{LINEAR, Posts};
 use crate::puller::{Raised, Raises, Raising, Stopping, activity_port};
 use crate::pulling::{Splits, Works};
@@ -359,6 +361,46 @@ impl Posting {
 impl Posts for Posting {
     fn post(&self, document: &str, variables: Value) -> Result<Value, BoardError> {
         locked(&self.0.asked).push((document.to_owned(), variables));
+        locked(&self.0.answers)
+            .pop_front()
+            .unwrap_or_else(|| panic!("the stand-in was asked more times than it was answered"))
+    }
+}
+
+/// A Jira that answers from memory, as [`Posting`] answers for Linear: it hands
+/// back what it was given, in the order it was given, and keeps every call it
+/// was asked, so a test can say which request came first and what reached the
+/// wire. Answers are popped rather than cloned because `Error` is not `Clone`.
+///
+/// All three of a call are kept and not just the body, because all three are
+/// how a Jira request is spelled: the same path is a read, a create and an edit
+/// by its method alone.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct Calling(Arc<Made>);
+
+#[derive(Debug, Default)]
+pub(crate) struct Made {
+    answers: Mutex<VecDeque<Result<Value, BoardError>>>,
+    asked: Mutex<Vec<(Method, String, Value)>>,
+}
+
+impl Calling {
+    pub(crate) fn answering(answers: impl IntoIterator<Item = Result<Value, BoardError>>) -> Self {
+        Self(Arc::new(Made {
+            answers: Mutex::new(answers.into_iter().collect()),
+            asked: Mutex::default(),
+        }))
+    }
+
+    /// Every call made, as its method, its path and its body, in order.
+    pub(crate) fn made(&self) -> Vec<(Method, String, Value)> {
+        locked(&self.0.asked).clone()
+    }
+}
+
+impl Calls for Calling {
+    fn call(&self, method: Method, path: &str, body: Value) -> Result<Value, BoardError> {
+        locked(&self.0.asked).push((method, path.to_owned(), body));
         locked(&self.0.answers)
             .pop_front()
             .unwrap_or_else(|| panic!("the stand-in was asked more times than it was answered"))

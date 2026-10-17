@@ -13,17 +13,63 @@
 use std::fmt;
 use std::time::Duration;
 
-use serde_json::Value;
+use serde_json::{Value, json};
 use ureq::Agent;
 use ureq::http::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE};
 use ureq::http::{HeaderValue, Method, Request};
+use warlock_engine::{FiledTo, ScopeRecord};
 
-use crate::board::Error;
+use crate::adf::document_for;
+use crate::board::{
+    Board, Error, FetchedBrief, Filable, FiledBrief, FiledTicket, Listing, NamedTicket, NewBrief,
+    NewTicket, Queue, TicketBrief,
+};
 use crate::linear::REQUEST_TIMEOUT;
+use crate::queue::same_name;
 
 /// The one place this vendor is spelled for a reader: every [`Error`] raised
 /// here, and `Board::NAME` for the board that answers over this transport.
 const JIRA: &str = "Jira";
+
+/// Where a JQL read goes. A POST and not a GET, because [`Calls`] carries a
+/// body and a query string would have to be percent-encoded into the path by
+/// hand; `/rest/api/2/search` answers 410 Gone and is not an option.
+const SEARCH: &str = "/rest/api/3/search/jql";
+
+/// Where one issue is created. The collection and not an issue's own URL: a
+/// create is a POST to it, and nothing here addresses an issue by id.
+// Read only by the brief create, which the library does not reach until the
+// opener is wired: the same expectation `Jira` and `browse` carry, and it comes
+// off with theirs.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the opener that builds a board is a later slice's; the tests \
+                  under `cfg(test)` are the only caller until then"
+    )
+)]
+const ISSUE: &str = "/rest/api/3/issue";
+
+/// Jira's own name for the issue type a brief is filed as, read both by the
+/// create that writes `issuetype` and by the lookup's JQL. A site that has
+/// renamed it refuses both in its own words rather than warlock guessing a
+/// second spelling.
+// Dead for the same reason [`ISSUE`] is: both of its readers are a board's
+// verbs, and nothing outside the tests opens a board yet.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the opener that builds a board is a later slice's; the tests \
+                  under `cfg(test)` are the only caller until then"
+    )
+)]
+const EPIC: &str = "Epic";
+
+/// Issues read per page of a JQL search. Not left off: an answer with no
+/// `maxResults` takes whatever default the site has today.
+const SEARCH_PAGE: usize = 100;
 
 /// How a Jira key is typed, and the whole of what a refusal of a stored line
 /// says about it.
@@ -151,6 +197,279 @@ impl Calls for Client {
     }
 }
 
+/// The one [`Board`] that speaks REST, over whatever [`Calls`] it holds.
+///
+/// The record it was opened for is held beside the transport, as
+/// [`Linear`](crate::linear::Linear) holds its own, and it is the whole of what
+/// this board knows about where work goes: the site and the project key a
+/// request is addressed by are read off it by [`site`](Self::site), and the
+/// label is there for whatever create reads it, so no verb below [`Board`] is
+/// handed any of them. Owned rather than borrowed, because a board is opened on
+/// a panel worker and outlives the manifest read that produced the record.
+///
+/// Every verb but the two a push makes — the brief-by-name lookup and the brief
+/// create — refuses as this stands: the requests themselves arrive a slice at a
+/// time, and a board that refuses is what keeps a flow which reaches a verb
+/// nobody has written yet a sentence rather than a panic.
+// Nothing in the library builds one yet: the opener that hands a Jira scope
+// this board instead of Linear's is the slice after the verbs, so until then
+// the only caller is this module's own tests. `cfg_attr` rather than a bare
+// `expect`, because under `cfg(test)` the tests do construct one and an
+// expectation nothing fulfils is itself a warning.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the opener that builds one is a later slice's; the tests \
+                  under `cfg(test)` are the only caller until then"
+    )
+)]
+#[derive(Debug)]
+pub(crate) struct Jira<C = Client> {
+    calls: C,
+    record: ScopeRecord,
+}
+
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the opener that builds one is a later slice's; the tests \
+                  under `cfg(test)` are the only caller until then"
+    )
+)]
+impl<C: Calls> Jira<C> {
+    #[must_use]
+    pub(crate) const fn new(calls: C, record: ScopeRecord) -> Self {
+        Self { calls, record }
+    }
+
+    /// The site and the project key this board files to, read off the record it
+    /// was opened for: the two halves of a Jira destination, because a project
+    /// key means nothing without the site it is a key on.
+    ///
+    /// Opening cannot fail, so a record that files somewhere else is refused
+    /// here instead — out of reach through warlock's verbs, which each refuse
+    /// such a scope before they open anything, and a `Result` rather than a
+    /// panic because this is a request that was not made.
+    fn site(&self) -> Result<(&str, &str), Error> {
+        match self.record.filed_to() {
+            FiledTo::Jira {
+                base_url,
+                project_key,
+            } => Ok((base_url, project_key)),
+            FiledTo::Linear => Err(Error::Elsewhere {
+                board: JIRA,
+                scope: self.record.name().to_owned(),
+            }),
+        }
+    }
+
+    /// Every issue one JQL read answers, page after page, with the `fields`
+    /// asked for on each of them.
+    ///
+    /// Jira's paging is the token an answer hands back going into the next
+    /// request, where `linear.rs`'s own `paged` reads a cursor off a `pageInfo`
+    /// beside a `hasNextPage` flag: the last page here is the one that carries
+    /// no token, and there is no flag beside it to read.
+    ///
+    /// One request per page, and a page that failed fails the whole read rather
+    /// than answering the pages that arrived before it: what a caller asks of
+    /// these issues is whether one of them is there, and a page that never
+    /// arrived could have been carrying it.
+    fn searched(&self, jql: &str, fields: &[&str]) -> Result<Vec<Value>, Error> {
+        let mut body = json!({ "jql": jql, "fields": fields, "maxResults": SEARCH_PAGE });
+        let mut found = Vec::new();
+
+        loop {
+            let answer = self.calls.call(Method::POST, SEARCH, body.clone())?;
+            let issues = answer
+                .get("issues")
+                .and_then(Value::as_array)
+                .ok_or_else(|| missing("issues"))?;
+
+            found.extend(issues.iter().cloned());
+
+            let Some(token) = answer["nextPageToken"].as_str().map(str::to_owned) else {
+                return Ok(found);
+            };
+
+            if let Some(sent) = body.as_object_mut() {
+                sent.insert("nextPageToken".to_owned(), json!(token));
+            }
+        }
+    }
+
+    /// The refusal of a verb no slice has written for this board yet, with
+    /// nothing sent through [`Calls`].
+    ///
+    /// The record is read first, so a board opened for a scope that files
+    /// somewhere else is told that instead: the two are different things to fix
+    /// — a manifest naming the wrong board, against a warlock that has not
+    /// learnt this verb — and the one about the record holds whichever verb was
+    /// reached.
+    fn untaught<T>(&self, verb: &'static str) -> Result<T, Error> {
+        self.site()?;
+        Err(Error::Untaught { board: JIRA, verb })
+    }
+}
+
+impl<C: Calls> Board for Jira<C> {
+    const NAME: &'static str = JIRA;
+
+    /// Nothing, because the create it would be settled for refuses as well: a
+    /// cut that cannot file a ticket has nothing to settle first.
+    type Filing = ();
+
+    fn viewer(&self) -> Result<String, Error> {
+        self.untaught("read whose key a scope files with")
+    }
+
+    fn move_brief(&self, _project: &str, _status: &str) -> Result<bool, Error> {
+        self.untaught("move a brief")
+    }
+
+    fn ticket_brief(&self, _issue: &str) -> Result<Option<TicketBrief>, Error> {
+        self.untaught("read the brief a ticket belongs to")
+    }
+
+    fn move_ticket(&self, _issue: &str, _status: &str) -> Result<bool, Error> {
+        self.untaught("move a ticket")
+    }
+
+    fn fetch_brief(&self, _slug: &str) -> Result<Option<FetchedBrief>, Error> {
+        self.untaught("read a brief")
+    }
+
+    fn planned_briefs(&self) -> Result<Listing, Error> {
+        self.untaught("list the planned briefs")
+    }
+
+    /// The URL of the Epic in this project with this name, or `None` when the
+    /// project holds none: the only thing a push can tell a second push of the
+    /// same brief by, now that nothing on the machine remembers the first.
+    ///
+    /// `~` is a fuzzy text match and the only operator JQL has for a summary, so
+    /// the search narrows and the comparison decides: a quoted phrase inside the
+    /// quoted value matches the words in order, and `A brief about pay` still
+    /// comes back for `A brief`. Every page is read and each summary is then
+    /// compared as [`same_name`] compares, which is how a brief whose name
+    /// differs in case or in spacing is the same brief — the same comparison
+    /// `project_named` makes on Linear, where the filter did the matching.
+    ///
+    /// A name carrying a double quote is a JQL string Jira refuses in its own
+    /// words. It is not escaped here because a brief's name is a heading in a
+    /// document somebody wrote, and a refusal naming the search is a better
+    /// answer than a lookup that quietly matched something else.
+    fn brief_named(&self, name: &str) -> Result<Option<String>, Error> {
+        let (base_url, project_key) = self.site()?;
+        // The [`EPIC`] the create writes as well, and the escaped quotes are a
+        // quoted phrase inside the quoted value `~` takes.
+        let jql =
+            format!(r#"project = {project_key} AND issuetype = {EPIC} AND summary ~ "\"{name}\"""#);
+
+        for issue in self.searched(&jql, &["summary"])? {
+            let summary = issue
+                .get("fields")
+                .and_then(|fields| fields.get("summary"))
+                .and_then(Value::as_str)
+                .ok_or_else(|| missing("summary"))?;
+
+            if same_name(summary, name) {
+                let key = issue
+                    .get("key")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| missing("key"))?;
+
+                return Ok(Some(browse(base_url, key)));
+            }
+        }
+
+        Ok(None)
+    }
+
+    fn scope_queue(&self, _assignee: &str) -> Result<Queue, Error> {
+        self.untaught("read a scope's queue")
+    }
+
+    fn named_ticket(&self, _number: u64) -> Result<Option<NamedTicket>, Error> {
+        self.untaught("read a ticket by number")
+    }
+
+    /// File the brief as an Epic in the project the record names, carrying the
+    /// label and its body as an ADF document, and answer where a person opens
+    /// it.
+    ///
+    /// One request, and the label is in it: it is the only mark on an Epic
+    /// saying warlock filed it, nothing here can take an Epic back, and a
+    /// create that landed before a label that then failed would be a brief no
+    /// cut ever reads. Jira writes a label by its own name on the issue, so
+    /// there is nothing to resolve first — where `create_project` on Linear
+    /// resolves an id before it creates anything, this spends no read at all.
+    /// It is the label [`NewBrief`] carries, which is the one the record
+    /// records: a push reads it off the scope and every create on this seam is
+    /// handed it the same way.
+    ///
+    /// No status field and no transition after it: the Epic opens in whatever
+    /// status the project's workflow starts an issue in, which is the site's
+    /// decision and not warlock's.
+    ///
+    /// Never `None`, which on this seam is "the board has nowhere to file it" —
+    /// a Linear workspace with no team by the recorded key. A Jira project key
+    /// the site does not hold is something the create itself refuses in Jira's
+    /// own words, and telling the two apart would cost a read before a
+    /// mutation that is one request.
+    fn create_brief(&self, project: &NewBrief<'_>) -> Result<Option<FiledBrief>, Error> {
+        let (base_url, project_key) = self.site()?;
+        let created = self.calls.call(
+            Method::POST,
+            ISSUE,
+            json!({
+                "fields": {
+                    "project": { "key": project_key },
+                    "issuetype": { "name": EPIC },
+                    "summary": project.name,
+                    "labels": [project.label],
+                    "description": document_for(project.content),
+                }
+            }),
+        )?;
+
+        // The key and not the numeric `id` beside it: every path this module
+        // addresses an issue by takes either, and the key is the one a person
+        // reads in a refusal and types into a search.
+        let key = created
+            .get("key")
+            .and_then(Value::as_str)
+            .ok_or_else(|| missing("key"))?;
+
+        Ok(Some(FiledBrief {
+            id: key.to_owned(),
+            url: browse(base_url, key),
+        }))
+    }
+
+    fn ticket_filing(&self) -> Result<Filable<()>, Error> {
+        self.untaught("settle where a cut's tickets file")
+    }
+
+    fn create_ticket(&self, _issue: &NewTicket<'_>, _filing: &()) -> Result<FiledTicket, Error> {
+        self.untaught("file a ticket")
+    }
+
+    fn create_relation(&self, _blocker: &str, _waiting: &str) -> Result<String, Error> {
+        self.untaught("record that one ticket blocks another")
+    }
+
+    fn comment_on_brief(&self, _project: &str, _body: &str) -> Result<String, Error> {
+        self.untaught("comment on a brief")
+    }
+
+    fn comment_on_ticket(&self, _issue: &str, _body: &str) -> Result<String, Error> {
+        self.untaught("comment on a ticket")
+    }
+}
+
 /// The answer to one call, from its status and its body as text.
 ///
 /// A success with an empty body is `Value::Null`: a transition answers 204 and
@@ -216,6 +535,37 @@ fn url(base_url: &str, path: &str) -> String {
         base_url.trim_end_matches('/'),
         path.trim_start_matches('/')
     )
+}
+
+/// Where a person opens one issue, from the site and the issue's key.
+///
+/// The one address this board answers with, for an issue it filed and for one
+/// it found: `/browse/<key>` is the path Jira itself redirects to whatever view
+/// the issue belongs to, so no project id, no board and no issue id is needed to
+/// build it.
+// Reached only from the board's own verbs, which nothing in the library opens
+// yet: the same expectation `Jira` itself carries, and it comes off with that
+// one when the opener is wired.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the opener that builds a board is a later slice's; the tests \
+                  under `cfg(test)` are the only caller until then"
+    )
+)]
+fn browse(base_url: &str, key: &str) -> String {
+    url(base_url, &format!("/browse/{key}"))
+}
+
+/// Warlock's own words for an answer that left out a field this module reads,
+/// which is all a reader is told about it: the bytes that arrived are whatever a
+/// captive portal or a proxy decided to send.
+fn missing(field: &str) -> Error {
+    Error::Malformed {
+        board: JIRA,
+        detail: format!("it carried no `{field}`"),
+    }
 }
 
 /// `Basic <base64(email:token)>`, and the only place the key is read.
