@@ -11,6 +11,7 @@ const ORDERED: &str = "orderedList";
 
 const STRONG: &str = "**";
 const CODE: &str = "`";
+const FENCE: &str = "```";
 
 // A heading deeper than this is not one: ADF has six levels, and `#######` is a
 // paragraph in Markdown too.
@@ -256,6 +257,194 @@ fn text_node(text: &str) -> Value {
 
 fn marked_text(text: &str, mark: &Value) -> Value {
     json!({ "type": "text", "text": text, "marks": [mark] })
+}
+
+/// `document` as Markdown.
+///
+/// Total, and that is the point: every field is read defensively because the
+/// tree may have been edited where warlock cannot see it, and a node type this
+/// does not model contributes the text under it and nothing else. So a brief
+/// somebody wrapped in a panel comes back plainer rather than not at all.
+///
+/// ```
+/// use warlock_tui::body_for;
+///
+/// let body = body_for(&serde_json::json!({
+///     "type": "doc",
+///     "version": 1,
+///     "content": [{
+///         "type": "heading",
+///         "attrs": { "level": 2 },
+///         "content": [{ "type": "text", "text": "Scope" }],
+///     }],
+/// }));
+///
+/// assert_eq!(body, "## Scope\n");
+/// ```
+#[must_use]
+pub fn body_for(document: &Value) -> String {
+    // The root's own type is not checked, and a tree rooted at anything is read
+    // for its children: refusing a root that does not say `doc` would turn one
+    // wrong field into a brief with no headings.
+    let mut written: Vec<String> = Vec::new();
+    for block in content_of(document) {
+        let block = block_of(block);
+        if !block.is_empty() {
+            written.push(block);
+        }
+    }
+
+    if written.is_empty() {
+        return String::new();
+    }
+    // Blank lines between blocks and a newline at the end, because the one
+    // consumer is a Markdown parse: a heading on the line after a paragraph is
+    // still a heading, but a list item on the line after one is that
+    // paragraph's own text.
+    written.join("\n\n") + "\n"
+}
+
+fn block_of(block: &Value) -> String {
+    match kind_of(block) {
+        "heading" => {
+            let text = text_of(block);
+            if text.is_empty() {
+                // A heading's markers with nothing after them are not a
+                // heading, here or in the writer above.
+                String::new()
+            } else {
+                format!("{} {text}", "#".repeat(level_of(block)))
+            }
+        }
+        BULLET => listed(block, false),
+        ORDERED => listed(block, true),
+        "codeBlock" => fence_of(block),
+        // `paragraph` and every type warlock does not model land here together:
+        // one line of the text underneath, carrying no trace of the node it came
+        // out of.
+        _ => text_of(block),
+    }
+}
+
+// A `N.` marker is the reader's own count of the items it kept, not a number
+// read out of the tree: ADF carries where a list starts and nothing per item,
+// and the one consumer reads a slice's number from its heading.
+fn listed(list: &Value, numbered: bool) -> String {
+    let mut items: Vec<String> = Vec::new();
+    for item in content_of(list) {
+        let text = text_of(item);
+        if text.is_empty() {
+            continue;
+        }
+        if numbered {
+            items.push(format!("{}. {text}", items.len() + 1));
+        } else {
+            items.push(format!("- {text}"));
+        }
+    }
+    items.join("\n")
+}
+
+fn fence_of(block: &Value) -> String {
+    let language = attribute_of(block, "language").unwrap_or_default();
+    let fence = format!("{FENCE}{language}");
+    // Text under a code block is what somebody typed, so no mark is applied to
+    // it: a `code` mark in here would come back as backticks inside the block.
+    let inside = source_of(block);
+    if inside.is_empty() {
+        format!("{fence}\n{FENCE}")
+    } else {
+        format!("{fence}\n{inside}\n{FENCE}")
+    }
+}
+
+fn source_of(node: &Value) -> String {
+    let mut text = String::new();
+    for child in content_of(node) {
+        match child.get("text").and_then(Value::as_str) {
+            Some(part) => text.push_str(part),
+            None => text.push_str(&source_of(child)),
+        }
+    }
+    text
+}
+
+fn text_of(node: &Value) -> String {
+    if kind_of(node) == "text" {
+        return inlined(node);
+    }
+
+    let mut text = String::new();
+    for child in content_of(node) {
+        let part = text_of(child);
+        if part.is_empty() {
+            continue;
+        }
+        // Text nodes are runs of one line and join as they were written. A child
+        // that is not one was a block of its own, and joining those bare would
+        // run the last word of a panel's first paragraph into its second.
+        if !text.is_empty() && kind_of(child) != "text" {
+            text.push(' ');
+        }
+        text.push_str(&part);
+    }
+    text
+}
+
+fn inlined(node: &Value) -> String {
+    let mut text = node
+        .get("text")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    if text.is_empty() {
+        return text;
+    }
+
+    // The writer puts one mark on a node, so the order only decides how a tree
+    // from elsewhere nests: innermost first, as the marks are listed.
+    for mark in node
+        .get("marks")
+        .and_then(Value::as_array)
+        .map_or(&[][..], Vec::as_slice)
+    {
+        text = match kind_of(mark) {
+            "strong" => format!("{STRONG}{text}{STRONG}"),
+            "code" => format!("{CODE}{text}{CODE}"),
+            "link" => match attribute_of(mark, "href") {
+                Some(href) if !href.is_empty() => format!("[{text}]({href})"),
+                _ => text,
+            },
+            _ => text,
+        };
+    }
+    text
+}
+
+fn kind_of(node: &Value) -> &str {
+    node.get("type").and_then(Value::as_str).unwrap_or_default()
+}
+
+fn level_of(heading: &Value) -> usize {
+    heading
+        .get("attrs")
+        .and_then(|attrs| attrs.get("level"))
+        .and_then(Value::as_u64)
+        .map_or(1, |level| {
+            usize::try_from(level).unwrap_or(LEVELS).clamp(1, LEVELS)
+        })
+}
+
+fn attribute_of<'a>(node: &'a Value, name: &str) -> Option<&'a str> {
+    node.get("attrs")
+        .and_then(|attrs| attrs.get(name))
+        .and_then(Value::as_str)
+}
+
+fn content_of(node: &Value) -> &[Value] {
+    node.get("content")
+        .and_then(Value::as_array)
+        .map_or(&[][..], Vec::as_slice)
 }
 
 #[cfg(test)]
