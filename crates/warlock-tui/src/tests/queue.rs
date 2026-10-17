@@ -1,15 +1,20 @@
 use crate::StateType;
 
 use super::{
-    Blocker, IN_PROGRESS, Priority, PullRun, Queue, QueuedIssue, Reason, RunStatus,
+    Blocker, IN_PROGRESS, Priority, PullRun, Queue, QueuedTicket, Reason, RunStatus,
     blocking_counts, choose, number_in, order_of,
 };
 
 // Enough of an issue to choose between: the id is never matched on here, and the
 // title is only ever printed, so both are derived from the identifier and the
 // facts the rules read are the parameters.
-fn issue(identifier: &str, state: &str, priority: Priority, blockers: Vec<Blocker>) -> QueuedIssue {
-    QueuedIssue::new(
+fn issue(
+    identifier: &str,
+    state: &str,
+    priority: Priority,
+    blockers: Vec<Blocker>,
+) -> QueuedTicket {
+    QueuedTicket::new(
         format!("id-{identifier}"),
         identifier,
         format!("The work of {identifier}"),
@@ -23,7 +28,7 @@ fn issue(identifier: &str, state: &str, priority: Priority, blockers: Vec<Blocke
     )
 }
 
-fn todo(identifier: &str, priority: Priority) -> QueuedIssue {
+fn todo(identifier: &str, priority: Priority) -> QueuedTicket {
     issue(identifier, "Todo", priority, Vec::new())
 }
 
@@ -47,7 +52,7 @@ fn run(ticket: &str, status: RunStatus) -> PullRun {
     run
 }
 
-fn queue_of(issues: Vec<QueuedIssue>) -> Queue {
+fn queue_of(issues: Vec<QueuedTicket>) -> Queue {
     Queue::new(issues)
 }
 
@@ -75,7 +80,7 @@ fn reasons(queue: &Queue, review_state: &str, runs: &[PullRun]) -> Vec<(String, 
 // ordering rather than about a copy of it.
 fn order(queue: &Queue) -> Vec<String> {
     let blocks = blocking_counts(queue);
-    let mut issues: Vec<&QueuedIssue> = queue.issues().iter().collect();
+    let mut issues: Vec<&QueuedTicket> = queue.issues().iter().collect();
     issues.sort_by_key(|issue| order_of(issue, &blocks));
     issues
         .iter()
@@ -100,7 +105,7 @@ fn the_first_issue_in_the_order_is_taken_and_the_rest_are_not_reported_as_skippe
 
     let chosen = choose(&queue, "In Review", &[]);
 
-    assert_eq!(chosen.taken().map(QueuedIssue::identifier), Some("WAR-11"));
+    assert_eq!(chosen.taken().map(QueuedTicket::identifier), Some("WAR-11"));
     // A ready issue that merely lost the ordering is not a skip: the reasons are
     // the four a person can act on.
     assert!(chosen.skipped().is_empty());

@@ -5,7 +5,7 @@ use warlock_engine::Destination;
 use warlock_engine::drafting::Draft;
 
 use super::{Cut, Filing, Slice, cut, cut_note, fold_title, noted, quoted, skip};
-use crate::board::{Board, Issue as LinearIssue};
+use crate::board::{Board, FiledTicket};
 use crate::error::Error;
 use crate::error::status_for;
 use crate::stubs::{Boarding, Call, IssueAsked, Op, VIEWER};
@@ -93,7 +93,7 @@ fn cut_after(
     linear: &impl Board,
     title: &str,
     drafts: &[Draft],
-    needs: &[&[LinearIssue]],
+    needs: &[&[FiledTicket]],
 ) -> (Result<Cut, Error>, String) {
     let mut out = Vec::new();
     let outcome = cut(
@@ -168,7 +168,7 @@ fn filed(outcome: Result<Cut, Error>) -> Vec<String> {
         .collect()
 }
 
-fn issues_of(outcome: Result<Cut, Error>) -> Vec<LinearIssue> {
+fn issues_of(outcome: Result<Cut, Error>) -> Vec<FiledTicket> {
     outcome.expect("a slice that files").issues
 }
 
@@ -191,7 +191,7 @@ fn notes_of(linear: &Boarding) -> Vec<String> {
 // conversation the slice under test has is only its own. This is the road the
 // issues of a `depends_on` arrive by: they are kept from the cut that made
 // them, because a note holds identifiers and a relation is written by id.
-fn an_earlier_slice(repo: &Path) -> Vec<LinearIssue> {
+fn an_earlier_slice(repo: &Path) -> Vec<FiledTicket> {
     let linear = Boarding::filing("").numbering_from(100);
 
     let outcome = cut_into(
@@ -520,7 +520,7 @@ fn a_refused_relation_is_a_reported_line_and_the_slice_still_files() {
     else {
         panic!("a refused edge failed the slice: {outcome:?}");
     };
-    let identifiers: Vec<&str> = issues.iter().map(LinearIssue::identifier).collect();
+    let identifiers: Vec<&str> = issues.iter().map(FiledTicket::identifier).collect();
     assert_eq!(identifiers, ["WAR-125", "WAR-126"]);
     assert_eq!(reported.len(), 1, "{reported:?}");
     assert!(reported[0].contains("`WAR-125`"), "{}", reported[0]);
@@ -659,7 +659,7 @@ fn a_draft_waiting_on_an_open_ticket_it_was_shown_is_blocked_by_it_and_no_other(
     let mut drafts = two_drafts();
     drafts[0].waits_on = vec!["war-142".to_owned()];
     drafts[1].waits_on = vec!["WAR-999".to_owned()];
-    let open = [LinearIssue::new("issue-142", "WAR-142", "")];
+    let open = [FiledTicket::new("issue-142", "WAR-142", "")];
     let linear = a_whole_cut();
     let mut out = Vec::new();
 

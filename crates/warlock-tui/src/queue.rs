@@ -26,7 +26,7 @@ use std::fmt;
 
 use warlock_engine::{LinearScope, PullRun, RunStatus};
 
-use crate::board::{Assignee, Blocker, Board, Error as LinearError, Priority, Queue, QueuedIssue};
+use crate::board::{Assignee, Blocker, Board, Error as LinearError, Priority, Queue, QueuedTicket};
 
 /// The workflow state a ticket sits in while a run works it.
 ///
@@ -47,13 +47,13 @@ pub(crate) const IN_PROGRESS: &str = "In Progress";
 /// [`skipped`]: Chosen::skipped
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Chosen {
-    taken: Option<QueuedIssue>,
+    taken: Option<QueuedTicket>,
     skipped: Vec<Skipped>,
 }
 
 impl Chosen {
     #[must_use]
-    pub const fn taken(&self) -> Option<&QueuedIssue> {
+    pub const fn taken(&self) -> Option<&QueuedTicket> {
         self.taken.as_ref()
     }
 
@@ -72,13 +72,13 @@ impl Chosen {
 /// that had to look the title back up would be a second pass over the queue.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Skipped {
-    issue: QueuedIssue,
+    issue: QueuedTicket,
     reason: Reason,
 }
 
 impl Skipped {
     #[must_use]
-    pub const fn issue(&self) -> &QueuedIssue {
+    pub const fn issue(&self) -> &QueuedTicket {
         &self.issue
     }
 
@@ -148,15 +148,15 @@ impl fmt::Display for Reason {
 /// first.
 ///
 /// ```
-/// use warlock_tui::{Priority, Queue, QueuedIssue, StateType, choose};
+/// use warlock_tui::{Priority, Queue, QueuedTicket, StateType, choose};
 ///
 /// let queue = Queue::new(
 ///     vec![
-///         QueuedIssue::new(
+///         QueuedTicket::new(
 ///             "id-10", "WAR-10", "Ten", "Todo",
 ///             StateType::new("unstarted"), Priority::High, vec![],
 ///         ),
-///         QueuedIssue::new(
+///         QueuedTicket::new(
 ///             "id-9", "WAR-9", "Nine", "In Review",
 ///             StateType::new("started"), Priority::Urgent, vec![],
 ///         ),
@@ -166,7 +166,7 @@ impl fmt::Display for Reason {
 /// let choice = choose(&queue, "In Review", &[]);
 ///
 /// // The urgent one is waiting on a human, so the high one is next.
-/// assert_eq!(choice.taken().map(QueuedIssue::identifier), Some("WAR-10"));
+/// assert_eq!(choice.taken().map(QueuedTicket::identifier), Some("WAR-10"));
 /// assert_eq!(choice.skipped().len(), 1);
 /// assert_eq!(
 ///     choice.skipped()[0].reason().to_string(),
@@ -220,7 +220,7 @@ pub fn choose(queue: &Queue, review_state: &str, runs: &[PullRun]) -> Chosen {
 ///
 /// The order of the four is the promise, for the reasons on [`choose`].
 fn unavailable(
-    issue: &QueuedIssue,
+    issue: &QueuedTicket,
     review_state: &str,
     status: Option<RunStatus>,
 ) -> Option<Reason> {
@@ -264,7 +264,7 @@ pub(crate) fn same_name(found: &str, name: &str) -> bool {
     found.trim().eq_ignore_ascii_case(name.trim())
 }
 
-fn skip(issue: &QueuedIssue, reason: Reason) -> Skipped {
+fn skip(issue: &QueuedTicket, reason: Reason) -> Skipped {
     Skipped {
         issue: issue.clone(),
         reason,
@@ -293,7 +293,7 @@ fn blocking_counts(queue: &Queue) -> HashMap<&str, usize> {
 /// the same queue choosing different tickets is not something a person could
 /// diagnose. The trailing identifier is what makes it so: it is unique on the
 /// board, so nothing after it could matter.
-fn order_of(issue: &QueuedIssue, blocks: &HashMap<&str, usize>) -> OrderKey {
+fn order_of(issue: &QueuedTicket, blocks: &HashMap<&str, usize>) -> OrderKey {
     let identifier = issue.identifier();
     (
         issue.priority(),
@@ -327,7 +327,7 @@ fn number_in(identifier: &str) -> Option<u64> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Named {
     /// The ticket, held to every rule [`choose`] holds a queue to.
-    Taken(QueuedIssue),
+    Taken(QueuedTicket),
     Refused(Refusal),
 }
 

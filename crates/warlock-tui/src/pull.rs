@@ -38,7 +38,7 @@ use warlock_engine::{
 };
 
 use crate::account::{THINKING, WRITING, tool_line};
-use crate::board::{Board, Key, Opener as LinearOpener, Opens, QueuedIssue};
+use crate::board::{Board, Key, Opener as LinearOpener, Opens, QueuedTicket};
 use crate::claude::{Activities, Activity};
 use crate::error::{Error, NO_QUEUE, files_to_linear, one_line, say};
 use crate::git::{Forge, Gh, Git, Repository};
@@ -386,7 +386,7 @@ pub(crate) enum Selected {
 /// The ticket selection gave up, or the reason there is none.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Taken<'a> {
-    Issue(&'a QueuedIssue),
+    Issue(&'a QueuedTicket),
     /// The queue answered and nothing in it was available, which is an answer and
     /// not a refusal.
     Nothing,
@@ -397,7 +397,7 @@ pub(crate) enum Taken<'a> {
 impl Selected {
     /// The ticket to work, `None` for a queue with nothing available, and a
     /// refusal for a ticket somebody named that cannot be worked.
-    pub(crate) fn issue(&self, named: Option<&str>) -> Result<Option<&QueuedIssue>, Error> {
+    pub(crate) fn issue(&self, named: Option<&str>) -> Result<Option<&QueuedTicket>, Error> {
         match self.taken() {
             Taken::Issue(issue) => Ok(Some(issue)),
             Taken::Nothing => Ok(None),

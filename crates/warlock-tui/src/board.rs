@@ -36,18 +36,18 @@ pub(crate) trait Board {
     fn backlog_status(&self) -> Result<Option<String>, Error>;
     fn project_status(&self, name: &str) -> Result<Option<String>, Error>;
     fn move_project(&self, project: &str, status: &str) -> Result<String, Error>;
-    fn issue_project(&self, issue: &str) -> Result<Option<IssueProject>, Error>;
+    fn issue_project(&self, issue: &str) -> Result<Option<TicketBrief>, Error>;
     fn backlog_state(&self, team: &str) -> Result<Option<String>, Error>;
     fn workflow_state(&self, team: &str, name: &str) -> Result<Option<String>, Error>;
     fn move_issue(&self, issue: &str, state: &str) -> Result<String, Error>;
     fn issue_label_id(&self, name: &str, team: &str) -> Result<String, Error>;
-    fn fetch_project(&self, slug: &str) -> Result<Option<FetchedProject>, Error>;
+    fn fetch_project(&self, slug: &str) -> Result<Option<FetchedBrief>, Error>;
     fn planned_projects(&self, team: &str, label: &str) -> Result<Listing, Error>;
     fn project_named(&self, team: &str, name: &str) -> Result<Option<String>, Error>;
     fn scope_queue(&self, team: &str, label: &str, assignee: &str) -> Result<Queue, Error>;
-    fn named_issue(&self, team: &str, number: u64) -> Result<Option<NamedIssue>, Error>;
-    fn create_project(&self, project: &NewProject<'_>) -> Result<Project, Error>;
-    fn create_issue(&self, issue: &NewIssue<'_>) -> Result<Issue, Error>;
+    fn named_issue(&self, team: &str, number: u64) -> Result<Option<NamedTicket>, Error>;
+    fn create_project(&self, project: &NewBrief<'_>) -> Result<FiledBrief, Error>;
+    fn create_issue(&self, issue: &NewTicket<'_>) -> Result<FiledTicket, Error>;
     fn create_relation(&self, blocker: &str, waiting: &str) -> Result<String, Error>;
     fn comment_on_project(&self, project: &str, body: &str) -> Result<String, Error>;
     fn comment_on_issue(&self, issue: &str, body: &str) -> Result<String, Error>;
@@ -78,14 +78,14 @@ pub(crate) struct Opener;
 /// What [`Board::issue_project`] answers: the project, and each of its issues'
 /// workflow state by name and type.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct IssueProject {
+pub(crate) struct TicketBrief {
     pub(crate) id: String,
     pub(crate) name: String,
     pub(crate) status: Option<String>,
     pub(crate) states: Vec<(String, StateType)>,
 }
 
-impl IssueProject {
+impl TicketBrief {
     #[must_use]
     #[cfg(test)]
     pub(crate) fn new(status: &str, issues: &[(&str, &str)]) -> Self {
@@ -128,9 +128,9 @@ pub(crate) const CUT_NOTE: &str = "Warlock cut slice ";
 pub(crate) const SKIP_NOTE: &str = "Warlock skipped slice ";
 
 /// A project as [`Board::fetch_project`] reads it back, which is not the
-/// [`Project`] a create answers with: what matters about a project that already
-/// exists is what is written on it, and what matters about one that has just
-/// been made is where to find it.
+/// [`FiledBrief`] a create answers with: what matters about a project that
+/// already exists is what is written on it, and what matters about one that
+/// has just been made is where to find it.
 ///
 /// Two of these are allowed to be empty and neither is a broken answer. A
 /// project filed into a workspace with no `Backlog` has no status at all, so a
@@ -138,7 +138,7 @@ pub(crate) const SKIP_NOTE: &str = "Warlock skipped slice ";
 /// and a description can be emptied in Linear after it was filed, which the
 /// caller that parses it will refuse in its own words.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct FetchedProject {
+pub(crate) struct FetchedBrief {
     pub(crate) id: String,
     pub(crate) name: String,
     pub(crate) content: String,
@@ -147,7 +147,7 @@ pub(crate) struct FetchedProject {
     pub(crate) notes: Vec<String>,
 }
 
-impl FetchedProject {
+impl FetchedBrief {
     #[must_use]
     #[cfg(test)]
     pub(crate) fn new(
@@ -236,12 +236,12 @@ impl Listing {
 /// A scope's queue, all of it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Queue {
-    pub(crate) issues: Vec<QueuedIssue>,
+    pub(crate) issues: Vec<QueuedTicket>,
 }
 
 impl Queue {
     #[must_use]
-    pub fn new(issues: Vec<QueuedIssue>) -> Self {
+    pub fn new(issues: Vec<QueuedTicket>) -> Self {
         Self { issues }
     }
 
@@ -249,7 +249,7 @@ impl Queue {
     /// choosing is somebody else's function, and it wants the queue as the board
     /// gave it.
     #[must_use]
-    pub fn issues(&self) -> &[QueuedIssue] {
+    pub fn issues(&self) -> &[QueuedTicket] {
         &self.issues
     }
 }
@@ -263,7 +263,7 @@ impl Queue {
 /// `review_state` and `In Progress` are matched against and what a skip prints,
 /// the type is what says whether a blocker is out of the way.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct QueuedIssue {
+pub struct QueuedTicket {
     pub(crate) id: String,
     pub(crate) identifier: String,
     pub(crate) title: String,
@@ -274,7 +274,7 @@ pub struct QueuedIssue {
     pub(crate) blockers: Vec<Blocker>,
 }
 
-impl QueuedIssue {
+impl QueuedTicket {
     #[must_use]
     pub fn new(
         id: impl Into<String>,
@@ -447,18 +447,18 @@ pub enum Priority {
 /// as facts here — which is what lets a refusal name which one failed instead of
 /// saying only that the ticket is not in the queue.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct NamedIssue {
-    pub(crate) issue: QueuedIssue,
+pub(crate) struct NamedTicket {
+    pub(crate) issue: QueuedTicket,
     pub(crate) team: String,
     pub(crate) labels: Vec<String>,
     pub(crate) assignee: Option<Assignee>,
 }
 
-impl NamedIssue {
+impl NamedTicket {
     #[must_use]
     #[cfg(test)]
     pub(crate) fn new(
-        issue: QueuedIssue,
+        issue: QueuedTicket,
         team: impl Into<String>,
         labels: Vec<String>,
         assignee: Option<Assignee>,
@@ -472,14 +472,14 @@ impl NamedIssue {
     }
 
     #[must_use]
-    pub(crate) const fn issue(&self) -> &QueuedIssue {
+    pub(crate) const fn issue(&self) -> &QueuedTicket {
         &self.issue
     }
 
     /// The ticket itself, once the checks on the rest are through: what is worked
     /// is an issue and not a membership.
     #[must_use]
-    pub(crate) fn into_issue(self) -> QueuedIssue {
+    pub(crate) fn into_issue(self) -> QueuedTicket {
         self.issue
     }
 
@@ -540,7 +540,7 @@ impl Assignee {
 /// in the workspace rather than an id, because the create path is what resolves
 /// it.
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct NewProject<'a> {
+pub(crate) struct NewBrief<'a> {
     pub(crate) name: &'a str,
     pub(crate) content: &'a str,
     pub(crate) team: &'a str,
@@ -548,7 +548,7 @@ pub(crate) struct NewProject<'a> {
     pub(crate) label: &'a str,
 }
 
-impl<'a> NewProject<'a> {
+impl<'a> NewBrief<'a> {
     #[must_use]
     pub(crate) const fn new(
         name: &'a str,
@@ -606,12 +606,12 @@ impl<'a> NewProject<'a> {
 /// never lose, so it comes back from the create rather than being built from the
 /// id here.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Project {
+pub(crate) struct FiledBrief {
     pub(crate) id: String,
     pub(crate) url: String,
 }
 
-impl Project {
+impl FiledBrief {
     #[must_use]
     #[cfg(test)]
     pub(crate) fn new(id: impl Into<String>, url: impl Into<String>) -> Self {
@@ -650,7 +650,7 @@ impl Project {
 /// `label` an *issue label* id from [`Board::issue_label_id`]; neither a project
 /// status nor a project label is usable here.
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct NewIssue<'a> {
+pub(crate) struct NewTicket<'a> {
     pub(crate) title: &'a str,
     pub(crate) body: &'a str,
     pub(crate) team: &'a str,
@@ -660,7 +660,7 @@ pub(crate) struct NewIssue<'a> {
     pub(crate) assignee: &'a str,
 }
 
-impl<'a> NewIssue<'a> {
+impl<'a> NewTicket<'a> {
     #[must_use]
     pub(crate) const fn new(
         title: &'a str,
@@ -729,13 +729,13 @@ impl<'a> NewIssue<'a> {
 /// name one: the id relations are written with, the identifier a cut record
 /// stores and a person types, and the URL a failure downstream must not lose.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Issue {
+pub(crate) struct FiledTicket {
     pub(crate) id: String,
     pub(crate) identifier: String,
     pub(crate) url: String,
 }
 
-impl Issue {
+impl FiledTicket {
     #[must_use]
     #[cfg(test)]
     pub(crate) fn new(
@@ -753,7 +753,7 @@ impl Issue {
     /// An open ticket the queue listed, with the id a relation is written
     /// with: what a draft that waits on `WAR-142` is blocked by.
     #[must_use]
-    pub(crate) fn listed(open: &QueuedIssue) -> Self {
+    pub(crate) fn listed(open: &QueuedTicket) -> Self {
         Self {
             id: open.id().to_owned(),
             identifier: open.identifier().to_owned(),

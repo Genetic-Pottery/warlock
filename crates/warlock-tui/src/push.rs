@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 use warlock_engine::{Destination, Manifest, manifest_path, resolve_filing};
 
 use crate::account::size;
-use crate::board::{Board, Key, NewProject, Opener as LinearOpener, Opens};
+use crate::board::{Board, Key, NewBrief, Opener as LinearOpener, Opens};
 use crate::brief::{Brief, brief_at};
 use crate::error::{Error, files_to_linear, say};
 use crate::standing::{FOR_PUSH, Standing};
@@ -186,7 +186,7 @@ pub(crate) fn sent<W: Write>(
     let status = linear.backlog_status()?;
 
     let project = linear.create_project(
-        &NewProject::new(brief.name(), brief.content(), &team, destination.label())
+        &NewBrief::new(brief.name(), brief.content(), &team, destination.label())
             .with_status(status.as_deref()),
     )?;
 

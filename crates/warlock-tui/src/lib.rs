@@ -81,7 +81,7 @@ pub use account::Voice;
 pub use board::Error as LinearError;
 pub use board::Priority;
 pub use board::Queue;
-pub use board::QueuedIssue;
+pub use board::QueuedTicket;
 pub use board::StateType;
 pub use branch::branch_use;
 pub use branch::{branch_clear, branch_show};

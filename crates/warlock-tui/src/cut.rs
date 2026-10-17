@@ -24,7 +24,7 @@ use std::path::Path;
 use warlock_engine::drafting::{Draft, is_identifier};
 use warlock_engine::{Destination, manifest_path};
 
-use crate::board::{Board, CUT_NOTE, Issue as LinearIssue, NewIssue, SKIP_NOTE};
+use crate::board::{Board, CUT_NOTE, FiledTicket, NewTicket, SKIP_NOTE};
 use crate::error::{Error, say};
 use crate::queue::IN_PROGRESS;
 
@@ -55,11 +55,11 @@ pub(crate) struct Filing<'a> {
 pub(crate) struct Slice<'a> {
     pub(crate) title: &'a str,
     pub(crate) drafts: &'a [Draft],
-    pub(crate) needs: &'a [&'a [LinearIssue]],
+    pub(crate) needs: &'a [&'a [FiledTicket]],
     /// The tickets the drafting session was shown — the open queue and what
     /// the project's earlier slices became — which are the only ones a draft's
     /// `waits_on` can name.
-    pub(crate) open: &'a [LinearIssue],
+    pub(crate) open: &'a [FiledTicket],
 }
 
 /// What filing one slice came to: the issues created, whole rather than as
@@ -71,7 +71,7 @@ pub(crate) struct Slice<'a> {
 /// reported beside the identifiers rather than taking them down with it.
 #[derive(Debug)]
 pub(crate) struct Cut {
-    pub(crate) issues: Vec<LinearIssue>,
+    pub(crate) issues: Vec<FiledTicket>,
     /// Beside `issues`, one each: the title each was filed under.
     pub(crate) titles: Vec<String>,
     pub(crate) reported: Vec<String>,
@@ -105,7 +105,7 @@ pub(crate) fn cut<W: Write>(
         // A create that fails partway is a refusal and not a short note: a note
         // says the slice is filed, so writing one for the drafts that landed
         // would be warlock promising never to file the rest.
-        let issue = linear.create_issue(&NewIssue::new(
+        let issue = linear.create_issue(&NewTicket::new(
             &draft.title,
             &draft.body,
             &team,
@@ -262,8 +262,8 @@ pub(crate) fn settled_as(issues: &[String]) -> String {
 /// other's `blocked_by` — are one edge said twice, and Linear would take both.
 fn edges<'a>(
     slice: Slice<'a>,
-    issues: &'a [LinearIssue],
-) -> Vec<(&'a LinearIssue, &'a LinearIssue)> {
+    issues: &'a [FiledTicket],
+) -> Vec<(&'a FiledTicket, &'a FiledTicket)> {
     let mut edges = Vec::new();
 
     for (position, draft) in slice.drafts.iter().enumerate() {
@@ -303,7 +303,7 @@ fn edges<'a>(
     edges
 }
 
-fn shown<'a>(open: &'a [LinearIssue], name: &str) -> Option<&'a LinearIssue> {
+fn shown<'a>(open: &'a [FiledTicket], name: &str) -> Option<&'a FiledTicket> {
     open.iter()
         .find(|issue| issue.identifier().eq_ignore_ascii_case(name.trim()))
 }
@@ -330,7 +330,7 @@ fn unshown(slice: Slice<'_>) -> Vec<String> {
         .collect()
 }
 
-fn relate(linear: &impl Board, edges: &[(&LinearIssue, &LinearIssue)]) -> Vec<String> {
+fn relate(linear: &impl Board, edges: &[(&FiledTicket, &FiledTicket)]) -> Vec<String> {
     edges
         .iter()
         .filter_map(|(blocker, waiting)| {

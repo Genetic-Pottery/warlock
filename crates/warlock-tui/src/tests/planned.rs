@@ -18,7 +18,7 @@ const ACCEPT: &str = "create";
 
 const SKIP: &str = "quit";
 use crate::asking::Asks;
-use crate::board::{FetchedProject, Listing, Opens};
+use crate::board::{FetchedBrief, Listing, Opens};
 use crate::brief::ScopeBlockError;
 use crate::claude::{
     Activities, Cancel, Converses, DRAFTING_CONTRACT, DRAFTING_ROUNDS, NOTHING_SETTLES_IT, Wired,
@@ -44,7 +44,7 @@ const LABEL: &str = "warlock";
 
 const SLUG: &str = "1a2b3c4d5e6f";
 
-// The id `FetchedProject::new` gives the project it stands in for, which is what
+// The id `FetchedBrief::new` gives the project it stands in for, which is what
 // issues are created in and notes are said on.
 const PROJECT_ID: &str = "project-1";
 
@@ -339,13 +339,13 @@ fn a_skip(title: &str) -> String {
 // A planned project whose comments already hold these notes.
 fn a_noted_project<const N: usize>(content: &str, notes: [String; N]) -> Boarding {
     Boarding::filing("")
-        .reading(FetchedProject::new(NAME, content, URL, Some(PLANNED)).with_notes(notes))
+        .reading(FetchedBrief::new(NAME, content, URL, Some(PLANNED)).with_notes(notes))
 }
 
 // A workspace holding the one project the slug names, which answers everything
 // a run then asks for as well.
 fn a_project_of(content: &str, status: Option<&str>) -> Boarding {
-    Boarding::filing("").reading(FetchedProject::new(NAME, content, URL, status))
+    Boarding::filing("").reading(FetchedBrief::new(NAME, content, URL, status))
 }
 
 // A planned project with slices in it, which is the one answer a whole cut
@@ -2638,10 +2638,10 @@ mod editing {
 // Forman's backlog digest: the open tickets a session can name in `blocked_by`.
 mod backlog {
     use super::*;
-    use crate::board::{Priority, Queue, QueuedIssue, StateType};
+    use crate::board::{Priority, Queue, QueuedTicket, StateType};
 
-    fn open(identifier: &str, title: &str) -> QueuedIssue {
-        QueuedIssue::new(
+    fn open(identifier: &str, title: &str) -> QueuedTicket {
+        QueuedTicket::new(
             format!("id-{identifier}"),
             identifier,
             title,

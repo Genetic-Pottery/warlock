@@ -11,8 +11,8 @@ use warlock_engine::{agent, drafting, working};
 
 use crate::asking::Asks;
 use crate::board::{
-    Board, Error as LinearError, FetchedProject, Issue as LinearIssue, IssueProject, Listing,
-    NamedIssue, NewIssue, NewProject, Opens, Project as LinearProject, Queue,
+    Board, Error as LinearError, FetchedBrief, FiledBrief, FiledTicket, Listing, NamedTicket,
+    NewBrief, NewTicket, Opens, Queue, TicketBrief,
 };
 use crate::claude::{Activities, Activity, Cancel, Converses, Split, Stopped, Wired, Worked};
 use crate::clipboard::Clip;
@@ -390,10 +390,10 @@ pub(crate) struct Boarding {
     moved_to: Option<String>,
     /// What [`Board::issue_project`] answers with: `None`, an issue in no
     /// project, until a test says otherwise.
-    issue_project: Option<IssueProject>,
+    issue_project: Option<TicketBrief>,
     state: Option<String>,
     label: String,
-    project: Option<FetchedProject>,
+    project: Option<FetchedBrief>,
     /// What [`Board::planned_projects`] answers with, empty until a test says
     /// otherwise.
     listing: Listing,
@@ -405,8 +405,8 @@ pub(crate) struct Boarding {
     queue: Queue,
     /// What [`Board::named_issue`] answers with, `None` being a board that has no
     /// such ticket.
-    named: Option<NamedIssue>,
-    created: LinearProject,
+    named: Option<NamedTicket>,
+    created: FiledBrief,
     first_issue: u32,
     refusals: Vec<Refusal>,
     refusing_everything: Option<String>,
@@ -557,7 +557,7 @@ impl Boarding {
             same_name: None,
             queue: Queue::new(Vec::new()),
             named: None,
-            created: LinearProject::new("project-filed", url),
+            created: FiledBrief::new("project-filed", url),
             first_issue: 1,
             refusals: Vec::new(),
             refusing_everything: None,
@@ -574,7 +574,7 @@ impl Boarding {
         status: Option<&str>,
         content: impl Into<String>,
     ) -> Self {
-        Self::filing("").reading(FetchedProject::new(
+        Self::filing("").reading(FetchedBrief::new(
             name,
             content,
             "https://linear.app/acme/project/drafted-1a2b3c",
@@ -620,12 +620,12 @@ impl Boarding {
     /// asked: which name that was is in the recorded call, so a test asserting
     /// that `--ticket` reached the board reads it there rather than from the
     /// answer.
-    pub(crate) fn naming(mut self, named: NamedIssue) -> Self {
+    pub(crate) fn naming(mut self, named: NamedTicket) -> Self {
         self.named = Some(named);
         self
     }
 
-    pub(crate) fn reading(mut self, project: FetchedProject) -> Self {
+    pub(crate) fn reading(mut self, project: FetchedBrief) -> Self {
         self.project = Some(project);
         self
     }
@@ -643,11 +643,11 @@ impl Boarding {
     }
 
     pub(crate) fn creating_project(mut self, id: &str, url: &str) -> Self {
-        self.created = LinearProject::new(id, url);
+        self.created = FiledBrief::new(id, url);
         self
     }
 
-    pub(crate) fn in_project(mut self, project: IssueProject) -> Self {
+    pub(crate) fn in_project(mut self, project: TicketBrief) -> Self {
         self.issue_project = Some(project);
         self
     }
@@ -861,7 +861,7 @@ impl Board for Boarding {
         Ok(self.moved_to.clone())
     }
 
-    fn issue_project(&self, issue: &str) -> Result<Option<IssueProject>, LinearError> {
+    fn issue_project(&self, issue: &str) -> Result<Option<TicketBrief>, LinearError> {
         self.ask(Call::IssueProject(issue.to_owned()))?;
         Ok(self.issue_project.clone())
     }
@@ -912,7 +912,7 @@ impl Board for Boarding {
         Ok(self.label.clone())
     }
 
-    fn fetch_project(&self, slug: &str) -> Result<Option<FetchedProject>, LinearError> {
+    fn fetch_project(&self, slug: &str) -> Result<Option<FetchedBrief>, LinearError> {
         self.ask(Call::FetchProject(slug.to_owned()))?;
         Ok(self.project.clone())
     }
@@ -947,7 +947,7 @@ impl Board for Boarding {
     /// Whatever ticket the test wrote down — `None`, a board with no such ticket,
     /// being the default — and the call recorded, which is where a test reads the
     /// team and number that were asked for.
-    fn named_issue(&self, team: &str, number: u64) -> Result<Option<NamedIssue>, LinearError> {
+    fn named_issue(&self, team: &str, number: u64) -> Result<Option<NamedTicket>, LinearError> {
         self.ask(Call::NamedIssue {
             team: team.to_owned(),
             number,
@@ -955,7 +955,7 @@ impl Board for Boarding {
         Ok(self.named.clone())
     }
 
-    fn create_project(&self, project: &NewProject<'_>) -> Result<LinearProject, LinearError> {
+    fn create_project(&self, project: &NewBrief<'_>) -> Result<FiledBrief, LinearError> {
         self.ask(Call::CreateProject(ProjectAsked {
             name: project.name().to_owned(),
             content: project.content().to_owned(),
@@ -966,7 +966,7 @@ impl Board for Boarding {
         Ok(self.created.clone())
     }
 
-    fn create_issue(&self, issue: &NewIssue<'_>) -> Result<LinearIssue, LinearError> {
+    fn create_issue(&self, issue: &NewTicket<'_>) -> Result<FiledTicket, LinearError> {
         self.ask(Call::CreateIssue(IssueAsked {
             title: issue.title().to_owned(),
             body: issue.body().to_owned(),
@@ -982,7 +982,7 @@ impl Board for Boarding {
             log.issued += 1;
             number
         };
-        Ok(LinearIssue::new(
+        Ok(FiledTicket::new(
             format!("issue-{number}"),
             format!("WAR-{number}"),
             format!("https://linear.app/acme/issue/WAR-{number}"),

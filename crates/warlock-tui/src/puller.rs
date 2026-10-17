@@ -58,9 +58,8 @@ use warlock_engine::{LinearScope, Manifest, PullRun, load_key_binding};
 
 use crate::app::App;
 use crate::board::{
-    Board, Error as LinearError, FetchedProject, Issue as LinearIssue, IssueProject, Listing,
-    NamedIssue, NewIssue, NewProject, Opener as LinearOpener, Opens, Project as LinearProject,
-    Queue,
+    Board, Error as LinearError, FetchedBrief, FiledBrief, FiledTicket, Listing, NamedTicket,
+    NewBrief, NewTicket, Opener as LinearOpener, Opens, Queue, TicketBrief,
 };
 use crate::claude::{
     Activities, Activity, Cancel, CancelGuard, ChatAgent, Split, Splitting, Worked, Working,
@@ -1037,7 +1036,7 @@ impl<B: Board> Board for Quiet<B> {
         self.asked(|board| board.move_project(project, status))
     }
 
-    fn issue_project(&self, issue: &str) -> Result<Option<IssueProject>, LinearError> {
+    fn issue_project(&self, issue: &str) -> Result<Option<TicketBrief>, LinearError> {
         self.asked(|board| board.issue_project(issue))
     }
 
@@ -1057,7 +1056,7 @@ impl<B: Board> Board for Quiet<B> {
         self.asked(|board| board.issue_label_id(name, team))
     }
 
-    fn fetch_project(&self, slug: &str) -> Result<Option<FetchedProject>, LinearError> {
+    fn fetch_project(&self, slug: &str) -> Result<Option<FetchedBrief>, LinearError> {
         self.asked(|board| board.fetch_project(slug))
     }
 
@@ -1073,15 +1072,15 @@ impl<B: Board> Board for Quiet<B> {
         self.asked(|board| board.scope_queue(team, label, assignee))
     }
 
-    fn named_issue(&self, team: &str, number: u64) -> Result<Option<NamedIssue>, LinearError> {
+    fn named_issue(&self, team: &str, number: u64) -> Result<Option<NamedTicket>, LinearError> {
         self.asked(|board| board.named_issue(team, number))
     }
 
-    fn create_project(&self, project: &NewProject<'_>) -> Result<LinearProject, LinearError> {
+    fn create_project(&self, project: &NewBrief<'_>) -> Result<FiledBrief, LinearError> {
         self.asked(|board| board.create_project(project))
     }
 
-    fn create_issue(&self, issue: &NewIssue<'_>) -> Result<LinearIssue, LinearError> {
+    fn create_issue(&self, issue: &NewTicket<'_>) -> Result<FiledTicket, LinearError> {
         self.asked(|board| board.create_issue(issue))
     }
 

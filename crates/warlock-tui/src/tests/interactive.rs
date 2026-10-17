@@ -3302,7 +3302,7 @@ mod pulling {
     use super::{AT_MOST, Session, Stubbed, key, session_reading};
     use crate::account::Line;
     use crate::app::Focus;
-    use crate::board::{Assignee, NamedIssue, Priority, Queue, QueuedIssue, StateType};
+    use crate::board::{Assignee, NamedTicket, Priority, Queue, QueuedTicket, StateType};
     use crate::claude::Activity;
     use crate::confirm::Answer;
     use crate::cutting::Cutter;
@@ -3481,12 +3481,12 @@ mod pulling {
         ])
     }
 
-    fn queue(issues: impl IntoIterator<Item = QueuedIssue>) -> Queue {
+    fn queue(issues: impl IntoIterator<Item = QueuedTicket>) -> Queue {
         Queue::new(issues.into_iter().collect())
     }
 
-    fn ready() -> QueuedIssue {
-        QueuedIssue::new(
+    fn ready() -> QueuedTicket {
+        QueuedTicket::new(
             ISSUE,
             TICKET,
             TITLE,
@@ -3504,7 +3504,7 @@ mod pulling {
     }
 
     fn naming() -> Boarding {
-        Boarding::filing(URL).naming(NamedIssue::new(
+        Boarding::filing(URL).naming(NamedTicket::new(
             ready(),
             TEAM,
             vec![LABEL.to_owned()],

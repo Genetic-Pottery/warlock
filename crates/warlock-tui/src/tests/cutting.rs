@@ -15,7 +15,7 @@ use warlock_engine::{
 use super::{ALREADY_CUTTING, Cutter};
 use crate::account::Line;
 use crate::app::App;
-use crate::board::{FetchedProject, Opens};
+use crate::board::{FetchedBrief, Opens};
 use crate::claude::Converses;
 use crate::error::{Error, one_line};
 use crate::inflight::Workers;
@@ -147,11 +147,9 @@ fn a_home(root: &Path) -> TempDir {
 // would have filed them.
 fn noted(cuts: &[&str]) -> Boarding {
     Boarding::filing("").reading(
-        FetchedProject::new(NAME, SLICED, URL, Some(STATUS)).with_notes(
-            cuts.iter().enumerate().map(|(place, title)| {
-                format!("Warlock cut slice `{title}` into `WAR-{}`.", place + 1)
-            }),
-        ),
+        FetchedBrief::new(NAME, SLICED, URL, Some(STATUS)).with_notes(cuts.iter().enumerate().map(
+            |(place, title)| format!("Warlock cut slice `{title}` into `WAR-{}`.", place + 1),
+        )),
     )
 }
 

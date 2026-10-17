@@ -16,7 +16,7 @@ use warlock_engine::{
 use super::Puller;
 use crate::account::Line;
 use crate::app::App;
-use crate::board::{Assignee, NamedIssue, Priority, Queue, QueuedIssue, StateType};
+use crate::board::{Assignee, NamedTicket, Priority, Queue, QueuedTicket, StateType};
 use crate::claude::Activity;
 use crate::confirm::{Answer, PullAnswered};
 use crate::error::{Error, NO_QUEUE, one_line};
@@ -164,12 +164,12 @@ fn unasked() -> Written {
     )
 }
 
-fn queue(issues: impl IntoIterator<Item = QueuedIssue>) -> Queue {
+fn queue(issues: impl IntoIterator<Item = QueuedTicket>) -> Queue {
     Queue::new(issues.into_iter().collect())
 }
 
-fn ready() -> QueuedIssue {
-    QueuedIssue::new(
+fn ready() -> QueuedTicket {
+    QueuedTicket::new(
         ISSUE,
         TICKET,
         TITLE,
@@ -184,8 +184,8 @@ fn board(queue: Queue) -> Boarding {
     Boarding::filing(URL).queueing(queue)
 }
 
-fn named(issue: QueuedIssue) -> NamedIssue {
-    NamedIssue::new(
+fn named(issue: QueuedTicket) -> NamedTicket {
+    NamedTicket::new(
         issue,
         TEAM,
         vec![LABEL.to_owned()],

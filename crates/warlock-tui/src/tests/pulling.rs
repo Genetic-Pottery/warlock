@@ -11,7 +11,7 @@ use warlock_engine::{
 use super::{
     Error, Heading, PullEvent, Pulled, Pulling, Reached, Ticket, halt_comment, next_runnable,
 };
-use crate::board::IssueProject;
+use crate::board::TicketBrief;
 use crate::claude::{Split, Stopped, Unsplit, Worked};
 use crate::git::{
     Dirty, Finished, Repository, Touched, commit_message, pull_request_body, pull_request_title,
@@ -1466,7 +1466,7 @@ fn a_checkout_answers_a_scripted_diff_one_answer_at_a_time() {
 const REVIEWED: &str =
     "every issue in `A brief` is in review or closed, so the project moved to `In Review`";
 
-fn reviewing(project: IssueProject) -> (Boarding, Vec<PullEvent>) {
+fn reviewing(project: TicketBrief) -> (Boarding, Vec<PullEvent>) {
     let ground = Ground::new();
     let board = Boarding::filing("").in_project(project);
     let forge = Forging::opening(URL);
@@ -1480,7 +1480,7 @@ fn reviewing(project: IssueProject) -> (Boarding, Vec<PullEvent>) {
 
 #[test]
 fn the_last_ticket_of_a_drafted_project_into_review_moves_the_project() {
-    let (board, events) = reviewing(IssueProject::new(
+    let (board, events) = reviewing(TicketBrief::new(
         "In Progress",
         &[
             ("In Review", "started"),
@@ -1509,7 +1509,7 @@ fn the_last_ticket_of_a_drafted_project_into_review_moves_the_project() {
 
 #[test]
 fn a_project_with_an_issue_still_open_stays_where_it_is() {
-    let (board, events) = reviewing(IssueProject::new(
+    let (board, events) = reviewing(TicketBrief::new(
         "In Progress",
         &[("In Review", "started"), ("In Progress", "started")],
     ));
@@ -1524,7 +1524,7 @@ fn a_project_with_an_issue_still_open_stays_where_it_is() {
 
 #[test]
 fn a_project_still_being_drafted_stays_planned_whatever_its_issues_are() {
-    let (board, events) = reviewing(IssueProject::new("Planned", &[("In Review", "started")]));
+    let (board, events) = reviewing(TicketBrief::new("Planned", &[("In Review", "started")]));
 
     assert!(board.moves().is_empty());
     assert!(
@@ -1538,10 +1538,7 @@ fn a_project_still_being_drafted_stays_planned_whatever_its_issues_are() {
 fn a_workspace_with_no_review_project_status_is_a_line_and_the_pull_still_finishes() {
     let ground = Ground::new();
     let board = Boarding::filing("")
-        .in_project(IssueProject::new(
-            "In Progress",
-            &[("In Review", "started")],
-        ))
+        .in_project(TicketBrief::new("In Progress", &[("In Review", "started")]))
         .without_project_status();
     let forge = Forging::opening(URL);
     let (repo, split, sessions) = two_sub_tasks();

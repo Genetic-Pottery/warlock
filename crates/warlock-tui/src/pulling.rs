@@ -651,7 +651,7 @@ pub(crate) struct TouchedScope {
 
 /// The ticket one pull works, in what a run needs of it and nothing else.
 ///
-/// Values rather than a [`QueuedIssue`](crate::board::QueuedIssue), because the
+/// Values rather than a [`QueuedTicket`](crate::board::QueuedTicket), because the
 /// number is wanted as a number, which [`branch_name`] takes. Whoever chose the
 /// ticket supplies them, and this module asks the board for nothing about the
 /// ticket it was handed.
