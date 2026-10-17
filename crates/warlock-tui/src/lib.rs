@@ -16,6 +16,7 @@
 //! second copy of one beside the test that wants it is a duplicate.
 
 mod account;
+mod adf;
 mod app;
 mod asking;
 mod board;
@@ -78,6 +79,7 @@ mod writing;
 
 pub use account::Line;
 pub use account::Voice;
+pub use adf::document_for;
 pub use board::Error as BoardError;
 pub use board::Priority;
 pub use board::Queue;
