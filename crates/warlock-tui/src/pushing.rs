@@ -37,7 +37,7 @@ use warlock_engine::{Manifest, from_manifest_path, load_key_binding, to_manifest
 use crate::app::App;
 use crate::board::{Opener as LinearOpener, Opens};
 use crate::confirm::{PushAnswered, PushConfirm};
-use crate::error::{Error, files_to_linear, one_line};
+use crate::error::{Error, one_line};
 use crate::inflight::{Lost, Once, Workers, settled};
 use crate::prompt::KeyPrompt;
 use crate::push::{Prepared, file, prepare};
@@ -265,13 +265,6 @@ impl<O: Opens> Pushes<O> {
         };
 
         let path = from_manifest_path(repo_root, &brief);
-        // Before the binding is read and before anything is parked behind the
-        // key window: a scope warlock cannot file to is a line on the thread,
-        // and asking somebody to bind a key for a push that can only be refused
-        // would be a window spent on a question that does not matter.
-        if let Err(error) = files_to_linear(manifest, scope) {
-            return Next::Window(saying(app, one_line(error), now));
-        }
         // After the home, which is where the config sits, and before `prepare`,
         // which is what resolves the key: a scope bound to nothing gets the
         // question rather than the refusal.

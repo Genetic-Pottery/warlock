@@ -1,6 +1,9 @@
 use std::fmt;
 
-use warlock_engine::ScopeRecord;
+use warlock_engine::{FiledTo, ScopeRecord};
+
+use crate::jira::{self, Jira};
+use crate::linear::{self, Linear, Resolved};
 
 /// A key value held for a run that opens a board later, on a worker.
 ///
@@ -141,8 +144,7 @@ pub(crate) trait Board {
 /// caller resolved.
 ///
 /// Infallible, so a record naming a board this opener cannot speak to is a
-/// refusal a verb answers with rather than one open can raise. Every caller
-/// refuses such a scope before it opens anything.
+/// refusal a verb answers with rather than one open can raise.
 ///
 /// The bounds are what the panel's workers need. A board is built from a record
 /// and a key borrowed for as long as the target lives and is then owned by a
@@ -158,10 +160,181 @@ pub(crate) trait Opens: Clone + Send + 'static {
 /// The one [`Opens`] that opens a socket, and the only value in warlock that
 /// does. Holds nothing: a board is built per request run, from a record and a
 /// key read on one line and dropped with whatever used it.
-///
-/// The impl is in `linear.rs`, beside the [`Board`] it answers with.
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct Opener;
+
+impl Opens for Opener {
+    type Board = Boards;
+
+    /// The client from the key and the destination from the record, which is
+    /// the whole of what a board is built from: the record is cloned because
+    /// the board outlives the manifest it was read from, and the Jira client
+    /// takes the site off it as well, because a project key means nothing
+    /// without the site it is a key on.
+    ///
+    /// The tracker is the only thing read here. Whether the key is this board's
+    /// is the board's own business — the store judges nothing on the way in and
+    /// this cannot fail — so a Linear key recorded against a Jira scope is a
+    /// refusal the first request answers with.
+    fn open(&self, record: &ScopeRecord, key: &str) -> Boards {
+        match record.filed_to() {
+            FiledTo::Linear => {
+                Boards::Linear(Linear::new(linear::Client::new(key), record.clone()))
+            }
+            FiledTo::Jira { base_url, .. } => {
+                Boards::Jira(Jira::new(jira::Client::new(base_url, key), record.clone()))
+            }
+        }
+    }
+}
+
+/// The [`Board`] [`Opener`] answers with: whichever of the two warlock speaks
+/// to, chosen once from the record and held for the run.
+///
+/// An enum and not a `Box<dyn Board>`. [`Filing`](Board::Filing) is an
+/// associated type and [`NAME`](Board::NAME) an associated const, so the trait
+/// is not object-safe, and the change that would make it so is erasing the
+/// filing — the one thing on this seam that is a board's own protocol, and the
+/// reason a cut can carry a value it has no method to read.
+#[derive(Debug)]
+pub(crate) enum Boards {
+    Linear(Linear<linear::Client>),
+    Jira(Jira<jira::Client>),
+}
+
+impl Board for Boards {
+    /// Not a vendor's name: an associated const cannot vary with the variant,
+    /// and what reads this is the cancel gate in `puller.rs`, whose sentence is
+    /// about a request that was never sent — no socket was opened, so there is
+    /// no vendor in it to name.
+    const NAME: &'static str = "the board";
+
+    /// Linear's, which is every filing there is: the Jira board settles `()`
+    /// and refuses the verb that would answer one.
+    type Filing = Resolved;
+
+    fn viewer(&self) -> Result<String, Error> {
+        match self {
+            Self::Linear(board) => board.viewer(),
+            Self::Jira(board) => board.viewer(),
+        }
+    }
+
+    fn move_brief(&self, project: &str, status: &str) -> Result<bool, Error> {
+        match self {
+            Self::Linear(board) => board.move_brief(project, status),
+            Self::Jira(board) => board.move_brief(project, status),
+        }
+    }
+
+    fn ticket_brief(&self, issue: &str) -> Result<Option<TicketBrief>, Error> {
+        match self {
+            Self::Linear(board) => board.ticket_brief(issue),
+            Self::Jira(board) => board.ticket_brief(issue),
+        }
+    }
+
+    fn move_ticket(&self, issue: &str, status: &str) -> Result<bool, Error> {
+        match self {
+            Self::Linear(board) => board.move_ticket(issue, status),
+            Self::Jira(board) => board.move_ticket(issue, status),
+        }
+    }
+
+    fn fetch_brief(&self, slug: &str) -> Result<Option<FetchedBrief>, Error> {
+        match self {
+            Self::Linear(board) => board.fetch_brief(slug),
+            Self::Jira(board) => board.fetch_brief(slug),
+        }
+    }
+
+    fn planned_briefs(&self) -> Result<Listing, Error> {
+        match self {
+            Self::Linear(board) => board.planned_briefs(),
+            Self::Jira(board) => board.planned_briefs(),
+        }
+    }
+
+    fn brief_named(&self, name: &str) -> Result<Option<String>, Error> {
+        match self {
+            Self::Linear(board) => board.brief_named(name),
+            Self::Jira(board) => board.brief_named(name),
+        }
+    }
+
+    fn scope_queue(&self, assignee: &str) -> Result<Queue, Error> {
+        match self {
+            Self::Linear(board) => board.scope_queue(assignee),
+            Self::Jira(board) => board.scope_queue(assignee),
+        }
+    }
+
+    fn named_ticket(&self, number: u64) -> Result<Option<NamedTicket>, Error> {
+        match self {
+            Self::Linear(board) => board.named_ticket(number),
+            Self::Jira(board) => board.named_ticket(number),
+        }
+    }
+
+    fn create_brief(&self, project: &NewBrief<'_>) -> Result<Option<FiledBrief>, Error> {
+        match self {
+            Self::Linear(board) => board.create_brief(project),
+            Self::Jira(board) => board.create_brief(project),
+        }
+    }
+
+    fn ticket_filing(&self) -> Result<Filable<Resolved>, Error> {
+        match self {
+            Self::Linear(board) => board.ticket_filing(),
+            // The Jira arm's `Ready` is out of reach: that board refuses this
+            // verb, and were it to answer, its `()` is nothing a [`Resolved`]
+            // can be made from. Folded into the absence rather than left to a
+            // panic — and the slice that teaches Jira to settle a filing has to
+            // give this enum a filing of its own, because a destination that is
+            // there and arrives here as one that is not would stop a cut with
+            // words about the manifest.
+            Self::Jira(board) => Ok(match board.ticket_filing()? {
+                Filable::Ready(()) | Filable::NoDestination => Filable::NoDestination,
+                Filable::NoColumn => Filable::NoColumn,
+            }),
+        }
+    }
+
+    fn create_ticket(
+        &self,
+        issue: &NewTicket<'_>,
+        filing: &Resolved,
+    ) -> Result<FiledTicket, Error> {
+        match self {
+            Self::Linear(board) => board.create_ticket(issue, filing),
+            // The filing is unread on the way through, as it is everywhere else
+            // on this seam: this board settles nothing, so there is nothing of
+            // Linear's for it to be handed.
+            Self::Jira(board) => board.create_ticket(issue, &()),
+        }
+    }
+
+    fn create_relation(&self, blocker: &str, waiting: &str) -> Result<String, Error> {
+        match self {
+            Self::Linear(board) => board.create_relation(blocker, waiting),
+            Self::Jira(board) => board.create_relation(blocker, waiting),
+        }
+    }
+
+    fn comment_on_brief(&self, project: &str, body: &str) -> Result<String, Error> {
+        match self {
+            Self::Linear(board) => board.comment_on_brief(project, body),
+            Self::Jira(board) => board.comment_on_brief(project, body),
+        }
+    }
+
+    fn comment_on_ticket(&self, issue: &str, body: &str) -> Result<String, Error> {
+        match self {
+            Self::Linear(board) => board.comment_on_ticket(issue, body),
+            Self::Jira(board) => board.comment_on_ticket(issue, body),
+        }
+    }
+}
 
 /// What [`Board::ticket_brief`] answers: the project, and each of its issues'
 /// workflow state by name and type.
@@ -916,10 +1089,12 @@ pub enum Error {
     /// none to read there. Warlock's own word, as [`Stopped`](Self::Stopped)
     /// is.
     ///
-    /// Out of reach through warlock's own verbs, each of which refuses a scope
-    /// it cannot file to before it opens anything. It is a refusal here and not
-    /// a panic because [`Opens::open`] cannot fail, so the check cannot live
-    /// where the board is built.
+    /// Out of reach through [`Opener`], which reads the record's tracker and
+    /// builds the variant it names, so the board and the record it holds agree
+    /// by construction. It is a refusal here and not a panic because
+    /// [`Opens::open`] cannot fail, so the check cannot live where the board is
+    /// built: the verb that goes to read the destination is the first thing
+    /// that could see a mismatch, and a request not made is worth a sentence.
     Elsewhere {
         board: &'static str,
         scope: String,
@@ -1017,3 +1192,7 @@ impl std::error::Error for Error {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "tests/board.rs"]
+mod tests;

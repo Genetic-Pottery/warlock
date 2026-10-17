@@ -27,7 +27,7 @@ use crate::cut::noted;
 use crate::error::Error;
 use crate::error::status_for;
 use crate::standing::Standing;
-use crate::stubs::{Answering, Boarding, Call, Op, Saying, Scripted, Typing, VIEWER};
+use crate::stubs::{Answering, Boarding, Call, Op, Opening, Saying, Scripted, Typing, VIEWER};
 
 // Not a key, and named so that nothing reading this file mistakes it for one.
 // It is stored only so that a bound name resolves and a cut can reach the
@@ -264,10 +264,10 @@ fn a_record(name: &str, team: &str) -> ScopeRecord {
     ScopeRecord::new(name, team, "In Review", LABEL)
 }
 
-// A record of the one shape warlock cannot read a board for, under the name
-// every fixture above records as a Linear one: the tracker is the only thing
-// that differs, so the refusals below are about that and not about a scope
-// spelled differently or a key nobody bound.
+// A record filing to Jira, under the name every fixture above records as a
+// Linear one: the tracker is the only thing that differs, so the refusal it
+// draws is about the board and not about a scope spelled differently or a key
+// nobody bound.
 fn a_jira_record(name: &str) -> ScopeRecord {
     ScopeRecord::jira(
         name,
@@ -283,13 +283,6 @@ fn a_jira_repository() -> TempDir {
     let repo = a_repository();
     saving(repo.path(), &a_manifest([a_jira_record(SCOPE)]));
     repo
-}
-
-// The sentence `warlock-engine` words for a record that files somewhere else,
-// spelled out because nothing outside that crate can build the refusal to ask
-// it: this is the line somebody at a shell reads.
-fn not_linear(scope: &str) -> String {
-    format!("`{scope}` files to Jira, and warlock can only file to Linear, so nothing was sent")
 }
 
 fn saving(root: &Path, manifest: &Manifest) {
@@ -998,27 +991,32 @@ mod listing {
     }
 
     #[test]
-    fn a_jira_scope_is_refused_before_a_board_is_opened_and_lists_nothing() {
-        // The client panics if it is opened at all, so the key store being read
-        // and a listing being asked for are the failure here rather than
-        // something asserted afterwards.
+    fn a_jira_scope_is_refused_by_the_board_verb_s_own_sentence_with_nothing_sent() {
         let repo = a_jira_repository();
         let home = a_home(repo.path());
         let standing = Standing::at(repo.path().to_path_buf(), repo.path().to_path_buf());
-        let linear = Boarding::unopened();
+        // Nothing written down, so a request that reached the transport panics
+        // the stand-in rather than being asserted about afterwards.
+        let jira = Opening::answering([]);
 
         let error = listing(
             &standing.manifest().expect("a manifest"),
             repo.path(),
             home.path(),
             SCOPE,
-            &linear,
+            &jira,
         )
         .expect_err("a scope that files to Jira");
 
-        assert!(matches!(error, Error::NotLinear { .. }), "{error:?}");
-        assert_eq!(said(&error), not_linear(SCOPE));
-        assert!(linear.calls().is_empty(), "{:?}", linear.calls());
+        // The board's own refusal for a verb no slice has written for it, and
+        // not a door check ahead of the board: the key was read and a client
+        // built, and the first call is what refused.
+        assert_eq!(
+            said(&error),
+            "warlock cannot list the planned briefs on a Jira scope yet, so nothing was sent"
+        );
+        assert_eq!(jira.opened_with(), [NOT_A_KEY]);
+        assert!(jira.made().is_empty(), "{:?}", jira.made());
     }
 
     #[test]
@@ -1302,25 +1300,6 @@ mod headless {
         assert!(printed.is_empty(), "a refusal printed something: {printed}");
         let error = refusal(outcome);
         assert!(matches!(error, Error::NotPlanned { .. }), "{error:?}");
-    }
-
-    #[test]
-    fn a_draft_of_a_jira_scope_is_refused_with_no_key_read_and_nothing_created() {
-        let repo = a_jira_repository();
-        let home = a_home(repo.path());
-        let linear = Boarding::unopened();
-
-        let (outcome, printed) = cut_to(repo.path(), home.path(), SLUG, None, false, &linear);
-
-        assert!(printed.is_empty(), "a refusal printed something: {printed}");
-        let error = refusal(outcome);
-        assert!(matches!(error, Error::NotLinear { .. }), "{error:?}");
-        assert_eq!(said(&error), not_linear(SCOPE));
-        assert!(
-            linear.tickets_created().is_empty(),
-            "a refused draft created an issue"
-        );
-        assert!(linear.calls().is_empty(), "{:?}", linear.calls());
     }
 
     #[test]

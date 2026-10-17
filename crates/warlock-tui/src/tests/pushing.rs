@@ -74,32 +74,6 @@ fn a_manifest() -> Manifest {
     .with_scopes([a_record(SCOPE, TEAM), a_record(OTHER_SCOPE, OTHER_TEAM)])
 }
 
-// The same two scopes with the one the commands below name recording the board
-// warlock cannot file to: the tracker is the only thing that differs from
-// `a_manifest`, so what the refusal is about is that and not a scope spelled
-// differently or a key nobody bound.
-fn a_jira_manifest() -> Manifest {
-    Manifest::with_directories([ScopedDirectory::new(".", "docs", SCOPE)
-        .expect("a relative module path is inside the root")])
-    .with_scopes([
-        ScopeRecord::jira(
-            SCOPE,
-            "https://acme.atlassian.net",
-            "PAY",
-            "In Review",
-            LABEL,
-        ),
-        a_record(OTHER_SCOPE, OTHER_TEAM),
-    ])
-}
-
-// The sentence `warlock-engine` words for a record that files somewhere else,
-// spelled out because nothing outside that crate can build the refusal to ask
-// it: this is the line a reader sees on the thread.
-fn not_linear(scope: &str) -> String {
-    format!("`{scope}` files to Jira, and warlock can only file to Linear, so nothing was sent")
-}
-
 // A repository with the manifest saved and the brief on disk.
 fn a_repository() -> TempDir {
     let repo = a_dir();
@@ -306,39 +280,6 @@ fn every_refusal_is_push_rs_own_line_on_the_thread_with_no_window_up() {
         );
         assert_eq!(pushing, Pushing::closed(), "a refusal put a window up");
     }
-}
-
-#[test]
-fn a_push_of_a_jira_scope_is_one_line_with_no_question_asked_and_nothing_parked() {
-    // The home binds nothing, which is the road that would otherwise put the key
-    // window up and park the push behind it: the tracker is read before that, so
-    // what comes back is the refusal and no question at all. The client panics if
-    // it is opened, so reaching a board is the failure rather than something
-    // asserted afterwards.
-    let repo = a_repository();
-    let home = an_unbound_home(repo.path());
-    let mut app = App::default();
-    let linear = Boarding::unopened();
-    let mut pushes = Pushes::with_client(linear.clone(), Some(home.path().to_path_buf()));
-
-    let prompt = pushes.press(
-        &mut app,
-        &a_jira_manifest(),
-        repo.path(),
-        SCOPE,
-        WRITTEN,
-        now(),
-    );
-
-    assert_eq!(notes(&app), vec![not_linear(SCOPE)]);
-    assert_eq!(prompt, KeyPrompt::Closed, "a refused push asked for a key");
-    assert!(pushes.parked.is_none(), "a refused push was parked");
-    assert_eq!(pushes.window, Pushing::closed(), "a dialog came up");
-    assert!(!pushes.sending(), "something was sent");
-    assert!(
-        linear.briefs_created().is_empty(),
-        "a refused push created a project"
-    );
 }
 
 // The manifest-relative spelling is resolved against the repository root and
