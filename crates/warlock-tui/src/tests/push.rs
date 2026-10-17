@@ -13,7 +13,7 @@ use crate::brief::{Brief, brief_at};
 use crate::error::Error;
 use crate::error::status_for;
 use crate::standing::Standing;
-use crate::stubs::{Boarding, Call, Op, ProjectAsked};
+use crate::stubs::{Boarding, BriefAsked, Call, Op};
 
 // Not a key, and named so that nothing reading this file mistakes it for one.
 // It is stored only so that a bound name resolves and a push can reach the
@@ -185,7 +185,7 @@ fn said(error: &Error) -> String {
 // of the brief's name, and creates the project at the address these tests
 // expect.
 fn a_whole_push() -> Boarding {
-    Boarding::filing(URL).creating_project(PROJECT_ID, URL)
+    Boarding::filing(URL).creating_brief(PROJECT_ID, URL)
 }
 
 fn brief_here(root: &Path) -> Brief {
@@ -224,16 +224,11 @@ fn a_push_asks_for_the_team_then_the_name_then_the_status_before_it_creates_anyt
     outcome.expect("a repository, a board and a brief are a push");
     // The value out of the key store reached the one line that reads it.
     assert_eq!(linear.opened_with(), [NOT_A_KEY]);
-    // The label is `create_project`'s own first request, so it is not asked for
+    // The label is `create_brief`'s own first request, so it is not asked for
     // here: see `linear.rs`, whose tests hold the label ahead of the create.
     assert_eq!(
         linear.ops(),
-        [
-            Op::Team,
-            Op::ProjectNamed,
-            Op::BacklogStatus,
-            Op::CreateProject
-        ],
+        [Op::Team, Op::BriefNamed, Op::BacklogStatus, Op::CreateBrief],
     );
     assert!(printed.contains(URL), "{printed}");
 }
@@ -249,7 +244,7 @@ fn the_name_asked_about_is_the_brief_s_title_in_the_scope_s_team() {
         .expect("a push");
 
     assert!(
-        linear.calls().contains(&Call::ProjectNamed {
+        linear.calls().contains(&Call::BriefNamed {
             team: TEAM.to_owned(),
             name: TITLE.to_owned(),
         }),
@@ -273,8 +268,8 @@ fn a_project_of_the_same_name_is_refused_with_its_url_and_nothing_is_created() {
         "{error:?}"
     );
     assert!(said(&error).contains(EARLIER), "{}", said(&error));
-    assert_eq!(linear.ops(), [Op::Team, Op::ProjectNamed]);
-    assert!(linear.projects_created().is_empty());
+    assert_eq!(linear.ops(), [Op::Team, Op::BriefNamed]);
+    assert!(linear.briefs_created().is_empty());
     assert!(printed.is_empty(), "{printed}");
 }
 
@@ -325,8 +320,8 @@ fn the_create_carries_the_brief_the_team_and_the_status_that_were_resolved_for_i
         .expect("a push");
 
     assert_eq!(
-        linear.projects_created(),
-        [ProjectAsked {
+        linear.briefs_created(),
+        [BriefAsked {
             name: TITLE.to_owned(),
             // The body is the file's own bytes.
             content: brief_here(repo.path()).content().to_owned(),
@@ -448,7 +443,7 @@ fn a_push_to_a_jira_scope_is_refused_with_no_key_read_and_nothing_created() {
     assert_eq!(said(&error), not_linear(SCOPE));
     assert!(printed.is_empty(), "a refusal printed something: {printed}");
     assert!(
-        linear.projects_created().is_empty(),
+        linear.briefs_created().is_empty(),
         "a refused push created a project"
     );
     assert!(linear.calls().is_empty(), "{:?}", linear.calls());
@@ -673,14 +668,14 @@ fn a_team_key_linear_does_not_know_names_the_value_and_the_file_it_is_written_in
 
 #[test]
 fn a_label_that_will_not_resolve_stops_before_the_project_rather_than_after_it() {
-    // The label is `create_project`'s own first request (see `linear.rs`, whose
+    // The label is `create_brief`'s own first request (see `linear.rs`, whose
     // tests hold that order), so there is no create that landed for a failing
     // label to be missing from. What the push can honestly report of a
-    // `create_project` that failed is that nothing was created and there is no
+    // `create_brief` that failed is that nothing was created and there is no
     // URL — which is what this asserts.
     let repo = a_repository();
     let home = a_home(repo.path());
-    let linear = a_whole_push().refuse(Op::CreateProject, "Entity not found");
+    let linear = a_whole_push().refuse(Op::CreateBrief, "Entity not found");
 
     let (outcome, printed) = push_to(repo.path(), home.path(), SCOPE, BRIEF_PATH, false, &linear);
 

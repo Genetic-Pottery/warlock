@@ -41,9 +41,7 @@ use warlock_engine::drafting::{self, Draft};
 use warlock_engine::{Destination, Manifest, agent, resolve_filing};
 
 use crate::asking::{self, Asks};
-use crate::board::{
-    Board, Issue as LinearIssue, Key, Listing, Opener as LinearOpener, Opens, QueuedIssue,
-};
+use crate::board::{Board, FiledTicket, Key, Listing, Opener as LinearOpener, Opens, QueuedTicket};
 use crate::brief::{Slice, scope_block_in};
 use crate::claude::{
     Activities, ChatAgent, Converses, Drafted, Drafting, NOTHING_SETTLES_IT, Replied,
@@ -294,7 +292,7 @@ pub(crate) fn listing<O: Opens>(
     let destination = target.destination()?;
     let listing = open
         .open(target.value())
-        .planned_projects(destination.team_key(), destination.label())?;
+        .planned_briefs(destination.team_key(), destination.label())?;
 
     Ok((destination, listing))
 }
@@ -665,14 +663,14 @@ pub(crate) struct Planned {
     settled: Vec<Option<bool>>,
     // The open tickets the scope's queue held when the run started: Forman's
     // backlog digest, and what a draft's `waits_on` resolves against.
-    open: Vec<QueuedIssue>,
+    open: Vec<QueuedTicket>,
     // One entry per slice of the *document*, indexed by position: what a
     // `depends_on` names is a position. Seeded from the cut notes, so a slice
     // an earlier run filed can still be named as a blocker, and filled as this
     // run's slices settle. Empty is "nothing this run can name as a blocker",
     // and an empty entry is left out of a cut's `needs` rather than written as
     // an edge to nothing.
-    became: Vec<Vec<LinearIssue>>,
+    became: Vec<Vec<FiledTicket>>,
     // Beside `became`, the title each of this run's issues was filed under. An
     // earlier run's are unknown, since a cut note keeps only identifiers.
     titled: Vec<Vec<String>>,
@@ -712,7 +710,7 @@ pub(crate) fn prepare<O: Opens>(
     let assignee = board.viewer()?;
 
     let project = board
-        .fetch_project(slug)?
+        .fetch_brief(slug)?
         .ok_or_else(|| Error::UnknownProject {
             slug: slug.to_owned(),
             scope: scope.to_owned(),
@@ -792,7 +790,7 @@ impl Planned {
     pub(crate) fn drafting_brief(&self) -> String {
         let mut sections = vec![self.brief.trim_end().to_owned()];
 
-        let mut open: Vec<&QueuedIssue> = self.open.iter().collect();
+        let mut open: Vec<&QueuedTicket> = self.open.iter().collect();
         if !open.is_empty() {
             open.sort_by_key(|issue| natural(issue.identifier()));
             let rows: Vec<String> = open
@@ -962,7 +960,7 @@ impl Planned {
             open: self
                 .open
                 .iter()
-                .map(LinearIssue::listed)
+                .map(FiledTicket::listed)
                 .chain(self.became.iter().flatten().cloned())
                 .collect(),
             finishes: self.finishes(next),
@@ -997,10 +995,10 @@ fn at(slice: &Slice) -> usize {
     slice.position().saturating_sub(1)
 }
 
-fn recorded(issues: &[String]) -> Vec<LinearIssue> {
+fn recorded(issues: &[String]) -> Vec<FiledTicket> {
     issues
         .iter()
-        .map(|issue| LinearIssue::recorded(issue))
+        .map(|issue| FiledTicket::recorded(issue))
         .collect()
 }
 
@@ -1049,8 +1047,8 @@ pub(crate) struct Filing {
     assignee: String,
     title: String,
     drafts: Vec<Draft>,
-    needs: Vec<Vec<LinearIssue>>,
-    open: Vec<LinearIssue>,
+    needs: Vec<Vec<FiledTicket>>,
+    open: Vec<FiledTicket>,
     finishes: bool,
 }
 
@@ -1059,7 +1057,7 @@ impl Filing {
     // `io::sink` for the panel, which words its own beside the slice they are
     // about.
     pub(crate) fn file<O: Opens, W: Write>(&self, open: &O, out: &mut W) -> Result<Cut, Error> {
-        let needs: Vec<&[LinearIssue]> = self.needs.iter().map(Vec::as_slice).collect();
+        let needs: Vec<&[FiledTicket]> = self.needs.iter().map(Vec::as_slice).collect();
         let board = open.open(self.value.as_str());
 
         let mut cut = cut::cut(

@@ -8,7 +8,7 @@ use warlock_engine::{
 };
 
 use super::{Ports, Prepared, Progress, Shared, held, prepare, pulled, shared};
-use crate::board::{Assignee, Blocker, NamedIssue, Priority, Queue, QueuedIssue, StateType};
+use crate::board::{Assignee, Blocker, NamedTicket, Priority, Queue, QueuedTicket, StateType};
 use crate::claude::Activity;
 use crate::error::status_for;
 use crate::error::{Error, NO_QUEUE};
@@ -146,8 +146,8 @@ impl Ground {
     }
 }
 
-fn issue(identifier: &str, title: &str, state: &str, kind: &str) -> QueuedIssue {
-    QueuedIssue::new(
+fn issue(identifier: &str, title: &str, state: &str, kind: &str) -> QueuedTicket {
+    QueuedTicket::new(
         format!("issue-{}", identifier.to_lowercase()),
         identifier,
         title,
@@ -160,8 +160,8 @@ fn issue(identifier: &str, title: &str, state: &str, kind: &str) -> QueuedIssue 
 
 /// The ticket every full run below works: `In Progress` is not it — a fresh
 /// ticket sits in an unstarted state and nothing on this machine holds a run.
-fn ready() -> QueuedIssue {
-    QueuedIssue::new(
+fn ready() -> QueuedTicket {
+    QueuedTicket::new(
         ISSUE,
         TICKET,
         TITLE,
@@ -172,8 +172,8 @@ fn ready() -> QueuedIssue {
     )
 }
 
-fn blocked(identifier: &str, by: &str, holder: Option<&str>) -> QueuedIssue {
-    QueuedIssue::new(
+fn blocked(identifier: &str, by: &str, holder: Option<&str>) -> QueuedTicket {
+    QueuedTicket::new(
         format!("issue-{}", identifier.to_lowercase()),
         identifier,
         "Something waiting",
@@ -184,7 +184,7 @@ fn blocked(identifier: &str, by: &str, holder: Option<&str>) -> QueuedIssue {
     )
 }
 
-fn queue(issues: impl IntoIterator<Item = QueuedIssue>) -> Queue {
+fn queue(issues: impl IntoIterator<Item = QueuedTicket>) -> Queue {
     Queue::new(issues.into_iter().collect())
 }
 
@@ -193,8 +193,8 @@ fn board(queue: Queue) -> Boarding {
     Boarding::filing(URL).queueing(queue)
 }
 
-fn named(issue: QueuedIssue) -> NamedIssue {
-    NamedIssue::new(
+fn named(issue: QueuedTicket) -> NamedTicket {
+    NamedTicket::new(
         issue,
         TEAM,
         vec![LABEL.to_owned()],

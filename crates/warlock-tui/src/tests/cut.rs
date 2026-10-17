@@ -5,10 +5,10 @@ use warlock_engine::Destination;
 use warlock_engine::drafting::Draft;
 
 use super::{Cut, Filing, Slice, cut, cut_note, fold_title, noted, quoted, skip};
-use crate::board::{Board, Issue as LinearIssue};
+use crate::board::{Board, FiledTicket};
 use crate::error::Error;
 use crate::error::status_for;
-use crate::stubs::{Boarding, Call, IssueAsked, Op, VIEWER};
+use crate::stubs::{Boarding, Call, Op, TicketAsked, VIEWER};
 
 const SCOPE: &str = "warlock-team";
 
@@ -93,7 +93,7 @@ fn cut_after(
     linear: &impl Board,
     title: &str,
     drafts: &[Draft],
-    needs: &[&[LinearIssue]],
+    needs: &[&[FiledTicket]],
 ) -> (Result<Cut, Error>, String) {
     let mut out = Vec::new();
     let outcome = cut(
@@ -168,7 +168,7 @@ fn filed(outcome: Result<Cut, Error>) -> Vec<String> {
         .collect()
 }
 
-fn issues_of(outcome: Result<Cut, Error>) -> Vec<LinearIssue> {
+fn issues_of(outcome: Result<Cut, Error>) -> Vec<FiledTicket> {
     outcome.expect("a slice that files").issues
 }
 
@@ -191,7 +191,7 @@ fn notes_of(linear: &Boarding) -> Vec<String> {
 // conversation the slice under test has is only its own. This is the road the
 // issues of a `depends_on` arrive by: they are kept from the cut that made
 // them, because a note holds identifiers and a relation is written by id.
-fn an_earlier_slice(repo: &Path) -> Vec<LinearIssue> {
+fn an_earlier_slice(repo: &Path) -> Vec<FiledTicket> {
     let linear = Boarding::filing("").numbering_from(100);
 
     let outcome = cut_into(
@@ -218,9 +218,9 @@ fn a_slice_becomes_one_issue_per_draft_and_one_note() {
         [
             Op::Team,
             Op::BacklogState,
-            Op::IssueLabel,
-            Op::CreateIssue,
-            Op::CreateIssue,
+            Op::TicketLabel,
+            Op::CreateTicket,
+            Op::CreateTicket,
             Op::Comment
         ],
         "one call per operation, one create per draft, one note, and no retry"
@@ -242,7 +242,7 @@ fn each_issue_carries_the_scope_records_team_the_project_and_the_backlog_state()
         .0
         .expect("a slice that files");
 
-    let issue = |title: &str, body: &str| IssueAsked {
+    let issue = |title: &str, body: &str| TicketAsked {
         title: title.to_owned(),
         body: body.to_owned(),
         team: "team-1".to_owned(),
@@ -252,7 +252,7 @@ fn each_issue_carries_the_scope_records_team_the_project_and_the_backlog_state()
         assignee: VIEWER.to_owned(),
     };
     assert_eq!(
-        linear.issues_created(),
+        linear.tickets_created(),
         [
             issue("Read the file off disk", "The bytes, whole."),
             issue("Fold its title", "Lowercased, collapsed."),
@@ -272,7 +272,7 @@ fn the_assignee_the_filing_carries_reaches_every_create_and_is_not_asked_for_her
 
     cut_assigning(repo.path(), &linear, "user-somebody-else").expect("a slice that files");
 
-    let issues = linear.issues_created();
+    let issues = linear.tickets_created();
     assert_eq!(issues.len(), 2, "{issues:?}");
     for issue in &issues {
         assert_eq!(issue.assignee, "user-somebody-else", "{issue:?}");
@@ -296,17 +296,17 @@ fn the_label_is_resolved_as_an_issue_label_and_not_as_a_project_label() {
     // Resolved on the team, by the name the scope record gives. That the issue
     // label queries never reach the project label ones is `linear.rs`'s to
     // hold; what a cut can do wrong is resolve the label as a project's, which
-    // only `create_project` does.
+    // only `create_brief` does.
     let calls = linear.calls();
     assert!(
-        calls.contains(&Call::IssueLabel {
+        calls.contains(&Call::TicketLabel {
             name: LABEL.to_owned(),
             team: "team-1".to_owned(),
         }),
         "{calls:?}"
     );
     assert!(
-        !linear.ops().contains(&Op::CreateProject),
+        !linear.ops().contains(&Op::CreateBrief),
         "a project label's id is not usable by an issue: {calls:?}"
     );
 }
@@ -321,7 +321,7 @@ fn the_label_the_board_answers_is_the_one_every_issue_carries() {
     let outcome = cut_into(repo.path(), &linear, TITLE, &two_drafts()[..1]).0;
 
     assert_eq!(filed(outcome), ["WAR-125"]);
-    assert_eq!(linear.issues_created()[0].label, "label-made");
+    assert_eq!(linear.tickets_created()[0].label, "label-made");
 }
 
 #[test]
@@ -336,9 +336,9 @@ fn a_team_with_no_backlog_state_is_refused_naming_the_team() {
         "{error:?}"
     );
     assert!(
-        linear.issues_created().is_empty(),
+        linear.tickets_created().is_empty(),
         "an issue was created: {:?}",
-        linear.issues_created()
+        linear.tickets_created()
     );
     let message = said(&error);
     assert!(message.contains(TEAM), "{message}");
@@ -377,7 +377,7 @@ fn an_unknown_team_is_refused_before_anything_is_created() {
 #[test]
 fn a_create_that_fails_partway_notes_nothing() {
     let repo = a_repository();
-    let linear = a_whole_cut().refuse_from(Op::CreateIssue, 1, "Entity not found");
+    let linear = a_whole_cut().refuse_from(Op::CreateTicket, 1, "Entity not found");
 
     let error = refusal(cut_into(repo.path(), &linear, TITLE, &two_drafts()).0);
 
@@ -435,7 +435,7 @@ fn every_issue_exists_before_the_first_relation_is_written() {
     .0;
 
     assert_eq!(filed(outcome), ["WAR-125", "WAR-126", "WAR-127"]);
-    let creates = linear.positions_of(Op::CreateIssue);
+    let creates = linear.positions_of(Op::CreateTicket);
     let relations = linear.positions_of(Op::Relation);
     assert_eq!(creates.len(), 3, "{creates:?}");
     assert_eq!(relations.len(), 5, "{relations:?}");
@@ -520,7 +520,7 @@ fn a_refused_relation_is_a_reported_line_and_the_slice_still_files() {
     else {
         panic!("a refused edge failed the slice: {outcome:?}");
     };
-    let identifiers: Vec<&str> = issues.iter().map(LinearIssue::identifier).collect();
+    let identifiers: Vec<&str> = issues.iter().map(FiledTicket::identifier).collect();
     assert_eq!(identifiers, ["WAR-125", "WAR-126"]);
     assert_eq!(reported.len(), 1, "{reported:?}");
     assert!(reported[0].contains("`WAR-125`"), "{}", reported[0]);
@@ -659,7 +659,7 @@ fn a_draft_waiting_on_an_open_ticket_it_was_shown_is_blocked_by_it_and_no_other(
     let mut drafts = two_drafts();
     drafts[0].waits_on = vec!["war-142".to_owned()];
     drafts[1].waits_on = vec!["WAR-999".to_owned()];
-    let open = [LinearIssue::new("issue-142", "WAR-142", "")];
+    let open = [FiledTicket::new("issue-142", "WAR-142", "")];
     let linear = a_whole_cut();
     let mut out = Vec::new();
 

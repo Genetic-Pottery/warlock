@@ -15,7 +15,7 @@ use warlock_engine::{
 use super::{ALREADY_CUTTING, Cutter};
 use crate::account::Line;
 use crate::app::App;
-use crate::board::{FetchedProject, Opens};
+use crate::board::{FetchedBrief, Opens};
 use crate::claude::Converses;
 use crate::error::{Error, one_line};
 use crate::inflight::Workers;
@@ -147,11 +147,9 @@ fn a_home(root: &Path) -> TempDir {
 // would have filed them.
 fn noted(cuts: &[&str]) -> Boarding {
     Boarding::filing("").reading(
-        FetchedProject::new(NAME, SLICED, URL, Some(STATUS)).with_notes(
-            cuts.iter().enumerate().map(|(place, title)| {
-                format!("Warlock cut slice `{title}` into `WAR-{}`.", place + 1)
-            }),
-        ),
+        FetchedBrief::new(NAME, SLICED, URL, Some(STATUS)).with_notes(cuts.iter().enumerate().map(
+            |(place, title)| format!("Warlock cut slice `{title}` into `WAR-{}`.", place + 1),
+        )),
     )
 }
 
@@ -854,7 +852,7 @@ mod binding {
         assert!(!cutter.fetching(), "a refused draft started a worker");
         assert!(!cutter.confirm().is_open(), "a dialog came up");
         assert!(
-            linear.issues_created().is_empty(),
+            linear.tickets_created().is_empty(),
             "a refused draft created an issue"
         );
     }
@@ -2091,7 +2089,7 @@ mod reviewing {
             "the cut note was not said"
         );
         assert_eq!(
-            linear.issues_created().len(),
+            linear.tickets_created().len(),
             2,
             "one issue per draft, and no more"
         );
@@ -2115,7 +2113,7 @@ mod reviewing {
         cutter.create(&mut app, now());
         settled(&mut app, &mut cutter);
 
-        let issues = linear.issues_created();
+        let issues = linear.tickets_created();
         assert_eq!(issues.len(), 2, "{issues:?}");
         for issue in &issues {
             assert_eq!(issue.assignee, VIEWER, "{issue:?}");
@@ -2124,7 +2122,7 @@ mod reviewing {
         // the question there is where the id came from, not the create.
         let asked = linear.positions_of(Op::Viewer);
         assert_eq!(asked.len(), 1, "{:?}", linear.ops());
-        let first = linear.positions_of(Op::CreateIssue)[0];
+        let first = linear.positions_of(Op::CreateTicket)[0];
         assert!(
             asked[0] < first,
             "the assignee was found out after an issue existed: {:?}",
@@ -2458,14 +2456,14 @@ mod reviewing {
             .filter(|op| {
                 matches!(
                     op,
-                    Op::CreateProject | Op::CreateIssue | Op::Relation | Op::Comment
+                    Op::CreateBrief | Op::CreateTicket | Op::Relation | Op::Comment
                 )
             })
             .collect();
         assert!(!sent.is_empty(), "nothing was filed at all");
         for op in &sent {
             assert!(
-                matches!(op, Op::CreateIssue | Op::Relation | Op::Comment),
+                matches!(op, Op::CreateTicket | Op::Relation | Op::Comment),
                 "a run wrote something that is not an issue, an edge or a note: {op:?}"
             );
         }
@@ -2488,7 +2486,7 @@ mod reviewing {
                 "Warlock cut slice `{FIRST}` into `WAR-1`, `WAR-2`."
             )]
         );
-        let creates = linear.positions_of(Op::CreateIssue);
+        let creates = linear.positions_of(Op::CreateTicket);
         let noted = linear.positions_of(Op::Comment)[0];
         assert!(
             creates.iter().all(|created| *created < noted),

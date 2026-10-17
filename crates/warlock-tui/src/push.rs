@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 use warlock_engine::{Destination, Manifest, manifest_path, resolve_filing};
 
 use crate::account::size;
-use crate::board::{Board, Key, NewProject, Opener as LinearOpener, Opens};
+use crate::board::{Board, Key, NewBrief, Opener as LinearOpener, Opens};
 use crate::brief::{Brief, brief_at};
 use crate::error::{Error, files_to_linear, say};
 use crate::standing::{FOR_PUSH, Standing};
@@ -155,12 +155,12 @@ pub(crate) fn file<O: Opens, W: Write>(
 // pushes racing each other can both pass it; that is two projects a person
 // deletes one of, and a lock on the board was not worth building for it.
 //
-// The label is resolved inside `create_project`, as its first request, and is
+// The label is resolved inside `create_brief`, as its first request, and is
 // deliberately not resolved here as well. That ordering is `linear.rs`'s
 // decision: the label is the only mark saying warlock filed a project, nothing
 // here can take a project back, so the label exists before the project does.
 // Resolving it here too would ask for the same name a second time, and a label
-// that will not resolve is already a failed `create_project` with nothing
+// that will not resolve is already a failed `create_brief` with nothing
 // created and no URL.
 pub(crate) fn sent<W: Write>(
     linear: &impl Board,
@@ -175,7 +175,7 @@ pub(crate) fn sent<W: Write>(
             team: destination.team_key().to_owned(),
             path: manifest_path(root),
         })?;
-    if let Some(url) = linear.project_named(destination.team_key(), brief.name())? {
+    if let Some(url) = linear.brief_named(destination.team_key(), brief.name())? {
         return Err(Error::AlreadyFiled {
             name: brief.name().to_owned(),
             url,
@@ -185,8 +185,8 @@ pub(crate) fn sent<W: Write>(
     // filed with no status at all rather than a failure.
     let status = linear.backlog_status()?;
 
-    let project = linear.create_project(
-        &NewProject::new(brief.name(), brief.content(), &team, destination.label())
+    let project = linear.create_brief(
+        &NewBrief::new(brief.name(), brief.content(), &team, destination.label())
             .with_status(status.as_deref()),
     )?;
 

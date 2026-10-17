@@ -20,9 +20,9 @@ use ureq::http::HeaderValue;
 use ureq::http::header::AUTHORIZATION;
 
 use crate::board::{
-    Assignee, Blocker, Board, CUT_NOTE, Error, FetchedProject, Issue, IssueProject, Listing,
-    NamedIssue, NewIssue, NewProject, Opener, Opens, Priority, Project, Queue, QueuedIssue,
-    SKIP_NOTE, StateType,
+    Assignee, Blocker, Board, CUT_NOTE, Error, FetchedBrief, FiledBrief, FiledTicket, Listing,
+    NamedTicket, NewBrief, NewTicket, Opener, Opens, Priority, Queue, QueuedTicket, SKIP_NOTE,
+    StateType, TicketBrief,
 };
 use crate::queue::same_name;
 
@@ -153,15 +153,15 @@ impl<P: Posts> Board for Linear<P> {
         backlog_status(&self.posts)
     }
 
-    fn project_status(&self, name: &str) -> Result<Option<String>, Error> {
+    fn brief_status(&self, name: &str) -> Result<Option<String>, Error> {
         project_status(&self.posts, name)
     }
 
-    fn move_project(&self, project: &str, status: &str) -> Result<String, Error> {
+    fn move_brief(&self, project: &str, status: &str) -> Result<String, Error> {
         move_project(&self.posts, project, status)
     }
 
-    fn issue_project(&self, issue: &str) -> Result<Option<IssueProject>, Error> {
+    fn ticket_brief(&self, issue: &str) -> Result<Option<TicketBrief>, Error> {
         issue_project(&self.posts, issue)
     }
 
@@ -173,23 +173,23 @@ impl<P: Posts> Board for Linear<P> {
         workflow_state(&self.posts, team, name)
     }
 
-    fn move_issue(&self, issue: &str, state: &str) -> Result<String, Error> {
+    fn move_ticket(&self, issue: &str, state: &str) -> Result<String, Error> {
         move_issue(&self.posts, issue, state)
     }
 
-    fn issue_label_id(&self, name: &str, team: &str) -> Result<String, Error> {
+    fn ticket_label_id(&self, name: &str, team: &str) -> Result<String, Error> {
         issue_label_id(&self.posts, name, team)
     }
 
-    fn fetch_project(&self, slug: &str) -> Result<Option<FetchedProject>, Error> {
+    fn fetch_brief(&self, slug: &str) -> Result<Option<FetchedBrief>, Error> {
         fetch_project(&self.posts, slug)
     }
 
-    fn planned_projects(&self, team: &str, label: &str) -> Result<Listing, Error> {
+    fn planned_briefs(&self, team: &str, label: &str) -> Result<Listing, Error> {
         planned_projects(&self.posts, team, label)
     }
 
-    fn project_named(&self, team: &str, name: &str) -> Result<Option<String>, Error> {
+    fn brief_named(&self, team: &str, name: &str) -> Result<Option<String>, Error> {
         project_named(&self.posts, team, name)
     }
 
@@ -197,15 +197,15 @@ impl<P: Posts> Board for Linear<P> {
         scope_queue(&self.posts, team, label, assignee)
     }
 
-    fn named_issue(&self, team: &str, number: u64) -> Result<Option<NamedIssue>, Error> {
+    fn named_ticket(&self, team: &str, number: u64) -> Result<Option<NamedTicket>, Error> {
         named_issue(&self.posts, team, number)
     }
 
-    fn create_project(&self, project: &NewProject<'_>) -> Result<Project, Error> {
+    fn create_brief(&self, project: &NewBrief<'_>) -> Result<FiledBrief, Error> {
         create_project(&self.posts, project)
     }
 
-    fn create_issue(&self, issue: &NewIssue<'_>) -> Result<Issue, Error> {
+    fn create_ticket(&self, issue: &NewTicket<'_>) -> Result<FiledTicket, Error> {
         create_issue(&self.posts, issue)
     }
 
@@ -213,11 +213,11 @@ impl<P: Posts> Board for Linear<P> {
         create_relation(&self.posts, blocker, waiting)
     }
 
-    fn comment_on_project(&self, project: &str, body: &str) -> Result<String, Error> {
+    fn comment_on_brief(&self, project: &str, body: &str) -> Result<String, Error> {
         comment_on_project(&self.posts, project, body)
     }
 
-    fn comment_on_issue(&self, issue: &str, body: &str) -> Result<String, Error> {
+    fn comment_on_ticket(&self, issue: &str, body: &str) -> Result<String, Error> {
         comment_on_issue(&self.posts, issue, body)
     }
 }
@@ -328,7 +328,7 @@ fn move_project(linear: &impl Posts, project: &str, status: &str) -> Result<Stri
 
 /// The project an issue belongs to, with its status and the state of every
 /// issue in it, or `None` for an issue in no project.
-fn issue_project(linear: &impl Posts, issue: &str) -> Result<Option<IssueProject>, Error> {
+fn issue_project(linear: &impl Posts, issue: &str) -> Result<Option<TicketBrief>, Error> {
     let data = linear.post(
         "query IssueProject($id: String!) {
             issue(id: $id) { project { id name status { name } } }
@@ -365,7 +365,7 @@ fn issue_project(linear: &impl Posts, issue: &str) -> Result<Option<IssueProject
     })
     .collect::<Result<_, Error>>()?;
 
-    Ok(Some(IssueProject {
+    Ok(Some(TicketBrief {
         id,
         name: text(project, "name")?,
         status: nullable(project, "status", |status| text(status, "name"))?,
@@ -527,7 +527,7 @@ macro_rules! blocker_nodes {
 /// on the wire: they are the whole of what records which slices are cut, and a
 /// project's other talk would spend the pages on nothing. Every page is read,
 /// because a note missed is a slice filed twice.
-fn fetch_project(linear: &impl Posts, slug: &str) -> Result<Option<FetchedProject>, Error> {
+fn fetch_project(linear: &impl Posts, slug: &str) -> Result<Option<FetchedBrief>, Error> {
     let data = match linear.post(
         concat!(
             "query Project($id: String!, $cut: String!, $skipped: String!) {
@@ -582,7 +582,7 @@ fn fetch_project(linear: &impl Posts, slug: &str) -> Result<Option<FetchedProjec
     .map(|comment| text(comment, "body"))
     .collect::<Result<_, _>>()?;
 
-    Ok(Some(FetchedProject {
+    Ok(Some(FetchedBrief {
         id,
         name: text(project, "name")?,
         content: unlinked(
@@ -822,7 +822,7 @@ fn issue_blockers(linear: &impl Posts, node: &Value) -> Result<Vec<Value>, Error
 }
 
 /// One issue, with every one of its blocking relations.
-fn queued_issue(linear: &impl Posts, node: &Value) -> Result<QueuedIssue, Error> {
+fn queued_issue(linear: &impl Posts, node: &Value) -> Result<QueuedTicket, Error> {
     let state = node.get("state").ok_or_else(|| missing("state"))?;
     let relations = issue_blockers(linear, node)?;
 
@@ -837,7 +837,7 @@ fn queued_issue(linear: &impl Posts, node: &Value) -> Result<QueuedIssue, Error>
         }
     }
 
-    let issue = QueuedIssue {
+    let issue = QueuedTicket {
         id: node_id(node)?,
         identifier: text(node, "identifier")?,
         title: text(node, "title")?,
@@ -925,7 +925,7 @@ const LABELS_PAGE: usize = 50;
 /// own words rather than a request.
 ///
 /// The node selection is [`scope_queue`]'s — the ticket comes back as the same
-/// [`QueuedIssue`], parsed by the same function, so a named ticket and a chosen
+/// [`QueuedTicket`], parsed by the same function, so a named ticket and a chosen
 /// one are the same value and the rules cannot drift — plus the three facts the
 /// queue's filters stood for. Which is the whole point of reading it this way:
 /// the filters are what make a queue, and an issue *missing* from a filtered
@@ -938,7 +938,7 @@ const LABELS_PAGE: usize = 50;
 ///
 /// `None` when the workspace has no such issue — a team key nobody uses, or a
 /// number that team has not reached. Not an error, for [`team_id`]'s reason.
-fn named_issue(linear: &impl Posts, team: &str, number: u64) -> Result<Option<NamedIssue>, Error> {
+fn named_issue(linear: &impl Posts, team: &str, number: u64) -> Result<Option<NamedTicket>, Error> {
     let document = format!(
         r"query NamedIssue($team: String!, $number: Float!, $labels: Int!, $blockers: Int!) {{
             issues(
@@ -976,7 +976,7 @@ fn named_issue(linear: &impl Posts, team: &str, number: u64) -> Result<Option<Na
     let team = node.get("team").ok_or_else(|| missing("team"))?;
     let issue = queued_issue(linear, node)?;
 
-    Ok(Some(NamedIssue {
+    Ok(Some(NamedTicket {
         issue,
         team: text(team, "key")?,
         labels: label_names(linear, node)?,
@@ -1066,7 +1066,7 @@ fn issue_label_id(linear: &impl Posts, name: &str, team: &str) -> Result<String,
 /// project back, and a create that landed before a label that then failed is a
 /// project no cut will ever read. Resolving first means a project that exists
 /// is a project that carries the label.
-fn create_project(linear: &impl Posts, project: &NewProject<'_>) -> Result<Project, Error> {
+fn create_project(linear: &impl Posts, project: &NewBrief<'_>) -> Result<FiledBrief, Error> {
     let label = label_id(linear, project.label)?;
 
     let mut input = json!({
@@ -1093,7 +1093,7 @@ fn create_project(linear: &impl Posts, project: &NewProject<'_>) -> Result<Proje
     )?;
     let created = payload(&data, "projectCreate", "project")?;
 
-    Ok(Project {
+    Ok(FiledBrief {
         id: node_id(created)?,
         url: text(created, "url")?,
     })
@@ -1105,7 +1105,7 @@ fn create_project(linear: &impl Posts, project: &NewProject<'_>) -> Result<Proje
 /// Nothing is resolved here: an issue create that had to look up its own state
 /// would be a second request per draft, and the team that has no `Backlog` has
 /// to be refused before any issue exists rather than once a slice is half filed.
-fn create_issue(linear: &impl Posts, issue: &NewIssue<'_>) -> Result<Issue, Error> {
+fn create_issue(linear: &impl Posts, issue: &NewTicket<'_>) -> Result<FiledTicket, Error> {
     let data = linear.post(
         "mutation IssueCreate($input: IssueCreateInput!) {
             issueCreate(input: $input) { issue { id identifier url } }
@@ -1124,7 +1124,7 @@ fn create_issue(linear: &impl Posts, issue: &NewIssue<'_>) -> Result<Issue, Erro
     )?;
     let created = payload(&data, "issueCreate", "issue")?;
 
-    Ok(Issue {
+    Ok(FiledTicket {
         id: node_id(created)?,
         identifier: text(created, "identifier")?,
         url: text(created, "url")?,

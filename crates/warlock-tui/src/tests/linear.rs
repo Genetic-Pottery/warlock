@@ -13,8 +13,8 @@ use super::{
 };
 
 use crate::board::{
-    Assignee, Blocker, Board, CUT_NOTE, Error, NamedIssue, NewIssue, NewProject, Priority,
-    QueuedIssue, SKIP_NOTE, StateType,
+    Assignee, Blocker, Board, CUT_NOTE, Error, NamedTicket, NewBrief, NewTicket, Priority,
+    QueuedTicket, SKIP_NOTE, StateType,
 };
 use crate::queue::IN_PROGRESS;
 use crate::stubs::Posting;
@@ -605,7 +605,7 @@ fn blocking(identifier: &str, assignee: Option<&str>, state: &str) -> Value {
     })
 }
 
-fn only_issue(queue: &Value) -> QueuedIssue {
+fn only_issue(queue: &Value) -> QueuedTicket {
     let linear = Posting::answering([Ok(queue.clone())]);
 
     scope_queue(&linear, TEAM, LABEL, ME)
@@ -1037,7 +1037,7 @@ fn named_node() -> Value {
     node
 }
 
-fn a_ticket(node: &Value) -> NamedIssue {
+fn a_ticket(node: &Value) -> NamedTicket {
     let linear = Posting::answering([Ok(a_named_ticket(node))]);
 
     named_issue(&linear, "WAR", 133)
@@ -1214,7 +1214,7 @@ fn the_board_hands_the_team_key_and_the_number_to_the_wire_in_that_order() {
     let board = Linear::new(Posting::answering([Ok(a_named_ticket(&named_node()))]));
 
     let found = board
-        .named_issue("WAR", 133)
+        .named_ticket("WAR", 133)
         .expect("the stand-in answered")
         .expect("the stand-in answered with the ticket");
 
@@ -1349,8 +1349,8 @@ fn project_created() -> Value {
     })
 }
 
-fn brief<'a>() -> NewProject<'a> {
-    NewProject::new(
+fn brief<'a>() -> NewBrief<'a> {
+    NewBrief::new(
         "Repair the answer",
         "# Repair the answer\n\nBody.\n",
         "team-1",
@@ -1877,8 +1877,8 @@ fn issue_created() -> Value {
     })
 }
 
-fn draft<'a>() -> NewIssue<'a> {
-    NewIssue::new(
+fn draft<'a>() -> NewTicket<'a> {
+    NewTicket::new(
         "Repair the answer",
         "## Problem\n\nThe answer is wrong.\n",
         "team-1",

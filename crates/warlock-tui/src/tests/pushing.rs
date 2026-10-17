@@ -336,7 +336,7 @@ fn a_push_of_a_jira_scope_is_one_line_with_no_question_asked_and_nothing_parked(
     assert_eq!(pushes.window, Pushing::closed(), "a dialog came up");
     assert!(!pushes.sending(), "something was sent");
     assert!(
-        linear.projects_created().is_empty(),
+        linear.briefs_created().is_empty(),
         "a refused push created a project"
     );
 }
@@ -399,7 +399,7 @@ fn a_yes_to_a_brief_the_board_already_holds_says_so_on_the_thread_and_creates_no
     pushes.keep_up(&mut app, now());
 
     assert!(
-        !linear.ops().contains(&Op::CreateProject),
+        !linear.ops().contains(&Op::CreateBrief),
         "{:?}",
         linear.ops()
     );
