@@ -2201,10 +2201,7 @@ mod filing {
             "the thread does not carry the project's address: {:?}",
             notes(&driven)
         );
-        assert_eq!(
-            linear.ops(),
-            [Op::Team, Op::BriefNamed, Op::BacklogStatus, Op::CreateBrief]
-        );
+        assert_eq!(linear.ops(), [Op::BriefNamed, Op::CreateBrief]);
         assert!(
             !repo.path().join(".warlock/filed.toml").exists(),
             "a push wrote something on this machine"

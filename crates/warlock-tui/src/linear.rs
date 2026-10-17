@@ -21,9 +21,9 @@ use ureq::http::header::AUTHORIZATION;
 use warlock_engine::{LinearScope, ScopeRecord};
 
 use crate::board::{
-    Assignee, Blocker, Board, CUT_NOTE, Category, Error, FetchedBrief, FiledBrief, FiledTicket,
-    Listing, NamedTicket, NewBrief, NewTicket, Opener, Opens, Priority, Queue, QueuedTicket,
-    SKIP_NOTE, TicketBrief,
+    Assignee, Blocker, Board, CUT_NOTE, Category, Error, FetchedBrief, Filable, FiledBrief,
+    FiledTicket, Listing, NamedTicket, NewBrief, NewTicket, Opener, Opens, Priority, Queue,
+    QueuedTicket, SKIP_NOTE, TicketBrief,
 };
 use crate::queue::same_name;
 
@@ -168,47 +168,60 @@ impl<P: Posts> Linear<P> {
     }
 }
 
+/// What a cut on this board has settled before its first issue: the team every
+/// issue of it is created on, and the state a fresh one lands in, both as
+/// Linear's own ids.
+///
+/// This board's [`Filing`](Board::Filing), so the fields are private to this
+/// module on purpose: the cut carries one of these from
+/// [`Board::ticket_filing`] to every [`Board::create_ticket`] and has no way to
+/// read it, which is what keeps Linear's two ids out of a flow.
+#[derive(Debug, Clone)]
+pub(crate) struct Resolved {
+    team: String,
+    state: String,
+}
+
 impl<P: Posts> Board for Linear<P> {
     const NAME: &'static str = LINEAR;
+
+    type Filing = Resolved;
 
     fn viewer(&self) -> Result<String, Error> {
         viewer(&self.posts)
     }
 
-    fn team_id(&self, key: &str) -> Result<Option<String>, Error> {
-        team_id(&self.posts, key)
-    }
-
-    fn backlog_status(&self) -> Result<Option<String>, Error> {
-        backlog_status(&self.posts)
-    }
-
-    fn brief_status(&self, name: &str) -> Result<Option<String>, Error> {
-        project_status(&self.posts, name)
-    }
-
-    fn move_brief(&self, project: &str, status: &str) -> Result<String, Error> {
-        move_project(&self.posts, project, status)
+    /// The status resolved here rather than by the caller: the mutation writes a
+    /// project status id, so the name is matched among the workspace's own
+    /// statuses. A name no status carries is `false` with the mutation never
+    /// sent.
+    fn move_brief(&self, project: &str, status: &str) -> Result<bool, Error> {
+        let Some(status) = project_status(&self.posts, status)? else {
+            return Ok(false);
+        };
+        move_project(&self.posts, project, &status)?;
+        Ok(true)
     }
 
     fn ticket_brief(&self, issue: &str) -> Result<Option<TicketBrief>, Error> {
         issue_project(&self.posts, issue)
     }
 
-    fn backlog_state(&self, team: &str) -> Result<Option<String>, Error> {
-        backlog_state(&self.posts, team)
-    }
-
-    fn workflow_state(&self, team: &str, name: &str) -> Result<Option<String>, Error> {
-        workflow_state(&self.posts, team, name)
-    }
-
-    fn move_ticket(&self, issue: &str, state: &str) -> Result<String, Error> {
-        move_issue(&self.posts, issue, state)
-    }
-
-    fn ticket_label_id(&self, name: &str, team: &str) -> Result<String, Error> {
-        issue_label_id(&self.posts, name, team)
+    /// The team and the state resolved here rather than by the caller: a
+    /// workflow state belongs to a team and the mutation wants its id, so the
+    /// team key comes off the record this board was opened with and the name is
+    /// matched among that team's own states. A name no state of the team
+    /// carries, or a key the workspace has no team for, is `false` with the
+    /// mutation never sent.
+    fn move_ticket(&self, issue: &str, status: &str) -> Result<bool, Error> {
+        let Some(team) = team_id(&self.posts, self.scope()?.team_key())? else {
+            return Ok(false);
+        };
+        let Some(state) = workflow_state(&self.posts, &team, status)? else {
+            return Ok(false);
+        };
+        move_issue(&self.posts, issue, &state)?;
+        Ok(true)
     }
 
     fn fetch_brief(&self, slug: &str) -> Result<Option<FetchedBrief>, Error> {
@@ -233,12 +246,40 @@ impl<P: Posts> Board for Linear<P> {
         named_issue(&self.posts, self.scope()?.team_key(), number)
     }
 
-    fn create_brief(&self, project: &NewBrief<'_>) -> Result<FiledBrief, Error> {
-        create_project(&self.posts, project)
+    /// The team read off the record, as [`planned_briefs`](Self::planned_briefs)
+    /// reads it: the mutation writes a team id, so the key the scope records is
+    /// resolved here and a key the workspace has no team for is the `None` this
+    /// answers.
+    fn create_brief(&self, project: &NewBrief<'_>) -> Result<Option<FiledBrief>, Error> {
+        create_project(&self.posts, self.scope()?.team_key(), project)
     }
 
-    fn create_ticket(&self, issue: &NewTicket<'_>) -> Result<FiledTicket, Error> {
-        create_issue(&self.posts, issue)
+    /// The two ids `issueCreate` writes that a draft says nothing about: the
+    /// team the record names, and that team's own [`BACKLOG`] state.
+    ///
+    /// Both are read here, once for the cut, because both are a team's and a
+    /// create that resolved them would buy the same two answers per draft. The
+    /// order is the refusal a caller can act on: a key the workspace has no team
+    /// for is [`Filable::NoDestination`] with the states never asked for, and a
+    /// team with no `Backlog` is [`Filable::NoColumn`]. Neither sends a
+    /// mutation.
+    fn ticket_filing(&self) -> Result<Filable<Resolved>, Error> {
+        let Some(team) = team_id(&self.posts, self.scope()?.team_key())? else {
+            return Ok(Filable::NoDestination);
+        };
+        let Some(state) = backlog_state(&self.posts, &team)? else {
+            return Ok(Filable::NoColumn);
+        };
+
+        Ok(Filable::Ready(Resolved { team, state }))
+    }
+
+    fn create_ticket(
+        &self,
+        issue: &NewTicket<'_>,
+        filing: &Resolved,
+    ) -> Result<FiledTicket, Error> {
+        create_issue(&self.posts, issue, filing)
     }
 
     fn create_relation(&self, blocker: &str, waiting: &str) -> Result<String, Error> {
@@ -492,10 +533,11 @@ fn backlog_state(linear: &impl Posts, team: &str) -> Result<Option<String>, Erro
 /// The id of the team's workflow state by name, or `None` when that team has no
 /// state by it.
 ///
-/// `None` rather than an error, and here it is load-bearing rather than tidy: the
-/// caller moving an issue prints a missing column as one line and works the
-/// ticket anyway. A workflow column is a courtesy to people who are not watching
-/// the terminal, and nothing about the work depends on it.
+/// `None` rather than an error, and here it is load-bearing rather than tidy: it
+/// is what [`Board::move_ticket`] answers `false` on, and a pull prints that as
+/// one line and works the ticket anyway. A workflow column is a courtesy to
+/// people who are not watching the terminal, and nothing about the work depends
+/// on it.
 ///
 /// Matched trimmed and case-insensitively, because `In progress` and
 /// `In Progress` are the same column to everyone except a string comparison.
@@ -1068,8 +1110,9 @@ fn label_id(linear: &impl Posts, name: &str) -> Result<String, Error> {
 /// at the call site.
 ///
 /// Two requests at most, one per thing asked, and the create only ever runs
-/// against an empty answer — so a second cut finds the label the first one made
-/// rather than adding another of the same name.
+/// against an empty answer — so the second issue of a slice, and every cut
+/// after the first, finds the label already there rather than adding another of
+/// the same name.
 fn issue_label_id(linear: &impl Posts, name: &str, team: &str) -> Result<String, Error> {
     let data = linear.post(
         "query IssueLabel($name: String!, $team: ID!) {
@@ -1095,27 +1138,41 @@ fn issue_label_id(linear: &impl Posts, name: &str, team: &str) -> Result<String,
     node_id(payload(&created, "issueLabelCreate", "issueLabel")?)
 }
 
-/// Create the project, with its label resolved first.
+/// Create the project in the team that key names, with its label resolved
+/// first, or `None` for a workspace with no team by that key.
 ///
-/// The order is the point and not an implementation detail: the label is the
+/// The label's place is the point and not an implementation detail: it is the
 /// only mark on a project saying warlock filed it, nothing here can take a
 /// project back, and a create that landed before a label that then failed is a
 /// project no cut will ever read. Resolving first means a project that exists
 /// is a project that carries the label.
-fn create_project(linear: &impl Posts, project: &NewBrief<'_>) -> Result<FiledBrief, Error> {
+///
+/// The team and the [`BACKLOG`] status are resolved after it and here rather
+/// than by the caller: `projectCreate` writes a team id and a project status
+/// id, and both are Linear's own kind of name. Neither costs a request the
+/// caller used to spend — it asked these two itself — and nothing is created
+/// once either has failed.
+fn create_project(
+    linear: &impl Posts,
+    key: &str,
+    project: &NewBrief<'_>,
+) -> Result<Option<FiledBrief>, Error> {
     let label = label_id(linear, project.label)?;
+    let Some(team) = team_id(linear, key)? else {
+        return Ok(None);
+    };
 
     let mut input = json!({
         "name": project.name,
         "content": project.content,
-        "teamIds": [project.team],
+        "teamIds": [team],
         "labelIds": [label],
     });
 
     // Absent rather than `null`: a status the workspace does not have is a
     // project filed with no status, and the field is left out entirely to say
     // that.
-    if let Some(status) = project.status
+    if let Some(status) = backlog_status(linear)?
         && let Some(fields) = input.as_object_mut()
     {
         fields.insert("statusId".to_owned(), json!(status));
@@ -1129,19 +1186,34 @@ fn create_project(linear: &impl Posts, project: &NewBrief<'_>) -> Result<FiledBr
     )?;
     let created = payload(&data, "projectCreate", "project")?;
 
-    Ok(FiledBrief {
+    Ok(Some(FiledBrief {
         id: node_id(created)?,
         url: text(created, "url")?,
-    })
+    }))
 }
 
-/// Create one issue, in the team, project, label and workflow state the caller
-/// already resolved.
+/// Create one issue: in the project the draft was named with, on the team and
+/// in the workflow state [`Board::ticket_filing`] settled for the cut, under
+/// the label whose *name* the create was given.
 ///
-/// Nothing is resolved here: an issue create that had to look up its own state
-/// would be a second request per draft, and the team that has no `Backlog` has
-/// to be refused before any issue exists rather than once a slice is half filed.
-fn create_issue(linear: &impl Posts, issue: &NewTicket<'_>) -> Result<FiledTicket, Error> {
+/// The label is the one thing resolved here, because the name is what arrives:
+/// `issueCreate` writes `labelIds`, so a name has to become an id somewhere
+/// below the seam, and the team it is resolved on is the filing's. One read per
+/// issue, and the first of them is what creates the label when the team has
+/// none — the same request, in the same place in the order, that a cut used to
+/// make once. A slice of several drafts buys that read again per draft, which
+/// is the price of a create that takes a label the way both boards name one.
+///
+/// The team and the state are not resolved here: those are two reads per draft
+/// rather than one, and a team with no `Backlog` has to be refused before any
+/// issue exists rather than once a slice is half filed.
+fn create_issue(
+    linear: &impl Posts,
+    issue: &NewTicket<'_>,
+    filing: &Resolved,
+) -> Result<FiledTicket, Error> {
+    let label = issue_label_id(linear, issue.label, &filing.team)?;
+
     let data = linear.post(
         "mutation IssueCreate($input: IssueCreateInput!) {
             issueCreate(input: $input) { issue { id identifier url } }
@@ -1150,10 +1222,10 @@ fn create_issue(linear: &impl Posts, issue: &NewTicket<'_>) -> Result<FiledTicke
             "input": {
                 "title": issue.title,
                 "description": issue.body,
-                "teamId": issue.team,
+                "teamId": filing.team,
                 "projectId": issue.project,
-                "labelIds": [issue.label],
-                "stateId": issue.state,
+                "labelIds": [label],
+                "stateId": filing.state,
                 "assigneeId": issue.assignee,
             },
         }),

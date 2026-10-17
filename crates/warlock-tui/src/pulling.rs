@@ -169,7 +169,11 @@ impl<B: Board, R: Repository, F: Forge, S: Splits, W: Works> Pulling<'_, B, R, F
         // Before the split, so the board is honest while the model works — and
         // before the record is first saved, because a team with no such state is
         // a line in the output rather than a thing the record has to remember.
-        if !self.move_ticket(ticket.id, IN_PROGRESS)? {
+        if !self
+            .board
+            .move_ticket(ticket.id, IN_PROGRESS)
+            .map_err(Error::board)?
+        {
             self.report(PullEvent::NoStartState {
                 team: self.scope.team_key().to_owned(),
             });
@@ -536,7 +540,11 @@ impl<B: Board, R: Repository, F: Forge, S: Splits, W: Works> Pulling<'_, B, R, F
 
     fn move_to_review(&mut self, ticket: &Ticket<'_>) -> Result<(), Error> {
         let review = self.scope.review_state();
-        if !self.move_ticket(ticket.id, review)? {
+        if !self
+            .board
+            .move_ticket(ticket.id, review)
+            .map_err(Error::board)?
+        {
             self.report(PullEvent::NoReviewState {
                 team: self.scope.team_key().to_owned(),
                 state: review.to_owned(),
@@ -547,37 +555,6 @@ impl<B: Board, R: Repository, F: Forge, S: Splits, W: Works> Pulling<'_, B, R, F
             self.report(PullEvent::Project { line });
         }
         Ok(())
-    }
-
-    /// The ticket moved to the team's state of that name, or `false` when the
-    /// team has no such state.
-    ///
-    /// `false` and not an error, for both callers: a board whose workflow nobody
-    /// has given an `In Progress` or a review state is a board warlock reports on
-    /// and works past, and a run that stopped over it would be the board wagging
-    /// the pull.
-    fn move_ticket(&self, issue: &str, state: &str) -> Result<bool, Error> {
-        // The scope record holds the team key and `workflow_state` filters on
-        // the team id, so the key is resolved first. Linear refuses a key where
-        // it wants an id, and the stand-in board takes either.
-        let Some(team) = self
-            .board
-            .team_id(self.scope.team_key())
-            .map_err(Error::board)?
-        else {
-            return Ok(false);
-        };
-        let found = self
-            .board
-            .workflow_state(&team, state)
-            .map_err(Error::board)?;
-        let Some(state) = found else {
-            return Ok(false);
-        };
-        self.board
-            .move_ticket(issue, &state)
-            .map_err(Error::board)?;
-        Ok(true)
     }
 
     /// Every halt goes through here, and the order of the three things it does is
@@ -944,15 +921,10 @@ fn project_review(board: &impl Board, issue: &str, review: &str) -> Option<Strin
         return None;
     }
 
-    let moved = board.brief_status(review).and_then(|status| {
-        status
-            .map(|status| board.move_brief(project.id(), &status))
-            .transpose()
-    });
     let every = format!("every issue in `{name}` is in review or closed");
-    Some(match moved {
-        Ok(Some(_)) => format!("{every}, so the project moved to `{review}`"),
-        Ok(None) => format!(
+    Some(match board.move_brief(project.id(), review) {
+        Ok(true) => format!("{every}, so the project moved to `{review}`"),
+        Ok(false) => format!(
             "{every}, and the workspace has no project status called `{review}`, so the project \
              was not moved"
         ),

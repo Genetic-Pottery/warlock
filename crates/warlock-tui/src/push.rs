@@ -149,7 +149,7 @@ pub(crate) fn file<O: Opens, W: Write>(
 }
 
 // Split from [`file`] over the [`Board`] seam and past the opener, so the order
-// — team, name, status, project — is assertable against an in-memory stand-in.
+// — the name, then the project — is assertable against an in-memory stand-in.
 //
 // The address comes back for the panel, which has no `out` to read afterwards,
 // and the URL is the one thing a push must not lose.
@@ -160,13 +160,16 @@ pub(crate) fn file<O: Opens, W: Write>(
 // pushes racing each other can both pass it; that is two projects a person
 // deletes one of, and a lock on the board was not worth building for it.
 //
-// The label is resolved inside `create_brief`, as its first request, and is
-// deliberately not resolved here as well. That ordering is `linear.rs`'s
-// decision: the label is the only mark saying warlock filed a project, nothing
-// here can take a project back, so the label exists before the project does.
-// Resolving it here too would ask for the same name a second time, and a label
-// that will not resolve is already a failed `create_brief` with nothing
-// created and no URL.
+// Nothing is resolved here, and that is deliberate: the team, the label and
+// the status a filed brief sits in are three names the board turns into
+// whatever its own create wants. The label is
+// `create_brief`'s first request, because it is the only mark saying warlock
+// filed a project and nothing here can take a project back; the team is the one
+// on the record the board was opened for; and a workspace with no status of the
+// board's own starting name files the brief with no status at all. What is left
+// here is the one question a board cannot answer for itself — a destination
+// that is not there at all is `None`, and the words about the file that records
+// it are this module's.
 pub(crate) fn sent<W: Write>(
     linear: &impl Board,
     root: &Path,
@@ -174,26 +177,23 @@ pub(crate) fn sent<W: Write>(
     brief: &Brief,
     out: &mut W,
 ) -> Result<String, Error> {
-    let team = linear
-        .team_id(destination.team_key())?
-        .ok_or_else(|| Error::UnknownTeam {
-            team: destination.team_key().to_owned(),
-            path: manifest_path(root),
-        })?;
     if let Some(url) = linear.brief_named(brief.name())? {
         return Err(Error::AlreadyFiled {
             name: brief.name().to_owned(),
             url,
         });
     }
-    // `None` is a workspace with no status by that name, which is a project
-    // filed with no status at all rather than a failure.
-    let status = linear.backlog_status()?;
 
-    let project = linear.create_brief(
-        &NewBrief::new(brief.name(), brief.content(), &team, destination.label())
-            .with_status(status.as_deref()),
-    )?;
+    let project = linear
+        .create_brief(&NewBrief::new(
+            brief.name(),
+            brief.content(),
+            destination.label(),
+        ))?
+        .ok_or_else(|| Error::UnknownTeam {
+            team: destination.team_key().to_owned(),
+            path: manifest_path(root),
+        })?;
 
     say(
         out,

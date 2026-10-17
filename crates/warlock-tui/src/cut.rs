@@ -24,7 +24,7 @@ use std::path::Path;
 use warlock_engine::drafting::{Draft, is_identifier};
 use warlock_engine::{Destination, manifest_path};
 
-use crate::board::{Board, CUT_NOTE, FiledTicket, NewTicket, SKIP_NOTE};
+use crate::board::{Board, CUT_NOTE, Filable, FiledTicket, NewTicket, SKIP_NOTE};
 use crate::error::{Error, say};
 use crate::queue::IN_PROGRESS;
 
@@ -84,36 +84,49 @@ pub(crate) fn cut<W: Write>(
     slice: Slice<'_>,
     out: &mut W,
 ) -> Result<Cut, Error> {
-    let team = linear
-        .team_id(filing.destination.team_key())?
-        .ok_or_else(|| Error::UnknownTeam {
-            team: filing.destination.team_key().to_owned(),
-            path: manifest_path(root),
-        })?;
-    // Before the label and before every create: a team with nowhere to put an
-    // issue is a refusal that costs nothing, and the same question asked after
-    // the first create would leave a slice half filed on the board.
-    let state = linear
-        .backlog_state(&team)?
-        .ok_or_else(|| Error::NoBacklog {
-            team: filing.destination.team_key().to_owned(),
-        })?;
-    let label = linear.ticket_label_id(filing.destination.label(), &team)?;
+    // One question to the board before every create, and the words about each
+    // answer are here because the file that records the destination is this
+    // side's: a destination the board does not have at all names the manifest,
+    // and a destination with no column for a fresh ticket names the team and
+    // the column. Whatever the board settled comes back opaque and is carried
+    // to each create unread — nothing here is holding one board's ids.
+    //
+    // Asked first and not once a draft has been filed: a refusal while the
+    // slice is still nothing costs nothing, and the same question after the
+    // first create would leave a slice half filed on the board.
+    let settled = match linear.ticket_filing()? {
+        Filable::Ready(settled) => settled,
+        Filable::NoDestination => {
+            return Err(Error::UnknownTeam {
+                team: filing.destination.team_key().to_owned(),
+                path: manifest_path(root),
+            });
+        }
+        Filable::NoColumn => {
+            return Err(Error::NoBacklog {
+                team: filing.destination.team_key().to_owned(),
+            });
+        }
+    };
 
     let mut issues = Vec::with_capacity(slice.drafts.len());
     for draft in slice.drafts {
         // A create that fails partway is a refusal and not a short note: a note
         // says the slice is filed, so writing one for the drafts that landed
         // would be warlock promising never to file the rest.
-        let issue = linear.create_ticket(&NewTicket::new(
-            &draft.title,
-            &draft.body,
-            &team,
-            filing.project,
-            &label,
-            &state,
-            filing.assignee,
-        ))?;
+        let issue = linear.create_ticket(
+            &NewTicket::new(
+                &draft.title,
+                &draft.body,
+                filing.project,
+                // By the name the scope record gives it, which is the whole of
+                // what a label is on this seam: what it takes to put a label of
+                // that name on an issue is the board's.
+                filing.destination.label(),
+                filing.assignee,
+            ),
+            &settled,
+        )?;
         issues.push(issue);
     }
 
@@ -158,16 +171,11 @@ pub(crate) fn cut<W: Write>(
 /// issues exist whatever happens here, so a workspace with no such status or a
 /// move Linear turns down is reported rather than failed.
 pub(crate) fn finish(linear: &impl Board, project: &str) -> String {
-    let moved = linear.brief_status(IN_PROGRESS).and_then(|status| {
-        status
-            .map(|status| linear.move_brief(project, &status))
-            .transpose()
-    });
-    match moved {
-        Ok(Some(_)) => {
+    match linear.move_brief(project, IN_PROGRESS) {
+        Ok(true) => {
             format!("every slice is settled, so the project moved to `{IN_PROGRESS}`")
         }
-        Ok(None) => format!(
+        Ok(false) => format!(
             "every slice is settled, and the workspace has no project status called \
              `{IN_PROGRESS}`, so the project was not moved"
         ),

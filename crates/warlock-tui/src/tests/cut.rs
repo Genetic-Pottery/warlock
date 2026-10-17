@@ -8,7 +8,7 @@ use super::{Cut, Filing, Slice, cut, cut_note, fold_title, noted, quoted, skip};
 use crate::board::{Board, FiledTicket};
 use crate::error::Error;
 use crate::error::status_for;
-use crate::stubs::{Boarding, Call, Op, TicketAsked, VIEWER};
+use crate::stubs::{Boarding, Op, TicketAsked, VIEWER};
 
 const SCOPE: &str = "warlock-team";
 
@@ -216,14 +216,12 @@ fn a_slice_becomes_one_issue_per_draft_and_one_note() {
     assert_eq!(
         linear.ops(),
         [
-            Op::Team,
-            Op::BacklogState,
-            Op::TicketLabel,
+            Op::TicketFiling,
             Op::CreateTicket,
             Op::CreateTicket,
             Op::Comment
         ],
-        "one call per operation, one create per draft, one note, and no retry"
+        "one pre-flight for the slice, one create per draft, one note, and no retry"
     );
     assert!(printed.contains(TITLE), "{printed}");
     assert!(printed.contains("`WAR-125`, `WAR-126`"), "{printed}");
@@ -234,7 +232,7 @@ fn a_slice_becomes_one_issue_per_draft_and_one_note() {
 }
 
 #[test]
-fn each_issue_carries_the_scope_records_team_the_project_and_the_backlog_state() {
+fn each_issue_carries_the_project_the_label_by_name_and_whatever_the_pre_flight_settled() {
     let repo = a_repository();
     let linear = a_whole_cut();
 
@@ -242,12 +240,16 @@ fn each_issue_carries_the_scope_records_team_the_project_and_the_backlog_state()
         .0
         .expect("a slice that files");
 
+    // The team and the state are the stand-in's own answers to the pre-flight,
+    // which is the whole of how they reach a create: this flow never held
+    // either, and the label it did hold goes by the name the scope record gives
+    // rather than as anything resolved here.
     let issue = |title: &str, body: &str| TicketAsked {
         title: title.to_owned(),
         body: body.to_owned(),
         team: "team-1".to_owned(),
         project: PROJECT_ID.to_owned(),
-        label: "label-held".to_owned(),
+        label: LABEL.to_owned(),
         state: "state-backlog".to_owned(),
         assignee: VIEWER.to_owned(),
     };
@@ -285,7 +287,7 @@ fn the_assignee_the_filing_carries_reaches_every_create_and_is_not_asked_for_her
 }
 
 #[test]
-fn the_label_is_resolved_as_an_issue_label_and_not_as_a_project_label() {
+fn nothing_is_asked_of_the_board_about_the_label_before_the_first_create() {
     let repo = a_repository();
     let linear = a_whole_cut();
 
@@ -293,41 +295,34 @@ fn the_label_is_resolved_as_an_issue_label_and_not_as_a_project_label() {
         .0
         .expect("a slice that files");
 
-    // Resolved on the team, by the name the scope record gives. That the issue
-    // label queries never reach the project label ones is `linear.rs`'s to
-    // hold; what a cut can do wrong is resolve the label as a project's, which
-    // only `create_brief` does.
-    let calls = linear.calls();
-    assert!(
-        calls.contains(&Call::TicketLabel {
-            name: LABEL.to_owned(),
-            team: "team-1".to_owned(),
-        }),
-        "{calls:?}"
+    // The label is handed over by name, so there is no label question in this
+    // conversation at all: whether an issue label of that name has to be made,
+    // and that it is never resolved as a project label, is `linear.rs`'s own to
+    // hold and is held in its tests.
+    let ops = linear.ops();
+    let before: Vec<Op> = ops
+        .iter()
+        .copied()
+        .take_while(|op| *op != Op::CreateTicket)
+        .collect();
+
+    assert_eq!(
+        before,
+        [Op::TicketFiling],
+        "the pre-flight is not the whole of what a cut asks before it files: {:?}",
+        linear.calls()
     );
     assert!(
-        !linear.ops().contains(&Op::CreateBrief),
-        "a project label's id is not usable by an issue: {calls:?}"
+        !ops.contains(&Op::CreateBrief),
+        "a cut asked for something only a push does: {:?}",
+        linear.calls()
     );
-}
-
-#[test]
-fn the_label_the_board_answers_is_the_one_every_issue_carries() {
-    // Whether the board found the label or had to make it is `linear.rs`'s own
-    // question; this is the id that came back reaching the create.
-    let repo = a_repository();
-    let linear = a_whole_cut().labelled("label-made");
-
-    let outcome = cut_into(repo.path(), &linear, TITLE, &two_drafts()[..1]).0;
-
-    assert_eq!(filed(outcome), ["WAR-125"]);
-    assert_eq!(linear.tickets_created()[0].label, "label-made");
 }
 
 #[test]
 fn a_team_with_no_backlog_state_is_refused_naming_the_team() {
     let repo = a_repository();
-    let linear = a_whole_cut().without_backlog_state();
+    let linear = a_whole_cut().without_states();
 
     let error = refusal(cut_into(repo.path(), &linear, TITLE, &two_drafts()).0);
 
@@ -347,13 +342,16 @@ fn a_team_with_no_backlog_state_is_refused_naming_the_team() {
 }
 
 #[test]
-fn the_backlog_state_is_asked_for_before_the_label_and_before_any_create() {
+fn the_pre_flight_is_the_whole_conversation_when_it_says_the_cut_cannot_file() {
     let repo = a_repository();
-    let linear = a_whole_cut().without_backlog_state();
+    let linear = a_whole_cut().without_states();
 
     refusal(cut_into(repo.path(), &linear, TITLE, &two_drafts()).0);
 
-    assert_eq!(linear.ops(), [Op::Team, Op::BacklogState]);
+    // One question, asked and refused on: a cut that went on to ask anything
+    // else — a label, a name — would be buying requests for a slice that is
+    // never going to be filed.
+    assert_eq!(linear.ops(), [Op::TicketFiling]);
 }
 
 #[test]
@@ -369,8 +367,8 @@ fn an_unknown_team_is_refused_before_anything_is_created() {
     );
     assert_eq!(
         linear.ops(),
-        [Op::Team],
-        "anything after the team was asked"
+        [Op::TicketFiling],
+        "anything after the pre-flight was asked"
     );
 }
 
@@ -475,7 +473,7 @@ fn a_slice_writes_its_own_edges_and_one_from_every_issue_it_waits_on() {
             edge("issue-100", "issue-127"),
         ],
     );
-    assert_eq!(linear.requests(), 12, "one call per operation and no retry");
+    assert_eq!(linear.requests(), 10, "one call per operation and no retry");
 }
 
 #[test]
@@ -528,7 +526,7 @@ fn a_refused_relation_is_a_reported_line_and_the_slice_still_files() {
     assert!(reported[0].contains("Entity not found"), "{}", reported[0]);
     assert_eq!(
         linear.requests(),
-        7,
+        5,
         "the refused edge was tried a second time"
     );
     assert_eq!(

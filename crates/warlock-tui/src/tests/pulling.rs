@@ -579,20 +579,14 @@ fn a_run_cuts_the_branch_moves_the_ticket_splits_it_and_commits_every_sub_task()
     );
     assert!(!repo.calls().contains(&GitCall::Publish(branch())));
 
-    // The ticket moved, and it moved before the split was asked for.
+    // The ticket moved, by the name of the status and in one call, and it moved
+    // before the split was asked for.
     assert_eq!(
         board.calls(),
-        [
-            Call::Team(TEAM.to_owned()),
-            Call::WorkflowState {
-                team: "team-1".to_owned(),
-                name: "In Progress".to_owned(),
-            },
-            Call::MoveTicket {
-                issue: ISSUE.to_owned(),
-                state: "state-backlog".to_owned(),
-            },
-        ]
+        [Call::MoveTicket {
+            issue: ISSUE.to_owned(),
+            status: "In Progress".to_owned(),
+        }]
     );
     assert_eq!(split.asked().len(), 1);
     assert_eq!(split.asked()[0].description, DESCRIPTION);
@@ -993,7 +987,7 @@ fn a_split_that_halts_halts_the_run_with_its_own_comment() {
 #[test]
 fn a_team_with_no_in_progress_state_gets_a_line_and_the_run_carries_on() {
     let ground = Ground::new();
-    let board = Boarding::filing("").without_backlog_state();
+    let board = Boarding::filing("").without_states();
     let repo = Checkout::clean(DEFAULT).trees([wrote("crates/engine/src/read.rs")]);
     let split = Slicing::into_chain(TICKET, &["Add the reader"]);
     let sessions = Sessions::answering([said("done", "Added the reader.", None)]);
@@ -1007,16 +1001,14 @@ fn a_team_with_no_in_progress_state_gets_a_line_and_the_run_carries_on() {
             team: TEAM.to_owned(),
         }
     );
-    // The state was asked for and no move was attempted.
+    // The move was asked for by the name of the status, and the board answering
+    // that it has no such status is the whole of what the run heard.
     assert_eq!(
         board.calls(),
-        [
-            Call::Team(TEAM.to_owned()),
-            Call::WorkflowState {
-                team: "team-1".to_owned(),
-                name: "In Progress".to_owned(),
-            }
-        ]
+        [Call::MoveTicket {
+            issue: ISSUE.to_owned(),
+            status: "In Progress".to_owned(),
+        }]
     );
     assert_eq!(
         repo.commits(),
@@ -1240,14 +1232,9 @@ fn a_finished_run_pushes_opens_the_pull_request_comments_and_moves_the_ticket() 
     assert_eq!(
         board.calls(),
         [
-            Call::Team(TEAM.to_owned()),
-            Call::WorkflowState {
-                team: "team-1".to_owned(),
-                name: "In Progress".to_owned(),
-            },
             Call::MoveTicket {
                 issue: ISSUE.to_owned(),
-                state: "state-backlog".to_owned(),
+                status: "In Progress".to_owned(),
             },
             Call::TicketComment {
                 issue: ISSUE.to_owned(),
@@ -1256,14 +1243,9 @@ fn a_finished_run_pushes_opens_the_pull_request_comments_and_moves_the_ticket() 
                     branch()
                 ),
             },
-            Call::Team(TEAM.to_owned()),
-            Call::WorkflowState {
-                team: "team-1".to_owned(),
-                name: REVIEW.to_owned(),
-            },
             Call::MoveTicket {
                 issue: ISSUE.to_owned(),
-                state: "state-backlog".to_owned(),
+                status: REVIEW.to_owned(),
             },
             Call::TicketBrief(ISSUE.to_owned()),
         ]
@@ -1288,7 +1270,7 @@ fn a_finished_run_pushes_opens_the_pull_request_comments_and_moves_the_ticket() 
 #[test]
 fn a_team_with_no_review_state_gets_a_line_and_the_run_still_finishes() {
     let ground = Ground::new();
-    let board = Boarding::filing("").without_backlog_state();
+    let board = Boarding::filing("").without_states();
     let forge = Forging::opening(URL);
     let (repo, split, sessions) = two_sub_tasks();
 
@@ -1303,13 +1285,13 @@ fn a_team_with_no_review_state_gets_a_line_and_the_run_still_finishes() {
         state: REVIEW.to_owned(),
     }));
 
-    // The state was asked for by the scope record's name and no move followed.
-    assert!(board.positions_of(Op::MoveTicket).is_empty());
+    // The move was asked for by the scope record's state name, and the board
+    // answering that it has no status of that name is what the line came from.
     assert_eq!(
         board.calls().last(),
-        Some(&Call::WorkflowState {
-            team: "team-1".to_owned(),
-            name: REVIEW.to_owned(),
+        Some(&Call::MoveTicket {
+            issue: ISSUE.to_owned(),
+            status: REVIEW.to_owned(),
         })
     );
     // The pull request was opened and the URL is on the ticket all the same.
@@ -1491,13 +1473,8 @@ fn the_last_ticket_of_a_drafted_project_into_review_moves_the_project() {
 
     assert_eq!(
         board.moves(),
-        [("project-1".to_owned(), "status-in-progress".to_owned())]
-    );
-    assert!(
-        board
-            .calls()
-            .contains(&Call::BriefStatus(REVIEW.to_owned())),
-        "the project status is the scope record's review state"
+        [("project-1".to_owned(), REVIEW.to_owned())],
+        "the status moved to is the scope record's review state, by name"
     );
     assert_eq!(
         events.last(),
@@ -1539,7 +1516,7 @@ fn a_workspace_with_no_review_project_status_is_a_line_and_the_pull_still_finish
     let ground = Ground::new();
     let board = Boarding::filing("")
         .in_brief(TicketBrief::new("In Progress", &[("In Review", "started")]))
-        .without_brief_status();
+        .without_brief_statuses();
     let forge = Forging::opening(URL);
     let (repo, split, sessions) = two_sub_tasks();
 
