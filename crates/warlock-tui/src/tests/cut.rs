@@ -5,9 +5,10 @@ use warlock_engine::Destination;
 use warlock_engine::drafting::Draft;
 
 use super::{Cut, Filing, Slice, cut, cut_note, fold_title, noted, quoted, skip};
+use crate::board::Issue as LinearIssue;
 use crate::error::Error;
 use crate::error::status_for;
-use crate::linear::{Board, Issue as LinearIssue};
+use crate::linear::Board;
 use crate::stubs::{Boarding, Call, IssueAsked, Op, VIEWER};
 
 const SCOPE: &str = "warlock-team";

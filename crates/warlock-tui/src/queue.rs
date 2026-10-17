@@ -10,7 +10,7 @@
 //! temporary home.
 //!
 //! No HTTP vocabulary crosses into it either. The choice is made over the types
-//! [`mod@crate::linear`] already parsed, so a change to how the board spells an
+//! [`mod@crate::board`] already parsed, so a change to how the board spells an
 //! answer cannot change which ticket is next.
 //!
 //! [`take_named`] is the other way in, for when a person says which ticket, and
@@ -26,7 +26,8 @@ use std::fmt;
 
 use warlock_engine::{LinearScope, PullRun, RunStatus};
 
-use crate::linear::{Assignee, Blocker, Board, Error as LinearError, Priority, Queue, QueuedIssue};
+use crate::board::{Assignee, Blocker, Error as LinearError, Priority, Queue, QueuedIssue};
+use crate::linear::Board;
 
 /// The workflow state a ticket sits in while a run works it.
 ///

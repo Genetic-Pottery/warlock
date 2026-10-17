@@ -15,10 +15,11 @@ use warlock_engine::{
 use super::{ALREADY_CUTTING, Cutter};
 use crate::account::Line;
 use crate::app::App;
+use crate::board::FetchedProject;
 use crate::claude::Converses;
 use crate::error::{Error, one_line};
 use crate::inflight::Workers;
-use crate::linear::{FetchedProject, Opens};
+use crate::linear::Opens;
 use crate::prompt::KeyPrompt;
 use crate::stubs::{Answering, Boarding, Gate, Scripted};
 use crate::submission::ToDraft;
@@ -597,9 +598,9 @@ mod binding {
         Scripted, TEAM, a_dir, a_jira_manifest, a_manifest, a_project, a_repository, drafting,
         landing, not_linear, notes, now, unasked,
     };
+    use crate::board::Listing;
     use crate::confirm::Answer;
     use crate::error::{Error, one_line};
-    use crate::linear::Listing;
     use crate::submission::ToDraft;
 
     // A home with the scope open and a key in the store, and no binding for any

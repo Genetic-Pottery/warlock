@@ -8,11 +8,11 @@ use warlock_engine::{
 };
 
 use super::{Ports, Prepared, Progress, Shared, held, prepare, pulled, shared};
+use crate::board::{Assignee, Blocker, NamedIssue, Priority, Queue, QueuedIssue, StateType};
 use crate::claude::Activity;
 use crate::error::status_for;
 use crate::error::{Error, NO_QUEUE};
 use crate::git::{Dirty, Opened};
-use crate::linear::{Assignee, Blocker, NamedIssue, Priority, Queue, QueuedIssue, StateType};
 use crate::pulling::Pulled;
 use crate::queue::{Reason, Refusal};
 use crate::stubs::{Boarding, Checkout, Forging, GitCall, Sessions, Slicing, VIEWER, said};

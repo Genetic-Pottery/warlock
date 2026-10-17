@@ -2663,8 +2663,8 @@ mod cutting {
     use super::{AT_MOST, Driven, key, session_reading};
     use crate::account::Line;
     use crate::app::Focus;
+    use crate::board::Listing;
     use crate::cutting::Cutter;
-    use crate::linear::Listing;
     use crate::pushing::Pushes;
     use crate::stubs::{Answering, Boarding, Call, Scripted};
 
@@ -3302,11 +3302,11 @@ mod pulling {
     use super::{AT_MOST, Session, Stubbed, key, session_reading};
     use crate::account::Line;
     use crate::app::Focus;
+    use crate::board::{Assignee, NamedIssue, Priority, Queue, QueuedIssue, StateType};
     use crate::claude::Activity;
     use crate::confirm::Answer;
     use crate::cutting::Cutter;
     use crate::git::Dirty;
-    use crate::linear::{Assignee, NamedIssue, Priority, Queue, QueuedIssue, StateType};
     use crate::prompt::ScopePrompt;
     use crate::puller::Puller;
     use crate::pushing::Pushes;

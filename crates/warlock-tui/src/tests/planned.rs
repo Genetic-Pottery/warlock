@@ -18,6 +18,7 @@ const ACCEPT: &str = "create";
 
 const SKIP: &str = "quit";
 use crate::asking::Asks;
+use crate::board::{FetchedProject, Listing};
 use crate::brief::ScopeBlockError;
 use crate::claude::{
     Activities, Cancel, Converses, DRAFTING_CONTRACT, DRAFTING_ROUNDS, NOTHING_SETTLES_IT, Wired,
@@ -25,7 +26,7 @@ use crate::claude::{
 use crate::cut::noted;
 use crate::error::Error;
 use crate::error::status_for;
-use crate::linear::{FetchedProject, Listing, Opens};
+use crate::linear::Opens;
 use crate::standing::Standing;
 use crate::stubs::{Answering, Boarding, Call, Op, QueueAsked, Saying, Scripted, Typing, VIEWER};
 
@@ -2638,7 +2639,7 @@ mod editing {
 // Forman's backlog digest: the open tickets a session can name in `blocked_by`.
 mod backlog {
     use super::*;
-    use crate::linear::{Priority, Queue, QueuedIssue, StateType};
+    use crate::board::{Priority, Queue, QueuedIssue, StateType};
 
     fn open(identifier: &str, title: &str) -> QueuedIssue {
         QueuedIssue::new(
