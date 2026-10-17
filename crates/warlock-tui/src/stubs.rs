@@ -388,8 +388,8 @@ pub(crate) struct Boarding {
     status: Option<String>,
     /// What [`Board::brief_status`] answers with, whatever name is asked.
     moved_to: Option<String>,
-    /// What [`Board::ticket_brief`] answers with: `None`, an issue in no
-    /// project, until a test says otherwise.
+    /// What [`Board::ticket_brief`] answers with: `None`, a ticket in no brief,
+    /// until a test says otherwise.
     ticket_brief: Option<TicketBrief>,
     state: Option<String>,
     label: String,
@@ -398,7 +398,7 @@ pub(crate) struct Boarding {
     /// otherwise.
     listing: Listing,
     /// What [`Board::brief_named`] answers with: `None` is a team holding no
-    /// project of that name, which is every push's default.
+    /// brief of that name, which is every push's default.
     same_name: Option<String>,
     /// What [`Board::scope_queue`] answers with, empty until a test says
     /// otherwise: most flows here never read a queue.
@@ -427,23 +427,23 @@ pub(crate) enum Call {
     Viewer,
     Team(String),
     BacklogStatus,
-    ProjectStatus(String),
-    MoveProject { project: String, status: String },
-    IssueProject(String),
+    BriefStatus(String),
+    MoveBrief { project: String, status: String },
+    TicketBrief(String),
     BacklogState(String),
     WorkflowState { team: String, name: String },
-    MoveIssue { issue: String, state: String },
-    IssueLabel { name: String, team: String },
-    FetchProject(String),
-    PlannedProjects { team: String, label: String },
-    ProjectNamed { team: String, name: String },
+    MoveTicket { issue: String, state: String },
+    TicketLabel { name: String, team: String },
+    FetchBrief(String),
+    PlannedBriefs { team: String, label: String },
+    BriefNamed { team: String, name: String },
     ScopeQueue(QueueAsked),
-    NamedIssue { team: String, number: u64 },
-    CreateProject(ProjectAsked),
-    CreateIssue(IssueAsked),
+    NamedTicket { team: String, number: u64 },
+    CreateBrief(BriefAsked),
+    CreateTicket(TicketAsked),
     Relation { blocker: String, waiting: String },
     Comment { project: String, body: String },
-    IssueComment { issue: String, body: String },
+    TicketComment { issue: String, body: String },
 }
 
 impl Call {
@@ -452,23 +452,23 @@ impl Call {
             Self::Viewer => Op::Viewer,
             Self::Team(_) => Op::Team,
             Self::BacklogStatus => Op::BacklogStatus,
-            Self::ProjectStatus(_) => Op::ProjectStatus,
-            Self::MoveProject { .. } => Op::MoveProject,
-            Self::IssueProject(_) => Op::IssueProject,
+            Self::BriefStatus(_) => Op::BriefStatus,
+            Self::MoveBrief { .. } => Op::MoveBrief,
+            Self::TicketBrief(_) => Op::TicketBrief,
             Self::BacklogState(_) => Op::BacklogState,
             Self::WorkflowState { .. } => Op::WorkflowState,
-            Self::MoveIssue { .. } => Op::MoveIssue,
-            Self::IssueLabel { .. } => Op::IssueLabel,
-            Self::FetchProject(_) => Op::FetchProject,
-            Self::PlannedProjects { .. } => Op::PlannedProjects,
-            Self::ProjectNamed { .. } => Op::ProjectNamed,
+            Self::MoveTicket { .. } => Op::MoveTicket,
+            Self::TicketLabel { .. } => Op::TicketLabel,
+            Self::FetchBrief(_) => Op::FetchBrief,
+            Self::PlannedBriefs { .. } => Op::PlannedBriefs,
+            Self::BriefNamed { .. } => Op::BriefNamed,
             Self::ScopeQueue(_) => Op::ScopeQueue,
-            Self::NamedIssue { .. } => Op::NamedIssue,
-            Self::CreateProject(_) => Op::CreateProject,
-            Self::CreateIssue(_) => Op::CreateIssue,
+            Self::NamedTicket { .. } => Op::NamedTicket,
+            Self::CreateBrief(_) => Op::CreateBrief,
+            Self::CreateTicket(_) => Op::CreateTicket,
             Self::Relation { .. } => Op::Relation,
             Self::Comment { .. } => Op::Comment,
-            Self::IssueComment { .. } => Op::IssueComment,
+            Self::TicketComment { .. } => Op::TicketComment,
         }
     }
 }
@@ -478,23 +478,23 @@ pub(crate) enum Op {
     Viewer,
     Team,
     BacklogStatus,
-    ProjectStatus,
-    MoveProject,
-    IssueProject,
+    BriefStatus,
+    MoveBrief,
+    TicketBrief,
     BacklogState,
     WorkflowState,
-    MoveIssue,
-    IssueLabel,
-    FetchProject,
-    PlannedProjects,
-    ProjectNamed,
+    MoveTicket,
+    TicketLabel,
+    FetchBrief,
+    PlannedBriefs,
+    BriefNamed,
     ScopeQueue,
-    NamedIssue,
-    CreateProject,
-    CreateIssue,
+    NamedTicket,
+    CreateBrief,
+    CreateTicket,
     Relation,
     Comment,
-    IssueComment,
+    TicketComment,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -505,7 +505,7 @@ pub(crate) struct QueueAsked {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ProjectAsked {
+pub(crate) struct BriefAsked {
     pub(crate) name: String,
     pub(crate) content: String,
     pub(crate) team: String,
@@ -514,7 +514,7 @@ pub(crate) struct ProjectAsked {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct IssueAsked {
+pub(crate) struct TicketAsked {
     pub(crate) title: String,
     pub(crate) body: String,
     pub(crate) team: String,
@@ -642,25 +642,25 @@ impl Boarding {
         self
     }
 
-    pub(crate) fn creating_project(mut self, id: &str, url: &str) -> Self {
+    pub(crate) fn creating_brief(mut self, id: &str, url: &str) -> Self {
         self.created = FiledBrief::new(id, url);
         self
     }
 
-    pub(crate) fn in_project(mut self, project: TicketBrief) -> Self {
+    pub(crate) fn in_brief(mut self, project: TicketBrief) -> Self {
         self.ticket_brief = Some(project);
         self
     }
 
-    pub(crate) fn without_project_status(mut self) -> Self {
+    pub(crate) fn without_brief_status(mut self) -> Self {
         self.moved_to = None;
         self
     }
 
-    /// Every project move asked for, as the project id and the status id.
+    /// Every brief move asked for, as the brief id and the status id.
     pub(crate) fn moves(&self) -> Vec<(String, String)> {
         self.picked(|call| match call {
-            Call::MoveProject { project, status } => Some((project.clone(), status.clone())),
+            Call::MoveBrief { project, status } => Some((project.clone(), status.clone())),
             _ => None,
         })
     }
@@ -745,16 +745,16 @@ impl Boarding {
             .collect()
     }
 
-    pub(crate) fn projects_created(&self) -> Vec<ProjectAsked> {
+    pub(crate) fn briefs_created(&self) -> Vec<BriefAsked> {
         self.picked(|call| match call {
-            Call::CreateProject(asked) => Some(asked.clone()),
+            Call::CreateBrief(asked) => Some(asked.clone()),
             _ => None,
         })
     }
 
-    pub(crate) fn issues_created(&self) -> Vec<IssueAsked> {
+    pub(crate) fn tickets_created(&self) -> Vec<TicketAsked> {
         self.picked(|call| match call {
-            Call::CreateIssue(asked) => Some(asked.clone()),
+            Call::CreateTicket(asked) => Some(asked.clone()),
             _ => None,
         })
     }
@@ -767,7 +767,7 @@ impl Boarding {
         })
     }
 
-    /// Every project comment asked for, as the project id and the body.
+    /// Every brief comment asked for, as the brief id and the body.
     pub(crate) fn comments(&self) -> Vec<(String, String)> {
         self.picked(|call| match call {
             Call::Comment { project, body } => Some((project.clone(), body.clone())),
@@ -857,17 +857,17 @@ impl Board for Boarding {
     }
 
     fn brief_status(&self, name: &str) -> Result<Option<String>, LinearError> {
-        self.ask(Call::ProjectStatus(name.to_owned()))?;
+        self.ask(Call::BriefStatus(name.to_owned()))?;
         Ok(self.moved_to.clone())
     }
 
     fn ticket_brief(&self, issue: &str) -> Result<Option<TicketBrief>, LinearError> {
-        self.ask(Call::IssueProject(issue.to_owned()))?;
+        self.ask(Call::TicketBrief(issue.to_owned()))?;
         Ok(self.ticket_brief.clone())
     }
 
     fn move_brief(&self, project: &str, status: &str) -> Result<String, LinearError> {
-        self.ask(Call::MoveProject {
+        self.ask(Call::MoveBrief {
             project: project.to_owned(),
             status: status.to_owned(),
         })?;
@@ -897,7 +897,7 @@ impl Board for Boarding {
     /// The move recorded and the issue handed back, as the real board answers
     /// with the issue it updated.
     fn move_ticket(&self, issue: &str, state: &str) -> Result<String, LinearError> {
-        self.ask(Call::MoveIssue {
+        self.ask(Call::MoveTicket {
             issue: issue.to_owned(),
             state: state.to_owned(),
         })?;
@@ -905,7 +905,7 @@ impl Board for Boarding {
     }
 
     fn ticket_label_id(&self, name: &str, team: &str) -> Result<String, LinearError> {
-        self.ask(Call::IssueLabel {
+        self.ask(Call::TicketLabel {
             name: name.to_owned(),
             team: team.to_owned(),
         })?;
@@ -913,12 +913,12 @@ impl Board for Boarding {
     }
 
     fn fetch_brief(&self, slug: &str) -> Result<Option<FetchedBrief>, LinearError> {
-        self.ask(Call::FetchProject(slug.to_owned()))?;
+        self.ask(Call::FetchBrief(slug.to_owned()))?;
         Ok(self.project.clone())
     }
 
     fn planned_briefs(&self, team: &str, label: &str) -> Result<Listing, LinearError> {
-        self.ask(Call::PlannedProjects {
+        self.ask(Call::PlannedBriefs {
             team: team.to_owned(),
             label: label.to_owned(),
         })?;
@@ -926,7 +926,7 @@ impl Board for Boarding {
     }
 
     fn brief_named(&self, team: &str, name: &str) -> Result<Option<String>, LinearError> {
-        self.ask(Call::ProjectNamed {
+        self.ask(Call::BriefNamed {
             team: team.to_owned(),
             name: name.to_owned(),
         })?;
@@ -948,7 +948,7 @@ impl Board for Boarding {
     /// being the default — and the call recorded, which is where a test reads the
     /// team and number that were asked for.
     fn named_ticket(&self, team: &str, number: u64) -> Result<Option<NamedTicket>, LinearError> {
-        self.ask(Call::NamedIssue {
+        self.ask(Call::NamedTicket {
             team: team.to_owned(),
             number,
         })?;
@@ -956,7 +956,7 @@ impl Board for Boarding {
     }
 
     fn create_brief(&self, project: &NewBrief<'_>) -> Result<FiledBrief, LinearError> {
-        self.ask(Call::CreateProject(ProjectAsked {
+        self.ask(Call::CreateBrief(BriefAsked {
             name: project.name().to_owned(),
             content: project.content().to_owned(),
             team: project.team().to_owned(),
@@ -967,7 +967,7 @@ impl Board for Boarding {
     }
 
     fn create_ticket(&self, issue: &NewTicket<'_>) -> Result<FiledTicket, LinearError> {
-        self.ask(Call::CreateIssue(IssueAsked {
+        self.ask(Call::CreateTicket(TicketAsked {
             title: issue.title().to_owned(),
             body: issue.body().to_owned(),
             team: issue.team().to_owned(),
@@ -1012,7 +1012,7 @@ impl Board for Boarding {
     /// it: a flow that meant to explain a halt on the ticket and commented on the
     /// project instead is a bug a shared variant would hide.
     fn comment_on_ticket(&self, issue: &str, body: &str) -> Result<String, LinearError> {
-        self.ask(Call::IssueComment {
+        self.ask(Call::TicketComment {
             issue: issue.to_owned(),
             body: body.to_owned(),
         })?;

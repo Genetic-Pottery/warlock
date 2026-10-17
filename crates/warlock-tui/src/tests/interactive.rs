@@ -2119,7 +2119,7 @@ mod filing {
         );
         assert_eq!(
             linear.ops(),
-            [Op::Viewer, Op::FetchProject],
+            [Op::Viewer, Op::FetchBrief],
             "a draft of an unknown project sent more than the read"
         );
         assert!(
@@ -2203,12 +2203,7 @@ mod filing {
         );
         assert_eq!(
             linear.ops(),
-            [
-                Op::Team,
-                Op::ProjectNamed,
-                Op::BacklogStatus,
-                Op::CreateProject
-            ]
+            [Op::Team, Op::BriefNamed, Op::BacklogStatus, Op::CreateBrief]
         );
         assert!(
             !repo.path().join(".warlock/filed.toml").exists(),
@@ -2317,7 +2312,7 @@ mod filing {
         );
         landing(&mut driven);
         assert_eq!(
-            linear.projects_created().len(),
+            linear.briefs_created().len(),
             1,
             "the brief was filed twice"
         );
@@ -2345,7 +2340,7 @@ mod filing {
         assert!(line.contains(URL), "{line} does not carry the address");
         assert_eq!(line.lines().count(), 1, "{line} is more than one line");
         assert!(
-            linear.projects_created().is_empty(),
+            linear.briefs_created().is_empty(),
             "a second project was created"
         );
         assert!(!driven.pushes.window().confirm.is_open());
@@ -2920,7 +2915,7 @@ mod cutting {
         );
         assert_eq!(
             linear.calls(),
-            [Call::PlannedProjects {
+            [Call::PlannedBriefs {
                 team: TEAM.to_owned(),
                 label: "warlock".to_owned(),
             }],
@@ -2944,9 +2939,7 @@ mod cutting {
         fetched(&mut driven);
 
         assert!(
-            linear
-                .calls()
-                .contains(&Call::FetchProject(SLUG.to_owned())),
+            linear.calls().contains(&Call::FetchBrief(SLUG.to_owned())),
             "the slug typed is not the one read: {:?}",
             linear.calls()
         );
@@ -4186,7 +4179,7 @@ mod pulling {
             "a cancelled run committed the tree"
         );
         assert!(
-            !linear.ops().contains(&Op::IssueComment),
+            !linear.ops().contains(&Op::TicketComment),
             "a cancelled run commented on the ticket: {:?}",
             linear.ops()
         );

@@ -477,7 +477,7 @@ fn comments(board: &Boarding) -> Vec<String> {
         .calls()
         .into_iter()
         .filter_map(|call| match call {
-            Call::IssueComment { issue, body } => {
+            Call::TicketComment { issue, body } => {
                 assert_eq!(issue, ISSUE, "a comment went to another issue");
                 Some(body)
             }
@@ -588,7 +588,7 @@ fn a_run_cuts_the_branch_moves_the_ticket_splits_it_and_commits_every_sub_task()
                 team: "team-1".to_owned(),
                 name: "In Progress".to_owned(),
             },
-            Call::MoveIssue {
+            Call::MoveTicket {
                 issue: ISSUE.to_owned(),
                 state: "state-backlog".to_owned(),
             },
@@ -676,7 +676,7 @@ fn a_crossing_halts_at_once_commits_nothing_and_leaves_the_tree_alone() {
     assert!(posted[0].contains("## Finished"));
     assert!(posted[0].contains("`crossed`"));
     // The ticket stays where it is: the only move is the one to `In Progress`.
-    assert_eq!(board.positions_of(Op::MoveIssue).len(), 1);
+    assert_eq!(board.positions_of(Op::MoveTicket).len(), 1);
 }
 
 #[test]
@@ -1245,11 +1245,11 @@ fn a_finished_run_pushes_opens_the_pull_request_comments_and_moves_the_ticket() 
                 team: "team-1".to_owned(),
                 name: "In Progress".to_owned(),
             },
-            Call::MoveIssue {
+            Call::MoveTicket {
                 issue: ISSUE.to_owned(),
                 state: "state-backlog".to_owned(),
             },
-            Call::IssueComment {
+            Call::TicketComment {
                 issue: ISSUE.to_owned(),
                 body: format!(
                     "`{}` is pushed and its pull request is open: {URL}",
@@ -1261,11 +1261,11 @@ fn a_finished_run_pushes_opens_the_pull_request_comments_and_moves_the_ticket() 
                 team: "team-1".to_owned(),
                 name: REVIEW.to_owned(),
             },
-            Call::MoveIssue {
+            Call::MoveTicket {
                 issue: ISSUE.to_owned(),
                 state: "state-backlog".to_owned(),
             },
-            Call::IssueProject(ISSUE.to_owned()),
+            Call::TicketBrief(ISSUE.to_owned()),
         ]
     );
 
@@ -1304,7 +1304,7 @@ fn a_team_with_no_review_state_gets_a_line_and_the_run_still_finishes() {
     }));
 
     // The state was asked for by the scope record's name and no move followed.
-    assert!(board.positions_of(Op::MoveIssue).is_empty());
+    assert!(board.positions_of(Op::MoveTicket).is_empty());
     assert_eq!(
         board.calls().last(),
         Some(&Call::WorkflowState {
@@ -1355,7 +1355,7 @@ fn no_gh_comments_the_body_on_the_ticket_and_the_run_still_counts_as_finished() 
     let saved = ground.saved();
     assert_eq!(saved.status(), RunStatus::InReview);
     assert_eq!(saved.pr_url(), None);
-    assert_eq!(board.positions_of(Op::MoveIssue).len(), 2);
+    assert_eq!(board.positions_of(Op::MoveTicket).len(), 2);
 }
 
 #[test]
@@ -1399,7 +1399,7 @@ fn a_run_whose_branch_changed_nothing_opens_no_pull_request_and_says_so_on_the_t
         "{}",
         posted[0]
     );
-    assert_eq!(board.positions_of(Op::MoveIssue).len(), 2);
+    assert_eq!(board.positions_of(Op::MoveTicket).len(), 2);
 
     let saved = ground.saved();
     assert_eq!(saved.status(), RunStatus::InReview);
@@ -1468,7 +1468,7 @@ const REVIEWED: &str =
 
 fn reviewing(project: TicketBrief) -> (Boarding, Vec<PullEvent>) {
     let ground = Ground::new();
-    let board = Boarding::filing("").in_project(project);
+    let board = Boarding::filing("").in_brief(project);
     let forge = Forging::opening(URL);
     let (repo, split, sessions) = two_sub_tasks();
 
@@ -1496,7 +1496,7 @@ fn the_last_ticket_of_a_drafted_project_into_review_moves_the_project() {
     assert!(
         board
             .calls()
-            .contains(&Call::ProjectStatus(REVIEW.to_owned())),
+            .contains(&Call::BriefStatus(REVIEW.to_owned())),
         "the project status is the scope record's review state"
     );
     assert_eq!(
@@ -1538,8 +1538,8 @@ fn a_project_still_being_drafted_stays_planned_whatever_its_issues_are() {
 fn a_workspace_with_no_review_project_status_is_a_line_and_the_pull_still_finishes() {
     let ground = Ground::new();
     let board = Boarding::filing("")
-        .in_project(TicketBrief::new("In Progress", &[("In Review", "started")]))
-        .without_project_status();
+        .in_brief(TicketBrief::new("In Progress", &[("In Review", "started")]))
+        .without_brief_status();
     let forge = Forging::opening(URL);
     let (repo, split, sessions) = two_sub_tasks();
 

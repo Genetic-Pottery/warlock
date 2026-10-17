@@ -945,7 +945,7 @@ mod binding {
         assert!(!puller.pulling(), "a refused pull started a run");
         assert!(repo.calls().is_empty(), "a refused `/pull` ran `git`");
         assert!(
-            linear.issues_created().is_empty(),
+            linear.tickets_created().is_empty(),
             "a refused pull created an issue"
         );
     }
@@ -980,7 +980,7 @@ fn a_failure_in_the_run_lands_as_one_line_and_leaves_the_panel_running() {
     let forge = Forging::opening(URL);
     let mut puller = puller(
         &ground,
-        board(queue([ready()])).refuse_from(Op::MoveIssue, 1, "Entity not found"),
+        board(queue([ready()])).refuse_from(Op::MoveTicket, 1, "Entity not found"),
         repo.clone(),
         forge.clone(),
         written,

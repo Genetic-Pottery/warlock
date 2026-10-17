@@ -363,13 +363,13 @@ fn a_project(status: Option<&str>) -> Boarding {
 // to, then the project the slug names. The queue is only asked for once there is
 // a draft to show it to.
 fn read_before_refusing() -> [Call; 2] {
-    [Call::Viewer, Call::FetchProject(SLUG.to_owned())]
+    [Call::Viewer, Call::FetchBrief(SLUG.to_owned())]
 }
 
 fn read_by_prepare() -> [Call; 3] {
     [
         Call::Viewer,
-        Call::FetchProject(SLUG.to_owned()),
+        Call::FetchBrief(SLUG.to_owned()),
         Call::ScopeQueue(QueueAsked {
             team: TEAM.to_owned(),
             label: LABEL.to_owned(),
@@ -997,7 +997,7 @@ mod listing {
         assert_eq!(listed, Listing::new(&[(SLUG, NAME)]));
         assert_eq!(
             linear.calls(),
-            [Call::PlannedProjects {
+            [Call::PlannedBriefs {
                 team: TEAM.to_owned(),
                 label: LABEL.to_owned(),
             }]
@@ -1324,7 +1324,7 @@ mod headless {
         assert!(matches!(error, Error::NotLinear { .. }), "{error:?}");
         assert_eq!(said(&error), not_linear(SCOPE));
         assert!(
-            linear.issues_created().is_empty(),
+            linear.tickets_created().is_empty(),
             "a refused draft created an issue"
         );
         assert!(linear.calls().is_empty(), "{:?}", linear.calls());
@@ -1466,7 +1466,7 @@ mod headless {
         // nothing, so nothing was put to anybody — the stand-ins for the
         // proposing model and for stdin both panic if they are reached.
         assert_eq!(agent.turns(), 3, "{:?}", agent.said());
-        assert_eq!(linear.issues_created().len(), 6);
+        assert_eq!(linear.tickets_created().len(), 6);
     }
 
     #[test]
@@ -1522,7 +1522,7 @@ mod headless {
         let repo = a_scoped_repository();
         let home = a_home(repo.path());
         let linear =
-            a_sliced_project(SLICED).refuse_from(Op::CreateIssue, 2, "that is enough issues");
+            a_sliced_project(SLICED).refuse_from(Op::CreateTicket, 2, "that is enough issues");
 
         let (outcome, printed) =
             cut_running(repo.path(), home.path(), &linear, &Sketching::drafting());
@@ -1556,7 +1556,7 @@ mod headless {
         // Not drafted and not filed: two sessions for three slices, and nothing
         // on the board carrying the skipped slice's stand-in titles.
         assert_eq!(agent.turns(), 2, "{:?}", agent.said());
-        assert_eq!(linear.issues_created().len(), 4);
+        assert_eq!(linear.tickets_created().len(), 4);
         // Its prose and not its title: a later session is shown the title among
         // the tickets earlier slices became, but only a drafted slice is sent
         // its prose.
@@ -1592,9 +1592,9 @@ mod headless {
         // Nothing on the board: the refusal happens while the slice is still
         // nothing rather than half filed.
         assert!(
-            linear.issues_created().is_empty(),
+            linear.tickets_created().is_empty(),
             "{:?}",
-            linear.issues_created()
+            linear.tickets_created()
         );
         assert!(linear.comments().is_empty(), "{:?}", linear.comments());
     }
@@ -1632,9 +1632,9 @@ mod headless {
         // Nothing was created and nothing was noted: a run that filed nothing
         // has nothing to say on the project.
         assert!(
-            linear.issues_created().is_empty(),
+            linear.tickets_created().is_empty(),
             "{:?}",
-            linear.issues_created()
+            linear.tickets_created()
         );
         assert!(linear.comments().is_empty(), "{:?}", linear.comments());
     }
@@ -1652,9 +1652,9 @@ mod headless {
             "{lines:?}"
         );
         assert!(
-            linear.issues_created().is_empty(),
+            linear.tickets_created().is_empty(),
             "{:?}",
-            linear.issues_created()
+            linear.tickets_created()
         );
     }
 
@@ -1667,7 +1667,7 @@ mod headless {
         cut_filing(repo.path(), home.path(), &linear, &Sketching::drafting());
 
         let notes = linear.positions_of(Op::Comment);
-        let creates = linear.positions_of(Op::CreateIssue);
+        let creates = linear.positions_of(Op::CreateTicket);
         assert_eq!(notes.len(), 3, "{:?}", linear.ops());
         for (slice, note) in notes.iter().enumerate() {
             assert!(*note > creates[slice * 2 + 1], "{:?}", linear.ops());
@@ -1693,7 +1693,7 @@ mod headless {
         );
         assert!(said(&error).contains("the workspace would not"), "{error}");
         assert!(lines(&printed).contains(&format!("cut `{FIRST}` into `WAR-1`, `WAR-2`")));
-        assert_eq!(linear.issues_created().len(), 2, "the run went on");
+        assert_eq!(linear.tickets_created().len(), 2, "the run went on");
     }
 
     #[test]
@@ -1731,16 +1731,16 @@ mod headless {
                 matches!(
                     op,
                     Op::Viewer
-                        | Op::FetchProject
+                        | Op::FetchBrief
                         | Op::ScopeQueue
                         | Op::Team
                         | Op::BacklogState
-                        | Op::IssueLabel
-                        | Op::CreateIssue
+                        | Op::TicketLabel
+                        | Op::CreateTicket
                         | Op::Relation
                         | Op::Comment
-                        | Op::ProjectStatus
-                        | Op::MoveProject
+                        | Op::BriefStatus
+                        | Op::MoveBrief
                 ),
                 "a run asked for {op:?}"
             );
@@ -1762,12 +1762,12 @@ mod headless {
         // Three slices with two drafts in each: six issues, and one answer about
         // who they are all for. A request per slice — or per draft — would be
         // bought again for an answer that cannot have changed.
-        assert_eq!(linear.issues_created().len(), 6);
+        assert_eq!(linear.tickets_created().len(), 6);
         let asked = linear.positions_of(Op::Viewer);
         assert_eq!(asked.len(), 1, "{:?}", linear.ops());
         // And before anything exists to assign: the id is resolved while the run
         // is still nothing, not found out once issues are on the board.
-        let first = linear.positions_of(Op::CreateIssue)[0];
+        let first = linear.positions_of(Op::CreateTicket)[0];
         assert!(
             asked[0] < first,
             "the viewer was asked at {} and the first issue created at {first}",
@@ -1786,7 +1786,7 @@ mod headless {
         // One id for the run, the one the board said the key belongs to: the
         // slices are cut one at a time and the assignee is not a thing a later
         // slice can drift on.
-        let issues = linear.issues_created();
+        let issues = linear.tickets_created();
         assert_eq!(issues.len(), 6, "{issues:?}");
         for issue in &issues {
             assert_eq!(issue.assignee, VIEWER, "{issue:?}");
@@ -1955,7 +1955,7 @@ mod relaying {
             "{lines:?}"
         );
         // A question is a pause and not an ending: every slice was cut.
-        assert_eq!(linear.issues_created().len(), 6);
+        assert_eq!(linear.tickets_created().len(), 6);
         // The key value reaches the client and nothing else, here as
         // everywhere.
         assert!(!printed.contains(NOT_A_KEY), "{printed}");
@@ -2005,7 +2005,7 @@ mod relaying {
                 .any(|line| line.contains("was answered") && line.contains(TYPED)),
             "{lines:?}"
         );
-        assert_eq!(linear.issues_created().len(), 6);
+        assert_eq!(linear.tickets_created().len(), 6);
     }
 
     #[test]
@@ -2047,7 +2047,7 @@ mod relaying {
             "{:?}",
             agent.said()
         );
-        assert_eq!(linear.issues_created().len(), 6);
+        assert_eq!(linear.tickets_created().len(), 6);
     }
 
     #[test]
@@ -2088,7 +2088,7 @@ mod relaying {
             "{:?}",
             agent.said()
         );
-        assert_eq!(linear.issues_created().len(), 6);
+        assert_eq!(linear.tickets_created().len(), 6);
     }
 
     #[test]
@@ -2117,7 +2117,7 @@ mod relaying {
         assert!(uncut.contains("nothing was typed"), "{uncut}");
         // The slice is uncut and the two after it were cut: nothing was filed
         // for it and no note names it, so the next run offers it again.
-        assert_eq!(linear.issues_created().len(), 4);
+        assert_eq!(linear.tickets_created().len(), 4);
         for (title, _) in recorded(&linear) {
             assert_ne!(title, folded(FIRST), "the uncut slice was noted");
         }
@@ -2162,9 +2162,9 @@ mod relaying {
         // at the review is nobody saying what to do with the drafts, which files
         // nothing.
         assert!(
-            linear.issues_created().is_empty(),
+            linear.tickets_created().is_empty(),
             "{:?}",
-            linear.issues_created()
+            linear.tickets_created()
         );
         assert!(recorded(&linear).is_empty());
     }
@@ -2252,7 +2252,7 @@ mod reviewing {
         // One read per slice, at Forman's own prompt.
         assert_eq!(typing.asked(), [REVIEWED; 3], "{:?}", typing.asked());
         assert_eq!(typing.discards(), 3);
-        assert_eq!(linear.issues_created().len(), 6);
+        assert_eq!(linear.tickets_created().len(), 6);
     }
 
     #[test]
@@ -2277,8 +2277,8 @@ mod reviewing {
         );
         // The two after it were drafted and filed, and nothing of the skipped
         // slice reached the board.
-        assert_eq!(linear.issues_created().len(), 4);
-        for issue in linear.issues_created() {
+        assert_eq!(linear.tickets_created().len(), 4);
+        for issue in linear.tickets_created() {
             assert!(!issue.title.contains(FIRST), "{issue:?}");
         }
     }
@@ -2296,7 +2296,7 @@ mod reviewing {
         let printed = reviewing(repo.path(), home.path(), &linear, &mut typing);
 
         assert!(!printed.contains("was skipped"), "{printed}");
-        assert_eq!(linear.issues_created().len(), 6);
+        assert_eq!(linear.tickets_created().len(), 6);
     }
 
     #[test]
@@ -2313,7 +2313,7 @@ mod reviewing {
             printed.contains("the run stopped; 2 slices left"),
             "{printed}"
         );
-        assert!(linear.issues_created().is_empty());
+        assert!(linear.tickets_created().is_empty());
         assert_eq!(recorded(&linear), [(folded(FIRST), Vec::<String>::new())]);
     }
 
@@ -2375,7 +2375,7 @@ mod reviewing {
             error.to_string().contains("already cut or skipped"),
             "{error}"
         );
-        assert!(again.issues_created().is_empty());
+        assert!(again.tickets_created().is_empty());
     }
 
     #[test]
@@ -2419,7 +2419,7 @@ mod reviewing {
         assert_eq!(typing.asked(), [REVIEWED; 4], "{:?}", typing.asked());
         assert!(lines.contains(&drafted(1, FIRST, AGAIN)), "{lines:?}");
         let filed: Vec<String> = linear
-            .issues_created()
+            .tickets_created()
             .into_iter()
             .map(|issue| issue.title)
             .collect();
@@ -2455,9 +2455,9 @@ mod reviewing {
         // nothing to say on the project.
         assert_eq!(typing.asked(), [REVIEWED; 3], "{:?}", typing.asked());
         assert!(
-            linear.issues_created().is_empty(),
+            linear.tickets_created().is_empty(),
             "{:?}",
-            linear.issues_created()
+            linear.tickets_created()
         );
         assert!(recorded(&linear).is_empty());
         assert!(linear.comments().is_empty(), "{:?}", linear.comments());
@@ -2798,7 +2798,7 @@ mod finishing {
         let repo = a_scoped_repository();
         let home = a_home(repo.path());
         let linear = a_noted_project(SLICED, [a_cut(FIRST, &["WAR-1"]), a_skip(SECOND)])
-            .without_project_status();
+            .without_brief_status();
         let mut planned = prepared(repo.path(), home.path(), &linear);
 
         let said = skipping_each(&mut planned, &linear);
@@ -2822,7 +2822,7 @@ mod finishing {
             SLICED,
             [a_cut(FIRST, &["WAR-1"]), a_cut(SECOND, &["WAR-2"])],
         )
-        .refuse(Op::MoveProject, "the workspace would not");
+        .refuse(Op::MoveBrief, "the workspace would not");
         let mut planned = prepared(repo.path(), home.path(), &linear);
 
         let settled = filing_each(&mut planned, &linear);
