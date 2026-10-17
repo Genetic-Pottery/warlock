@@ -8,14 +8,18 @@ use warlock_engine::{
 };
 
 use super::{Ports, Prepared, Progress, Shared, held, prepare, pulled, shared};
-use crate::board::{Assignee, Blocker, Category, NamedTicket, Priority, Queue, QueuedTicket};
+use crate::board::{
+    Assignee, Blocker, Category, NamedTicket, Opens, Priority, Queue, QueuedTicket,
+};
 use crate::claude::Activity;
 use crate::error::status_for;
 use crate::error::{Error, NO_QUEUE};
 use crate::git::{Dirty, Opened};
 use crate::pulling::Pulled;
 use crate::queue::{Reason, Refusal};
-use crate::stubs::{Boarding, Checkout, Forging, GitCall, Sessions, Slicing, VIEWER, said};
+use crate::stubs::{
+    Boarding, Checkout, Forging, GitCall, Opening, Sessions, Slicing, VIEWER, said,
+};
 
 // Not a key, and named so that nothing reading this file mistakes it for one: it
 // is stored only so that a bound name resolves.
@@ -58,6 +62,20 @@ fn a_manifest() -> Manifest {
     ])
     .with_scopes([
         ScopeRecord::new(SCOPE, TEAM, REVIEW, LABEL),
+        ScopeRecord::new(CLOSED, "CTL", REVIEW, LABEL),
+    ])
+}
+
+// The same two records with the open scope's one recording a Jira board: the
+// tracker is the only thing that differs, so what the pull below draws is the
+// board's own refusal and not a scope spelled differently.
+fn a_jira_manifest() -> Manifest {
+    Manifest::with_directories([
+        scoped("crates/engine", SCOPE),
+        scoped("crates/control", CLOSED),
+    ])
+    .with_scopes([
+        ScopeRecord::jira(SCOPE, "https://acme.atlassian.net", "PAY", REVIEW, LABEL),
         ScopeRecord::new(CLOSED, "CTL", REVIEW, LABEL),
     ])
 }
@@ -106,6 +124,14 @@ impl Ground {
             root,
             home,
             manifest: a_manifest(),
+        }
+    }
+
+    /// The same ground with the open scope recording a Jira board.
+    fn jira() -> Self {
+        Self {
+            manifest: a_jira_manifest(),
+            ..Self::new()
         }
     }
 
@@ -207,10 +233,13 @@ fn wrote(path: &str) -> Vec<Dirty> {
 
 /// The whole command, less the environment and with the seams written down: what
 /// `pull` spends once it has resolved a repository, a home and a scope.
-fn pull_with(
+// Generic over the opener alone, because that is the one seam a run can reach
+// either board through: everything else a pull touches is the same checkout,
+// forge and pair of sessions whichever board the scope files to.
+fn pull_with<O: Opens>(
     ground: &Ground,
     prepared: &Prepared,
-    ports: &Ports<'_, Boarding, Checkout, Forging, Slicing, Sessions>,
+    ports: &Ports<'_, O, Checkout, Forging, Slicing, Sessions>,
     ticket: Option<&str>,
     dry_run: bool,
 ) -> (Result<(), Error>, String) {
@@ -387,6 +416,47 @@ fn a_dirty_tree_is_refused_before_the_board_is_opened() {
     assert_eq!(status_for(&Err(error)), 1);
 
     assert_eq!(repo.calls(), vec![GitCall::Dirty]);
+    assert_eq!(printed, "");
+    assert!(!ground.any_record());
+}
+
+#[test]
+fn a_pull_over_a_jira_scope_is_refused_by_the_board_verb_s_own_sentence() {
+    let ground = Ground::jira();
+    let prepared = ground.prepared();
+    let repo = Checkout::clean(DEFAULT);
+    // Nothing written down, so a request that reached the transport panics the
+    // stand-in rather than being asserted about afterwards.
+    let jira = Opening::answering([]);
+
+    let (outcome, printed) = pull_with(
+        &ground,
+        &prepared,
+        &Ports {
+            open: &jira,
+            repo: &repo,
+            forge: &Forging::opening(URL),
+            split: &no_split(),
+            sessions: &no_sessions(),
+        },
+        None,
+        false,
+    );
+
+    // The first verb selection asks of the board, refused in the board's own
+    // words: warlock has no request for it on Jira yet.
+    let error = outcome.expect_err("a scope that files to Jira");
+    assert_eq!(
+        error.to_string(),
+        "warlock cannot read whose key a scope files with on a Jira scope yet, \
+         so nothing was sent"
+    );
+    // The ordering the flow already had, now with the board at the end of it:
+    // the tree is read, the key is read and a client built, and the first call
+    // is what refuses. Nothing was sent and nothing was written down.
+    assert_eq!(repo.calls(), vec![GitCall::Dirty]);
+    assert_eq!(jira.opened_with(), [NOT_A_KEY]);
+    assert!(jira.made().is_empty(), "{:?}", jira.made());
     assert_eq!(printed, "");
     assert!(!ground.any_record());
 }

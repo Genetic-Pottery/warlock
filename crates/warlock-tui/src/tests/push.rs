@@ -1,7 +1,9 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use serde_json::{Value, json};
 use tempfile::TempDir;
+use ureq::http::Method;
 use warlock_engine::{
     Destination, Manifest, ScopeRecord, ScopedDirectory, config_path, keys_path, manifest_path,
     route, save_key, save_key_binding, save_open_scopes,
@@ -13,7 +15,7 @@ use crate::brief::{Brief, brief_at};
 use crate::error::Error;
 use crate::error::status_for;
 use crate::standing::Standing;
-use crate::stubs::{Boarding, BriefAsked, Call, Op};
+use crate::stubs::{Boarding, BriefAsked, Call, Op, Opening};
 
 // Not a key, and named so that nothing reading this file mistakes it for one.
 // It is stored only so that a bound name resolves and a push can reach the
@@ -37,6 +39,17 @@ const PROJECT_ID: &str = "b229262b-22aa-444a-a8af-0a2a3f4ef100";
 const EARLIER: &str = "https://linear.app/acme/project/push-a-brief-9f8e7d";
 
 const URL: &str = "https://linear.app/acme/project/push-a-brief-1a2b3c";
+
+// The site a Jira record names, which is what every address below is built on.
+const SITE: &str = "https://acme.atlassian.net";
+
+// A Jira project key, which is what a Jira record's destination is named by
+// where a Linear record's is named by its team key.
+const PROJECT_KEY: &str = "PAY";
+
+// The Epic a create answers with, and the one a second push finds already
+// there.
+const ISSUE_KEY: &str = "PAY-14";
 
 // Every section the built-in shape asks for, so a repository that has written
 // no template of its own holds this document to something it satisfies.
@@ -62,6 +75,49 @@ fn a_manifest(scopes: impl IntoIterator<Item = ScopeRecord>) -> Manifest {
 
 fn a_record(name: &str, team: &str) -> ScopeRecord {
     ScopeRecord::new(name, team, "In Review", LABEL)
+}
+
+// A record filing to Jira, under the name every fixture above records as a
+// Linear one: the tracker is the only thing that differs, so what the pushes
+// below show is the board the record names and nothing about a scope spelled
+// differently or a key nobody bound.
+fn a_jira_record(name: &str) -> ScopeRecord {
+    ScopeRecord::jira(name, SITE, PROJECT_KEY, "In Review", LABEL)
+}
+
+// `a_repository` with that record in place of the Linear one, and the same
+// brief under it.
+fn a_jira_repository() -> TempDir {
+    let repo = a_repository();
+    saving(repo.path(), &a_manifest([a_jira_record(SCOPE)]));
+    repo
+}
+
+// Where a person opens that Epic, which is the whole of what a Jira push prints
+// as the address.
+fn browse() -> String {
+    format!("{SITE}/browse/{ISSUE_KEY}")
+}
+
+// One page of a JQL answer holding these issues and no page after it, as the
+// brief-by-name lookup reads one.
+fn page(issues: &[(&str, &str)]) -> Value {
+    let issues: Vec<Value> = issues
+        .iter()
+        .map(|(key, summary)| json!({ "key": key, "fields": { "summary": summary } }))
+        .collect();
+    json!({ "issues": issues })
+}
+
+// The two requests a Jira push spells, each by the method and the path that name
+// it: the brief-by-name lookup, and the create. What they carry is asserted in
+// `jira.rs`'s own tests.
+fn asked() -> (Method, String) {
+    (Method::POST, "/rest/api/3/search/jql".to_owned())
+}
+
+fn created() -> (Method, String) {
+    (Method::POST, "/rest/api/3/issue".to_owned())
 }
 
 // A repository holding one recorded scope and one brief: the ordinary finished
@@ -247,6 +303,58 @@ fn a_project_of_the_same_name_is_refused_with_its_url_and_nothing_is_created() {
     assert!(said(&error).contains(EARLIER), "{}", said(&error));
     assert_eq!(linear.ops(), [Op::BriefNamed]);
     assert!(linear.briefs_created().is_empty());
+    assert!(printed.is_empty(), "{printed}");
+}
+
+#[test]
+fn a_push_to_a_jira_scope_files_the_brief_and_says_where_a_person_opens_it() {
+    let repo = a_jira_repository();
+    let home = a_home(repo.path());
+    // The lookup's one page, holding no Epic of this name, and then the create's
+    // answer: the same flow as the Linear push above, over the board the record
+    // names.
+    let jira = Opening::answering([Ok(page(&[])), Ok(json!({ "key": ISSUE_KEY }))]);
+
+    let (outcome, printed) = push_to(repo.path(), home.path(), SCOPE, BRIEF_PATH, false, &jira);
+
+    outcome.expect("a repository, a Jira board and a brief are a push");
+    // The value out of the key store reached the one line that reads it.
+    assert_eq!(jira.opened_with(), [NOT_A_KEY]);
+    // The name asked about before anything is created, as the Linear push asks
+    // it: nothing on this machine remembers a push, so a brief of the same name
+    // in the project is the only sign of an earlier one.
+    assert_eq!(jira.spelled(), [asked(), created()]);
+    // The project key where a Linear push prints the team key, and the browse
+    // URL the create built out of the site the record names.
+    assert_eq!(
+        printed,
+        format!(
+            "warlock: filed `{TITLE}` to `{PROJECT_KEY}`, labelled `{LABEL}`: {}\n",
+            browse()
+        )
+    );
+}
+
+#[test]
+fn a_second_push_onto_a_jira_scope_is_refused_with_its_url_and_creates_nothing() {
+    let repo = a_jira_repository();
+    let home = a_home(repo.path());
+    // The project already holds an Epic of this brief's name, which is the only
+    // sign a first push ever happened: nothing on this machine remembers one.
+    let jira = Opening::answering([Ok(page(&[(ISSUE_KEY, TITLE)]))]);
+
+    let (outcome, printed) = push_to(repo.path(), home.path(), SCOPE, BRIEF_PATH, false, &jira);
+
+    assert_eq!(status_for(&outcome), 1);
+    let error = outcome.expect_err("a brief is filed once");
+    assert!(
+        matches!(&error, Error::AlreadyFiled { name, url } if name == TITLE && *url == browse()),
+        "{error:?}"
+    );
+    assert!(said(&error).contains(&browse()), "{}", said(&error));
+    // The lookup is the whole conversation: no create was sent, so there is no
+    // second Epic to delete.
+    assert_eq!(jira.spelled(), [asked()]);
     assert!(printed.is_empty(), "{printed}");
 }
 

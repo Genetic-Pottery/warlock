@@ -19,7 +19,7 @@ use crate::claude::{Activities, Activity, Cancel, Converses, Split, Stopped, Wir
 use crate::clipboard::Clip;
 use crate::error::Error;
 use crate::git::{Commit, Dirty, Error as GitError, Forge, Opened, PullRequest, Repository};
-use crate::jira::Calls;
+use crate::jira::{Calls, Jira};
 use crate::linear::{LINEAR, Posts};
 use crate::puller::{Raised, Raises, Raising, Stopping, activity_port};
 use crate::pulling::{Splits, Works};
@@ -404,6 +404,70 @@ impl Calls for Calling {
         locked(&self.0.answers)
             .pop_front()
             .unwrap_or_else(|| panic!("the stand-in was asked more times than it was answered"))
+    }
+}
+
+/// The seam a flow reaches a Jira board through, with [`Calling`] under it: the
+/// real [`Opener`](crate::board::Opener) builds a socket client, so a flow
+/// driven against a Jira board is driven against this instead.
+///
+/// Not a [`Boarding`], which answers the [`Board`] verbs out of memory: what a
+/// push over Jira is about is the two requests it spells and the sentence an
+/// unwritten verb refuses with, and both of those are the board's own — so the
+/// board here is the very [`Jira`] the opener would have built, over answers
+/// written down in advance.
+///
+/// The key is kept as [`Boarding`] keeps one, because the ordering it stands for
+/// is the point: a flow that refuses a Jira scope at its door would reach the
+/// first request with nothing read.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct Opening {
+    calls: Calling,
+    keys: Arc<Mutex<Vec<String>>>,
+}
+
+impl Opening {
+    /// A board answering these, in this order, to whatever requests the flow
+    /// makes: a verb warlock has not written for Jira sends none of them, so a
+    /// refusal is driven by writing nothing down at all.
+    pub(crate) fn answering(answers: impl IntoIterator<Item = Result<Value, BoardError>>) -> Self {
+        Self {
+            calls: Calling::answering(answers),
+            keys: Arc::default(),
+        }
+    }
+
+    /// Every call the board made, as [`Calling::made`] records them.
+    pub(crate) fn made(&self) -> Vec<(Method, String, Value)> {
+        self.calls.made()
+    }
+
+    /// The method and the path of each, which is how a Jira request is named:
+    /// the body is asserted on in `jira.rs`'s own tests, and what a flow test
+    /// says is which request came first.
+    pub(crate) fn spelled(&self) -> Vec<(Method, String)> {
+        self.made()
+            .into_iter()
+            .map(|(method, path, _)| (method, path))
+            .collect()
+    }
+
+    /// Every key a board was opened with, as [`Boarding::opened_with`] answers:
+    /// how a test says the key store was read before the first request.
+    pub(crate) fn opened_with(&self) -> Vec<String> {
+        locked(&self.keys).clone()
+    }
+}
+
+impl Opens for Opening {
+    type Board = Jira<Calling>;
+
+    /// The record goes to the board whole, because this board reads its site and
+    /// its project key off one: a request's address can only have come from the
+    /// record the flow resolved.
+    fn open(&self, record: &ScopeRecord, key: &str) -> Jira<Calling> {
+        locked(&self.keys).push(key.to_owned());
+        Jira::new(self.calls.clone(), record.clone())
     }
 }
 
