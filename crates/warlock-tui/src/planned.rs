@@ -38,7 +38,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use warlock_engine::drafting::{self, Draft};
-use warlock_engine::{Destination, Manifest, agent, resolve_filing};
+use warlock_engine::{Destination, Manifest, ScopeRecord, agent, resolve_filing};
 
 use crate::asking::{self, Asks};
 use crate::board::{Board, FiledTicket, Key, Listing, Opener as LinearOpener, Opens, QueuedTicket};
@@ -291,7 +291,7 @@ pub(crate) fn listing<O: Opens>(
         .map_err(|source| Error::Filing { source })?;
     let destination = target.destination()?;
     let listing = open
-        .open(target.value())
+        .open(target.record(), target.value())
         .planned_briefs(destination.team_key(), destination.label())?;
 
     Ok((destination, listing))
@@ -645,6 +645,10 @@ pub(crate) struct Planned {
     status: String,
     brief: String,
     destination: Destination,
+    // The scope's own record, which a board is opened from beside the key: a
+    // filing and a skip each take a clone, because they open theirs on a
+    // worker. Nothing here reads a field off it.
+    record: ScopeRecord,
     value: Key,
     // The user the key belongs to, resolved once by `prepare`: every issue this
     // run files is assigned to them, and nothing here can name anybody else.
@@ -699,7 +703,7 @@ pub(crate) fn prepare<O: Opens>(
     // by: the refusal it can raise has been asked above.
     let destination = target.destination()?;
 
-    let board = open.open(target.value());
+    let board = open.open(target.record(), target.value());
     // Once for the run, here rather than in `cut::cut`, which is called per
     // slice: the id is the same for every issue the run files, and asking per
     // slice — or per draft — would be a request bought again for an answer that
@@ -749,7 +753,7 @@ pub(crate) fn prepare<O: Opens>(
     // the assignee, so a draft can wait on one by identifier. A queue that
     // cannot be read is not worth failing a draft over.
     let open = board
-        .scope_queue(destination.team_key(), destination.label(), &assignee)
+        .scope_queue(&assignee)
         .map(|queue| queue.issues().to_vec())
         .unwrap_or_default();
 
@@ -767,6 +771,7 @@ pub(crate) fn prepare<O: Opens>(
         status: status.to_owned(),
         brief: block.brief().to_owned(),
         destination,
+        record: target.record().clone(),
         value: Key::new(target.value()),
         assignee,
         slices: ordered.into_iter().cloned().collect(),
@@ -858,6 +863,7 @@ impl Planned {
         Skipping {
             project: self.project.clone(),
             title: next.slice.heading().to_owned(),
+            record: self.record.clone(),
             value: self.value.clone(),
             finishes,
         }
@@ -952,6 +958,7 @@ impl Planned {
             root: self.root.clone(),
             project: self.project.clone(),
             destination: self.destination.clone(),
+            record: self.record.clone(),
             value: self.value.clone(),
             assignee: self.assignee.clone(),
             title: next.slice.heading().to_owned(),
@@ -1043,6 +1050,7 @@ pub(crate) struct Filing {
     root: PathBuf,
     project: String,
     destination: Destination,
+    record: ScopeRecord,
     value: Key,
     assignee: String,
     title: String,
@@ -1058,7 +1066,7 @@ impl Filing {
     // about.
     pub(crate) fn file<O: Opens, W: Write>(&self, open: &O, out: &mut W) -> Result<Cut, Error> {
         let needs: Vec<&[FiledTicket]> = self.needs.iter().map(Vec::as_slice).collect();
-        let board = open.open(self.value.as_str());
+        let board = open.open(&self.record, self.value.as_str());
 
         let mut cut = cut::cut(
             &board,
@@ -1096,6 +1104,7 @@ pub(crate) struct Settled {
 pub(crate) struct Skipping {
     project: String,
     title: String,
+    record: ScopeRecord,
     value: Key,
     finishes: bool,
 }
@@ -1104,7 +1113,7 @@ impl Skipping {
     /// The note said, and the line about the project's move when this skip is
     /// the one that finishes it.
     pub(crate) fn post<O: Opens>(&self, open: &O) -> Result<Option<String>, Error> {
-        let board = open.open(self.value.as_str());
+        let board = open.open(&self.record, self.value.as_str());
         cut::skip(&board, &self.project, &self.title)?;
         Ok(self.finishes.then(|| cut::finish(&board, &self.project)))
     }

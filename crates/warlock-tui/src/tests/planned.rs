@@ -27,7 +27,7 @@ use crate::cut::noted;
 use crate::error::Error;
 use crate::error::status_for;
 use crate::standing::Standing;
-use crate::stubs::{Answering, Boarding, Call, Op, QueueAsked, Saying, Scripted, Typing, VIEWER};
+use crate::stubs::{Answering, Boarding, Call, Op, Saying, Scripted, Typing, VIEWER};
 
 // Not a key, and named so that nothing reading this file mistakes it for one.
 // It is stored only so that a bound name resolves and a cut can reach the
@@ -370,11 +370,7 @@ fn read_by_prepare() -> [Call; 3] {
     [
         Call::Viewer,
         Call::FetchBrief(SLUG.to_owned()),
-        Call::ScopeQueue(QueueAsked {
-            team: TEAM.to_owned(),
-            label: LABEL.to_owned(),
-            assignee: VIEWER.to_owned(),
-        }),
+        Call::ScopeQueue(VIEWER.to_owned()),
     ]
 }
 

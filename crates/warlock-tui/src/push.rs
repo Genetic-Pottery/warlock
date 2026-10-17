@@ -18,7 +18,7 @@
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
-use warlock_engine::{Destination, Manifest, manifest_path, resolve_filing};
+use warlock_engine::{Destination, Manifest, ScopeRecord, manifest_path, resolve_filing};
 
 use crate::account::size;
 use crate::board::{Board, Key, NewBrief, Opener as LinearOpener, Opens};
@@ -86,6 +86,10 @@ pub(crate) struct Prepared {
     root: PathBuf,
     brief: Brief,
     destination: Destination,
+    // The scope's own record, owned so it can cross onto the panel's worker
+    // beside the key: the two together are what a board is opened from, and
+    // nothing here reads a field off it.
+    record: ScopeRecord,
     value: Key,
 }
 
@@ -124,6 +128,7 @@ pub(crate) fn prepare(
         root: root.to_path_buf(),
         brief,
         destination: target.destination()?,
+        record: target.record().clone(),
         value: Key::new(target.value()),
     })
 }
@@ -133,7 +138,7 @@ pub(crate) fn file<O: Opens, W: Write>(
     open: &O,
     out: &mut W,
 ) -> Result<String, Error> {
-    let linear = open.open(prepared.value.as_str());
+    let linear = open.open(&prepared.record, prepared.value.as_str());
     sent(
         &linear,
         &prepared.root,

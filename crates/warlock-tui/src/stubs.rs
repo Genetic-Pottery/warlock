@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use serde_json::Value;
 use warlock_engine::splitting::Numbered;
-use warlock_engine::{agent, drafting, working};
+use warlock_engine::{ScopeRecord, agent, drafting, working};
 
 use crate::asking::Asks;
 use crate::board::{
@@ -437,7 +437,7 @@ pub(crate) enum Call {
     FetchBrief(String),
     PlannedBriefs { team: String, label: String },
     BriefNamed { team: String, name: String },
-    ScopeQueue(QueueAsked),
+    ScopeQueue(String),
     NamedTicket { team: String, number: u64 },
     CreateBrief(BriefAsked),
     CreateTicket(TicketAsked),
@@ -495,13 +495,6 @@ pub(crate) enum Op {
     Relation,
     Comment,
     TicketComment,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct QueueAsked {
-    pub(crate) team: String,
-    pub(crate) label: String,
-    pub(crate) assignee: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -834,7 +827,11 @@ impl fmt::Debug for Boarding {
 impl Opens for Boarding {
     type Board = Self;
 
-    fn open(&self, key: &str) -> Self {
+    /// The key is written down and the record is not: this board answers every
+    /// verb out of memory, so it has no destination to read off a record. What
+    /// a test asserts here is that the key reached the one line that opens a
+    /// board — see [`opened_with`](Boarding::opened_with).
+    fn open(&self, _record: &ScopeRecord, key: &str) -> Self {
         assert!(!self.unopened, "the key was read and a board was opened");
         self.log().keys.push(key.to_owned());
         self.clone()
@@ -937,13 +934,12 @@ impl Board for Boarding {
     }
 
     /// Whatever queue the test wrote down, and the call recorded: the flows that
-    /// file and cut read none, so the default is an empty one.
-    fn scope_queue(&self, team: &str, label: &str, assignee: &str) -> Result<Queue, BoardError> {
-        self.ask(Call::ScopeQueue(QueueAsked {
-            team: team.to_owned(),
-            label: label.to_owned(),
-            assignee: assignee.to_owned(),
-        }))?;
+    /// file and cut read none, so the default is an empty one. The assignee is
+    /// the whole of the recorded call, because it is the whole of what the verb
+    /// is told — a real board reads its team and its label off the record it was
+    /// opened with.
+    fn scope_queue(&self, assignee: &str) -> Result<Queue, BoardError> {
+        self.ask(Call::ScopeQueue(assignee.to_owned()))?;
         Ok(self.queue.clone())
     }
 

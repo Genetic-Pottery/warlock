@@ -553,7 +553,7 @@ mod named {
     fn asked_for(posting: &Posting, ticket: &str, runs: &[PullRun]) -> Named {
         let record = record();
         take_named(
-            &Linear::new(posting.clone()),
+            &Linear::new(posting.clone(), record.clone()),
             linear(&record),
             ME,
             ticket,
@@ -851,7 +851,7 @@ mod named {
 
         let record = record();
         let error = take_named(
-            &Linear::new(posting.clone()),
+            &Linear::new(posting.clone(), record.clone()),
             linear(&record),
             ME,
             "WAR-133",

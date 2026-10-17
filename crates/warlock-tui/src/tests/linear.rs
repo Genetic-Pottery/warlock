@@ -2,6 +2,7 @@ use std::error::Error as _;
 use std::io;
 
 use serde_json::{Value, json};
+use warlock_engine::ScopeRecord;
 
 use super::{
     BACKLOG, BLOCKERS_PAGE, Client, ENDPOINT, LABELS_PAGE, LINEAR, Linear, Posts, QUEUE_PAGE,
@@ -24,6 +25,10 @@ const KEY: &str = "lin_api_a_key_nobody_holds_8f3a1c";
 fn variants() -> Vec<Error> {
     vec![
         Error::Key { board: LINEAR },
+        Error::Elsewhere {
+            board: LINEAR,
+            scope: "payments".to_owned(),
+        },
         Error::Transport {
             board: LINEAR,
             source: Box::new(ureq::Error::Io(io::Error::other(
@@ -581,6 +586,12 @@ const TEAM: &str = "team-1";
 const LABEL: &str = "warlock";
 const ME: &str = "user-viewer";
 
+// The record a board is opened for: a verb is told none of it, so the team key
+// and the label a request carries can only have come from here.
+fn a_scope() -> ScopeRecord {
+    ScopeRecord::new("warlock-team", TEAM, "In Review", LABEL)
+}
+
 fn a_queue_of(issues: &[Value], after: Option<&str>) -> Value {
     json!({
         "issues": {
@@ -1030,14 +1041,14 @@ fn an_unassigned_issue_can_still_be_holding_one_up() {
 }
 
 #[test]
-fn the_board_hands_the_team_label_and_assignee_to_the_wire_in_that_order() {
-    // Three `&str` in a row: a swap between the trait and the operation under it
-    // compiles, and asks the board for somebody else's work.
-    let board = Linear::new(Posting::answering([Ok(a_queue_of(&[], None))]));
+fn the_board_reads_the_team_and_label_off_its_record_and_is_told_the_assignee() {
+    // The verb takes one argument, so the two facts about where the work lives
+    // cannot be handed to it in the wrong order: they are the record's, read
+    // where the board was opened, and the assignee is the whole of what the
+    // queue read is told.
+    let board = Linear::new(Posting::answering([Ok(a_queue_of(&[], None))]), a_scope());
 
-    board
-        .scope_queue(TEAM, LABEL, ME)
-        .expect("the stand-in answered");
+    board.scope_queue(ME).expect("the stand-in answered");
 
     assert_eq!(
         board.posts.variables().pop().expect("one request was made"),
@@ -1049,6 +1060,33 @@ fn the_board_hands_the_team_label_and_assignee_to_the_wire_in_that_order() {
             "blockers": BLOCKERS_PAGE,
         })
     );
+}
+
+#[test]
+fn a_board_opened_for_a_scope_that_files_elsewhere_sends_nothing() {
+    // Out of reach through warlock's own verbs, each of which refuses such a
+    // scope before it opens anything — but opening cannot fail, so the refusal
+    // has to be a verb's and it has to arrive with no request made.
+    let board = Linear::new(
+        Posting::answering([]),
+        ScopeRecord::jira(
+            "payments",
+            "https://acme.atlassian.net",
+            "PAY",
+            "In Review",
+            "area/pay",
+        ),
+    );
+
+    let error = board
+        .scope_queue(ME)
+        .expect_err("a Jira record names no Linear team");
+
+    assert!(
+        matches!(&error, Error::Elsewhere { scope, .. } if scope == "payments"),
+        "{error:?}"
+    );
+    assert!(board.posts.documents().is_empty(), "nothing was sent");
 }
 
 // One named ticket as the board answers it: the queue's own node, plus the three
@@ -1240,7 +1278,10 @@ fn a_named_answer_that_is_not_the_one_asked_for_is_malformed() {
 
 #[test]
 fn the_board_hands_the_team_key_and_the_number_to_the_wire_in_that_order() {
-    let board = Linear::new(Posting::answering([Ok(a_named_ticket(&named_node()))]));
+    let board = Linear::new(
+        Posting::answering([Ok(a_named_ticket(&named_node()))]),
+        a_scope(),
+    );
 
     let found = board
         .named_ticket("WAR", 133)
@@ -2057,7 +2098,7 @@ fn a_relation_is_one_blocking_edge_written_in_one_request() {
 fn the_board_hands_the_blocker_to_the_wire_first() {
     // The two ids are both `&str`, so a swap between the trait and the
     // operation under it compiles and inverts every dependency a cut writes.
-    let board = Linear::new(Posting::answering([Ok(relation_created())]));
+    let board = Linear::new(Posting::answering([Ok(relation_created())]), a_scope());
 
     board
         .create_relation("issue-first", "issue-second")

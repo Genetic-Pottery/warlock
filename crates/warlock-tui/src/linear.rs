@@ -18,6 +18,7 @@ use serde_json::{Value, json};
 use ureq::Agent;
 use ureq::http::HeaderValue;
 use ureq::http::header::AUTHORIZATION;
+use warlock_engine::{LinearScope, ScopeRecord};
 
 use crate::board::{
     Assignee, Blocker, Board, CUT_NOTE, Category, Error, FetchedBrief, FiledBrief, FiledTicket,
@@ -133,15 +134,37 @@ impl Posts for Client {
 }
 
 /// The one [`Board`] that speaks GraphQL, over whatever [`Posts`] it holds.
+///
+/// The record it was opened for is held beside the transport, and it is the
+/// whole of what this board knows about where work goes: the team key and the
+/// label are read off it here, so no verb below [`Board`] is handed either.
+/// Owned rather than borrowed, because a board is opened on a panel worker and
+/// outlives the manifest read that produced the record.
 #[derive(Debug)]
 pub(crate) struct Linear<P = Client> {
     posts: P,
+    record: ScopeRecord,
 }
 
 impl<P: Posts> Linear<P> {
     #[must_use]
-    pub(crate) const fn new(posts: P) -> Self {
-        Self { posts }
+    pub(crate) const fn new(posts: P, record: ScopeRecord) -> Self {
+        Self { posts, record }
+    }
+
+    /// The record as the Linear scope it files to, which is where a verb's team
+    /// key and label come from.
+    ///
+    /// [`LinearScope::of`] is the only road to a team key, and it refuses a
+    /// record that files to Jira. Opening cannot fail, so that refusal arrives
+    /// here instead — out of reach through warlock's verbs, which each refuse
+    /// such a scope before they open anything, and a `Result` rather than a
+    /// panic because this is a request that was not made.
+    fn scope(&self) -> Result<LinearScope<'_>, Error> {
+        LinearScope::of(&self.record).map_err(|_| Error::Elsewhere {
+            board: LINEAR,
+            scope: self.record.name().to_owned(),
+        })
     }
 }
 
@@ -200,8 +223,9 @@ impl<P: Posts> Board for Linear<P> {
         project_named(&self.posts, team, name)
     }
 
-    fn scope_queue(&self, team: &str, label: &str, assignee: &str) -> Result<Queue, Error> {
-        scope_queue(&self.posts, team, label, assignee)
+    fn scope_queue(&self, assignee: &str) -> Result<Queue, Error> {
+        let scope = self.scope()?;
+        scope_queue(&self.posts, scope.team_key(), scope.label(), assignee)
     }
 
     fn named_ticket(&self, team: &str, number: u64) -> Result<Option<NamedTicket>, Error> {
@@ -232,8 +256,11 @@ impl<P: Posts> Board for Linear<P> {
 impl Opens for Opener {
     type Board = Linear<Client>;
 
-    fn open(&self, key: &str) -> Linear<Client> {
-        Linear::new(Client::new(key))
+    /// The client from the key and the destination from the record, which is the
+    /// whole of what a board is built from: the record is cloned because the
+    /// board outlives the manifest it was read from.
+    fn open(&self, record: &ScopeRecord, key: &str) -> Linear<Client> {
+        Linear::new(Client::new(key), record.clone())
     }
 }
 
