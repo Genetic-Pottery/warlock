@@ -606,15 +606,44 @@ impl ScopeRecord {
             },
         }
     }
+
+    /// `Ok` for a record that files to Linear, and the refusal naming the
+    /// scope for one that files anywhere else.
+    ///
+    /// ```
+    /// use warlock_engine::ScopeRecord;
+    ///
+    /// let linear = ScopeRecord::new("data-plane", "WAR", "In Review", "area/data");
+    /// let jira =
+    ///     ScopeRecord::jira("payments", "https://acme.atlassian.net", "PAY", "In Review", "area/pay");
+    ///
+    /// assert!(linear.files_to_linear().is_ok());
+    /// assert_eq!(
+    ///     jira.files_to_linear().expect_err("the record files to Jira").to_string(),
+    ///     "`payments` files to Jira, and warlock can only file to Linear, so nothing was sent",
+    /// );
+    /// ```
+    // The refusal off the record itself, so a door that only wants to turn a
+    // Jira scope away has one call for it and reaches no view: what such a
+    // door would otherwise do is construct a Linear-only view for its error
+    // and drop the values it carried.
+    pub fn files_to_linear(&self) -> Result<(), NotLinear> {
+        match &self.tracker {
+            Tracker::Linear { .. } => Ok(()),
+            Tracker::Jira { .. } => Err(NotLinear {
+                scope: self.name.clone(),
+            }),
+        }
+    }
 }
 
 /// Where a record files, read off the record and borrowed from it.
 // [`Tracker`] with the team key left out, rather than that enum handed over:
 // what a reader of a record wants is which board and, for Jira, the two values
-// that name a project on a site — and a team key is wanted by a flow on its way
-// to Linear, which gets there through [`LinearScope::of`] and the proof that
-// carries. Spelling the key here too would make that the second way to reach
-// it.
+// that name a project on a site, because a project key means nothing without
+// it. The prefix a ticket key starts with, whichever board a record files to,
+// is [`BoardScope::ticket_prefix`], and a team key spelled here as well would
+// put that one value in reach under two names.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum FiledTo<'r> {
     Linear,
@@ -737,6 +766,79 @@ fn read_record(value: &toml::Value) -> Result<ScopeRecord, ScopeFault> {
     Ok(record)
 }
 
+/// One `[[scope]]` record read without regard to which board it files to.
+///
+/// ```
+/// use warlock_engine::{BoardScope, ScopeRecord};
+///
+/// let linear = ScopeRecord::new("data-plane", "WAR", "In Review", "area/data");
+/// let jira =
+///     ScopeRecord::jira("payments", "https://acme.atlassian.net/", "PAY", "In Review", "area/pay");
+///
+/// let scope = BoardScope::of(&linear);
+/// assert_eq!(scope.name(), "data-plane");
+/// assert_eq!(scope.ticket_prefix(), "WAR");
+/// assert_eq!(scope.review_state(), "In Review");
+/// assert_eq!(scope.label(), "area/data");
+///
+/// assert_eq!(BoardScope::of(&jira).ticket_prefix(), "PAY");
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct BoardScope<'r> {
+    name: &'r str,
+    ticket_prefix: &'r str,
+    review_state: &'r str,
+    label: &'r str,
+}
+
+impl<'r> BoardScope<'r> {
+    /// The record read as a scope on whichever board it names.
+    // Every record is one, so there is nothing to refuse here: a reader that
+    // wants a board's own fields asks [`ScopeRecord::filed_to`], and one that
+    // wants a Jira scope turned away asks
+    // [`ScopeRecord::files_to_linear`] — neither answer is on this road.
+    #[must_use]
+    pub fn of(record: &'r ScopeRecord) -> Self {
+        let ticket_prefix = match &record.tracker {
+            Tracker::Linear { team_key } => team_key,
+            Tracker::Jira { project_key, .. } => project_key,
+        };
+        Self {
+            name: &record.name,
+            ticket_prefix,
+            review_state: &record.review_state,
+            label: &record.label,
+        }
+    }
+
+    #[must_use]
+    pub const fn name(&self) -> &'r str {
+        self.name
+    }
+
+    /// The prefix every ticket key of this scope starts with — `WAR`, `PAY`.
+    // One accessor over both boards' keys, because what the flows reading it
+    // want is the prefix and not the field: a Linear team key and a Jira
+    // project key are each the thing a ticket of that board is keyed by, so a
+    // reader asking which board it holds first would be branching to spell the
+    // same sentence twice. Read off the record as recorded, spacing and all,
+    // for the reason on [`ScopeRecord`].
+    #[must_use]
+    pub const fn ticket_prefix(&self) -> &'r str {
+        self.ticket_prefix
+    }
+
+    #[must_use]
+    pub const fn review_state(&self) -> &'r str {
+        self.review_state
+    }
+
+    #[must_use]
+    pub const fn label(&self) -> &'r str {
+        self.label
+    }
+}
+
 /// One `[[scope]]` record read as a scope that files to Linear.
 ///
 /// ```
@@ -765,11 +867,9 @@ pub struct LinearScope<'r> {
 
 impl<'r> LinearScope<'r> {
     /// The record seen as a Linear scope, or a refusal naming it.
-    // The one way to a team key, and the reason no caller of one reads a
-    // tracker itself: a flow that holds this type is holding proof that the
-    // record it came from files to Linear, rather than an assumption that
-    // every record does. Which board a record names is
-    // [`ScopeRecord::filed_to`]'s answer, and it hands over no team.
+    // A flow that holds this type is holding proof that the record it came
+    // from files to Linear, rather than an assumption that every record does,
+    // and that is the whole of why it is not [`BoardScope`].
     pub fn of(record: &'r ScopeRecord) -> Result<Self, NotLinear> {
         match &record.tracker {
             Tracker::Linear { team_key } => Ok(Self {

@@ -2,8 +2,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use super::{
-    Error, FiledTo, LinearScope, MANIFEST_FILE, Manifest, NotLinear, SCHEMA_VERSION, ScopeFault,
-    ScopeRecord, ScopedDirectory, TrackerName, from_manifest_path, manifest_path, to_manifest_path,
+    BoardScope, Error, FiledTo, LinearScope, MANIFEST_FILE, Manifest, NotLinear, SCHEMA_VERSION,
+    ScopeFault, ScopeRecord, ScopedDirectory, TrackerName, from_manifest_path, manifest_path,
+    to_manifest_path,
 };
 
 fn engine() -> ScopedDirectory {
@@ -39,9 +40,6 @@ fn warlock_dir_listing(root: &Path) -> Vec<String> {
     names
 }
 
-// The team key is read through the view and never off the record, which is the
-// only way there is to read one: a record is a name, a tracker, a review state
-// and a label.
 fn team_of(record: &ScopeRecord) -> &str {
     LinearScope::of(record)
         .expect("the fixture records a Linear scope")
@@ -303,6 +301,54 @@ fn a_record_read_as_a_linear_scope_carries_its_values_as_spelled() {
     assert_eq!(linear.label(), "area/Data_Plane", "not folded either");
 }
 
+// Read off records the file reader built, and with the spacing and the trailing
+// slash a hand-edited manifest is allowed to hold: the prefix a view hands over
+// is the field as recorded, and a view that trimmed one would be reading a key
+// nobody wrote.
+#[test]
+fn a_board_scope_carries_the_recorded_prefix_of_either_tracker() {
+    let text = concat!(
+        "version = 2\n\n",
+        "[[scope]]\n",
+        "name = \"data-plane\"\n",
+        "tracker = \"linear\"\n",
+        "team = \" War \"\n",
+        "review_state = \"In Review\"\n",
+        "label = \"area/Data_Plane\"\n\n",
+        "[[scope]]\n",
+        "name = \"payments\"\n",
+        "tracker = \"jira\"\n",
+        "base_url = \"https://acme.atlassian.net/\"\n",
+        "project_key = \" PAY \"\n",
+        "review_state = \"Review \"\n",
+        "label = \"area/pay\"\n",
+    );
+    let loaded = Manifest::from_toml_str(text).expect("parses");
+    let [linear, jira] = loaded.scopes() else {
+        panic!("the text records two scopes");
+    };
+
+    let linear = BoardScope::of(linear);
+    assert_eq!(linear.name(), "data-plane");
+    assert_eq!(
+        linear.ticket_prefix(),
+        " War ",
+        "the team key of a Linear record, neither trimmed nor folded"
+    );
+    assert_eq!(linear.review_state(), "In Review");
+    assert_eq!(linear.label(), "area/Data_Plane");
+
+    let jira = BoardScope::of(jira);
+    assert_eq!(jira.name(), "payments");
+    assert_eq!(
+        jira.ticket_prefix(),
+        " PAY ",
+        "the project key of a Jira record, and not the base URL it is a project on"
+    );
+    assert_eq!(jira.review_state(), "Review ", "not trimmed either");
+    assert_eq!(jira.label(), "area/pay");
+}
+
 // Read off records the file reader built, because the TUI reads what the
 // manifest holds and not what a constructor was handed: the word is the one
 // the file spells, and a Jira record's two values arrive with the spacing and
@@ -345,19 +391,32 @@ fn a_loaded_record_says_which_board_it_files_to_in_the_word_the_file_spells() {
     );
 }
 
-// Built here rather than asked of `LinearScope::of`, which answers `Ok` for
-// every record `ScopeRecord` can hold: the sentence is what a scope filing
-// somewhere warlock cannot file to will say, and it is fixed before any record
-// can be one.
+// The sentence a scope filing somewhere warlock cannot file to arrives with,
+// asserted whole: every door to a board says this one and none of them words it
+// itself.
 #[test]
 fn a_scope_that_files_elsewhere_is_refused_by_name_with_nothing_sent() {
-    let refusal = NotLinear {
-        scope: "payments".to_owned(),
-    };
+    let record = ScopeRecord::jira(
+        "payments",
+        "https://acme.atlassian.net/",
+        " PAY ",
+        "In Review",
+        "area/pay",
+    );
+
+    let refusal = record
+        .files_to_linear()
+        .expect_err("the record files to Jira");
 
     assert_eq!(
         refusal.to_string(),
         "`payments` files to Jira, and warlock can only file to Linear, so nothing was sent"
+    );
+    assert!(
+        ScopeRecord::new("data-plane", "WAR", "In Review", "area/data")
+            .files_to_linear()
+            .is_ok(),
+        "a record that files to Linear is not refused"
     );
 }
 
