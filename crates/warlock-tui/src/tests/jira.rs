@@ -308,13 +308,15 @@ fn field_errors_are_named_after_the_messages() {
     );
 }
 
-/// Every [`Board`] verb driven once against one board, as the name a reader
-/// would look the method up by and the refusal it answered.
+/// Every [`Board`] verb warlock has no request for on this board yet, driven
+/// once against one board, as the name a reader would look the method up by and
+/// the refusal it answered.
 ///
-/// Written out by hand and in one place, because every test below asks the
-/// same thing of all of them: a verb added to the trait is added here as well,
-/// and nothing but a reader checks that.
-fn every_verb(board: &Jira<Calling>) -> Vec<(&'static str, Option<Error>)> {
+/// Written out by hand and in one place, because every test below asks the same
+/// thing of all of them: a verb added to the trait is added here as well, and a
+/// verb a slice teaches moves out of here and into [`every_verb`]; nothing but a
+/// reader checks either.
+fn untaught_verbs(board: &Jira<Calling>) -> Vec<(&'static str, Option<Error>)> {
     vec![
         ("viewer", board.viewer().err()),
         ("move_brief", board.move_brief("10001", "In Review").err()),
@@ -322,7 +324,6 @@ fn every_verb(board: &Jira<Calling>) -> Vec<(&'static str, Option<Error>)> {
         ("move_ticket", board.move_ticket("PAY-1", "In Review").err()),
         ("fetch_brief", board.fetch_brief("a-brief").err()),
         ("planned_briefs", board.planned_briefs().err()),
-        ("brief_named", board.brief_named("A brief").err()),
         ("scope_queue", board.scope_queue("me").err()),
         ("named_ticket", board.named_ticket(1).err()),
         (
@@ -356,13 +357,23 @@ fn every_verb(board: &Jira<Calling>) -> Vec<(&'static str, Option<Error>)> {
     ]
 }
 
+/// Every verb, the ones a slice has taught after the ones it has not: what a
+/// board opened for a scope that files somewhere else has to refuse, whether or
+/// not warlock knows how to ask it.
+fn every_verb(board: &Jira<Calling>) -> Vec<(&'static str, Option<Error>)> {
+    let mut verbs = untaught_verbs(board);
+
+    verbs.push(("brief_named", board.brief_named("A brief").err()));
+    verbs
+}
+
 #[test]
-fn every_verb_refuses_with_a_sentence_and_sends_nothing() {
+fn every_unwritten_verb_refuses_with_a_sentence_and_sends_nothing() {
     // Nothing queued, so a verb that reached the transport panics the stand-in
     // rather than answering anything.
     let board = Jira::new(Calling::answering([]), a_scope());
 
-    for (verb, refusal) in every_verb(&board) {
+    for (verb, refusal) in untaught_verbs(&board) {
         let error =
             refusal.unwrap_or_else(|| panic!("`{verb}` answered instead of refusing the request"));
 
@@ -392,7 +403,7 @@ fn every_verb_refuses_with_a_sentence_and_sends_nothing() {
 fn each_verb_is_refused_in_its_own_words() {
     let board = Jira::new(Calling::answering([]), a_scope());
 
-    let mut said: Vec<String> = every_verb(&board)
+    let mut said: Vec<String> = untaught_verbs(&board)
         .into_iter()
         .map(|(verb, refusal)| {
             refusal
@@ -432,6 +443,193 @@ fn a_board_opened_for_a_scope_that_files_elsewhere_sends_nothing() {
     }
 
     assert!(board.calls.made().is_empty(), "{:?}", board.calls.made());
+}
+
+/// The brief a push is about to file, which is the name every lookup below
+/// asks by.
+const NAME: &str = "Push a brief to the board";
+
+/// One page of a JQL answer: an issue per key and summary, and the token to
+/// read on from when a page follows this one.
+fn page(issues: &[(&str, &str)], next: Option<&str>) -> Value {
+    let issues: Vec<Value> = issues
+        .iter()
+        .map(|(key, summary)| json!({ "key": key, "fields": { "summary": summary } }))
+        .collect();
+    let mut answer = json!({ "issues": issues });
+
+    if let Some(token) = next {
+        answer["nextPageToken"] = json!(token);
+    }
+
+    answer
+}
+
+/// One page of the lookup's read, as the stand-in records a call: the JQL is
+/// spelled out here rather than built from the module's own pieces, so a change
+/// to what Jira is asked shows up as a failure and not as two expressions that
+/// moved together.
+fn asked(token: Option<&str>) -> (Method, String, Value) {
+    let mut body = json!({
+        // The project key is the record's: no verb is handed one.
+        "jql": format!(r#"project = {PROJECT} AND issuetype = Epic AND summary ~ "\"{NAME}\"""#),
+        "fields": ["summary"],
+        "maxResults": 100,
+    });
+
+    if let Some(token) = token {
+        body["nextPageToken"] = json!(token);
+    }
+
+    (Method::POST, "/rest/api/3/search/jql".to_owned(), body)
+}
+
+#[test]
+fn a_brief_of_the_same_name_is_answered_by_the_url_a_person_opens_it_at() {
+    let board = Jira::new(
+        Calling::answering([Ok(page(&[("PAY-14", NAME)], None))]),
+        a_scope(),
+    );
+
+    assert_eq!(
+        board.brief_named(NAME).expect("the stand-in answered"),
+        Some(format!("{SITE}/browse/PAY-14"))
+    );
+    // A POST and not a GET: the JQL goes in the body, because nothing in the
+    // crate percent-encodes a query string into a path.
+    assert_eq!(board.calls.made(), [asked(None)]);
+}
+
+#[test]
+fn a_project_holding_no_brief_of_that_name_answers_none() {
+    let board = Jira::new(Calling::answering([Ok(page(&[], None))]), a_scope());
+
+    assert_eq!(
+        board.brief_named(NAME).expect("the stand-in answered"),
+        None
+    );
+    assert_eq!(board.calls.made(), [asked(None)]);
+}
+
+#[test]
+fn a_near_name_is_not_the_brief_already_filed() {
+    // `~` is a fuzzy text match, so a summary carrying the name's words comes
+    // back whether or not it is the name: the comparison and not the search is
+    // what answers, or a push of `Push a brief to the board` would be refused
+    // over a brief somebody else filed.
+    let longer = format!("{NAME} over Calls");
+    let board = Jira::new(
+        Calling::answering([Ok(page(
+            &[("PAY-9", longer.as_str()), ("PAY-11", "Push a brief")],
+            None,
+        ))]),
+        a_scope(),
+    );
+
+    assert_eq!(
+        board.brief_named(NAME).expect("the stand-in answered"),
+        None
+    );
+    assert_eq!(board.calls.made(), [asked(None)]);
+}
+
+#[test]
+fn a_name_differing_in_case_or_in_spacing_is_the_same_brief() {
+    // `queue::same_name`, which is the comparison `project_named` makes on
+    // Linear: a brief filed from a heading somebody retyped is the same brief.
+    let shouted = format!("  {}  ", NAME.to_uppercase());
+    let board = Jira::new(
+        Calling::answering([Ok(page(&[("PAY-14", shouted.as_str())], None))]),
+        a_scope(),
+    );
+
+    assert_eq!(
+        board.brief_named(NAME).expect("the stand-in answered"),
+        Some(format!("{SITE}/browse/PAY-14"))
+    );
+}
+
+#[test]
+fn a_match_on_the_second_page_is_found_by_the_token_the_first_page_gave() {
+    let longer = format!("{NAME} over Calls");
+    let board = Jira::new(
+        Calling::answering([
+            Ok(page(&[("PAY-9", longer.as_str())], Some("page-2"))),
+            Ok(page(&[("PAY-14", NAME)], None)),
+        ]),
+        a_scope(),
+    );
+
+    assert_eq!(
+        board.brief_named(NAME).expect("the stand-in answered"),
+        Some(format!("{SITE}/browse/PAY-14"))
+    );
+    // One request per page, the second carrying the token the first answered,
+    // and the page carrying no token is the last one: Jira has no `hasNextPage`
+    // flag beside it to read.
+    assert_eq!(board.calls.made(), [asked(None), asked(Some("page-2"))]);
+}
+
+#[test]
+fn a_search_jira_refuses_is_reported_in_jiras_words_and_is_not_retried() {
+    let said = "The value 'Epic' does not exist for the field 'issuetype'.";
+    let board = Jira::new(
+        Calling::answering([Err(Error::Refused {
+            board: JIRA,
+            message: said.to_owned(),
+        })]),
+        a_scope(),
+    );
+
+    let error = board.brief_named(NAME).expect_err("the search was refused");
+
+    assert!(error.to_string().contains(said), "{error}");
+    assert_eq!(board.calls.made(), [asked(None)], "the search was retried");
+}
+
+#[test]
+fn a_page_that_failed_fails_the_read_rather_than_answering_the_pages_before_it() {
+    // The match is on the page that arrived and the read fails all the same: a
+    // lookup that answered here would be answering about a project it only read
+    // part of, and the next page is where a second brief of this name would be.
+    let board = Jira::new(
+        Calling::answering([
+            Ok(page(&[("PAY-14", NAME)], Some("page-2"))),
+            Err(Error::Status {
+                board: JIRA,
+                code: 502,
+            }),
+        ]),
+        a_scope(),
+    );
+
+    let error = board.brief_named(NAME).expect_err("a page did not arrive");
+
+    assert!(
+        matches!(error, Error::Status { code: 502, .. }),
+        "{error:?}"
+    );
+    assert_eq!(board.calls.made().len(), 2, "{:?}", board.calls.made());
+}
+
+#[test]
+fn an_answer_missing_its_issues_its_summary_or_a_matchs_key_is_malformed() {
+    for answer in [
+        json!({ "total": 1 }),
+        json!({ "issues": [{ "key": "PAY-14" }] }),
+        json!({ "issues": [{ "fields": { "summary": NAME } }] }),
+    ] {
+        let board = Jira::new(Calling::answering([Ok(answer.clone())]), a_scope());
+
+        let error = board
+            .brief_named(NAME)
+            .expect_err("not the answer asked for");
+
+        assert!(
+            matches!(error, Error::Malformed { board: JIRA, .. }),
+            "{answer}: {error:?}"
+        );
+    }
 }
 
 #[test]

@@ -13,7 +13,7 @@
 use std::fmt;
 use std::time::Duration;
 
-use serde_json::Value;
+use serde_json::{Value, json};
 use ureq::Agent;
 use ureq::http::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE};
 use ureq::http::{HeaderValue, Method, Request};
@@ -24,10 +24,20 @@ use crate::board::{
     NewTicket, Queue, TicketBrief,
 };
 use crate::linear::REQUEST_TIMEOUT;
+use crate::queue::same_name;
 
 /// The one place this vendor is spelled for a reader: every [`Error`] raised
 /// here, and `Board::NAME` for the board that answers over this transport.
 const JIRA: &str = "Jira";
+
+/// Where a JQL read goes. A POST and not a GET, because [`Calls`] carries a
+/// body and a query string would have to be percent-encoded into the path by
+/// hand; `/rest/api/2/search` answers 410 Gone and is not an option.
+const SEARCH: &str = "/rest/api/3/search/jql";
+
+/// Issues read per page of a JQL search. Not left off: an answer with no
+/// `maxResults` takes whatever default the site has today.
+const SEARCH_PAGE: usize = 100;
 
 /// How a Jira key is typed, and the whole of what a refusal of a stored line
 /// says about it.
@@ -165,9 +175,10 @@ impl Calls for Client {
 /// handed any of them. Owned rather than borrowed, because a board is opened on
 /// a panel worker and outlives the manifest read that produced the record.
 ///
-/// Every verb refuses as this stands: the requests themselves arrive a slice at
-/// a time, and a board that refuses is what keeps a flow which reaches a verb
-/// nobody has written yet a sentence rather than a panic.
+/// Every verb but the brief-by-name lookup refuses as this stands: the requests
+/// themselves arrive a slice at a time, and a board that refuses is what keeps a
+/// flow which reaches a verb nobody has written yet a sentence rather than a
+/// panic.
 // Nothing in the library builds one yet: the opener that hands a Jira scope
 // this board instead of Linear's is the slice after the verbs, so until then
 // the only caller is this module's own tests. `cfg_attr` rather than a bare
@@ -222,6 +233,41 @@ impl<C: Calls> Jira<C> {
         }
     }
 
+    /// Every issue one JQL read answers, page after page, with the `fields`
+    /// asked for on each of them.
+    ///
+    /// Jira's paging is the token an answer hands back going into the next
+    /// request, where `linear.rs`'s own `paged` reads a cursor off a `pageInfo`
+    /// beside a `hasNextPage` flag: the last page here is the one that carries
+    /// no token, and there is no flag beside it to read.
+    ///
+    /// One request per page, and a page that failed fails the whole read rather
+    /// than answering the pages that arrived before it: what a caller asks of
+    /// these issues is whether one of them is there, and a page that never
+    /// arrived could have been carrying it.
+    fn searched(&self, jql: &str, fields: &[&str]) -> Result<Vec<Value>, Error> {
+        let mut body = json!({ "jql": jql, "fields": fields, "maxResults": SEARCH_PAGE });
+        let mut found = Vec::new();
+
+        loop {
+            let answer = self.calls.call(Method::POST, SEARCH, body.clone())?;
+            let issues = answer
+                .get("issues")
+                .and_then(Value::as_array)
+                .ok_or_else(|| missing("issues"))?;
+
+            found.extend(issues.iter().cloned());
+
+            let Some(token) = answer["nextPageToken"].as_str().map(str::to_owned) else {
+                return Ok(found);
+            };
+
+            if let Some(sent) = body.as_object_mut() {
+                sent.insert("nextPageToken".to_owned(), json!(token));
+            }
+        }
+    }
+
     /// The refusal of a verb no slice has written for this board yet, with
     /// nothing sent through [`Calls`].
     ///
@@ -267,8 +313,47 @@ impl<C: Calls> Board for Jira<C> {
         self.untaught("list the planned briefs")
     }
 
-    fn brief_named(&self, _name: &str) -> Result<Option<String>, Error> {
-        self.untaught("look a brief up by name")
+    /// The URL of the Epic in this project with this name, or `None` when the
+    /// project holds none: the only thing a push can tell a second push of the
+    /// same brief by, now that nothing on the machine remembers the first.
+    ///
+    /// `~` is a fuzzy text match and the only operator JQL has for a summary, so
+    /// the search narrows and the comparison decides: a quoted phrase inside the
+    /// quoted value matches the words in order, and `A brief about pay` still
+    /// comes back for `A brief`. Every page is read and each summary is then
+    /// compared as [`same_name`] compares, which is how a brief whose name
+    /// differs in case or in spacing is the same brief — the same comparison
+    /// `project_named` makes on Linear, where the filter did the matching.
+    ///
+    /// A name carrying a double quote is a JQL string Jira refuses in its own
+    /// words. It is not escaped here because a brief's name is a heading in a
+    /// document somebody wrote, and a refusal naming the search is a better
+    /// answer than a lookup that quietly matched something else.
+    fn brief_named(&self, name: &str) -> Result<Option<String>, Error> {
+        let (base_url, project_key) = self.site()?;
+        // `Epic` is Jira's own name for the type a brief is filed as, and the
+        // escaped quotes are a quoted phrase inside the quoted value `~` takes.
+        let jql =
+            format!(r#"project = {project_key} AND issuetype = Epic AND summary ~ "\"{name}\"""#);
+
+        for issue in self.searched(&jql, &["summary"])? {
+            let summary = issue
+                .get("fields")
+                .and_then(|fields| fields.get("summary"))
+                .and_then(Value::as_str)
+                .ok_or_else(|| missing("summary"))?;
+
+            if same_name(summary, name) {
+                let key = issue
+                    .get("key")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| missing("key"))?;
+
+                return Ok(Some(browse(base_url, key)));
+            }
+        }
+
+        Ok(None)
     }
 
     fn scope_queue(&self, _assignee: &str) -> Result<Queue, Error> {
@@ -369,6 +454,37 @@ fn url(base_url: &str, path: &str) -> String {
         base_url.trim_end_matches('/'),
         path.trim_start_matches('/')
     )
+}
+
+/// Where a person opens one issue, from the site and the issue's key.
+///
+/// The one address this board answers with, for an issue it filed and for one
+/// it found: `/browse/<key>` is the path Jira itself redirects to whatever view
+/// the issue belongs to, so no project id, no board and no issue id is needed to
+/// build it.
+// Reached only from the board's own verbs, which nothing in the library opens
+// yet: the same expectation `Jira` itself carries, and it comes off with that
+// one when the opener is wired.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the opener that builds a board is a later slice's; the tests \
+                  under `cfg(test)` are the only caller until then"
+    )
+)]
+fn browse(base_url: &str, key: &str) -> String {
+    url(base_url, &format!("/browse/{key}"))
+}
+
+/// Warlock's own words for an answer that left out a field this module reads,
+/// which is all a reader is told about it: the bytes that arrived are whatever a
+/// captive portal or a proxy decided to send.
+fn missing(field: &str) -> Error {
+    Error::Malformed {
+        board: JIRA,
+        detail: format!("it carried no `{field}`"),
+    }
 }
 
 /// `Basic <base64(email:token)>`, and the only place the key is read.
