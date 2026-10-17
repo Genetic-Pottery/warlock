@@ -79,6 +79,7 @@ mod writing;
 
 pub use account::Line;
 pub use account::Voice;
+pub use adf::body_for;
 pub use adf::document_for;
 pub use board::Category;
 pub use board::Error as BoardError;

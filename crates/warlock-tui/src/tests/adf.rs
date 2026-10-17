@@ -1,6 +1,6 @@
 use serde_json::{Value, json};
 
-use super::document_for;
+use super::{body_for, document_for};
 
 // Every assertion goes through the one public conversion, so a node shape read
 // here is the node shape a board would be sent.
@@ -519,4 +519,483 @@ fn the_conversion_names_no_board_and_no_transport() {
     for word in ["ureq", "http", "crate::", "client", "newbrief"] {
         assert!(!source.contains(word), "adf.rs mentions {word:?}");
     }
+}
+
+// The reader's side. Every assertion goes through the one public conversion
+// again, so the tree read here is a tree a board could hand back.
+fn read(content: &Value) -> String {
+    body_for(&json!({ "type": "doc", "version": 1, "content": content }))
+}
+
+fn text(text: &str) -> Value {
+    json!({ "type": "text", "text": text })
+}
+
+fn marked(text: &str, mark: &Value) -> Value {
+    json!({ "type": "text", "text": text, "marks": [mark] })
+}
+
+#[test]
+fn a_paragraph_is_one_line_and_two_are_separated_by_a_blank_one() {
+    assert_eq!(
+        read(&json!([
+            paragraph("One slice lands on its own."),
+            paragraph("The next needs it."),
+        ])),
+        "One slice lands on its own.\n\nThe next needs it.\n"
+    );
+}
+
+#[test]
+fn a_headings_level_is_read_back_as_that_many_markers() {
+    for level in 1..=6 {
+        assert_eq!(
+            read(&json!([{
+                "type": "heading",
+                "attrs": { "level": level },
+                "content": [text("Scope")],
+            }])),
+            format!("{} Scope\n", "#".repeat(level)),
+            "{level}"
+        );
+    }
+}
+
+#[test]
+fn a_heading_level_outside_the_six_is_pulled_back_inside_them() {
+    // Not a refusal and not seven markers: a level ADF cannot hold becomes the
+    // nearest one it can, so the heading is still a heading.
+    for (level, markers) in [(json!(0), "#"), (json!(9), "######"), (json!("two"), "#")] {
+        assert_eq!(
+            read(&json!([{
+                "type": "heading",
+                "attrs": { "level": level },
+                "content": [text("Scope")],
+            }])),
+            format!("{markers} Scope\n"),
+            "{level}"
+        );
+    }
+}
+
+#[test]
+fn a_heading_with_no_attrs_is_a_first_level_heading() {
+    assert_eq!(
+        read(&json!([{ "type": "heading", "content": [text("Scope")] }])),
+        "# Scope\n"
+    );
+}
+
+#[test]
+fn a_bullet_list_reads_back_as_dashed_items_on_consecutive_lines() {
+    assert_eq!(
+        read(&json!([{
+            "type": "bulletList",
+            "content": [
+                { "type": "listItem", "content": [paragraph("sees a URL")] },
+                { "type": "listItem", "content": [paragraph("sees a key")] },
+            ],
+        }])),
+        "- sees a URL\n- sees a key\n"
+    );
+}
+
+#[test]
+fn an_ordered_list_reads_back_numbered_from_one() {
+    assert_eq!(
+        read(&json!([{
+            "type": "orderedList",
+            "content": [
+                { "type": "listItem", "content": [paragraph("Read the file")] },
+                { "type": "listItem", "content": [paragraph("File the Epic")] },
+                { "type": "listItem", "content": [paragraph("Cut the slices")] },
+            ],
+        }])),
+        "1. Read the file\n2. File the Epic\n3. Cut the slices\n"
+    );
+}
+
+#[test]
+fn a_code_block_reads_back_fenced_under_its_language() {
+    assert_eq!(
+        read(&json!([{
+            "type": "codeBlock",
+            "attrs": { "language": "rust" },
+            "content": [text("fn main() {\n    let brief = 1;\n\n}")],
+        }])),
+        "```rust\nfn main() {\n    let brief = 1;\n\n}\n```\n"
+    );
+}
+
+#[test]
+fn a_code_block_with_no_language_and_no_content_is_still_a_fence() {
+    assert_eq!(
+        read(&json!([{ "type": "codeBlock", "content": [text("warlock push")] }])),
+        "```\nwarlock push\n```\n"
+    );
+    assert_eq!(read(&json!([{ "type": "codeBlock" }])), "```\n```\n");
+}
+
+#[test]
+fn a_code_blocks_text_is_not_marked_up_again() {
+    // A mark in here is somebody else's edit, and backticks around a line
+    // inside a fence would be characters the block did not hold.
+    assert_eq!(
+        read(&json!([{
+            "type": "codeBlock",
+            "content": [marked("warlock push", &json!({ "type": "code" }))],
+        }])),
+        "```\nwarlock push\n```\n"
+    );
+}
+
+#[test]
+fn the_three_marks_read_back_as_the_characters_they_were_written_as() {
+    assert_eq!(
+        read(&json!([{
+            "type": "paragraph",
+            "content": [
+                text("The brief is "),
+                marked("the document", &json!({ "type": "strong" })),
+                text(", and "),
+                marked("push.rs", &json!({ "type": "code" })),
+                text(" files it; see "),
+                marked(
+                    "the brief",
+                    &json!({ "type": "link", "attrs": { "href": "docs/brief.md" } }),
+                ),
+                text("."),
+            ],
+        }])),
+        "The brief is **the document**, and `push.rs` files it; see [the brief](docs/brief.md).\n"
+    );
+}
+
+#[test]
+fn a_mark_the_reader_does_not_know_leaves_its_text_alone() {
+    for mark in [
+        json!({ "type": "underline" }),
+        json!({ "type": "link" }),
+        json!({ "type": "link", "attrs": { "href": "" } }),
+    ] {
+        assert_eq!(
+            read(&json!([{ "type": "paragraph", "content": [marked("plain", &mark)] }])),
+            "plain\n",
+            "{mark}"
+        );
+    }
+}
+
+#[test]
+fn marks_on_one_node_nest_in_the_order_they_are_listed() {
+    assert_eq!(
+        read(&json!([{
+            "type": "paragraph",
+            "content": [{
+                "type": "text",
+                "text": "cut",
+                "marks": [{ "type": "code" }, { "type": "strong" }],
+            }],
+        }])),
+        "**`cut`**\n"
+    );
+}
+
+// A tree no warlock code path writes: panels, a table, media, a mention and an
+// emoji are what an edit in the board's own UI leaves behind.
+fn edited_elsewhere() -> Value {
+    json!([
+        {
+            "type": "panel",
+            "attrs": { "panelType": "info" },
+            "content": [
+                paragraph("A brief is the document."),
+                paragraph("Everything else follows from it."),
+            ],
+        },
+        {
+            "type": "table",
+            "attrs": { "isNumberColumnEnabled": false },
+            "content": [{
+                "type": "tableRow",
+                "content": [
+                    { "type": "tableHeader", "content": [paragraph("slice")] },
+                    { "type": "tableCell", "content": [paragraph("waits on")] },
+                ],
+            }],
+        },
+        {
+            "type": "mediaSingle",
+            "attrs": { "layout": "center" },
+            "content": [{ "type": "media", "attrs": { "id": "a1", "collection": "b2" } }],
+        },
+        {
+            "type": "paragraph",
+            "content": [
+                text("asked "),
+                { "type": "mention", "attrs": { "id": "u1", "text": "@someone" } },
+                text("to look again"),
+                { "type": "emoji", "attrs": { "shortName": ":white_check_mark:", "text": "y" } },
+            ],
+        },
+    ])
+}
+
+#[test]
+fn an_unknown_node_contributes_the_text_under_it_and_nothing_else() {
+    assert_eq!(
+        read(&edited_elsewhere()),
+        "A brief is the document. Everything else follows from it.\n\nslice waits on\n\nasked to look again\n"
+    );
+}
+
+#[test]
+fn an_unknown_node_leaves_no_name_no_attribute_and_no_marker_behind() {
+    let body = read(&edited_elsewhere());
+
+    for name in [
+        "panel",
+        "table",
+        "tableRow",
+        "tableHeader",
+        "tableCell",
+        "mediaSingle",
+        "media",
+        "mention",
+        "emoji",
+        "paragraph",
+        "type",
+        "attrs",
+        "content",
+        "panelType",
+        "layout",
+        "shortName",
+        "collection",
+        "isNumberColumnEnabled",
+    ] {
+        assert!(!body.contains(name), "{name:?} survived into {body:?}");
+    }
+    for marker in ["|", "#", "```", "- ", "1. ", "[", "*"] {
+        assert!(!body.contains(marker), "{marker:?} survived into {body:?}");
+    }
+}
+
+#[test]
+fn a_tree_that_is_not_a_document_is_read_for_whatever_it_holds() {
+    // The root's `type` is not checked, so a paragraph handed back as a whole
+    // document is still that paragraph's line.
+    assert_eq!(
+        body_for(&json!({
+            "type": "paragraph",
+            "content": [text("Just the one line.")],
+        })),
+        "Just the one line.\n"
+    );
+    assert_eq!(
+        body_for(&json!({ "content": [paragraph("No type at all.")] })),
+        "No type at all.\n"
+    );
+}
+
+#[test]
+fn a_malformed_tree_reads_back_as_nothing_at_all() {
+    for tree in [
+        json!({}),
+        json!({ "type": "doc" }),
+        json!({ "type": "doc", "version": 1, "content": [] }),
+        json!({ "type": "doc", "content": "## Scope" }),
+        json!(null),
+        json!("doc"),
+        json!(7),
+        json!([paragraph("in an array, not a document")]),
+    ] {
+        assert_eq!(body_for(&tree), "", "{tree}");
+    }
+}
+
+#[test]
+fn a_node_with_nothing_under_it_contributes_no_line() {
+    // Including a heading: markers with nothing after them are not a heading,
+    // and an empty line between two blocks is one the writer would read as a
+    // separator.
+    assert_eq!(
+        read(&json!([
+            paragraph("above"),
+            { "type": "heading", "attrs": { "level": 2 } },
+            { "type": "paragraph" },
+            { "type": "paragraph", "content": [] },
+            { "type": "bulletList" },
+            { "type": "orderedList", "content": [{ "type": "listItem" }] },
+            { "type": "panel" },
+            { "type": "text", "text": "" },
+            "a string where a node should be",
+            json!(null),
+            json!([]),
+            paragraph("below"),
+        ])),
+        "above\n\nbelow\n"
+    );
+}
+
+#[test]
+fn an_item_with_nothing_in_it_does_not_take_a_number() {
+    assert_eq!(
+        read(&json!([{
+            "type": "orderedList",
+            "content": [
+                { "type": "listItem", "content": [paragraph("first")] },
+                { "type": "listItem" },
+                { "type": "listItem", "content": [paragraph("second")] },
+            ],
+        }])),
+        "1. first\n2. second\n"
+    );
+}
+
+// Both conversions, in the order a brief meets them: out to the board as a tree
+// and back off it as the text `cut` parses. A body written one block to a
+// paragraph, with a blank line between blocks, is what the reader emits, so the
+// round trip of one is the text itself.
+fn round_trip(body: &str) -> String {
+    body_for(&document_for(body))
+}
+
+#[test]
+fn every_construct_in_the_subset_comes_back_as_the_markdown_it_went_out_as() {
+    let body = "\
+# Problem
+
+Nothing converts **Markdown** to `ADF`, so see [the API](https://example.test/v3) first.
+
+## Acceptance criteria
+
+- sees a URL
+- sees a key
+
+### Out of scope
+
+1. Read the file
+2. File the Epic
+
+```rust
+fn main() {}
+```
+
+#### A fourth level
+
+##### A fifth
+
+###### And a sixth
+";
+
+    assert_eq!(round_trip(body), body);
+}
+
+#[test]
+fn each_of_the_three_marks_comes_back_as_the_characters_it_was_written_as() {
+    for line in [
+        "The brief is **the document**.",
+        "`push.rs` hands it over",
+        "see [the API](https://example.test/v3) first",
+        "**one** and `two` and [three](https://example.test)",
+        "## The `doc` node",
+        "- [ ] `adf.rs` is **declared**",
+    ] {
+        assert_eq!(
+            round_trip(&format!("{line}\n")),
+            format!("{line}\n"),
+            "{line}"
+        );
+    }
+}
+
+#[test]
+fn a_fence_comes_back_with_its_markers_once_and_its_own_lines_unchanged() {
+    // The backticks inside are the point of counting them: a `code` mark
+    // applied to a block's text, or a second fence around a block that already
+    // carried one, is how a block comes back holding characters it never held.
+    let inside = "let marked = `not code`;\n\nwarlock push --scope pay";
+    let body = format!("```rust\n{inside}\n```\n");
+
+    let read = round_trip(&body);
+
+    assert_eq!(read, body);
+    assert_eq!(read.matches("```").count(), 2, "{read:?}");
+    assert_eq!(read.lines().next(), Some("```rust"));
+    assert_eq!(read.lines().next_back(), Some("```"));
+    for line in inside.lines() {
+        assert!(read.contains(line), "{line:?} changed in {read:?}");
+    }
+}
+
+#[test]
+fn a_criterion_comes_back_holding_its_box_and_one_marker() {
+    let body = "- [ ] A new module is declared.\n- [x] It is tested.\n";
+
+    assert_eq!(round_trip(body), body);
+}
+
+// A brief holding the three things `cut` reads off the board: the scope
+// heading, a `### N. ` heading per slice, and a slice's dependency line.
+fn brief_body() -> String {
+    [
+        "Nothing walks an ADF tree back to Markdown.",
+        "",
+        "## Acceptance criteria",
+        "",
+        "- [ ] `body_for` does not return `Result`.",
+        "",
+        "## Scope",
+        "",
+        "### 1. Walk the tree back",
+        "",
+        "Read `heading`, `paragraph` and both list kinds.",
+        "",
+        "### 2. Round-trip a brief",
+        "",
+        "depends_on: [1]",
+        "",
+        "Assert that **both** directions compose.",
+        "",
+    ]
+    .join("\n")
+}
+
+#[test]
+fn a_brief_still_parses_after_both_conversions() {
+    let body = brief_body();
+    let read = round_trip(&body);
+    assert_eq!(read, body);
+
+    let block = crate::brief::scope_block_in(&read).expect("a scope block");
+
+    assert!(
+        block.brief().ends_with("does not return `Result`."),
+        "{:?}",
+        block.brief()
+    );
+    let headings: Vec<&str> = block
+        .slices()
+        .iter()
+        .map(crate::brief::Slice::heading)
+        .collect();
+    assert_eq!(headings, vec!["Walk the tree back", "Round-trip a brief"]);
+    assert_eq!(block.slices()[0].depends_on(), [0usize; 0]);
+    assert_eq!(block.slices()[1].depends_on(), [1]);
+    assert_eq!(block.unreadable(), 0);
+}
+
+#[test]
+fn a_briefs_criterion_and_its_dependency_line_keep_their_brackets() {
+    let read = round_trip(&brief_body());
+
+    // No link mark fired on either, and neither bracket came back escaped: a
+    // `\[` here is a Linear storage quirk that `depended` undoes, and nothing
+    // this conversion is allowed to introduce.
+    assert!(
+        read.contains("- [ ] `body_for` does not return `Result`."),
+        "{read:?}"
+    );
+    assert!(read.contains("\ndepends_on: [1]\n"), "{read:?}");
+    assert!(!read.contains('\\'), "{read:?}");
 }
