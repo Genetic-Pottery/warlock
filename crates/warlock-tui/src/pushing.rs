@@ -147,13 +147,13 @@ enum Next {
     Binding(Parked, KeyPrompt),
 }
 
-// The channel and the board its answer is about. The team rides along because
+// The channel and the board its answer is about. The prefix rides along because
 // the worker sends back an address and nothing about where it went, and the line
 // that says it landed names the board the line that started it named.
 #[derive(Debug)]
 struct Sending {
     events: Once<Landing>,
-    team: String,
+    prefix: String,
 }
 
 impl Pushes<LinearOpener> {
@@ -370,13 +370,13 @@ impl<O: Opens> Pushes<O> {
         // dialog holds every key until it is answered.
         debug_assert!(!self.sending(), "a second push reached send");
 
-        let team = ready.destination().team_key().to_owned();
+        let prefix = ready.destination().ticket_prefix().to_owned();
         // Before the worker starts, so the thread says which board is being
         // filed to from the instant it is: the answer may be seconds away and a
         // reader who has just said yes is looking at the conversation.
-        app.panel_mut().note(filing_line(&team), now);
+        app.panel_mut().note(filing_line(&prefix), now);
         self.sending = Some(Sending {
-            team,
+            prefix,
             events: spawn_push(self.workers, self.open.clone(), ready),
         });
     }
@@ -393,7 +393,7 @@ impl<O: Opens> Pushes<O> {
             return;
         };
         let line = match landing.unwrap_or_else(|Lost| Err(PUSH_LOST.to_owned())) {
-            Ok(url) => filed_line(&sending.team, &url),
+            Ok(url) => filed_line(&sending.prefix, &url),
             // The worker's own sentence, which is `push.rs`'s wording of
             // whatever went wrong: a transport failure, Linear's refusal, a
             // project of the same name already in the team.
@@ -414,15 +414,15 @@ fn spawn_push<O: Opens>(workers: Workers, open: O, ready: Prepared) -> Once<Land
     workers.once(move || file(&ready, &open, &mut io::sink()).map_err(one_line))
 }
 
-fn filing_line(team: &str) -> String {
-    format!("filing to {team}")
+fn filing_line(prefix: &str) -> String {
+    format!("filing to {prefix}")
 }
 
 // The address, which is the one thing about a push that must not be lost, with
 // the board it went to: the same two facts the line above it said it was about
 // to do.
-fn filed_line(team: &str, url: &str) -> String {
-    format!("filed to {team}: {url}")
+fn filed_line(prefix: &str, url: &str) -> String {
+    format!("filed to {prefix}: {url}")
 }
 
 // The key window over this machine's key names, with the push parked behind it.

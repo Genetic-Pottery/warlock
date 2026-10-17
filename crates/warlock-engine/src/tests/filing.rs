@@ -1,10 +1,10 @@
 use std::mem::discriminant;
 use std::path::Path;
 
-use super::{Destination, Error, LinearScope, Target, resolve_filing};
+use super::{Destination, Error, Target, resolve_filing};
 use crate::config::{config_path, save_key_binding, save_open_scopes};
 use crate::keys::save_key;
-use crate::manifest::{Manifest, ScopeRecord, ScopedDirectory, manifest_path};
+use crate::manifest::{LinearScope, Manifest, ScopeRecord, ScopedDirectory, manifest_path};
 use crate::route::{self, resolve_route};
 
 // A plausible Linear key rather than the word "secret", so a test that looks for
@@ -100,8 +100,7 @@ fn a_destination_is_the_target_by_name_with_no_key_value_in_it() {
     let manifest = a_manifest(&["data-plane", "web"]);
     let destination = resolve_filing(&manifest, root.path(), home.path(), None)
         .expect("one board")
-        .destination()
-        .expect("every record files to Linear");
+        .destination();
 
     assert_eq!(
         destination,
@@ -110,6 +109,32 @@ fn a_destination_is_the_target_by_name_with_no_key_value_in_it() {
     assert!(
         !format!("{destination:?}").contains(KEY),
         "a destination printed the key value: {destination:?}"
+    );
+}
+
+#[test]
+fn a_destination_of_a_jira_record_carries_its_project_key_as_the_prefix() {
+    let (home, root) = (a_dir(), a_dir());
+    bound(home.path(), root.path());
+    opens(home.path(), root.path(), &["data-plane"]);
+
+    let manifest = Manifest::with_directories([scoped("data-plane", "data-plane")]).with_scopes([
+        ScopeRecord::jira(
+            "data-plane",
+            "https://acme.atlassian.net/",
+            "PAY",
+            "In Review",
+            "warlock",
+        ),
+    ]);
+    let destination = resolve_filing(&manifest, root.path(), home.path(), None)
+        .expect("one board")
+        .destination();
+
+    assert_eq!(
+        destination,
+        Destination::new("data-plane", "PAY", "warlock", "work"),
+        "the prefix is the project key, and the base URL is nowhere in it"
     );
 }
 

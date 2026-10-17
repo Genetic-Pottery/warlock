@@ -283,13 +283,14 @@ pub(crate) fn listing<O: Opens>(
     open: &O,
 ) -> Result<(Destination, Listing), Error> {
     // Above `resolve_filing`, which loads the key value: a scope warlock cannot
-    // read a board for is refused with no key read and no client built, which is
-    // what the destination below would otherwise refuse one step too late.
+    // read a board for is refused with no key read and no client built, and
+    // nothing further down this road refuses one — the destination carries
+    // whichever prefix the record names and the board is opened below it.
     files_to_linear(manifest, scope)?;
 
     let target = resolve_filing(manifest, root, home, Some(scope))
         .map_err(|source| Error::Filing { source })?;
-    let destination = target.destination()?;
+    let destination = target.destination();
     let listing = open
         .open(target.record(), target.value())
         .planned_briefs()?;
@@ -312,7 +313,7 @@ pub(crate) fn listing_lines(destination: &Destination, listing: &Listing) -> Vec
     if listing.projects().is_empty() {
         return vec![format!(
             "warlock: no project in `{}` is `Planned` and labelled `{}`",
-            destination.team_key(),
+            destination.ticket_prefix(),
             destination.label()
         )];
     }
@@ -614,7 +615,7 @@ fn would(mut planned: Planned) -> Vec<String> {
          nothing was drafted",
         planned.name(),
         planned.status(),
-        destination.team_key(),
+        destination.ticket_prefix(),
         destination.scope(),
         counted(planned.total()),
         planned.total() - planned.left()
@@ -699,9 +700,7 @@ pub(crate) fn prepare<O: Opens>(
 
     let target = resolve_filing(manifest, root, home, Some(scope))
         .map_err(|source| Error::Filing { source })?;
-    // The same record through the same view, which is how the team key is come
-    // by: the refusal it can raise has been asked above.
-    let destination = target.destination()?;
+    let destination = target.destination();
 
     let board = open.open(target.record(), target.value());
     // Once for the run, here rather than in `cut::cut`, which is called per

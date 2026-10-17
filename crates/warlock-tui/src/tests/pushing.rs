@@ -216,7 +216,7 @@ fn a_push_opens_the_dialog_over_the_project_the_team_and_the_key_name() {
     );
     let destination = filing.destination();
     assert_eq!(
-        destination.team_key(),
+        destination.ticket_prefix(),
         TEAM,
         "the team is the `[[scope]]` record's"
     );
@@ -253,7 +253,7 @@ fn a_machine_that_could_file_to_either_board_files_to_the_scope_typed() {
 
     let filing = pushing.confirm.filing().expect("the dialog is up");
     assert_eq!(filing.destination().scope(), OTHER_SCOPE);
-    assert_eq!(filing.destination().team_key(), OTHER_TEAM);
+    assert_eq!(filing.destination().ticket_prefix(), OTHER_TEAM);
     assert!(notes(&app).is_empty());
 }
 
@@ -378,10 +378,15 @@ fn a_yes_files_what_the_dialog_was_drawn_from_without_resolving_it_again() {
     assert!(!pushes.sending(), "the push never reported");
     assert_eq!(pushes.window, Pushing::closed(), "the dialog is still up");
     assert_eq!(linear.opened_with(), [NOT_A_KEY]);
-    assert!(
-        notes(&app).iter().any(|note| note.contains(URL)),
-        "{:?}",
-        notes(&app)
+    // Both lines, in the order the thread said them: the board named while the
+    // worker runs is the board the address comes back under, and the address is
+    // the one thing a push must not lose.
+    assert_eq!(
+        notes(&app),
+        vec![
+            format!("filing to {TEAM}"),
+            format!("filed to {TEAM}: {URL}")
+        ]
     );
 }
 
@@ -468,7 +473,7 @@ fn the_binding_written_leads_to_the_dialog_over_the_same_scope_and_brief() {
         .expect("the dialog the binding led to");
     assert_eq!(filing.project(), TITLE, "the brief is not the one typed");
     assert_eq!(filing.destination().scope(), SCOPE);
-    assert_eq!(filing.destination().team_key(), TEAM);
+    assert_eq!(filing.destination().ticket_prefix(), TEAM);
     assert_eq!(filing.destination().key(), KEY_NAME);
     assert_eq!(filing.answer(), Answer::No, "the dialog opened on Yes");
     assert!(notes(&app).is_empty(), "{:?}", notes(&app));

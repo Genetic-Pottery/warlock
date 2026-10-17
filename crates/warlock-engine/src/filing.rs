@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 use crate::config::{self, open_scopes};
 use crate::keys::{keys_path, load_key};
-use crate::manifest::{LinearScope, Manifest, NotLinear, ScopeRecord, manifest_path};
+use crate::manifest::{BoardScope, Manifest, ScopeRecord, manifest_path};
 use crate::route::{self, bound_key};
 use crate::scope::{scope_opens_to, valid_scope};
 
@@ -247,14 +247,15 @@ impl<'m> Target<'m> {
         &self.value
     }
 
-    pub fn destination(&self) -> Result<Destination, NotLinear> {
-        let linear = LinearScope::of(self.record)?;
-        Ok(Destination {
+    #[must_use]
+    pub fn destination(&self) -> Destination {
+        let scope = BoardScope::of(self.record);
+        Destination {
             scope: self.scope.to_owned(),
-            team_key: linear.team_key().to_owned(),
-            label: linear.label().to_owned(),
+            ticket_prefix: scope.ticket_prefix().to_owned(),
+            label: scope.label().to_owned(),
             key: self.key.clone(),
-        })
+        }
     }
 }
 
@@ -263,13 +264,21 @@ impl<'m> Target<'m> {
 // which borrows the manifest and carries the key, cannot. The key is here by
 // name only: nothing that holds a `Destination` can print a key value.
 //
-// The board's project is not here. A draft is handed one on its command line
-// rather than reading it from the `[[scope]]` record, and the push that is about
-// to make one has none to carry.
+// The prefix is the only field of a board's own that is here, and it is
+// `BoardScope::ticket_prefix`: what a reader of this type does with it is name
+// the board a ticket key belongs to, so a record that files to Jira carries its
+// project key here exactly as a Linear one carries its team key, and nothing
+// holding a `Destination` has to ask which board it came from. A base URL, or
+// anything else a request is addressed with, belongs to whatever opens the
+// client and not here.
+//
+// The project a brief becomes is not here either. A draft is handed one on its
+// command line rather than reading it from the `[[scope]]` record, and the push
+// that is about to make one has none to carry.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Destination {
     scope: String,
-    team_key: String,
+    ticket_prefix: String,
     label: String,
     key: String,
 }
@@ -278,13 +287,13 @@ impl Destination {
     #[must_use]
     pub fn new(
         scope: impl Into<String>,
-        team_key: impl Into<String>,
+        ticket_prefix: impl Into<String>,
         label: impl Into<String>,
         key: impl Into<String>,
     ) -> Self {
         Self {
             scope: scope.into(),
-            team_key: team_key.into(),
+            ticket_prefix: ticket_prefix.into(),
             label: label.into(),
             key: key.into(),
         }
@@ -296,8 +305,8 @@ impl Destination {
     }
 
     #[must_use]
-    pub fn team_key(&self) -> &str {
-        &self.team_key
+    pub fn ticket_prefix(&self) -> &str {
+        &self.ticket_prefix
     }
 
     #[must_use]

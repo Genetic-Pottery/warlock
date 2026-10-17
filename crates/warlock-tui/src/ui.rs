@@ -1353,7 +1353,7 @@ impl<'a> Dialog<'a> {
             Line::from(PUSH_QUESTION).centered(),
             Line::default(),
             Line::from(filing.project()).bold().centered(),
-            labelled(PUSH_TEAM, filing.destination().team_key()),
+            labelled(PUSH_TEAM, filing.destination().ticket_prefix()),
             labelled(PUSH_KEY, filing.destination().key()),
             Line::default(),
             answers_line(filing.answer()),

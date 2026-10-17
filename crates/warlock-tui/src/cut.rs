@@ -98,13 +98,13 @@ pub(crate) fn cut<W: Write>(
         Filable::Ready(settled) => settled,
         Filable::NoDestination => {
             return Err(Error::UnknownTeam {
-                team: filing.destination.team_key().to_owned(),
+                team: filing.destination.ticket_prefix().to_owned(),
                 path: manifest_path(root),
             });
         }
         Filable::NoColumn => {
             return Err(Error::NoBacklog {
-                team: filing.destination.team_key().to_owned(),
+                team: filing.destination.ticket_prefix().to_owned(),
             });
         }
     };
