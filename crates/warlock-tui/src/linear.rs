@@ -1132,29 +1132,31 @@ fn issue_label_id(linear: &impl Posts, name: &str, team: &str) -> Result<String,
     node_id(payload(&created, "issueLabelCreate", "issueLabel")?)
 }
 
-/// Create the project in the team that key names, with its label resolved
-/// first, or `None` for a workspace with no team by that key.
+/// Create the project in the team that key names, or `None` for a workspace
+/// with no team by that key.
 ///
-/// The label's place is the point and not an implementation detail: it is the
-/// only mark on a project saying warlock filed it, nothing here can take a
-/// project back, and a create that landed before a label that then failed is a
-/// project no cut will ever read. Resolving first means a project that exists
-/// is a project that carries the label.
+/// The team is read first because it is the one answer that can end the push
+/// with nothing filed, and the label read creates the label when the workspace
+/// has none: label first, a key naming no team left a new project label behind
+/// for a brief that was never filed.
 ///
-/// The team and the [`BACKLOG`] status are resolved after it and here rather
-/// than by the caller: `projectCreate` writes a team id and a project status
-/// id, and both are Linear's own kind of name. Neither costs a request the
-/// caller used to spend — it asked these two itself — and nothing is created
-/// once either has failed.
+/// The label is still resolved before the project is created. It is the only
+/// mark on a project saying warlock filed it, nothing here can take a project
+/// back, and a create that landed before a label that then failed is a project
+/// no cut will ever read.
+///
+/// The team and the [`BACKLOG`] status are resolved here rather than by the
+/// caller: `projectCreate` writes a team id and a project status id, and both
+/// are Linear's own kind of name.
 fn create_project(
     linear: &impl Posts,
     key: &str,
     project: &NewBrief<'_>,
 ) -> Result<Option<FiledBrief>, Error> {
-    let label = label_id(linear, project.label)?;
     let Some(team) = team_id(linear, key)? else {
         return Ok(None);
     };
+    let label = label_id(linear, project.label)?;
 
     let mut input = json!({
         "name": project.name,

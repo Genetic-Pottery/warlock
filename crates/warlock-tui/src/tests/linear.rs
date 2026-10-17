@@ -1471,8 +1471,8 @@ fn backlog_statuses() -> Value {
 // the key names, the statuses, and the create itself.
 fn a_whole_create() -> [Result<Value, Error>; 4] {
     [
-        Ok(label_found()),
         Ok(the_team()),
+        Ok(label_found()),
         Ok(backlog_statuses()),
         Ok(project_created()),
     ]
@@ -1930,8 +1930,8 @@ fn the_label_is_resolved_before_the_project_is_created() {
 
     assert_eq!(asked.len(), 4);
     assert!(
-        asked[0].contains("projectLabels"),
-        "the label is not the first request: {asked:?}"
+        asked[1].contains("projectLabels"),
+        "the label is not read straight after the team: {asked:?}"
     );
     assert!(
         asked[3].contains("projectCreate"),
@@ -1942,9 +1942,9 @@ fn the_label_is_resolved_before_the_project_is_created() {
 #[test]
 fn a_label_that_had_to_be_created_still_precedes_the_project() {
     let linear = Posting::answering([
+        Ok(the_team()),
         Ok(no_label()),
         Ok(label_created()),
-        Ok(the_team()),
         Ok(backlog_statuses()),
         Ok(project_created()),
     ]);
@@ -1954,8 +1954,8 @@ fn a_label_that_had_to_be_created_still_precedes_the_project() {
     let asked = linear.documents();
 
     assert_eq!(asked.len(), 5);
-    assert!(asked[0].contains("projectLabels"), "{asked:?}");
-    assert!(asked[1].contains("projectLabelCreate"), "{asked:?}");
+    assert!(asked[1].contains("projectLabels"), "{asked:?}");
+    assert!(asked[2].contains("projectLabelCreate"), "{asked:?}");
     assert!(
         asked[4].contains("projectCreate("),
         "the project was created before its label existed: {asked:?}"
@@ -1965,17 +1965,20 @@ fn a_label_that_had_to_be_created_still_precedes_the_project() {
 
 #[test]
 fn a_label_that_cannot_be_resolved_stops_before_the_project_is_created() {
-    let linear = Posting::answering([Err(Error::Refused {
-        board: LINEAR,
-        message: "Entity not found".to_owned(),
-    })]);
+    let linear = Posting::answering([
+        Ok(the_team()),
+        Err(Error::Refused {
+            board: LINEAR,
+            message: "Entity not found".to_owned(),
+        }),
+    ]);
 
     let error = create_project(&linear, TEAM_KEY, &brief()).expect_err("the stand-in refused");
 
     assert!(matches!(error, Error::Refused { .. }), "{error:?}");
     assert_eq!(
         linear.documents().len(),
-        1,
+        2,
         "nothing is created once the label has failed"
     );
 }
@@ -1984,16 +1987,20 @@ fn a_label_that_cannot_be_resolved_stops_before_the_project_is_created() {
 fn a_key_the_workspace_has_no_team_for_is_a_none_with_nothing_created() {
     // The caller turns this into its own refusal, naming the file the key is
     // written in: the words about a manifest are not this module's.
-    let linear = Posting::answering([Ok(label_found()), Ok(no_team())]);
+    let linear = Posting::answering([Ok(no_team())]);
 
     let filed = create_project(&linear, TEAM_KEY, &brief()).expect("an unknown key is an answer");
 
     assert_eq!(filed, None);
     let asked = linear.documents();
-    assert_eq!(asked.len(), 2, "{asked:?}");
+    assert_eq!(asked.len(), 1, "{asked:?}");
+    // Neither the project nor its label: the label read creates a label the
+    // workspace lacks, and a refused push must not leave one behind.
     assert!(
-        !asked.iter().any(|sent| sent.contains("projectCreate")),
-        "a project was created in a team the workspace does not have: {asked:?}"
+        !asked
+            .iter()
+            .any(|sent| sent.contains("projectCreate") || sent.contains("projectLabel")),
+        "something was written for a team the workspace does not have: {asked:?}"
     );
 }
 
@@ -2018,7 +2025,7 @@ fn the_board_files_a_brief_into_the_team_its_record_names() {
         "https://linear.app/acme/project/a-brief-1a2b3c"
     );
     let variables = board.posts.variables();
-    assert_eq!(variables[1], json!({ "key": TEAM_KEY }));
+    assert_eq!(variables[0], json!({ "key": TEAM_KEY }));
     assert_eq!(variables[3]["input"]["teamIds"], json!(["team-1"]));
 }
 
@@ -2049,8 +2056,8 @@ fn a_workspace_with_no_backlog_status_files_the_brief_with_no_status_at_all() {
     // the brief is still filed, and the field is left out rather than sent as
     // null or as whichever status sorts first.
     let linear = Posting::answering([
-        Ok(label_found()),
         Ok(the_team()),
+        Ok(label_found()),
         Ok(project_statuses()),
         Ok(project_created()),
     ]);
@@ -2091,8 +2098,8 @@ fn a_create_that_answers_no_project_is_malformed() {
         json!({ "projectCreate": { "project": { "id": "project-1" } } }),
     ] {
         let linear = Posting::answering([
-            Ok(label_found()),
             Ok(the_team()),
+            Ok(label_found()),
             Ok(backlog_statuses()),
             Ok(answer.clone()),
         ]);

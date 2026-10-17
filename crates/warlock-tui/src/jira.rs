@@ -316,16 +316,20 @@ impl<C: Calls> Board for Jira<C> {
     /// differs in case or in spacing is the same brief — the same comparison
     /// `project_named` makes on Linear, where the filter did the matching.
     ///
-    /// A name carrying a double quote is a JQL string Jira refuses in its own
-    /// words. It is not escaped here because a brief's name is a heading in a
-    /// document somebody wrote, and a refusal naming the search is a better
-    /// answer than a lookup that quietly matched something else.
+    /// A double quote or a backslash in the name is a space in the phrase. Left
+    /// in, either ends the quoted value early and Jira refuses the search, so a
+    /// brief with a quoted word in its title could never be pushed. The text
+    /// match drops punctuation anyway, and the comparison against the full
+    /// name is what decides, so the space narrows no less and matches nothing
+    /// [`same_name`] would not.
     fn brief_named(&self, name: &str) -> Result<Option<String>, Error> {
         let (base_url, project_key) = self.site()?;
         // The [`EPIC`] the create writes as well, and the escaped quotes are a
         // quoted phrase inside the quoted value `~` takes.
-        let jql =
-            format!(r#"project = {project_key} AND issuetype = {EPIC} AND summary ~ "\"{name}\"""#);
+        let phrase = name.replace(['"', '\\'], " ");
+        let jql = format!(
+            r#"project = {project_key} AND issuetype = {EPIC} AND summary ~ "\"{phrase}\"""#
+        );
 
         for issue in self.searched(&jql, &["summary"])? {
             let summary = issue
