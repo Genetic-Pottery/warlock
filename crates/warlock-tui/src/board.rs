@@ -398,6 +398,11 @@ pub(crate) const SKIP_NOTE: &str = "Warlock skipped slice ";
 /// gate on the status has to be able to say that as well as name a wrong one;
 /// and a description can be emptied in Linear after it was filed, which the
 /// caller that parses it will refuse in its own words.
+///
+/// `draftable` is the board's own answer to whether the brief is open for
+/// drafting, and the status beside it is only ever named in a refusal: which
+/// of a board's status words mean a brief may be cut is a fact that board
+/// states, so no caller reads the name to decide.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct FetchedBrief {
     pub(crate) id: String,
@@ -405,6 +410,7 @@ pub(crate) struct FetchedBrief {
     pub(crate) content: String,
     pub(crate) url: String,
     pub(crate) status: Option<String>,
+    pub(crate) draftable: bool,
     pub(crate) notes: Vec<String>,
 }
 
@@ -416,6 +422,7 @@ impl FetchedBrief {
         content: impl Into<String>,
         url: impl Into<String>,
         status: Option<&str>,
+        draftable: bool,
     ) -> Self {
         Self {
             id: "project-1".to_owned(),
@@ -423,6 +430,7 @@ impl FetchedBrief {
             content: content.into(),
             url: url.into(),
             status: status.map(ToOwned::to_owned),
+            draftable,
             notes: Vec::new(),
         }
     }
@@ -461,6 +469,11 @@ impl FetchedBrief {
     #[must_use]
     pub(crate) fn status(&self) -> Option<&str> {
         self.status.as_deref()
+    }
+
+    #[must_use]
+    pub(crate) fn draftable(&self) -> bool {
+        self.draftable
     }
 
     /// The bodies of warlock's cut and skip notes, oldest first.

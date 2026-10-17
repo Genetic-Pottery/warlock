@@ -56,11 +56,6 @@ use crate::error::{Error, one_line, say};
 use crate::pull::Watched;
 use crate::standing::{FOR_CUT, Standing};
 
-// The one status a project is read back from, and the only spelling accepted:
-// the comparison below trims and folds case, so `planned` and ` Planned ` are
-// this and `Backlog` is not.
-const PLANNED: &str = "Planned";
-
 // The cursor a question stops on. A bare mark rather than a sentence, because
 // what a reader needs before they can answer is on the lines above it:
 // warlock's own attempt at it.
@@ -635,8 +630,8 @@ pub(crate) struct Planned {
     project: String,
     name: String,
     // The board's own spelling and not `Planned`, because that is what somebody
-    // sent to look will find written on the project: the gate folds case and
-    // trims, so the two need not match.
+    // sent to look will find written on the project: whether it was open for
+    // drafting is the board's own answer, so the two need not match.
     status: String,
     brief: String,
     destination: Destination,
@@ -709,12 +704,17 @@ pub(crate) fn prepare<O: Opens>(
             scope: scope.to_owned(),
         })?;
 
-    let Some(status) = project.status().filter(|status| is_planned(status)) else {
+    if !project.draftable() {
         return Err(Error::NotPlanned {
             name: project.name().to_owned(),
             status: project.status().map(ToOwned::to_owned),
         });
-    };
+    }
+    // Which of its status words leave a brief open for drafting is the board's
+    // own fact, so a board that answers yes without naming a status is taken at
+    // its word: the name below is only ever printed back, and refusing on it
+    // here would be this module judging a status after all.
+    let status = project.status().unwrap_or_default();
 
     let block = scope_block_in(project.content()).map_err(|source| Error::ScopeBlock { source })?;
     let ordered = block.ordered();
@@ -1416,15 +1416,6 @@ pub(crate) fn named(slice: &Slice) -> String {
 pub(crate) fn counted(count: usize) -> String {
     let noun = if count == 1 { "slice" } else { "slices" };
     format!("{count} {noun}")
-}
-
-// Trimmed and case-folded because the name is typed into Linear by a person and
-// read back over a wire, and neither end promises the capitalisation warlock
-// filed it under. Nothing wider than that: `Planned` is the gate, so a workspace
-// that spells its planned column something else is a refusal rather than a
-// guess.
-fn is_planned(status: &str) -> bool {
-    status.trim().eq_ignore_ascii_case(PLANNED)
 }
 
 // Every test drives a temporary repository and a temporary home through the
