@@ -326,12 +326,6 @@ fn untaught_verbs(board: &Jira<Calling>) -> Vec<(&'static str, Option<Error>)> {
         ("planned_briefs", board.planned_briefs().err()),
         ("scope_queue", board.scope_queue("me").err()),
         ("named_ticket", board.named_ticket(1).err()),
-        (
-            "create_brief",
-            board
-                .create_brief(&NewBrief::new("A brief", "## Problem", "area/pay"))
-                .err(),
-        ),
         ("ticket_filing", board.ticket_filing().err()),
         (
             "create_ticket",
@@ -363,7 +357,8 @@ fn untaught_verbs(board: &Jira<Calling>) -> Vec<(&'static str, Option<Error>)> {
 fn every_verb(board: &Jira<Calling>) -> Vec<(&'static str, Option<Error>)> {
     let mut verbs = untaught_verbs(board);
 
-    verbs.push(("brief_named", board.brief_named("A brief").err()));
+    verbs.push(("brief_named", board.brief_named(NAME).err()));
+    verbs.push(("create_brief", board.create_brief(&a_brief()).err()));
     verbs
 }
 
@@ -630,6 +625,160 @@ fn an_answer_missing_its_issues_its_summary_or_a_matchs_key_is_malformed() {
             "{answer}: {error:?}"
         );
     }
+}
+
+/// The label the record records, which is the one a push hands the create: no
+/// verb is told a label either, so a label in a request can only have come
+/// through [`NewBrief`].
+const LABEL: &str = "area/pay";
+
+/// A brief's body as somebody wrote it, short enough for the ADF tree it
+/// becomes to be spelled out beside it: a heading, a paragraph and one bullet.
+const BODY: &str = "## Problem\n\nPush has nowhere to file.\n\n- One request\n";
+
+/// The brief every create below files.
+fn a_brief() -> NewBrief<'static> {
+    NewBrief::new(NAME, BODY, LABEL)
+}
+
+/// The one request a create makes, as the stand-in records it. Spelled out
+/// rather than built from `adf::document_for` and the module's own constants,
+/// so a change to what Jira is sent — a field added, the type renamed, the
+/// converter's own tree moving — is a failure here and not two expressions that
+/// moved together.
+fn filed() -> (Method, String, Value) {
+    (
+        Method::POST,
+        "/rest/api/3/issue".to_owned(),
+        json!({
+            "fields": {
+                // The project is the record's key, as the lookup's JQL is.
+                "project": { "key": PROJECT },
+                "issuetype": { "name": "Epic" },
+                "summary": NAME,
+                "labels": [LABEL],
+                "description": {
+                    "type": "doc",
+                    "version": 1,
+                    "content": [
+                        {
+                            "type": "heading",
+                            "attrs": { "level": 2 },
+                            "content": [{ "type": "text", "text": "Problem" }],
+                        },
+                        {
+                            "type": "paragraph",
+                            "content": [
+                                { "type": "text", "text": "Push has nowhere to file." },
+                            ],
+                        },
+                        {
+                            "type": "bulletList",
+                            "content": [{
+                                "type": "listItem",
+                                "content": [{
+                                    "type": "paragraph",
+                                    "content": [
+                                        { "type": "text", "text": "One request" },
+                                    ],
+                                }],
+                            }],
+                        },
+                    ],
+                },
+            }
+        }),
+    )
+}
+
+#[test]
+fn a_brief_is_filed_as_one_epic_carrying_the_label_and_its_body_as_adf() {
+    let board = Jira::new(
+        Calling::answering([Ok(json!({ "id": "10042", "key": "PAY-14" }))]),
+        a_scope(),
+    );
+
+    let filed_brief = board
+        .create_brief(&a_brief())
+        .expect("the stand-in answered")
+        .expect("a Jira create either files or is refused");
+
+    // The key and not the numeric id beside it: every path addressing an issue
+    // takes either, and the key is the one a person reads.
+    assert_eq!(filed_brief.id(), "PAY-14");
+    // Built from the key the create answered and the site the record names.
+    assert_eq!(filed_brief.url(), format!("{SITE}/browse/PAY-14"));
+    // One request, carrying the whole of what warlock asks for: the label is in
+    // the create because it is the only mark saying warlock filed this Epic and
+    // nothing here can take an Epic back.
+    assert_eq!(board.calls.made(), [filed()]);
+}
+
+#[test]
+fn the_create_sends_no_status_and_transitions_nothing_after_it() {
+    let board = Jira::new(
+        Calling::answering([Ok(json!({ "key": "PAY-14" }))]),
+        a_scope(),
+    );
+
+    board
+        .create_brief(&a_brief())
+        .expect("the stand-in answered");
+
+    let made = board.calls.made();
+
+    // The Epic opens in whatever status the project's workflow starts an issue
+    // in: no status is asked for on the way in, and nothing reads the issue's
+    // transitions or spends one afterwards. One call, and it is the create.
+    assert_eq!(made.len(), 1, "{made:?}");
+    let (_, path, body) = &made[0];
+    assert!(!path.contains("transitions"), "{path}");
+    let fields = body["fields"]
+        .as_object()
+        .expect("the create writes a `fields` object");
+    let sent: Vec<&str> = fields.keys().map(String::as_str).collect();
+    assert_eq!(
+        sent,
+        ["project", "issuetype", "summary", "labels", "description"],
+        "{sent:?}"
+    );
+}
+
+#[test]
+fn a_create_jira_refuses_is_reported_in_jiras_words_and_is_not_retried() {
+    let said = "project: project is required";
+    let board = Jira::new(
+        Calling::answering([Err(Error::Refused {
+            board: JIRA,
+            message: said.to_owned(),
+        })]),
+        a_scope(),
+    );
+
+    let error = board.create_brief(&a_brief()).expect_err("it was refused");
+
+    assert!(error.to_string().contains(said), "{error}");
+    // A mutation is one request: a create that failed is reported and the
+    // person decides, because nothing here can tell a refusal that arrived
+    // before the Epic existed from one that arrived after.
+    assert_eq!(board.calls.made(), [filed()], "the create was retried");
+}
+
+#[test]
+fn a_create_answering_no_key_is_malformed() {
+    let board = Jira::new(
+        Calling::answering([Ok(json!({ "id": "10042" }))]),
+        a_scope(),
+    );
+
+    let error = board
+        .create_brief(&a_brief())
+        .expect_err("not the answer asked for");
+
+    assert!(
+        matches!(error, Error::Malformed { board: JIRA, .. }),
+        "{error:?}"
+    );
 }
 
 #[test]

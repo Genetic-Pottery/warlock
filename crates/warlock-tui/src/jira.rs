@@ -19,6 +19,7 @@ use ureq::http::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE};
 use ureq::http::{HeaderValue, Method, Request};
 use warlock_engine::{FiledTo, ScopeRecord};
 
+use crate::adf::document_for;
 use crate::board::{
     Board, Error, FetchedBrief, Filable, FiledBrief, FiledTicket, Listing, NamedTicket, NewBrief,
     NewTicket, Queue, TicketBrief,
@@ -34,6 +35,37 @@ const JIRA: &str = "Jira";
 /// body and a query string would have to be percent-encoded into the path by
 /// hand; `/rest/api/2/search` answers 410 Gone and is not an option.
 const SEARCH: &str = "/rest/api/3/search/jql";
+
+/// Where one issue is created. The collection and not an issue's own URL: a
+/// create is a POST to it, and nothing here addresses an issue by id.
+// Read only by the brief create, which the library does not reach until the
+// opener is wired: the same expectation `Jira` and `browse` carry, and it comes
+// off with theirs.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the opener that builds a board is a later slice's; the tests \
+                  under `cfg(test)` are the only caller until then"
+    )
+)]
+const ISSUE: &str = "/rest/api/3/issue";
+
+/// Jira's own name for the issue type a brief is filed as, read both by the
+/// create that writes `issuetype` and by the lookup's JQL. A site that has
+/// renamed it refuses both in its own words rather than warlock guessing a
+/// second spelling.
+// Dead for the same reason [`ISSUE`] is: both of its readers are a board's
+// verbs, and nothing outside the tests opens a board yet.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the opener that builds a board is a later slice's; the tests \
+                  under `cfg(test)` are the only caller until then"
+    )
+)]
+const EPIC: &str = "Epic";
 
 /// Issues read per page of a JQL search. Not left off: an answer with no
 /// `maxResults` takes whatever default the site has today.
@@ -175,10 +207,10 @@ impl Calls for Client {
 /// handed any of them. Owned rather than borrowed, because a board is opened on
 /// a panel worker and outlives the manifest read that produced the record.
 ///
-/// Every verb but the brief-by-name lookup refuses as this stands: the requests
-/// themselves arrive a slice at a time, and a board that refuses is what keeps a
-/// flow which reaches a verb nobody has written yet a sentence rather than a
-/// panic.
+/// Every verb but the two a push makes — the brief-by-name lookup and the brief
+/// create — refuses as this stands: the requests themselves arrive a slice at a
+/// time, and a board that refuses is what keeps a flow which reaches a verb
+/// nobody has written yet a sentence rather than a panic.
 // Nothing in the library builds one yet: the opener that hands a Jira scope
 // this board instead of Linear's is the slice after the verbs, so until then
 // the only caller is this module's own tests. `cfg_attr` rather than a bare
@@ -331,10 +363,10 @@ impl<C: Calls> Board for Jira<C> {
     /// answer than a lookup that quietly matched something else.
     fn brief_named(&self, name: &str) -> Result<Option<String>, Error> {
         let (base_url, project_key) = self.site()?;
-        // `Epic` is Jira's own name for the type a brief is filed as, and the
-        // escaped quotes are a quoted phrase inside the quoted value `~` takes.
+        // The [`EPIC`] the create writes as well, and the escaped quotes are a
+        // quoted phrase inside the quoted value `~` takes.
         let jql =
-            format!(r#"project = {project_key} AND issuetype = Epic AND summary ~ "\"{name}\"""#);
+            format!(r#"project = {project_key} AND issuetype = {EPIC} AND summary ~ "\"{name}\"""#);
 
         for issue in self.searched(&jql, &["summary"])? {
             let summary = issue
@@ -364,8 +396,57 @@ impl<C: Calls> Board for Jira<C> {
         self.untaught("read a ticket by number")
     }
 
-    fn create_brief(&self, _project: &NewBrief<'_>) -> Result<Option<FiledBrief>, Error> {
-        self.untaught("file a brief")
+    /// File the brief as an Epic in the project the record names, carrying the
+    /// label and its body as an ADF document, and answer where a person opens
+    /// it.
+    ///
+    /// One request, and the label is in it: it is the only mark on an Epic
+    /// saying warlock filed it, nothing here can take an Epic back, and a
+    /// create that landed before a label that then failed would be a brief no
+    /// cut ever reads. Jira writes a label by its own name on the issue, so
+    /// there is nothing to resolve first — where `create_project` on Linear
+    /// resolves an id before it creates anything, this spends no read at all.
+    /// It is the label [`NewBrief`] carries, which is the one the record
+    /// records: a push reads it off the scope and every create on this seam is
+    /// handed it the same way.
+    ///
+    /// No status field and no transition after it: the Epic opens in whatever
+    /// status the project's workflow starts an issue in, which is the site's
+    /// decision and not warlock's.
+    ///
+    /// Never `None`, which on this seam is "the board has nowhere to file it" —
+    /// a Linear workspace with no team by the recorded key. A Jira project key
+    /// the site does not hold is something the create itself refuses in Jira's
+    /// own words, and telling the two apart would cost a read before a
+    /// mutation that is one request.
+    fn create_brief(&self, project: &NewBrief<'_>) -> Result<Option<FiledBrief>, Error> {
+        let (base_url, project_key) = self.site()?;
+        let created = self.calls.call(
+            Method::POST,
+            ISSUE,
+            json!({
+                "fields": {
+                    "project": { "key": project_key },
+                    "issuetype": { "name": EPIC },
+                    "summary": project.name,
+                    "labels": [project.label],
+                    "description": document_for(project.content),
+                }
+            }),
+        )?;
+
+        // The key and not the numeric `id` beside it: every path this module
+        // addresses an issue by takes either, and the key is the one a person
+        // reads in a refusal and types into a search.
+        let key = created
+            .get("key")
+            .and_then(Value::as_str)
+            .ok_or_else(|| missing("key"))?;
+
+        Ok(Some(FiledBrief {
+            id: key.to_owned(),
+            url: browse(base_url, key),
+        }))
     }
 
     fn ticket_filing(&self) -> Result<Filable<()>, Error> {
