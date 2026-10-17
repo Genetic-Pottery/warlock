@@ -1283,22 +1283,28 @@ fn a_named_answer_that_is_not_the_one_asked_for_is_malformed() {
 }
 
 #[test]
-fn the_board_hands_the_team_key_and_the_number_to_the_wire_in_that_order() {
+fn the_board_reads_the_team_key_off_its_record_and_is_told_the_number() {
+    // The verb takes one argument, so the team and the number cannot be handed
+    // to it in the wrong order: the number is the whole of what it is told, and
+    // the key on the wire can only have come off the record.
     let board = Linear::new(
         Posting::answering([Ok(a_named_ticket(&named_node()))]),
         a_scope(),
     );
 
     let found = board
-        .named_ticket("WAR", 133)
+        .named_ticket(133)
         .expect("the stand-in answered")
         .expect("the stand-in answered with the ticket");
 
     assert_eq!(found.issue().identifier(), "WAR-133");
-    assert_eq!(
-        board.posts.variables().pop().expect("one request was made")["number"],
-        json!(133)
-    );
+
+    let asked = board.posts.variables().pop().expect("one request was made");
+
+    // Upper cased on the way out, because Linear's keys are and a record's
+    // `team` is something a person typed.
+    assert_eq!(asked["team"], json!(TEAM.to_uppercase()));
+    assert_eq!(asked["number"], json!(133));
 }
 
 fn issue_label_found() -> Value {

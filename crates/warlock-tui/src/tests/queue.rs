@@ -643,7 +643,25 @@ mod named {
     }
 
     #[test]
+    fn a_prefix_naming_another_team_is_refused_without_asking_the_board() {
+        // The board is told only the number and reads the team off the record it
+        // was opened for, so an `ENG-133` that went out unchecked would be
+        // answered with `WAR-133` — the right answer to a question nobody asked.
+        let posting = holding(&ticket());
+
+        let named = asked_for(&posting, "ENG-133", &[]);
+
+        assert_eq!(
+            reason(&named),
+            "on team `ENG`, and this scope routes to `WAR`"
+        );
+        assert!(posting.variables().is_empty(), "ENG-133 reached the board");
+    }
+
+    #[test]
     fn a_ticket_on_another_team_is_refused_naming_both_teams() {
+        // The team the answer states and not the prefix that was typed: `WAR-133`
+        // is what is asked for, and the board answers with a ticket on `ENG`.
         let mut node = ticket();
         node["team"] = json!({ "key": "ENG" });
 

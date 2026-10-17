@@ -1074,8 +1074,8 @@ impl<B: Board> Board for Quiet<B> {
         self.asked(|board| board.scope_queue(assignee))
     }
 
-    fn named_ticket(&self, team: &str, number: u64) -> Result<Option<NamedTicket>, BoardError> {
-        self.asked(|board| board.named_ticket(team, number))
+    fn named_ticket(&self, number: u64) -> Result<Option<NamedTicket>, BoardError> {
+        self.asked(|board| board.named_ticket(number))
     }
 
     fn create_brief(&self, project: &NewBrief<'_>) -> Result<FiledBrief, BoardError> {

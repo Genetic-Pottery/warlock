@@ -229,8 +229,8 @@ impl<P: Posts> Board for Linear<P> {
         scope_queue(&self.posts, scope.team_key(), scope.label(), assignee)
     }
 
-    fn named_ticket(&self, team: &str, number: u64) -> Result<Option<NamedTicket>, Error> {
-        named_issue(&self.posts, team, number)
+    fn named_ticket(&self, number: u64) -> Result<Option<NamedTicket>, Error> {
+        named_issue(&self.posts, self.scope()?.team_key(), number)
     }
 
     fn create_brief(&self, project: &NewBrief<'_>) -> Result<FiledBrief, Error> {
@@ -955,9 +955,10 @@ const LABELS_PAGE: usize = 50;
 ///
 /// Not by the identifier itself, because Linear's `IssueFilter` has no
 /// `identifier`: the identifier is a display name made of the team's key and the
-/// issue's number, and those two are what can be filtered on. Splitting it is the
-/// caller's, which is also where a string that is no identifier at all gets its
-/// own words rather than a request.
+/// issue's number, and those two are what can be filtered on. The team is the one
+/// the board was opened for and never a typed one: the caller splits the
+/// identifier, refuses a prefix naming another team, and is also where a string
+/// that is no identifier at all gets its own words rather than a request.
 ///
 /// The node selection is [`scope_queue`]'s — the ticket comes back as the same
 /// [`QueuedTicket`], parsed by the same function, so a named ticket and a chosen
@@ -995,8 +996,8 @@ fn named_issue(linear: &impl Posts, team: &str, number: u64) -> Result<Option<Na
     let data = linear.post(
         &document,
         json!({
-            // Upper cased because Linear's team keys are, and `WAR-133` is
-            // something a person types: `war-133` names the same ticket to
+            // Upper cased because Linear's team keys are, and a scope record's
+            // `team` is something a person typed: `war` names the same team to
             // everyone except an `eq` on the key.
             "team": team.trim().to_uppercase(),
             "number": number,

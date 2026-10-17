@@ -52,7 +52,7 @@ pub(crate) trait Board {
     fn planned_briefs(&self) -> Result<Listing, Error>;
     fn brief_named(&self, name: &str) -> Result<Option<String>, Error>;
     fn scope_queue(&self, assignee: &str) -> Result<Queue, Error>;
-    fn named_ticket(&self, team: &str, number: u64) -> Result<Option<NamedTicket>, Error>;
+    fn named_ticket(&self, number: u64) -> Result<Option<NamedTicket>, Error>;
     fn create_brief(&self, project: &NewBrief<'_>) -> Result<FiledBrief, Error>;
     fn create_ticket(&self, issue: &NewTicket<'_>) -> Result<FiledTicket, Error>;
     fn create_relation(&self, blocker: &str, waiting: &str) -> Result<String, Error>;

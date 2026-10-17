@@ -438,7 +438,7 @@ pub(crate) enum Call {
     PlannedBriefs,
     BriefNamed(String),
     ScopeQueue(String),
-    NamedTicket { team: String, number: u64 },
+    NamedTicket(u64),
     CreateBrief(BriefAsked),
     CreateTicket(TicketAsked),
     Relation { blocker: String, waiting: String },
@@ -463,7 +463,7 @@ impl Call {
             Self::PlannedBriefs => Op::PlannedBriefs,
             Self::BriefNamed(_) => Op::BriefNamed,
             Self::ScopeQueue(_) => Op::ScopeQueue,
-            Self::NamedTicket { .. } => Op::NamedTicket,
+            Self::NamedTicket(_) => Op::NamedTicket,
             Self::CreateBrief(_) => Op::CreateBrief,
             Self::CreateTicket(_) => Op::CreateTicket,
             Self::Relation { .. } => Op::Relation,
@@ -944,12 +944,10 @@ impl Board for Boarding {
 
     /// Whatever ticket the test wrote down — `None`, a board with no such ticket,
     /// being the default — and the call recorded, which is where a test reads the
-    /// team and number that were asked for.
-    fn named_ticket(&self, team: &str, number: u64) -> Result<Option<NamedTicket>, BoardError> {
-        self.ask(Call::NamedTicket {
-            team: team.to_owned(),
-            number,
-        })?;
+    /// number that was asked for. The number is the whole of it: the team the
+    /// ticket is looked for on is the record's, as the queue read's is.
+    fn named_ticket(&self, number: u64) -> Result<Option<NamedTicket>, BoardError> {
+        self.ask(Call::NamedTicket(number))?;
         Ok(self.named.clone())
     }
 
