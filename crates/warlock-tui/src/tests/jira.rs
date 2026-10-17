@@ -1,10 +1,13 @@
 use std::error::Error as _;
 use std::io;
 
-use serde_json::Value;
+use serde_json::{Value, json};
 use ureq::http::Method;
 
-use super::{Calls, Client, EMAIL_TOKEN, JIRA, REQUEST_TIMEOUT, authorization, base64, pair, url};
+use super::{
+    Calls, Client, EMAIL_TOKEN, JIRA, REQUEST_TIMEOUT, answer, authorization, base64, pair,
+    refusal, url,
+};
 
 use crate::board::Error;
 
@@ -232,5 +235,75 @@ fn every_base64_quantum_is_four_characters() {
 
         assert_eq!(encoded.len() % 4, 0, "{length}: {encoded}");
         assert_eq!(encoded.len(), length.div_ceil(3) * 4, "{length}: {encoded}");
+    }
+}
+
+#[test]
+fn a_success_with_no_body_answers_null() {
+    // A transition answers 204 and an issue link 201, each with nothing after
+    // the headers.
+    assert_eq!(answer(204, "").unwrap(), Value::Null);
+    assert_eq!(answer(201, " \n").unwrap(), Value::Null);
+}
+
+#[test]
+fn a_success_with_a_body_answers_its_json() {
+    assert_eq!(
+        answer(201, r#"{"key":"KAN-2"}"#).unwrap(),
+        json!({ "key": "KAN-2" })
+    );
+}
+
+#[test]
+fn a_success_whose_body_is_not_json_is_malformed() {
+    assert!(matches!(
+        answer(200, "<html>sign in</html>"),
+        Err(Error::Malformed { board: JIRA, .. })
+    ));
+}
+
+#[test]
+fn a_refusal_carries_jiras_reasons() {
+    let error = answer(
+        404,
+        r#"{"errorMessages":["Issue does not exist or you do not have permission to see it."],"errors":{}}"#,
+    )
+    .unwrap_err();
+
+    assert_eq!(
+        error.to_string(),
+        "Jira refused the request: Issue does not exist or you do not have permission to see it."
+    );
+}
+
+#[test]
+fn field_errors_are_named_after_the_messages() {
+    let body = json!({
+        "errorMessages": ["The request was invalid."],
+        "errors": { "summary": "You must specify a summary of the issue." }
+    });
+
+    assert_eq!(
+        refusal(&body).unwrap(),
+        "The request was invalid.; summary: You must specify a summary of the issue."
+    );
+}
+
+#[test]
+fn a_refusal_with_no_reasons_is_its_status() {
+    // A 401 from Jira, a proxy's HTML and an envelope with empty reasons all
+    // name nothing warlock can pass on.
+    for text in [
+        "",
+        "<html>bad gateway</html>",
+        r#"{"errorMessages":[],"errors":{}}"#,
+    ] {
+        assert!(matches!(
+            answer(401, text),
+            Err(Error::Status {
+                board: JIRA,
+                code: 401
+            })
+        ));
     }
 }

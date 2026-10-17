@@ -94,6 +94,10 @@ impl Client {
             // call, and a resolve, a connect and a body read with thirty
             // seconds each is a minute and a half.
             .timeout_global(Some(REQUEST_TIMEOUT))
+            // Off so a 4xx keeps its body: Jira says why it refused in
+            // `errorMessages` and `errors`, and ureq's own error for a status
+            // carries the code alone. See `answer`.
+            .http_status_as_error(false)
             .build();
 
         Self {
@@ -140,9 +144,66 @@ impl Calls for Client {
             .map_err(unreachable)?;
 
         let mut response = self.agent.run(request).map_err(failure)?;
+        let status = response.status().as_u16();
+        let text = response.body_mut().read_to_string().map_err(failure)?;
 
-        response.body_mut().read_json().map_err(failure)
+        answer(status, &text)
     }
+}
+
+/// The answer to one call, from its status and its body as text.
+///
+/// A success with an empty body is `Value::Null`: a transition answers 204 and
+/// an issue link 201, both with nothing after the headers, and reading either
+/// as JSON would fail a call that worked. A refusal is Jira's own words when
+/// the body carries any, and the bare status when it carries none.
+fn answer(status: u16, text: &str) -> Result<Value, Error> {
+    if (200..300).contains(&status) {
+        if text.trim().is_empty() {
+            return Ok(Value::Null);
+        }
+        return serde_json::from_str(text).map_err(|_| Error::Malformed {
+            board: JIRA,
+            detail: "it was not JSON".to_owned(),
+        });
+    }
+
+    match serde_json::from_str::<Value>(text)
+        .ok()
+        .and_then(|body| refusal(&body))
+    {
+        Some(message) => Err(Error::Refused {
+            board: JIRA,
+            message,
+        }),
+        None => Err(Error::Status {
+            board: JIRA,
+            code: status,
+        }),
+    }
+}
+
+/// Jira's reasons for a refusal, joined: every `errorMessages` entry, then each
+/// `errors` field as `field: reason`. `None` when the body names none, so a
+/// proxy's error page reads as a status and never as Jira's words.
+fn refusal(body: &Value) -> Option<String> {
+    let messages = body["errorMessages"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::to_owned);
+    let fields = body["errors"]
+        .as_object()
+        .into_iter()
+        .flatten()
+        .filter_map(|(field, reason)| Some(format!("{field}: {}", reason.as_str()?)));
+    let reasons: Vec<String> = messages
+        .chain(fields)
+        .filter(|reason| !reason.trim().is_empty())
+        .collect();
+
+    (!reasons.is_empty()).then(|| reasons.join("; "))
 }
 
 /// The site joined to one path.
@@ -191,14 +252,10 @@ fn pair(stored: &str) -> Result<(&str, &str), Error> {
 
 fn failure(error: ureq::Error) -> Error {
     match error {
-        // ureq turns 4xx and 5xx into this by default. A 401 is the key and a
-        // 400 is the body; neither is an I/O failure and neither should read
-        // like one.
+        // Out of reach with `http_status_as_error` off, and kept so a config
+        // change that turns it back on still reads a 401 as a status rather
+        // than as an I/O failure.
         ureq::Error::StatusCode(code) => Error::Status { board: JIRA, code },
-        ureq::Error::Json(_) => Error::Malformed {
-            board: JIRA,
-            detail: "it was not JSON".to_owned(),
-        },
         source => Error::Transport {
             board: JIRA,
             source: Box::new(source),
