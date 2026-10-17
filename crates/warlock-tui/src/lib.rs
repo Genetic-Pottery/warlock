@@ -9,7 +9,8 @@
 //! The rest of the outside world is reached on purpose — `claude` runs the CLI
 //! as a child process because the engine's port spawns nothing, `git` runs `git`
 //! and `gh` through `claude`'s process plumbing because a pull request is made of
-//! subprocesses, `linear` opens a socket because the board is somewhere else,
+//! subprocesses, `linear` and `jira` open a socket because the board is
+//! somewhere else,
 //! `watch` holds a filesystem watcher, and `asking` and `key` read stdin at a
 //! shell, raw only for the length of one read. The stand-ins tests drive those
 //! seams with are in `stubs.rs`, one set for every test in the crate, so a
@@ -44,6 +45,7 @@ mod help;
 mod inflight;
 mod input;
 mod interactive;
+mod jira;
 mod key;
 mod linear;
 mod modal;
@@ -140,6 +142,8 @@ pub use git::pull_request_body;
 pub use git::pull_request_title;
 pub use interactive::Interactive;
 pub use interactive::POLL_INTERVAL;
+pub use jira::Calls;
+pub use jira::Client as JiraClient;
 pub use key::key_add;
 pub use key::key_forget;
 pub use key::key_list;

@@ -885,8 +885,8 @@ impl FiledTicket {
     }
 }
 
-/// Nothing here carries the key, and two variants say why they carry what they
-/// do instead.
+/// Nothing here carries the key, and the variants carrying words say why they
+/// carry those.
 #[derive(Debug)]
 pub enum Error {
     /// The key cannot be a header value at all — a newline or a byte outside
@@ -894,6 +894,15 @@ pub enum Error {
     /// printed.
     Key {
         board: &'static str,
+    },
+    /// Nothing was sent, because the stored key is not shaped like this board's:
+    /// a Jira key is an account email and an API token on one line, and a line
+    /// missing either half authenticates as nobody. The shape is warlock's own
+    /// word for what a person types, which is why it is static and why nothing
+    /// of the stored value is here beside it.
+    Mistyped {
+        board: &'static str,
+        expected: &'static str,
     },
     /// Nothing was sent, because nothing is left to hear the answer: the run the
     /// request belonged to was stopped before it went out. Warlock's own word
@@ -949,6 +958,12 @@ impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Key { board } => write!(f, "the {board} key cannot be sent as a header value"),
+            Self::Mistyped { board, expected } => {
+                write!(
+                    f,
+                    "the {board} key must be typed `{expected}`, and the stored one is not"
+                )
+            }
             Self::Stopped { board } => {
                 write!(f, "the run was stopped, so nothing was sent to {board}")
             }
@@ -972,6 +987,7 @@ impl std::error::Error for Error {
         match self {
             Self::Transport { source, .. } => Some(&**source),
             Self::Key { .. }
+            | Self::Mistyped { .. }
             | Self::Stopped { .. }
             | Self::Elsewhere { .. }
             | Self::Status { .. }
