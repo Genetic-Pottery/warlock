@@ -1046,12 +1046,8 @@ impl<B: Board> Board for Quiet<B> {
         self.asked(|board| board.backlog_state(team))
     }
 
-    fn workflow_state(&self, team: &str, name: &str) -> Result<Option<String>, BoardError> {
-        self.asked(|board| board.workflow_state(team, name))
-    }
-
-    fn move_ticket(&self, issue: &str, state: &str) -> Result<String, BoardError> {
-        self.asked(|board| board.move_ticket(issue, state))
+    fn move_ticket(&self, issue: &str, status: &str) -> Result<bool, BoardError> {
+        self.asked(|board| board.move_ticket(issue, status))
     }
 
     fn ticket_label_id(&self, name: &str, team: &str) -> Result<String, BoardError> {

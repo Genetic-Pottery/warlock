@@ -391,6 +391,9 @@ pub(crate) struct Boarding {
     /// What [`Board::ticket_brief`] answers with: `None`, a ticket in no brief,
     /// until a test says otherwise.
     ticket_brief: Option<TicketBrief>,
+    /// The one workflow state this team holds, which is both what
+    /// [`Board::backlog_state`] answers with and whether a move reaches the
+    /// status it asked for: `None` is a team with no states at all.
     state: Option<String>,
     label: String,
     project: Option<FetchedBrief>,
@@ -431,8 +434,7 @@ pub(crate) enum Call {
     MoveBrief { project: String, status: String },
     TicketBrief(String),
     BacklogState(String),
-    WorkflowState { team: String, name: String },
-    MoveTicket { issue: String, state: String },
+    MoveTicket { issue: String, status: String },
     TicketLabel { name: String, team: String },
     FetchBrief(String),
     PlannedBriefs,
@@ -456,7 +458,6 @@ impl Call {
             Self::MoveBrief { .. } => Op::MoveBrief,
             Self::TicketBrief(_) => Op::TicketBrief,
             Self::BacklogState(_) => Op::BacklogState,
-            Self::WorkflowState { .. } => Op::WorkflowState,
             Self::MoveTicket { .. } => Op::MoveTicket,
             Self::TicketLabel { .. } => Op::TicketLabel,
             Self::FetchBrief(_) => Op::FetchBrief,
@@ -482,7 +483,6 @@ pub(crate) enum Op {
     MoveBrief,
     TicketBrief,
     BacklogState,
-    WorkflowState,
     MoveTicket,
     TicketLabel,
     FetchBrief,
@@ -879,29 +879,19 @@ impl Board for Boarding {
         Ok(self.state.clone())
     }
 
-    /// The one workflow state this workspace holds an id for, whatever name is
-    /// asked: which name that was is in the recorded call, so a test asserting
-    /// that a flow asked for `In Progress` reads it there rather than from the
-    /// answer. A board built [`without_backlog_state`] has no states at all, so
-    /// a move's resolve comes back empty too.
+    /// The move recorded, and the status reached whenever this workspace holds a
+    /// state at all: which name was asked for is in the recorded call, so a test
+    /// asserting that a flow asked for `In Progress` reads it there rather than
+    /// from the answer. A board built [`without_backlog_state`] has no states, so
+    /// every move answers that there is no status of that name.
     ///
     /// [`without_backlog_state`]: Boarding::without_backlog_state
-    fn workflow_state(&self, team: &str, name: &str) -> Result<Option<String>, BoardError> {
-        self.ask(Call::WorkflowState {
-            team: team.to_owned(),
-            name: name.to_owned(),
-        })?;
-        Ok(self.state.clone())
-    }
-
-    /// The move recorded and the issue handed back, as the real board answers
-    /// with the issue it updated.
-    fn move_ticket(&self, issue: &str, state: &str) -> Result<String, BoardError> {
+    fn move_ticket(&self, issue: &str, status: &str) -> Result<bool, BoardError> {
         self.ask(Call::MoveTicket {
             issue: issue.to_owned(),
-            state: state.to_owned(),
+            status: status.to_owned(),
         })?;
-        Ok(issue.to_owned())
+        Ok(self.state.is_some())
     }
 
     fn ticket_label_id(&self, name: &str, team: &str) -> Result<String, BoardError> {

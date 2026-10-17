@@ -199,12 +199,21 @@ impl<P: Posts> Board for Linear<P> {
         backlog_state(&self.posts, team)
     }
 
-    fn workflow_state(&self, team: &str, name: &str) -> Result<Option<String>, Error> {
-        workflow_state(&self.posts, team, name)
-    }
-
-    fn move_ticket(&self, issue: &str, state: &str) -> Result<String, Error> {
-        move_issue(&self.posts, issue, state)
+    /// The team and the state resolved here rather than by the caller: a
+    /// workflow state belongs to a team and the mutation wants its id, so the
+    /// team key comes off the record this board was opened with and the name is
+    /// matched among that team's own states. A name no state of the team
+    /// carries, or a key the workspace has no team for, is `false` with the
+    /// mutation never sent.
+    fn move_ticket(&self, issue: &str, status: &str) -> Result<bool, Error> {
+        let Some(team) = team_id(&self.posts, self.scope()?.team_key())? else {
+            return Ok(false);
+        };
+        let Some(state) = workflow_state(&self.posts, &team, status)? else {
+            return Ok(false);
+        };
+        move_issue(&self.posts, issue, &state)?;
+        Ok(true)
     }
 
     fn ticket_label_id(&self, name: &str, team: &str) -> Result<String, Error> {
@@ -492,10 +501,11 @@ fn backlog_state(linear: &impl Posts, team: &str) -> Result<Option<String>, Erro
 /// The id of the team's workflow state by name, or `None` when that team has no
 /// state by it.
 ///
-/// `None` rather than an error, and here it is load-bearing rather than tidy: the
-/// caller moving an issue prints a missing column as one line and works the
-/// ticket anyway. A workflow column is a courtesy to people who are not watching
-/// the terminal, and nothing about the work depends on it.
+/// `None` rather than an error, and here it is load-bearing rather than tidy: it
+/// is what [`Board::move_ticket`] answers `false` on, and a pull prints that as
+/// one line and works the ticket anyway. A workflow column is a courtesy to
+/// people who are not watching the terminal, and nothing about the work depends
+/// on it.
 ///
 /// Matched trimmed and case-insensitively, because `In progress` and
 /// `In Progress` are the same column to everyone except a string comparison.

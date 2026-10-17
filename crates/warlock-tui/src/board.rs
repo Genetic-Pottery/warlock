@@ -45,8 +45,20 @@ pub(crate) trait Board {
     fn move_brief(&self, project: &str, status: &str) -> Result<String, Error>;
     fn ticket_brief(&self, issue: &str) -> Result<Option<TicketBrief>, Error>;
     fn backlog_state(&self, team: &str) -> Result<Option<String>, Error>;
-    fn workflow_state(&self, team: &str, name: &str) -> Result<Option<String>, Error>;
-    fn move_ticket(&self, issue: &str, state: &str) -> Result<String, Error>;
+    /// The ticket moved to the board's status of that name, and `true` when a
+    /// status of that name was there to move it to.
+    ///
+    /// The name and not an id, because what a status is named is the only thing
+    /// two boards agree on: a Linear workflow state has a global id and a Jira
+    /// status is reachable only through the transitions of the one issue, so the
+    /// board is what turns a name into whatever the move needs.
+    ///
+    /// `false` and not an error, and the callers lean on it: a board whose
+    /// workflow nobody has given an `In Progress` or a review state is a board
+    /// warlock reports on and works past, and a run that stopped over it would be
+    /// the board wagging the pull. An answer and not a silent success, so a
+    /// caller cannot mistake "no such column" for a move that happened.
+    fn move_ticket(&self, issue: &str, status: &str) -> Result<bool, Error>;
     fn ticket_label_id(&self, name: &str, team: &str) -> Result<String, Error>;
     fn fetch_brief(&self, slug: &str) -> Result<Option<FetchedBrief>, Error>;
     fn planned_briefs(&self) -> Result<Listing, Error>;

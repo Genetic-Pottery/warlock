@@ -2234,6 +2234,62 @@ fn a_move_the_api_refuses_comes_back_once_in_linears_words() {
     assert_eq!(linear.documents().len(), 1, "no retry and no backoff");
 }
 
+fn team_found() -> Value {
+    json!({ "teams": { "nodes": [{ "id": TEAM }] } })
+}
+
+#[test]
+fn the_board_moves_a_ticket_by_the_status_name_resolving_the_team_and_the_state_itself() {
+    // Through the board rather than the functions under it: the verb takes the
+    // name of the status, so the team key on the wire can only have come off the
+    // record, and the `stateId` the mutation writes can only have come from the
+    // state the board resolved under that name.
+    let board = Linear::new(
+        Posting::answering([Ok(team_found()), Ok(workflow_states()), Ok(issue_updated())]),
+        a_scope(),
+    );
+
+    let moved = board
+        .move_ticket("issue-1", IN_PROGRESS)
+        .expect("the stand-in answered");
+
+    assert!(moved, "the team has a state of that name");
+    assert_eq!(
+        board.posts.variables(),
+        [
+            json!({ "key": TEAM }),
+            json!({ "team": TEAM }),
+            json!({ "id": "issue-1", "input": { "stateId": "state-doing" } }),
+        ]
+    );
+}
+
+#[test]
+fn a_board_with_no_status_of_that_name_answers_so_and_sends_no_move() {
+    // Both halves of "no such column": a workspace holding no team by the
+    // record's key, and a team whose states do not include the one asked for.
+    // Either way the mutation is never sent and the caller hears it as an
+    // answer, which is the line a run prints before working the ticket anyway.
+    for (answers, asked) in [
+        (vec![Ok(json!({ "teams": { "nodes": [] } }))], 1),
+        (vec![Ok(team_found()), Ok(workflow_states())], 2),
+    ] {
+        let board = Linear::new(Posting::answering(answers), a_scope());
+
+        let moved = board
+            .move_ticket("issue-1", "Doing")
+            .expect("no such column is an answer");
+
+        assert!(!moved);
+        let documents = board.posts.documents();
+        assert_eq!(documents.len(), asked, "{documents:?}");
+        assert!(
+            !documents.iter().any(|sent| sent.contains("issueUpdate")),
+            "{documents:?}"
+        );
+    }
+}
+
 fn comment_created() -> Value {
     json!({ "commentCreate": { "comment": { "id": "comment-1" } } })
 }
