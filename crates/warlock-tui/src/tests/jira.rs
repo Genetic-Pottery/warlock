@@ -10,7 +10,10 @@ use super::{
     refusal, url,
 };
 
+use crate::adf::document_for;
 use crate::board::{Board, Error, NewBrief, NewTicket};
+use crate::brief::{Slice, scope_block_in};
+use crate::cut;
 use crate::stubs::Calling;
 
 const EMAIL: &str = "nobody@example.com";
@@ -321,7 +324,6 @@ fn untaught_verbs(board: &Jira<Calling>) -> Vec<(&'static str, Option<Error>)> {
         ("move_brief", board.move_brief("10001", "In Review").err()),
         ("ticket_brief", board.ticket_brief("PAY-1").err()),
         ("move_ticket", board.move_ticket("PAY-1", "In Review").err()),
-        ("fetch_brief", board.fetch_brief("a-brief").err()),
         ("planned_briefs", board.planned_briefs().err()),
         ("scope_queue", board.scope_queue("me").err()),
         ("named_ticket", board.named_ticket(1).err()),
@@ -357,6 +359,7 @@ fn every_verb(board: &Jira<Calling>) -> Vec<(&'static str, Option<Error>)> {
     let mut verbs = untaught_verbs(board);
 
     verbs.push(("viewer", board.viewer().err()));
+    verbs.push(("fetch_brief", board.fetch_brief(BRIEF).err()));
     verbs.push(("brief_named", board.brief_named(NAME).err()));
     verbs.push(("create_brief", board.create_brief(&a_brief()).err()));
     verbs
@@ -854,6 +857,506 @@ fn a_create_answering_no_key_is_malformed() {
         matches!(error, Error::Malformed { board: JIRA, .. }),
         "{error:?}"
     );
+}
+
+/// The key a draft is handed, as a person types one: the whole address of the
+/// Epic every read below asks for.
+const BRIEF: &str = "PAY-14";
+
+/// A brief as it comes back off the board, which is what a cut parses: the scope
+/// heading and one slice under it. Spelled as the Markdown it is, because the
+/// assertion is that the ADF the site holds reads back as this and not as
+/// something a parse has to be taught.
+const BRIEF_BODY: &str = "## Scope\n\n### 1. Read the Epic\n\nBy its key.\n";
+
+/// The status a team-managed project's workflow opens an issue in, and the
+/// category Jira files it under: the word is the board's and the category is
+/// what a judgement is made on.
+const TO_DO: &str = "To Do";
+
+/// The issue read, as the stand-in records it. Spelled out rather than built
+/// from the module's own constants, so a change to what Jira is asked — the
+/// path moving, the fields asked for changing, a body appearing — is a failure
+/// here and not two expressions that moved together.
+fn fetched(key: &str) -> (Method, String, Value) {
+    (
+        Method::GET,
+        format!("/rest/api/3/issue/{key}?fields=summary,status,description"),
+        Value::Null,
+    )
+}
+
+/// One page of the notes read, by the key it is under and how many comments the
+/// read has already seen. A GET with its window in the path, because [`Calls`]
+/// carries a method, a path and a body and nothing else.
+fn noted_page(key: &str, at: usize) -> (Method, String, Value) {
+    (
+        Method::GET,
+        format!("/rest/api/3/issue/{key}/comment?startAt={at}&maxResults=100&orderBy=created"),
+        Value::Null,
+    )
+}
+
+/// One Epic as an issue read answers it: the key Jira spells it with, the
+/// summary, the status and its category, and the description as an ADF tree.
+fn epic(status: &str, category: &str, description: &Value) -> Value {
+    json!({
+        "id": "10042",
+        "key": BRIEF,
+        "fields": {
+            "summary": NAME,
+            "status": { "name": status, "statusCategory": { "key": category } },
+            "description": description,
+        },
+    })
+}
+
+/// The Epic a draft is about to read, in the status it is open for drafting in.
+fn a_draftable_epic() -> Value {
+    epic(TO_DO, "new", &document_for(BRIEF_BODY))
+}
+
+/// One page of an issue's comments, each body the ADF a comment arrives as:
+/// written through the converter the notes go up as, so what is asserted is the
+/// round trip and not a tree typed out by hand to match the reader.
+fn commented(bodies: &[&str], at: usize, total: usize) -> Value {
+    let comments: Vec<Value> = bodies
+        .iter()
+        .enumerate()
+        .map(|(index, body)| {
+            json!({ "id": format!("{}", at + index + 1), "body": document_for(body) })
+        })
+        .collect();
+
+    json!({ "startAt": at, "maxResults": 100, "total": total, "comments": comments })
+}
+
+/// An issue with no comments at all, which is every brief before its first cut.
+fn uncommented() -> Value {
+    commented(&[], 0, 0)
+}
+
+#[test]
+fn an_epic_is_read_by_its_key_as_its_name_status_url_and_description() {
+    let board = Jira::new(
+        Calling::answering([Ok(a_draftable_epic()), Ok(uncommented())]),
+        a_scope(),
+    );
+
+    let brief = board
+        .fetch_brief(BRIEF)
+        .expect("the stand-in answered")
+        .expect("the site holds the key");
+
+    // The key is the id, as the create answers one: nothing here addresses a
+    // brief by a slug or by a numeric id.
+    assert_eq!(brief.id(), BRIEF);
+    assert_eq!(brief.name(), NAME);
+    assert_eq!(brief.status(), Some(TO_DO));
+    assert_eq!(brief.url(), format!("{SITE}/browse/{BRIEF}"));
+    // The description back through the ADF reader, which is the Markdown it was
+    // filed as: a cut parses this for its `## Scope` block.
+    assert_eq!(brief.content(), BRIEF_BODY);
+    assert!(brief.draftable(), "`To Do` is a `new` category status");
+    assert!(brief.notes().is_empty(), "{:?}", brief.notes());
+    // Two reads and no mutation: the issue, then its comments. The fields are
+    // asked for by name, so a site's custom fields do not ride along.
+    assert_eq!(
+        board.calls.made(),
+        [fetched(BRIEF), noted_page(BRIEF, 0)],
+        "{:?}",
+        board.calls.made()
+    );
+}
+
+#[test]
+fn the_key_jira_spells_back_is_the_one_recorded_and_the_notes_are_read_under_it() {
+    let typed = "pay-14";
+    let board = Jira::new(
+        Calling::answering([Ok(a_draftable_epic()), Ok(uncommented())]),
+        a_scope(),
+    );
+
+    let brief = board
+        .fetch_brief(typed)
+        .expect("the stand-in answered")
+        .expect("Jira reads a key case-insensitively");
+
+    assert_eq!(brief.id(), BRIEF);
+    assert_eq!(brief.url(), format!("{SITE}/browse/{BRIEF}"));
+    // The read goes out under the key that was typed, and everything after it
+    // under the key Jira answered with.
+    assert_eq!(
+        board.calls.made(),
+        [fetched(typed), noted_page(BRIEF, 0)],
+        "{:?}",
+        board.calls.made()
+    );
+}
+
+#[test]
+fn only_a_new_category_status_is_draftable_and_the_boards_own_word_rides_back() {
+    for (status, category, draftable) in [
+        (TO_DO, "new", true),
+        ("In Progress", "indeterminate", false),
+        ("Shipped", "done", false),
+        // A category key nothing has seen: the corner where a brief is neither
+        // offered as fresh work nor treated as finished.
+        ("Held", "invented", false),
+    ] {
+        let board = Jira::new(
+            Calling::answering([
+                Ok(epic(status, category, &document_for(BRIEF_BODY))),
+                Ok(uncommented()),
+            ]),
+            a_scope(),
+        );
+
+        let brief = board
+            .fetch_brief(BRIEF)
+            .expect("the stand-in answered")
+            .expect("the site holds the key");
+
+        assert_eq!(brief.draftable(), draftable, "{status} ({category})");
+        // The board's own spelling and not a word warlock has for the category:
+        // a refusal names the status a person sees on the board.
+        assert_eq!(brief.status(), Some(status), "{status}");
+    }
+}
+
+#[test]
+fn a_status_with_no_category_or_no_status_at_all_is_not_draftable() {
+    for status in [json!({ "name": "Held" }), Value::Null] {
+        let mut answer = a_draftable_epic();
+        answer["fields"]["status"] = status.clone();
+        let board = Jira::new(
+            Calling::answering([Ok(answer), Ok(uncommented())]),
+            a_scope(),
+        );
+
+        let brief = board
+            .fetch_brief(BRIEF)
+            .expect("the stand-in answered")
+            .expect("the site holds the key");
+
+        // An Epic warlock cannot place is left alone rather than offered as
+        // fresh work, and a status it could not read is no status at all.
+        assert!(!brief.draftable(), "{status}");
+        assert_eq!(brief.status(), status["name"].as_str(), "{status}");
+    }
+}
+
+/// A note each of the two shapes `cut.rs` writes, and a comment a person left,
+/// in the order they were written.
+const A_PERSONS_COMMENT: &str = "Looks right to me, cutting this now.";
+const A_CUT: &str = "Warlock cut slice `Read the Epic` into `PAY-20`, `PAY-21`.";
+const A_SKIP: &str = "Warlock skipped slice `Read the notes`.";
+
+#[test]
+fn only_warlocks_own_notes_are_carried_back_and_a_persons_comment_is_not() {
+    let board = Jira::new(
+        Calling::answering([
+            Ok(a_draftable_epic()),
+            Ok(commented(&[A_PERSONS_COMMENT, A_CUT, A_SKIP], 0, 3)),
+        ]),
+        a_scope(),
+    );
+
+    let brief = board
+        .fetch_brief(BRIEF)
+        .expect("the stand-in answered")
+        .expect("the site holds the key");
+
+    // The filter is on this side because JQL has no operator for a comment's
+    // text, and it is the two prefixes `board.rs` spells and nothing wider: a
+    // comment that starts some other way is a person talking.
+    assert_eq!(brief.notes(), [A_CUT, A_SKIP]);
+    // And read back by the reader that matters, through the ADF a comment
+    // arrives as: a body `cut::noted` cannot read is a slice filed twice.
+    assert_eq!(
+        cut::noted(brief.notes()),
+        [
+            (
+                "read the epic".to_owned(),
+                vec!["PAY-20".to_owned(), "PAY-21".to_owned()]
+            ),
+            ("read the notes".to_owned(), Vec::new()),
+        ]
+    );
+}
+
+#[test]
+fn every_page_of_notes_is_read_oldest_first() {
+    let board = Jira::new(
+        Calling::answering([
+            Ok(a_draftable_epic()),
+            Ok(commented(&[A_PERSONS_COMMENT, A_CUT], 0, 3)),
+            Ok(commented(&[A_SKIP], 2, 3)),
+        ]),
+        a_scope(),
+    );
+
+    let brief = board
+        .fetch_brief(BRIEF)
+        .expect("the stand-in answered")
+        .expect("the site holds the key");
+
+    assert_eq!(brief.notes(), [A_CUT, A_SKIP]);
+    // One request per page, each window starting where the comments that
+    // arrived left off, and `orderBy` spelled so the oldest note is the first
+    // one read.
+    assert_eq!(
+        board.calls.made(),
+        [fetched(BRIEF), noted_page(BRIEF, 0), noted_page(BRIEF, 2)],
+        "{:?}",
+        board.calls.made()
+    );
+}
+
+#[test]
+fn a_key_the_site_does_not_hold_is_an_absence_and_no_comments_are_read() {
+    // The two shapes Jira's 404 arrives as, because `answer` keeps the prose
+    // and drops the code when a refusal carries any.
+    for failure in [
+        Error::Refused {
+            board: JIRA,
+            message: "Issue does not exist or you do not have permission to see it.".to_owned(),
+        },
+        Error::Status {
+            board: JIRA,
+            code: 404,
+        },
+    ] {
+        let said = failure.to_string();
+        let board = Jira::new(Calling::answering([Err(failure)]), a_scope());
+
+        assert_eq!(
+            board
+                .fetch_brief("PAY-999")
+                .expect("an absence, not a failure"),
+            None,
+            "{said}"
+        );
+        // One request: there is nothing to read the notes of.
+        assert_eq!(board.calls.made(), [fetched("PAY-999")], "{said}");
+    }
+}
+
+#[test]
+fn a_refusal_about_anything_else_is_reported_in_jiras_words() {
+    // "does not exist" is also how a site says it has no such field or issue
+    // type, and a 401 is a key to fix: neither is a brief that is not there.
+    let said = "The value 'Epic' does not exist for the field 'issuetype'.";
+    for failure in [
+        Error::Refused {
+            board: JIRA,
+            message: said.to_owned(),
+        },
+        Error::Status {
+            board: JIRA,
+            code: 401,
+        },
+    ] {
+        let expected = failure.to_string();
+        let board = Jira::new(Calling::answering([Err(failure)]), a_scope());
+
+        let error = board.fetch_brief(BRIEF).expect_err("the read was refused");
+
+        assert_eq!(error.to_string(), expected);
+    }
+}
+
+#[test]
+fn an_epic_with_no_description_is_the_empty_content_a_caller_refuses_itself() {
+    for description in [Value::Null, json!({ "type": "doc", "version": 1 })] {
+        let mut answer = a_draftable_epic();
+        answer["fields"]["description"] = description.clone();
+        let board = Jira::new(
+            Calling::answering([Ok(answer), Ok(uncommented())]),
+            a_scope(),
+        );
+
+        let brief = board
+            .fetch_brief(BRIEF)
+            .expect("the stand-in answered")
+            .expect("the site holds the key");
+
+        // An emptied description is not a broken answer: the caller that parses
+        // it refuses the brief in its own words.
+        assert_eq!(brief.content(), "", "{description}");
+    }
+}
+
+#[test]
+fn a_description_carrying_an_adf_node_the_reader_does_not_know_still_parses() {
+    // A brief lightly edited in the Jira UI: a panel beside the headings, which
+    // is a node type warlock neither writes nor models.
+    let description = json!({
+        "type": "doc",
+        "version": 1,
+        "content": [
+            {
+                "type": "heading",
+                "attrs": { "level": 2 },
+                "content": [{ "type": "text", "text": "Scope" }],
+            },
+            {
+                "type": "panel",
+                "attrs": { "panelType": "info" },
+                "content": [{
+                    "type": "paragraph",
+                    "content": [{ "type": "text", "text": "Edited here." }],
+                }],
+            },
+            {
+                "type": "heading",
+                "attrs": { "level": 3 },
+                "content": [{ "type": "text", "text": "1. Read the Epic" }],
+            },
+            {
+                "type": "paragraph",
+                "content": [{ "type": "text", "text": "By its key." }],
+            },
+            {
+                "type": "heading",
+                "attrs": { "level": 3 },
+                "content": [{ "type": "text", "text": "2. Read the notes" }],
+            },
+            {
+                "type": "paragraph",
+                "content": [{ "type": "text", "text": "Every page." }],
+            },
+        ],
+    });
+    let board = Jira::new(
+        Calling::answering([Ok(epic(TO_DO, "new", &description)), Ok(uncommented())]),
+        a_scope(),
+    );
+
+    let brief = board
+        .fetch_brief(BRIEF)
+        .expect("the stand-in answered")
+        .expect("the site holds the key");
+
+    // The panel comes back as the text under it and the headings are still
+    // headings, so the block parses and both slices are there.
+    let block = scope_block_in(brief.content()).expect("a scope block with slices under it");
+    let headings: Vec<&str> = block.slices().iter().map(Slice::heading).collect();
+    assert_eq!(headings, ["Read the Epic", "Read the notes"]);
+    assert!(
+        brief.content().contains("Edited here."),
+        "{}",
+        brief.content()
+    );
+}
+
+#[test]
+fn an_issue_read_missing_its_key_its_fields_or_its_summary_is_malformed() {
+    for answer in [
+        json!({ "fields": { "summary": NAME } }),
+        json!({ "key": BRIEF }),
+        json!({ "key": BRIEF, "fields": { "status": { "name": TO_DO } } }),
+    ] {
+        let board = Jira::new(Calling::answering([Ok(answer.clone())]), a_scope());
+
+        let error = board
+            .fetch_brief(BRIEF)
+            .expect_err("not the answer asked for");
+
+        assert!(
+            matches!(error, Error::Malformed { board: JIRA, .. }),
+            "{answer}: {error:?}"
+        );
+    }
+}
+
+#[test]
+fn a_comment_page_with_no_comments_or_no_total_is_malformed() {
+    for page in [json!({ "total": 1 }), json!({ "comments": [] })] {
+        let board = Jira::new(
+            Calling::answering([Ok(a_draftable_epic()), Ok(page.clone())]),
+            a_scope(),
+        );
+
+        let error = board
+            .fetch_brief(BRIEF)
+            .expect_err("not the answer asked for");
+
+        // A read that cannot tell how far it got is not a read that has
+        // finished: half the notes means the other half's slices filed again.
+        assert!(
+            matches!(error, Error::Malformed { board: JIRA, .. }),
+            "{page}: {error:?}"
+        );
+    }
+}
+
+#[test]
+fn a_page_of_notes_that_failed_fails_the_whole_read() {
+    let board = Jira::new(
+        Calling::answering([
+            Ok(a_draftable_epic()),
+            Ok(commented(&[A_CUT], 0, 2)),
+            Err(Error::Status {
+                board: JIRA,
+                code: 502,
+            }),
+        ]),
+        a_scope(),
+    );
+
+    let error = board
+        .fetch_brief(BRIEF)
+        .expect_err("a page of notes did not arrive");
+
+    // Not the notes that did arrive: the page that never came is where the note
+    // for the slice this run is about to file would be.
+    assert!(
+        matches!(error, Error::Status { code: 502, .. }),
+        "{error:?}"
+    );
+    assert_eq!(board.calls.made().len(), 3, "{:?}", board.calls.made());
+}
+
+#[test]
+fn a_comment_page_that_answers_fewer_comments_than_its_total_ends_the_read() {
+    // A site that says there are more comments than it hands back: the read
+    // ends rather than asking for the same window forever.
+    let board = Jira::new(
+        Calling::answering([Ok(a_draftable_epic()), Ok(commented(&[], 0, 7))]),
+        a_scope(),
+    );
+
+    let brief = board
+        .fetch_brief(BRIEF)
+        .expect("the stand-in answered")
+        .expect("the site holds the key");
+
+    assert!(brief.notes().is_empty(), "{:?}", brief.notes());
+    assert_eq!(board.calls.made(), [fetched(BRIEF), noted_page(BRIEF, 0)]);
+}
+
+#[test]
+fn no_read_of_a_brief_goes_under_the_older_api() {
+    let board = Jira::new(
+        Calling::answering([
+            Ok(a_draftable_epic()),
+            Ok(commented(&[A_CUT], 0, 2)),
+            Ok(commented(&[A_SKIP], 1, 2)),
+        ]),
+        a_scope(),
+    );
+
+    board.fetch_brief(BRIEF).expect("the stand-in answered");
+
+    for (method, path, body) in board.calls.made() {
+        // Jira renders a v2 description as wiki markup, which is what makes a
+        // `## Scope` parse of one fail; and a read sends no body at all.
+        assert!(path.starts_with("/rest/api/3/"), "{path}");
+        assert!(!path.contains("/rest/api/2"), "{path}");
+        assert_eq!(method, Method::GET, "{path}");
+        assert_eq!(body, Value::Null, "{path}");
+    }
 }
 
 #[test]

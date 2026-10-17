@@ -19,10 +19,10 @@ use ureq::http::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE};
 use ureq::http::{HeaderValue, Method, Request};
 use warlock_engine::{FiledTo, ScopeRecord};
 
-use crate::adf::document_for;
+use crate::adf::{body_for, document_for};
 use crate::board::{
-    Board, Error, FetchedBrief, Filable, FiledBrief, FiledTicket, Listing, NamedTicket, NewBrief,
-    NewTicket, Queue, TicketBrief,
+    Board, CUT_NOTE, Category, Error, FetchedBrief, Filable, FiledBrief, FiledTicket, Listing,
+    NamedTicket, NewBrief, NewTicket, Queue, SKIP_NOTE, TicketBrief,
 };
 use crate::linear::REQUEST_TIMEOUT;
 use crate::queue::same_name;
@@ -36,8 +36,9 @@ const JIRA: &str = "Jira";
 /// hand; `/rest/api/2/search` answers 410 Gone and is not an option.
 const SEARCH: &str = "/rest/api/3/search/jql";
 
-/// Where one issue is created. The collection and not an issue's own URL: a
-/// create is a POST to it, and nothing here addresses an issue by id.
+/// The issue collection: a create is a POST to it, and one issue and its
+/// comments are a key under it. The same root for both, because an issue's own
+/// URL is this path and its key and nothing else is needed to build one.
 const ISSUE: &str = "/rest/api/3/issue";
 
 /// Where the account a key authenticates as is read. The account the key
@@ -55,6 +56,15 @@ const EPIC: &str = "Epic";
 /// Issues read per page of a JQL search. Not left off: an answer with no
 /// `maxResults` takes whatever default the site has today.
 const SEARCH_PAGE: usize = 100;
+
+/// Comments read per page of an issue's own comment list, for the same reason
+/// [`SEARCH_PAGE`] is sent.
+const COMMENTS_PAGE: usize = 100;
+
+/// The fields an Epic is read back for, asked for by name: an issue read with no
+/// `fields` carries every field the site has, every custom one included, and
+/// three of them are the whole of what a draft reads.
+const BRIEF_FIELDS: &str = "summary,status,description";
 
 /// How a Jira key is typed, and the whole of what a refusal of a stored line
 /// says about it.
@@ -193,10 +203,10 @@ impl Calls for Client {
 /// a panel worker and outlives the manifest read that produced the record.
 ///
 /// Every verb but the two a push makes — the brief-by-name lookup and the brief
-/// create — and the account read a cut asks first refuses as this stands: the
-/// requests themselves arrive a slice at a time, and a board that refuses is
-/// what keeps a flow which reaches a verb nobody has written yet a sentence
-/// rather than a panic.
+/// create — and the two reads a cut asks first, for whose key it is and for the
+/// brief itself, refuses as this stands: the requests themselves arrive a slice
+/// at a time, and a board that refuses is what keeps a flow which reaches a verb
+/// nobody has written yet a sentence rather than a panic.
 #[derive(Debug)]
 pub(crate) struct Jira<C = Client> {
     calls: C,
@@ -266,6 +276,62 @@ impl<C: Calls> Jira<C> {
         }
     }
 
+    /// Warlock's own notes on one issue, oldest first, as Markdown: the whole
+    /// record of which of a brief's slices a run has already cut or been told to
+    /// pass over.
+    ///
+    /// The prefixes are matched here and not on the wire, which is the one
+    /// difference from `linear.rs`'s own read: JQL has no operator for the text
+    /// of a comment, so every comment on the Epic arrives and a person's own
+    /// comment is dropped on this side. Every page of them, because a note
+    /// missed is a slice filed twice.
+    ///
+    /// Each body arrives as an ADF tree — that is what a comment is under
+    /// `/rest/api/3` — so the match runs on what [`body_for`] reads back out of
+    /// it, which is also the Markdown a note was written as.
+    ///
+    /// A page that failed fails the whole read rather than answering the notes
+    /// that arrived before it, as a search's pages do: a cut that read half the
+    /// notes would file the slices in the other half a second time.
+    fn notes(&self, key: &str) -> Result<Vec<String>, Error> {
+        let mut notes = Vec::new();
+        let mut read = 0;
+
+        loop {
+            let answer = self
+                .calls
+                .call(Method::GET, &comments(key, read), Value::Null)?;
+            let page = answer
+                .get("comments")
+                .and_then(Value::as_array)
+                .ok_or_else(|| missing("comments"))?;
+            // Read rather than counted off the pages that arrived: an answer
+            // that says nothing about how many comments there are is one this
+            // read cannot tell the end of, and guessing it has ended there is
+            // the slice-filed-twice failure again.
+            let total = answer
+                .get("total")
+                .and_then(Value::as_u64)
+                .ok_or_else(|| missing("total"))?;
+
+            read += page.len();
+            for comment in page {
+                let body = body_for(comment.get("body").unwrap_or(&Value::Null));
+                let body = body.trim();
+                if body.starts_with(CUT_NOTE) || body.starts_with(SKIP_NOTE) {
+                    notes.push(body.to_owned());
+                }
+            }
+
+            // The empty page is checked first, so a `total` that outruns the
+            // comments a site hands back ends the read rather than asking for
+            // the same window forever.
+            if page.is_empty() || read >= usize::try_from(total).unwrap_or(usize::MAX) {
+                return Ok(notes);
+            }
+        }
+    }
+
     /// The refusal of a verb no slice has written for this board yet, with
     /// nothing sent through [`Calls`].
     ///
@@ -324,8 +390,63 @@ impl<C: Calls> Board for Jira<C> {
         self.untaught("move a ticket")
     }
 
-    fn fetch_brief(&self, _slug: &str) -> Result<Option<FetchedBrief>, Error> {
-        self.untaught("read a brief")
+    /// The Epic this key names — its summary as the brief's name, its status,
+    /// where a person opens it, its description as Markdown and warlock's own
+    /// notes on it — or `None` when the site holds no such issue.
+    ///
+    /// The key is the whole address, as [`create_brief`](Self::create_brief)
+    /// answers one: nothing here looks a brief up by a slug, a numeric id or a
+    /// name.
+    ///
+    /// Two reads and not one. Asking for the issue's `comment` field would
+    /// carry its first page of comments along with the issue and no more, and
+    /// reading the rest means the comment collection anyway — so the notes are
+    /// read there from the start, by [`notes`](Self::notes).
+    ///
+    /// The description goes through [`body_for`], which is total: an ADF node
+    /// type warlock does not model contributes the text under it, so a brief
+    /// somebody edited in the Jira UI comes back plainer with its headings
+    /// intact rather than not at all. An Epic with no description at all is the
+    /// empty content [`FetchedBrief`] allows, which the caller that parses it
+    /// refuses in its own words.
+    fn fetch_brief(&self, slug: &str) -> Result<Option<FetchedBrief>, Error> {
+        let (base_url, _) = self.site()?;
+
+        let issue = match self.calls.call(
+            Method::GET,
+            &format!("{ISSUE}/{slug}?fields={BRIEF_FIELDS}"),
+            Value::Null,
+        ) {
+            Ok(issue) => issue,
+            Err(error) if unknown_issue(&error) => return Ok(None),
+            Err(error) => return Err(error),
+        };
+
+        // Jira's own spelling of the key and not the one that was asked for, so
+        // a key typed in lower case is recorded as the board writes it: this is
+        // the brief's id for the rest of the cut, the key its notes are read
+        // under and the key a person is shown.
+        let key = issue
+            .get("key")
+            .and_then(Value::as_str)
+            .ok_or_else(|| missing("key"))?
+            .to_owned();
+        let fields = issue.get("fields").ok_or_else(|| missing("fields"))?;
+        let (status, draftable) = standing(fields.get("status"));
+
+        Ok(Some(FetchedBrief {
+            name: fields
+                .get("summary")
+                .and_then(Value::as_str)
+                .ok_or_else(|| missing("summary"))?
+                .to_owned(),
+            content: body_for(fields.get("description").unwrap_or(&Value::Null)),
+            url: browse(base_url, &key),
+            status,
+            draftable,
+            notes: self.notes(&key)?,
+            id: key,
+        }))
     }
 
     fn planned_briefs(&self) -> Result<Listing, Error> {
@@ -536,6 +657,71 @@ fn url(base_url: &str, path: &str) -> String {
 /// build it.
 fn browse(base_url: &str, key: &str) -> String {
     url(base_url, &format!("/browse/{key}"))
+}
+
+/// Where one issue's comments are read, from the issue's key and how many of
+/// them this read has already seen.
+///
+/// The window is in the path because [`Calls`] carries a method, a path and a
+/// body and nothing else: a GET's query parameters are part of its path here,
+/// which is the same reason a JQL read is a POST.
+///
+/// `startAt` and not a token, which is the whole difference from the search's
+/// paging: Jira's comment collection answers a window and the `total` beside it,
+/// and the next page is the window after the comments that arrived.
+///
+/// `orderBy` is spelled rather than taken as read, because the one caller needs
+/// the notes oldest first: a cut note and a later skip note for the same slice
+/// are read in the order a person wrote them.
+fn comments(key: &str, read: usize) -> String {
+    format!("{ISSUE}/{key}/comment?startAt={read}&maxResults={COMMENTS_PAGE}&orderBy=created")
+}
+
+/// Whether a failed issue read is a key the site does not hold rather than a
+/// failure a person has to act on.
+///
+/// Read off the error because [`answer`] keeps Jira's prose and drops the code
+/// when a refusal carries any, so a 404 arrives as either shape depending on
+/// what the body said — the same fold `linear.rs`'s own `unknown_entity` makes,
+/// and for the same reason: a caller that had to recognise Jira's sentence
+/// itself would be reading the vendor's prose in a second place.
+///
+/// The phrase and not a bare "does not exist", which on this board is also how a
+/// site says an issue type or a field is not one it has: the sentence a GET of a
+/// missing issue answers names the issue, and a refusal about anything else
+/// stays a refusal in Jira's own words.
+fn unknown_issue(error: &Error) -> bool {
+    match error {
+        Error::Status { code: 404, .. } => true,
+        Error::Refused { message, .. } => message.to_lowercase().contains("issue does not exist"),
+        _ => false,
+    }
+}
+
+/// One issue's status as a read answers it: the name a refusal prints, and
+/// whether the brief is open for drafting.
+///
+/// The two come apart on purpose. The name is a site's own word — `To Do` on one
+/// board and `Triage` on the next — so the judgement is made on the category
+/// Jira files that status under, and the name only ever rides back to be printed.
+/// [`Category::New`] is the one category a brief may be cut in: an Epic somebody
+/// has started or finished is not work to file slices against.
+///
+/// A status with no category, or one spelling a word [`Category::of`] does not
+/// know, is not draftable: an Epic warlock cannot place is left alone rather
+/// than offered as fresh work.
+fn standing(status: Option<&Value>) -> (Option<String>, bool) {
+    let name = status
+        .and_then(|status| status.get("name"))
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    let category = status
+        .and_then(|status| status.get("statusCategory"))
+        .and_then(|category| category.get("key"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+
+    (name, Category::of(category) == Category::New)
 }
 
 /// Warlock's own words for an answer that left out a field this module reads,
