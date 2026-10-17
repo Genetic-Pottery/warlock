@@ -40,6 +40,12 @@ const SEARCH: &str = "/rest/api/3/search/jql";
 /// create is a POST to it, and nothing here addresses an issue by id.
 const ISSUE: &str = "/rest/api/3/issue";
 
+/// Where the account a key authenticates as is read. The account the key
+/// belongs to and not a user looked up by id or by email: whose key it is is
+/// the one thing nothing on this side knows before the site says it, and
+/// `/rest/api/3/user` would need the answer to ask the question.
+const MYSELF: &str = "/rest/api/3/myself";
+
 /// Jira's own name for the issue type a brief is filed as, read both by the
 /// create that writes `issuetype` and by the lookup's JQL. A site that has
 /// renamed it refuses both in its own words rather than warlock guessing a
@@ -187,9 +193,10 @@ impl Calls for Client {
 /// a panel worker and outlives the manifest read that produced the record.
 ///
 /// Every verb but the two a push makes — the brief-by-name lookup and the brief
-/// create — refuses as this stands: the requests themselves arrive a slice at a
-/// time, and a board that refuses is what keeps a flow which reaches a verb
-/// nobody has written yet a sentence rather than a panic.
+/// create — and the account read a cut asks first refuses as this stands: the
+/// requests themselves arrive a slice at a time, and a board that refuses is
+/// what keeps a flow which reaches a verb nobody has written yet a sentence
+/// rather than a panic.
 #[derive(Debug)]
 pub(crate) struct Jira<C = Client> {
     calls: C,
@@ -280,8 +287,29 @@ impl<C: Calls> Board for Jira<C> {
     /// cut that cannot file a ticket has nothing to settle first.
     type Filing = ();
 
+    /// The account the key authenticates as, as Jira's own `accountId`: the one
+    /// value every read that filters on a person is written against, since a
+    /// Jira user is addressed by that id and not by the email the key is typed
+    /// with.
+    ///
+    /// No `Option`, as `linear.rs`'s own `viewer` answers none: a request the
+    /// site answered at all was authenticated as somebody, so an answer carrying
+    /// no account is malformed and not an absence for a caller to have words
+    /// about.
+    ///
+    /// One request, and a read: the body is [`Value::Null`], so the GET leaves
+    /// with nothing after its headers. The record is read first all the same, so
+    /// a board opened for a scope that files somewhere else is told that with
+    /// nothing sent.
     fn viewer(&self) -> Result<String, Error> {
-        self.untaught("read whose key a scope files with")
+        self.site()?;
+        let account = self.calls.call(Method::GET, MYSELF, Value::Null)?;
+
+        account
+            .get("accountId")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .ok_or_else(|| missing("accountId"))
     }
 
     fn move_brief(&self, _project: &str, _status: &str) -> Result<bool, Error> {

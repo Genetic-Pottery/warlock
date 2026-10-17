@@ -1,7 +1,9 @@
 use std::fs;
 use std::path::Path;
 
+use serde_json::json;
 use tempfile::TempDir;
+use ureq::http::Method;
 use warlock_engine::{
     Manifest, PullRun, RunStatus, ScopeRecord, ScopedDirectory, brief_path, pulls_dir, save_key,
     save_key_binding, save_open_scopes, state_path,
@@ -425,9 +427,10 @@ fn a_pull_over_a_jira_scope_is_refused_by_the_board_verb_s_own_sentence() {
     let ground = Ground::jira();
     let prepared = ground.prepared();
     let repo = Checkout::clean(DEFAULT);
-    // Nothing written down, so a request that reached the transport panics the
-    // stand-in rather than being asserted about afterwards.
-    let jira = Opening::answering([]);
+    // The account read answers, because selection asks whose key it is before
+    // anything else; nothing is written down after it, so a second request would
+    // panic the stand-in rather than being asserted about afterwards.
+    let jira = Opening::answering([Ok(json!({ "accountId": "5b10a2844c20165700ede21g" }))]);
 
     let (outcome, printed) = pull_with(
         &ground,
@@ -443,20 +446,24 @@ fn a_pull_over_a_jira_scope_is_refused_by_the_board_verb_s_own_sentence() {
         false,
     );
 
-    // The first verb selection asks of the board, refused in the board's own
-    // words: warlock has no request for it on Jira yet.
+    // The queue read, which is the first verb selection asks that warlock has no
+    // request for on Jira yet, refused in the board's own words: the account read
+    // ahead of it answered.
     let error = outcome.expect_err("a scope that files to Jira");
     assert_eq!(
         error.to_string(),
-        "warlock cannot read whose key a scope files with on a Jira scope yet, \
-         so nothing was sent"
+        "warlock cannot read a scope's queue on a Jira scope yet, so nothing was sent"
     );
     // The ordering the flow already had, now with the board at the end of it:
-    // the tree is read, the key is read and a client built, and the first call
-    // is what refuses. Nothing was sent and nothing was written down.
+    // the tree is read, the key is read and a client built, and the account read
+    // is the only request that went out before a verb refused. Nothing was
+    // written down.
     assert_eq!(repo.calls(), vec![GitCall::Dirty]);
     assert_eq!(jira.opened_with(), [NOT_A_KEY]);
-    assert!(jira.made().is_empty(), "{:?}", jira.made());
+    assert_eq!(
+        jira.spelled(),
+        [(Method::GET, "/rest/api/3/myself".to_owned())]
+    );
     assert_eq!(printed, "");
     assert!(!ground.any_record());
 }

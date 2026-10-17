@@ -318,7 +318,6 @@ fn field_errors_are_named_after_the_messages() {
 /// reader checks either.
 fn untaught_verbs(board: &Jira<Calling>) -> Vec<(&'static str, Option<Error>)> {
     vec![
-        ("viewer", board.viewer().err()),
         ("move_brief", board.move_brief("10001", "In Review").err()),
         ("ticket_brief", board.ticket_brief("PAY-1").err()),
         ("move_ticket", board.move_ticket("PAY-1", "In Review").err()),
@@ -357,6 +356,7 @@ fn untaught_verbs(board: &Jira<Calling>) -> Vec<(&'static str, Option<Error>)> {
 fn every_verb(board: &Jira<Calling>) -> Vec<(&'static str, Option<Error>)> {
     let mut verbs = untaught_verbs(board);
 
+    verbs.push(("viewer", board.viewer().err()));
     verbs.push(("brief_named", board.brief_named(NAME).err()));
     verbs.push(("create_brief", board.create_brief(&a_brief()).err()));
     verbs
@@ -438,6 +438,58 @@ fn a_board_opened_for_a_scope_that_files_elsewhere_sends_nothing() {
     }
 
     assert!(board.calls.made().is_empty(), "{:?}", board.calls.made());
+}
+
+/// The account the key authenticates as, as Jira spells an `accountId`: an
+/// opaque id and not the email the key is typed with, which is the whole reason
+/// this is read off the site rather than split out of the stored line.
+const ACCOUNT: &str = "5b10a2844c20165700ede21g";
+
+/// The one request the account read makes, as the stand-in records it. Spelled
+/// out rather than built from the module's own constant, so a change to what
+/// Jira is asked — the path moving, a body appearing, a POST where a GET was —
+/// is a failure here and not two expressions that moved together.
+fn whoami() -> (Method, String, Value) {
+    (Method::GET, "/rest/api/3/myself".to_owned(), Value::Null)
+}
+
+#[test]
+fn the_account_the_key_belongs_to_is_read_once_from_myself_and_carries_no_body() {
+    let board = Jira::new(
+        Calling::answering([Ok(json!({
+            "accountId": ACCOUNT,
+            "emailAddress": EMAIL,
+            "displayName": "Nobody At All",
+        }))]),
+        a_scope(),
+    );
+
+    // The `accountId` and nothing else off the answer: the email and the display
+    // name beside it are not what a read filters on.
+    assert_eq!(board.viewer().expect("the stand-in answered"), ACCOUNT);
+    // One request, and it is a GET under `/rest/api/3` with `Value::Null` for a
+    // body, so nothing goes out after the headers. A second call would panic the
+    // stand-in, which is how "read once per run" is asserted.
+    assert_eq!(board.calls.made(), [whoami()]);
+}
+
+#[test]
+fn an_account_read_answering_no_account_id_is_malformed_and_not_an_absence() {
+    // A request the site answered at all was authenticated as somebody, so there
+    // is no account for this verb to be missing: an answer with none is bytes a
+    // proxy decided to send.
+    let board = Jira::new(
+        Calling::answering([Ok(json!({ "displayName": "Nobody At All" }))]),
+        a_scope(),
+    );
+
+    let error = board.viewer().expect_err("not the answer asked for");
+
+    assert!(
+        matches!(error, Error::Malformed { board: JIRA, .. }),
+        "{error:?}"
+    );
+    assert!(error.to_string().contains("accountId"), "{error}");
 }
 
 /// The brief a push is about to file, which is the name every lookup below
