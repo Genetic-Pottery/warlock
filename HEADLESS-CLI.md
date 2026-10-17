@@ -74,6 +74,7 @@ $ warlock key add acme
 key `acme`
 stored at `/home/you/.warlock/keys.toml`
 no key is stored under this name yet
+a Jira key is typed `email:token`: the account email, a colon, then the API token
 what you type is not shown
 Ctrl-C or EOF changes nothing
 key> ••••••••••••••••••••••••••••••••••••••••
@@ -89,6 +90,7 @@ $ warlock key add acme < key.txt
 key `acme`
 stored at `/home/you/.warlock/keys.toml`
 no key is stored under this name yet
+a Jira key is typed `email:token`: the account email, a colon, then the API token
 the line is echoed, so `warlock key add acme < key.txt` is how to keep it off the screen
 Ctrl-C or EOF changes nothing
 key> warlock: stored a key for `acme` in `/home/you/.warlock/keys.toml`

@@ -245,10 +245,16 @@ impl fmt::Display for Stored {
 // Pure, and everything above the cursor: [`PROMPT`] itself is the ask's, so this
 // ends with the newline that puts the cursor on a line of its own. The order is
 // fixed by what they need before they can answer: what this is about, where it
-// lands, what is there now, what the screen will show of the key, and what
-// changes nothing.
+// lands, what is there now, how a Jira key is typed, what the screen will show
+// of the key, and what changes nothing.
 //
-// The fourth line is the only one that moves, and it has to: telling somebody
+// The Jira line is printed for every key rather than for Jira ones, because
+// nothing here knows which board a name is for: the store is per-machine, a key
+// is bound to scopes later and a flag saying so was rejected. A Linear reader
+// reads one line they do not need, which costs less than a Jira reader pasting
+// a bare token and meeting a 401 with nothing on screen to explain it.
+//
+// The fifth line is the only one that moves, and it has to: telling somebody
 // their key is hidden when the terminal is about to echo it is the one lie here
 // that costs them the credential.
 fn preamble(name: &str, path: &Path, stored: &Stored, masked: bool) -> String {
@@ -267,6 +273,7 @@ fn preamble(name: &str, path: &Path, stored: &Stored, masked: bool) -> String {
         "key `{name}`\n\
          stored at `{path}`\n\
          {stored}\n\
+         a Jira key is typed `email:token`: the account email, a colon, then the API token\n\
          {showing}\n\
          Ctrl-C or EOF changes nothing\n",
         path = path.display(),
