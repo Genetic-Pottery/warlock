@@ -851,3 +851,151 @@ fn an_item_with_nothing_in_it_does_not_take_a_number() {
         "1. first\n2. second\n"
     );
 }
+
+// Both conversions, in the order a brief meets them: out to the board as a tree
+// and back off it as the text `cut` parses. A body written one block to a
+// paragraph, with a blank line between blocks, is what the reader emits, so the
+// round trip of one is the text itself.
+fn round_trip(body: &str) -> String {
+    body_for(&document_for(body))
+}
+
+#[test]
+fn every_construct_in_the_subset_comes_back_as_the_markdown_it_went_out_as() {
+    let body = "\
+# Problem
+
+Nothing converts **Markdown** to `ADF`, so see [the API](https://example.test/v3) first.
+
+## Acceptance criteria
+
+- sees a URL
+- sees a key
+
+### Out of scope
+
+1. Read the file
+2. File the Epic
+
+```rust
+fn main() {}
+```
+
+#### A fourth level
+
+##### A fifth
+
+###### And a sixth
+";
+
+    assert_eq!(round_trip(body), body);
+}
+
+#[test]
+fn each_of_the_three_marks_comes_back_as_the_characters_it_was_written_as() {
+    for line in [
+        "The brief is **the document**.",
+        "`push.rs` hands it over",
+        "see [the API](https://example.test/v3) first",
+        "**one** and `two` and [three](https://example.test)",
+        "## The `doc` node",
+        "- [ ] `adf.rs` is **declared**",
+    ] {
+        assert_eq!(
+            round_trip(&format!("{line}\n")),
+            format!("{line}\n"),
+            "{line}"
+        );
+    }
+}
+
+#[test]
+fn a_fence_comes_back_with_its_markers_once_and_its_own_lines_unchanged() {
+    // The backticks inside are the point of counting them: a `code` mark
+    // applied to a block's text, or a second fence around a block that already
+    // carried one, is how a block comes back holding characters it never held.
+    let inside = "let marked = `not code`;\n\nwarlock push --scope pay";
+    let body = format!("```rust\n{inside}\n```\n");
+
+    let read = round_trip(&body);
+
+    assert_eq!(read, body);
+    assert_eq!(read.matches("```").count(), 2, "{read:?}");
+    assert_eq!(read.lines().next(), Some("```rust"));
+    assert_eq!(read.lines().next_back(), Some("```"));
+    for line in inside.lines() {
+        assert!(read.contains(line), "{line:?} changed in {read:?}");
+    }
+}
+
+#[test]
+fn a_criterion_comes_back_holding_its_box_and_one_marker() {
+    let body = "- [ ] A new module is declared.\n- [x] It is tested.\n";
+
+    assert_eq!(round_trip(body), body);
+}
+
+// A brief holding the three things `cut` reads off the board: the scope
+// heading, a `### N. ` heading per slice, and a slice's dependency line.
+fn brief_body() -> String {
+    [
+        "Nothing walks an ADF tree back to Markdown.",
+        "",
+        "## Acceptance criteria",
+        "",
+        "- [ ] `body_for` does not return `Result`.",
+        "",
+        "## Scope",
+        "",
+        "### 1. Walk the tree back",
+        "",
+        "Read `heading`, `paragraph` and both list kinds.",
+        "",
+        "### 2. Round-trip a brief",
+        "",
+        "depends_on: [1]",
+        "",
+        "Assert that **both** directions compose.",
+        "",
+    ]
+    .join("\n")
+}
+
+#[test]
+fn a_brief_still_parses_after_both_conversions() {
+    let body = brief_body();
+    let read = round_trip(&body);
+    assert_eq!(read, body);
+
+    let block = crate::brief::scope_block_in(&read).expect("a scope block");
+
+    assert!(
+        block.brief().ends_with("does not return `Result`."),
+        "{:?}",
+        block.brief()
+    );
+    let headings: Vec<&str> = block
+        .slices()
+        .iter()
+        .map(crate::brief::Slice::heading)
+        .collect();
+    assert_eq!(headings, vec!["Walk the tree back", "Round-trip a brief"]);
+    assert_eq!(block.slices()[0].depends_on(), [0usize; 0]);
+    assert_eq!(block.slices()[1].depends_on(), [1]);
+    assert_eq!(block.unreadable(), 0);
+}
+
+#[test]
+fn a_briefs_criterion_and_its_dependency_line_keep_their_brackets() {
+    let read = round_trip(&brief_body());
+
+    // No link mark fired on either, and neither bracket came back escaped: a
+    // `\[` here is a Linear storage quirk that `depended` undoes, and nothing
+    // this conversion is allowed to introduce.
+    assert!(
+        read.contains("- [ ] `body_for` does not return `Result`."),
+        "{read:?}"
+    );
+    assert!(read.contains("\ndepends_on: [1]\n"), "{read:?}");
+    assert!(!read.contains('\\'), "{read:?}");
+}
