@@ -492,8 +492,8 @@ mod named {
     use warlock_engine::{LinearScope, ScopeRecord};
 
     use super::{PullRun, Reason, RunStatus, run};
-    use crate::board::Error as LinearError;
-    use crate::linear::Linear;
+    use crate::board::Error as BoardError;
+    use crate::linear::{LINEAR, Linear};
     use crate::queue::{Named, Refusal, take_named};
     use crate::stubs::Posting;
 
@@ -844,7 +844,10 @@ mod named {
 
     #[test]
     fn a_board_that_could_not_be_reached_is_a_failure_and_not_a_refusal() {
-        let posting = Posting::answering([Err(LinearError::Status { code: 500 })]);
+        let posting = Posting::answering([Err(BoardError::Status {
+            board: LINEAR,
+            code: 500,
+        })]);
 
         let record = record();
         let error = take_named(
@@ -859,7 +862,7 @@ mod named {
         // Nothing is said about the ticket: warlock does not know anything about
         // it yet, and a refusal would be an invented fact.
         assert!(
-            matches!(error, LinearError::Status { code: 500 }),
+            matches!(error, BoardError::Status { code: 500, .. }),
             "{error:?}"
         );
     }

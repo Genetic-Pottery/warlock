@@ -11,7 +11,7 @@ use warlock_engine::{
     Manifest, RunStatus, briefs, config, filing, keys, load, manifest, pulls, route, scope,
 };
 
-use crate::board::Error as LinearError;
+use crate::board::Error as BoardError;
 use crate::boundary::{closed_scope_message, unscoped_message};
 use crate::brief::{Error as BriefError, ScopeBlockError};
 use crate::cut::listed;
@@ -203,7 +203,7 @@ pub enum Error {
         path: PathBuf,
     },
     Linear {
-        source: LinearError,
+        source: BoardError,
     },
     // The two refusals a cut has before it reads a slice: a slug the workspace
     // does not have, and a project that is not planned. The scope rides along
@@ -341,12 +341,12 @@ pub enum Error {
         // Boxed because the variant is this enum's largest otherwise, and every
         // `Result<_, Error>` in the workspace — which is most of them — would be
         // widened by a failure only one command can reach.
-        source: Box<LinearError>,
+        source: Box<BoardError>,
     },
     Unskipped {
         title: String,
         // Boxed for `Uncut`'s reason.
-        source: Box<LinearError>,
+        source: Box<BoardError>,
     },
     Terminal {
         source: io::Error,
@@ -621,7 +621,7 @@ fn nothing_to_resume_message(
 fn uncut_message(
     f: &mut fmt::Formatter<'_>,
     issues: &[String],
-    source: &LinearError,
+    source: &BoardError,
 ) -> fmt::Result {
     write!(
         f,
@@ -933,8 +933,8 @@ impl std::error::Error for Error {
     }
 }
 
-impl From<LinearError> for Error {
-    fn from(source: LinearError) -> Self {
+impl From<BoardError> for Error {
+    fn from(source: BoardError) -> Self {
         Self::Linear { source }
     }
 }

@@ -4,7 +4,7 @@ use std::io;
 use serde_json::{Value, json};
 
 use super::{
-    BACKLOG, BLOCKERS_PAGE, Client, ENDPOINT, LABELS_PAGE, Linear, Posts, QUEUE_PAGE,
+    BACKLOG, BLOCKERS_PAGE, Client, ENDPOINT, LABELS_PAGE, LINEAR, Linear, Posts, QUEUE_PAGE,
     REQUEST_TIMEOUT, answer, authorization, backlog_state, backlog_status, comment_on_issue,
     comment_on_project, create_issue, create_project, create_relation, fetch_project,
     issue_label_id, issue_project, label_id, move_issue, move_project, named_issue,
@@ -23,17 +23,23 @@ const KEY: &str = "lin_api_a_key_nobody_holds_8f3a1c";
 
 fn variants() -> Vec<Error> {
     vec![
-        Error::Key,
+        Error::Key { board: LINEAR },
         Error::Transport {
+            board: LINEAR,
             source: Box::new(ureq::Error::Io(io::Error::other(
                 "connection reset by peer",
             ))),
         },
-        Error::Status { code: 401 },
+        Error::Status {
+            board: LINEAR,
+            code: 401,
+        },
         Error::Malformed {
+            board: LINEAR,
             detail: "it was not JSON".to_owned(),
         },
         Error::Refused {
+            board: LINEAR,
             message: "Entity not found".to_owned(),
         },
     ]
@@ -108,7 +114,7 @@ fn a_key_that_cannot_be_a_header_value_is_refused_without_quoting_it() {
     let error = authorization(&format!("{KEY}\nX-Injected: yes"))
         .expect_err("a newline cannot go in a header value");
 
-    assert!(matches!(error, Error::Key));
+    assert!(matches!(error, Error::Key { .. }));
     assert!(!error.to_string().contains(KEY));
 }
 
@@ -131,7 +137,7 @@ fn a_graphql_errors_array_is_a_refusal_in_linears_words() {
     let error = answer(body).expect_err("an `errors` array is a refusal");
 
     assert!(
-        matches!(&error, Error::Refused { message } if message == "Entity not found"),
+        matches!(&error, Error::Refused { message, .. } if message == "Entity not found"),
         "{error:?}"
     );
 }
@@ -170,7 +176,7 @@ fn a_presentable_message_that_repeats_the_message_is_not_said_twice() {
     let error = answer(body).expect_err("an `errors` array is a refusal");
 
     assert!(
-        matches!(&error, Error::Refused { message } if message == "Entity not found"),
+        matches!(&error, Error::Refused { message, .. } if message == "Entity not found"),
         "{error:?}"
     );
 }
@@ -217,13 +223,19 @@ fn the_seam_drives_an_operation_with_no_socket() {
 
 #[test]
 fn the_seam_carries_a_refusal_as_well_as_an_answer() {
-    let linear = Posting::answering([Err(Error::Status { code: 401 })]);
+    let linear = Posting::answering([Err(Error::Status {
+        board: LINEAR,
+        code: 401,
+    })]);
 
     let error = linear
         .post("query { viewer { id } }", json!({}))
         .expect_err("the stand-in refused");
 
-    assert!(matches!(error, Error::Status { code: 401 }), "{error:?}");
+    assert!(
+        matches!(error, Error::Status { code: 401, .. }),
+        "{error:?}"
+    );
 }
 
 const SLUG: &str = "1a2b3c4d5e6f";
@@ -357,6 +369,7 @@ fn a_slug_the_api_does_not_know_is_a_none_rather_than_an_error() {
     // null node a nullable field would give.
     let answers = [
         Err(Error::Refused {
+            board: LINEAR,
             message: "Entity not found - could not find referenced Project.".to_owned(),
         }),
         Ok(json!({ "project": null })),
@@ -374,6 +387,7 @@ fn a_slug_the_api_does_not_know_is_a_none_rather_than_an_error() {
 #[test]
 fn any_other_refusal_is_still_linears_to_word() {
     let linear = Posting::answering([Err(Error::Refused {
+        board: LINEAR,
         message: "Access denied".to_owned(),
     })]);
 
@@ -1695,6 +1709,7 @@ fn a_named_state_answer_that_is_not_the_one_asked_for_is_malformed() {
 #[test]
 fn a_state_lookup_the_api_refuses_comes_back_once_in_linears_words() {
     let linear = Posting::answering([Err(Error::Refused {
+        board: LINEAR,
         message: "Entity not found".to_owned(),
     })]);
 
@@ -1787,6 +1802,7 @@ fn a_label_that_had_to_be_created_still_precedes_the_project() {
 #[test]
 fn a_label_that_cannot_be_resolved_stops_before_the_project_is_created() {
     let linear = Posting::answering([Err(Error::Refused {
+        board: LINEAR,
         message: "Entity not found".to_owned(),
     })]);
 
@@ -2063,6 +2079,7 @@ fn a_relation_that_answers_nothing_usable_is_malformed() {
 #[test]
 fn a_relation_the_api_refuses_comes_back_in_linears_words() {
     let linear = Posting::answering([Err(Error::Refused {
+        board: LINEAR,
         message: "Entity not found".to_owned(),
     })]);
 
@@ -2137,6 +2154,7 @@ fn a_move_that_answers_nothing_usable_is_malformed() {
 #[test]
 fn a_move_the_api_refuses_comes_back_once_in_linears_words() {
     let linear = Posting::answering([Err(Error::Refused {
+        board: LINEAR,
         message: "Entity not found".to_owned(),
     })]);
 
@@ -2266,6 +2284,7 @@ fn an_issue_comment_that_answers_nothing_usable_is_malformed() {
 #[test]
 fn an_issue_comment_the_api_refuses_comes_back_once_in_linears_words() {
     let linear = Posting::answering([Err(Error::Refused {
+        board: LINEAR,
         message: "Entity not found".to_owned(),
     })]);
 

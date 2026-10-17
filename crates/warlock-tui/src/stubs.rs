@@ -11,14 +11,14 @@ use warlock_engine::{agent, drafting, working};
 
 use crate::asking::Asks;
 use crate::board::{
-    Board, Error as LinearError, FetchedBrief, FiledBrief, FiledTicket, Listing, NamedTicket,
+    Board, Error as BoardError, FetchedBrief, FiledBrief, FiledTicket, Listing, NamedTicket,
     NewBrief, NewTicket, Opens, Queue, TicketBrief,
 };
 use crate::claude::{Activities, Activity, Cancel, Converses, Split, Stopped, Wired, Worked};
 use crate::clipboard::Clip;
 use crate::error::Error;
 use crate::git::{Commit, Dirty, Error as GitError, Forge, Opened, PullRequest, Repository};
-use crate::linear::Posts;
+use crate::linear::{LINEAR, Posts};
 use crate::puller::{Raised, Raises, Raising, Stopping, activity_port};
 use crate::pulling::{Splits, Works};
 
@@ -329,12 +329,12 @@ pub(crate) struct Posting(Arc<Posted>);
 
 #[derive(Debug, Default)]
 pub(crate) struct Posted {
-    answers: Mutex<VecDeque<Result<Value, LinearError>>>,
+    answers: Mutex<VecDeque<Result<Value, BoardError>>>,
     asked: Mutex<Vec<(String, Value)>>,
 }
 
 impl Posting {
-    pub(crate) fn answering(answers: impl IntoIterator<Item = Result<Value, LinearError>>) -> Self {
+    pub(crate) fn answering(answers: impl IntoIterator<Item = Result<Value, BoardError>>) -> Self {
         Self(Arc::new(Posted {
             answers: Mutex::new(answers.into_iter().collect()),
             asked: Mutex::default(),
@@ -357,7 +357,7 @@ impl Posting {
 }
 
 impl Posts for Posting {
-    fn post(&self, document: &str, variables: Value) -> Result<Value, LinearError> {
+    fn post(&self, document: &str, variables: Value) -> Result<Value, BoardError> {
         locked(&self.0.asked).push((document.to_owned(), variables));
         locked(&self.0.answers)
             .pop_front()
@@ -789,7 +789,7 @@ impl Boarding {
         self.log().calls.iter().filter_map(pick).collect()
     }
 
-    fn ask(&self, call: Call) -> Result<(), LinearError> {
+    fn ask(&self, call: Call) -> Result<(), BoardError> {
         assert!(!self.unreachable, "a request was sent: {call:?}");
         let op = call.op();
         let index = {
@@ -813,7 +813,8 @@ impl Boarding {
                 .map(|refusal| &refusal.message)
         });
         match refused {
-            Some(message) => Err(LinearError::Refused {
+            Some(message) => Err(BoardError::Refused {
+                board: LINEAR,
                 message: message.clone(),
             }),
             None => Ok(()),
@@ -841,32 +842,34 @@ impl Opens for Boarding {
 }
 
 impl Board for Boarding {
-    fn viewer(&self) -> Result<String, LinearError> {
+    const NAME: &'static str = LINEAR;
+
+    fn viewer(&self) -> Result<String, BoardError> {
         self.ask(Call::Viewer)?;
         Ok(self.viewer.clone())
     }
 
-    fn team_id(&self, key: &str) -> Result<Option<String>, LinearError> {
+    fn team_id(&self, key: &str) -> Result<Option<String>, BoardError> {
         self.ask(Call::Team(key.to_owned()))?;
         Ok(self.team.clone())
     }
 
-    fn backlog_status(&self) -> Result<Option<String>, LinearError> {
+    fn backlog_status(&self) -> Result<Option<String>, BoardError> {
         self.ask(Call::BacklogStatus)?;
         Ok(self.status.clone())
     }
 
-    fn brief_status(&self, name: &str) -> Result<Option<String>, LinearError> {
+    fn brief_status(&self, name: &str) -> Result<Option<String>, BoardError> {
         self.ask(Call::BriefStatus(name.to_owned()))?;
         Ok(self.moved_to.clone())
     }
 
-    fn ticket_brief(&self, issue: &str) -> Result<Option<TicketBrief>, LinearError> {
+    fn ticket_brief(&self, issue: &str) -> Result<Option<TicketBrief>, BoardError> {
         self.ask(Call::TicketBrief(issue.to_owned()))?;
         Ok(self.ticket_brief.clone())
     }
 
-    fn move_brief(&self, project: &str, status: &str) -> Result<String, LinearError> {
+    fn move_brief(&self, project: &str, status: &str) -> Result<String, BoardError> {
         self.ask(Call::MoveBrief {
             project: project.to_owned(),
             status: status.to_owned(),
@@ -874,7 +877,7 @@ impl Board for Boarding {
         Ok(project.to_owned())
     }
 
-    fn backlog_state(&self, team: &str) -> Result<Option<String>, LinearError> {
+    fn backlog_state(&self, team: &str) -> Result<Option<String>, BoardError> {
         self.ask(Call::BacklogState(team.to_owned()))?;
         Ok(self.state.clone())
     }
@@ -886,7 +889,7 @@ impl Board for Boarding {
     /// a move's resolve comes back empty too.
     ///
     /// [`without_backlog_state`]: Boarding::without_backlog_state
-    fn workflow_state(&self, team: &str, name: &str) -> Result<Option<String>, LinearError> {
+    fn workflow_state(&self, team: &str, name: &str) -> Result<Option<String>, BoardError> {
         self.ask(Call::WorkflowState {
             team: team.to_owned(),
             name: name.to_owned(),
@@ -896,7 +899,7 @@ impl Board for Boarding {
 
     /// The move recorded and the issue handed back, as the real board answers
     /// with the issue it updated.
-    fn move_ticket(&self, issue: &str, state: &str) -> Result<String, LinearError> {
+    fn move_ticket(&self, issue: &str, state: &str) -> Result<String, BoardError> {
         self.ask(Call::MoveTicket {
             issue: issue.to_owned(),
             state: state.to_owned(),
@@ -904,7 +907,7 @@ impl Board for Boarding {
         Ok(issue.to_owned())
     }
 
-    fn ticket_label_id(&self, name: &str, team: &str) -> Result<String, LinearError> {
+    fn ticket_label_id(&self, name: &str, team: &str) -> Result<String, BoardError> {
         self.ask(Call::TicketLabel {
             name: name.to_owned(),
             team: team.to_owned(),
@@ -912,12 +915,12 @@ impl Board for Boarding {
         Ok(self.label.clone())
     }
 
-    fn fetch_brief(&self, slug: &str) -> Result<Option<FetchedBrief>, LinearError> {
+    fn fetch_brief(&self, slug: &str) -> Result<Option<FetchedBrief>, BoardError> {
         self.ask(Call::FetchBrief(slug.to_owned()))?;
         Ok(self.project.clone())
     }
 
-    fn planned_briefs(&self, team: &str, label: &str) -> Result<Listing, LinearError> {
+    fn planned_briefs(&self, team: &str, label: &str) -> Result<Listing, BoardError> {
         self.ask(Call::PlannedBriefs {
             team: team.to_owned(),
             label: label.to_owned(),
@@ -925,7 +928,7 @@ impl Board for Boarding {
         Ok(self.listing.clone())
     }
 
-    fn brief_named(&self, team: &str, name: &str) -> Result<Option<String>, LinearError> {
+    fn brief_named(&self, team: &str, name: &str) -> Result<Option<String>, BoardError> {
         self.ask(Call::BriefNamed {
             team: team.to_owned(),
             name: name.to_owned(),
@@ -935,7 +938,7 @@ impl Board for Boarding {
 
     /// Whatever queue the test wrote down, and the call recorded: the flows that
     /// file and cut read none, so the default is an empty one.
-    fn scope_queue(&self, team: &str, label: &str, assignee: &str) -> Result<Queue, LinearError> {
+    fn scope_queue(&self, team: &str, label: &str, assignee: &str) -> Result<Queue, BoardError> {
         self.ask(Call::ScopeQueue(QueueAsked {
             team: team.to_owned(),
             label: label.to_owned(),
@@ -947,7 +950,7 @@ impl Board for Boarding {
     /// Whatever ticket the test wrote down — `None`, a board with no such ticket,
     /// being the default — and the call recorded, which is where a test reads the
     /// team and number that were asked for.
-    fn named_ticket(&self, team: &str, number: u64) -> Result<Option<NamedTicket>, LinearError> {
+    fn named_ticket(&self, team: &str, number: u64) -> Result<Option<NamedTicket>, BoardError> {
         self.ask(Call::NamedTicket {
             team: team.to_owned(),
             number,
@@ -955,7 +958,7 @@ impl Board for Boarding {
         Ok(self.named.clone())
     }
 
-    fn create_brief(&self, project: &NewBrief<'_>) -> Result<FiledBrief, LinearError> {
+    fn create_brief(&self, project: &NewBrief<'_>) -> Result<FiledBrief, BoardError> {
         self.ask(Call::CreateBrief(BriefAsked {
             name: project.name().to_owned(),
             content: project.content().to_owned(),
@@ -966,7 +969,7 @@ impl Board for Boarding {
         Ok(self.created.clone())
     }
 
-    fn create_ticket(&self, issue: &NewTicket<'_>) -> Result<FiledTicket, LinearError> {
+    fn create_ticket(&self, issue: &NewTicket<'_>) -> Result<FiledTicket, BoardError> {
         self.ask(Call::CreateTicket(TicketAsked {
             title: issue.title().to_owned(),
             body: issue.body().to_owned(),
@@ -989,7 +992,7 @@ impl Board for Boarding {
         ))
     }
 
-    fn create_relation(&self, blocker: &str, waiting: &str) -> Result<String, LinearError> {
+    fn create_relation(&self, blocker: &str, waiting: &str) -> Result<String, BoardError> {
         self.ask(Call::Relation {
             blocker: blocker.to_owned(),
             waiting: waiting.to_owned(),
@@ -1000,7 +1003,7 @@ impl Board for Boarding {
         ))
     }
 
-    fn comment_on_brief(&self, project: &str, body: &str) -> Result<String, LinearError> {
+    fn comment_on_brief(&self, project: &str, body: &str) -> Result<String, BoardError> {
         self.ask(Call::Comment {
             project: project.to_owned(),
             body: body.to_owned(),
@@ -1011,7 +1014,7 @@ impl Board for Boarding {
     /// Recorded as its own call, not as a [`Call::Comment`] with an issue id in
     /// it: a flow that meant to explain a halt on the ticket and commented on the
     /// project instead is a bug a shared variant would hide.
-    fn comment_on_ticket(&self, issue: &str, body: &str) -> Result<String, LinearError> {
+    fn comment_on_ticket(&self, issue: &str, body: &str) -> Result<String, BoardError> {
         self.ask(Call::TicketComment {
             issue: issue.to_owned(),
             body: body.to_owned(),

@@ -26,7 +26,7 @@ use std::fmt;
 
 use warlock_engine::{LinearScope, PullRun, RunStatus};
 
-use crate::board::{Assignee, Blocker, Board, Error as LinearError, Priority, Queue, QueuedTicket};
+use crate::board::{Assignee, Blocker, Board, Error as BoardError, Priority, Queue, QueuedTicket};
 
 /// The workflow state a ticket sits in while a run works it.
 ///
@@ -322,7 +322,7 @@ fn number_in(identifier: &str) -> Option<u64> {
 ///
 /// Two outcomes and not a `Result`, because neither of these is a failure: the
 /// board answered, and the answer was either the ticket or a reason. A
-/// [`LinearError`] is what failure looks like, and it stays in the `Result` around
+/// [`BoardError`] is what failure looks like, and it stays in the `Result` around
 /// this.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Named {
@@ -425,7 +425,7 @@ pub(crate) fn take_named(
     assignee: &str,
     ticket: &str,
     runs: &[PullRun],
-) -> Result<Named, LinearError> {
+) -> Result<Named, BoardError> {
     let Some((team, number)) = split(ticket) else {
         return Ok(Named::Refused(Refusal::NotATicket {
             ticket: ticket.to_owned(),
