@@ -11,8 +11,8 @@ use warlock_engine::{ScopeRecord, agent, drafting, working};
 
 use crate::asking::Asks;
 use crate::board::{
-    Board, Error as BoardError, FetchedBrief, FiledBrief, FiledTicket, Listing, NamedTicket,
-    NewBrief, NewTicket, Opens, Queue, TicketBrief,
+    Board, Error as BoardError, FetchedBrief, Filable, FiledBrief, FiledTicket, Listing,
+    NamedTicket, NewBrief, NewTicket, Opens, Queue, TicketBrief,
 };
 use crate::claude::{Activities, Activity, Cancel, Converses, Split, Stopped, Wired, Worked};
 use crate::clipboard::Clip;
@@ -384,10 +384,10 @@ impl Posts for Posting {
 pub(crate) struct Boarding {
     log: Arc<Mutex<Log>>,
     viewer: String,
-    /// The team this workspace holds, which is both what [`Board::team_id`]
-    /// answers with and whether a brief create has anywhere to file: a board
-    /// built [`without_team`] has none, so every create answers that the
-    /// destination is not there and nothing is recorded.
+    /// The team this workspace holds, which is whether anything has anywhere to
+    /// file: a board built [`without_team`] has none, so a brief create answers
+    /// that the destination is not there with nothing recorded, and a cut's
+    /// pre-flight answers [`Filable::NoDestination`].
     ///
     /// [`without_team`]: Boarding::without_team
     team: Option<String>,
@@ -401,11 +401,14 @@ pub(crate) struct Boarding {
     /// What [`Board::ticket_brief`] answers with: `None`, a ticket in no brief,
     /// until a test says otherwise.
     ticket_brief: Option<TicketBrief>,
-    /// The one workflow state this team holds, which is both what
-    /// [`Board::backlog_state`] answers with and whether a move reaches the
-    /// status it asked for: `None` is a team with no states at all.
+    /// The one workflow state this team holds, which is both what a cut's
+    /// pre-flight settles and whether a move reaches the status it asked for: a
+    /// board built [`without_states`] has none, so the pre-flight answers
+    /// [`Filable::NoColumn`] and every ticket move answers that there is no
+    /// status of that name.
+    ///
+    /// [`without_states`]: Boarding::without_states
     state: Option<String>,
-    label: String,
     project: Option<FetchedBrief>,
     /// What [`Board::planned_briefs`] answers with, empty until a test says
     /// otherwise.
@@ -438,12 +441,10 @@ struct Log {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Call {
     Viewer,
-    Team(String),
     MoveBrief { project: String, status: String },
     TicketBrief(String),
-    BacklogState(String),
     MoveTicket { issue: String, status: String },
-    TicketLabel { name: String, team: String },
+    TicketFiling,
     FetchBrief(String),
     PlannedBriefs,
     BriefNamed(String),
@@ -460,12 +461,10 @@ impl Call {
     pub(crate) const fn op(&self) -> Op {
         match self {
             Self::Viewer => Op::Viewer,
-            Self::Team(_) => Op::Team,
             Self::MoveBrief { .. } => Op::MoveBrief,
             Self::TicketBrief(_) => Op::TicketBrief,
-            Self::BacklogState(_) => Op::BacklogState,
             Self::MoveTicket { .. } => Op::MoveTicket,
-            Self::TicketLabel { .. } => Op::TicketLabel,
+            Self::TicketFiling => Op::TicketFiling,
             Self::FetchBrief(_) => Op::FetchBrief,
             Self::PlannedBriefs => Op::PlannedBriefs,
             Self::BriefNamed(_) => Op::BriefNamed,
@@ -483,12 +482,10 @@ impl Call {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Op {
     Viewer,
-    Team,
     MoveBrief,
     TicketBrief,
-    BacklogState,
     MoveTicket,
-    TicketLabel,
+    TicketFiling,
     FetchBrief,
     PlannedBriefs,
     BriefNamed,
@@ -508,6 +505,10 @@ pub(crate) struct BriefAsked {
     pub(crate) label: String,
 }
 
+/// What one ticket create was asked for, as the board saw it: what the draft
+/// said, the label by the name it arrived under, and the team and the column off
+/// the value the pre-flight answered — which is how a test says that value
+/// reached the create.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct TicketAsked {
     pub(crate) title: String,
@@ -517,6 +518,17 @@ pub(crate) struct TicketAsked {
     pub(crate) label: String,
     pub(crate) state: String,
     pub(crate) assignee: String,
+}
+
+/// What this stand-in's pre-flight settles and its create takes back: the two
+/// ids a board of Linear's shape would have resolved for the cut.
+///
+/// Its fields are read by the create and nowhere else, as a real board's are: a
+/// test reads them off the [`TicketAsked`] the create wrote down.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Resolved {
+    team: String,
+    state: String,
 }
 
 // Which calls of one operation are turned down, counted from the first call of
@@ -534,9 +546,9 @@ struct Refusal {
 pub(crate) const VIEWER: &str = "user-viewer";
 
 impl Boarding {
-    /// A workspace that has the team, its `Backlog` state, every brief status
-    /// and the label already, creates the project at `url`, numbers issues from
-    /// 1, and holds no project to read back.
+    /// A workspace that has the team, its `Backlog` state and every brief
+    /// status already, creates the project at `url`, numbers issues from 1, and
+    /// holds no project to read back.
     pub(crate) fn filing(url: impl Into<String>) -> Self {
         Self {
             log: Arc::default(),
@@ -545,7 +557,6 @@ impl Boarding {
             brief_statuses: true,
             ticket_brief: None,
             state: Some("state-backlog".to_owned()),
-            label: "label-held".to_owned(),
             project: None,
             listing: Listing::default(),
             same_name: None,
@@ -662,20 +673,18 @@ impl Boarding {
         })
     }
 
-    /// A workspace with no team by whatever key is asked for, which is both a
-    /// `None` from [`Board::team_id`] and a brief create with nowhere to file.
+    /// A workspace with no team at all, which is both a brief create with
+    /// nowhere to file and a cut whose pre-flight has no destination.
     pub(crate) fn without_team(mut self) -> Self {
         self.team = None;
         self
     }
 
-    pub(crate) fn without_backlog_state(mut self) -> Self {
+    /// A team with no workflow state at all, which is both a cut with no column
+    /// to file a fresh ticket into and a ticket move that reaches no status,
+    /// whatever name it asks for.
+    pub(crate) fn without_states(mut self) -> Self {
         self.state = None;
-        self
-    }
-
-    pub(crate) fn labelled(mut self, id: &str) -> Self {
-        id.clone_into(&mut self.label);
         self
     }
 
@@ -847,14 +856,11 @@ impl Opens for Boarding {
 impl Board for Boarding {
     const NAME: &'static str = LINEAR;
 
+    type Filing = Resolved;
+
     fn viewer(&self) -> Result<String, BoardError> {
         self.ask(Call::Viewer)?;
         Ok(self.viewer.clone())
-    }
-
-    fn team_id(&self, key: &str) -> Result<Option<String>, BoardError> {
-        self.ask(Call::Team(key.to_owned()))?;
-        Ok(self.team.clone())
     }
 
     fn ticket_brief(&self, issue: &str) -> Result<Option<TicketBrief>, BoardError> {
@@ -877,32 +883,19 @@ impl Board for Boarding {
         Ok(true)
     }
 
-    fn backlog_state(&self, team: &str) -> Result<Option<String>, BoardError> {
-        self.ask(Call::BacklogState(team.to_owned()))?;
-        Ok(self.state.clone())
-    }
-
     /// The move recorded, and the status reached whenever this workspace holds a
     /// state at all: which name was asked for is in the recorded call, so a test
     /// asserting that a flow asked for `In Progress` reads it there rather than
-    /// from the answer. A board built [`without_backlog_state`] has no states, so
+    /// from the answer. A board built [`without_states`] has no states, so
     /// every move answers that there is no status of that name.
     ///
-    /// [`without_backlog_state`]: Boarding::without_backlog_state
+    /// [`without_states`]: Boarding::without_states
     fn move_ticket(&self, issue: &str, status: &str) -> Result<bool, BoardError> {
         self.ask(Call::MoveTicket {
             issue: issue.to_owned(),
             status: status.to_owned(),
         })?;
         Ok(self.state.is_some())
-    }
-
-    fn ticket_label_id(&self, name: &str, team: &str) -> Result<String, BoardError> {
-        self.ask(Call::TicketLabel {
-            name: name.to_owned(),
-            team: team.to_owned(),
-        })?;
-        Ok(self.label.clone())
     }
 
     fn fetch_brief(&self, slug: &str) -> Result<Option<FetchedBrief>, BoardError> {
@@ -962,14 +955,42 @@ impl Board for Boarding {
         Ok(Some(self.created.clone()))
     }
 
-    fn create_ticket(&self, issue: &NewTicket<'_>) -> Result<FiledTicket, BoardError> {
+    /// The call recorded whatever the answer, because the question was asked
+    /// either way: this is a read and not a mutation, so a workspace with
+    /// nowhere to file says so rather than saying nothing happened.
+    ///
+    /// A board holding no team has no destination, and one holding no state has
+    /// no column — the two in that order, so a stand-in built both ways answers
+    /// as a board that cannot find its team before it looks for a column in it.
+    fn ticket_filing(&self) -> Result<Filable<Resolved>, BoardError> {
+        self.ask(Call::TicketFiling)?;
+
+        let Some(team) = self.team.clone() else {
+            return Ok(Filable::NoDestination);
+        };
+        let Some(state) = self.state.clone() else {
+            return Ok(Filable::NoColumn);
+        };
+
+        Ok(Filable::Ready(Resolved { team, state }))
+    }
+
+    /// The team and the column written down off the filing and not off the
+    /// issue, because the create is told neither: a [`TicketAsked`] carrying
+    /// both is how a test says the value the pre-flight answered reached here
+    /// unchanged.
+    fn create_ticket(
+        &self,
+        issue: &NewTicket<'_>,
+        filing: &Resolved,
+    ) -> Result<FiledTicket, BoardError> {
         self.ask(Call::CreateTicket(TicketAsked {
             title: issue.title().to_owned(),
             body: issue.body().to_owned(),
-            team: issue.team().to_owned(),
+            team: filing.team.clone(),
             project: issue.project().to_owned(),
             label: issue.label().to_owned(),
-            state: issue.state().to_owned(),
+            state: filing.state.clone(),
             assignee: issue.assignee().to_owned(),
         }))?;
         let number = {

@@ -38,8 +38,19 @@ pub(crate) trait Board {
     /// client still has to name the board it wraps.
     const NAME: &'static str;
 
+    /// Whatever one board has to have in hand before it can create a ticket, in
+    /// that board's own terms: a team and a column as ids here, and nothing at
+    /// all for a board whose create resolves nothing.
+    ///
+    /// An associated type rather than a shape written in this module's words,
+    /// because there are no words for it: this is the one thing on the seam that
+    /// is a board's own protocol, and a flow that could read it would be holding
+    /// that protocol again. [`ticket_filing`](Self::ticket_filing) answers one,
+    /// [`create_ticket`](Self::create_ticket) takes it back, and between the two
+    /// the cut carries a value it has no method to look inside.
+    type Filing;
+
     fn viewer(&self) -> Result<String, Error>;
-    fn team_id(&self, key: &str) -> Result<Option<String>, Error>;
     /// The brief moved to the board's status of that name, and `true` when a
     /// status of that name was there to move it to.
     ///
@@ -55,7 +66,6 @@ pub(crate) trait Board {
     /// happened.
     fn move_brief(&self, project: &str, status: &str) -> Result<bool, Error>;
     fn ticket_brief(&self, issue: &str) -> Result<Option<TicketBrief>, Error>;
-    fn backlog_state(&self, team: &str) -> Result<Option<String>, Error>;
     /// The ticket moved to the board's status of that name, and `true` when a
     /// status of that name was there to move it to.
     ///
@@ -70,7 +80,6 @@ pub(crate) trait Board {
     /// the board wagging the pull. An answer and not a silent success, so a
     /// caller cannot mistake "no such column" for a move that happened.
     fn move_ticket(&self, issue: &str, status: &str) -> Result<bool, Error>;
-    fn ticket_label_id(&self, name: &str, team: &str) -> Result<String, Error>;
     fn fetch_brief(&self, slug: &str) -> Result<Option<FetchedBrief>, Error>;
     fn planned_briefs(&self) -> Result<Listing, Error>;
     fn brief_named(&self, name: &str) -> Result<Option<String>, Error>;
@@ -90,7 +99,31 @@ pub(crate) trait Board {
     /// freshly filed brief sits in. A workspace with no status of that name
     /// files the brief with no status at all.
     fn create_brief(&self, project: &NewBrief<'_>) -> Result<Option<FiledBrief>, Error>;
-    fn create_ticket(&self, issue: &NewTicket<'_>) -> Result<FiledTicket, Error>;
+    /// Whatever this board must settle before a cut files anything, asked once
+    /// for the cut and answered before its first ticket exists.
+    ///
+    /// The one verb here whose answer is a value and not a fact: a board
+    /// resolves what its own create wants — a team and a column on a board that
+    /// writes those as ids, nothing at all on one that does not — and the
+    /// [`Filing`](Self::Filing) comes straight back to
+    /// [`create_ticket`](Self::create_ticket) unread.
+    ///
+    /// Both absences are answered rather than raised, as every other absence on
+    /// this seam is: the words belong to the caller, which holds the file that
+    /// records where a scope files. They are told apart because they are two
+    /// different things to fix — a destination the board does not have is a
+    /// manifest naming the wrong one, and a destination with no column for a
+    /// ticket nobody has started is a board nobody has finished setting up.
+    ///
+    /// Nothing is created on the way to either answer, and that ordering is the
+    /// promise: a destination a cut cannot file into is refused while the slice
+    /// is still nothing rather than half filed.
+    fn ticket_filing(&self) -> Result<Filable<Self::Filing>, Error>;
+    fn create_ticket(
+        &self,
+        issue: &NewTicket<'_>,
+        filing: &Self::Filing,
+    ) -> Result<FiledTicket, Error>;
     fn create_relation(&self, blocker: &str, waiting: &str) -> Result<String, Error>;
     fn comment_on_brief(&self, project: &str, body: &str) -> Result<String, Error>;
     fn comment_on_ticket(&self, issue: &str, body: &str) -> Result<String, Error>;
@@ -103,8 +136,9 @@ pub(crate) trait Board {
 /// Both, because they answer different halves of "which board": the key says
 /// which workspace is being spoken to and the record says where in it the work
 /// goes. A board that captured its own destination when it was opened is what
-/// lets the destination leave every verb — nothing below this seam is told a
-/// team or a label.
+/// lets the destination leave every verb — no verb below this seam takes a
+/// team, and the label a create carries is a name rather than something a
+/// caller resolved.
 ///
 /// Infallible, so a record naming a board this opener cannot speak to is a
 /// refusal a verb answers with rather than one open can raise. Every caller
@@ -672,11 +706,33 @@ impl FiledBrief {
     }
 }
 
-/// What [`Board::create_ticket`] is asked for, and the whole of it: every field
-/// here is an id the caller resolved, and priority, estimate, cycle and
-/// milestone stay unwritten. A draft says what the work is, and a field warlock
-/// would have to invent a value for is a decision taken away from the person who
-/// owns the board.
+/// What [`Board::ticket_filing`] answers: a destination a cut can file into,
+/// carrying whatever that board's creates need, or which half of the
+/// destination is not there.
+///
+/// Two absences rather than one, because the caller says a different sentence
+/// about each and names a different thing in it. The value in
+/// [`Ready`](Self::Ready) is a type parameter and not a shape with fields,
+/// which is what makes "handed back unread" something the compiler holds: a
+/// flow is generic over the board and so over this, and a generic value has
+/// nothing to read.
+#[derive(Debug)]
+pub(crate) enum Filable<F> {
+    /// The destination is there and can take a ticket, with whatever the board
+    /// settled for the cut.
+    Ready(F),
+    /// The record this board was opened for names a destination the board does
+    /// not have at all.
+    NoDestination,
+    /// The destination is there, and nothing in it is where a ticket nobody has
+    /// started belongs.
+    NoColumn,
+}
+
+/// What [`Board::create_ticket`] is asked for, and the whole of it: priority,
+/// estimate, cycle and milestone stay unwritten. A draft says what the work is,
+/// and a field warlock would have to invent a value for is a decision taken
+/// away from the person who owns the board.
 ///
 /// `assignee` is the exception, and it is not an invented value: the person
 /// running `draft` is the person who owns the board, and the assignee is the
@@ -685,17 +741,20 @@ impl FiledBrief {
 /// from. Handing work to a teammate stays a reassignment a human makes in
 /// Linear, which is why there is no way to name anybody else here.
 ///
-/// `state` is a *team workflow state* id from [`Board::backlog_state`] and
-/// `label` an *issue label* id from [`Board::ticket_label_id`]; neither a project
-/// status nor a project label is usable here.
+/// `label` is the name the label goes by in the workspace and not an id, as
+/// [`NewBrief`]'s is: what a label is called is the only thing two boards agree
+/// on — one of them has no id for a label at all — so the board is what turns
+/// the name into whatever its own create takes.
+///
+/// No team and no column. Both are a board's own business, settled once for the
+/// cut by [`Board::ticket_filing`] and handed back to the create beside this,
+/// so nothing a caller resolved reaches here.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct NewTicket<'a> {
     pub(crate) title: &'a str,
     pub(crate) body: &'a str,
-    pub(crate) team: &'a str,
     pub(crate) project: &'a str,
     pub(crate) label: &'a str,
-    pub(crate) state: &'a str,
     pub(crate) assignee: &'a str,
 }
 
@@ -704,19 +763,15 @@ impl<'a> NewTicket<'a> {
     pub(crate) const fn new(
         title: &'a str,
         body: &'a str,
-        team: &'a str,
         project: &'a str,
         label: &'a str,
-        state: &'a str,
         assignee: &'a str,
     ) -> Self {
         Self {
             title,
             body,
-            team,
             project,
             label,
-            state,
             assignee,
         }
     }
@@ -735,12 +790,6 @@ impl<'a> NewTicket<'a> {
 
     #[must_use]
     #[cfg(test)]
-    pub(crate) const fn team(&self) -> &'a str {
-        self.team
-    }
-
-    #[must_use]
-    #[cfg(test)]
     pub(crate) const fn project(&self) -> &'a str {
         self.project
     }
@@ -749,12 +798,6 @@ impl<'a> NewTicket<'a> {
     #[cfg(test)]
     pub(crate) const fn label(&self) -> &'a str {
         self.label
-    }
-
-    #[must_use]
-    #[cfg(test)]
-    pub(crate) const fn state(&self) -> &'a str {
-        self.state
     }
 
     #[must_use]

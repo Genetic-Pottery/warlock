@@ -1571,7 +1571,7 @@ mod headless {
     fn a_team_with_no_backlog_state_refuses_the_run_with_nothing_created() {
         let repo = a_scoped_repository();
         let home = a_home(repo.path());
-        let linear = a_sliced_project(SLICED).without_backlog_state();
+        let linear = a_sliced_project(SLICED).without_states();
 
         let (outcome, _printed) =
             cut_running(repo.path(), home.path(), &linear, &Sketching::drafting());
@@ -1714,11 +1714,11 @@ mod headless {
 
         cut_filing(repo.path(), home.path(), &linear, &Sketching::drafting());
 
-        // An issue create has no field beyond the seven a draft, its slice and
-        // the run's own viewer resolve: what it puts on the wire is held by
-        // `linear.rs`'s own tests. What a run can still get wrong is asking for
-        // something a cut has no business asking, and the one status it moves
-        // is the project's, once.
+        // An issue create has no field beyond what a draft, its slice, the
+        // run's own viewer and the cut's one pre-flight settle: what it puts on
+        // the wire is held by `linear.rs`'s own tests. What a run can still get
+        // wrong is asking for something a cut has no business asking, and the
+        // one status it moves is the project's, once.
         for op in linear.ops() {
             assert!(
                 matches!(
@@ -1726,9 +1726,7 @@ mod headless {
                     Op::Viewer
                         | Op::FetchBrief
                         | Op::ScopeQueue
-                        | Op::Team
-                        | Op::BacklogState
-                        | Op::TicketLabel
+                        | Op::TicketFiling
                         | Op::CreateTicket
                         | Op::Relation
                         | Op::Comment

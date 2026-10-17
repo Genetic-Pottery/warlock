@@ -987,7 +987,7 @@ fn a_split_that_halts_halts_the_run_with_its_own_comment() {
 #[test]
 fn a_team_with_no_in_progress_state_gets_a_line_and_the_run_carries_on() {
     let ground = Ground::new();
-    let board = Boarding::filing("").without_backlog_state();
+    let board = Boarding::filing("").without_states();
     let repo = Checkout::clean(DEFAULT).trees([wrote("crates/engine/src/read.rs")]);
     let split = Slicing::into_chain(TICKET, &["Add the reader"]);
     let sessions = Sessions::answering([said("done", "Added the reader.", None)]);
@@ -1270,7 +1270,7 @@ fn a_finished_run_pushes_opens_the_pull_request_comments_and_moves_the_ticket() 
 #[test]
 fn a_team_with_no_review_state_gets_a_line_and_the_run_still_finishes() {
     let ground = Ground::new();
-    let board = Boarding::filing("").without_backlog_state();
+    let board = Boarding::filing("").without_states();
     let forge = Forging::opening(URL);
     let (repo, split, sessions) = two_sub_tasks();
 

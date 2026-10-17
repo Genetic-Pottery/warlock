@@ -6,15 +6,15 @@ use warlock_engine::ScopeRecord;
 
 use super::{
     BACKLOG, BLOCKERS_PAGE, Client, ENDPOINT, LABELS_PAGE, LINEAR, Linear, Posts, QUEUE_PAGE,
-    REQUEST_TIMEOUT, answer, authorization, backlog_state, backlog_status, comment_on_issue,
-    comment_on_project, create_issue, create_project, create_relation, fetch_project,
-    issue_label_id, issue_project, label_id, move_issue, move_project, named_issue,
+    REQUEST_TIMEOUT, Resolved, answer, authorization, backlog_state, backlog_status,
+    comment_on_issue, comment_on_project, create_issue, create_project, create_relation,
+    fetch_project, issue_label_id, issue_project, label_id, move_issue, move_project, named_issue,
     planned_projects, project_named, project_status, scope_queue, team_id, unlinked, viewer,
     workflow_state,
 };
 
 use crate::board::{
-    Assignee, Blocker, Board, CUT_NOTE, Category, Error, NamedTicket, NewBrief, NewTicket,
+    Assignee, Blocker, Board, CUT_NOTE, Category, Error, Filable, NamedTicket, NewBrief, NewTicket,
     Priority, QueuedTicket, SKIP_NOTE,
 };
 use crate::queue::IN_PROGRESS;
@@ -2123,19 +2123,34 @@ fn draft<'a>() -> NewTicket<'a> {
     NewTicket::new(
         "Repair the answer",
         "## Problem\n\nThe answer is wrong.\n",
-        "team-1",
         "project-1",
-        "issue-label-held",
-        "state-backlog",
+        // The label by the name the scope record gives it: turning that into
+        // the id `issueCreate` writes is this module's own business.
+        LABEL,
         "user-viewer",
     )
 }
 
+/// What the cut's pre-flight settled, which every create of that cut is handed
+/// back: the team and the state as [`Board::ticket_filing`] answered them.
+fn settled() -> Resolved {
+    Resolved {
+        team: "team-1".to_owned(),
+        state: "state-backlog".to_owned(),
+    }
+}
+
+/// Every answer one create needs: the label it was given by name, and then the
+/// issue.
+fn a_whole_issue_create() -> Vec<Result<Value, Error>> {
+    vec![Ok(issue_label_found()), Ok(issue_created())]
+}
+
 #[test]
 fn a_created_issue_comes_back_with_its_id_identifier_and_url() {
-    let linear = Posting::answering([Ok(issue_created())]);
+    let linear = Posting::answering(a_whole_issue_create());
 
-    let issue = create_issue(&linear, &draft()).expect("the stand-in answered");
+    let issue = create_issue(&linear, &draft(), &settled()).expect("the stand-in answered");
 
     // The id is what a relation is written with and the identifier is what the
     // cut record stores, so one create has to answer both.
@@ -2145,21 +2160,27 @@ fn a_created_issue_comes_back_with_its_id_identifier_and_url() {
         issue.url(),
         "https://linear.app/acme/issue/WAR-125/repair-the-answer"
     );
-    assert_eq!(linear.documents().len(), 1, "one request per operation");
+    assert_eq!(
+        linear.documents().len(),
+        2,
+        "the label the create was given by name, and then the one mutation"
+    );
 }
 
 #[test]
 fn the_issue_create_carries_the_title_body_team_project_label_state_and_assignee_and_nothing_else()
 {
-    let linear = Posting::answering([Ok(issue_created())]);
+    let linear = Posting::answering(a_whole_issue_create());
 
-    create_issue(&linear, &draft()).expect("the stand-in answered");
+    create_issue(&linear, &draft(), &settled()).expect("the stand-in answered");
 
     assert_eq!(
         last_input(&linear),
         json!({
             "title": "Repair the answer",
             "description": "## Problem\n\nThe answer is wrong.\n",
+            // The two ids the pre-flight settled, and the label's own, resolved
+            // from the name the create was given.
             "teamId": "team-1",
             "projectId": "project-1",
             "labelIds": ["issue-label-held"],
@@ -2171,10 +2192,51 @@ fn the_issue_create_carries_the_title_body_team_project_label_state_and_assignee
 }
 
 #[test]
-fn an_issue_is_created_assigned_to_the_user_the_caller_resolved() {
-    let linear = Posting::answering([Ok(issue_created())]);
+fn the_label_the_create_is_given_by_name_is_resolved_as_an_issue_label_on_the_filings_team() {
+    let linear = Posting::answering(a_whole_issue_create());
 
-    create_issue(&linear, &draft()).expect("the stand-in answered");
+    create_issue(&linear, &draft(), &settled()).expect("the stand-in answered");
+
+    let asked = linear.documents();
+
+    // Before the mutation, because the id has to exist for the create to carry
+    // it, and on the team the pre-flight settled rather than one the caller
+    // named. A project label is a different type whose id no issue can carry,
+    // so this path may never drift onto those queries.
+    assert!(asked[0].contains("issueLabels("), "{asked:?}");
+    assert!(asked[1].contains("issueCreate("), "{asked:?}");
+    assert_eq!(
+        linear.variables()[0],
+        json!({ "name": LABEL, "team": "team-1" })
+    );
+    for sent in asked {
+        assert!(!sent.contains("projectLabel"), "{sent}");
+    }
+}
+
+#[test]
+fn a_label_that_cannot_be_resolved_stops_before_the_issue_is_created() {
+    let linear = Posting::answering([Err(Error::Refused {
+        board: LINEAR,
+        message: "Entity not found".to_owned(),
+    })]);
+
+    let error =
+        create_issue(&linear, &draft(), &settled()).expect_err("the stand-in refused the label");
+
+    assert!(matches!(error, Error::Refused { .. }), "{error:?}");
+    assert_eq!(
+        linear.documents().len(),
+        1,
+        "an issue was created once its label had failed"
+    );
+}
+
+#[test]
+fn an_issue_is_created_assigned_to_the_user_the_caller_resolved() {
+    let linear = Posting::answering(a_whole_issue_create());
+
+    create_issue(&linear, &draft(), &settled()).expect("the stand-in answered");
 
     // The claim `warlock pull` reads: an issue filed with no assignee is one it
     // can never select, so the id the caller resolved has to reach the wire
@@ -2184,9 +2246,9 @@ fn an_issue_is_created_assigned_to_the_user_the_caller_resolved() {
 
 #[test]
 fn no_issue_create_invents_a_status_priority_estimate_cycle_or_milestone() {
-    let linear = Posting::answering([Ok(issue_created())]);
+    let linear = Posting::answering(a_whole_issue_create());
 
-    create_issue(&linear, &draft()).expect("the stand-in answered");
+    create_issue(&linear, &draft(), &settled()).expect("the stand-in answered");
 
     let input = last_input(&linear);
 
@@ -2203,10 +2265,10 @@ fn no_issue_create_invents_a_status_priority_estimate_cycle_or_milestone() {
             "the create invented `{invented}`: {input}"
         );
     }
-    // The workflow state the issue is filed in is a team's, resolved by the
-    // caller; a project status is not a thing an issue has and nothing on this
-    // path moves one.
-    let asked = linear.documents().pop().expect("one request was made");
+    // The workflow state the issue is filed in is a team's, settled by the
+    // pre-flight; a project status is not a thing an issue has and nothing on
+    // this path moves one.
+    let asked = linear.documents().pop().expect("the mutation was sent");
 
     assert!(!asked.contains("projectStatus"), "{asked}");
     assert!(!asked.contains("projectUpdate"), "{asked}");
@@ -2222,16 +2284,93 @@ fn an_issue_create_that_answers_nothing_usable_is_malformed() {
         json!({ "issueCreate": { "issue": { "id": "issue-1", "url": "u" } } }),
         json!({ "issueCreate": { "issue": { "id": "issue-1", "identifier": "WAR-125" } } }),
     ] {
-        let linear = Posting::answering([Ok(answer.clone())]);
+        let linear = Posting::answering([Ok(issue_label_found()), Ok(answer.clone())]);
 
-        let error = create_issue(&linear, &draft()).expect_err("no issue is no answer");
+        let error = create_issue(&linear, &draft(), &settled()).expect_err("no issue is no answer");
 
         assert!(
             matches!(error, Error::Malformed { .. }),
             "{answer}: {error:?}"
         );
-        assert_eq!(linear.documents().len(), 1, "no retry and no backoff");
+        assert_eq!(linear.documents().len(), 2, "no retry and no backoff");
     }
+}
+
+#[test]
+fn the_board_settles_a_cuts_filing_from_its_record_and_hands_it_to_the_create() {
+    // Through the board rather than the functions under it: the pre-flight is
+    // told nothing at all, so the team key the first read asks about can only
+    // have come off the record it was opened for — and the `teamId` and
+    // `stateId` the mutation writes can only have come back through the value
+    // the caller carried from one verb to the other.
+    let board = Linear::new(
+        Posting::answering([
+            Ok(the_team()),
+            Ok(workflow_states()),
+            Ok(issue_label_found()),
+            Ok(issue_created()),
+        ]),
+        a_scope(),
+    );
+
+    let Filable::Ready(filing) = board.ticket_filing().expect("the stand-in answered") else {
+        panic!("a workspace with the team and the state can be filed into");
+    };
+    board
+        .create_ticket(&draft(), &filing)
+        .expect("the stand-in answered");
+
+    let variables = board.posts.variables();
+
+    assert_eq!(variables[0], json!({ "key": TEAM }));
+    assert_eq!(variables[1], json!({ "team": "team-1" }));
+    assert_eq!(variables[3]["input"]["teamId"], json!("team-1"));
+    assert_eq!(variables[3]["input"]["stateId"], json!("state-backlog"));
+}
+
+#[test]
+fn a_workspace_with_no_team_for_the_record_has_no_destination_and_is_asked_nothing_more() {
+    let board = Linear::new(Posting::answering([Ok(no_team())]), a_scope());
+
+    let filing = board.ticket_filing().expect("an unknown key is an answer");
+
+    // The caller turns this into its own refusal, naming the file the key is
+    // written in: the words about a manifest are not this module's.
+    assert!(matches!(filing, Filable::NoDestination), "{filing:?}");
+    let asked = board.posts.documents();
+    assert_eq!(
+        asked.len(),
+        1,
+        "something was asked about a team that is not there: {asked:?}"
+    );
+}
+
+#[test]
+fn a_team_with_no_backlog_state_has_no_column_and_nothing_is_created() {
+    let board = Linear::new(
+        Posting::answering([
+            Ok(the_team()),
+            Ok(json!({
+                "workflowStates": {
+                    "pageInfo": { "hasNextPage": false },
+                    "nodes": [{ "id": "state-doing", "name": IN_PROGRESS }],
+                },
+            })),
+        ]),
+        a_scope(),
+    );
+
+    let filing = board.ticket_filing().expect("no `Backlog` is an answer");
+
+    // Told apart from a team that is not there at all, because the caller says
+    // a different sentence about each — and neither sends a mutation.
+    assert!(matches!(filing, Filable::NoColumn), "{filing:?}");
+    let asked = board.posts.documents();
+    assert_eq!(asked.len(), 2, "{asked:?}");
+    assert!(
+        !asked.iter().any(|sent| sent.contains("issueCreate")),
+        "an issue was created into a team with no column for it: {asked:?}"
+    );
 }
 
 fn relation_created() -> Value {

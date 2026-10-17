@@ -58,8 +58,8 @@ use warlock_engine::{LinearScope, Manifest, PullRun, load_key_binding};
 
 use crate::app::App;
 use crate::board::{
-    Board, Error as BoardError, FetchedBrief, FiledBrief, FiledTicket, Listing, NamedTicket,
-    NewBrief, NewTicket, Opener as LinearOpener, Opens, Queue, TicketBrief,
+    Board, Error as BoardError, FetchedBrief, Filable, FiledBrief, FiledTicket, Listing,
+    NamedTicket, NewBrief, NewTicket, Opener as LinearOpener, Opens, Queue, TicketBrief,
 };
 use crate::claude::{
     Activities, Activity, Cancel, CancelGuard, ChatAgent, Split, Splitting, Worked, Working,
@@ -1018,12 +1018,13 @@ impl<B: Board> Quiet<B> {
 impl<B: Board> Board for Quiet<B> {
     const NAME: &'static str = B::NAME;
 
+    /// The board's own, forwarded as it is: what one holds is that board's
+    /// business and this decorator has no more business reading it than a flow
+    /// does.
+    type Filing = B::Filing;
+
     fn viewer(&self) -> Result<String, BoardError> {
         self.asked(Board::viewer)
-    }
-
-    fn team_id(&self, key: &str) -> Result<Option<String>, BoardError> {
-        self.asked(|board| board.team_id(key))
     }
 
     fn move_brief(&self, project: &str, status: &str) -> Result<bool, BoardError> {
@@ -1034,16 +1035,8 @@ impl<B: Board> Board for Quiet<B> {
         self.asked(|board| board.ticket_brief(issue))
     }
 
-    fn backlog_state(&self, team: &str) -> Result<Option<String>, BoardError> {
-        self.asked(|board| board.backlog_state(team))
-    }
-
     fn move_ticket(&self, issue: &str, status: &str) -> Result<bool, BoardError> {
         self.asked(|board| board.move_ticket(issue, status))
-    }
-
-    fn ticket_label_id(&self, name: &str, team: &str) -> Result<String, BoardError> {
-        self.asked(|board| board.ticket_label_id(name, team))
     }
 
     fn fetch_brief(&self, slug: &str) -> Result<Option<FetchedBrief>, BoardError> {
@@ -1070,8 +1063,16 @@ impl<B: Board> Board for Quiet<B> {
         self.asked(|board| board.create_brief(project))
     }
 
-    fn create_ticket(&self, issue: &NewTicket<'_>) -> Result<FiledTicket, BoardError> {
-        self.asked(|board| board.create_ticket(issue))
+    fn ticket_filing(&self) -> Result<Filable<B::Filing>, BoardError> {
+        self.asked(Board::ticket_filing)
+    }
+
+    fn create_ticket(
+        &self,
+        issue: &NewTicket<'_>,
+        filing: &B::Filing,
+    ) -> Result<FiledTicket, BoardError> {
+        self.asked(|board| board.create_ticket(issue, filing))
     }
 
     fn create_relation(&self, blocker: &str, waiting: &str) -> Result<String, BoardError> {
