@@ -1009,13 +1009,15 @@ struct Quiet<B: Board> {
 impl<B: Board> Quiet<B> {
     fn asked<T>(&self, ask: impl FnOnce(&B) -> Result<T, LinearError>) -> Result<T, LinearError> {
         if self.cancel.is_cancelled() {
-            return Err(LinearError::Stopped);
+            return Err(LinearError::Stopped { board: B::NAME });
         }
         ask(&self.inner)
     }
 }
 
 impl<B: Board> Board for Quiet<B> {
+    const NAME: &'static str = B::NAME;
+
     fn viewer(&self) -> Result<String, LinearError> {
         self.asked(Board::viewer)
     }

@@ -18,7 +18,7 @@ use crate::claude::{Activities, Activity, Cancel, Converses, Split, Stopped, Wir
 use crate::clipboard::Clip;
 use crate::error::Error;
 use crate::git::{Commit, Dirty, Error as GitError, Forge, Opened, PullRequest, Repository};
-use crate::linear::Posts;
+use crate::linear::{LINEAR, Posts};
 use crate::puller::{Raised, Raises, Raising, Stopping, activity_port};
 use crate::pulling::{Splits, Works};
 
@@ -814,6 +814,7 @@ impl Boarding {
         });
         match refused {
             Some(message) => Err(LinearError::Refused {
+                board: LINEAR,
                 message: message.clone(),
             }),
             None => Ok(()),
@@ -841,6 +842,8 @@ impl Opens for Boarding {
 }
 
 impl Board for Boarding {
+    const NAME: &'static str = LINEAR;
+
     fn viewer(&self) -> Result<String, LinearError> {
         self.ask(Call::Viewer)?;
         Ok(self.viewer.clone())

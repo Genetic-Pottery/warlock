@@ -39,6 +39,11 @@ pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// in this module is the same URL with a different document.
 const ENDPOINT: &str = "https://api.linear.app/graphql";
 
+/// The one place this vendor is spelled for a reader: every [`Error`] raised
+/// here, and [`Board::NAME`] for this board and for the stand-ins that answer
+/// in its place.
+pub(crate) const LINEAR: &str = "Linear";
+
 /// One GraphQL round trip: a document, its variables, and the answer's `data`
 /// object.
 ///
@@ -141,6 +146,8 @@ impl<P: Posts> Linear<P> {
 }
 
 impl<P: Posts> Board for Linear<P> {
+    const NAME: &'static str = LINEAR;
+
     fn viewer(&self) -> Result<String, Error> {
         viewer(&self.posts)
     }
@@ -550,7 +557,7 @@ fn fetch_project(linear: &impl Posts, slug: &str) -> Result<Option<FetchedBrief>
         // null node. Both shapes are folded into the absence here, because a
         // caller that had to recognise "Entity not found" itself would be
         // reading Linear's prose in a second place.
-        Err(Error::Refused { message }) if unknown_entity(&message) => return Ok(None),
+        Err(Error::Refused { message, .. }) if unknown_entity(&message) => return Ok(None),
         Err(error) => return Err(error),
     };
 
@@ -1217,7 +1224,7 @@ fn comment(linear: &impl Posts, input: &Value) -> Result<String, Error> {
 /// Linear takes a personal API key bare there, and the prefix an OAuth token
 /// wants is a 401 for a key. This is the only place the key is read.
 fn authorization(key: &str) -> Result<HeaderValue, Error> {
-    let mut value = HeaderValue::from_str(key).map_err(|_| Error::Key)?;
+    let mut value = HeaderValue::from_str(key).map_err(|_| Error::Key { board: LINEAR })?;
     // So that anything which prints a header map — ureq's own logging, a
     // middleware added later — prints `Sensitive` where the key is.
     value.set_sensitive(true);
@@ -1229,11 +1236,16 @@ fn failure(error: ureq::Error) -> Error {
         // ureq turns 4xx and 5xx into this by default. A 401 is the key and a
         // 400 is the document; neither is an I/O failure and neither should
         // read like one.
-        ureq::Error::StatusCode(code) => Error::Status { code },
+        ureq::Error::StatusCode(code) => Error::Status {
+            board: LINEAR,
+            code,
+        },
         ureq::Error::Json(_) => Error::Malformed {
+            board: LINEAR,
             detail: "it was not JSON".to_owned(),
         },
         source => Error::Transport {
+            board: LINEAR,
             source: Box::new(source),
         },
     }
@@ -1244,13 +1256,17 @@ fn failure(error: ureq::Error) -> Error {
 /// status does not.
 fn answer(mut body: Value) -> Result<Value, Error> {
     if let Some(message) = refusal(&body) {
-        return Err(Error::Refused { message });
+        return Err(Error::Refused {
+            board: LINEAR,
+            message,
+        });
     }
 
     body.get_mut("data")
         .map(Value::take)
         .filter(|data| !data.is_null())
         .ok_or_else(|| Error::Malformed {
+            board: LINEAR,
             detail: "it carried no `data`".to_owned(),
         })
 }
@@ -1283,6 +1299,7 @@ fn nodes<'a>(data: &'a Value, connection: &str) -> Result<&'a [Value], Error> {
         .and_then(Value::as_array)
         .map(Vec::as_slice)
         .ok_or_else(|| Error::Malformed {
+            board: LINEAR,
             detail: format!("`{connection}` carried no nodes"),
         })
 }
@@ -1292,6 +1309,7 @@ fn payload<'a>(data: &'a Value, mutation: &str, created: &str) -> Result<&'a Val
         .and_then(|payload| payload.get(created))
         .filter(|created| !created.is_null())
         .ok_or_else(|| Error::Malformed {
+            board: LINEAR,
             detail: format!("`{mutation}` carried no `{created}`"),
         })
 }
@@ -1351,6 +1369,7 @@ fn text(node: &Value, field: &str) -> Result<String, Error> {
 
 fn missing(field: &str) -> Error {
     Error::Malformed {
+        board: LINEAR,
         detail: format!("a node carried no `{field}`"),
     }
 }

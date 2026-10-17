@@ -31,6 +31,11 @@ impl fmt::Debug for Key {
 /// test fake answers operations instead of recognising query text: Linear's
 /// spelling is `Linear`'s business, checked in `linear.rs`'s own tests.
 pub(crate) trait Board {
+    /// The vendor's name, as every [`Error`] this board builds prints it. An
+    /// associated const and not a method, because a decorator that holds no
+    /// client still has to name the board it wraps.
+    const NAME: &'static str;
+
     fn viewer(&self) -> Result<String, Error>;
     fn team_id(&self, key: &str) -> Result<Option<String>, Error>;
     fn backlog_status(&self) -> Result<Option<String>, Error>;
@@ -810,33 +815,42 @@ pub enum Error {
     /// The key cannot be a header value at all — a newline or a byte outside
     /// ASCII in whatever was stored. It is named and not quoted: this type is
     /// printed.
-    Key,
+    Key {
+        board: &'static str,
+    },
     /// Nothing was sent, because nothing is left to hear the answer: the run the
     /// request belonged to was stopped before it went out. Warlock's own word
-    /// rather than Linear's — no socket was opened, so the board knows nothing
-    /// about it and there is nothing to undo.
-    Stopped,
+    /// rather than the board's — no socket was opened, so the board knows
+    /// nothing about it and there is nothing to undo.
+    Stopped {
+        board: &'static str,
+    },
     /// Type-erased rather than the HTTP client's own error, which is what keeps
     /// this module free of one: a board that speaks over a socket boxes whatever
     /// its transport failed with, and a second board's transport need not be the
     /// first's. Naming a concrete error here points the dependency back at one
     /// board's wire.
     Transport {
+        board: &'static str,
         source: Box<dyn std::error::Error + Send + Sync>,
     },
     Status {
+        board: &'static str,
         code: u16,
     },
     /// Warlock's own words about the answer's shape, never the answer's bytes:
-    /// what comes back from an endpoint that is not Linear is whatever a captive
-    /// portal or a proxy decided to send, and printing it is printing that.
+    /// what comes back from an endpoint that is not the board's is whatever a
+    /// captive portal or a proxy decided to send, and printing it is printing
+    /// that.
     Malformed {
+        board: &'static str,
         detail: String,
     },
-    /// Linear's words, for a request it understood and refused. Worth keeping as
-    /// they are — "Entity not found" and "A project with that name exists" are
-    /// the two the caller can act on.
+    /// The board's words, for a request it understood and refused. Worth keeping
+    /// as they are — "Entity not found" and "A project with that name exists"
+    /// are the two the caller can act on.
     Refused {
+        board: &'static str,
         message: String,
     },
 }
@@ -844,12 +858,18 @@ pub enum Error {
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Key => write!(f, "the Linear key cannot be sent as a header value"),
-            Self::Stopped => write!(f, "the run was stopped, so nothing was sent to Linear"),
-            Self::Transport { source } => write!(f, "could not reach Linear: {source}"),
-            Self::Status { code } => write!(f, "Linear answered {code}"),
-            Self::Malformed { detail } => write!(f, "Linear's answer was unreadable: {detail}"),
-            Self::Refused { message } => write!(f, "Linear refused the request: {message}"),
+            Self::Key { board } => write!(f, "the {board} key cannot be sent as a header value"),
+            Self::Stopped { board } => {
+                write!(f, "the run was stopped, so nothing was sent to {board}")
+            }
+            Self::Transport { board, source } => write!(f, "could not reach {board}: {source}"),
+            Self::Status { board, code } => write!(f, "{board} answered {code}"),
+            Self::Malformed { board, detail } => {
+                write!(f, "{board}'s answer was unreadable: {detail}")
+            }
+            Self::Refused { board, message } => {
+                write!(f, "{board} refused the request: {message}")
+            }
         }
     }
 }
@@ -857,9 +877,9 @@ impl fmt::Display for Error {
 impl std::error::Error for Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::Transport { source } => Some(&**source),
-            Self::Key
-            | Self::Stopped
+            Self::Transport { source, .. } => Some(&**source),
+            Self::Key { .. }
+            | Self::Stopped { .. }
             | Self::Status { .. }
             | Self::Malformed { .. }
             | Self::Refused { .. } => None,
