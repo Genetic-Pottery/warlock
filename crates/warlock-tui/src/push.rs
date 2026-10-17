@@ -23,7 +23,7 @@ use warlock_engine::{Destination, Manifest, ScopeRecord, manifest_path, resolve_
 use crate::account::size;
 use crate::board::{Board, Key, NewBrief, Opener as LinearOpener, Opens};
 use crate::brief::{Brief, brief_at};
-use crate::error::{Error, files_to_linear, say};
+use crate::error::{Error, say};
 use crate::standing::{FOR_PUSH, Standing};
 
 pub fn push(scope: &str, path: &Path, dry_run: bool) -> Result<(), Error> {
@@ -112,14 +112,6 @@ pub(crate) fn prepare(
     scope: &str,
     path: &Path,
 ) -> Result<Prepared, Error> {
-    // Above `resolve_filing`, which loads the key *value*: a scope warlock
-    // cannot file to is refused with no key read, no client built and no brief
-    // opened, which is the whole of what the sentence it refuses with promises.
-    // It is also the only board refusal left on this road: the destination
-    // below carries whichever prefix the record names, Linear's or Jira's, and
-    // turns nothing away.
-    files_to_linear(manifest, scope)?;
-
     let target = resolve_filing(manifest, root, home, Some(scope))
         .map_err(|source| Error::Filing { source })?;
 

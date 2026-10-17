@@ -100,28 +100,6 @@ fn a_manifest() -> Manifest {
     .with_scopes([ScopeRecord::new(SCOPE, TEAM, "In Review", LABEL)])
 }
 
-// The same manifest with that scope recording the board warlock cannot read: the
-// tracker is the only thing that differs, so the refusal is about that and not
-// about a scope spelled differently or a key nobody bound.
-fn a_jira_manifest() -> Manifest {
-    Manifest::with_directories([ScopedDirectory::new(".", "docs", SCOPE)
-        .expect("a relative module path is inside the root")])
-    .with_scopes([ScopeRecord::jira(
-        SCOPE,
-        "https://acme.atlassian.net",
-        "PAY",
-        "In Review",
-        LABEL,
-    )])
-}
-
-// The sentence `warlock-engine` words for a record that files somewhere else,
-// spelled out because nothing outside that crate can build the refusal to ask
-// it: this is the line a reader sees on the thread.
-fn not_linear(scope: &str) -> String {
-    format!("`{scope}` files to Jira, and warlock can only file to Linear, so nothing was sent")
-}
-
 // A repository with the manifest saved and nothing else: what a cut reads is
 // the project on the board.
 fn a_repository() -> TempDir {
@@ -592,8 +570,8 @@ mod binding {
 
     use super::{
         App, Boarding, Cutter, KEY_NAME, KeyPrompt, NAME, NOT_A_KEY, PREPARED, SCOPE, SLUG,
-        Scripted, TEAM, a_dir, a_jira_manifest, a_manifest, a_project, a_repository, drafting,
-        landing, not_linear, notes, now, unasked,
+        Scripted, TEAM, a_dir, a_manifest, a_project, a_repository, drafting, landing, notes, now,
+        unasked,
     };
     use crate::board::Listing;
     use crate::confirm::Answer;
@@ -822,39 +800,6 @@ mod binding {
         assert_eq!(notes(&app), vec![one_line(Error::Config { source })]);
         assert_eq!(prompt, KeyPrompt::Closed, "a question was asked anyway");
         assert!(!cutter.fetching(), "a refusal started a worker");
-    }
-
-    #[test]
-    fn a_draft_of_a_jira_scope_is_one_line_with_no_question_asked_and_nothing_parked() {
-        // The home binds nothing, which is the road that would otherwise put the
-        // key window up and park the `/draft` behind it: the tracker is read
-        // before that, so what comes back is the refusal and no question at all.
-        // The client panics if it is opened, so reaching a board is the failure
-        // rather than something asserted afterwards.
-        let repo = a_repository();
-        let home = an_unbound_home(repo.path());
-        let linear = Boarding::unopened();
-        let mut cutter = cutter(linear.clone(), home.path());
-        let mut app = App::default();
-
-        let prompt = cutter.press(
-            &mut app,
-            &a_jira_manifest(),
-            repo.path(),
-            &drafting(),
-            None,
-            now(),
-        );
-
-        assert_eq!(notes(&app), vec![not_linear(SCOPE)]);
-        assert_eq!(prompt, KeyPrompt::Closed, "a refused draft asked for a key");
-        assert!(cutter.parked.is_none(), "a refused draft was parked");
-        assert!(!cutter.fetching(), "a refused draft started a worker");
-        assert!(!cutter.confirm().is_open(), "a dialog came up");
-        assert!(
-            linear.tickets_created().is_empty(),
-            "a refused draft created an issue"
-        );
     }
 
     #[test]

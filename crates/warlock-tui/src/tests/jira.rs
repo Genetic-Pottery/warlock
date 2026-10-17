@@ -496,6 +496,29 @@ fn a_brief_of_the_same_name_is_answered_by_the_url_a_person_opens_it_at() {
 }
 
 #[test]
+fn a_name_with_a_quote_or_a_backslash_searches_on_spaces_and_compares_whole() {
+    // Either character would end the quoted JQL value early, and Jira would
+    // refuse the search, so the push of such a brief could never get past it.
+    let name = r#"Accept "quoted" words \ here"#;
+    let board = Jira::new(
+        Calling::answering([Ok(page(&[("PAY-3", name)], None))]),
+        a_scope(),
+    );
+
+    assert_eq!(
+        board.brief_named(name).expect("the stand-in answered"),
+        Some(format!("{SITE}/browse/PAY-3"))
+    );
+    let made = board.calls.made();
+    assert_eq!(
+        made[0].2["jql"],
+        json!(format!(
+            r#"project = {PROJECT} AND issuetype = Epic AND summary ~ "\"Accept  quoted  words   here\"""#
+        ))
+    );
+}
+
+#[test]
 fn a_project_holding_no_brief_of_that_name_answers_none() {
     let board = Jira::new(Calling::answering([Ok(page(&[], None))]), a_scope());
 
