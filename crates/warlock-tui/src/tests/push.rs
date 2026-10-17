@@ -224,7 +224,7 @@ fn a_push_asks_for_the_team_then_the_name_then_the_status_before_it_creates_anyt
     outcome.expect("a repository, a board and a brief are a push");
     // The value out of the key store reached the one line that reads it.
     assert_eq!(linear.opened_with(), [NOT_A_KEY]);
-    // The label is `create_project`'s own first request, so it is not asked for
+    // The label is `create_brief`'s own first request, so it is not asked for
     // here: see `linear.rs`, whose tests hold the label ahead of the create.
     assert_eq!(
         linear.ops(),
@@ -673,10 +673,10 @@ fn a_team_key_linear_does_not_know_names_the_value_and_the_file_it_is_written_in
 
 #[test]
 fn a_label_that_will_not_resolve_stops_before_the_project_rather_than_after_it() {
-    // The label is `create_project`'s own first request (see `linear.rs`, whose
+    // The label is `create_brief`'s own first request (see `linear.rs`, whose
     // tests hold that order), so there is no create that landed for a failing
     // label to be missing from. What the push can honestly report of a
-    // `create_project` that failed is that nothing was created and there is no
+    // `create_brief` that failed is that nothing was created and there is no
     // URL — which is what this asserts.
     let repo = a_repository();
     let home = a_home(repo.path());

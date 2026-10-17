@@ -292,7 +292,7 @@ pub(crate) fn listing<O: Opens>(
     let destination = target.destination()?;
     let listing = open
         .open(target.value())
-        .planned_projects(destination.team_key(), destination.label())?;
+        .planned_briefs(destination.team_key(), destination.label())?;
 
     Ok((destination, listing))
 }
@@ -710,7 +710,7 @@ pub(crate) fn prepare<O: Opens>(
     let assignee = board.viewer()?;
 
     let project = board
-        .fetch_project(slug)?
+        .fetch_brief(slug)?
         .ok_or_else(|| Error::UnknownProject {
             slug: slug.to_owned(),
             scope: scope.to_owned(),

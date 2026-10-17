@@ -153,15 +153,15 @@ impl<P: Posts> Board for Linear<P> {
         backlog_status(&self.posts)
     }
 
-    fn project_status(&self, name: &str) -> Result<Option<String>, Error> {
+    fn brief_status(&self, name: &str) -> Result<Option<String>, Error> {
         project_status(&self.posts, name)
     }
 
-    fn move_project(&self, project: &str, status: &str) -> Result<String, Error> {
+    fn move_brief(&self, project: &str, status: &str) -> Result<String, Error> {
         move_project(&self.posts, project, status)
     }
 
-    fn issue_project(&self, issue: &str) -> Result<Option<TicketBrief>, Error> {
+    fn ticket_brief(&self, issue: &str) -> Result<Option<TicketBrief>, Error> {
         issue_project(&self.posts, issue)
     }
 
@@ -173,23 +173,23 @@ impl<P: Posts> Board for Linear<P> {
         workflow_state(&self.posts, team, name)
     }
 
-    fn move_issue(&self, issue: &str, state: &str) -> Result<String, Error> {
+    fn move_ticket(&self, issue: &str, state: &str) -> Result<String, Error> {
         move_issue(&self.posts, issue, state)
     }
 
-    fn issue_label_id(&self, name: &str, team: &str) -> Result<String, Error> {
+    fn ticket_label_id(&self, name: &str, team: &str) -> Result<String, Error> {
         issue_label_id(&self.posts, name, team)
     }
 
-    fn fetch_project(&self, slug: &str) -> Result<Option<FetchedBrief>, Error> {
+    fn fetch_brief(&self, slug: &str) -> Result<Option<FetchedBrief>, Error> {
         fetch_project(&self.posts, slug)
     }
 
-    fn planned_projects(&self, team: &str, label: &str) -> Result<Listing, Error> {
+    fn planned_briefs(&self, team: &str, label: &str) -> Result<Listing, Error> {
         planned_projects(&self.posts, team, label)
     }
 
-    fn project_named(&self, team: &str, name: &str) -> Result<Option<String>, Error> {
+    fn brief_named(&self, team: &str, name: &str) -> Result<Option<String>, Error> {
         project_named(&self.posts, team, name)
     }
 
@@ -197,15 +197,15 @@ impl<P: Posts> Board for Linear<P> {
         scope_queue(&self.posts, team, label, assignee)
     }
 
-    fn named_issue(&self, team: &str, number: u64) -> Result<Option<NamedTicket>, Error> {
+    fn named_ticket(&self, team: &str, number: u64) -> Result<Option<NamedTicket>, Error> {
         named_issue(&self.posts, team, number)
     }
 
-    fn create_project(&self, project: &NewBrief<'_>) -> Result<FiledBrief, Error> {
+    fn create_brief(&self, project: &NewBrief<'_>) -> Result<FiledBrief, Error> {
         create_project(&self.posts, project)
     }
 
-    fn create_issue(&self, issue: &NewTicket<'_>) -> Result<FiledTicket, Error> {
+    fn create_ticket(&self, issue: &NewTicket<'_>) -> Result<FiledTicket, Error> {
         create_issue(&self.posts, issue)
     }
 
@@ -213,11 +213,11 @@ impl<P: Posts> Board for Linear<P> {
         create_relation(&self.posts, blocker, waiting)
     }
 
-    fn comment_on_project(&self, project: &str, body: &str) -> Result<String, Error> {
+    fn comment_on_brief(&self, project: &str, body: &str) -> Result<String, Error> {
         comment_on_project(&self.posts, project, body)
     }
 
-    fn comment_on_issue(&self, issue: &str, body: &str) -> Result<String, Error> {
+    fn comment_on_ticket(&self, issue: &str, body: &str) -> Result<String, Error> {
         comment_on_issue(&self.posts, issue, body)
     }
 }

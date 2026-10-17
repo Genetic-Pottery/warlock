@@ -98,14 +98,14 @@ pub(crate) fn cut<W: Write>(
         .ok_or_else(|| Error::NoBacklog {
             team: filing.destination.team_key().to_owned(),
         })?;
-    let label = linear.issue_label_id(filing.destination.label(), &team)?;
+    let label = linear.ticket_label_id(filing.destination.label(), &team)?;
 
     let mut issues = Vec::with_capacity(slice.drafts.len());
     for draft in slice.drafts {
         // A create that fails partway is a refusal and not a short note: a note
         // says the slice is filed, so writing one for the drafts that landed
         // would be warlock promising never to file the rest.
-        let issue = linear.create_issue(&NewTicket::new(
+        let issue = linear.create_ticket(&NewTicket::new(
             &draft.title,
             &draft.body,
             &team,
@@ -137,7 +137,7 @@ pub(crate) fn cut<W: Write>(
     );
 
     linear
-        .comment_on_project(filing.project, &cut_note(slice.title, &identifiers))
+        .comment_on_brief(filing.project, &cut_note(slice.title, &identifiers))
         .map_err(|source| Error::Uncut {
             issues: identifiers,
             source: Box::new(source),
@@ -158,9 +158,9 @@ pub(crate) fn cut<W: Write>(
 /// issues exist whatever happens here, so a workspace with no such status or a
 /// move Linear turns down is reported rather than failed.
 pub(crate) fn finish(linear: &impl Board, project: &str) -> String {
-    let moved = linear.project_status(IN_PROGRESS).and_then(|status| {
+    let moved = linear.brief_status(IN_PROGRESS).and_then(|status| {
         status
-            .map(|status| linear.move_project(project, &status))
+            .map(|status| linear.move_brief(project, &status))
             .transpose()
     });
     match moved {
@@ -184,7 +184,7 @@ pub(crate) fn finish(linear: &impl Board, project: &str) -> String {
 /// comes back.
 pub(crate) fn skip(linear: &impl Board, project: &str, title: &str) -> Result<(), Error> {
     linear
-        .comment_on_project(project, &skip_note(title))
+        .comment_on_brief(project, &skip_note(title))
         .map(drop)
         .map_err(|source| Error::Unskipped {
             title: title.to_owned(),

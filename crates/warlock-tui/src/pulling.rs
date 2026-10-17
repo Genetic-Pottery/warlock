@@ -454,7 +454,7 @@ impl<B: Board, R: Repository, F: Forge, S: Splits, W: Works> Pulling<'_, B, R, F
             None => without_gh(run.branch(), &body),
         };
         self.board
-            .comment_on_issue(ticket.id, &comment)
+            .comment_on_ticket(ticket.id, &comment)
             .map_err(Error::board)?;
 
         self.move_to_review(ticket)?;
@@ -479,7 +479,7 @@ impl<B: Board, R: Repository, F: Forge, S: Splits, W: Works> Pulling<'_, B, R, F
         self.save(&run)?;
 
         self.board
-            .comment_on_issue(ticket.id, &unchanged_comment(base, &finished_in(&run)))
+            .comment_on_ticket(ticket.id, &unchanged_comment(base, &finished_in(&run)))
             .map_err(Error::board)?;
 
         self.move_to_review(ticket)?;
@@ -574,7 +574,9 @@ impl<B: Board, R: Repository, F: Forge, S: Splits, W: Works> Pulling<'_, B, R, F
         let Some(state) = found else {
             return Ok(false);
         };
-        self.board.move_issue(issue, &state).map_err(Error::board)?;
+        self.board
+            .move_ticket(issue, &state)
+            .map_err(Error::board)?;
         Ok(true)
     }
 
@@ -597,7 +599,7 @@ impl<B: Board, R: Repository, F: Forge, S: Splits, W: Works> Pulling<'_, B, R, F
         run.set_status(RunStatus::Halted);
         self.save(run)?;
         self.board
-            .comment_on_issue(ticket.id, comment)
+            .comment_on_ticket(ticket.id, comment)
             .map_err(Error::board)?;
         Ok(Reached::Stopped(ending))
     }
@@ -918,7 +920,7 @@ impl PullEvent {
 /// Every failure is a line, never an error: the ticket is in review by now, and
 /// a pull is not undone by the project it belongs to.
 fn project_review(board: &impl Board, issue: &str, review: &str) -> Option<String> {
-    let project = match board.issue_project(issue) {
+    let project = match board.ticket_brief(issue) {
         Ok(Some(project)) => project,
         Ok(None) => return None,
         Err(error) => {
@@ -942,9 +944,9 @@ fn project_review(board: &impl Board, issue: &str, review: &str) -> Option<Strin
         return None;
     }
 
-    let moved = board.project_status(review).and_then(|status| {
+    let moved = board.brief_status(review).and_then(|status| {
         status
-            .map(|status| board.move_project(project.id(), &status))
+            .map(|status| board.move_brief(project.id(), &status))
             .transpose()
     });
     let every = format!("every issue in `{name}` is in review or closed");

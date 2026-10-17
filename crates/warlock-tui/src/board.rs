@@ -34,23 +34,23 @@ pub(crate) trait Board {
     fn viewer(&self) -> Result<String, Error>;
     fn team_id(&self, key: &str) -> Result<Option<String>, Error>;
     fn backlog_status(&self) -> Result<Option<String>, Error>;
-    fn project_status(&self, name: &str) -> Result<Option<String>, Error>;
-    fn move_project(&self, project: &str, status: &str) -> Result<String, Error>;
-    fn issue_project(&self, issue: &str) -> Result<Option<TicketBrief>, Error>;
+    fn brief_status(&self, name: &str) -> Result<Option<String>, Error>;
+    fn move_brief(&self, project: &str, status: &str) -> Result<String, Error>;
+    fn ticket_brief(&self, issue: &str) -> Result<Option<TicketBrief>, Error>;
     fn backlog_state(&self, team: &str) -> Result<Option<String>, Error>;
     fn workflow_state(&self, team: &str, name: &str) -> Result<Option<String>, Error>;
-    fn move_issue(&self, issue: &str, state: &str) -> Result<String, Error>;
-    fn issue_label_id(&self, name: &str, team: &str) -> Result<String, Error>;
-    fn fetch_project(&self, slug: &str) -> Result<Option<FetchedBrief>, Error>;
-    fn planned_projects(&self, team: &str, label: &str) -> Result<Listing, Error>;
-    fn project_named(&self, team: &str, name: &str) -> Result<Option<String>, Error>;
+    fn move_ticket(&self, issue: &str, state: &str) -> Result<String, Error>;
+    fn ticket_label_id(&self, name: &str, team: &str) -> Result<String, Error>;
+    fn fetch_brief(&self, slug: &str) -> Result<Option<FetchedBrief>, Error>;
+    fn planned_briefs(&self, team: &str, label: &str) -> Result<Listing, Error>;
+    fn brief_named(&self, team: &str, name: &str) -> Result<Option<String>, Error>;
     fn scope_queue(&self, team: &str, label: &str, assignee: &str) -> Result<Queue, Error>;
-    fn named_issue(&self, team: &str, number: u64) -> Result<Option<NamedTicket>, Error>;
-    fn create_project(&self, project: &NewBrief<'_>) -> Result<FiledBrief, Error>;
-    fn create_issue(&self, issue: &NewTicket<'_>) -> Result<FiledTicket, Error>;
+    fn named_ticket(&self, team: &str, number: u64) -> Result<Option<NamedTicket>, Error>;
+    fn create_brief(&self, project: &NewBrief<'_>) -> Result<FiledBrief, Error>;
+    fn create_ticket(&self, issue: &NewTicket<'_>) -> Result<FiledTicket, Error>;
     fn create_relation(&self, blocker: &str, waiting: &str) -> Result<String, Error>;
-    fn comment_on_project(&self, project: &str, body: &str) -> Result<String, Error>;
-    fn comment_on_issue(&self, issue: &str, body: &str) -> Result<String, Error>;
+    fn comment_on_brief(&self, project: &str, body: &str) -> Result<String, Error>;
+    fn comment_on_ticket(&self, issue: &str, body: &str) -> Result<String, Error>;
 }
 
 /// Where a board comes from: a key in, a [`Board`] out, and the one seam both
@@ -75,7 +75,7 @@ pub(crate) trait Opens: Clone + Send + 'static {
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct Opener;
 
-/// What [`Board::issue_project`] answers: the project, and each of its issues'
+/// What [`Board::ticket_brief`] answers: the project, and each of its issues'
 /// workflow state by name and type.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct TicketBrief {
@@ -127,7 +127,7 @@ impl TicketBrief {
 pub(crate) const CUT_NOTE: &str = "Warlock cut slice ";
 pub(crate) const SKIP_NOTE: &str = "Warlock skipped slice ";
 
-/// A project as [`Board::fetch_project`] reads it back, which is not the
+/// A project as [`Board::fetch_brief`] reads it back, which is not the
 /// [`FiledBrief`] a create answers with: what matters about a project that
 /// already exists is what is written on it, and what matters about one that
 /// has just been made is where to find it.
@@ -209,7 +209,7 @@ impl FetchedBrief {
     }
 }
 
-/// What [`Board::planned_projects`] answers: slug and name, in Linear's order.
+/// What [`Board::planned_briefs`] answers: slug and name, in Linear's order.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct Listing {
     pub(crate) projects: Vec<(String, String)>,
@@ -536,7 +536,7 @@ impl Assignee {
     }
 }
 
-/// What [`Board::create_project`] is asked for: the label is the name it goes by
+/// What [`Board::create_brief`] is asked for: the label is the name it goes by
 /// in the workspace rather than an id, because the create path is what resolves
 /// it.
 #[derive(Debug, Clone, Copy)]
@@ -633,7 +633,7 @@ impl FiledBrief {
     }
 }
 
-/// What [`Board::create_issue`] is asked for, and the whole of it: every field
+/// What [`Board::create_ticket`] is asked for, and the whole of it: every field
 /// here is an id the caller resolved, and priority, estimate, cycle and
 /// milestone stay unwritten. A draft says what the work is, and a field warlock
 /// would have to invent a value for is a decision taken away from the person who
@@ -647,7 +647,7 @@ impl FiledBrief {
 /// Linear, which is why there is no way to name anybody else here.
 ///
 /// `state` is a *team workflow state* id from [`Board::backlog_state`] and
-/// `label` an *issue label* id from [`Board::issue_label_id`]; neither a project
+/// `label` an *issue label* id from [`Board::ticket_label_id`]; neither a project
 /// status nor a project label is usable here.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct NewTicket<'a> {

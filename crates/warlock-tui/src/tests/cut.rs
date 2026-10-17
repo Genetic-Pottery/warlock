@@ -296,7 +296,7 @@ fn the_label_is_resolved_as_an_issue_label_and_not_as_a_project_label() {
     // Resolved on the team, by the name the scope record gives. That the issue
     // label queries never reach the project label ones is `linear.rs`'s to
     // hold; what a cut can do wrong is resolve the label as a project's, which
-    // only `create_project` does.
+    // only `create_brief` does.
     let calls = linear.calls();
     assert!(
         calls.contains(&Call::IssueLabel {

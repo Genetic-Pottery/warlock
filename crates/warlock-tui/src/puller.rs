@@ -1028,16 +1028,16 @@ impl<B: Board> Board for Quiet<B> {
         self.asked(Board::backlog_status)
     }
 
-    fn project_status(&self, name: &str) -> Result<Option<String>, LinearError> {
-        self.asked(|board| board.project_status(name))
+    fn brief_status(&self, name: &str) -> Result<Option<String>, LinearError> {
+        self.asked(|board| board.brief_status(name))
     }
 
-    fn move_project(&self, project: &str, status: &str) -> Result<String, LinearError> {
-        self.asked(|board| board.move_project(project, status))
+    fn move_brief(&self, project: &str, status: &str) -> Result<String, LinearError> {
+        self.asked(|board| board.move_brief(project, status))
     }
 
-    fn issue_project(&self, issue: &str) -> Result<Option<TicketBrief>, LinearError> {
-        self.asked(|board| board.issue_project(issue))
+    fn ticket_brief(&self, issue: &str) -> Result<Option<TicketBrief>, LinearError> {
+        self.asked(|board| board.ticket_brief(issue))
     }
 
     fn backlog_state(&self, team: &str) -> Result<Option<String>, LinearError> {
@@ -1048,52 +1048,52 @@ impl<B: Board> Board for Quiet<B> {
         self.asked(|board| board.workflow_state(team, name))
     }
 
-    fn move_issue(&self, issue: &str, state: &str) -> Result<String, LinearError> {
-        self.asked(|board| board.move_issue(issue, state))
+    fn move_ticket(&self, issue: &str, state: &str) -> Result<String, LinearError> {
+        self.asked(|board| board.move_ticket(issue, state))
     }
 
-    fn issue_label_id(&self, name: &str, team: &str) -> Result<String, LinearError> {
-        self.asked(|board| board.issue_label_id(name, team))
+    fn ticket_label_id(&self, name: &str, team: &str) -> Result<String, LinearError> {
+        self.asked(|board| board.ticket_label_id(name, team))
     }
 
-    fn fetch_project(&self, slug: &str) -> Result<Option<FetchedBrief>, LinearError> {
-        self.asked(|board| board.fetch_project(slug))
+    fn fetch_brief(&self, slug: &str) -> Result<Option<FetchedBrief>, LinearError> {
+        self.asked(|board| board.fetch_brief(slug))
     }
 
-    fn planned_projects(&self, team: &str, label: &str) -> Result<Listing, LinearError> {
-        self.asked(|board| board.planned_projects(team, label))
+    fn planned_briefs(&self, team: &str, label: &str) -> Result<Listing, LinearError> {
+        self.asked(|board| board.planned_briefs(team, label))
     }
 
-    fn project_named(&self, team: &str, name: &str) -> Result<Option<String>, LinearError> {
-        self.asked(|board| board.project_named(team, name))
+    fn brief_named(&self, team: &str, name: &str) -> Result<Option<String>, LinearError> {
+        self.asked(|board| board.brief_named(team, name))
     }
 
     fn scope_queue(&self, team: &str, label: &str, assignee: &str) -> Result<Queue, LinearError> {
         self.asked(|board| board.scope_queue(team, label, assignee))
     }
 
-    fn named_issue(&self, team: &str, number: u64) -> Result<Option<NamedTicket>, LinearError> {
-        self.asked(|board| board.named_issue(team, number))
+    fn named_ticket(&self, team: &str, number: u64) -> Result<Option<NamedTicket>, LinearError> {
+        self.asked(|board| board.named_ticket(team, number))
     }
 
-    fn create_project(&self, project: &NewBrief<'_>) -> Result<FiledBrief, LinearError> {
-        self.asked(|board| board.create_project(project))
+    fn create_brief(&self, project: &NewBrief<'_>) -> Result<FiledBrief, LinearError> {
+        self.asked(|board| board.create_brief(project))
     }
 
-    fn create_issue(&self, issue: &NewTicket<'_>) -> Result<FiledTicket, LinearError> {
-        self.asked(|board| board.create_issue(issue))
+    fn create_ticket(&self, issue: &NewTicket<'_>) -> Result<FiledTicket, LinearError> {
+        self.asked(|board| board.create_ticket(issue))
     }
 
     fn create_relation(&self, blocker: &str, waiting: &str) -> Result<String, LinearError> {
         self.asked(|board| board.create_relation(blocker, waiting))
     }
 
-    fn comment_on_project(&self, project: &str, body: &str) -> Result<String, LinearError> {
-        self.asked(|board| board.comment_on_project(project, body))
+    fn comment_on_brief(&self, project: &str, body: &str) -> Result<String, LinearError> {
+        self.asked(|board| board.comment_on_brief(project, body))
     }
 
-    fn comment_on_issue(&self, issue: &str, body: &str) -> Result<String, LinearError> {
-        self.asked(|board| board.comment_on_issue(issue, body))
+    fn comment_on_ticket(&self, issue: &str, body: &str) -> Result<String, LinearError> {
+        self.asked(|board| board.comment_on_ticket(issue, body))
     }
 }
 

@@ -1214,7 +1214,7 @@ fn the_board_hands_the_team_key_and_the_number_to_the_wire_in_that_order() {
     let board = Linear::new(Posting::answering([Ok(a_named_ticket(&named_node()))]));
 
     let found = board
-        .named_issue("WAR", 133)
+        .named_ticket("WAR", 133)
         .expect("the stand-in answered")
         .expect("the stand-in answered with the ticket");
 

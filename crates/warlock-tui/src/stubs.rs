@@ -386,24 +386,24 @@ pub(crate) struct Boarding {
     viewer: String,
     team: Option<String>,
     status: Option<String>,
-    /// What [`Board::project_status`] answers with, whatever name is asked.
+    /// What [`Board::brief_status`] answers with, whatever name is asked.
     moved_to: Option<String>,
-    /// What [`Board::issue_project`] answers with: `None`, an issue in no
+    /// What [`Board::ticket_brief`] answers with: `None`, an issue in no
     /// project, until a test says otherwise.
-    issue_project: Option<TicketBrief>,
+    ticket_brief: Option<TicketBrief>,
     state: Option<String>,
     label: String,
     project: Option<FetchedBrief>,
-    /// What [`Board::planned_projects`] answers with, empty until a test says
+    /// What [`Board::planned_briefs`] answers with, empty until a test says
     /// otherwise.
     listing: Listing,
-    /// What [`Board::project_named`] answers with: `None` is a team holding no
+    /// What [`Board::brief_named`] answers with: `None` is a team holding no
     /// project of that name, which is every push's default.
     same_name: Option<String>,
     /// What [`Board::scope_queue`] answers with, empty until a test says
     /// otherwise: most flows here never read a queue.
     queue: Queue,
-    /// What [`Board::named_issue`] answers with, `None` being a board that has no
+    /// What [`Board::named_ticket`] answers with, `None` being a board that has no
     /// such ticket.
     named: Option<NamedTicket>,
     created: FiledBrief,
@@ -549,7 +549,7 @@ impl Boarding {
             team: Some("team-1".to_owned()),
             status: Some("status-backlog".to_owned()),
             moved_to: Some("status-in-progress".to_owned()),
-            issue_project: None,
+            ticket_brief: None,
             state: Some("state-backlog".to_owned()),
             label: "label-held".to_owned(),
             project: None,
@@ -616,7 +616,7 @@ impl Boarding {
         self
     }
 
-    /// The one ticket this board answers `named_issue` with, whatever name is
+    /// The one ticket this board answers `named_ticket` with, whatever name is
     /// asked: which name that was is in the recorded call, so a test asserting
     /// that `--ticket` reached the board reads it there rather than from the
     /// answer.
@@ -648,7 +648,7 @@ impl Boarding {
     }
 
     pub(crate) fn in_project(mut self, project: TicketBrief) -> Self {
-        self.issue_project = Some(project);
+        self.ticket_brief = Some(project);
         self
     }
 
@@ -856,17 +856,17 @@ impl Board for Boarding {
         Ok(self.status.clone())
     }
 
-    fn project_status(&self, name: &str) -> Result<Option<String>, LinearError> {
+    fn brief_status(&self, name: &str) -> Result<Option<String>, LinearError> {
         self.ask(Call::ProjectStatus(name.to_owned()))?;
         Ok(self.moved_to.clone())
     }
 
-    fn issue_project(&self, issue: &str) -> Result<Option<TicketBrief>, LinearError> {
+    fn ticket_brief(&self, issue: &str) -> Result<Option<TicketBrief>, LinearError> {
         self.ask(Call::IssueProject(issue.to_owned()))?;
-        Ok(self.issue_project.clone())
+        Ok(self.ticket_brief.clone())
     }
 
-    fn move_project(&self, project: &str, status: &str) -> Result<String, LinearError> {
+    fn move_brief(&self, project: &str, status: &str) -> Result<String, LinearError> {
         self.ask(Call::MoveProject {
             project: project.to_owned(),
             status: status.to_owned(),
@@ -896,7 +896,7 @@ impl Board for Boarding {
 
     /// The move recorded and the issue handed back, as the real board answers
     /// with the issue it updated.
-    fn move_issue(&self, issue: &str, state: &str) -> Result<String, LinearError> {
+    fn move_ticket(&self, issue: &str, state: &str) -> Result<String, LinearError> {
         self.ask(Call::MoveIssue {
             issue: issue.to_owned(),
             state: state.to_owned(),
@@ -904,7 +904,7 @@ impl Board for Boarding {
         Ok(issue.to_owned())
     }
 
-    fn issue_label_id(&self, name: &str, team: &str) -> Result<String, LinearError> {
+    fn ticket_label_id(&self, name: &str, team: &str) -> Result<String, LinearError> {
         self.ask(Call::IssueLabel {
             name: name.to_owned(),
             team: team.to_owned(),
@@ -912,12 +912,12 @@ impl Board for Boarding {
         Ok(self.label.clone())
     }
 
-    fn fetch_project(&self, slug: &str) -> Result<Option<FetchedBrief>, LinearError> {
+    fn fetch_brief(&self, slug: &str) -> Result<Option<FetchedBrief>, LinearError> {
         self.ask(Call::FetchProject(slug.to_owned()))?;
         Ok(self.project.clone())
     }
 
-    fn planned_projects(&self, team: &str, label: &str) -> Result<Listing, LinearError> {
+    fn planned_briefs(&self, team: &str, label: &str) -> Result<Listing, LinearError> {
         self.ask(Call::PlannedProjects {
             team: team.to_owned(),
             label: label.to_owned(),
@@ -925,7 +925,7 @@ impl Board for Boarding {
         Ok(self.listing.clone())
     }
 
-    fn project_named(&self, team: &str, name: &str) -> Result<Option<String>, LinearError> {
+    fn brief_named(&self, team: &str, name: &str) -> Result<Option<String>, LinearError> {
         self.ask(Call::ProjectNamed {
             team: team.to_owned(),
             name: name.to_owned(),
@@ -947,7 +947,7 @@ impl Board for Boarding {
     /// Whatever ticket the test wrote down — `None`, a board with no such ticket,
     /// being the default — and the call recorded, which is where a test reads the
     /// team and number that were asked for.
-    fn named_issue(&self, team: &str, number: u64) -> Result<Option<NamedTicket>, LinearError> {
+    fn named_ticket(&self, team: &str, number: u64) -> Result<Option<NamedTicket>, LinearError> {
         self.ask(Call::NamedIssue {
             team: team.to_owned(),
             number,
@@ -955,7 +955,7 @@ impl Board for Boarding {
         Ok(self.named.clone())
     }
 
-    fn create_project(&self, project: &NewBrief<'_>) -> Result<FiledBrief, LinearError> {
+    fn create_brief(&self, project: &NewBrief<'_>) -> Result<FiledBrief, LinearError> {
         self.ask(Call::CreateProject(ProjectAsked {
             name: project.name().to_owned(),
             content: project.content().to_owned(),
@@ -966,7 +966,7 @@ impl Board for Boarding {
         Ok(self.created.clone())
     }
 
-    fn create_issue(&self, issue: &NewTicket<'_>) -> Result<FiledTicket, LinearError> {
+    fn create_ticket(&self, issue: &NewTicket<'_>) -> Result<FiledTicket, LinearError> {
         self.ask(Call::CreateIssue(IssueAsked {
             title: issue.title().to_owned(),
             body: issue.body().to_owned(),
@@ -1000,7 +1000,7 @@ impl Board for Boarding {
         ))
     }
 
-    fn comment_on_project(&self, project: &str, body: &str) -> Result<String, LinearError> {
+    fn comment_on_brief(&self, project: &str, body: &str) -> Result<String, LinearError> {
         self.ask(Call::Comment {
             project: project.to_owned(),
             body: body.to_owned(),
@@ -1011,7 +1011,7 @@ impl Board for Boarding {
     /// Recorded as its own call, not as a [`Call::Comment`] with an issue id in
     /// it: a flow that meant to explain a halt on the ticket and commented on the
     /// project instead is a bug a shared variant would hide.
-    fn comment_on_issue(&self, issue: &str, body: &str) -> Result<String, LinearError> {
+    fn comment_on_ticket(&self, issue: &str, body: &str) -> Result<String, LinearError> {
         self.ask(Call::IssueComment {
             issue: issue.to_owned(),
             body: body.to_owned(),

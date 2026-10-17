@@ -432,7 +432,7 @@ pub(crate) fn take_named(
         }));
     };
 
-    let Some(found) = board.named_issue(team, number)? else {
+    let Some(found) = board.named_ticket(team, number)? else {
         return Ok(Named::Refused(Refusal::Unknown {
             ticket: ticket.to_owned(),
         }));
