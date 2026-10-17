@@ -9,6 +9,9 @@ const VERSION: u8 = 1;
 const BULLET: &str = "bulletList";
 const ORDERED: &str = "orderedList";
 
+const STRONG: &str = "**";
+const CODE: &str = "`";
+
 // A heading deeper than this is not one: ADF has six levels, and `#######` is a
 // paragraph in Markdown too.
 const LEVELS: usize = 6;
@@ -59,7 +62,7 @@ fn blocks(body: &str) -> Vec<Value> {
             content.push(json!({
                 "type": "heading",
                 "attrs": { "level": level },
-                "content": [text_node(text)],
+                "content": inline(text),
             }));
             continue;
         }
@@ -168,18 +171,91 @@ fn source_text(trimmed: &str) -> bool {
 }
 
 // Separate from `paragraph` on purpose, and not to be folded back into it: the
-// fallback's text is the source itself, so whatever is read out of a paragraph's
-// text is never read out of this one.
+// fallback's text is the source itself, so a `**` or a `[a](b)` inside a table
+// row or a quote stays the characters that were written rather than becoming a
+// mark over part of a line nothing else on the board understands.
 fn literal(line: &str) -> Value {
     json!({ "type": "paragraph", "content": [text_node(line)] })
 }
 
 fn paragraph(text: &str) -> Value {
-    json!({ "type": "paragraph", "content": [text_node(text)] })
+    json!({ "type": "paragraph", "content": inline(text) })
+}
+
+// `text` split into the marked and unmarked runs it is written as. A construct
+// left open is none: its characters stay in the run around it, which is what
+// keeps the conversion total.
+fn inline(text: &str) -> Vec<Value> {
+    let mut nodes = Vec::new();
+    let mut plain = 0;
+    let mut at = 0;
+
+    while at < text.len() {
+        if let Some((width, node)) = marked(&text[at..]) {
+            if plain < at {
+                nodes.push(text_node(&text[plain..at]));
+            }
+            nodes.push(node);
+            at += width;
+            plain = at;
+        } else {
+            at += text[at..].chars().next().map_or(1, char::len_utf8);
+        }
+    }
+
+    if plain < text.len() {
+        nodes.push(text_node(&text[plain..]));
+    }
+    nodes
+}
+
+// A span's body is one text node under one mark and is not scanned again, so
+// marks never nest and never combine: `**a `b`**` is strong over all of it.
+fn marked(rest: &str) -> Option<(usize, Value)> {
+    if let Some((width, body)) = delimited(rest, STRONG) {
+        return Some((width, marked_text(body, &json!({ "type": "strong" }))));
+    }
+    if let Some((width, body)) = delimited(rest, CODE) {
+        return Some((width, marked_text(body, &json!({ "type": "code" }))));
+    }
+    link(rest)
+}
+
+// The delimiters are ASCII, so every offset `find` hands back is a character
+// boundary.
+fn delimited<'a>(rest: &'a str, delimiter: &str) -> Option<(usize, &'a str)> {
+    let body = rest.strip_prefix(delimiter)?;
+    let end = body.find(delimiter)?;
+    // An ADF text node may not be empty, so `****` is four characters somebody
+    // typed rather than a mark over nothing.
+    if end == 0 {
+        return None;
+    }
+    Some((delimiter.len() * 2 + end, &body[..end]))
+}
+
+fn link(rest: &str) -> Option<(usize, Value)> {
+    let body = rest.strip_prefix('[')?;
+    // `](` together, which leaves a criterion's `[ ] ` box and a bare `[]` as
+    // the characters they are.
+    let close = body.find("](")?;
+    let target = &body[close + 2..];
+    let end = target.find(')')?;
+
+    let (text, href) = (&body[..close], &target[..end]);
+    if text.is_empty() || href.is_empty() {
+        return None;
+    }
+    let mark = json!({ "type": "link", "attrs": { "href": href } });
+    Some((close + end + "[]()".len(), marked_text(text, &mark)))
 }
 
 fn text_node(text: &str) -> Value {
     json!({ "type": "text", "text": text })
+}
+
+fn marked_text(text: &str, mark: &Value) -> Value {
+    json!({ "type": "text", "text": text, "marks": [mark] })
 }
 
 #[cfg(test)]

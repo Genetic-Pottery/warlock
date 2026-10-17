@@ -17,6 +17,11 @@ fn paragraph(text: &str) -> Value {
     json!({ "type": "paragraph", "content": [{ "type": "text", "text": text }] })
 }
 
+// The marks of the one paragraph a body of `text` converts to.
+fn marks(text: &str) -> Value {
+    blocks(text).remove(0)["content"].clone()
+}
+
 #[test]
 fn the_root_is_a_doc_node_carrying_a_version_and_its_content() {
     let document = document_for("Nothing converts Markdown yet.\n");
@@ -241,8 +246,7 @@ fn every_row_of_a_table_is_a_paragraph_of_its_own() {
 
 #[test]
 fn a_criterion_keeps_its_box_and_no_task_node_is_written() {
-    let document =
-        document_for("- [ ] A new module is declared in `lib.rs`.\n- [x] It is tested.\n");
+    let document = document_for("- [ ] A new module is declared.\n- [x] It is tested.\n");
 
     assert_eq!(
         document["content"],
@@ -251,7 +255,7 @@ fn a_criterion_keeps_its_box_and_no_task_node_is_written() {
             "content": [
                 {
                     "type": "listItem",
-                    "content": [paragraph("[ ] A new module is declared in `lib.rs`.")],
+                    "content": [paragraph("[ ] A new module is declared.")],
                 },
                 { "type": "listItem", "content": [paragraph("[x] It is tested.")] },
             ],
@@ -263,9 +267,246 @@ fn a_criterion_keeps_its_box_and_no_task_node_is_written() {
 }
 
 #[test]
+fn doubled_asterisks_are_one_text_node_under_the_strong_mark() {
+    assert_eq!(
+        marks("The brief is **the document**."),
+        json!([
+            { "type": "text", "text": "The brief is " },
+            {
+                "type": "text",
+                "text": "the document",
+                "marks": [{ "type": "strong" }],
+            },
+            { "type": "text", "text": "." },
+        ])
+    );
+}
+
+#[test]
+fn backticked_text_is_one_text_node_under_the_code_mark() {
+    assert_eq!(
+        marks("`push.rs` hands it over"),
+        json!([
+            { "type": "text", "text": "push.rs", "marks": [{ "type": "code" }] },
+            { "type": "text", "text": " hands it over" },
+        ])
+    );
+}
+
+#[test]
+fn a_link_is_one_text_node_under_a_link_mark_carrying_its_href() {
+    assert_eq!(
+        marks("see [the API](https://example.test/v3) first"),
+        json!([
+            { "type": "text", "text": "see " },
+            {
+                "type": "text",
+                "text": "the API",
+                "marks": [{
+                    "type": "link",
+                    "attrs": { "href": "https://example.test/v3" },
+                }],
+            },
+            { "type": "text", "text": " first" },
+        ])
+    );
+}
+
+#[test]
+fn a_heading_and_a_list_item_carry_marks_of_their_own() {
+    assert_eq!(
+        blocks("## The `doc` node\n- [ ] `adf.rs` is declared\n"),
+        vec![
+            json!({
+                "type": "heading",
+                "attrs": { "level": 2 },
+                "content": [
+                    { "type": "text", "text": "The " },
+                    { "type": "text", "text": "doc", "marks": [{ "type": "code" }] },
+                    { "type": "text", "text": " node" },
+                ],
+            }),
+            json!({
+                "type": "bulletList",
+                "content": [{
+                    "type": "listItem",
+                    "content": [{
+                        "type": "paragraph",
+                        "content": [
+                            { "type": "text", "text": "[ ] " },
+                            {
+                                "type": "text",
+                                "text": "adf.rs",
+                                "marks": [{ "type": "code" }],
+                            },
+                            { "type": "text", "text": " is declared" },
+                        ],
+                    }],
+                }],
+            }),
+        ]
+    );
+}
+
+#[test]
+fn several_marks_on_one_line_are_each_their_own_node() {
+    let nodes = marks("**one** and `two` and [three](https://example.test)");
+    let written: Vec<&Value> = nodes
+        .as_array()
+        .expect("the paragraph's text nodes")
+        .iter()
+        .collect();
+
+    assert_eq!(written.len(), 5, "{nodes}");
+    assert_eq!(written[0]["marks"][0]["type"], "strong");
+    assert_eq!(written[2]["marks"][0]["type"], "code");
+    assert_eq!(written[4]["marks"][0]["type"], "link");
+}
+
+#[test]
+fn a_marks_body_is_not_scanned_again() {
+    // One mark to a node: a code span inside strong is strong over the whole
+    // run, backticks and all.
+    assert_eq!(
+        marks("**the `doc` node**"),
+        json!([{
+            "type": "text",
+            "text": "the `doc` node",
+            "marks": [{ "type": "strong" }],
+        }])
+    );
+}
+
+#[test]
+fn an_unclosed_or_empty_construct_is_the_characters_it_was_written_as() {
+    for line in [
+        "**unclosed and alone",
+        "a stray ` backtick",
+        "an *emphasis* is not a mark",
+        "****",
+        "``",
+        "[](https://example.test)",
+        "[no target]()",
+        "[a reference] and (a parenthesis)",
+        "100% of **",
+    ] {
+        assert_eq!(blocks(line), vec![paragraph(line)], "{line}");
+    }
+}
+
+#[test]
+fn a_fence_and_the_literal_fallback_are_not_scanned_for_marks() {
+    let fenced = blocks("```\n**not strong** and `not code`\n```\n").remove(0);
+
+    assert_eq!(fenced["type"], "codeBlock");
+    assert_eq!(
+        fenced["content"],
+        json!([{ "type": "text", "text": "**not strong** and `not code`" }])
+    );
+
+    for line in [
+        "| **a** | `b` |",
+        "> see [the API](https://example.test)",
+        "<kbd>**Enter**</kbd>",
+    ] {
+        assert_eq!(blocks(line), vec![paragraph(line)], "{line}");
+    }
+}
+
+#[test]
+fn a_mark_around_text_that_is_not_ascii_keeps_its_characters() {
+    assert_eq!(
+        marks("a **brief — ünchanged** ✓"),
+        json!([
+            { "type": "text", "text": "a " },
+            {
+                "type": "text",
+                "text": "brief — ünchanged",
+                "marks": [{ "type": "strong" }],
+            },
+            { "type": "text", "text": " ✓" },
+        ])
+    );
+}
+
+#[test]
+fn the_writer_emits_six_node_types_and_three_marks_and_no_others() {
+    let document = document_for(
+        "# Problem\n\nNothing converts **Markdown** to `ADF`.\n\n- a bullet\n1. a number\n\n```rust\nfn main() {}\n```\n\n| a | table |\n\nsee [the API](https://example.test).\n",
+    );
+
+    let mut kinds: Vec<String> = Vec::new();
+    collect(&document, &mut kinds);
+    kinds.sort_unstable();
+    kinds.dedup();
+
+    assert_eq!(
+        kinds,
+        vec![
+            "bulletList",
+            "code",
+            "codeBlock",
+            "doc",
+            "heading",
+            "link",
+            "listItem",
+            "orderedList",
+            "paragraph",
+            "strong",
+            "text",
+        ]
+    );
+}
+
+// Every `type` anywhere in the tree, so a node or a mark added past the six and
+// the three fails the count above wherever it is written.
+fn collect(value: &Value, kinds: &mut Vec<String>) {
+    match value {
+        Value::Object(fields) => {
+            if let Some(Value::String(kind)) = fields.get("type") {
+                kinds.push(kind.clone());
+            }
+            for field in fields.values() {
+                collect(field, kinds);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                collect(item, kinds);
+            }
+        }
+        _ => {}
+    }
+}
+
+#[test]
 fn a_body_with_nothing_in_it_is_a_doc_with_nothing_in_it() {
     for body in ["", "\n", "\n\n", "   ", "   \n\n\t\n"] {
         assert_eq!(blocks(body), Vec::<Value>::new(), "{body:?}");
+    }
+}
+
+// The scanner walks byte offsets, where a slice taken mid-character panics and
+// an offset past the end panics. Every short arrangement of the characters the
+// marks are made of is cheaper than reasoning about which ones can.
+#[test]
+fn no_arrangement_of_the_mark_characters_panics() {
+    const ALPHABET: [char; 11] = ['*', '`', '[', ']', '(', ')', '#', '-', 'a', '—', '\n'];
+
+    let mut bodies: Vec<String> = vec![String::new()];
+    for _ in 0..4 {
+        let mut longer = Vec::with_capacity(bodies.len() * ALPHABET.len());
+        for body in &bodies {
+            for character in ALPHABET {
+                longer.push(format!("{body}{character}"));
+            }
+        }
+        bodies = longer;
+
+        for body in &bodies {
+            let document = document_for(body);
+            assert_eq!(document["version"], 1, "{body:?}");
+        }
     }
 }
 
