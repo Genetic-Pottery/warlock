@@ -45,7 +45,7 @@ use warlock_engine::{
     LinearScope, Manifest, PullRun, PullSubtask, RunStatus, SubtaskStatus, now_rfc3339, pulls,
 };
 
-use crate::board::{Board, Error as LinearError};
+use crate::board::{Board, Error as BoardError};
 use crate::claude::{Activity, Sibling, Split, Worked, working_opening};
 use crate::crossings::{Crossing, crossings_after};
 use crate::git::{
@@ -687,7 +687,7 @@ pub enum Error {
         source: GitError,
     },
     Board {
-        source: LinearError,
+        source: BoardError,
     },
     Record {
         source: pulls::Error,
@@ -706,7 +706,7 @@ impl Error {
         Self::Git { source }
     }
 
-    fn board(source: LinearError) -> Self {
+    fn board(source: BoardError) -> Self {
         Self::Board { source }
     }
 

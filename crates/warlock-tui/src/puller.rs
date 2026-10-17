@@ -58,7 +58,7 @@ use warlock_engine::{LinearScope, Manifest, PullRun, load_key_binding};
 
 use crate::app::App;
 use crate::board::{
-    Board, Error as LinearError, FetchedBrief, FiledBrief, FiledTicket, Listing, NamedTicket,
+    Board, Error as BoardError, FetchedBrief, FiledBrief, FiledTicket, Listing, NamedTicket,
     NewBrief, NewTicket, Opener as LinearOpener, Opens, Queue, TicketBrief,
 };
 use crate::claude::{
@@ -1007,9 +1007,9 @@ struct Quiet<B: Board> {
 }
 
 impl<B: Board> Quiet<B> {
-    fn asked<T>(&self, ask: impl FnOnce(&B) -> Result<T, LinearError>) -> Result<T, LinearError> {
+    fn asked<T>(&self, ask: impl FnOnce(&B) -> Result<T, BoardError>) -> Result<T, BoardError> {
         if self.cancel.is_cancelled() {
-            return Err(LinearError::Stopped { board: B::NAME });
+            return Err(BoardError::Stopped { board: B::NAME });
         }
         ask(&self.inner)
     }
@@ -1018,83 +1018,83 @@ impl<B: Board> Quiet<B> {
 impl<B: Board> Board for Quiet<B> {
     const NAME: &'static str = B::NAME;
 
-    fn viewer(&self) -> Result<String, LinearError> {
+    fn viewer(&self) -> Result<String, BoardError> {
         self.asked(Board::viewer)
     }
 
-    fn team_id(&self, key: &str) -> Result<Option<String>, LinearError> {
+    fn team_id(&self, key: &str) -> Result<Option<String>, BoardError> {
         self.asked(|board| board.team_id(key))
     }
 
-    fn backlog_status(&self) -> Result<Option<String>, LinearError> {
+    fn backlog_status(&self) -> Result<Option<String>, BoardError> {
         self.asked(Board::backlog_status)
     }
 
-    fn brief_status(&self, name: &str) -> Result<Option<String>, LinearError> {
+    fn brief_status(&self, name: &str) -> Result<Option<String>, BoardError> {
         self.asked(|board| board.brief_status(name))
     }
 
-    fn move_brief(&self, project: &str, status: &str) -> Result<String, LinearError> {
+    fn move_brief(&self, project: &str, status: &str) -> Result<String, BoardError> {
         self.asked(|board| board.move_brief(project, status))
     }
 
-    fn ticket_brief(&self, issue: &str) -> Result<Option<TicketBrief>, LinearError> {
+    fn ticket_brief(&self, issue: &str) -> Result<Option<TicketBrief>, BoardError> {
         self.asked(|board| board.ticket_brief(issue))
     }
 
-    fn backlog_state(&self, team: &str) -> Result<Option<String>, LinearError> {
+    fn backlog_state(&self, team: &str) -> Result<Option<String>, BoardError> {
         self.asked(|board| board.backlog_state(team))
     }
 
-    fn workflow_state(&self, team: &str, name: &str) -> Result<Option<String>, LinearError> {
+    fn workflow_state(&self, team: &str, name: &str) -> Result<Option<String>, BoardError> {
         self.asked(|board| board.workflow_state(team, name))
     }
 
-    fn move_ticket(&self, issue: &str, state: &str) -> Result<String, LinearError> {
+    fn move_ticket(&self, issue: &str, state: &str) -> Result<String, BoardError> {
         self.asked(|board| board.move_ticket(issue, state))
     }
 
-    fn ticket_label_id(&self, name: &str, team: &str) -> Result<String, LinearError> {
+    fn ticket_label_id(&self, name: &str, team: &str) -> Result<String, BoardError> {
         self.asked(|board| board.ticket_label_id(name, team))
     }
 
-    fn fetch_brief(&self, slug: &str) -> Result<Option<FetchedBrief>, LinearError> {
+    fn fetch_brief(&self, slug: &str) -> Result<Option<FetchedBrief>, BoardError> {
         self.asked(|board| board.fetch_brief(slug))
     }
 
-    fn planned_briefs(&self, team: &str, label: &str) -> Result<Listing, LinearError> {
+    fn planned_briefs(&self, team: &str, label: &str) -> Result<Listing, BoardError> {
         self.asked(|board| board.planned_briefs(team, label))
     }
 
-    fn brief_named(&self, team: &str, name: &str) -> Result<Option<String>, LinearError> {
+    fn brief_named(&self, team: &str, name: &str) -> Result<Option<String>, BoardError> {
         self.asked(|board| board.brief_named(team, name))
     }
 
-    fn scope_queue(&self, team: &str, label: &str, assignee: &str) -> Result<Queue, LinearError> {
+    fn scope_queue(&self, team: &str, label: &str, assignee: &str) -> Result<Queue, BoardError> {
         self.asked(|board| board.scope_queue(team, label, assignee))
     }
 
-    fn named_ticket(&self, team: &str, number: u64) -> Result<Option<NamedTicket>, LinearError> {
+    fn named_ticket(&self, team: &str, number: u64) -> Result<Option<NamedTicket>, BoardError> {
         self.asked(|board| board.named_ticket(team, number))
     }
 
-    fn create_brief(&self, project: &NewBrief<'_>) -> Result<FiledBrief, LinearError> {
+    fn create_brief(&self, project: &NewBrief<'_>) -> Result<FiledBrief, BoardError> {
         self.asked(|board| board.create_brief(project))
     }
 
-    fn create_ticket(&self, issue: &NewTicket<'_>) -> Result<FiledTicket, LinearError> {
+    fn create_ticket(&self, issue: &NewTicket<'_>) -> Result<FiledTicket, BoardError> {
         self.asked(|board| board.create_ticket(issue))
     }
 
-    fn create_relation(&self, blocker: &str, waiting: &str) -> Result<String, LinearError> {
+    fn create_relation(&self, blocker: &str, waiting: &str) -> Result<String, BoardError> {
         self.asked(|board| board.create_relation(blocker, waiting))
     }
 
-    fn comment_on_brief(&self, project: &str, body: &str) -> Result<String, LinearError> {
+    fn comment_on_brief(&self, project: &str, body: &str) -> Result<String, BoardError> {
         self.asked(|board| board.comment_on_brief(project, body))
     }
 
-    fn comment_on_ticket(&self, issue: &str, body: &str) -> Result<String, LinearError> {
+    fn comment_on_ticket(&self, issue: &str, body: &str) -> Result<String, BoardError> {
         self.asked(|board| board.comment_on_ticket(issue, body))
     }
 }

@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use warlock_engine::{Manifest, briefs, config, manifest, manifest_path, resolve_filing, scope};
 
 use super::{Error, one_line, status_for};
-use crate::board::Error as LinearError;
+use crate::board::Error as BoardError;
 use crate::boundary::unscoped_message;
 use crate::brief::{ScopeBlockError, brief_at};
 use crate::linear::LINEAR;
@@ -308,7 +308,7 @@ fn a_project_that_is_not_planned_is_named_with_its_status_or_the_lack_of_one() {
 fn issues_no_note_names_are_listed_and_the_reader_told_they_come_round_again() {
     let error = Error::Uncut {
         issues: vec!["WAR-1".to_owned(), "WAR-2".to_owned()],
-        source: Box::new(LinearError::Status {
+        source: Box::new(BoardError::Status {
             board: LINEAR,
             code: 500,
         }),
@@ -325,7 +325,7 @@ fn issues_no_note_names_are_listed_and_the_reader_told_they_come_round_again() {
 fn a_skip_that_was_not_noted_says_it_will_be_offered_again() {
     let error = Error::Unskipped {
         title: "Read the file".to_owned(),
-        source: Box::new(LinearError::Status {
+        source: Box::new(BoardError::Status {
             board: LINEAR,
             code: 500,
         }),
@@ -685,7 +685,7 @@ fn every_refusal_a_push_has_is_the_ordinary_one_and_never_the_boundarys_three() 
             path: manifest_path(repo.path()),
         },
         Error::Linear {
-            source: LinearError::Status {
+            source: BoardError::Status {
                 board: LINEAR,
                 code: 401,
             },

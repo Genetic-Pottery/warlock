@@ -62,7 +62,7 @@ pub(crate) const LINEAR: &str = "Linear";
 /// let client = LinearClient::new("lin_api_example");
 ///
 /// println!("{}", client.post("query { viewer { id } }", json!({}))?);
-/// # Ok::<(), warlock_tui::LinearError>(())
+/// # Ok::<(), warlock_tui::BoardError>(())
 /// ```
 pub trait Posts {
     fn post(&self, document: &str, variables: Value) -> Result<Value, Error>;

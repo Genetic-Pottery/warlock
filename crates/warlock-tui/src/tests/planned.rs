@@ -1796,7 +1796,7 @@ mod headless {
     #[test]
     fn a_viewer_request_the_api_turns_down_refuses_the_run_before_anything_exists() {
         // A board that will not say who the key belongs to has nothing to file
-        // for. A timeout is the same failure by the same road — one `LinearError`
+        // for. A timeout is the same failure by the same road — one `BoardError`
         // through the one line that maps it — so the refusal stands for both.
         let repo = a_scoped_repository();
         let home = a_home(repo.path());

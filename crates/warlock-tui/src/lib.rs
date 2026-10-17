@@ -78,7 +78,7 @@ mod writing;
 
 pub use account::Line;
 pub use account::Voice;
-pub use board::Error as LinearError;
+pub use board::Error as BoardError;
 pub use board::Priority;
 pub use board::Queue;
 pub use board::QueuedTicket;
