@@ -1,4 +1,4 @@
-use crate::StateType;
+use crate::Category;
 
 use super::{
     Blocker, IN_PROGRESS, Priority, PullRun, Queue, QueuedTicket, Reason, RunStatus,
@@ -22,7 +22,7 @@ fn issue(
         // The queue's own state type is never read by choosing: the query
         // already dropped everything settled, and `In Progress` and the review
         // state are matched by name.
-        StateType::new("started"),
+        Category::of("started"),
         priority,
         blockers,
     )
@@ -33,11 +33,11 @@ fn todo(identifier: &str, priority: Priority) -> QueuedTicket {
 }
 
 fn open(identifier: &str, assignee: Option<&str>) -> Blocker {
-    Blocker::new(identifier, assignee, StateType::new("unstarted"))
+    Blocker::new(identifier, assignee, Category::of("unstarted"))
 }
 
 fn settled(identifier: &str, state_type: &str) -> Blocker {
-    Blocker::new(identifier, Some("Someone Else"), StateType::new(state_type))
+    Blocker::new(identifier, Some("Someone Else"), Category::of(state_type))
 }
 
 fn run(ticket: &str, status: RunStatus) -> PullRun {

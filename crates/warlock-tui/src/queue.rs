@@ -26,7 +26,9 @@ use std::fmt;
 
 use warlock_engine::{LinearScope, PullRun, RunStatus};
 
-use crate::board::{Assignee, Blocker, Board, Error as BoardError, Priority, Queue, QueuedTicket};
+use crate::board::{
+    Assignee, Blocker, Board, Category, Error as BoardError, Priority, Queue, QueuedTicket,
+};
 
 /// The workflow state a ticket sits in while a run works it.
 ///
@@ -106,9 +108,8 @@ pub enum Reason {
     /// It is in [`IN_PROGRESS`] and this machine holds no run record for it, so
     /// the work is somewhere warlock cannot see.
     InProgressElsewhere,
-    /// At least one issue blocking it is neither `completed` nor `canceled`.
-    /// Only the open blockers are carried; a settled one is not part of the
-    /// reason.
+    /// At least one issue blocking it is not settled. Only the open blockers
+    /// are carried; a settled one is not part of the reason.
     Blocked { blockers: Vec<Blocker> },
 }
 
@@ -148,17 +149,17 @@ impl fmt::Display for Reason {
 /// first.
 ///
 /// ```
-/// use warlock_tui::{Priority, Queue, QueuedTicket, StateType, choose};
+/// use warlock_tui::{Category, Priority, Queue, QueuedTicket, choose};
 ///
 /// let queue = Queue::new(
 ///     vec![
 ///         QueuedTicket::new(
 ///             "id-10", "WAR-10", "Ten", "Todo",
-///             StateType::new("unstarted"), Priority::High, vec![],
+///             Category::of("unstarted"), Priority::High, vec![],
 ///         ),
 ///         QueuedTicket::new(
 ///             "id-9", "WAR-9", "Nine", "In Review",
-///             StateType::new("started"), Priority::Urgent, vec![],
+///             Category::of("started"), Priority::Urgent, vec![],
 ///         ),
 ///     ],
 /// );
@@ -243,7 +244,7 @@ fn unavailable(
     let open: Vec<Blocker> = issue
         .blockers()
         .iter()
-        .filter(|blocker| !blocker.state_type().settled())
+        .filter(|blocker| blocker.state_type() != Category::Settled)
         .cloned()
         .collect();
 
@@ -465,7 +466,7 @@ pub(crate) fn take_named(
         }));
     }
 
-    if found.issue().state_type().settled() {
+    if found.issue().state_type() == Category::Settled {
         return Ok(Named::Refused(Refusal::Finished {
             state: found.issue().state().to_owned(),
         }));

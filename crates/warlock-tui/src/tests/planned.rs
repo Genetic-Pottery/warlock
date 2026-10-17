@@ -2638,7 +2638,7 @@ mod editing {
 // Forman's backlog digest: the open tickets a session can name in `blocked_by`.
 mod backlog {
     use super::*;
-    use crate::board::{Priority, Queue, QueuedTicket, StateType};
+    use crate::board::{Category, Priority, Queue, QueuedTicket};
 
     fn open(identifier: &str, title: &str) -> QueuedTicket {
         QueuedTicket::new(
@@ -2646,7 +2646,7 @@ mod backlog {
             identifier,
             title,
             "Todo",
-            StateType::new("unstarted"),
+            Category::of("unstarted"),
             Priority::None,
             Vec::new(),
         )

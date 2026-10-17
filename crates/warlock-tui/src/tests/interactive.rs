@@ -3295,7 +3295,7 @@ mod pulling {
     use super::{AT_MOST, Session, Stubbed, key, session_reading};
     use crate::account::Line;
     use crate::app::Focus;
-    use crate::board::{Assignee, NamedTicket, Priority, Queue, QueuedTicket, StateType};
+    use crate::board::{Assignee, Category, NamedTicket, Priority, Queue, QueuedTicket};
     use crate::claude::Activity;
     use crate::confirm::Answer;
     use crate::cutting::Cutter;
@@ -3484,7 +3484,7 @@ mod pulling {
             TICKET,
             TITLE,
             "Todo",
-            StateType::new("unstarted"),
+            Category::of("unstarted"),
             Priority::Urgent,
             Vec::new(),
         )
