@@ -3,20 +3,32 @@ use std::io;
 
 use serde_json::{Value, json};
 use ureq::http::Method;
+use warlock_engine::ScopeRecord;
 
 use super::{
-    Calls, Client, EMAIL_TOKEN, JIRA, REQUEST_TIMEOUT, answer, authorization, base64, pair,
+    Calls, Client, EMAIL_TOKEN, JIRA, Jira, REQUEST_TIMEOUT, answer, authorization, base64, pair,
     refusal, url,
 };
 
-use crate::board::Error;
+use crate::board::{Board, Error, NewBrief, NewTicket};
+use crate::stubs::Calling;
 
 const EMAIL: &str = "nobody@example.com";
 const TOKEN: &str = "ATATT3xFfGF0_a_token_nobody_holds_8f3a1c";
 const SITE: &str = "https://example.atlassian.net";
+/// The project key the record names, and the key every issue key a verb is
+/// handed below starts with, so one assertion against it covers both halves of
+/// what a refusal must never carry.
+const PROJECT: &str = "PAY";
 
 fn key() -> String {
     format!("{EMAIL}:{TOKEN}")
+}
+
+/// The record a board is opened for: a verb is told none of it, so the site and
+/// the project key a request carries can only have come from here.
+fn a_scope() -> ScopeRecord {
+    ScopeRecord::jira("payments", SITE, PROJECT, "In Review", "area/pay")
 }
 
 fn variants() -> Vec<Error> {
@@ -29,6 +41,10 @@ fn variants() -> Vec<Error> {
         Error::Elsewhere {
             board: JIRA,
             scope: "payments".to_owned(),
+        },
+        Error::Untaught {
+            board: JIRA,
+            verb: "file a brief",
         },
         Error::Transport {
             board: JIRA,
@@ -66,6 +82,9 @@ fn one_timeout_of_thirty_seconds_covers_the_whole_call() {
 #[test]
 fn the_vendor_is_spelled_once_and_every_error_reads_as_jiras() {
     assert_eq!(JIRA, "Jira");
+    // The board's own name is that one spelling and not a second literal, so a
+    // decorator that prints `NAME` and an error this module built read alike.
+    assert_eq!(<Jira<Calling> as Board>::NAME, JIRA);
 
     for error in variants() {
         assert!(
@@ -287,6 +306,132 @@ fn field_errors_are_named_after_the_messages() {
         refusal(&body).unwrap(),
         "The request was invalid.; summary: You must specify a summary of the issue."
     );
+}
+
+/// Every [`Board`] verb driven once against one board, as the name a reader
+/// would look the method up by and the refusal it answered.
+///
+/// Written out by hand and in one place, because every test below asks the
+/// same thing of all of them: a verb added to the trait is added here as well,
+/// and nothing but a reader checks that.
+fn every_verb(board: &Jira<Calling>) -> Vec<(&'static str, Option<Error>)> {
+    vec![
+        ("viewer", board.viewer().err()),
+        ("move_brief", board.move_brief("10001", "In Review").err()),
+        ("ticket_brief", board.ticket_brief("PAY-1").err()),
+        ("move_ticket", board.move_ticket("PAY-1", "In Review").err()),
+        ("fetch_brief", board.fetch_brief("a-brief").err()),
+        ("planned_briefs", board.planned_briefs().err()),
+        ("brief_named", board.brief_named("A brief").err()),
+        ("scope_queue", board.scope_queue("me").err()),
+        ("named_ticket", board.named_ticket(1).err()),
+        (
+            "create_brief",
+            board
+                .create_brief(&NewBrief::new("A brief", "## Problem", "area/pay"))
+                .err(),
+        ),
+        ("ticket_filing", board.ticket_filing().err()),
+        (
+            "create_ticket",
+            board
+                .create_ticket(
+                    &NewTicket::new("A slice", "## Goal", "10001", "area/pay", "me"),
+                    &(),
+                )
+                .err(),
+        ),
+        (
+            "create_relation",
+            board.create_relation("PAY-1", "PAY-2").err(),
+        ),
+        (
+            "comment_on_brief",
+            board.comment_on_brief("10001", "a note").err(),
+        ),
+        (
+            "comment_on_ticket",
+            board.comment_on_ticket("PAY-1", "a note").err(),
+        ),
+    ]
+}
+
+#[test]
+fn every_verb_refuses_with_a_sentence_and_sends_nothing() {
+    // Nothing queued, so a verb that reached the transport panics the stand-in
+    // rather than answering anything.
+    let board = Jira::new(Calling::answering([]), a_scope());
+
+    for (verb, refusal) in every_verb(&board) {
+        let error =
+            refusal.unwrap_or_else(|| panic!("`{verb}` answered instead of refusing the request"));
+
+        assert!(
+            matches!(error, Error::Untaught { board: JIRA, .. }),
+            "{verb}: {error:?}"
+        );
+
+        let shown = error.to_string();
+
+        // A sentence rather than a panic, naming the board and what warlock
+        // cannot do with it yet.
+        assert!(shown.contains("Jira"), "{verb}: {shown}");
+        assert!(shown.contains("yet"), "{verb}: {shown}");
+        // And carrying no key value: not the project the record names, and not
+        // the issue key a verb was handed.
+        assert!(
+            !shown.contains(PROJECT),
+            "{verb}: a refusal carries a key: {shown}"
+        );
+    }
+
+    assert!(board.calls.made().is_empty(), "{:?}", board.calls.made());
+}
+
+#[test]
+fn each_verb_is_refused_in_its_own_words() {
+    let board = Jira::new(Calling::answering([]), a_scope());
+
+    let mut said: Vec<String> = every_verb(&board)
+        .into_iter()
+        .map(|(verb, refusal)| {
+            refusal
+                .unwrap_or_else(|| panic!("`{verb}` answered instead of refusing"))
+                .to_string()
+        })
+        .collect();
+    let verbs = said.len();
+
+    said.sort_unstable();
+    said.dedup();
+
+    // One sentence per verb, so a reader who sees a refusal knows which one
+    // they reached rather than only that something is unwritten.
+    assert_eq!(said.len(), verbs, "{said:?}");
+}
+
+#[test]
+fn a_board_opened_for_a_scope_that_files_elsewhere_sends_nothing() {
+    // Out of reach through warlock's own verbs, each of which refuses such a
+    // scope before it opens anything — but opening cannot fail, so the refusal
+    // has to be a verb's and it has to arrive with no request made.
+    let board = Jira::new(
+        Calling::answering([]),
+        ScopeRecord::new("data-plane", "WAR", "In Review", "area/data"),
+    );
+
+    for (verb, refusal) in every_verb(&board) {
+        let error = refusal.unwrap_or_else(|| panic!("`{verb}` answered for a Linear record"));
+
+        // The record and not the unwritten verb, because the two are different
+        // things to fix.
+        assert!(
+            matches!(&error, Error::Elsewhere { scope, .. } if scope == "data-plane"),
+            "{verb}: {error:?}"
+        );
+    }
+
+    assert!(board.calls.made().is_empty(), "{:?}", board.calls.made());
 }
 
 #[test]

@@ -17,8 +17,12 @@ use serde_json::Value;
 use ureq::Agent;
 use ureq::http::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE};
 use ureq::http::{HeaderValue, Method, Request};
+use warlock_engine::{FiledTo, ScopeRecord};
 
-use crate::board::Error;
+use crate::board::{
+    Board, Error, FetchedBrief, Filable, FiledBrief, FiledTicket, Listing, NamedTicket, NewBrief,
+    NewTicket, Queue, TicketBrief,
+};
 use crate::linear::REQUEST_TIMEOUT;
 
 /// The one place this vendor is spelled for a reader: every [`Error`] raised
@@ -148,6 +152,155 @@ impl Calls for Client {
         let text = response.body_mut().read_to_string().map_err(failure)?;
 
         answer(status, &text)
+    }
+}
+
+/// The one [`Board`] that speaks REST, over whatever [`Calls`] it holds.
+///
+/// The record it was opened for is held beside the transport, as
+/// [`Linear`](crate::linear::Linear) holds its own, and it is the whole of what
+/// this board knows about where work goes: the site and the project key a
+/// request is addressed by are read off it by [`site`](Self::site), and the
+/// label is there for whatever create reads it, so no verb below [`Board`] is
+/// handed any of them. Owned rather than borrowed, because a board is opened on
+/// a panel worker and outlives the manifest read that produced the record.
+///
+/// Every verb refuses as this stands: the requests themselves arrive a slice at
+/// a time, and a board that refuses is what keeps a flow which reaches a verb
+/// nobody has written yet a sentence rather than a panic.
+// Nothing in the library builds one yet: the opener that hands a Jira scope
+// this board instead of Linear's is the slice after the verbs, so until then
+// the only caller is this module's own tests. `cfg_attr` rather than a bare
+// `expect`, because under `cfg(test)` the tests do construct one and an
+// expectation nothing fulfils is itself a warning.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the opener that builds one is a later slice's; the tests \
+                  under `cfg(test)` are the only caller until then"
+    )
+)]
+#[derive(Debug)]
+pub(crate) struct Jira<C = Client> {
+    calls: C,
+    record: ScopeRecord,
+}
+
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the opener that builds one is a later slice's; the tests \
+                  under `cfg(test)` are the only caller until then"
+    )
+)]
+impl<C: Calls> Jira<C> {
+    #[must_use]
+    pub(crate) const fn new(calls: C, record: ScopeRecord) -> Self {
+        Self { calls, record }
+    }
+
+    /// The site and the project key this board files to, read off the record it
+    /// was opened for: the two halves of a Jira destination, because a project
+    /// key means nothing without the site it is a key on.
+    ///
+    /// Opening cannot fail, so a record that files somewhere else is refused
+    /// here instead — out of reach through warlock's verbs, which each refuse
+    /// such a scope before they open anything, and a `Result` rather than a
+    /// panic because this is a request that was not made.
+    fn site(&self) -> Result<(&str, &str), Error> {
+        match self.record.filed_to() {
+            FiledTo::Jira {
+                base_url,
+                project_key,
+            } => Ok((base_url, project_key)),
+            FiledTo::Linear => Err(Error::Elsewhere {
+                board: JIRA,
+                scope: self.record.name().to_owned(),
+            }),
+        }
+    }
+
+    /// The refusal of a verb no slice has written for this board yet, with
+    /// nothing sent through [`Calls`].
+    ///
+    /// The record is read first, so a board opened for a scope that files
+    /// somewhere else is told that instead: the two are different things to fix
+    /// — a manifest naming the wrong board, against a warlock that has not
+    /// learnt this verb — and the one about the record holds whichever verb was
+    /// reached.
+    fn untaught<T>(&self, verb: &'static str) -> Result<T, Error> {
+        self.site()?;
+        Err(Error::Untaught { board: JIRA, verb })
+    }
+}
+
+impl<C: Calls> Board for Jira<C> {
+    const NAME: &'static str = JIRA;
+
+    /// Nothing, because the create it would be settled for refuses as well: a
+    /// cut that cannot file a ticket has nothing to settle first.
+    type Filing = ();
+
+    fn viewer(&self) -> Result<String, Error> {
+        self.untaught("read whose key a scope files with")
+    }
+
+    fn move_brief(&self, _project: &str, _status: &str) -> Result<bool, Error> {
+        self.untaught("move a brief")
+    }
+
+    fn ticket_brief(&self, _issue: &str) -> Result<Option<TicketBrief>, Error> {
+        self.untaught("read the brief a ticket belongs to")
+    }
+
+    fn move_ticket(&self, _issue: &str, _status: &str) -> Result<bool, Error> {
+        self.untaught("move a ticket")
+    }
+
+    fn fetch_brief(&self, _slug: &str) -> Result<Option<FetchedBrief>, Error> {
+        self.untaught("read a brief")
+    }
+
+    fn planned_briefs(&self) -> Result<Listing, Error> {
+        self.untaught("list the planned briefs")
+    }
+
+    fn brief_named(&self, _name: &str) -> Result<Option<String>, Error> {
+        self.untaught("look a brief up by name")
+    }
+
+    fn scope_queue(&self, _assignee: &str) -> Result<Queue, Error> {
+        self.untaught("read a scope's queue")
+    }
+
+    fn named_ticket(&self, _number: u64) -> Result<Option<NamedTicket>, Error> {
+        self.untaught("read a ticket by number")
+    }
+
+    fn create_brief(&self, _project: &NewBrief<'_>) -> Result<Option<FiledBrief>, Error> {
+        self.untaught("file a brief")
+    }
+
+    fn ticket_filing(&self) -> Result<Filable<()>, Error> {
+        self.untaught("settle where a cut's tickets file")
+    }
+
+    fn create_ticket(&self, _issue: &NewTicket<'_>, _filing: &()) -> Result<FiledTicket, Error> {
+        self.untaught("file a ticket")
+    }
+
+    fn create_relation(&self, _blocker: &str, _waiting: &str) -> Result<String, Error> {
+        self.untaught("record that one ticket blocks another")
+    }
+
+    fn comment_on_brief(&self, _project: &str, _body: &str) -> Result<String, Error> {
+        self.untaught("comment on a brief")
+    }
+
+    fn comment_on_ticket(&self, _issue: &str, _body: &str) -> Result<String, Error> {
+        self.untaught("comment on a ticket")
     }
 }
 

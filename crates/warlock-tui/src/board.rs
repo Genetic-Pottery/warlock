@@ -924,6 +924,20 @@ pub enum Error {
         board: &'static str,
         scope: String,
     },
+    /// Nothing was sent, because warlock has no request for this verb on this
+    /// board yet: the board can do the thing and warlock cannot ask it. The
+    /// refusal a board implemented a slice at a time answers with until the
+    /// slice that teaches it arrives, so a flow that reaches such a verb fails
+    /// with a sentence rather than a panic.
+    ///
+    /// Warlock's own words, as [`Stopped`](Self::Stopped) and
+    /// [`Elsewhere`](Self::Elsewhere) are, and both halves static: the verb is
+    /// named in this crate's words, so nothing the request was carrying — a
+    /// project key, an issue key, a label — can reach the sentence.
+    Untaught {
+        board: &'static str,
+        verb: &'static str,
+    },
     /// Type-erased rather than the HTTP client's own error, which is what keeps
     /// this module free of one: a board that speaks over a socket boxes whatever
     /// its transport failed with, and a second board's transport need not be the
@@ -970,6 +984,12 @@ impl fmt::Display for Error {
             Self::Elsewhere { board, scope } => {
                 write!(f, "`{scope}` does not file to {board}, so nothing was sent")
             }
+            Self::Untaught { board, verb } => {
+                write!(
+                    f,
+                    "warlock cannot {verb} on a {board} scope yet, so nothing was sent"
+                )
+            }
             Self::Transport { board, source } => write!(f, "could not reach {board}: {source}"),
             Self::Status { board, code } => write!(f, "{board} answered {code}"),
             Self::Malformed { board, detail } => {
@@ -990,6 +1010,7 @@ impl std::error::Error for Error {
             | Self::Mistyped { .. }
             | Self::Stopped { .. }
             | Self::Elsewhere { .. }
+            | Self::Untaught { .. }
             | Self::Status { .. }
             | Self::Malformed { .. }
             | Self::Refused { .. } => None,
