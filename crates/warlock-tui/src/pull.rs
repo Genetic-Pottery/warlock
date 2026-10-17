@@ -33,7 +33,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use warlock_engine::{
-    LinearScope, Manifest, PullRun, ScopeRecord, brief_path, held_runs, resolve_filing,
+    BoardScope, Manifest, PullRun, ScopeRecord, brief_path, held_runs, resolve_filing,
     scope_opens_to,
 };
 
@@ -138,7 +138,8 @@ pub(crate) fn pulled<O: Opens, R: Repository, F: Forge, S: Splits, W: Works, P: 
     let (root, home) = (prepared.root(), prepared.home());
     // Before the tree is read and before the board is opened: a scope warlock
     // cannot file to is refused with nothing run and no client built.
-    let scope = LinearScope::of(prepared.record())?;
+    prepared.record().files_to_linear()?;
+    let scope = BoardScope::of(prepared.record());
 
     // Before the board is opened and before the queue is read: what a dirty tree
     // costs is a run that would fold somebody's uncommitted edit into a sub-task's
@@ -341,7 +342,7 @@ pub(crate) fn clean<R: Repository>(repo: &R) -> Result<(), Error> {
 /// board does not swallow it.
 pub(crate) fn selection(
     board: &impl Board,
-    scope: LinearScope<'_>,
+    scope: BoardScope<'_>,
     home: &Path,
     root: &Path,
     named: Option<&str>,
@@ -357,7 +358,7 @@ pub(crate) fn selection(
 
 fn select(
     board: &impl Board,
-    scope: LinearScope<'_>,
+    scope: BoardScope<'_>,
     assignee: &str,
     named: Option<&str>,
     runs: &[PullRun],

@@ -54,7 +54,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use warlock_engine::{LinearScope, Manifest, PullRun, load_key_binding};
+use warlock_engine::{BoardScope, Manifest, PullRun, load_key_binding};
 
 use crate::app::App;
 use crate::board::{
@@ -635,11 +635,12 @@ where
         // The question goes up over the lines that report the reading: what a
         // reader is being asked to confirm is what they have just read.
         if let Some(undertook) = chose.undertook {
-            match LinearScope::of(choosing.work.prepared.record()) {
-                Ok(scope) => self.confirm = asking(&undertook, scope),
-                // The reading that got this far was made through the same view,
-                // so nothing reaches this arm today. It is a line and not an
-                // unwrap because a panic here takes the terminal with it.
+            let record = choosing.work.prepared.record();
+            match record.files_to_linear() {
+                Ok(()) => self.confirm = asking(&undertook, BoardScope::of(record)),
+                // The reading that got this far asked the same record the same
+                // question, so nothing reaches this arm today. It is a line and
+                // not an unwrap because a panic here takes the terminal with it.
                 Err(refusal) => {
                     app.panel_mut().note(one_line(refusal), now);
                     return;
@@ -1133,7 +1134,8 @@ fn chose<O: Opens, R: Repository>(
     }
     // Before the tree is read and before the board is opened, as the headless
     // door has it: a scope warlock cannot file to is refused having run nothing.
-    let scope = LinearScope::of(work.prepared.record())?;
+    work.prepared.record().files_to_linear()?;
+    let scope = BoardScope::of(work.prepared.record());
     clean(repo)?;
 
     let board = open.open(work.prepared.record(), work.prepared.value());
@@ -1186,7 +1188,7 @@ fn chose<O: Opens, R: Repository>(
             next_runnable(run).map(|next| next.id().to_owned()),
         ),
         None => (
-            branch_name(scope.team_key(), ticket.number, &ticket.title),
+            branch_name(scope.ticket_prefix(), ticket.number, &ticket.title),
             None,
         ),
     };
@@ -1223,13 +1225,11 @@ where
             // scope warlock cannot file to ends the run here, with nothing
             // spent and the line the panel prints for every other way a run
             // stops.
-            let scope = match LinearScope::of(work.prepared.record()) {
-                Ok(scope) => scope,
-                Err(refusal) => {
-                    events.send(Step::Finished(Err(one_line(refusal))));
-                    return;
-                }
-            };
+            if let Err(refusal) = work.prepared.record().files_to_linear() {
+                events.send(Step::Finished(Err(one_line(refusal))));
+                return;
+            }
+            let scope = BoardScope::of(work.prepared.record());
             let raised = spending.raises.raise(Raising {
                 scope: scope.name(),
                 held: work.prepared.held(),
@@ -1306,7 +1306,7 @@ fn phase(app: &mut App, heading: &str, now: Instant) {
     app.panel_mut().start_work(now);
 }
 
-fn asking(undertook: &Undertook, scope: LinearScope<'_>) -> PullConfirm {
+fn asking(undertook: &Undertook, scope: BoardScope<'_>) -> PullConfirm {
     let Undertook {
         ticket,
         branch,
@@ -1320,7 +1320,7 @@ fn asking(undertook: &Undertook, scope: LinearScope<'_>) -> PullConfirm {
             &ticket.identifier,
             &ticket.title,
             scope.name(),
-            scope.team_key(),
+            scope.ticket_prefix(),
             branch,
             subtask,
         ),
@@ -1328,7 +1328,7 @@ fn asking(undertook: &Undertook, scope: LinearScope<'_>) -> PullConfirm {
             &ticket.identifier,
             &ticket.title,
             scope.name(),
-            scope.team_key(),
+            scope.ticket_prefix(),
             branch,
         ),
     }

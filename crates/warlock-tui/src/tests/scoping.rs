@@ -5,7 +5,7 @@ use std::{fs, io};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use tempfile::TempDir;
 use warlock_engine::{
-    LinearScope, Manifest, Node, ScopeRecord, ScopedDirectory, Tree, config, config_path,
+    BoardScope, Manifest, Node, ScopeRecord, ScopedDirectory, Tree, config, config_path,
     load_key_binding, manifest, route_facts, save_key, save_key_binding, validate_scope,
 };
 
@@ -44,12 +44,10 @@ const LAST_KEY: &str = "something the last key said";
 // was typed.
 const JIRA_SITE: &str = "https://acme.atlassian.net/";
 
-// The team key is read through the view, which is the only way there is to
-// read one off a record.
+// The prefix a record that files to Linear keys its tickets by is its team
+// key, which is what these tests name it.
 fn team_of(record: &ScopeRecord) -> &str {
-    LinearScope::of(record)
-        .expect("the record window writes a Linear scope")
-        .team_key()
+    BoardScope::of(record).ticket_prefix()
 }
 
 // The tree below is written out by hand rather than loaded, so nothing is
@@ -1358,7 +1356,7 @@ fn a_jira_form_writes_the_record_its_own_four_fields_describe() {
         &ScopeRecord::jira("payments", JIRA_SITE, "PAY", "In Review", "area/payments"),
     );
     assert!(
-        LinearScope::of(record).is_err(),
+        record.files_to_linear().is_err(),
         "a Jira form wrote a Linear record",
     );
 }

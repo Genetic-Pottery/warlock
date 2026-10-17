@@ -4,7 +4,7 @@ use tempfile::TempDir;
 use warlock_engine::splitting::{Caught, Cycle, Numbered};
 use warlock_engine::working;
 use warlock_engine::{
-    LinearScope, Manifest, PullRun, PullSubtask, RunStatus, ScopeRecord, ScopedDirectory,
+    BoardScope, Manifest, PullRun, PullSubtask, RunStatus, ScopeRecord, ScopedDirectory,
     SubtaskStatus, state_path,
 };
 
@@ -338,10 +338,10 @@ impl Ground {
         }
     }
 
-    /// The record as the door hands it to the loop: a scope that files to
-    /// Linear, which is the only kind a `Pulling` can be built over.
-    fn linear(&self) -> LinearScope<'_> {
-        LinearScope::of(&self.scope).expect("every record files to Linear")
+    /// The record as the door hands it to the loop, its prefix the team key
+    /// this Linear record carries.
+    fn linear(&self) -> BoardScope<'_> {
+        BoardScope::of(&self.scope)
     }
 
     /// The record as it is on disk, which is the only copy the next invocation of

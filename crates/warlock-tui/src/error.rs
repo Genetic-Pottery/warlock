@@ -398,12 +398,11 @@ impl Error {
 /// on that road either.
 pub(crate) fn files_to_linear(manifest: &Manifest, scope: &str) -> Result<(), Error> {
     match manifest.scope_record(scope) {
-        // The engine's view is the only reader of a record's tracker, so this is
-        // the same answer the flows past it get — and its refusal is the
-        // engine's sentence, carried by `Error::NotLinear` and not reworded.
-        Some(record) => manifest::LinearScope::of(record)
-            .map(drop)
-            .map_err(Error::from),
+        // The record's own tracker, read through the one question the engine
+        // answers about it, so this is the same answer the flows past it get —
+        // and its refusal is the engine's sentence, carried by
+        // `Error::NotLinear` and not reworded.
+        Some(record) => record.files_to_linear().map_err(Error::from),
         None => Ok(()),
     }
 }

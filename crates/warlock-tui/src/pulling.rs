@@ -42,7 +42,7 @@ use std::path::Path;
 
 use warlock_engine::working::{Accepted, Reported};
 use warlock_engine::{
-    LinearScope, Manifest, PullRun, PullSubtask, RunStatus, SubtaskStatus, now_rfc3339, pulls,
+    BoardScope, Manifest, PullRun, PullSubtask, RunStatus, SubtaskStatus, now_rfc3339, pulls,
 };
 
 use crate::board::{Board, Category, Error as BoardError};
@@ -69,16 +69,16 @@ pub(crate) struct Pulling<'a, B: Board, R: Repository, F: Forge, S: Splits, W: W
     pub(crate) forge: &'a F,
     pub(crate) split: &'a S,
     pub(crate) sessions: &'a W,
-    /// The scope the ticket was pulled under, read as a Linear scope: the team
-    /// to file against, the label the queue is read by, and the state a finished
-    /// run moves the ticket to are all on it, and asking the manifest again here
-    /// would be a second reading of a record the door already resolved.
+    /// The scope the ticket was pulled under: the prefix its tickets are keyed
+    /// by, the label the queue is read by, and the state a finished run moves
+    /// the ticket to are all on it, and asking the manifest again here would be
+    /// a second reading of a record the door already resolved.
     ///
-    /// The view and not the record, because a view can only be had from a record
-    /// that files to Linear: every board request below is made against a team
-    /// key, and this is what says the door answered that question before the
-    /// first one was sent.
-    pub(crate) scope: LinearScope<'a>,
+    /// The view says nothing about which board the record files to. That was
+    /// answered at the door, which refuses a scope warlock cannot file to
+    /// before a `Pulling` is built, and the prefix below is a Linear team key
+    /// because of that read and not because of this type.
+    pub(crate) scope: BoardScope<'a>,
     /// What the check after a session judges a changed path against, with
     /// `held`. The manifest in hand rather than one loaded here: reading it
     /// again could disagree with the boundary the door already judged.
@@ -175,7 +175,7 @@ impl<B: Board, R: Repository, F: Forge, S: Splits, W: Works> Pulling<'_, B, R, F
             .map_err(Error::board)?
         {
             self.report(PullEvent::NoStartState {
-                team: self.scope.team_key().to_owned(),
+                team: self.scope.ticket_prefix().to_owned(),
             });
         }
         // Saved before the split, as Forman saves its state before it
@@ -526,7 +526,7 @@ impl<B: Board, R: Repository, F: Forge, S: Splits, W: Works> Pulling<'_, B, R, F
         self.repo.switch_to(&base).map_err(Error::git)?;
         self.repo.catch_up(&base).map_err(Error::git)?;
 
-        let branch = branch_name(self.scope.team_key(), ticket.number, ticket.title);
+        let branch = branch_name(self.scope.ticket_prefix(), ticket.number, ticket.title);
         self.repo.cut_branch(&branch, &base).map_err(Error::git)?;
 
         Ok(PullRun::new(
@@ -546,7 +546,7 @@ impl<B: Board, R: Repository, F: Forge, S: Splits, W: Works> Pulling<'_, B, R, F
             .map_err(Error::board)?
         {
             self.report(PullEvent::NoReviewState {
-                team: self.scope.team_key().to_owned(),
+                team: self.scope.ticket_prefix().to_owned(),
                 state: review.to_owned(),
             });
             return Ok(());
