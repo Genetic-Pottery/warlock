@@ -653,6 +653,9 @@ fn fetch_project(linear: &impl Posts, slug: &str) -> Result<Option<FetchedBrief>
     .map(|comment| text(comment, "body"))
     .collect::<Result<_, _>>()?;
 
+    let status = nullable(project, "status", |status| text(status, "name"))?;
+    let draftable = status.as_deref().is_some_and(is_planned);
+
     Ok(Some(FetchedBrief {
         id,
         name: text(project, "name")?,
@@ -666,9 +669,26 @@ fn fetch_project(linear: &impl Posts, slug: &str) -> Result<Option<FetchedBrief>
             .unwrap_or_default(),
         ),
         url: text(project, "url")?,
-        status: nullable(project, "status", |status| text(status, "name"))?,
+        status,
+        draftable,
         notes,
     }))
+}
+
+/// The one project status a brief is open for drafting in, which
+/// [`planned_projects`] spells again for itself because its filter is on the
+/// wire.
+///
+/// A project status carries no category in Linear's schema, unlike a team's
+/// workflow states, so the name is the whole of what there is to judge by.
+const PLANNED: &str = "Planned";
+
+/// Trimmed and case-folded because the name is typed into Linear by a person
+/// and read back over a wire, and neither end promises the capitalisation
+/// warlock filed it under. Nothing wider than that: a workspace that spells its
+/// planned column something else is a refusal rather than a guess.
+fn is_planned(status: &str) -> bool {
+    status.trim().eq_ignore_ascii_case(PLANNED)
 }
 
 /// Linear rewrites a bare name that ends like a domain, such as `run.sh`, into

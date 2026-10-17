@@ -49,8 +49,9 @@ const URL: &str = "https://linear.app/acme/project/draft-a-brief-1a2b3c";
 
 const NAME: &str = "Cut a planned project into tickets";
 
-// The board's own spelling, which is not `Planned`: the gate folds case, and
-// the line reports what somebody sent to look would find written there.
+// The board's own spelling, which is not `Planned`: whether a brief is open
+// for drafting is the board's answer and not this word, and the line reports
+// what somebody sent to look would find written there.
 const STATUS: &str = "planned";
 
 // Three slices in document order, each waiting on the one before it: the
@@ -125,9 +126,11 @@ fn a_home(root: &Path) -> TempDir {
 // would have filed them.
 fn noted(cuts: &[&str]) -> Boarding {
     Boarding::filing("").reading(
-        FetchedBrief::new(NAME, SLICED, URL, Some(STATUS)).with_notes(cuts.iter().enumerate().map(
-            |(place, title)| format!("Warlock cut slice `{title}` into `WAR-{}`.", place + 1),
-        )),
+        FetchedBrief::new(NAME, SLICED, URL, Some(STATUS), true).with_notes(
+            cuts.iter().enumerate().map(|(place, title)| {
+                format!("Warlock cut slice `{title}` into `WAR-{}`.", place + 1)
+            }),
+        ),
     )
 }
 
@@ -234,7 +237,7 @@ fn refusal(error: &Error) -> String {
 // The workspace every test here reads back: one project, planned, with three
 // slices under its scope block.
 fn a_project() -> Boarding {
-    Boarding::holding(NAME, Some(STATUS), SLICED)
+    Boarding::holding(NAME, Some(STATUS), true, SLICED)
 }
 
 // A model no slice may reach. Every test above the run is decided before a
@@ -306,7 +309,7 @@ fn a_cut_reports_the_project_its_status_and_how_many_slices_are_left() {
     // asked about.
     let repo = a_repository();
     let home = a_home(repo.path());
-    let linear = Boarding::holding(NAME, Some(STATUS), SLICED);
+    let linear = Boarding::holding(NAME, Some(STATUS), true, SLICED);
     let mut cutter = Cutter::with_client(
         linear.clone(),
         Some(home.path().to_path_buf()),
@@ -375,7 +378,7 @@ fn a_project_that_is_not_planned_is_one_line_with_nothing_torn_down() {
     // there is no other way to know the status — and nothing else happened.
     let repo = a_repository();
     let home = a_home(repo.path());
-    let linear = Boarding::holding(NAME, Some("Backlog"), SLICED);
+    let linear = Boarding::holding(NAME, Some("Backlog"), false, SLICED);
     let mut cutter = Cutter::with_client(
         linear.clone(),
         Some(home.path().to_path_buf()),
@@ -442,7 +445,7 @@ fn a_second_cut_with_one_in_flight_is_one_line_and_reads_nothing() {
     let repo = a_repository();
     let home = a_home(repo.path());
     let gate = Gate::shut();
-    let linear = Boarding::holding(NAME, Some(STATUS), SLICED).held_at(&gate);
+    let linear = Boarding::holding(NAME, Some(STATUS), true, SLICED).held_at(&gate);
     let mut cutter = Cutter::with_client(
         linear.clone(),
         Some(home.path().to_path_buf()),
@@ -477,7 +480,7 @@ fn the_rounds_go_on_while_the_request_is_in_flight() {
     let home = a_home(repo.path());
     let gate = Gate::shut();
     let mut cutter = Cutter::with_client(
-        Boarding::holding(NAME, Some(STATUS), SLICED).held_at(&gate),
+        Boarding::holding(NAME, Some(STATUS), true, SLICED).held_at(&gate),
         Some(home.path().to_path_buf()),
         unasked(),
         unasked(),
@@ -511,7 +514,7 @@ fn a_cut_says_which_project_it_is_reading_before_the_board_answers() {
     let home = a_home(repo.path());
     let gate = Gate::shut();
     let mut cutter = Cutter::with_client(
-        Boarding::holding(NAME, Some(STATUS), SLICED).held_at(&gate),
+        Boarding::holding(NAME, Some(STATUS), true, SLICED).held_at(&gate),
         Some(home.path().to_path_buf()),
         unasked(),
         unasked(),
@@ -537,7 +540,7 @@ fn dropping_the_session_ends_the_cut_without_waiting_for_it() {
     let home = a_home(repo.path());
     let gate = Gate::shut();
     let mut cutter = Cutter::with_client(
-        Boarding::holding(NAME, Some(STATUS), SLICED).held_at(&gate),
+        Boarding::holding(NAME, Some(STATUS), true, SLICED).held_at(&gate),
         Some(home.path().to_path_buf()),
         unasked(),
         unasked(),
@@ -868,7 +871,7 @@ mod asking {
         let repo = a_repository();
         let home = a_home(repo.path());
         let mut cutter = Cutter::with_client(
-            Boarding::holding(NAME, Some("Backlog"), SLICED),
+            Boarding::holding(NAME, Some("Backlog"), false, SLICED),
             Some(home.path().to_path_buf()),
             unasked(),
             unasked(),
@@ -961,7 +964,7 @@ mod asking {
         let repo = a_repository();
         let home = a_home(repo.path());
         let mut cutter = Cutter::with_client(
-            Boarding::holding(NAME, Some(STATUS), SLICED),
+            Boarding::holding(NAME, Some(STATUS), true, SLICED),
             Some(home.path().to_path_buf()),
             unasked(),
             unasked(),

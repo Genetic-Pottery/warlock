@@ -237,9 +237,9 @@ pub(crate) fn push_answer_for(key: KeyEvent, highlighted: Answer) -> PushAnswere
 // board the machine's own way, with no field in front of it to name a second
 // one, so a Yes asks that same question again from nothing this value carries.
 //
-// The status is the board's own spelling and not `Planned`: the gate folds case
-// and trims, and what a reader is shown is what somebody sent to look would
-// find written on the project.
+// The status is the board's own spelling and not `Planned`: whether the brief
+// was open for drafting is the board's own answer, and what a reader is shown
+// is what somebody sent to look would find written on the project.
 //
 // The lit answer rides along inside it for [`QuitConfirm`]'s reason — it exists
 // exactly as long as the question does — which is why this is only ever built

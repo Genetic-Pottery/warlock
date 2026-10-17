@@ -332,24 +332,26 @@ fn a_skip(title: &str) -> String {
 // A planned project whose comments already hold these notes.
 fn a_noted_project<const N: usize>(content: &str, notes: [String; N]) -> Boarding {
     Boarding::filing("")
-        .reading(FetchedBrief::new(NAME, content, URL, Some(PLANNED)).with_notes(notes))
+        .reading(FetchedBrief::new(NAME, content, URL, Some(PLANNED), true).with_notes(notes))
 }
 
 // A workspace holding the one project the slug names, which answers everything
-// a run then asks for as well.
-fn a_project_of(content: &str, status: Option<&str>) -> Boarding {
-    Boarding::filing("").reading(FetchedBrief::new(NAME, content, URL, status))
+// a run then asks for as well. The status and the board's judgement of it are
+// given apart, because that is how a brief comes back: which words mean a
+// brief may be drafted is the board's fact and not this module's.
+fn a_project_of(content: &str, status: Option<&str>, draftable: bool) -> Boarding {
+    Boarding::filing("").reading(FetchedBrief::new(NAME, content, URL, status, draftable))
 }
 
 // A planned project with slices in it, which is the one answer a whole cut
 // gets before it starts drafting.
 fn a_sliced_project(content: &str) -> Boarding {
-    a_project_of(content, Some(PLANNED))
+    a_project_of(content, Some(PLANNED), true)
 }
 
 // The same slices in whatever status a case needs.
-fn a_project(status: Option<&str>) -> Boarding {
-    a_project_of(SLICED, status)
+fn a_project(status: Option<&str>, draftable: bool) -> Boarding {
+    a_project_of(SLICED, status, draftable)
 }
 
 // What a refusal on the project's own state reads: the user the key belongs
@@ -653,7 +655,7 @@ mod preparing {
     fn a_project_is_fetched_by_the_slug_it_was_named_with() {
         let repo = a_scoped_repository();
         let home = a_home(repo.path());
-        let linear = a_project(Some("Planned"));
+        let linear = a_project(Some("Planned"), true);
 
         let planned = prepared(repo.path(), home.path(), &linear);
 
@@ -696,7 +698,7 @@ mod preparing {
     fn a_project_that_is_not_planned_names_the_status_it_found_and_the_one_it_wanted() {
         let repo = a_scoped_repository();
         let home = a_home(repo.path());
-        let linear = a_project(Some("Backlog"));
+        let linear = a_project(Some("Backlog"), false);
 
         let error = refused(repo.path(), home.path(), SLUG, None, &linear);
 
@@ -718,7 +720,13 @@ mod preparing {
         let repo = a_scoped_repository();
         let home = a_home(repo.path());
 
-        let error = refused(repo.path(), home.path(), SLUG, None, &a_project(None));
+        let error = refused(
+            repo.path(),
+            home.path(),
+            SLUG,
+            None,
+            &a_project(None, false),
+        );
 
         assert!(
             matches!(&error, Error::NotPlanned { status: None, .. }),
@@ -730,42 +738,35 @@ mod preparing {
     }
 
     #[test]
-    fn the_status_is_trimmed_and_case_folded_and_planned_is_the_only_spelling_accepted() {
+    fn the_board_decides_whether_a_brief_is_open_for_drafting_and_the_status_is_only_reported() {
         let repo = a_scoped_repository();
         let home = a_home(repo.path());
 
-        for accepted in ["Planned", "planned", " Planned ", "PLANNED", "\tplanned\n"] {
+        for open_in in ["Planned", "planned", "To Do", "Ready for dev"] {
             let planned = preparing(
                 repo.path(),
                 home.path(),
                 SLUG,
                 None,
-                &a_project(Some(accepted)),
+                &a_project(Some(open_in), true),
             )
-            .unwrap_or_else(|error| panic!("`{accepted}` is `Planned`: {error:?}"));
+            .unwrap_or_else(|error| panic!("the board called `{open_in}` draftable: {error:?}"));
             // The board's own spelling is what is reported, not this module's.
-            assert_eq!(planned.status(), accepted);
+            assert_eq!(planned.status(), open_in);
         }
 
-        for refused_as in [
-            "Backlog",
-            "In Progress",
-            "Plan",
-            "Planned later",
-            "",
-            "unplanned",
-        ] {
+        for closed_in in ["Backlog", "In Progress", "Planned", "Planned later", ""] {
             let error = refused(
                 repo.path(),
                 home.path(),
                 SLUG,
                 None,
-                &a_project(Some(refused_as)),
+                &a_project(Some(closed_in), false),
             );
 
             assert!(
-                matches!(&error, Error::NotPlanned { status, .. } if status.as_deref() == Some(refused_as)),
-                "`{refused_as}` was read as `Planned`: {error:?}"
+                matches!(&error, Error::NotPlanned { status, .. } if status.as_deref() == Some(closed_in)),
+                "`{closed_in}` was drafted against the board's answer: {error:?}"
             );
         }
     }
@@ -774,7 +775,7 @@ mod preparing {
     fn nothing_on_this_path_writes_to_the_board() {
         let repo = a_scoped_repository();
         let home = a_home(repo.path());
-        let linear = a_project(Some("Planned"));
+        let linear = a_project(Some("Planned"), true);
 
         prepared(repo.path(), home.path(), &linear);
 
@@ -1293,7 +1294,7 @@ mod headless {
     fn a_refusal_prints_nothing_and_is_the_ordinary_exit_status() {
         let repo = a_scoped_repository();
         let home = a_home(repo.path());
-        let linear = a_project(Some("Backlog"));
+        let linear = a_project(Some("Backlog"), false);
 
         let (outcome, printed) = cut_to(repo.path(), home.path(), SLUG, None, false, &linear);
 

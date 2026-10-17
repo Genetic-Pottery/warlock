@@ -678,11 +678,17 @@ impl Boarding {
         }
     }
 
-    /// A workspace holding one project, under that name, in that status, with
-    /// that description — which is where the scope block a cut parses lives.
+    /// A workspace holding one project, under that name, in that status, open
+    /// for drafting or not, with that description — which is where the scope
+    /// block a cut parses lives.
+    ///
+    /// The status and the judgement are given apart, as a board answers them:
+    /// nothing here reads one off the other, so a case can hold whichever pair
+    /// it is about.
     pub(crate) fn holding(
         name: impl Into<String>,
         status: Option<&str>,
+        draftable: bool,
         content: impl Into<String>,
     ) -> Self {
         Self::filing("").reading(FetchedBrief::new(
@@ -690,6 +696,7 @@ impl Boarding {
             content,
             "https://linear.app/acme/project/drafted-1a2b3c",
             status,
+            draftable,
         ))
     }
 

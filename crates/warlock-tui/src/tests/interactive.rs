@@ -1989,7 +1989,7 @@ mod filing {
     // the brief as its description, which is where the scope block a cut is made
     // over lives.
     fn a_planned_project() -> Boarding {
-        Boarding::holding(PLANNED, Some("Planned"), BRIEF)
+        Boarding::holding(PLANNED, Some("Planned"), true, BRIEF)
     }
 
     // The same home with the scope bound to nothing: the checkout somebody has
@@ -2732,7 +2732,7 @@ mod cutting {
         session_on(
             repo,
             home,
-            &Boarding::holding(NAME, Some("Planned"), SLICED),
+            &Boarding::holding(NAME, Some("Planned"), true, SLICED),
             agent,
             proposer,
         )
@@ -2921,7 +2921,7 @@ mod cutting {
     fn a_draft_naming_a_slug_reads_that_project_and_asks_about_it() {
         let repo = a_repository();
         let home = a_home(repo.path());
-        let linear = Boarding::holding(NAME, Some("Planned"), SLICED);
+        let linear = Boarding::holding(NAME, Some("Planned"), true, SLICED);
         let mut driven = session_on(
             repo.path(),
             home.path(),

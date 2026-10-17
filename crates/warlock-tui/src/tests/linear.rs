@@ -297,6 +297,50 @@ fn a_project_is_read_back_by_slug_in_one_request_with_its_notes() {
 }
 
 #[test]
+fn a_project_is_draftable_exactly_when_its_status_is_planned_trimmed_and_case_folded() {
+    for (status, draftable) in [
+        ("Planned", true),
+        ("planned", true),
+        (" Planned ", true),
+        ("PLANNED", true),
+        ("\tplanned\n", true),
+        ("Backlog", false),
+        ("In Progress", false),
+        ("Plan", false),
+        ("Planned later", false),
+        ("", false),
+        ("unplanned", false),
+    ] {
+        let mut answer = project_on_the_board();
+        answer["project"]["status"] = json!({ "name": status });
+        let linear = Posting::answering([Ok(answer)]);
+
+        let project = fetch_project(&linear, SLUG)
+            .expect("the stand-in answered")
+            .expect("the stand-in knows the project");
+
+        assert_eq!(project.draftable(), draftable, "{status:?}");
+        // The board's own spelling rides along whichever way it was judged:
+        // the refusal names what somebody sent to look would find there.
+        assert_eq!(project.status(), Some(status));
+    }
+}
+
+#[test]
+fn a_project_with_no_status_at_all_is_not_draftable() {
+    let mut answer = project_on_the_board();
+    answer["project"]["status"] = Value::Null;
+    let linear = Posting::answering([Ok(answer)]);
+
+    let project = fetch_project(&linear, SLUG)
+        .expect("the stand-in answered")
+        .expect("the stand-in knows the project");
+
+    assert_eq!(project.status(), None);
+    assert!(!project.draftable());
+}
+
+#[test]
 fn a_name_linear_linked_comes_back_as_the_name_the_brief_wrote() {
     let mut answer = project_on_the_board();
     answer["project"]["content"] = json!(
