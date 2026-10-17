@@ -87,7 +87,7 @@ pub(crate) struct TicketBrief {
     pub(crate) id: String,
     pub(crate) name: String,
     pub(crate) status: Option<String>,
-    pub(crate) states: Vec<(String, StateType)>,
+    pub(crate) states: Vec<(String, Category)>,
 }
 
 impl TicketBrief {
@@ -100,7 +100,7 @@ impl TicketBrief {
             status: Some(status.to_owned()),
             states: issues
                 .iter()
-                .map(|(name, kind)| ((*name).to_owned(), StateType::new(*kind)))
+                .map(|(name, kind)| ((*name).to_owned(), Category::of(kind)))
                 .collect(),
         }
     }
@@ -121,7 +121,7 @@ impl TicketBrief {
     }
 
     #[must_use]
-    pub(crate) fn states(&self) -> &[(String, StateType)] {
+    pub(crate) fn states(&self) -> &[(String, Category)] {
         &self.states
     }
 }
@@ -274,7 +274,7 @@ pub struct QueuedTicket {
     pub(crate) title: String,
     pub(crate) description: String,
     pub(crate) state: String,
-    pub(crate) state_type: StateType,
+    pub(crate) state_type: Category,
     pub(crate) priority: Priority,
     pub(crate) blockers: Vec<Blocker>,
 }
@@ -286,7 +286,7 @@ impl QueuedTicket {
         identifier: impl Into<String>,
         title: impl Into<String>,
         state: impl Into<String>,
-        state_type: StateType,
+        state_type: Category,
         priority: Priority,
         blockers: Vec<Blocker>,
     ) -> Self {
@@ -340,8 +340,8 @@ impl QueuedTicket {
     }
 
     #[must_use]
-    pub const fn state_type(&self) -> &StateType {
-        &self.state_type
+    pub const fn state_type(&self) -> Category {
+        self.state_type
     }
 
     #[must_use]
@@ -365,7 +365,7 @@ impl QueuedTicket {
 pub struct Blocker {
     pub(crate) identifier: String,
     pub(crate) assignee: Option<String>,
-    pub(crate) state_type: StateType,
+    pub(crate) state_type: Category,
 }
 
 impl Blocker {
@@ -373,7 +373,7 @@ impl Blocker {
     pub fn new(
         identifier: impl Into<String>,
         assignee: Option<&str>,
-        state_type: StateType,
+        state_type: Category,
     ) -> Self {
         Self {
             identifier: identifier.into(),
@@ -396,34 +396,39 @@ impl Blocker {
     }
 
     #[must_use]
-    pub const fn state_type(&self) -> &StateType {
-        &self.state_type
+    pub const fn state_type(&self) -> Category {
+        self.state_type
     }
 }
 
-/// A workflow state's type, which is the part of a state that is Linear's rather
-/// than the team's: `triage`, `backlog`, `unstarted`, `started`, `completed`,
-/// `canceled`.
+/// How far along a workflow state is, in the three answers warlock acts on: an
+/// issue nobody has begun, one somebody is on, and one that is out of the way.
 ///
-/// Kept as the string it arrived as instead of an enum over those six, because
-/// the only question anything asks of it is [`StateType::settled`] and a seventh
-/// type invented in Linear next year should not make a queue unreadable.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StateType(pub(crate) String);
+/// [`Settled`](Self::Settled) is the judgement everything downstream asks for —
+/// a blocker in it no longer holds anything up, and a named ticket in it is
+/// refused as finished — so a word warlock does not recognise must not land
+/// there. [`Category::of`] puts an unknown word in [`Started`](Self::Started)
+/// instead: the corner where the issue is neither offered as fresh work nor
+/// treated as done, which is what a seventh Linear type or a Jira category
+/// nobody has seen should cost.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Category {
+    New,
+    Started,
+    Settled,
+}
 
-impl StateType {
+impl Category {
+    /// Both boards' vocabularies in one match, because they do not collide:
+    /// Linear answers a state's `type` and Jira a status category's `key`, and
+    /// no word means one thing on one board and another on the other.
     #[must_use]
-    pub fn new(name: impl Into<String>) -> Self {
-        Self(name.into())
-    }
-
-    /// Out of the way: the one judgement this type exists to make. An issue is
-    /// ready when every issue blocking it is settled, and these two types are
-    /// what Linear calls settled — a state named `Done`, `Shipped` or `Won't do`
-    /// is one of them whatever the team called it.
-    #[must_use]
-    pub fn settled(&self) -> bool {
-        self.0 == "completed" || self.0 == "canceled"
+    pub fn of(word: &str) -> Self {
+        match word {
+            "triage" | "backlog" | "unstarted" | "new" => Self::New,
+            "completed" | "canceled" | "done" => Self::Settled,
+            _ => Self::Started,
+        }
     }
 }
 

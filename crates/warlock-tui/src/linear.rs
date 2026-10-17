@@ -20,9 +20,9 @@ use ureq::http::HeaderValue;
 use ureq::http::header::AUTHORIZATION;
 
 use crate::board::{
-    Assignee, Blocker, Board, CUT_NOTE, Error, FetchedBrief, FiledBrief, FiledTicket, Listing,
-    NamedTicket, NewBrief, NewTicket, Opener, Opens, Priority, Queue, QueuedTicket, SKIP_NOTE,
-    StateType, TicketBrief,
+    Assignee, Blocker, Board, CUT_NOTE, Category, Error, FetchedBrief, FiledBrief, FiledTicket,
+    Listing, NamedTicket, NewBrief, NewTicket, Opener, Opens, Priority, Queue, QueuedTicket,
+    SKIP_NOTE, TicketBrief,
 };
 use crate::queue::same_name;
 
@@ -368,7 +368,7 @@ fn issue_project(linear: &impl Posts, issue: &str) -> Result<Option<TicketBrief>
     .iter()
     .map(|issue| {
         let state = issue.get("state").ok_or_else(|| missing("state"))?;
-        Ok((text(state, "name")?, StateType::new(text(state, "type")?)))
+        Ok((text(state, "name")?, Category::of(&text(state, "type")?)))
     })
     .collect::<Result<_, Error>>()?;
 
@@ -856,7 +856,7 @@ fn queued_issue(linear: &impl Posts, node: &Value) -> Result<QueuedTicket, Error
             .unwrap_or_default()
             .to_owned(),
         state: text(state, "name")?,
-        state_type: StateType(text(state, "type")?),
+        state_type: Category::of(&text(state, "type")?),
         priority: priority(node)?,
         blockers,
     };
@@ -880,7 +880,7 @@ fn blocker(relation: &Value) -> Result<Blocker, Error> {
     Ok(Blocker {
         identifier: text(blocker, "identifier")?,
         assignee: nullable(blocker, "assignee", |assignee| text(assignee, "name"))?,
-        state_type: StateType(text(state, "type")?),
+        state_type: Category::of(&text(state, "type")?),
     })
 }
 

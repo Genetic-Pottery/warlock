@@ -45,7 +45,7 @@ use warlock_engine::{
     LinearScope, Manifest, PullRun, PullSubtask, RunStatus, SubtaskStatus, now_rfc3339, pulls,
 };
 
-use crate::board::{Board, Error as BoardError};
+use crate::board::{Board, Category, Error as BoardError};
 use crate::claude::{Activity, Sibling, Split, Worked, working_opening};
 use crate::crossings::{Crossing, crossings_after};
 use crate::git::{
@@ -939,7 +939,7 @@ fn project_review(board: &impl Board, issue: &str, review: &str) -> Option<Strin
     let reviewed = project
         .states()
         .iter()
-        .all(|(state, kind)| kind.settled() || same_name(state, review));
+        .all(|(state, kind)| *kind == Category::Settled || same_name(state, review));
     if !reviewed {
         return None;
     }

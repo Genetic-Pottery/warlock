@@ -13,8 +13,8 @@ use super::{
 };
 
 use crate::board::{
-    Assignee, Blocker, Board, CUT_NOTE, Error, NamedTicket, NewBrief, NewTicket, Priority,
-    QueuedTicket, SKIP_NOTE, StateType,
+    Assignee, Blocker, Board, CUT_NOTE, Category, Error, NamedTicket, NewBrief, NewTicket,
+    Priority, QueuedTicket, SKIP_NOTE,
 };
 use crate::queue::IN_PROGRESS;
 use crate::stubs::Posting;
@@ -665,14 +665,14 @@ fn a_scopes_whole_queue_is_read_in_one_request() {
     // The team's own name for the state, and Linear's type for it: a record
     // names states the first way and readiness is decided the second.
     assert_eq!(issue.state(), "Todo");
-    assert_eq!(issue.state_type(), &StateType::new("unstarted"));
+    assert_eq!(issue.state_type(), Category::of("unstarted"));
     assert_eq!(issue.priority(), Priority::High);
     assert_eq!(
         issue.blockers(),
         [Blocker::new(
             "WAR-129",
             Some("Ada"),
-            StateType::new("started")
+            Category::of("started")
         )]
     );
     assert_eq!(
@@ -811,14 +811,18 @@ fn a_blocker_is_carried_whoever_owns_it_and_whatever_state_it_is_in() {
     assert_eq!(
         issue.blockers(),
         [
-            Blocker::new("WAR-9", Some("Someone Else"), StateType::new("started")),
-            Blocker::new("WAR-10", None, StateType::new("backlog")),
-            Blocker::new("WAR-11", Some("Ada"), StateType::new("completed")),
+            Blocker::new("WAR-9", Some("Someone Else"), Category::of("started")),
+            Blocker::new("WAR-10", None, Category::of("backlog")),
+            Blocker::new("WAR-11", Some("Ada"), Category::of("completed")),
         ]
     );
-    assert!(!issue.blockers()[0].state_type().settled());
-    assert!(!issue.blockers()[1].state_type().settled());
-    assert!(issue.blockers()[2].state_type().settled(), "out of the way");
+    assert_ne!(issue.blockers()[0].state_type(), Category::Settled);
+    assert_ne!(issue.blockers()[1].state_type(), Category::Settled);
+    assert_eq!(
+        issue.blockers()[2].state_type(),
+        Category::Settled,
+        "out of the way"
+    );
 }
 
 #[test]
@@ -840,13 +844,24 @@ fn the_blockers_asked_for_carry_no_filter_of_their_own() {
 }
 
 #[test]
-fn only_completed_and_canceled_are_out_of_the_way() {
-    for settled in ["completed", "canceled"] {
-        assert!(StateType::new(settled).settled(), "{settled}");
+fn each_boards_status_words_map_to_a_category() {
+    for new in ["triage", "backlog", "unstarted", "new"] {
+        assert_eq!(Category::of(new), Category::New, "{new}");
     }
-    for open in ["triage", "backlog", "unstarted", "started", "invented"] {
-        assert!(!StateType::new(open).settled(), "{open}");
+    for started in ["started", "indeterminate"] {
+        assert_eq!(Category::of(started), Category::Started, "{started}");
     }
+    for settled in ["completed", "canceled", "done"] {
+        assert_eq!(Category::of(settled), Category::Settled, "{settled}");
+    }
+}
+
+#[test]
+fn a_status_word_neither_board_has_is_neither_new_nor_settled() {
+    let invented = Category::of("invented");
+
+    assert_ne!(invented, Category::New);
+    assert_ne!(invented, Category::Settled);
 }
 
 #[test]
@@ -1172,7 +1187,7 @@ fn a_ticket_that_shipped_is_still_answered() {
     // absent from the queue too, and a refusal calling that "not on your team"
     // would be a lie about the board.
     assert_eq!(found.issue().state(), "Done");
-    assert!(found.issue().state_type().settled());
+    assert_eq!(found.issue().state_type(), Category::Settled);
 }
 
 #[test]

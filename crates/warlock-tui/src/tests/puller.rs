@@ -16,7 +16,7 @@ use warlock_engine::{
 use super::Puller;
 use crate::account::Line;
 use crate::app::App;
-use crate::board::{Assignee, NamedTicket, Priority, Queue, QueuedTicket, StateType};
+use crate::board::{Assignee, Category, NamedTicket, Priority, Queue, QueuedTicket};
 use crate::claude::Activity;
 use crate::confirm::{Answer, PullAnswered};
 use crate::error::{Error, NO_QUEUE, one_line};
@@ -174,7 +174,7 @@ fn ready() -> QueuedTicket {
         TICKET,
         TITLE,
         "Todo",
-        StateType::new("unstarted"),
+        Category::of("unstarted"),
         Priority::Urgent,
         Vec::new(),
     )

@@ -8,7 +8,7 @@ use warlock_engine::{
 };
 
 use super::{Ports, Prepared, Progress, Shared, held, prepare, pulled, shared};
-use crate::board::{Assignee, Blocker, NamedTicket, Priority, Queue, QueuedTicket, StateType};
+use crate::board::{Assignee, Blocker, Category, NamedTicket, Priority, Queue, QueuedTicket};
 use crate::claude::Activity;
 use crate::error::status_for;
 use crate::error::{Error, NO_QUEUE};
@@ -152,7 +152,7 @@ fn issue(identifier: &str, title: &str, state: &str, kind: &str) -> QueuedTicket
         identifier,
         title,
         state,
-        StateType::new(kind),
+        Category::of(kind),
         Priority::High,
         Vec::new(),
     )
@@ -166,7 +166,7 @@ fn ready() -> QueuedTicket {
         TICKET,
         TITLE,
         "Todo",
-        StateType::new("unstarted"),
+        Category::of("unstarted"),
         Priority::Urgent,
         Vec::new(),
     )
@@ -178,9 +178,9 @@ fn blocked(identifier: &str, by: &str, holder: Option<&str>) -> QueuedTicket {
         identifier,
         "Something waiting",
         "Todo",
-        StateType::new("unstarted"),
+        Category::of("unstarted"),
         Priority::High,
-        vec![Blocker::new(by, holder, StateType::new("started"))],
+        vec![Blocker::new(by, holder, Category::of("started"))],
     )
 }
 
