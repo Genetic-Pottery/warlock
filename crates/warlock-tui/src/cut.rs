@@ -24,8 +24,8 @@ use std::path::Path;
 use warlock_engine::drafting::{Draft, is_identifier};
 use warlock_engine::{Destination, manifest_path};
 
+use crate::board::{Board, CUT_NOTE, Issue as LinearIssue, NewIssue, SKIP_NOTE};
 use crate::error::{Error, say};
-use crate::linear::{Board, CUT_NOTE, Issue as LinearIssue, NewIssue, SKIP_NOTE};
 use crate::queue::IN_PROGRESS;
 
 /// Where one slice's issues go: the board [`resolve_filing`] answered and the

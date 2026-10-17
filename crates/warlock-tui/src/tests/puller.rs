@@ -16,11 +16,11 @@ use warlock_engine::{
 use super::Puller;
 use crate::account::Line;
 use crate::app::App;
+use crate::board::{Assignee, NamedIssue, Priority, Queue, QueuedIssue, StateType};
 use crate::claude::Activity;
 use crate::confirm::{Answer, PullAnswered};
 use crate::error::{Error, NO_QUEUE, one_line};
 use crate::git::Dirty;
-use crate::linear::{Assignee, NamedIssue, Priority, Queue, QueuedIssue, StateType};
 use crate::prompt::KeyPrompt;
 use crate::stubs::{Boarding, Checkout, Forging, Op, Sessions, Slicing, VIEWER, Written, said};
 use crate::submission::Taking;

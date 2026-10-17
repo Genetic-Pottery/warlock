@@ -57,6 +57,11 @@ use std::time::Instant;
 use warlock_engine::{LinearScope, Manifest, PullRun, load_key_binding};
 
 use crate::app::App;
+use crate::board::{
+    Board, Error as LinearError, FetchedProject, Issue as LinearIssue, IssueProject, Listing,
+    NamedIssue, NewIssue, NewProject, Opener as LinearOpener, Opens, Project as LinearProject,
+    Queue,
+};
 use crate::claude::{
     Activities, Activity, Cancel, CancelGuard, ChatAgent, Split, Splitting, Worked, Working,
     working_system_prompt,
@@ -65,11 +70,6 @@ use crate::confirm::{PullAnswered, PullConfirm, Undertaking};
 use crate::error::{Error, files_to_linear, one_line};
 use crate::git::{Commit, Dirty, Error as GitError, Forge, Gh, Git, Repository, branch_name};
 use crate::inflight::{Lost, Once, Port, Stream, Workers, settled};
-use crate::linear::{
-    Board, Error as LinearError, FetchedProject, Issue as LinearIssue, IssueProject, Listing,
-    NamedIssue, NewIssue, NewProject, Opener as LinearOpener, Opens, Project as LinearProject,
-    Queue,
-};
 use crate::prompt::KeyPrompt;
 use crate::pull::{
     Prepared, clean, nothing_ready, number_in, opened, passed_over, prepare, selection, unchanged,

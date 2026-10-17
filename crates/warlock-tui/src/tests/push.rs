@@ -8,10 +8,10 @@ use warlock_engine::{
 };
 
 use super::{Prepared, file, prepare, pushed, sent};
+use crate::board::Opens;
 use crate::brief::{Brief, brief_at};
 use crate::error::Error;
 use crate::error::status_for;
-use crate::linear::Opens;
 use crate::standing::Standing;
 use crate::stubs::{Boarding, Call, Op, ProjectAsked};
 

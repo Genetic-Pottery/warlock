@@ -487,7 +487,8 @@ mod named {
     use warlock_engine::{LinearScope, ScopeRecord};
 
     use super::{PullRun, Reason, RunStatus, run};
-    use crate::linear::{Error as LinearError, Linear};
+    use crate::board::Error as LinearError;
+    use crate::linear::Linear;
     use crate::queue::{Named, Refusal, take_named};
     use crate::stubs::Posting;
 

@@ -4,15 +4,18 @@ use std::io;
 use serde_json::{Value, json};
 
 use super::{
-    Assignee, BACKLOG, BLOCKERS_PAGE, Blocker, Board, CUT_NOTE, Client, ENDPOINT, Error,
-    LABELS_PAGE, Linear, NamedIssue, NewIssue, NewProject, Posts, Priority, QUEUE_PAGE,
-    QueuedIssue, REQUEST_TIMEOUT, SKIP_NOTE, StateType, answer, authorization, backlog_state,
-    backlog_status, comment_on_issue, comment_on_project, create_issue, create_project,
-    create_relation, fetch_project, issue_label_id, issue_project, label_id, move_issue,
-    move_project, named_issue, planned_projects, project_named, project_status, scope_queue,
-    team_id, unlinked, viewer, workflow_state,
+    BACKLOG, BLOCKERS_PAGE, Client, ENDPOINT, LABELS_PAGE, Linear, Posts, QUEUE_PAGE,
+    REQUEST_TIMEOUT, answer, authorization, backlog_state, backlog_status, comment_on_issue,
+    comment_on_project, create_issue, create_project, create_relation, fetch_project,
+    issue_label_id, issue_project, label_id, move_issue, move_project, named_issue,
+    planned_projects, project_named, project_status, scope_queue, team_id, unlinked, viewer,
+    workflow_state,
 };
 
+use crate::board::{
+    Assignee, Blocker, Board, CUT_NOTE, Error, NamedIssue, NewIssue, NewProject, Priority,
+    QueuedIssue, SKIP_NOTE, StateType,
+};
 use crate::queue::IN_PROGRESS;
 use crate::stubs::Posting;
 
@@ -22,7 +25,9 @@ fn variants() -> Vec<Error> {
     vec![
         Error::Key,
         Error::Transport {
-            source: ureq::Error::Io(io::Error::other("connection reset by peer")),
+            source: Box::new(ureq::Error::Io(io::Error::other(
+                "connection reset by peer",
+            ))),
         },
         Error::Status { code: 401 },
         Error::Malformed {

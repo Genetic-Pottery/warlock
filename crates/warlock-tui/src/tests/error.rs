@@ -3,9 +3,9 @@ use std::path::{Path, PathBuf};
 use warlock_engine::{Manifest, briefs, config, manifest, manifest_path, resolve_filing, scope};
 
 use super::{Error, one_line, status_for};
+use crate::board::Error as LinearError;
 use crate::boundary::unscoped_message;
 use crate::brief::{ScopeBlockError, brief_at};
-use crate::linear::Error as LinearError;
 use crate::query::spelled;
 use crate::rescope::ScopeRefusal;
 use crate::template::Error as TemplateError;

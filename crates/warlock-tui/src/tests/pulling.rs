@@ -11,11 +11,11 @@ use warlock_engine::{
 use super::{
     Error, Heading, PullEvent, Pulled, Pulling, Reached, Ticket, halt_comment, next_runnable,
 };
+use crate::board::IssueProject;
 use crate::claude::{Split, Stopped, Unsplit, Worked};
 use crate::git::{
     Dirty, Finished, Repository, Touched, commit_message, pull_request_body, pull_request_title,
 };
-use crate::linear::IssueProject;
 use crate::stubs::{Boarding, Call, Checkout, Forging, GitCall, Op, Sessions, Slicing, said};
 
 const TICKET: &str = "WAR-140";

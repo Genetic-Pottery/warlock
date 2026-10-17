@@ -9,6 +9,7 @@ use ratatui::layout::Size;
 use warlock_engine::Manifest;
 
 use crate::app::{App, Focus, Working};
+use crate::board::{Opener as LinearOpener, Opens};
 use crate::chatting::Chat;
 use crate::claude::{ChatAgent, Converses};
 use crate::clipboard::{self, Clip, Clipboard};
@@ -24,7 +25,6 @@ use crate::input::{
     Action, Drag, MouseAction, Pressed, Scroll, drag_after, mouse_action, press_for,
 };
 use crate::key::{bound_name, names_line};
-use crate::linear::{Opener as LinearOpener, Opens};
 use crate::modal::{Modal, Modals};
 use crate::planned::edited_drafts;
 use crate::prompt::{KeyEdited, KeyPrompt, RecordPrompt, ScopePrompt, TrackerPrompt};

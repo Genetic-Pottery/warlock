@@ -10,14 +10,15 @@ use warlock_engine::splitting::Numbered;
 use warlock_engine::{agent, drafting, working};
 
 use crate::asking::Asks;
+use crate::board::{
+    Board, Error as LinearError, FetchedProject, Issue as LinearIssue, IssueProject, Listing,
+    NamedIssue, NewIssue, NewProject, Opens, Project as LinearProject, Queue,
+};
 use crate::claude::{Activities, Activity, Cancel, Converses, Split, Stopped, Wired, Worked};
 use crate::clipboard::Clip;
 use crate::error::Error;
 use crate::git::{Commit, Dirty, Error as GitError, Forge, Opened, PullRequest, Repository};
-use crate::linear::{
-    Board, Error as LinearError, FetchedProject, Issue as LinearIssue, IssueProject, Listing,
-    NamedIssue, NewIssue, NewProject, Opens, Posts, Project as LinearProject, Queue,
-};
+use crate::linear::Posts;
 use crate::puller::{Raised, Raises, Raising, Stopping, activity_port};
 use crate::pulling::{Splits, Works};
 

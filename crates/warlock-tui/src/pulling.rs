@@ -45,13 +45,13 @@ use warlock_engine::{
     LinearScope, Manifest, PullRun, PullSubtask, RunStatus, SubtaskStatus, now_rfc3339, pulls,
 };
 
+use crate::board::{Board, Error as LinearError};
 use crate::claude::{Activity, Sibling, Split, Worked, working_opening};
 use crate::crossings::{Crossing, crossings_after};
 use crate::git::{
     Dirty, Error as GitError, Finished, Forge, Head, PullRequest, Repository, Touched, branch_name,
     commit_message, pull_request_body, pull_request_title,
 };
-use crate::linear::{Board, Error as LinearError};
 use crate::queue::{IN_PROGRESS, same_name};
 
 /// Everything one pull is allowed to touch, built by whichever door is pulling.
@@ -651,7 +651,7 @@ pub(crate) struct TouchedScope {
 
 /// The ticket one pull works, in what a run needs of it and nothing else.
 ///
-/// Values rather than a [`QueuedIssue`](crate::linear::QueuedIssue), because the
+/// Values rather than a [`QueuedIssue`](crate::board::QueuedIssue), because the
 /// number is wanted as a number, which [`branch_name`] takes. Whoever chose the
 /// ticket supplies them, and this module asks the board for nothing about the
 /// ticket it was handed.

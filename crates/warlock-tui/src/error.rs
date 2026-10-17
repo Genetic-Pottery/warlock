@@ -11,11 +11,11 @@ use warlock_engine::{
     Manifest, RunStatus, briefs, config, filing, keys, load, manifest, pulls, route, scope,
 };
 
+use crate::board::Error as LinearError;
 use crate::boundary::{closed_scope_message, unscoped_message};
 use crate::brief::{Error as BriefError, ScopeBlockError};
 use crate::cut::listed;
 use crate::git::{Dirty, Error as GitError};
-use crate::linear::Error as LinearError;
 use crate::pulling;
 use crate::queue::Refusal;
 use crate::rescope::ScopeRefusal;
