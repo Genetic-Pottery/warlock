@@ -38,33 +38,12 @@ const SEARCH: &str = "/rest/api/3/search/jql";
 
 /// Where one issue is created. The collection and not an issue's own URL: a
 /// create is a POST to it, and nothing here addresses an issue by id.
-// Read only by the brief create, which the library does not reach until the
-// opener is wired: the same expectation `Jira` and `browse` carry, and it comes
-// off with theirs.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the opener that builds a board is a later slice's; the tests \
-                  under `cfg(test)` are the only caller until then"
-    )
-)]
 const ISSUE: &str = "/rest/api/3/issue";
 
 /// Jira's own name for the issue type a brief is filed as, read both by the
 /// create that writes `issuetype` and by the lookup's JQL. A site that has
 /// renamed it refuses both in its own words rather than warlock guessing a
 /// second spelling.
-// Dead for the same reason [`ISSUE`] is: both of its readers are a board's
-// verbs, and nothing outside the tests opens a board yet.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the opener that builds a board is a later slice's; the tests \
-                  under `cfg(test)` are the only caller until then"
-    )
-)]
 const EPIC: &str = "Epic";
 
 /// Issues read per page of a JQL search. Not left off: an answer with no
@@ -211,33 +190,12 @@ impl Calls for Client {
 /// create — refuses as this stands: the requests themselves arrive a slice at a
 /// time, and a board that refuses is what keeps a flow which reaches a verb
 /// nobody has written yet a sentence rather than a panic.
-// Nothing in the library builds one yet: the opener that hands a Jira scope
-// this board instead of Linear's is the slice after the verbs, so until then
-// the only caller is this module's own tests. `cfg_attr` rather than a bare
-// `expect`, because under `cfg(test)` the tests do construct one and an
-// expectation nothing fulfils is itself a warning.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the opener that builds one is a later slice's; the tests \
-                  under `cfg(test)` are the only caller until then"
-    )
-)]
 #[derive(Debug)]
 pub(crate) struct Jira<C = Client> {
     calls: C,
     record: ScopeRecord,
 }
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the opener that builds one is a later slice's; the tests \
-                  under `cfg(test)` are the only caller until then"
-    )
-)]
 impl<C: Calls> Jira<C> {
     #[must_use]
     pub(crate) const fn new(calls: C, record: ScopeRecord) -> Self {
@@ -543,17 +501,6 @@ fn url(base_url: &str, path: &str) -> String {
 /// it found: `/browse/<key>` is the path Jira itself redirects to whatever view
 /// the issue belongs to, so no project id, no board and no issue id is needed to
 /// build it.
-// Reached only from the board's own verbs, which nothing in the library opens
-// yet: the same expectation `Jira` itself carries, and it comes off with that
-// one when the opener is wired.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the opener that builds a board is a later slice's; the tests \
-                  under `cfg(test)` are the only caller until then"
-    )
-)]
 fn browse(base_url: &str, key: &str) -> String {
     url(base_url, &format!("/browse/{key}"))
 }

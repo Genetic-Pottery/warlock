@@ -22,8 +22,8 @@ use warlock_engine::{BoardScope, ScopeRecord};
 
 use crate::board::{
     Assignee, Blocker, Board, CUT_NOTE, Category, Error, FetchedBrief, Filable, FiledBrief,
-    FiledTicket, Listing, NamedTicket, NewBrief, NewTicket, Opener, Opens, Priority, Queue,
-    QueuedTicket, SKIP_NOTE, TicketBrief,
+    FiledTicket, Listing, NamedTicket, NewBrief, NewTicket, Priority, Queue, QueuedTicket,
+    SKIP_NOTE, TicketBrief,
 };
 use crate::queue::same_name;
 
@@ -297,17 +297,6 @@ impl<P: Posts> Board for Linear<P> {
 
     fn comment_on_ticket(&self, issue: &str, body: &str) -> Result<String, Error> {
         comment_on_issue(&self.posts, issue, body)
-    }
-}
-
-impl Opens for Opener {
-    type Board = Linear<Client>;
-
-    /// The client from the key and the destination from the record, which is the
-    /// whole of what a board is built from: the record is cloned because the
-    /// board outlives the manifest it was read from.
-    fn open(&self, record: &ScopeRecord, key: &str) -> Linear<Client> {
-        Linear::new(Client::new(key), record.clone())
     }
 }
 
