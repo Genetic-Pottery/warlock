@@ -544,9 +544,9 @@ impl Queue {
         Self { issues }
     }
 
-    /// In Linear's own order, which is not the order the queue is worked:
-    /// choosing is somebody else's function, and it wants the queue as the board
-    /// gave it.
+    /// In the board's own order, whatever that is, and not the order the queue
+    /// is worked: choosing is somebody else's function, and it wants the queue
+    /// as the board gave it.
     #[must_use]
     pub fn issues(&self) -> &[QueuedTicket] {
         &self.issues
@@ -556,8 +556,10 @@ impl Queue {
 /// One issue in a scope's queue, carrying everything choosing needs and nothing
 /// else.
 ///
-/// Both names Linear has for an issue, because both are needed: the id writes a
+/// Both names a board has for an issue, because both are needed: the id writes a
 /// state move and the identifier is what a person types and a run record holds.
+/// One value can be both, and is on Jira, where the key a person types is also
+/// the address every request is built from.
 /// The state arrives twice for the same reason — the name is what the record's
 /// `review_state` and `In Progress` are matched against and what a skip prints,
 /// the type is what says whether a blocker is out of the way.
@@ -726,13 +728,14 @@ impl Category {
     }
 }
 
-/// Linear's `priority`, in the order work is taken rather than the order the
-/// numbers come in.
+/// How urgent a ticket is, in the order work is taken rather than in either
+/// board's own spelling of it.
 ///
 /// The derived ordering is the whole point: ascending is urgent first and no
 /// priority last, so sorting a queue by this sorts it the way the board reads.
 /// Linear's own numbers — `0` for none, `1` for urgent — sort the other way
-/// round, which is why nothing outside the parsing that reads them holds one.
+/// round, and Jira's names do not sort at all, which is why nothing outside the
+/// parsing that reads them holds either.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Priority {
     Urgent,

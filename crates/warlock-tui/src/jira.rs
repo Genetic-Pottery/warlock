@@ -22,7 +22,7 @@ use warlock_engine::{FiledTo, ScopeRecord};
 use crate::adf::{body_for, document_for};
 use crate::board::{
     Board, CUT_NOTE, Category, Error, FetchedBrief, Filable, FiledBrief, FiledTicket, Listing,
-    NamedTicket, NewBrief, NewTicket, Queue, SKIP_NOTE, TicketBrief,
+    NamedTicket, NewBrief, NewTicket, Priority, Queue, QueuedTicket, SKIP_NOTE, TicketBrief,
 };
 use crate::linear::REQUEST_TIMEOUT;
 use crate::queue::same_name;
@@ -95,6 +95,16 @@ const BLOCKS: &str = "Blocks";
 /// judgement [`standing`] makes of an Epic a draft has already fetched, so the
 /// listing offers exactly the briefs the fetch after it calls draftable.
 const PLANNED: &str = "new";
+
+/// Jira's own key for the status category a ticket is finished in, written into
+/// the JQL a queue excludes by.
+///
+/// A key and not a status name, for the reason [`PLANNED`] is one: `Done` on one
+/// board is `Shipped` on the next, and the category is the one vocabulary every
+/// board shares. It is the word [`Category::of`] reads as [`Category::Settled`],
+/// so the tickets the search leaves out are the ones choosing would have called
+/// settled anyway.
+const FINISHED: &str = "done";
 
 /// Issues read per page of a JQL search. Not left off: an answer with no
 /// `maxResults` takes whatever default the site has today.
@@ -257,15 +267,16 @@ impl Calls for Client {
 /// handed any of them. Owned rather than borrowed, because a board is opened on
 /// a panel worker and outlives the manifest read that produced the record.
 ///
-/// Every verb but ten refuses as this stands: the two a push makes, the
+/// Every verb but eleven refuses as this stands: the two a push makes, the
 /// brief-by-name lookup and the brief create; the two a cut reads first, for
 /// whose key it is and for the brief itself; the pre-flight a cut settles
 /// before it files anything and the create that files each of a slice's drafts;
 /// the edge between two of those tickets, the note that records the slice and
-/// the brief's own move once every slice is settled; and the listing a bare
-/// `warlock draft` prints. The requests themselves
-/// arrive a slice at a time, and a board that refuses is what keeps a flow
-/// which reaches a verb nobody has written yet a sentence rather than a panic.
+/// the brief's own move once every slice is settled; the listing a bare
+/// `warlock draft` prints; and the queue a pull chooses a ticket out of. The
+/// requests themselves arrive a slice at a time, and a board that refuses is
+/// what keeps a flow which reaches a verb nobody has written yet a sentence
+/// rather than a panic.
 #[derive(Debug)]
 pub(crate) struct Jira<C = Client> {
     calls: C,
@@ -725,8 +736,51 @@ impl<C: Calls> Board for Jira<C> {
         Ok(None)
     }
 
-    fn scope_queue(&self, _assignee: &str) -> Result<Queue, Error> {
-        self.untaught("read a scope's queue")
+    /// Every ticket in the record's project that carries its label, belongs to
+    /// the account the key authenticates as and is not finished, every page of
+    /// them: the queue a pull chooses from.
+    ///
+    /// The three filters are the whole of what makes a ticket this scope's work,
+    /// as the Linear arm's three are: the project the record names, the label a
+    /// cut filed each child under, and the account — Jira's own `accountId`,
+    /// which [`viewer`](Self::viewer) answered and the caller filled this
+    /// parameter from, because a Jira user is addressed by that id and never by
+    /// the email the key is typed with. The assignee is a filter rather than a
+    /// check afterwards because a pull only ever works tickets the operator
+    /// holds.
+    ///
+    /// The fourth clause is on the status category and never on a status name,
+    /// for the reason [`standing`] states: only the category says which of a
+    /// site's own words means finished. On the wire rather than on this side,
+    /// which is the difference between a page of live work and a page that may
+    /// be all history.
+    ///
+    /// The order is asked for and not taken as read: a search with no clause
+    /// comes back in whatever order the site settles on. `Rank` is the name JQL
+    /// knows a board's rank field by, so a project whose rank is not orderable
+    /// refuses the search in Jira's own words — dropping the clause to get an
+    /// answer would be warlock handing back a different queue than the one that
+    /// was asked for. Choosing sorts these again from the values below, so what
+    /// this order settles is whatever those values leave equal.
+    ///
+    /// A label carrying a double quote ends the quoted JQL value early and Jira
+    /// refuses the search, as it does for a listing and for the same reason:
+    /// Jira holds no such label, so a record naming one is a manifest to fix
+    /// rather than a search to repair.
+    fn scope_queue(&self, assignee: &str) -> Result<Queue, Error> {
+        let (_, project_key) = self.site()?;
+        let label = self.record.label();
+        let jql = format!(
+            r#"project = {project_key} AND labels = "{label}" AND assignee = "{assignee}" AND statusCategory != {FINISHED} ORDER BY priority DESC, Rank ASC"#
+        );
+
+        let issues = self
+            .searched(&jql, &["summary", "status", "description", "priority"])?
+            .iter()
+            .map(queued)
+            .collect::<Result<_, Error>>()?;
+
+        Ok(Queue { issues })
     }
 
     fn named_ticket(&self, _number: u64) -> Result<Option<NamedTicket>, Error> {
@@ -1150,6 +1204,86 @@ fn standing(status: Option<&Value>) -> (Option<String>, bool) {
         .unwrap_or_default();
 
     (name, Category::of(category) == Category::New)
+}
+
+/// One issue a queue read answered, as the ticket choosing reads.
+///
+/// The key is both of a ticket's names. Jira addresses an issue by it
+/// everywhere — a transition, a comment and a link are all written with the key
+/// — and it is what a person types, so the id a move spends and the identifier a
+/// run record holds are one value here where Linear has two.
+///
+/// The status arrives twice for the reason it does on the other board: the name
+/// is a site's own word and is only ever printed back, and the category is what
+/// every judgement is made on. Both are read rather than defaulted — a ticket
+/// whose status an answer did not carry is bytes a proxy decided to send, and
+/// guessing a category for it would be guessing whether somebody is on it.
+///
+/// No blocker is read, because nothing here asks for an issue's links: a ticket
+/// this board hands up is held by nothing as far as choosing can tell.
+fn queued(issue: &Value) -> Result<QueuedTicket, Error> {
+    let key = issue
+        .get("key")
+        .and_then(Value::as_str)
+        .ok_or_else(|| missing("key"))?;
+    let fields = issue.get("fields").ok_or_else(|| missing("fields"))?;
+    let status = fields.get("status").ok_or_else(|| missing("status"))?;
+    let category = status
+        .get("statusCategory")
+        .and_then(|category| category.get("key"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| missing("statusCategory.key"))?;
+
+    Ok(QueuedTicket {
+        id: key.to_owned(),
+        identifier: key.to_owned(),
+        title: fields
+            .get("summary")
+            .and_then(Value::as_str)
+            .ok_or_else(|| missing("summary"))?
+            .to_owned(),
+        // Through [`body_for`], as a fetched brief's own description is: a
+        // ticket nobody described is the empty string a sub-task is handed, and
+        // one somebody edited in the Jira UI comes back plainer rather than not
+        // at all.
+        description: body_for(fields.get("description").unwrap_or(&Value::Null)),
+        state: status
+            .get("name")
+            .and_then(Value::as_str)
+            .ok_or_else(|| missing("status.name"))?
+            .to_owned(),
+        state_type: Category::of(category),
+        priority: ranked(fields),
+        blockers: Vec::new(),
+    })
+}
+
+/// Jira's priority, read into the order a queue is worked.
+///
+/// The name and not the `id` beside it: a priority scheme is the site's to edit,
+/// so the ids are one site's own numbering, where these five names are the
+/// scheme every Cloud project is created with. Nothing outside this function
+/// sees either.
+///
+/// A project whose scheme makes priority optional answers a ticket nobody ranked
+/// with no `priority` field at all, and a site that added a sixth priority
+/// answers a name warlock has no rank for. Both are [`Priority::None`], which is
+/// also where `Lowest` lands: a rank this side cannot read is not a reason to
+/// work something first, and the bottom of five is not either.
+fn ranked(fields: &Value) -> Priority {
+    let name = fields
+        .get("priority")
+        .and_then(|priority| priority.get("name"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+
+    match name {
+        "Highest" => Priority::Urgent,
+        "High" => Priority::High,
+        "Medium" => Priority::Medium,
+        "Low" => Priority::Low,
+        _ => Priority::None,
+    }
 }
 
 /// A status in the project that a ticket nobody has started belongs in, by the

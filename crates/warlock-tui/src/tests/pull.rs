@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::Path;
 
-use serde_json::json;
+use serde_json::{Value, json};
 use tempfile::TempDir;
 use ureq::http::Method;
 use warlock_engine::{
@@ -422,15 +422,43 @@ fn a_dirty_tree_is_refused_before_the_board_is_opened() {
     assert!(!ground.any_record());
 }
 
+/// The key of the one ticket the Jira scope's queue holds: the project is
+/// `a_jira_manifest`'s, and the key is both of a ticket's names on that board.
+const JIRA_TICKET: &str = "PAY-140";
+
+/// The account the key authenticates as, as Jira's own `accountId`: what
+/// selection reads before it asks for the queue, and what the queue filters on.
+const ACCOUNT: &str = "5b10a2844c20165700ede21g";
+
+/// That scope's queue as the search answers it, holding one ticket in a status
+/// nobody has started: a page with no `nextPageToken`, which is the last one.
+///
+/// The body the search went out with is `tests/jira.rs`'s own assertion; what a
+/// flow test says is which request came first.
+fn a_jira_queue() -> Value {
+    json!({
+        "issues": [{
+            "id": "10140",
+            "key": JIRA_TICKET,
+            "fields": {
+                "summary": TITLE,
+                "status": { "name": "To Do", "statusCategory": { "key": "new" } },
+                "priority": { "name": "High" },
+            },
+        }],
+    })
+}
+
 #[test]
-fn a_pull_over_a_jira_scope_is_refused_by_the_board_verb_s_own_sentence() {
+fn a_pull_over_a_jira_scope_takes_the_queues_ticket_and_stops_at_the_first_unwritten_verb() {
     let ground = Ground::jira();
     let prepared = ground.prepared();
     let repo = Checkout::clean(DEFAULT);
-    // The account read answers, because selection asks whose key it is before
-    // anything else; nothing is written down after it, so a second request would
-    // panic the stand-in rather than being asserted about afterwards.
-    let jira = Opening::answering([Ok(json!({ "accountId": "5b10a2844c20165700ede21g" }))]);
+    // Whose key it is, then the scope's queue: selection asks for the account
+    // before anything else and chooses out of what the search answers. Nothing
+    // is written down after those two, so a third request would panic the
+    // stand-in rather than being asserted about afterwards.
+    let jira = Opening::answering([Ok(json!({ "accountId": ACCOUNT })), Ok(a_jira_queue())]);
 
     let (outcome, printed) = pull_with(
         &ground,
@@ -446,24 +474,47 @@ fn a_pull_over_a_jira_scope_is_refused_by_the_board_verb_s_own_sentence() {
         false,
     );
 
-    // The queue read, which is the first verb selection asks that warlock has no
-    // request for on Jira yet, refused in the board's own words: the account read
-    // ahead of it answered.
-    let error = outcome.expect_err("a scope that files to Jira");
+    // The move, which is the first verb past selection that warlock has no
+    // request for on this board, refused in the board's own words.
+    let error = outcome.expect_err("a Jira board cannot move a ticket yet");
     assert_eq!(
         error.to_string(),
-        "warlock cannot read a scope's queue on a Jira scope yet, so nothing was sent"
+        "warlock cannot move a ticket on a Jira scope yet, so nothing was sent"
     );
-    // The ordering the flow already had, now with the board at the end of it:
-    // the tree is read, the key is read and a client built, and the account read
-    // is the only request that went out before a verb refused. Nothing was
-    // written down.
-    assert_eq!(repo.calls(), vec![GitCall::Dirty]);
+    // Both requests went out, in that order: the account and then the queue.
     assert_eq!(jira.opened_with(), [NOT_A_KEY]);
     assert_eq!(
         jira.spelled(),
-        [(Method::GET, "/rest/api/3/myself".to_owned())]
+        [
+            (Method::GET, "/rest/api/3/myself".to_owned()),
+            (Method::POST, "/rest/api/3/search/jql".to_owned()),
+        ]
     );
+    // And the ticket the search answered is the one the run took: the tree was
+    // read, then the base checked out and caught up, then a branch cut carrying
+    // the number out of that key. Which is as far as this board gets — the move
+    // is the next thing asked, and nothing is written down for a run that never
+    // reached its split.
+    let calls = repo.calls();
+    assert_eq!(
+        calls[..4],
+        [
+            GitCall::Dirty,
+            GitCall::DefaultBranch,
+            GitCall::SwitchTo(DEFAULT.to_owned()),
+            GitCall::CatchUp(DEFAULT.to_owned()),
+        ],
+        "{calls:?}"
+    );
+    assert!(
+        matches!(
+            calls.get(4),
+            Some(GitCall::CutBranch { branch, from })
+                if branch.starts_with("pay-140/") && from == DEFAULT
+        ),
+        "{calls:?}"
+    );
+    assert_eq!(calls.len(), 5, "{calls:?}");
     assert_eq!(printed, "");
     assert!(!ground.any_record());
 }
