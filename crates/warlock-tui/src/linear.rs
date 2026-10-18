@@ -22,7 +22,7 @@ use warlock_engine::{BoardScope, ScopeRecord};
 
 use crate::board::{
     Assignee, Blocker, Board, CUT_NOTE, Category, Error, FetchedBrief, Filable, FiledBrief,
-    FiledTicket, Listing, NamedTicket, NewBrief, NewTicket, Priority, Queue, QueuedTicket,
+    FiledTicket, Holder, Listing, NamedTicket, NewBrief, NewTicket, Priority, Queue, QueuedTicket,
     SKIP_NOTE, TicketBrief,
 };
 use crate::queue::same_name;
@@ -969,7 +969,8 @@ fn blocker(relation: &Value) -> Result<Blocker, Error> {
 
     Ok(Blocker {
         identifier: text(blocker, "identifier")?,
-        assignee: nullable(blocker, "assignee", |assignee| text(assignee, "name"))?,
+        holder: nullable(blocker, "assignee", |assignee| text(assignee, "name"))?
+            .map_or(Holder::Nobody, Holder::Named),
         state_type: Category::of(&text(state, "type")?),
     })
 }

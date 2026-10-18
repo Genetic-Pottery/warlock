@@ -14,8 +14,8 @@ use super::{
 };
 
 use crate::board::{
-    Assignee, Blocker, Board, CUT_NOTE, Category, Error, Filable, NamedTicket, NewBrief, NewTicket,
-    Priority, QueuedTicket, SKIP_NOTE,
+    Assignee, Blocker, Board, CUT_NOTE, Category, Error, Filable, Holder, NamedTicket, NewBrief,
+    NewTicket, Priority, QueuedTicket, SKIP_NOTE,
 };
 use crate::queue::IN_PROGRESS;
 use crate::stubs::Posting;
@@ -1087,7 +1087,7 @@ fn an_unassigned_issue_can_still_be_holding_one_up() {
 
     let issue = only_issue(&a_queue_of(&[issue], None));
 
-    assert_eq!(issue.blockers()[0].assignee(), None);
+    assert_eq!(issue.blockers()[0].holder(), &Holder::Nobody);
 }
 
 #[test]

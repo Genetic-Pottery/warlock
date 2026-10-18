@@ -21,8 +21,9 @@ use warlock_engine::{FiledTo, ScopeRecord};
 
 use crate::adf::{body_for, document_for};
 use crate::board::{
-    Board, CUT_NOTE, Category, Error, FetchedBrief, Filable, FiledBrief, FiledTicket, Listing,
-    NamedTicket, NewBrief, NewTicket, Queue, SKIP_NOTE, TicketBrief,
+    Blocker, Board, CUT_NOTE, Category, Error, FetchedBrief, Filable, FiledBrief, FiledTicket,
+    Holder, Listing, NamedTicket, NewBrief, NewTicket, Priority, Queue, QueuedTicket, SKIP_NOTE,
+    TicketBrief,
 };
 use crate::linear::REQUEST_TIMEOUT;
 use crate::queue::same_name;
@@ -96,6 +97,16 @@ const BLOCKS: &str = "Blocks";
 /// listing offers exactly the briefs the fetch after it calls draftable.
 const PLANNED: &str = "new";
 
+/// Jira's own key for the status category a ticket is finished in, written into
+/// the JQL a queue excludes by.
+///
+/// A key and not a status name, for the reason [`PLANNED`] is one: `Done` on one
+/// board is `Shipped` on the next, and the category is the one vocabulary every
+/// board shares. It is the word [`Category::of`] reads as [`Category::Settled`],
+/// so the tickets the search leaves out are the ones choosing would have called
+/// settled anyway.
+const FINISHED: &str = "done";
+
 /// Issues read per page of a JQL search. Not left off: an answer with no
 /// `maxResults` takes whatever default the site has today.
 const SEARCH_PAGE: usize = 100;
@@ -108,6 +119,16 @@ const COMMENTS_PAGE: usize = 100;
 /// `fields` carries every field the site has, every custom one included, and
 /// three of them are the whole of what a draft reads.
 const BRIEF_FIELDS: &str = "summary,status,description";
+
+/// The fields a queued ticket is read out of, asked for by name for the reason
+/// [`BRIEF_FIELDS`] is: a search with no `fields` carries every field the site
+/// has, every custom one included, and a board with a hundred of them would
+/// answer a queue a hundred times the size of what is read.
+///
+/// `issuelinks` is one of them because what blocks a ticket is a field of the
+/// ticket: it is the whole of what [`blocking`] reads, and leaving it off is an
+/// answer in which every held-up ticket looks ready.
+const QUEUED_FIELDS: &[&str] = &["summary", "status", "description", "priority", "issuelinks"];
 
 /// The field a cut's pre-flight reads the Epic back for, which is one field
 /// because nothing of it is read: what the read answers is whether the Epic is
@@ -257,15 +278,16 @@ impl Calls for Client {
 /// handed any of them. Owned rather than borrowed, because a board is opened on
 /// a panel worker and outlives the manifest read that produced the record.
 ///
-/// Every verb but ten refuses as this stands: the two a push makes, the
+/// Every verb but eleven refuses as this stands: the two a push makes, the
 /// brief-by-name lookup and the brief create; the two a cut reads first, for
 /// whose key it is and for the brief itself; the pre-flight a cut settles
 /// before it files anything and the create that files each of a slice's drafts;
 /// the edge between two of those tickets, the note that records the slice and
-/// the brief's own move once every slice is settled; and the listing a bare
-/// `warlock draft` prints. The requests themselves
-/// arrive a slice at a time, and a board that refuses is what keeps a flow
-/// which reaches a verb nobody has written yet a sentence rather than a panic.
+/// the brief's own move once every slice is settled; the listing a bare
+/// `warlock draft` prints; and the queue a pull chooses a ticket out of. The
+/// requests themselves arrive a slice at a time, and a board that refuses is
+/// what keeps a flow which reaches a verb nobody has written yet a sentence
+/// rather than a panic.
 #[derive(Debug)]
 pub(crate) struct Jira<C = Client> {
     calls: C,
@@ -725,8 +747,64 @@ impl<C: Calls> Board for Jira<C> {
         Ok(None)
     }
 
-    fn scope_queue(&self, _assignee: &str) -> Result<Queue, Error> {
-        self.untaught("read a scope's queue")
+    /// Every ticket in the record's project that carries its label, belongs to
+    /// the account the key authenticates as and is not finished, every page of
+    /// them: the queue a pull chooses from.
+    ///
+    /// The three filters are the whole of what makes a ticket this scope's work,
+    /// as the Linear arm's three are: the project the record names, the label a
+    /// cut filed each child under, and the account — Jira's own `accountId`,
+    /// which [`viewer`](Self::viewer) answered and the caller filled this
+    /// parameter from, because a Jira user is addressed by that id and never by
+    /// the email the key is typed with. The assignee is a filter rather than a
+    /// check afterwards because a pull only ever works tickets the operator
+    /// holds.
+    ///
+    /// The fourth clause is on the status category and never on a status name,
+    /// for the reason [`standing`] states: only the category says which of a
+    /// site's own words means finished. On the wire rather than on this side,
+    /// which is the difference between a page of live work and a page that may
+    /// be all history.
+    ///
+    /// The order is asked for and not taken as read: a search with no clause
+    /// comes back in whatever order the site settles on. `Rank` is the name JQL
+    /// knows a board's rank field by, so a project whose rank is not orderable
+    /// refuses the search in Jira's own words — dropping the clause to get an
+    /// answer would be warlock handing back a different queue than the one that
+    /// was asked for. Choosing sorts these again from the values below, so what
+    /// this order settles is whatever those values leave equal.
+    ///
+    /// A label carrying a double quote ends the quoted JQL value early and Jira
+    /// refuses the search, as it does for a listing and for the same reason:
+    /// Jira holds no such label, so a record naming one is a manifest to fix
+    /// rather than a search to repair.
+    ///
+    /// What holds a ticket up rides back in the same answer, in the
+    /// `issuelinks` field asked for beside the four a ticket is read from, and
+    /// none of the clauses above reach it: an issue's links are a field *of*
+    /// the issue the search matched, so a ticket is held up by whatever blocks
+    /// it, whoever owns that and whatever label it carries. Which is the
+    /// asymmetry `linear.rs`'s own queue states and the point of it — the
+    /// filters make the queue, and a blocker must not inherit them.
+    ///
+    /// To the end as well, and that costs nothing here: Jira hands an issue's
+    /// links over as one whole field, with no token beside it and no page after
+    /// it, where Linear pages an issue's relations and has to be read on. A
+    /// blocker list cut off midway makes a held-up ticket look ready.
+    fn scope_queue(&self, assignee: &str) -> Result<Queue, Error> {
+        let (_, project_key) = self.site()?;
+        let label = self.record.label();
+        let jql = format!(
+            r#"project = {project_key} AND labels = "{label}" AND assignee = "{assignee}" AND statusCategory != {FINISHED} ORDER BY priority DESC, Rank ASC"#
+        );
+
+        let issues = self
+            .searched(&jql, QUEUED_FIELDS)?
+            .iter()
+            .map(queued)
+            .collect::<Result<_, Error>>()?;
+
+        Ok(Queue { issues })
     }
 
     fn named_ticket(&self, _number: u64) -> Result<Option<NamedTicket>, Error> {
@@ -1150,6 +1228,163 @@ fn standing(status: Option<&Value>) -> (Option<String>, bool) {
         .unwrap_or_default();
 
     (name, Category::of(category) == Category::New)
+}
+
+/// One issue a queue read answered, as the ticket choosing reads.
+///
+/// The key is both of a ticket's names. Jira addresses an issue by it
+/// everywhere — a transition, a comment and a link are all written with the key
+/// — and it is what a person types, so the id a move spends and the identifier a
+/// run record holds are one value here where Linear has two.
+///
+/// The status arrives twice for the reason it does on the other board: the name
+/// is a site's own word and is only ever printed back, and the category is what
+/// every judgement is made on. Both are read rather than defaulted — a ticket
+/// whose status an answer did not carry is bytes a proxy decided to send, and
+/// guessing a category for it would be guessing whether somebody is on it.
+fn queued(issue: &Value) -> Result<QueuedTicket, Error> {
+    let key = issue
+        .get("key")
+        .and_then(Value::as_str)
+        .ok_or_else(|| missing("key"))?;
+    let fields = issue.get("fields").ok_or_else(|| missing("fields"))?;
+    let status = fields.get("status").ok_or_else(|| missing("status"))?;
+    let category = status
+        .get("statusCategory")
+        .and_then(|category| category.get("key"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| missing("statusCategory.key"))?;
+
+    Ok(QueuedTicket {
+        id: key.to_owned(),
+        identifier: key.to_owned(),
+        title: fields
+            .get("summary")
+            .and_then(Value::as_str)
+            .ok_or_else(|| missing("summary"))?
+            .to_owned(),
+        // Through [`body_for`], as a fetched brief's own description is: a
+        // ticket nobody described is the empty string a sub-task is handed, and
+        // one somebody edited in the Jira UI comes back plainer rather than not
+        // at all.
+        description: body_for(fields.get("description").unwrap_or(&Value::Null)),
+        state: status
+            .get("name")
+            .and_then(Value::as_str)
+            .ok_or_else(|| missing("status.name"))?
+            .to_owned(),
+        state_type: Category::of(category),
+        priority: ranked(fields),
+        blockers: blocking(fields)?,
+    })
+}
+
+/// Every issue holding up the one these fields belong to, off its `issuelinks`.
+///
+/// Which side of a link the blocker is is the whole of what this reads, and it
+/// lives in which field is taken off the link. Jira holds a link as a thing
+/// between two issues and hands an issue the far side of each of its own:
+/// [`Board::create_relation`] writes the blocker as `inwardIssue` and the issue
+/// held up as `outwardIssue`, so on a held-up issue — which is what a queue read
+/// answers — a [`BLOCKS`] link carries `inwardIssue`, and that is the blocker.
+/// A [`BLOCKS`] link carrying `outwardIssue` is one of this issue's own: it says
+/// this ticket blocks that one, which holds nothing up on this side and is read
+/// and dropped. Taking the wrong one of the two compiles, answers the same shape
+/// and inverts every dependency in the queue.
+///
+/// Only a [`BLOCKS`] link at all: a `Relates`, a `Duplicate` or a clone link
+/// says nothing about what can be worked. A link carrying no type is an
+/// unreadable answer rather than one more link to drop, as it is on the other
+/// board — dropping it quietly is how a held-up ticket comes to look ready.
+///
+/// A ticket the field is absent from is a ticket with no links, which is a
+/// ticket nothing holds up: whether a site spells that an empty list or leaves
+/// the field out of the answer is the site's to decide, and the field is asked
+/// for by name on every page, so its absence is not a question the ticket was
+/// never asked. A link that did arrive is read strictly.
+fn blocking(fields: &Value) -> Result<Vec<Blocker>, Error> {
+    let Some(links) = fields.get("issuelinks") else {
+        return Ok(Vec::new());
+    };
+    let links = links.as_array().ok_or_else(|| missing("issuelinks"))?;
+    let mut blockers = Vec::new();
+
+    for link in links {
+        let relation = link
+            .get("type")
+            .and_then(|relation| relation.get("name"))
+            .and_then(Value::as_str)
+            .ok_or_else(|| missing("issuelinks.type.name"))?;
+
+        // `inwardIssue` and never `outwardIssue`, per the direction above.
+        if relation == BLOCKS
+            && let Some(blocker) = link.get("inwardIssue")
+        {
+            blockers.push(held_by(blocker)?);
+        }
+    }
+
+    Ok(blockers)
+}
+
+/// The far side of one [`BLOCKS`] link, which [`blocking`] has already decided
+/// is the issue doing the blocking, in the facts a refusal names it by.
+///
+/// The category and not the status name: whether a blocker is still in the way
+/// is the one judgement made of it, and `Done` on this project is `Shipped` on
+/// the next. Read rather than defaulted, for [`queued`]'s reason — a category
+/// guessed here is a guess about whether work can start.
+///
+/// [`Holder::Unread`], because the answer carries no assignee: Jira puts
+/// `summary`, `status`, `priority` and `issuetype` on the far side of a link and
+/// nothing else, and naming the person would cost a read per blocker to print
+/// one word. Not [`Holder::Nobody`], which a refusal prints as unassigned.
+fn held_by(blocker: &Value) -> Result<Blocker, Error> {
+    let category = blocker
+        .get("fields")
+        .and_then(|fields| fields.get("status"))
+        .and_then(|status| status.get("statusCategory"))
+        .and_then(|category| category.get("key"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| missing("issuelinks.inwardIssue.status.statusCategory.key"))?;
+
+    Ok(Blocker {
+        identifier: blocker
+            .get("key")
+            .and_then(Value::as_str)
+            .ok_or_else(|| missing("issuelinks.inwardIssue.key"))?
+            .to_owned(),
+        holder: Holder::Unread,
+        state_type: Category::of(category),
+    })
+}
+
+/// Jira's priority, read into the order a queue is worked.
+///
+/// The name and not the `id` beside it: a priority scheme is the site's to edit,
+/// so the ids are one site's own numbering, where these five names are the
+/// scheme every Cloud project is created with. Nothing outside this function
+/// sees either.
+///
+/// A project whose scheme makes priority optional answers a ticket nobody ranked
+/// with no `priority` field at all, and a site that added a sixth priority
+/// answers a name warlock has no rank for. Both are [`Priority::None`], which is
+/// also where `Lowest` lands: a rank this side cannot read is not a reason to
+/// work something first, and the bottom of five is not either.
+fn ranked(fields: &Value) -> Priority {
+    let name = fields
+        .get("priority")
+        .and_then(|priority| priority.get("name"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+
+    match name {
+        "Highest" => Priority::Urgent,
+        "High" => Priority::High,
+        "Medium" => Priority::Medium,
+        "Low" => Priority::Low,
+        _ => Priority::None,
+    }
 }
 
 /// A status in the project that a ticket nobody has started belongs in, by the

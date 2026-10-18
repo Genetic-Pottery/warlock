@@ -544,9 +544,9 @@ impl Queue {
         Self { issues }
     }
 
-    /// In Linear's own order, which is not the order the queue is worked:
-    /// choosing is somebody else's function, and it wants the queue as the board
-    /// gave it.
+    /// In the board's own order, whatever that is, and not the order the queue
+    /// is worked: choosing is somebody else's function, and it wants the queue
+    /// as the board gave it.
     #[must_use]
     pub fn issues(&self) -> &[QueuedTicket] {
         &self.issues
@@ -556,8 +556,10 @@ impl Queue {
 /// One issue in a scope's queue, carrying everything choosing needs and nothing
 /// else.
 ///
-/// Both names Linear has for an issue, because both are needed: the id writes a
+/// Both names a board has for an issue, because both are needed: the id writes a
 /// state move and the identifier is what a person types and a run record holds.
+/// One value can be both, and is on Jira, where the key a person types is also
+/// the address every request is built from.
 /// The state arrives twice for the same reason — the name is what the record's
 /// `review_state` and `In Progress` are matched against and what a skip prints,
 /// the type is what says whether a blocker is out of the way.
@@ -651,15 +653,33 @@ impl QueuedTicket {
 }
 
 /// An issue holding up one in the queue, in the three facts a refusal needs: the
-/// identifier to name it, the assignee to say whose it is, and the state type to
-/// say whether it is still in the way.
+/// identifier to name it, whose it is, and the state type to say whether it is
+/// still in the way.
 ///
 /// No id and no title: nothing is done to a blocker, it is only reported.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Blocker {
     pub(crate) identifier: String,
-    pub(crate) assignee: Option<String>,
+    pub(crate) holder: Holder,
     pub(crate) state_type: Category,
+}
+
+/// Whose a [`Blocker`] is, as far as the board said.
+///
+/// Three answers and not an `Option`, because "nobody" and "not read" print
+/// differently: Jira carries no assignee on the far side of a link, and calling
+/// that blocker unassigned would tell a person something false about work that
+/// is somebody's.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Holder {
+    /// The person's name and not their id: a blocker is never matched against
+    /// anybody, only printed.
+    Named(String),
+    /// Assigned to nobody, which a queue filtered by assignee can still be held
+    /// up by.
+    Nobody,
+    /// The board's answer did not say.
+    Unread,
 }
 
 impl Blocker {
@@ -671,7 +691,7 @@ impl Blocker {
     ) -> Self {
         Self {
             identifier: identifier.into(),
-            assignee: assignee.map(ToOwned::to_owned),
+            holder: assignee.map_or(Holder::Nobody, |name| Holder::Named(name.to_owned())),
             state_type,
         }
     }
@@ -681,12 +701,9 @@ impl Blocker {
         &self.identifier
     }
 
-    /// The person's name and not their id: a blocker is never matched against
-    /// anybody, only printed. `None` is an unassigned blocker, which a queue
-    /// filtered by assignee can still be held up by.
     #[must_use]
-    pub fn assignee(&self) -> Option<&str> {
-        self.assignee.as_deref()
+    pub const fn holder(&self) -> &Holder {
+        &self.holder
     }
 
     #[must_use]
@@ -726,13 +743,14 @@ impl Category {
     }
 }
 
-/// Linear's `priority`, in the order work is taken rather than the order the
-/// numbers come in.
+/// How urgent a ticket is, in the order work is taken rather than in either
+/// board's own spelling of it.
 ///
 /// The derived ordering is the whole point: ascending is urgent first and no
 /// priority last, so sorting a queue by this sorts it the way the board reads.
 /// Linear's own numbers — `0` for none, `1` for urgent — sort the other way
-/// round, which is why nothing outside the parsing that reads them holds one.
+/// round, and Jira's names do not sort at all, which is why nothing outside the
+/// parsing that reads them holds either.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Priority {
     Urgent,

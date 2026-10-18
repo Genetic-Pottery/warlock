@@ -11,7 +11,7 @@ use super::{
 };
 
 use crate::adf::document_for;
-use crate::board::{Board, Error, Filable, NewBrief, NewTicket};
+use crate::board::{Board, Category, Error, Filable, Holder, NewBrief, NewTicket, Priority};
 use crate::brief::{Slice, scope_block_in};
 use crate::cut;
 use crate::queue::IN_PROGRESS;
@@ -356,7 +356,6 @@ fn untaught_verbs(board: &Jira<Calling>) -> Vec<(&'static str, Option<Error>)> {
     vec![
         ("ticket_brief", board.ticket_brief("PAY-1").err()),
         ("move_ticket", board.move_ticket("PAY-1", "In Review").err()),
-        ("scope_queue", board.scope_queue("me").err()),
         ("named_ticket", board.named_ticket(1).err()),
         (
             "comment_on_ticket",
@@ -375,6 +374,7 @@ fn every_verb(board: &Jira<Calling>) -> Vec<(&'static str, Option<Error>)> {
     verbs.push(("fetch_brief", board.fetch_brief(BRIEF).err()));
     verbs.push(("planned_briefs", board.planned_briefs().err()));
     verbs.push(("brief_named", board.brief_named(NAME).err()));
+    verbs.push(("scope_queue", board.scope_queue(ACCOUNT).err()));
     verbs.push(("create_brief", board.create_brief(&a_brief()).err()));
     verbs.push(("ticket_filing", board.ticket_filing(BRIEF).err()));
     verbs.push((
@@ -2763,6 +2763,629 @@ fn an_epics_moves_read_with_no_transitions_is_malformed_and_nothing_is_posted() 
         "{error:?}"
     );
     assert_eq!(board.calls.made(), [offered(BRIEF)]);
+}
+
+/// The key of one ticket a cut filed under the Epic, which is both of the names
+/// the queue answers it by: a person types this, and every path a move or a
+/// comment is addressed by is built out of it.
+const TICKET: &str = "PAY-31";
+
+/// That ticket's summary, which is its title in the queue.
+const TITLE: &str = "Read the queue through `search/jql`";
+
+/// And what it says, as the Markdown it was filed as: a sub-task is handed the
+/// description, so the assertion below is the round trip through the ADF the
+/// site holds and not a tree typed out to match the reader.
+const TICKET_BODY: &str = "## Goal\n\nRead the queue.\n";
+
+/// The status a board may spell a ticket somebody is on with, which is no word
+/// warlock knows: the category is the judgement and the name is what rides back.
+const IN_DEV: &str = "In dev on a branch";
+
+/// An issue holding the queued ticket up, which is no ticket of this queue: a
+/// blocker is read whoever holds it, whatever label it carries and whatever
+/// status it stands in.
+const BLOCKER: &str = "PAY-30";
+
+/// One ticket as a queue read answers it: the key, the summary, the status with
+/// the category Jira files it under, the description as an ADF tree, the empty
+/// link list of a ticket nothing is linked to, and the priority field — left off
+/// entirely for a ticket nobody ranked.
+fn a_ticket(status: &str, category: &str, priority: Option<&str>) -> Value {
+    let mut fields = json!({
+        "summary": TITLE,
+        "status": { "name": status, "statusCategory": { "key": category } },
+        "description": document_for(TICKET_BODY),
+        "issuelinks": [],
+    });
+
+    if let Some(priority) = priority {
+        // The id rides along because a real answer carries one, and nothing
+        // reads it: a priority scheme is the site's to edit, so the ids are one
+        // site's own numbering.
+        fields["priority"] = json!({ "id": "3", "name": priority });
+    }
+
+    json!({ "id": "10031", "key": TICKET, "fields": fields })
+}
+
+/// A ticket a queue read would otherwise have parsed, with the field at that
+/// JSON pointer taken off it.
+fn without(pointer: &str) -> Value {
+    let mut ticket = a_ticket(TO_DO, "new", Some("High"));
+    // The pointer's last step is the field to take and everything before it
+    // addresses the object holding it, which is the whole document for a field
+    // on the issue itself.
+    let (parent, field) = pointer
+        .rsplit_once('/')
+        .expect("a JSON pointer, which begins with a slash");
+
+    ticket
+        .pointer_mut(parent)
+        .and_then(Value::as_object_mut)
+        .expect("a ticket to take a field off")
+        .remove(field)
+        .expect("the field was there to take");
+
+    ticket
+}
+
+/// One page of a queue's answer, and the token to read on from when a page
+/// follows this one.
+fn holding(tickets: &[Value], next: Option<&str>) -> Value {
+    let mut answer = json!({ "issues": tickets });
+
+    if let Some(token) = next {
+        answer["nextPageToken"] = json!(token);
+    }
+
+    answer
+}
+
+/// One page of the queue's read, as the stand-in records a call. The JQL is
+/// spelled out rather than built from the module's own pieces, for the reason
+/// [`asked`] spells its own: a filter dropped, the exclusion changing, the order
+/// clause leaving the search or the account not reaching it is a failure here
+/// and not two expressions that moved together.
+fn pulling(token: Option<&str>) -> (Method, String, Value) {
+    let mut body = json!({
+        // The project key and the label are the record's — the verb is handed
+        // neither — and the account is the whole of what the caller passes in.
+        "jql": format!(
+            r#"project = {PROJECT} AND labels = "{LABEL}" AND assignee = "{ACCOUNT}" AND statusCategory != done ORDER BY priority DESC, Rank ASC"#
+        ),
+        // Asked for by name, `issuelinks` among them: a search with no `fields`
+        // carries every custom field the site has, and a search that left the
+        // links off would answer a queue in which every held-up ticket is ready.
+        "fields": ["summary", "status", "description", "priority", "issuelinks"],
+        "maxResults": 100,
+    });
+
+    if let Some(token) = token {
+        body["nextPageToken"] = json!(token);
+    }
+
+    (Method::POST, "/rest/api/3/search/jql".to_owned(), body)
+}
+
+#[test]
+fn a_queued_ticket_carries_the_key_as_both_names_with_its_summary_status_and_body() {
+    let board = Jira::new(
+        Calling::answering([Ok(holding(&[a_ticket(TO_DO, "new", Some("High"))], None))]),
+        a_scope(),
+    );
+
+    let queue = board.scope_queue(ACCOUNT).expect("the stand-in answered");
+
+    let [ticket] = queue.issues() else {
+        panic!("one ticket: {:?}", queue.issues())
+    };
+    // The key twice over: the id a move and a comment are addressed by and the
+    // identifier a person types are one value on this board, where Linear has
+    // two.
+    assert_eq!(ticket.id(), TICKET);
+    assert_eq!(ticket.identifier(), TICKET);
+    assert_eq!(ticket.title(), TITLE);
+    // The description back through the ADF reader, which is the Markdown it was
+    // filed as: this is what a sub-task session is handed as the parent ticket.
+    assert_eq!(ticket.description(), TICKET_BODY);
+    // The board's own status word, which is only ever printed, beside the
+    // category every judgement is made on.
+    assert_eq!(ticket.state(), TO_DO);
+    assert_eq!(ticket.state_type(), Category::New);
+    assert_eq!(ticket.priority(), Priority::High);
+    // And nothing holds it up, because the links the answer carried are none:
+    // an unlinked ticket is ready, and the field was asked for to know that.
+    assert!(ticket.blockers().is_empty(), "{:?}", ticket.blockers());
+    // One request, a POST with the JQL in its body, narrowed to the project, the
+    // label and the account — so a ticket of another scope, and one somebody
+    // else holds, never arrives.
+    assert_eq!(board.calls.made(), [pulling(None)]);
+}
+
+#[test]
+fn the_queue_is_ordered_by_priority_then_rank_and_excludes_the_done_category() {
+    let board = Jira::new(Calling::answering([Ok(holding(&[], None))]), a_scope());
+
+    let queue = board
+        .scope_queue(ACCOUNT)
+        .expect("an empty queue is an answer");
+
+    assert!(queue.issues().is_empty(), "{:?}", queue.issues());
+
+    let jql = board.calls.made()[0].2["jql"]
+        .as_str()
+        .expect("the search carries a JQL string")
+        .to_owned();
+
+    // The board's own order, asked for rather than taken as read: a search with
+    // no clause comes back in whatever order the site settles on today.
+    assert!(jql.ends_with(" ORDER BY priority DESC, Rank ASC"), "{jql}");
+    // And the exclusion is by category, which is the vocabulary both boards
+    // share: the word left out is the one `Category::of` reads as settled, so no
+    // status *name* is in the search at all — `Done` on this board is `Shipped`
+    // on the next, and only the category tells either from live work.
+    assert!(jql.contains("statusCategory != done"), "{jql}");
+    assert_eq!(Category::of("done"), Category::Settled);
+    for name in ["Done", "Shipped", "Closed", "Cancelled"] {
+        assert!(!jql.contains(name), "the status `{name}` is in: {jql}");
+    }
+}
+
+#[test]
+fn a_tickets_category_is_its_status_categorys_key_and_the_boards_word_rides_back() {
+    for (status, category, kind) in [
+        (TO_DO, "new", Category::New),
+        (IN_DEV, "indeterminate", Category::Started),
+        // Left out by the search, and read the same way when one arrives all the
+        // same: nothing here may answer a category the judgement downstream
+        // would not have made of the word on the wire.
+        ("Shipped to production", "done", Category::Settled),
+    ] {
+        let board = Jira::new(
+            Calling::answering([Ok(holding(
+                &[a_ticket(status, category, Some("High"))],
+                None,
+            ))]),
+            a_scope(),
+        );
+
+        let queue = board.scope_queue(ACCOUNT).expect("the stand-in answered");
+
+        assert_eq!(queue.issues()[0].state(), status, "{category}");
+        assert_eq!(queue.issues()[0].state_type(), kind, "{category}");
+    }
+}
+
+#[test]
+fn the_five_priority_names_are_the_ranks_and_anything_else_is_no_priority() {
+    for (name, rank) in [
+        (Some("Highest"), Priority::Urgent),
+        (Some("High"), Priority::High),
+        (Some("Medium"), Priority::Medium),
+        (Some("Low"), Priority::Low),
+        // The bottom of the five lands where nothing at all does: a ticket
+        // somebody ranked lowest is not worked ahead of one nobody ranked.
+        (Some("Lowest"), Priority::None),
+        // A site that renamed its scheme or added a sixth priority.
+        (Some("Blocker"), Priority::None),
+        // And a project whose scheme leaves the field off a ticket nobody
+        // ranked, which is not a ticket to read as urgent.
+        (None, Priority::None),
+    ] {
+        let board = Jira::new(
+            Calling::answering([Ok(holding(&[a_ticket(TO_DO, "new", name)], None))]),
+            a_scope(),
+        );
+
+        let queue = board.scope_queue(ACCOUNT).expect("the stand-in answered");
+
+        assert_eq!(queue.issues()[0].priority(), rank, "{name:?}");
+    }
+}
+
+#[test]
+fn a_ticket_nobody_described_is_the_empty_description_a_subtask_is_handed() {
+    let board = Jira::new(
+        Calling::answering([Ok(holding(&[without("/fields/description")], None))]),
+        a_scope(),
+    );
+
+    let queue = board
+        .scope_queue(ACCOUNT)
+        .expect("a ticket with nothing more to say than its title is a ticket");
+
+    assert_eq!(queue.issues()[0].description(), "");
+}
+
+#[test]
+fn the_queue_reads_every_page_by_the_token_the_page_before_it_gave() {
+    let board = Jira::new(
+        Calling::answering([
+            Ok(holding(
+                &[a_ticket(TO_DO, "new", Some("High"))],
+                Some("page-2"),
+            )),
+            Ok(holding(&[a_ticket(IN_DEV, "indeterminate", None)], None)),
+        ]),
+        a_scope(),
+    );
+
+    let queue = board.scope_queue(ACCOUNT).expect("the stand-in answered");
+
+    assert_eq!(queue.issues().len(), 2, "{:?}", queue.issues());
+    // One request per page, the second carrying the token the first answered,
+    // and the page with no token is the last.
+    assert_eq!(board.calls.made(), [pulling(None), pulling(Some("page-2"))]);
+}
+
+#[test]
+fn a_queue_jira_refuses_is_reported_in_jiras_words_with_its_order_clause_kept() {
+    let said = "Field 'Rank' does not exist or you do not have permission to view it.";
+    let board = Jira::new(
+        Calling::answering([Err(Error::Refused {
+            board: JIRA,
+            message: said.to_owned(),
+        })]),
+        a_scope(),
+    );
+
+    let error = board
+        .scope_queue(ACCOUNT)
+        .expect_err("the search was refused");
+
+    assert!(error.to_string().contains(said), "{error}");
+    // One request and no second: a search asked again without the clause the
+    // site turned down would answer a queue in some other order, which is a
+    // different queue and not a repaired one.
+    assert_eq!(
+        board.calls.made(),
+        [pulling(None)],
+        "the search was retried or asked again"
+    );
+}
+
+#[test]
+fn a_queue_page_that_failed_fails_the_read_rather_than_answering_the_ones_before_it() {
+    // Half a queue is a queue a pull would choose out of believing it whole: the
+    // ticket that should have been taken is the one on the page that never
+    // arrived, and nothing downstream can tell that from an empty board.
+    let board = Jira::new(
+        Calling::answering([
+            Ok(holding(
+                &[a_ticket(TO_DO, "new", Some("High"))],
+                Some("page-2"),
+            )),
+            Err(Error::Status {
+                board: JIRA,
+                code: 502,
+            }),
+        ]),
+        a_scope(),
+    );
+
+    let error = board
+        .scope_queue(ACCOUNT)
+        .expect_err("a page did not arrive");
+
+    assert!(
+        matches!(error, Error::Status { code: 502, .. }),
+        "{error:?}"
+    );
+    assert_eq!(board.calls.made().len(), 2, "{:?}", board.calls.made());
+}
+
+#[test]
+fn a_queue_answer_missing_any_field_a_ticket_is_read_out_of_is_malformed() {
+    for pointer in [
+        "/key",
+        "/fields",
+        "/fields/summary",
+        "/fields/status",
+        "/fields/status/name",
+        "/fields/status/statusCategory",
+    ] {
+        let board = Jira::new(
+            Calling::answering([Ok(holding(&[without(pointer)], None))]),
+            a_scope(),
+        );
+
+        let error = board
+            .scope_queue(ACCOUNT)
+            .expect_err("not the answer asked for");
+
+        // Parsed and not described: a ticket a field is missing from is bytes a
+        // proxy decided to send, and a queue read that guessed at one would hand
+        // a pull a ticket nobody filed.
+        assert!(
+            matches!(error, Error::Malformed { board: JIRA, .. }),
+            "{pointer}: {error:?}"
+        );
+    }
+}
+
+/// The queued ticket, carrying those links in its `issuelinks`: the field the
+/// read asks for beside the four the ticket itself is read out of.
+fn with_links(links: &[Value]) -> Value {
+    let mut ticket = a_ticket(TO_DO, "new", Some("High"));
+
+    ticket["fields"]["issuelinks"] = json!(links);
+
+    ticket
+}
+
+/// One of the queued ticket's links, of that type, with the far side under that
+/// field — which is the whole of a link's direction and so is never defaulted
+/// by a test. The phrases ride along because a real answer carries them and
+/// nothing reads them: `Blocks` is matched by the type's name, never by the
+/// sentence a board shows beside it.
+fn link(relation: &str, side: &str, far: Value) -> Value {
+    let mut link = json!({
+        "id": "10101",
+        "type": { "id": "10000", "name": relation, "inward": "is blocked by", "outward": "blocks" },
+    });
+
+    link[side] = far;
+
+    link
+}
+
+/// The far side of a link as Jira hands it back on an issue: the key, the id
+/// beside it that nothing reads, and the four fields a link carries its far
+/// side's — no `assignee` among them, which is why no blocker read off this
+/// board says whose it is.
+fn far_side(key: &str, status: &str, category: &str) -> Value {
+    json!({
+        "id": "10020",
+        "key": key,
+        "fields": {
+            "summary": "Write the thing this one waits on",
+            "status": { "name": status, "statusCategory": { "key": category } },
+            "priority": { "id": "3", "name": "High" },
+            "issuetype": { "name": "Task" },
+        },
+    })
+}
+
+#[test]
+fn a_blocker_is_read_off_the_very_side_a_link_create_writes_one_into() {
+    let writer = Jira::new(Calling::answering([Ok(Value::Null)]), a_scope());
+
+    // `CHILD` blocks `TICKET`, written the way a cut writes a slice's edge.
+    writer
+        .create_relation(CHILD, TICKET)
+        .expect("the stand-in answered");
+
+    let made = writer.calls.made();
+    let [(_, _, wrote)] = made.as_slice() else {
+        panic!("one request: {made:?}")
+    };
+    // Which field holds the blocker is not named by this test: it is whichever
+    // one the create put `CHILD` in, and the link read below is built by
+    // putting that same value back under that same field. A swap on either
+    // side fails here — a create that wrote the held-up issue inward has
+    // `TICKET` reported as its own blocker, and a read that took the other
+    // field finds no blocker at all.
+    let (side, far) = wrote
+        .as_object()
+        .expect("a link create writes an object")
+        .iter()
+        .find(|(_, issue)| issue["key"] == json!(CHILD))
+        .expect("the create wrote the blocking issue under some field");
+    let blocking = far["key"].as_str().expect("the key the create wrote");
+    let reader = Jira::new(
+        Calling::answering([Ok(holding(
+            &[with_links(&[link(
+                "Blocks",
+                side,
+                far_side(blocking, IN_DEV, "indeterminate"),
+            )])],
+            None,
+        ))]),
+        a_scope(),
+    );
+
+    let queue = reader.scope_queue(ACCOUNT).expect("the stand-in answered");
+
+    let [held_up] = queue.issues() else {
+        panic!("one ticket: {:?}", queue.issues())
+    };
+    assert_eq!(held_up.identifier(), TICKET);
+
+    let [blocker] = held_up.blockers() else {
+        panic!("one blocker: {:?}", held_up.blockers())
+    };
+
+    assert_eq!(blocker.identifier(), CHILD);
+    // The category of the blocker's own status, which is what says whether it
+    // is still in the way, and the board's word for it is never read.
+    assert_eq!(blocker.state_type(), Category::Started);
+    // Unread rather than nobody, because the far side of a link carries no
+    // `assignee`: a queue's refusal names a Jira blocker by its key alone
+    // rather than spending a read per link to print one word.
+    assert_eq!(blocker.holder(), &Holder::Unread);
+    // And the links cost no request of their own: they ride back in the fields
+    // the queue's own search asked for.
+    assert_eq!(reader.calls.made(), [pulling(None)]);
+}
+
+#[test]
+fn only_a_blocks_link_holds_a_ticket_up_and_only_from_the_side_it_arrives_on() {
+    let dropped = [
+        // This ticket blocks that one, which holds nothing up on this side.
+        link("Blocks", "outwardIssue", far_side(CHILD, TO_DO, "new")),
+        // And the link types that say no dependency at all, whichever side of
+        // either the far issue arrives on.
+        link("Relates", "inwardIssue", far_side(CHILD, TO_DO, "new")),
+        link("Duplicate", "inwardIssue", far_side(CHILD, TO_DO, "new")),
+        link("Cloners", "outwardIssue", far_side(CHILD, TO_DO, "new")),
+    ];
+
+    for link in &dropped {
+        let board = Jira::new(
+            Calling::answering([Ok(holding(&[with_links(std::slice::from_ref(link))], None))]),
+            a_scope(),
+        );
+
+        let queue = board.scope_queue(ACCOUNT).expect("the stand-in answered");
+
+        assert!(
+            queue.issues()[0].blockers().is_empty(),
+            "{link}: {:?}",
+            queue.issues()[0].blockers()
+        );
+    }
+
+    // The same four beside the one link that does hold it up, so the blocker is
+    // picked out of a list rather than read because it is the only entry.
+    let mut links = dropped.to_vec();
+    links.push(link(
+        "Blocks",
+        "inwardIssue",
+        far_side(BLOCKER, TO_DO, "new"),
+    ));
+    let board = Jira::new(
+        Calling::answering([Ok(holding(&[with_links(&links)], None))]),
+        a_scope(),
+    );
+
+    let queue = board.scope_queue(ACCOUNT).expect("the stand-in answered");
+
+    let [blocker] = queue.issues()[0].blockers() else {
+        panic!("one blocker: {:?}", queue.issues()[0].blockers())
+    };
+
+    assert_eq!(blocker.identifier(), BLOCKER);
+    assert_eq!(blocker.state_type(), Category::New);
+}
+
+#[test]
+fn a_blocker_arrives_whatever_the_queues_own_filters_would_have_dropped() {
+    // A ticket is held up by whatever blocks it: an issue of another project,
+    // one somebody is on, and one already finished — none of which the queue's
+    // own four clauses would have let through. What a blocker's category means
+    // is choosing's judgement to make and not this read's, so all three arrive.
+    let blockers = [
+        far_side("OPS-9", TO_DO, "new"),
+        far_side(BLOCKER, IN_DEV, "indeterminate"),
+        far_side(CHILD, "Shipped to production", "done"),
+    ];
+    let board = Jira::new(
+        Calling::answering([Ok(holding(
+            &[with_links(
+                &blockers
+                    .iter()
+                    .map(|far| link("Blocks", "inwardIssue", far.clone()))
+                    .collect::<Vec<_>>(),
+            )],
+            None,
+        ))]),
+        a_scope(),
+    );
+
+    let queue = board.scope_queue(ACCOUNT).expect("the stand-in answered");
+
+    let read: Vec<_> = queue.issues()[0]
+        .blockers()
+        .iter()
+        .map(|blocker| (blocker.identifier(), blocker.state_type()))
+        .collect();
+
+    assert_eq!(
+        read,
+        [
+            ("OPS-9", Category::New),
+            (BLOCKER, Category::Started),
+            (CHILD, Category::Settled),
+        ]
+    );
+    // One request, and no second one narrowed any further: the links were in it.
+    assert_eq!(board.calls.made(), [pulling(None)]);
+}
+
+#[test]
+fn a_ticket_whose_answer_carries_no_links_is_a_ticket_nothing_holds_up() {
+    // A ticket linked to nothing: whether a site spells that an empty list or
+    // leaves the field out of the answer, it is not a ticket to refuse — the
+    // field was asked for by name, so there is nothing more to ask.
+    for ticket in [with_links(&[]), without("/fields/issuelinks")] {
+        let board = Jira::new(
+            Calling::answering([Ok(holding(&[ticket], None))]),
+            a_scope(),
+        );
+
+        let queue = board
+            .scope_queue(ACCOUNT)
+            .expect("a ticket nothing links to is a ticket");
+
+        assert!(
+            queue.issues()[0].blockers().is_empty(),
+            "{:?}",
+            queue.issues()[0].blockers()
+        );
+    }
+}
+
+#[test]
+fn a_link_answer_missing_any_field_a_blocker_is_read_out_of_is_malformed() {
+    let blocks = link("Blocks", "inwardIssue", far_side(BLOCKER, TO_DO, "new"));
+
+    for pointer in [
+        // A link carrying no type is an unreadable answer and not one more link
+        // to drop: dropping it quietly is how a held-up ticket looks ready.
+        "/type",
+        "/type/name",
+        "/inwardIssue/key",
+        // And a blocker whose category cannot be read is not a blocker to guess
+        // at, for the reason a ticket's own status is not guessed at either: the
+        // guess is about whether the work can start.
+        "/inwardIssue/fields",
+        "/inwardIssue/fields/status",
+        "/inwardIssue/fields/status/statusCategory",
+    ] {
+        let mut link = blocks.clone();
+        let (parent, field) = pointer
+            .rsplit_once('/')
+            .expect("a JSON pointer, which begins with a slash");
+
+        link.pointer_mut(parent)
+            .and_then(Value::as_object_mut)
+            .expect("a link to take a field off")
+            .remove(field)
+            .expect("the field was there to take");
+
+        let board = Jira::new(
+            Calling::answering([Ok(holding(&[with_links(&[link])], None))]),
+            a_scope(),
+        );
+
+        let error = board
+            .scope_queue(ACCOUNT)
+            .expect_err("not the answer asked for");
+
+        assert!(
+            matches!(error, Error::Malformed { board: JIRA, .. }),
+            "{pointer}: {error:?}"
+        );
+    }
+
+    // And a links field that is no list at all, which is the one way its
+    // absence is not read as a ticket with no links.
+    let mut ticket = with_links(&[]);
+    ticket["fields"]["issuelinks"] = json!("none");
+    let board = Jira::new(
+        Calling::answering([Ok(holding(&[ticket], None))]),
+        a_scope(),
+    );
+
+    let error = board
+        .scope_queue(ACCOUNT)
+        .expect_err("not the answer asked for");
+
+    assert!(
+        matches!(error, Error::Malformed { board: JIRA, .. }),
+        "{error:?}"
+    );
 }
 
 #[test]

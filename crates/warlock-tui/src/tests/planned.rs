@@ -2915,10 +2915,19 @@ mod jira {
         commented(&[])
     }
 
+    // Where a JQL read goes, which is the one request a dry run makes that is a
+    // POST: `Calls` carries a body and a query string would have to be
+    // percent-encoded into the path by hand.
+    const SEARCH: &str = "/rest/api/3/search/jql";
+
     // Every request a dry run makes, spelled out rather than built from the
     // module's own constants: a path moving, the fields asked for changing or a
-    // fourth request appearing is a failure here. All three are reads, which is
-    // the whole of "nothing was sent".
+    // fifth request appearing is a failure here.
+    //
+    // The last is the queue, which `prepare` reads for the backlog digest a
+    // draft can wait on a ticket by — after the gate and after the `## Scope`
+    // parse, so a run that stopped at either asks for the reads before it and
+    // no more.
     //
     // The issue is read under the key that was typed and the notes under the one
     // Jira spelled back, which is why only the first takes a parameter.
@@ -2935,7 +2944,15 @@ mod jira {
                     "/rest/api/3/issue/{BRIEF}/comment?startAt=0&maxResults=100&orderBy=created"
                 ),
             ),
+            (Method::POST, SEARCH.to_owned()),
         ]
+    }
+
+    // The queue as its read answers it, which here holds nothing: what the
+    // digest made of a queue is `mod backlog`'s own assertion, and what this
+    // answer is for is the request the read spends.
+    fn an_empty_queue() -> Value {
+        json!({ "issues": [] })
     }
 
     // The whole subcommand as a dry run over the Jira scope, with the models and
@@ -2958,18 +2975,30 @@ mod jira {
     #[test]
     fn a_dry_run_reports_the_brief_its_status_and_every_slice_and_sends_no_mutation() {
         let (outcome, printed, jira) = dry_running(
-            [Ok(myself()), Ok(a_draftable_epic()), Ok(uncommented())],
+            [
+                Ok(myself()),
+                Ok(a_draftable_epic()),
+                Ok(uncommented()),
+                Ok(an_empty_queue()),
+            ],
             BRIEF,
         );
 
         outcome.expect("a dry run answers");
-        // The account, the Epic, then its comments, and nothing after them: the
-        // queue read `prepare` asks for next is untaught on this board and
-        // sends nothing, and a dry run spends nothing else.
+        // The account, the Epic, its comments, then the queue, and nothing after
+        // them: a dry run spends four requests on this board and no fifth.
         assert_eq!(jira.spelled(), reads(BRIEF), "{:?}", jira.made());
+        // And none of the four is a mutation: the three before it leave with
+        // nothing after their headers, and the queue is a POST only because a
+        // JQL has nowhere else to ride — what that body carries is the search.
         for (method, path, body) in jira.made() {
-            assert_eq!(method, Method::GET, "{path} was not a read");
-            assert_eq!(body, Value::Null, "{path} carried a body");
+            if path == SEARCH {
+                assert_eq!(method, Method::POST, "{path} was not the search");
+                assert!(body["jql"].is_string(), "the search carried no JQL: {body}");
+            } else {
+                assert_eq!(method, Method::GET, "{path} was not a read");
+                assert_eq!(body, Value::Null, "{path} carried a body");
+            }
         }
         assert_eq!(jira.opened_with(), [NOT_A_KEY]);
 
@@ -3005,6 +3034,7 @@ mod jira {
                     &a_cut(FIRST, &["PAY-20", "PAY-21"]),
                     &a_skip(SECOND),
                 ])),
+                Ok(an_empty_queue()),
             ],
             BRIEF,
         );
@@ -3092,8 +3122,14 @@ mod jira {
             let message = said(&error);
             assert!(message.contains(status), "{message}");
             // Nothing is sent after the gate: the brief's slices are never
-            // parsed and no queue is asked for.
-            assert_eq!(jira.spelled(), reads(BRIEF), "{status}: {:?}", jira.made());
+            // parsed, and the queue the digest is drawn from — the read after
+            // both — is never asked for.
+            assert_eq!(
+                jira.spelled(),
+                reads(BRIEF)[..3],
+                "{status}: {:?}",
+                jira.made()
+            );
         }
     }
 
@@ -3139,6 +3175,7 @@ mod jira {
                 Ok(myself()),
                 Ok(an_epic(TO_DO, "new", &description)),
                 Ok(uncommented()),
+                Ok(an_empty_queue()),
             ],
             BRIEF,
         );
@@ -3231,7 +3268,7 @@ mod jira {
     }
 
     // Every answer one whole cut of that slice is given, in the order the verbs
-    // ask: the three reads a dry run makes, then the pre-flight's two, then a
+    // ask: the four reads a dry run makes, then the pre-flight's two, then a
     // create and a status read per draft, the link, the note and the Epic's
     // move.
     //
@@ -3242,6 +3279,7 @@ mod jira {
             Ok(myself()),
             Ok(a_draftable_epic()),
             Ok(two_slices_settled()),
+            Ok(an_empty_queue()),
             Ok(a_filable_project()),
             Ok(reachable()),
             Ok(filed(CHILD)),
@@ -3259,7 +3297,7 @@ mod jira {
 
     // Every request one whole cut makes, spelled out rather than built from the
     // module's own constants, for the reason `reads` is: a path moving, a POST
-    // where a GET was or a fourteenth request appearing is a failure here.
+    // where a GET was or a fifteenth request appearing is a failure here.
     //
     // This is the order the ticket promises — the pre-flight, one create per
     // draft, the links, the comment, then the Epic's move — and the only place

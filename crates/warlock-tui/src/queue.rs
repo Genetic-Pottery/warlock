@@ -27,7 +27,7 @@ use std::fmt;
 use warlock_engine::{BoardScope, PullRun, RunStatus};
 
 use crate::board::{
-    Assignee, Blocker, Board, Category, Error as BoardError, Priority, Queue, QueuedTicket,
+    Assignee, Blocker, Board, Category, Error as BoardError, Holder, Priority, Queue, QueuedTicket,
 };
 
 /// The workflow state a ticket sits in while a run works it.
@@ -512,17 +512,15 @@ fn split(ticket: &str) -> Option<(&str, u64)> {
     (!team.is_empty()).then_some((team, number.trim().parse().ok()?))
 }
 
-/// `WAR-12 (Ada)`, `WAR-13 (unassigned)`, joined — the blockers as a refusal
-/// names them, with whose each one is.
+/// `WAR-12 (Ada)`, `WAR-13 (unassigned)`, `KAN-14`, joined — the blockers as a
+/// refusal names them, with whose each one is when the board said.
 fn listed(blockers: &[Blocker]) -> String {
     blockers
         .iter()
-        .map(|blocker| {
-            format!(
-                "{} ({})",
-                blocker.identifier(),
-                blocker.assignee().unwrap_or("unassigned")
-            )
+        .map(|blocker| match blocker.holder() {
+            Holder::Named(name) => format!("{} ({name})", blocker.identifier()),
+            Holder::Nobody => format!("{} (unassigned)", blocker.identifier()),
+            Holder::Unread => blocker.identifier().to_owned(),
         })
         .collect::<Vec<_>>()
         .join(", ")
